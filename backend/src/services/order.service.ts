@@ -15,7 +15,6 @@ import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { BaseProductSku } from '../entities/base-product-sku.entity.js'
-import { InventoryLog } from '../entities/inventory-log.entity.js'
 import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import {
@@ -42,6 +41,13 @@ import {
 import { orderSerialService, type OrderType } from './order-serial.service.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 import { systemConfigService, type ClientDepartmentTreeNode } from './system-config.service.js'
+import {
+  applyManualOutboundInventoryDeltas,
+  MANUAL_OUTBOUND_CHANGE_TYPES,
+  resolveManualOutboundReleasedOrderIds,
+  type ManualOutboundInventoryDelta,
+  type ManualOutboundInventoryLineView,
+} from './manual-outbound-inventory.js'
 
 /**
  * 开单页客户部门选项：
@@ -145,7 +151,23 @@ export interface OrderSummaryView {
   deletedByUserId: string | null
   deletedByUsername: string | null
   deletedByDisplayName: string | null
+  /** 删除时是否已回补库存；恢复时据此决定是否重新扣减。 */
+  inventoryReleased: boolean
   createdAt: string
+}
+
+export interface SoftDeleteOrderOptions {
+  /** 仅 `manual_applied` 手工单可选择删除时回补商品与 SKU 库存。 */
+  releaseInventory?: boolean
+}
+
+export interface SubmitOrderResult {
+  order: SubmittedOrderView
+  items: SubmittedOrderItemView[]
+  /** 本次提交实际完成的库存扣减；幂等重放命中既有订单时为空。 */
+  inventory: { deductedQty: number; lines: ManualOutboundInventoryLineView[] }
+  /** 命中同一幂等键的既有订单，未再次扣减库存。 */
+  idempotentReplay: boolean
 }
 
 export interface SubmittedOrderView {
@@ -346,11 +368,17 @@ export class OrderService {
       .take(query.pageSize)
       .getManyAndCount()
 
+    // 仅对当前页已删除的手工库存单批量判定回补状态，正常单不产生额外查询。
+    const releasedOrderIds = await resolveManualOutboundReleasedOrderIds(
+      AppDataSource.manager,
+      list.filter((order) => order.isDeleted && order.inventoryMode === 'manual_applied').map((order) => normalizeEntityId(order.id)),
+    )
+
     return {
       page: query.page,
       pageSize: query.pageSize,
       total,
-      list: list.map((order) => this.buildOrderSummaryView(order)),
+      list: list.map((order) => this.buildOrderSummaryView(order, releasedOrderIds.has(normalizeEntityId(order.id)))),
     }
   }
 
@@ -360,7 +388,7 @@ export class OrderService {
       throw new BizError('出库单不存在', 404)
     }
     const items = await this.loadDetailItems(id)
-    return { order: this.buildOrderSummaryView(order), items }
+    return { order: this.buildOrderSummaryView(order, await this.isOrderInventoryReleased(order)), items }
   }
 
   async detailByShowNo(showNo: string): Promise<{ order: OrderSummaryView; items: OrderDetailItemView[] }> {
@@ -369,7 +397,14 @@ export class OrderService {
       throw new BizError('出库单不存在', 404)
     }
     const items = await this.loadDetailItems(order.id)
-    return { order: this.buildOrderSummaryView(order), items }
+    return { order: this.buildOrderSummaryView(order, await this.isOrderInventoryReleased(order)), items }
+  }
+
+  /** 只有已删除的手工库存单才可能处于“已回补”状态，其余订单直接返回 false，避免多余查询。 */
+  private async isOrderInventoryReleased(order: BizOutboundOrder): Promise<boolean> {
+    if (!order.isDeleted || order.inventoryMode !== 'manual_applied') return false
+    const releasedOrderIds = await resolveManualOutboundReleasedOrderIds(AppDataSource.manager, [normalizeEntityId(order.id)])
+    return releasedOrderIds.has(normalizeEntityId(order.id))
   }
 
   async updateComplianceFlags(
@@ -418,23 +453,30 @@ export class OrderService {
   /**
    * 软删除单据：
    * - 仅标记主单删除态，不物理删除明细，保证可恢复；
-   * - 记录删除操作者快照，满足后续审计追溯。
+   * - 记录删除操作者快照，满足后续审计追溯；
+   * - 手工库存单可由管理员显式选择同时回补商品与 SKU 库存，回补与删除在同一事务内完成；
+   * - 未选择回补时保持原语义：订单仍承载库存影响。
    */
   async softDeleteById(
     id: string,
     actor: AuthUserContext,
     confirmShowNo: string,
     requestMeta?: RequestMeta,
+    options: SoftDeleteOrderOptions = {},
   ): Promise<OrderSummaryView> {
     const normalizedConfirmShowNo = confirmShowNo.trim()
     if (!normalizedConfirmShowNo) {
       throw new BizError('请填写业务单号完成二次确认')
     }
+    const releaseInventory = options.releaseInventory === true
 
-    return runInTransaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
       const orderRepo = manager.getRepository(BizOutboundOrder)
-      const order = await orderRepo.findOne({ where: { id } })
+      const order = await orderRepo.findOne({
+        where: { id },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
       if (!order) {
         throw new BizError('出库单不存在', 404)
       }
@@ -445,6 +487,21 @@ export class OrderService {
 
       if (order.isDeleted) {
         throw new BizError('该出库单已删除', 409)
+      }
+
+      let inventoryLines: ManualOutboundInventoryLineView[] = []
+      if (releaseInventory) {
+        if (order.inventoryMode !== 'manual_applied') {
+          throw new BizError('该出库单不承载手工库存扣减，无法在删除时回补库存', 409)
+        }
+        const deltas = await this.loadLockedOrderInventoryDeltas(manager, order, -1)
+        inventoryLines = await applyManualOutboundInventoryDeltas(manager, {
+          order,
+          actor,
+          changeType: MANUAL_OUTBOUND_CHANGE_TYPES.deleteRelease,
+          deltas,
+          buildRemark: (delta) => `删除手工出库单 ${order.businessNo}，回补库存 ${-delta.deltaQty}`,
+        })
       }
 
       order.isDeleted = true
@@ -458,7 +515,7 @@ export class OrderService {
       await auditService.record(
         {
           actionType: 'order.delete',
-          actionLabel: '删除出库单',
+          actionLabel: releaseInventory ? '删除出库单并回补库存' : '删除出库单',
           targetType: 'order',
           targetId: savedOrder.id,
           targetCode: savedOrder.showNo,
@@ -467,31 +524,119 @@ export class OrderService {
           detail: {
             ...this.buildOrderAuditDetail(savedOrder),
             linkedO2oPreorderSync,
+            inventoryMode: savedOrder.inventoryMode,
+            inventoryReleased: releaseInventory,
+            inventoryLines,
           },
         },
         manager,
       )
 
-      return this.buildOrderSummaryView(savedOrder)
+      return this.buildOrderSummaryView(savedOrder, releaseInventory)
+    })
+    if (releaseInventory) invalidateMallCatalogReadCache()
+    return result
+  }
+
+  /**
+   * 锁定订单明细及其商品、SKU，并按 SKU 汇总为库存变动：
+   * - 加锁顺序与开单一致（明细 → 商品 ID 升序 → SKU ID 升序），降低与出库、入库并发时的死锁概率；
+   * - `sign = -1` 表示回补（删除），`sign = 1` 表示重新扣减（恢复）；
+   * - 库存型明细缺失 SKU 或数量非整数属于数据异常，直接拒绝，避免回补口径不明。
+   */
+  private async loadLockedOrderInventoryDeltas(
+    manager: EntityManager,
+    order: BizOutboundOrder,
+    sign: 1 | -1,
+  ): Promise<ManualOutboundInventoryDelta[]> {
+    const lockRows = manager.connection.options.type !== 'sqlite'
+    const itemQuery = manager.getRepository(BizOutboundOrderItem)
+      .createQueryBuilder('item')
+      .where('item.orderId = :orderId', { orderId: order.id })
+      .orderBy('item.id', 'ASC')
+    if (lockRows) itemQuery.setLock('pessimistic_write')
+    const items = await itemQuery.getMany()
+    if (items.length === 0) throw new BizError('出库单缺少明细，无法处理库存', 409)
+
+    const skuQtyMap = new Map<string, { productId: string; qty: number }>()
+    for (const item of items) {
+      const skuId = normalizeNullableEntityId(item.skuId)
+      if (!skuId) throw new BizError(`出库单第 ${item.lineNo} 行缺少 SKU，无法回补或重扣库存`, 409)
+      const qty = Number(item.qty)
+      if (!Number.isSafeInteger(qty) || qty <= 0) throw new BizError(`出库单第 ${item.lineNo} 行数量异常，无法处理库存`, 409)
+      const current = skuQtyMap.get(skuId)
+      skuQtyMap.set(skuId, { productId: normalizeEntityId(item.productId), qty: (current?.qty ?? 0) + qty })
+    }
+
+    const productIds = [...new Set([...skuQtyMap.values()].map((item) => item.productId))].sort((left, right) => left.localeCompare(right))
+    const productQuery = manager.getRepository(BaseProduct)
+      .createQueryBuilder('product')
+      .where('product.id IN (:...productIds)', { productIds })
+      .orderBy('product.id', 'ASC')
+    if (lockRows) productQuery.setLock('pessimistic_write')
+    const productMap = new Map((await productQuery.getMany()).map((product) => [normalizeEntityId(product.id), product]))
+
+    const skuIds = [...skuQtyMap.keys()].sort((left, right) => left.localeCompare(right))
+    const skuQuery = manager.getRepository(BaseProductSku)
+      .createQueryBuilder('sku')
+      .where('sku.id IN (:...skuIds)', { skuIds })
+      .orderBy('sku.productId', 'ASC')
+      .addOrderBy('sku.id', 'ASC')
+    if (lockRows) skuQuery.setLock('pessimistic_write')
+    const skuMap = new Map((await skuQuery.getMany()).map((sku) => [normalizeEntityId(sku.id), sku]))
+
+    return skuIds.map((skuId) => {
+      const entry = skuQtyMap.get(skuId) as { productId: string; qty: number }
+      const product = productMap.get(entry.productId)
+      const sku = skuMap.get(skuId)
+      if (!product || !sku) throw new BizError('出库单关联的商品或 SKU 已不存在，无法处理库存', 409)
+      return { product, sku, deltaQty: sign * entry.qty }
     })
   }
 
   /**
    * 恢复单据：
    * - 清空删除标记与删除人快照；
-   * - 保留主单与明细原始数据，恢复后可继续查询与查看详情。
+   * - 保留主单与明细原始数据，恢复后可继续查询与查看详情；
+   * - 若删除时已回补库存，恢复必须在同一事务内按明细重新扣减，可用库存不足时拒绝恢复并保持删除态。
    */
   async restoreById(id: string, actor: AuthUserContext, requestMeta?: RequestMeta): Promise<OrderSummaryView> {
-    return runInTransaction(async (manager) => {
+    let inventoryReapplied = false
+    const result = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
       const orderRepo = manager.getRepository(BizOutboundOrder)
-      const order = await orderRepo.findOne({ where: { id } })
+      const order = await orderRepo.findOne({
+        where: { id },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
       if (!order) {
         throw new BizError('出库单不存在', 404)
       }
 
       if (!order.isDeleted) {
         throw new BizError('该出库单未被删除，无需恢复', 409)
+      }
+
+      let inventoryLines: ManualOutboundInventoryLineView[] = []
+      if (order.inventoryMode === 'manual_applied') {
+        const releasedOrderIds = await resolveManualOutboundReleasedOrderIds(manager, [normalizeEntityId(order.id)])
+        if (releasedOrderIds.has(normalizeEntityId(order.id))) {
+          const deltas = await this.loadLockedOrderInventoryDeltas(manager, order, 1)
+          try {
+            inventoryLines = await applyManualOutboundInventoryDeltas(manager, {
+              order,
+              actor,
+              changeType: MANUAL_OUTBOUND_CHANGE_TYPES.restoreApply,
+              deltas,
+              buildRemark: (delta) => `恢复手工出库单 ${order.businessNo}，重新扣减库存 ${delta.deltaQty}`,
+            })
+          } catch (error) {
+            if (error instanceof BizError) {
+              throw new BizError(`恢复需要重新扣减删除时回补的库存，${error.message}`, error.statusCode)
+            }
+            throw error
+          }
+        }
       }
 
       order.isDeleted = false
@@ -501,11 +646,12 @@ export class OrderService {
       order.deletedByDisplayName = null
       const savedOrder = await orderRepo.save(order)
       const linkedO2oPreorderSync = await this.syncLinkedO2oPreorderVisibilityInManager(manager, savedOrder, actor, false)
+      inventoryReapplied = inventoryLines.length > 0
 
       await auditService.record(
         {
           actionType: 'order.restore',
-          actionLabel: '恢复出库单',
+          actionLabel: inventoryReapplied ? '恢复出库单并重新扣减库存' : '恢复出库单',
           targetType: 'order',
           targetId: savedOrder.id,
           targetCode: savedOrder.showNo,
@@ -514,13 +660,18 @@ export class OrderService {
           detail: {
             ...this.buildOrderAuditDetail(savedOrder),
             linkedO2oPreorderSync,
+            inventoryMode: savedOrder.inventoryMode,
+            inventoryReapplied,
+            inventoryLines,
           },
         },
         manager,
       )
 
-      return this.buildOrderSummaryView(savedOrder)
+      return this.buildOrderSummaryView(savedOrder, false)
     })
+    if (inventoryReapplied) invalidateMallCatalogReadCache()
+    return result
   }
 
   /**
@@ -664,7 +815,7 @@ export class OrderService {
     input: SubmitOrderInput,
     actor: AuthUserContext,
     requestMeta?: RequestMeta,
-  ): Promise<{ order: SubmittedOrderView; items: SubmittedOrderItemView[] }> {
+  ): Promise<SubmitOrderResult> {
     const normalizedItems = this.normalizeSubmitItemsInput(input.items)
     const normalizedCustomerName = this.readLimitedText(
       input.customerName,
@@ -699,6 +850,8 @@ export class OrderService {
             return {
               order: this.buildSubmittedOrderView(existed),
               items: existedItems.map((item) => this.buildSubmittedOrderItemView(item)),
+              inventory: { deductedQty: 0, lines: [] },
+              idempotentReplay: true,
             }
           }
 
@@ -752,7 +905,17 @@ export class OrderService {
           })
           const savedItems = await itemRepo.save(preparedItems.itemEntities)
 
-          await this.applyManualInventoryForCreate(manager, savedOrder, resolvedItems, productMap, actor)
+          const inventoryLines = await applyManualOutboundInventoryDeltas(manager, {
+            order: savedOrder,
+            actor,
+            changeType: MANUAL_OUTBOUND_CHANGE_TYPES.create,
+            deltas: resolvedItems.map((item) => {
+              const product = productMap.get(item.productId)
+              if (!product) throw new BizError(`商品 ${item.productId} 不存在`, 409)
+              return { product, sku: item.sku, deltaQty: item.qty }
+            }),
+            buildRemark: (delta) => `创建手工出库单 ${savedOrder.businessNo}，扣减库存 ${delta.deltaQty}`,
+          })
 
           products.forEach((product) => {
             const latestPrice = preparedItems.latestProductPriceMap.get(String(product.id))
@@ -785,6 +948,11 @@ export class OrderService {
           return {
             order: this.buildSubmittedOrderView(savedOrder),
             items: savedItems.map((item) => this.buildSubmittedOrderItemView(item)),
+            inventory: {
+              deductedQty: inventoryLines.reduce((sum, line) => sum + line.deltaQty, 0),
+              lines: inventoryLines,
+            },
+            idempotentReplay: false,
           }
         })
         invalidateMallCatalogReadCache()
@@ -1063,63 +1231,6 @@ export class OrderService {
     }
   }
 
-  private async applyManualInventoryForCreate(
-    manager: EntityManager,
-    order: BizOutboundOrder,
-    items: ResolvedSubmitOrderItem[],
-    productMap: Map<string, BaseProduct>,
-    actor: AuthUserContext,
-  ): Promise<void> {
-    const productQtyMap = new Map<string, number>()
-    for (const item of items) {
-      productQtyMap.set(item.productId, (productQtyMap.get(item.productId) ?? 0) + item.qty)
-      if (Number(item.sku.currentStock) - Number(item.sku.preOrderedStock) < item.qty) {
-        throw new BizError(`SKU ${item.sku.skuCode} 可用库存不足`, 409)
-      }
-    }
-    for (const [productId, qty] of productQtyMap) {
-      const product = productMap.get(productId)
-      if (!product || Number(product.currentStock) - Number(product.preOrderedStock) < qty) {
-        throw new BizError(`商品 ${product?.productName ?? productId} 可用库存不足`, 409)
-      }
-    }
-
-    const inventoryLogs: InventoryLog[] = []
-    for (const item of items) {
-      const product = productMap.get(item.productId)
-      if (!product) throw new BizError(`商品 ${item.productId} 不存在`, 409)
-      const beforeCurrentStock = Number(product.currentStock)
-      const beforePreorderedStock = Number(product.preOrderedStock)
-      const beforeSkuCurrentStock = Number(item.sku.currentStock)
-      const beforeSkuPreorderedStock = Number(item.sku.preOrderedStock)
-      product.currentStock = beforeCurrentStock - item.qty
-      item.sku.currentStock = beforeSkuCurrentStock - item.qty
-      inventoryLogs.push(manager.getRepository(InventoryLog).create({
-        productId: item.productId,
-        skuId: item.skuId,
-        changeType: 'manual_outbound_create',
-        changeQty: item.qty,
-        beforeCurrentStock,
-        afterCurrentStock: product.currentStock,
-        beforePreorderedStock,
-        afterPreorderedStock: beforePreorderedStock,
-        beforeSkuCurrentStock,
-        afterSkuCurrentStock: item.sku.currentStock,
-        beforeSkuPreorderedStock,
-        afterSkuPreorderedStock: beforeSkuPreorderedStock,
-        operatorType: 'admin',
-        operatorId: actor.userId,
-        operatorName: actor.displayName,
-        refType: 'biz_outbound_order',
-        refId: String(order.id),
-        remark: `创建手工出库单 ${order.businessNo}，扣减库存 ${item.qty}`,
-      }))
-    }
-    await manager.getRepository(BaseProduct).save([...productMap.values()])
-    await manager.getRepository(BaseProductSku).save(items.map((item) => item.sku))
-    await manager.getRepository(InventoryLog).save(inventoryLogs)
-  }
-
   private shouldRetrySubmitError(error: unknown, attempt: number) {
     return (
       attempt < ORDER_SUBMIT_MAX_RETRY
@@ -1141,7 +1252,7 @@ export class OrderService {
 
   private async loadOrderByIdempotencyKey(
     idempotencyKey: string,
-  ): Promise<{ order: SubmittedOrderView; items: SubmittedOrderItemView[] }> {
+  ): Promise<SubmitOrderResult> {
     const order = await this.orderRepo.findOne({ where: { idempotencyKey } })
     if (!order) {
       throw new BizError('订单处理中，请稍后重试', 409)
@@ -1152,9 +1263,12 @@ export class OrderService {
       order: { lineNo: 'ASC' },
     })
 
+    // 并发下另一请求已落库同一幂等键：本请求事务已回滚，不会重复扣减库存。
     return {
       order: this.buildSubmittedOrderView(order),
       items: items.map((item) => this.buildSubmittedOrderItemView(item)),
+      inventory: { deductedQty: 0, lines: [] },
+      idempotentReplay: true,
     }
   }
 
@@ -1207,7 +1321,7 @@ export class OrderService {
     }
   }
 
-  private buildOrderSummaryView(order: BizOutboundOrder): OrderSummaryView {
+  private buildOrderSummaryView(order: BizOutboundOrder, inventoryReleased = false): OrderSummaryView {
     return {
       id: normalizeEntityId(order.id),
       showNo: order.showNo,
@@ -1232,6 +1346,7 @@ export class OrderService {
       deletedByUserId: normalizeNullableEntityId(order.deletedByUserId),
       deletedByUsername: order.deletedByUsername,
       deletedByDisplayName: order.deletedByDisplayName,
+      inventoryReleased,
       createdAt: normalizeDateTime(order.createdAt),
     }
   }

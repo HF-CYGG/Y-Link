@@ -24,6 +24,7 @@ import {
 } from '@/utils/storage-user-scope'
 import {
   getSelectableProductSkus,
+  getSkuAvailableStock,
   resolveLegacyOrderEntryProductValue,
   type FocusField,
   type OrderEntryDrawerForm,
@@ -83,6 +84,13 @@ export const useOrderEntryForm = () => {
     drawerVisible: boolean
     editingRowUid: string
     drawerForm: OrderEntryDrawerForm
+    /** 最近一次未确认成功的提交：用于超时或断网后重试时复用同一幂等键，避免重复开单、重复扣库存。 */
+    pendingSubmission?: PendingOrderSubmission | null
+  }
+
+  interface PendingOrderSubmission {
+    idempotencyKey: string
+    fingerprint: string
   }
 
   /**
@@ -208,6 +216,14 @@ export const useOrderEntryForm = () => {
     return sku?.specText || '未选择规格'
   }
 
+  /** 所选规格的可用库存（物理库存 - 预订占用），未选择规格时返回 null，仅用于展示与预检。 */
+  const getSkuAvailableStockById = (productId: string, skuId: string): number | null => {
+    if (!productId || !skuId) {
+      return null
+    }
+    return getSkuAvailableStock(getSelectableSkus(productId).find((item) => item.id === skuId))
+  }
+
   /**
    * 汇总信息：
    * - totalQty 汇总所有明细数量；
@@ -285,7 +301,16 @@ export const useOrderEntryForm = () => {
    * - 仅保存录入页真实需要恢复的数据；
    * - 使用深拷贝后的普通对象，避免把 Vue 响应式代理直接写入 sessionStorage。
    */
+  /**
+   * 待确认的提交：
+   * - 提交前记录“幂等键 + 载荷指纹”并随草稿持久化；
+   * - 超时、断网等结果未知的失败后，只要载荷未变就复用同一幂等键重试，服务端命中既有订单时不会重复扣库存；
+   * - 保存成功或载荷发生变化时才生成新键。
+   */
+  const pendingSubmission = ref<PendingOrderSubmission | null>(null)
+
   const buildDraftSnapshot = (): OrderEntryDraftSnapshot => ({
+    pendingSubmission: pendingSubmission.value ? { ...pendingSubmission.value } : null,
     headerForm: {
       orderType: headerForm.orderType,
       hasCustomerOrder: headerForm.hasCustomerOrder,
@@ -362,6 +387,12 @@ export const useOrderEntryForm = () => {
       headerForm.customerDepartmentName = parsedDraft.headerForm.customerDepartmentName ?? ''
       headerForm.customerName = parsedDraft.headerForm.customerName ?? ''
       headerForm.remark = parsedDraft.headerForm.remark ?? ''
+      const draftPending = parsedDraft.pendingSubmission
+      pendingSubmission.value = draftPending
+        && typeof draftPending.idempotencyKey === 'string'
+        && typeof draftPending.fingerprint === 'string'
+        ? { idempotencyKey: draftPending.idempotencyKey, fingerprint: draftPending.fingerprint }
+        : null
 
       itemRows.value = parsedDraft.itemRows.length
         ? parsedDraft.itemRows.map((row) => ({
@@ -802,13 +833,37 @@ export const useOrderEntryForm = () => {
     drawerForm.qty = null
     drawerForm.unitPrice = null
     drawerForm.remark = ''
+    pendingSubmission.value = null
+  }
+
+  /**
+   * 提交前库存预检：
+   * - 按规格汇总本单所需数量，与商品列表返回的可用库存比较；
+   * - 仅用于提前提示，服务端事务内校验仍是最终依据（期间库存可能被其他单据改动）。
+   */
+  const findStockShortage = (): string | null => {
+    const requiredBySku = new Map<string, { productId: string; qty: number }>()
+    for (const row of itemRows.value) {
+      const qty = normalizeNumber(row.qty)
+      if (!row.productId || !row.skuId || qty <= 0) continue
+      const current = requiredBySku.get(row.skuId)
+      requiredBySku.set(row.skuId, { productId: row.productId, qty: (current?.qty ?? 0) + qty })
+    }
+    for (const [skuId, required] of requiredBySku) {
+      const sku = getSelectableSkus(required.productId).find((item) => item.id === skuId)
+      const available = getSkuAvailableStock(sku)
+      if (available !== null && required.qty > available) {
+        return `商品“${getProductLabelById(required.productId)}”规格“${sku?.specText || '默认规格'}”可用库存 ${available}，本单需要 ${required.qty}，请调整数量`
+      }
+    }
+    return null
   }
 
   /**
    * 提交整单：
-   * - 先校验至少存在一条有效明细；
-   * - 自动生成幂等键，配合后端防重复；
-   * - 成功后回到初始状态并提示新单号。
+   * - 先校验至少存在一条有效明细，并按可用库存预检；
+   * - 结果未知的失败（超时、断网）重试时复用同一幂等键，避免重复开单与重复扣库存；
+   * - 成功后回到初始状态并提示新单号与实际扣减数量。
    */
   const submitOrder = async () => {
     if (isSaving.value) {
@@ -872,15 +927,19 @@ export const useOrderEntryForm = () => {
       return
     }
 
+    const stockShortage = findStockShortage()
+    if (stockShortage) {
+      showAppWarning(stockShortage)
+      return
+    }
+
     // 记录本次是否携带系统部门节点，失败后据此刷新部门选项。
     const submittedDepartmentNodeId = headerForm.orderType === 'department' ? headerForm.customerDepartmentNodeId : ''
     isSaving.value = true
     try {
       const submitItems = buildSubmitItems()
-      const idempotencyKey = `web-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
       const isDepartmentOrder = headerForm.orderType === 'department'
-      const result = await orderApi.submitOrder({
-        idempotencyKey,
+      const payloadWithoutKey: Omit<SubmitOrderPayload, 'idempotencyKey'> = {
         orderType: headerForm.orderType,
         // 详细注释：正式出库单、系统申请等概念只属于部门单。
         // 即便未来界面状态被草稿恢复或异常交互影响，这里仍统一按订单类型做一次最终兜底。
@@ -893,9 +952,23 @@ export const useOrderEntryForm = () => {
         customerName: headerForm.customerName.trim() || undefined,
         remark: headerForm.remark.trim() || undefined,
         items: submitItems,
-      } as SubmitOrderPayload)
+      }
+      // 载荷未变时复用上次未确认成功的幂等键：若上次其实已落库，服务端直接返回既有订单而不会再次扣库存。
+      const fingerprint = JSON.stringify(payloadWithoutKey)
+      const idempotencyKey = pendingSubmission.value?.fingerprint === fingerprint
+        ? pendingSubmission.value.idempotencyKey
+        : `web-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+      pendingSubmission.value = { idempotencyKey, fingerprint }
+      persistDraft()
 
-      showAppSuccess(`保存成功，业务单号：${result.order.businessNo}`)
+      const result = await orderApi.submitOrder({ ...payloadWithoutKey, idempotencyKey } as SubmitOrderPayload)
+
+      pendingSubmission.value = null
+      showAppSuccess(
+        result.idempotentReplay
+          ? `该单已保存（业务单号：${result.order.businessNo}），本次未重复扣减库存`
+          : `保存成功，业务单号：${result.order.businessNo}，已扣减库存 ${result.inventoryDeductedQty} 件`,
+      )
 
       resetForm()
       persistDraft()
@@ -913,6 +986,9 @@ export const useOrderEntryForm = () => {
       if (submittedDepartmentNodeId) {
         void loadDepartmentOptions()
       }
+      // 失败可能源于库存已被其他单据扣减：刷新商品可用库存，便于用户按最新数量调整后重试。
+      // 明细行只保存商品/SKU 主键，刷新候选不影响已录内容；草稿与待确认幂等键保持不变。
+      void loadProducts()
       void showCriticalErrorDialog(error, {
         title: '出库单保存失败',
         fallback: '保存失败，请稍后重试',
@@ -1082,6 +1158,7 @@ export const useOrderEntryForm = () => {
     handleSkuChange,
     getSelectableSkus,
     getSkuLabelById,
+    getSkuAvailableStockById,
     getProductLabelById,
     calcLineAmount,
     toMoney,

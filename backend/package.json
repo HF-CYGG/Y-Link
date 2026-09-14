@@ -84,6 +84,8 @@
     "order:amendment:verify": "tsx scripts/order-amendment-verify.ts",
     "order:amendment:legacy:verify": "tsx scripts/order-amendment-legacy-verify.ts",
     "order:content-edit:verify": "tsx scripts/order-content-edit-verify.ts",
+    "order:inventory:verify": "tsx scripts/manual-outbound-inventory-verify.ts",
+    "inventory:reconcile:audit": "tsx scripts/inventory-reconcile-audit.ts",
     "order-query:baseline:verify": "tsx scripts/order-query-baseline-verify.ts",
     "reports:contract:verify": "tsx scripts/report-center-contract-verify.ts",
     "reports:inventory:verify": "tsx scripts/report-inventory-verify.ts",

@@ -14,7 +14,6 @@ import { BaseProduct } from '../entities/base-product.entity.js'
 import { BaseProductSku } from '../entities/base-product-sku.entity.js'
 import { BizOutboundOrder, type OrderInventoryMode } from '../entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
-import { InventoryLog } from '../entities/inventory-log.entity.js'
 import { OrderRevision } from '../entities/order-revision.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { isRetryableMysqlTransactionError } from '../utils/database-errors.js'
@@ -22,6 +21,7 @@ import { BizError } from '../utils/errors.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
 import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
+import { applyManualOutboundInventoryDeltas, MANUAL_OUTBOUND_CHANGE_TYPES } from './manual-outbound-inventory.js'
 import { orderBusinessNoService } from './order-business-no.service.js'
 import type { OrderType } from './order-serial.service.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
@@ -439,66 +439,17 @@ export class OrderContentEditService {
     actor: AuthUserContext,
   ) {
     const changed = deltas.filter((delta) => delta.deltaQty !== 0)
-    const productDeltaMap = new Map<string, number>()
     for (const delta of changed) {
       if (!Number.isSafeInteger(delta.deltaQty) || !delta.sku) throw new BizError('库存型订单差额或 SKU 异常', 409)
-      productDeltaMap.set(delta.productId, (productDeltaMap.get(delta.productId) ?? 0) + delta.deltaQty)
-      const nextSkuCurrent = Number(delta.sku.currentStock) - delta.deltaQty
-      if (nextSkuCurrent < Number(delta.sku.preOrderedStock)) {
-        throw new BizError(`SKU ${delta.sku.skuCode} 可用库存不足`, 409)
-      }
     }
-    for (const [productId, deltaQty] of productDeltaMap) {
-      const product = changed.find((item) => item.productId === productId)?.product
-      if (!product || Number(product.currentStock) - deltaQty < Number(product.preOrderedStock)) {
-        throw new BizError(`商品 ${product?.productName ?? productId} 可用库存不足`, 409)
-      }
-    }
-
-    const inventoryLogRepo = manager.getRepository(InventoryLog)
-    const views: Array<Record<string, unknown>> = []
-    for (const delta of changed) {
-      const sku = delta.sku as BaseProductSku
-      const beforeCurrentStock = Number(delta.product.currentStock)
-      const beforePreorderedStock = Number(delta.product.preOrderedStock)
-      const beforeSkuCurrentStock = Number(sku.currentStock)
-      const beforeSkuPreorderedStock = Number(sku.preOrderedStock)
-      delta.product.currentStock = beforeCurrentStock - delta.deltaQty
-      sku.currentStock = beforeSkuCurrentStock - delta.deltaQty
-      const view = {
-        productId: delta.productId,
-        skuId: delta.skuId,
-        deltaQty: delta.deltaQty,
-        beforeCurrentStock,
-        afterCurrentStock: delta.product.currentStock,
-        beforeSkuCurrentStock,
-        afterSkuCurrentStock: sku.currentStock,
-      }
-      views.push(view)
-      await inventoryLogRepo.save(inventoryLogRepo.create({
-        productId: delta.productId,
-        skuId: delta.skuId,
-        changeType: 'manual_outbound_edit',
-        changeQty: delta.deltaQty,
-        beforeCurrentStock,
-        afterCurrentStock: delta.product.currentStock,
-        beforePreorderedStock,
-        afterPreorderedStock: beforePreorderedStock,
-        beforeSkuCurrentStock,
-        afterSkuCurrentStock: sku.currentStock,
-        beforeSkuPreorderedStock,
-        afterSkuPreorderedStock: beforeSkuPreorderedStock,
-        operatorType: 'admin',
-        operatorId: actor.userId,
-        operatorName: actor.displayName,
-        refType: 'biz_outbound_order',
-        refId: normalizeId(order.id),
-        remark: `编辑出库单 ${order.businessNo}，库存差额 ${delta.deltaQty}`,
-      }))
-    }
-    await manager.getRepository(BaseProduct).save([...new Set(changed.map((delta) => delta.product))])
-    await manager.getRepository(BaseProductSku).save([...new Set(changed.map((delta) => delta.sku as BaseProductSku))])
-    return views
+    // 校验、记账与落库统一交给共享模块，保证与创建、删除回补、恢复重扣同一口径。
+    return applyManualOutboundInventoryDeltas(manager, {
+      order,
+      actor,
+      changeType: MANUAL_OUTBOUND_CHANGE_TYPES.edit,
+      deltas: changed.map((delta) => ({ product: delta.product, sku: delta.sku as BaseProductSku, deltaQty: delta.deltaQty })),
+      buildRemark: (delta) => `编辑出库单 ${order.businessNo}，库存差额 ${delta.deltaQty}`,
+    })
   }
 
   private buildSnapshot(order: BizOutboundOrder, items: BizOutboundOrderItem[]) {

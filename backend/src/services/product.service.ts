@@ -73,6 +73,19 @@ export interface UpdateProductInput {
   tagIds?: Array<string | number>
   specGroups?: ProductSpecGroupInput[]
   skus?: ProductSkuInput[]
+  /** 编辑弹窗打开时读取到的库存基线，库存变动时用于拦截并发出入库造成的覆盖。 */
+  stockBaseline?: ProductStockBaselineInput
+}
+
+export interface ProductStockBaselineInput {
+  currentStock?: number
+  skus?: Array<{ id: string | number; currentStock: number }>
+}
+
+interface ProductStockSnapshot {
+  productCurrentStock: number
+  productPreOrderedStock: number
+  skus: Map<string, { currentStock: number; preOrderedStock: number; contributes: boolean }>
 }
 
 export interface BatchUpdateProductInput {
@@ -417,6 +430,10 @@ export class ProductService {
         throw new BizError('产品不存在', 404)
       }
 
+      // 先在锁内拍下库存快照并校验基线，避免把打开弹窗时的旧库存写回、覆盖期间发生的出入库。
+      const stockSnapshot = await this.captureProductStockSnapshot(product, manager)
+      this.assertProductLevelStockBaseline(product, input)
+
       this.applyUpdateInputToProduct(product, input)
 
       const saved = await repo.save(product)
@@ -424,14 +441,139 @@ export class ProductService {
         await this.replaceProductTags(saved.id, input.tagIds, manager)
       }
       if (Array.isArray(input.skus) || Array.isArray(input.specGroups)) {
-        await this.replaceProductSkus(saved, input, manager)
+        await this.replaceProductSkus(saved, input, manager, { stockBaseline: input.stockBaseline, enforceSkuStockBaseline: true })
       } else if (this.shouldSyncDefaultProductSku(input)) {
         await this.syncDefaultProductSkuFields(saved, manager)
       }
+      await this.recordManualStockAdjustments(saved, stockSnapshot, actor, manager)
       return this.buildProductView(saved, manager)
     })
     invalidateMallCatalogReadCache()
     return result
+  }
+
+  /**
+   * 拍下商品编辑前的库存快照：
+   * - 包含商品汇总库存与全部 SKU（含已退役）的物理库存、启用状态，供事后逐项生成调整流水；
+   * - MySQL 下对 SKU 加写锁，与出库扣减的加锁顺序（商品 → SKU）保持一致。
+   */
+  private async captureProductStockSnapshot(product: BaseProduct, manager: EntityManager): Promise<ProductStockSnapshot> {
+    const skuQuery = manager.getRepository(BaseProductSku)
+      .createQueryBuilder('sku')
+      .where('sku.productId = :productId', { productId: product.id })
+      .orderBy('sku.id', 'ASC')
+    if (manager.connection.options.type !== 'sqlite') skuQuery.setLock('pessimistic_write')
+    const skus = await skuQuery.getMany()
+    return {
+      productCurrentStock: Number(product.currentStock ?? 0),
+      productPreOrderedStock: Number(product.preOrderedStock ?? 0),
+      skus: new Map(skus.map((sku) => [String(sku.id), {
+        currentStock: Number(sku.currentStock ?? 0),
+        preOrderedStock: Number(sku.preOrderedStock ?? 0),
+        contributes: isDatabaseFlagEnabled(sku.isCurrent) && isDatabaseFlagEnabled(sku.isActive),
+      }])),
+    }
+  }
+
+  /**
+   * 商品级库存基线校验：提交的物理库存与数据库不一致时，必须携带且匹配打开编辑时的基线。
+   * 未提交库存字段或提交值与数据库一致时不做任何限制。
+   */
+  private assertProductLevelStockBaseline(product: BaseProduct, input: UpdateProductInput): void {
+    if (typeof input.currentStock !== 'number') return
+    // 显式提交 SKU 列表时，商品汇总库存由 SKU 重新计算，商品级字段不会落库，无需校验。
+    if (Array.isArray(input.skus) && input.skus.length > 0) return
+    const databaseStock = Number(product.currentStock ?? 0)
+    if (input.currentStock === databaseStock) return
+    this.assertStockBaselineMatches(databaseStock, input.stockBaseline?.currentStock, product.productName)
+  }
+
+  private assertStockBaselineMatches(databaseStock: number, baselineStock: number | undefined, label: string): void {
+    if (typeof baselineStock !== 'number') {
+      throw new BizError(`「${label}」库存调整缺少打开编辑时的库存基线，请刷新后重新编辑`, 409, {
+        reason: 'PRODUCT_STOCK_BASELINE_REQUIRED',
+        currentStock: databaseStock,
+      })
+    }
+    if (baselineStock !== databaseStock) {
+      throw new BizError(
+        `「${label}」库存已被出入库变动（打开编辑时 ${baselineStock}，当前 ${databaseStock}），请刷新后重新编辑`,
+        409,
+        { reason: 'PRODUCT_STOCK_BASELINE_CONFLICT', currentStock: databaseStock, baselineStock },
+      )
+    }
+  }
+
+  /**
+   * 生成商品编辑导致的库存调整流水：
+   * - 逐个 SKU 比较“对商品汇总的贡献”（启用且当前版本才计入）与物理库存，变化即写一条 `manual_stock_adjust`；
+   * - 商品汇总前后值按流水顺序串联，若最终仍与落库汇总不一致（历史汇总漂移被重算纠正），补一条无 SKU 的汇总校正流水；
+   * - 预订库存不在商品编辑中改动，流水前后预订量保持一致。
+   */
+  private async recordManualStockAdjustments(
+    product: BaseProduct,
+    snapshot: ProductStockSnapshot,
+    actor: AuthUserContext,
+    manager: EntityManager,
+  ): Promise<void> {
+    const skus = await manager.getRepository(BaseProductSku).find({ where: { productId: product.id }, order: { id: 'ASC' } })
+    const logRepo = manager.getRepository(InventoryLog)
+    const logs: InventoryLog[] = []
+    const finalProductStock = Number(product.currentStock ?? 0)
+    const preOrderedStock = Number(product.preOrderedStock ?? 0)
+    let runningProductStock = snapshot.productCurrentStock
+    const baseLog = {
+      productId: String(product.id),
+      changeType: 'manual_stock_adjust',
+      beforePreorderedStock: snapshot.productPreOrderedStock,
+      afterPreorderedStock: preOrderedStock,
+      operatorType: 'admin',
+      operatorId: actor.userId,
+      operatorName: actor.displayName,
+      refType: 'base_product',
+      refId: String(product.id),
+    }
+
+    for (const sku of skus) {
+      const before = snapshot.skus.get(String(sku.id))
+      const beforeSkuStock = before?.currentStock ?? 0
+      const afterSkuStock = Number(sku.currentStock ?? 0)
+      const beforeContribution = before?.contributes ? beforeSkuStock : 0
+      const afterContribution = isDatabaseFlagEnabled(sku.isCurrent) && isDatabaseFlagEnabled(sku.isActive) ? afterSkuStock : 0
+      const contributionDelta = afterContribution - beforeContribution
+      if (beforeSkuStock === afterSkuStock && contributionDelta === 0) continue
+      const beforeProductStock = runningProductStock
+      runningProductStock += contributionDelta
+      logs.push(logRepo.create({
+        ...baseLog,
+        skuId: String(sku.id),
+        changeQty: afterSkuStock - beforeSkuStock !== 0 ? afterSkuStock - beforeSkuStock : contributionDelta,
+        beforeCurrentStock: beforeProductStock,
+        afterCurrentStock: runningProductStock,
+        beforeSkuCurrentStock: beforeSkuStock,
+        afterSkuCurrentStock: afterSkuStock,
+        beforeSkuPreorderedStock: before?.preOrderedStock ?? 0,
+        afterSkuPreorderedStock: Number(sku.preOrderedStock ?? 0),
+        remark: `商品编辑调整 SKU ${sku.skuCode} 库存 ${beforeSkuStock} → ${afterSkuStock}${before?.contributes && afterContribution === 0 ? '（规格停用/退役，移出汇总）' : ''}`,
+      }))
+    }
+
+    if (runningProductStock !== finalProductStock) {
+      logs.push(logRepo.create({
+        ...baseLog,
+        skuId: null,
+        changeQty: finalProductStock - runningProductStock,
+        beforeCurrentStock: runningProductStock,
+        afterCurrentStock: finalProductStock,
+        beforeSkuCurrentStock: null,
+        afterSkuCurrentStock: null,
+        beforeSkuPreorderedStock: null,
+        afterSkuPreorderedStock: null,
+        remark: `商品编辑校正汇总库存 ${runningProductStock} → ${finalProductStock}`,
+      }))
+    }
+
+    if (logs.length > 0) await logRepo.save(logs)
   }
 
   async batchUpdate(input: BatchUpdateProductInput, actor: AuthUserContext): Promise<ProductView[]> {
@@ -633,9 +775,13 @@ export class ProductService {
     product: BaseProduct,
     input: CreateProductInput | UpdateProductInput,
     manager = AppDataSource.manager,
+    options: { stockBaseline?: ProductStockBaselineInput; enforceSkuStockBaseline?: boolean } = {},
   ): Promise<void> {
     const skuRepo = manager.getRepository(BaseProductSku)
     const specGroups = this.normalizeSpecGroups(input.specGroups)
+    // 只对调用方显式提交的 SKU 库存做基线校验；缺省 SKU 由商品级字段推导，已在商品级校验。
+    const shouldEnforceSkuBaseline = options.enforceSkuStockBaseline === true && Array.isArray(input.skus) && input.skus.length > 0
+    const skuBaselineMap = new Map((options.stockBaseline?.skus ?? []).map((item) => [String(item.id), Number(item.currentStock)]))
     const skuInputs = this.normalizeSkuInputs(product, input)
     const existingSkuQuery = skuRepo
       .createQueryBuilder('sku')
@@ -692,6 +838,13 @@ export class ProductService {
         }
         if (skuInput.currentStock === undefined) {
           skuEntity.currentStock = matchedSku.currentStock
+        } else if (shouldEnforceSkuBaseline && Number(skuEntity.currentStock) !== Number(matchedSku.currentStock)) {
+          // 提交的 SKU 库存与锁内数据库值不同：必须证明打开编辑时看到的就是当前值，否则视为覆盖并发出入库。
+          this.assertStockBaselineMatches(
+            Number(matchedSku.currentStock),
+            skuBaselineMap.get(String(matchedSku.id)),
+            `${product.productName} / ${matchedSku.specText || matchedSku.skuCode}`,
+          )
         }
         // 预订占用只能由 O2O 订单生命周期记账。商品编辑即使回传或伪造该字段，
         // 也必须以已加锁的数据库值为准，避免先把占用改成 0 再停用 SKU。
@@ -1244,14 +1397,7 @@ export class ProductService {
         PRODUCT_FIELD_LIMITS.maxStock,
       ) as number
     }
-    if (typeof input.preOrderedStock === 'number') {
-      product.preOrderedStock = this.readOptionalInteger(
-        input.preOrderedStock,
-        '预订库存',
-        0,
-        PRODUCT_FIELD_LIMITS.maxStock,
-      ) as number
-    }
+    // 预订库存只能由 O2O 订单生命周期记账：商品编辑即使回传该字段也忽略，与 SKU 编辑口径保持一致。
     this.assertStockRelation(product.currentStock, product.preOrderedStock)
   }
 

@@ -382,7 +382,21 @@ const isProductImplicitDefaultSku = (row: ProductRecord) => {
   )
 }
 
+/**
+ * 编辑弹窗打开时的库存基线：
+ * - 仅提交用户实际改动过的库存字段，未改动的由服务端保留锁内最新值；
+ * - 改动时附带基线，服务端发现期间已被出入库改动会拒绝保存，避免静默覆盖出库扣减。
+ */
+let productEditStockBaseline: { productId: string; currentStock: number; skus: Map<string, number> } | null = null
+
 const buildEditForm = (row: ProductRecord): ProductForm => {
+  productEditStockBaseline = {
+    productId: row.id,
+    currentStock: Number(row.currentStock) || 0,
+    skus: new Map((row.skus ?? [])
+      .filter((sku) => typeof sku.id === 'string' && sku.id)
+      .map((sku) => [String(sku.id), Number(sku.currentStock ?? 0)])),
+  }
   const currentSkus = (row.skus ?? []).filter((sku) => sku.isCurrent !== false)
   const skus = currentSkus.length && !isProductImplicitDefaultSku(row)
     ? currentSkus.map((sku) => ({
@@ -444,6 +458,12 @@ const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProdu
     min: 0,
     integer: true,
   })
+  // 编辑已有商品时，只提交用户改动过的库存，并附带打开弹窗时的基线；新增商品不受影响。
+  const baseline = currentForm.id && productEditStockBaseline?.productId === currentForm.id ? productEditStockBaseline : null
+  const resolveSkuStockField = (skuId: string | undefined, stock: number) => {
+    if (!baseline || !skuId) return { currentStock: stock }
+    return baseline.skus.get(String(skuId)) === stock ? {} : { currentStock: stock }
+  }
 
   return {
     // 详细注释：单个新增/编辑与批量新增统一使用相同的字段归一化口径，
@@ -453,7 +473,7 @@ const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProdu
     pinyinAbbr: normalizedPinyinAbbr,
     defaultPrice: normalizedDefaultPrice,
     discountRate: normalizedDiscountRate,
-    currentStock: normalizedCurrentStock,
+    ...(baseline && baseline.currentStock === normalizedCurrentStock ? {} : { currentStock: normalizedCurrentStock }),
     isActive: currentForm.isActive,
     tagIds: resolvedTagIds,
     skus: currentForm.skus.length
@@ -462,7 +482,7 @@ const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProdu
           specValues: buildSkuSpecValues(sku, index),
           defaultPrice: normalizeSubmitNumber(sku.defaultPrice, { fallback: normalizedDefaultPrice, min: 0 }),
           discountRate: normalizeSubmitNumber(sku.discountRate, { fallback: normalizedDiscountRate, min: 1, max: 10 }),
-          currentStock: normalizeSubmitNumber(sku.currentStock, { fallback: 0, min: 0, integer: true }),
+          ...resolveSkuStockField(sku.id, normalizeSubmitNumber(sku.currentStock, { fallback: 0, min: 0, integer: true })),
           isActive: sku.isActive !== false,
           isCurrent: true,
           o2oRecommended: sku.o2oRecommended === true,
@@ -470,6 +490,14 @@ const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProdu
           sortOrder: index,
         }))
       : [],
+    ...(baseline
+      ? {
+          stockBaseline: {
+            currentStock: baseline.currentStock,
+            skus: [...baseline.skus.entries()].map(([id, currentStock]) => ({ id, currentStock })),
+          },
+        }
+      : {}),
   }
 }
 

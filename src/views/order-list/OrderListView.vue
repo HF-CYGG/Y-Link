@@ -32,6 +32,7 @@ import {
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { useOrderListView } from './composables/useOrderListView'
+import OrderDeleteConfirmDialog from './components/OrderDeleteConfirmDialog.vue'
 
 import { showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
@@ -135,6 +136,10 @@ const {
   handlePageSizeChange,
   handleViewDetail,
   handleDeleteOrderWithConfirm,
+  handleDeleteDialogConfirm,
+  deleteDialogVisible,
+  deleteDialogOrder,
+  deleteDialogSubmitting,
   handlePurgeOrderWithConfirm,
   handleRestoreOrderWithConfirm,
   refreshOrders,
@@ -810,6 +815,13 @@ const handleSaveComplianceFlags = async () => {
       v-model="contentEditDialogVisible"
       :order="currentOrder"
       @committed="handleContentEditCommitted"
+    />
+
+    <OrderDeleteConfirmDialog
+      v-model="deleteDialogVisible"
+      :order="deleteDialogOrder"
+      :submitting="deleteDialogSubmitting"
+      @confirm="handleDeleteDialogConfirm"
     />
   </PageContainer>
 </template>

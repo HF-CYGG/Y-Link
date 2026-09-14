@@ -96,3 +96,16 @@ export const resolveLegacyOrderEntryProductValue = (
 export const getProductSkuOptionLabel = (sku: ProductSkuRecord): string => {
   return `${sku.specText || '默认规格'}（${sku.skuCode || sku.id || '-'}）`
 }
+
+/**
+ * SKU 可用库存（物理库存 - 预订占用）：
+ * - 优先使用服务端返回的 availableStock，缺失时按同一口径推导；
+ * - 仅用于开单页展示与提交前预检，最终以服务端事务内校验为准。
+ */
+export const getSkuAvailableStock = (sku: ProductSkuRecord | undefined): number | null => {
+  if (!sku) return null
+  if (typeof sku.availableStock === 'number' && Number.isFinite(sku.availableStock)) return sku.availableStock
+  const current = Number(sku.currentStock)
+  const reserved = Number(sku.preOrderedStock ?? 0)
+  return Number.isFinite(current) ? current - (Number.isFinite(reserved) ? reserved : 0) : null
+}

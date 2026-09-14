@@ -120,6 +120,14 @@ const updateProductSchema = z.object({
   tagIds: z.array(productTagIdSchema).optional(),
   specGroups: z.array(productSpecGroupSchema).optional(),
   skus: z.array(productSkuSchema).optional(),
+  // 编辑弹窗打开时读取到的库存基线；提交库存与数据库不一致时，服务端据此判断是否被出入库并发改动。
+  stockBaseline: z.object({
+    currentStock: z.number().int().nonnegative().optional(),
+    skus: z.array(z.object({
+      id: productTagIdSchema,
+      currentStock: z.number().int().nonnegative(),
+    })).optional(),
+  }).optional(),
 })
 
 const batchUpdateProductSchema = z

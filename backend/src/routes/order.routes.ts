@@ -42,6 +42,11 @@ const deleteOrderSchema = z.object({
   confirmShowNo: z.string().trim().min(1, '请填写业务单号完成二次确认'),
 })
 
+const softDeleteOrderSchema = deleteOrderSchema.extend({
+  // 仅手工库存单可选择删除时回补库存；缺省视为不回补，保持旧调用方语义不变。
+  releaseInventory: z.boolean().optional(),
+})
+
 const purgeOrderSchema = deleteOrderSchema.extend({
   permanentDeletePassword: z.string().optional(),
 })
@@ -248,8 +253,14 @@ orderRouter.delete(
   requirePermission('orders:delete'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
-    const payload = deleteOrderSchema.parse(req.body ?? {})
-    const data = await orderService.softDeleteById(req.params.id, authReq.auth, payload.confirmShowNo, extractRequestMeta(req))
+    const payload = softDeleteOrderSchema.parse(req.body ?? {})
+    const data = await orderService.softDeleteById(
+      req.params.id,
+      authReq.auth,
+      payload.confirmShowNo,
+      extractRequestMeta(req),
+      { releaseInventory: payload.releaseInventory === true },
+    )
     res.json({
       code: 0,
       message: 'ok',

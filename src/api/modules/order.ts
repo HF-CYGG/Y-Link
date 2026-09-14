@@ -90,6 +90,10 @@ export interface SubmittedOrderItemRecord extends SubmitOrderItemPayload {
 export interface SubmitOrderResult {
   order: SubmittedOrderRecord
   items: SubmittedOrderItemRecord[]
+  /** 本次提交实际扣减的库存数量；幂等重放时为 0。 */
+  inventoryDeductedQty: number
+  /** 命中同一幂等键的既有订单，服务端未重复扣减库存。 */
+  idempotentReplay: boolean
 }
 
 /**
@@ -116,6 +120,8 @@ export const submitOrder = async (payload: SubmitOrderPayload): Promise<SubmitOr
       unitPrice: PrimitiveTextValue
       remark?: PrimitiveTextValue
     }>
+    inventory?: { deductedQty?: number | PrimitiveTextValue }
+    idempotentReplay?: boolean
   }>({
     method: 'POST',
     url: '/orders/submit',
@@ -140,6 +146,8 @@ export const submitOrder = async (payload: SubmitOrderPayload): Promise<SubmitOr
       unitPrice: Number(normalizeDecimalField(item.unitPrice)),
       remark: normalizeTextField(item.remark) || undefined,
     })),
+    inventoryDeductedQty: Number(result.inventory?.deductedQty ?? 0) || 0,
+    idempotentReplay: result.idempotentReplay === true,
   }
 }
 
@@ -186,6 +194,8 @@ export interface OrderRecord {
   deletedByUserId: string | null
   deletedByUsername: string | null
   deletedByDisplayName: string | null
+  /** 删除时是否已回补库存；恢复时服务端会据此重新扣减。 */
+  inventoryReleased: boolean
   createdAt: string
 }
 
@@ -224,6 +234,7 @@ interface OrderRecordRaw {
   deletedByUserId?: PrimitiveTextValue
   deletedByUsername?: PrimitiveTextValue
   deletedByDisplayName?: PrimitiveTextValue
+  inventoryReleased?: boolean | PrimitiveTextValue
   createdAt: PrimitiveTextValue
 }
 
@@ -302,6 +313,7 @@ const normalizeOrderRecord = (record: OrderRecordRaw): OrderRecord => ({
   deletedByUserId: normalizeNullableTextField(record.deletedByUserId),
   deletedByUsername: normalizeNullableTextField(record.deletedByUsername),
   deletedByDisplayName: normalizeNullableTextField(record.deletedByDisplayName),
+  inventoryReleased: normalizeBooleanField(record.inventoryReleased),
   createdAt: normalizeTextField(record.createdAt),
 })
 
@@ -459,6 +471,8 @@ export const getOrderDetailByShowNo = async (
 export interface DeleteOrderPayload {
   confirmShowNo: string
   permanentDeletePassword?: string
+  /** 仅软删除手工库存单时生效：true 表示删除同时回补商品与 SKU 库存。 */
+  releaseInventory?: boolean
 }
 
 export interface PurgeOrderResult {

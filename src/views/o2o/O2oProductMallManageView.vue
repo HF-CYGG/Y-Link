@@ -425,12 +425,20 @@ const openBatchCreateDialog = () => {
   globalThis.location.assign('/base-data/products')
 }
 
+// 打开编辑弹窗时的 SKU 库存基线：只提交被改动的库存，并附带基线让服务端拦截“期间已被出入库改动”的覆盖。
+let editStockBaseline = new Map<string, number>()
+
 // 详细注释：打开编辑商品弹窗，将商品记录字段回显到表单模型中。
 const openEditDialog = (product: ProductRecord) => {
   if (!ensurePermission('products:manage', '编辑产品')) {
     return
   }
   resetForm()
+  editStockBaseline = new Map(
+    (product.skus ?? [])
+      .filter((sku) => typeof sku.id === 'string' && sku.id.trim())
+      .map((sku) => [String(sku.id).trim(), normalizeSkuInteger(sku.currentStock)]),
+  )
   form.id = product.id
   form.productCode = product.productCode
   form.productName = product.productName
@@ -515,24 +523,27 @@ const handleCompactBatchCommand = (command: string | number | object) => {
 
 const buildSkuSubmitPayload = (): ProductSkuRecord[] => {
   const recommendedSkuIdSet = new Set(form.recommendationMode === 'specific' ? form.selectedRecommendedSkuIds : [])
-  return form.skus.map((sku) => ({
-    id: sku.id || undefined,
-    productId: sku.productId || undefined,
-    skuCode: sku.skuCode || undefined,
-    specValues: { ...sku.specValues },
-    specText: sku.specText || undefined,
-    defaultPrice: sku.defaultPrice,
-    originalPrice: sku.originalPrice,
-    discountRate: sku.discountRate,
-    discountedPrice: calculateDiscountedPriceText(sku.defaultPrice, sku.discountRate),
-    currentStock: sku.currentStock,
-    preOrderedStock: sku.preOrderedStock,
-    availableStock: sku.availableStock,
-    isActive: sku.isActive,
-    o2oRecommended: recommendedSkuIdSet.has(sku.localId),
-    thumbnail: sku.thumbnail.trim() || null,
-    sortOrder: sku.sortOrder,
-  }))
+  return form.skus.map((sku) => {
+    // 已有 SKU 库存未改动时不提交库存：由服务端保留锁内最新值，避免把打开弹窗时的旧库存写回、覆盖期间的出入库。
+    const baselineStock = sku.id ? editStockBaseline.get(sku.id) : undefined
+    const stockChanged = baselineStock === undefined || baselineStock !== sku.currentStock
+    return {
+      id: sku.id || undefined,
+      productId: sku.productId || undefined,
+      skuCode: sku.skuCode || undefined,
+      specValues: { ...sku.specValues },
+      specText: sku.specText || undefined,
+      defaultPrice: sku.defaultPrice,
+      originalPrice: sku.originalPrice,
+      discountRate: sku.discountRate,
+      discountedPrice: calculateDiscountedPriceText(sku.defaultPrice, sku.discountRate),
+      ...(stockChanged ? { currentStock: sku.currentStock } : {}),
+      isActive: sku.isActive,
+      o2oRecommended: recommendedSkuIdSet.has(sku.localId),
+      thumbnail: sku.thumbnail.trim() || null,
+      sortOrder: sku.sortOrder,
+    }
+  })
 }
 
 // 详细注释：提交商品表单（新增/编辑），处理图片上传逻辑并构造对应 payload 发起请求。
@@ -557,6 +568,9 @@ const handleSubmit = async () => {
         skus: buildSkuSubmitPayload(),
         detailContent: form.detailContent.trim() || null,
         limitPerUser: Math.max(1, Math.floor(form.limitPerUser)),
+        stockBaseline: {
+          skus: [...editStockBaseline.entries()].map(([id, currentStock]) => ({ id, currentStock })),
+        },
       }
       await updateProduct(form.id, payload)
       showAppSuccess('商品已更新')
