@@ -377,6 +377,16 @@ export const useClientCartStore = defineStore('client-cart', () => {
     persist()
   }
 
+  // 手动输入数量：空值、非数字或小于 1 的输入不写入购物车，避免 NaN 落入缓存或输入 0 被当成删除；
+  // 合法值统一交给 updateQty，复用“可预订库存 + 单人限购”上限与超限提示，不另立一套校验口径。
+  const setQtyFromInput = (productId: string, qty: number | null) => {
+    if (qty === null || !Number.isFinite(qty) || Math.floor(qty) < 1) {
+      showAppWarning('请输入大于 0 的整数数量')
+      return
+    }
+    updateQty(productId, Math.floor(qty))
+  }
+
   const incrementQty = (productId: string, delta = 1) => {
     const target = items.value.find((item) => resolveCartItemId(item.productId, item.skuId) === productId || item.productId === productId)
     if (!target) {
@@ -446,6 +456,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
     syncWithCatalog,
     addProduct,
     updateQty,
+    setQtyFromInput,
     incrementQty,
     removeItem,
     clearSelectedItems,

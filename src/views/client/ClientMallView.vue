@@ -5,6 +5,7 @@
  * 实现逻辑：商品详情按 SKU 的真实规格维度逐组展示选项，选择上层规格后只保留下层已配置组合，并由完整 SKU 统一驱动图片、价格与库存摘要。
  * 维护说明：重点维护“左侧标签高亮 <-> 右侧分组定位”一致性；规格选择不得虚构未配置组合，也不能绕过现有 SKU 库存与购物车校验。
  * 悬浮购物车遮挡：页面尾部留白、分类浏览列表高度与 scroll-padding 统一由摘要栏实测遮挡高度 `--mall-floating-occlusion` 驱动，不要改回固定常量估算。
+ * 数量输入：迷你购物车与详情弹层的数量均可直接输入，购物车走 store 的 setQtyFromInput，详情弹层走 commitDetailQty，与加减按钮共用同一上限与提示。
  */
 
 
@@ -39,6 +40,7 @@ import {
 import ClientCartView from './ClientCartView.vue'
 import ClientCheckoutView from './ClientCheckoutView.vue'
 import ClientImagePreviewer from './components/ClientImagePreviewer.vue'
+import ClientQtyInput from './components/ClientQtyInput.vue'
 
 
 import { showAppSuccess, showAppWarning } from '@/utils/app-alert'
@@ -786,6 +788,12 @@ const handleSortModeChange = async (nextMode: ProductSortMode) => {
   }
 }
 
+// 详情数量触顶提示：不限购（limitPerUser=0）时触顶只可能是库存不足，避免误报“限购上限”。
+const warnDetailQtyLimit = (maxQty: number) => {
+  const limit = Math.max(0, Number(detailProduct.value?.limitPerUser ?? 0))
+  showAppWarning(limit > 0 && maxQty >= limit ? '已达单人限购上限' : '库存不足')
+}
+
 const changeDetailQty = (delta: number) => {
   if (!detailProduct.value) {
     return
@@ -793,13 +801,27 @@ const changeDetailQty = (delta: number) => {
   const maxQty = detailMaxQty.value
   const nextQty = Math.min(maxQty, Math.max(1, detailQty.value + delta))
   if (detailQty.value === maxQty && delta > 0) {
-    if (maxQty >= detailProduct.value.limitPerUser) {
-      showAppWarning('已达单人限购上限')
-    } else {
-      showAppWarning('库存不足')
-    }
+    warnDetailQtyLimit(maxQty)
   }
   detailQty.value = nextQty
+}
+
+// 详情数量手动输入：非法值保留原数量并提示，超出可购上限时按上限收敛，提示口径与加减按钮一致。
+const commitDetailQty = (value: number | null) => {
+  if (!detailProduct.value) {
+    return
+  }
+  if (value === null || !Number.isFinite(value) || Math.floor(value) < 1) {
+    showAppWarning('请输入大于 0 的整数数量')
+    return
+  }
+  const maxQty = detailMaxQty.value
+  if (value > maxQty) {
+    warnDetailQtyLimit(maxQty)
+    detailQty.value = Math.max(1, maxQty)
+    return
+  }
+  detailQty.value = Math.floor(value)
 }
 
 const selectDetailSku = (sku: O2oMallSku) => {
@@ -1763,11 +1785,12 @@ onBeforeUnmount(() => {
                 <div class="item-stepper">
                   <p v-if="item.specText" class="text-xs text-slate-500">{{ item.specText }}</p>
                   <button type="button" class="step-btn" @click="clientCartStore.incrementQty(item.skuId || item.productId, -1)">-</button>
-                  <span class="step-val">
-                    <Transition name="qty-pop" mode="out-in">
-                      <span :key="`mini-qty-${item.skuId || item.productId}-${item.qty}`" class="step-val__num">{{ item.qty }}</span>
-                    </Transition>
-                  </span>
+                  <ClientQtyInput
+                    size="compact"
+                    :model-value="item.qty"
+                    :aria-label="`${item.productName}数量`"
+                    @commit="clientCartStore.setQtyFromInput(item.skuId || item.productId, $event)"
+                  />
                   <button type="button" class="step-btn" @click="clientCartStore.incrementQty(item.skuId || item.productId, 1)">+</button>
                 </div>
               </article>
@@ -1904,7 +1927,7 @@ onBeforeUnmount(() => {
             <span>数量</span>
             <div class="client-detail-qty-control">
               <button type="button" class="client-qty-button" aria-label="减少数量" @click="changeDetailQty(-1)">-</button>
-              <span>{{ detailQty }}</span>
+              <ClientQtyInput :model-value="detailQty" aria-label="商品数量" @commit="commitDetailQty" />
               <button type="button" class="client-qty-button" aria-label="增加数量" @click="changeDetailQty(1)">+</button>
             </div>
           </div>
@@ -2699,14 +2722,6 @@ onBeforeUnmount(() => {
   gap: 0.62rem;
 }
 
-.client-detail-qty-control span {
-  min-width: 1.7rem;
-  color: #0f172a;
-  font-size: 0.95rem;
-  font-weight: 800;
-  text-align: center;
-}
-
 .client-detail-cart-button {
   width: 100%;
   min-height: 2.9rem;
@@ -3401,12 +3416,6 @@ onBeforeUnmount(() => {
   transform: translateY(-6px) scale(0.92);
 }
 
-.step-val__num {
-  display: inline-block;
-  min-width: 20px;
-  text-align: center;
-}
-
 .item-list::-webkit-scrollbar {
   width: 6px;
 }
@@ -3459,14 +3468,6 @@ onBeforeUnmount(() => {
   background: #ffffff;
   color: #1e293b;
   font-weight: 700;
-}
-
-.step-val {
-  min-width: 20px;
-  color: #1e293b;
-  font-size: 0.82rem;
-  font-weight: 700;
-  text-align: center;
 }
 
 .expand-footer {
