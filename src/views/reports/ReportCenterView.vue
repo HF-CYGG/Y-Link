@@ -5,10 +5,12 @@
  * 实现逻辑：
  * - 页面以报表类型为主入口，统一维护时间段、标签、字段勾选和分页预览参数；
  * - 报表预览与 Excel 导出共用同一套查询参数，避免用户看到的列表与导出的文件口径不一致；
- * - 字段勾选只负责用户偏好，最终字段白名单仍由后端报表服务二次校验。
+ * - 字段勾选只负责用户偏好，最终字段白名单仍由后端报表服务二次校验；
+ * - 标签销售汇总表在说明卡下方展示总数量与总金额，数值直接取后端 summary（全部命中明细 SUM），与分页无关。
  * 维护说明：
  * - 新增报表类型时需要同步补齐本页字段定义、报表说明和后端 ReportType；
- * - 库存表展示当前且启用 SKU 的实时合计；无当前 SKU 的旧数据才回退商品主表，不在页面层重算。
+ * - 库存表展示当前且启用 SKU 的实时合计；无当前 SKU 的旧数据才回退商品主表，不在页面层重算；
+ * - 销售汇总禁止改为前端累加当前页 records，否则翻页后金额会失真。
  */
 
 import dayjs from 'dayjs'
@@ -22,7 +24,14 @@ import {
 } from '@/components/common'
 import { useAppStore } from '@/store'
 import pinia from '@/store/pinia'
-import { exportReportExcel, getReportData, type ReportFieldDefinition, type ReportRow, type ReportType } from '@/api/modules/report'
+import {
+  exportReportExcel,
+  getReportData,
+  type ReportFieldDefinition,
+  type ReportRow,
+  type ReportSalesSummary,
+  type ReportType,
+} from '@/api/modules/report'
 import { getTagList, type Tag } from '@/api/modules/tag'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
@@ -233,6 +242,9 @@ const loadTags = async () => {
 
 /** 最近一次成功取数的时间：库存为实时快照，展示取数时刻便于核对是否已包含最新出入库。 */
 const lastLoadedAt = ref<Date | null>(null)
+/** 标签销售汇总表的全量汇总，来自后端 summary；切换报表类型时清空，避免短暂展示上一类报表的数值。 */
+const salesSummary = ref<ReportSalesSummary | null>(null)
+const showSalesSummary = computed(() => reportType.value === 'tag-sales')
 
 const loadData = async () => {
   if (!ensurePermission('reports:view', '报表中心查看')) {
@@ -251,6 +263,7 @@ const loadData = async () => {
     executor: (signal) => getReportData(reportType.value, buildQueryParams(), { signal }),
     onSuccess: (result) => {
       applyPaginatedResult(listState, result)
+      salesSummary.value = result.summary
       lastLoadedAt.value = new Date()
     },
     onError: (error) => {
@@ -275,6 +288,7 @@ const handleReset = () => {
 }
 
 const handleReportTypeChange = () => {
+  salesSummary.value = null
   selectedTagIds.value = []
   selectedFieldKeys.value = currentAvailableFields.value.map((field) => field.key)
   listState.query.page = 1
@@ -447,6 +461,21 @@ onActivated(() => {
         <p v-if="lastLoadedAt" class="mt-1 text-xs text-slate-500 dark:text-slate-400">
           数据更新于 {{ dayjs(lastLoadedAt).format('YYYY-MM-DD HH:mm:ss') }}（切回本页会自动刷新，也可点击“查询”获取最新库存）
         </p>
+      </div>
+
+      <div v-if="showSalesSummary" class="report-sales-summary grid gap-3 sm:grid-cols-2" aria-live="polite">
+        <div class="report-sales-summary__item rounded-xl bg-slate-50 px-4 py-3 dark:bg-slate-900/40">
+          <div class="text-xs text-slate-500 dark:text-slate-400">总数量（全部命中明细）</div>
+          <div class="mt-1 text-lg font-semibold text-slate-800 dark:text-slate-100">
+            {{ salesSummary ? salesSummary.totalQty : '-' }}
+          </div>
+        </div>
+        <div class="report-sales-summary__item rounded-xl bg-slate-50 px-4 py-3 dark:bg-slate-900/40">
+          <div class="text-xs text-slate-500 dark:text-slate-400">总金额（全部命中明细）</div>
+          <div class="mt-1 text-lg font-semibold text-brand">
+            {{ salesSummary ? `¥${salesSummary.totalAmount}` : '-' }}
+          </div>
+        </div>
       </div>
 
       <div class="apple-card flex min-h-0 flex-1 flex-col p-3 sm:p-4 xl:p-5">
@@ -623,6 +652,11 @@ onActivated(() => {
 }
 
 .report-summary-card__condition {
+  overflow-wrap: anywhere;
+}
+
+.report-sales-summary__item {
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 
