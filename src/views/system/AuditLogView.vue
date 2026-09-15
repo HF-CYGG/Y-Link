@@ -118,19 +118,23 @@ const categoryOptions = computed(() => filterOptions.value?.categories ?? [])
  * 操作类型树：
  * - 一级节点为业务类别，二级节点为该类别下的操作类型，只有叶子节点可选；
  * - 已选择业务类别时只展示该类别并默认展开，未选类别时展示全部类别供逐级展开；
- * - 类别节点值加 `category:` 前缀，避免与动作编码冲突。
+ * - 类别节点值加 `category:` 前缀，避免与动作编码冲突，并设为 disabled：el-tree-select 默认允许选中父节点，
+ *   否则点击类别节点会把合成值写入 actionType，后端按不存在的动作编码精确查询导致空结果。
  */
+const ACTION_TREE_CATEGORY_PREFIX = 'category:'
+
 const actionTreeData = computed(() => {
   return categoryOptions.value
     .filter((item) => item.actionTypes.length > 0 && (!searchForm.category || item.key === searchForm.category))
     .map((item) => ({
-      value: `category:${item.key}`,
+      value: `${ACTION_TREE_CATEGORY_PREFIX}${item.key}`,
       label: item.label,
+      disabled: true,
       children: item.actionTypes.map((action) => ({ value: action.value, label: action.label })),
     }))
 })
 
-const actionTreeExpandedKeys = computed(() => (searchForm.category ? [`category:${searchForm.category}`] : []))
+const actionTreeExpandedKeys = computed(() => (searchForm.category ? [`${ACTION_TREE_CATEGORY_PREFIX}${searchForm.category}`] : []))
 
 const targetTypeOptions = computed(() => filterOptions.value?.targetTypes ?? [])
 
@@ -340,6 +344,10 @@ const handleCategoryChange = () => {
 
 /** 先选操作类型时自动带出所属业务类别，避免一级与二级筛选互相矛盾。 */
 const handleActionTypeChange = () => {
+  // 兜底：类别父节点已禁用，若仍收到类别合成值（如键盘或组件行为变化），视为未选择操作类型，避免按不存在的动作编码查询。
+  if (searchForm.actionType.startsWith(ACTION_TREE_CATEGORY_PREFIX)) {
+    searchForm.actionType = ''
+  }
   const matched = searchForm.actionType ? actionTypeCategoryMap.value.get(searchForm.actionType) : undefined
   if (matched) {
     searchForm.category = matched.category

@@ -537,6 +537,8 @@ export async function backfillSqliteOrderSourceDocs(dataSource: DataSource): Pro
     p."id" = CAST(substr("biz_outbound_order"."idempotency_key", 21) AS INTEGER)
     AND "biz_outbound_order"."idempotency_key" = 'o2o-preorder-verify:' || p."id"
   `
+  // 专项回填脚本会传入隔离 DataSource；先幂等安装协调器，确保随后开启的 SQLite 事务同样受单写者队列保护。
+  await initializeDatabaseInfrastructure(dataSource)
   return dataSource.transaction(async (manager) => {
     let clearedItemRemarks = 0
     if (itemColumns.has('remark') && itemColumns.has('order_id') && itemColumns.has('source_order_id')) {

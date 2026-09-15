@@ -294,6 +294,18 @@ const ALLOWED_DIRECT_TRANSACTION_CALLS: Array<{
     relativePath: 'src/config/database-bootstrap.ts',
     receiver: 'dataSource',
     method: 'transaction',
+    enclosingFunction: 'backfillSqliteOrderSourceDocs',
+    expectedCount: 1,
+    reason:
+      'backfillSqliteOrderSourceDocs 是接受任意 DataSource 的启动期 #70 核销来源快照回填，'
+      + '不能使用只绑定全局 AppDataSource 的 runInTransaction；函数会先幂等调用 '
+      + 'initializeDatabaseInfrastructure(dataSource)，再通过已被协调器接管的 transaction '
+      + '原子执行“先清理明细备注、后回填主单来源”，避免只完成其一',
+  },
+  {
+    relativePath: 'src/config/database-bootstrap.ts',
+    receiver: 'dataSource',
+    method: 'transaction',
     enclosingFunction: 'migrateLegacyFeedbackAttachments',
     expectedCount: 1,
     reason:
