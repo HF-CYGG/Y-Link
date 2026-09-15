@@ -30,9 +30,13 @@ const reportPath = path.join(runtimeRoot, 'enterprise-performance-budget-report.
  * 而 pdf-export、charting、qr-scanner 三个低频重包与 main 的哈希和体积均未变化。
  * 首屏、路由、低频重包和运行时细分预算均已通过，因此总量上限设为 4315 KB，
  * 为当前批准功能基线保留约 1.49% 余量，同时继续阻止整体包体无约束增长。
+ *
+ * Issues #93/#94（报表中心规格明细抽屉、标签销售汇总）：同一环境下 main@ed46790 总产物实测 4310.83 KB，
+ * 叠加两项功能后为 4320.15 KB（+9.32 KB），增量集中在异步拆包的 InventorySkuDetailDrawer 与报表中心路由分包，
+ * 首屏依赖图、首屏 JS/CSS、低频重包与路由分包预算均未新增超额，因此总量上限上调为 4330 KB，保留约 0.23% 余量。
  */
 const performanceBudget = {
-  totalAssetsMaxKB: 4315,
+  totalAssetsMaxKB: 4330,
   criticalAssetsMaxKB: 1180,
   initialLoadJsMaxKB: 850,
   initialLoadCssMaxKB: 320,

@@ -5,7 +5,8 @@
  * - 手工固定商品主表与 SKU 差异夹具，覆盖当前、停用、退役和无当前 SKU 的回退语义；
  * - 调用真实 ProductService、ReportService，并解析流式生成的 ExcelJS 工作簿；
  * - 对三个出口逐项核对固定期望，同时确认报表读取不会修改库存或库存流水；
- * - Issue #94：标签销售汇总表的 summary 必须等于全部命中明细之和，且不随分页变化，无命中时为 0。
+ * - Issue #94：标签销售汇总表的 summary 必须等于全部命中明细之和，且不随分页变化，无命中时为 0；
+ * - Issue #93：库存行必须保留 productId，规格明细的合计与商品行一致，停用/历史规格不计入且无当前规格时标记回退主表。
  * 维护说明：
  * - 夹具期望必须独立手工给出，不能从任一被测出口反推；
  * - 脚本只能连接本次唯一临时 SQLite，禁止读取或修改业务数据库。
@@ -331,6 +332,68 @@ async function main() {
     }
     assert.deepEqual(afterSnapshot, beforeSnapshot, '商品/报表/Excel 读取前后不得修改商品、SKU 或库存流水')
     assert.deepEqual(mismatches, [], mismatches.join('\n'))
+
+    // Issue #93：库存行在未勾选商品标识字段时仍保留 productId，规格明细与商品行合计同源且停用/历史规格不计入。
+    const skuDetailSnapshotBefore = {
+      skus: await skuRepo.find({ order: { id: 'ASC' } }),
+      inventoryLogs: await inventoryLogRepo.find({ order: { id: 'ASC' } }),
+    }
+    const previewRowMap = new Map(preview.list.map((row) => [String(row.productCode), row]))
+    for (const fixture of fixtures) {
+      const row = previewRowMap.get(fixture.code)
+      assert.ok(row?.productId, `${fixture.code} 库存行必须保留 productId 元数据`)
+      const detail = await reportService.listInventorySkus(String(row.productId))
+      assert.equal(detail.productCode, fixture.code)
+      assert.deepEqual(
+        [detail.summary.currentStock, detail.summary.preOrderedStock, detail.summary.availableStock],
+        fixture.expected,
+        `${fixture.code} 规格明细合计必须与商品行一致`,
+      )
+      const expectedFallback = !fixture.skus.some((sku) => sku.isCurrent)
+      assert.equal(detail.fallbackToProductStock, expectedFallback, `${fixture.code} 回退主表标记不符`)
+      const normalizeSkuTuple = (tuple: [boolean, boolean, number, number]) => tuple.join('|')
+      assert.deepEqual(
+        detail.skus.map((sku) => normalizeSkuTuple([sku.isCurrent, sku.isActive, sku.currentStock, sku.preOrderedStock])).sort(),
+        fixture.skus.map((sku) => normalizeSkuTuple([sku.isCurrent, sku.isActive, sku.currentStock, sku.preOrderedStock])).sort(),
+        `${fixture.code} 规格明细必须包含全部 SKU（含停用与历史规格）`,
+      )
+      for (const sku of detail.skus) {
+        assert.equal(sku.countedInSummary, sku.isCurrent && sku.isActive, `${fixture.code} 仅当前且启用的规格计入合计`)
+      }
+      if (!expectedFallback) {
+        const countedSkus = detail.skus.filter((sku) => sku.countedInSummary)
+        assert.deepEqual(
+          [
+            countedSkus.reduce((sum, sku) => sum + sku.currentStock, 0),
+            countedSkus.reduce((sum, sku) => sum + sku.preOrderedStock, 0),
+          ],
+          [fixture.expected[0], fixture.expected[1]],
+          `${fixture.code} 计入合计的规格之和必须等于商品行合计`,
+        )
+      }
+    }
+    // 夹具创建后 code 已追加随机种子，这里按原始前缀定位对应商品行。
+    const findFixtureRow = (codePrefix: string) => {
+      const fixture = fixtures.find((item) => item.code.startsWith(`${codePrefix}-`))
+      const row = fixture ? previewRowMap.get(fixture.code) : undefined
+      assert.ok(row?.productId, `缺少夹具商品行：${codePrefix}`)
+      return row
+    }
+    const inactiveDetail = await reportService.listInventorySkus(String(findFixtureRow('REPORT-INACTIVE').productId))
+    assert.equal(inactiveDetail.skus[0]?.countedInSummary, false, '当前但停用的规格不得被标记为计入合计')
+    const historyDetail = await reportService.listInventorySkus(String(findFixtureRow('REPORT-HISTORY').productId))
+    assert.equal(historyDetail.skus[0]?.isCurrent, false, '历史规格必须标记为非当前')
+    await assert.rejects(() => reportService.listInventorySkus(`missing-${verifySeed}`), /商品不存在/, '不存在的商品必须拒绝')
+    await assert.rejects(() => reportService.listInventorySkus('   '), /商品标识不正确/, '空商品标识必须拒绝')
+    await assert.rejects(() => reportService.listInventorySkus('x'.repeat(65)), /商品标识不正确/, '超长商品标识必须拒绝')
+    assert.deepEqual(
+      {
+        skus: await skuRepo.find({ order: { id: 'ASC' } }),
+        inventoryLogs: await inventoryLogRepo.find({ order: { id: 'ASC' } }),
+      },
+      skuDetailSnapshotBefore,
+      '规格明细读取不得修改 SKU 或库存流水',
+    )
 
     const pagedCodes: string[] = []
     for (let page = 1; page <= 3; page += 1) {

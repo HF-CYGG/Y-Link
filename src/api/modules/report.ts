@@ -25,6 +25,8 @@ export interface ReportFieldDefinition {
 export interface ReportRow {
   /** 出库类报表统一使用独立业务号；非出库报表可不返回该字段。 */
   businessNo?: string | number | null
+  /** 库存一览表行元数据：不属于展示字段，仅用于打开规格明细。 */
+  productId?: string | number | null
   [key: string]: string | number | null | undefined
 }
 
@@ -48,6 +50,43 @@ export interface ReportQueryResult extends PaginationResult<ReportRow> {
   availableFields: ReportFieldDefinition[]
   /** 仅标签销售、金蝶、散客等销售明细类报表返回。 */
   summary: ReportSalesSummary | null
+}
+
+export interface InventorySkuDetail {
+  skuId: string
+  skuCode: string
+  specText: string
+  currentStock: number
+  preOrderedStock: number
+  availableStock: number
+  isActive: boolean
+  isCurrent: boolean
+  /** 是否参与商品行合计：仅当前且启用的规格计入。 */
+  countedInSummary: boolean
+}
+
+export interface InventorySkuDetailResult {
+  productId: string
+  productCode: string
+  productName: string
+  productStatus: string
+  summary: {
+    currentStock: number
+    preOrderedStock: number
+    availableStock: number
+  }
+  /** 商品没有当前规格时，商品行合计回退商品主表库存。 */
+  fallbackToProductStock: boolean
+  skus: InventorySkuDetail[]
+}
+
+/** 获取库存一览表中单个商品的全部规格库存明细（含停用与历史规格）。 */
+export const getInventorySkuDetail = (productId: string, requestConfig: RequestConfig = {}) => {
+  return request<InventorySkuDetailResult>({
+    ...requestConfig,
+    method: 'GET',
+    url: `/reports/inventory/${encodeURIComponent(productId)}/skus`,
+  })
 }
 
 const buildReportParams = (params: ReportQuery = {}) => {
