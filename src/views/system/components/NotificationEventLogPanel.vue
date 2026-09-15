@@ -43,8 +43,14 @@ const searchForm = reactive({
   resultStatus: '' as '' | NotificationEventResultStatus,
   channel: '' as '' | NonNullable<NotificationEventLogQuery['channel']>,
   eventId: '',
-  timeRange: [] as [Date, Date] | [],
+  timeRange: [] as [Date, Date] | [] | null,
 })
+
+// el-date-picker 清空后绑定值为 null，只有完整起止时间才参与筛选。
+const getSelectedTimeRange = (): [Date, Date] | null => {
+  const range = searchForm.timeRange
+  return Array.isArray(range) && range.length === 2 ? range : null
+}
 
 const listState = reactive(createPaginatedListState<NotificationEventLogRecord>({
   loading: true,
@@ -102,9 +108,10 @@ const buildQueryParams = (): NotificationEventLogQuery => {
   if (searchForm.resultStatus) params.resultStatus = searchForm.resultStatus
   if (searchForm.channel) params.channel = searchForm.channel
   if (searchForm.eventId.trim()) params.eventId = searchForm.eventId.trim()
-  if (searchForm.timeRange.length === 2) {
-    params.startAt = searchForm.timeRange[0].toISOString()
-    params.endAt = searchForm.timeRange[1].toISOString()
+  const selectedTimeRange = getSelectedTimeRange()
+  if (selectedTimeRange) {
+    params.startAt = selectedTimeRange[0].toISOString()
+    params.endAt = selectedTimeRange[1].toISOString()
   }
   return params
 }

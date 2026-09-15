@@ -67,8 +67,18 @@ const searchForm = reactive({
   actionType: '',
   targetType: '',
   targetId: '',
-  timeRange: [] as [Date, Date] | [],
+  timeRange: [] as [Date, Date] | [] | null,
 })
+
+/**
+ * 读取已选时间范围：
+ * - el-date-picker 点击清空后会把绑定值置为 null，不能直接读取 length；
+ * - 只有完整的起止时间才参与筛选、摘要与导出。
+ */
+const getSelectedTimeRange = (): [Date, Date] | null => {
+  const range = searchForm.timeRange
+  return Array.isArray(range) && range.length === 2 ? range : null
+}
 
 /**
  * 审计列表分页状态：
@@ -184,9 +194,10 @@ const currentFilterSummary = computed(() => {
   if (searchForm.targetId.trim()) {
     summary.push(`目标ID=${searchForm.targetId.trim()}`)
   }
-  if (searchForm.timeRange.length === 2) {
+  const selectedTimeRange = getSelectedTimeRange()
+  if (selectedTimeRange) {
     summary.push(
-      `时间=${dayjs(searchForm.timeRange[0]).format('YYYY-MM-DD HH:mm:ss')} ~ ${dayjs(searchForm.timeRange[1]).format('YYYY-MM-DD HH:mm:ss')}`,
+      `时间=${dayjs(selectedTimeRange[0]).format('YYYY-MM-DD HH:mm:ss')} ~ ${dayjs(selectedTimeRange[1]).format('YYYY-MM-DD HH:mm:ss')}`,
     )
   }
 
@@ -219,9 +230,10 @@ const buildQueryParams = (): AuditLogListQuery => {
   if (searchForm.targetId.trim()) {
     params.targetId = searchForm.targetId.trim()
   }
-  if (searchForm.timeRange.length === 2) {
-    params.startAt = searchForm.timeRange[0].toISOString()
-    params.endAt = searchForm.timeRange[1].toISOString()
+  const selectedTimeRange = getSelectedTimeRange()
+  if (selectedTimeRange) {
+    params.startAt = selectedTimeRange[0].toISOString()
+    params.endAt = selectedTimeRange[1].toISOString()
   }
 
   return params
