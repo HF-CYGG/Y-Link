@@ -105,6 +105,9 @@ const REQUIRED_COLUMNS = [
   ['biz_outbound_order', 'edit_version'],
   ['biz_outbound_order', 'inventory_mode'],
   ['biz_outbound_order', 'status'],
+  ['biz_outbound_order', 'source_doc_type'],
+  ['biz_outbound_order', 'source_doc_id'],
+  ['biz_outbound_order', 'source_doc_no'],
   ['biz_outbound_order_item', 'source_order_id'],
   ['biz_outbound_order_item', 'source_order_uuid'],
   ['biz_outbound_order_item', 'source_order_item_id'],
@@ -152,6 +155,24 @@ interface ColumnFixture {
 }
 
 const REQUIRED_MANUAL_OUTBOUND_COLUMN_DEFINITIONS = new Map<string, ColumnFixture>([
+  ['biz_outbound_order.source_doc_type', {
+    dataType: 'varchar',
+    columnType: 'varchar(32)',
+    isNullable: 'YES',
+    characterMaximumLength: 32,
+  }],
+  ['biz_outbound_order.source_doc_id', {
+    dataType: 'bigint',
+    columnType: 'bigint unsigned',
+    isNullable: 'YES',
+    characterMaximumLength: null,
+  }],
+  ['biz_outbound_order.source_doc_no', {
+    dataType: 'varchar',
+    columnType: 'varchar(64)',
+    isNullable: 'YES',
+    characterMaximumLength: 64,
+  }],
   ['biz_outbound_order_item.sku_id', {
     dataType: 'bigint',
     columnType: 'bigint unsigned',
@@ -430,6 +451,7 @@ const REQUIRED_INDEXES: readonly IndexFixture[] = [
     unique: false,
   },
   { tableName: 'biz_outbound_order', indexName: 'idx_biz_outbound_status', columns: ['status'], unique: false },
+  { tableName: 'biz_outbound_order', indexName: 'idx_biz_outbound_source_doc', columns: ['source_doc_type', 'source_doc_id'], unique: false },
   { tableName: 'biz_outbound_order_item', indexName: 'idx_biz_outbound_item_source_order_id', columns: ['source_order_id'], unique: false },
   { tableName: 'biz_outbound_order_item', indexName: 'idx_biz_outbound_item_source_item_id', columns: ['source_order_item_id'], unique: false },
   { tableName: 'order_merge_operation', indexName: 'uk_order_merge_operation_uuid', columns: ['operation_uuid'], unique: true },
@@ -697,6 +719,20 @@ missingSourceTraceColumn.columns.delete(objectKey('biz_outbound_order_item', 'so
 await expectSchemaFailure(missingSourceTraceColumn, [
   '字段 biz_outbound_order_item.source_order_item_id',
   '045_order_merge_governance.sql',
+])
+
+const missingOutboundSourceDocColumn = createCompleteFixture()
+missingOutboundSourceDocColumn.columns.delete(objectKey('biz_outbound_order', 'source_doc_no'))
+await expectSchemaFailure(missingOutboundSourceDocColumn, [
+  '字段 biz_outbound_order.source_doc_no',
+  '046_outbound_order_source_doc.sql',
+])
+
+const missingOutboundSourceDocIndex = createCompleteFixture()
+missingOutboundSourceDocIndex.indexes.delete(objectKey('biz_outbound_order', 'idx_biz_outbound_source_doc'))
+await expectSchemaFailure(missingOutboundSourceDocIndex, [
+  '索引 biz_outbound_order.idx_biz_outbound_source_doc',
+  '046_outbound_order_source_doc.sql',
 ])
 
 const nullableOrderMergeResultSnapshot = createCompleteFixture()

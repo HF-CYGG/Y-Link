@@ -24,6 +24,7 @@ import { BizError } from '../utils/errors.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { detectUnsafeHost, formatUnsafeHostReason } from '../utils/safe-network.js'
 import { hashSessionToken } from '../utils/session-token.js'
+import { maskFeishuWebhookTarget } from '../utils/notification-target-mask.js'
 import { auditService } from './audit.service.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { systemConfigService } from './system-config.service.js'
@@ -251,19 +252,6 @@ function buildDispatchDedupeKey(channel: NotificationDispatchChannel, destinatio
 function resolveNotificationRetryDelayMs(attemptCount: number): number {
   const index = Math.max(0, Math.min(NOTIFICATION_OUTBOX_RETRY_DELAYS_MS.length - 1, attemptCount - 1))
   return NOTIFICATION_OUTBOX_RETRY_DELAYS_MS[index] ?? NOTIFICATION_OUTBOX_RETRY_DELAYS_MS.at(-1) ?? 300_000
-}
-
-function maskFeishuWebhookTarget(webhookUrl: string): string {
-  try {
-    const url = new URL(webhookUrl.trim())
-    const segments = url.pathname.split('/').filter(Boolean)
-    const hookIndex = segments.findIndex((segment) => segment === 'hook')
-    const hookId = hookIndex >= 0 ? segments[hookIndex + 1] : ''
-    const suffix = hookId ? hookId.slice(-6) : ''
-    return suffix ? `${url.origin}/open-apis/bot/v2/hook/***${suffix}` : `${url.origin}/open-apis/bot/v2/hook/***`
-  } catch {
-    return '[已隐藏飞书 Webhook]'
-  }
 }
 
 function normalizeFeishuWebhookUrl(rawValue: string): string {
@@ -1271,22 +1259,30 @@ export class NotificationService {
       const dispatchDedupKeys = new Set<string>()
       let hasRetryableFailure = false
       let hasTerminalFailure = false
+      // 本轮处理序号（从 1 开始）：写入命中与外发审计，供通知事件详情按处理轮次分组展示。
+      const attemptNo = event.attemptCount + 1
       for (const item of ruleRecipients) {
         const allowExternal = await this.shouldTriggerExternal(item.rule)
+        // 外发计数口径：sent 仅统计本轮实际发送成功；alreadySent 为此前轮次已成功、本轮跳过的目标，避免重试时重复计为发送。
         let emailSent = 0
+        let emailAlreadySent = 0
         let emailFailed = 0
         let feishuSent = 0
+        let feishuAlreadySent = 0
         let feishuFailed = 0
 
+        // “规则命中”只表示规则匹配与站内通知生成，不代表外发成功；外发结果以下方外发审计与 dispatch 状态为准。
         await auditService.safeRecord({
           actionType: 'notification.rule.matched',
           actionLabel: '通知规则命中',
           targetType: 'notification_rule',
           targetId: item.rule.id,
           targetCode: item.rule.ruleCode,
+          resultStatus: 'success',
           detail: {
             eventId: event.id,
             eventType: input.eventType,
+            attemptNo,
             externalTriggerMode: item.rule.externalTriggerMode,
             externalAllowed: allowExternal,
             recipientCount: item.inboxUsers.length,
@@ -1296,6 +1292,29 @@ export class NotificationService {
         })
 
         if (!allowExternal) {
+          // 规则已配置外发渠道但被触发时机拦截时留痕，避免排查时误以为外发被遗漏；未配置任何外发渠道的规则不写，避免审计膨胀。
+          if (item.rule.emailEnabled || item.rule.feishuEnabled) {
+            await auditService.safeRecord({
+              actionType: 'notification.external.dispatch',
+              actionLabel: '通知外发执行',
+              targetType: 'notification_rule',
+              targetId: item.rule.id,
+              targetCode: item.rule.ruleCode,
+              resultStatus: 'success',
+              detail: {
+                eventId: event.id,
+                eventType: input.eventType,
+                attemptNo,
+                skipped: 'trigger_mode_blocked',
+                emailSent: 0,
+                emailAlreadySent: 0,
+                emailFailed: 0,
+                feishuSent: 0,
+                feishuAlreadySent: 0,
+                feishuFailed: 0,
+              },
+            })
+          }
           continue
         }
 
@@ -1325,19 +1344,18 @@ export class NotificationService {
                 message.content,
               ),
             })
-            if (result.sent) emailSent += 1
+            if (result.sent && result.attempted) emailSent += 1
+            else if (result.sent) emailAlreadySent += 1
             else emailFailed += 1
             hasRetryableFailure ||= result.retryableFailure
             hasTerminalFailure ||= !result.sent && !result.retryableFailure
           }
         }
 
-        if (item.rule.feishuEnabled && item.rule.feishuWebhookUrl) {
-          const feishuWebhookUrl = item.rule.feishuWebhookUrl.trim()
-          const feishuDispatchKey = `feishu:${buildDispatchDedupeKey('feishu', feishuWebhookUrl)}`
-          if (!feishuWebhookUrl || dispatchDedupKeys.has(feishuDispatchKey)) {
-            continue
-          }
+        const feishuWebhookUrl = item.rule.feishuEnabled ? (item.rule.feishuWebhookUrl?.trim() || '') : ''
+        const feishuDispatchKey = feishuWebhookUrl ? `feishu:${buildDispatchDedupeKey('feishu', feishuWebhookUrl)}` : ''
+        // 多条规则共用同一飞书 Webhook 时只外发一次；这里用条件包裹而不是 continue，保证本规则的外发审计仍会写入。
+        if (feishuWebhookUrl && !dispatchDedupKeys.has(feishuDispatchKey)) {
           dispatchDedupKeys.add(feishuDispatchKey)
           await this.refreshEventClaim(event.id)
           const result = await this.attemptExternalDispatch({
@@ -1352,24 +1370,30 @@ export class NotificationService {
               item.feishuSignSecret,
             ),
           })
-          if (result.sent) feishuSent += 1
+          if (result.sent && result.attempted) feishuSent += 1
+          else if (result.sent) feishuAlreadySent += 1
           else feishuFailed += 1
           hasRetryableFailure ||= result.retryableFailure
           hasTerminalFailure ||= !result.sent && !result.retryableFailure
         }
 
+        // 外发审计结果状态反映真实外发结果：任一目标失败即记为 failed，不再默认显示为成功。
         await auditService.safeRecord({
           actionType: 'notification.external.dispatch',
           actionLabel: '通知外发执行',
           targetType: 'notification_rule',
           targetId: item.rule.id,
           targetCode: item.rule.ruleCode,
+          resultStatus: emailFailed + feishuFailed > 0 ? 'failed' : 'success',
           detail: {
             eventId: event.id,
             eventType: input.eventType,
+            attemptNo,
             emailSent,
+            emailAlreadySent,
             emailFailed,
             feishuSent,
+            feishuAlreadySent,
             feishuFailed,
           },
         })

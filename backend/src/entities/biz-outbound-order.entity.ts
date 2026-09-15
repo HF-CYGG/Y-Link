@@ -22,8 +22,12 @@ export const ORDER_INVENTORY_MODES = ['legacy_none', 'manual_applied', 'o2o_prea
 export type OrderInventoryMode = (typeof ORDER_INVENTORY_MODES)[number]
 export const ORDER_STATUSES = ['active', 'merged'] as const
 export type OrderStatus = (typeof ORDER_STATUSES)[number]
+/** 正式出库单来源单据类型：目前仅线上预订单核销生成的出库单写入来源快照。 */
+export const ORDER_SOURCE_DOC_TYPES = ['o2o_preorder'] as const
+export type OrderSourceDocType = (typeof ORDER_SOURCE_DOC_TYPES)[number]
 
 @Index('uk_biz_outbound_show_no_is_deleted', ['showNo', 'isDeleted'], { unique: true })
+@Index('idx_biz_outbound_source_doc', ['sourceDocType', 'sourceDocId'])
 @Index('uk_biz_outbound_business_no', ['businessNo'], { unique: true })
 @Index('idx_biz_outbound_order_type_created_at', ['orderType', 'createdAt'])
 @Entity({ name: 'biz_outbound_order' })
@@ -80,6 +84,17 @@ export class BizOutboundOrder {
   @Index('uk_biz_outbound_idempotency_key', { unique: true })
   @Column({ name: 'idempotency_key', type: 'varchar', length: 128, comment: '幂等键' })
   idempotencyKey!: string
+
+  // 来源单据快照：与人工备注分离，详情、打印与追溯统一读取结构化字段，不再解析备注或幂等键文本。
+  // 注意与明细表 source_order_* 区分：后者表示订单合并时复制来源的出库单明细。
+  @Column({ name: 'source_doc_type', type: 'varchar', length: 32, nullable: true, comment: '来源单据类型' })
+  sourceDocType!: OrderSourceDocType | null
+
+  @Column({ name: 'source_doc_id', ...entityColumnOptions.foreignId, nullable: true, comment: '来源单据ID' })
+  sourceDocId!: string | null
+
+  @Column({ name: 'source_doc_no', type: 'varchar', length: 64, nullable: true, comment: '来源单据号快照' })
+  sourceDocNo!: string | null
 
   @Column({ name: 'customer_name', type: 'varchar', length: 128, nullable: true, comment: '客户名称' })
   customerName!: string | null

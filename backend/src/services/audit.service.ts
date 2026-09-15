@@ -10,6 +10,17 @@ import { IsNull, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { escapeCsvCell } from '../utils/csv-security.js'
 import { SysAuditLog } from '../entities/sys-audit-log.entity.js'
+import {
+  AUDIT_ACTION_CATALOG,
+  AUDIT_CATEGORIES,
+  AUDIT_DEFAULT_HIDDEN_ACTION_TYPES,
+  AUDIT_TARGET_TYPE_LABELS,
+  buildAuditCategoryCondition,
+  getAuditActionTypeLabel,
+  getAuditCategoryLabel,
+  resolveAuditCategory,
+  type AuditCategoryKey,
+} from '../constants/audit-action-catalog.js'
 import type { AuditResultStatus } from '../types/auth.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
@@ -31,6 +42,8 @@ export interface CreateAuditLogInput {
 }
 
 export interface AuditLogListQuery {
+  /** 业务类别：一级筛选，由后端常量统一翻译为动作编码条件。 */
+  category?: AuditCategoryKey
   actionType?: string
   targetType?: string
   actorUserId?: string
@@ -54,6 +67,26 @@ export interface SafeAuditRecordOptions {
   allowDuringDatabaseMaintenance?: boolean
 }
 
+/** 审计列表记录：在实体字段基础上补充业务类别与中文名，列表与卡片直接展示。 */
+export type AuditLogListRecord = SysAuditLog & {
+  category: AuditCategoryKey
+  categoryLabel: string
+  actionTypeLabel: string
+  targetTypeLabel: string
+}
+
+export interface AuditFilterOptions {
+  categories: Array<{
+    key: AuditCategoryKey
+    label: string
+    actionTypes: Array<{ value: string; label: string }>
+  }>
+  targetTypes: Array<{ value: string; label: string }>
+  defaultHiddenActionTypes: string[]
+}
+
+const AUDIT_FILTER_OPTIONS_CACHE_MS = 60_000
+
 const truncateAuditTextByCodePoint = (value: string | null | undefined, maxLength: number): string | null => {
   if (value == null) return null
   const characters = Array.from(value)
@@ -66,14 +99,27 @@ const truncateAuditTextByCodePoint = (value: string | null | undefined, maxLengt
  * - 非关键或辅助日志可调用 safeRecord，避免日志失败反向影响主流程。
  */
 export class AuditService {
+  private filterOptionsCache: { expiresAt: number; value: AuditFilterOptions } | null = null
+
   /**
    * 统一构造审计筛选条件：
    * - 列表查询与导出共用同一套 where 条件，避免筛选口径不一致；
+   * - 业务类别由后端常量翻译为“精确 IN + 前缀 LIKE”条件，未登记动作归入“其他”；
+   * - 未选择业务类别与操作类型时，默认排除通知内部处理记录（改在“通知事件”页签按事件聚合展示）；
    * - 时间范围采用闭区间，满足“按当前筛选导出”预期。
    */
   private buildListQuery(query: AuditLogListQuery) {
     const qb = AppDataSource.getRepository(SysAuditLog).createQueryBuilder('audit')
 
+    if (query.category) {
+      const condition = buildAuditCategoryCondition('audit.actionType', query.category)
+      qb.andWhere(condition.sql, condition.params)
+    }
+    if (!query.category && !query.actionType) {
+      qb.andWhere('audit.actionType NOT IN (:...defaultHiddenActionTypes)', {
+        defaultHiddenActionTypes: [...AUDIT_DEFAULT_HIDDEN_ACTION_TYPES],
+      })
+    }
     if (query.actionType) {
       qb.andWhere('audit.actionType = :actionType', { actionType: query.actionType })
     }
@@ -167,9 +213,9 @@ export class AuditService {
     }
   }
 
-  async list(query: AuditLogPageQuery): Promise<{ page: number; pageSize: number; total: number; list: SysAuditLog[] }> {
+  async list(query: AuditLogPageQuery): Promise<{ page: number; pageSize: number; total: number; list: AuditLogListRecord[] }> {
     const qb = this.buildListQuery(query)
-    const [list, total] = await qb
+    const [rows, total] = await qb
       .orderBy('audit.id', 'DESC')
       .skip((query.page - 1) * query.pageSize)
       .take(query.pageSize)
@@ -179,8 +225,80 @@ export class AuditService {
       page: query.page,
       pageSize: query.pageSize,
       total,
-      list,
+      list: rows.map((item) => this.toListRecord(item)),
     }
+  }
+
+  private toListRecord(item: SysAuditLog): AuditLogListRecord {
+    const category = resolveAuditCategory(item.actionType)
+    return Object.assign(item, {
+      category,
+      categoryLabel: getAuditCategoryLabel(category),
+      actionTypeLabel: getAuditActionTypeLabel(item.actionType) ?? item.actionLabel,
+      targetTypeLabel: AUDIT_TARGET_TYPE_LABELS[item.targetType] ?? item.targetType,
+    })
+  }
+
+  /**
+   * 审计筛选项：
+   * - 以后端动作目录为主，合并数据库中实际出现过的动作与目标类型，历史或新增未登记动作归入“其他”；
+   * - 结果按类别分组下发，前端据此做“业务类别 → 操作类型”二级联动；
+   * - 进程内缓存 60 秒，避免每次打开页面都对审计表做分组统计。
+   */
+  async getFilterOptions(): Promise<AuditFilterOptions> {
+    const nowMs = Date.now()
+    if (this.filterOptionsCache && this.filterOptionsCache.expiresAt > nowMs) {
+      return this.filterOptionsCache.value
+    }
+    const repository = AppDataSource.getRepository(SysAuditLog)
+    const [actionRows, targetRows] = await Promise.all([
+      repository
+        .createQueryBuilder('audit')
+        .select('audit.actionType', 'actionType')
+        .addSelect('MAX(audit.actionLabel)', 'actionLabel')
+        .groupBy('audit.actionType')
+        .getRawMany<{ actionType: string; actionLabel: string | null }>(),
+      repository
+        .createQueryBuilder('audit')
+        .select('audit.targetType', 'targetType')
+        .groupBy('audit.targetType')
+        .getRawMany<{ targetType: string }>(),
+    ])
+
+    const actionTypesByCategory = new Map<AuditCategoryKey, Map<string, string>>(
+      AUDIT_CATEGORIES.map((category) => [category.key, new Map<string, string>()]),
+    )
+    for (const [actionType, definition] of Object.entries(AUDIT_ACTION_CATALOG)) {
+      actionTypesByCategory.get(definition.category)?.set(actionType, definition.label)
+    }
+    for (const row of actionRows) {
+      const actionType = String(row.actionType ?? '').trim()
+      if (!actionType || AUDIT_ACTION_CATALOG[actionType]) continue
+      actionTypesByCategory.get(resolveAuditCategory(actionType))?.set(actionType, row.actionLabel?.trim() || actionType)
+    }
+
+    const targetTypeMap = new Map<string, string>(Object.entries(AUDIT_TARGET_TYPE_LABELS))
+    for (const row of targetRows) {
+      const targetType = String(row.targetType ?? '').trim()
+      if (targetType && !targetTypeMap.has(targetType)) {
+        targetTypeMap.set(targetType, targetType)
+      }
+    }
+
+    const value: AuditFilterOptions = {
+      categories: AUDIT_CATEGORIES.map((category) => ({
+        key: category.key,
+        label: category.label,
+        actionTypes: [...(actionTypesByCategory.get(category.key)?.entries() ?? [])].map(([actionType, label]) => ({
+          value: actionType,
+          label,
+        })),
+      })),
+      targetTypes: [...targetTypeMap.entries()].map(([targetType, label]) => ({ value: targetType, label })),
+      defaultHiddenActionTypes: [...AUDIT_DEFAULT_HIDDEN_ACTION_TYPES],
+    }
+    this.filterOptionsCache = { expiresAt: nowMs + AUDIT_FILTER_OPTIONS_CACHE_MS, value }
+    return value
   }
 
   /**
@@ -190,11 +308,12 @@ export class AuditService {
    */
   async exportCsv(query: AuditLogListQuery): Promise<string> {
     const list = await this.buildListQuery(query).orderBy('audit.id', 'DESC').getMany()
-    const headers = ['时间', '动作编码', '动作名称', '执行结果', '操作人ID', '操作人账号', '操作人姓名', '目标类型', '目标ID', '目标标识', '来源IP', '客户端UA', '详情']
+    const headers = ['时间', '动作编码', '动作名称', '业务类别', '执行结果', '操作人ID', '操作人账号', '操作人姓名', '目标类型', '目标ID', '目标标识', '来源IP', '客户端UA', '详情']
     const rows = list.map((item) => [
       item.createdAt.toISOString(),
       item.actionType,
       item.actionLabel,
+      getAuditCategoryLabel(resolveAuditCategory(item.actionType)),
       item.resultStatus,
       item.actorUserId ?? '',
       item.actorUsername ?? '',

@@ -91,6 +91,18 @@ const getOrderDisplayName = (order: OrderDetailResult) => {
   return order.customerName || order.customerDepartmentName || '-'
 }
 const hasItemProvenance = () => props.order.items.some((item) => Boolean(item.sourceOrderId))
+
+/**
+ * 来源单据文案：
+ * - 读取结构化来源快照，不解析备注或幂等键；
+ * - 目前仅线上预订单核销生成的正式出库单有来源，其余返回 null 不展示。
+ */
+const formatSourceDoc = (order: { sourceDocType?: string | null; sourceDocNo?: string | null }) => {
+  if (order.sourceDocType === 'o2o_preorder' && order.sourceDocNo) {
+    return `线上预订单 ${order.sourceDocNo}`
+  }
+  return null
+}
 </script>
 
 <template>
@@ -124,6 +136,7 @@ const hasItemProvenance = () => props.order.items.some((item) => Boolean(item.so
       <el-descriptions-item label="总金额">
         <span class="text-base font-bold text-red-500">¥{{ formatAmount(order.totalAmount) }}</span>
       </el-descriptions-item>
+      <el-descriptions-item v-if="formatSourceDoc(order)" label="来源单据" :span="isPhone ? 1 : 2">{{ formatSourceDoc(order) }}</el-descriptions-item>
       <el-descriptions-item label="单据备注" :span="isPhone ? 1 : 2">{{ order.remark || '-' }}</el-descriptions-item>
     </el-descriptions>
   </section>
@@ -141,7 +154,7 @@ const hasItemProvenance = () => props.order.items.some((item) => Boolean(item.so
       <p class="text-sm text-teal-800">当前为父单，包含 {{ order.merge.children.length }} 张来源单。</p>
       <div class="mt-2 flex flex-wrap gap-2">
         <el-button v-for="child in order.merge.children" :key="child.id" link type="primary" @click="emit('navigate', child.id)">
-          {{ child.businessNo || child.showNo }}
+          {{ child.businessNo || child.showNo }}<span v-if="formatSourceDoc(child)">（{{ formatSourceDoc(child) }}）</span>
         </el-button>
       </div>
     </div>

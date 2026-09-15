@@ -44,6 +44,10 @@ export interface OrderMergeOrderReference {
   totalQty: string
   totalAmount: string
   remark: string | null
+  /** 来源单据类型：线上预订单核销生成的正式出库单为 o2o_preorder，其余为 null。 */
+  sourceDocType: 'o2o_preorder' | null
+  /** 来源单据号快照，与人工备注分离。 */
+  sourceDocNo: string | null
   creatorUserId: string | null
   creatorUsername: string | null
   creatorDisplayName: string | null

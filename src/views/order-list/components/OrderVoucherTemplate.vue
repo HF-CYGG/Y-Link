@@ -130,6 +130,18 @@ const getItemRemark = (value: string | null | undefined) => {
   return normalizedValue || '-'
 }
 
+/**
+ * 来源单据文案：
+ * - 读取结构化来源快照，线上预订单核销生成的正式出库单在表头展示一次来源预订单号；
+ * - 明细备注与总计行备注只保留人工备注，不再承载来源信息。
+ */
+const sourceDocText = computed(() => {
+  if (props.order.sourceDocType === 'o2o_preorder' && props.order.sourceDocNo) {
+    return `线上预订单 ${props.order.sourceDocNo}`
+  }
+  return '-'
+})
+
 const getEditableFieldDisplay = (value: string | null | undefined) => {
   const normalizedValue = String(value ?? '').trim()
   return normalizedValue || ' '
@@ -186,9 +198,11 @@ const printTimestamp = formatDateTime(new Date())
           </tr>
           <tr class="voucher-meta-row voucher-meta-row--secondary">
             <th scope="row">业务单号</th>
-            <td colspan="2">{{ props.order.businessNo }}</td>
+            <td>{{ props.order.businessNo }}</td>
+            <th scope="row">来源单据</th>
+            <td>{{ sourceDocText }}</td>
             <th scope="row">开单时间</th>
-            <td colspan="2">{{ formatDateTime(props.order.createdAt) }}</td>
+            <td>{{ formatDateTime(props.order.createdAt) }}</td>
           </tr>
           <tr class="voucher-detail-header-row">
             <th colspan="2" scope="colgroup">产品名称</th>

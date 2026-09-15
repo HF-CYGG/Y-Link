@@ -196,6 +196,10 @@ export interface OrderRecord {
   status: OrderMergeStatus
   merge: OrderMergeMetadata
   remark: string | null
+  /** 来源单据快照：线上预订单核销生成的正式出库单为 o2o_preorder，与人工备注分离。 */
+  sourceDocType: 'o2o_preorder' | null
+  sourceDocId: string | null
+  sourceDocNo: string | null
   creatorUserId: string | null
   creatorUsername: string | null
   creatorDisplayName: string | null
@@ -237,6 +241,9 @@ interface OrderRecordRaw {
   status?: PrimitiveTextValue
   merge?: unknown
   remark: PrimitiveTextValue
+  sourceDocType?: PrimitiveTextValue
+  sourceDocId?: PrimitiveTextValue
+  sourceDocNo?: PrimitiveTextValue
   creatorUserId: PrimitiveTextValue
   creatorUsername: PrimitiveTextValue
   creatorDisplayName: PrimitiveTextValue
@@ -320,6 +327,9 @@ const normalizeOrderRecord = (record: OrderRecordRaw): OrderRecord => ({
   status: normalizeOrderMergeStatus(record.status),
   merge: normalizeOrderMergeMetadata(record.merge),
   remark: normalizeNullableTextField(record.remark),
+  sourceDocType: normalizeTextField(record.sourceDocType) === 'o2o_preorder' ? 'o2o_preorder' : null,
+  sourceDocId: normalizeNullableTextField(record.sourceDocId),
+  sourceDocNo: normalizeNullableTextField(record.sourceDocNo),
   creatorUserId: normalizeNullableTextField(record.creatorUserId),
   creatorUsername: normalizeNullableTextField(record.creatorUsername),
   creatorDisplayName: normalizeNullableTextField(record.creatorDisplayName),
@@ -447,6 +457,8 @@ const normalizeOrderMergeReference = (value: unknown): OrderMergeOrderReference 
     totalQty: normalizeDecimalField(record.totalQty as PrimitiveTextValue),
     totalAmount: normalizeDecimalField(record.totalAmount as PrimitiveTextValue),
     remark: normalizeNullableTextField(record.remark as PrimitiveTextValue),
+    sourceDocType: normalizeTextField(record.sourceDocType as PrimitiveTextValue) === 'o2o_preorder' ? 'o2o_preorder' : null,
+    sourceDocNo: normalizeNullableTextField(record.sourceDocNo as PrimitiveTextValue),
     creatorUserId: normalizeNullableTextField(record.creatorUserId as PrimitiveTextValue),
     creatorUsername: normalizeNullableTextField(record.creatorUsername as PrimitiveTextValue),
     creatorDisplayName: normalizeNullableTextField(record.creatorDisplayName as PrimitiveTextValue),

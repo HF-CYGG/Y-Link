@@ -2,15 +2,19 @@
 /**
  * 模块说明：src/views/o2o/O2oOrderQueryView.vue
  * 文件职责：管理端集中查看 O2O 订单池、详情进度、超时状态与业务状态流转。
+ * 实现逻辑：
+ * - 左侧订单池采用服务端分页：每次只加载当前分栏的当前页订单，分栏数量取服务端按同一筛选口径统计的总数；
+ * - 切换分栏、搜索、筛选与改每页条数时回到第一页；自动轮询沿用当前分栏、页码与已提交筛选静默刷新；
+ * - 新单提醒依赖服务端 newOrderCount 与 latestOrderId 基准，不再对比前后两次列表 id 集合，避免翻页后误报。
  * 维护说明：
- * - 左侧订单池分组依赖统一状态推导，修改分组规则时要同步校验高亮、新订单提醒与详情联动；
+ * - 分栏口径由后端 `/o2o/orders/pool` 统一计算，修改分栏规则时要同步校验计数、高亮、新订单提醒与详情联动；
  * - 详情区的状态文案必须复用共享状态配置，避免“主动撤回”被错误展示成普通取消。
  */
 
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
-import { BizO2oItemSpecText, PageContainer } from '@/components/common'
+import { BizO2oItemSpecText, PageContainer, PagePaginationBar } from '@/components/common'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import {
@@ -28,10 +32,12 @@ import {
   cancelO2oConsoleOrder,
   deleteO2oConsoleOrder,
   getO2oConsoleOrderDetail,
-  getO2oConsoleOrders,
+  getO2oConsoleOrderPool,
   updateO2oOrderComplianceFlags,
   updateO2oOrderBusinessStatus,
   updateO2oOrderMerchantMessage,
+  type O2oConsoleOrderPoolCounts,
+  type O2oConsoleOrderPoolKey,
   type O2oPreorderDetail,
   type O2oPreorderSummary,
   type O2oOrderStatusReport,
@@ -46,7 +52,7 @@ import { captureOrderRefreshAnchor, restoreOrderRefreshAnchor } from '@/utils/or
 
 import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
-type OrderPoolKey = 'all' | 'pending' | 'completed' | 'cancelled' | 'returns'
+type OrderPoolKey = O2oConsoleOrderPoolKey
 
 const ORDER_POOL_TABS: Array<{ key: OrderPoolKey; label: string }> = [
   { key: 'all', label: '全部订单' },
@@ -56,7 +62,10 @@ const ORDER_POOL_TABS: Array<{ key: OrderPoolKey; label: string }> = [
   { key: 'returns', label: '退货订单' },
 ]
 
-const NEW_ORDER_WINDOW_MS = 30 * 60 * 1000
+// 订单池分页：默认每页 10 条，控件样式复用共享分页条，窄栏下依赖全局 el-pagination 换行规则避免横向溢出。
+const ORDER_POOL_DEFAULT_PAGE_SIZE = 10
+const ORDER_POOL_PAGE_SIZES = [10, 20, 50]
+const ORDER_POOL_PAGINATION_LAYOUT = 'total, sizes, prev, pager, next'
 const NEW_ORDER_HIGHLIGHT_MS = 6000
 const ORDER_POOL_REFRESH_MARK_MS = 3200
 const MERCHANT_MESSAGE_MAX_LENGTH = 500
@@ -95,6 +104,11 @@ const batchInteractionActive = ref(false)
 const selectedCancelledOrderIds = ref<string[]>([])
 const batchPurgeResults = ref<Array<{ id: string; showNo?: string; outcome: 'deleted' | 'skipped' | 'failed'; code: string; message: string }>>([])
 const orders = ref<O2oPreorderSummary[]>([])
+// 订单池分页状态：orders 仅保存当前页数据，total 与各分栏数量均以服务端返回为准。
+const poolPagination = reactive({ page: 1, pageSize: ORDER_POOL_DEFAULT_PAGE_SIZE, total: 0 })
+const poolCounts = ref<O2oConsoleOrderPoolCounts>({ all: 0, pending: 0, completed: 0, cancelled: 0, returns: 0 })
+// 新单提醒基准：记录上一轮同筛选条件下的最大订单 ID，轮询时交给服务端统计新增待核销订单。
+const latestOrderIdBaseline = ref<string | null>(null)
 const activePool = ref<OrderPoolKey>('all')
 const activeOrderId = ref('')
 const activeOrderDetail = ref<O2oPreorderDetail | null>(null)
@@ -123,6 +137,9 @@ let secondTickTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let reminderAudioContext: AudioContext | null = null
 let pageRuntimeActive = false
 let hasActivatedOnce = false
+// 最近一次成功加载的筛选键与视图键：用于判断静默刷新是否仍是同一视图，决定新单提醒、更新标记与滚动锚点。
+let lastLoadedFilterKey = ''
+let lastLoadedViewKey = ''
 
 const query = reactive({
   keyword: '',
@@ -195,18 +212,6 @@ const parseTimeMs = (value: string | null | undefined) => {
   return Number.isFinite(timestamp) ? timestamp : 0
 }
 
-/**
- * 确定订单的排序时间戳：
- * 优先使用创建时间，若缺失则使用超时时间作为兜底。
- */
-const resolveOrderSortTimestamp = (order: O2oPreorderSummary) => {
-  return parseTimeMs(order.createdAt) || parseTimeMs(order.timeoutAt)
-}
-
-const getOrderScenario = (order: { statusReport?: O2oOrderStatusReport; status: O2oOrderStatus; timeoutAt: string | null }) => {
-  return order.statusReport?.scenario ?? getClientOrderReportScenario(order.status, order.timeoutAt, nowMs.value)
-}
-
 const getOrderReportConfig = (order: { statusReport?: O2oOrderStatusReport; status: O2oOrderStatus; timeoutAt: string | null }) => {
   return getClientOrderStatusReportConfig({
     statusReport: order.statusReport,
@@ -216,80 +221,21 @@ const getOrderReportConfig = (order: { statusReport?: O2oOrderStatusReport; stat
 }
 
 /**
- * 判断是否为新订单：
- * 仅 pending 状态且在设定时间窗口（NEW_ORDER_WINDOW_MS）内的订单判定为新订单。
+ * 订单 ID 大小比较：
+ * - 订单 ID 为数据库自增整数的字符串形式，先比长度再比字典序，避免超出 Number 安全范围时比较失真。
  */
-const isNewOrder = (order: O2oPreorderSummary) => {
-  if (order.status !== 'pending') {
-    return false
+const isOrderIdGreaterThan = (id: string, baseline: string) => {
+  if (id.length !== baseline.length) {
+    return id.length > baseline.length
   }
-  const createdAtMs = new Date(order.createdAt).getTime()
-  if (!Number.isFinite(createdAtMs)) {
-    return false
-  }
-  return nowMs.value - createdAtMs <= NEW_ORDER_WINDOW_MS
+  return id > baseline
 }
 
-const resolvePoolKey = (order: O2oPreorderSummary): OrderPoolKey => {
-  const scenario = getOrderScenario(order)
-  if (scenario === 'verified') {
-    return 'completed'
-  }
-  if (scenario === 'cancelled' || scenario === 'timeout_cancelled') {
-    return 'cancelled'
-  }
-  return 'pending'
-}
+// 分栏数量取服务端按同一筛选口径统计的总数，不受当前页条数影响。
+const poolCountMap = computed(() => poolCounts.value)
 
-const hasReturnRequests = (order: Pick<O2oPreorderSummary, 'returnRequestCount'>) => {
-  return Number(order.returnRequestCount ?? 0) > 0
-}
-
-const poolCountMap = computed(() => {
-  const map: Record<OrderPoolKey, number> = {
-    all: orders.value.length,
-    pending: 0,
-    completed: 0,
-    cancelled: 0,
-    returns: 0,
-  }
-  for (const order of orders.value) {
-    map[resolvePoolKey(order)] += 1
-    if (hasReturnRequests(order)) {
-      map.returns += 1
-    }
-  }
-  return map
-})
-
-const poolOrderMap = computed(() => {
-  const map: Record<OrderPoolKey, O2oPreorderSummary[]> = {
-    all: [],
-    pending: [],
-    completed: [],
-    cancelled: [],
-    returns: [],
-  }
-  for (const order of orders.value) {
-    map.all.push(order)
-    map[resolvePoolKey(order)].push(order)
-    if (hasReturnRequests(order)) {
-      map.returns.push(order)
-    }
-  }
-  for (const tab of ORDER_POOL_TABS) {
-    map[tab.key] = map[tab.key].slice().sort((prev, next) => {
-      const timeDiff = resolveOrderSortTimestamp(next) - resolveOrderSortTimestamp(prev)
-      if (timeDiff !== 0) {
-        return timeDiff
-      }
-      return next.showNo.localeCompare(prev.showNo)
-    })
-  }
-  return map
-})
-
-const currentPoolOrders = computed(() => poolOrderMap.value[activePool.value])
+// 服务端已按当前分栏、页码返回 id 倒序订单，页面直接渲染当前页即可。
+const currentPoolOrders = computed(() => orders.value)
 const canBatchPurgeCancelledOrders = computed(() => activePool.value === 'cancelled' && hasPermission('orders:delete') && authStore.currentUser?.role === 'admin')
 const selectedCancelledOrders = computed(() => currentPoolOrders.value.filter((order) => selectedCancelledOrderIds.value.includes(order.id)))
 const hasVisibleCancelledSelection = computed(() => canBatchPurgeCancelledOrders.value && selectedCancelledOrders.value.length > 0)
@@ -696,18 +642,23 @@ const playNewOrderReminderSound = () => {
   oscillator.stop(startAt + 0.24)
 }
 
-const markIncrementalNewOrders = (items: O2oPreorderSummary[]) => {
-  if (!items.length) {
+/**
+ * 新单提醒：
+ * - count 为服务端统计的新增待核销订单数，操作员停留在其他分栏或页码时也能收到提醒；
+ * - 高亮只作用于当前页中可见的新订单。
+ */
+const markIncrementalNewOrders = (count: number, visibleOrderIds: string[]) => {
+  if (count <= 0) {
     return
   }
   const nextMap = { ...orderHighlightExpiresAtMap.value }
   const expiresAt = nowMs.value + NEW_ORDER_HIGHLIGHT_MS
-  for (const item of items) {
-    nextMap[item.id] = expiresAt
+  for (const orderId of visibleOrderIds) {
+    nextMap[orderId] = expiresAt
   }
   orderHighlightExpiresAtMap.value = nextMap
   latestNewOrderNotice.value = {
-    count: items.length,
+    count,
     expiresAt,
   }
   playNewOrderReminderSound()
@@ -731,12 +682,16 @@ const loadOrderDetail = async (
 ) => {
   if (!id) {
     activeOrderDetail.value = null
-    return
+    return 'canceled' as const
   }
+  // 返回本次详情请求结果，供静默刷新判断“保留详情”还是回退到当前页首单。
+  // 使用 as 断言声明，避免回调内赋值被 TS 控制流收窄为初始字面量。
+  let outcome = 'canceled' as 'success' | 'error' | 'canceled'
   detailLoading.value = !options?.silent
   await orderDetailRequest.runLatest({
     executor: (signal) => getO2oConsoleOrderDetail(id, { signal }),
     onSuccess: (detail) => {
+      outcome = 'success'
       const changed = hasOrderDetailChanged(activeOrderDetail.value, detail)
       activeOrderDetail.value = detail
       mergeOrderSummaryFromDetail(detail)
@@ -745,6 +700,7 @@ const loadOrderDetail = async (
       }
     },
     onError: (error) => {
+      outcome = 'error'
       if (options?.silent) {
         return
       }
@@ -754,6 +710,7 @@ const loadOrderDetail = async (
       detailLoading.value = false
     },
   })
+  return outcome
 }
 
 const mergeOrderSummaryFromDetail = (detail: O2oPreorderDetail) => {
@@ -796,7 +753,7 @@ const mergeOrderSummaryFromDetail = (detail: O2oPreorderDetail) => {
   }
   const index = orders.value.findIndex((item) => item.id === nextOrder.id)
   if (index < 0) {
-    orders.value = [nextSummary, ...orders.value]
+    // 分页后当前页只承载服务端返回的订单；不在当前页的订单交给下一次列表加载对齐，避免当前页超量或混入其他分栏订单。
     return
   }
   const nextOrders = orders.value.slice()
@@ -809,20 +766,15 @@ const mergeOrderSummaryFromDetail = (detail: O2oPreorderDetail) => {
 
 /**
  * 同步当前选中订单：
- * - 列表刷新后若当前订单仍存在，则刷新详情；
- * - 若当前订单已不在当前分栏，则自动切到分栏首单；
+ * - 当前页包含选中订单时刷新详情；
+ * - 手动切换分栏、翻页或筛选后，选中订单不在当前页时自动切到当前页首单，空页则清空详情；
+ * - 静默轮询或操作后刷新时，选中订单离开当前分栏/当前页（如刚被取消、被新单挤到下一页）则保留右侧详情并静默刷新，
+ *   仅在详情已无法获取（例如已被删除）时才回退到当前页首单，避免打断操作员；
  * - 静默轮询时同步使用静默详情刷新，避免右侧面板每 10/15 秒闪烁一次。
  */
 const syncActiveOrder = async (options?: { silentDetail?: boolean }) => {
   const currentOrders = currentPoolOrders.value
-  if (currentOrders.length === 0) {
-    // 用户主动点进空分类时，不自动跳走，右侧保留空态说明即可。
-    activeOrderId.value = ''
-    activeOrderDetail.value = null
-    return
-  }
-  const latestCurrentOrders = poolOrderMap.value[activePool.value]
-  const exists = latestCurrentOrders.find((item) => item.id === activeOrderId.value)
+  const exists = currentOrders.some((item) => item.id === activeOrderId.value)
   if (exists) {
     await loadOrderDetail(activeOrderId.value, {
       silent: options?.silentDetail,
@@ -830,8 +782,19 @@ const syncActiveOrder = async (options?: { silentDetail?: boolean }) => {
     })
     return
   }
-  const first = latestCurrentOrders[0]
-  activeOrderId.value = first?.id ?? ''
+  if (options?.silentDetail && activeOrderId.value && activeOrderDetail.value?.order.id === activeOrderId.value) {
+    const outcome = await loadOrderDetail(activeOrderId.value, { silent: true })
+    if (outcome !== 'error') {
+      return
+    }
+  }
+  if (currentOrders.length === 0) {
+    // 当前页没有订单时不自动跳走，右侧保留空态说明即可。
+    activeOrderId.value = ''
+    activeOrderDetail.value = null
+    return
+  }
+  activeOrderId.value = currentOrders[0]?.id ?? ''
   await loadOrderDetail(activeOrderId.value, {
     silent: options?.silentDetail,
     errorMessage: '加载首个订单详情失败，请稍后重试',
@@ -839,17 +802,25 @@ const syncActiveOrder = async (options?: { silentDetail?: boolean }) => {
 }
 
 /**
- * 加载订单池：
- * - 列表接入稳定请求后，自动轮询与手动筛选共用同一通道；
- * - 新请求会中止旧请求，只允许最后一次有效结果更新列表与详情联动；
- * - 自动轮询仅复用最后一次已提交筛选词，避免用户正在输入时被后台刷新改写结果。
+ * 加载订单池当前页：
+ * - 列表接入稳定请求后，自动轮询、手动筛选与翻页共用同一通道，新请求会中止旧请求；
+ * - 自动轮询仅复用最后一次已提交筛选词，并沿用当前分栏、页码与每页条数，不追加当前页之外的订单；
+ * - 服务端会收敛越界页码，页面以响应中的 page 回写分页状态；
+ * - 仅在同一筛选条件下的静默刷新里计算新单提醒，同一视图下才计算“已更新”标记与恢复滚动锚点。
  */
 const loadOrders = async (options?: { silent?: boolean }) => {
   const silent = options?.silent ?? false
   const committedKeyword = appliedKeyword.value.trim()
+  const committedAccountType = query.accountType
   const committedDepartmentName = query.departmentName.trim()
   const committedStaffNo = query.staffNo.trim()
-  const scrollAnchor = silent
+  const requestPool = activePool.value
+  const filterKey = JSON.stringify([committedKeyword, committedAccountType, committedDepartmentName, committedStaffNo])
+  const requestViewKey = JSON.stringify([filterKey, requestPool, poolPagination.page, poolPagination.pageSize])
+  const sameFilter = orderSnapshotReady.value && filterKey === lastLoadedFilterKey
+  const sameView = sameFilter && requestViewKey === lastLoadedViewKey
+  const baselineOrderId = latestOrderIdBaseline.value
+  const scrollAnchor = silent && sameView
     ? captureOrderRefreshAnchor({
         listRoot: orderPoolListRef.value,
         itemAttributeName: 'data-order-pool-card-id',
@@ -860,31 +831,45 @@ const loadOrders = async (options?: { silent?: boolean }) => {
 
   await orderListRequest.runLatest({
     executor: (signal) =>
-      getO2oConsoleOrders(
+      getO2oConsoleOrderPool(
         {
+          pool: requestPool,
+          page: poolPagination.page,
+          pageSize: poolPagination.pageSize,
           keyword: committedKeyword || undefined,
-          accountType: query.accountType || undefined,
+          accountType: committedAccountType || undefined,
           departmentName: committedDepartmentName || undefined,
           staffNo: committedStaffNo || undefined,
-          limit: 200,
+          sinceOrderId: silent && sameFilter && baselineOrderId ? baselineOrderId : undefined,
         },
         { signal },
       ),
-    onSuccess: async (latestOrders) => {
+    onSuccess: async (result) => {
       const previousOrderMap = new Map(orders.value.map((item) => [item.id, item]))
-      const previousOrderIds = new Set(orders.value.map((item) => item.id))
-      if (orderSnapshotReady.value) {
-        const incrementalNewOrders = latestOrders.filter((item) => !previousOrderIds.has(item.id) && isNewOrder(item))
-        markIncrementalNewOrders(incrementalNewOrders)
-      }
+      const latestOrders = result.records
       orders.value = latestOrders
+      poolPagination.page = result.page
+      poolPagination.pageSize = result.pageSize
+      poolPagination.total = result.total
+      poolCounts.value = result.poolCounts
+      if (silent && sameFilter && baselineOrderId && result.newOrderCount > 0) {
+        const visibleNewOrderIds = latestOrders
+          .filter((item) => item.status === 'pending' && isOrderIdGreaterThan(item.id, baselineOrderId))
+          .map((item) => item.id)
+        markIncrementalNewOrders(result.newOrderCount, visibleNewOrderIds)
+      }
+      latestOrderIdBaseline.value = result.latestOrderId
+      lastLoadedFilterKey = filterKey
+      lastLoadedViewKey = JSON.stringify([filterKey, requestPool, result.page, result.pageSize])
       const currentCancelledIds = new Set(latestOrders.filter((item) => item.status === 'cancelled').map((item) => item.id))
       selectedCancelledOrderIds.value = selectedCancelledOrderIds.value.filter((id) => currentCancelledIds.has(id))
       if (silent) {
-        const refreshedOrderIds = latestOrders
-          .filter((item) => hasOrderSummaryChanged(previousOrderMap.get(item.id), item))
-          .map((item) => item.id)
-        markRefreshedOrders(refreshedOrderIds)
+        if (sameView) {
+          const refreshedOrderIds = latestOrders
+            .filter((item) => hasOrderSummaryChanged(previousOrderMap.get(item.id), item))
+            .map((item) => item.id)
+          markRefreshedOrders(refreshedOrderIds)
+        }
         lastSilentListRefreshAt.value = Date.now()
       }
       orderSnapshotReady.value = true
@@ -917,16 +902,17 @@ const handlePickOrder = async (id: string) => {
 }
 
 const handlePoolChange = async (poolKey: OrderPoolKey) => {
-  if (poolKey !== 'cancelled') {
-    selectedCancelledOrderIds.value = []
-  }
+  // 分页后勾选只对当前页生效，切换分栏统一清空，避免批量删除误带其他页订单。
+  selectedCancelledOrderIds.value = []
   activePool.value = poolKey
-  await syncActiveOrder()
+  poolPagination.page = 1
+  await loadOrders()
 }
 
 const handleSearch = async () => {
   // 查询动作提交后，自动轮询统一复用这次确认过的关键词，避免输入中的草稿与轮询请求互相覆盖。
   appliedKeyword.value = query.keyword.trim()
+  poolPagination.page = 1
   await loadOrders()
 }
 
@@ -936,6 +922,31 @@ const handleReset = async () => {
   query.departmentName = ''
   query.staffNo = ''
   appliedKeyword.value = ''
+  poolPagination.page = 1
+  await loadOrders()
+}
+
+const scrollOrderPoolListIntoView = async () => {
+  await nextTick()
+  orderPoolListRef.value?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+}
+
+/**
+ * 订单池翻页：
+ * - 翻页时清空批量勾选，勾选不跨页保留；
+ * - 加载完成后把列表顶部滚入视野，避免停留在分页条位置看不到新页首单。
+ */
+const handlePoolPageChange = async (page: number) => {
+  selectedCancelledOrderIds.value = []
+  poolPagination.page = page
+  await loadOrders()
+  await scrollOrderPoolListIntoView()
+}
+
+const handlePoolPageSizeChange = async (pageSize: number) => {
+  selectedCancelledOrderIds.value = []
+  poolPagination.pageSize = pageSize
+  poolPagination.page = 1
   await loadOrders()
 }
 
@@ -1454,7 +1465,7 @@ onBeforeUnmount(() => {
           <el-button class="search-action-button w-full sm:w-auto" type="primary" @click="handleSearch">查询</el-button>
           <el-button class="w-full sm:w-auto" @click="handleReset">重置</el-button>
           <template v-if="canBatchPurgeCancelledOrders">
-            <el-button class="w-full sm:w-auto" :disabled="batchPurging" @click="handleSelectAllCancelled">全选当前结果</el-button>
+            <el-button class="w-full sm:w-auto" :disabled="batchPurging" @click="handleSelectAllCancelled">全选本页</el-button>
             <el-button class="w-full sm:w-auto" :disabled="batchPurging || !selectedCancelledOrderIds.length" @click="selectedCancelledOrderIds = []">清空选择</el-button>
             <el-button class="w-full sm:w-auto" type="danger" :loading="batchPurging" :disabled="!selectedCancelledOrderIds.length" @click="handleBatchPurgeCancelledOrders">删除已选（{{ selectedCancelledOrderIds.length }}/50）</el-button>
           </template>
@@ -1552,11 +1563,24 @@ onBeforeUnmount(() => {
             当前分栏暂无订单
           </div>
         </div>
+
+        <PagePaginationBar
+          v-if="poolPagination.total > 0"
+          class="order-pool-pagination"
+          :current-page="poolPagination.page"
+          :page-size="poolPagination.pageSize"
+          :total="poolPagination.total"
+          :layout="ORDER_POOL_PAGINATION_LAYOUT"
+          :page-sizes="ORDER_POOL_PAGE_SIZES"
+          @current-change="handlePoolPageChange"
+          @size-change="handlePoolPageSizeChange"
+        />
       </section>
 
       <section class="min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm">
         <template v-if="activeOrderDetail">
-          <div class="flex flex-col gap-3 lg:flex-row lg:flex-wrap lg:items-start lg:justify-between">
+          <!-- 右侧详情栏宽度受左侧订单池挤压，宽屏再把单号区与操作区并排，保证 5 个操作按钮能在同一行完整显示。 -->
+          <div class="flex flex-col gap-3 2xl:flex-row 2xl:items-start 2xl:justify-between">
             <div class="min-w-0">
               <div class="flex flex-wrap items-center gap-2">
                 <p class="break-words text-lg font-semibold text-slate-900">{{ activeOrderDetail.order.showNo }}</p>
@@ -1571,14 +1595,15 @@ onBeforeUnmount(() => {
               </div>
               <p class="mt-1 break-all text-sm text-slate-400">核销码：{{ activeOrderDetail.order.verifyCode }}</p>
             </div>
-            <div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 lg:w-auto">
-              <el-button class="w-full" type="primary" plain :disabled="!canGoVerify" @click="handleGoVerify">{{ goVerifyButtonText }}</el-button>
-              <el-button class="w-full" :loading="detailLoading" @click="handleRefreshCurrentOrder">刷新状态</el-button>
-              <el-button class="w-full" @click="handleCopyVerifyCode">复制核销码</el-button>
-              <el-button v-if="canCancelCurrentOrder" class="w-full" type="warning" plain :loading="adminCancelling" :disabled="detailLoading" @click="handleCancelCurrentOrder">取消订单</el-button>
+            <!-- 窄屏两列网格，平板及以上改为弹性单行；!ml-0 抵消 Element Plus 相邻按钮自带的左边距，避免与 gap 叠加后提前换行。 -->
+            <div class="order-detail-actions grid min-w-0 grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center">
+              <el-button class="!ml-0 w-full sm:w-auto" type="primary" plain :disabled="!canGoVerify" @click="handleGoVerify">{{ goVerifyButtonText }}</el-button>
+              <el-button class="!ml-0 w-full sm:w-auto" :loading="detailLoading" @click="handleRefreshCurrentOrder">刷新状态</el-button>
+              <el-button class="!ml-0 w-full sm:w-auto" @click="handleCopyVerifyCode">复制核销码</el-button>
+              <el-button v-if="canCancelCurrentOrder" class="!ml-0 w-full sm:w-auto" type="warning" plain :loading="adminCancelling" :disabled="detailLoading" @click="handleCancelCurrentOrder">取消订单</el-button>
               <el-button
                 v-if="canDeleteCurrentOrder"
-                class="w-full"
+                class="!ml-0 w-full sm:w-auto"
                 type="danger"
                 plain
                 :loading="orderDeleting"

@@ -353,6 +353,10 @@ const voucherOrder = computed<OrderDetailResult | null>(() => {
     status: 'active',
     merge: { role: 'standalone', parent: null, children: [] },
     remark: order.remark,
+    // 客户端预览/打印以当前预订单为来源单据，与管理端正式出库单的结构化来源口径一致。
+    sourceDocType: 'o2o_preorder',
+    sourceDocId: order.id,
+    sourceDocNo: order.showNo,
     creatorUserId: customerProfile?.id || null,
     creatorUsername: customerProfile?.username || null,
     creatorDisplayName: customerDisplayName,

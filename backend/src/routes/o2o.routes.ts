@@ -17,6 +17,7 @@ import {
   O2O_MERCHANT_MESSAGE_MAX_LENGTH,
   O2O_RETURN_REASON_MAX_LENGTH,
   O2O_RETURN_REJECT_REASON_MAX_LENGTH,
+  O2O_CONSOLE_ORDER_POOL_KEYS,
   o2oPreorderService,
   type O2oPublicJsonSnapshot,
 } from '../services/o2o-preorder.service.js'
@@ -91,6 +92,14 @@ const consoleOrderQuerySchema = z.object({
   startTime: z.string().trim().max(32).optional(),
   endTime: z.string().trim().max(32).optional(),
   limit: z.coerce.number().int().min(1).max(200).optional(),
+})
+
+// 订单池分页查询：沿用订单查询筛选字段，分栏与分页由服务端统一计算。
+const consoleOrderPoolQuerySchema = consoleOrderQuerySchema.omit({ status: true, limit: true }).extend({
+  pool: z.enum(O2O_CONSOLE_ORDER_POOL_KEYS).optional(),
+  page: z.coerce.number().int().min(1).optional(),
+  pageSize: z.coerce.number().int().min(1).max(100).optional(),
+  sinceOrderId: z.string().trim().regex(/^\d{1,20}$/, '新单基准 ID 格式不正确').optional(),
 })
 
 const businessStatusSchema = z.object({
@@ -443,6 +452,18 @@ o2oAdminRouter.get(
   }),
 )
 
+// 管理端订单池分页：返回当前页订单、各分栏服务端统计数量与新单提醒基准。
+// 必须注册在 `/orders/:id` 之前，避免 `pool` 被当作订单 ID 匹配。
+o2oAdminRouter.get(
+  '/orders/pool',
+  requirePermission('orders:view'),
+  asyncHandler(async (req, res) => {
+    const query = consoleOrderPoolQuerySchema.parse(req.query)
+    const data = await o2oPreorderService.listConsoleOrderPool(query)
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
 // 管理端订单详情：用于查询页右侧展示订单状态报告与进度。
 o2oAdminRouter.get(
   '/orders/:id',
@@ -700,6 +721,8 @@ o2oAdminRouter.post(
         verifyCode: payload.verifyCode,
         operationType: data.operationType,
         verifyTargetType: data.verifyTargetType,
+        // 预订单核销生成的正式出库单号，便于从审计日志追溯到结构化来源字段对应的出库单。
+        outboundOrderShowNo: 'returnNo' in targetDetail ? null : (targetDetail.order.customerOrderShowNo ?? null),
       },
     })
 
