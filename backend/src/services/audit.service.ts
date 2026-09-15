@@ -18,8 +18,10 @@ import {
   buildAuditCategoryCondition,
   getAuditActionTypeLabel,
   getAuditCategoryLabel,
+  getAuditCategoryLevel,
   resolveAuditCategory,
   type AuditCategoryKey,
+  type CategoryImportanceLevel,
 } from '../constants/audit-action-catalog.js'
 import type { AuditResultStatus } from '../types/auth.js'
 import type { RequestMeta } from '../utils/request-meta.js'
@@ -71,6 +73,8 @@ export interface SafeAuditRecordOptions {
 export type AuditLogListRecord = SysAuditLog & {
   category: AuditCategoryKey
   categoryLabel: string
+  /** 业务类别重要程度，前端据此给类别标签着色。 */
+  categoryLevel: CategoryImportanceLevel
   actionTypeLabel: string
   targetTypeLabel: string
 }
@@ -79,6 +83,7 @@ export interface AuditFilterOptions {
   categories: Array<{
     key: AuditCategoryKey
     label: string
+    level: CategoryImportanceLevel
     actionTypes: Array<{ value: string; label: string }>
   }>
   targetTypes: Array<{ value: string; label: string }>
@@ -234,6 +239,7 @@ export class AuditService {
     return Object.assign(item, {
       category,
       categoryLabel: getAuditCategoryLabel(category),
+      categoryLevel: getAuditCategoryLevel(category),
       actionTypeLabel: getAuditActionTypeLabel(item.actionType) ?? item.actionLabel,
       targetTypeLabel: AUDIT_TARGET_TYPE_LABELS[item.targetType] ?? item.targetType,
     })
@@ -289,6 +295,7 @@ export class AuditService {
       categories: AUDIT_CATEGORIES.map((category) => ({
         key: category.key,
         label: category.label,
+        level: category.level,
         actionTypes: [...(actionTypesByCategory.get(category.key)?.entries() ?? [])].map(([actionType, label]) => ({
           value: actionType,
           label,

@@ -25,25 +25,36 @@ export const AUDIT_CATEGORY_KEYS = [
 
 export type AuditCategoryKey = (typeof AUDIT_CATEGORY_KEYS)[number]
 
+/**
+ * 业务类别重要程度（审计日志与通知事件共用），前端据此给类别标签着色：
+ * - critical 高风险：账号权限、数据与数据库、安全告警等影响系统安全或数据完整性的类别；
+ * - high 重要：登录认证、系统配置等影响全局行为的类别；
+ * - normal 常规业务：订单、入库、商品等日常业务类别；
+ * - low 一般：客服消息、通知处理与兜底类别。
+ */
+export const CATEGORY_IMPORTANCE_LEVELS = ['critical', 'high', 'normal', 'low'] as const
+export type CategoryImportanceLevel = (typeof CATEGORY_IMPORTANCE_LEVELS)[number]
+
 interface AuditCategoryDefinition {
   key: AuditCategoryKey
   label: string
+  level: CategoryImportanceLevel
   /** 前缀规则：动作编码以该前缀开头即归入本类别（精确目录优先）。 */
   prefixes: readonly string[]
 }
 
 export const AUDIT_CATEGORIES: readonly AuditCategoryDefinition[] = [
-  { key: 'auth', label: '登录与认证', prefixes: ['auth.', 'client.auth.', 'mobile_auth.'] },
-  { key: 'order_outbound', label: '订单与出库', prefixes: ['order.', 'o2o.'] },
-  { key: 'inbound_supply', label: '入库与供货', prefixes: ['inbound.'] },
+  { key: 'auth', label: '登录与认证', level: 'high', prefixes: ['auth.', 'client.auth.', 'mobile_auth.'] },
+  { key: 'order_outbound', label: '订单与出库', level: 'normal', prefixes: ['order.', 'o2o.'] },
+  { key: 'inbound_supply', label: '入库与供货', level: 'normal', prefixes: ['inbound.'] },
   // 商品与库存当前尚无独立审计动作，预留前缀便于后续接入。
-  { key: 'product_inventory', label: '商品与库存', prefixes: ['product.', 'inventory.'] },
-  { key: 'customer_service', label: '客服与消息', prefixes: ['customer_service.', 'client_feedback.'] },
-  { key: 'notification', label: '通知中心', prefixes: ['notification.'] },
-  { key: 'user_permission', label: '用户与权限', prefixes: ['user.', 'client_user.', 'client_staff_directory.', 'security.'] },
-  { key: 'system_config', label: '系统配置', prefixes: ['system_config.'] },
-  { key: 'data_database', label: '数据维护与数据库', prefixes: ['data_maintenance.', 'database_migration.'] },
-  { key: 'other', label: '其他', prefixes: [] },
+  { key: 'product_inventory', label: '商品与库存', level: 'normal', prefixes: ['product.', 'inventory.'] },
+  { key: 'customer_service', label: '客服与消息', level: 'low', prefixes: ['customer_service.', 'client_feedback.'] },
+  { key: 'notification', label: '通知中心', level: 'low', prefixes: ['notification.'] },
+  { key: 'user_permission', label: '用户与权限', level: 'critical', prefixes: ['user.', 'client_user.', 'client_staff_directory.', 'security.'] },
+  { key: 'system_config', label: '系统配置', level: 'high', prefixes: ['system_config.'] },
+  { key: 'data_database', label: '数据维护与数据库', level: 'critical', prefixes: ['data_maintenance.', 'database_migration.'] },
+  { key: 'other', label: '其他', level: 'low', prefixes: [] },
 ]
 
 interface AuditActionDefinition {
@@ -246,6 +257,10 @@ export const isAuditCategoryKey = (value: unknown): value is AuditCategoryKey =>
   typeof value === 'string' && (AUDIT_CATEGORY_KEYS as readonly string[]).includes(value)
 
 export const getAuditCategoryLabel = (key: AuditCategoryKey) => CATEGORY_LABEL_MAP.get(key) ?? '其他'
+
+const CATEGORY_LEVEL_MAP = new Map(AUDIT_CATEGORIES.map((item) => [item.key, item.level]))
+
+export const getAuditCategoryLevel = (key: AuditCategoryKey): CategoryImportanceLevel => CATEGORY_LEVEL_MAP.get(key) ?? 'low'
 
 /** 按前缀规则归类（不查精确目录），取最长匹配前缀。 */
 const resolveAuditCategoryByPrefix = (actionType: string): AuditCategoryKey => {

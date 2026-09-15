@@ -10,15 +10,22 @@
  * - 本文件不得引用 notification.service，避免常量层与服务层形成循环依赖。
  */
 
+import type { CategoryImportanceLevel } from './audit-action-catalog.js'
+
 export const NOTIFICATION_EVENT_CATEGORY_KEYS = ['order', 'customer_service', 'security', 'system'] as const
 export type NotificationEventCategoryKey = (typeof NOTIFICATION_EVENT_CATEGORY_KEYS)[number]
 
-export const NOTIFICATION_EVENT_CATEGORIES: ReadonlyArray<{ key: NotificationEventCategoryKey; label: string }> = [
-  { key: 'order', label: '订单通知' },
-  { key: 'customer_service', label: '客服通知' },
-  { key: 'security', label: '安全告警' },
+/** level 与审计业务类别共用同一套重要程度口径，前端据此给分类标签着色。 */
+export const NOTIFICATION_EVENT_CATEGORIES: ReadonlyArray<{
+  key: NotificationEventCategoryKey
+  label: string
+  level: CategoryImportanceLevel
+}> = [
+  { key: 'order', label: '订单通知', level: 'normal' },
+  { key: 'customer_service', label: '客服通知', level: 'normal' },
+  { key: 'security', label: '安全告警', level: 'critical' },
   // 系统通知为库存、入库、系统维护等后续事件预留，未登记事件类型也归入此类。
-  { key: 'system', label: '系统通知' },
+  { key: 'system', label: '系统通知', level: 'low' },
 ]
 
 export const NOTIFICATION_EVENT_TYPE_CATALOG: Readonly<Record<string, { label: string; category: NotificationEventCategoryKey }>> = {
@@ -68,6 +75,11 @@ export const resolveNotificationEventCategory = (eventType: string): Notificatio
   NOTIFICATION_EVENT_TYPE_CATALOG[eventType]?.category ?? 'system'
 
 export const getNotificationEventCategoryLabel = (key: NotificationEventCategoryKey) => CATEGORY_LABEL_MAP.get(key) ?? '系统通知'
+
+const CATEGORY_LEVEL_MAP = new Map(NOTIFICATION_EVENT_CATEGORIES.map((item) => [item.key, item.level]))
+
+export const getNotificationEventCategoryLevel = (key: NotificationEventCategoryKey): CategoryImportanceLevel =>
+  CATEGORY_LEVEL_MAP.get(key) ?? 'low'
 
 export const getNotificationEventTypeLabel = (eventType: string) => NOTIFICATION_EVENT_TYPE_CATALOG[eventType]?.label ?? eventType
 

@@ -6,7 +6,8 @@
  * - 主列表以通知事件为单位分页，同一业务事件即使经历多次外发重试也只显示一条主记录；
  * - 支持业务分类 → 事件类型联动、处理结果、外发渠道、时间范围与事件 ID 筛选，筛选项由后端常量下发；
  * - 桌面表格使用展开行、手机/平板卡片使用展开按钮查看详情，详情首次展开时请求并按事件 ID 缓存；
- * - 列表请求接入稳定请求工具，快速切换筛选或翻页时旧结果不会覆盖新状态。
+ * - 列表请求接入稳定请求工具，快速切换筛选或翻页时旧结果不会覆盖新状态；
+ * - 业务分类标签按后端下发的重要程度着色，与操作日志业务类别共用同一配色与图例。
  * 维护说明：
  * - “外发成功”只代表实际外发成功，处理结果口径以后端推导为准，前端不得自行根据审计记录改写；
  * - 从操作日志跳转时通过 focusEventId 精确定位事件，修改筛选逻辑时需保留该入口。
@@ -30,6 +31,12 @@ import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 import { extractErrorMessage } from '@/utils/error'
 import { showAppError } from '@/utils/app-alert'
 import NotificationEventDetailContent from './NotificationEventDetailContent.vue'
+import {
+  CATEGORY_IMPORTANCE_META,
+  CATEGORY_IMPORTANCE_ORDER,
+  getCategoryDotClass,
+  getCategoryTagType,
+} from '../category-importance'
 
 const props = defineProps<{
   filterOptions: NotificationEventFilterOptions | null
@@ -234,7 +241,12 @@ onMounted(() => {
             :class="isPhone ? '!w-full' : isTablet ? '!w-[160px]' : '!w-[160px]'"
             @change="handleCategoryChange"
           >
-            <el-option v-for="item in categoryOptions" :key="item.key" :label="item.label" :value="item.key" />
+            <el-option v-for="item in categoryOptions" :key="item.key" :label="item.label" :value="item.key">
+              <span class="flex items-center gap-2">
+                <span class="inline-block h-2 w-2 shrink-0 rounded-full" :class="getCategoryDotClass(item.level)" />
+                <span>{{ item.label }}</span>
+              </span>
+            </el-option>
           </el-select>
           <el-select
             v-model="searchForm.eventType"
@@ -289,6 +301,18 @@ onMounted(() => {
 
     <div class="rounded-2xl border border-dashed border-brand/20 bg-brand/5 px-4 py-3 text-sm leading-6 text-slate-600 dark:border-brand/20 dark:bg-brand/10 dark:text-slate-300">
       同一通知事件只展示一条记录，展开后查看规则命中、外发渠道、重试次数与失败原因。“外发成功”仅表示邮件/飞书实际发送成功。
+      <div class="mt-1.5 flex flex-wrap items-center gap-2 text-xs">
+        <span>业务分类颜色按重要程度区分：</span>
+        <el-tag
+          v-for="level in CATEGORY_IMPORTANCE_ORDER"
+          :key="level"
+          :type="CATEGORY_IMPORTANCE_META[level].tagType"
+          effect="plain"
+          size="small"
+        >
+          {{ CATEGORY_IMPORTANCE_META[level].label }}
+        </el-tag>
+      </div>
     </div>
 
     <div class="apple-card flex min-h-0 flex-1 flex-col p-3 sm:p-4 xl:p-5">
@@ -326,7 +350,9 @@ onMounted(() => {
               <template #default="{ row }">{{ formatTime(row.createdAt) }}</template>
             </el-table-column>
             <el-table-column label="业务分类" width="110">
-              <template #default="{ row }"><el-tag effect="plain">{{ row.categoryLabel }}</el-tag></template>
+              <template #default="{ row }">
+                <el-tag :type="getCategoryTagType(row.categoryLevel)" effect="plain">{{ row.categoryLabel }}</el-tag>
+              </template>
             </el-table-column>
             <el-table-column label="通知事件" min-width="220" show-overflow-tooltip>
               <template #default="{ row }">
@@ -360,7 +386,7 @@ onMounted(() => {
             <div class="grid gap-2 rounded-2xl bg-slate-50 p-3 text-sm text-slate-600 dark:bg-white/5 dark:text-slate-300">
               <div class="flex items-center justify-between gap-3">
                 <span class="text-slate-400">业务分类</span>
-                <span>{{ item.categoryLabel }}</span>
+                <el-tag :type="getCategoryTagType(item.categoryLevel)" effect="plain" size="small">{{ item.categoryLabel }}</el-tag>
               </div>
               <div class="flex items-start justify-between gap-3">
                 <span class="shrink-0 text-slate-400">外发结果</span>

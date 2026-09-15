@@ -211,6 +211,14 @@ const main = async () => {
   assert.ok(!JSON.stringify(resultById.get(String(serviceEvent.id))).includes('客服消息正文'), '通知事件列表不得透出客服消息正文')
   assert.equal(resultById.get(String(securityEvent.id))?.resultStatus, 'failed')
   assert.equal(resultById.get(String(securityEvent.id))?.categoryLabel, '安全告警')
+  assert.equal(resultById.get(String(orderEvent.id))?.categoryLevel, 'normal', '订单通知重要程度必须为常规业务')
+  assert.equal(resultById.get(String(serviceEvent.id))?.categoryLevel, 'normal', '客服通知重要程度必须为常规业务')
+  assert.equal(resultById.get(String(securityEvent.id))?.categoryLevel, 'critical', '安全告警重要程度必须为高风险')
+  assert.deepEqual(
+    Object.fromEntries(notificationEventLogService.getFilterOptions().categories.map((item) => [item.key, item.level])),
+    { order: 'normal', customer_service: 'normal', security: 'critical', system: 'low' },
+    '通知事件筛选项必须按分类下发重要程度',
+  )
 
   const expectIds = async (query: Omit<Parameters<typeof notificationEventLogService.listEvents>[0], 'page' | 'pageSize'>, expected: unknown[], message: string) => {
     const result = await notificationEventLogService.listEvents({ page: 1, pageSize: 20, ...query })

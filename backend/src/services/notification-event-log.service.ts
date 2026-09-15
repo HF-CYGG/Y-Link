@@ -15,6 +15,7 @@ import { Brackets, In, type SelectQueryBuilder } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import {
   getNotificationEventCategoryLabel,
+  getNotificationEventCategoryLevel,
   getNotificationEventTypeLabel,
   listNotificationEventTypesByCategory,
   NOTIFICATION_EVENT_CATEGORIES,
@@ -140,6 +141,7 @@ export class NotificationEventLogService {
       categories: NOTIFICATION_EVENT_CATEGORIES.map((category) => ({
         key: category.key,
         label: category.label,
+        level: category.level,
         eventTypes: listNotificationEventTypesByCategory(category.key).map((eventType) => ({
           value: eventType,
           label: getNotificationEventTypeLabel(eventType),
@@ -250,6 +252,7 @@ export class NotificationEventLogService {
       eventTypeLabel: getNotificationEventTypeLabel(event.eventType),
       category,
       categoryLabel: getNotificationEventCategoryLabel(category),
+      categoryLevel: getNotificationEventCategoryLevel(category),
       sourceType: event.sourceType,
       sourceId: event.sourceId,
       summary: summaryText,

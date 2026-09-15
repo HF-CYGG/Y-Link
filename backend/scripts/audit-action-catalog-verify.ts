@@ -124,6 +124,14 @@ const main = async () => {
   assert.equal(defaultResult.total, seed.length - 3, '未选类别与操作类型时必须默认隐藏 3 类通知内部处理记录')
   assert.ok(!defaultResult.actionTypes.includes('notification.rule.matched'))
   assert.ok(defaultResult.list.every((item) => item.categoryLabel && item.actionTypeLabel && item.targetTypeLabel), '列表记录必须带业务类别与中文名')
+  assert.ok(
+    defaultResult.list.every((item) => (catalog.CATEGORY_IMPORTANCE_LEVELS as readonly string[]).includes(item.categoryLevel)),
+    '列表记录必须带合法的业务类别重要程度',
+  )
+  assert.ok(
+    defaultResult.list.every((item) => item.categoryLevel === catalog.getAuditCategoryLevel(item.category)),
+    '列表记录的重要程度必须与所属类别目录一致',
+  )
 
   const expectCategory = async (category: typeof catalog.AUDIT_CATEGORY_KEYS[number], expected: string[]) => {
     const result = await listActionTypes({ ...page, category })
@@ -161,6 +169,19 @@ const main = async () => {
   assert.ok(otherOptions?.actionTypes.some((item) => item.value === 'legacy.unknown_action'), '未登记的历史动作必须出现在“其他”类别筛选项中')
   assert.ok(options.targetTypes.some((item) => item.value === 'legacy_target'), '数据库中出现的未登记目标类型必须出现在筛选项中')
   assert.deepEqual(options.defaultHiddenActionTypes, [...catalog.AUDIT_DEFAULT_HIDDEN_ACTION_TYPES])
+  const levelByCategory = Object.fromEntries(options.categories.map((item) => [item.key, item.level]))
+  assert.deepEqual(levelByCategory, {
+    auth: 'high',
+    order_outbound: 'normal',
+    inbound_supply: 'normal',
+    product_inventory: 'normal',
+    customer_service: 'low',
+    notification: 'low',
+    user_permission: 'critical',
+    system_config: 'high',
+    data_database: 'critical',
+    other: 'low',
+  }, '筛选项必须按类别下发重要程度')
 
   await AppDataSource.destroy()
   console.log(`OK 审计业务类别目录（源码动作 ${sourceActionTypes.size} 个）、类别筛选、默认隐藏与导出口径验收通过`)

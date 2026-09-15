@@ -24,6 +24,9 @@ export type AuditCategoryKey =
   | 'data_database'
   | 'other'
 
+/** 业务类别重要程度：审计业务类别与通知事件业务分类共用，由后端目录统一维护。 */
+export type CategoryImportanceLevel = 'critical' | 'high' | 'normal' | 'low'
+
 export interface AuditLogListQuery extends PaginationQueryInput {
   /** 业务类别：一级筛选，类别与动作映射由后端统一维护。 */
   category?: AuditCategoryKey
@@ -58,6 +61,7 @@ export interface AuditLogRecord {
   /** 后端按动作目录与前缀规则归类，未登记动作为 other。 */
   category: AuditCategoryKey
   categoryLabel: string
+  categoryLevel: CategoryImportanceLevel
   actionTypeLabel: string
   targetTypeLabel: string
 }
@@ -71,6 +75,7 @@ export interface AuditFilterOptions {
   categories: Array<{
     key: AuditCategoryKey
     label: string
+    level: CategoryImportanceLevel
     actionTypes: Array<{ value: string; label: string }>
   }>
   targetTypes: Array<{ value: string; label: string }>
@@ -93,6 +98,7 @@ export interface NotificationEventFilterOptions {
   categories: Array<{
     key: NotificationEventCategoryKey
     label: string
+    level: CategoryImportanceLevel
     eventTypes: Array<{ value: string; label: string }>
   }>
   resultStatuses: Array<{ value: NotificationEventResultStatus; label: string }>
@@ -127,6 +133,7 @@ export interface NotificationEventLogRecord {
   eventTypeLabel: string
   category: NotificationEventCategoryKey
   categoryLabel: string
+  categoryLevel: CategoryImportanceLevel
   sourceType: string
   sourceId: string
   summary: string
