@@ -140,6 +140,40 @@ export interface O2oConsoleOrderListQuery {
   limit?: number
 }
 
+/** 订单池分栏：退货分栏与主状态分栏交叉统计。 */
+export type O2oConsoleOrderPoolKey = 'all' | 'pending' | 'completed' | 'cancelled' | 'returns'
+export type O2oConsoleOrderPoolCounts = Record<O2oConsoleOrderPoolKey, number>
+
+/**
+ * 订单池分页查询参数：
+ * - 与后端 `/o2o/orders/pool` 路由保持一致；
+ * - sinceOrderId 传入上一轮 latestOrderId，用于服务端统计新单提醒数量。
+ */
+export interface O2oConsoleOrderPoolQuery extends Omit<O2oConsoleOrderListQuery, 'status' | 'limit'> {
+  pool?: O2oConsoleOrderPoolKey
+  page?: number
+  pageSize?: number
+  sinceOrderId?: string
+}
+
+interface O2oConsoleOrderPoolRawResult {
+  page: number
+  pageSize: number
+  total: number
+  list: O2oPreorderSummary[]
+  pool: O2oConsoleOrderPoolKey
+  poolCounts: O2oConsoleOrderPoolCounts
+  latestOrderId: string | null
+  newOrderCount: number
+}
+
+export interface O2oConsoleOrderPoolResult extends PaginationResult<O2oPreorderSummary> {
+  pool: O2oConsoleOrderPoolKey
+  poolCounts: O2oConsoleOrderPoolCounts
+  latestOrderId: string | null
+  newOrderCount: number
+}
+
 /**
  * 客户端展示订单号时，优先使用核销后沉淀出的正式出库单号：
  * - 已生成管理端正式出库单时，客户端应与管理端保持完全一致；
@@ -209,6 +243,33 @@ export const getO2oConsoleOrders = (
     params,
     ...config,
   })
+
+/**
+ * 订单池分页查询：
+ * - 服务端只返回当前页订单，分栏数量为服务端统计总数；
+ * - 返回的 page 已由服务端收敛越界页码，页面应以响应为准回写分页状态。
+ */
+export const getO2oConsoleOrderPool = async (
+  params: O2oConsoleOrderPoolQuery,
+  config?: RequestConfig,
+): Promise<O2oConsoleOrderPoolResult> => {
+  const result = await request<O2oConsoleOrderPoolRawResult>({
+    method: 'GET',
+    url: '/o2o/orders/pool',
+    params,
+    ...config,
+  })
+  return {
+    page: result.page,
+    pageSize: result.pageSize,
+    total: result.total,
+    records: result.list,
+    pool: result.pool,
+    poolCounts: result.poolCounts,
+    latestOrderId: result.latestOrderId,
+    newOrderCount: Number(result.newOrderCount ?? 0),
+  }
+}
 
 export const getO2oPreorderDetail = (id: string, config?: RequestConfig) =>
   request<O2oPreorderDetail>({

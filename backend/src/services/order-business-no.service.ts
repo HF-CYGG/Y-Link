@@ -61,6 +61,18 @@ export interface BusinessNoCursorPlan {
   nextBusinessNo: string | null
 }
 
+export interface BusinessNoSuggestion {
+  orderType: OrderType
+  namespace: 'hyyzjd' | 'hyyz'
+  cursor: number
+  businessNos: string[]
+  skippedBusinessNos: string[]
+}
+
+/** 建议号每批按区间查询占用表，并限制最大扫描跨度，避免异常占用数据导致长时间扫描。 */
+const SUGGESTION_WINDOW_SIZE = 200
+const SUGGESTION_SCAN_LIMIT = 5000
+
 export interface BusinessNoReservationTarget {
   parsed: ParsedBusinessNo
   orderUuid: string
@@ -154,22 +166,64 @@ export class OrderBusinessNoService {
       const orderType = namespace === 'hyyzjd' ? 'department' : 'walkin'
       const rule = BUSINESS_NO_RULES[orderType]
       const config = await this.loadConfig(rule.configKeyPrefix, manager)
-      const existingSequence = await manager.getRepository(BusinessSequence).findOneBy({ sequenceKey: rule.sequenceKey })
-      let beforeCursor: number
-      if (existingSequence) {
-        beforeCursor = this.parseNonNegativeInteger(existingSequence.currentValue, '订单业务号游标异常')
-      } else {
-        const maxRow = await manager.getRepository(OrderBusinessNoOccupancy)
-          .createQueryBuilder('occupancy')
-          .select('MAX(occupancy.serialValue)', 'maxSerial')
-          .where('occupancy.namespace = :namespace', { namespace })
-          .getRawOne<{ maxSerial: string | number | null }>()
-        beforeCursor = Math.max(config.start - 1, Number(maxRow?.maxSerial ?? config.start - 1))
-      }
+      const beforeCursor = await this.readCursorWithoutLock(orderType, config, manager)
       const afterCursor = Math.max(...namespaceTargets.map((target) => target.parsed.serialValue))
       plans.push(this.buildCursorPlan(namespace, beforeCursor, afterCursor, config.width))
     }
     return plans
+  }
+
+  /**
+   * 修订弹窗切换订单类型时的业务号建议：只读游标与占用表，不加锁、不占号、不推进游标。
+   * 从 cursor + 1 起顺延，跳过已永久占用号与调用方排除号（同批其他草稿），结果仅作为可手改的默认值；
+   * 最终是否可用仍以预览/提交时的事务内校验为准，因此这里的跳过不改变新单分配“禁止扫描跳号”的约束。
+   */
+  async suggestForAmendment(
+    orderType: OrderType,
+    count: number,
+    excludeBusinessNos: string[],
+    manager: EntityManager,
+  ): Promise<BusinessNoSuggestion> {
+    const rule = BUSINESS_NO_RULES[orderType]
+    const config = await this.loadConfig(rule.configKeyPrefix, manager)
+    const cursor = await this.readCursorWithoutLock(orderType, config, manager)
+    const maxSerial = 10 ** config.width - 1
+    const excluded = new Set(excludeBusinessNos.map((value) => value.trim().toLowerCase()).filter(Boolean))
+    const businessNos: string[] = []
+    const skippedBusinessNos: string[] = []
+    const formatSerial = (serial: number) => `${rule.namespace}${String(serial).padStart(config.width, '0')}`
+
+    let windowStart = Math.max(cursor + 1, config.start)
+    while (businessNos.length < count && windowStart <= maxSerial) {
+      if (windowStart - cursor > SUGGESTION_SCAN_LIMIT) {
+        throw new BizError(`业务号游标之后连续 ${SUGGESTION_SCAN_LIMIT} 个号均不可用，请手动填写业务单号`, 409)
+      }
+      const windowEnd = Math.min(maxSerial, windowStart + SUGGESTION_WINDOW_SIZE - 1)
+      const occupiedRows = await manager.getRepository(OrderBusinessNoOccupancy)
+        .createQueryBuilder('occupancy')
+        .select('occupancy.serialValue', 'serialValue')
+        .where('occupancy.namespace = :namespace', { namespace: rule.namespace })
+        .andWhere('occupancy.serialValue BETWEEN :windowStart AND :windowEnd', { windowStart, windowEnd })
+        .getRawMany<{ serialValue: string | number }>()
+      const occupied = new Set(occupiedRows.map((row) => Number(row.serialValue)))
+      for (let serial = windowStart; serial <= windowEnd && businessNos.length < count; serial += 1) {
+        const businessNo = formatSerial(serial)
+        if (occupied.has(serial)) {
+          skippedBusinessNos.push(businessNo)
+        } else if (!excluded.has(businessNo)) {
+          businessNos.push(businessNo)
+        }
+      }
+      windowStart = windowEnd + 1
+    }
+
+    return {
+      orderType,
+      namespace: rule.namespace,
+      cursor,
+      businessNos,
+      skippedBusinessNos,
+    }
   }
 
   async inspectConfirmed(
@@ -236,6 +290,21 @@ export class OrderBusinessNoService {
       throw new BizError('订单业务号位宽配置异常：位宽必须在 1 到 12 之间', 500)
     }
     return { start, width }
+  }
+
+  /** 无锁读取命名空间游标；游标行尚未创建时与分配逻辑一致，取 start - 1 与历史最大占用号的较大值。 */
+  private async readCursorWithoutLock(orderType: OrderType, config: BusinessNoConfig, manager: EntityManager): Promise<number> {
+    const rule = BUSINESS_NO_RULES[orderType]
+    const existingSequence = await manager.getRepository(BusinessSequence).findOneBy({ sequenceKey: rule.sequenceKey })
+    if (existingSequence) {
+      return this.parseNonNegativeInteger(existingSequence.currentValue, '订单业务号游标异常')
+    }
+    const maxRow = await manager.getRepository(OrderBusinessNoOccupancy)
+      .createQueryBuilder('occupancy')
+      .select('MAX(occupancy.serialValue)', 'maxSerial')
+      .where('occupancy.namespace = :namespace', { namespace: rule.namespace })
+      .getRawOne<{ maxSerial: string | number | null }>()
+    return Math.max(config.start - 1, Number(maxRow?.maxSerial ?? config.start - 1))
   }
 
   private groupTargets(targets: BusinessNoReservationTarget[]) {

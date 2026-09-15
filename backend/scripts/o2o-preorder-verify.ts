@@ -13,7 +13,9 @@ import { randomUUID } from 'node:crypto'
 import { AppDataSource } from '../src/config/data-source.js'
 import { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } from '../src/config/database-bootstrap.js'
 import { BaseProduct } from '../src/entities/base-product.entity.js'
+import { IsNull, Not } from 'typeorm'
 import { BizOutboundOrder } from '../src/entities/biz-outbound-order.entity.js'
+import { BizOutboundOrderItem } from '../src/entities/biz-outbound-order-item.entity.js'
 import { ClientUser } from '../src/entities/client-user.entity.js'
 import { InventoryLog } from '../src/entities/inventory-log.entity.js'
 import { O2oPreorder } from '../src/entities/o2o-preorder.entity.js'
@@ -714,6 +716,18 @@ const run = async () => {
   assert.equal(departmentSnapshotOutboundOrder.orderType, 'department')
   assert.equal(departmentSnapshotOutboundOrder.customerDepartmentName, '脚本部门-A')
   assert.match(departmentSnapshotOutboundOrder.businessNo, /^hyyzjd\d{6}$/)
+  // #70：来源预订单写入结构化来源快照，主单与明细备注不再自动写入预订单号。
+  assert.equal(departmentSnapshotOutboundOrder.sourceDocType, 'o2o_preorder', '核销生成的正式出库单必须写入来源单据类型')
+  assert.equal(String(departmentSnapshotOutboundOrder.sourceDocId), String(departmentSnapshotPreorder.order.id), '来源单据 ID 必须指向核销的预订单')
+  assert.equal(departmentSnapshotOutboundOrder.sourceDocNo, departmentSnapshotPreorder.order.showNo, '来源单据号必须保留预订单号快照')
+  assert.equal(departmentSnapshotOutboundOrder.remark, null, '核销生成的正式出库单主单备注不得自动写入来源文案')
+  assert.equal(
+    await AppDataSource.getRepository(BizOutboundOrderItem).count({
+      where: { orderId: departmentSnapshotOutboundOrder.id, remark: Not(IsNull()) },
+    }),
+    0,
+    '核销生成的正式出库单明细备注不得自动写入来源文案',
+  )
   assert.equal(departmentSnapshotOutboundOrder.editVersion, 2, '客户端打印联动必须推进正式单据版本')
   assert.equal(
     await AppDataSource.getRepository(OrderRevision).countBy({ orderUuid: departmentSnapshotOutboundOrder.orderUuid }),

@@ -88,6 +88,14 @@ const orderAmendmentCommitBatchSchema = z.object({
   amendments: z.array(orderAmendmentCommitSchema).min(1).max(100),
 })
 
+const amendmentBusinessNoSuggestionSchema = z.object({
+  orderType: z.enum(['department', 'walkin']),
+  count: z.coerce.number().int().min(1).max(100).default(1),
+  // 同批其他草稿已填写的业务号，逗号分隔；只用于建议时避让，不参与占号。
+  exclude: z.string().max(4000).optional()
+    .transform((value) => (value ?? '').split(',').map((item) => item.trim()).filter(Boolean).slice(0, 100)),
+})
+
 const updateOrderContentSchema = z.object({
   expectedVersion: z.number().int().positive(),
   reason: z.string().trim().min(1, '请填写修改原因').max(500),
@@ -180,6 +188,17 @@ orderRouter.get(
       message: 'ok',
       data,
     })
+  }),
+)
+
+orderRouter.get(
+  '/amendments/business-no-suggestions',
+  // 修订弹窗切换订单类型时按目标命名空间游标顺延建议业务号；只读，不占号、不推进游标。
+  requirePermission('orders:update'),
+  asyncHandler(async (req, res) => {
+    const query = amendmentBusinessNoSuggestionSchema.parse(req.query ?? {})
+    const data = await orderService.suggestAmendmentBusinessNos(query)
+    res.json({ code: 0, message: 'ok', data })
   }),
 )
 

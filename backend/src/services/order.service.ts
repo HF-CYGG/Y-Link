@@ -155,6 +155,10 @@ export interface OrderSummaryView {
   totalAmount: string
   totalQty: string
   remark: string | null
+  /** 来源单据快照：线上预订单核销生成的正式出库单记录来源预订单，展示与打印以此为准，不再解析备注。 */
+  sourceDocType: BizOutboundOrder['sourceDocType']
+  sourceDocId: string | null
+  sourceDocNo: string | null
   creatorUserId: string | null
   creatorUsername: string | null
   creatorDisplayName: string | null
@@ -527,6 +531,11 @@ export class OrderService {
 
   async previewAmendments(input: OrderAmendmentBatchInput, actor: AuthUserContext): Promise<OrderAmendmentPreviewResult> {
     return orderAmendmentService.preview(input, actor)
+  }
+
+  /** 修订切换订单类型时自动编排业务号：只读建议，不占号、不推进游标。 */
+  async suggestAmendmentBusinessNos(input: { orderType: OrderType; count: number; exclude: string[] }) {
+    return orderBusinessNoService.suggestForAmendment(input.orderType, input.count, input.exclude, AppDataSource.manager)
   }
 
   async commitAmendments(
@@ -1492,6 +1501,9 @@ export class OrderService {
       totalAmount: normalizeDecimalText(order.totalAmount),
       totalQty: normalizeDecimalText(order.totalQty),
       remark: order.remark,
+      sourceDocType: order.sourceDocType ?? null,
+      sourceDocId: normalizeNullableEntityId(order.sourceDocId),
+      sourceDocNo: order.sourceDocNo ?? null,
       creatorUserId: normalizeNullableEntityId(order.creatorUserId),
       creatorUsername: order.creatorUsername,
       creatorDisplayName: order.creatorDisplayName,

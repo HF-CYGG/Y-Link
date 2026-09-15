@@ -171,6 +171,22 @@ try {
     'SQLite 历史手工单与 O2O 正式单必须按既定库存模式推断',
   )
   assert.deepEqual(legacyInventoryLogs, [{ skuId: null, beforeSkuCurrentStock: null }], '历史库存流水新增 SKU 字段必须保持 NULL')
+  const sourceDocRows = await AppDataSource.query(
+    'SELECT idempotency_key AS idempotencyKey, source_doc_type AS sourceDocType, source_doc_no AS sourceDocNo FROM biz_outbound_order ORDER BY id',
+  ) as Array<{ idempotencyKey: string; sourceDocType: string | null; sourceDocNo: string | null }>
+  assert.deepEqual(
+    sourceDocRows.map((item) => [item.idempotencyKey, item.sourceDocType, item.sourceDocNo]),
+    [
+      ['legacy-manual-73', null, null],
+      ['o2o-preorder-verify:legacy-73', null, null],
+    ],
+    '#70 来源快照列必须补齐，无法确认来源预订单的历史单据保持为空',
+  )
+  const outboundOrderIndexes = await AppDataSource.query('PRAGMA index_list(biz_outbound_order)') as Array<{ name: string }>
+  assert.ok(
+    outboundOrderIndexes.some((index) => index.name === 'idx_biz_outbound_source_doc'),
+    '#70 来源快照组合索引必须在旧库升级后存在',
+  )
   assert.ok(
     inventoryLogForeignKeys.some((foreignKey) => (
       foreignKey.from === 'sku_id'

@@ -185,6 +185,9 @@ const SQLITE_REQUIRED_ORDER_COLUMNS = [
   'edit_version',
   'inventory_mode',
   'status',
+  'source_doc_type',
+  'source_doc_id',
+  'source_doc_no',
 ]
 
 const SQLITE_REQUIRED_ORDER_ITEM_COLUMNS = [
@@ -486,6 +489,100 @@ async function prepareSqliteOrderContentInventoryColumns(dataSource: DataSource)
        OR "inventory_mode" NOT IN ('legacy_none', 'manual_applied', 'o2o_preapplied')
        OR ("inventory_mode" = 'legacy_none' AND "idempotency_key" LIKE 'o2o-preorder-verify:%')
   `)
+}
+
+/**
+ * #70 出库单来源快照列：存量 SQLite 先以可空列补齐，并显式建组合索引。
+ * 列提前补齐后 shouldSynchronizeSqliteSchema 可能判定无需同步，索引不能依赖 synchronize 自动创建。
+ */
+async function prepareSqliteOrderSourceDocColumns(dataSource: DataSource): Promise<void> {
+  const orderColumns = await listSqliteTableColumns(dataSource, 'biz_outbound_order')
+  if (orderColumns.size === 0) return
+  if (!orderColumns.has('source_doc_type')) {
+    await dataSource.query('ALTER TABLE "biz_outbound_order" ADD COLUMN "source_doc_type" varchar(32) NULL')
+  }
+  if (!orderColumns.has('source_doc_id')) {
+    await dataSource.query('ALTER TABLE "biz_outbound_order" ADD COLUMN "source_doc_id" integer NULL')
+  }
+  if (!orderColumns.has('source_doc_no')) {
+    await dataSource.query('ALTER TABLE "biz_outbound_order" ADD COLUMN "source_doc_no" varchar(64) NULL')
+  }
+  await dataSource.query(
+    'CREATE INDEX IF NOT EXISTS "idx_biz_outbound_source_doc" ON "biz_outbound_order" ("source_doc_type", "source_doc_id")',
+  )
+}
+
+/**
+ * #70 历史线上预订核销出库单回填：
+ * - 以幂等键 `o2o-preorder-verify:<预订单ID>` 关联预订单，主键相等且字符串全等才视为可确认来源，防止 `12abc` 之类误匹配；
+ * - 先清理明细再回填主单：明细仅在血缘主单（自身所属主单或合并复制来源主单）尚未回填、且备注与自动文案逐字节一致时置空；
+ * - 主单回填来源快照，并仅清理逐字节等于自动文案的主单备注；人工备注与无法关联来源的单据一律保留；
+ * - 只处理 source_doc_type 为空的主单，重复执行不会清理之后人工写回的同样文案。
+ */
+export async function backfillSqliteOrderSourceDocs(dataSource: DataSource): Promise<{ clearedItemRemarks: number; backfilledOrders: number }> {
+  const [orderColumns, preorderColumns, itemColumns] = await Promise.all([
+    listSqliteTableColumns(dataSource, 'biz_outbound_order'),
+    listSqliteTableColumns(dataSource, 'o2o_preorder'),
+    listSqliteTableColumns(dataSource, 'biz_outbound_order_item'),
+  ])
+  if (
+    !orderColumns.has('source_doc_type')
+    || !orderColumns.has('idempotency_key')
+    || !preorderColumns.has('id')
+    || !preorderColumns.has('show_no')
+  ) {
+    return { clearedItemRemarks: 0, backfilledOrders: 0 }
+  }
+  const matchedPreorderCondition = `
+    p."id" = CAST(substr("biz_outbound_order"."idempotency_key", 21) AS INTEGER)
+    AND "biz_outbound_order"."idempotency_key" = 'o2o-preorder-verify:' || p."id"
+  `
+  // 专项回填脚本会传入隔离 DataSource；先幂等安装协调器，确保随后开启的 SQLite 事务同样受单写者队列保护。
+  await initializeDatabaseInfrastructure(dataSource)
+  return dataSource.transaction(async (manager) => {
+    let clearedItemRemarks = 0
+    if (itemColumns.has('remark') && itemColumns.has('order_id') && itemColumns.has('source_order_id')) {
+      await manager.query(`
+        UPDATE "biz_outbound_order_item"
+        SET "remark" = NULL
+        WHERE "remark" IS NOT NULL
+          AND EXISTS (
+            SELECT 1
+            FROM "biz_outbound_order" AS lineage
+            INNER JOIN "o2o_preorder" AS p
+              ON p."id" = CAST(substr(lineage."idempotency_key", 21) AS INTEGER)
+             AND lineage."idempotency_key" = 'o2o-preorder-verify:' || p."id"
+            WHERE lineage."id" = COALESCE("biz_outbound_order_item"."source_order_id", "biz_outbound_order_item"."order_id")
+              AND lineage."source_doc_type" IS NULL
+              AND lineage."idempotency_key" LIKE 'o2o-preorder-verify:%'
+              AND "biz_outbound_order_item"."remark" = '线上预订核销，预订单号：' || p."show_no"
+          )
+      `)
+      const [row] = await manager.query('SELECT changes() AS "changed"') as Array<{ changed: number }>
+      clearedItemRemarks = Number(row?.changed ?? 0)
+    }
+    await manager.query(`
+      UPDATE "biz_outbound_order"
+      SET
+        "remark" = CASE
+          WHEN "remark" = (SELECT '线上预订核销出库，预订单号：' || p."show_no" FROM "o2o_preorder" AS p WHERE ${matchedPreorderCondition})
+          THEN NULL
+          ELSE "remark"
+        END,
+        "source_doc_type" = 'o2o_preorder',
+        "source_doc_id" = (SELECT p."id" FROM "o2o_preorder" AS p WHERE ${matchedPreorderCondition}),
+        "source_doc_no" = (SELECT p."show_no" FROM "o2o_preorder" AS p WHERE ${matchedPreorderCondition})
+      WHERE "source_doc_type" IS NULL
+        AND "idempotency_key" LIKE 'o2o-preorder-verify:%'
+        AND EXISTS (SELECT 1 FROM "o2o_preorder" AS p WHERE ${matchedPreorderCondition})
+    `)
+    const [orderRow] = await manager.query('SELECT changes() AS "changed"') as Array<{ changed: number }>
+    const backfilledOrders = Number(orderRow?.changed ?? 0)
+    if (clearedItemRemarks > 0 || backfilledOrders > 0) {
+      console.log(`[y-link-backend] 已回填线上预订核销出库单来源快照：主单 ${backfilledOrders} 条，清理自动明细备注 ${clearedItemRemarks} 条`)
+    }
+    return { clearedItemRemarks, backfilledOrders }
+  })
 }
 
 /**
@@ -1539,6 +1636,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
     await ensureSqliteMobileSessionSchema(dataSource)
     await prepareSqliteOrderAmendmentColumns(dataSource)
     await prepareSqliteOrderContentInventoryColumns(dataSource)
+    await prepareSqliteOrderSourceDocColumns(dataSource)
     await prepareSqliteOrderMergeOperationResultSnapshot(dataSource)
     await normalizeSqliteOutboundItemColumns(dataSource)
     await normalizeSqliteO2oDiscountColumns(dataSource)
@@ -1557,6 +1655,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
       await ensureSqliteMallCatalogIndexes(dataSource)
       await backfillSqliteOrderAmendmentData(dataSource)
       await prepareSqliteOrderContentInventoryColumns(dataSource)
+      await backfillSqliteOrderSourceDocs(dataSource)
     }
     await migrateClientUserDepartmentGovernance(dataSource)
     await migrateLegacyFeedbackAttachments(dataSource)
@@ -1590,6 +1689,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
     await ensureSqliteMallCatalogIndexes(dataSource)
     await backfillSqliteOrderAmendmentData(dataSource)
     await prepareSqliteOrderContentInventoryColumns(dataSource)
+    await backfillSqliteOrderSourceDocs(dataSource)
     await migrateClientUserDepartmentGovernance(dataSource)
     await ensureSqliteAccountLifecycleAppendOnly(dataSource)
     await migrateLegacyFeedbackAttachments(dataSource)
@@ -1606,6 +1706,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   await ensureSqliteMallCatalogIndexes(dataSource)
   await backfillSqliteOrderAmendmentData(dataSource)
   await prepareSqliteOrderContentInventoryColumns(dataSource)
+  await backfillSqliteOrderSourceDocs(dataSource)
   await migrateClientUserDepartmentGovernance(dataSource)
   await ensureSqliteAccountLifecycleAppendOnly(dataSource)
   await migrateLegacyFeedbackAttachments(dataSource)

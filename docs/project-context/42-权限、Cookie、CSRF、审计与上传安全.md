@@ -52,6 +52,8 @@
 - 客户端鉴权上下文写入 `req.clientAuth`。
 - 上传兼容逻辑会把旧 `/uploads/<file>` 请求内部改写到 `products` 或 `client-feedback` 分类目录。
 - 审计记录至少关心：动作类型、目标对象、操作者、请求元信息、结果状态。
+- 审计业务类别由 `backend/src/constants/audit-action-catalog.ts` 统一维护：登录与认证、订单与出库、入库与供货、商品与库存、客服与消息、通知中心、用户与权限、系统配置、数据维护与数据库、其他。归类先查精确动作目录再按前缀匹配，未命中归入“其他”；类别筛选在 SQL 中翻译为精确 `IN` 与前缀 `LIKE ... ESCAPE '!'` 组合，列表与导出共用 `buildListQuery()`。`GET /api/audit-logs/filter-options`（`audit_logs:view + admin`）下发“类别 → 操作类型”、目标对象中文名与通知事件筛选项。每个业务类别在目录中声明重要程度 `level`（`critical` 高风险：用户与权限、数据维护与数据库；`high` 重要：登录与认证、系统配置；`normal` 常规业务：订单与出库、入库与供货、商品与库存；`low` 一般：客服与消息、通知中心、其他），随列表记录 `categoryLevel` 与筛选项下发，前端 `src/views/system/category-importance.ts` 映射为红/橙/主色/灰标签并展示图例。
+- 操作日志未选择业务类别与操作类型时，默认排除 `notification.rule.matched`、`notification.external.dispatch`、`notification.event.process` 三类通知内部处理记录（导出同口径，数据不删不改）；选择“通知中心”或具体动作时仍可完整查询，按事件聚合的视图见审计日志页“通知事件”页签。
 
 ## 权限与安全边界
 
@@ -76,6 +78,7 @@
 ## 验证与回归关注点
 
 - 改权限或鉴权时回归：登录、刷新恢复、写操作、越权拦截、审计记录。
+- 新增审计动作或调整审计类别后运行 `npm --prefix backend run audit:catalog:verify`：扫描源码中全部 `actionType` 必须已登记类别与中文名，并验证类别筛选、“其他”兜底、默认隐藏、组合筛选与导出口径一致。
 - 改上传安全时回归：新图片可访问、旧图片兼容访问、响应头正确。
 - 改 CSRF 时回归：管理端写接口在 Cookie 会话下的正常提交与失败提示。
 - 改图形验证码时执行 `npm --prefix backend run captcha:rendering:verify`，覆盖无系统字体的真实 PNG 渲染、兼容字段、作用域隔离和一次性校验。

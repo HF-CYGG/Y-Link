@@ -64,6 +64,8 @@ export interface OrderMergeOrderReference {
   totalQty: string
   totalAmount: string
   remark: string | null
+  sourceDocType: 'o2o_preorder' | null
+  sourceDocNo: string | null
   creatorUserId: string | null
   creatorUsername: string | null
   creatorDisplayName: string | null
@@ -995,6 +997,8 @@ export class OrderMergeService {
       totalQty: normalizeDecimal(order.totalQty),
       totalAmount: normalizeDecimal(order.totalAmount),
       remark: order.remark ?? null,
+      sourceDocType: order.sourceDocType ?? null,
+      sourceDocNo: order.sourceDocNo ?? null,
       creatorUserId: order.creatorUserId == null ? null : normalizeId(order.creatorUserId),
       creatorUsername: order.creatorUsername ?? null,
       creatorDisplayName: order.creatorDisplayName ?? null,

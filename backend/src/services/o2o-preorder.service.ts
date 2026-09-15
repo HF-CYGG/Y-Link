@@ -7,7 +7,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto'
-import { Brackets, type EntityManager, In, Not } from 'typeorm'
+import { Brackets, type EntityManager, In, Not, type SelectQueryBuilder } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { databaseOperationGate } from '../database/operation-gate.js'
@@ -190,6 +190,22 @@ export interface InventoryLogView {
 }
 
 type O2oNumericLike = string | number | null
+
+/** 管理端订单池分栏：与订单池页面分栏一一对应，退货分栏与主状态分栏交叉。 */
+export const O2O_CONSOLE_ORDER_POOL_KEYS = ['all', 'pending', 'completed', 'cancelled', 'returns'] as const
+export type O2oConsoleOrderPoolKey = (typeof O2O_CONSOLE_ORDER_POOL_KEYS)[number]
+/** 新单提醒时间窗：与订单池页面“新订单”高亮口径保持一致。 */
+const O2O_CONSOLE_NEW_ORDER_WINDOW_MS = 30 * 60 * 1000
+
+/** 管理端订单池公共筛选入参：数组接口与分页接口共用。 */
+type O2oConsoleOrderFilterInput = {
+  keyword?: string
+  accountType?: ClientUser['accountType']
+  departmentName?: string
+  staffNo?: string
+  startTime?: string
+  endTime?: string
+}
 
 export interface O2oMallSkuView {
   id: string
@@ -1199,7 +1215,8 @@ class O2oPreorderService {
           qty: qty.toFixed(2),
           unitPrice: formatMoneyFromCents(unitPriceCents),
           lineAmount: formatMoneyFromCents(lineAmountCents),
-          remark: `线上预订核销，预订单号：${input.preorder.showNo}`,
+          // 来源预订单改由主单结构化字段记录，明细备注只保留人工备注，避免每行重复写入预订单号。
+          remark: null,
         }),
       )
     })
@@ -1219,7 +1236,11 @@ class O2oPreorderService {
       // 正式出库单上的客户名称应优先使用下单时填写的提货人，
       // 这样线下打印/核销后回看单据时，仍能还原真实领取人而不是账号用户名。
       customerName: input.preorder.pickupContact?.trim() || clientUser?.realName?.trim() || null,
-      remark: `线上预订核销出库，预订单号：${input.preorder.showNo}`,
+      // 单据备注只承载人工填写内容；来源预订单写入结构化来源快照，预订单后续变更或清理后仍可追溯。
+      remark: null,
+      sourceDocType: 'o2o_preorder',
+      sourceDocId: input.preorder.id,
+      sourceDocNo: input.preorder.showNo,
       totalQty: totalQty.toFixed(2),
       totalAmount: this.formatCentsToMoney(totalAmountCents),
       creatorUserId: input.actor.userId,
@@ -3545,20 +3566,129 @@ class O2oPreorderService {
     return result.detail
   }
 
-  async listConsoleOrders(input: {
+  async listConsoleOrders(input: O2oConsoleOrderFilterInput & {
     status?: 'pending' | 'verified' | 'cancelled'
-    keyword?: string
-    accountType?: ClientUser['accountType']
-    departmentName?: string
-    staffNo?: string
-    startTime?: string
-    endTime?: string
     limit?: number
   }) {
+    const normalizedLimit = Math.max(1, Math.min(200, Number(input.limit) || 50))
+    const queryBuilder = this.createConsoleOrderFilteredQuery(input)
+      .orderBy('order.id', 'DESC')
+      .take(normalizedLimit)
+
+    if (input.status) {
+      queryBuilder.andWhere('order.status = :status', { status: input.status })
+    }
+
+    const rows = await queryBuilder.getMany()
+    const nowMs = Date.now()
+    return this.buildOrderSummaryViews(rows, { nowMs })
+  }
+
+  /**
+   * 订单池分页查询：
+   * - 各分栏数量由服务端按同一筛选口径统计，不受当前页条数影响；
+   * - 退货分栏与状态分栏交叉统计，与订单池页面原有分组规则保持一致；
+   * - 请求页码越界时由服务端收敛到最后有效页，前端无需二次请求；
+   * - latestOrderId / newOrderCount 用于轮询时判断新单提醒，避免分页后用 id 集合对比误报。
+   */
+  async listConsoleOrderPool(input: O2oConsoleOrderFilterInput & {
+    pool?: O2oConsoleOrderPoolKey
+    page?: number
+    pageSize?: number
+    sinceOrderId?: string
+  }) {
+    const pool = input.pool ?? 'all'
+    const pageSize = Math.max(1, Math.min(100, Math.floor(Number(input.pageSize) || 10)))
+    const requestedPage = Math.max(1, Math.floor(Number(input.page) || 1))
+    const baseQuery = this.createConsoleOrderFilteredQuery(input)
+
+    const statusRows = await baseQuery
+      .clone()
+      .select('order.status', 'status')
+      .addSelect('COUNT(1)', 'total')
+      .groupBy('order.status')
+      .getRawMany<{ status: string; total: O2oNumericLike }>()
+    const statusCountMap = new Map(statusRows.map((row) => [String(row.status), Number(row.total ?? 0)]))
+    const returnsCount = await this.applyConsoleOrderPoolCondition(baseQuery.clone(), 'returns').getCount()
+    const poolCounts: Record<O2oConsoleOrderPoolKey, number> = {
+      all: [...statusCountMap.values()].reduce((sum, value) => sum + value, 0),
+      pending: statusCountMap.get('pending') ?? 0,
+      completed: statusCountMap.get('verified') ?? 0,
+      cancelled: statusCountMap.get('cancelled') ?? 0,
+      returns: returnsCount,
+    }
+
+    const total = poolCounts[pool]
+    const page = Math.min(requestedPage, Math.max(1, Math.ceil(total / pageSize)))
+    const rows = total > 0
+      ? await this.applyConsoleOrderPoolCondition(baseQuery.clone(), pool)
+        .orderBy('order.id', 'DESC')
+        .skip((page - 1) * pageSize)
+        .take(pageSize)
+        .getMany()
+      : []
+
+    const latestRow = await baseQuery
+      .clone()
+      .select('MAX(order.id)', 'latestId')
+      .getRawOne<{ latestId: O2oNumericLike | null }>()
+    const latestOrderId = latestRow?.latestId === null || latestRow?.latestId === undefined ? null : String(latestRow.latestId)
+
+    let newOrderCount = 0
+    if (input.sinceOrderId) {
+      newOrderCount = await baseQuery
+        .clone()
+        .andWhere('order.id > :sinceOrderId', { sinceOrderId: input.sinceOrderId })
+        .andWhere('order.status = :newOrderStatus', { newOrderStatus: 'pending' })
+        .andWhere('order.createdAt >= :newOrderWindowStart', { newOrderWindowStart: new Date(Date.now() - O2O_CONSOLE_NEW_ORDER_WINDOW_MS) })
+        .getCount()
+    }
+
+    const list = await this.buildOrderSummaryViews(rows, { nowMs: Date.now() })
+    return {
+      page,
+      pageSize,
+      total,
+      list,
+      pool,
+      poolCounts,
+      latestOrderId,
+      newOrderCount,
+    }
+  }
+
+  /**
+   * 订单池分栏条件：
+   * - pending / completed / cancelled 直接对应预订单主状态（超时取消同属 cancelled）；
+   * - returns 以是否存在退货申请判断，与主状态交叉；all 不追加条件。
+   */
+  private applyConsoleOrderPoolCondition(queryBuilder: SelectQueryBuilder<O2oPreorder>, pool: O2oConsoleOrderPoolKey) {
+    if (pool === 'pending' || pool === 'cancelled') {
+      queryBuilder.andWhere('order.status = :poolStatus', { poolStatus: pool })
+    } else if (pool === 'completed') {
+      queryBuilder.andWhere('order.status = :poolStatus', { poolStatus: 'verified' })
+    } else if (pool === 'returns') {
+      const returnSubQuery = this.preorderRepo
+        .createQueryBuilder('order_pool_return')
+        .subQuery()
+        .select('1')
+        .from(O2oReturnRequest, 'poolReturnRequest')
+        .where('poolReturnRequest.orderId = order.id')
+        .getQuery()
+      queryBuilder.andWhere(`EXISTS ${returnSubQuery}`)
+    }
+    return queryBuilder
+  }
+
+  /**
+   * 订单池公共筛选：
+   * - 旧数组接口与分页接口共用同一套筛选口径，避免计数、分页与历史接口结果漂移；
+   * - 只负责筛选条件，不追加排序、分页与分栏条件。
+   */
+  private createConsoleOrderFilteredQuery(input: O2oConsoleOrderFilterInput) {
     const normalizedKeyword = input.keyword?.trim() ?? ''
     const normalizedDepartmentName = input.departmentName?.trim() ?? ''
     const normalizedStaffNo = input.staffNo?.trim() ?? ''
-    const normalizedLimit = Math.max(1, Math.min(200, Number(input.limit) || 50))
     const startTime = this.parseTimeFilter(input.startTime, '开始时间')
     const endTime = this.parseTimeFilter(input.endTime, '结束时间')
     if (startTime && endTime && startTime.getTime() > endTime.getTime()) {
@@ -3567,12 +3697,7 @@ class O2oPreorderService {
     const queryBuilder = this.preorderRepo
       .createQueryBuilder('order')
       .where('order.isDeleted = :isDeleted', { isDeleted: false })
-      .orderBy('order.id', 'DESC')
-      .take(normalizedLimit)
 
-    if (input.status) {
-      queryBuilder.andWhere('order.status = :status', { status: input.status })
-    }
     if (input.accountType === 'department') {
       queryBuilder.andWhere('order.clientOrderType = :accountTypeOrderType', { accountTypeOrderType: 'department' })
     }
@@ -3637,9 +3762,7 @@ class O2oPreorderService {
       )
     }
 
-    const rows = await queryBuilder.getMany()
-    const nowMs = Date.now()
-    return this.buildOrderSummaryViews(rows, { nowMs })
+    return queryBuilder
   }
 
   async detailById(id: string, manager: EntityManager = AppDataSource.manager) {

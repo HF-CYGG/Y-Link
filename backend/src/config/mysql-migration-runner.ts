@@ -309,6 +309,32 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
     expectedColumnType: 'bigint unsigned',
     expectedNullable: true,
   },
+  {
+    tableName: 'biz_outbound_order',
+    columnName: 'source_doc_type',
+    introducingScript: '046_outbound_order_source_doc.sql',
+    expectedDataType: 'varchar',
+    expectedColumnType: 'varchar(32)',
+    expectedCharacterMaximumLength: 32,
+    expectedNullable: true,
+  },
+  {
+    tableName: 'biz_outbound_order',
+    columnName: 'source_doc_id',
+    introducingScript: '046_outbound_order_source_doc.sql',
+    expectedDataType: 'bigint',
+    expectedColumnType: 'bigint unsigned',
+    expectedNullable: true,
+  },
+  {
+    tableName: 'biz_outbound_order',
+    columnName: 'source_doc_no',
+    introducingScript: '046_outbound_order_source_doc.sql',
+    expectedDataType: 'varchar',
+    expectedColumnType: 'varchar(64)',
+    expectedCharacterMaximumLength: 64,
+    expectedNullable: true,
+  },
   ...['operation_uuid', 'idempotency_key', 'request_hash', 'target_order_id', 'target_order_uuid', 'target_edit_version', 'merged_source_order_ids_json', 'reason', 'actor_user_id', 'actor_username', 'actor_display_name', 'created_at']
     .map((columnName) => ({ tableName: 'order_merge_operation', columnName, introducingScript: '045_order_merge_governance.sql' })),
   {
@@ -531,6 +557,7 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
     introducingScript: '042_order_business_no_amendment.sql',
   },
   { tableName: 'biz_outbound_order', indexName: 'idx_biz_outbound_status', columns: ['status'], unique: false, introducingScript: '045_order_merge_governance.sql' },
+  { tableName: 'biz_outbound_order', indexName: 'idx_biz_outbound_source_doc', columns: ['source_doc_type', 'source_doc_id'], unique: false, introducingScript: '046_outbound_order_source_doc.sql' },
   { tableName: 'biz_outbound_order_item', indexName: 'idx_biz_outbound_item_source_order_id', columns: ['source_order_id'], unique: false, introducingScript: '045_order_merge_governance.sql' },
   { tableName: 'biz_outbound_order_item', indexName: 'idx_biz_outbound_item_source_item_id', columns: ['source_order_item_id'], unique: false, introducingScript: '045_order_merge_governance.sql' },
   { tableName: 'order_merge_operation', indexName: 'uk_order_merge_operation_uuid', columns: ['operation_uuid'], unique: true, introducingScript: '045_order_merge_governance.sql' },
@@ -639,6 +666,7 @@ const AUTO_MIGRATABLE_FILES = [
   '043_order_content_inventory_mode.sql',
   '044_account_lifecycle_governance.sql',
   '045_order_merge_governance.sql',
+  '046_outbound_order_source_doc.sql',
 ]
 
 /**

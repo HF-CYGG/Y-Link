@@ -1165,6 +1165,32 @@ async function main() {
     assert.ok(consoleOrderItems.some((item) => item.id === preorder.order.id))
     pass('管理端 O2O 订单列表读取通过')
 
+    const consoleOrderPool = await expectJsonOk<{
+      data: {
+        page: number
+        pageSize: number
+        total: number
+        list: Array<{ id: string }>
+        poolCounts: Record<'all' | 'pending' | 'completed' | 'cancelled' | 'returns', number>
+      }
+    }>(
+      () =>
+        fetch(`${baseUrl}/api/o2o/orders/pool?pool=pending&page=1&pageSize=10`, {
+          headers: {
+            Authorization: `Bearer ${adminToken}`,
+          },
+        }),
+      '管理端 O2O 订单池分页读取',
+    )
+    assert.equal(consoleOrderPool.pageSize, 10)
+    assert.ok(consoleOrderPool.list.length <= 10, '订单池分页每页不得超过 pageSize')
+    assert.ok(
+      consoleOrderPool.list.some((item) => item.id === preorder.order.id),
+      '订单池分页必须返回刚创建的待核销订单，且 /orders/pool 不得被 /orders/:id 截获',
+    )
+    assert.ok(consoleOrderPool.poolCounts.pending >= 1)
+    pass('管理端 O2O 订单池分页读取通过')
+
     const verifiedOrder = await expectJsonOk<{
       data: {
         detail: {
