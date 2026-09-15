@@ -79,6 +79,7 @@ const REQUIRED_COLUMNS = [
   ['o2o_preorder', 'cancellation_source'],
   ['o2o_preorder', 'cancellation_remark'],
   ['o2o_preorder', 'cancelled_at'],
+  ['biz_inbound_order', 'expected_arrival_at'],
   ['biz_outbound_order_item', 'sku_id'],
   ['biz_outbound_order_item', 'sku_code_snapshot'],
   ['biz_outbound_order_item', 'spec_text_snapshot'],
@@ -733,6 +734,13 @@ missingOutboundSourceDocIndex.indexes.delete(objectKey('biz_outbound_order', 'id
 await expectSchemaFailure(missingOutboundSourceDocIndex, [
   '索引 biz_outbound_order.idx_biz_outbound_source_doc',
   '046_outbound_order_source_doc.sql',
+])
+
+const missingInboundExpectedArrivalAt = createCompleteFixture()
+missingInboundExpectedArrivalAt.columns.delete(objectKey('biz_inbound_order', 'expected_arrival_at'))
+await expectSchemaFailure(missingInboundExpectedArrivalAt, [
+  '字段 biz_inbound_order.expected_arrival_at',
+  '048_inbound_order_expected_arrival.sql',
 ])
 
 const nullableOrderMergeResultSnapshot = createCompleteFixture()

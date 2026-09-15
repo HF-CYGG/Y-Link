@@ -1,8 +1,10 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/inbound/InboundScanView.vue
- * 文件职责：提供送货单扫码查询、明细核对、现场改单、一键确认入库与最近查询回查能力。
+ * 文件职责：提供送货单扫码查询、明细核对、现场改单、一键确认入库、最近查询回查与管理端送货单池查看能力。
  * 实现逻辑：
+ * - 页面用被动分段标签在“扫码入库”和“送货单池”之间切换，送货单池异步拆包加载，不影响扫码首屏；
+ * - 送货单池点“去入库”会切回扫码页签并复用同一查询链路，库管无需手动抄写单号；
  * - 页面同时兼容核销码与送货单号两种输入方式，并在查询失败时按规则自动兜底到 showNo 查询；
  * - 查询、现场改单、核销、快捷键和扫码弹窗共用同一份状态门禁，避免连续作业时重复触发请求；
  * - 工作台布局统一收敛为“单主滚动区”，避免桌面与移动端多层滚动互相抢焦点。
@@ -11,9 +13,9 @@
  * - 模板里用到的图标必须与脚本导入保持一致，否则运行时会直接报错并表现为页面无响应。
  */
 
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
-import { PageContainer, PassiveNumberInput, UnifiedScanDialog } from '@/components/common'
+import { PageContainer, PassiveNumberInput, PassiveSegmentedTabs, UnifiedScanDialog } from '@/components/common'
 import {
   getInboundDetail,
   getInboundDetailByShowNo,
@@ -30,6 +32,15 @@ import dayjs from 'dayjs'
 
 
 import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
+
+// 送货单池属于低频查看面板，异步拆包避免把列表与轮询逻辑打进扫码页首屏分包。
+const InboundDeliveryPoolPanel = defineAsyncComponent(() => import('./components/InboundDeliveryPoolPanel.vue'))
+
+const INBOUND_SCAN_TABS = [
+  { label: '扫码入库', name: 'scan' },
+  { label: '送货单池', name: 'pool' },
+] as const
+const activeTab = ref<'scan' | 'pool'>('scan')
 
 const scanCode = ref('')
 const scanInputRef = ref<{ focus: () => void } | null>(null)
@@ -137,6 +148,10 @@ const summaryCards = computed(() => {
     {
       label: '总件数',
       value: `${order.totalQty} 件`,
+    },
+    {
+      label: '预计送达时间',
+      value: order.expectedArrivalAt ? dayjs(order.expectedArrivalAt).format('YYYY-MM-DD HH:mm') : '未填写',
     },
   ]
 })
@@ -325,6 +340,19 @@ const handleScan = async () => {
   } finally {
     loading.value = false
   }
+}
+
+// 送货单池点“去入库”：切回扫码页签并复用同一查询链路，避免库管再手动抄一次单号。
+const handleVerifyFromPool = async (showNo: string) => {
+  const normalizedShowNo = String(showNo || '').trim()
+  if (!normalizedShowNo) {
+    showAppWarning('该送货单缺少单号，请刷新送货单池后重试')
+    return
+  }
+  activeTab.value = 'scan'
+  scanCode.value = normalizedShowNo
+  await nextTick()
+  await handleScan()
 }
 
 const handlePasteAndSearch = async () => {
@@ -521,11 +549,17 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <PageContainer title="一键扫码入库" description="扫码识别送货单、核对明细并确认入库，支持快捷键连续作业。">
+  <PageContainer title="一键扫码入库" description="扫码识别送货单、核对明细并确认入库，也可在送货单池查看供货方已提交的待入库单据。">
+    <div class="mb-3">
+      <PassiveSegmentedTabs v-model="activeTab" :tabs="INBOUND_SCAN_TABS" aria-label="入库工作台标签" />
+    </div>
+
+    <InboundDeliveryPoolPanel v-if="activeTab === 'pool'" @verify="handleVerifyFromPool" />
+
     <!-- 扫码工作台统一采用 dvh + flex 高度口径：
          - 桌面端锁定工作区高度，左右面板各自只保留一个主滚动区；
          - 窄屏端回退为自然流，避免把手机页面切成多个难以操作的内层滚动容器。 -->
-    <div class="inbound-scan-workbench">
+    <div v-show="activeTab === 'scan'" class="inbound-scan-workbench">
       <!-- 左侧：扫码区 + 快捷指引 + 最近扫码 -->
       <section class="inbound-scan-side bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-100 dark:border-slate-700 flex flex-col overflow-hidden">
         <div class="p-5 border-b border-slate-100 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-900/40">

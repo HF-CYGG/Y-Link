@@ -27,6 +27,8 @@ export const inboundRouter = Router()
 // 供货方：提交送货单
 const submitInboundSchema = z.object({
   remark: z.string().max(255).optional(),
+  // 预计送达时间：供货方提交时必填，格式为带时区偏移的 ISO 时间，业务范围由服务层校验。
+  expectedArrivalAt: z.string().datetime({ offset: true }),
   items: z.array(
     z.object({
       productId: z.string().min(1),
@@ -51,6 +53,8 @@ const supplierListQuerySchema = z.object({
 
 const updateSupplierInboundSchema = z.object({
   remark: z.string().trim().max(255).optional(),
+  // 改单（供货方与库管现场改单共用）可选修改预计送达时间；不传表示保持原值。
+  expectedArrivalAt: z.string().datetime({ offset: true }).optional(),
   items: z.array(
     z.object({
       productId: z.string().min(1),
@@ -299,6 +303,32 @@ inboundRouter.patch(
     res.json({
       code: 0,
       message: '现场改单成功',
+      data: result,
+    })
+  }),
+)
+
+// 库管员：送货单池分页列表（供货方提交即可见，用于提前备货与安排入库）
+const adminPoolQuerySchema = z.object({
+  pool: z.enum(['all', 'pending', 'verified']).optional(),
+  keyword: z.string().trim().max(64).optional(),
+  page: z.coerce.number().int().min(1).optional(),
+  pageSize: z.coerce.number().int().min(1).max(50).optional(),
+  sinceOrderId: z.string().trim().max(32).optional(),
+})
+
+inboundRouter.get(
+  '/admin/pool',
+  requirePermission('inbound:view'),
+  // 与 admin/list 保持同一职责边界：供货方不得访问管理端送货单池。
+  requireRole('admin', 'operator'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const query = adminPoolQuerySchema.parse(req.query)
+    const result = await inboundService.listInboundOrderPool(authReq.auth, query)
+    res.json({
+      code: 0,
+      message: 'ok',
       data: result,
     })
   }),

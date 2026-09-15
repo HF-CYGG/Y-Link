@@ -184,6 +184,7 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
   { tableName: 'o2o_preorder', columnName: 'cancellation_source', introducingScript: '040_o2o_preorder_governance.sql' },
   { tableName: 'o2o_preorder', columnName: 'cancellation_remark', introducingScript: '040_o2o_preorder_governance.sql' },
   { tableName: 'o2o_preorder', columnName: 'cancelled_at', introducingScript: '040_o2o_preorder_governance.sql' },
+  { tableName: 'biz_inbound_order', columnName: 'expected_arrival_at', introducingScript: '048_inbound_order_expected_arrival.sql', expectedNullable: true },
   {
     tableName: 'biz_outbound_order_item',
     columnName: 'sku_id',
@@ -667,6 +668,7 @@ const AUTO_MIGRATABLE_FILES = [
   '044_account_lifecycle_governance.sql',
   '045_order_merge_governance.sql',
   '046_outbound_order_source_doc.sql',
+  '048_inbound_order_expected_arrival.sql',
 ]
 
 /**

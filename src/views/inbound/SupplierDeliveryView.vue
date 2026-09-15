@@ -59,6 +59,13 @@ const handleProductChange = (item: DeliveryItemRow) => {
 // 供货单明细
 const items = ref<DeliveryItemRow[]>([])
 const remark = ref('')
+// 预计送达时间为必填项：库管据此在送货单池安排备货与入库，不允许留空提交。
+const expectedArrivalAt = ref<Date | null>(null)
+const disabledExpectedArrivalDate = (date: Date) => {
+  const todayStart = new Date()
+  todayStart.setHours(0, 0, 0, 0)
+  return date.getTime() < todayStart.getTime()
+}
 
 // 二维码与成功状态
 const qrCodeDataUrl = ref('')
@@ -87,7 +94,7 @@ const completionRate = computed(() => {
 
 // 提交按钮统一可用性判定，避免模板中散落复杂表达式
 const canSubmit = computed(() => {
-  return !loading.value && !submitting.value && products.value.length > 0 && totalQty.value > 0
+  return !loading.value && !submitting.value && products.value.length > 0 && totalQty.value > 0 && Boolean(expectedArrivalAt.value)
 })
 
 const hasNoProducts = computed(() => !loading.value && products.value.length === 0)
@@ -157,6 +164,11 @@ const handleSubmit = async () => {
     return
   }
 
+  if (!expectedArrivalAt.value) {
+    showAppWarning('请选择预计送达时间')
+    return
+  }
+
   try {
     await ElMessageBox.confirm('送货单生成后可在待入库阶段到历史单据中改单或撤销，确认提交吗？', '确认生成', {
       confirmButtonText: '确认生成',
@@ -178,6 +190,7 @@ const handleSubmit = async () => {
 
   const submitData = {
     remark: remark.value.trim(),
+    expectedArrivalAt: expectedArrivalAt.value.toISOString(),
     items: Array.from(uniqueItems.entries()).map(([key, qty]) => {
       const [productId, skuId] = key.split(':')
       return { productId, skuId, qty }
@@ -203,6 +216,7 @@ const handleSubmit = async () => {
 const handleReset = () => {
   items.value = []
   remark.value = ''
+  expectedArrivalAt.value = null
   isSuccess.value = false
   qrCodeDataUrl.value = ''
   qrCodeUnavailable.value = false
@@ -327,6 +341,24 @@ onMounted(() => {
                   </el-tooltip>
                 </div>
               </transition-group>
+
+              <div class="rounded-2xl border border-slate-200/70 bg-slate-50/70 p-4 dark:border-slate-700/70 dark:bg-slate-900/40">
+                <div class="mb-2 flex flex-wrap items-center gap-2">
+                  <p class="text-sm font-medium text-slate-600 dark:text-slate-400">预计送达时间</p>
+                  <span class="rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-semibold text-rose-600 dark:bg-rose-950/40 dark:text-rose-300">必填</span>
+                </div>
+                <el-date-picker
+                  v-model="expectedArrivalAt"
+                  type="datetime"
+                  class="w-full"
+                  placeholder="请选择预计送达时间"
+                  format="YYYY-MM-DD HH:mm"
+                  :disabled-date="disabledExpectedArrivalDate"
+                />
+                <p class="mt-2 text-xs" :class="expectedArrivalAt ? 'text-slate-500 dark:text-slate-400' : 'text-rose-600 dark:text-rose-300'">
+                  {{ expectedArrivalAt ? '库管会按该时间安排备货与入库。' : '必填：请选择预计送达时间，库管据此安排入库。' }}
+                </p>
+              </div>
 
               <div class="rounded-2xl border border-slate-200/70 bg-slate-50/70 p-4 dark:border-slate-700/70 dark:bg-slate-900/40">
                 <p class="mb-2 text-sm font-medium text-slate-600 dark:text-slate-400">备注信息</p>

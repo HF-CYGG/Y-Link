@@ -77,6 +77,16 @@ export class BizInboundOrder {
   })
   remark!: string | null
 
+  // expectedArrivalAt 记录供货方提交时承诺的预计送达时间，供库管安排备货与入库排班；
+  // 功能上线前的历史单据为 NULL，展示层必须按“未填写”兜底，不得回填默认值。
+  @Column({
+    name: 'expected_arrival_at',
+    ...entityColumnOptions.timestamp,
+    nullable: true,
+    comment: '预计送达时间（供货方提交时必填）',
+  })
+  expectedArrivalAt!: Date | null
+
   @Column({
     name: 'cancel_reason',
     type: 'varchar',

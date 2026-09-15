@@ -502,6 +502,7 @@ async function main() {
     }
     const inbound = await inboundService.submitSupplierDelivery(supplierActor, {
       remark: '库存报表真实入库验证',
+      expectedArrivalAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
       items: [{ productId: lifecycleProduct.id, skuId: lifecycleSku.id, qty: 5 }],
     })
     await inboundService.verifyInbound(inbound.order.verifyCode, adminActor)
