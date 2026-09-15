@@ -98,19 +98,22 @@ const filterOptions = ref<AuditFilterOptions | null>(null)
 const categoryOptions = computed(() => filterOptions.value?.categories ?? [])
 
 /**
- * 操作类型选项：
- * - 选择业务类别后只展示该类别下的动作；
- * - 未选类别时展示全部动作，并以“类别 / 动作”命名便于区分（不使用 el-option-group，避免额外样式进入首屏公共包）。
+ * 操作类型树：
+ * - 一级节点为业务类别，二级节点为该类别下的操作类型，只有叶子节点可选；
+ * - 已选择业务类别时只展示该类别并默认展开，未选类别时展示全部类别供逐级展开；
+ * - 类别节点值加 `category:` 前缀，避免与动作编码冲突。
  */
-const actionOptions = computed(() => {
-  const categories = categoryOptions.value
-  if (searchForm.category) {
-    return categories
-      .filter((item) => item.key === searchForm.category)
-      .flatMap((item) => item.actionTypes.map((action) => ({ value: action.value, label: action.label })))
-  }
-  return categories.flatMap((item) => item.actionTypes.map((action) => ({ value: action.value, label: `${item.label} / ${action.label}` })))
+const actionTreeData = computed(() => {
+  return categoryOptions.value
+    .filter((item) => item.actionTypes.length > 0 && (!searchForm.category || item.key === searchForm.category))
+    .map((item) => ({
+      value: `category:${item.key}`,
+      label: item.label,
+      children: item.actionTypes.map((action) => ({ value: action.value, label: action.label })),
+    }))
 })
+
+const actionTreeExpandedKeys = computed(() => (searchForm.category ? [`category:${searchForm.category}`] : []))
 
 const targetTypeOptions = computed(() => filterOptions.value?.targetTypes ?? [])
 
@@ -422,16 +425,18 @@ onMounted(() => {
               >
                 <el-option v-for="item in categoryOptions" :key="item.key" :label="item.label" :value="item.key" />
               </el-select>
-              <el-select
+              <el-tree-select
                 v-model="searchForm.actionType"
+                :data="actionTreeData"
+                node-key="value"
                 placeholder="操作类型"
                 clearable
                 filterable
+                :render-after-expand="false"
+                :default-expanded-keys="actionTreeExpandedKeys"
                 :class="isPhone ? '!w-full' : isTablet ? '!w-[240px]' : '!w-[260px]'"
                 @change="handleActionTypeChange"
-              >
-                <el-option v-for="item in actionOptions" :key="item.value" :label="item.label" :value="item.value" />
-              </el-select>
+              />
               <el-select
                 v-model="searchForm.targetType"
                 placeholder="目标对象"
