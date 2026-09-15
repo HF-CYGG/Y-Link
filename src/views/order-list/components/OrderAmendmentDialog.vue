@@ -5,7 +5,10 @@
  * 实现逻辑：
  * 1. 每张订单携带当前 editVersion，预览只展示服务端重算结果，不写入任何持久状态；
  * 2. 表单变化会立即作废上次预览，正式提交仍由服务端在事务内重新校验全部冲突；
- * 3. 类型切换时只展示目标类型领用字段，并显式提示业务号命名空间，避免跨类型残留；
+ * 3. 类型切换时只展示目标类型领用字段，并按目标命名空间游标自动顺延编排业务号（避让同批草稿号，用户仍可手改），
+ *    切回原类型时恢复原业务号；建议号不占号，过期响应按请求序号丢弃；
+ *    客户部门与开单页一致，为可搜索、可选择、可手动录入的组合输入，选项来自系统部门配置的完整路径，
+ *    加载失败或配置为空只做提示，不阻断手动填写，修订只保存部门快照文本、不回写系统配置；
  * 4. 批量提交共享一次确认动作，服务端任一阻断都会整体回滚，不在前端模拟部分成功。
  * 维护说明：该组件只允许修改订单治理字段，不得在此增加商品明细、库存扣减或库存流水能力。
  */
@@ -13,8 +16,11 @@
 import { computed, ref, watch } from 'vue'
 import {
   commitOrderAmendments,
+  getOrderAmendmentBusinessNoSuggestions,
+  getOrderDepartmentOptions,
   previewOrderAmendments,
   type OrderAmendmentInput,
+  type OrderDepartmentOption,
   type OrderAmendmentResult,
   type OrderRecord,
 } from '@/api/modules/order'
@@ -39,6 +45,13 @@ interface AmendmentDraft {
   hasCustomerOrder: boolean
   isSystemApplied: boolean
   remark: string
+  originalOrderType: 'department' | 'walkin'
+  originalBusinessNo: string
+  /** 最近一次自动编排写入的业务号；用户手改后不再展示自动编排提示。 */
+  autoBusinessNo: string
+  autoBusinessNoHint: string
+  suggesting: boolean
+  suggestionSeq: number
 }
 
 const props = defineProps<Props>()
@@ -53,7 +66,48 @@ const previewing = ref(false)
 const committing = ref(false)
 const previewResult = ref<OrderAmendmentResult | null>(null)
 const dialogTitle = computed(() => drafts.value.length > 1 ? `批量修订单据（${drafts.value.length} 张）` : '修订单据')
-const canCommit = computed(() => Boolean(previewResult.value?.ready) && !previewing.value)
+const departmentOptions = ref<OrderDepartmentOption[]>([])
+const departmentOptionsLoading = ref(false)
+const departmentOptionsLoadFailed = ref(false)
+
+/** 按完整路径去重：路径即订单保存的部门快照，也是展示与搜索文本。 */
+const departmentPathOptions = computed(() => {
+  const seen = new Set<string>()
+  return departmentOptions.value.filter((option) => {
+    if (seen.has(option.path)) return false
+    seen.add(option.path)
+    return true
+  })
+})
+
+/** 部门输入下方提示：加载失败 > 配置为空 > 未匹配配置，均不阻断手动填写。 */
+const resolveDepartmentHint = (draft: AmendmentDraft) => {
+  if (departmentOptionsLoading.value) return ''
+  if (departmentOptionsLoadFailed.value) return '部门选项加载失败，可直接手动填写'
+  if (!departmentOptions.value.length) return '系统暂无部门配置，可直接手动填写'
+  const departmentName = draft.customerDepartmentName.trim()
+  if (departmentName && !departmentPathOptions.value.some((option) => option.path === departmentName)) {
+    return '未匹配系统部门，将按手动填写保存，不会写入系统配置'
+  }
+  return ''
+}
+
+/** 每次打开弹窗刷新部门选项；失败只记录状态，保证手动录入仍可修订。 */
+const loadDepartmentOptions = async () => {
+  departmentOptionsLoading.value = true
+  try {
+    departmentOptions.value = await getOrderDepartmentOptions()
+    departmentOptionsLoadFailed.value = false
+  } catch {
+    departmentOptions.value = []
+    departmentOptionsLoadFailed.value = true
+  } finally {
+    departmentOptionsLoading.value = false
+  }
+}
+
+const suggestingBusinessNo = computed(() => drafts.value.some((draft) => draft.suggesting))
+const canCommit = computed(() => Boolean(previewResult.value?.ready) && !previewing.value && !suggestingBusinessNo.value)
 
 const initializeDrafts = () => {
   drafts.value = props.orders.map((order) => ({
@@ -68,6 +122,12 @@ const initializeDrafts = () => {
     hasCustomerOrder: Boolean(order.hasCustomerOrder),
     isSystemApplied: Boolean(order.isSystemApplied),
     remark: order.remark || '',
+    originalOrderType: order.orderType,
+    originalBusinessNo: order.businessNo,
+    autoBusinessNo: '',
+    autoBusinessNoHint: '',
+    suggesting: false,
+    suggestionSeq: 0,
   }))
   reason.value = ''
   previewResult.value = null
@@ -76,7 +136,9 @@ const initializeDrafts = () => {
 watch(
   () => props.modelValue,
   (visible) => {
-    if (visible) initializeDrafts()
+    if (!visible) return
+    initializeDrafts()
+    void loadDepartmentOptions()
   },
 )
 
@@ -93,6 +155,57 @@ watch(reason, () => {
 })
 
 const normalizeOptionalText = (value: string): string | null => value.trim() || null
+
+/**
+ * 切换订单类型后自动编排业务号：
+ * - 切回原类型直接恢复原业务号，不请求服务端；
+ * - 切到新类型时按目标命名空间游标顺延，并避让同批其他草稿已填写的号；
+ * - 快速来回切换时只采纳最后一次请求的结果，失败则保留当前值并提示手动填写。
+ */
+const handleOrderTypeChange = async (draft: AmendmentDraft) => {
+  const seq = ++draft.suggestionSeq
+  if (draft.orderType === draft.originalOrderType) {
+    draft.businessNo = draft.originalBusinessNo
+    draft.autoBusinessNo = ''
+    draft.autoBusinessNoHint = ''
+    draft.suggesting = false
+    return
+  }
+  const targetType = draft.orderType
+  const exclude = drafts.value
+    .filter((item) => item.orderId !== draft.orderId)
+    .map((item) => item.businessNo.trim().toLowerCase())
+    .filter(Boolean)
+  draft.suggesting = true
+  try {
+    const suggestion = await getOrderAmendmentBusinessNoSuggestions({ orderType: targetType, count: 1, exclude })
+    if (seq !== draft.suggestionSeq) return
+    const nextBusinessNo = suggestion.businessNos[0]
+    if (!nextBusinessNo) {
+      draft.autoBusinessNo = ''
+      draft.autoBusinessNoHint = ''
+      showAppWarning(`${suggestion.namespace} 命名空间已无可用业务号，请手动填写`)
+      return
+    }
+    draft.businessNo = nextBusinessNo
+    draft.autoBusinessNo = nextBusinessNo
+    const skippedText = suggestion.skippedBusinessNos.length
+      ? `，已跳过被占用的 ${suggestion.skippedBusinessNos.length} 个号`
+      : ''
+    draft.autoBusinessNoHint = `已按 ${suggestion.namespace} 当前游标 ${suggestion.cursor} 顺延自动编排${skippedText}，可手动修改`
+  } catch (error) {
+    if (seq !== draft.suggestionSeq) return
+    draft.autoBusinessNo = ''
+    draft.autoBusinessNoHint = ''
+    void showCriticalErrorDialog(error, {
+      title: '业务单号自动编排失败',
+      fallback: '无法获取目标类型的下一个业务单号，请手动填写',
+      operation: '自动编排业务单号',
+    })
+  } finally {
+    if (seq === draft.suggestionSeq) draft.suggesting = false
+  }
+}
 
 const buildInputs = (): OrderAmendmentInput[] => drafts.value.map((draft) => ({
   orderId: draft.orderId,
@@ -195,7 +308,7 @@ const handleCommit = async () => {
   >
     <div class="space-y-4">
       <el-alert
-        title="showNo 是永久不可修改的系统键；部门单使用 hyyzjd，散客单使用 hyyz。预览不会占号，提交时会重新校验。"
+        title="showNo 是永久不可修改的系统键；部门单使用 hyyzjd，散客单使用 hyyz。切换订单类型会自动编排目标类型的下一个业务单号，可手动修改；预览不会占号，提交时会重新校验。"
         type="warning"
         :closable="false"
         show-icon
@@ -212,16 +325,50 @@ const handleCommit = async () => {
         </div>
         <div class="grid gap-3 md:grid-cols-2">
           <el-form-item label="业务单号" class="!mb-0">
-            <el-input v-model="draft.businessNo" :placeholder="draft.orderType === 'department' ? 'hyyzjd000001' : 'hyyz000001'" />
+            <div class="w-full">
+              <el-input
+                v-model="draft.businessNo"
+                :disabled="draft.suggesting"
+                :placeholder="draft.suggesting ? '正在自动编排…' : (draft.orderType === 'department' ? 'hyyzjd000001' : 'hyyz000001')"
+              />
+              <p
+                v-if="draft.autoBusinessNoHint && draft.businessNo === draft.autoBusinessNo"
+                class="mt-1 text-xs leading-5 text-emerald-700"
+              >
+                {{ draft.autoBusinessNoHint }}
+              </p>
+            </div>
           </el-form-item>
           <el-form-item label="订单类型" class="!mb-0">
-            <el-radio-group v-model="draft.orderType">
+            <el-radio-group v-model="draft.orderType" @change="handleOrderTypeChange(draft)">
               <el-radio-button value="department">部门单</el-radio-button>
               <el-radio-button value="walkin">散客单</el-radio-button>
             </el-radio-group>
           </el-form-item>
           <el-form-item v-if="draft.orderType === 'department'" label="客户部门" class="!mb-0">
-            <el-input v-model="draft.customerDepartmentName" placeholder="请输入完整部门路径" />
+            <div class="w-full">
+              <el-select
+                v-model="draft.customerDepartmentName"
+                class="w-full"
+                filterable
+                allow-create
+                default-first-option
+                clearable
+                :loading="departmentOptionsLoading"
+                placeholder="搜索选择或直接输入客户部门"
+                no-data-text="暂无部门配置，可直接输入"
+              >
+                <el-option
+                  v-for="option in departmentPathOptions"
+                  :key="option.path"
+                  :label="option.path"
+                  :value="option.path"
+                />
+              </el-select>
+              <p v-if="resolveDepartmentHint(draft)" class="mt-1 text-xs leading-5 text-slate-500">
+                {{ resolveDepartmentHint(draft) }}
+              </p>
+            </div>
           </el-form-item>
           <el-form-item v-else label="散客名称" class="!mb-0">
             <el-input v-model="draft.customerName" placeholder="请输入散客名称" />
@@ -279,7 +426,7 @@ const handleCommit = async () => {
     <template #footer="{ close }">
       <div class="flex flex-wrap justify-end gap-2">
         <el-button @click="close">取消</el-button>
-        <el-button type="primary" plain :loading="previewing" :disabled="committing" @click="handlePreview">重新预览</el-button>
+        <el-button type="primary" plain :loading="previewing" :disabled="committing || suggestingBusinessNo" @click="handlePreview">重新预览</el-button>
         <el-button type="primary" :loading="committing" :disabled="!canCommit" @click="handleCommit">原子提交</el-button>
       </div>
     </template>

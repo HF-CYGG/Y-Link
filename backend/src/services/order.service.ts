@@ -533,6 +533,11 @@ export class OrderService {
     return orderAmendmentService.preview(input, actor)
   }
 
+  /** 修订切换订单类型时自动编排业务号：只读建议，不占号、不推进游标。 */
+  async suggestAmendmentBusinessNos(input: { orderType: OrderType; count: number; exclude: string[] }) {
+    return orderBusinessNoService.suggestForAmendment(input.orderType, input.count, input.exclude, AppDataSource.manager)
+  }
+
   async commitAmendments(
     input: OrderAmendmentBatchInput,
     actor: AuthUserContext,

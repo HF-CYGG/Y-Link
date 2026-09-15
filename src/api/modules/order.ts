@@ -706,6 +706,30 @@ export const getOrderRevisions = (id: string) =>
     url: `/orders/${id}/revisions`,
   })
 
+export interface OrderAmendmentBusinessNoSuggestion {
+  orderType: 'department' | 'walkin'
+  namespace: 'hyyzjd' | 'hyyz'
+  cursor: number
+  businessNos: string[]
+  skippedBusinessNos: string[]
+}
+
+/** 修订切换订单类型时获取目标命名空间的顺延业务号建议；只读，不占号，最终以预览/提交校验为准。 */
+export const getOrderAmendmentBusinessNoSuggestions = (params: {
+  orderType: 'department' | 'walkin'
+  count?: number
+  exclude?: string[]
+}) =>
+  request<OrderAmendmentBusinessNoSuggestion>({
+    method: 'GET',
+    url: '/orders/amendments/business-no-suggestions',
+    params: {
+      orderType: params.orderType,
+      count: params.count ?? 1,
+      exclude: params.exclude?.length ? params.exclude.join(',') : undefined,
+    },
+  })
+
 export const previewOrderAmendments = (amendments: OrderAmendmentInput[]) =>
   request<OrderAmendmentResult>({
     method: 'POST',

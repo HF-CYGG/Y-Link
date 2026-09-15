@@ -429,6 +429,28 @@ async function main() {
       orderUuid: 'historical-occupancy-without-order',
       assignedReason: '专项验证永久占用',
     } as never)
+
+    // 修订切换类型的自动编排建议：从游标顺延，跳过永久占用号与同批排除号，且只读不占号、不推进游标。
+    const { orderBusinessNoService } = await import('../src/services/order-business-no.service.js')
+    const suggestionOccupancyBefore = await occupancyRepo.count()
+    const walkinSuggestion = await orderBusinessNoService.suggestForAmendment(
+      'walkin',
+      2,
+      ['HYYZ000202', ' '],
+      AppDataSource.manager,
+    )
+    assert.deepEqual(walkinSuggestion, {
+      orderType: 'walkin',
+      namespace: 'hyyz',
+      cursor: 200,
+      businessNos: ['hyyz000203', 'hyyz000204'],
+      skippedBusinessNos: ['hyyz000201'],
+    }, '散客建议号必须从游标顺延并跳过占用号与同批排除号')
+    const departmentSuggestion = await orderBusinessNoService.suggestForAmendment('department', 1, [], AppDataSource.manager)
+    assert.deepEqual(departmentSuggestion.businessNos, ['hyyzjd000353'], '部门建议号必须使用 hyyzjd 命名空间游标 + 1')
+    assert.equal(await occupancyRepo.count(), suggestionOccupancyBefore, '建议号不得占用业务号')
+    assert.equal(Number((await sequenceRepo.findOneByOrFail({ sequenceKey: 'order.business.walkin' })).currentValue), 200, '建议号不得推进游标')
+    assert.equal(Number((await sequenceRepo.findOneByOrFail({ sequenceKey: 'order.business.department' })).currentValue), 352)
     await assert.rejects(
       () => submitOrder('strict-cursor', 'walkin'),
       (error: unknown) => error instanceof BizError && error.statusCode === 409,
@@ -517,6 +539,24 @@ async function main() {
     assert.match(routeSource, /\/amendments['"][\s\S]*requirePermission\('orders:update'\)/)
     assert.match(routeSource, /orderAmendmentCommitSchema[\s\S]*reason:\s*z\.string\(\)\.trim\(\)\.min\(1/, '修订提交路由必须强制非空原因')
     assert.match(routeSource, /\/amendments\/preview[\s\S]*orderAmendmentBatchSchema\.parse/, '修订预览允许沿用可选原因 schema')
+    assert.match(
+      routeSource,
+      /'\/amendments\/business-no-suggestions',[\s\S]*?requirePermission\('orders:update'\)/,
+      '业务号建议接口必须要求 orders:update 权限',
+    )
+    const amendmentDialogSource = fs.readFileSync(
+      path.resolve(process.cwd(), '..', 'src', 'views', 'order-list', 'components', 'OrderAmendmentDialog.vue'),
+      'utf8',
+    )
+    assert.match(amendmentDialogSource, /@change="handleOrderTypeChange\(draft\)"/, '修订弹窗切换订单类型必须触发业务号自动编排')
+    assert.match(amendmentDialogSource, /draft\.businessNo = draft\.originalBusinessNo/, '切回原类型必须恢复原业务号')
+    assert.match(amendmentDialogSource, /seq !== draft\.suggestionSeq/, '自动编排必须丢弃过期响应')
+    assert.match(amendmentDialogSource, /getOrderDepartmentOptions\(\)/, '修订弹窗客户部门必须复用系统部门配置选项')
+    assert.match(
+      amendmentDialogSource,
+      /v-model="draft\.customerDepartmentName"[\s\S]*?filterable[\s\S]*?allow-create/,
+      '修订弹窗客户部门必须支持搜索选择与手动录入',
+    )
     const dashboardViewSource = fs.readFileSync(
       path.resolve(process.cwd(), '..', 'src', 'views', 'dashboard', 'DashboardView.vue'),
       'utf8',
