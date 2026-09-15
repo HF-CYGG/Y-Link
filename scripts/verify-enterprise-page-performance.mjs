@@ -30,9 +30,13 @@ const reportPath = path.join(runtimeRoot, 'enterprise-performance-budget-report.
  * 而 pdf-export、charting、qr-scanner 三个低频重包与 main 的哈希和体积均未变化。
  * 首屏、路由、低频重包和运行时细分预算均已通过，因此总量上限设为 4315 KB，
  * 为当前批准功能基线保留约 1.49% 余量，同时继续阻止整体包体无约束增长。
+ *
+ * Issue #96（部门单到店取货时间）：同一环境下 main@ed46790 总产物实测 4310.83 KB，
+ * 本功能新增结算页日期按钮与时段下拉后为 4315.89 KB（+5.06 KB），增量落在客户端结算页分包，
+ * 首屏依赖图、首屏 JS/CSS、低频重包与路由分包预算均无新增超额，因此总量上限上调为 4325 KB。
  */
 const performanceBudget = {
-  totalAssetsMaxKB: 4315,
+  totalAssetsMaxKB: 4325,
   criticalAssetsMaxKB: 1180,
   initialLoadJsMaxKB: 850,
   initialLoadCssMaxKB: 320,

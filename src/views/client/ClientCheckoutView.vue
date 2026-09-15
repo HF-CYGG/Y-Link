@@ -5,10 +5,12 @@
  * 实现逻辑：
  * - 进入页面后会恢复当前账号的提货人草稿，并同步最新商品库存快照；
  * - 下单归属完全由当前登录账号类型决定，页面只负责展示部门/工号/实名信息，不允许手动篡改归属；
- * - 部门账号下单前强制校验所属部门、教职工号与金蝶申请状态，避免订单归属与实名链路脱节。
+ * - 部门账号下单前强制校验所属部门、教职工号与金蝶申请状态，避免订单归属与实名链路脱节；
+ * - 部门单必须选择到店取货时间：日期按钮 + 半小时时段下拉，可选范围受店铺自动取消时长（pickupWindowHours）约束。
  * 维护说明：
  * - 若后端继续扩展实名字段或工号核验状态，请优先同步本页的实名信息展示区与 `handleSubmit()` 前置校验；
- * - 若调整下单归属说明文案，请保持“前端只展示，服务端强制判定”的口径不变。
+ * - 若调整下单归属说明文案，请保持“前端只展示，服务端强制判定”的口径不变；
+ * - 到店取货时间必须同时进入提交载荷与提交意图指纹，否则弱网重试会用同一请求键提交不同取货时间并被服务端判为冲突。
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
@@ -52,6 +54,110 @@ const remark = ref('')
 const pickupContact = ref('')
 const submitting = ref(false)
 const departmentSystemApplyChoice = ref<boolean | null>(null)
+
+// 到店取货时间：日期与时段分开选择，避免在手机上使用体积更大的日期时间弹层。
+const pickupDateKey = ref<string | null>(null)
+const pickupTimeSlot = ref<string | null>(null)
+/** 取货可选范围依赖“当前时间”，用一次性时钟快照驱动 computed，避免每次渲染都读 Date.now() 造成结果抖动。 */
+const pickupClock = ref(Date.now())
+const PICKUP_SLOT_START_MINUTES = 8 * 60
+const PICKUP_SLOT_END_MINUTES = 21 * 60 + 30
+const PICKUP_SLOT_STEP_MINUTES = 30
+const PICKUP_LEAD_MINUTES = 15
+const PICKUP_MAX_DATE_OPTIONS = 8
+const PICKUP_DEFAULT_WINDOW_HOURS = 7 * 24
+const PICKUP_WEEKDAY_LABELS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+
+const pad2 = (value: number) => String(value).padStart(2, '0')
+const toDateKey = (date: Date) => `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
+const buildPickupDate = (dateKey: string, minutesOfDay: number) => {
+  const [year, month, day] = dateKey.split('-').map(Number)
+  return new Date(year, (month ?? 1) - 1, day ?? 1, Math.floor(minutesOfDay / 60), minutesOfDay % 60, 0, 0)
+}
+
+const pickupWindowHours = computed(() => {
+  const configuredHours = clientCatalogStore.storefront.pickupWindowHours
+  return typeof configuredHours === 'number' && configuredHours > 0 ? configuredHours : null
+})
+const pickupWindowEndMs = computed(() => (
+  pickupClock.value + (pickupWindowHours.value ?? PICKUP_DEFAULT_WINDOW_HOURS) * 60 * 60 * 1000
+))
+const pickupWindowHint = computed(() => (
+  pickupWindowHours.value
+    ? `请在下单后 ${pickupWindowHours.value} 小时内到店取货，超时未取将自动取消`
+    : '可选择未来 7 天内的到店时间'
+))
+
+const buildPickupSlots = (dateKey: string) => {
+  const earliestMs = pickupClock.value + PICKUP_LEAD_MINUTES * 60 * 1000
+  const slots: Array<{ value: string; label: string }> = []
+  for (let minutes = PICKUP_SLOT_START_MINUTES; minutes <= PICKUP_SLOT_END_MINUTES; minutes += PICKUP_SLOT_STEP_MINUTES) {
+    const slotDate = buildPickupDate(dateKey, minutes)
+    const slotMs = slotDate.getTime()
+    if (slotMs < earliestMs || slotMs > pickupWindowEndMs.value) {
+      continue
+    }
+    const slotText = `${pad2(slotDate.getHours())}:${pad2(slotDate.getMinutes())}`
+    slots.push({ value: slotText, label: slotText })
+  }
+  return slots
+}
+
+const pickupDateOptions = computed(() => {
+  const options: Array<{ key: string; label: string; dateText: string }> = []
+  const today = new Date(pickupClock.value)
+  for (let offset = 0; offset < PICKUP_MAX_DATE_OPTIONS; offset += 1) {
+    const date = new Date(today.getFullYear(), today.getMonth(), today.getDate() + offset)
+    if (date.getTime() > pickupWindowEndMs.value) {
+      break
+    }
+    const dateKey = toDateKey(date)
+    if (!buildPickupSlots(dateKey).length) {
+      continue
+    }
+    const relativeLabel = offset === 0 ? '今天' : offset === 1 ? '明天' : offset === 2 ? '后天' : PICKUP_WEEKDAY_LABELS[date.getDay()]
+    options.push({
+      key: dateKey,
+      label: relativeLabel,
+      dateText: `${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`,
+    })
+  }
+  return options
+})
+
+const pickupTimeOptions = computed(() => (pickupDateKey.value ? buildPickupSlots(pickupDateKey.value) : []))
+
+const pickupAtIso = computed(() => {
+  if (!pickupDateKey.value || !pickupTimeSlot.value) {
+    return null
+  }
+  const [hours, minutes] = pickupTimeSlot.value.split(':').map(Number)
+  return buildPickupDate(pickupDateKey.value, (hours ?? 0) * 60 + (minutes ?? 0)).toISOString()
+})
+
+const pickupAtStatusText = computed(() => {
+  if (!isDepartmentOrder.value) return '散客单无需选择到店取货时间'
+  if (!pickupDateOptions.value.length) return '当前暂无可选到店时间，请稍后重试或联系门店'
+  if (!pickupDateKey.value) return '必填：请先选择到店取货日期'
+  if (!pickupTimeSlot.value) return '必填：请选择到店取货时段'
+  const selectedDate = pickupDateOptions.value.find((option) => option.key === pickupDateKey.value)
+  return `已选择：${selectedDate?.dateText ?? pickupDateKey.value} ${pickupTimeSlot.value} 到店取货`
+})
+
+/** 选择日期时同步刷新时钟，确保“今天”的过期时段被及时剔除；原时段不在新范围内时清空重选。 */
+const selectPickupDate = (dateKey: string) => {
+  pickupClock.value = Date.now()
+  pickupDateKey.value = dateKey
+  if (pickupTimeSlot.value && !buildPickupSlots(dateKey).some((slot) => slot.value === pickupTimeSlot.value)) {
+    pickupTimeSlot.value = null
+  }
+}
+
+const resetPickupSelection = () => {
+  pickupClock.value = Date.now()
+  pickupDateKey.value = null
+  pickupTimeSlot.value = null
+}
 
 const PICKUP_CONTACT_STORAGE_KEY_PREFIX = 'ylink:client:checkout:pickup-contact:'
 const AMBIGUOUS_PREORDER_SUBMIT_STATUS_SET = new Set<number | undefined>([undefined, 408, 502, 503, 504])
@@ -149,6 +255,7 @@ watch(
   () => {
     restorePickupContactDraft()
     departmentSystemApplyChoice.value = null
+    resetPickupSelection()
   },
 )
 
@@ -261,6 +368,22 @@ const handleSubmit = async () => {
     return
   }
 
+  // 到店取货时间只对部门单必填；提交前刷新时钟复核所选时段是否仍在可选范围内，避免页面停留过久后提交已过期时间。
+  let requestedPickupAt: string | null = null
+  if (isDepartmentOrder.value) {
+    pickupClock.value = Date.now()
+    if (!pickupDateKey.value || !pickupTimeSlot.value) {
+      showAppWarning('请选择到店取货时间')
+      return
+    }
+    if (!pickupTimeOptions.value.some((slot) => slot.value === pickupTimeSlot.value)) {
+      pickupTimeSlot.value = null
+      showAppWarning('所选到店取货时间已不可选，请重新选择')
+      return
+    }
+    requestedPickupAt = pickupAtIso.value
+  }
+
   const submitRemark = remark.value.trim() || undefined
   const requestedClientOrderType = enforcedClientOrderType.value
   const requestedIsSystemApplied = isDepartmentOrder.value ? Boolean(departmentSystemApplyChoice.value) : false
@@ -276,6 +399,7 @@ const handleSubmit = async () => {
     clientOrderType: requestedClientOrderType,
     isSystemApplied: requestedIsSystemApplied,
     pickupContact: normalizedPickupContact,
+    pickupAt: requestedPickupAt,
     remark: submitRemark,
     items: requestedItemSnapshot,
   })
@@ -299,6 +423,7 @@ const handleSubmit = async () => {
           clientOrderType: requestedClientOrderType,
           isSystemApplied: requestedIsSystemApplied,
           pickupContact: normalizedPickupContact,
+          pickupAt: requestedPickupAt,
           remark: submitRemark,
           items: freshItemSnapshot,
         }) : null
@@ -331,6 +456,7 @@ const handleSubmit = async () => {
           clientRequestId: submitRequestKey,
           isSystemApplied: requestedIsSystemApplied,
           pickupContact: normalizedPickupContact,
+          pickupAt: requestedPickupAt,
           remark: submitRemark,
           items: submitItemSnapshot,
         })
@@ -478,6 +604,46 @@ const handleSubmit = async () => {
           <p class="mt-2 text-xs" :class="departmentSystemApplyChoice === null ? 'text-rose-600' : 'text-slate-500'">
             {{ systemApplyStatusText }}
           </p>
+
+          <div class="mt-4 border-t border-slate-200 pt-3">
+            <div class="flex flex-wrap items-center gap-2">
+              <p class="text-sm font-semibold text-slate-700">到店取货时间</p>
+              <span class="rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-semibold text-rose-600">必填</span>
+            </div>
+            <p class="mt-1 text-xs text-slate-500">{{ pickupWindowHint }}</p>
+
+            <div v-if="pickupDateOptions.length" class="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-4">
+              <button
+                v-for="option in pickupDateOptions"
+                :key="option.key"
+                type="button"
+                class="rounded-[0.9rem] border px-2 py-2 text-center transition"
+                :class="
+                  pickupDateKey === option.key
+                    ? 'border-teal-300 bg-teal-50 text-teal-700'
+                    : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
+                "
+                @click="selectPickupDate(option.key)"
+              >
+                <span class="block text-sm font-medium">{{ option.label }}</span>
+                <span class="mt-0.5 block text-[11px] text-slate-400">{{ option.dateText }}</span>
+              </button>
+            </div>
+
+            <el-select
+              v-if="pickupDateOptions.length"
+              v-model="pickupTimeSlot"
+              class="mt-3 w-full"
+              placeholder="请选择到店时段"
+              :disabled="!pickupDateKey"
+            >
+              <el-option v-for="slot in pickupTimeOptions" :key="slot.value" :label="slot.label" :value="slot.value" />
+            </el-select>
+
+            <p class="mt-2 text-xs" :class="!pickupAtIso ? 'text-rose-600' : 'text-slate-500'">
+              {{ pickupAtStatusText }}
+            </p>
+          </div>
         </div>
         <p class="mt-3 text-xs leading-5" :class="isDepartmentOrder && !currentDepartmentName ? 'text-amber-600' : 'text-slate-500'">
           {{ orderTypeDescription }}
@@ -522,7 +688,7 @@ const handleSubmit = async () => {
         <textarea
           v-model.trim="remark"
           class="min-h-24 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-teal-300"
-          placeholder="选填：如领取时间、特殊说明等"
+          placeholder="选填：如特殊说明、联系事项等"
         />
       </div>
     </section>

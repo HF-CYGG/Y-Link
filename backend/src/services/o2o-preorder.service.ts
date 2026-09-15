@@ -70,6 +70,11 @@ import {
   parseMoneyToCents,
 } from '../utils/discount-price.js'
 
+/** 部门单到店取货时间允许的过去容差：覆盖客户端时钟偏差与提交网络耗时。 */
+const O2O_PICKUP_AT_PAST_TOLERANCE_MS = 5 * 60 * 1000
+/** 未开启自动取消时，到店取货时间最远允许选择的范围。 */
+const O2O_PICKUP_AT_MAX_AHEAD_MS = 30 * 24 * 60 * 60 * 1000
+
 export interface SubmitPreorderItemInput {
   productId: string | number
   skuId?: string | number | null
@@ -82,6 +87,8 @@ export interface SubmitPreorderInput {
   remark?: string
   isSystemApplied: boolean
   pickupContact: string
+  /** 到店取货时间（ISO 字符串）：部门单必填，散客单忽略。 */
+  pickupAt?: string | null
 }
 
 export interface UpdateMyPreorderInput {
@@ -250,6 +257,8 @@ export interface O2oMallProductView {
 export interface O2oMallStorefrontView {
   businessHoursText: string
   mallAnnouncementText: string
+  /** 部门单到店取货时间可选窗口（小时）：开启自动取消时等于自动取消时长，未开启为 null。 */
+  pickupWindowHours: number | null
 }
 
 export interface O2oMallProductsView {
@@ -322,6 +331,8 @@ export interface O2oPreorderSummaryView {
   } | null
   totalQty: number
   timeoutAt: Date | null
+  /** 部门单到店取货时间；散客单与历史订单为 null。 */
+  pickupAt: Date | null
   createdAt: Date
 }
 
@@ -363,6 +374,7 @@ export interface O2oPreorderDetailView {
     hasCustomerOrder: boolean
     isSystemApplied: boolean
     pickupContact: string | null
+    pickupAt: Date | null
     merchantMessage: string | null
     clientOrderType: O2oPreorder['clientOrderType']
     departmentNameSnapshot: string | null
@@ -396,6 +408,7 @@ export interface O2oPreorderDetailView {
   storefront: {
     businessHoursText: string
     mallAnnouncementText: string
+    pickupWindowHours: number | null
   }
   qrPayload: string
 }
@@ -728,6 +741,7 @@ class O2oPreorderService {
     input: Pick<SubmitPreorderInput, 'isSystemApplied' | 'pickupContact'>,
     normalizedRemark: string | null,
     normalizedItems: Array<{ productId: string; skuId: string | null; qty: number }>,
+    normalizedPickupAt: Date | null = null,
   ): string {
     const items = normalizedItems
       .map((item) => ({ ...item }))
@@ -741,8 +755,42 @@ class O2oPreorderService {
         pickupContact: String(input.pickupContact ?? '').trim(),
         remark: normalizedRemark,
         items,
+        // 仅在传入取货时间时纳入摘要：未携带该字段的请求摘要与上线前保持一致，避免部署窗口内的重试被误判为不同载荷。
+        ...(normalizedPickupAt ? { pickupAt: normalizedPickupAt.toISOString() } : {}),
       }))
       .digest('hex')
+  }
+
+  // 到店取货时间只做格式归一化；是否必填与可选范围在确定订单归属后由 assertDepartmentPickupAt 校验。
+  private normalizePickupAtInput(value: string | null | undefined): Date | null {
+    const normalizedValue = (value ?? '').toString().trim()
+    if (!normalizedValue) {
+      return null
+    }
+    const parsed = new Date(normalizedValue)
+    if (Number.isNaN(parsed.getTime())) {
+      throw new BizError('到店取货时间格式不正确', 400)
+    }
+    return parsed
+  }
+
+  // 部门单到店取货时间：必填、不得早于当前时间（含少量时钟容差），且不得晚于订单自动取消时间，
+  // 否则订单会在客户到店前被系统超时取消；未开启自动取消时最远允许 30 天。
+  private assertDepartmentPickupAt(pickupAt: Date | null, timeoutAt: Date | null, autoCancelHours: number): Date {
+    if (!pickupAt) {
+      throw new BizError('请选择到店取货时间', 400)
+    }
+    const nowMs = Date.now()
+    if (pickupAt.getTime() < nowMs - O2O_PICKUP_AT_PAST_TOLERANCE_MS) {
+      throw new BizError('到店取货时间不能早于当前时间，请重新选择', 400)
+    }
+    if (timeoutAt && pickupAt.getTime() > timeoutAt.getTime()) {
+      throw new BizError(`到店取货时间不能晚于订单自动取消时间（下单后 ${autoCancelHours} 小时内）`, 400)
+    }
+    if (!timeoutAt && pickupAt.getTime() > nowMs + O2O_PICKUP_AT_MAX_AHEAD_MS) {
+      throw new BizError('到店取货时间不能晚于 30 天后', 400)
+    }
+    return pickupAt
   }
 
   private assertIdempotentRequestMatches(order: O2oPreorder, clientRequestHash: string): void {
@@ -2070,6 +2118,7 @@ class O2oPreorderService {
         hasCustomerOrder: Boolean(order.hasCustomerOrder),
         isSystemApplied: Boolean(order.isSystemApplied),
         pickupContact: resolvedPickupContact,
+        pickupAt: order.pickupAt ?? null,
         merchantMessage: order.merchantMessage ?? null,
         clientOrderType: order.clientOrderType === 'department' ? 'department' : 'walkin',
         departmentNameSnapshot: order.departmentNameSnapshot?.trim() || null,
@@ -2112,6 +2161,7 @@ class O2oPreorderService {
       storefront: {
         businessHoursText: o2oRules.storeBusinessHoursText,
         mallAnnouncementText: o2oRules.mallAnnouncementText,
+        pickupWindowHours: o2oRules.autoCancelEnabled ? o2oRules.autoCancelHours : null,
       },
       qrPayload: `y-link://o2o/verify/${order.verifyCode}`,
     }
@@ -2387,6 +2437,7 @@ class O2oPreorderService {
       latestReturnRequest: latestReturnRequestMap.get(String(item.id)) ?? null,
       totalQty: item.totalQty,
       timeoutAt: item.timeoutAt,
+      pickupAt: item.pickupAt ?? null,
       createdAt: item.createdAt,
     }))
   }
@@ -2434,6 +2485,7 @@ class O2oPreorderService {
         storefront: {
           businessHoursText: o2oRules.storeBusinessHoursText,
           mallAnnouncementText: o2oRules.mallAnnouncementText,
+          pickupWindowHours: o2oRules.autoCancelEnabled ? o2oRules.autoCancelHours : null,
         },
       }
     }
@@ -2550,6 +2602,7 @@ class O2oPreorderService {
       storefront: {
         businessHoursText: o2oRules.storeBusinessHoursText,
         mallAnnouncementText: o2oRules.mallAnnouncementText,
+        pickupWindowHours: o2oRules.autoCancelEnabled ? o2oRules.autoCancelHours : null,
       },
     }
   }
@@ -2559,6 +2612,7 @@ class O2oPreorderService {
     return {
       businessHoursText: o2oRules.storeBusinessHoursText,
       mallAnnouncementText: o2oRules.mallAnnouncementText,
+      pickupWindowHours: o2oRules.autoCancelEnabled ? o2oRules.autoCancelHours : null,
     }
   }
 
@@ -2770,7 +2824,8 @@ class O2oPreorderService {
     const normalizedItems = this.normalizePreorderItems(input.items)
     const normalizedRemark = this.normalizePreorderRemark(input.remark)
     const normalizedClientRequestId = this.normalizeClientRequestId(input.clientRequestId)
-    const clientRequestHash = this.buildClientRequestHash(input, normalizedRemark, normalizedItems)
+    const normalizedPickupAt = this.normalizePickupAtInput(input.pickupAt)
+    const clientRequestHash = this.buildClientRequestHash(input, normalizedRemark, normalizedItems, normalizedPickupAt)
     // 详细注释：是否系统申请必须以客户端本次明确选择为准，不再使用服务端默认兜底。
     const normalizedIsSystemApplied = Boolean(input.isSystemApplied)
 
@@ -2842,8 +2897,12 @@ class O2oPreorderService {
             : input.pickupContact,
         )
 
-        const showNo = await this.generatePreorderShowNo(normalizedClientOrderType, manager)
         const timeoutAt = o2oRules.autoCancelEnabled ? new Date(Date.now() + o2oRules.autoCancelHours * 60 * 60 * 1000) : null
+        // 取货时间校验放在生成单号与写库存之前，失败时整个事务回滚，不占用单号与库存。
+        const pickupAt = normalizedClientOrderType === 'department'
+          ? this.assertDepartmentPickupAt(normalizedPickupAt, timeoutAt, o2oRules.autoCancelHours)
+          : null
+        const showNo = await this.generatePreorderShowNo(normalizedClientOrderType, manager)
         const savedOrder = await preorderRepo.save(
           preorderRepo.create({
             showNo,
@@ -2858,6 +2917,7 @@ class O2oPreorderService {
             isSystemApplied: normalizedIsSystemApplied,
             hasCustomerOrder: false,
             pickupContact: normalizedPickupContact,
+            pickupAt,
             totalQty,
             remark: normalizedRemark,
             timeoutAt,
