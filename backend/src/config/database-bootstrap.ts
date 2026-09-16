@@ -310,6 +310,7 @@ const SQLITE_REQUIRED_O2O_PREORDER_COLUMNS = [
   'is_system_applied',
   'has_customer_order',
   'pickup_contact',
+  'pickup_at',
   'update_count',
   'is_deleted',
   'deleted_at',

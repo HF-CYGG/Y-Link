@@ -1599,6 +1599,16 @@ onBeforeUnmount(() => {
               <p class="mt-1 text-sm text-slate-700">{{ detail.order.pickupContact || '未填写' }}</p>
             </div>
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <p class="text-sm text-slate-400">到店取货时间</p>
+              <p class="mt-1 text-sm text-slate-700">
+                {{
+                  detail.order.clientOrderType === 'department'
+                    ? formatOrderDateTime(detail.order.pickupAt, '未填写')
+                    : '散客单不适用'
+                }}
+              </p>
+            </div>
+            <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">总金额</p>
               <p class="mt-1 text-sm font-semibold text-teal-600">¥{{ totalAmount.toFixed(2) }}</p>
             </div>

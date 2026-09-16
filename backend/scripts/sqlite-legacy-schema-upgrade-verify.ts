@@ -141,6 +141,7 @@ try {
     'SELECT sku_id AS skuId FROM biz_inbound_order_item WHERE id = 1',
   ) as Array<{ skuId: string | number | null }>
   const indexes = await AppDataSource.query('PRAGMA index_list(o2o_preorder)') as Array<{ name: string }>
+  const preorderColumns = await AppDataSource.query('PRAGMA table_info(o2o_preorder)') as Array<{ name: string; notnull: number }>
   const inboundOrderColumns = await AppDataSource.query('PRAGMA table_info(biz_inbound_order)') as Array<{ name: string; notnull: number }>
   const inventoryModes = await AppDataSource.query(
     'SELECT idempotency_key AS idempotencyKey, inventory_mode AS inventoryMode FROM biz_outbound_order ORDER BY id',
@@ -163,6 +164,10 @@ try {
     indexes.some((index) => index.name === 'idx_o2o_preorder_client_deleted_id'),
     '依赖新列的商城索引必须在结构升级后创建',
   )
+  // Issue #96：到店取货时间对历史订单必须是可空新列，升级不得要求回填。
+  const pickupAtColumn = preorderColumns.find((column) => column.name === 'pickup_at')
+  assert.ok(pickupAtColumn, '结构升级后必须补齐 o2o_preorder.pickup_at 列')
+  assert.equal(Number(pickupAtColumn?.notnull), 0, '历史订单没有到店取货时间，pickup_at 必须允许为空')
   // Issue #95：预计送达时间对历史送货单必须是可空新列，升级不得要求回填。
   const expectedArrivalColumn = inboundOrderColumns.find((column) => column.name === 'expected_arrival_at')
   assert.ok(expectedArrivalColumn, '结构升级后必须补齐 biz_inbound_order.expected_arrival_at 列')

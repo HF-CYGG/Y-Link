@@ -98,7 +98,7 @@ UI 应优先展示 `statusReport`，不要仅根据本机时间和 `status` 重�
 - 状态：`status`、`businessStatus`、`statusReport`；
 - 金额/数量：`totalAmount`、`totalQty`、`expireInSeconds`；
 - 归属快照：`clientOrderType`、`departmentNameSnapshot`、`staffNoSnapshot`；
-- 履约信息：`timeoutAt`、`hasCustomerOrder`、`isSystemApplied`、`merchantMessage`；
+- 履约信息：`timeoutAt`、`hasCustomerOrder`、`isSystemApplied`、`merchantMessage`、`pickupAt`（部门单到店取货时间，散客单与历史订单为 null）；
 - 售后摘要：`returnRequestCount`、`pendingReturnRequestCount`、`latestReturnRequest`；
 - 创建时间：`createdAt`。
 

@@ -31,13 +31,21 @@ const reportPath = path.join(runtimeRoot, 'enterprise-performance-budget-report.
  * 首屏、路由、低频重包和运行时细分预算均已通过，因此总量上限设为 4315 KB，
  * 为当前批准功能基线保留约 1.49% 余量，同时继续阻止整体包体无约束增长。
  *
- * Issue #95（管理端送货单池与预计送达时间）：同一环境下 main@ed46790 总产物实测 4310.83 KB，
- * 叠加本功能后为 4326.12 KB（+15.29 KB），其中异步拆包的 InboundDeliveryPoolPanel 占 11.04 KB，
- * 其余为扫码页页签、送货单录入与历史页新增字段；首屏依赖图、首屏 JS/CSS、低频重包与路由分包预算均无新增超额，
- * 因此总量上限上调为 4335 KB。
+ * Issue #96（部门单到店取货时间）：同一环境下 main@ed46790 总产物实测 4310.83 KB，
+ * 本功能新增结算页日期按钮与时段下拉后为 4315.89 KB（+5.06 KB），增量落在客户端结算页分包，
+ * 首屏依赖图、首屏 JS/CSS、低频重包与路由分包预算均无新增超额，因此总量上限上调为 4325 KB。
+ *
+ * Issues #93/#94（报表中心规格明细抽屉、标签销售汇总）：相对 main@ed46790 单独叠加后实测 4320.15 KB（+9.32 KB），
+ * 增量集中在异步拆包的 InventorySkuDetailDrawer 与报表中心路由分包。#96 合入 main 后两份增量叠加，
+ * 与 main@80e0b54 合并后同一环境实测 4325.74 KB，因此上限定为 4330 KB（约 0.1% 余量）；
+ * 两个分支各自的上限不能简单取大值沿用，合并后必须重新实测。
+ *
+ * Issue #95（管理端送货单池与预计送达时间）：相对 main@ed46790 单独叠加后实测 4326.12 KB（+15.29 KB），
+ * 其中异步拆包的 InboundDeliveryPoolPanel 占 11.04 KB，其余为扫码页页签、送货单录入与历史页新增字段。
+ * 与含 #93/#94/#96/#97 的 main@86f6bd8 合并后同一环境实测 4342.37 KB，因此上限定为 4350 KB（约 0.18% 余量）。
  */
 const performanceBudget = {
-  totalAssetsMaxKB: 4335,
+  totalAssetsMaxKB: 4350,
   criticalAssetsMaxKB: 1180,
   initialLoadJsMaxKB: 850,
   initialLoadCssMaxKB: 320,

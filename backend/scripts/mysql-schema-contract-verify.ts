@@ -79,6 +79,7 @@ const REQUIRED_COLUMNS = [
   ['o2o_preorder', 'cancellation_source'],
   ['o2o_preorder', 'cancellation_remark'],
   ['o2o_preorder', 'cancelled_at'],
+  ['o2o_preorder', 'pickup_at'],
   ['biz_inbound_order', 'expected_arrival_at'],
   ['biz_outbound_order_item', 'sku_id'],
   ['biz_outbound_order_item', 'sku_code_snapshot'],
@@ -734,6 +735,13 @@ missingOutboundSourceDocIndex.indexes.delete(objectKey('biz_outbound_order', 'id
 await expectSchemaFailure(missingOutboundSourceDocIndex, [
   '索引 biz_outbound_order.idx_biz_outbound_source_doc',
   '046_outbound_order_source_doc.sql',
+])
+
+const missingPreorderPickupAt = createCompleteFixture()
+missingPreorderPickupAt.columns.delete(objectKey('o2o_preorder', 'pickup_at'))
+await expectSchemaFailure(missingPreorderPickupAt, [
+  '字段 o2o_preorder.pickup_at',
+  '047_o2o_preorder_pickup_at.sql',
 ])
 
 const missingInboundExpectedArrivalAt = createCompleteFixture()

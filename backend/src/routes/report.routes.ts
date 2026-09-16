@@ -1,6 +1,6 @@
 /**
  * 模块说明：backend/src/routes/report.routes.ts
- * 文件职责：提供报表中心的分页预览与 Excel 导出接口。
+ * 文件职责：提供报表中心的分页预览、库存规格明细与 Excel 导出接口。
  * 实现逻辑：路由层统一解析报表类型、时间段、标签和字段参数，再由报表服务按白名单生成数据或文件。
  * 维护说明：新增报表接口时必须继续保留 reports:view / reports:export 权限边界，避免经营数据被低权限账号直接读取。
  */
@@ -58,6 +58,20 @@ reportRouter.get('/tag-sales', requirePermission('reports:view'), handleReportQu
 reportRouter.get('/kingdee', requirePermission('reports:view'), handleReportQuery('kingdee'))
 reportRouter.get('/walkin', requirePermission('reports:view'), handleReportQuery('walkin'))
 reportRouter.get('/outbound-flow', requirePermission('reports:view'), handleReportQuery('outbound-flow'))
+
+// 库存一览表规格明细：与库存预览同属 reports:view，只读返回单商品全部 SKU（含停用与历史规格）。
+reportRouter.get(
+  '/inventory/:productId/skus',
+  requirePermission('reports:view'),
+  asyncHandler(async (req, res) => {
+    const data = await reportService.listInventorySkus(req.params.productId)
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
 
 reportRouter.get(
   '/:type/export',

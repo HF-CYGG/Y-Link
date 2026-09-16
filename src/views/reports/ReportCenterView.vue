@@ -5,15 +5,18 @@
  * 实现逻辑：
  * - 页面以报表类型为主入口，统一维护时间段、标签、字段勾选和分页预览参数；
  * - 报表预览与 Excel 导出共用同一套查询参数，避免用户看到的列表与导出的文件口径不一致；
- * - 字段勾选只负责用户偏好，最终字段白名单仍由后端报表服务二次校验。
+ * - 字段勾选只负责用户偏好，最终字段白名单仍由后端报表服务二次校验；
+ * - 标签销售汇总表在说明卡下方展示总数量与总金额，数值直接取后端 summary（全部命中明细 SUM），与分页无关；
+ * - 库存一览表每行提供“规格明细”入口，按行内 productId 元数据异步打开 InventorySkuDetailDrawer，不改变主表聚合列。
  * 维护说明：
  * - 新增报表类型时需要同步补齐本页字段定义、报表说明和后端 ReportType；
- * - 库存表展示当前且启用 SKU 的实时合计；无当前 SKU 的旧数据才回退商品主表，不在页面层重算。
+ * - 库存表展示当前且启用 SKU 的实时合计；无当前 SKU 的旧数据才回退商品主表，不在页面层重算；
+ * - 销售汇总禁止改为前端累加当前页 records，否则翻页后金额会失真。
  */
 
 import dayjs from 'dayjs'
 import { Download, List, Refresh, Search, View } from '@element-plus/icons-vue'
-import { computed, onActivated, onMounted, reactive, ref } from 'vue'
+import { computed, defineAsyncComponent, onActivated, onMounted, reactive, ref } from 'vue'
 import {
   BizResponsiveDataCollectionShell,
   PageContainer,
@@ -22,13 +25,23 @@ import {
 } from '@/components/common'
 import { useAppStore } from '@/store'
 import pinia from '@/store/pinia'
-import { exportReportExcel, getReportData, type ReportFieldDefinition, type ReportRow, type ReportType } from '@/api/modules/report'
+import {
+  exportReportExcel,
+  getReportData,
+  type ReportFieldDefinition,
+  type ReportRow,
+  type ReportSalesSummary,
+  type ReportType,
+} from '@/api/modules/report'
 import { getTagList, type Tag } from '@/api/modules/tag'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 import { extractErrorMessage } from '@/utils/error'
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
+
+// 规格明细属于低频查看，异步拆包避免把抽屉与表格依赖打进报表中心首屏分包。
+const InventorySkuDetailDrawer = defineAsyncComponent(() => import('./components/InventorySkuDetailDrawer.vue'))
 
 interface ReportTypeOption {
   label: string
@@ -233,6 +246,30 @@ const loadTags = async () => {
 
 /** 最近一次成功取数的时间：库存为实时快照，展示取数时刻便于核对是否已包含最新出入库。 */
 const lastLoadedAt = ref<Date | null>(null)
+/**
+ * 标签销售汇总表的全量汇总，来自后端 summary。
+ * 切换报表类型与每次发起查询时都先清空：筛选条件一改，条件摘要立刻更新，若汇总仍留着上一组条件的数值，
+ * 加载期间和请求失败后都会被误读成新条件的结果，所以宁可先显示占位符。
+ */
+const salesSummary = ref<ReportSalesSummary | null>(null)
+const showSalesSummary = computed(() => reportType.value === 'tag-sales')
+
+/** 库存一览表规格明细抽屉：只在库存报表且行内带 productId 时可打开。 */
+const skuDetailVisible = ref(false)
+const skuDetailProductId = ref('')
+const skuDetailProductName = ref('')
+const showInventorySkuEntry = computed(() => reportType.value === 'inventory')
+const resolveRowProductId = (row: ReportRow) => String(row.productId ?? '').trim()
+const openInventorySkuDetail = (row: ReportRow) => {
+  const productId = resolveRowProductId(row)
+  if (!productId) {
+    showAppWarning('当前行缺少商品标识，请刷新报表后重试')
+    return
+  }
+  skuDetailProductId.value = productId
+  skuDetailProductName.value = String(row.productName ?? '')
+  skuDetailVisible.value = true
+}
 
 const loadData = async () => {
   if (!ensurePermission('reports:view', '报表中心查看')) {
@@ -247,10 +284,13 @@ const loadData = async () => {
   }
 
   listState.loading = true
+  // 新请求一发出就丢弃旧汇总：加载中与失败时汇总卡显示“-”，不会把上一组筛选条件的数值挂在新条件下。
+  salesSummary.value = null
   await reportRequest.runLatest({
     executor: (signal) => getReportData(reportType.value, buildQueryParams(), { signal }),
     onSuccess: (result) => {
       applyPaginatedResult(listState, result)
+      salesSummary.value = result.summary
       lastLoadedAt.value = new Date()
     },
     onError: (error) => {
@@ -275,6 +315,7 @@ const handleReset = () => {
 }
 
 const handleReportTypeChange = () => {
+  salesSummary.value = null
   selectedTagIds.value = []
   selectedFieldKeys.value = currentAvailableFields.value.map((field) => field.key)
   listState.query.page = 1
@@ -449,6 +490,21 @@ onActivated(() => {
         </p>
       </div>
 
+      <div v-if="showSalesSummary" class="report-sales-summary grid gap-3 sm:grid-cols-2" aria-live="polite">
+        <div class="report-sales-summary__item rounded-xl bg-slate-50 px-4 py-3 dark:bg-slate-900/40">
+          <div class="text-xs text-slate-500 dark:text-slate-400">总数量（全部命中明细）</div>
+          <div class="mt-1 text-lg font-semibold text-slate-800 dark:text-slate-100">
+            {{ salesSummary ? salesSummary.totalQty : '-' }}
+          </div>
+        </div>
+        <div class="report-sales-summary__item rounded-xl bg-slate-50 px-4 py-3 dark:bg-slate-900/40">
+          <div class="text-xs text-slate-500 dark:text-slate-400">总金额（全部命中明细）</div>
+          <div class="mt-1 text-lg font-semibold text-brand">
+            {{ salesSummary ? `¥${salesSummary.totalAmount}` : '-' }}
+          </div>
+        </div>
+      </div>
+
       <div class="apple-card flex min-h-0 flex-1 flex-col p-3 sm:p-4 xl:p-5">
         <BizResponsiveDataCollectionShell
           :items="listState.records"
@@ -473,6 +529,12 @@ onActivated(() => {
                 :align="field.numeric ? 'right' : 'left'"
               >
                 <template #default="{ row }">{{ formatCellValue(row, field) }}</template>
+              </el-table-column>
+              <el-table-column v-if="showInventorySkuEntry" label="规格明细" width="104" align="center" fixed="right">
+                <template #default="{ row }">
+                  <el-button v-if="resolveRowProductId(row)" link type="primary" @click="openInventorySkuDetail(row)">查看规格</el-button>
+                  <span v-else class="text-slate-400">-</span>
+                </template>
               </el-table-column>
             </el-table>
           </template>
@@ -508,6 +570,10 @@ onActivated(() => {
                   <span class="report-mobile-card__meta-value">{{ formatCellValue(item, field) }}</span>
                 </div>
               </div>
+
+              <div v-if="showInventorySkuEntry && resolveRowProductId(item)" class="report-mobile-card__actions">
+                <el-button type="primary" plain @click="openInventorySkuDetail(item)">查看规格库存明细</el-button>
+              </div>
             </div>
           </template>
         </BizResponsiveDataCollectionShell>
@@ -524,6 +590,13 @@ onActivated(() => {
         />
       </div>
     </div>
+
+    <InventorySkuDetailDrawer
+      v-if="skuDetailProductId"
+      v-model="skuDetailVisible"
+      :product-id="skuDetailProductId"
+      :product-name="skuDetailProductName"
+    />
 
     <el-dialog
       v-model="exportPreviewVisible"
@@ -624,6 +697,19 @@ onActivated(() => {
 
 .report-summary-card__condition {
   overflow-wrap: anywhere;
+}
+
+.report-sales-summary__item {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.report-mobile-card__actions {
+  margin-top: 12px;
+}
+
+.report-mobile-card__actions :deep(.el-button) {
+  width: 100%;
 }
 
 .report-field-checkbox-group {

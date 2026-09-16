@@ -3,7 +3,7 @@
  * 文件职责：封装报表中心五类报表的分页预览、字段定义与 Excel 导出接口。
  * 实现逻辑：
  * - 前端把字段与标签数组统一序列化为逗号分隔参数，兼容后端路由解析；
- * - 查询接口返回当前页数据、已选字段和可选字段，页面据此渲染动态表格；
+ * - 查询接口返回当前页数据、已选字段和可选字段，页面据此渲染动态表格；销售明细类报表额外返回全量汇总 summary；
  * - 导出接口返回 Blob 与文件名，由页面复用统一下载流程。
  * 维护说明：
  * - 新增报表类型时需要同步扩展 ReportType、页面字段配置和后端白名单；
@@ -25,6 +25,8 @@ export interface ReportFieldDefinition {
 export interface ReportRow {
   /** 出库类报表统一使用独立业务号；非出库报表可不返回该字段。 */
   businessNo?: string | number | null
+  /** 库存一览表行元数据：不属于展示字段，仅用于打开规格明细。 */
+  productId?: string | number | null
   [key: string]: string | number | null | undefined
 }
 
@@ -35,11 +37,56 @@ export interface ReportQuery extends PaginationQueryInput {
   fields?: string[]
 }
 
+/** 销售明细类报表的全量汇总：覆盖当前筛选条件下全部命中明细，不受分页影响。 */
+export interface ReportSalesSummary {
+  totalQty: string
+  totalAmount: string
+}
+
 export interface ReportQueryResult extends PaginationResult<ReportRow> {
   type: ReportType
   title: string
   fields: ReportFieldDefinition[]
   availableFields: ReportFieldDefinition[]
+  /** 仅标签销售、金蝶、散客等销售明细类报表返回。 */
+  summary: ReportSalesSummary | null
+}
+
+export interface InventorySkuDetail {
+  skuId: string
+  skuCode: string
+  specText: string
+  currentStock: number
+  preOrderedStock: number
+  availableStock: number
+  isActive: boolean
+  isCurrent: boolean
+  /** 是否参与商品行合计：仅当前且启用的规格计入。 */
+  countedInSummary: boolean
+}
+
+export interface InventorySkuDetailResult {
+  productId: string
+  productCode: string
+  productName: string
+  productStatus: string
+  summary: {
+    currentStock: number
+    preOrderedStock: number
+    availableStock: number
+  }
+  /** 商品没有当前规格时，商品行合计回退商品主表库存。 */
+  fallbackToProductStock: boolean
+  skus: InventorySkuDetail[]
+}
+
+/** 获取库存一览表中单个商品的全部规格库存明细（含停用与历史规格）。 */
+export const getInventorySkuDetail = (productId: string, requestConfig: RequestConfig = {}) => {
+  return request<InventorySkuDetailResult>({
+    ...requestConfig,
+    method: 'GET',
+    url: `/reports/inventory/${encodeURIComponent(productId)}/skus`,
+  })
 }
 
 const buildReportParams = (params: ReportQuery = {}) => {
@@ -64,6 +111,7 @@ export const getReportData = async (
     list: ReportRow[]
     fields: ReportFieldDefinition[]
     availableFields: ReportFieldDefinition[]
+    summary?: ReportSalesSummary
   }>({
     ...requestConfig,
     method: 'GET',
@@ -80,6 +128,7 @@ export const getReportData = async (
     records: result.list,
     fields: result.fields,
     availableFields: result.availableFields,
+    summary: result.summary ?? null,
   }
 }
 

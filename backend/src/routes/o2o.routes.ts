@@ -45,6 +45,8 @@ const submitPreorderSchema = z.object({
   isSystemApplied: z.boolean(),
   // 详细注释：提货人由客户端显式填写后传入服务端，避免继续退回为账号默认名导致代领场景失真。
   pickupContact: z.string().trim().min(1).max(32),
+  // 到店取货时间：部门单必填、散客单忽略；格式为带时区偏移的 ISO 时间，业务范围由服务层按自动取消时间校验。
+  pickupAt: z.string().datetime({ offset: true }).nullable().optional(),
   remark: z.string().max(O2O_PREORDER_REMARK_MAX_LENGTH).optional(),
   items: z.array(preorderItemSchema).min(1).max(MAX_O2O_ORDER_ITEM_COUNT, '单次最多提交 200 条商品明细'),
 })

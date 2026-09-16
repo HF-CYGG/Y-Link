@@ -1510,6 +1510,8 @@ async function main() {
       clientRequestId: 'department-govern-shared-0001',
       isSystemApplied: false,
       pickupContact: '部门共享账号领取',
+      // Issue #96：部门单必须携带到店取货时间，取当前时间之后的合法时段。
+      pickupAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
       items: [{ productId: product.id, qty: 1 }],
     })
     assert.equal(departmentPreorder.order.clientOrderType, 'department')
@@ -1537,6 +1539,8 @@ async function main() {
       clientRequestId: 'department-govern-long-path-0001',
       isSystemApplied: false,
       pickupContact: '长路径部门共享账号领取',
+      // Issue #96：部门单必须携带到店取货时间，取当前时间之后的合法时段。
+      pickupAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
       items: [{ productId: product.id, qty: 1 }],
     })
     assert.equal(longDepartmentPreorder.order.departmentNameSnapshot, longDepartmentPath)
