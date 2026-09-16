@@ -223,6 +223,7 @@ async function main() {
     assert.ok(sku)
     const delivery = await inboundService.submitSupplierDelivery(actor, {
       remark: '已入库删除验证',
+      expectedArrivalAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
       items: [{ productId: String(product.id), skuId: String(sku.id), qty: quantity }],
     })
     await inboundService.verifyInbound(delivery.order.verifyCode, adminActor)
@@ -250,6 +251,7 @@ async function main() {
     const quantities = [3, 4]
     const delivery = await inboundService.submitSupplierDelivery(supplierActor, {
       remark: '多规格整单回滚验证',
+      expectedArrivalAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
       items: product.skus.map((sku, index) => ({
         productId: String(product.id),
         skuId: String(sku.id),
@@ -294,7 +296,11 @@ async function main() {
       skuId: String(product.skus[0]?.id),
       qty: index + 2,
     }))
-    const delivery = await inboundService.submitSupplierDelivery(supplierActor, { remark: '跨商品 SKU 防护验证', items })
+    const delivery = await inboundService.submitSupplierDelivery(supplierActor, {
+      remark: '跨商品 SKU 防护验证',
+      expectedArrivalAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+      items,
+    })
     if (verified) await inboundService.verifyInbound(delivery.order.verifyCode, adminActor)
     return { products, items, orderId: String(delivery.order.id), showNo: delivery.order.showNo, verifyCode: delivery.order.verifyCode }
   }
@@ -392,6 +398,7 @@ async function main() {
   assert.ok(duplicateSku)
   const duplicateDelivery = await inboundService.submitSupplierDelivery(supplierActor, {
     remark: '同商品同 SKU 重复明细验证',
+    expectedArrivalAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
     items: [{ productId: String(duplicateProduct.id), skuId: String(duplicateSku.id), qty: 2 }],
   })
   const duplicateItemRepo = AppDataSource.getRepository(BizInboundOrderItem)

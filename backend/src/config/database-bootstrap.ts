@@ -325,6 +325,7 @@ const SQLITE_REQUIRED_O2O_RETURN_REQUEST_ITEM_COLUMNS = [
   'spec_text_snapshot',
 ]
 const SQLITE_REQUIRED_BIZ_INBOUND_ORDER_COLUMNS = [
+  'expected_arrival_at',
   'cancel_reason',
   'cancelled_at',
   'cancelled_by_user_id',

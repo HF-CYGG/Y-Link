@@ -39,9 +39,13 @@ const reportPath = path.join(runtimeRoot, 'enterprise-performance-budget-report.
  * 增量集中在异步拆包的 InventorySkuDetailDrawer 与报表中心路由分包。#96 合入 main 后两份增量叠加，
  * 与 main@80e0b54 合并后同一环境实测 4325.74 KB，因此上限定为 4330 KB（约 0.1% 余量）；
  * 两个分支各自的上限不能简单取大值沿用，合并后必须重新实测。
+ *
+ * Issue #95（管理端送货单池与预计送达时间）：相对 main@ed46790 单独叠加后实测 4326.12 KB（+15.29 KB），
+ * 其中异步拆包的 InboundDeliveryPoolPanel 占 11.04 KB，其余为扫码页页签、送货单录入与历史页新增字段。
+ * 与含 #93/#94/#96/#97 的 main@86f6bd8 合并后同一环境实测 4342.37 KB，因此上限定为 4350 KB（约 0.18% 余量）。
  */
 const performanceBudget = {
-  totalAssetsMaxKB: 4330,
+  totalAssetsMaxKB: 4350,
   criticalAssetsMaxKB: 1180,
   initialLoadJsMaxKB: 850,
   initialLoadCssMaxKB: 320,

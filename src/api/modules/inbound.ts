@@ -28,6 +28,8 @@ export interface SubmitInboundItemInput {
  */
 export interface SubmitInboundInput {
   remark?: string
+  /** 预计送达时间（带时区 ISO 字符串）：提交送货单时必填。 */
+  expectedArrivalAt: string
   items: SubmitInboundItemInput[]
 }
 
@@ -36,6 +38,8 @@ export interface SubmitInboundInput {
  */
 export interface UpdateSupplierInboundInput {
   remark?: string
+  /** 改单时可选修改预计送达时间；不传保持原值。 */
+  expectedArrivalAt?: string
   items: SubmitInboundItemInput[]
 }
 
@@ -78,6 +82,8 @@ export interface InboundOrder {
   status: 'pending' | 'verified' | 'cancelled'
   totalQty: string
   remark: string | null
+  /** 预计送达时间；上线前的历史送货单为 null。 */
+  expectedArrivalAt: string | null
   cancelReason: string | null
   cancelledAt: string | null
   cancelledByUserId: string | null
@@ -335,5 +341,38 @@ export const getInboundAdminOrders = (params: InboundAdminListQuery = {}) =>
   request<InboundOrder[]>({
     method: 'GET',
     url: '/inbound/admin/list',
+    params,
+  })
+
+/**
+ * 管理端送货单池分栏：
+ * - all/pending/verified 三个分栏，服务端统一计算计数与分页；
+ * - latestOrderId 与 newOrderCount 用于轮询时提示供货方新提交的送货单。
+ */
+export type InboundOrderPoolKey = 'all' | 'pending' | 'verified'
+
+export interface InboundOrderPoolQuery extends PaginationQueryInput {
+  pool?: InboundOrderPoolKey
+  keyword?: string
+  sinceOrderId?: string
+}
+
+export interface InboundOrderPoolResult extends PaginationResult<InboundOrder> {
+  pool: InboundOrderPoolKey
+  poolCounts: Record<InboundOrderPoolKey, number>
+  latestOrderId: string | null
+  newOrderCount: number
+}
+
+/**
+ * 管理端送货单池：
+ * - 库管无需知道送货单号即可看到供货方已提交的待入库单据；
+ * - 与扫码入库共用同一权限边界（inbound:view + admin/operator）。
+ */
+export const getInboundAdminPool = (params: InboundOrderPoolQuery = {}, requestConfig: RequestConfig = {}) =>
+  request<InboundOrderPoolResult>({
+    ...requestConfig,
+    method: 'GET',
+    url: '/inbound/admin/pool',
     params,
   })

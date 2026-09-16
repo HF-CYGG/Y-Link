@@ -176,7 +176,11 @@ async function main() {
   }
 
   const createDelivery = async (items: Array<{ productId: string; skuId: string; qty: number }>, verified: boolean) => {
-    const delivery = await inboundService.submitSupplierDelivery(supplierActor, { remark: 'Issue66 MySQL 并发验证', items })
+    const delivery = await inboundService.submitSupplierDelivery(supplierActor, {
+      remark: 'Issue66 MySQL 并发验证',
+      expectedArrivalAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+      items,
+    })
     if (verified) await inboundService.verifyInbound(delivery.order.verifyCode, adminActor)
     return delivery
   }

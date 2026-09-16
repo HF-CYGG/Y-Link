@@ -80,6 +80,7 @@ const REQUIRED_COLUMNS = [
   ['o2o_preorder', 'cancellation_remark'],
   ['o2o_preorder', 'cancelled_at'],
   ['o2o_preorder', 'pickup_at'],
+  ['biz_inbound_order', 'expected_arrival_at'],
   ['biz_outbound_order_item', 'sku_id'],
   ['biz_outbound_order_item', 'sku_code_snapshot'],
   ['biz_outbound_order_item', 'spec_text_snapshot'],
@@ -741,6 +742,13 @@ missingPreorderPickupAt.columns.delete(objectKey('o2o_preorder', 'pickup_at'))
 await expectSchemaFailure(missingPreorderPickupAt, [
   '字段 o2o_preorder.pickup_at',
   '047_o2o_preorder_pickup_at.sql',
+])
+
+const missingInboundExpectedArrivalAt = createCompleteFixture()
+missingInboundExpectedArrivalAt.columns.delete(objectKey('biz_inbound_order', 'expected_arrival_at'))
+await expectSchemaFailure(missingInboundExpectedArrivalAt, [
+  '字段 biz_inbound_order.expected_arrival_at',
+  '048_inbound_order_expected_arrival.sql',
 ])
 
 const nullableOrderMergeResultSnapshot = createCompleteFixture()

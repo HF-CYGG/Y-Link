@@ -6,7 +6,8 @@
  * - 页面采用“统计卡 + 筛选工具栏 + 列表容器 + 详情抽屉”的工作台布局，与录入页形成统一视觉语言；
  * - 历史页使用服务端筛选与分页，并通过自动同步保持库管入库、供货方删除恢复后的列表状态及时更新；
  * - 列表请求、详情请求与操作前状态校验都接入稳定请求或最新详情读取，避免旧结果覆盖新状态；
- * - 详情抽屉在打开期间进行轻量刷新，状态变化后立即收起不可用操作入口，降低误改单、误撤销风险。
+ * - 详情抽屉在打开期间进行轻量刷新，状态变化后立即收起不可用操作入口，降低误改单、误撤销风险；
+ * - 列表与详情展示预计送达时间，改单弹窗可调整该时间；未选择时不回传，服务端保持原值。
  * 维护说明：
  * - 若后续要增加更多筛选维度，优先继续扩展服务端查询参数，而不是回退到前端全量筛选；
  * - 二维码生成失败时不能静默吞掉，否则用户只会看到空白占位而不知道单据本身已存在；
@@ -115,8 +116,16 @@ const handleEditProductChange = (item: EditItemRow) => {
 const editForm = reactive({
   orderId: '',
   remark: '',
+  // 预计送达时间可在改单时调整；未改动时保持原值，不回传给服务端。
+  expectedArrivalAt: null as Date | null,
   items: [] as EditItemRow[],
 })
+
+const disabledExpectedArrivalDate = (date: Date) => {
+  const todayStart = new Date()
+  todayStart.setHours(0, 0, 0, 0)
+  return date.getTime() < todayStart.getTime()
+}
 
 const statusMap = {
   pending: { label: '待入库', type: 'warning' },
@@ -219,12 +228,14 @@ const replaceCurrentPageRecord = (nextOrder: InboundOrder) => {
 const resetEditForm = () => {
   editForm.orderId = ''
   editForm.remark = ''
+  editForm.expectedArrivalAt = null
   editForm.items = [createEditItemRow()]
 }
 
 const ensureEditRowsFromDetail = (detail: InboundOrderDetail) => {
   editForm.orderId = detail.order.id
   editForm.remark = detail.order.remark ?? ''
+  editForm.expectedArrivalAt = detail.order.expectedArrivalAt ? new Date(detail.order.expectedArrivalAt) : null
   editForm.items = detail.items.map((item) => ({
     uid: `supplier-history-edit-item-${editUidSeed.value++}`,
     productId: String(item.productId),
@@ -919,6 +930,8 @@ const buildEditPayload = () => {
 
   return {
     remark: editForm.remark.trim(),
+    // 未选择时不回传该字段，服务端保持原有预计送达时间。
+    ...(editForm.expectedArrivalAt ? { expectedArrivalAt: editForm.expectedArrivalAt.toISOString() } : {}),
     items: Array.from(uniqueItems.entries()).map(([key, qty]) => {
       const [productId, skuId] = key.split(':')
       return { productId, skuId, qty }
@@ -931,7 +944,7 @@ const handleSubmitEdit = async () => {
     return
   }
 
-  let payload: { remark: string; items: Array<{ productId: string; skuId: string; qty: number }> }
+  let payload: { remark: string; expectedArrivalAt?: string; items: Array<{ productId: string; skuId: string; qty: number }> }
   try {
     payload = buildEditPayload()
   } catch (error) {
@@ -1108,6 +1121,11 @@ onBeforeUnmount(() => {
                     {{ getStatusMeta(row.status as InboundOrder['status']).label }}
                   </el-tag>
                   <el-tag v-if="row.isDeleted" class="ml-2" type="danger" effect="light" round>已删除</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="预计送达时间" min-width="170">
+                <template #default="{ row }">
+                  {{ row.expectedArrivalAt ? dayjs(row.expectedArrivalAt).format('YYYY-MM-DD HH:mm') : '未填写' }}
                 </template>
               </el-table-column>
               <el-table-column label="创建时间" min-width="170">
@@ -1289,6 +1307,12 @@ onBeforeUnmount(() => {
                     <p class="mt-2 text-lg font-semibold text-brand dark:text-teal-400">{{ Number(currentDetail.order.totalQty) }} 件</p>
                   </div>
                   <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-slate-700/70 dark:bg-slate-900/40">
+                    <p class="text-xs text-slate-500 dark:text-slate-400">预计送达时间</p>
+                    <p class="mt-2 text-lg font-semibold text-slate-800 dark:text-slate-100">
+                      {{ currentDetail.order.expectedArrivalAt ? dayjs(currentDetail.order.expectedArrivalAt).format('MM-DD HH:mm') : '未填写' }}
+                    </p>
+                  </div>
+                  <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-slate-700/70 dark:bg-slate-900/40">
                     <p class="text-xs text-slate-500 dark:text-slate-400">入库时间</p>
                     <p class="mt-2 text-lg font-semibold text-slate-800 dark:text-slate-100">
                       {{ currentDetail.order.verifiedAt ? dayjs(currentDetail.order.verifiedAt).format('MM-DD HH:mm') : '-' }}
@@ -1425,7 +1449,19 @@ onBeforeUnmount(() => {
       >
         <div class="space-y-4">
           <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 px-4 py-3 text-sm leading-6 text-slate-600 dark:border-slate-700/70 dark:bg-slate-900/40 dark:text-slate-300">
-            仅待入库送货单支持改单。保存后会直接覆盖当前商品明细、总件数和备注，核销二维码保持不变。
+            仅待入库送货单支持改单。保存后会直接覆盖当前商品明细、总件数、预计送达时间和备注，核销二维码保持不变。
+          </div>
+
+          <div class="rounded-2xl border border-slate-200/70 bg-slate-50/75 p-4 dark:border-slate-700/70 dark:bg-slate-900/40">
+            <p class="mb-2 text-sm font-medium text-slate-600 dark:text-slate-400">预计送达时间</p>
+            <el-date-picker
+              v-model="editForm.expectedArrivalAt"
+              type="datetime"
+              class="w-full"
+              placeholder="不修改则保持原有时间"
+              format="YYYY-MM-DD HH:mm"
+              :disabled-date="disabledExpectedArrivalDate"
+            />
           </div>
 
           <div class="space-y-3">

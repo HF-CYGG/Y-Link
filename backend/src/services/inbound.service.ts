@@ -30,12 +30,37 @@ export interface SubmitInboundItemInput {
 
 export interface SubmitInboundInput {
   remark?: string
+  /** 预计送达时间（ISO 字符串）：供货方提交送货单时必填。 */
+  expectedArrivalAt?: string | null
   items: SubmitInboundItemInput[]
 }
 
 export interface UpdateSupplierInboundInput {
   remark?: string
+  /** 改单时可选修改预计送达时间；不传保持原值。 */
+  expectedArrivalAt?: string | null
   items: SubmitInboundItemInput[]
+}
+
+export type InboundOrderPoolKey = 'all' | 'pending' | 'verified'
+
+export interface InboundOrderPoolQuery {
+  pool?: InboundOrderPoolKey
+  keyword?: string
+  page?: number
+  pageSize?: number
+  sinceOrderId?: string
+}
+
+export interface InboundOrderPoolResult {
+  page: number
+  pageSize: number
+  total: number
+  pool: InboundOrderPoolKey
+  records: BizInboundOrder[]
+  poolCounts: Record<InboundOrderPoolKey, number>
+  latestOrderId: string | null
+  newOrderCount: number
 }
 
 export interface DeleteVerifiedSupplierInboundInput {
@@ -68,6 +93,9 @@ export interface SupplierDeliveryListResult {
   summary: SupplierDeliverySummaryResult
 }
 
+/** 预计送达时间允许的最远范围，避免录入明显错误的远期时间。 */
+const INBOUND_EXPECTED_ARRIVAL_MAX_AHEAD_MS = 90 * 24 * 60 * 60 * 1000
+
 class InboundService {
   private readonly inboundRepo = AppDataSource.getRepository(BizInboundOrder)
   private readonly inboundItemRepo = AppDataSource.getRepository(BizInboundOrderItem)
@@ -90,6 +118,44 @@ class InboundService {
     if (actor.role !== 'supplier') {
       throw new BizError('仅供货方账号可操作送货单', 403)
     }
+  }
+
+  // 预计送达时间只做格式归一化；是否必填由各入口决定，范围校验统一走 assertExpectedArrivalAt。
+  private normalizeExpectedArrivalAtInput(value: string | null | undefined): Date | null {
+    const normalizedValue = (value ?? '').toString().trim()
+    if (!normalizedValue) {
+      return null
+    }
+    const parsed = new Date(normalizedValue)
+    if (Number.isNaN(parsed.getTime())) {
+      throw new BizError('预计送达时间格式不正确', 400)
+    }
+    return parsed
+  }
+
+  // 预计送达时间必须落在“今天零点 ~ 90 天内”：允许补录当天早些时候的送货安排，同时避免录入明显错误的远期时间。
+  private assertExpectedArrivalAt(value: Date | null): Date {
+    if (!value) {
+      throw new BizError('请选择预计送达时间', 400)
+    }
+    const todayStart = new Date()
+    todayStart.setHours(0, 0, 0, 0)
+    if (value.getTime() < todayStart.getTime()) {
+      throw new BizError('预计送达时间不能早于今天', 400)
+    }
+    if (value.getTime() > Date.now() + INBOUND_EXPECTED_ARRIVAL_MAX_AHEAD_MS) {
+      throw new BizError('预计送达时间不能晚于 90 天后', 400)
+    }
+    return value
+  }
+
+  // 审计 detail 走 JSON 存储：时间统一转成 ISO 文本，避免 SQLite 返回字符串、MySQL 返回 Date 导致同一字段两种形态。
+  private toAuditTimeText(value: Date | string | null | undefined): string | null {
+    if (!value) {
+      return null
+    }
+    const parsed = value instanceof Date ? value : new Date(value)
+    return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString()
   }
 
   // 后台现场改单与核销入库属于同一工作台职责，统一限制为 admin / operator。
@@ -341,6 +407,8 @@ class InboundService {
   async submitSupplierDelivery(actor: AuthUserContext, input: SubmitInboundInput, requestMeta?: RequestMeta) {
     this.assertSupplierActor(actor)
     const normalizedItems = this.normalizeSupplierInboundItems(input.items)
+    // 预计送达时间在进入事务前校验：缺失或超范围时直接拒绝，不占用送货单号。
+    const expectedArrivalAt = this.assertExpectedArrivalAt(this.normalizeExpectedArrivalAtInput(input.expectedArrivalAt))
 
     return runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
@@ -360,6 +428,7 @@ class InboundService {
           status: 'pending',
           totalQty: String(totalQty),
           remark: input.remark?.trim() || null,
+          expectedArrivalAt,
         }),
       )
 
@@ -393,6 +462,7 @@ class InboundService {
           supplierName: savedOrder.supplierName,
           itemCount: itemEntities.length,
           totalQty: savedOrder.totalQty,
+          expectedArrivalAt: savedOrder.expectedArrivalAt?.toISOString() ?? null,
         },
       }, manager)
 
@@ -431,8 +501,14 @@ class InboundService {
       })
       await manager.getRepository(BizInboundOrderItem).save(nextItems)
 
+      const previousExpectedArrivalAt = order.expectedArrivalAt
       order.remark = input.remark?.trim() || null
       order.totalQty = String(nextTotalQty)
+      // 改单未传预计送达时间时保持原值，传入则按与提交一致的范围校验。
+      const nextExpectedArrivalAt = this.normalizeExpectedArrivalAtInput(input.expectedArrivalAt)
+      if (nextExpectedArrivalAt) {
+        order.expectedArrivalAt = this.assertExpectedArrivalAt(nextExpectedArrivalAt)
+      }
 
       const savedOrder = await manager.getRepository(BizInboundOrder).save(order)
       await auditService.record({
@@ -449,6 +525,9 @@ class InboundService {
           supplierName: savedOrder.supplierName,
           itemCount: nextItems.length,
           totalQty: savedOrder.totalQty,
+          // 送达排班发生争议时要能追溯改成了什么、原先是什么，只记生效值不足以定责。
+          expectedArrivalAt: this.toAuditTimeText(savedOrder.expectedArrivalAt),
+          previousExpectedArrivalAt: this.toAuditTimeText(previousExpectedArrivalAt),
         },
       }, manager)
       return {
@@ -940,8 +1019,15 @@ class InboundService {
       })
       await manager.getRepository(BizInboundOrderItem).save(nextItems)
 
+      const previousExpectedArrivalAt = order.expectedArrivalAt
       order.remark = input.remark?.trim() || null
       order.totalQty = String(nextTotalQty)
+      // 现场改单与供货方改单共用同一套入参：schema 既然接受预计送达时间，这里就必须按同样的范围校验写入，
+      // 否则接口返回成功而排班时间没变。未传则保持原值。
+      const nextExpectedArrivalAt = this.normalizeExpectedArrivalAtInput(input.expectedArrivalAt)
+      if (nextExpectedArrivalAt) {
+        order.expectedArrivalAt = this.assertExpectedArrivalAt(nextExpectedArrivalAt)
+      }
 
       const savedOrder = await manager.getRepository(BizInboundOrder).save(order)
       await auditService.record({
@@ -958,6 +1044,9 @@ class InboundService {
           supplierName: savedOrder.supplierName,
           itemCount: nextItems.length,
           totalQty: savedOrder.totalQty,
+          // 送达排班发生争议时要能追溯改成了什么、原先是什么，只记生效值不足以定责。
+          expectedArrivalAt: this.toAuditTimeText(savedOrder.expectedArrivalAt),
+          previousExpectedArrivalAt: this.toAuditTimeText(previousExpectedArrivalAt),
         },
       }, manager)
       return {
@@ -1261,7 +1350,7 @@ class InboundService {
     return result
   }
 
-  // 管理端查看所有入库单
+  // 管理端查看所有入库单（旧接口：仅按状态截断返回，保持既有调用方兼容）
   async listAllInboundOrders(actor: AuthUserContext, query: { limit?: number, status?: string }) {
     const limit = Math.min(200, Math.max(1, query.limit || 50))
     const qb = this.inboundRepo.createQueryBuilder('order').orderBy('order.id', 'DESC').take(limit)
@@ -1274,6 +1363,95 @@ class InboundService {
       qb.andWhere('order.status = :status', { status: query.status })
     }
     return qb.getMany()
+  }
+
+  /**
+   * 管理端送货单池：供货方提交后库管无需知道单号即可看到待入库单据。
+   * - 只面向 admin / operator，服务层再做一次角色兜底，避免仅靠路由权限放行；
+   * - 排除已删除与已撤销单据，分栏计数与分页在同一筛选口径下计算；
+   * - 待入库按预计送达时间由近到远排序（未填写的历史单据排在最后），已入库按入库时间倒序。
+   */
+  async listInboundOrderPool(actor: AuthUserContext, query: InboundOrderPoolQuery = {}): Promise<InboundOrderPoolResult> {
+    if (actor.role !== 'admin' && actor.role !== 'operator') {
+      throw new BizError('仅后台库管人员可查看送货单池', 403)
+    }
+
+    const pool: InboundOrderPoolKey = query.pool ?? 'all'
+    const pageSize = Math.min(50, Math.max(1, Math.floor(Number(query.pageSize) || 10)))
+    const requestedPage = Math.max(1, Math.floor(Number(query.page) || 1))
+    const normalizedKeyword = String(query.keyword || '').trim()
+
+    const buildBaseQuery = () => {
+      const queryBuilder = this.inboundRepo
+        .createQueryBuilder('order')
+        .where('order.isDeleted = :isDeleted', { isDeleted: false })
+        .andWhere('order.status <> :cancelledStatus', { cancelledStatus: 'cancelled' })
+      if (normalizedKeyword) {
+        queryBuilder.andWhere(
+          new Brackets((keywordBuilder) => {
+            keywordBuilder
+              .where('order.showNo LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
+              .orWhere('order.supplierName LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
+          }),
+        )
+      }
+      return queryBuilder
+    }
+
+    const statusRows = await buildBaseQuery()
+      .select('order.status', 'status')
+      .addSelect('COUNT(1)', 'total')
+      .groupBy('order.status')
+      .getRawMany<{ status: string; total: string | number }>()
+    const statusCountMap = new Map(statusRows.map((row) => [String(row.status), Number(row.total ?? 0)]))
+    const poolCounts: Record<InboundOrderPoolKey, number> = {
+      all: [...statusCountMap.values()].reduce((sum, value) => sum + value, 0),
+      pending: statusCountMap.get('pending') ?? 0,
+      verified: statusCountMap.get('verified') ?? 0,
+    }
+
+    const total = poolCounts[pool]
+    const page = Math.min(requestedPage, Math.max(1, Math.ceil(total / pageSize)))
+    let records: BizInboundOrder[] = []
+    if (total > 0) {
+      const listQuery = buildBaseQuery()
+      if (pool !== 'all') {
+        listQuery.andWhere('order.status = :poolStatus', { poolStatus: pool })
+      }
+      if (pool === 'verified') {
+        listQuery.orderBy('order.verifiedAt', 'DESC').addOrderBy('order.id', 'DESC')
+      } else {
+        // 待入库优先按预计送达时间排序；历史单据没有该字段，统一排在有时间的单据之后。
+        listQuery
+          .orderBy('CASE WHEN order.expected_arrival_at IS NULL THEN 1 ELSE 0 END', 'ASC')
+          .addOrderBy('order.status', 'ASC')
+          .addOrderBy('order.expectedArrivalAt', 'ASC')
+          .addOrderBy('order.id', 'DESC')
+      }
+      records = await listQuery.skip((page - 1) * pageSize).take(pageSize).getMany()
+    }
+
+    const latestRow = await buildBaseQuery().select('MAX(order.id)', 'latestId').getRawOne<{ latestId: string | number | null }>()
+    const latestOrderId = latestRow?.latestId === null || latestRow?.latestId === undefined ? null : String(latestRow.latestId)
+
+    let newOrderCount = 0
+    if (query.sinceOrderId) {
+      newOrderCount = await buildBaseQuery()
+        .andWhere('order.id > :sinceOrderId', { sinceOrderId: query.sinceOrderId })
+        .andWhere('order.status = :newOrderStatus', { newOrderStatus: 'pending' })
+        .getCount()
+    }
+
+    return {
+      page,
+      pageSize,
+      total,
+      pool,
+      records,
+      poolCounts,
+      latestOrderId,
+      newOrderCount,
+    }
   }
 }
 

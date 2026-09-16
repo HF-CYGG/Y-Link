@@ -1018,6 +1018,7 @@ try {
   }
   const staleInboundOrder = await inboundService.submitSupplierDelivery(businessGuardSupplierActor, {
     remark: '旧系统账号入库核销阻断验证',
+    expectedArrivalAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
     items: [{ productId: lifecycleRaceProduct.id, skuId: lifecycleRaceSku.id, qty: 1 }],
   })
   const staleProductUpdateFixture = await productService.create({
@@ -1371,6 +1372,7 @@ try {
   await assert.rejects(
     inboundService.submitSupplierDelivery(staleSupplierActor, {
       remark: '生命周期竞态验证',
+      expectedArrivalAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
       items: [{ productId: lifecycleRaceProduct.id, skuId: lifecycleRaceSku.id, qty: 1 }],
     }),
     /账号已停用或已注销/,
@@ -1512,6 +1514,7 @@ try {
   try {
     const submitPromise = inboundService.submitSupplierDelivery(businessFirstSupplierActor, {
       remark: '生命周期业务先提交验证',
+      expectedArrivalAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
       items: [{ productId: lifecycleRaceProduct.id, skuId: lifecycleRaceSku.id, qty: 1 }],
     })
     await supplierGuardReached

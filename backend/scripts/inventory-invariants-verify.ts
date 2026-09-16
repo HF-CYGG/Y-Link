@@ -116,6 +116,7 @@ async function main() {
       assert.ok(skuId)
       const delivery = await inboundService.submitSupplierDelivery(supplierActor, {
         remark: `property-step-${index}`,
+        expectedArrivalAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
         items: [{ productId: product.id, skuId, qty }],
       })
       await inboundService.verifyInbound(delivery.order.verifyCode, adminActor)
