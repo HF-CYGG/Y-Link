@@ -4,7 +4,8 @@
  * 实现逻辑：
  * - 手工固定商品主表与 SKU 差异夹具，覆盖当前、停用、退役和无当前 SKU 的回退语义；
  * - 调用真实 ProductService、ReportService，并解析流式生成的 ExcelJS 工作簿；
- * - 对三个出口逐项核对固定期望，同时确认报表读取不会修改库存或库存流水。
+ * - 对三个出口逐项核对固定期望，同时确认报表读取不会修改库存或库存流水；
+ * - Issue #94：标签销售汇总表的 summary 必须等于全部命中明细之和，且不随分页变化，无命中时为 0。
  * 维护说明：
  * - 夹具期望必须独立手工给出，不能从任一被测出口反推；
  * - 脚本只能连接本次唯一临时 SQLite，禁止读取或修改业务数据库。
@@ -602,7 +603,42 @@ async function main() {
     await productService.update(lifecycleProduct.id, { currentStock: 20, stockBaseline: { currentStock: 9 } }, adminActor)
     await assertLifecycleStock([20, 0, 20], '商品编辑按基线调整库存后')
 
-    console.log('库存报表专项验证通过：固定口径、分页、跨批次、真实 Excel 与库存生命周期均一致')
+    // Issue #94：标签销售汇总表按全部命中明细汇总总数量与总金额，不受分页影响。
+    const salesInput: ReportQueryInput = {
+      page: 1,
+      pageSize: 100,
+      tagIds: [String(lifecycleTag.id)],
+      fields: ['businessNo', 'qty', 'amount'],
+    }
+    const fullSales = await reportService.query('tag-sales', salesInput)
+    assert.ok(fullSales.total >= 2, '生命周期标签至少应命中 O2O 核销与普通出库两条销售明细')
+    assert.equal(fullSales.list.length, fullSales.total, '全量汇总核对需要一次取回全部明细')
+    const expectedSalesQty = fullSales.list.reduce((sum, row) => sum + Number(row.qty), 0)
+    const expectedSalesAmount = fullSales.list.reduce((sum, row) => sum + Number(row.amount), 0)
+    assert.deepEqual(
+      fullSales.summary,
+      { totalQty: expectedSalesQty.toFixed(2), totalAmount: expectedSalesAmount.toFixed(2) },
+      '标签销售汇总必须等于全部命中明细的数量与金额之和',
+    )
+    for (let page = 1; page <= fullSales.total; page += 1) {
+      const pagedSales = await reportService.query('tag-sales', { ...salesInput, page, pageSize: 1 })
+      assert.equal(pagedSales.list.length, 1, `标签销售第 ${page} 页应只返回一条明细`)
+      assert.deepEqual(pagedSales.summary, fullSales.summary, `标签销售第 ${page} 页的汇总不得只统计当前页`)
+    }
+    const emptySalesTag = await tagRepo.save(tagRepo.create({
+      tagName: `销售汇总空标签-${verifySeed}`,
+      tagCode: `SALES-EMPTY-${verifySeed}`,
+    }))
+    const emptyTagSales = await reportService.query('tag-sales', { tagIds: [String(emptySalesTag.id)] })
+    assert.equal(emptyTagSales.total, 0)
+    assert.deepEqual(emptyTagSales.summary, { totalQty: '0.00', totalAmount: '0.00' }, '无商品标签的销售汇总必须为 0')
+    const noSalesTagSummary = await reportService.query('tag-sales', { tagIds: [String(tag.id)] })
+    assert.equal(noSalesTagSummary.total, 0, '固定库存夹具标签没有出库明细')
+    assert.deepEqual(noSalesTagSummary.summary, { totalQty: '0.00', totalAmount: '0.00' }, '有商品但无销售明细时汇总必须为 0')
+    const inventoryResult = await reportService.query('inventory', { tagIds: [String(tag.id)] })
+    assert.equal(inventoryResult.summary, undefined, '库存一览表不返回销售汇总')
+
+    console.log('库存报表专项验证通过：固定口径、分页、跨批次、真实 Excel、库存生命周期与标签销售汇总均一致')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()
