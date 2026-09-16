@@ -6,7 +6,8 @@
  * - 进入页面后会恢复当前账号的提货人草稿，并同步最新商品库存快照；
  * - 下单归属完全由当前登录账号类型决定，页面只负责展示部门/工号/实名信息，不允许手动篡改归属；
  * - 部门账号下单前强制校验所属部门、教职工号与金蝶申请状态，避免订单归属与实名链路脱节；
- * - 部门单必须选择到店取货时间：日期按钮 + 半小时时段下拉，可选范围受店铺自动取消时长（pickupWindowHours）约束。
+ * - 部门单必须选择到店取货时间：日期按钮（el-button）+ 半小时时段下拉，日期范围受店铺自动取消时长（pickupWindowHours）约束，
+ *   时段范围按店铺营业时间文案解析并在闭店前半小时截止，解析失败时回退默认营业时间。
  * 维护说明：
  * - 若后端继续扩展实名字段或工号核验状态，请优先同步本页的实名信息展示区与 `handleSubmit()` 前置校验；
  * - 若调整下单归属说明文案，请保持“前端只展示，服务端强制判定”的口径不变；
@@ -60,8 +61,9 @@ const pickupDateKey = ref<string | null>(null)
 const pickupTimeSlot = ref<string | null>(null)
 /** 取货可选范围依赖“当前时间”，用一次性时钟快照驱动 computed，避免每次渲染都读 Date.now() 造成结果抖动。 */
 const pickupClock = ref(Date.now())
-const PICKUP_SLOT_START_MINUTES = 8 * 60
-const PICKUP_SLOT_END_MINUTES = 21 * 60 + 30
+/** 营业时间文案解析失败时的兜底范围，与系统配置 o2o.store_business_hours_text 的默认值 10:00 - 22:00 一致。 */
+const PICKUP_FALLBACK_OPEN_MINUTES = 10 * 60
+const PICKUP_FALLBACK_CLOSE_MINUTES = 22 * 60
 const PICKUP_SLOT_STEP_MINUTES = 30
 const PICKUP_LEAD_MINUTES = 15
 const PICKUP_MAX_DATE_OPTIONS = 8
@@ -75,6 +77,35 @@ const buildPickupDate = (dateKey: string, minutesOfDay: number) => {
   return new Date(year, (month ?? 1) - 1, day ?? 1, Math.floor(minutesOfDay / 60), minutesOfDay % 60, 0, 0)
 }
 
+/**
+ * 取货时段范围跟随店铺营业时间，闭店前半小时为最后一档。
+ * 营业时间是管理员可改的自由文案，这里只解析其中的「HH:MM - HH:MM」，解析不出或范围非法时回退默认值；
+ * 不能写死起始时间：服务端只校验当前时间与超时窗口，闭店时段照样会被接受。
+ */
+const pickupSlotRange = computed(() => {
+  const fallback = {
+    startMinutes: PICKUP_FALLBACK_OPEN_MINUTES,
+    endMinutes: PICKUP_FALLBACK_CLOSE_MINUTES - PICKUP_SLOT_STEP_MINUTES,
+  }
+  const matched = /(\d{1,2}):(\d{2})\s*[-~～—–至]\s*(\d{1,2}):(\d{2})/.exec(clientCatalogStore.storefront.businessHoursText || '')
+  if (!matched) {
+    return fallback
+  }
+  const openMinutes = Number(matched[1]) * 60 + Number(matched[2])
+  const closeMinutes = Number(matched[3]) * 60 + Number(matched[4])
+  const withinDay = openMinutes >= 0 && closeMinutes <= 24 * 60
+  // 跨零点营业（如 18:00 - 02:00）无法用单日时段表达，按兜底范围处理，避免生成颠倒的空列表。
+  if (!withinDay || closeMinutes - openMinutes < PICKUP_SLOT_STEP_MINUTES) {
+    return fallback
+  }
+  return { startMinutes: openMinutes, endMinutes: closeMinutes - PICKUP_SLOT_STEP_MINUTES }
+})
+
+const pickupSlotRangeText = computed(() => {
+  const toText = (minutes: number) => `${pad2(Math.floor(minutes / 60))}:${pad2(minutes % 60)}`
+  return `${toText(pickupSlotRange.value.startMinutes)} - ${toText(pickupSlotRange.value.endMinutes + PICKUP_SLOT_STEP_MINUTES)}`
+})
+
 const pickupWindowHours = computed(() => {
   const configuredHours = clientCatalogStore.storefront.pickupWindowHours
   return typeof configuredHours === 'number' && configuredHours > 0 ? configuredHours : null
@@ -82,16 +113,17 @@ const pickupWindowHours = computed(() => {
 const pickupWindowEndMs = computed(() => (
   pickupClock.value + (pickupWindowHours.value ?? PICKUP_DEFAULT_WINDOW_HOURS) * 60 * 60 * 1000
 ))
-const pickupWindowHint = computed(() => (
-  pickupWindowHours.value
+const pickupWindowHint = computed(() => {
+  const windowText = pickupWindowHours.value
     ? `请在下单后 ${pickupWindowHours.value} 小时内到店取货，超时未取将自动取消`
     : '可选择未来 7 天内的到店时间'
-))
+  return `${windowText}；可选时段为营业时间 ${pickupSlotRangeText.value}`
+})
 
 const buildPickupSlots = (dateKey: string) => {
   const earliestMs = pickupClock.value + PICKUP_LEAD_MINUTES * 60 * 1000
   const slots: Array<{ value: string; label: string }> = []
-  for (let minutes = PICKUP_SLOT_START_MINUTES; minutes <= PICKUP_SLOT_END_MINUTES; minutes += PICKUP_SLOT_STEP_MINUTES) {
+  for (let minutes = pickupSlotRange.value.startMinutes; minutes <= pickupSlotRange.value.endMinutes; minutes += PICKUP_SLOT_STEP_MINUTES) {
     const slotDate = buildPickupDate(dateKey, minutes)
     const slotMs = slotDate.getTime()
     if (slotMs < earliestMs || slotMs > pickupWindowEndMs.value) {
@@ -612,22 +644,20 @@ const handleSubmit = async () => {
             </div>
             <p class="mt-1 text-xs text-slate-500">{{ pickupWindowHint }}</p>
 
-            <div v-if="pickupDateOptions.length" class="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-4">
-              <button
+            <div v-if="pickupDateOptions.length" class="pickup-date-grid mt-3 grid grid-cols-3 gap-2 sm:grid-cols-4">
+              <el-button
                 v-for="option in pickupDateOptions"
                 :key="option.key"
-                type="button"
-                class="rounded-[0.9rem] border px-2 py-2 text-center transition"
-                :class="
-                  pickupDateKey === option.key
-                    ? 'border-teal-300 bg-teal-50 text-teal-700'
-                    : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
-                "
+                class="pickup-date-option"
+                :type="pickupDateKey === option.key ? 'primary' : 'default'"
+                plain
                 @click="selectPickupDate(option.key)"
               >
-                <span class="block text-sm font-medium">{{ option.label }}</span>
-                <span class="mt-0.5 block text-[11px] text-slate-400">{{ option.dateText }}</span>
-              </button>
+                <span class="flex flex-col items-center leading-tight">
+                  <span class="text-sm font-medium">{{ option.label }}</span>
+                  <span class="mt-0.5 text-[11px] opacity-70">{{ option.dateText }}</span>
+                </span>
+              </el-button>
             </div>
 
             <el-select
@@ -715,5 +745,17 @@ const handleSubmit = async () => {
 <style scoped>
 .pb-safe {
   padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+}
+
+/* 取货日期按钮要在栅格里等宽并容纳两行文案：Element Plus 默认固定行高、相邻按钮还带左外边距，会撑破栅格。 */
+.pickup-date-grid :deep(.el-button) {
+  width: 100%;
+  height: auto;
+  padding: 0.5rem 0.5rem;
+  border-radius: 0.9rem;
+}
+
+.pickup-date-grid :deep(.el-button + .el-button) {
+  margin-left: 0;
 }
 </style>
