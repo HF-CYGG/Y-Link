@@ -377,14 +377,15 @@ export const useClientCartStore = defineStore('client-cart', () => {
     persist()
   }
 
-  // 手动输入数量：空值、非数字或小于 1 的输入不写入购物车，避免 NaN 落入缓存或输入 0 被当成删除；
+  // 手动输入数量：空值、非数字、小数或小于 1 的输入不写入购物车，避免 NaN 落入缓存或输入 0 被当成删除；
+  // 小数一律拒绝而不是向下取整：提示文案要求“大于 0 的整数”，静默取整会让用户以为 2.7 这类输入被原样接受。
   // 合法值统一交给 updateQty，复用“可预订库存 + 单人限购”上限与超限提示，不另立一套校验口径。
   const setQtyFromInput = (productId: string, qty: number | null) => {
-    if (qty === null || !Number.isFinite(qty) || Math.floor(qty) < 1) {
+    if (qty === null || !Number.isInteger(qty) || qty < 1) {
       showAppWarning('请输入大于 0 的整数数量')
       return
     }
-    updateQty(productId, Math.floor(qty))
+    updateQty(productId, qty)
   }
 
   const incrementQty = (productId: string, delta = 1) => {

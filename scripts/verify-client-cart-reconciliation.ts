@@ -367,20 +367,28 @@ manualQtyCart.setQtyFromInput('sku-manual', 3)
 assert.equal(manualQtyCart.items[0]?.qty, 3, '手动输入可购范围内的数量应直接生效')
 manualQtyCart.setQtyFromInput('sku-manual', 99)
 assert.equal(manualQtyCart.items[0]?.qty, 5, '手动输入超出可预订库存时必须按上限收口，不能绕过库存限制')
+// 小数必须按非法输入拒绝：输入框不再逐字过滤非数字字符，“2.7”会原样送到这里，静默取整与提示文案不符。
 manualQtyCart.setQtyFromInput('sku-manual', 2.7)
-assert.equal(manualQtyCart.items[0]?.qty, 2, '手动输入小数时应向下取整为合法件数')
+assert.equal(manualQtyCart.items[0]?.qty, 5, '手动输入小数应按非法输入拒绝并保留原数量')
 manualQtyCart.setQtyFromInput('sku-manual', 0)
 assert.equal(manualQtyCart.items.length, 1, '手动输入 0 不得被当成删除商品')
-assert.equal(manualQtyCart.items[0]?.qty, 2, '手动输入 0 时应保留原数量')
+assert.equal(manualQtyCart.items[0]?.qty, 5, '手动输入 0 时应保留原数量')
 manualQtyCart.setQtyFromInput('sku-manual', null)
 manualQtyCart.setQtyFromInput('sku-manual', Number.NaN)
-assert.equal(manualQtyCart.items[0]?.qty, 2, '空值或非数字输入不得把数量写成 NaN')
-assert.equal(createCart('client-manual-qty').items[0]?.qty, 2, '手动输入后的合法数量应正常持久化恢复')
+assert.equal(manualQtyCart.items[0]?.qty, 5, '空值或非数字输入不得把数量写成 NaN')
+assert.equal(createCart('client-manual-qty').items[0]?.qty, 5, '手动输入后的合法数量应正常持久化恢复')
 
 const limitedQtyCart = createCart('client-manual-limit')
 const limitedQtyProduct = { ...createProduct({ id: 'product-limit', skuId: 'sku-limit', availableStock: 10 }), limitPerUser: 3 }
 limitedQtyCart.addProduct(limitedQtyProduct, 1, limitedQtyProduct.skus?.[0] ?? null)
 limitedQtyCart.setQtyFromInput('sku-limit', 8)
 assert.equal(limitedQtyCart.items[0]?.qty, 3, '手动输入超出单人限购时必须按限购上限收口')
+
+// 后端商品库存上限 999999999、单人限购上限 999999，手动输入不得被输入框长度卡在四位以内。
+const largeQtyCart = createCart('client-manual-large')
+const largeQtyProduct = createProduct({ id: 'product-large', skuId: 'sku-large', availableStock: 120000 })
+largeQtyCart.addProduct(largeQtyProduct, 1, largeQtyProduct.skus?.[0] ?? null)
+largeQtyCart.setQtyFromInput('sku-large', 100000)
+assert.equal(largeQtyCart.items[0]?.qty, 100000, '库存允许时必须支持录入五位以上的合法数量')
 
 console.log('[verify:client-cart-reconciliation] 购物车目录对账及存储故障降级回归验证通过')

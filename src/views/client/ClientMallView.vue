@@ -807,11 +807,12 @@ const changeDetailQty = (delta: number) => {
 }
 
 // 详情数量手动输入：非法值保留原数量并提示，超出可购上限时按上限收敛，提示口径与加减按钮一致。
+// 小数按非法输入直接拒绝而不是向下取整：提示文案写的是“大于 0 的整数”，静默取整会让用户以为输入被原样接受。
 const commitDetailQty = (value: number | null) => {
   if (!detailProduct.value) {
     return
   }
-  if (value === null || !Number.isFinite(value) || Math.floor(value) < 1) {
+  if (value === null || !Number.isInteger(value) || value < 1) {
     showAppWarning('请输入大于 0 的整数数量')
     return
   }
@@ -821,7 +822,7 @@ const commitDetailQty = (value: number | null) => {
     detailQty.value = Math.max(1, maxQty)
     return
   }
-  detailQty.value = Math.floor(value)
+  detailQty.value = value
 }
 
 const selectDetailSku = (sku: O2oMallSku) => {
