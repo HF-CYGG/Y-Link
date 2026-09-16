@@ -5,7 +5,8 @@
  * - 报表字段先按类型声明白名单，查询和导出都只能消费白名单字段；
  * - 库存表读取商品当前库存快照，销售类报表基于出库主单和明细联表生成；
  * - Excel 导出复用同一套行数据与字段定义，保证页面预览和导出文件口径一致；
- * - 销售明细类报表（标签销售、金蝶、散客）分页预览额外返回 summary，按同一筛选条件对全部命中明细做 SUM，不受分页影响。
+ * - 销售明细类报表（标签销售、金蝶、散客）分页预览额外返回 summary，按同一筛选条件对全部命中明细做 SUM，不受分页影响；
+ * - 库存行额外保留 productId 元数据，listInventorySkus 返回单商品全部 SKU 明细，合计与商品行共用 summarizeProductInventory。
  * 维护说明：
  * - 新增报表类型时必须先补字段定义，再补查询分支和导出标题；
  * - 财务类报表默认排除已软删除单据，出库流水表保留删除状态用于追溯；
@@ -24,7 +25,12 @@ import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity
 import { RelProductTag } from '../entities/rel-product-tag.entity.js'
 import type { PaginationResult } from '../types/api.js'
 import { BizError } from '../utils/errors.js'
-import { summarizeProductInventory } from '../utils/product-inventory-summary.js'
+import {
+  isDatabaseFlagEnabled,
+  normalizeSkuInventoryQuantity,
+  summarizeProductInventory,
+  type ProductInventorySummary,
+} from '../utils/product-inventory-summary.js'
 
 export const REPORT_TYPES = ['inventory', 'tag-sales', 'kingdee', 'walkin', 'outbound-flow'] as const
 export type ReportType = (typeof REPORT_TYPES)[number]
@@ -62,6 +68,32 @@ export interface ReportQueryResult extends PaginationResult<ReportRow> {
   summary?: ReportSalesSummary
   /** 仅供流式导出内部使用，普通分页 API 不返回。 */
   nextCursor?: string | null
+}
+
+/** 库存一览表单个规格（SKU）的库存明细。 */
+export interface ReportInventorySkuDetail {
+  skuId: string
+  skuCode: string
+  specText: string
+  currentStock: number
+  preOrderedStock: number
+  availableStock: number
+  isActive: boolean
+  isCurrent: boolean
+  /** 是否参与库存一览表的商品行合计：仅当前且启用的 SKU 计入。 */
+  countedInSummary: boolean
+}
+
+/** 库存一览表商品行的规格明细：summary 与商品行合计同源计算，便于逐项核对。 */
+export interface ReportInventorySkuDetailResult {
+  productId: string
+  productCode: string
+  productName: string
+  productStatus: string
+  summary: ProductInventorySummary
+  /** 商品没有任何当前 SKU 时，商品行合计回退商品主表库存，此时规格明细之和与合计不相等。 */
+  fallbackToProductStock: boolean
+  skus: ReportInventorySkuDetail[]
 }
 
 export interface ReportExportResult {
@@ -500,6 +532,8 @@ export class ReportService {
       const tags = tagMap.get(String(product.id)) ?? []
       const inventory = summarizeProductInventory(product, skuMap.get(String(product.id)) ?? [])
       return {
+        // productId 不在字段白名单内，仅作为行元数据供报表中心打开规格明细，由 buildResult 在字段投影后保留。
+        productId: String(product.id),
         category: tags.length > 0 ? tags.join('、') : '未分类',
         productCode: product.productCode,
         productName: product.productName,
@@ -516,6 +550,57 @@ export class ReportService {
       total,
       keyset ? String(products.at(-1)?.id ?? '') || null : undefined,
     )
+  }
+
+  /**
+   * 库存一览表规格明细：返回商品下全部 SKU（含停用与历史规格），并用与商品行相同的 summarizeProductInventory 计算合计。
+   * 排序为“当前启用 → 当前停用 → 历史规格”，同组内按规格排序号与主键稳定排列。
+   */
+  async listInventorySkus(productId: string): Promise<ReportInventorySkuDetailResult> {
+    const normalizedProductId = String(productId ?? '').trim()
+    if (!normalizedProductId || normalizedProductId.length > 64) {
+      throw new BizError('商品标识不正确', 400)
+    }
+    const product = await AppDataSource.getRepository(BaseProduct).findOneBy({ id: normalizedProductId })
+    if (!product) {
+      throw new BizError('商品不存在或已被删除', 404)
+    }
+    const skus = await AppDataSource.getRepository(BaseProductSku).find({
+      where: { productId: normalizedProductId },
+      order: { sortOrder: 'ASC', id: 'ASC' },
+    })
+    const resolveSkuRank = (sku: BaseProductSku) => {
+      if (!isDatabaseFlagEnabled(sku.isCurrent)) return 2
+      return isDatabaseFlagEnabled(sku.isActive) ? 0 : 1
+    }
+    const skuDetails = [...skus]
+      .sort((left, right) => resolveSkuRank(left) - resolveSkuRank(right))
+      .map((sku): ReportInventorySkuDetail => {
+        const currentStock = normalizeSkuInventoryQuantity(sku.currentStock)
+        const preOrderedStock = normalizeSkuInventoryQuantity(sku.preOrderedStock)
+        const isActive = isDatabaseFlagEnabled(sku.isActive)
+        const isCurrent = isDatabaseFlagEnabled(sku.isCurrent)
+        return {
+          skuId: String(sku.id),
+          skuCode: normalizeText(sku.skuCode),
+          specText: normalizeText(sku.specText, '默认规格'),
+          currentStock,
+          preOrderedStock,
+          availableStock: Math.max(0, currentStock - preOrderedStock),
+          isActive,
+          isCurrent,
+          countedInSummary: isActive && isCurrent,
+        }
+      })
+    return {
+      productId: String(product.id),
+      productCode: product.productCode,
+      productName: product.productName,
+      productStatus: product.isActive ? '启用' : '停用',
+      summary: summarizeProductInventory(product, skus),
+      fallbackToProductStock: !skuDetails.some((sku) => sku.isCurrent),
+      skus: skuDetails,
+    }
   }
 
   private async queryOrderItemReport(
@@ -712,7 +797,14 @@ export class ReportService {
       total,
       fields: query.fields,
       availableFields: this.getFieldDefinitions(type),
-      list: rows.map((row) => projectSelectedRow(row, query.fields)),
+      list: rows.map((row) => {
+        const projectedRow = projectSelectedRow(row, query.fields)
+        // 库存行无论用户勾选哪些字段都保留商品标识，否则取消勾选商品编码后无法打开规格明细；Excel 只按字段写列，不受影响。
+        if (type === 'inventory' && row.productId) {
+          projectedRow.productId = row.productId
+        }
+        return projectedRow
+      }),
     }
     if (nextCursor !== undefined) {
       result.nextCursor = nextCursor
