@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 文件说明：backend/scripts/o2o-preorder-verify.ts
  * 文件职责：验证 O2O 预订的注册、下单、撤回、超时取消、核销与备份导出链路。
  * 实现逻辑：
@@ -142,6 +142,14 @@ const expectBizError = async (executor: () => Promise<unknown>, expectedMessage:
   }
 }
 
+// Issue #96：部门单必须携带到店取货时间。脚本统一使用同一个固定时间提交，
+// 保证同一 clientRequestId 的幂等重试载荷完全一致，不会被服务端判为“同键不同参数”。
+const SCRIPT_PICKUP_AT = new Date(Date.now() + 30 * 60 * 1000).toISOString()
+const submitPreorderWithPickup = (
+  auth: ClientAuthContext,
+  input: Parameters<typeof o2oPreorderService.submit>[1],
+) => o2oPreorderService.submit(auth, { pickupAt: SCRIPT_PICKUP_AT, ...input })
+
 const assertPreorderVerifyDetail = (verifyResult: O2oVerifyResultView): O2oPreorderDetailView => {
   // 详细注释：核销接口已升级为“预订单/退货单”联合返回，
   // 当前脚本这里只接受预订单核销结果，因此先做显式类型收窄，
@@ -237,7 +245,7 @@ const run = async () => {
     invoke: (order: O2oPreorderDetailView['order']) => Promise<unknown>
   }) => {
     const productBeforeSubmit = await productRepo.findOneByOrFail({ id: product.id })
-    const preorder = await o2oPreorderService.submit(clientAuth, {
+    const preorder = await submitPreorderWithPickup(clientAuth, {
       clientRequestId: input.requestId,
       items: [{ productId: product.id, qty: 1 }],
       remark: input.remark,
@@ -277,7 +285,46 @@ const run = async () => {
     },
   )
 
-  const departmentOwnedResult = await o2oPreorderService.submit(clientAuth, {
+  // Issue #96：部门单到店取货时间必填，且必须落在“当前时间 ~ 自动取消时间”窗口内。
+  const pickupRules = await systemConfigService.getO2oRuleConfigs()
+  const productBeforePickupRejects = await productRepo.findOneByOrFail({ id: product.id })
+  await expectBizError(() => o2oPreorderService.submit(clientAuth, {
+    clientRequestId: 'o2o-verify-pickup-missing-01',
+    items: [{ productId: product.id, qty: 1 }],
+    isSystemApplied: false,
+    pickupContact: '脚本提货人-缺少取货时间',
+  }), '请选择到店取货时间')
+  await expectBizError(() => o2oPreorderService.submit(clientAuth, {
+    clientRequestId: 'o2o-verify-pickup-past-01',
+    items: [{ productId: product.id, qty: 1 }],
+    isSystemApplied: false,
+    pickupContact: '脚本提货人-过去取货时间',
+    pickupAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+  }), '到店取货时间不能早于当前时间')
+  const beyondWindowPickupAt = pickupRules.autoCancelEnabled
+    ? new Date(Date.now() + (pickupRules.autoCancelHours + 1) * 60 * 60 * 1000)
+    : new Date(Date.now() + 31 * 24 * 60 * 60 * 1000)
+  await expectBizError(() => o2oPreorderService.submit(clientAuth, {
+    clientRequestId: 'o2o-verify-pickup-beyond-01',
+    items: [{ productId: product.id, qty: 1 }],
+    isSystemApplied: false,
+    pickupContact: '脚本提货人-超出可选范围',
+    pickupAt: beyondWindowPickupAt.toISOString(),
+  }), '到店取货时间不能晚于')
+  const productAfterPickupRejects = await productRepo.findOneByOrFail({ id: product.id })
+  assert.equal(
+    productAfterPickupRejects.preOrderedStock,
+    productBeforePickupRejects.preOrderedStock,
+    '到店取货时间校验失败必须整单回滚，不得占用库存',
+  )
+  assert.equal(
+    await preorderRepo.count({ where: { clientRequestId: 'o2o-verify-pickup-missing-01' } }),
+    0,
+    '缺少到店取货时间的请求不得落库',
+  )
+  log('部门单到店取货时间必填与可选范围校验通过')
+
+  const departmentOwnedResult = await submitPreorderWithPickup(clientAuth, {
     clientRequestId: 'o2o-verify-department-owned-01',
     items: [{ productId: product.id, qty: 1 }],
     remark: '部门账号归属强制判定验证',
@@ -288,10 +335,15 @@ const run = async () => {
   assert.equal(departmentOwnedResult.order.departmentNameSnapshot, '脚本部门-A')
   assert.ok(departmentOwnedResult.order.staffNoSnapshot)
   assert.equal(departmentOwnedResult.order.pickupContact, expectedDepartmentPickupContact)
+  assert.equal(
+    departmentOwnedResult.order.pickupAt?.toISOString(),
+    SCRIPT_PICKUP_AT,
+    '部门单必须原样保存客户端选择的到店取货时间',
+  )
   await o2oPreorderService.cancelMyOrder(clientAuth, departmentOwnedResult.order.id)
   log('服务端会按部门账号强制判定订单归属通过')
 
-  const departmentSnapshotPreorder = await o2oPreorderService.submit(clientAuth, {
+  const departmentSnapshotPreorder = await submitPreorderWithPickup(clientAuth, {
     clientRequestId: 'o2o-verify-department-snapshot-01',
     items: [{ productId: product.id, qty: 1 }],
     remark: '部门快照固化验证',
@@ -330,6 +382,8 @@ const run = async () => {
     remark: '自动化验证',
     isSystemApplied: false,
     pickupContact: '脚本提货人-A',
+    // 并发幂等下单必须逐次提交完全相同的载荷，因此取货时间也使用脚本级固定值。
+    pickupAt: SCRIPT_PICKUP_AT,
   }
   const idempotentSubmitResults = await Promise.all(
     Array.from({ length: 10 }, () => o2oPreorderService.submit(clientAuth, idempotentSubmitPayload)),
@@ -405,7 +459,7 @@ const run = async () => {
   assert.equal(legacyUnknownCancellation.order.statusReport.cancellationSource, null)
   log('历史取消记录保持未知来源且不按当前超时时间误判')
 
-  const timeoutPreorder = await o2oPreorderService.submit(clientAuth, {
+  const timeoutPreorder = await submitPreorderWithPickup(clientAuth, {
     clientRequestId: 'o2o-verify-timeout-cancel-001',
     items: [{ productId: product.id, qty: 1 }],
     remark: '超时取消验证',
@@ -439,7 +493,7 @@ const run = async () => {
 
   // RED：撤回请求在事务内发现已超时时，接口虽应返回 409，
   // 但超时取消和库存释放必须先提交，不能被随后抛出的 409 一并回滚。
-  const timeoutRacePreorder = await o2oPreorderService.submit(clientAuth, {
+  const timeoutRacePreorder = await submitPreorderWithPickup(clientAuth, {
     clientRequestId: 'o2o-verify-timeout-race-001',
     items: [{ productId: product.id, qty: 1 }],
     remark: '超时撤回竞态验证',
@@ -457,7 +511,7 @@ const run = async () => {
   }), 1)
   log('超时撤回竞态会提交系统取消并仅释放一次库存')
 
-  const adminTimeoutRacePreorder = await o2oPreorderService.submit(clientAuth, {
+  const adminTimeoutRacePreorder = await submitPreorderWithPickup(clientAuth, {
     clientRequestId: 'o2o-verify-admin-timeout-race-001', items: [{ productId: product.id, qty: 1 }], remark: '管理员超时竞态验证', isSystemApplied: false, pickupContact: '脚本提货人-管理员超时竞态',
   })
   await preorderRepo.update({ id: adminTimeoutRacePreorder.order.id }, { timeoutAt: new Date(Date.now() - 60 * 1000) })
@@ -531,7 +585,7 @@ const run = async () => {
 
   // RED：管理员取消必须走独立的后台语义，持久化来源、面向用户的原因与取消时间，
   // 同时复用状态 CAS，只释放预占库存，并留下不暴露给客户端的操作审计。
-  const adminCancelPreorder = await o2oPreorderService.submit(clientAuth, {
+  const adminCancelPreorder = await submitPreorderWithPickup(clientAuth, {
     clientRequestId: 'o2o-verify-admin-cancel-001',
     items: [{ productId: product.id, qty: 1 }],
     remark: '管理员取消验证',
@@ -579,21 +633,21 @@ const run = async () => {
 
   // RED：批量永久删除只允许已取消且无业务依赖的订单；每项独立结算，
   // 混合批次不能重改库存，重复执行也必须保持幂等可审计。
-  const batchPurgeOne = await o2oPreorderService.submit(clientAuth, {
+  const batchPurgeOne = await submitPreorderWithPickup(clientAuth, {
     clientRequestId: 'o2o-verify-batch-purge-001', items: [{ productId: product.id, qty: 1 }], remark: '批量删除一', isSystemApplied: false, pickupContact: '脚本提货人-批删一',
   })
-  const batchPurgeTwo = await o2oPreorderService.submit(clientAuth, {
+  const batchPurgeTwo = await submitPreorderWithPickup(clientAuth, {
     clientRequestId: 'o2o-verify-batch-purge-002', items: [{ productId: product.id, qty: 1 }], remark: '批量删除二', isSystemApplied: false, pickupContact: '脚本提货人-批删二',
   })
-  const batchPurgeMismatch = await o2oPreorderService.submit(clientAuth, {
+  const batchPurgeMismatch = await submitPreorderWithPickup(clientAuth, {
     clientRequestId: 'o2o-verify-batch-purge-003', items: [{ productId: product.id, qty: 1 }], remark: '批量删除确认错误', isSystemApplied: false, pickupContact: '脚本提货人-批删确认',
   })
-  const batchPurgePending = await o2oPreorderService.submit(clientAuth, {
+  const batchPurgePending = await submitPreorderWithPickup(clientAuth, {
     clientRequestId: 'o2o-verify-batch-purge-004', items: [{ productId: product.id, qty: 1 }], remark: '批量删除跨状态', isSystemApplied: false, pickupContact: '脚本提货人-批删跨状态',
   })
   // RED：已取消订单即便关联正式出库单，也不能被批量永久删除，避免跨单据数据被误删。
   const batchDependencyClientAuth = await registerAndLoginClient(Date.now() + 2)
-  const batchPurgeOutboundLinked = await o2oPreorderService.submit(batchDependencyClientAuth, {
+  const batchPurgeOutboundLinked = await submitPreorderWithPickup(batchDependencyClientAuth, {
     clientRequestId: 'o2o-verify-batch-purge-outbound-001', items: [{ productId: product.id, qty: 1 }], remark: '批量删除出库依赖', isSystemApplied: false, pickupContact: '脚本提货人-批删出库依赖',
   })
   await o2oPreorderService.cancelMyOrder(clientAuth, batchPurgeOne.order.id)
@@ -639,7 +693,7 @@ const run = async () => {
 
   // 汇总审计是批次辅助索引。模拟其底层写入失败时，已经逐单提交的删除结果
   // 仍必须返回给客户端，避免重试后只能得到“订单不存在”而丢失首次结果。
-  const batchSummaryAuditFaultOrder = await o2oPreorderService.submit(clientAuth, {
+  const batchSummaryAuditFaultOrder = await submitPreorderWithPickup(clientAuth, {
     clientRequestId: 'o2o-verify-batch-summary-audit-fault-001',
     items: [{ productId: product.id, qty: 1 }],
     remark: '批量汇总审计故障注入',
@@ -741,7 +795,7 @@ const run = async () => {
   )
   log('部门订单下单快照会稳定继承到正式出库单通过')
 
-  const verifiedPreorder = await o2oPreorderService.submit(clientAuth, {
+  const verifiedPreorder = await submitPreorderWithPickup(clientAuth, {
     clientRequestId: 'o2o-verify-completed-order-001',
     items: [{ productId: product.id, qty: 2 }],
     remark: '核销后不可撤回验证',

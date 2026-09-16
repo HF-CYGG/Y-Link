@@ -22,6 +22,8 @@ export interface ClientPreorderSubmitIntentInput {
   clientOrderType: O2oClientOrderType
   isSystemApplied: boolean
   pickupContact: string
+  /** 部门单到店取货时间；改变取货时间属于不同下单意图，不得复用结果未知订单的请求键。 */
+  pickupAt?: string | null
   remark?: string
   items: ClientPreorderSubmitItemInput[]
 }
@@ -84,6 +86,8 @@ export const buildClientPreorderSubmitIntentKey = (input: ClientPreorderSubmitIn
     pickupContact: normalizeText(input.pickupContact),
     remark: normalizeRemark(input.remark),
     items: normalizedItems,
+    // 仅在携带取货时间时写入指纹，未携带时指纹与旧版本一致，不影响已存在的散客单提交锁。
+    ...(input.pickupAt ? { pickupAt: input.pickupAt } : {}),
   })
 }
 

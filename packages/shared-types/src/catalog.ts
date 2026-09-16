@@ -41,6 +41,8 @@ export interface O2oMallProduct {
 export interface O2oMallStorefrontConfig {
   businessHoursText: string
   mallAnnouncementText: string
+  /** 部门单到店取货时间可选窗口（小时）：开启自动取消时等于自动取消时长，未开启或旧快照为 null/缺省。 */
+  pickupWindowHours?: number | null
 }
 
 export interface O2oMallProductsResult {

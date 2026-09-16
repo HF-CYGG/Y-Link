@@ -19,6 +19,7 @@ import {
   persistClientCatalogBrowseContextSnapshot,
   persistClientCatalogDataSnapshot,
   persistClientCatalogStorefrontSnapshot,
+  normalizePickupWindowHours,
   readPersistedClientCatalogSnapshot,
 } from '@/utils/client-catalog-storage'
 
@@ -33,6 +34,7 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
   const storefront = ref<O2oMallStorefrontConfig>({
     businessHoursText: '10:00 - 22:00',
     mallAnnouncementText: '',
+    pickupWindowHours: null,
   })
   const activeCategoryKey = ref('all')
   const keyword = ref('')
@@ -98,6 +100,7 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
     storefront.value = {
       businessHoursText: '10:00 - 22:00',
       mallAnnouncementText: '',
+      pickupWindowHours: null,
     }
     activeCategoryKey.value = 'all'
     keyword.value = ''
@@ -154,6 +157,7 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
         {
           businessHoursText: storefront.value.businessHoursText || '10:00 - 22:00',
           mallAnnouncementText: storefront.value.mallAnnouncementText || '',
+          pickupWindowHours: normalizePickupWindowHours(storefront.value.pickupWindowHours),
         },
         { touchUpdatedAt: true, markComplete: true },
       )
@@ -164,6 +168,7 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
       {
         businessHoursText: nextCatalog.storefront.businessHoursText || '10:00 - 22:00',
         mallAnnouncementText: nextCatalog.storefront.mallAnnouncementText || '',
+        pickupWindowHours: normalizePickupWindowHours(nextCatalog.storefront.pickupWindowHours),
       },
       { touchUpdatedAt: true, markComplete: true },
     )
@@ -173,6 +178,7 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
     const normalizedStorefront = {
       businessHoursText: nextStorefront.businessHoursText || '10:00 - 22:00',
       mallAnnouncementText: nextStorefront.mallAnnouncementText || '',
+      pickupWindowHours: normalizePickupWindowHours(nextStorefront.pickupWindowHours),
     }
     storefront.value = normalizedStorefront
     // 公告刷新只写独立小快照，避免重新序列化整份商品/SKU 目录。

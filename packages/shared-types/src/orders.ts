@@ -146,6 +146,8 @@ export interface O2oPreorderSummary {
   latestReturnRequest: O2oLatestReturnRequestSummary | null
   totalQty: number
   timeoutAt: string | null
+  /** 部门单到店取货时间；散客单与历史订单为 null，旧缓存可能缺省。 */
+  pickupAt?: string | null
   createdAt: string
 }
 
@@ -193,6 +195,8 @@ export interface O2oPreorderDetailOrder {
   hasCustomerOrder: boolean
   isSystemApplied: boolean
   pickupContact: string | null
+  /** 部门单到店取货时间；散客单与历史订单为 null。 */
+  pickupAt?: string | null
   merchantMessage: string | null
   clientOrderType: O2oClientOrderType
   departmentNameSnapshot: string | null
@@ -239,6 +243,8 @@ export interface SubmitO2oPreorderPayload {
   clientRequestId: string
   isSystemApplied: boolean
   pickupContact: string
+  /** 到店取货时间（带时区 ISO 字符串）：部门单必填，散客单不传或传 null。 */
+  pickupAt?: string | null
   remark?: string
   items: Array<{
     productId: string | number
