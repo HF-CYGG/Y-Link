@@ -242,7 +242,11 @@ const loadTags = async () => {
 
 /** 最近一次成功取数的时间：库存为实时快照，展示取数时刻便于核对是否已包含最新出入库。 */
 const lastLoadedAt = ref<Date | null>(null)
-/** 标签销售汇总表的全量汇总，来自后端 summary；切换报表类型时清空，避免短暂展示上一类报表的数值。 */
+/**
+ * 标签销售汇总表的全量汇总，来自后端 summary。
+ * 切换报表类型与每次发起查询时都先清空：筛选条件一改，条件摘要立刻更新，若汇总仍留着上一组条件的数值，
+ * 加载期间和请求失败后都会被误读成新条件的结果，所以宁可先显示占位符。
+ */
 const salesSummary = ref<ReportSalesSummary | null>(null)
 const showSalesSummary = computed(() => reportType.value === 'tag-sales')
 
@@ -259,6 +263,8 @@ const loadData = async () => {
   }
 
   listState.loading = true
+  // 新请求一发出就丢弃旧汇总：加载中与失败时汇总卡显示“-”，不会把上一组筛选条件的数值挂在新条件下。
+  salesSummary.value = null
   await reportRequest.runLatest({
     executor: (signal) => getReportData(reportType.value, buildQueryParams(), { signal }),
     onSuccess: (result) => {
