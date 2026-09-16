@@ -4,15 +4,18 @@
  * 实现逻辑：
  * - 报表字段先按类型声明白名单，查询和导出都只能消费白名单字段；
  * - 库存表读取商品当前库存快照，销售类报表基于出库主单和明细联表生成；
- * - Excel 导出复用同一套行数据与字段定义，保证页面预览和导出文件口径一致。
+ * - Excel 导出复用同一套行数据与字段定义，保证页面预览和导出文件口径一致；
+ * - 销售明细类报表（标签销售、金蝶、散客）分页预览额外返回 summary，按同一筛选条件对全部命中明细做 SUM，不受分页影响。
  * 维护说明：
  * - 新增报表类型时必须先补字段定义，再补查询分支和导出标题；
- * - 财务类报表默认排除已软删除单据，出库流水表保留删除状态用于追溯。
+ * - 财务类报表默认排除已软删除单据，出库流水表保留删除状态用于追溯；
+ * - summary 只在普通分页查询计算，流式导出（主键游标）不计算，避免每个批次重复聚合；
+ * - 联表 + getRawMany 的查询必须用 offset/limit 分页，skip/take 在存在 join 时不会生成 SQL 分页子句。
  */
 
 import ExcelJS from 'exceljs'
 import type { Writable } from 'node:stream'
-import { In } from 'typeorm'
+import { In, type SelectQueryBuilder } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { BaseProductSku } from '../entities/base-product-sku.entity.js'
@@ -44,11 +47,19 @@ export interface ReportQueryInput {
   fields?: string[]
 }
 
+/** 销售明细类报表的全量汇总：覆盖当前筛选条件下全部命中明细，数值统一保留两位小数字符串。 */
+export interface ReportSalesSummary {
+  totalQty: string
+  totalAmount: string
+}
+
 export interface ReportQueryResult extends PaginationResult<ReportRow> {
   type: ReportType
   title: string
   fields: ReportFieldDefinition[]
   availableFields: ReportFieldDefinition[]
+  /** 仅销售明细类报表的普通分页查询返回。 */
+  summary?: ReportSalesSummary
   /** 仅供流式导出内部使用，普通分页 API 不返回。 */
   nextCursor?: string | null
 }
@@ -108,6 +119,7 @@ interface OutboundFlowRaw {
 
 const MAX_PAGE_SIZE = 100
 const EXPORT_BATCH_SIZE = 500
+const EMPTY_SALES_SUMMARY: ReportSalesSummary = { totalQty: '0.00', totalAmount: '0.00' }
 const MAX_REPORT_EXPORTS_PER_ACTOR = 1
 const MAX_REPORT_EXPORTS_PER_PROCESS = 4
 
@@ -514,7 +526,7 @@ export class ReportService {
   ): Promise<ReportQueryResult> {
     const productIdsByTags = await this.resolveProductIdsByTagIds(query.tagIds)
     if (query.tagIds.length > 0 && productIdsByTags.length === 0) {
-      return this.buildResult(type, query, [], 0)
+      return this.buildResult(type, query, [], 0, keyset ? null : undefined, keyset ? undefined : EMPTY_SALES_SUMMARY)
     }
 
     const baseQb = AppDataSource.getRepository(BizOutboundOrderItem)
@@ -559,6 +571,10 @@ export class ReportService {
     }
 
     const total = keyset ? 0 : (knownTotal ?? await baseQb.clone().getCount())
+    // 汇总必须在追加排序与分页前基于同一筛选条件聚合，保证总数量/总金额覆盖全部命中明细而非当前页。
+    const summary = keyset ? undefined : await this.querySalesSummary(baseQb)
+    // 明细查询联表了出库主单：TypeORM 在存在 join 时不会把 skip/take 翻译成 SQL 的 OFFSET/LIMIT（只在 getMany 走去重子查询），
+    // getRawMany 下会静默返回全部命中行，因此这里必须使用 offset/limit 才能真正分页，流式导出的批次大小同理。
     if (keyset) {
       baseQb.orderBy('item.id', 'DESC')
     } else {
@@ -566,9 +582,9 @@ export class ReportService {
         .orderBy('order.createdAt', 'DESC')
         .addOrderBy('order.id', 'DESC')
         .addOrderBy('item.lineNo', 'ASC')
-        .skip((query.page - 1) * query.pageSize)
+        .offset((query.page - 1) * query.pageSize)
     }
-    const rawRows = await baseQb.take(query.pageSize).getRawMany<OrderItemReportRaw>()
+    const rawRows = await baseQb.limit(query.pageSize).getRawMany<OrderItemReportRaw>()
     const tagMap = await this.loadProductTagMap(rawRows.map((row) => String(row.productId ?? '').trim()).filter(Boolean))
     const rows = rawRows.map((row) => this.buildOrderItemReportRow(row, tagMap))
     return this.buildResult(
@@ -577,7 +593,21 @@ export class ReportService {
       rows,
       total,
       keyset ? String(rawRows.at(-1)?.rowId ?? '') || null : undefined,
+      summary,
     )
+  }
+
+  private async querySalesSummary(baseQb: SelectQueryBuilder<BizOutboundOrderItem>): Promise<ReportSalesSummary> {
+    // select() 会替换明细列，只保留聚合列；SQLite 返回 number、MySQL 返回 decimal 字符串，统一走 normalizeAmount 收口。
+    const raw = await baseQb
+      .clone()
+      .select('COALESCE(SUM(item.qty), 0)', 'totalQty')
+      .addSelect('COALESCE(SUM(item.lineAmount), 0)', 'totalAmount')
+      .getRawOne<{ totalQty: string | number | null, totalAmount: string | number | null }>()
+    return {
+      totalQty: normalizeNumberText(raw?.totalQty),
+      totalAmount: normalizeAmount(raw?.totalAmount),
+    }
   }
 
   private async queryOutboundFlow(
@@ -672,6 +702,7 @@ export class ReportService {
     rows: ReportRow[],
     total: number,
     nextCursor?: string | null,
+    summary?: ReportSalesSummary,
   ): ReportQueryResult {
     const result: ReportQueryResult = {
       type,
@@ -685,6 +716,9 @@ export class ReportService {
     }
     if (nextCursor !== undefined) {
       result.nextCursor = nextCursor
+    }
+    if (summary) {
+      result.summary = summary
     }
     return result
   }

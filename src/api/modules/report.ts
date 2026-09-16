@@ -3,7 +3,7 @@
  * 文件职责：封装报表中心五类报表的分页预览、字段定义与 Excel 导出接口。
  * 实现逻辑：
  * - 前端把字段与标签数组统一序列化为逗号分隔参数，兼容后端路由解析；
- * - 查询接口返回当前页数据、已选字段和可选字段，页面据此渲染动态表格；
+ * - 查询接口返回当前页数据、已选字段和可选字段，页面据此渲染动态表格；销售明细类报表额外返回全量汇总 summary；
  * - 导出接口返回 Blob 与文件名，由页面复用统一下载流程。
  * 维护说明：
  * - 新增报表类型时需要同步扩展 ReportType、页面字段配置和后端白名单；
@@ -35,11 +35,19 @@ export interface ReportQuery extends PaginationQueryInput {
   fields?: string[]
 }
 
+/** 销售明细类报表的全量汇总：覆盖当前筛选条件下全部命中明细，不受分页影响。 */
+export interface ReportSalesSummary {
+  totalQty: string
+  totalAmount: string
+}
+
 export interface ReportQueryResult extends PaginationResult<ReportRow> {
   type: ReportType
   title: string
   fields: ReportFieldDefinition[]
   availableFields: ReportFieldDefinition[]
+  /** 仅标签销售、金蝶、散客等销售明细类报表返回。 */
+  summary: ReportSalesSummary | null
 }
 
 const buildReportParams = (params: ReportQuery = {}) => {
@@ -64,6 +72,7 @@ export const getReportData = async (
     list: ReportRow[]
     fields: ReportFieldDefinition[]
     availableFields: ReportFieldDefinition[]
+    summary?: ReportSalesSummary
   }>({
     ...requestConfig,
     method: 'GET',
@@ -80,6 +89,7 @@ export const getReportData = async (
     records: result.list,
     fields: result.fields,
     availableFields: result.availableFields,
+    summary: result.summary ?? null,
   }
 }
 
