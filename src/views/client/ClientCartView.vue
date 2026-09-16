@@ -6,8 +6,9 @@
  * - 购物车页与商城内嵌购物车共用同一组件，通过 `standalone` 区分路由页与抽屉页模式；
  * - 去结算时统一沿用商城页口径，若用户尚未手动勾选，则自动勾选全部可结算商品再继续；
  * - 进入页面后会在后台静默同步一次最新商品目录，及时修正库存、限购与失效商品状态；
- * - 在路由跳转或抽屉切换前先进入短暂“处理中”状态，减少重复点击与“无响应”感知。
- * 维护说明：后续若继续扩展购物车入口，需要同步保持不同入口的勾选与反馈口径一致。
+ * - 在路由跳转或抽屉切换前先进入短暂“处理中”状态，减少重复点击与“无响应”感知；
+ * - 数量既可用加减按钮逐件调整，也可直接输入，手动输入统一走 store 的 setQtyFromInput 复用库存与限购上限。
+ * 维护说明：后续若继续扩展购物车入口，需要同步保持不同入口的勾选、数量输入与反馈口径一致。
  */
 
 import { computed, nextTick, onMounted, ref } from 'vue'
@@ -25,6 +26,7 @@ import pinia from '@/store/pinia'
 
 import { showAppSuccess, showAppWarning } from '@/utils/app-alert'
 import { resolveO2oPriceView } from '@/utils/o2o-price'
+import ClientQtyInput from './components/ClientQtyInput.vue'
 
 const props = defineProps<{
   standalone?: boolean
@@ -179,11 +181,11 @@ const handleBack = () => {
                 </div>
                 <div class="flex items-center justify-end gap-3 sm:w-auto w-full">
                   <button type="button" class="client-cart-qty-btn" @click="clientCartStore.incrementQty(resolveCartItemKey(item), -1)">-</button>
-                  <span class="min-w-8 text-center text-sm font-medium">
-                    <Transition name="cart-qty-pop" mode="out-in">
-                      <span :key="`drawer-qty-${resolveCartItemKey(item)}-${item.qty}`">{{ item.qty }}</span>
-                    </Transition>
-                  </span>
+                  <ClientQtyInput
+                    :model-value="item.qty"
+                    :aria-label="`${item.productName}数量`"
+                    @commit="clientCartStore.setQtyFromInput(resolveCartItemKey(item), $event)"
+                  />
                   <button type="button" class="client-cart-qty-btn" @click="clientCartStore.incrementQty(resolveCartItemKey(item), 1)">+</button>
                 </div>
               </div>
