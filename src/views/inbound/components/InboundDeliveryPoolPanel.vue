@@ -197,16 +197,12 @@ onBeforeUnmount(() => {
       </p>
 
       <div v-loading="listLoading" class="mt-3 space-y-2">
-        <button
+        <el-button
           v-for="order in records"
           :key="order.id"
-          type="button"
-          class="inbound-pool__item w-full rounded-xl border px-3 py-2.5 text-left transition"
-          :class="
-            activeOrderId === order.id
-              ? 'border-teal-300 bg-teal-50/70 dark:border-teal-700 dark:bg-teal-950/30'
-              : 'border-slate-200 bg-white hover:border-slate-300 dark:border-slate-700 dark:bg-slate-800'
-          "
+          class="inbound-pool__item"
+          :type="activeOrderId === order.id ? 'primary' : 'default'"
+          plain
           @click="loadDetail(order)"
         >
           <div class="flex items-center justify-between gap-2">
@@ -219,7 +215,7 @@ onBeforeUnmount(() => {
           <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
             预计送达：{{ formatDateTime(order.expectedArrivalAt) }} · 共 {{ Number(order.totalQty) }} 件
           </p>
-        </button>
+        </el-button>
         <div v-if="!listLoading && !records.length" class="rounded-xl border border-dashed border-slate-200 py-10 text-center text-sm text-slate-400 dark:border-slate-700">
           当前分栏暂无送货单
         </div>
@@ -356,7 +352,25 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* 送货单列表项用 el-button 承载整行点击：Element Plus 默认单行居中、固定行高且相邻按钮带左外边距，
+   这里改回整块左对齐的卡片形态，纵向间距仍由容器的 space-y 控制。 */
 .inbound-pool__item {
+  display: block;
+  width: 100%;
   min-width: 0;
+  height: auto;
+  padding: 0.625rem 0.75rem;
+  border-radius: 0.75rem;
+  text-align: left;
+  white-space: normal;
+}
+
+.inbound-pool__item + .inbound-pool__item {
+  margin-left: 0;
+}
+
+.inbound-pool__item :deep(> span) {
+  display: block;
+  width: 100%;
 }
 </style>

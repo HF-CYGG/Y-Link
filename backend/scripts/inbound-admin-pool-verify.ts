@@ -203,6 +203,40 @@ async function main() {
       '改单未传预计送达时间时必须保持原值',
     )
 
+    // 管理端现场改单与供货方改单共用同一套入参：既然 schema 接受预计送达时间，就必须真正写入，
+    // 否则接口返回成功而排班时间原封不动。
+    const adminUpdatedArrivalAt = hoursLater(96)
+    await inboundService.updateInboundOrderForAdmin(adminActor, newDelivery.order.id, {
+      remark: '现场改单调整预计送达时间',
+      expectedArrivalAt: adminUpdatedArrivalAt,
+      items: [{ productId: String(product.id), skuId: String(sku.id), qty: 4 }],
+    })
+    const adminUpdatedDetail = await inboundService.detailById(newDelivery.order.id)
+    assert.equal(
+      adminUpdatedDetail.order.expectedArrivalAt?.toISOString(),
+      new Date(adminUpdatedArrivalAt).toISOString(),
+      '管理端现场改单必须写入新的预计送达时间',
+    )
+    await inboundService.updateInboundOrderForAdmin(adminActor, newDelivery.order.id, {
+      remark: '现场改单不传预计送达时间',
+      items: [{ productId: String(product.id), skuId: String(sku.id), qty: 5 }],
+    })
+    const adminKeptDetail = await inboundService.detailById(newDelivery.order.id)
+    assert.equal(
+      adminKeptDetail.order.expectedArrivalAt?.toISOString(),
+      new Date(adminUpdatedArrivalAt).toISOString(),
+      '管理端现场改单未传预计送达时间时必须保持原值',
+    )
+    await assert.rejects(
+      () => inboundService.updateInboundOrderForAdmin(adminActor, newDelivery.order.id, {
+        remark: '现场改单传入超范围时间',
+        expectedArrivalAt: hoursLater(24 * 120),
+        items: [{ productId: String(product.id), skuId: String(sku.id), qty: 5 }],
+      }),
+      /预计送达时间不能晚于 90 天后/,
+      '管理端现场改单必须沿用与提交一致的范围校验',
+    )
+
     // 权限边界：供货方即便持有 inbound:view，也不能访问管理端送货单池。
     await assert.rejects(
       () => inboundService.listInboundOrderPool(supplierActor, {}),
@@ -210,7 +244,7 @@ async function main() {
       '供货方访问送货单池必须被拒绝',
     )
 
-    console.log('送货单池专项验证通过：分栏计数、排序、分页收敛、关键词、新单提醒、预计送达时间约束与权限边界均符合预期')
+    console.log('送货单池专项验证通过：分栏计数、排序、分页收敛、关键词、新单提醒、预计送达时间约束、现场改单写入与权限边界均符合预期')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()

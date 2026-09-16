@@ -149,6 +149,15 @@ class InboundService {
     return value
   }
 
+  // 审计 detail 走 JSON 存储：时间统一转成 ISO 文本，避免 SQLite 返回字符串、MySQL 返回 Date 导致同一字段两种形态。
+  private toAuditTimeText(value: Date | string | null | undefined): string | null {
+    if (!value) {
+      return null
+    }
+    const parsed = value instanceof Date ? value : new Date(value)
+    return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString()
+  }
+
   // 后台现场改单与核销入库属于同一工作台职责，统一限制为 admin / operator。
   private assertAdminInboundActor(actor: AuthUserContext) {
     if (actor.role !== 'admin' && actor.role !== 'operator') {
@@ -492,6 +501,7 @@ class InboundService {
       })
       await manager.getRepository(BizInboundOrderItem).save(nextItems)
 
+      const previousExpectedArrivalAt = order.expectedArrivalAt
       order.remark = input.remark?.trim() || null
       order.totalQty = String(nextTotalQty)
       // 改单未传预计送达时间时保持原值，传入则按与提交一致的范围校验。
@@ -515,6 +525,9 @@ class InboundService {
           supplierName: savedOrder.supplierName,
           itemCount: nextItems.length,
           totalQty: savedOrder.totalQty,
+          // 送达排班发生争议时要能追溯改成了什么、原先是什么，只记生效值不足以定责。
+          expectedArrivalAt: this.toAuditTimeText(savedOrder.expectedArrivalAt),
+          previousExpectedArrivalAt: this.toAuditTimeText(previousExpectedArrivalAt),
         },
       }, manager)
       return {
@@ -1006,8 +1019,15 @@ class InboundService {
       })
       await manager.getRepository(BizInboundOrderItem).save(nextItems)
 
+      const previousExpectedArrivalAt = order.expectedArrivalAt
       order.remark = input.remark?.trim() || null
       order.totalQty = String(nextTotalQty)
+      // 现场改单与供货方改单共用同一套入参：schema 既然接受预计送达时间，这里就必须按同样的范围校验写入，
+      // 否则接口返回成功而排班时间没变。未传则保持原值。
+      const nextExpectedArrivalAt = this.normalizeExpectedArrivalAtInput(input.expectedArrivalAt)
+      if (nextExpectedArrivalAt) {
+        order.expectedArrivalAt = this.assertExpectedArrivalAt(nextExpectedArrivalAt)
+      }
 
       const savedOrder = await manager.getRepository(BizInboundOrder).save(order)
       await auditService.record({
@@ -1024,6 +1044,9 @@ class InboundService {
           supplierName: savedOrder.supplierName,
           itemCount: nextItems.length,
           totalQty: savedOrder.totalQty,
+          // 送达排班发生争议时要能追溯改成了什么、原先是什么，只记生效值不足以定责。
+          expectedArrivalAt: this.toAuditTimeText(savedOrder.expectedArrivalAt),
+          previousExpectedArrivalAt: this.toAuditTimeText(previousExpectedArrivalAt),
         },
       }, manager)
       return {
