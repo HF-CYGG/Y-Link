@@ -126,6 +126,11 @@ export class O2oPreorder {
   @Column({ name: 'pickup_contact', type: 'varchar', length: 32, nullable: true, comment: '提货人' })
   pickupContact!: string | null
 
+  // pickupAt 记录部门单下单时选择的到店取货时间，供门店提前备货与核销排班；
+  // 散客单与功能上线前的历史订单为 NULL，展示层必须按“未填写”兜底，不得回填默认值。
+  @Column({ name: 'pickup_at', ...entityColumnOptions.timestamp, nullable: true, comment: '到店取货时间（部门单必填）' })
+  pickupAt!: Date | null
+
   // totalQty 记录整单总件数，便于列表快速展示，避免每次都聚合子项。
   @Column({ name: 'total_qty', type: 'int', default: 0, comment: '总件数' })
   totalQty!: number

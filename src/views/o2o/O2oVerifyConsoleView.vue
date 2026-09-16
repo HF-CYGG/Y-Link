@@ -57,6 +57,19 @@ import { notifyClientOrderRefresh } from '@/utils/client-order-refresh'
 
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
+// 到店取货时间只在核销台展示，使用与订单池一致的本地时间格式，空值按“未填写”兜底。
+const formatPickupAt = (value: string | null | undefined) => {
+  if (!value) {
+    return '未填写'
+  }
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return '未填写'
+  }
+  const pad2 = (input: number) => String(input).padStart(2, '0')
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`
+}
+
 const verifyCode = ref('')
 const verifyResult = ref<O2oVerifyDetailResult | null>(null)
 const loading = ref(false)
@@ -923,6 +936,16 @@ watch(
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">下单归属</p>
               <p class="mt-1 text-base font-semibold text-slate-900">{{ preorderOwnershipLabel }}</p>
+            </div>
+            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <p class="text-sm text-slate-400">到店取货时间</p>
+              <p class="mt-1 text-base font-semibold text-slate-900">
+                {{
+                  preorderDetail.order.clientOrderType === 'department'
+                    ? formatPickupAt(preorderDetail.order.pickupAt)
+                    : '散客单不适用'
+                }}
+              </p>
             </div>
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">总金额</p>

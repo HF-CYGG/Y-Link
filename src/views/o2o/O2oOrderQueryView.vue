@@ -1777,6 +1777,16 @@ onBeforeUnmount(() => {
               <p class="mt-1 text-sm font-semibold text-slate-900">{{ activeOrderOwnership }}</p>
             </div>
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <p class="text-sm text-slate-400">到店取货时间</p>
+              <p class="mt-1 text-sm font-semibold text-slate-900">
+                {{
+                  activeOrderDetail.order.clientOrderType === 'department'
+                    ? formatOrderDateTime(activeOrderDetail.order.pickupAt, { includeSeconds: false, fallback: '未填写' })
+                    : '散客单不适用'
+                }}
+              </p>
+            </div>
+            <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">状态</p>
               <p class="mt-1 text-sm font-semibold text-slate-900">{{ reportConfig.statusLabel }}</p>
             </div>

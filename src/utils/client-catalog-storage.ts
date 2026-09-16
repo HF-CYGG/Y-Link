@@ -193,11 +193,18 @@ const normalizeUpdatedAt = (value: unknown) => {
   return Number.isFinite(value) ? Number(value) : 0
 }
 
+/** 取货时间窗口只接受正整数小时，旧快照或脏值统一回退 null，由结算页使用默认窗口。 */
+export const normalizePickupWindowHours = (value: unknown): number | null => {
+  const hours = Number(value)
+  return Number.isInteger(hours) && hours > 0 ? hours : null
+}
+
 const normalizeStorefront = (value: unknown): O2oMallStorefrontConfig => {
   if (!value || typeof value !== 'object') {
     return {
       businessHoursText: '10:00 - 22:00',
       mallAnnouncementText: '',
+      pickupWindowHours: null,
     }
   }
   const row = value as Record<string, unknown>
@@ -207,6 +214,7 @@ const normalizeStorefront = (value: unknown): O2oMallStorefrontConfig => {
   return {
     businessHoursText,
     mallAnnouncementText: typeof row.mallAnnouncementText === 'string' ? row.mallAnnouncementText.trim() : '',
+    pickupWindowHours: normalizePickupWindowHours(row.pickupWindowHours),
   }
 }
 
