@@ -1,7 +1,8 @@
 /**
  * 文件说明：Issue #52 客户端购物车目录对账回归验证。
  * 文件职责：以真实 Pinia Store 与浏览器存储替身覆盖库存刷新、缓存恢复和多标签页隔离语义；不访问业务数据库或网络。
- * 维护说明：本脚本只验证购物车本地状态不能在后台目录刷新时静默减量或取消勾选，结算提交拦截由结算页守卫单独覆盖。
+ * 维护说明：本脚本只验证购物车本地状态不能在后台目录刷新时静默减量或取消勾选，结算提交拦截由结算页守卫单独覆盖；
+ * Issue #97 追加手动输入数量断言：合法值按可购上限收口，非法值（空、非数字、小于 1）不得写入 NaN 或删除商品。
  */
 
 import assert from 'node:assert/strict'
@@ -357,5 +358,37 @@ const restoredWritableCart = createCart('client-storage-recovered')
 restoredWritableCart.addProduct(originalCatalogItem, 1, originalCatalogItem.skus?.[0] ?? null)
 assert.equal(createCart('client-storage-recovered').items[0]?.qty, 1, '恢复可写后应继续正常持久化与恢复')
 assert.equal(createCart('client-other-storage-user').items.length, 0, '降级不得退回共享账号缓存')
+
+// Issue #97：购物车数量支持直接输入，但必须复用 updateQty 的可购上限，且非法输入不能污染或删除购物车行。
+const manualQtyCart = createCart('client-manual-qty')
+const manualQtyProduct = createProduct({ id: 'product-manual', skuId: 'sku-manual', availableStock: 5 })
+manualQtyCart.addProduct(manualQtyProduct, 1, manualQtyProduct.skus?.[0] ?? null)
+manualQtyCart.setQtyFromInput('sku-manual', 3)
+assert.equal(manualQtyCart.items[0]?.qty, 3, '手动输入可购范围内的数量应直接生效')
+manualQtyCart.setQtyFromInput('sku-manual', 99)
+assert.equal(manualQtyCart.items[0]?.qty, 5, '手动输入超出可预订库存时必须按上限收口，不能绕过库存限制')
+// 小数必须按非法输入拒绝：输入框不再逐字过滤非数字字符，“2.7”会原样送到这里，静默取整与提示文案不符。
+manualQtyCart.setQtyFromInput('sku-manual', 2.7)
+assert.equal(manualQtyCart.items[0]?.qty, 5, '手动输入小数应按非法输入拒绝并保留原数量')
+manualQtyCart.setQtyFromInput('sku-manual', 0)
+assert.equal(manualQtyCart.items.length, 1, '手动输入 0 不得被当成删除商品')
+assert.equal(manualQtyCart.items[0]?.qty, 5, '手动输入 0 时应保留原数量')
+manualQtyCart.setQtyFromInput('sku-manual', null)
+manualQtyCart.setQtyFromInput('sku-manual', Number.NaN)
+assert.equal(manualQtyCart.items[0]?.qty, 5, '空值或非数字输入不得把数量写成 NaN')
+assert.equal(createCart('client-manual-qty').items[0]?.qty, 5, '手动输入后的合法数量应正常持久化恢复')
+
+const limitedQtyCart = createCart('client-manual-limit')
+const limitedQtyProduct = { ...createProduct({ id: 'product-limit', skuId: 'sku-limit', availableStock: 10 }), limitPerUser: 3 }
+limitedQtyCart.addProduct(limitedQtyProduct, 1, limitedQtyProduct.skus?.[0] ?? null)
+limitedQtyCart.setQtyFromInput('sku-limit', 8)
+assert.equal(limitedQtyCart.items[0]?.qty, 3, '手动输入超出单人限购时必须按限购上限收口')
+
+// 后端商品库存上限 999999999、单人限购上限 999999，手动输入不得被输入框长度卡在四位以内。
+const largeQtyCart = createCart('client-manual-large')
+const largeQtyProduct = createProduct({ id: 'product-large', skuId: 'sku-large', availableStock: 120000 })
+largeQtyCart.addProduct(largeQtyProduct, 1, largeQtyProduct.skus?.[0] ?? null)
+largeQtyCart.setQtyFromInput('sku-large', 100000)
+assert.equal(largeQtyCart.items[0]?.qty, 100000, '库存允许时必须支持录入五位以上的合法数量')
 
 console.log('[verify:client-cart-reconciliation] 购物车目录对账及存储故障降级回归验证通过')
