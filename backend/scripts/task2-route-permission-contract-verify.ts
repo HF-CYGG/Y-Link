@@ -23,7 +23,7 @@ const appFilePath = path.join(sourceRoot, 'app.ts')
 const rescueAppFilePath = path.join(sourceRoot, 'runtime', 'rescue-app.ts')
 const permissionsFilePath = path.join(sourceRoot, 'constants', 'auth-permissions.ts')
 const GUARD_NAMES = new Set([
-  'requireAuth', 'requireAdminCsrf', 'requireClientAuth', 'requireMobileAuth', 'requirePermission', 'requireRole', 'requireDatabaseRescueCredential',
+  'requireAuth', 'requireAdminCsrf', 'requireClientAuth', 'requireMobileAuth', 'requirePermission', 'requireAnyPermission', 'requireRole', 'requireDatabaseRescueCredential',
 ])
 const HTTP_METHODS = new Set(['get', 'post', 'put', 'patch', 'delete', 'head', 'options'])
 const DATABASE_RESCUE_ROUTER_NAME = 'databaseRescueRouter'
@@ -86,10 +86,10 @@ function guardsOf(node: ts.Node | readonly ts.Node[]): Set<string> {
 function permissionsOf(node: ts.Node | readonly ts.Node[]): string[] {
   const permissions = new Set<string>()
   const visit = (child: ts.Node) => {
-    if (ts.isCallExpression(child) && ts.isIdentifier(child.expression) && child.expression.text === 'requirePermission') {
+    if (ts.isCallExpression(child) && ts.isIdentifier(child.expression) && (child.expression.text === 'requirePermission' || child.expression.text === 'requireAnyPermission')) {
       child.arguments.forEach((argument) => {
-        const value = staticPath(argument, 'requirePermission')
-        if (!value) throw new Error('requirePermission 必须使用静态权限点字符串')
+        const value = staticPath(argument, child.expression.getText())
+        if (!value) throw new Error(`${child.expression.getText()} 必须使用静态权限点字符串`)
         permissions.add(value)
       })
     }
@@ -225,7 +225,7 @@ function parseApp(appPath: string, routers: Map<string, RouterDefinition>): { mo
 function audienceOf(guards: Set<string>): Audience {
   if (guards.has('requireDatabaseRescueCredential')) return 'rescue'
   if (guards.has('requireClientAuth') || guards.has('requireMobileAuth')) return 'client'
-  if (guards.has('requireAuth') || guards.has('requirePermission') || guards.has('requireRole')) return 'admin'
+  if (guards.has('requireAuth') || guards.has('requirePermission') || guards.has('requireAnyPermission') || guards.has('requireRole')) return 'admin'
   return 'public'
 }
 

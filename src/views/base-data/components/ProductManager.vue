@@ -6,17 +6,20 @@
  * - 通过 useCrudManager 统一收敛产品列表、弹窗保存与删除流程；
  * - 编辑弹窗在主商品字段之外维护 SKU 行，提交时把颜色、款式、售价、库存和启停状态转换为后端规格数据；
  * - 未配置规格时继续使用默认规格，由后端同步主商品价格与库存，兼容历史单规格商品；
- * - 表格、移动卡片和筛选条件仍复用既有数据集合，避免规格能力影响原有基础资料工作台。
+ * - 表格、移动卡片和筛选条件仍复用既有数据集合，避免规格能力影响原有基础资料工作台；
+ * - 商品可归属一个分类；单规格商品在编辑弹窗直接维护条码、成本价与库位（通过 defaultSku 提交），多规格商品在规格配置里逐行维护；
+ * - Excel 导入与条码打印弹窗均为异步组件，只在点击时加载。
  * 维护说明：
  * - 后续扩展尺码、容量等规格维度时，优先扩展 SKU 表单和后端规格归一化逻辑，不要绕过商品服务直接写库存；
  * - 删除或停用已有 SKU 前需保留占用库存汇总，避免已下单未核销记录丢失库存占用。
  */
 
 
-import { computed, h, nextTick, onActivated, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, h, nextTick, onActivated, onMounted, ref } from 'vue'
 import { type FormInstance, type FormRules, type TableInstance, type UploadRequestOptions } from 'element-plus'
 import type { RequestConfig } from '@/api/http'
 import { createTag, getTagList, type Tag } from '@/api/modules/tag'
+import { exportProducts, getCategories, getLocations, type CategoryRecord, type LocationRecord } from '@/api/modules/inventory'
 import { uploadImage } from '@/api/modules/upload'
 import {
   batchCreateProducts,
@@ -29,6 +32,7 @@ import {
   updateProduct,
   type ProductListQuery,
   type ProductRecord,
+  type ProductSkuRecord,
 } from '@/api/modules/product'
 import {
   BizCrudDialogShell,
@@ -62,7 +66,17 @@ import {
   type ProductSkuMatrixRow,
 } from '@/views/base-data/components/product-sku-matrix.helpers'
 
+const ProductImportDialog = defineAsyncComponent(() => import('@/views/inventory/components/ProductImportDialog.vue'))
+const BarcodeLabelPrintDialog = defineAsyncComponent(() => import('@/views/inventory/components/BarcodeLabelPrintDialog.vue'))
+
 const allTags = ref<Tag[]>([])
+const allCategories = ref<CategoryRecord[]>([])
+const allLocations = ref<LocationRecord[]>([])
+const importDialogVisible = ref(false)
+const printDialogVisible = ref(false)
+const printSkuIds = ref<string[]>([])
+const exportLoading = ref(false)
+const searchCategoryId = ref('')
 const formRef = ref<FormInstance>()
 const productTableRef = ref<TableInstance>()
 const pageReady = ref(false)
@@ -99,6 +113,11 @@ interface ProductForm {
   isActive: boolean
   productThumbnail: string | null
   tagIds: string[]
+  categoryId: string
+  defaultSkuCode: string
+  defaultBarcode: string
+  defaultCostPrice: number | null
+  defaultLocationId: string
   skuColorText: string
   skuStyleText: string
   skus: ProductSkuForm[]
@@ -165,6 +184,11 @@ const createDefaultForm = (): ProductForm => ({
   isActive: true,
   productThumbnail: null,
   tagIds: [] as string[],
+  categoryId: '',
+  defaultSkuCode: '',
+  defaultBarcode: '',
+  defaultCostPrice: null,
+  defaultLocationId: '',
   skuColorText: '',
   skuStyleText: '',
   skus: [],
@@ -174,6 +198,10 @@ const selectedProductCount = computed(() => selectedProductIds.value.length)
 const batchCreateRowCount = computed(() => batchCreateRows.value.length)
 const { hasPermission, ensurePermission } = usePermissionAction()
 const canManageProducts = computed(() => hasPermission('products:manage'))
+const canImportProducts = computed(() => hasPermission('products:import') && hasPermission('products:manage'))
+const activeCategoryOptions = computed(() => allCategories.value.filter((item) => item.isActive || item.id === form.value.categoryId))
+const activeLocationOptions = computed(() => allLocations.value.filter((item) => item.isActive))
+const resolveLocationLabel = (id: string | null | undefined) => allLocations.value.find((item) => item.id === id)?.locationCode ?? ''
 
 const createBatchCreateFormRow = (): BatchCreateProductFormRow => {
   batchCreateRowSeed.value += 1
@@ -268,10 +296,44 @@ const loadTags = async (requestConfig: RequestConfig = {}) => {
  * - 保持页面现有搜索交互与后端参数契约不变；
  * - 让通用 CRUD composable 只消费一个统一的 loadList 函数。
  */
+const loadInventoryDictionaries = async () => {
+  try {
+    const [categories, locations] = await Promise.all([getCategories(), getLocations()])
+    allCategories.value = categories
+    allLocations.value = locations
+  } catch (error) {
+    showAppError(extractErrorMessage(error, '分类与库位加载失败'))
+  }
+}
+
+const handleExportProducts = async () => {
+  exportLoading.value = true
+  try {
+    await exportProducts()
+  } catch (error) {
+    showAppError(extractErrorMessage(error, '导出失败'))
+  } finally {
+    exportLoading.value = false
+  }
+}
+
+const openPrintDialog = () => {
+  const skuIds = products.value
+    .filter((product) => selectedProductIds.value.includes(product.id))
+    .flatMap((product) => (product.skus ?? []).filter((sku) => sku.isCurrent !== false && sku.id).map((sku) => String(sku.id)))
+  if (!skuIds.length) {
+    showAppWarning('请先勾选要打印条码的产品')
+    return
+  }
+  printSkuIds.value = skuIds
+  printDialogVisible.value = true
+}
+
 const buildQueryParams = (): ProductListQuery => {
   const params: ProductListQuery = {}
   if (searchKeyword.value) params.keyword = searchKeyword.value
   if (searchTagId.value) params.tagId = searchTagId.value
+  if (searchCategoryId.value) params.categoryId = searchCategoryId.value
   return params
 }
 
@@ -375,11 +437,17 @@ const isProductImplicitDefaultSku = (row: ProductRecord) => {
     return false
   }
   const [sku] = currentSkus
-  const specValues = sku?.specValues ?? {}
-  return Boolean(
-    sku
-    && Object.keys(specValues).length === 0
-  )
+  if (!sku) {
+    return false
+  }
+  // 没有真实规格组：规格值为空，或历史数据里唯一的 { 规格: '默认规格' }。
+  const specValues = sku.specValues ?? {}
+  const specKeys = Object.keys(specValues)
+  const specText = String(sku.specText ?? '').trim()
+  if (specKeys.length === 0) {
+    return true
+  }
+  return specKeys.length === 1 && specValues.规格 === '默认规格' && (!specText || specText === '默认规格')
 }
 
 /**
@@ -388,6 +456,14 @@ const isProductImplicitDefaultSku = (row: ProductRecord) => {
  * - 改动时附带基线，服务端发现期间已被出入库改动会拒绝保存，避免静默覆盖出库扣减。
  */
 let productEditStockBaseline: { productId: string; currentStock: number; skus: Map<string, number> } | null = null
+
+/** 单规格商品默认 SKU 扩展字段的打开时快照：未改动时不提交 defaultSku，避免无关保存触发服务端校验。 */
+let defaultSkuBaseline: string | null = null
+/** 单规格商品的默认 SKU 原始记录：规格弹窗的占位行据此展示 id、编码、条码、成本价与库位。 */
+let defaultSkuSnapshot: ProductSkuRecord | null = null
+const buildDefaultSkuSignature = (barcode: string, costPrice: string | number | null, locationId: string) =>
+  JSON.stringify([barcode.trim(), costPrice === null || costPrice === '' ? null : Number(costPrice), locationId || ''])
+const EMPTY_DEFAULT_SKU_SIGNATURE = buildDefaultSkuSignature('', null, '')
 
 const buildEditForm = (row: ProductRecord): ProductForm => {
   productEditStockBaseline = {
@@ -412,9 +488,16 @@ const buildEditForm = (row: ProductRecord): ProductForm => {
         isCurrent: true,
         o2oRecommended: sku.o2oRecommended === true,
         thumbnail: sku.thumbnail ?? null,
+        skuCode: sku.skuCode,
+        barcode: sku.barcode ?? null,
+        costPrice: sku.costPrice === null || sku.costPrice === undefined ? null : Number(sku.costPrice),
+        locationId: sku.locationId ?? null,
       }))
     : []
   const dimensions = extractSkuDimensionValues(skus)
+  const defaultSku = skus.length ? null : currentSkus[0] ?? null
+  defaultSkuSnapshot = defaultSku
+  defaultSkuBaseline =defaultSku ? buildDefaultSkuSignature(defaultSku.barcode ?? '', defaultSku.costPrice ?? null, defaultSku.locationId ?? '') : null
 
   return {
     id: row.id,
@@ -427,6 +510,11 @@ const buildEditForm = (row: ProductRecord): ProductForm => {
     isActive: row.isActive,
     productThumbnail: row.thumbnail ?? null,
     tagIds: row.tagIds,
+    categoryId: row.categoryId ?? '',
+    defaultSkuCode: defaultSku?.skuCode ?? '',
+    defaultBarcode: defaultSku?.barcode ?? '',
+    defaultCostPrice: defaultSku?.costPrice === null || defaultSku?.costPrice === undefined ? null : Number(defaultSku.costPrice),
+    defaultLocationId: defaultSku?.locationId ?? '',
     skuColorText: dimensions.colors.join('，'),
     skuStyleText: dimensions.styles.join('，'),
     skus,
@@ -438,6 +526,22 @@ const buildEditForm = (row: ProductRecord): ProductForm => {
  * - 保存前先兜底创建缺失标签；
  * - 输出统一的产品 DTO，供新增与编辑接口共用。
  */
+const resolveDefaultSkuPayload = (currentForm: ProductForm): { defaultSku?: CreateProductDto['defaultSku'] } => {
+  // 与编辑表单的显示条件一致：没有真实规格行（form.skus 为空）时展示并提交默认规格字段。
+  if (currentForm.skus.length) return {}
+  const signature = buildDefaultSkuSignature(currentForm.defaultBarcode, currentForm.defaultCostPrice, currentForm.defaultLocationId)
+  // 编辑时与打开时快照比较；新增或原本没有默认 SKU 记录时与空值比较，改动过就提交。
+  const baseline = currentForm.id && defaultSkuBaseline !== null ? defaultSkuBaseline : EMPTY_DEFAULT_SKU_SIGNATURE
+  if (signature === baseline) return {}
+  return {
+    defaultSku: {
+      barcode: currentForm.defaultBarcode.trim() || null,
+      costPrice: currentForm.defaultCostPrice === null ? null : normalizeSubmitNumber(currentForm.defaultCostPrice, { fallback: 0, min: 0 }),
+      locationId: currentForm.defaultLocationId || null,
+    },
+  }
+}
+
 const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProductDto> => {
   hasAutoCreatedTags.value = false
   const resolvedTagIds = await resolveTagIds(currentForm.tagIds)
@@ -476,6 +580,8 @@ const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProdu
     ...(baseline && baseline.currentStock === normalizedCurrentStock ? {} : { currentStock: normalizedCurrentStock }),
     isActive: currentForm.isActive,
     tagIds: resolvedTagIds,
+    categoryId: currentForm.categoryId || null,
+    ...resolveDefaultSkuPayload(currentForm),
     skus: currentForm.skus.length
       ? currentForm.skus.map((sku, index) => ({
           id: sku.id,
@@ -488,6 +594,9 @@ const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProdu
           o2oRecommended: sku.o2oRecommended === true,
           thumbnail: typeof sku.thumbnail === 'string' && sku.thumbnail.trim() ? sku.thumbnail.trim() : null,
           sortOrder: index,
+          barcode: typeof sku.barcode === 'string' && sku.barcode.trim() ? sku.barcode.trim() : null,
+          costPrice: sku.costPrice === null || sku.costPrice === undefined ? null : normalizeSubmitNumber(sku.costPrice, { fallback: 0, min: 0 }),
+          locationId: sku.locationId || null,
         }))
       : [],
     ...(baseline
@@ -799,25 +908,64 @@ const isImplicitDefaultSku = (sku: ProductSkuForm) => {
   return (!specText || specText === '默认规格') && (!Object.keys(specValues).length || specValues.规格 === '默认规格')
 }
 
-const hasMultipleEditableSkus = computed(() => {
-  return form.value.skus.length > 1 || form.value.skus.some((sku) => !isImplicitDefaultSku(sku))
-})
+/**
+ * 是否存在真实规格行：
+ * - 与 resolveDefaultSkuPayload 同一口径——form.skus 为空即单规格商品（含历史“默认规格”唯一 SKU），
+ *   编辑表单展示默认规格字段并通过 defaultSku 提交；否则提示到规格配置中维护。
+ */
+const hasMultipleEditableSkus = computed(() => form.value.skus.length > 0)
 
+/**
+ * 规格弹窗打开时的默认规格占位行：
+ * - 代表单规格商品现有的默认 SKU，带上其 id、编码、条码、成本价与库位用于展示；
+ * - 价格、折扣、库存、启停取商品级字段（单规格商品两者一致），保存时再回写。
+ */
 const ensureSkuConfigRows = () => {
   if (form.value.skus.length) {
     return
   }
+  const snapshot = defaultSkuSnapshot
   form.value.skus = [{
+    id: snapshot?.id,
     specValues: { 规格: '默认规格' },
     specText: '默认规格',
     defaultPrice: Number(form.value.defaultPrice) || 0,
     discountRate: normalizeDiscountRateNumber(form.value.discountRate),
     currentStock: Number(form.value.currentStock) || 0,
     isActive: form.value.isActive,
-    o2oRecommended: false,
+    isCurrent: true,
+    o2oRecommended: snapshot?.o2oRecommended === true,
     thumbnail: form.value.productThumbnail,
+    skuCode: snapshot?.skuCode,
+    barcode: form.value.defaultBarcode || null,
+    costPrice: form.value.defaultCostPrice,
+    locationId: form.value.defaultLocationId || null,
+    isDefaultPlaceholder: true,
   }]
 }
+
+/** 规格弹窗里只剩默认规格占位行时返回该行：此时仍按单规格商品保存。 */
+const resolveDefaultSkuPlaceholder = (currentForm: ProductForm) => {
+  const [row] = currentForm.skus
+  return currentForm.skus.length === 1 && row?.isDefaultPlaceholder === true && isImplicitDefaultSku(row) ? row : null
+}
+
+/**
+ * 把占位行的编辑结果回写为单规格表单：
+ * - skus 置空，继续走 defaultSku 提交，避免原默认 SKU 被退役、编码变化、条码/成本价/库位丢失；
+ * - 规格图回写为商品主图（仅在改动时提交）。
+ */
+const buildSingleSpecFormFromPlaceholder = (currentForm: ProductForm, row: ProductSkuForm): ProductForm => ({
+  ...currentForm,
+  defaultPrice: Number(row.defaultPrice ?? currentForm.defaultPrice) || 0,
+  discountRate: normalizeDiscountRateNumber(row.discountRate ?? currentForm.discountRate),
+  currentStock: Number(row.currentStock ?? currentForm.currentStock) || 0,
+  isActive: row.isActive !== false,
+  defaultBarcode: typeof row.barcode === 'string' ? row.barcode : '',
+  defaultCostPrice: row.costPrice === null || row.costPrice === undefined ? null : Number(row.costPrice),
+  defaultLocationId: row.locationId || '',
+  skus: [],
+})
 
 const discountedPricePreview = computed(() => {
   return calculateDiscountedPriceText(form.value.defaultPrice, form.value.discountRate)
@@ -896,7 +1044,15 @@ const handleSubmitSkuConfig = async () => {
   }
   submitting.value = true
   try {
-    const payload = await buildSubmitPayload(form.value)
+    const placeholder = resolveDefaultSkuPlaceholder(form.value)
+    const submitForm = placeholder ? buildSingleSpecFormFromPlaceholder(form.value, placeholder) : form.value
+    const payload = await buildSubmitPayload(submitForm)
+    if (placeholder) {
+      const nextThumbnail = typeof placeholder.thumbnail === 'string' && placeholder.thumbnail.trim() ? placeholder.thumbnail.trim() : null
+      if (nextThumbnail !== (form.value.productThumbnail ?? null)) {
+        payload.thumbnail = nextThumbnail
+      }
+    }
     await updateProduct(form.value.id, payload)
     dialogVisible.value = false
     showAppSuccess('规格配置已保存')
@@ -965,7 +1121,7 @@ const resolveTagIds = async (tagValues: Array<string | number>, silent = false):
 }
 
 const refreshProductView = async () => {
-  await Promise.all([loadTags(), reloadProducts()])
+  await Promise.all([loadTags(), loadInventoryDictionaries(), reloadProducts()])
 }
 
 const handleBatchUpdateStatus = async (isActive: boolean) => {
@@ -1007,6 +1163,11 @@ const handleCompactBatchCommand = (command: string | number | object) => {
 
   if (command === 'clear') {
     void clearSelection()
+    return
+  }
+
+  if (command === 'print') {
+    openPrintDialog()
   }
 }
 
@@ -1145,6 +1306,15 @@ onActivated(() => {
               :value="tag.id"
             />
           </el-select>
+          <el-select
+            v-model="searchCategoryId"
+            placeholder="按分类筛选"
+            clearable
+            :class="isPhone ? 'product-toolbar-search__tag' : isTablet ? '!w-[160px]' : '!w-[180px]'"
+            @change="handleSearch"
+          >
+            <el-option v-for="category in allCategories" :key="category.id" :label="`${category.categoryCode} ${category.categoryName}`" :value="category.id" />
+          </el-select>
           <el-button :class="isPhone ? 'product-toolbar-search__submit' : ''" type="primary" icon="Search" @click="handleSearch">搜索</el-button>
         </div>
       </template>
@@ -1167,6 +1337,7 @@ onActivated(() => {
                   <el-dropdown-item command="activate" :disabled="!selectedProductCount">批量启用</el-dropdown-item>
                   <el-dropdown-item command="deactivate" :disabled="!selectedProductCount">批量停用</el-dropdown-item>
                   <el-dropdown-item command="clear" :disabled="!selectedProductCount">清空选择</el-dropdown-item>
+                  <el-dropdown-item command="print" :disabled="!selectedProductCount">打印条码</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
@@ -1198,6 +1369,9 @@ onActivated(() => {
           <el-button v-if="canManageProducts" :disabled="!selectedProductCount" @click="clearSelection">
             清空选择
           </el-button>
+          <el-button :disabled="!selectedProductCount" @click="openPrintDialog">打印条码</el-button>
+          <el-button :loading="exportLoading" @click="handleExportProducts">导出</el-button>
+          <el-button v-if="canImportProducts" @click="importDialogVisible = true">Excel 导入</el-button>
           <el-button v-if="canManageProducts" type="primary" plain @click="openBatchCreateDialog">
             批量新增
           </el-button>
@@ -1241,6 +1415,9 @@ onActivated(() => {
             />
             <el-table-column label="产品名称" prop="productName" min-width="220" show-overflow-tooltip />
             <el-table-column label="拼音首字母" prop="pinyinAbbr" width="120" show-overflow-tooltip />
+            <el-table-column label="分类" width="110" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.categoryName || '—' }}</template>
+            </el-table-column>
             <el-table-column label="基础售价" prop="defaultPrice" width="132">
               <template #default="{ row }">
                 ¥{{ Number(row.defaultPrice).toFixed(2) }}
@@ -1514,7 +1691,12 @@ onActivated(() => {
             <h3 class="text-sm font-semibold text-slate-800 dark:text-slate-200">规格基础配置</h3>
             <div class="sku-scroll rounded-xl border border-slate-200 dark:border-white/10" style="overflow-x: auto">
               <el-table native-scrollbar :data="form.skus" size="small" class="sku-table w-full">
-                <el-table-column prop="specText" label="规格" min-width="150" show-overflow-tooltip />
+                <el-table-column prop="specText" label="规格" min-width="150" show-overflow-tooltip>
+                  <template #default="{ row }">
+                    <div>{{ row.specText }}</div>
+                    <div class="text-xs text-slate-400">{{ row.skuCode || '保存后生成编码' }}</div>
+                  </template>
+                </el-table-column>
                 <el-table-column label="规格图" width="112" align="center">
                   <template #default="{ row }">
                     <div
@@ -1622,6 +1804,28 @@ onActivated(() => {
                     <PassiveNumberInput v-model="row.currentStock" class="w-full" :controls="false" :min="0" :precision="0" :step="1" placeholder="库存" />
                   </template>
                 </el-table-column>
+                <el-table-column label="原厂条码" width="150">
+                  <template #default="{ row }">
+                    <el-input v-model="row.barcode" maxlength="64" placeholder="留空用 SKU 编码" />
+                  </template>
+                </el-table-column>
+                <el-table-column label="成本价" width="110">
+                  <template #default="{ row }">
+                    <PassiveNumberInput v-model="row.costPrice" class="w-full" :controls="false" :min="0" :precision="2" placeholder="成本" />
+                  </template>
+                </el-table-column>
+                <el-table-column label="库位" width="130">
+                  <template #default="{ row }">
+                    <el-select v-model="row.locationId" clearable filterable placeholder="库位">
+                      <el-option
+                        v-if="row.locationId && !activeLocationOptions.some((item) => item.id === row.locationId)"
+                        :label="resolveLocationLabel(row.locationId)"
+                        :value="row.locationId"
+                      />
+                      <el-option v-for="location in activeLocationOptions" :key="location.id" :label="location.locationCode" :value="location.id" />
+                    </el-select>
+                  </template>
+                </el-table-column>
                 <el-table-column label="状态" width="72" align="center">
                   <template #default="{ row }">
                     <el-switch v-model="row.isActive" aria-label="SKU 启停" />
@@ -1645,6 +1849,16 @@ onActivated(() => {
           </el-form-item>
           <el-form-item label="拼音简写" prop="pinyinAbbr">
             <el-input v-model="form.pinyinAbbr" placeholder="请输入拼音简写(可选)" />
+          </el-form-item>
+          <el-form-item label="商品分类">
+            <el-select v-model="form.categoryId" clearable filterable placeholder="选择分类后新规格按 WC 规则编码" class="w-full">
+              <el-option
+                v-for="category in activeCategoryOptions"
+                :key="category.id"
+                :label="`${category.categoryCode} ${category.categoryName}${category.isActive ? '' : '（已停用）'}`"
+                :value="category.id"
+              />
+            </el-select>
           </el-form-item>
           <div v-if="hasMultipleEditableSkus" class="sku-owned-fields-hint">
             该商品已启用多规格，价格、库存和折扣请在规格配置中维护。
@@ -1706,6 +1920,22 @@ onActivated(() => {
                 placeholder="请输入基础库存"
               />
             </el-form-item>
+            <el-form-item label="原厂条码">
+              <el-input v-model="form.defaultBarcode" maxlength="64" :placeholder="form.defaultSkuCode ? `留空则打印 SKU 编码 ${form.defaultSkuCode}` : '留空则打印 SKU 编码'" />
+            </el-form-item>
+            <el-form-item label="成本价">
+              <PassiveNumberInput v-model="form.defaultCostPrice" :min="0" :precision="2" class="w-full" placeholder="可选" />
+            </el-form-item>
+            <el-form-item label="默认库位">
+              <el-select v-model="form.defaultLocationId" clearable filterable placeholder="可选" class="w-full">
+                <el-option
+                  v-if="form.defaultLocationId && !activeLocationOptions.some((item) => item.id === form.defaultLocationId)"
+                  :label="resolveLocationLabel(form.defaultLocationId)"
+                  :value="form.defaultLocationId"
+                />
+                <el-option v-for="location in activeLocationOptions" :key="location.id" :label="location.locationCode" :value="location.id" />
+              </el-select>
+            </el-form-item>
           </template>
           <el-form-item label="关联标签" prop="tagIds">
             <el-select
@@ -1735,6 +1965,9 @@ onActivated(() => {
         </el-form>
       </template>
     </BizCrudDialogShell>
+
+    <ProductImportDialog v-if="importDialogVisible" v-model="importDialogVisible" @imported="reloadProducts" />
+    <BarcodeLabelPrintDialog v-if="printDialogVisible" v-model="printDialogVisible" :sku-ids="printSkuIds" />
   </div>
 </template>
 

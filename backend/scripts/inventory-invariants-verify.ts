@@ -41,6 +41,8 @@ async function main() {
   const { inboundService } = await import('../src/services/inbound.service.js')
   const { o2oPreorderService } = await import('../src/services/o2o-preorder.service.js')
   const { productService } = await import('../src/services/product.service.js')
+  const { applyInventoryDeltas } = await import('../src/services/inventory-ledger.service.js')
+  const { runInTransaction } = await import('../src/config/transaction-runner.js')
 
   prepareDatabaseRuntime()
   await AppDataSource.initialize()
@@ -110,6 +112,11 @@ async function main() {
     }
 
     await assertAggregateInvariant()
+    const assertSkuSnapshot = (log: InstanceType<typeof InventoryLog>, expectedSkuId: string) => {
+      assert.equal(String(log.skuId), String(expectedSkuId))
+      assert.equal(Number(log.afterSkuCurrentStock) - Number(log.beforeSkuCurrentStock), Number(log.changeQty))
+      assert.equal(Number(log.afterSkuPreorderedStock) - Number(log.beforeSkuPreorderedStock), 0)
+    }
     for (let index = 0; index < 16; index += 1) {
       const skuId = skuIds[nextRandom() % skuIds.length]
       const qty = 1 + (nextRandom() % 5)
@@ -128,6 +135,7 @@ async function main() {
       assert.ok(log)
       assert.equal(Number(log.afterCurrentStock) - Number(log.beforeCurrentStock), Number(log.changeQty))
       assert.equal(Number(log.afterPreorderedStock) - Number(log.beforePreorderedStock), 0)
+      assertSkuSnapshot(log, skuId)
       await assert.rejects(() => inboundService.verifyInbound(delivery.order.verifyCode, adminActor), /已入库/)
       await assertAggregateInvariant()
     }
@@ -142,8 +150,44 @@ async function main() {
     })
     assert.ok(manualLog)
     assert.equal(Number(manualLog.afterCurrentStock) - Number(manualLog.beforeCurrentStock), Number(manualLog.changeQty))
+    assertSkuSnapshot(manualLog, manualSkuId)
 
-    console.log('inventory invariants verify: passed (16 generated inbound lifecycles + manual inbound)')
+    // 通用记账：增减双向、可用量不足整笔拒绝、流水满足 after - before = changeQty。
+    const ledgerRefId = `ledger-${verifySeed}`
+    const applyLedger = (stockDelta: number) => runInTransaction(async (manager) => {
+      const lockedProduct = await manager.getRepository(BaseProduct).findOneByOrFail({ id: product.id })
+      const lockedSku = await manager.getRepository(BaseProductSku).findOneByOrFail({ id: manualSkuId })
+      return applyInventoryDeltas(manager, {
+        deltas: [{ product: lockedProduct, sku: lockedSku, stockDelta }],
+        changeType: 'stock_adjust',
+        refType: 'inventory_ledger_verify',
+        refId: ledgerRefId,
+        operator: { type: 'admin', id: adminActor.userId, name: adminActor.displayName },
+        buildRemark: () => 'ledger verify',
+      })
+    })
+    const [increaseLine] = await applyLedger(7)
+    assert.ok(increaseLine)
+    assert.equal(increaseLine.afterSkuCurrentStock - increaseLine.beforeSkuCurrentStock, 7)
+    await assertAggregateInvariant()
+    const skuAfterIncrease = await AppDataSource.getRepository(BaseProductSku).findOneByOrFail({ id: manualSkuId })
+    await assert.rejects(() => applyLedger(-(Number(skuAfterIncrease.currentStock) + 1)), /可用库存不足/)
+    await assertAggregateInvariant()
+    const [decreaseLine] = await applyLedger(-4)
+    assert.ok(decreaseLine)
+    assert.equal(decreaseLine.afterSkuCurrentStock, Number(skuAfterIncrease.currentStock) - 4)
+    await assertAggregateInvariant()
+    const ledgerLogs = await AppDataSource.getRepository(InventoryLog).find({
+      where: { refType: 'inventory_ledger_verify', refId: ledgerRefId },
+      order: { id: 'ASC' },
+    })
+    assert.deepEqual(ledgerLogs.map((item) => Number(item.changeQty)), [7, -4])
+    for (const item of ledgerLogs) {
+      assert.equal(Number(item.afterCurrentStock) - Number(item.beforeCurrentStock), Number(item.changeQty))
+      assertSkuSnapshot(item, manualSkuId)
+    }
+
+    console.log('inventory invariants verify: passed (16 generated inbound lifecycles + manual inbound + ledger deltas)')
   } finally {
     if (AppDataSource.isInitialized) await AppDataSource.destroy()
     cleanup()

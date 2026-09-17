@@ -57,6 +57,11 @@ const VENDOR_CHUNK_RULES: VendorChunkRule[] = [
     packageNames: ['qrcode'],
   },
   {
+    // 条码标签打印仅在打印弹窗打开时动态加载。
+    chunkName: 'barcode',
+    packageNames: ['jsbarcode'],
+  },
+  {
     chunkName: 'image-tools',
     packageNames: ['browser-image-compression'],
   },

@@ -30,6 +30,7 @@ import { dashboardRouter } from './routes/dashboard.routes.js'
 import { o2oRouter } from './routes/o2o.routes.js'
 import { orderRouter } from './routes/order.routes.js'
 import { productRouter } from './routes/product.routes.js'
+import { inventoryRouter } from './routes/inventory.routes.js'
 import { reportRouter } from './routes/report.routes.js'
 import { systemConfigRouter } from './routes/system-config.routes.js'
 import { notificationRouter } from './routes/notification.routes.js'
@@ -260,6 +261,7 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use('/api/dashboard', dashboardRouter)
   app.use('/api/reports', reportRouter)
   app.use('/api/inbound', inboundRouter)
+  app.use('/api/inventory', inventoryRouter)
 
   // 系统治理接口：由细粒度权限点控制，而不是单纯依赖管理员角色。
   app.use('/api/users', userRouter)

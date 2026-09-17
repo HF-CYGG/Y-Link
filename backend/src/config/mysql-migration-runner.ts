@@ -74,6 +74,12 @@ const MYSQL_REQUIRED_TABLES = [
   'account_lifecycle_event',
   'order_merge_operation',
   'order_merge_relation',
+  'base_category',
+  'base_storage_location',
+  'inv_stock_doc',
+  'inv_stock_doc_item',
+  'inv_stocktake',
+  'inv_stocktake_item',
 ]
 
 // 每个必需表由哪个迁移脚本创建，用于在报错时给出精确指引，而不是笼统建议“从头跑一遍”。
@@ -108,6 +114,12 @@ const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
   account_lifecycle_event: '044_account_lifecycle_governance.sql',
   order_merge_operation: '045_order_merge_governance.sql',
   order_merge_relation: '045_order_merge_governance.sql',
+  base_category: '049_inventory_sku_barcode_stocktake.sql',
+  base_storage_location: '049_inventory_sku_barcode_stocktake.sql',
+  inv_stock_doc: '049_inventory_sku_barcode_stocktake.sql',
+  inv_stock_doc_item: '049_inventory_sku_barcode_stocktake.sql',
+  inv_stocktake: '049_inventory_sku_barcode_stocktake.sql',
+  inv_stocktake_item: '049_inventory_sku_barcode_stocktake.sql',
 }
 
 interface MysqlRequiredColumn {
@@ -186,6 +198,9 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
   { tableName: 'o2o_preorder', columnName: 'cancelled_at', introducingScript: '040_o2o_preorder_governance.sql' },
   { tableName: 'o2o_preorder', columnName: 'pickup_at', introducingScript: '047_o2o_preorder_pickup_at.sql', expectedNullable: true },
   { tableName: 'biz_inbound_order', columnName: 'expected_arrival_at', introducingScript: '048_inbound_order_expected_arrival.sql', expectedNullable: true },
+  { tableName: 'base_product', columnName: 'category_id', introducingScript: '049_inventory_sku_barcode_stocktake.sql', expectedNullable: true },
+  ...['barcode', 'cost_price', 'location_id']
+    .map((columnName) => ({ tableName: 'base_product_sku', columnName, introducingScript: '049_inventory_sku_barcode_stocktake.sql', expectedNullable: true })),
   {
     tableName: 'biz_outbound_order_item',
     columnName: 'sku_id',
@@ -569,6 +584,23 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
   { tableName: 'order_merge_relation', indexName: 'uk_order_merge_relation_parent_source', columns: ['parent_order_id', 'source_order_id'], unique: true, introducingScript: '045_order_merge_governance.sql' },
   { tableName: 'order_merge_relation', indexName: 'idx_order_merge_relation_operation_id', columns: ['operation_id'], unique: false, introducingScript: '045_order_merge_governance.sql' },
   { tableName: 'order_merge_relation', indexName: 'idx_order_merge_relation_parent_order_id', columns: ['parent_order_id'], unique: false, introducingScript: '045_order_merge_governance.sql' },
+  // 049：库存域唯一键承担编码唯一、条码唯一、单据幂等与“同单同规格一行”约束，缺失时必须在启动期阻断。
+  ...([
+    ['base_category', 'uk_base_category_code', ['category_code']],
+    ['base_category', 'uk_base_category_name', ['category_name']],
+    ['base_storage_location', 'uk_base_storage_location_code', ['location_code']],
+    ['base_product_sku', 'uk_base_product_sku_barcode', ['barcode']],
+    ['inv_stock_doc', 'uk_inv_stock_doc_no', ['doc_no']],
+    ['inv_stock_doc', 'uk_inv_stock_doc_request', ['client_request_id']],
+    ['inv_stocktake', 'uk_inv_stocktake_no', ['stocktake_no']],
+    ['inv_stocktake_item', 'uk_inv_stocktake_item_sku', ['stocktake_id', 'sku_id']],
+  ] as const).map(([tableName, indexName, columns]) => ({
+    tableName,
+    indexName,
+    columns: [...columns],
+    unique: true,
+    introducingScript: '049_inventory_sku_barcode_stocktake.sql',
+  })),
 ]
 
 const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [
@@ -621,6 +653,23 @@ const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [
     deleteRule: 'RESTRICT',
     introducingScript: '045_order_merge_governance.sql',
   })),
+  ...[
+    ['base_product', 'category_id', 'base_category', 'RESTRICT'],
+    ['base_product_sku', 'location_id', 'base_storage_location', 'RESTRICT'],
+    ['inv_stock_doc_item', 'doc_id', 'inv_stock_doc', 'CASCADE'],
+    ['inv_stock_doc_item', 'product_id', 'base_product', 'RESTRICT'],
+    ['inv_stock_doc_item', 'sku_id', 'base_product_sku', 'RESTRICT'],
+    ['inv_stocktake_item', 'stocktake_id', 'inv_stocktake', 'CASCADE'],
+    ['inv_stocktake_item', 'product_id', 'base_product', 'RESTRICT'],
+    ['inv_stocktake_item', 'sku_id', 'base_product_sku', 'RESTRICT'],
+  ].map(([tableName, columnName, referencedTableName, deleteRule]) => ({
+    tableName,
+    columnName,
+    referencedTableName,
+    referencedColumnName: 'id',
+    deleteRule,
+    introducingScript: '049_inventory_sku_barcode_stocktake.sql',
+  })),
 ]
 
 const MYSQL_REQUIRED_TRIGGERS: readonly MysqlRequiredTrigger[] = [
@@ -671,6 +720,7 @@ const AUTO_MIGRATABLE_FILES = [
   '046_outbound_order_source_doc.sql',
   '047_o2o_preorder_pickup_at.sql',
   '048_inbound_order_expected_arrival.sql',
+  '049_inventory_sku_barcode_stocktake.sql',
 ]
 
 /**

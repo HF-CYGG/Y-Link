@@ -46,6 +46,12 @@ import { OrderRevision } from '../entities/order-revision.entity.js'
 import { AccountLifecycleEvent } from '../entities/account-lifecycle-event.entity.js'
 import { OrderMergeOperation } from '../entities/order-merge-operation.entity.js'
 import { OrderMergeRelation } from '../entities/order-merge-relation.entity.js'
+import { BaseCategory } from '../entities/base-category.entity.js'
+import { BaseStorageLocation } from '../entities/base-storage-location.entity.js'
+import { InvStockDoc } from '../entities/inv-stock-doc.entity.js'
+import { InvStockDocItem } from '../entities/inv-stock-doc-item.entity.js'
+import { InvStocktake } from '../entities/inv-stocktake.entity.js'
+import { InvStocktakeItem } from '../entities/inv-stocktake-item.entity.js'
 
 export const appEntities = [
   BaseProduct,
@@ -84,6 +90,12 @@ export const appEntities = [
   AccountLifecycleEvent,
   OrderMergeOperation,
   OrderMergeRelation,
+  BaseCategory,
+  BaseStorageLocation,
+  InvStockDoc,
+  InvStockDocItem,
+  InvStocktake,
+  InvStocktakeItem,
 ]
 
 function resolveEffectiveDatabaseConfig(

@@ -16,6 +16,7 @@ import {
   UpdateDateColumn,
 } from 'typeorm'
 import { BaseProduct } from './base-product.entity.js'
+import { BaseStorageLocation } from './base-storage-location.entity.js'
 import { entityColumnOptions } from './entity-column-options.js'
 
 const skuSpecValuesJsonColumnOptions = entityColumnOptions.isSqlite ? { default: '{}' } : {}
@@ -25,6 +26,7 @@ const skuSpecValuesJsonColumnOptions = entityColumnOptions.isSqlite ? { default:
 @Index('idx_base_product_sku_mall_list', ['productId', 'isActive', 'sortOrder', 'id'])
 @Index('idx_base_product_sku_current_mall_list', ['productId', 'isCurrent', 'isActive', 'sortOrder', 'id'])
 @Index('uk_base_product_sku_code', ['skuCode'], { unique: true })
+@Index('uk_base_product_sku_barcode', ['barcode'], { unique: true })
 export class BaseProductSku {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })
   id!: string
@@ -46,6 +48,16 @@ export class BaseProductSku {
 
   @Column({ name: 'discount_rate', type: 'decimal', precision: 3, scale: 1, default: 10.0, comment: 'SKU 折扣' })
   discountRate!: string
+
+  @Column({ name: 'barcode', type: 'varchar', length: 64, nullable: true, comment: '原厂条码（为空时以 SKU 编码作为内部条码）' })
+  barcode!: string | null
+
+  @Column({ name: 'cost_price', type: 'decimal', precision: 12, scale: 2, nullable: true, comment: 'SKU 成本价' })
+  costPrice!: string | null
+
+  @Index('idx_base_product_sku_location_id')
+  @Column({ name: 'location_id', ...entityColumnOptions.foreignId, nullable: true, comment: '默认库位ID' })
+  locationId!: string | null
 
   @Column({ name: 'current_stock', type: 'int', default: 0, comment: 'SKU 物理库存' })
   currentStock!: number
@@ -77,4 +89,18 @@ export class BaseProductSku {
   @ManyToOne(() => BaseProduct, (product) => product.skus, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'product_id' })
   product?: Relation<BaseProduct>
+
+  @ManyToOne(() => BaseStorageLocation, { onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'location_id' })
+  location?: Relation<BaseStorageLocation>
+
+  /**
+   * 序列化保护：成本价属于经营敏感数据，实体被直接 JSON 化（例如送货单详情带出的 SKU 关联）时不下发。
+   * 需要成本价的接口必须显式构造视图（商品 SKU 视图、当前库存查询），并按 products:manage 裁剪。
+   */
+  toJSON(): Record<string, unknown> {
+    const plain = { ...this } as unknown as Record<string, unknown>
+    delete plain.costPrice
+    return plain
+  }
 }

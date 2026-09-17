@@ -63,6 +63,12 @@ const HEAVY_IMPORT_RULES = [
   },
 ]
 
+HEAVY_IMPORT_RULES.push({
+  packageName: 'jsbarcode',
+  runtimeStaticAllowedFiles: new Set(),
+  description: '条码生成库只允许在条码打印弹窗内通过动态 import 加载',
+})
+
 const ECHARTS_RUNTIME_ALLOWED_FILES = new Set([
   path.join(srcRoot, 'components', 'charts', 'echarts.ts'),
 ])

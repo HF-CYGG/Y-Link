@@ -186,6 +186,28 @@ export function requireRole(...roles: UserRole[]) {
 }
 
 /**
+ * 任一权限点校验中间件：满足其中任意一个权限即可放行，用于多个模块共用的只读字典与扫码识别接口。
+ */
+export function requireAnyPermission(...permissions: PermissionCode[]) {
+  return (req: Request, _res: Response, next: NextFunction): void => {
+    const auth = (req as AuthenticatedRequest).auth
+    if (!auth) {
+      next(new BizError('未登录或登录状态已失效', 401))
+      return
+    }
+    if (!permissions.some((permission) => auth.permissions.includes(permission))) {
+      recordForbiddenAudit(req, 'permission_missing', {
+        requiredAnyPermissions: permissions,
+        missingPermissions: permissions,
+      })
+      next(new BizError(FORBIDDEN_MESSAGE, 403))
+      return
+    }
+    next()
+  }
+}
+
+/**
  * 权限点校验中间件：
  * - 在保留 role 的同时，以 permission 作为更细粒度的接口访问控制依据；
  * - 适用于用户管理、审计导出等系统治理接口，避免再以“管理员大权限”粗放控制。
