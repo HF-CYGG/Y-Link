@@ -66,6 +66,8 @@
     "account-lifecycle:mysql:verify": "tsx scripts/account-lifecycle-mysql-verify.ts",
     "product:sku-current:verify": "tsx scripts/product-sku-current-verify.ts",
     "inventory:invariants:verify": "tsx scripts/inventory-invariants-verify.ts",
+    "inventory:stock-management:verify": "tsx scripts/inventory-stock-management-verify.ts",
+    "inventory:http-permission:verify": "tsx scripts/inventory-http-permission-verify.ts",
     "inbound:verified-delete:verify": "tsx scripts/inbound-verified-delete-verify.ts",
     "inbound:verified-delete:mysql:verify": "tsx scripts/inbound-verified-delete-mysql-verify.ts",
     "o2o:discount-price:verify": "tsx scripts/o2o-discount-price-verify.ts",

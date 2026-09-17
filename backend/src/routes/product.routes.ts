@@ -4,12 +4,52 @@
  * 维护重点：新增商品字段或筛选条件时，需要同步检查 Zod 预处理逻辑、实体约束以及批量导入的数据兼容性。
  */
 
+import path from 'node:path'
 import { Router } from 'express'
+import multer from 'multer'
 import { z } from 'zod'
-import { requirePermission } from '../middleware/auth.middleware.js'
-import { batchCreateProducts, productService } from '../services/product.service.js'
+import { requireAnyPermission, requirePermission } from '../middleware/auth.middleware.js'
+import { productExcelService } from '../services/product-excel.service.js'
+import { batchCreateProducts, productService, type ProductView } from '../services/product.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
+import { BizError } from '../utils/errors.js'
+import { extractRequestMeta } from '../utils/request-meta.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
+
+const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+
+const productImportUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024, files: 1 },
+  fileFilter: (_req, file, cb) => {
+    const mimeType = (file.mimetype || '').toLowerCase()
+    if (path.extname(file.originalname).toLowerCase() === '.xlsx' && (!mimeType || mimeType === XLSX_MIME || mimeType === 'application/octet-stream')) {
+      cb(null, true)
+      return
+    }
+    cb(new BizError('仅支持上传 .xlsx 文件', 400))
+  },
+})
+
+const requireUploadedFile = (file: Express.Multer.File | undefined) => {
+  if (!file) throw new BizError('请选择要导入的 Excel 文件', 400)
+  return file.buffer
+}
+
+const sendXlsx = (res: import('express').Response, fileName: string, buffer: Buffer) => {
+  res.setHeader('Content-Type', XLSX_MIME)
+  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`)
+  res.send(buffer)
+}
+
+/**
+ * 成本价属于经营敏感数据：只有具备商品维护权限的账号可见。
+ * 供货方等只有 products:view 的账号读取商品、扫码识别或导出时，统一抹掉成本价。
+ */
+const canViewCostPrice = (req: import('express').Request) =>
+  (req as AuthenticatedRequest).auth.permissions.includes('products:manage')
+const maskSkuCostPrice = <T extends { costPrice: string | null }>(sku: T): T => ({ ...sku, costPrice: null })
+const maskProductCostPrice = (product: ProductView): ProductView => ({ ...product, skus: product.skus.map(maskSkuCostPrice) })
 
 const productTagIdSchema = z.union([z.string(), z.number()])
 
@@ -82,7 +122,16 @@ const productSkuSchema = z.object({
   o2oRecommended: optionalBooleanSchema,
   thumbnail: z.string().max(255).nullable().optional(),
   sortOrder: z.number().int().nonnegative().optional(),
+  barcode: z.string().max(64).nullable().optional(),
+  costPrice: z.number().min(0).nullable().optional(),
+  locationId: productTagIdSchema.nullable().optional(),
 })
+
+const defaultSkuSchema = z.object({
+  barcode: z.string().max(64).nullable().optional(),
+  costPrice: z.number().min(0).nullable().optional(),
+  locationId: productTagIdSchema.nullable().optional(),
+}).optional()
 
 const createProductSchema = z.object({
   productCode: optionalGeneratedProductCodeSchema,
@@ -99,6 +148,8 @@ const createProductSchema = z.object({
   currentStock: z.number().int().nonnegative().optional(),
   preOrderedStock: z.number().int().nonnegative().optional(),
   tagIds: z.array(productTagIdSchema).optional(),
+  categoryId: productTagIdSchema.nullable().optional(),
+  defaultSku: defaultSkuSchema,
   specGroups: z.array(productSpecGroupSchema).optional(),
   skus: z.array(productSkuSchema).optional(),
 })
@@ -118,6 +169,8 @@ const updateProductSchema = z.object({
   currentStock: z.number().int().nonnegative().optional(),
   preOrderedStock: z.number().int().nonnegative().optional(),
   tagIds: z.array(productTagIdSchema).optional(),
+  categoryId: productTagIdSchema.nullable().optional(),
+  defaultSku: defaultSkuSchema,
   specGroups: z.array(productSpecGroupSchema).optional(),
   skus: z.array(productSkuSchema).optional(),
   // 编辑弹窗打开时读取到的库存基线；提交库存与数据库不一致时，服务端据此判断是否被出入库并发改动。
@@ -160,6 +213,7 @@ productRouter.get(
     const data = await productService.list({
       keyword: typeof req.query.keyword === 'string' ? req.query.keyword : undefined,
       tagId: typeof req.query.tagId === 'string' ? req.query.tagId : undefined,
+      categoryId: typeof req.query.categoryId === 'string' && req.query.categoryId ? req.query.categoryId : undefined,
       isActive,
       o2oStatus:
         req.query.o2oStatus === 'listed' || req.query.o2oStatus === 'unlisted'
@@ -170,7 +224,7 @@ productRouter.get(
     res.json({
       code: 0,
       message: 'ok',
-      data,
+      data: canViewCostPrice(req) ? data : data.map(maskProductCostPrice),
     })
   }),
 )
@@ -190,6 +244,7 @@ productRouter.get(
     const data = await productService.listPaged({
       keyword: typeof req.query.keyword === 'string' ? req.query.keyword : undefined,
       tagId: typeof req.query.tagId === 'string' ? req.query.tagId : undefined,
+      categoryId: typeof req.query.categoryId === 'string' && req.query.categoryId ? req.query.categoryId : undefined,
       isActive,
       o2oStatus:
         req.query.o2oStatus === 'listed' || req.query.o2oStatus === 'unlisted'
@@ -202,7 +257,7 @@ productRouter.get(
     res.json({
       code: 0,
       message: 'ok',
-      data,
+      data: canViewCostPrice(req) ? data : { ...data, list: data.list.map(maskProductCostPrice) },
     })
   }),
 )
@@ -240,6 +295,72 @@ productRouter.post(
 )
 
 productRouter.get(
+  '/lookup',
+  // 扫码识别：库存作业与盘点页面共用；purpose=stocktake 时不返回库存数量，避免盲盘泄露账面数。
+  requireAnyPermission('products:view', 'inventory:view', 'stocktake:count'),
+  asyncHandler(async (req, res) => {
+    const auth = (req as AuthenticatedRequest).auth
+    const code = typeof req.query.code === 'string' ? req.query.code : ''
+    const data = await productService.lookupByCode(code)
+    const hideStock = req.query.purpose === 'stocktake'
+      || !(auth.permissions.includes('inventory:view') || auth.permissions.includes('products:view'))
+    if (hideStock) {
+      data.sku = { ...data.sku, currentStock: 0, preOrderedStock: 0, availableStock: 0 }
+    }
+    if (!canViewCostPrice(req)) {
+      data.sku = maskSkuCostPrice(data.sku)
+    }
+    res.json({ code: 0, message: 'ok', data: { ...data, stockHidden: hideStock } })
+  }),
+)
+
+productRouter.post(
+  '/labels',
+  requirePermission('products:view'),
+  asyncHandler(async (req, res) => {
+    const payload = z.object({ skuIds: z.array(productTagIdSchema).min(1).max(500) }).parse(req.body)
+    res.json({ code: 0, message: 'ok', data: await productService.listLabels(payload.skuIds) })
+  }),
+)
+
+productRouter.get(
+  '/export',
+  requirePermission('products:view'),
+  asyncHandler(async (req, res) => {
+    const buffer = await productExcelService.exportProducts({ includeCostPrice: canViewCostPrice(req) })
+    sendXlsx(res, `products-${new Date().toISOString().slice(0, 10)}.xlsx`, buffer)
+  }),
+)
+
+productRouter.get(
+  '/import/template',
+  requirePermission('products:import'),
+  asyncHandler(async (_req, res) => {
+    sendXlsx(res, 'product-import-template.xlsx', await productExcelService.buildTemplate())
+  }),
+)
+
+productRouter.post(
+  '/import/preview',
+  requirePermission('products:import'),
+  productImportUpload.single('file'),
+  asyncHandler(async (req, res) => {
+    res.json({ code: 0, message: 'ok', data: await productExcelService.preview(requireUploadedFile(req.file)) })
+  }),
+)
+
+productRouter.post(
+  '/import',
+  requirePermission('products:import', 'products:manage'),
+  productImportUpload.single('file'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const data = await productExcelService.importProducts(requireUploadedFile(req.file), authReq.auth, extractRequestMeta(req))
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+productRouter.get(
   '/:id',
   // 查看商品详情属于读取能力，需要 products:view。
   requirePermission('products:view'),
@@ -248,7 +369,7 @@ productRouter.get(
     res.json({
       code: 0,
       message: 'ok',
-      data,
+      data: canViewCostPrice(req) ? data : maskProductCostPrice(data),
     })
   }),
 )

@@ -43,9 +43,16 @@ const reportPath = path.join(runtimeRoot, 'enterprise-performance-budget-report.
  * Issue #95（管理端送货单池与预计送达时间）：相对 main@ed46790 单独叠加后实测 4326.12 KB（+15.29 KB），
  * 其中异步拆包的 InboundDeliveryPoolPanel 占 11.04 KB，其余为扫码页页签、送货单录入与历史页新增字段。
  * 与含 #93/#94/#96/#97 的 main@86f6bd8 合并后同一环境实测 4342.37 KB，因此上限定为 4350 KB（约 0.18% 余量）。
+ *
+ * Issue #103（文创店库存管理：SKU 条码、扫码出入库、库存盘点）：同一环境下 main@235fdfc 实测 4342.37 KB，
+ * 本功能叠加后实测 4493.14 KB（+150.77 KB）。增量为异步 barcode 低频块（JsBarcode，62.72 KB）、
+ * 库存管理七个路由分包与条码打印、Excel 导入两个异步弹窗（约 80 KB），以及入口路由表与权限文案（约 4 KB）；
+ * 首屏依赖图、首屏 JS/CSS 与其余低频重包预算均未超额，并为 barcode 块单独设 80 KB 上限。
+ * 评审修复（扫码串行队列、打印与导入弹窗防护、盘点差异逐字段提交）再增 10.12 KB 至 4503.26 KB，
+ * 均落在库存低频分包与产品管理页，因此总量上限定为 4510 KB。
  */
 const performanceBudget = {
-  totalAssetsMaxKB: 4350,
+  totalAssetsMaxKB: 4510,
   criticalAssetsMaxKB: 1180,
   initialLoadJsMaxKB: 850,
   initialLoadCssMaxKB: 320,
@@ -60,6 +67,7 @@ const performanceBudget = {
     charting: 650,
     'image-tools': 80,
     'qr-code': 60,
+    barcode: 80,
   },
   /**
    * OrderEntryView：#68-#74 引入 SKU 选择、草稿商品对账后接近 30 KB 上限；

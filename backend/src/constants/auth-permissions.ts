@@ -46,6 +46,13 @@ export const PERMISSION_CODES = [
   'inbound:verify',
   'customer_service:view',
   'customer_service:reply',
+  'products:import',
+  'inventory:view',
+  'inventory:operate',
+  'inventory:void',
+  'stocktake:view',
+  'stocktake:count',
+  'stocktake:approve',
 ] as const
 
 export type PermissionCode = (typeof PERMISSION_CODES)[number]
@@ -90,6 +97,13 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, PermissionCode[]> = {
     'inbound:verify',
     'customer_service:view',
     'customer_service:reply',
+    'products:import',
+    'inventory:view',
+    'inventory:operate',
+    'inventory:void',
+    'stocktake:view',
+    'stocktake:count',
+    'stocktake:approve',
   ],
   operator: [
     'dashboard:view',
@@ -108,6 +122,10 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, PermissionCode[]> = {
     'inbound:verify',
     'customer_service:view',
     'customer_service:reply',
+    'inventory:view',
+    'inventory:operate',
+    'stocktake:view',
+    'stocktake:count',
   ],
   supplier: [
     'products:view',

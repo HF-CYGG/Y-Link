@@ -21,6 +21,7 @@ import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.
 import { MAX_DATABASE_INT, MAX_INBOUND_ORDER_ITEM_COUNT } from '../constants/web-resource-limits.js'
 import { assertPermanentDeletePassword } from '../utils/permanent-delete-password.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
+import { buildSkuLogFields, snapshotSkuStock } from './inventory-ledger.service.js'
 
 export interface SubmitInboundItemInput {
   productId: string
@@ -890,12 +891,14 @@ class InboundService {
           }
           const beforeCurrentStock = Number(product.currentStock)
           const afterCurrentStock = beforeCurrentStock - item.qty
+          const skuBefore = snapshotSkuStock(sku)
           sku.currentStock = Number(sku.currentStock) - item.qty
           product.currentStock = afterCurrentStock
           await skuRepository.save(sku)
           await productRepository.save(product)
           await inventoryLogRepository.save(inventoryLogRepository.create({
             productId: String(product.id),
+            ...buildSkuLogFields(sku, skuBefore),
             changeType: 'inbound_reverse',
             changeQty: -item.qty,
             beforeCurrentStock,
@@ -1297,7 +1300,8 @@ class InboundService {
         const qty = Number(row.qty)
         const beforeCurrentStock = Number(product.currentStock)
         const beforeSkuCurrentStock = Number(sku.currentStock)
-        
+        const skuBefore = snapshotSkuStock(sku)
+
         product.currentStock = beforeCurrentStock + qty
         sku.currentStock = beforeSkuCurrentStock + qty
         await manager.getRepository(BaseProductSku).save(sku)
@@ -1306,6 +1310,7 @@ class InboundService {
         await manager.getRepository(InventoryLog).save(
           manager.getRepository(InventoryLog).create({
             productId: product.id,
+            ...buildSkuLogFields(sku, skuBefore),
             changeType: 'inbound_sys',
             changeQty: qty,
             beforeCurrentStock,

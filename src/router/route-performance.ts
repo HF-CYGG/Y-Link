@@ -45,6 +45,14 @@ export type AppRouteName =
   | 'o2o-console-orders'
   | 'o2o-console-verify'
   | 'o2o-console-inbound'
+  | 'inventory'
+  | 'inventory-scan'
+  | 'inventory-stocks'
+  | 'inventory-logs'
+  | 'inventory-docs'
+  | 'inventory-stocktakes'
+  | 'inventory-stocktake-work'
+  | 'inventory-master-data'
   | 'system'
   | 'system-configs'
   | 'system-db-migration'
@@ -106,6 +114,13 @@ export const routeViewLoaders = {
   'o2o-console-orders': () => import('@/views/o2o/O2oOrderQueryView.vue'),
   'o2o-console-verify': () => import('@/views/o2o/O2oVerifyConsoleView.vue'),
   'o2o-console-inbound': () => import('@/views/o2o/O2oInboundManageView.vue'),
+  'inventory-scan': () => import('@/views/inventory/InventoryScanView.vue'),
+  'inventory-stocks': () => import('@/views/inventory/InventoryStockView.vue'),
+  'inventory-logs': () => import('@/views/inventory/InventoryLogView.vue'),
+  'inventory-docs': () => import('@/views/inventory/InventoryDocListView.vue'),
+  'inventory-stocktakes': () => import('@/views/inventory/StocktakeListView.vue'),
+  'inventory-stocktake-work': () => import('@/views/inventory/StocktakeWorkView.vue'),
+  'inventory-master-data': () => import('@/views/inventory/InventoryMasterDataView.vue'),
   'system-configs': () => import('@/views/system/SystemConfigViewLoader'),
   'system-db-migration': () => import('@/views/system/DatabaseMigrationView.vue'),
   'system-users': () => import('@/views/system/UserCenterView.vue'),

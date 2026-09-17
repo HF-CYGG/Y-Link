@@ -10,11 +10,14 @@ import {
   CreateDateColumn,
   Entity,
   Index,
+  JoinColumn,
+  ManyToOne,
   OneToMany,
   PrimaryGeneratedColumn,
   type Relation,
   UpdateDateColumn,
 } from 'typeorm'
+import { BaseCategory } from './base-category.entity.js'
 import { BizOutboundOrderItem } from './biz-outbound-order-item.entity.js'
 import { BaseProductSku } from './base-product-sku.entity.js'
 import { entityColumnOptions } from './entity-column-options.js'
@@ -76,6 +79,10 @@ export class BaseProduct {
   @Column({ name: 'current_stock', type: 'int', default: 0, comment: '物理库存' })
   currentStock!: number
 
+  @Index('idx_base_product_category_id')
+  @Column({ name: 'category_id', ...entityColumnOptions.foreignId, nullable: true, comment: '商品分类ID' })
+  categoryId!: string | null
+
   @Column({ name: 'pre_ordered_stock', type: 'int', default: 0, comment: '已预订库存' })
   preOrderedStock!: number
 
@@ -95,4 +102,8 @@ export class BaseProduct {
 
   @OneToMany(() => BaseProductSku, (sku) => sku.product)
   skus?: Relation<BaseProductSku[]>
+
+  @ManyToOne(() => BaseCategory, { onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'category_id' })
+  category?: Relation<BaseCategory>
 }

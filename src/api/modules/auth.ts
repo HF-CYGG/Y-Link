@@ -55,6 +55,13 @@ export const PERMISSION_CODES = [
   'inbound:verify',
   'customer_service:view',
   'customer_service:reply',
+  'products:import',
+  'inventory:view',
+  'inventory:operate',
+  'inventory:void',
+  'stocktake:view',
+  'stocktake:count',
+  'stocktake:approve',
 ] as const
 
 export type PermissionCode = (typeof PERMISSION_CODES)[number]
@@ -99,6 +106,13 @@ export const ROLE_DEFAULT_PERMISSION_MAP: Record<UserRole, PermissionCode[]> = {
     'inbound:verify',
     'customer_service:view',
     'customer_service:reply',
+    'products:import',
+    'inventory:view',
+    'inventory:operate',
+    'inventory:void',
+    'stocktake:view',
+    'stocktake:count',
+    'stocktake:approve',
   ],
   operator: [
     'dashboard:view',
@@ -117,6 +131,10 @@ export const ROLE_DEFAULT_PERMISSION_MAP: Record<UserRole, PermissionCode[]> = {
     'inbound:verify',
     'customer_service:view',
     'customer_service:reply',
+    'inventory:view',
+    'inventory:operate',
+    'stocktake:view',
+    'stocktake:count',
   ],
   supplier: [
     'products:view',
@@ -165,6 +183,13 @@ export const PERMISSION_LABEL_MAP: Record<PermissionCode, string> = {
   'inbound:verify': '核销入库',
   'customer_service:view': '查看客服工作台',
   'customer_service:reply': '回复客服反馈',
+  'products:import': 'Excel 批量导入商品',
+  'inventory:view': '查看库存与流水',
+  'inventory:operate': '扫码出入库作业',
+  'inventory:void': '作废库存单据',
+  'stocktake:view': '查看盘点单',
+  'stocktake:count': '创建盘点与扫码计数',
+  'stocktake:approve': '审核盘点差异并调账',
 }
 
 /**

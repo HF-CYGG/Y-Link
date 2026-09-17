@@ -4,7 +4,7 @@
  * 实现逻辑：
  * - 将颜色、款式输入归一化为去重后的规格维度；
  * - 根据规格维度生成稳定排序的 SKU 笛卡尔积；
- * - 通过规格组合键匹配已有 SKU，保留历史 id、价格、库存和启停状态。
+ * - 通过规格组合键匹配已有 SKU，保留历史 id、价格、库存、启停状态以及编码、条码、成本价与库位。
  * 维护说明：
  * - 新增尺码、容量等规格维度时，应先扩展这里的矩阵生成规则，再调整表单展示；
  * - 不要在页面模板中重复实现组合逻辑，否则容易出现保存 payload 与界面矩阵不一致。
@@ -23,6 +23,12 @@ export interface ProductSkuMatrixRow {
   isCurrent?: boolean
   o2oRecommended?: boolean
   thumbnail?: string | null
+  skuCode?: string
+  barcode?: string | null
+  costPrice?: number | null
+  locationId?: string | null
+  /** 单规格商品在规格弹窗里的默认规格占位行；保存时回写到默认规格字段，不作为新 SKU 提交，生成矩阵时不继承。 */
+  isDefaultPlaceholder?: boolean
 }
 
 export interface ProductSkuMatrixDefaults {
@@ -133,6 +139,10 @@ export const buildSkuMatrixRows = ({
       isCurrent: true,
       o2oRecommended: matchedRow?.o2oRecommended ?? false,
       thumbnail: matchedRow?.thumbnail ?? null,
+      skuCode: matchedRow?.skuCode,
+      barcode: matchedRow?.barcode ?? null,
+      costPrice: matchedRow?.costPrice ?? null,
+      locationId: matchedRow?.locationId ?? null,
     }
   }))
 }

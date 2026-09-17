@@ -46,6 +46,12 @@ const REQUIRED_TABLES = [
   'account_lifecycle_event',
   'order_merge_operation',
   'order_merge_relation',
+  'base_category',
+  'base_storage_location',
+  'inv_stock_doc',
+  'inv_stock_doc_item',
+  'inv_stocktake',
+  'inv_stocktake_item',
 ] as const
 
 const REQUIRED_COLUMNS = [
@@ -81,6 +87,10 @@ const REQUIRED_COLUMNS = [
   ['o2o_preorder', 'cancelled_at'],
   ['o2o_preorder', 'pickup_at'],
   ['biz_inbound_order', 'expected_arrival_at'],
+  ['base_product', 'category_id'],
+  ['base_product_sku', 'barcode'],
+  ['base_product_sku', 'cost_price'],
+  ['base_product_sku', 'location_id'],
   ['biz_outbound_order_item', 'sku_id'],
   ['biz_outbound_order_item', 'sku_code_snapshot'],
   ['biz_outbound_order_item', 'spec_text_snapshot'],
@@ -463,6 +473,14 @@ const REQUIRED_INDEXES: readonly IndexFixture[] = [
   { tableName: 'order_merge_relation', indexName: 'uk_order_merge_relation_parent_source', columns: ['parent_order_id', 'source_order_id'], unique: true },
   { tableName: 'order_merge_relation', indexName: 'idx_order_merge_relation_operation_id', columns: ['operation_id'], unique: false },
   { tableName: 'order_merge_relation', indexName: 'idx_order_merge_relation_parent_order_id', columns: ['parent_order_id'], unique: false },
+  { tableName: 'base_category', indexName: 'uk_base_category_code', columns: ['category_code'], unique: true },
+  { tableName: 'base_category', indexName: 'uk_base_category_name', columns: ['category_name'], unique: true },
+  { tableName: 'base_storage_location', indexName: 'uk_base_storage_location_code', columns: ['location_code'], unique: true },
+  { tableName: 'base_product_sku', indexName: 'uk_base_product_sku_barcode', columns: ['barcode'], unique: true },
+  { tableName: 'inv_stock_doc', indexName: 'uk_inv_stock_doc_no', columns: ['doc_no'], unique: true },
+  { tableName: 'inv_stock_doc', indexName: 'uk_inv_stock_doc_request', columns: ['client_request_id'], unique: true },
+  { tableName: 'inv_stocktake', indexName: 'uk_inv_stocktake_no', columns: ['stocktake_no'], unique: true },
+  { tableName: 'inv_stocktake_item', indexName: 'uk_inv_stocktake_item_sku', columns: ['stocktake_id', 'sku_id'], unique: true },
 ]
 
 const REQUIRED_FOREIGN_KEYS: readonly ForeignKeyFixture[] = [
@@ -518,6 +536,24 @@ const REQUIRED_FOREIGN_KEYS: readonly ForeignKeyFixture[] = [
     referencedColumnName: 'id',
     ordinalPosition: 1,
     deleteRule: 'RESTRICT',
+  })),
+  ...[
+    ['base_product', 'fk_base_product_category_id', 'category_id', 'base_category', 'RESTRICT'],
+    ['base_product_sku', 'fk_base_product_sku_location_id', 'location_id', 'base_storage_location', 'RESTRICT'],
+    ['inv_stock_doc_item', 'fk_inv_stock_doc_item_doc_id', 'doc_id', 'inv_stock_doc', 'CASCADE'],
+    ['inv_stock_doc_item', 'fk_inv_stock_doc_item_product_id', 'product_id', 'base_product', 'RESTRICT'],
+    ['inv_stock_doc_item', 'fk_inv_stock_doc_item_sku_id', 'sku_id', 'base_product_sku', 'RESTRICT'],
+    ['inv_stocktake_item', 'fk_inv_stocktake_item_stocktake_id', 'stocktake_id', 'inv_stocktake', 'CASCADE'],
+    ['inv_stocktake_item', 'fk_inv_stocktake_item_product_id', 'product_id', 'base_product', 'RESTRICT'],
+    ['inv_stocktake_item', 'fk_inv_stocktake_item_sku_id', 'sku_id', 'base_product_sku', 'RESTRICT'],
+  ].map(([tableName, constraintName, columnName, referencedTableName, deleteRule]) => ({
+    tableName,
+    constraintName,
+    columnName,
+    referencedTableName,
+    referencedColumnName: 'id',
+    ordinalPosition: 1,
+    deleteRule,
   })),
 ]
 
@@ -751,6 +787,20 @@ await expectSchemaFailure(missingInboundExpectedArrivalAt, [
   '048_inbound_order_expected_arrival.sql',
 ])
 
+const missingSkuBarcode = createCompleteFixture()
+missingSkuBarcode.columns.delete(objectKey('base_product_sku', 'barcode'))
+await expectSchemaFailure(missingSkuBarcode, [
+  '字段 base_product_sku.barcode',
+  '049_inventory_sku_barcode_stocktake.sql',
+])
+
+const missingStocktakeTable = createCompleteFixture()
+missingStocktakeTable.tables.delete('inv_stocktake')
+await expectSchemaFailure(missingStocktakeTable, [
+  'inv_stocktake',
+  '049_inventory_sku_barcode_stocktake.sql',
+])
+
 const nullableOrderMergeResultSnapshot = createCompleteFixture()
 nullableOrderMergeResultSnapshot.columnDefinitions.get(objectKey('order_merge_operation', 'result_json'))!.isNullable = 'YES'
 await expectSchemaFailure(nullableOrderMergeResultSnapshot, [
@@ -956,6 +1006,31 @@ await expectSchemaFailure(wrongMergeParentDeleteRule, [
   '外键 order_merge_relation.parent_order_id 必须使用 ON DELETE RESTRICT',
   '045_order_merge_governance.sql',
 ])
+
+const missingSkuBarcodeUnique = createCompleteFixture()
+missingSkuBarcodeUnique.indexes.delete(objectKey('base_product_sku', 'uk_base_product_sku_barcode'))
+await expectSchemaFailure(missingSkuBarcodeUnique, [
+  '索引 base_product_sku.uk_base_product_sku_barcode',
+  '049_inventory_sku_barcode_stocktake.sql',
+])
+
+const wrongStocktakeItemDeleteRule = createCompleteFixture()
+wrongStocktakeItemDeleteRule.foreignKeys.get(
+  objectKey('inv_stocktake_item', 'fk_inv_stocktake_item_stocktake_id'),
+)!.deleteRule = 'RESTRICT'
+await expectSchemaFailure(wrongStocktakeItemDeleteRule, [
+  '外键 inv_stocktake_item.stocktake_id 必须使用 ON DELETE CASCADE',
+  '049_inventory_sku_barcode_stocktake.sql',
+])
+
+const inventoryMigrationSource = fs.readFileSync(
+  path.resolve(backendRoot, 'sql/049_inventory_sku_barcode_stocktake.sql'),
+  'utf8',
+)
+// 外键按列结构判断是否存在，兼容 DB_SYNC 建库时 TypeORM 生成的外键名。
+assert.match(inventoryMigrationSource, /kcu\.COLUMN_NAME = 'category_id'[\s\S]*?REFERENCED_TABLE_NAME = 'base_category'/)
+assert.match(inventoryMigrationSource, /kcu\.COLUMN_NAME = 'location_id'[\s\S]*?REFERENCED_TABLE_NAME = 'base_storage_location'/)
+assert.doesNotMatch(inventoryMigrationSource, /CONSTRAINT_NAME = 'fk_base_product/)
 
 const orderMergeMigrationSource = fs.readFileSync(
   path.resolve(backendRoot, 'sql/045_order_merge_governance.sql'),

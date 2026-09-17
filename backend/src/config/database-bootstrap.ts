@@ -54,6 +54,12 @@ const SQLITE_REQUIRED_TABLES = [
   'account_lifecycle_event',
   'order_merge_operation',
   'order_merge_relation',
+  'base_category',
+  'base_storage_location',
+  'inv_stock_doc',
+  'inv_stock_doc_item',
+  'inv_stocktake',
+  'inv_stocktake_item',
 ]
 
 /**
@@ -220,8 +226,9 @@ const SQLITE_REQUIRED_PRODUCT_COLUMNS = [
   'limit_per_user',
   'current_stock',
   'pre_ordered_stock',
+  'category_id',
 ]
-const SQLITE_REQUIRED_PRODUCT_SKU_COLUMNS = ['o2o_recommended', 'is_current']
+const SQLITE_REQUIRED_PRODUCT_SKU_COLUMNS = ['o2o_recommended', 'is_current', 'barcode', 'cost_price', 'location_id']
 const SQLITE_REQUIRED_O2O_PREORDER_ITEM_COLUMNS = [
   'original_price',
   'discount_rate',

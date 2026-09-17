@@ -9,8 +9,10 @@
 import { In, type EntityManager, type Repository } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
+import { BaseCategory } from '../entities/base-category.entity.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { BaseProductSku } from '../entities/base-product-sku.entity.js'
+import { BaseStorageLocation } from '../entities/base-storage-location.entity.js'
 import { RelProductTag } from '../entities/rel-product-tag.entity.js'
 import { BaseTag } from '../entities/base-tag.entity.js'
 import { BizInboundOrderItem } from '../entities/biz-inbound-order-item.entity.js'
@@ -27,10 +29,12 @@ import { normalizeLegacyUploadUrl } from '../utils/upload-storage.js'
 import { assertDiscountRateInRange, calculateDiscountedPrice, normalizeDiscountRate } from '../utils/discount-price.js'
 import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
+import { allocateWcSkuCode } from './inventory-sequence.service.js'
 
 export interface ProductQuery {
   keyword?: string
   tagId?: string
+  categoryId?: string
   isActive?: boolean
   o2oStatus?: 'listed' | 'unlisted'
   page?: number
@@ -52,9 +56,14 @@ export interface CreateProductInput {
   currentStock?: number
   preOrderedStock?: number
   tagIds?: Array<string | number>
+  categoryId?: string | number | null
+  /** 单规格商品（未提交 skus）时写入默认规格的条码、成本价与库位。 */
+  defaultSku?: ProductDefaultSkuExtras
   specGroups?: ProductSpecGroupInput[]
   skus?: ProductSkuInput[]
 }
+
+export type ProductDefaultSkuExtras = Pick<ProductSkuInput, 'barcode' | 'costPrice' | 'locationId'>
 
 export interface UpdateProductInput {
   productCode?: string
@@ -71,6 +80,8 @@ export interface UpdateProductInput {
   currentStock?: number
   preOrderedStock?: number
   tagIds?: Array<string | number>
+  categoryId?: string | number | null
+  defaultSku?: ProductDefaultSkuExtras
   specGroups?: ProductSpecGroupInput[]
   skus?: ProductSkuInput[]
   /** 编辑弹窗打开时读取到的库存基线，库存变动时用于拦截并发出入库造成的覆盖。 */
@@ -117,6 +128,10 @@ export interface ProductSkuInput {
   o2oRecommended?: boolean
   thumbnail?: string | null
   sortOrder?: number
+  /** 原厂条码；空字符串或 null 表示使用 SKU 编码作为内部条码。 */
+  barcode?: string | null
+  costPrice?: number | null
+  locationId?: string | number | null
 }
 
 export interface ProductSpecGroupView {
@@ -142,6 +157,12 @@ export interface ProductSkuView {
   o2oRecommended: boolean
   thumbnail: string | null
   sortOrder: number
+  barcode: string | null
+  /** 实际用于打印与扫码的条码：原厂条码优先，否则为 SKU 编码。 */
+  effectiveBarcode: string
+  costPrice: string | null
+  locationId: string | null
+  locationCode: string | null
 }
 
 export interface ProductView {
@@ -163,8 +184,36 @@ export interface ProductView {
   availableStock: number
   tagIds: string[]
   tags: ProductTagView[]
+  categoryId: string | null
+  categoryCode: string | null
+  categoryName: string | null
   specGroups: ProductSpecGroupView[]
   skus: ProductSkuView[]
+}
+
+export interface ProductLookupView {
+  matchedBy: 'barcode' | 'sku_code'
+  product: {
+    id: string
+    productCode: string
+    productName: string
+    thumbnail: string | null
+    isActive: boolean
+    categoryId: string | null
+    categoryName: string | null
+  }
+  sku: ProductSkuView
+}
+
+export interface ProductLabelView {
+  skuId: string
+  skuCode: string
+  barcode: string
+  productName: string
+  specText: string
+  price: string
+  categoryName: string | null
+  locationCode: string | null
 }
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
@@ -275,6 +324,8 @@ const PRODUCT_FIELD_LIMITS = {
   maxStock: 999999999,
 } as const
 
+const SKU_BARCODE_PATTERN = /^[!-~]{1,64}$/
+
 const PRODUCT_REFERENCE_LABELS = [
   { repoEntity: BizInboundOrderItem, label: '入库明细' },
   { repoEntity: BizOutboundOrderItem, label: '出库明细' },
@@ -302,30 +353,36 @@ const resolveEffectiveO2oStatus = (
 export class ProductService {
   private readonly productRepo = AppDataSource.getRepository(BaseProduct)
 
-  async list(query: ProductQuery): Promise<ProductView[]> {
-    const qb = this.productRepo.createQueryBuilder('p')
-
+  /**
+   * 列表与计数共用的筛选条件：
+   * - 关键字同时匹配商品名称、拼音、商品编码，以及当前 SKU 的编码与原厂条码；
+   * - 标签、分类筛选直接在 SQL 中完成，避免拉取全量数据后在内存筛选。
+   */
+  private applyListFilters(qb: ReturnType<Repository<BaseProduct>['createQueryBuilder']>, query: ProductQuery) {
     if (typeof query.isActive === 'boolean') {
       qb.andWhere('p.is_active = :isActive', { isActive: query.isActive ? 1 : 0 })
     }
     if (query.o2oStatus) {
       qb.andWhere('p.o2o_status = :o2oStatus', { o2oStatus: query.o2oStatus })
     }
-
     if (query.keyword?.trim()) {
-      // 支持产品名称 + 拼音首字母双字段模糊检索。
-      qb.andWhere('(p.product_name LIKE :keyword OR p.pinyin_abbr LIKE :keyword OR p.product_code LIKE :keyword)', {
-        keyword: `%${query.keyword.trim()}%`,
-      })
+      qb.andWhere(
+        `(p.product_name LIKE :keyword OR p.pinyin_abbr LIKE :keyword OR p.product_code LIKE :keyword
+          OR EXISTS (SELECT 1 FROM base_product_sku ks WHERE ks.product_id = p.id AND (ks.sku_code LIKE :keyword OR ks.barcode LIKE :keyword)))`,
+        { keyword: `%${query.keyword.trim()}%` },
+      )
     }
-
     if (query.tagId) {
-      // 通过关系表过滤标签，避免拉取全量数据后在内存筛选。
-      qb.innerJoin('rel_product_tag', 'rpt', 'rpt.product_id = p.id AND rpt.tag_id = :tagId', {
-        tagId: query.tagId,
-      })
+      qb.innerJoin('rel_product_tag', 'rpt', 'rpt.product_id = p.id AND rpt.tag_id = :tagId', { tagId: query.tagId })
     }
+    if (query.categoryId) {
+      qb.andWhere('p.category_id = :categoryId', { categoryId: query.categoryId })
+    }
+  }
 
+  async list(query: ProductQuery): Promise<ProductView[]> {
+    const qb = this.productRepo.createQueryBuilder('p')
+    this.applyListFilters(qb, query)
     qb.orderBy('p.id', 'DESC')
 
     const page = query.page ?? 0
@@ -352,18 +409,7 @@ export class ProductService {
 
   private async count(query: ProductQuery): Promise<number> {
     const qb = this.productRepo.createQueryBuilder('p')
-    if (typeof query.isActive === 'boolean') {
-      qb.andWhere('p.is_active = :isActive', { isActive: query.isActive ? 1 : 0 })
-    }
-    if (query.o2oStatus) {
-      qb.andWhere('p.o2o_status = :o2oStatus', { o2oStatus: query.o2oStatus })
-    }
-    if (query.keyword?.trim()) {
-      qb.andWhere('(p.product_name LIKE :keyword OR p.pinyin_abbr LIKE :keyword OR p.product_code LIKE :keyword)', { keyword: `%${query.keyword.trim()}%` })
-    }
-    if (query.tagId) {
-      qb.innerJoin('rel_product_tag', 'rpt', 'rpt.product_id = p.id AND rpt.tag_id = :tagId', { tagId: query.tagId })
-    }
+    this.applyListFilters(qb, query)
     return qb.getCount()
   }
 
@@ -379,7 +425,7 @@ export class ProductService {
   async create(input: CreateProductInput, actor: AuthUserContext): Promise<ProductView> {
     const result = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
-      return this.createWithManager(input, manager)
+      return this.createWithManager(input, manager, actor)
     })
     invalidateMallCatalogReadCache()
     return result
@@ -402,7 +448,7 @@ export class ProductService {
       for (let index = 0; index < inputs.length; index += 1) {
         const currentInput = inputs[index]
         try {
-          const createdProduct = await this.createWithManager(currentInput, manager)
+          const createdProduct = await this.createWithManager(currentInput, manager, actor)
           createdProducts.push(createdProduct)
         } catch (error) {
           if (error instanceof BizError) {
@@ -435,6 +481,9 @@ export class ProductService {
       this.assertProductLevelStockBaseline(product, input)
 
       this.applyUpdateInputToProduct(product, input)
+      if (input.categoryId !== undefined) {
+        product.categoryId = await this.resolveCategoryId(input.categoryId, manager, product.categoryId)
+      }
 
       const saved = await repo.save(product)
       if (Array.isArray(input.tagIds)) {
@@ -442,8 +491,13 @@ export class ProductService {
       }
       if (Array.isArray(input.skus) || Array.isArray(input.specGroups)) {
         await this.replaceProductSkus(saved, input, manager, { stockBaseline: input.stockBaseline, enforceSkuStockBaseline: true })
-      } else if (this.shouldSyncDefaultProductSku(input)) {
-        await this.syncDefaultProductSkuFields(saved, manager)
+      } else {
+        if (this.shouldSyncDefaultProductSku(input)) {
+          await this.syncDefaultProductSkuFields(saved, manager)
+        }
+        if (input.defaultSku) {
+          await this.applyDefaultSkuExtras(saved, input.defaultSku, manager)
+        }
       }
       await this.recordManualStockAdjustments(saved, stockSnapshot, actor, manager)
       return this.buildProductView(saved, manager)
@@ -506,7 +560,7 @@ export class ProductService {
 
   /**
    * 生成商品编辑导致的库存调整流水：
-   * - 逐个 SKU 比较“对商品汇总的贡献”（启用且当前版本才计入）与物理库存，变化即写一条 `manual_stock_adjust`；
+   * - 逐个 SKU 比较“对商品汇总的贡献”（启用且当前版本才计入）与物理库存，变化即写一条 `manual_stock_adjust`（新建商品为 `stock_initial`）；
    * - 商品汇总前后值按流水顺序串联，若最终仍与落库汇总不一致（历史汇总漂移被重算纠正），补一条无 SKU 的汇总校正流水；
    * - 预订库存不在商品编辑中改动，流水前后预订量保持一致。
    */
@@ -515,6 +569,7 @@ export class ProductService {
     snapshot: ProductStockSnapshot,
     actor: AuthUserContext,
     manager: EntityManager,
+    mode: 'edit' | 'create' = 'edit',
   ): Promise<void> {
     const skus = await manager.getRepository(BaseProductSku).find({ where: { productId: product.id }, order: { id: 'ASC' } })
     const logRepo = manager.getRepository(InventoryLog)
@@ -524,7 +579,7 @@ export class ProductService {
     let runningProductStock = snapshot.productCurrentStock
     const baseLog = {
       productId: String(product.id),
-      changeType: 'manual_stock_adjust',
+      changeType: mode === 'create' ? 'stock_initial' : 'manual_stock_adjust',
       beforePreorderedStock: snapshot.productPreOrderedStock,
       afterPreorderedStock: preOrderedStock,
       operatorType: 'admin',
@@ -559,7 +614,7 @@ export class ProductService {
           afterSkuCurrentStock: afterSkuStock,
           beforeSkuPreorderedStock: before?.preOrderedStock ?? skuPreOrderedStock,
           afterSkuPreorderedStock: before?.preOrderedStock ?? skuPreOrderedStock,
-          remark: `商品编辑调整 SKU ${sku.skuCode} 库存 ${beforeSkuStock} → ${afterSkuStock}${beforeContributes ? '' : '（该规格不计入商品汇总）'}`,
+          remark: `${mode === 'create' ? '新建商品初始库存' : '商品编辑调整'} SKU ${sku.skuCode} 库存 ${beforeSkuStock} → ${afterSkuStock}${beforeContributes ? '' : '（该规格不计入商品汇总）'}`,
         }))
       }
 
@@ -733,8 +788,10 @@ export class ProductService {
     if (Array.isArray(input.skus) && input.skus.length) {
       return input.skus
     }
+    // 默认规格不显式传编码：已存在的默认 SKU 保留原编码（已打印的标签依赖它），
+    // 新建时再由 replaceProductSkus 按分类生成 WC 编码或回退为 `${productCode}-DEFAULT`。
     return [{
-      skuCode: `${product.productCode}-DEFAULT`,
+      ...input.defaultSku,
       specValues: {},
       defaultPrice: Number(product.defaultPrice ?? 0),
       discountRate: Number(product.discountRate ?? 10),
@@ -784,6 +841,11 @@ export class ProductService {
     return repo.create({
       productId: product.id,
       skuCode,
+      barcode: this.readOptionalBarcode(input.barcode) ?? null,
+      costPrice: input.costPrice === null ? null : (this.readOptionalPrice(input.costPrice ?? undefined, 'SKU 成本价') ?? null),
+      locationId: input.locationId === null || input.locationId === undefined || String(input.locationId).trim() === ''
+        ? null
+        : normalizeEntityId(input.locationId),
       specValuesJson: JSON.stringify(specValues),
       specText,
       defaultPrice,
@@ -810,6 +872,7 @@ export class ProductService {
     const shouldEnforceSkuBaseline = options.enforceSkuStockBaseline === true && Array.isArray(input.skus) && input.skus.length > 0
     const skuBaselineMap = new Map((options.stockBaseline?.skus ?? []).map((item) => [String(item.id), Number(item.currentStock)]))
     const skuInputs = this.normalizeSkuInputs(product, input)
+    const isSynthesizedDefaultMatrix = !(Array.isArray(input.skus) && input.skus.length)
     const existingSkuQuery = skuRepo
       .createQueryBuilder('sku')
       .where('sku.productId = :productId', { productId: product.id })
@@ -851,7 +914,12 @@ export class ProductService {
       usedSkuCodeSet.add(nextCode)
     }
 
-    const skuEntities = skuInputs.map((skuInput, index) => {
+    const categoryCode = product.categoryId
+      ? (await manager.getRepository(BaseCategory).findOne({ where: { id: product.categoryId }, select: ['id', 'categoryCode'] }))?.categoryCode ?? null
+      : null
+    const submittedBarcodeSet = new Set(skuInputs.map((item) => this.readOptionalBarcode(item.barcode)).filter((code): code is string => Boolean(code)))
+    const skuEntities: BaseProductSku[] = []
+    for (const [index, skuInput] of skuInputs.entries()) {
       const skuEntity = this.buildProductSkuEntity(product, skuInput, specGroups, index, skuRepo)
       const specKey = buildSkuEntitySpecValuesKey(skuEntity)
       const matchedById = skuInput.id ? existingSkuById.get(String(skuInput.id)) : undefined
@@ -888,12 +956,37 @@ export class ProductService {
         if (skuInput.sortOrder === undefined) {
           skuEntity.sortOrder = matchedSku.sortOrder
         }
+        if (skuInput.barcode === undefined) {
+          skuEntity.barcode = matchedSku.barcode
+        }
+        if (skuInput.costPrice === undefined) {
+          skuEntity.costPrice = matchedSku.costPrice
+        }
+        if (skuInput.locationId === undefined) {
+          skuEntity.locationId = matchedSku.locationId
+        }
         this.assertStockRelation(skuEntity.currentStock, skuEntity.preOrderedStock)
       }
       skuEntity.isCurrent = true
+      if (!matchedSku && skuInput.skuCode === undefined && categoryCode) {
+        // 已归类商品的新规格按 WC + 分类码 + 流水号编码；流水号与手工编码或原厂条码撞码时继续取下一个。
+        let wcCode = await allocateWcSkuCode(manager, categoryCode)
+        while (
+          existingSkuCodeSet.has(wcCode)
+          || usedSkuCodeSet.has(wcCode)
+          || submittedBarcodeSet.has(wcCode)
+          || await skuRepo.exists({ where: [{ skuCode: wcCode }, { barcode: wcCode }] })
+        ) {
+          wcCode = await allocateWcSkuCode(manager, categoryCode)
+        }
+        skuEntity.skuCode = wcCode
+      } else if (!matchedSku && skuInput.skuCode === undefined && isSynthesizedDefaultMatrix) {
+        skuEntity.skuCode = `${product.productCode}-DEFAULT`
+      }
       allocateSkuCode(skuEntity, matchedSku, skuInput)
-      return skuEntity
-    })
+      skuEntities.push(skuEntity)
+    }
+    await this.assertSkuRelationsValid(product, skuEntities, manager)
     const specTextSet = new Set<string>()
     const skuCodeSet = new Set<string>()
     skuEntities.forEach((sku) => {
@@ -922,15 +1015,49 @@ export class ProductService {
         sku.o2oRecommended = false
         return sku
       })
-    const savedSkus = await skuRepo.save(skuEntities)
+    // 条码全局唯一：退役规格释放条码（退役规格不能再做库存操作，也不参与扫码），
+    // 保留规格若改了条码，先在库里置空，保证两个规格互换条码时不会撞唯一索引。
+    const existingBarcodeById = new Map(existingSkus.map((sku) => [String(sku.id), sku.barcode ?? null]))
+    const releaseBarcodeIds = [
+      ...inactiveLegacySkus.filter((sku) => sku.barcode).map((sku) => String(sku.id)),
+      ...skuEntities
+        .filter((sku) => sku.id && existingBarcodeById.get(String(sku.id)) && existingBarcodeById.get(String(sku.id)) !== (sku.barcode ?? null))
+        .map((sku) => String(sku.id)),
+    ]
+    inactiveLegacySkus.forEach((sku) => {
+      sku.barcode = null
+    })
+    if (releaseBarcodeIds.length) {
+      await skuRepo.createQueryBuilder().update(BaseProductSku).set({ barcode: null }).whereInIds(releaseBarcodeIds).execute()
+    }
     if (inactiveLegacySkus.length) {
       await skuRepo.save(inactiveLegacySkus)
     }
+    const savedSkus = await skuRepo.save(skuEntities)
 
     const summarySkus = savedSkus.filter((sku) => isDatabaseFlagEnabled(sku.isCurrent) && isDatabaseFlagEnabled(sku.isActive))
     product.currentStock = summarySkus.reduce((sum, sku) => sum + Math.max(0, Number(sku.currentStock ?? 0)), 0)
     product.preOrderedStock = summarySkus.reduce((sum, sku) => sum + Math.max(0, Number(sku.preOrderedStock ?? 0)), 0)
     await manager.getRepository(BaseProduct).save(product)
+  }
+
+  /** 单规格商品编辑时写入默认规格的条码、成本价与库位；多规格商品必须通过 skus 逐行提交。 */
+  private async applyDefaultSkuExtras(product: BaseProduct, extras: ProductDefaultSkuExtras, manager: EntityManager): Promise<void> {
+    const skuRepo = manager.getRepository(BaseProductSku)
+    const skus = (await skuRepo.find({ where: { productId: product.id } })).filter((sku) => isDatabaseFlagEnabled(sku.isCurrent))
+    const [sku] = skus
+    if (skus.length !== 1 || !sku || !this.isDefaultProductSku(sku)) {
+      throw new BizError('多规格商品请在规格配置中逐个设置条码、成本价与库位', 400)
+    }
+    if (extras.barcode !== undefined) sku.barcode = this.readOptionalBarcode(extras.barcode) ?? null
+    if (extras.costPrice !== undefined) {
+      sku.costPrice = extras.costPrice === null ? null : this.readOptionalPrice(extras.costPrice, 'SKU 成本价') ?? null
+    }
+    if (extras.locationId !== undefined) {
+      sku.locationId = extras.locationId === null || String(extras.locationId).trim() === '' ? null : normalizeEntityId(extras.locationId)
+    }
+    await this.assertSkuRelationsValid(product, [sku], manager)
+    await skuRepo.save(sku)
   }
 
   private shouldSyncDefaultProductSku(input: UpdateProductInput): boolean {
@@ -1021,6 +1148,15 @@ export class ProductService {
       },
     })
 
+    const categoryIds = [...new Set(products.map((product) => product.categoryId).filter(Boolean).map(String))]
+    const locationIds = [...new Set(skus.map((sku) => sku.locationId).filter(Boolean).map(String))]
+    const [categories, locations] = await Promise.all([
+      categoryIds.length ? manager.getRepository(BaseCategory).find({ where: { id: In(categoryIds) } }) : [],
+      locationIds.length ? manager.getRepository(BaseStorageLocation).find({ where: { id: In(locationIds) } }) : [],
+    ])
+    const categoryMap = new Map(categories.map((category) => [String(category.id), category]))
+    const locationCodeMap = new Map(locations.map((location) => [String(location.id), location.locationCode]))
+
     const productTagMap = new Map<string, ProductTagView[]>()
     relations.forEach((relation) => {
       const productId = normalizeEntityId(relation.productId)
@@ -1036,7 +1172,7 @@ export class ProductService {
     skus.forEach((sku) => {
       const productId = normalizeEntityId(sku.productId)
       const currentSkus = productSkuMap.get(productId) ?? []
-      currentSkus.push(this.buildProductSkuView(sku))
+      currentSkus.push(this.buildProductSkuView(sku, locationCodeMap))
       productSkuMap.set(productId, currentSkus)
     })
 
@@ -1046,6 +1182,7 @@ export class ProductService {
       const allProductSkus = productSkuMap.get(productId) ?? []
       const productSkus = allProductSkus.filter((sku) => isDatabaseFlagEnabled(sku.isCurrent))
       const inventory = summarizeProductInventory(product, allProductSkus)
+      const category = product.categoryId ? categoryMap.get(String(product.categoryId)) : undefined
 
       return {
         id: productId,
@@ -1064,13 +1201,16 @@ export class ProductService {
         ...inventory,
         tagIds: tags.map((tag) => tag.id),
         tags,
+        categoryId: product.categoryId ? normalizeEntityId(product.categoryId) : null,
+        categoryCode: category?.categoryCode ?? null,
+        categoryName: category?.categoryName ?? null,
         specGroups: this.buildSpecGroupsFromSkus(productSkus),
         skus: productSkus,
       }
     })
   }
 
-  private buildProductSkuView(sku: BaseProductSku): ProductSkuView {
+  private buildProductSkuView(sku: BaseProductSku, locationCodeMap?: Map<string, string>): ProductSkuView {
     const specValues = parseSpecValuesJson(sku.specValuesJson)
     const originalPrice = normalizeDecimalText(sku.defaultPrice)
     const discountRate = normalizeDiscountRate(sku.discountRate)
@@ -1096,6 +1236,11 @@ export class ProductService {
       o2oRecommended: Boolean(sku.o2oRecommended),
       thumbnail: normalizeProductThumbnailUrl(sku.thumbnail) ?? null,
       sortOrder: Number(sku.sortOrder ?? 0),
+      barcode: sku.barcode ?? null,
+      effectiveBarcode: sku.barcode || sku.skuCode,
+      costPrice: sku.costPrice === null || sku.costPrice === undefined ? null : normalizeDecimalText(sku.costPrice),
+      locationId: sku.locationId ? normalizeEntityId(sku.locationId) : null,
+      locationCode: locationCodeMap?.get(String(sku.locationId ?? '')) ?? null,
     }
   }
 
@@ -1111,6 +1256,160 @@ export class ProductService {
       })
     })
     return [...groupValueMap.entries()].map(([name, values]) => ({ name, values }))
+  }
+
+  /**
+   * 扫码识别：先按原厂条码精确匹配，再按 SKU 编码精确匹配；同码时优先当前版本、启用中的规格。
+   * 返回的 SKU 视图带库存，调用方按权限决定是否裁剪。
+   */
+  async lookupByCode(rawCode: string): Promise<ProductLookupView> {
+    const code = String(rawCode ?? '').trim()
+    if (!code || code.length > 96) throw new BizError('请扫描或输入有效的条码', 400)
+    const skuRepo = AppDataSource.getRepository(BaseProductSku)
+    // 条码与编码两路合并：优先当前版本、启用中的规格，同等条件下条码命中优先。
+    const [byBarcode, bySkuCode] = await Promise.all([
+      skuRepo.find({ where: { barcode: code } }),
+      skuRepo.find({ where: { skuCode: code } }),
+    ])
+    const candidates = [
+      ...byBarcode.map((row) => ({ row, matchedBy: 'barcode' as const, rank: 1 })),
+      ...bySkuCode.map((row) => ({ row, matchedBy: 'sku_code' as const, rank: 0 })),
+    ].sort((left, right) =>
+      Number(isDatabaseFlagEnabled(right.row.isCurrent)) - Number(isDatabaseFlagEnabled(left.row.isCurrent))
+      || Number(isDatabaseFlagEnabled(right.row.isActive)) - Number(isDatabaseFlagEnabled(left.row.isActive))
+      || right.rank - left.rank)
+    const best = candidates[0]
+    if (!best) throw new BizError(`未找到条码「${code}」对应的商品`, 404)
+    const { row: sku, matchedBy } = best
+    const product = await this.productRepo.findOne({ where: { id: sku.productId } })
+    if (!product) throw new BizError(`未找到条码「${code}」对应的商品`, 404)
+    const [category, location] = await Promise.all([
+      product.categoryId ? AppDataSource.getRepository(BaseCategory).findOne({ where: { id: product.categoryId } }) : null,
+      sku.locationId ? AppDataSource.getRepository(BaseStorageLocation).findOne({ where: { id: sku.locationId } }) : null,
+    ])
+    return {
+      matchedBy,
+      product: {
+        id: normalizeEntityId(product.id),
+        productCode: product.productCode,
+        productName: product.productName,
+        thumbnail: normalizeProductThumbnailUrl(product.thumbnail) ?? null,
+        isActive: Boolean(product.isActive),
+        categoryId: product.categoryId ? normalizeEntityId(product.categoryId) : null,
+        categoryName: category?.categoryName ?? null,
+      },
+      sku: this.buildProductSkuView(sku, location ? new Map([[String(location.id), location.locationCode]]) : undefined),
+    }
+  }
+
+  /** 条码打印数据：按传入顺序返回，条码图由前端生成。 */
+  async listLabels(skuIds: Array<string | number>): Promise<ProductLabelView[]> {
+    const ids = [...new Set(skuIds.map((id) => normalizeEntityId(id)).filter(Boolean))]
+    if (!ids.length) throw new BizError('请至少选择一个规格', 400)
+    if (ids.length > 500) throw new BizError('单次最多打印 500 个规格', 400)
+    const skus = await AppDataSource.getRepository(BaseProductSku).find({ where: { id: In(ids) } })
+    if (skus.length !== ids.length) throw new BizError('存在无效的规格，请刷新后重试', 404)
+    const products = await this.productRepo.find({ where: { id: In([...new Set(skus.map((sku) => String(sku.productId)))]) } })
+    const productMap = new Map(products.map((product) => [String(product.id), product]))
+    const categoryIds = [...new Set(products.map((product) => product.categoryId).filter(Boolean).map(String))]
+    const locationIds = [...new Set(skus.map((sku) => sku.locationId).filter(Boolean).map(String))]
+    const [categories, locations] = await Promise.all([
+      categoryIds.length ? AppDataSource.getRepository(BaseCategory).find({ where: { id: In(categoryIds) } }) : [],
+      locationIds.length ? AppDataSource.getRepository(BaseStorageLocation).find({ where: { id: In(locationIds) } }) : [],
+    ])
+    const categoryMap = new Map(categories.map((category) => [String(category.id), category.categoryName]))
+    const locationMap = new Map(locations.map((location) => [String(location.id), location.locationCode]))
+    const skuMap = new Map(skus.map((sku) => [String(sku.id), sku]))
+    return ids.map((id) => {
+      const sku = skuMap.get(id) as BaseProductSku
+      const product = productMap.get(String(sku.productId))
+      return {
+        skuId: id,
+        skuCode: sku.skuCode,
+        barcode: sku.barcode || sku.skuCode,
+        productName: product?.productName ?? '',
+        specText: sku.specText || '默认规格',
+        price: calculateDiscountedPrice(sku.defaultPrice, sku.discountRate),
+        categoryName: product?.categoryId ? categoryMap.get(String(product.categoryId)) ?? null : null,
+        locationCode: sku.locationId ? locationMap.get(String(sku.locationId)) ?? null : null,
+      }
+    })
+  }
+
+  /** 分类只能指向存在的分类；新指定的分类必须启用，保持原分类不变时允许其已停用。 */
+  private async resolveCategoryId(
+    value: string | number | null | undefined,
+    manager: EntityManager,
+    currentCategoryId: string | null,
+  ): Promise<string | null> {
+    if (value === undefined) return currentCategoryId
+    const id = value === null ? '' : normalizeEntityId(value)
+    if (!id) return null
+    const category = await manager.getRepository(BaseCategory).findOne({ where: { id } })
+    if (!category) throw new BizError('商品分类不存在', 400)
+    if (!isDatabaseFlagEnabled(category.isActive) && String(currentCategoryId ?? '') !== id) {
+      throw new BizError(`商品分类「${category.categoryName}」已停用`, 400)
+    }
+    return String(category.id)
+  }
+
+  private readOptionalBarcode(value: string | null | undefined): string | null | undefined {
+    if (value === undefined) return undefined
+    const normalized = (value ?? '').trim()
+    if (!normalized) return null
+    if (!SKU_BARCODE_PATTERN.test(normalized)) {
+      throw new BizError(`条码「${normalized}」只能包含 1 到 64 个半角字母、数字或符号`, 400)
+    }
+    return normalized
+  }
+
+  /**
+   * 规格关联校验：
+   * - 库位必须存在，新指定的库位必须启用；
+   * - 扫码时条码与 SKU 编码共用一个命名空间，任何 SKU 的条码都不能与其他 SKU 的条码或编码相同。
+   */
+  private async assertSkuRelationsValid(product: BaseProduct, skus: BaseProductSku[], manager: EntityManager) {
+    const skuRepo = manager.getRepository(BaseProductSku)
+    const locationIds = [...new Set(skus.map((sku) => sku.locationId).filter(Boolean).map(String))]
+    if (locationIds.length) {
+      const locations = await manager.getRepository(BaseStorageLocation).find({ where: { id: In(locationIds) } })
+      const locationMap = new Map(locations.map((location) => [String(location.id), location]))
+      const existingSkus = await skuRepo.find({ where: { productId: product.id }, select: ['id', 'locationId'] })
+      const existingLocationBySkuId = new Map(existingSkus.map((sku) => [String(sku.id), String(sku.locationId ?? '')]))
+      for (const sku of skus) {
+        if (!sku.locationId) continue
+        const location = locationMap.get(String(sku.locationId))
+        if (!location) throw new BizError('SKU 库位不存在，请刷新后重试', 400)
+        const unchanged = Boolean(sku.id) && existingLocationBySkuId.get(String(sku.id)) === String(sku.locationId)
+        if (!isDatabaseFlagEnabled(location.isActive) && !unchanged) {
+          throw new BizError(`库位 ${location.locationCode} 已停用`, 400)
+        }
+      }
+    }
+
+    const seen = new Map<string, string>()
+    for (const sku of skus) {
+      for (const code of [sku.skuCode, sku.barcode]) {
+        if (!code) continue
+        const owner = seen.get(code)
+        if (owner !== undefined && owner !== sku.skuCode) {
+          throw new BizError(`条码或编码「${code}」在本商品的多个规格中重复`, 409)
+        }
+        seen.set(code, sku.skuCode)
+      }
+    }
+    const barcodes = skus.map((sku) => sku.barcode).filter((code): code is string => Boolean(code))
+    const allCodes = [...new Set([...barcodes, ...skus.map((sku) => sku.skuCode)])]
+    const query = skuRepo.createQueryBuilder('sku')
+      .select(['sku.id', 'sku.skuCode', 'sku.barcode', 'sku.productId'])
+      .where('sku.barcode IN (:...allCodes)', { allCodes })
+    if (barcodes.length) query.orWhere('sku.skuCode IN (:...barcodes)', { barcodes })
+    const conflicts = await query.getMany()
+    for (const other of conflicts) {
+      if (String(other.productId) === String(product.id)) continue
+      const hit = [other.barcode, other.skuCode].find((code) => code && allCodes.includes(code))
+      throw new BizError(`条码或编码「${hit}」已被其他商品的规格使用`, 409)
+    }
   }
 
   private assertNoDuplicateProductCodesInBatch(inputs: CreateProductInput[]): void {
@@ -1130,7 +1429,7 @@ export class ProductService {
     })
   }
 
-  private async createWithManager(input: CreateProductInput, manager: EntityManager): Promise<ProductView> {
+  async createWithManager(input: CreateProductInput, manager: EntityManager, actor: AuthUserContext): Promise<ProductView> {
     const normalizedProductCode = normalizeProductCodeInput(input.productCode)
     const shouldGenerateProductCode = !normalizedProductCode
     const normalizedCreateInput = this.normalizeCreateInput(input)
@@ -1141,10 +1440,17 @@ export class ProductService {
         const repo = manager.getRepository(BaseProduct)
         const productCode = shouldGenerateProductCode ? await generateProductCode(manager) : normalizedProductCode
         const product = this.buildProductEntityForCreate(repo, normalizedCreateInput, productCode)
+        product.categoryId = await this.resolveCategoryId(normalizedCreateInput.categoryId, manager, null)
 
         const saved = await repo.save(product)
         await this.replaceProductTags(saved.id, normalizedCreateInput.tagIds ?? [], manager)
         await this.replaceProductSkus(saved, normalizedCreateInput, manager)
+        // 新建商品的初始库存同样要落流水，保证“库存 = 初始库存 + 各类变动”可追溯。
+        await this.recordManualStockAdjustments(saved, {
+          productCurrentStock: 0,
+          productPreOrderedStock: Number(saved.preOrderedStock ?? 0),
+          skus: new Map(),
+        }, actor, manager, 'create')
         return this.buildProductView(saved, manager)
       } catch (error) {
         lastError = error

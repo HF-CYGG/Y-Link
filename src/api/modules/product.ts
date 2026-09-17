@@ -31,6 +31,9 @@ export interface ProductRecord {
   availableStock: number
   tagIds: string[]
   tags: { id: string; tagName: string; tagCode: string | null }[]
+  categoryId?: string | null
+  categoryCode?: string | null
+  categoryName?: string | null
   skus?: ProductSkuRecord[]
 }
 
@@ -57,6 +60,18 @@ export interface ProductSkuRecord {
   o2oRecommended?: boolean
   thumbnail?: string | null
   sortOrder?: number
+  /** 原厂条码；为空表示以 SKU 编码作为内部条码。 */
+  barcode?: string | null
+  effectiveBarcode?: string
+  costPrice?: string | number | null
+  locationId?: string | null
+  locationCode?: string | null
+}
+
+export interface ProductDefaultSkuDto {
+  barcode?: string | null
+  costPrice?: number | null
+  locationId?: string | null
 }
 
 export interface CreateProductDto {
@@ -74,6 +89,9 @@ export interface CreateProductDto {
   currentStock?: number
   preOrderedStock?: number
   tagIds?: Array<string | number>
+  categoryId?: string | null
+  /** 单规格商品默认 SKU 的条码、成本价与库位。 */
+  defaultSku?: ProductDefaultSkuDto
   specGroups?: ProductSpecGroup[]
   skus?: ProductSkuRecord[]
   /** 仅编辑复用同一 payload 时携带；新增接口不识别该字段。 */
@@ -95,6 +113,9 @@ export interface UpdateProductDto {
   currentStock?: number
   preOrderedStock?: number
   tagIds?: Array<string | number>
+  categoryId?: string | null
+  /** 单规格商品默认 SKU 的条码、成本价与库位。 */
+  defaultSku?: ProductDefaultSkuDto
   specGroups?: ProductSpecGroup[]
   skus?: ProductSkuRecord[]
   /** 编辑弹窗打开时的库存基线：提交库存变动时服务端据此拦截“期间已被出入库改动”的覆盖。 */
@@ -124,6 +145,7 @@ export interface ProductListQuery {
   keyword?: string
   isActive?: boolean
   tagId?: string
+  categoryId?: string
   page?: number
   pageSize?: number
 }
@@ -162,6 +184,9 @@ interface ProductRawRecord {
   availableStock?: PrimitiveValue
   tagIds?: PrimitiveValue[]
   tags?: ProductTagRawRecord[] | null
+  categoryId?: PrimitiveValue
+  categoryCode?: PrimitiveValue
+  categoryName?: PrimitiveValue
   skus?: ProductSkuRecord[] | null
 }
 
@@ -263,6 +288,11 @@ const normalizeProductSkuRecord = (record: ProductSkuRecord): ProductSkuRecord =
   o2oRecommended: normalizeBoolean(record.o2oRecommended),
   thumbnail: normalizeText(record.thumbnail) || null,
   sortOrder: normalizeInteger(record.sortOrder),
+  barcode: normalizeText(record.barcode) || null,
+  effectiveBarcode: normalizeText(record.effectiveBarcode) || normalizeText(record.barcode) || normalizeText(record.skuCode),
+  costPrice: record.costPrice === null || record.costPrice === undefined || record.costPrice === '' ? null : normalizeDecimal(record.costPrice),
+  locationId: normalizeId(record.locationId) || null,
+  locationCode: normalizeText(record.locationCode) || null,
 })
 
 const normalizeProductRecord = (record: ProductRawRecord): ProductRecord => {
@@ -288,6 +318,9 @@ const normalizeProductRecord = (record: ProductRawRecord): ProductRecord => {
     availableStock: normalizeInteger(record.availableStock, 0),
     tagIds,
     tags,
+    categoryId: normalizeId(record.categoryId) || null,
+    categoryCode: normalizeText(record.categoryCode) || null,
+    categoryName: normalizeText(record.categoryName) || null,
     skus: Array.isArray(record.skus) ? record.skus.map(normalizeProductSkuRecord).filter((sku) => sku.id) : [],
   }
 }

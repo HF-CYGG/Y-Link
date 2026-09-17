@@ -60,6 +60,7 @@ import {
   invalidateMallCatalogReadCache,
   readMallCatalogRevision,
 } from './mall-catalog-revision.service.js'
+import { buildSkuLogFields, snapshotSkuStock } from './inventory-ledger.service.js'
 import type { PaginationResult } from '../types/api.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import {
@@ -1569,6 +1570,7 @@ class O2oPreorderService {
       const sku = row.skuId ? skuMap.get(String(row.skuId)) ?? null : null
       const beforeCurrentStock = Number(product.currentStock ?? 0)
       const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
+      const skuBefore = snapshotSkuStock(sku)
       if (sku) {
         sku.preOrderedStock = Math.max(0, Number(sku.preOrderedStock ?? 0) - qty)
         await manager.getRepository(BaseProductSku).save(sku)
@@ -1578,6 +1580,7 @@ class O2oPreorderService {
       await manager.getRepository(InventoryLog).save(
         manager.getRepository(InventoryLog).create({
           productId: product.id,
+          ...buildSkuLogFields(sku, skuBefore),
           changeType: 'preorder_release',
           changeQty: qty,
           beforeCurrentStock,
@@ -1858,6 +1861,7 @@ class O2oPreorderService {
       const sku = row.skuId ? skuMap.get(String(row.skuId)) ?? null : null
       const beforeCurrentStock = Number(product.currentStock ?? 0)
       const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
+      const skuBefore = snapshotSkuStock(sku)
       if (sku) {
         sku.preOrderedStock = Math.max(0, Number(sku.preOrderedStock ?? 0) - Number(row.qty ?? 0))
       }
@@ -1865,6 +1869,7 @@ class O2oPreorderService {
       inventoryLogs.push(
         inventoryLogRepo.create({
           productId: product.id,
+          ...buildSkuLogFields(sku, skuBefore),
           changeType: 'preorder_release',
           changeQty: row.qty,
           beforeCurrentStock,
@@ -2951,10 +2956,12 @@ class O2oPreorderService {
           const sku = this.getRequiredSku(skuMap, skuByProductMap, row.productId, row.skuId)
           const beforeCurrentStock = Number(product.currentStock ?? 0)
           const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
+          const skuBefore = snapshotSkuStock(sku)
           product.preOrderedStock = beforePreOrderedStock + row.qty
           sku.preOrderedStock = Number(sku.preOrderedStock ?? 0) + row.qty
           inventoryLogs.push(inventoryLogRepo.create({
             productId: product.id,
+            ...buildSkuLogFields(sku, skuBefore),
             changeType: 'preorder_hold',
             changeQty: row.qty,
             beforeCurrentStock,
@@ -3183,6 +3190,7 @@ class O2oPreorderService {
       const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
       const changeQty = Math.abs(deltaQty)
       const sku = itemRef.skuId ? skuMap.get(itemRef.skuId) : null
+      const skuBefore = snapshotSkuStock(sku)
       if (sku) {
         sku.preOrderedStock = deltaQty > 0
           ? Number(sku.preOrderedStock ?? 0) + deltaQty
@@ -3197,6 +3205,7 @@ class O2oPreorderService {
       await inventoryLogRepo.save(
         inventoryLogRepo.create({
           productId: product.id,
+          ...buildSkuLogFields(sku, skuBefore),
           changeType: deltaQty > 0 ? 'preorder_hold' : 'preorder_release',
           changeQty,
           beforeCurrentStock,
@@ -4341,6 +4350,7 @@ class O2oPreorderService {
 
     const beforeCurrentStock = Math.max(0, Number(product.currentStock ?? 0))
     const beforePreOrderedStock = Math.max(0, Number(product.preOrderedStock ?? 0))
+    const skuBefore = snapshotSkuStock(sku)
     if (returnRequest.sourceOrderStatus === 'pending') {
       if (sku) {
         sku.preOrderedStock = Math.max(0, Number(sku.preOrderedStock ?? 0) - requestQty)
@@ -4351,6 +4361,7 @@ class O2oPreorderService {
       await manager.getRepository(InventoryLog).save(
         manager.getRepository(InventoryLog).create({
           productId: product.id,
+          ...buildSkuLogFields(sku, skuBefore),
           changeType: 'preorder_release',
           changeQty: requestQty,
           beforeCurrentStock,
@@ -4375,6 +4386,7 @@ class O2oPreorderService {
       await manager.getRepository(InventoryLog).save(
         manager.getRepository(InventoryLog).create({
           productId: product.id,
+          ...buildSkuLogFields(sku, skuBefore),
           changeType: 'preorder_return_inbound',
           changeQty: requestQty,
           beforeCurrentStock,
@@ -4547,6 +4559,7 @@ class O2oPreorderService {
       const sku = row.skuId ? skuMap.get(String(row.skuId)) : null
       const beforeCurrentStock = Number(product.currentStock ?? 0)
       const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
+      const skuBefore = snapshotSkuStock(sku)
       if (beforeCurrentStock < verifyQty || beforePreOrderedStock < verifyQty) {
         throw new BizError(`商品「${product.productName}」库存异常，请先补货后再核销`, 409)
       }
@@ -4566,6 +4579,7 @@ class O2oPreorderService {
       await manager.getRepository(InventoryLog).save(
         manager.getRepository(InventoryLog).create({
           productId: product.id,
+          ...buildSkuLogFields(sku, skuBefore),
           changeType: 'preorder_verify',
           changeQty: verifyQty,
           beforeCurrentStock,
@@ -4690,6 +4704,7 @@ class O2oPreorderService {
       }
       const beforeCurrentStock = Number(product.currentStock ?? 0)
       const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
+      const skuBefore = snapshotSkuStock(sku)
       // 入库只增加现货库存，不改动预订占用库存，因为预订占用代表已承诺但未核销的数量。
       sku.currentStock = Number(sku.currentStock ?? 0) + normalizedQty
       product.currentStock = beforeCurrentStock + normalizedQty
@@ -4698,6 +4713,7 @@ class O2oPreorderService {
       await manager.getRepository(InventoryLog).save(
         manager.getRepository(InventoryLog).create({
           productId: product.id,
+          ...buildSkuLogFields(sku, skuBefore),
           changeType: 'inbound',
           changeQty: normalizedQty,
           beforeCurrentStock,

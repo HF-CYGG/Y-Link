@@ -357,6 +357,12 @@ const CRITICAL_VALIDATION_TABLES = new Set([
   'o2o_preorder',
   'o2o_preorder_item',
   'inventory_log',
+  'base_category',
+  'base_storage_location',
+  'inv_stock_doc',
+  'inv_stock_doc_item',
+  'inv_stocktake',
+  'inv_stocktake_item',
 ])
 
 function createTaskId(): string {

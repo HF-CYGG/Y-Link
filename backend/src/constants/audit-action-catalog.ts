@@ -47,7 +47,6 @@ export const AUDIT_CATEGORIES: readonly AuditCategoryDefinition[] = [
   { key: 'auth', label: '登录与认证', level: 'high', prefixes: ['auth.', 'client.auth.', 'mobile_auth.'] },
   { key: 'order_outbound', label: '订单与出库', level: 'normal', prefixes: ['order.', 'o2o.'] },
   { key: 'inbound_supply', label: '入库与供货', level: 'normal', prefixes: ['inbound.'] },
-  // 商品与库存当前尚无独立审计动作，预留前缀便于后续接入。
   { key: 'product_inventory', label: '商品与库存', level: 'normal', prefixes: ['product.', 'inventory.'] },
   { key: 'customer_service', label: '客服与消息', level: 'low', prefixes: ['customer_service.', 'client_feedback.'] },
   { key: 'notification', label: '通知中心', level: 'low', prefixes: ['notification.'] },
@@ -138,6 +137,21 @@ export const AUDIT_ACTION_CATALOG: Readonly<Record<string, AuditActionDefinition
   'inbound.supplier.delete_verified': { label: '供货方删除已入库送货单并冲销库存', category: 'inbound_supply' },
   'inbound.admin.update': { label: '库管现场修改送货单', category: 'inbound_supply' },
   'inbound.admin.verify': { label: '库管核销入库', category: 'inbound_supply' },
+
+  // 商品与库存
+  'product.category.create': { label: '新增商品分类', category: 'product_inventory' },
+  'product.category.update': { label: '修改商品分类', category: 'product_inventory' },
+  'product.location.create': { label: '新增库位', category: 'product_inventory' },
+  'product.location.update': { label: '修改库位', category: 'product_inventory' },
+  'product.import': { label: 'Excel 批量导入商品', category: 'product_inventory' },
+  'inventory.doc.create': { label: '提交库存单据', category: 'product_inventory' },
+  'inventory.doc.void': { label: '作废库存单据', category: 'product_inventory' },
+  'inventory.stocktake.create': { label: '创建盘点单', category: 'product_inventory' },
+  'inventory.stocktake.submit': { label: '提交盘点结果', category: 'product_inventory' },
+  'inventory.stocktake.reopen': { label: '退回重新盘点', category: 'product_inventory' },
+  'inventory.stocktake.resolve': { label: '处理盘点差异', category: 'product_inventory' },
+  'inventory.stocktake.complete': { label: '确认盘点差异并调账', category: 'product_inventory' },
+  'inventory.stocktake.cancel': { label: '取消盘点单', category: 'product_inventory' },
 
   // 客服与消息
   'client_feedback.create': { label: '客户端提交反馈', category: 'customer_service' },
@@ -238,6 +252,11 @@ export const AUDIT_TARGET_TYPE_LABELS: Readonly<Record<string, string>> = {
   o2o_return_request: '退货申请',
   notification_rule: '通知规则',
   notification_event: '通知事件',
+  base_category: '商品分类',
+  base_storage_location: '库位',
+  product_import: '商品导入',
+  inv_stock_doc: '库存单据',
+  inv_stocktake: '盘点单',
 }
 
 /**
