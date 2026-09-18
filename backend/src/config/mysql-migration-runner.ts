@@ -769,6 +769,7 @@ const AUTO_MIGRATABLE_FILES = [
   '047_o2o_preorder_pickup_at.sql',
   '048_inbound_order_expected_arrival.sql',
   '049_inventory_sku_barcode_stocktake.sql',
+  '050_product_yz_sku_code.sql',
 ]
 
 /**
