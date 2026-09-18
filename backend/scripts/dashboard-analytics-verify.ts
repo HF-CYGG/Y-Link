@@ -422,6 +422,47 @@ async function main() {
     assert.equal(mergedDrilldown.totalQty, '15.00', '合并下钻应统计该商品全部规格，并受区间约束')
     pass('下钻明细继承当前统计区间，并可按规格精确过滤')
 
+    // ---- 8.1 经常购买部门榜排除散客 ----
+    // 区间内散客单合计 7*20 + 3*15 + 12*5 = 245，高于行政部 160、教务处 120；
+    // 另补一张误填部门名的散客单，验证口径按订单类型而不是仅看部门名称。
+    await seedOutboundOrder({
+      createdAt: new Date(2026, 5, 1, 10, 0, 0),
+      orderType: 'walkin',
+      departmentName: '行政部',
+      items: [{ productId: mug.id, nameSnapshot: '马克杯', qty: 10, unitPrice: 30 }],
+    })
+    const departmentRank = await dashboardService.getAnalytics({ ...baseRange, topN: 20 })
+    assert.deepEqual(
+      departmentRank.topCustomers.map((item) => [item.customerName, item.totalAmount, item.orderCount]),
+      [
+        ['行政部', '160.00', 2],
+        ['教务处', '120.00', 1],
+      ],
+      '部门榜只能包含部门单，散客金额更高也不得进入，且误填部门名的散客单不能计入部门金额',
+    )
+    const topOneDepartment = await dashboardService.getAnalytics({ ...baseRange, topN: 5 })
+    assert.equal(topOneDepartment.topCustomers[0]?.customerName, '行政部', '排除散客后应重新排序，榜首为金额最高的部门')
+    const departmentDrilldown = await dashboardService.getCustomerRankDrilldown({ customerName: '行政部', ...baseRange })
+    assert.equal(departmentDrilldown.orderCount, 2, '部门下钻应与榜单口径一致，只含该部门的部门单')
+    assert.equal(departmentDrilldown.totalAmount, '160.00')
+    assert.equal(
+      departmentDrilldown.records.every((record) => record.orderType === 'department'),
+      true,
+      '部门下钻明细不得混入散客单',
+    )
+    const walkinDrilldown = await dashboardService.getCustomerRankDrilldown({ customerName: '散客', ...baseRange })
+    assert.equal(walkinDrilldown.orderCount, 0, '部门榜下钻不再提供“散客”分组')
+    const walkinOnlyRank = await dashboardService.getAnalytics({ ...baseRange, orderType: 'walkin' })
+    assert.deepEqual(walkinOnlyRank.topCustomers, [], '仅筛选散客单时部门榜应为空')
+    const pieWithWalkin = await dashboardService.getDashboardPieData({ ...baseRange })
+    assert.ok(
+      pieWithWalkin.customerPie.some((slice) => slice.key === '散客'),
+      '客户占比等其他模块仍应正常统计散客',
+    )
+    const walkinTypeSlice = pieWithWalkin.orderTypePie.find((slice) => slice.key === 'walkin')
+    assert.ok(walkinTypeSlice && Number(walkinTypeSlice.value) > 0, '订单类型结构仍应统计散客单')
+    pass('经常购买部门榜在后端排除散客单后再排序截断，下钻口径一致且不影响其他模块')
+
     // ---- 9. 概览接口瘦身回归 ----
     const stats = await dashboardService.getStats()
     assert.equal(typeof stats.todayOrderCount, 'number')
