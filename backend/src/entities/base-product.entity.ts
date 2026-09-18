@@ -18,6 +18,7 @@ import {
   UpdateDateColumn,
 } from 'typeorm'
 import { BaseCategory } from './base-category.entity.js'
+import { BaseTag } from './base-tag.entity.js'
 import { BizOutboundOrderItem } from './biz-outbound-order-item.entity.js'
 import { BaseProductSku } from './base-product-sku.entity.js'
 import { entityColumnOptions } from './entity-column-options.js'
@@ -26,6 +27,7 @@ import { RelProductTag } from './rel-product-tag.entity.js'
 @Entity({ name: 'base_product' })
 @Check('ck_base_product_non_negative', '`default_price` >= 0 AND `discount_rate` >= 1.0 AND `discount_rate` <= 10.0 AND `limit_per_user` >= 1 AND `current_stock` >= 0 AND `pre_ordered_stock` >= 0 AND `pre_ordered_stock` <= `current_stock`')
 @Index('idx_base_product_mall_list', ['isActive', 'o2oStatus', 'id'])
+@Index('uk_base_product_series_seq', ['primarySeriesTagId', 'seriesSeq'], { unique: true })
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export class BaseProduct {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })
@@ -86,6 +88,17 @@ export class BaseProduct {
   @Column({ name: 'pre_ordered_stock', type: 'int', default: 0, comment: '已预订库存' })
   preOrderedStock!: number
 
+  // YZ 通用 SKU 编码体系：主系列标签是编码唯一权威，消除商品-标签多对多关系下“该用哪个系列码”的歧义。
+  @Index('idx_base_product_primary_series_tag_id')
+  @Column({ name: 'primary_series_tag_id', ...entityColumnOptions.foreignId, nullable: true, comment: '主系列标签ID（编码唯一权威，消除商品-标签多对多歧义）' })
+  primarySeriesTagId!: string | null
+
+  @Column({ name: 'series_seq', type: 'smallint', unsigned: true, nullable: true, comment: '系列内商品序号（1-99）' })
+  seriesSeq!: number | null
+
+  @Column({ name: 'code_scheme', type: 'varchar', length: 8, default: 'legacy', comment: '编码体系：legacy=历史P-/WC编码，yz=新版定长编码' })
+  codeScheme!: string
+
   @CreateDateColumn({ name: 'created_at', ...entityColumnOptions.timestamp })
   createdAt!: Date
 
@@ -106,4 +119,8 @@ export class BaseProduct {
   @ManyToOne(() => BaseCategory, { onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'category_id' })
   category?: Relation<BaseCategory>
+
+  @ManyToOne(() => BaseTag, { onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'primary_series_tag_id' })
+  primarySeriesTag?: Relation<BaseTag>
 }

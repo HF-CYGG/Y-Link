@@ -30,6 +30,12 @@ export class BaseTag {
   @Column({ name: 'tag_code', type: 'varchar', length: 64, nullable: true, comment: '标签编码（可选，唯一）' })
   tagCode!: string | null
 
+  // 注意：tagCode 历史上实际存放的是颜色值（如 #409EFF），字段名有误导性，
+  // 因此 YZ 商品编码体系另开 seriesCode 承载“两位大写字母系列码”，两者互不影响。
+  @Index('uk_base_tag_series_code', { unique: true })
+  @Column({ name: 'series_code', type: 'varchar', length: 2, nullable: true, comment: '文创系列码（两位大写字母，供商品编码使用）' })
+  seriesCode!: string | null
+
   @CreateDateColumn({ name: 'created_at', ...entityColumnOptions.timestamp })
   createdAt!: Date
 
