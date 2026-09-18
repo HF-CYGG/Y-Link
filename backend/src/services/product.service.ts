@@ -1406,6 +1406,22 @@ export class ProductService {
     currentExistingSkus.forEach((sku) => {
       existingSkuBySpecKey.set(buildSkuEntitySpecValuesKey(sku), sku)
     })
+    // YZ 编码商品：退役 SKU 的规格组合若被重新启用，必须复活原行而不是新建一行。
+    // 否则变体码会正确复用（例如仍是 2），但拼出的 skuCode 与永久保留的退役行撞唯一索引，
+    // 被下面的 allocateSkuCode 追加 -2 后缀，产出 YZPX012A-2 这种不符合 YZ 定长规则的编码。
+    const retiredSkuBySpecKey = new Map<string, BaseProductSku>()
+    if (product.codeScheme === 'yz') {
+      existingSkus
+        .filter((sku) => !isDatabaseFlagEnabled(sku.isCurrent))
+        .forEach((sku) => {
+          const retiredSpecKey = buildSkuEntitySpecValuesKey(sku)
+          const previousRetired = retiredSkuBySpecKey.get(retiredSpecKey)
+          // 同一规格组合可能留有多条历史行，取 id 最大的那条（最近一次退役的）复活。
+          if (!previousRetired || Number(sku.id) > Number(previousRetired.id)) {
+            retiredSkuBySpecKey.set(retiredSpecKey, sku)
+          }
+        })
+    }
     const existingSkuCodeSet = new Set(existingSkus.map((sku) => sku.skuCode))
     const usedSkuCodeSet = new Set<string>()
 
@@ -1442,9 +1458,12 @@ export class ProductService {
       const skuEntity = this.buildProductSkuEntity(product, skuInput, specGroups, index, skuRepo)
       const specKey = buildSkuEntitySpecValuesKey(skuEntity)
       const matchedById = skuInput.id ? existingSkuById.get(String(skuInput.id)) : undefined
-      const matchedSku = matchedById && buildSkuEntitySpecValuesKey(matchedById) === specKey
+      const currentMatchedSku = matchedById && buildSkuEntitySpecValuesKey(matchedById) === specKey
         ? matchedById
         : existingSkuBySpecKey.get(specKey)
+      // 当前有效行没命中时，YZ 商品回落到同规格的退役行并复活它，保证 SKU 身份、编码与库存延续。
+      const revivedSku = currentMatchedSku ? undefined : retiredSkuBySpecKey.get(specKey)
+      const matchedSku = currentMatchedSku ?? revivedSku
       if (matchedSku && String(matchedSku.productId) === String(product.id)) {
         skuEntity.id = matchedSku.id
         if (skuInput.skuCode === undefined) {
@@ -1467,7 +1486,8 @@ export class ProductService {
           skuEntity.thumbnail = matchedSku.thumbnail
         }
         if (skuInput.isActive === undefined) {
-          skuEntity.isActive = matchedSku.isActive
+          // 复活退役行时必须重新启用，否则会沿用退役时写入的 false，导致规格加回来却不可售。
+          skuEntity.isActive = revivedSku ? true : matchedSku.isActive
         }
         if (skuInput.o2oRecommended === undefined) {
           skuEntity.o2oRecommended = matchedSku.o2oRecommended
