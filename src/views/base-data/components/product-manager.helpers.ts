@@ -1,14 +1,18 @@
 /**
  * 模块说明：src/views/base-data/components/product-manager.helpers.ts
- * 文件职责：沉淀产品管理页的批量录入、排序与选择值归一化等纯函数，降低页面脚本的职责密度。
+ * 文件职责：沉淀产品管理页的批量录入、排序、选择值归一化以及文创系列（YZ 编码）选项加工等纯函数，降低页面脚本的职责密度。
  * 实现逻辑：
  * - 把批量新增行工厂、产品编码排序规则、批量表单校验等稳定规则移到独立模块；
+ * - 提供文创系列标签的候选过滤与选项文案格式化，供新增/编辑弹窗与升级弹窗共用同一口径；
  * - 让页面保留请求编排、权限动作和视图状态，纯函数负责结构化数据加工；
  * - 所有导出函数都不依赖 Vue 响应式对象，便于后续继续拆子组件或补单测。
  * 维护说明：
  * - 若批量新增字段继续扩展，请优先同步调整本文件的行模型与校验逻辑；
- * - 若产品编码排序规则变化，也请统一在这里修改，避免表格与卡片出现不一致。
+ * - 若产品编码排序规则变化，也请统一在这里修改，避免表格与卡片出现不一致；
+ * - 批量新增本批仍固定走 legacy 编码路径，未接入文创系列选择，如需支持请在这里新增行字段与校验，而不是绕过校验直接拼 payload。
  */
+import type { Tag } from '@/api/modules/tag'
+
 export interface BatchCreateProductFormRow {
   rowId: string
   productCode: string
@@ -103,5 +107,38 @@ export const validateBatchCreateRows = (rows: BatchCreateProductFormRow[]): stri
     explicitProductCodeRowMap.set(normalizedProductCode, index)
   }
 
+  return null
+}
+
+/**
+ * 过滤可作为文创系列的标签：
+ * - 只有配置了两位系列编码（seriesCode 非空）的标签才能挂靠 YZ 编码；
+ * - 供新增/编辑弹窗的文创系列选择器与升级弹窗共用同一份候选集口径。
+ */
+export const filterSeriesTagOptions = (tags: Tag[]): Tag[] => {
+  return tags.filter((tag) => !!tag.seriesCode)
+}
+
+/**
+ * 格式化文创系列选项文案：
+ * - 统一展示为「标签名（系列码）」，例如「品宣（PX）」；
+ * - seriesCode 缺失时兜底只展示标签名，避免出现空括号。
+ */
+export const formatSeriesTagOptionLabel = (tag: Pick<Tag, 'tagName' | 'seriesCode'>): string => {
+  return tag.seriesCode ? `${tag.tagName}（${tag.seriesCode}）` : tag.tagName
+}
+
+/**
+ * 校验新增商品是否已选择文创系列：
+ * - 业务决策：系列必填，非文创商品归入「通用」系列；
+ * - 仅新增场景校验，编辑场景该选择器始终禁用，不受本函数约束。
+ */
+export const validatePrimarySeriesTagRequired = (isCreateMode: boolean, primarySeriesTagId: string): string | null => {
+  if (!isCreateMode) {
+    return null
+  }
+  if (!primarySeriesTagId.trim()) {
+    return '请选择文创系列，非文创商品可归入「通用」系列'
+  }
   return null
 }

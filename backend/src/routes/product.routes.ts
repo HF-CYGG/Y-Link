@@ -10,6 +10,7 @@ import multer from 'multer'
 import { z } from 'zod'
 import { requireAnyPermission, requirePermission } from '../middleware/auth.middleware.js'
 import { productExcelService } from '../services/product-excel.service.js'
+import { productImportYzService, type YzImportResolution } from '../services/product-import-yz.service.js'
 import { batchCreateProducts, productService, type ProductView } from '../services/product.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
@@ -152,6 +153,8 @@ const createProductSchema = z.object({
   defaultSku: defaultSkuSchema,
   specGroups: z.array(productSpecGroupSchema).optional(),
   skus: z.array(productSkuSchema).optional(),
+  // 非空时走 YZ 通用 SKU 编码体系：productCode 由系统按该系列生成，不能手工填写。
+  primarySeriesTagId: z.string().min(1).nullable().optional(),
 })
 
 const updateProductSchema = z.object({
@@ -173,6 +176,8 @@ const updateProductSchema = z.object({
   defaultSku: defaultSkuSchema,
   specGroups: z.array(productSpecGroupSchema).optional(),
   skus: z.array(productSkuSchema).optional(),
+  // YZ 编码商品本批不支持切换系列，传入与当前值不同的值会被服务层拒绝。
+  primarySeriesTagId: z.string().min(1).nullable().optional(),
   // 编辑弹窗打开时读取到的库存基线；提交库存与数据库不一致时，服务端据此判断是否被出入库并发改动。
   stockBaseline: z.object({
     currentStock: z.number().int().nonnegative().optional(),
@@ -360,6 +365,62 @@ productRouter.post(
   }),
 )
 
+const yzImportResolutionSchema = z.object({
+  groupKey: z.string().min(1),
+  kind: z.enum(['multi_product_name', 'axis_ambiguous']),
+  value: z.string().min(1),
+})
+
+const parseYzImportResolutions = (raw: unknown): YzImportResolution[] => {
+  if (raw === undefined || raw === null || raw === '') return []
+  const parsedJson = typeof raw === 'string' ? (() => {
+    try {
+      return JSON.parse(raw)
+    } catch {
+      throw new BizError('待确认项参数格式不正确', 400)
+    }
+  })() : raw
+  const result = z.array(yzImportResolutionSchema).safeParse(parsedJson)
+  if (!result.success) {
+    throw new BizError('待确认项参数格式不正确', 400)
+  }
+  return result.data
+}
+
+productRouter.get(
+  '/import-yz/template',
+  requirePermission('products:import'),
+  asyncHandler(async (_req, res) => {
+    sendXlsx(res, 'product-import-yz-template.xlsx', await productImportYzService.buildTemplate())
+  }),
+)
+
+productRouter.post(
+  '/import-yz/preview',
+  requirePermission('products:import'),
+  productImportUpload.single('file'),
+  asyncHandler(async (req, res) => {
+    res.json({ code: 0, message: 'ok', data: await productImportYzService.preview(requireUploadedFile(req.file)) })
+  }),
+)
+
+productRouter.post(
+  '/import-yz',
+  requirePermission('products:import', 'products:manage'),
+  productImportUpload.single('file'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const resolutions = parseYzImportResolutions(req.body?.resolutions)
+    const data = await productImportYzService.importProducts(
+      requireUploadedFile(req.file),
+      resolutions,
+      authReq.auth,
+      extractRequestMeta(req),
+    )
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
 productRouter.get(
   '/:id',
   // 查看商品详情属于读取能力，需要 products:view。
@@ -417,6 +478,87 @@ productRouter.delete(
       code: 0,
       message: 'ok',
       data: true,
+    })
+  }),
+)
+
+const yzCodeUpgradeSchema = z.object({
+  primarySeriesTagId: z.string().min(1, '请选择要升级到的文创系列'),
+})
+
+productRouter.post(
+  '/:id/yz-code-upgrade/preview',
+  // 只读预检，权限口径与商品维护一致，需要 products:manage。
+  requirePermission('products:manage'),
+  asyncHandler(async (req, res) => {
+    const payload = yzCodeUpgradeSchema.parse(req.body)
+    const data = await productService.previewProductYzUpgrade(req.params.id, payload.primarySeriesTagId)
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+productRouter.post(
+  '/:id/yz-code-upgrade',
+  // 存量商品逐个手动升级到 YZ 编码，属于管理操作，需要 products:manage。
+  requirePermission('products:manage'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = yzCodeUpgradeSchema.parse(req.body)
+    const data = await productService.upgradeProductToYzCode(req.params.id, payload, authReq.auth, extractRequestMeta(req))
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+const specAxisSchema = z.enum(['variant', 'size'])
+
+const specValueRenameSchema = z.object({
+  axis: specAxisSchema,
+  oldValue: z.string().min(1, '请提供原取值'),
+  newValue: z.string().min(1, '请提供新取值'),
+})
+
+productRouter.post(
+  '/:id/spec-value-rename',
+  // 规格取值重命名（编码位不变），属于管理操作，需要 products:manage。
+  requirePermission('products:manage'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = specValueRenameSchema.parse(req.body)
+    const data = await productService.renameProductSpecValue(req.params.id, payload, authReq.auth, extractRequestMeta(req))
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+const zeroSpecEvolveSchema = z.object({
+  axis: specAxisSchema,
+  mode: z.enum(['inherit', 'retain']),
+  inheritValue: z.string().optional(),
+})
+
+productRouter.post(
+  '/:id/zero-spec-evolve',
+  // 0 号规格演进（继承/保留），属于管理操作，需要 products:manage。
+  requirePermission('products:manage'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = zeroSpecEvolveSchema.parse(req.body)
+    const data = await productService.evolveProductZeroSpec(req.params.id, payload, authReq.auth, extractRequestMeta(req))
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
     })
   }),
 )

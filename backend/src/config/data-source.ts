@@ -12,6 +12,7 @@ import type { DatabaseRuntimeOverrideConfig } from './database-runtime-override.
 import { databasePerformanceLogger } from '../database/database-performance-logger.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { BaseProductSku } from '../entities/base-product-sku.entity.js'
+import { BaseProductVariantCodeRegistry } from '../entities/base-product-variant-code-registry.entity.js'
 import { BaseTag } from '../entities/base-tag.entity.js'
 import { RelProductTag } from '../entities/rel-product-tag.entity.js'
 import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
@@ -56,6 +57,7 @@ import { InvStocktakeItem } from '../entities/inv-stocktake-item.entity.js'
 export const appEntities = [
   BaseProduct,
   BaseProductSku,
+  BaseProductVariantCodeRegistry,
   BaseTag,
   RelProductTag,
   BizOutboundOrder,

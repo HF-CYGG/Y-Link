@@ -65,6 +65,8 @@
     "account-lifecycle:verify": "tsx scripts/account-lifecycle-verify.ts",
     "account-lifecycle:mysql:verify": "tsx scripts/account-lifecycle-mysql-verify.ts",
     "product:sku-current:verify": "tsx scripts/product-sku-current-verify.ts",
+    "product:yz-code:verify": "tsx scripts/product-yz-code-verify.ts",
+    "product:import-yz:verify": "tsx scripts/product-import-yz-verify.ts",
     "inventory:invariants:verify": "tsx scripts/inventory-invariants-verify.ts",
     "inventory:stock-management:verify": "tsx scripts/inventory-stock-management-verify.ts",
     "inventory:http-permission:verify": "tsx scripts/inventory-http-permission-verify.ts",

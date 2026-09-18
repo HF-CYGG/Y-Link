@@ -6,7 +6,9 @@
  * - 通过 `useCrudManager` 统一处理标签新增、编辑、删除与列表刷新；
  * - 通过 `useStableRequest` 承接统计查询，只保留最后一次筛选结果，避免重复点击导致旧统计覆盖；
  * - 通过列表共享壳在桌面展示表格、在移动端展示卡片；
- * - 对标签列表显式关闭逐项卡片过渡，避免 keep-alive 恢复、刷新列表和统计联动时批量重排造成操作迟滞。
+ * - 对标签列表显式关闭逐项卡片过渡，避免 keep-alive 恢复、刷新列表和统计联动时批量重排造成操作迟滞；
+ * - 表单新增可选的“系列编码”（两位大写字母），标记该标签可被商品选作文创系列，用于拼接 YZ 商品编码；
+ *   列表提供“仅看系列标签”开关做前端本地过滤，不改变后端查询接口。
  * 维护说明：
  * - 标签页本身数据量通常较小，但在弱机和移动端仍容易被频繁动画放大体感卡顿，后续保持“稳态优先”即可；
  * - 若统计区后续新增图表，优先异步化图表子块，不要阻塞主列表交互。
@@ -46,16 +48,19 @@ const aggregateDateRange = ref<[string, string]>([
 ])
 const aggregateTagId = ref('')
 const aggregateOrderType = ref<'' | 'department' | 'walkin'>('')
+// 仅看系列标签：纯前端本地过滤，不影响统计查询可选的标签范围。
+const onlySeriesTags = ref(false)
 
 /**
  * 标签表单类型：
- * - 对齐当前弹窗中的两个可编辑字段；
+ * - 对齐当前弹窗中的三个可编辑字段（名称、颜色、系列编码）；
  * - 独立类型可让通用 CRUD composable 正确推断表单结构。
  */
 interface TagForm {
   id: string
   tagName: string
   tagCode: string
+  seriesCode: string
 }
 
 /**
@@ -67,16 +72,31 @@ const createDefaultForm = (): TagForm => ({
   id: '',
   tagName: '',
   tagCode: '#409EFF',
+  seriesCode: '',
 })
 
 /**
  * 表单规则：
  * - 限制标签名称不能为空；
- * - 颜色选择必填，保证标签展示稳定。
+ * - 颜色选择必填，保证标签展示稳定；
+ * - 系列编码可留空；填写时必须是两位大写字母，供 YZ 商品编码体系拼接使用。
  */
 const rules: FormRules = {
   tagName: [{ required: true, message: '请输入标签名称', trigger: 'blur' }],
   tagCode: [{ required: true, message: '请选择标签颜色', trigger: 'change' }],
+  seriesCode: [
+    {
+      trigger: 'blur',
+      validator: (_rule, value: string, callback) => {
+        const normalizedValue = (value || '').trim()
+        if (!normalizedValue || /^[A-Z]{2}$/.test(normalizedValue)) {
+          callback()
+          return
+        }
+        callback(new Error('系列编码必须是两位大写字母'))
+      },
+    },
+  ],
 }
 
 /**
@@ -98,6 +118,7 @@ const buildEditForm = (row: Tag): TagForm => ({
   id: row.id,
   tagName: row.tagName,
   tagCode: row.tagCode || '#409EFF',
+  seriesCode: row.seriesCode || '',
 })
 
 /**
@@ -108,7 +129,17 @@ const buildEditForm = (row: Tag): TagForm => ({
 const buildSubmitPayload = (currentForm: TagForm): CreateTagDto => ({
   tagName: normalizeSubmitText(currentForm.tagName),
   tagCode: normalizeSubmitText(currentForm.tagCode),
+  seriesCode: normalizeSubmitText(currentForm.seriesCode).toUpperCase() || null,
 })
+
+/**
+ * 系列编码输入时自动转大写：
+ * - 避免用户输入小写字母通过前端校验后与后端归一化结果不一致；
+ * - 直接回写表单字段，保持输入框内容与提交值一致。
+ */
+const handleSeriesCodeInput = (value: string) => {
+  form.value.seriesCode = value.toUpperCase()
+}
 
 const upsertTag = (tag: Tag) => {
   const currentIndex = tags.value.findIndex((item) => item.id === tag.id)
@@ -165,6 +196,18 @@ const {
     upsertTag(result)
     return 'local'
   },
+})
+
+/**
+ * 展示用标签列表：
+ * - 开启“仅看系列标签”时仅保留已设置系列编码的标签；
+ * - 统计查询的标签下拉框仍使用完整 `tags` 列表，不受该过滤影响。
+ */
+const displayTags = computed(() => {
+  if (!onlySeriesTags.value) {
+    return tags.value
+  }
+  return tags.value.filter((tag) => Boolean(tag.seriesCode))
 })
 
 const refreshTagView = async () => {
@@ -292,7 +335,13 @@ onActivated(() => {
   <div class="tag-manager flex min-w-0 flex-col gap-3 sm:gap-4">
     <PageToolbarCard compact :action-stretch-on-phone="false">
       <template #default>
-        <div class="max-w-3xl text-xs leading-5 text-slate-500 dark:text-slate-400 sm:text-sm sm:leading-6">统一维护标签名称与颜色，用于产品分类展示，并为产品检索、筛选与视觉识别提供稳定标签体系。</div>
+        <div class="flex flex-col gap-2">
+          <div class="max-w-3xl text-xs leading-5 text-slate-500 dark:text-slate-400 sm:text-sm sm:leading-6">统一维护标签名称与颜色，用于产品分类展示，并为产品检索、筛选与视觉识别提供稳定标签体系。</div>
+          <div class="flex items-center gap-2">
+            <el-switch v-model="onlySeriesTags" />
+            <span class="text-xs text-slate-500 dark:text-slate-400 sm:text-sm">仅看系列标签</span>
+          </div>
+        </div>
       </template>
 
       <template #actions="{ isPhone }">
@@ -360,7 +409,7 @@ onActivated(() => {
     </div>
 
     <BizResponsiveDataCollectionShell
-      :items="tags"
+      :items="displayTags"
       :loading="loading"
       empty-description="暂无标签数据"
       :empty-card="true"
@@ -370,8 +419,8 @@ onActivated(() => {
       table-wrapper-class="apple-card h-full min-w-0 overflow-hidden px-0 py-3 sm:py-4 xl:py-5"
       card-container-class="pb-3 xl:grid-cols-3"
     >
-      <template #table>
-        <el-table native-scrollbar :data="tags" class="h-full w-full" stripe row-key="id" table-layout="auto">
+      <template #table="{ items }">
+        <el-table native-scrollbar :data="items" class="h-full w-full" stripe row-key="id" table-layout="auto">
             <el-table-column label="标签名称" prop="tagName" min-width="220" show-overflow-tooltip>
               <template #default="{ row }">
                 <el-tag :color="row.tagCode || '#409EFF'" effect="dark" class="border-none">
@@ -380,6 +429,12 @@ onActivated(() => {
               </template>
             </el-table-column>
             <el-table-column label="颜色编码" prop="tagCode" min-width="220" show-overflow-tooltip />
+            <el-table-column label="系列编码" prop="seriesCode" min-width="120">
+              <template #default="{ row }">
+                <el-tag v-if="row.seriesCode" type="success" effect="plain">{{ row.seriesCode }}</el-tag>
+                <span v-else class="text-slate-400">—</span>
+              </template>
+            </el-table-column>
             <el-table-column v-if="canManageTags" label="操作" width="160" fixed="right" align="right">
               <template #default="{ row }">
                 <el-button link type="primary" @click="handleEditTag(row)">编辑</el-button>
@@ -396,6 +451,11 @@ onActivated(() => {
               {{ item.tagName }}
             </el-tag>
             <span class="shrink-0 text-xs text-slate-500 dark:text-slate-400">{{ item.tagCode || '#409EFF' }}</span>
+          </div>
+          <div class="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+            <span>系列编码</span>
+            <el-tag v-if="item.seriesCode" size="small" type="success" effect="plain">{{ item.seriesCode }}</el-tag>
+            <span v-else>—</span>
           </div>
           <div v-if="canManageTags" class="flex flex-wrap justify-end gap-2 border-t border-slate-100 pt-2 dark:border-white/10 sm:pt-3">
             <el-button size="small" @click="handleEditTag(item)">编辑</el-button>
@@ -427,6 +487,17 @@ onActivated(() => {
               <el-color-picker v-model="form.tagCode" :predefine="predefinedColors" />
               <span class="text-slate-500 dark:text-slate-400">{{ form.tagCode }}</span>
             </div>
+          </el-form-item>
+          <el-form-item label="系列编码" prop="seriesCode">
+            <el-input
+              :model-value="form.seriesCode"
+              placeholder="选填，如 PX"
+              maxlength="2"
+              @update:model-value="handleSeriesCodeInput"
+            />
+            <p class="mt-2 text-xs leading-5 text-slate-400">
+              填写系列编码后，该标签可被商品选为文创系列，用于生成商品编码（如 PX → YZPX18）
+            </p>
           </el-form-item>
         </el-form>
       </template>

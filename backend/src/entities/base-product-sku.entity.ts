@@ -80,6 +80,13 @@ export class BaseProductSku {
   @Column({ name: 'sort_order', type: 'int', default: 0, comment: '排序' })
   sortOrder!: number
 
+  // YZ 通用 SKU 编码体系专用字段：历史规格组合（颜色/款式等）编码的商品不写这两列，保持 NULL。
+  @Column({ name: 'variant_code', type: 'varchar', length: 1, nullable: true, comment: '一级变体码（0-9），仅 YZ 编码商品使用' })
+  variantCode!: string | null
+
+  @Column({ name: 'size_code', type: 'varchar', length: 1, nullable: true, comment: '尺码码（A-E），NULL 表示无尺码位' })
+  sizeCode!: string | null
+
   @CreateDateColumn({ name: 'created_at', ...entityColumnOptions.timestamp })
   createdAt!: Date
 

@@ -52,9 +52,17 @@ const REQUIRED_TABLES = [
   'inv_stock_doc_item',
   'inv_stocktake',
   'inv_stocktake_item',
+  'base_product_variant_code_registry',
 ] as const
 
 const REQUIRED_COLUMNS = [
+  // 050：YZ 通用 SKU 编码体系新增字段，需与 mysql-migration-runner 的 MYSQL_REQUIRED_COLUMNS 保持同一口径。
+  ['base_tag', 'series_code'],
+  ['base_product', 'primary_series_tag_id'],
+  ['base_product', 'series_seq'],
+  ['base_product', 'code_scheme'],
+  ['base_product_sku', 'variant_code'],
+  ['base_product_sku', 'size_code'],
   ...['deactivated_at', 'deactivation_reason', 'deactivated_by_user_id', 'deactivated_by_username', 'deactivated_by_display_name', 'restored_at', 'restored_by_user_id', 'restored_by_username', 'restored_by_display_name']
     .flatMap((columnName) => [
       ['sys_user', columnName] as const,
@@ -167,6 +175,12 @@ interface ColumnFixture {
 }
 
 const REQUIRED_MANUAL_OUTBOUND_COLUMN_DEFINITIONS = new Map<string, ColumnFixture>([
+  ['base_product.code_scheme', {
+    dataType: 'varchar',
+    columnType: 'varchar(8)',
+    isNullable: 'NO',
+    characterMaximumLength: 8,
+  }],
   ['biz_outbound_order.source_doc_type', {
     dataType: 'varchar',
     columnType: 'varchar(32)',
@@ -312,6 +326,37 @@ interface CheckFixture {
 }
 
 const REQUIRED_INDEXES: readonly IndexFixture[] = [
+  // 050：系列码唯一、系列内序号唯一与变体码登记表的两个唯一键。
+  {
+    tableName: 'base_product',
+    indexName: 'idx_base_product_primary_series_tag_id',
+    columns: ['primary_series_tag_id'],
+    unique: false,
+  },
+  {
+    tableName: 'base_tag',
+    indexName: 'uk_base_tag_series_code',
+    columns: ['series_code'],
+    unique: true,
+  },
+  {
+    tableName: 'base_product',
+    indexName: 'uk_base_product_series_seq',
+    columns: ['primary_series_tag_id', 'series_seq'],
+    unique: true,
+  },
+  {
+    tableName: 'base_product_variant_code_registry',
+    indexName: 'uk_registry_lookup',
+    columns: ['product_id', 'axis', 'spec_value'],
+    unique: true,
+  },
+  {
+    tableName: 'base_product_variant_code_registry',
+    indexName: 'uk_registry_code',
+    columns: ['product_id', 'axis', 'code'],
+    unique: true,
+  },
   {
     tableName: 'account_lifecycle_event',
     indexName: 'idx_account_lifecycle_event_account',
@@ -546,6 +591,9 @@ const REQUIRED_FOREIGN_KEYS: readonly ForeignKeyFixture[] = [
     ['inv_stocktake_item', 'fk_inv_stocktake_item_stocktake_id', 'stocktake_id', 'inv_stocktake', 'CASCADE'],
     ['inv_stocktake_item', 'fk_inv_stocktake_item_product_id', 'product_id', 'base_product', 'RESTRICT'],
     ['inv_stocktake_item', 'fk_inv_stocktake_item_sku_id', 'sku_id', 'base_product_sku', 'RESTRICT'],
+    // 050：主系列标签禁止级联删除（编码权威），变体码登记随商品级联清理。
+    ['base_product', 'fk_base_product_primary_series_tag_id', 'primary_series_tag_id', 'base_tag', 'RESTRICT'],
+    ['base_product_variant_code_registry', 'fk_base_product_variant_code_registry_product_id', 'product_id', 'base_product', 'CASCADE'],
   ].map(([tableName, constraintName, columnName, referencedTableName, deleteRule]) => ({
     tableName,
     constraintName,

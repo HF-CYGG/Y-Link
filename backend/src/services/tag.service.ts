@@ -20,17 +20,20 @@ import { lockActiveSysAccountForBusiness } from './account-business-guard.servic
 export interface CreateTagInput {
   tagName: string
   tagCode?: string | null
+  seriesCode?: string | null
 }
 
 export interface UpdateTagInput {
   tagName?: string
   tagCode?: string | null
+  seriesCode?: string | null
 }
 
 export interface TagView {
   id: string
   tagName: string
   tagCode: string | null
+  seriesCode: string | null
   createdAt: string
   updatedAt: string
 }
@@ -58,6 +61,14 @@ const TAG_CODE_CONSTRAINT_MATCHER = {
   sqliteColumns: ['base_tag.tag_code'],
 } as const
 
+const TAG_SERIES_CODE_CONSTRAINT_MATCHER = {
+  mysqlConstraint: 'uk_base_tag_series_code',
+  sqliteColumns: ['base_tag.series_code'],
+} as const
+
+// 系列编码格式：两位大写字母，供 YZ 商品编码体系拼接使用（如 PX → YZPX18）。
+const SERIES_CODE_PATTERN = /^[A-Z]{2}$/
+
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export class TagService {
   private readonly tagRepo = AppDataSource.getRepository(BaseTag)
@@ -84,9 +95,26 @@ export class TagService {
     return normalizedValue
   }
 
+  /**
+   * 归一化文创系列码：
+   * - 空字符串、纯空白、undefined、null 统一归一化为 null（表示未设置系列）；
+   * - 非空时去除首尾空白并转大写，必须为两位大写字母，否则拒绝保存。
+   */
+  private normalizeSeriesCode(value: string | null | undefined): string | null {
+    const normalizedValue = value?.trim().toUpperCase() ?? ''
+    if (!normalizedValue) {
+      return null
+    }
+    if (!SERIES_CODE_PATTERN.test(normalizedValue)) {
+      throw new BizError('系列编码必须是两位大写字母', 400)
+    }
+    return normalizedValue
+  }
+
   private async assertTagUniqueness(repo: Repository<BaseTag>, input: {
     tagName: string
     tagCode: string | null
+    seriesCode: string | null
     excludeTagId?: string
   }) {
     const tagNameConflict = await repo.findOne({
@@ -100,19 +128,30 @@ export class TagService {
       throw new BizError('标签名称已存在，请更换后再试', 409)
     }
 
-    if (!input.tagCode) {
-      return
+    if (input.tagCode) {
+      const tagCodeConflict = await repo.findOne({
+        where: {
+          tagCode: input.tagCode,
+          ...(input.excludeTagId ? { id: Not(input.excludeTagId) } : {}),
+        },
+        select: ['id'],
+      })
+      if (tagCodeConflict) {
+        throw new BizError('标签编码已存在，请更换后再试', 409)
+      }
     }
 
-    const tagCodeConflict = await repo.findOne({
-      where: {
-        tagCode: input.tagCode,
-        ...(input.excludeTagId ? { id: Not(input.excludeTagId) } : {}),
-      },
-      select: ['id'],
-    })
-    if (tagCodeConflict) {
-      throw new BizError('标签编码已存在，请更换后再试', 409)
+    if (input.seriesCode) {
+      const seriesCodeConflict = await repo.findOne({
+        where: {
+          seriesCode: input.seriesCode,
+          ...(input.excludeTagId ? { id: Not(input.excludeTagId) } : {}),
+        },
+        select: ['id'],
+      })
+      if (seriesCodeConflict) {
+        throw new BizError('系列编码已被其他标签占用', 409)
+      }
     }
   }
 
@@ -122,6 +161,9 @@ export class TagService {
     }
     if (isUniqueConstraintError(error, TAG_CODE_CONSTRAINT_MATCHER)) {
       throw new BizError('标签编码已存在，请更换后再试', 409)
+    }
+    if (isUniqueConstraintError(error, TAG_SERIES_CODE_CONSTRAINT_MATCHER)) {
+      throw new BizError('系列编码已被其他标签占用', 409)
     }
     throw error
   }
@@ -136,16 +178,19 @@ export class TagService {
   async create(input: CreateTagInput, actor: AuthUserContext): Promise<TagView> {
     const normalizedTagName = this.normalizeTagName(input.tagName)
     const normalizedTagCode = this.normalizeTagCode(input.tagCode)
+    const normalizedSeriesCode = this.normalizeSeriesCode(input.seriesCode)
     const result = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
       const tagRepo = manager.getRepository(BaseTag)
       await this.assertTagUniqueness(tagRepo, {
         tagName: normalizedTagName,
         tagCode: normalizedTagCode,
+        seriesCode: normalizedSeriesCode,
       })
       const entity = tagRepo.create({
         tagName: normalizedTagName,
         tagCode: normalizedTagCode,
+        seriesCode: normalizedSeriesCode,
       })
       try {
         return this.buildTagView(await tagRepo.save(entity))
@@ -168,13 +213,16 @@ export class TagService {
 
       const nextTagName = typeof input.tagName === 'string' ? this.normalizeTagName(input.tagName) : tag.tagName
       const nextTagCode = 'tagCode' in input ? this.normalizeTagCode(input.tagCode) : tag.tagCode
+      const nextSeriesCode = 'seriesCode' in input ? this.normalizeSeriesCode(input.seriesCode) : tag.seriesCode
       await this.assertTagUniqueness(tagRepo, {
         tagName: nextTagName,
         tagCode: nextTagCode,
+        seriesCode: nextSeriesCode,
         excludeTagId: id,
       })
       tag.tagName = nextTagName
       tag.tagCode = nextTagCode
+      tag.seriesCode = nextSeriesCode
       try {
         return this.buildTagView(await tagRepo.save(tag))
       } catch (error) {
@@ -215,6 +263,7 @@ export class TagService {
       id: normalizeEntityId(tag.id),
       tagName: tag.tagName,
       tagCode: tag.tagCode,
+      seriesCode: tag.seriesCode,
       createdAt: normalizeDateTime(tag.createdAt),
       updatedAt: normalizeDateTime(tag.updatedAt),
     }
