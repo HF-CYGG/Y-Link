@@ -1423,6 +1423,18 @@ export class ProductService {
         })
     }
     const existingSkuCodeSet = new Set(existingSkus.map((sku) => sku.skuCode))
+    // 存量商品升级到 YZ 编码时，会把旧 skuCode 回填进 barcode 以保住已打印的标签；而 legacy 商品编码
+    // 由 generateProductCode 按“当日最大值 + 1”生成，升级腾出的日期流水号可能被当天新建的商品重新取到，
+    // 于是新商品的 `${productCode}-DEFAULT` / `-SKU-N` 会与那条回填的 barcode 撞全局唯一索引导致建档失败
+    // （WC 分支本身已有 barcode 冲突检查，这两个分支原本没有）。这里预先把同前缀的 barcode 纳入去重集合，
+    // 让既有的 allocateSkuCode 自动避开，而不是等到落库才抛唯一约束错误。
+    const prefixedBarcodeRows = await skuRepo.createQueryBuilder('sku')
+      .select('sku.barcode', 'barcode')
+      .where('sku.barcode LIKE :codePrefix', { codePrefix: `${product.productCode}%` })
+      .getRawMany<{ barcode: string | null }>()
+    prefixedBarcodeRows.forEach((row) => {
+      if (row.barcode) existingSkuCodeSet.add(row.barcode)
+    })
     const usedSkuCodeSet = new Set<string>()
 
     const allocateSkuCode = (sku: BaseProductSku, matchedSku: BaseProductSku | undefined, skuInput: ProductSkuInput) => {
