@@ -206,6 +206,21 @@ assert.equal(
   '列表滚到底时末尾分组应能激活，而不是卡在倒数第二个',
 )
 assert.equal(
+  resolveViewportCategoryKey({ ...viewportCategoryBase, scrollTop: 989, currentKey: 'c' }),
+  'd',
+  '进入到底容差内即激活末尾分组',
+)
+assert.equal(
+  resolveViewportCategoryKey({ ...viewportCategoryBase, scrollTop: 987, currentKey: 'd' }),
+  'd',
+  '已激活末尾分组后，在到底容差边界上抖动几像素不得来回切换',
+)
+assert.equal(
+  resolveViewportCategoryKey({ ...viewportCategoryBase, scrollTop: 960, currentKey: 'd' }),
+  'c',
+  '离开底部滞回区后仍应正常交还给上一个分类',
+)
+assert.equal(
   resolveViewportCategoryKey({ ...viewportCategoryBase, sections: [], scrollTop: 500, currentKey: 'b' }),
   'all',
   '分组 DOM 尚未挂载时回落到“全部”，不抛错',
@@ -334,6 +349,14 @@ const listScrollSource = mallSource.slice(
 assert.ok(
   listScrollSource.includes('hasReachedRequestedCategory(scroller)'),
   '点击会话是否结束必须按真实滚动位置判定',
+)
+const reachedSource = mallSource.slice(
+  mallSource.indexOf('const hasReachedRequestedCategory'),
+  mallSource.indexOf('const handleMallViewportResize'),
+)
+assert.ok(
+  /sectionStraddlesAnchor = targetMetrics\.relativeTop <= CATEGORY_VIEWPORT_ACTIVATE_OFFSET\s+&& targetMetrics\.relativeBottom > CATEGORY_VIEWPORT_ACTIVATE_OFFSET/.test(reachedSource),
+  '抵达判定必须要求目标分组跨过锚线：只判顶边会让向上跳转与点击“全部”在第一帧误判抵达',
 )
 assert.ok(
   listScrollSource.indexOf('hasReachedRequestedCategory') < listScrollSource.indexOf('resolveActiveCategoryByViewport'),

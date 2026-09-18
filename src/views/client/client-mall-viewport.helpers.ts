@@ -179,7 +179,8 @@ export interface ViewportCategoryInput {
  * 按右侧滚动位置推导当前分类：
  * - 滚动位置在顶部容差内时，“全部”保持“全部”，其余情况归属第一个真实分类；
  * - 其余位置先按锚线取候选分组：优先跨过锚线的分组，否则取锚线以上最后一个分组；
- *   滚到底时改用“最后一个清晰可见的分组”，避免末尾分组顶不到锚线而永远无法激活；
+ *   滚到底时改用“最后一个清晰可见的分组”，避免末尾分组顶不到锚线而永远无法激活，
+ *   且该分支的边界同样带滞回，离开底部一段距离后才交还给上一个分类；
  * - 候选与当前分类不一致时再判滞回：向下接管要多越过 hysteresis，向上回退要当前分组多退
  *   hysteresis，同一个临界点不会被双向反复触发。
  */
@@ -219,7 +220,9 @@ export const resolveViewportCategoryKey = ({
   })
 
   // 列表已到底：末尾分组无法再顶到锚线，改以“最后一个清晰可见分组”为准。
-  if (maxScrollTop - scrollTop <= edgeThreshold) {
+  // 该判定同样要滞回：已经激活底部分组时放宽退出边界，否则在到底容差上下抖动几像素就会来回切换。
+  const bottomBand = currentKey === visibleCategoryKey ? edgeThreshold + safeHysteresis : edgeThreshold
+  if (maxScrollTop - scrollTop <= bottomBand) {
     return visibleCategoryKey
   }
 

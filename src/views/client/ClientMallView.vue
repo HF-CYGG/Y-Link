@@ -1235,7 +1235,9 @@ const isCategorySyncTemporarilyBlocked = () => {
 /**
  * 判断右侧是否真正抵达点击目标：
  * - 只看实测位置，不依赖固定动画时长；
- * - 目标分组顶到锚线，或列表已到底且目标分组清晰可见，都算抵达。
+ * - 目标分组必须“跨过锚线”（顶边在锚线以上且底边仍在锚线以下）才算抵达：
+ *   只判顶边会让向上跳转和点击“全部”在第一帧就误判抵达，锁提前释放后高亮又会扫过中间分类；
+ * - 列表已到底时目标分组顶不到锚线，改以“分组清晰可见”兜底。
  */
 const hasReachedRequestedCategory = (scroller: HTMLElement): boolean => {
   const requestedKey = requestedCategoryKey.value
@@ -1248,11 +1250,12 @@ const hasReachedRequestedCategory = (scroller: HTMLElement): boolean => {
   }
   const distanceToTarget = Math.abs(targetMetrics.reachableTargetTop - scroller.scrollTop)
   const nearBottom = targetMetrics.maxScrollTop - scroller.scrollTop <= CATEGORY_SCROLL_HIT_THRESHOLD
-  const sectionReachedViewport = targetMetrics.relativeTop <= CATEGORY_VIEWPORT_ACTIVATE_OFFSET
-    || (nearBottom
-      && targetMetrics.relativeBottom > CATEGORY_VIEWPORT_ACTIVATE_OFFSET
-      && targetMetrics.relativeTop < scroller.clientHeight - CATEGORY_BOTTOM_VISIBLE_PADDING)
-  return distanceToTarget <= CATEGORY_SCROLL_HIT_THRESHOLD || sectionReachedViewport
+  const sectionStraddlesAnchor = targetMetrics.relativeTop <= CATEGORY_VIEWPORT_ACTIVATE_OFFSET
+    && targetMetrics.relativeBottom > CATEGORY_VIEWPORT_ACTIVATE_OFFSET
+  const sectionVisibleAtBottom = nearBottom
+    && targetMetrics.relativeBottom > CATEGORY_VIEWPORT_ACTIVATE_OFFSET
+    && targetMetrics.relativeTop < scroller.clientHeight - CATEGORY_BOTTOM_VISIBLE_PADDING
+  return distanceToTarget <= CATEGORY_SCROLL_HIT_THRESHOLD || sectionStraddlesAnchor || sectionVisibleAtBottom
 }
 
 const handleMallViewportResize = () => {
