@@ -50,9 +50,17 @@ const reportPath = path.join(runtimeRoot, 'enterprise-performance-budget-report.
  * 首屏依赖图、首屏 JS/CSS 与其余低频重包预算均未超额，并为 barcode 块单独设 80 KB 上限。
  * 评审修复（扫码串行队列、打印与导入弹窗防护、盘点差异逐字段提交）再增 10.12 KB 至 4503.26 KB，
  * 均落在库存低频分包与产品管理页，因此总量上限定为 4510 KB。
+ *
+ * YZ 通用 SKU 编码体系（商品/SKU 定长编码、建库导入、野辙条码标签）：同一环境下 main@b149f94 实测
+ * 4505.77 KB，本功能叠加后实测 4529.67 KB（+23.90 KB）。增量来源：标签管理页的系列编码维护、
+ * 商品管理页的文创系列选择与编码位展示及两轴容量校验、异步拆包的存量商品升级弹窗与 YZ 建库导入弹窗
+ * （ProductYzImportDialog 独立块 7.37 KB）、以及标签打印的两个野辙模板与共用的标签卡片组件。
+ * 升级弹窗与导入弹窗均走 defineAsyncComponent 不进首屏，首屏依赖图、首屏 JS/CSS 与低频重包预算
+ * 均未超额；"总产物"统计的是全部 chunk，拆包无法降低该项。经人工评估批准后总量上限调整为 4550 KB
+ * （约 0.45% 余量），其余各项预算维持不变。
  */
 const performanceBudget = {
-  totalAssetsMaxKB: 4510,
+  totalAssetsMaxKB: 4550,
   criticalAssetsMaxKB: 1180,
   initialLoadJsMaxKB: 850,
   initialLoadCssMaxKB: 320,
