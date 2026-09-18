@@ -84,6 +84,8 @@ interface DashboardRecentActivity {
 
 const DATE_MS = 24 * 60 * 60 * 1000
 const ORDER_TYPE_VALUES = ['department', 'walkin'] as const
+// 部门榜分组键：去掉首尾空白后的部门名称，配合 applyDepartmentRankFilter 排除空值与散客单。
+const DEPARTMENT_RANK_LABEL_EXPR = `COALESCE(TRIM(order.customerDepartmentName), '')`
 type DashboardOrderType = (typeof ORDER_TYPE_VALUES)[number]
 
 // 区间上限：统计区间最长一年，既覆盖“年末/学期报告”场景，也避免趋势分桶扫描无界行数。
@@ -646,17 +648,18 @@ export const dashboardService = {
     }
     this.applyOrderFilter(productRankQb, filter)
 
-    const customerLabelExpr = `COALESCE(NULLIF(TRIM(order.customerDepartmentName), ''), '散客')`
+    // 经常购买部门榜：散客单在 SQL 层整体排除后再排序截断，保证 Top N 基于纯部门集合。
     const customerRankQb = orderRepo
       .createQueryBuilder('order')
-      .select(customerLabelExpr, 'customerName')
+      .select(DEPARTMENT_RANK_LABEL_EXPR, 'customerName')
       .addSelect('SUM(order.totalAmount)', 'totalAmount')
       .addSelect('COUNT(order.id)', 'orderCount')
       .where('1=1')
-      .groupBy(customerLabelExpr)
+      .groupBy(DEPARTMENT_RANK_LABEL_EXPR)
       .orderBy('SUM(order.totalAmount)', 'DESC')
-      .addOrderBy(customerLabelExpr, 'ASC')
+      .addOrderBy(DEPARTMENT_RANK_LABEL_EXPR, 'ASC')
       .limit(topN)
+    this.applyDepartmentRankFilter(customerRankQb)
     this.applyOrderFilter(customerRankQb, filter)
 
     const [trendRows, productRankRows, customerRankRows] = await Promise.all([
@@ -683,7 +686,7 @@ export const dashboardService = {
     })
 
     const topCustomers: DashboardTopCustomer[] = customerRankRows.map((row) => ({
-      customerName: normalizeText(row.customerName, '散客'),
+      customerName: normalizeText(row.customerName, ''),
       totalAmount: normalizeAmount(row.totalAmount),
       orderCount: Number(row.orderCount ?? 0),
     }))
@@ -1003,8 +1006,20 @@ export const dashboardService = {
     }
   },
 
+  /**
+   * 部门榜口径：
+   * - 只统计部门单，且部门名称去空白后非空；
+   * - 散客单（含历史上误填部门名的散客单）一律不进入部门榜及其下钻；
+   * - 其他模块（订单类型结构、客户占比饼图等）不受影响，仍按原口径统计散客。
+   */
+  applyDepartmentRankFilter(queryBuilder: { andWhere: (sql: string, parameters?: Record<string, unknown>) => unknown }): void {
+    queryBuilder.andWhere('order.orderType = :departmentRankOrderType', { departmentRankOrderType: 'department' })
+    queryBuilder.andWhere(`${DEPARTMENT_RANK_LABEL_EXPR} <> ''`)
+  },
+
   applyCustomerFilter(queryBuilder: { andWhere: (sql: string, parameters?: Record<string, unknown>) => unknown }, customerName: string): void {
-    queryBuilder.andWhere(`COALESCE(NULLIF(TRIM(order.customerDepartmentName), ''), '散客') = :customerName`, { customerName })
+    this.applyDepartmentRankFilter(queryBuilder)
+    queryBuilder.andWhere(`${DEPARTMENT_RANK_LABEL_EXPR} = :customerName`, { customerName })
   },
 
   /**
