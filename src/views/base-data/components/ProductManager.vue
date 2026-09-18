@@ -1,21 +1,32 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/base-data/components/ProductManager.vue
- * 文件职责：维护产品主数据列表、编辑弹窗、批量操作和颜色/款式规格配置。
+ * 文件职责：维护产品主数据列表、编辑弹窗、批量操作、颜色/款式（YZ 编码语义下为“颜色/款式”与“尺码”两轴）规格配置，以及存量商品到 YZ 通用 SKU 编码体系的升级入口。
  * 实现逻辑：
  * - 通过 useCrudManager 统一收敛产品列表、弹窗保存与删除流程；
  * - 编辑弹窗在主商品字段之外维护 SKU 行，提交时把颜色、款式、售价、库存和启停状态转换为后端规格数据；
  * - 未配置规格时继续使用默认规格，由后端同步主商品价格与库存，兼容历史单规格商品；
  * - 表格、移动卡片和筛选条件仍复用既有数据集合，避免规格能力影响原有基础资料工作台；
  * - 商品可归属一个分类；单规格商品在编辑弹窗直接维护条码、成本价与库位（通过 defaultSku 提交），多规格商品在规格配置里逐行维护；
- * - Excel 导入与条码打印弹窗均为异步组件，只在点击时加载。
+ * - 新增商品必须选择文创系列（seriesCode 非空的标签），选中后走 YZ 编码，productCode 由后端生成、前端禁用并清空该输入；
+ *   编辑已有 YZ 编码商品时产品编码与文创系列均只读；编辑历史（legacy）商品保持原有自由编辑行为，并提供「升级到 YZ 编码」入口（ProductYzUpgradeDialog.vue）；
+ * - 规格弹窗里一级变体轴（对应 YZ 编码位 1-9）展示并写入 key「颜色/款式」，尺码轴（对应 YZ 编码位 A-E）展示并
+ *   写入 key「尺码」（B8 批次改名，新写入统一新 key）；读取历史 SKU 时兼容旧 key「颜色」「款式」，不做批量
+ *   迁移，靠重新保存自然懒迁移，具体规则见 product-sku-matrix.helpers.ts 顶部注释；
+ * - YZ 编码商品的规格弹窗会前置校验两轴取值数量（evaluateSkuDimensionCapacity），超限时禁用保存按钮，避免提交后才被后端 409 拦截；
+ * - YZ 编码商品的规格弹窗额外提供「规格取值重命名」（ProductSpecValueRenameDialog.vue，只改显示名称、编码位不变）
+ *   与「0 号规格演进」（ProductZeroSpecEvolveDialog.vue，把原本"无该轴规格"的 SKU 继承为具体取值，或退役保留）
+ *   两个入口，均为异步组件、只读商品当前是否存在待演进的 0 号 SKU 决定是否展示；
+ * - Excel 导入、条码打印弹窗、YZ 编码升级弹窗、规格取值重命名弹窗与 0 号规格演进弹窗均为异步组件，只在点击时加载。
  * 维护说明：
  * - 后续扩展尺码、容量等规格维度时，优先扩展 SKU 表单和后端规格归一化逻辑，不要绕过商品服务直接写库存；
- * - 删除或停用已有 SKU 前需保留占用库存汇总，避免已下单未核销记录丢失库存占用。
+ * - 删除或停用已有 SKU 前需保留占用库存汇总，避免已下单未核销记录丢失库存占用；
+ * - 升级到 YZ 编码属于不可逆操作，不要在本文件里叠加绕过 ProductYzUpgradeDialog 预检结果的“快速升级”入口。
  */
 
 
 import { computed, defineAsyncComponent, h, nextTick, onActivated, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { type FormInstance, type FormRules, type TableInstance, type UploadRequestOptions } from 'element-plus'
 import type { RequestConfig } from '@/api/http'
 import { createTag, getTagList, type Tag } from '@/api/modules/tag'
@@ -56,23 +67,34 @@ import { compressImageForUpload } from '@/utils/image-upload'
 import {
   compareProductCode,
   createBatchCreateRow,
+  filterSeriesTagOptions,
+  formatSeriesTagOptionLabel,
   normalizeSelectValue,
   validateBatchCreateRows,
+  validatePrimarySeriesTagRequired,
   type BatchCreateProductFormRow,
 } from '@/views/base-data/components/product-manager.helpers'
 import {
   buildSkuMatrixRows,
+  evaluateSkuDimensionCapacity,
   extractSkuDimensionValues,
+  SIZE_AXIS_SPEC_KEY,
+  VARIANT_AXIS_SPEC_KEY,
   type ProductSkuMatrixRow,
 } from '@/views/base-data/components/product-sku-matrix.helpers'
 
 const ProductImportDialog = defineAsyncComponent(() => import('@/views/inventory/components/ProductImportDialog.vue'))
+const ProductYzImportDialog = defineAsyncComponent(() => import('@/views/inventory/components/ProductYzImportDialog.vue'))
 const BarcodeLabelPrintDialog = defineAsyncComponent(() => import('@/views/inventory/components/BarcodeLabelPrintDialog.vue'))
+const ProductYzUpgradeDialog = defineAsyncComponent(() => import('@/views/base-data/components/ProductYzUpgradeDialog.vue'))
+const ProductSpecValueRenameDialog = defineAsyncComponent(() => import('@/views/base-data/components/ProductSpecValueRenameDialog.vue'))
+const ProductZeroSpecEvolveDialog = defineAsyncComponent(() => import('@/views/base-data/components/ProductZeroSpecEvolveDialog.vue'))
 
 const allTags = ref<Tag[]>([])
 const allCategories = ref<CategoryRecord[]>([])
 const allLocations = ref<LocationRecord[]>([])
 const importDialogVisible = ref(false)
+const yzImportDialogVisible = ref(false)
 const printDialogVisible = ref(false)
 const printSkuIds = ref<string[]>([])
 const exportLoading = ref(false)
@@ -89,6 +111,10 @@ const batchSubmitting = ref(false)
 const batchCreateDialogVisible = ref(false)
 const batchCreateSubmitting = ref(false)
 const selectedProductIds = ref<string[]>([])
+const yzUpgradeDialogVisible = ref(false)
+const specValueRenameDialogVisible = ref(false)
+const zeroSpecEvolveDialogVisible = ref(false)
+const router = useRouter()
 
 const searchKeyword = ref('')
 const searchTagId = ref('')
@@ -121,6 +147,16 @@ interface ProductForm {
   skuColorText: string
   skuStyleText: string
   skus: ProductSkuForm[]
+  /** YZ 编码体系专用：主系列标签ID；legacy 商品或未选择系列时为空字符串。 */
+  primarySeriesTagId: string
+  /** 编辑已有商品时的编码体系快照，决定产品编码/文创系列选择器是否只读；新增商品恒为 legacy，实际编码体系由是否选择系列决定。 */
+  codeScheme: 'legacy' | 'yz'
+  /**
+   * 单规格商品（form.skus 为空、走 defaultSku 提交）的默认 SKU 编码位快照，仅用于判断「0 号规格演进」
+   * 入口是否展示；多规格商品直接看 form.skus 里各行的 variantCode/sizeCode，不使用这两个字段。
+   */
+  defaultSkuVariantCode: string | null
+  defaultSkuSizeCode: string | null
 }
 
 type ProductSkuForm = ProductSkuMatrixRow
@@ -192,6 +228,10 @@ const createDefaultForm = (): ProductForm => ({
   skuColorText: '',
   skuStyleText: '',
   skus: [],
+  primarySeriesTagId: '',
+  codeScheme: 'legacy',
+  defaultSkuVariantCode: null,
+  defaultSkuSizeCode: null,
 })
 
 const selectedProductCount = computed(() => selectedProductIds.value.length)
@@ -202,6 +242,105 @@ const canImportProducts = computed(() => hasPermission('products:import') && has
 const activeCategoryOptions = computed(() => allCategories.value.filter((item) => item.isActive || item.id === form.value.categoryId))
 const activeLocationOptions = computed(() => allLocations.value.filter((item) => item.isActive))
 const resolveLocationLabel = (id: string | null | undefined) => allLocations.value.find((item) => item.id === id)?.locationCode ?? ''
+
+/**
+ * 文创系列（YZ 编码）相关派生状态：
+ * - seriesTagOptions 只保留配置了两位系列编码的标签，供新增/编辑弹窗与升级弹窗共用；
+ * - effectiveCodeScheme 新增商品按是否已选系列实时推算，编辑商品固定沿用后端返回的 codeScheme（不可切换）；
+ * - 产品编码输入框的禁用态与占位文案统一由 effectiveCodeScheme 推导，避免模板里散落条件判断。
+ */
+const seriesTagOptions = computed(() => filterSeriesTagOptions(allTags.value))
+const hasSeriesTagOptions = computed(() => seriesTagOptions.value.length > 0)
+const effectiveCodeScheme = computed<'legacy' | 'yz'>(() => {
+  if (form.value.id) {
+    return form.value.codeScheme
+  }
+  return form.value.primarySeriesTagId ? 'yz' : 'legacy'
+})
+const isYzProduct = computed(() => effectiveCodeScheme.value === 'yz')
+
+/**
+ * 0 号规格演进入口的展示条件：
+ * - 仅编辑已有 YZ 编码商品时可用（新增商品还没有 SKU，无从谈"0 号"）；
+ * - 多规格商品（form.skus 非空）看各行的 variantCode/sizeCode；单规格商品（走 defaultSku 提交）看
+ *   defaultSkuVariantCode/defaultSkuSizeCode 快照；
+ * - 只是前端的展示态过滤，登记表是否已经真正被继承过以后端 400 校验为准。
+ */
+const hasZeroVariantSku = computed(() => {
+  if (!form.value.id || effectiveCodeScheme.value !== 'yz') return false
+  if (form.value.skus.length) {
+    return form.value.skus.some((sku) => (sku.variantCode ?? '0') === '0')
+  }
+  return (form.value.defaultSkuVariantCode ?? '0') === '0'
+})
+const hasZeroSizeSku = computed(() => {
+  if (!form.value.id || effectiveCodeScheme.value !== 'yz') return false
+  if (form.value.skus.length) {
+    return form.value.skus.some((sku) => sku.sizeCode === null || sku.sizeCode === undefined)
+  }
+  return form.value.defaultSkuSizeCode === null || form.value.defaultSkuSizeCode === undefined
+})
+const hasZeroSpecToEvolve = computed(() => hasZeroVariantSku.value || hasZeroSizeSku.value)
+const productCodeFieldDisabled = computed(() => isYzProduct.value)
+const productCodePlaceholder = computed(() => {
+  if (!form.value.id) {
+    return isYzProduct.value ? '由系统按所选系列自动生成，如 YZPX18' : '留空则自动生成统一编码'
+  }
+  return '请输入产品编码'
+})
+
+/** 选择文创系列后，新增商品的产品编码统一由后端生成：清空输入框，避免用户填写的内容被静默丢弃。 */
+const handlePrimarySeriesTagChange = () => {
+  if (!form.value.id) {
+    form.value.productCode = ''
+  }
+}
+
+const openYzUpgradeDialog = () => {
+  if (!ensurePermission('products:manage', '升级到 YZ 编码')) {
+    return
+  }
+  yzUpgradeDialogVisible.value = true
+}
+
+/** 升级成功后：用最新商品数据回填当前编辑态，并刷新列表，让用户立刻看到新编码。 */
+const handleYzUpgraded = async (updated: ProductRecord) => {
+  yzUpgradeDialogVisible.value = false
+  form.value = buildEditForm(updated)
+  await reloadProducts()
+}
+
+const openSpecValueRenameDialog = () => {
+  if (!ensurePermission('products:manage', '重命名规格取值')) {
+    return
+  }
+  specValueRenameDialogVisible.value = true
+}
+
+/** 重命名成功后：用最新商品数据回填当前编辑态，并刷新列表，让用户立刻看到新名称。 */
+const handleSpecValueRenamed = async (updated: ProductRecord) => {
+  specValueRenameDialogVisible.value = false
+  form.value = buildEditForm(updated)
+  await reloadProducts()
+}
+
+const openZeroSpecEvolveDialog = () => {
+  if (!ensurePermission('products:manage', '0 号规格演进')) {
+    return
+  }
+  zeroSpecEvolveDialogVisible.value = true
+}
+
+/** 演进成功后：用最新商品数据回填当前编辑态，并刷新列表。 */
+const handleZeroSpecEvolved = async (updated: ProductRecord) => {
+  zeroSpecEvolveDialogVisible.value = false
+  form.value = buildEditForm(updated)
+  await reloadProducts()
+}
+
+const goToTagManagement = () => {
+  void router.push('/base-data/tags')
+}
 
 const createBatchCreateFormRow = (): BatchCreateProductFormRow => {
   batchCreateRowSeed.value += 1
@@ -261,6 +400,19 @@ const rules: FormRules = {
     },
   ],
   productName: [{ required: true, message: '请输入产品名称', trigger: 'blur' }],
+  primarySeriesTagId: [
+    {
+      validator: (_rule, value, callback) => {
+        const message = validatePrimarySeriesTagRequired(!form.value.id, normalizeSelectValue(value))
+        if (message) {
+          callback(new Error(message))
+          return
+        }
+        callback()
+      },
+      trigger: ['blur', 'change'],
+    },
+  ],
   defaultPrice: [{ required: true, message: '请输入默认售价', trigger: 'blur' }],
   discountRate: [
     {
@@ -402,15 +554,17 @@ const handleCardSelectionChange = async (productId: string, checked: boolean | s
  * - 标签集合转换为 id 数组，便于多选组件直接回填；
  * - 默认售价显式转 number，保持输入组件的数据类型稳定。
  */
+// B8 批次改名：新 key 优先，缺失时回退旧 key（颜色→颜色/款式，款式→尺码），兼容尚未重新保存过的历史数据。
 const resolveSkuFormColor = (specValues: Record<string, string> | undefined, specText: string | undefined) => {
-  const color = String(specValues?.颜色 ?? '').trim()
+  const color = String(specValues?.[VARIANT_AXIS_SPEC_KEY] ?? specValues?.颜色 ?? '').trim()
   if (color) {
     return color
   }
   return String(specValues?.规格 || specText || '').trim()
 }
 
-const resolveSkuFormStyle = (specValues: Record<string, string> | undefined) => String(specValues?.款式 ?? '').trim()
+const resolveSkuFormStyle = (specValues: Record<string, string> | undefined) =>
+  String(specValues?.[SIZE_AXIS_SPEC_KEY] ?? specValues?.款式 ?? '').trim()
 
 const buildSkuSpecValues = (sku: ProductSkuForm, index: number): Record<string, string> => {
   if (sku.specValues && Object.keys(sku.specValues).length) {
@@ -421,10 +575,10 @@ const buildSkuSpecValues = (sku: ProductSkuForm, index: number): Record<string, 
   if (color || style) {
     const specValues: Record<string, string> = {}
     if (color) {
-      specValues.颜色 = color
+      specValues[VARIANT_AXIS_SPEC_KEY] = color
     }
     if (style) {
-      specValues.款式 = style
+      specValues[SIZE_AXIS_SPEC_KEY] = style
     }
     return specValues
   }
@@ -492,6 +646,8 @@ const buildEditForm = (row: ProductRecord): ProductForm => {
         barcode: sku.barcode ?? null,
         costPrice: sku.costPrice === null || sku.costPrice === undefined ? null : Number(sku.costPrice),
         locationId: sku.locationId ?? null,
+        variantCode: sku.variantCode ?? null,
+        sizeCode: sku.sizeCode ?? null,
       }))
     : []
   const dimensions = extractSkuDimensionValues(skus)
@@ -518,6 +674,10 @@ const buildEditForm = (row: ProductRecord): ProductForm => {
     skuColorText: dimensions.colors.join('，'),
     skuStyleText: dimensions.styles.join('，'),
     skus,
+    primarySeriesTagId: row.primarySeriesTagId ?? '',
+    codeScheme: row.codeScheme === 'yz' ? 'yz' : 'legacy',
+    defaultSkuVariantCode: defaultSku?.variantCode ?? null,
+    defaultSkuSizeCode: defaultSku?.sizeCode ?? null,
   }
 }
 
@@ -545,7 +705,11 @@ const resolveDefaultSkuPayload = (currentForm: ProductForm): { defaultSku?: Crea
 const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProductDto> => {
   hasAutoCreatedTags.value = false
   const resolvedTagIds = await resolveTagIds(currentForm.tagIds)
-  const normalizedProductCode = normalizeOptionalSubmitText(currentForm.productCode)
+  const normalizedPrimarySeriesTagId = normalizeSelectValue(currentForm.primarySeriesTagId)
+  // 新增商品且已选文创系列时走 YZ 编码：productCode 由后端生成，这里不提交该字段（提交了会被后端 400 拒绝）。
+  // 编辑场景下无论 legacy 还是 yz，都沿用输入框当前值（yz 商品该输入框已禁用，值与后端一致，不会触发“改码”校验）。
+  const isNewYzSubmission = !currentForm.id && !!normalizedPrimarySeriesTagId
+  const normalizedProductCode = isNewYzSubmission ? undefined : normalizeOptionalSubmitText(currentForm.productCode)
   const normalizedProductName = normalizeSubmitText(currentForm.productName)
   const normalizedPinyinAbbr = normalizeOptionalSubmitText(currentForm.pinyinAbbr)
   const normalizedDefaultPrice = normalizeSubmitNumber(currentForm.defaultPrice, {
@@ -581,6 +745,7 @@ const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProdu
     isActive: currentForm.isActive,
     tagIds: resolvedTagIds,
     categoryId: currentForm.categoryId || null,
+    primarySeriesTagId: normalizedPrimarySeriesTagId || null,
     ...resolveDefaultSkuPayload(currentForm),
     skus: currentForm.skus.length
       ? currentForm.skus.map((sku, index) => ({
@@ -723,6 +888,19 @@ const skuStyleInput = computed({
   set: (values: string[]) => {
     form.value.skuStyleText = normalizeSkuDimensionValues(values).join('，')
   },
+})
+
+/**
+ * YZ 编码两轴容量前置校验：
+ * - 仅对已经是 YZ 编码的商品生效（legacy 商品无编码位限制）；
+ * - 直接对当前输入的颜色/款式取值数量校验，不等用户点击“生成规格矩阵”，第一时间给出反馈；
+ * - 非空即阻止保存，供 SKU 配置弹窗的确认按钮禁用态和错误提示共用。
+ */
+const skuDimensionCapacityIssues = computed(() => {
+  if (form.value.codeScheme !== 'yz') {
+    return []
+  }
+  return evaluateSkuDimensionCapacity(skuColorInput.value, skuStyleInput.value)
 })
 
 const discountRateOptions = computed(() => {
@@ -941,6 +1119,8 @@ const ensureSkuConfigRows = () => {
     costPrice: form.value.defaultCostPrice,
     locationId: form.value.defaultLocationId || null,
     isDefaultPlaceholder: true,
+    variantCode: snapshot?.variantCode ?? null,
+    sizeCode: snapshot?.sizeCode ?? null,
   }]
 }
 
@@ -1372,6 +1552,7 @@ onActivated(() => {
           <el-button :disabled="!selectedProductCount" @click="openPrintDialog">打印条码</el-button>
           <el-button :loading="exportLoading" @click="handleExportProducts">导出</el-button>
           <el-button v-if="canImportProducts" @click="importDialogVisible = true">Excel 导入</el-button>
+          <el-button v-if="canImportProducts" @click="yzImportDialogVisible = true">YZ 建库导入</el-button>
           <el-button v-if="canManageProducts" type="primary" plain @click="openBatchCreateDialog">
             批量新增
           </el-button>
@@ -1412,7 +1593,14 @@ onActivated(() => {
               show-overflow-tooltip
               sortable="custom"
               :sort-orders="['ascending', 'descending']"
-            />
+            >
+              <template #default="{ row }">
+                <span>{{ row.productCode }}</span>
+                <el-tag v-if="row.codeScheme === 'yz' && row.seriesCode" size="small" type="success" effect="plain" class="ml-1">
+                  {{ row.seriesCode }}
+                </el-tag>
+              </template>
+            </el-table-column>
             <el-table-column label="产品名称" prop="productName" min-width="220" show-overflow-tooltip />
             <el-table-column label="拼音首字母" prop="pinyinAbbr" width="120" show-overflow-tooltip />
             <el-table-column label="分类" width="110" show-overflow-tooltip>
@@ -1496,7 +1684,12 @@ onActivated(() => {
               <h4 class="truncate text-[15px] font-semibold leading-5 text-slate-800 dark:text-slate-100">
                 {{ item.productName }}
               </h4>
-              <p class="mt-0.5 break-all text-xs leading-5 text-slate-500 dark:text-slate-400">{{ item.productCode }}</p>
+              <p class="mt-0.5 break-all text-xs leading-5 text-slate-500 dark:text-slate-400">
+                {{ item.productCode }}
+                <el-tag v-if="item.codeScheme === 'yz' && item.seriesCode" size="small" type="success" effect="plain" class="ml-1">
+                  {{ item.seriesCode }}
+                </el-tag>
+              </p>
             </div>
             <div class="text-right">
               <span class="font-medium text-red-500">¥{{ Number(item.defaultPrice).toFixed(2) }}</span>
@@ -1641,6 +1834,9 @@ onActivated(() => {
           <p class="text-xs leading-5 text-slate-400">
             提示：批量提交采用整批回滚策略；任一行校验失败会整体失败。不存在标签会自动创建后再关联。
           </p>
+          <p class="text-xs leading-5 text-amber-500">
+            批量新增本批仅支持历史编码（legacy），暂不支持按文创系列生成 YZ 编码；如需 YZ 编码商品，请使用「新增产品」逐个录入。
+          </p>
           <p v-if="isPhone" class="text-xs text-slate-400">
             移动端建议分批录入，单次最多 50 行。
           </p>
@@ -1658,31 +1854,44 @@ onActivated(() => {
       :desktop-width="isSkuDialog ? '920px' : '500px'"
       :confirm-loading="submitting"
       dialog-class="product-dialog"
-      @confirm="isSkuDialog ? handleSubmitSkuConfig() : handleSubmit()"
     >
       <template #default="{ isPhone }">
         <div v-if="isSkuDialog" class="product-sku-config-card flex flex-col gap-5">
           <div class="sku-card sku-form rounded-xl border border-slate-200 bg-slate-50/50 p-4 dark:border-white/10 dark:bg-slate-900/20" style="min-inline-size: 0; max-width: 100%">
             <h3 class="mb-4 text-sm font-semibold text-slate-800 dark:text-slate-200">规格维度配置</h3>
+            <p v-if="form.codeScheme === 'yz'" class="mb-2 text-xs leading-5 text-slate-400">
+              YZ 编码规则：颜色/款式最多 9 个（编码位 1-9），尺码最多 5 个（编码位 A-E）
+            </p>
             <div class="sku-dims">
               <label>
-                <span>颜色</span>
+                <span>颜色/款式</span>
                 <el-input-tag
                   v-model="skuColorInput"
                   clearable
-                  placeholder="输入颜色后按回车，如：红色、蓝色"
+                  placeholder="输入颜色或款式后按回车，如：米色、明心书院"
                 />
               </label>
               <label>
-                <span>款式</span>
+                <span>尺码</span>
                 <el-input-tag
                   v-model="skuStyleInput"
                   clearable
-                  placeholder="输入款式后按回车，如：标准、加大"
+                  placeholder="输入尺码后按回车，如：S、M、L"
                 />
               </label>
-              <div class="mt-1">
+              <div v-if="skuDimensionCapacityIssues.length" class="sku-capacity-issues">
+                <p v-for="issue in skuDimensionCapacityIssues" :key="issue.dimension" class="text-xs text-red-500">
+                  {{ issue.message }}
+                </p>
+              </div>
+              <div class="mt-1 flex flex-wrap gap-2">
                 <el-button class="sku-gen" icon="Grid" type="primary" plain @click="syncSkuMatrixRows">生成规格矩阵</el-button>
+                <el-button v-if="form.id && form.codeScheme === 'yz'" plain @click="openSpecValueRenameDialog">
+                  重命名规格取值
+                </el-button>
+                <el-button v-if="form.id && form.codeScheme === 'yz' && hasZeroSpecToEvolve" plain @click="openZeroSpecEvolveDialog">
+                  0 号规格演进
+                </el-button>
               </div>
             </div>
           </div>
@@ -1695,6 +1904,11 @@ onActivated(() => {
                   <template #default="{ row }">
                     <div>{{ row.specText }}</div>
                     <div class="text-xs text-slate-400">{{ row.skuCode || '保存后生成编码' }}</div>
+                  </template>
+                </el-table-column>
+                <el-table-column v-if="form.codeScheme === 'yz'" label="编码位" width="88" align="center">
+                  <template #default="{ row }">
+                    <span class="font-mono text-xs text-slate-400">{{ `${row.variantCode ?? ''}${row.sizeCode ?? ''}` || '—' }}</span>
                   </template>
                 </el-table-column>
                 <el-table-column label="规格图" width="112" align="center">
@@ -1842,7 +2056,39 @@ onActivated(() => {
         </div>
         <el-form v-else ref="formRef" :model="form" :rules="rules" :label-width="isPhone ? '82px' : '90px'">
           <el-form-item label="产品编码" prop="productCode">
-            <el-input v-model="form.productCode" :placeholder="form.id ? '请输入产品编码' : '留空则自动生成统一编码'" />
+            <el-input v-model="form.productCode" :disabled="productCodeFieldDisabled" :placeholder="productCodePlaceholder" />
+          </el-form-item>
+          <el-form-item label="文创系列" prop="primarySeriesTagId">
+            <el-select
+              v-model="form.primarySeriesTagId"
+              filterable
+              :disabled="!!form.id"
+              placeholder="请选择文创系列"
+              class="w-full"
+              @change="handlePrimarySeriesTagChange"
+            >
+              <el-option
+                v-for="tag in seriesTagOptions"
+                :key="tag.id"
+                :label="formatSeriesTagOptionLabel(tag)"
+                :value="tag.id"
+              />
+            </el-select>
+            <p v-if="!form.id && !hasSeriesTagOptions" class="mt-1 text-xs leading-5 text-amber-500">
+              尚未配置文创系列，请先到标签管理页为标签设置两位系列编码
+              <el-button link type="primary" size="small" class="ml-1" @click="goToTagManagement">前往标签管理</el-button>
+            </p>
+            <p v-else-if="form.id && form.codeScheme === 'yz'" class="mt-1 text-xs leading-5 text-slate-400">
+              YZ 编码商品的文创系列不可修改
+            </p>
+            <template v-else-if="form.id && form.codeScheme === 'legacy'">
+              <p class="mt-1 text-xs leading-5 text-slate-400">
+                历史编码商品暂未接入文创系列，如需切换为 YZ 编码请使用下方升级入口
+              </p>
+              <el-button class="mt-2" size="small" type="primary" plain @click="openYzUpgradeDialog">
+                升级到 YZ 编码
+              </el-button>
+            </template>
           </el-form-item>
           <el-form-item label="产品名称" prop="productName">
             <el-input v-model="form.productName" placeholder="请输入产品名称" />
@@ -1964,10 +2210,51 @@ onActivated(() => {
           </el-form-item>
         </el-form>
       </template>
+
+      <template #footer="{ close }">
+        <span class="flex flex-wrap justify-end gap-2">
+          <el-button @click="close">取消</el-button>
+          <el-button
+            type="primary"
+            :loading="submitting"
+            :disabled="isSkuDialog && skuDimensionCapacityIssues.length > 0"
+            @click="isSkuDialog ? handleSubmitSkuConfig() : handleSubmit()"
+          >
+            确认
+          </el-button>
+        </span>
+      </template>
     </BizCrudDialogShell>
 
     <ProductImportDialog v-if="importDialogVisible" v-model="importDialogVisible" @imported="reloadProducts" />
+    <ProductYzImportDialog v-if="yzImportDialogVisible" v-model="yzImportDialogVisible" @imported="reloadProducts" />
     <BarcodeLabelPrintDialog v-if="printDialogVisible" v-model="printDialogVisible" :sku-ids="printSkuIds" />
+    <ProductYzUpgradeDialog
+      v-if="canManageProducts && yzUpgradeDialogVisible"
+      v-model="yzUpgradeDialogVisible"
+      :product-id="form.id"
+      :product-name="form.productName"
+      :series-tag-options="seriesTagOptions"
+      @upgraded="handleYzUpgraded"
+    />
+    <ProductSpecValueRenameDialog
+      v-if="canManageProducts && specValueRenameDialogVisible"
+      v-model="specValueRenameDialogVisible"
+      :product-id="form.id"
+      :product-name="form.productName"
+      :variant-values="skuColorInput"
+      :size-values="skuStyleInput"
+      @renamed="handleSpecValueRenamed"
+    />
+    <ProductZeroSpecEvolveDialog
+      v-if="canManageProducts && zeroSpecEvolveDialogVisible"
+      v-model="zeroSpecEvolveDialogVisible"
+      :product-id="form.id"
+      :product-name="form.productName"
+      :variant-evolvable="hasZeroVariantSku"
+      :size-evolvable="hasZeroSizeSku"
+      @evolved="handleZeroSpecEvolved"
+    />
   </div>
 </template>
 
@@ -2022,6 +2309,12 @@ onActivated(() => {
   min-width: 0;
   color: rgb(71 85 105);
   font-size: 13px;
+}
+
+.sku-capacity-issues {
+  display: grid;
+  gap: 2px;
+  margin-top: 4px;
 }
 
 .sku-gen {
