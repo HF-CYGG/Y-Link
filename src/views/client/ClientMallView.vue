@@ -34,6 +34,8 @@ import {
   PHONE_FLOATING_OCCLUSION_FALLBACK,
   resolveFloatingOcclusion,
   resolveBrowseListHeight,
+  resolveKeepVisibleScrollTop,
+  resolveViewportCategoryKey,
   resolveViewportHeight,
 } from './client-mall-viewport.helpers'
 
@@ -121,13 +123,24 @@ const productCardStableKeyMap = new Map<string, string>()
 const productCardStableElementMap = new Map<string, HTMLElement>()
 
 const listScrollerRef = ref<HTMLElement | null>(null)
+// 左侧分类栏滚动容器与各分类按钮，用于右侧滚动切换激活分类时让左栏“跟随可见”。
+const categoryScrollerRef = ref<HTMLElement | null>(null)
+const categoryButtonElementMap = new Map<string, HTMLElement>()
 const sectionRefMap = reactive<Record<string, HTMLElement | null>>({})
 const scrollingByCategoryClick = ref(false)
-const pendingCategoryKey = ref<string | null>(null)
+// 用户点击的目标分类：只表示“想去哪”，右侧是否已经滚到由 activeCategoryKey 单独表示。
+const requestedCategoryKey = ref<string | null>(null)
 const categoryScrollUnlockTimer = ref<number | null>(null)
+const categoryScrollSettleTimer = ref<number | null>(null)
 const categoryScrollSessionId = ref(0)
 const currentLockedSessionId = ref(0)
 const pendingCategoryTargetTop = ref<number | null>(null)
+/**
+ * 分类栏高亮与跟随使用的分类键：
+ * - 点击后立即显示点击目标，避免右侧平滑滚动途中高亮扫过中间分类；
+ * - 没有待抵达目标时回落到右侧实际所处分类。
+ */
+const displayCategoryKey = computed(() => requestedCategoryKey.value ?? activeCategoryKey.value)
 // 分类浏览列表与分类栏共用的实测高度（px），0 表示尚未测量、沿用样式里的兜底高度。
 const browseListHeight = ref(0)
 const mallPageRef = ref<HTMLElement | null>(null)
@@ -141,9 +154,16 @@ let floatingOcclusionFrameId: number | null = null
 let floatingLayoutResizeObserver: ResizeObserver | null = null
 
 const CATEGORY_SCROLL_HIT_THRESHOLD = 12
-const CATEGORY_SCROLL_FALLBACK_MS = 420
+// 平滑滚动的真实时长随距离、浏览器与设备变化，固定时间只作为异常兜底，正常完成一律按真实位置判定。
+const CATEGORY_SCROLL_FALLBACK_MS = 2400
+// 滚动事件停止这么久即认为平滑滚动已停稳（含 scrollTo 原地不动、动画被系统降级等情况）。
+const CATEGORY_SCROLL_SETTLE_MS = 160
 const CATEGORY_VIEWPORT_ACTIVATE_OFFSET = 28
 const CATEGORY_BOTTOM_VISIBLE_PADDING = 56
+// 分类切换滞回：分组标题停在锚线附近时，避免同一临界点被双向反复触发。
+const CATEGORY_ACTIVATE_HYSTERESIS = 14
+// 分类栏跟随滚动后，激活项与分类栏上下边缘保留的间距，与按钮间距 mb-2 对齐。
+const CATEGORY_RAIL_VISIBLE_PADDING = 8
 const DEFAULT_PRODUCT_IMAGE_WARMUP_BATCH = 12
 const DEFAULT_PRODUCT_IMAGE_WARMUP_DELAY_MS = 180
 const PRODUCT_CARD_SEARCH_DETAIL_MAX_LENGTH = 80
@@ -607,6 +627,11 @@ const loadProducts = async (force = false) => {
       if (!activeExists) {
         activeCategoryKey.value = 'all'
       }
+      const requestedKey = requestedCategoryKey.value
+      if (requestedKey && !categoryOptions.value.some((option) => option.key === requestedKey)) {
+        // 刷新后点击目标已不存在，立刻解锁，避免会话一直等一个不会出现的分组。
+        releaseCategoryScrollLock()
+      }
       await nextTick()
       handleProductListScroll()
     },
@@ -869,7 +894,15 @@ const quickAdd = (product: O2oMallProduct) => {
   triggerSettlePulse()
 }
 
+const clearCategoryScrollSettleTimer = () => {
+  if (categoryScrollSettleTimer.value !== null) {
+    globalThis.window.clearTimeout(categoryScrollSettleTimer.value)
+    categoryScrollSettleTimer.value = null
+  }
+}
+
 const clearCategoryUnlockTimer = () => {
+  clearCategoryScrollSettleTimer()
   if (categoryScrollUnlockTimer.value !== null) {
     globalThis.window.clearTimeout(categoryScrollUnlockTimer.value)
     categoryScrollUnlockTimer.value = null
@@ -918,8 +951,20 @@ const syncMallFloatingOcclusion = () => {
 const releaseCategoryScrollLock = () => {
   clearCategoryUnlockTimer()
   scrollingByCategoryClick.value = false
-  pendingCategoryKey.value = null
+  requestedCategoryKey.value = null
   pendingCategoryTargetTop.value = null
+}
+
+/**
+ * 结束一次分类点击会话：把右侧实际分类落到点击目标后再解锁。
+ * 解锁瞬间不按当前位置反算分类，避免平滑滚动尾帧把高亮拉回中间分类。
+ */
+const settleCategoryScrollSession = () => {
+  const requestedKey = requestedCategoryKey.value
+  if (requestedKey) {
+    activeCategoryKey.value = requestedKey
+  }
+  releaseCategoryScrollLock()
 }
 
 const syncBrowseListHeight = () => {
@@ -989,29 +1034,49 @@ const lockCategoryScrollSession = (categoryKey: string, targetTop: number) => {
   categoryScrollSessionId.value = nextSessionId
   currentLockedSessionId.value = nextSessionId
   scrollingByCategoryClick.value = true
-  pendingCategoryKey.value = categoryKey
+  requestedCategoryKey.value = categoryKey
   pendingCategoryTargetTop.value = targetTop
   clearCategoryUnlockTimer()
+  scheduleCategoryScrollSettleCheck(nextSessionId)
   categoryScrollUnlockTimer.value = globalThis.window.setTimeout(() => {
-    // 只允许最后一次标签点击会话解锁，避免旧回调覆盖新状态。
+    // 兜底：滚动事件迟迟不来或被外部打断时，也要把会话收口到点击目标，不能一直锁着。
     if (currentLockedSessionId.value !== nextSessionId) {
       return
     }
-    releaseCategoryScrollLock()
-    handleProductListScroll()
+    settleCategoryScrollSession()
   }, CATEGORY_SCROLL_FALLBACK_MS)
 }
 
+/**
+ * 平滑滚动停稳判定：
+ * - 每来一个滚动事件就重置计时，滚动事件停止即认为动画结束；
+ * - 覆盖 scrollTo 原地不动、动画被系统降级为瞬间跳转等不产生后续事件的情况。
+ */
+const scheduleCategoryScrollSettleCheck = (sessionId: number) => {
+  clearCategoryScrollSettleTimer()
+  categoryScrollSettleTimer.value = globalThis.window.setTimeout(() => {
+    if (currentLockedSessionId.value !== sessionId) {
+      return
+    }
+    settleCategoryScrollSession()
+  }, CATEGORY_SCROLL_SETTLE_MS)
+}
+
 const scrollToCategory = async (categoryKey: string) => {
-  activeCategoryKey.value = categoryKey
   releaseCategoryScrollLock()
   if (largeDatasetMode.value) {
-    // 大数据模式下列表按当前分类单独渲染，不再进行 DOM 锚点滚动。
+    // 大数据模式下列表按当前分类单独渲染，没有平滑滚动过程，直接落到目标分类。
+    activeCategoryKey.value = categoryKey
     return
   }
+  // 先只登记点击目标：高亮由 displayCategoryKey 立即跟上，
+  // activeCategoryKey 仍等右侧真正滚到目标后再更新。
+  requestedCategoryKey.value = categoryKey
   await nextTick()
   const scroller = listScrollerRef.value
   if (!scroller) {
+    activeCategoryKey.value = categoryKey
+    releaseCategoryScrollLock()
     return
   }
 
@@ -1019,11 +1084,16 @@ const scrollToCategory = async (categoryKey: string) => {
   await nextTick()
   const nextScroller = listScrollerRef.value
   if (!nextScroller) {
+    activeCategoryKey.value = categoryKey
+    releaseCategoryScrollLock()
     return
   }
 
   const targetMetrics = resolveCategoryScrollMetrics(categoryKey, nextScroller)
   if (!targetMetrics) {
+    // 搜索结果态等没有分组锚点的场景无法滚动定位，直接认定已落到目标分类。
+    activeCategoryKey.value = categoryKey
+    releaseCategoryScrollLock()
     return
   }
   lockCategoryScrollSession(categoryKey, targetMetrics.reachableTargetTop)
@@ -1031,6 +1101,68 @@ const scrollToCategory = async (categoryKey: string) => {
   nextScroller.scrollTo({
     top: targetMetrics.reachableTargetTop,
     behavior: 'smooth',
+  })
+}
+
+const setCategoryButtonRef = (categoryKey: string, element: unknown) => {
+  if (element instanceof HTMLElement) {
+    categoryButtonElementMap.set(categoryKey, element)
+    return
+  }
+  categoryButtonElementMap.delete(categoryKey)
+}
+
+/**
+ * 分类栏底部被悬浮购物车盖住的高度：
+ * - 分类栏底边落在购物车上方时为 0；
+ * - 否则取分类栏底边越过“购物车实测遮挡线”的那一段，供跟随计算扣掉。
+ */
+const measureCategoryRailBottomInset = (scroller: HTMLElement) => {
+  const viewportHeight = resolveMallViewportHeight()
+  if (viewportHeight <= 0) {
+    return 0
+  }
+  const occlusionTop = viewportHeight - floatingOcclusion.value
+  return Math.max(0, Math.round(scroller.getBoundingClientRect().bottom - occlusionTop))
+}
+
+/**
+ * 左侧分类栏跟随可见：
+ * - 只滚动分类栏自身容器，显式计算 scrollTop，不用 scrollIntoView，避免带动页面或右侧列表；
+ * - 激活项已完整可见时不动，越界时按最小位移滚入；减少动画偏好下直接跳转；
+ * - 可视区底部扣掉悬浮购物车遮挡，并同步补齐尾部占位，末尾分类才能被抬到购物车上方。
+ */
+const ensureActiveCategoryVisible = (behavior: ScrollBehavior = 'smooth') => {
+  const scroller = categoryScrollerRef.value
+  const button = categoryButtonElementMap.get(displayCategoryKey.value)
+  if (!mallRuntimeActive || !scroller || !button || scroller.clientHeight <= 0) {
+    return
+  }
+  if (scroller.classList.contains('mall-category-panel-enter-active') || scroller.classList.contains('mall-category-panel-leave-active')) {
+    // 分类栏展开/收起过渡中高度仍在变化，交给过渡结束回调再对齐。
+    return
+  }
+  const bottomInset = measureCategoryRailBottomInset(scroller)
+  // 尾部占位与遮挡等高，直接写在容器上即时生效，随后读取的 scrollHeight 才包含这段可滚动空间。
+  scroller.style.setProperty('--mall-category-rail-tail-space', `${bottomInset}px`)
+  const scrollerRect = scroller.getBoundingClientRect()
+  const buttonRect = button.getBoundingClientRect()
+  const nextScrollTop = resolveKeepVisibleScrollTop({
+    scrollTop: scroller.scrollTop,
+    viewportHeight: scroller.clientHeight,
+    contentHeight: scroller.scrollHeight,
+    itemTop: buttonRect.top - scrollerRect.top - scroller.clientTop + scroller.scrollTop,
+    itemHeight: buttonRect.height,
+    padding: CATEGORY_RAIL_VISIBLE_PADDING,
+    bottomInset,
+  })
+  if (nextScrollTop === null) {
+    return
+  }
+  const prefersReducedMotion = globalThis.window?.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  scroller.scrollTo({
+    top: nextScrollTop,
+    behavior: prefersReducedMotion ? 'auto' : behavior,
   })
 }
 
@@ -1043,46 +1175,32 @@ const handleCategoryManualInterrupt = () => {
 }
 
 const resolveActiveCategoryByViewport = (scroller: HTMLElement) => {
-  const firstCategoryKey = categoryGroups.value[0]?.key ?? 'all'
-  if (scroller.scrollTop <= CATEGORY_SCROLL_HIT_THRESHOLD) {
-    // 顶部位置允许“全部”和首个标签共用同一滚动位置：
-    // - 用户主动点“全部”时保留“全部”高亮；
-    // - 其余情况下顶部默认归属第一个真实分类。
-    return activeCategoryKey.value === 'all' ? 'all' : firstCategoryKey
-  }
-  const anchorLine = Math.min(
-    CATEGORY_VIEWPORT_ACTIVATE_OFFSET,
-    Math.max(18, Math.floor(scroller.clientHeight * 0.12)),
-  )
-  const maxScrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
-  let passedCategoryKey = 'all'
-  let visibleCategoryKey = 'all'
-
-  for (const group of categoryGroups.value) {
+  const sections = categoryGroups.value.flatMap((group) => {
     const section = sectionRefMap[group.key]
     if (!section) {
-      continue
+      return []
     }
-    const sectionTopWithinScroller = resolveSectionTopWithinScroller(section, scroller)
-    const relativeTop = sectionTopWithinScroller - scroller.scrollTop
-    const relativeBottom = sectionTopWithinScroller + section.offsetHeight - scroller.scrollTop
-
-    if (relativeTop <= anchorLine) {
-      passedCategoryKey = group.key
-    }
-    if (relativeBottom > 0 && relativeTop < scroller.clientHeight - CATEGORY_BOTTOM_VISIBLE_PADDING) {
-      visibleCategoryKey = group.key
-    }
-    if (relativeTop <= anchorLine && relativeBottom > anchorLine) {
-      return group.key
-    }
-  }
-
-  // 当列表接近底部时，后续分组可能无法再顶到顶部，此时优先采用“最后一个清晰可见分组”。
-  if (maxScrollTop - scroller.scrollTop <= CATEGORY_SCROLL_HIT_THRESHOLD) {
-    return visibleCategoryKey
-  }
-  return passedCategoryKey
+    return [{
+      key: group.key,
+      top: resolveSectionTopWithinScroller(section, scroller),
+      height: section.offsetHeight,
+    }]
+  })
+  return resolveViewportCategoryKey({
+    sections,
+    scrollTop: scroller.scrollTop,
+    viewportHeight: scroller.clientHeight,
+    contentHeight: scroller.scrollHeight,
+    anchorOffset: Math.min(
+      CATEGORY_VIEWPORT_ACTIVATE_OFFSET,
+      Math.max(18, Math.floor(scroller.clientHeight * 0.12)),
+    ),
+    hysteresis: CATEGORY_ACTIVATE_HYSTERESIS,
+    bottomVisiblePadding: CATEGORY_BOTTOM_VISIBLE_PADDING,
+    edgeThreshold: CATEGORY_SCROLL_HIT_THRESHOLD,
+    currentKey: activeCategoryKey.value,
+    firstCategoryKey: categoryGroups.value[0]?.key ?? 'all',
+  })
 }
 
 const handleProductListScroll = () => {
@@ -1091,12 +1209,14 @@ const handleProductListScroll = () => {
     return
   }
 
-  const lockHit = getPendingLockedCategory(scroller)
-  if (lockHit === 'target-hit') {
-    releaseCategoryScrollLock()
-  } else if (lockHit) {
-    activeCategoryKey.value = lockHit
-    // 搜索模式、点击触发滚动与虚拟列表模式都不适合反向计算激活分类，直接跳过。
+  if (requestedCategoryKey.value && scrollingByCategoryClick.value) {
+    // 点击会话进行中：只按真实位置判断“是否已抵达目标”，
+    // 中途位置一律不回写 activeCategoryKey，杜绝“目标 → 中间分类 → 目标”的回跳。
+    if (hasReachedRequestedCategory(scroller)) {
+      settleCategoryScrollSession()
+      return
+    }
+    scheduleCategoryScrollSettleCheck(currentLockedSessionId.value)
     return
   }
 
@@ -1112,16 +1232,19 @@ const isCategorySyncTemporarilyBlocked = () => {
   return searchMode.value || largeDatasetMode.value || useRecommendedAllProductFlow.value || scrollingByCategoryClick.value
 }
 
-const getPendingLockedCategory = (scroller: HTMLElement): string | 'target-hit' | null => {
-  // 用户点击分类后，在滚动抵达目标分组前锁定激活项，
-  // 防止“先跳到目标后又瞬间回到上一个分类”的回写抖动。
-  const pendingKey = pendingCategoryKey.value
-  if (!pendingKey || !scrollingByCategoryClick.value) {
-    return null
+/**
+ * 判断右侧是否真正抵达点击目标：
+ * - 只看实测位置，不依赖固定动画时长；
+ * - 目标分组顶到锚线，或列表已到底且目标分组清晰可见，都算抵达。
+ */
+const hasReachedRequestedCategory = (scroller: HTMLElement): boolean => {
+  const requestedKey = requestedCategoryKey.value
+  if (!requestedKey) {
+    return false
   }
-  const targetMetrics = resolveCategoryScrollMetrics(pendingKey, scroller)
+  const targetMetrics = resolveCategoryScrollMetrics(requestedKey, scroller)
   if (!targetMetrics) {
-    return null
+    return true
   }
   const distanceToTarget = Math.abs(targetMetrics.reachableTargetTop - scroller.scrollTop)
   const nearBottom = targetMetrics.maxScrollTop - scroller.scrollTop <= CATEGORY_SCROLL_HIT_THRESHOLD
@@ -1129,7 +1252,7 @@ const getPendingLockedCategory = (scroller: HTMLElement): string | 'target-hit' 
     || (nearBottom
       && targetMetrics.relativeBottom > CATEGORY_VIEWPORT_ACTIVATE_OFFSET
       && targetMetrics.relativeTop < scroller.clientHeight - CATEGORY_BOTTOM_VISIBLE_PADDING)
-  return distanceToTarget <= CATEGORY_SCROLL_HIT_THRESHOLD || sectionReachedViewport ? 'target-hit' : pendingKey
+  return distanceToTarget <= CATEGORY_SCROLL_HIT_THRESHOLD || sectionReachedViewport
 }
 
 const handleMallViewportResize = () => {
@@ -1175,6 +1298,8 @@ const syncMallViewportAfterRender = async () => {
   syncMallFloatingOcclusion()
   syncBrowseListHeight()
   handleProductListScroll()
+  // KeepAlive 返回、列表重建或尺寸变化后分类栏滚动位置可能丢失，直接对齐到激活分类。
+  ensureActiveCategoryVisible('auto')
   if (mallRuntimeActive) {
     // 搜索 / 分类 / 大数据量模式切换会替换列表容器，需要重新挂载尺寸观察目标。
     bindFloatingLayoutObserver()
@@ -1264,6 +1389,15 @@ watch(
     if (mallRuntimeActive) {
       void syncMallViewportAfterRender()
     }
+  },
+  { flush: 'post' },
+)
+
+// 右侧滚动或点击切换分类后，左侧分类栏按最小位移跟随，保证当前分类完整可见。
+watch(
+  displayCategoryKey,
+  () => {
+    ensureActiveCategoryVisible()
   },
   { flush: 'post' },
 )
@@ -1580,22 +1714,25 @@ onBeforeUnmount(() => {
           </button>
         </div>
       </div>
-      <Transition name="mall-category-panel">
+      <Transition name="mall-category-panel" @after-enter="ensureActiveCategoryVisible('auto')">
         <aside
           v-if="!isRecommendedSortMode"
+          ref="categoryScrollerRef"
           class="mall-browse-categories overflow-y-auto pr-1 sm:pr-2 hide-scrollbar"
         >
           <button
             v-for="category in categoryOptions"
             :key="category.key"
+            :ref="(element) => setCategoryButtonRef(category.key, element)"
             type="button"
             class="mall-category-button mb-2 w-full rounded-xl px-2 py-2 sm:px-3 sm:py-3 text-left transition-colors duration-200"
-            :class="activeCategoryKey === category.key ? 'bg-[var(--ylink-color-primary-strong)] text-white shadow-md' : 'bg-[var(--ylink-color-surface-muted)] text-slate-500 hover:bg-slate-200'"
+            :class="displayCategoryKey === category.key ? 'bg-[var(--ylink-color-primary-strong)] text-white shadow-md' : 'bg-[var(--ylink-color-surface-muted)] text-slate-500 hover:bg-slate-200'"
             @click="scrollToCategory(category.key)"
           >
             <p class="truncate text-xs sm:text-sm font-medium">{{ category.label }}</p>
             <p class="mt-0.5 text-[10px] sm:text-xs opacity-75">{{ category.count }} 款</p>
           </button>
+          <div class="mall-category-rail-tail" aria-hidden="true"></div>
         </aside>
       </Transition>
 
@@ -2279,6 +2416,13 @@ onBeforeUnmount(() => {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 0.5rem;
+}
+
+/* 分类栏尾部占位：高度等于悬浮购物车盖住分类栏的那一段，末尾分类才能滚到购物车上方。 */
+.mall-category-rail-tail {
+  width: 100%;
+  height: var(--mall-category-rail-tail-space, 0px);
+  pointer-events: none;
 }
 
 .mall-category-bottom-spacer,

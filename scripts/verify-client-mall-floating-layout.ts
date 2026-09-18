@@ -1,5 +1,5 @@
 /**
- * 文件说明：Issue #83 / #84 客户端商城悬浮层遮挡与原图预览回归验证。
+ * 文件说明：Issue #83 / #84 / #106 客户端商城悬浮层遮挡、原图预览与分类同步（当前分类判定 + 分类栏跟随可见）回归验证。
  * 文件职责：以纯函数用例覆盖遮挡高度的测量回退、分类浏览列表“滚到底恰好越过购物车”的高度推导与原图缩放边界，并以静态契约守住旧浏览器降级写法；不访问网络与数据库。
  * 维护说明：真实设备的视口、缩放与浏览器版本差异无法在脚本中复现，问题设备仍需人工回归；本脚本只防止根因写法回流。
  */
@@ -10,6 +10,8 @@ import { readFileSync } from 'node:fs'
 import {
   resolveFloatingOcclusion,
   resolveBrowseListHeight,
+  resolveKeepVisibleScrollTop,
+  resolveViewportCategoryKey,
   resolveViewportHeight,
 } from '../src/views/client/client-mall-viewport.helpers'
 import {
@@ -148,6 +150,223 @@ assert.deepEqual(
 )
 const clampedScroll = resolveZoomAnchoredScroll({ scrollLeft: 5000, scrollTop: 5000, stageWidth: 800, stageHeight: 600, previousWidth: 1600, previousHeight: 1200, nextWidth: 3200, nextHeight: 2400 })
 assert.ok(clampedScroll.left <= 3200 - 800 && clampedScroll.top <= 2400 - 600, '放大后的滚动位置必须限制在图片边界内')
+
+// ---------- #106 当前分类判定：锚线 + 滞回 + 边界 ----------
+// 四个分组各高 400，右侧可视高度 600、内容高度 1600（最大滚动 1000），锚线 28、滞回 14。
+const viewportCategoryBase = {
+  sections: [
+    { key: 'a', top: 0, height: 400 },
+    { key: 'b', top: 400, height: 400 },
+    { key: 'c', top: 800, height: 400 },
+    { key: 'd', top: 1200, height: 400 },
+  ],
+  viewportHeight: 600,
+  contentHeight: 1600,
+  anchorOffset: 28,
+  hysteresis: 14,
+  bottomVisiblePadding: 56,
+  edgeThreshold: 12,
+  firstCategoryKey: 'a',
+}
+assert.equal(
+  resolveViewportCategoryKey({ ...viewportCategoryBase, scrollTop: 0, currentKey: 'all' }),
+  'all',
+  '顶部位置且当前为“全部”时保持“全部”',
+)
+assert.equal(
+  resolveViewportCategoryKey({ ...viewportCategoryBase, scrollTop: 0, currentKey: 'b' }),
+  'a',
+  '顶部位置在非“全部”状态下归属第一个真实分类',
+)
+assert.equal(
+  resolveViewportCategoryKey({ ...viewportCategoryBase, scrollTop: 500, currentKey: 'b' }),
+  'b',
+  '锚线落在某分组内部时该分组为当前分类',
+)
+// 分组 c 顶边停在锚线附近（相对顶部 20，锚线 28）：
+// 当前为 b 时 c 还差滞回距离，不抢；当前已是 c 时也不因为同一位置退回 b。
+assert.equal(
+  resolveViewportCategoryKey({ ...viewportCategoryBase, scrollTop: 780, currentKey: 'b' }),
+  'b',
+  '候选分组只越过锚线一点点时不接管，避免临界点抖动',
+)
+assert.equal(
+  resolveViewportCategoryKey({ ...viewportCategoryBase, scrollTop: 780, currentKey: 'c' }),
+  'c',
+  '同一位置下当前分类保持不变，滞回区两侧结果稳定',
+)
+assert.equal(
+  resolveViewportCategoryKey({ ...viewportCategoryBase, scrollTop: 790, currentKey: 'b' }),
+  'c',
+  '候选分组越过锚线加滞回后正常接管',
+)
+assert.equal(
+  resolveViewportCategoryKey({ ...viewportCategoryBase, scrollTop: 1000, currentKey: 'c' }),
+  'd',
+  '列表滚到底时末尾分组应能激活，而不是卡在倒数第二个',
+)
+assert.equal(
+  resolveViewportCategoryKey({ ...viewportCategoryBase, sections: [], scrollTop: 500, currentKey: 'b' }),
+  'all',
+  '分组 DOM 尚未挂载时回落到“全部”，不抛错',
+)
+
+// ---------- #106 左侧分类栏跟随可见 ----------
+// 分类栏可视高度 300、内容高度 900（最大滚动 600），按钮高 50、间距 8。
+const railBase = { viewportHeight: 300, contentHeight: 900, itemHeight: 50, padding: 8 }
+assert.equal(
+  resolveKeepVisibleScrollTop({ ...railBase, scrollTop: 0, itemTop: 116 }),
+  null,
+  '激活项已完整可见时分类栏不应滚动',
+)
+assert.equal(
+  resolveKeepVisibleScrollTop({ ...railBase, scrollTop: 100, itemTop: 100 }),
+  null,
+  '激活项恰好贴住可视区上边缘也算完整可见',
+)
+assert.equal(
+  resolveKeepVisibleScrollTop({ ...railBase, scrollTop: 0, itemTop: 464 }),
+  222,
+  '向下越界时按最小位移滚动，使激活项底边贴近可视区底部而不是强制置顶',
+)
+assert.equal(
+  resolveKeepVisibleScrollTop({ ...railBase, scrollTop: 0, itemTop: 270 }),
+  28,
+  '激活项部分越出底部时同样只做最小位移',
+)
+assert.equal(
+  resolveKeepVisibleScrollTop({ ...railBase, scrollTop: 400, itemTop: 232 }),
+  224,
+  '从底部向上滚动时，分类栏按最小位移向上跟随',
+)
+assert.equal(
+  resolveKeepVisibleScrollTop({ ...railBase, scrollTop: 300, itemTop: 0 }),
+  0,
+  '回到“全部”时分类栏回到顶部，且不会出现负的 scrollTop',
+)
+assert.equal(
+  resolveKeepVisibleScrollTop({ ...railBase, scrollTop: 0, itemTop: 850 }),
+  600,
+  '末分类滚入时限制在最大滚动距离内，保证最后一个分类完整可见',
+)
+// 悬浮购物车盖住分类栏底部 120 时，可视区实际只有上面 180。
+assert.equal(
+  resolveKeepVisibleScrollTop({ ...railBase, scrollTop: 0, itemTop: 150, bottomInset: 120 }),
+  28,
+  '激活项落在被购物车遮挡的区域时必须继续上移，不能当成已可见',
+)
+assert.equal(
+  resolveKeepVisibleScrollTop({ ...railBase, scrollTop: 0, itemTop: 100, bottomInset: 120 }),
+  null,
+  '激活项完整落在购物车遮挡线以上时不滚动',
+)
+assert.equal(
+  resolveKeepVisibleScrollTop({ ...railBase, scrollTop: 0, itemTop: 464, bottomInset: 120 }),
+  342,
+  '扣掉遮挡后按缩小的可视区做最小位移，激活项贴住遮挡线而不是容器底边',
+)
+assert.equal(
+  resolveKeepVisibleScrollTop({ ...railBase, scrollTop: 0, itemTop: 150, bottomInset: 400 }),
+  null,
+  '遮挡高度异常超过容器高度时按无遮挡处理，避免可视区被算成 0 后反复滚动',
+)
+assert.equal(
+  resolveKeepVisibleScrollTop({ ...railBase, scrollTop: 0, itemTop: 400, itemHeight: 360 }),
+  392,
+  '激活项比可视区还高时优先保证顶边可见',
+)
+assert.equal(
+  resolveKeepVisibleScrollTop({ ...railBase, viewportHeight: 0, scrollTop: 0, itemTop: 464 }),
+  null,
+  '分类栏不可测（隐藏或过渡中）时不滚动',
+)
+assert.equal(
+  resolveKeepVisibleScrollTop({ ...railBase, scrollTop: 600, itemTop: 900, contentHeight: 900 }),
+  null,
+  '已滚到最大距离仍无法再移动时不重复触发滚动，避免循环抖动',
+)
+const categoryFollowSource = mallSource.slice(
+  mallSource.indexOf('const ensureActiveCategoryVisible'),
+  mallSource.indexOf('const handleCategoryManualInterrupt'),
+)
+assert.ok(categoryFollowSource.includes('categoryScrollerRef.value'), '分类栏跟随必须只滚动分类栏自身容器')
+assert.ok(!categoryFollowSource.includes('scrollIntoView'), '分类栏跟随不得使用可能带动页面滚动的 scrollIntoView')
+assert.ok(categoryFollowSource.includes('prefers-reduced-motion: reduce'), '分类栏跟随需尊重减少动画偏好')
+assert.ok(categoryFollowSource.includes('bottomInset'), '分类栏跟随必须扣掉悬浮购物车对分类栏底部的遮挡')
+assert.ok(
+  categoryFollowSource.includes('--mall-category-rail-tail-space'),
+  '分类栏需要与遮挡等高的尾部占位，否则末尾分类无法滚到购物车上方',
+)
+assert.ok(
+  mallSource.includes('class="mall-category-rail-tail"') && mallSource.includes('height: var(--mall-category-rail-tail-space, 0px);'),
+  '分类栏尾部占位元素与样式必须同时存在',
+)
+assert.ok(mallSource.includes('ref="categoryScrollerRef"'), '左侧分类栏需要独立的滚动容器引用')
+
+// ---------- #106 点击分类的时序契约：目标态与实际态分离 ----------
+assert.ok(
+  mallSource.includes('const requestedCategoryKey = ref<string | null>(null)'),
+  '点击目标必须与右侧实际分类分开存放，不能共用一个状态',
+)
+assert.ok(
+  mallSource.includes('const displayCategoryKey = computed(() => requestedCategoryKey.value ?? activeCategoryKey.value)'),
+  '高亮应优先跟随点击目标，滚动途中不得扫过中间分类',
+)
+assert.match(
+  mallSource,
+  /:class="displayCategoryKey === category\.key \?/,
+  '分类按钮高亮必须绑定 displayCategoryKey',
+)
+const scrollToCategorySource = mallSource.slice(
+  mallSource.indexOf('const scrollToCategory = async'),
+  mallSource.indexOf('const handleCategoryManualInterrupt'),
+)
+assert.ok(
+  !/^\s*activeCategoryKey\.value = categoryKey$/m.test(
+    scrollToCategorySource.slice(0, scrollToCategorySource.indexOf('largeDatasetMode')),
+  ),
+  '点击分类不得在右侧滚动前就把实际分类改成目标分类',
+)
+const listScrollSource = mallSource.slice(
+  mallSource.indexOf('const handleProductListScroll = () => {'),
+  mallSource.indexOf('const isCategorySyncTemporarilyBlocked'),
+)
+assert.ok(
+  listScrollSource.includes('hasReachedRequestedCategory(scroller)'),
+  '点击会话是否结束必须按真实滚动位置判定',
+)
+assert.ok(
+  listScrollSource.indexOf('hasReachedRequestedCategory') < listScrollSource.indexOf('resolveActiveCategoryByViewport'),
+  '点击会话必须先收口，之后才允许按滚动位置回写当前分类',
+)
+assert.equal(
+  (listScrollSource.match(/activeCategoryKey\.value =/g) ?? []).length,
+  1,
+  '滚动处理里只应有一处回写当前分类，点击会话进行中不得额外回写中途分类',
+)
+assert.match(
+  mallSource,
+  /const CATEGORY_SCROLL_FALLBACK_MS = (\d+)/,
+  '固定时长兜底常量应保留',
+)
+const fallbackMs = Number(/const CATEGORY_SCROLL_FALLBACK_MS = (\d+)/.exec(mallSource)?.[1] ?? '0')
+assert.ok(
+  fallbackMs >= 1200,
+  `固定时长只能作为异常兜底，不能按 ${fallbackMs}ms 当成正常滚动完成条件`,
+)
+assert.ok(
+  mallSource.includes('const CATEGORY_SCROLL_SETTLE_MS'),
+  '需要“滚动事件停止即视为停稳”的判定，覆盖平滑滚动时长不固定的情况',
+)
+assert.ok(
+  mallSource.includes('const CATEGORY_ACTIVATE_HYSTERESIS'),
+  '分类切换需要滞回常量，避免临界点来回闪烁',
+)
+assert.match(
+  mallSource,
+  /watch\(\s*displayCategoryKey,\s*\(\) => \{\s*ensureActiveCategoryVisible\(\)/,
+  '分类高亮变化后必须驱动分类栏跟随可见',
+)
 
 // ---------- #84 静态契约：可访问性与旧浏览器降级 ----------
 assert.ok(mallSource.includes('<ClientImagePreviewer'), '商城页必须改用原图预览组件')
