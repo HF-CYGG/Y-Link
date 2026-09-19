@@ -253,6 +253,7 @@ const ensureProductOptionsFromDetail = (detail: InboundOrderDetail) => {
       seriesCode: null,
       seriesSeq: null,
       codeScheme: 'legacy' as const,
+      legacyProductCode: null,
     }))
 
   if (fallbackProducts.length) {

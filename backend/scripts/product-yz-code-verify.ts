@@ -532,18 +532,19 @@ async function main() {
     )
     pass('升级全流程：2 色 × 2 款 legacy 商品升级为 productCode=YZUP01，4 条 SKU 码为 011A/011B/012A/012B')
 
-    // 用例 2：旧码回填。
+    // 用例 2（B9 批次修正）：旧编码不再回填进 barcode，改为无条件写入 legacySkuCode；barcode 只保留真实原厂条码。
     const preUpgradeSkuCodeById = new Map(beforeUpgrade.skus.map((sku) => [sku.id, sku.skuCode]))
     upgraded.skus.forEach((sku) => {
       const oldCode = preUpgradeSkuCodeById.get(sku.id)
       assert.ok(oldCode, `应找到 SKU ${sku.id} 升级前的编码`)
+      assert.equal(sku.legacySkuCode, oldCode, '每条当前 SKU 的 legacySkuCode 应等于其升级前的 skuCode')
       if (sku.specValues['颜色'] === '白色' && sku.specValues['款式'] === 'S') {
         assert.equal(sku.barcode, `ORIG-${verifySeed}`, '原本有原厂条码的 SKU 条码应保持不变')
       } else {
-        assert.equal(sku.barcode, oldCode, '原本条码为空的 SKU 应回填为其升级前的 skuCode')
+        assert.equal(sku.barcode, null, '原本条码为空的 SKU 升级后 barcode 仍应为 null，不再回填旧编码')
       }
     })
-    pass('旧码回填：原本条码为空的 3 条 SKU 回填为各自升级前的 skuCode，原厂条码的那条保持不变')
+    pass('旧编码落位：4 条当前 SKU 的 legacySkuCode 均等于升级前 skuCode；原厂条码保持不变，其余 SKU 的 barcode 仍为 null（不再污染条码）')
 
     // 用例 3：退役行不动。
     const retiredRowAfterUpgrade = await skuRepo.findOneBy({ id: redSSku!.id })
@@ -613,10 +614,12 @@ async function main() {
     )
     pass('legacy update 防护：普通编辑接口传非空 primarySeriesTagId 会被拒绝（400）')
 
-    // 用例 23：升级腾出的日期流水号被当天新建商品重新取到时，不能因撞 barcode 唯一索引而建档失败。
-    // 复现路径：legacy 商品自动生成 P-YYMMDD-NNNN 且为当日最大 → 升级到 YZ（旧 skuCode 回填进 barcode）
-    // → 当天再自动生成一个 legacy 商品，generateProductCode 按“当日最大值 + 1”会重新取到腾出的那个号，
-    // 其 `${productCode}-DEFAULT` 恰好等于上一个商品回填的 barcode。
+    // 用例 23（B9 批次修正）：升级腾出的日期流水号被当天新建商品重新取到时，不能因撞唯一索引而建档失败。
+    // 复现路径：legacy 商品自动生成 P-YYMMDD-NNNN 且为当日最大 → 升级到 YZ（旧 skuCode 不再回填进 barcode，
+    // 改写入不受唯一约束限制的 legacySkuCode）→ 当天再自动生成一个 legacy 商品，generateProductCode 按
+    // “当日最大值 + 1”会重新取到腾出的那个号，其 `${productCode}-DEFAULT` 恰好等于上一个商品升级前的旧
+    // skuCode——该字符串此时只活在 legacySkuCode 里（无唯一约束），不再占用 skuCode/barcode 的唯一索引位，
+    // 所以新商品应当能直接拿到这个字符串作为自己的 skuCode，建档不受阻。
     const recycleTag = await createSeriesTag('RC')
     const recycleProduct = await productService.create({
       productName: `yz-recycle-${verifySeed}`,
@@ -637,10 +640,12 @@ async function main() {
       { primarySeriesTagId: recycleTag.id },
       actor,
     )
-    const backfilled = await skuRepo.findOneBy({ barcode: recycledSkuCode })
-    assert.ok(backfilled, '升级后旧 skuCode 应已回填进 barcode')
+    const legacyCodeRow = await skuRepo.findOneBy({ legacySkuCode: recycledSkuCode })
+    assert.ok(legacyCodeRow, '升级后旧 skuCode 应已写入 legacySkuCode')
+    assert.equal(legacyCodeRow!.barcode, null, '该 SKU 原厂条码为空，升级后 barcode 不应被回填')
 
-    // 这一步在补防护之前会直接抛 uk_base_product_sku_barcode 唯一约束错误。
+    // 这一步在 B9 批次之前会因“旧 skuCode 回填进 barcode”而抛 uk_base_product_sku_barcode 唯一约束错误；
+    // 现在旧编码只活在 legacySkuCode（无唯一约束），新商品应能直接拿到这个字符串作为自己的 skuCode，建档不受阻。
     const afterRecycle = await productService.create({
       productName: `yz-recycle-next-${verifySeed}`,
       pinyinAbbr: 'RN',
@@ -656,12 +661,12 @@ async function main() {
       recycledProductCode,
       '当日流水号应被重新取到，否则本用例没有真正复现撞车场景',
     )
-    assert.notEqual(
+    assert.equal(
       afterRecycle.skus[0].skuCode,
       recycledSkuCode,
-      '新商品的默认 SKU 码必须避开已被回填占用的 barcode',
+      '旧编码已不占用 skuCode/barcode 的唯一索引位，新商品的默认 SKU 码应能直接复用这个字符串',
     )
-    pass('升级腾出的日期流水号被重新取到时，新商品默认 SKU 码自动避开已回填的 barcode，建档不失败')
+    pass('升级腾出的日期流水号被重新取到时，旧编码只留在 legacySkuCode、不再占用唯一索引位，新商品默认 SKU 码可直接复用，建档不失败')
 
     // 用例 24：Excel 导入可乱序精确占用系列内序号，不依赖“分组必须按序号升序处理”的调用顺序前提。
     // 早期实现是“把序列游标垫高到目标序号 - 1 再让内部 +1”，一旦分组顺序被打乱就会分配出错误的 productCode；
@@ -1001,6 +1006,86 @@ async function main() {
       '切换到其它文创系列应当仍被拒绝',
     )
     pass('原样回传当前文创系列（含数字形态主键）可正常编辑其它字段，真正切换系列仍被拒绝')
+
+    // ============ 第 5 批：B9 —— 历史编码字段落位、扫码兼容与优先级 ============
+
+    // 用例 33：升级写历史编码——legacyProductCode 等于升级前 productCode，每条当前 SKU 的 legacySkuCode
+    // 等于其升级前 skuCode；同时验证不再污染条码：原本为空的 barcode 升级后仍为 null，原本有真实原厂
+    // 条码的 SKU 保持原值不变。
+    const legacyCodeTag = await createSeriesTag('LC')
+    const legacyCodeProduct = await productService.create({
+      productCode: nextProductCode(),
+      productName: `legacy-code-${verifySeed}`,
+      pinyinAbbr: 'LC',
+      defaultPrice: 20,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+      skus: [
+        { specValues: { 颜色: '蓝色' }, defaultPrice: 20, currentStock: 0, isActive: true, sortOrder: 0, barcode: `FACT-${verifySeed}` },
+        { specValues: { 颜色: '绿色' }, defaultPrice: 20, currentStock: 0, isActive: true, sortOrder: 1 },
+      ],
+    } as Parameters<typeof productService.create>[0], actor)
+    const oldLegacyCodeProductCode = legacyCodeProduct.productCode
+    const oldLegacyCodeSkuCodeById = new Map(legacyCodeProduct.skus.map((sku) => [sku.id, sku.skuCode]))
+    const legacyCodeUpgraded = await productService.upgradeProductToYzCode(
+      legacyCodeProduct.id,
+      { primarySeriesTagId: legacyCodeTag.id },
+      actor,
+    )
+    assert.equal(legacyCodeUpgraded.legacyProductCode, oldLegacyCodeProductCode, 'legacyProductCode 应等于升级前 productCode')
+    assert.equal(legacyCodeUpgraded.skus.length, 2)
+    legacyCodeUpgraded.skus.forEach((sku) => {
+      const oldCode = oldLegacyCodeSkuCodeById.get(sku.id)
+      assert.ok(oldCode, `应找到 SKU ${sku.id} 升级前的编码`)
+      assert.equal(sku.legacySkuCode, oldCode, '每条当前 SKU 的 legacySkuCode 应等于其升级前的 skuCode')
+      if (sku.specValues['颜色'] === '蓝色') {
+        assert.equal(sku.barcode, `FACT-${verifySeed}`, '原本有真实原厂条码的 SKU 升级后 barcode 应保持原值不变')
+      } else {
+        assert.equal(sku.barcode, null, '原本条码为空的 SKU 升级后 barcode 仍应为 null')
+      }
+    })
+    pass('升级写历史编码：legacyProductCode 等于升级前 productCode，各当前 SKU 的 legacySkuCode 等于其升级前 skuCode，barcode 不受污染')
+
+    // 用例 34：旧码可扫——用升级前的旧 skuCode 调 lookupByCode，应命中该 SKU 且 matchedBy 为 legacy_sku_code。
+    const legacyCodeGreenSku = legacyCodeUpgraded.skus.find((sku) => sku.specValues['颜色'] === '绿色')
+    assert.ok(legacyCodeGreenSku, '应存在绿色 SKU')
+    const oldGreenSkuCode = oldLegacyCodeSkuCodeById.get(legacyCodeGreenSku!.id)
+    assert.ok(oldGreenSkuCode, '应找到绿色 SKU 升级前的编码')
+    const legacyLookup = await productService.lookupByCode(oldGreenSkuCode!)
+    assert.equal(legacyLookup.matchedBy, 'legacy_sku_code', '用升级前的旧 skuCode 扫码应命中历史编码路径')
+    assert.equal(legacyLookup.sku.id, legacyCodeGreenSku!.id, '应命中对应的 SKU')
+    pass('旧码可扫：用升级前的旧 skuCode 调 lookupByCode 能命中该 SKU，matchedBy 为 legacy_sku_code')
+
+    // 用例 35：优先级正确——构造「A 商品的 skuCode」恰好等于「B 商品的 legacySkuCode」的场景，
+    // 断言 lookupByCode 优先返回 A（SKU 编码命中优先于历史编码命中）。这里复用用例 33 里蓝色 SKU
+    // 升级前的旧编码：升级后它只活在 legacyCodeUpgraded 蓝色 SKU 的 legacySkuCode 里（不受唯一约束），
+    // 因此可以把同一个字符串显式指定为另一个新商品 B 的真实 skuCode。
+    const oldBlueSkuCode = oldLegacyCodeSkuCodeById.get(
+      legacyCodeUpgraded.skus.find((sku) => sku.specValues['颜色'] === '蓝色')!.id,
+    )
+    assert.ok(oldBlueSkuCode, '应找到蓝色 SKU 升级前的编码')
+    const priorityProduct = await productService.create({
+      productCode: nextProductCode(),
+      productName: `legacy-priority-${verifySeed}`,
+      pinyinAbbr: 'PR',
+      defaultPrice: 15,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+      skus: [
+        { defaultPrice: 15, currentStock: 0, isActive: true, sortOrder: 0, skuCode: oldBlueSkuCode },
+      ],
+    } as Parameters<typeof productService.create>[0], actor)
+    const priorityLookup = await productService.lookupByCode(oldBlueSkuCode!)
+    assert.equal(priorityLookup.matchedBy, 'sku_code', 'SKU 编码命中应优先于历史编码命中')
+    assert.equal(priorityLookup.product.id, priorityProduct.id, '应返回当前 SKU 编码命中的商品 A，而不是历史编码命中的商品 B')
+    assert.equal(priorityLookup.sku.id, priorityProduct.skus[0].id, '应返回 A 商品的 SKU，而不是 B 商品退役的历史编码')
+    pass('优先级正确：A 商品当前 skuCode 恰好等于 B 商品的 legacySkuCode 时，lookupByCode 优先返回 A（SKU 编码命中优先于历史编码命中）')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()

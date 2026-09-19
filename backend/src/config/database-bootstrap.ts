@@ -231,8 +231,9 @@ const SQLITE_REQUIRED_PRODUCT_COLUMNS = [
   'primary_series_tag_id',
   'series_seq',
   'code_scheme',
+  'legacy_product_code',
 ]
-const SQLITE_REQUIRED_PRODUCT_SKU_COLUMNS = ['o2o_recommended', 'is_current', 'barcode', 'cost_price', 'location_id', 'variant_code', 'size_code']
+const SQLITE_REQUIRED_PRODUCT_SKU_COLUMNS = ['o2o_recommended', 'is_current', 'barcode', 'cost_price', 'location_id', 'variant_code', 'size_code', 'legacy_sku_code']
 // YZ 通用 SKU 编码体系：base_tag 此前没有需要增量检测的列，series_code 是第一个，新增独立清单沿用既有命名规范。
 const SQLITE_REQUIRED_TAG_COLUMNS = ['series_code']
 const SQLITE_REQUIRED_O2O_PREORDER_ITEM_COLUMNS = [

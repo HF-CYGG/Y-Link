@@ -218,6 +218,9 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
   },
   ...['variant_code', 'size_code']
     .map((columnName) => ({ tableName: 'base_product_sku', columnName, introducingScript: '050_product_yz_sku_code.sql', expectedNullable: true })),
+  // 051：历史编码字段（B9 批次），legacy 产品编码/SKU 编码追溯展示与扫码兼容匹配。
+  { tableName: 'base_product', columnName: 'legacy_product_code', introducingScript: '051_product_legacy_code.sql', expectedNullable: true },
+  { tableName: 'base_product_sku', columnName: 'legacy_sku_code', introducingScript: '051_product_legacy_code.sql', expectedNullable: true },
   {
     tableName: 'biz_outbound_order_item',
     columnName: 'sku_id',
@@ -638,6 +641,14 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
     unique: true,
     introducingScript: '050_product_yz_sku_code.sql',
   })),
+  // 051：历史 SKU 编码要支持扫码按它查，普通索引，不加唯一约束（历史编码理论上可能重复）。
+  {
+    tableName: 'base_product_sku',
+    indexName: 'idx_base_product_sku_legacy_code',
+    columns: ['legacy_sku_code'],
+    unique: false,
+    introducingScript: '051_product_legacy_code.sql',
+  },
 ]
 
 const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [
@@ -770,6 +781,7 @@ const AUTO_MIGRATABLE_FILES = [
   '048_inbound_order_expected_arrival.sql',
   '049_inventory_sku_barcode_stocktake.sql',
   '050_product_yz_sku_code.sql',
+  '051_product_legacy_code.sql',
 ]
 
 /**

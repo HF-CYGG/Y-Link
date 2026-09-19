@@ -17,11 +17,19 @@
  * - YZ 编码商品的规格弹窗额外提供「规格取值重命名」（ProductSpecValueRenameDialog.vue，只改显示名称、编码位不变）
  *   与「0 号规格演进」（ProductZeroSpecEvolveDialog.vue，把原本"无该轴规格"的 SKU 继承为具体取值，或退役保留）
  *   两个入口，均为异步组件、只读商品当前是否存在待演进的 0 号 SKU 决定是否展示；
- * - Excel 导入、条码打印弹窗、YZ 编码升级弹窗、规格取值重命名弹窗与 0 号规格演进弹窗均为异步组件，只在点击时加载。
+ * - Excel 导入、条码打印弹窗、YZ 编码升级弹窗、规格取值重命名弹窗与 0 号规格演进弹窗均为异步组件，只在点击时加载；
+ * - B9 批次：升级前的历史编码不再回填进 barcode，改为独立字段展示——商品级 legacyProductCode 显示在「产品编码」
+ *   输入框下方、SKU 级 legacySkuCode 显示在规格表格编码位旁（单规格商品显示在「原厂条码」输入框下方），均为
+ *   只读追溯提示，不可编辑；
+ * - B9 批次：「默认库位」与规格表格里的库位选择支持 allow-create 直接新建库位，交互方式对齐「关联标签」的自动
+ *   创建（resolveTagIds/hasAutoCreatedTags），提交前统一由 resolveLocationIds 解析真实库位ID、按
+ *   LOCATION_CODE_PATTERN 前端预校验并调用 createLocation 建库位，仅 products:manage 权限可见。
  * 维护说明：
  * - 后续扩展尺码、容量等规格维度时，优先扩展 SKU 表单和后端规格归一化逻辑，不要绕过商品服务直接写库存；
  * - 删除或停用已有 SKU 前需保留占用库存汇总，避免已下单未核销记录丢失库存占用；
- * - 升级到 YZ 编码属于不可逆操作，不要在本文件里叠加绕过 ProductYzUpgradeDialog 预检结果的“快速升级”入口。
+ * - 升级到 YZ 编码属于不可逆操作，不要在本文件里叠加绕过 ProductYzUpgradeDialog 预检结果的“快速升级”入口；
+ * - 历史编码字段（legacyProductCode/legacySkuCode）只读展示，不要在本文件里增加可编辑入口——它们只应由
+ *   升级流程（upgradeProductToYzCode）写入。
  */
 
 
@@ -30,7 +38,7 @@ import { useRouter } from 'vue-router'
 import { type FormInstance, type FormRules, type TableInstance, type UploadRequestOptions } from 'element-plus'
 import type { RequestConfig } from '@/api/http'
 import { createTag, getTagList, type Tag } from '@/api/modules/tag'
-import { exportProducts, getCategories, getLocations, type CategoryRecord, type LocationRecord } from '@/api/modules/inventory'
+import { createLocation, exportProducts, getCategories, getLocations, type CategoryRecord, type LocationRecord } from '@/api/modules/inventory'
 import { uploadImage } from '@/api/modules/upload'
 import {
   batchCreateProducts,
@@ -104,6 +112,7 @@ const productTableRef = ref<TableInstance>()
 const pageReady = ref(false)
 const keepAliveActivated = ref(false)
 const hasAutoCreatedTags = ref(false)
+const hasAutoCreatedLocations = ref(false)
 const editingProductId = ref('')
 const editLoading = ref(false)
 const productDetailRequest = useStableRequest()
@@ -141,6 +150,8 @@ interface ProductForm {
   tagIds: string[]
   categoryId: string
   defaultSkuCode: string
+  /** 单规格商品默认 SKU 升级前的历史编码，仅用于「原厂条码」输入框下方的只读追溯提示；未升级过恒为空串。 */
+  defaultSkuLegacyCode: string
   defaultBarcode: string
   defaultCostPrice: number | null
   defaultLocationId: string
@@ -151,6 +162,8 @@ interface ProductForm {
   primarySeriesTagId: string
   /** 编辑已有商品时的编码体系快照，决定产品编码/文创系列选择器是否只读；新增商品恒为 legacy，实际编码体系由是否选择系列决定。 */
   codeScheme: 'legacy' | 'yz'
+  /** 升级到 YZ 编码前的历史产品编码，仅用于「产品编码」输入框下方的只读追溯提示；未升级过恒为空串。 */
+  legacyProductCode: string
   /**
    * 单规格商品（form.skus 为空、走 defaultSku 提交）的默认 SKU 编码位快照，仅用于判断「0 号规格演进」
    * 入口是否展示；多规格商品直接看 form.skus 里各行的 variantCode/sizeCode，不使用这两个字段。
@@ -188,6 +201,12 @@ const ElInputTag = (
   ])
 }
 
+/**
+ * 库位编码格式（B9 批次，与后端 inventory-master-data.service.ts 的 LOCATION_CODE_PATTERN 保持一致）：
+ * 以字母或数字开头，只能包含大写字母、数字和短横线，最长 32 位；提交前统一转大写。
+ * 前端做同口径预校验，避免用户在库位下拉里手打了不合法编码后才被后端 400 拦截。
+ */
+const LOCATION_CODE_PATTERN = /^[A-Z0-9][A-Z0-9-]{0,31}$/
 const BATCH_CREATE_MAX_ROWS = 50
 const batchCreateRowSeed = ref(0)
 const batchCreateRows = ref<BatchCreateProductFormRow[]>([])
@@ -222,6 +241,7 @@ const createDefaultForm = (): ProductForm => ({
   tagIds: [] as string[],
   categoryId: '',
   defaultSkuCode: '',
+  defaultSkuLegacyCode: '',
   defaultBarcode: '',
   defaultCostPrice: null,
   defaultLocationId: '',
@@ -230,6 +250,7 @@ const createDefaultForm = (): ProductForm => ({
   skus: [],
   primarySeriesTagId: '',
   codeScheme: 'legacy',
+  legacyProductCode: '',
   defaultSkuVariantCode: null,
   defaultSkuSizeCode: null,
 })
@@ -648,6 +669,7 @@ const buildEditForm = (row: ProductRecord): ProductForm => {
         locationId: sku.locationId ?? null,
         variantCode: sku.variantCode ?? null,
         sizeCode: sku.sizeCode ?? null,
+        legacySkuCode: sku.legacySkuCode ?? null,
       }))
     : []
   const dimensions = extractSkuDimensionValues(skus)
@@ -668,6 +690,7 @@ const buildEditForm = (row: ProductRecord): ProductForm => {
     tagIds: row.tagIds,
     categoryId: row.categoryId ?? '',
     defaultSkuCode: defaultSku?.skuCode ?? '',
+    defaultSkuLegacyCode: defaultSku?.legacySkuCode ?? '',
     defaultBarcode: defaultSku?.barcode ?? '',
     defaultCostPrice: defaultSku?.costPrice === null || defaultSku?.costPrice === undefined ? null : Number(defaultSku.costPrice),
     defaultLocationId: defaultSku?.locationId ?? '',
@@ -676,6 +699,7 @@ const buildEditForm = (row: ProductRecord): ProductForm => {
     skus,
     primarySeriesTagId: row.primarySeriesTagId ?? '',
     codeScheme: row.codeScheme === 'yz' ? 'yz' : 'legacy',
+    legacyProductCode: row.legacyProductCode ?? '',
     defaultSkuVariantCode: defaultSku?.variantCode ?? null,
     defaultSkuSizeCode: defaultSku?.sizeCode ?? null,
   }
@@ -686,10 +710,13 @@ const buildEditForm = (row: ProductRecord): ProductForm => {
  * - 保存前先兜底创建缺失标签；
  * - 输出统一的产品 DTO，供新增与编辑接口共用。
  */
-const resolveDefaultSkuPayload = (currentForm: ProductForm): { defaultSku?: CreateProductDto['defaultSku'] } => {
+const resolveDefaultSkuPayload = (
+  currentForm: ProductForm,
+  resolvedDefaultLocationId: string,
+): { defaultSku?: CreateProductDto['defaultSku'] } => {
   // 与编辑表单的显示条件一致：没有真实规格行（form.skus 为空）时展示并提交默认规格字段。
   if (currentForm.skus.length) return {}
-  const signature = buildDefaultSkuSignature(currentForm.defaultBarcode, currentForm.defaultCostPrice, currentForm.defaultLocationId)
+  const signature = buildDefaultSkuSignature(currentForm.defaultBarcode, currentForm.defaultCostPrice, resolvedDefaultLocationId)
   // 编辑时与打开时快照比较；新增或原本没有默认 SKU 记录时与空值比较，改动过就提交。
   const baseline = currentForm.id && defaultSkuBaseline !== null ? defaultSkuBaseline : EMPTY_DEFAULT_SKU_SIGNATURE
   if (signature === baseline) return {}
@@ -697,14 +724,26 @@ const resolveDefaultSkuPayload = (currentForm: ProductForm): { defaultSku?: Crea
     defaultSku: {
       barcode: currentForm.defaultBarcode.trim() || null,
       costPrice: currentForm.defaultCostPrice === null ? null : normalizeSubmitNumber(currentForm.defaultCostPrice, { fallback: 0, min: 0 }),
-      locationId: currentForm.defaultLocationId || null,
+      locationId: resolvedDefaultLocationId || null,
     },
   }
 }
 
 const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProductDto> => {
   hasAutoCreatedTags.value = false
+  hasAutoCreatedLocations.value = false
   const resolvedTagIds = await resolveTagIds(currentForm.tagIds)
+  // 库位下拉支持 allow-create：把「默认库位」与规格表格里各行的库位原始取值统一解析为真实库位ID，
+  // 新编码会在这一步被建成真实库位；不合法的编码会在这里抛错并中断提交（不会提交到后端才 400）。
+  const resolvedLocationIdMap = await resolveLocationIds([
+    currentForm.defaultLocationId,
+    ...currentForm.skus.map((sku) => sku.locationId),
+  ])
+  const resolveLocationIdValue = (raw: string | null | undefined): string => {
+    const value = typeof raw === 'string' ? raw.trim() : ''
+    return value ? (resolvedLocationIdMap.get(value) ?? '') : ''
+  }
+  const resolvedDefaultLocationId = resolveLocationIdValue(currentForm.defaultLocationId)
   const normalizedPrimarySeriesTagId = normalizeSelectValue(currentForm.primarySeriesTagId)
   // 新增商品且已选文创系列时走 YZ 编码：productCode 由后端生成，这里不提交该字段（提交了会被后端 400 拒绝）。
   // 编辑场景下无论 legacy 还是 yz，都沿用输入框当前值（yz 商品该输入框已禁用，值与后端一致，不会触发“改码”校验）。
@@ -750,7 +789,7 @@ const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProdu
     tagIds: resolvedTagIds,
     categoryId: currentForm.categoryId || null,
     ...(isExistingYzProduct ? {} : { primarySeriesTagId: normalizedPrimarySeriesTagId || null }),
-    ...resolveDefaultSkuPayload(currentForm),
+    ...resolveDefaultSkuPayload(currentForm, resolvedDefaultLocationId),
     skus: currentForm.skus.length
       ? currentForm.skus.map((sku, index) => ({
           id: sku.id,
@@ -765,7 +804,7 @@ const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProdu
           sortOrder: index,
           barcode: typeof sku.barcode === 'string' && sku.barcode.trim() ? sku.barcode.trim() : null,
           costPrice: sku.costPrice === null || sku.costPrice === undefined ? null : normalizeSubmitNumber(sku.costPrice, { fallback: 0, min: 0 }),
-          locationId: sku.locationId || null,
+          locationId: resolveLocationIdValue(sku.locationId) || null,
         }))
       : [],
     ...(baseline
@@ -860,12 +899,14 @@ const {
     deleteError: '删除失败：该产品可能已被历史业务数据引用',
   },
   afterSubmit: async () => {
-    if (!hasAutoCreatedTags.value) {
-      return
+    if (hasAutoCreatedTags.value) {
+      hasAutoCreatedTags.value = false
+      await loadTags()
     }
-
-    hasAutoCreatedTags.value = false
-    await loadTags()
+    if (hasAutoCreatedLocations.value) {
+      hasAutoCreatedLocations.value = false
+      await loadInventoryDictionaries()
+    }
   },
   syncAfterSubmit: () => {
     productPage.value = 1
@@ -1302,6 +1343,67 @@ const resolveTagIds = async (tagValues: Array<string | number>, silent = false):
   }
 
   return [...new Set(resolvedIds)]
+}
+
+/**
+ * 库位下拉支持直接新建（B9 批次，交互对齐「关联标签」的 resolveTagIds）：
+ * - 入参是表单里出现过的库位原始取值（可能是真实库位ID，也可能是 allow-create 产生的新编码文本）；
+ * - 已存在的库位（按ID或编码，编码大小写不敏感）直接复用；否则按 LOCATION_CODE_PATTERN 预校验后调用
+ *   createLocation 建库位；同一批提交里多处引用同一个新编码只建一次（createdCache 去重）；
+ * - 返回原始取值到真实库位ID的映射，调用方按此把表单里的库位字段替换成真实ID再提交。
+ */
+const resolveLocationIds = async (
+  rawValues: Array<string | null | undefined>,
+  silent = false,
+): Promise<Map<string, string>> => {
+  const resolved = new Map<string, string>()
+  const createdCodeCache = new Map<string, string>()
+  const autoCreatedCodes: string[] = []
+
+  for (const rawValue of rawValues) {
+    const value = typeof rawValue === 'string' ? rawValue.trim() : ''
+    if (!value || resolved.has(value)) {
+      continue
+    }
+
+    const existedById = allLocations.value.find((item) => item.id === value)
+    if (existedById) {
+      resolved.set(value, existedById.id)
+      continue
+    }
+
+    const normalizedCode = value.toUpperCase()
+    const existedByCode = allLocations.value.find((item) => item.locationCode.toUpperCase() === normalizedCode)
+    if (existedByCode) {
+      resolved.set(value, existedByCode.id)
+      continue
+    }
+
+    const cachedId = createdCodeCache.get(normalizedCode)
+    if (cachedId) {
+      resolved.set(value, cachedId)
+      continue
+    }
+
+    if (!LOCATION_CODE_PATTERN.test(normalizedCode)) {
+      throw new Error(`库位编码「${value}」格式不正确：需以字母或数字开头，只能包含大写字母、数字和短横线，长度不超过 32 位`)
+    }
+
+    const created = await createLocation({ locationCode: normalizedCode })
+    allLocations.value = [...allLocations.value, created]
+    createdCodeCache.set(normalizedCode, created.id)
+    autoCreatedCodes.push(normalizedCode)
+    resolved.set(value, created.id)
+  }
+
+  if (autoCreatedCodes.length) {
+    hasAutoCreatedLocations.value = true
+    if (!silent) {
+      showAppSuccess(`已自动创建库位：${[...new Set(autoCreatedCodes)].join('、')}`)
+    }
+  }
+
+  return resolved
 }
 
 const refreshProductView = async () => {
@@ -1908,6 +2010,7 @@ onActivated(() => {
                   <template #default="{ row }">
                     <div>{{ row.specText }}</div>
                     <div class="text-xs text-slate-400">{{ row.skuCode || '保存后生成编码' }}</div>
+                    <div v-if="row.legacySkuCode" class="text-xs text-slate-400">原编码：{{ row.legacySkuCode }}</div>
                   </template>
                 </el-table-column>
                 <el-table-column v-if="form.codeScheme === 'yz'" label="编码位" width="88" align="center">
@@ -2034,10 +2137,17 @@ onActivated(() => {
                 </el-table-column>
                 <el-table-column label="库位" width="130">
                   <template #default="{ row }">
-                    <el-select v-model="row.locationId" clearable filterable placeholder="库位">
+                    <el-select
+                      v-model="row.locationId"
+                      clearable
+                      filterable
+                      :allow-create="canManageProducts"
+                      default-first-option
+                      placeholder="库位"
+                    >
                       <el-option
                         v-if="row.locationId && !activeLocationOptions.some((item) => item.id === row.locationId)"
-                        :label="resolveLocationLabel(row.locationId)"
+                        :label="resolveLocationLabel(row.locationId) || row.locationId"
                         :value="row.locationId"
                       />
                       <el-option v-for="location in activeLocationOptions" :key="location.id" :label="location.locationCode" :value="location.id" />
@@ -2061,6 +2171,9 @@ onActivated(() => {
         <el-form v-else ref="formRef" :model="form" :rules="rules" :label-width="isPhone ? '82px' : '90px'">
           <el-form-item label="产品编码" prop="productCode">
             <el-input v-model="form.productCode" :disabled="productCodeFieldDisabled" :placeholder="productCodePlaceholder" />
+            <p v-if="form.legacyProductCode" class="mt-1 text-xs leading-5 text-slate-400">
+              原编码：{{ form.legacyProductCode }}（升级前，仅作追溯）
+            </p>
           </el-form-item>
           <el-form-item label="文创系列" prop="primarySeriesTagId">
             <el-select
@@ -2172,19 +2285,33 @@ onActivated(() => {
             </el-form-item>
             <el-form-item label="原厂条码">
               <el-input v-model="form.defaultBarcode" maxlength="64" :placeholder="form.defaultSkuCode ? `留空则打印 SKU 编码 ${form.defaultSkuCode}` : '留空则打印 SKU 编码'" />
+              <p v-if="form.defaultSkuLegacyCode" class="mt-1 text-xs leading-5 text-slate-400">
+                原编码：{{ form.defaultSkuLegacyCode }}（升级前，仅作追溯）
+              </p>
             </el-form-item>
             <el-form-item label="成本价">
               <PassiveNumberInput v-model="form.defaultCostPrice" :min="0" :precision="2" class="w-full" placeholder="可选" />
             </el-form-item>
             <el-form-item label="默认库位">
-              <el-select v-model="form.defaultLocationId" clearable filterable placeholder="可选" class="w-full">
+              <el-select
+                v-model="form.defaultLocationId"
+                clearable
+                filterable
+                :allow-create="canManageProducts"
+                default-first-option
+                placeholder="可选"
+                class="w-full"
+              >
                 <el-option
                   v-if="form.defaultLocationId && !activeLocationOptions.some((item) => item.id === form.defaultLocationId)"
-                  :label="resolveLocationLabel(form.defaultLocationId)"
+                  :label="resolveLocationLabel(form.defaultLocationId) || form.defaultLocationId"
                   :value="form.defaultLocationId"
                 />
                 <el-option v-for="location in activeLocationOptions" :key="location.id" :label="location.locationCode" :value="location.id" />
               </el-select>
+              <p v-if="canManageProducts" class="mt-1 text-xs leading-5 text-slate-400">
+                可直接输入新库位编码（如 A-01-01）自动创建，无需前往库存主数据页
+              </p>
             </el-form-item>
           </template>
           <el-form-item label="关联标签" prop="tagIds">

@@ -43,6 +43,8 @@ export interface ProductRecord {
   seriesSeq: number | null
   /** 编码体系：legacy=历史 P-/WC 编码，yz=新版定长编码。 */
   codeScheme: 'legacy' | 'yz'
+  /** 升级到 YZ 编码前的历史产品编码，仅作追溯展示；未升级过（含 legacy 商品）恒为 null。 */
+  legacyProductCode: string | null
 }
 
 export interface ProductSpecGroup {
@@ -78,6 +80,8 @@ export interface ProductSkuRecord {
   variantCode?: string | null
   /** YZ 编码体系专用：尺码码（A-E），无尺码位为 null。历史 legacy 商品的 SKU 恒为 null。 */
   sizeCode?: string | null
+  /** 升级到 YZ 编码前的历史 SKU 编码，仅作追溯展示；未升级过（含 legacy 商品）恒为 null。 */
+  legacySkuCode?: string | null
 }
 
 export interface ProductDefaultSkuDto {
@@ -208,6 +212,7 @@ interface ProductRawRecord {
   seriesCode?: PrimitiveValue
   seriesSeq?: PrimitiveValue
   codeScheme?: PrimitiveValue
+  legacyProductCode?: PrimitiveValue
 }
 
 interface ProductDetailRawResult {
@@ -317,6 +322,7 @@ const normalizeProductSkuRecord = (record: ProductSkuRecord): ProductSkuRecord =
   locationCode: normalizeText(record.locationCode) || null,
   variantCode: normalizeText(record.variantCode) || null,
   sizeCode: normalizeText(record.sizeCode) || null,
+  legacySkuCode: normalizeText(record.legacySkuCode) || null,
 })
 
 const normalizeProductRecord = (record: ProductRawRecord): ProductRecord => {
@@ -352,6 +358,7 @@ const normalizeProductRecord = (record: ProductRawRecord): ProductRecord => {
       ? null
       : normalizeInteger(record.seriesSeq),
     codeScheme: normalizeCodeScheme(record.codeScheme),
+    legacyProductCode: normalizeText(record.legacyProductCode) || null,
   }
 }
 
@@ -483,14 +490,16 @@ export const deleteProduct = (id: string) =>
     url: `/products/${id}`,
   })
 
-/** 存量商品升级到 YZ 编码：单条 SKU 编码变化视图，供升级预检 / 执行弹窗共用。 */
+/**
+ * 存量商品升级到 YZ 编码：单条 SKU 编码变化视图，供升级预检 / 执行弹窗共用。
+ * B9 批次：旧编码统一写入 legacySkuCode 用于扫码兼容，不再有“是否回填条码”的分支，原
+ * willBackfillBarcode 字段已随后端一并移除。
+ */
 export interface ProductYzUpgradeSkuChange {
   skuId: string
   specText: string
   oldSkuCode: string
   newSkuCode: string
-  /** 该 SKU 原厂条码为空时，是否会把旧编码回填进条码位（被其他 SKU 占用时为 false）。 */
-  willBackfillBarcode: boolean
 }
 
 /** 升级预检结果：blockingReason 非空时前端应禁止提交升级。 */

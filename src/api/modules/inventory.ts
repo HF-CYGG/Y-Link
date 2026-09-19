@@ -52,7 +52,8 @@ export interface LocationPayload {
 }
 
 export interface ProductLookupResult {
-  matchedBy: 'barcode' | 'sku_code'
+  /** legacy_sku_code：命中历史 SKU 编码（升级前旧码），仅作扫码兼容，优先级低于条码与当前 SKU 编码。 */
+  matchedBy: 'barcode' | 'sku_code' | 'legacy_sku_code'
   stockHidden: boolean
   product: {
     id: string

@@ -27,6 +27,7 @@ const skuSpecValuesJsonColumnOptions = entityColumnOptions.isSqlite ? { default:
 @Index('idx_base_product_sku_current_mall_list', ['productId', 'isCurrent', 'isActive', 'sortOrder', 'id'])
 @Index('uk_base_product_sku_code', ['skuCode'], { unique: true })
 @Index('uk_base_product_sku_barcode', ['barcode'], { unique: true })
+@Index('idx_base_product_sku_legacy_code', ['legacySkuCode'])
 export class BaseProductSku {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })
   id!: string
@@ -86,6 +87,11 @@ export class BaseProductSku {
 
   @Column({ name: 'size_code', type: 'varchar', length: 1, nullable: true, comment: '尺码码（A-E），NULL 表示无尺码位' })
   sizeCode!: string | null
+
+  // 历史编码字段（B9 批次）：升级到 YZ 编码前的历史 SKU 编码，参与扫码匹配（lookupByCode 第三路）以兼容已打印标签。
+  // 理论上可能与其他商品的历史编码重复，只加普通索引，不加唯一约束。
+  @Column({ name: 'legacy_sku_code', type: 'varchar', length: 96, nullable: true, comment: '升级到 YZ 编码前的历史 SKU 编码，参与扫码匹配以兼容已打印标签' })
+  legacySkuCode!: string | null
 
   @CreateDateColumn({ name: 'created_at', ...entityColumnOptions.timestamp })
   createdAt!: Date

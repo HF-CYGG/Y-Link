@@ -235,6 +235,8 @@ export interface ProductSkuView {
   variantCode: string | null
   /** YZ 编码体系专用：尺码码（A-E），无尺码位为 null。历史 legacy 商品的 SKU 恒为 null。 */
   sizeCode: string | null
+  /** 升级到 YZ 编码前的历史 SKU 编码，仅作追溯展示；未升级过（含 legacy 商品）恒为 null。 */
+  legacySkuCode: string | null
 }
 
 export interface ProductView {
@@ -269,10 +271,12 @@ export interface ProductView {
   seriesSeq: number | null
   /** 编码体系：legacy=历史 P-/WC 编码，yz=新版定长编码。 */
   codeScheme: string
+  /** 升级到 YZ 编码前的历史产品编码，仅作追溯展示；未升级过（含 legacy 商品）恒为 null。 */
+  legacyProductCode: string | null
 }
 
 export interface ProductLookupView {
-  matchedBy: 'barcode' | 'sku_code'
+  matchedBy: 'barcode' | 'sku_code' | 'legacy_sku_code'
   product: {
     id: string
     productCode: string
@@ -311,14 +315,16 @@ export interface ProductYzUpgradeInput {
   primarySeriesTagId: string
 }
 
-/** 升级预检 / 执行升级共用的单条 SKU 编码变化视图。 */
+/**
+ * 升级预检 / 执行升级共用的单条 SKU 编码变化视图。
+ * B9 批次：不再有“是否回填条码”的分支——每条当前 SKU 的 oldSkuCode 都会无条件写入 legacySkuCode，
+ * 用于扫码兼容旧标签，因此原 willBackfillBarcode 字段（曾经在条码被占用时为 false）已失去意义，整体移除。
+ */
 export interface ProductYzUpgradeSkuChange {
   skuId: string
   specText: string
   oldSkuCode: string
   newSkuCode: string
-  /** 该 SKU 原厂条码为空时，是否会把 oldSkuCode 回填进 barcode（被其他 SKU 占用时为 false）。 */
-  willBackfillBarcode: boolean
 }
 
 /** 升级预检结果：供前端弹窗展示“升级后会变成什么”，blockingReason 非空时前端应禁止提交。 */
@@ -882,10 +888,11 @@ export class ProductService {
   }
 
   /**
-   * 存量商品手动升级到 YZ 编码（第 3.5 批）：
+   * 存量商品手动升级到 YZ 编码（第 3.5 批；B9 批次改造历史编码落位）：
    * - 业务决策是“冻结在 legacy，逐个手动升级”，因此本方法只处理单个商品，不做批量/自动重编码；
    * - 前置校验全部通过后才在同一事务内重生 productCode 与当前有效 SKU 的 skuCode，已退役 SKU 原样保留；
-   * - 旧 skuCode 在原厂条码为空时回填进 barcode，保证已打印的旧标签仍可通过 lookupByCode 的 barcode 路径扫到。
+   * - 旧 productCode 写入 product.legacyProductCode，每条被重算编码的 SKU 旧 skuCode 写入 sku.legacySkuCode，
+   *   用于 lookupByCode 的历史编码兼容路径扫描；barcode（原厂条码）字段从此只保留真实原厂条码，不再回填。
    */
   async upgradeProductToYzCode(
     productId: string,
@@ -929,6 +936,7 @@ export class ProductService {
       product.seriesSeq = seriesSeq
       product.codeScheme = 'yz'
       product.productCode = newProductCode
+      product.legacyProductCode = oldProductCode
       const savedProduct = await productRepo.save(product)
 
       // 主系列标签必须出现在标签关联里，口径与 YZ 建档（createWithManager）一致；已存在则不重复插入。
@@ -949,14 +957,9 @@ export class ProductService {
         const oldSkuCode = sku.skuCode
         const newSkuCode = formatSkuCode(newProductCode, variantCode, sizeCode)
 
-        // 旧标签救济：原厂条码为空才回填旧编码；barcode 全局唯一，被其他 SKU 占用则跳过（不报错）。
-        if (!sku.barcode) {
-          const barcodeTaken = await skuRepo.exists({ where: { barcode: oldSkuCode } })
-          if (!barcodeTaken) {
-            sku.barcode = oldSkuCode
-          }
-        }
-
+        // 旧标签救济：旧 skuCode 无条件写入 legacySkuCode（历史编码理论上可能重复，不受唯一约束限制），
+        // 供 lookupByCode 第三路匹配，让已打印的旧标签仍可扫描；barcode（原厂条码）不再被本流程改动。
+        sku.legacySkuCode = oldSkuCode
         sku.variantCode = variantCode
         sku.sizeCode = sizeCode
         sku.skuCode = newSkuCode
@@ -1423,11 +1426,13 @@ export class ProductService {
         })
     }
     const existingSkuCodeSet = new Set(existingSkus.map((sku) => sku.skuCode))
-    // 存量商品升级到 YZ 编码时，会把旧 skuCode 回填进 barcode 以保住已打印的标签；而 legacy 商品编码
-    // 由 generateProductCode 按“当日最大值 + 1”生成，升级腾出的日期流水号可能被当天新建的商品重新取到，
-    // 于是新商品的 `${productCode}-DEFAULT` / `-SKU-N` 会与那条回填的 barcode 撞全局唯一索引导致建档失败
-    // （WC 分支本身已有 barcode 冲突检查，这两个分支原本没有）。这里预先把同前缀的 barcode 纳入去重集合，
-    // 让既有的 allocateSkuCode 自动避开，而不是等到落库才抛唯一约束错误。
+    // B9 批次后，存量商品升级到 YZ 编码不再把旧 skuCode 回填进 barcode（改写入 legacySkuCode，不受唯一
+    // 索引约束），因此下面这段“按 productCode 前缀纳入 barcode 去重集合”对新产生的数据而言通常查不到东西。
+    // 仍然保留：051 迁移脚本是保守判定，历史库里可能仍有个别未被迁移语句覆盖到的、按旧方案回填进 barcode
+    // 的记录（真实原厂条码本就不该长这个前缀，不会被误伤）；留着这段查询当作过渡期的防御性兜底，等历史
+    // 数据全部迁清后可以再评估是否移除。同一原理下，legacy 商品编码由 generateProductCode 按“当日最大值 + 1”
+    // 生成，升级腾出的日期流水号可能被当天新建的商品重新取到，`${productCode}-DEFAULT` / `-SKU-N` 若撞上
+    // 这类历史遗留 barcode，会被下面的 allocateSkuCode 自动避开，不至于等到落库才抛唯一约束错误。
     const prefixedBarcodeRows = await skuRepo.createQueryBuilder('sku')
       .select('sku.barcode', 'barcode')
       .where('sku.barcode LIKE :codePrefix', { codePrefix: `${product.productCode}%` })
@@ -1777,6 +1782,7 @@ export class ProductService {
         seriesCode: product.primarySeriesTagId ? seriesCodeMap.get(String(product.primarySeriesTagId)) ?? null : null,
         seriesSeq: product.seriesSeq ?? null,
         codeScheme: product.codeScheme || 'legacy',
+        legacyProductCode: product.legacyProductCode ?? null,
       }
     })
   }
@@ -1814,6 +1820,7 @@ export class ProductService {
       locationCode: locationCodeMap?.get(String(sku.locationId ?? '')) ?? null,
       variantCode: sku.variantCode ?? null,
       sizeCode: sku.sizeCode ?? null,
+      legacySkuCode: sku.legacySkuCode ?? null,
     }
   }
 
@@ -1833,21 +1840,24 @@ export class ProductService {
   }
 
   /**
-   * 扫码识别：先按原厂条码精确匹配，再按 SKU 编码精确匹配；同码时优先当前版本、启用中的规格。
+   * 扫码识别：条码、SKU 编码、历史 SKU 编码（B9 批次新增，兼容升级前已打印的旧标签）三路精确匹配合并；
+   * 排序优先级为「当前版本 > 启用中 > 条码命中 > SKU 编码命中 > 历史编码命中」——历史编码只是兼容手段，
+   * 优先级最低，避免与真实条码/当前编码撞码时抢占展示。
    * 返回的 SKU 视图带库存，调用方按权限决定是否裁剪。
    */
   async lookupByCode(rawCode: string): Promise<ProductLookupView> {
     const code = String(rawCode ?? '').trim()
     if (!code || code.length > 96) throw new BizError('请扫描或输入有效的条码', 400)
     const skuRepo = AppDataSource.getRepository(BaseProductSku)
-    // 条码与编码两路合并：优先当前版本、启用中的规格，同等条件下条码命中优先。
-    const [byBarcode, bySkuCode] = await Promise.all([
+    const [byBarcode, bySkuCode, byLegacySkuCode] = await Promise.all([
       skuRepo.find({ where: { barcode: code } }),
       skuRepo.find({ where: { skuCode: code } }),
+      skuRepo.find({ where: { legacySkuCode: code } }),
     ])
     const candidates = [
-      ...byBarcode.map((row) => ({ row, matchedBy: 'barcode' as const, rank: 1 })),
-      ...bySkuCode.map((row) => ({ row, matchedBy: 'sku_code' as const, rank: 0 })),
+      ...byBarcode.map((row) => ({ row, matchedBy: 'barcode' as const, rank: 2 })),
+      ...bySkuCode.map((row) => ({ row, matchedBy: 'sku_code' as const, rank: 1 })),
+      ...byLegacySkuCode.map((row) => ({ row, matchedBy: 'legacy_sku_code' as const, rank: 0 })),
     ].sort((left, right) =>
       Number(isDatabaseFlagEnabled(right.row.isCurrent)) - Number(isDatabaseFlagEnabled(left.row.isCurrent))
       || Number(isDatabaseFlagEnabled(right.row.isActive)) - Number(isDatabaseFlagEnabled(left.row.isActive))
@@ -2503,27 +2513,18 @@ export class ProductService {
       return candidate
     }
 
-    const barcodeCandidateCodes = [...new Set(currentSkus.filter((sku) => !sku.barcode).map((sku) => sku.skuCode))]
-    const takenBarcodes = barcodeCandidateCodes.length
-      ? new Set((await manager.getRepository(BaseProductSku).find({
-        where: { barcode: In(barcodeCandidateCodes) },
-        select: ['barcode'],
-      })).map((row) => row.barcode).filter((barcode): barcode is string => Boolean(barcode)))
-      : new Set<string>()
-
+    // B9 批次：旧编码统一落 legacySkuCode，不再受 barcode 占用与否影响，预检不用再模拟条码占用情况。
     return currentSkus.map((sku) => {
       const specValues = normalizeSpecValuesKeys(parseSpecValuesJson(sku.specValuesJson))
       const variantCode = simulateVariantCode(specValues[VARIANT_AXIS_SPEC_KEY])
       const sizeCode = simulateSizeCode(specValues[SIZE_AXIS_SPEC_KEY])
       const oldSkuCode = sku.skuCode
       const newSkuCode = formatSkuCode(newProductCode, variantCode, sizeCode)
-      const willBackfillBarcode = !sku.barcode && !takenBarcodes.has(oldSkuCode)
       return {
         skuId: String(sku.id),
         specText: sku.specText,
         oldSkuCode,
         newSkuCode,
-        willBackfillBarcode,
       }
     })
   }

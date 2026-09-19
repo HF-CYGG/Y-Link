@@ -63,6 +63,9 @@ const REQUIRED_COLUMNS = [
   ['base_product', 'code_scheme'],
   ['base_product_sku', 'variant_code'],
   ['base_product_sku', 'size_code'],
+  // 051：历史编码字段（B9 批次），需与 MYSQL_REQUIRED_COLUMNS 保持同一口径。
+  ['base_product', 'legacy_product_code'],
+  ['base_product_sku', 'legacy_sku_code'],
   ...['deactivated_at', 'deactivation_reason', 'deactivated_by_user_id', 'deactivated_by_username', 'deactivated_by_display_name', 'restored_at', 'restored_by_user_id', 'restored_by_username', 'restored_by_display_name']
     .flatMap((columnName) => [
       ['sys_user', columnName] as const,
@@ -356,6 +359,13 @@ const REQUIRED_INDEXES: readonly IndexFixture[] = [
     indexName: 'uk_registry_code',
     columns: ['product_id', 'axis', 'code'],
     unique: true,
+  },
+  // 051：历史 SKU 编码要支持扫码按它查，普通索引。
+  {
+    tableName: 'base_product_sku',
+    indexName: 'idx_base_product_sku_legacy_code',
+    columns: ['legacy_sku_code'],
+    unique: false,
   },
   {
     tableName: 'account_lifecycle_event',

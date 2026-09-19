@@ -37,6 +37,8 @@ export interface ProductSkuMatrixRow {
   variantCode?: string | null
   /** YZ 编码体系专用：尺码码（A-E），只读展示，legacy 商品或尚未保存的行恒为 null/undefined。 */
   sizeCode?: string | null
+  /** 升级到 YZ 编码前的历史 SKU 编码，只读展示，仅作追溯；未升级过（含 legacy 商品）恒为 null/undefined。 */
+  legacySkuCode?: string | null
 }
 
 export interface ProductSkuMatrixDefaults {
@@ -164,6 +166,7 @@ export const buildSkuMatrixRows = ({
       locationId: matchedRow?.locationId ?? null,
       variantCode: matchedRow?.variantCode ?? null,
       sizeCode: matchedRow?.sizeCode ?? null,
+      legacySkuCode: matchedRow?.legacySkuCode ?? null,
     }
   }))
 }

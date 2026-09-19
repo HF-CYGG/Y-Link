@@ -4,8 +4,9 @@
  * 文件职责：存量（legacy）商品升级到 YZ 通用 SKU 编码体系的确认弹窗，承载文创系列选择、升级预检展示与最终提交。
  * 实现逻辑：
  * - 弹窗打开时重置内部状态，由使用方（ProductManager.vue）传入商品 id/名称与可选的文创系列标签候选集；
- * - 选定系列后调用 previewProductYzUpgrade 预检，展示旧/新产品编码、SKU 编码变化列表与是否回填条码；
- * - blockingReason 非空时用醒目错误提示替代变更列表并禁用提交；提交前固定展示旧标签失效、条码回填两条警示；
+ * - 选定系列后调用 previewProductYzUpgrade 预检，展示旧/新产品编码与 SKU 编码变化列表；
+ * - blockingReason 非空时用醒目错误提示替代变更列表并禁用提交；提交前固定展示两条警示：编码会重新生成、
+ *   旧编码会保留在历史编码字段中用于扫码兼容（B9 批次不再回填进 barcode，语义与之前不同）；
  * - 提交调用 upgradeProductToYzCode，成功后把最新商品数据通过 upgraded 事件回传，由使用方刷新列表与编辑态。
  * 维护说明：
  * - 升级涉及编码重算且不可逆，禁止在本组件内新增“静默重试”“忽略 blockingReason 强提交”等绕过后端拦截的逻辑；
@@ -117,8 +118,8 @@ const handleSubmit = async () => {
           商品「{{ productName }}」当前使用历史编码，升级后将改用 YZ 通用 SKU 编码体系，产品编码与全部在用 SKU 编码都会重新生成。
         </p>
 
-        <el-alert type="warning" :closable="false" show-icon title="升级后该商品已打印的旧标签将失效，需要重新打印。原编码会写入审计日志，已退役的历史 SKU 保持原编码不变。" />
-        <el-alert type="warning" :closable="false" show-icon title="原厂条码为空的 SKU 会把旧编码回填到条码位，旧标签仍可扫描；已有原厂条码的 SKU 不受影响。" />
+        <el-alert type="warning" :closable="false" show-icon title="升级后产品编码与全部在用 SKU 编码都会重新生成，原编码会写入审计日志，已退役的历史 SKU 保持原编码不变。" />
+        <el-alert type="warning" :closable="false" show-icon title="旧编码会保留在历史编码字段中参与扫码匹配，已打印的旧标签仍可正常扫描识别，无需强制重新打印；原厂条码字段不受影响。" />
 
         <div>
           <label class="mb-1 block text-xs text-slate-500">选择要升级到的文创系列</label>
@@ -168,13 +169,6 @@ const handleSubmit = async () => {
                 </el-table-column>
                 <el-table-column label="新 SKU 码" min-width="120">
                   <template #default="{ row }"><span class="font-mono text-xs font-semibold text-teal-600">{{ row.newSkuCode }}</span></template>
-                </el-table-column>
-                <el-table-column label="回填条码" width="100" align="center">
-                  <template #default="{ row }">
-                    <el-tag :type="row.willBackfillBarcode ? 'success' : 'info'" size="small">
-                      {{ row.willBackfillBarcode ? '是' : '否' }}
-                    </el-tag>
-                  </template>
                 </el-table-column>
               </el-table>
             </div>

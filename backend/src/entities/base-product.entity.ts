@@ -99,6 +99,10 @@ export class BaseProduct {
   @Column({ name: 'code_scheme', type: 'varchar', length: 8, default: 'legacy', comment: '编码体系：legacy=历史P-/WC编码，yz=新版定长编码' })
   codeScheme!: string
 
+  // 历史编码字段（B9 批次）：升级到 YZ 编码前的历史产品编码，仅作追溯展示，不参与任何查询匹配。
+  @Column({ name: 'legacy_product_code', type: 'varchar', length: 64, nullable: true, comment: '升级到 YZ 编码前的历史产品编码，仅作追溯展示' })
+  legacyProductCode!: string | null
+
   @CreateDateColumn({ name: 'created_at', ...entityColumnOptions.timestamp })
   createdAt!: Date
 
