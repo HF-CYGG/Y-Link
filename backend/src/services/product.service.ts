@@ -2266,7 +2266,10 @@ export class ProductService {
       }
       if (input.primarySeriesTagId !== undefined) {
         const normalizedSeriesTagId = this.normalizeSeriesTagIdInput(input.primarySeriesTagId)
-        if (normalizedSeriesTagId !== (product.primarySeriesTagId ?? null)) {
+        // 两侧都要归一化再比：SQLite 下主键读出来是 number，而入参归一化后是 string，
+        // 直接比较会让「原样回传当前系列」也被判成修改，导致编辑其它字段时被误拦。
+        const currentSeriesTagId = this.normalizeSeriesTagIdInput(product.primarySeriesTagId)
+        if (normalizedSeriesTagId !== currentSeriesTagId) {
           throw new BizError('YZ 编码商品的文创系列不可修改', 400)
         }
       }
@@ -2366,7 +2369,7 @@ export class ProductService {
   }
 
   /** 规范化 primarySeriesTagId 输入：空串/null/undefined 统一归一为 null，表示走 legacy 路径。 */
-  private normalizeSeriesTagIdInput(value: string | null | undefined): string | null {
+  private normalizeSeriesTagIdInput(value: string | number | null | undefined): string | null {
     if (value === null || value === undefined) return null
     const trimmed = String(value).trim()
     return trimmed || null

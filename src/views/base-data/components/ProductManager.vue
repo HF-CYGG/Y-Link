@@ -709,6 +709,10 @@ const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProdu
   // 新增商品且已选文创系列时走 YZ 编码：productCode 由后端生成，这里不提交该字段（提交了会被后端 400 拒绝）。
   // 编辑场景下无论 legacy 还是 yz，都沿用输入框当前值（yz 商品该输入框已禁用，值与后端一致，不会触发“改码”校验）。
   const isNewYzSubmission = !currentForm.id && !!normalizedPrimarySeriesTagId
+  // 编辑已有的 YZ 商品时，文创系列本就不可变更，干脆不提交该字段：
+  // 后端只在该字段存在时才做“是否被改动”的比对，不传就完全绕开这条校验，
+  // 避免因为主键类型差异等原因把“原样回传”误判成修改而挡住其它字段的保存。
+  const isExistingYzProduct = !!currentForm.id && !!normalizedPrimarySeriesTagId
   const normalizedProductCode = isNewYzSubmission ? undefined : normalizeOptionalSubmitText(currentForm.productCode)
   const normalizedProductName = normalizeSubmitText(currentForm.productName)
   const normalizedPinyinAbbr = normalizeOptionalSubmitText(currentForm.pinyinAbbr)
@@ -745,7 +749,7 @@ const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProdu
     isActive: currentForm.isActive,
     tagIds: resolvedTagIds,
     categoryId: currentForm.categoryId || null,
-    primarySeriesTagId: normalizedPrimarySeriesTagId || null,
+    ...(isExistingYzProduct ? {} : { primarySeriesTagId: normalizedPrimarySeriesTagId || null }),
     ...resolveDefaultSkuPayload(currentForm),
     skus: currentForm.skus.length
       ? currentForm.skus.map((sku, index) => ({

@@ -944,6 +944,63 @@ async function main() {
     assert.ok(afterRetainSku, '应能新增红色规格')
     assert.equal(afterRetainSku!.variantCode, '1', '0 号保留后新增红色应取得变体码 1')
     pass('0 号保留：原 SKU 退役但行保留、skuCode 不变；随后新增红色取得变体码 1')
+
+    // 用例 32：原样回传当前文创系列时，编辑其它字段必须放行。
+    // 回归场景：前端编辑弹窗里系列选择器虽然禁用，但仍会把当前 primarySeriesTagId 一起提交；
+    // 早期实现把入参归一化成字符串后直接与实体字段比较，而 SQLite 下主键读出来是 number，
+    // "5" !== 5 恒成立，于是只改商品名也会被「YZ 编码商品的文创系列不可修改」拦下。
+    const keepSeriesTag = await createSeriesTag('KS')
+    const keepSeriesProduct = await productService.create({
+      productName: `yz-keep-series-${verifySeed}`,
+      pinyinAbbr: 'KS',
+      defaultPrice: 20,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+      primarySeriesTagId: keepSeriesTag.id,
+    } as Parameters<typeof productService.create>[0], actor)
+    const keptProductCode = keepSeriesProduct.productCode
+
+    // 原样回传当前系列（模拟前端提交禁用字段），只改商品名。
+    const renamedProduct = await productService.update(
+      keepSeriesProduct.id,
+      {
+        productName: `yz-keep-series-renamed-${verifySeed}`,
+        primarySeriesTagId: keepSeriesProduct.primarySeriesTagId,
+      } as Parameters<typeof productService.update>[1],
+      actor,
+    )
+    assert.equal(renamedProduct.productName, `yz-keep-series-renamed-${verifySeed}`, '原样回传当前系列时应放行改名')
+    assert.equal(renamedProduct.productCode, keptProductCode, '编码不应因编辑而变化')
+
+    // 用数字形态的同一个系列 ID 再提交一次，覆盖主键类型差异。
+    const numericSeriesId = Number(keepSeriesProduct.primarySeriesTagId)
+    if (Number.isFinite(numericSeriesId)) {
+      const renamedAgain = await productService.update(
+        keepSeriesProduct.id,
+        {
+          productName: `yz-keep-series-numeric-${verifySeed}`,
+          primarySeriesTagId: numericSeriesId,
+        } as unknown as Parameters<typeof productService.update>[1],
+        actor,
+      )
+      assert.equal(renamedAgain.productName, `yz-keep-series-numeric-${verifySeed}`, '数字形态的同一系列 ID 同样应放行')
+    }
+
+    // 真正切换到另一个系列仍必须被拒绝。
+    const otherSeriesTag = await createSeriesTag('OS')
+    await assert.rejects(
+      productService.update(
+        keepSeriesProduct.id,
+        { primarySeriesTagId: otherSeriesTag.id } as Parameters<typeof productService.update>[1],
+        actor,
+      ),
+      (error: unknown) => assertBizErrorWithStatus(error, 400),
+      '切换到其它文创系列应当仍被拒绝',
+    )
+    pass('原样回传当前文创系列（含数字形态主键）可正常编辑其它字段，真正切换系列仍被拒绝')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()
