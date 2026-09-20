@@ -1946,6 +1946,86 @@ async function main() {
     const p12PurpleUnchanged = await skuRepo.findOneBy({ id: p12SkuPurple!.id })
     assert.equal(p12PurpleUnchanged!.skuCode, p12SkuPurple!.skuCode, '被拒绝的写入不应残留，紫色 SKU 的 skuCode 应保持原样')
     pass('P1-A：assertSkuRelationsValid 已纳入本商品内其它 SKU 的 legacySkuCode 冲突检查——普通保存路径同样抛 409，且不残留写入')
+
+    // ============ P2-A（PR #109 第八轮评审）：升级前必须检测"产品编码"冲突，且不能陷入重试死循环 ============
+    // 模拟"另一件商品已经手工占用了某个具体 productCode"，不建立任何系列/序号归属关系——要验证的正是
+    // allocateSeriesSeq / predictNextSeriesSeq 除占用登记表外还要查 base_product.product_code 本身。
+    const createManualCodeProduct = async (productCode: string) => productRepo.save(productRepo.create({
+      productCode,
+      productName: `manual-code-${productCode}`,
+      pinyinAbbr: 'MC',
+      defaultPrice: '10.00',
+      discountRate: '10.0',
+      isActive: true,
+      o2oStatus: 'unlisted',
+      o2oRecommended: false,
+      thumbnail: null,
+      detailContent: null,
+      limitPerUser: 5,
+      currentStock: 0,
+      categoryId: null,
+      preOrderedStock: 0,
+      primarySeriesTagId: null,
+      seriesSeq: null,
+      codeScheme: 'legacy',
+    }))
+
+    const createSingleSkuLegacyProduct = async (pinyinAbbr: string, namePrefix: string) => productService.create({
+      productCode: nextProductCode(),
+      productName: `${namePrefix}-${verifySeed}`,
+      pinyinAbbr,
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+      specGroups: [{ name: '颜色', values: ['白色'] }],
+      skus: [{ specValues: { 颜色: '白色' }, defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 0 }],
+    } as Parameters<typeof productService.create>[0], actor)
+
+    // 用例 P2-A-1：另一件商品手工占用了本系列 01 号产品编码 → 升级应跳过 01，取到下一个可用序号并成功。
+    const p2aSkipTag = await createSeriesTag('PA')
+    const p2aOccupiedProductCode = formatProductCode(defaultPrefix, 'PA', 1)
+    await createManualCodeProduct(p2aOccupiedProductCode)
+
+    const p2aLegacyProduct = await createSingleSkuLegacyProduct('PA', 'p2a-skip')
+    const p2aPreview = await productService.previewProductYzUpgrade(p2aLegacyProduct.id, p2aSkipTag.id)
+    assert.equal(p2aPreview.blockingReason, null, '01 号被其他商品占用不应阻断预检，应当跳号')
+    assert.equal(p2aPreview.newProductCode, formatProductCode(defaultPrefix, 'PA', 2), '预检应跳过被占用的 01 号，预测出 02 号')
+    assert.equal(p2aPreview.seriesSeq, 2, '预检预测的序号应为跳过 01 后的 02')
+
+    const p2aUpgraded = await productService.upgradeProductToYzCode(p2aLegacyProduct.id, { primarySeriesTagId: p2aSkipTag.id }, actor)
+    assert.equal(p2aUpgraded.productCode, p2aPreview.newProductCode, '实际升级结果应与预检一致（均跳过被占用的 01 号）')
+    assert.equal(p2aUpgraded.seriesSeq, 2, '实际分配的序号应为 02，与预检一致')
+    pass('P2-A：其他商品手工占用系列 01 号产品编码时，升级自动跳号分配到 02 号并成功，预检与实际执行结论一致')
+
+    // 用例 P2-A-2：该系列 01-99 号产品编码全部被占用（极端情况）→ 预检给出耗尽阻断，正式升级抛 409，
+    // 且不会因为事务回滚导致序列游标复位而陷入重试死循环（每次重试都应稳定得到同一个"已耗尽"结论）。
+    const p2aExhaustTag = await createSeriesTag('PB')
+    for (let seq = 1; seq <= 99; seq += 1) {
+      await createManualCodeProduct(formatProductCode(defaultPrefix, 'PB', seq))
+    }
+    const p2aExhaustLegacyProduct = await createSingleSkuLegacyProduct('PB', 'p2a-exhaust')
+
+    const p2aExhaustPreview = await productService.previewProductYzUpgrade(p2aExhaustLegacyProduct.id, p2aExhaustTag.id)
+    assert.ok(
+      p2aExhaustPreview.blockingReason && p2aExhaustPreview.blockingReason.includes('耗尽'),
+      '01-99 全被占用时预检应给出序号耗尽的阻断原因',
+    )
+
+    await assert.rejects(
+      productService.upgradeProductToYzCode(p2aExhaustLegacyProduct.id, { primarySeriesTagId: p2aExhaustTag.id }, actor),
+      (error: unknown) => assertBizErrorWithStatus(error, 409) && (error as InstanceType<typeof BizError>).message.includes('耗尽'),
+      '01-99 全被占用时正式升级应抛 409 且说明序号已耗尽',
+    )
+    // 重试一次，断言仍然是同一个"已耗尽"结论（而不是挂起、无限重试或换一种报错），验证不存在死循环。
+    await assert.rejects(
+      productService.upgradeProductToYzCode(p2aExhaustLegacyProduct.id, { primarySeriesTagId: p2aExhaustTag.id }, actor),
+      (error: unknown) => assertBizErrorWithStatus(error, 409) && (error as InstanceType<typeof BizError>).message.includes('耗尽'),
+      '重试升级仍应稳定抛出同样的 409 序号耗尽错误，证明不会陷入死循环',
+    )
+    pass('P2-A：该系列 01-99 号产品编码全部被占用时，预检给出序号耗尽阻断，正式升级抛 409 且重试结论稳定，不会陷入死循环')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()

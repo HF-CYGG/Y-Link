@@ -943,6 +943,13 @@ export class ProductService {
       const oldProductCode = product.productCode
       const newProductCode = formatProductCode(prefix, seriesTag.seriesCode as string, seriesSeq)
 
+      // P2-A 修复（PR #109 第八轮评审）：allocateSeriesSeq 分配阶段已经会跳过被其他商品占用的
+      // productCode，但分配与下面 productRepo.save 之间仍有极小的并发窗口（另一事务恰好在此时写入了
+      // 相同编码）。这里保存前先做一次兜底校验，命中即抛出友好的 409，避免退化成
+      // base_product.product_code 唯一约束的原始 DB 报错——那种报错会让整个事务回滚、序列游标也跟着
+      // 回退，重试仍会分配到同一个号，商品就永远无法升级了。
+      await this.assertNoUpgradeCodeConflict(manager, product.id, newProductCode, [])
+
       product.primarySeriesTagId = seriesTag.id
       product.seriesSeq = seriesSeq
       product.codeScheme = 'yz'
@@ -1326,14 +1333,20 @@ export class ProductService {
     const predictedSeriesSeq = await this.predictNextSeriesSeq(manager, seriesTag.id, seriesTag.seriesCode as string, prefix)
 
     const capacityBlockingReason = this.detectUpgradeCapacityBlockingReason(currentSkus)
+    // P2-A 修复（PR #109 第八轮评审）：predictNextSeriesSeq 跳号跳过 99 上限时原样返回 >99 的候选值，
+    // 这里据此判断序号是否已耗尽——与 allocateSeriesSeq 真正执行时抛出的 409 保持同一个结论。
+    const seriesSeqExhaustedReason = predictedSeriesSeq > 99
+      ? '该系列可用序号已耗尽（1-99 均已被占用），无法继续升级'
+      : null
+    const blockedBeforeConflictCheck = capacityBlockingReason ?? seriesSeqExhaustedReason
     const newProductCode = formatProductCode(prefix, seriesTag.seriesCode as string, predictedSeriesSeq)
 
-    const skuChanges: ProductYzUpgradeSkuChange[] = capacityBlockingReason
+    const skuChanges: ProductYzUpgradeSkuChange[] = blockedBeforeConflictCheck
       ? []
       : await this.simulateUpgradeSkuChanges(product.id, currentSkus, newProductCode, manager)
 
-    // 预检阶段同样要检测跨列编码冲突，让前端在提交升级前就能拦住并展示原因。
-    const codeConflictReason = capacityBlockingReason
+    // 预检阶段同样要检测跨列编码冲突（含产品编码本身），让前端在提交升级前就能拦住并展示原因。
+    const codeConflictReason = blockedBeforeConflictCheck
       ? null
       : await this.detectUpgradeCodeConflict(
         manager,
@@ -1350,7 +1363,7 @@ export class ProductService {
       seriesSeq: predictedSeriesSeq,
       skuChanges,
       retiredSkuCount,
-      blockingReason: capacityBlockingReason ?? codeConflictReason,
+      blockingReason: blockedBeforeConflictCheck ?? codeConflictReason,
     }
   }
 
@@ -2660,6 +2673,11 @@ export class ProductService {
    * SKU 一视同仁全部纳入候选冲突集合），改为按"候选编码归属的那条 SKU 自身"逐条判断豁免——只有当命中
    * 的行恰好就是产生该候选编码的那条 SKU 本身时才放行，其余一律视为冲突（无论是本商品的兄弟 SKU 还是
    * 别的商品的 SKU）。newProductCode 不属于任何一条 SKU（不是某条 SKU 升级出来的候选），不享有任何豁免。
+   * P2-A 修复（PR #109 第八轮评审）：此前只查了 SKU 表的 skuCode/barcode/legacySkuCode 三列，完全没查
+   * 其他商品的 base_product.product_code——如果另一件商品（常见于 legacy 商品手工填写了恰好落在本系列
+   * 序号段的编码）已经占用了本次升级将生成的 newProductCode，这里查不出任何冲突，直到保存时才撞
+   * base_product.product_code 唯一约束。现在把这一列也纳入检测：allocateSeriesSeq 分配阶段已经会跳过
+   * 这类被占用的号，这里是保存前的最后一道兜底，专防分配与保存之间的并发窗口。
    */
   private async detectUpgradeCodeConflict(
     manager: EntityManager,
@@ -2667,6 +2685,19 @@ export class ProductService {
     newProductCode: string,
     skuCodeChanges: Array<{ skuId: string; newSkuCode: string }>,
   ): Promise<string | null> {
+    if (newProductCode) {
+      const productConflict = await manager.getRepository(BaseProduct).findOne({
+        where: { productCode: newProductCode },
+        select: ['id'],
+      })
+      // 注意：productId 入参在 TypeScript 里标注为 string，但调用方大多直接透传实体的 .id（SQLite
+      // 整数主键在运行时可能是原始 number），这里统一用 String() 包一层再比较，避免 "8" !== 8 这种类型
+      // 不一致导致自我豁免失效、把商品自己的新编码误判成跟自己冲突。
+      if (productConflict && String(productConflict.id) !== String(productId)) {
+        return `升级生成的产品编码「${newProductCode}」已被其他商品（ID ${normalizeEntityId(productConflict.id)}）的产品编码占用，请先处理该冲突后再升级`
+      }
+    }
+
     // codeOwners：候选编码 -> 产生该编码的 SKU id。newProductCode 没有归属 SKU，记 null，不享有任何豁免。
     const codeOwners = new Map<string, string | null>()
     if (newProductCode) codeOwners.set(newProductCode, null)
@@ -2723,6 +2754,11 @@ export class ProductService {
    * P1-C 修复（PR #109 第五轮评审）：占用判定改为按 (code_prefix, series_code, series_seq) 命中，
    * 必须与 allocateSeriesSeq 保持完全一致的判定维度，否则预测号与真正分配号会再次对不上——见调用处
    * previewProductYzUpgrade 改为先取 prefix 再调用本方法。
+   * P2-A 修复（PR #109 第八轮评审）：预测也要跳过「按该候选号拼出的 productCode 已被其他商品占用」的
+   * 情况，与 allocateSeriesSeq 保持完全一致的跳号判定，否则预测号与真正分配号会再次对不上。全程只用
+   * 只读查询（.exists()），不调用 allocateSequenceValue、不写登记表，候选号超过 99 时原样返回（调用方
+   * previewProductYzUpgrade 据此判断序号是否已耗尽），不在本方法内抛错——预检失败应体现为
+   * blockingReason 文案，而不是中断整个预检请求。
    */
   private async predictNextSeriesSeq(manager: EntityManager, seriesTagId: string, seriesCode: string, prefix: string): Promise<number> {
     const sequenceKey = `product_series_seq.${seriesTagId}`
@@ -2739,8 +2775,19 @@ export class ProductService {
       candidate = Number(row?.maxSeq ?? 0) + 1
     }
     const reservationRepo = manager.getRepository(BaseYzSeriesSeqReservation)
-    while (candidate <= 99 && await reservationRepo.exists({ where: { codePrefix: prefix, seriesCode, seriesSeq: candidate } })) {
-      candidate += 1
+    const productRepo = manager.getRepository(BaseProduct)
+    while (candidate <= 99) {
+      const reserved = await reservationRepo.exists({ where: { codePrefix: prefix, seriesCode, seriesSeq: candidate } })
+      if (reserved) {
+        candidate += 1
+        continue
+      }
+      const productCodeTaken = await productRepo.exists({ where: { productCode: formatProductCode(prefix, seriesCode, candidate) } })
+      if (productCodeTaken) {
+        candidate += 1
+        continue
+      }
+      break
     }
     return candidate
   }

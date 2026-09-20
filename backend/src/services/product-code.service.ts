@@ -109,6 +109,14 @@ export async function findYzSeriesSeqReservation(
  * series_tag_id 不再是唯一性判定维度，避免“系列最后一个商品与标签都被删除后，新建同 seriesCode 的
  * 新标签重新从 01 分配、生成与旧标签重复的编码”这一漏洞（详见占用表实体文件头说明）。写入登记行时仍
  * 保留 series_tag_id 字段，只作追溯展示。
+ * P2-A 修复（PR #109 第八轮评审）：占用登记表只记录“本函数/reserveSeriesSeq 分配过的号”，但升级路径
+ * （upgradeProductToYzCode）会把某个序号拼成的 productCode 写回 base_product.product_code——如果另一
+ * 件商品（常见于 legacy 商品手工填过恰好落在本系列序号段的编码）已经占用了这个 productCode，占用登记
+ * 表完全看不出冲突，直到保存时撞 base_product.product_code 唯一约束才会失败；更糟的是失败会回滚整个
+ * 事务，序列游标也跟着回滚，下次重试还是分配到同一个号，商品永远无法升级。这里在候选号试探阶段就加一
+ * 层查询：按该候选号拼出的 productCode 是否已被其他商品占用，命中同样跳号继续取下一个——这个判断在
+ * 事务提交前完成，不依赖回滚，天然不会死循环；跳号本身就是升级/新建重新分配编码的正常情形，不会造成
+ * 编码静默漂移（跳过的号本身就不该被分配出去）。
  */
 export async function allocateSeriesSeq(
   manager: EntityManager,
@@ -118,10 +126,12 @@ export async function allocateSeriesSeq(
 ): Promise<number> {
   const sequenceKey = `product_series_seq.${seriesTagId}`
   const reservationRepo = manager.getRepository(BaseYzSeriesSeqReservation)
+  const productRepo = manager.getRepository(BaseProduct)
 
   let value: number
   for (;;) {
-    // 序号需要逐个试探是否已被永久占用登记，只能按候选顺序依次等待上一次结果，不能并发发起。
+    // 序号需要逐个试探是否已被永久占用登记 / 已被其他商品的 productCode 占用，只能按候选顺序依次
+    // 等待上一次结果，不能并发发起。
     value = await allocateSequenceValue(manager, sequenceKey, async () => {
       const row = await manager.getRepository(BaseProduct)
         .createQueryBuilder('product')
@@ -131,11 +141,16 @@ export async function allocateSeriesSeq(
       return Number(row?.maxSeq ?? 0)
     })
     if (value > 99) {
-      throw new BizError('该系列商品数量已达上限（99），无法继续分配序号', 409)
+      throw new BizError('该系列可用序号已耗尽（1-99 均已被占用），无法继续分配序号', 409)
     }
     const reserved = await reservationRepo.exists({ where: { codePrefix: prefix, seriesCode, seriesSeq: value } })
-    if (!reserved) break
+    if (reserved) continue
     // 该号历史上已被分配/预占过（对应商品甚至标签可能已被删除），跳过继续取下一个，不重新分配给新商品。
+    const candidateProductCode = formatProductCode(prefix, seriesCode, value)
+    const productCodeTaken = await productRepo.exists({ where: { productCode: candidateProductCode } })
+    if (productCodeTaken) continue
+    // 该号拼出的 productCode 已被其他商品占用（常见于 legacy 商品手工填的编码），跳过继续取下一个。
+    break
   }
 
   const productCode = formatProductCode(prefix, seriesCode, value)
