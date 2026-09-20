@@ -61,3 +61,6 @@ apps/mobile/**/*.p8
 apps/mobile/**/*.p12
 apps/mobile/**/*.mobileprovision
 apps/mobile/credentials.json
+
+# 竞赛提交文档（本地编辑，不纳入版本库）
+docs/competition/
