@@ -315,6 +315,8 @@ export class ProductImportYzService {
     }
     const sheet = workbook.worksheets[0]
     if (!sheet) throw new BizError('Excel 文件中没有可读取的工作表', 400)
+    // 快速预检：actualRowCount 是 ExcelJS 里“真正带值的行数”，与下面 eachRow 实际会访问的行一一对应，
+    // 用它做前置早拒即可，不依赖、也不再放大到 sheet.rowCount（见下方 P2-C 修复说明）。
     if (sheet.actualRowCount - 1 > MAX_IMPORT_ROWS) throw new BizError(`单次最多导入 ${MAX_IMPORT_ROWS} 行`, 400)
 
     const headerValues = (sheet.getRow(1).values as unknown[]).map((value) => normalizeHeader(cellText(value)))
@@ -332,9 +334,28 @@ export class ProductImportYzService {
     let lastCategory = ''
     let lastSeriesSeqText = ''
     let lastProductName = ''
-    const actualRowCount = Math.max(sheet.actualRowCount, sheet.rowCount)
-    for (let rowNumber = 2; rowNumber <= actualRowCount; rowNumber += 1) {
-      const row = sheet.getRow(rowNumber)
+    // P2-C 修复（PR #109 第七轮评审）：此前用 Math.max(sheet.actualRowCount, sheet.rowCount) 撑大循环
+    // 上界，而 sheet.rowCount 只反映“曾经被触碰过的最大行号”，哪怕该行只设置过行高、从未写过值也会被
+    // 计入——ExcelJS 在只给极靠后的行设置格式（不写任何单元格值）时，会给出很小的 actualRowCount 但
+    // 极大的 rowCount。此前的上限检查用 actualRowCount 校验，循环却用两者的最大值，等于让检查形同虚设：
+    // 一个几 KB、只给第 1,000,000 行设过行高的工作簿就能让每次预览/导入执行近百万次 getRow，绕开行数
+    // 限制并长时间占用服务进程，是可被利用的资源耗尽问题。
+    // 改用 sheet.eachRow({ includeEmpty: false }, ...)：与仓库既有的通用导入（product-excel.service.ts
+    // 的 parseWorkbook）保持同一范式，只遍历真正带值的行，天然不受 rowCount 这类“空白格式行”影响。
+    // forward-fill（品类/序号/商品名沿用上一行）语义不受影响：改造前对“6 个目标字段全部为空”的行本就是
+    // 直接跳过、不更新 lastCategory/lastSeriesSeqText/lastProductName（状态只由非空行推进），而
+    // eachRow({includeEmpty:false}) 跳过的“空行”是指该行所有单元格都没有值——是前者的子集（只要目标
+    // 6 个字段中任意一个非空，该行在 ExcelJS 里就已经“带值”，一定会被 eachRow 访问到），所以两种遍历
+    // 方式对 forward-fill 状态机的推进结果完全一致，不会因为跳过纯格式空行而丢字段延续。
+    // 行数上限同样收紧到“真正会被遍历的上界”：不再只依赖前面 actualRowCount 的预检（理论上不可能超过
+    // eachRow 实际访问的行数，但仍在循环体内加一道计数兜底，双重防护、防止两者口径未来出现偏差）。
+    let visitedDataRowCount = 0
+    sheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+      if (rowNumber === 1) return // 表头行
+      visitedDataRowCount += 1
+      if (visitedDataRowCount > MAX_IMPORT_ROWS) {
+        throw new BizError(`单次最多导入 ${MAX_IMPORT_ROWS} 行`, 400)
+      }
       const read = (header: (typeof TEMPLATE_HEADERS)[number]) => {
         const index = columnIndex.get(header) as number
         return cellText(row.getCell(index).value)
@@ -347,7 +368,7 @@ export class ProductImportYzService {
       const priceRaw = read('价格')
 
       if (![categoryRaw, seriesSeqRaw, productNameRaw, variantAxisValue, sizeAxisValue, priceRaw].some(Boolean)) {
-        continue
+        return
       }
 
       const category = categoryRaw || lastCategory
@@ -407,7 +428,7 @@ export class ProductImportYzService {
         errors,
         predictedSkuCode: null,
       })
-    }
+    })
     if (!rows.length) throw new BizError('Excel 中没有可导入的数据行', 400)
     return rows
   }

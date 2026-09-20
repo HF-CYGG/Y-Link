@@ -377,6 +377,15 @@ try {
     'INSERT INTO "base_yz_series_seq_reservation" ("series_tag_id", "series_seq", "product_code") VALUES (999999, 1, ?)',
     ['YZLEGACY01'],
   )
+  // P2-B 修复验收（PR #109 第七轮评审）：登记时用的是历史前缀 'AB'（当前全局前缀是默认值 'YZ'），
+  // 标签也查无此标签（series_tag_id=999998），只能靠 product_code 自身结构反推。product_code
+  // 'ABPX01' = 前缀 'AB' + 系列码 'PX' + 序号 '01'，序号与本行 series_seq=1 一致。回填后必须解析出
+  // code_prefix='AB'，不能像旧实现那样套用当前前缀 'YZ'（那样会把 'ABPX01' 错误登记进 YZ 命名空间，
+  // 导致前缀切回 AB 后 'ABPX01' 可以被重新分配，同时还多占了一个根本不存在的 'YZPX01'）。
+  await AppDataSource.query(
+    'INSERT INTO "base_yz_series_seq_reservation" ("series_tag_id", "series_seq", "product_code") VALUES (999998, 1, ?)',
+    ['ABPX01'],
+  )
 
   // 注意：P2-C 的修复方式是准备函数自己直接完成表重建（见 database-bootstrap.ts 的
   // rebuildSqliteYzReservationConstraints），不依赖 shouldSynchronizeSqliteSchema 触发整体
@@ -416,6 +425,15 @@ try {
     'P2-C 附带：反推不出系列码（标签已删除且 product_code 不匹配当前前缀）的历史行应落入占位哨兵，标记待人工核对',
   )
 
+  const p2bHistoricalPrefixRow = await AppDataSource.query(
+    'SELECT series_code AS seriesCode, code_prefix AS codePrefix FROM "base_yz_series_seq_reservation" WHERE series_tag_id = 999998 AND series_seq = 1',
+  ) as Array<{ seriesCode: string; codePrefix: string }>
+  assert.deepEqual(
+    p2bHistoricalPrefixRow[0],
+    { seriesCode: 'PX', codePrefix: 'AB' },
+    'P2-B：product_code 用的是历史前缀（AB）时，回填必须从 product_code 结构本身解析出原始前缀 AB，不能套用当前全局前缀 YZ',
+  )
+
   const p1bBackfilledRow = await AppDataSource.query(
     'SELECT product_code AS productCode, series_code AS seriesCode, code_prefix AS codePrefix FROM "base_yz_series_seq_reservation" WHERE series_tag_id = ? AND series_seq = 3',
     [liveYzTag.id],
@@ -434,7 +452,7 @@ try {
     'P1-B：回填登记后，该商品被删除，同序号导入仍应被永久占用拒绝',
   )
 
-  console.log('OK P1-B/P2-C：SQLite 旧库占用表结构补齐（新唯一索引 + 非空约束 + 旧索引降级）与存活 YZ 商品占用自动回填均验收通过')
+  console.log('OK P1-B/P2-B/P2-C：SQLite 旧库占用表结构补齐（新唯一索引 + 非空约束 + 旧索引降级）、存活 YZ 商品占用自动回填、以及历史前缀记录按 product_code 结构反推（不套用当前前缀）均验收通过')
 } finally {
   if (dataSource?.isInitialized) {
     await dataSource.destroy()

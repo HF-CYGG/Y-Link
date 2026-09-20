@@ -16,16 +16,24 @@
 --      idx_yz_series_seq_reservation_tag，不删除——仍用于按 tagId 反查“这个标签当年生成过哪些序号”，
 --      仅追溯用途，不再承担唯一性约束。
 -- 数据回填（幂等，按优先级依次尝试，前一步能解析出的记录不会被后一步覆盖）：
---   a) 用当前全局前缀反推 product_code：product_code 本身就是 `${prefix}${seriesCode}${序号补零}` 的
---      定长拼接（见 product-code.service.ts 的 formatProductCode），比反查标签更可靠——标签可能已经
---      被删除，但 product_code 是登记时写入的快照，永远还在。若 product_code 以当前前缀开头、总长度
---      恰好等于「前缀长度 + 4」、紧跟着两位大写字母系列码和两位数字序号，且这两位数字序号与本行
---      series_seq 完全一致，则直接解析出 series_code，code_prefix 取当前前缀；
---   b) 若按当前前缀反推失败（说明登记时用的是历史前缀，配置后来改过，或本来就不是 YZ 格式），退化为
---      按 series_tag_id 反查 base_tag.series_code——标签未被删除时这是唯一还能拿到 series_code 的
---      来源，code_prefix 只能取当前全局配置（无法得知登记时刻的历史前缀值）；
---   c) 两条都反推不出的记录（标签已删除、且 product_code 格式又不匹配当前前缀，通常是前缀曾经改过又
---      找不到标签的存量脏数据）：不瞎猜，写入占位哨兵 series_code='??'、code_prefix='?'。这两个值都不
+--   a) 结构化解析 product_code 快照，不依赖当前全局前缀：product_code 本身就是
+--      `${前缀}${两位大写系列码}${两位数字序号}` 的定长拼接（见 product-code.service.ts 的
+--      formatProductCode），且这行自己的 series_seq 列已知（回填前就存在，不需要反推）。既然序号位
+--      已知，直接从字符串尾部反切：末两位必须等于该行 series_seq 补零后的值，其前两位就是系列码，
+--      再往前剩下的部分就是前缀——全程不假设前缀等于当前配置，因此即使登记之后全局前缀被改过
+--      （P2-B 修复，PR #109 第七轮评审：旧实现按“当前前缀”反推，前缀改过的环境里旧编码反推失败后
+--      退化到标签反查，但 code_prefix 却被强制写成当前前缀，例如历史编码 `ABPX01` 会被错误登记成
+--      `YZ/PX/01`——前缀切回 AB 后 `ABPX01` 可以被重新分配，同时还多占了一个根本不存在的 `YZPX01`），
+--      也无需依赖标签是否还存在。解析结果需要满足：总长度落在「前缀 1-4 位 + 系列码 2 位 + 序号 2 位」
+--      即 5-8 位区间内，切出的系列码需匹配两位大写字母，切出的前缀需匹配 1-4 位大写字母，两者都校验
+--      通过才采信；
+--   b) 若结构化解析失败（product_code 长度或格式本身就不满足上述定长规则），退化为按 series_tag_id
+--      反查 base_tag.series_code——标签未被删除时这是唯一还能拿到系列码的来源；拿到系列码后仍然用
+--      同一套结构化反切规则反推前缀（用标签给出的系列码去匹配 product_code 该位置的子串，而不是直接
+--      采信任何两位大写字母），反推失败（product_code 里对应位置的子串与标签系列码对不上，或前缀部分
+--      不合法）同样不采信，绝不会退回到套用当前前缀这种做法；
+--   c) 两条都反推不出的记录（product_code 完全不符合定长规则、且标签已删除或对不上，通常是格式本来
+--      就不对的存量脏数据）：不瞎猜，写入占位哨兵 series_code='??'、code_prefix='?'。这两个值都不
 --      满足系列码/前缀的合法格式（系列码要求两位大写字母、前缀要求 1-4 位大写字母），不会被真实的
 --      allocateSeriesSeq/reserveSeriesSeq 查询意外命中造成误拦截，只是让这几条脏数据在新命名空间下
 --      "可查、不冲突"，便于后续用 `WHERE series_code = '??'` 一键定位人工核对。
@@ -52,27 +60,43 @@ SET @ddl = IF(
 PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 -- 当前全局前缀（读不到则回退默认值 'YZ'，与 product-code.service.ts 的 getProductCodePrefix 口径一致）。
+-- P2-B 修复后，@current_prefix 不再用于下面两步回填（结构化解析不依赖它），仅保留给本文件末尾
+-- "仍存活 YZ 商品" 的补登记段使用——那一段面向的是当下仍在用当前前缀的活跃商品，语义与历史存量数据
+-- 的反推不同，继续沿用当前前缀是合理的（见该段落自己的注释）。
 SET @current_prefix := (
   SELECT IF(config_value REGEXP '^[A-Z]{1,4}$', config_value, 'YZ')
   FROM system_configs WHERE config_key = 'product.yz_code.prefix' LIMIT 1
 );
 SET @current_prefix := COALESCE(@current_prefix, 'YZ');
 
--- 回填 a：按当前前缀反推 product_code。
+-- 回填 a：结构化解析 product_code 快照，不依赖当前前缀——已知 series_seq（本行自带），从字符串尾部
+-- 反切：长度落在 5-8 位区间内，末两位须等于 series_seq 补零后的值，其前两位切作系列码（须为两位大写
+-- 字母），再往前剩下的部分切作前缀（须为 1-4 位大写字母），两项校验都通过才采信。
 UPDATE `base_yz_series_seq_reservation`
-SET series_code = SUBSTRING(product_code, LENGTH(@current_prefix) + 1, 2),
-    code_prefix = @current_prefix
+SET series_code = SUBSTRING(product_code, LENGTH(product_code) - 3, 2),
+    code_prefix = SUBSTRING(product_code, 1, LENGTH(product_code) - 4)
 WHERE series_code IS NULL
-  AND product_code REGEXP CONCAT('^', @current_prefix, '[A-Z]{2}[0-9]{2}$')
-  AND CAST(SUBSTRING(product_code, LENGTH(@current_prefix) + 3, 2) AS UNSIGNED) = series_seq;
+  AND product_code IS NOT NULL
+  AND LENGTH(product_code) BETWEEN 5 AND 8
+  AND RIGHT(product_code, 2) = LPAD(series_seq, 2, '0')
+  AND SUBSTRING(product_code, LENGTH(product_code) - 3, 2) REGEXP '^[A-Z]{2}$'
+  AND SUBSTRING(product_code, 1, LENGTH(product_code) - 4) REGEXP '^[A-Z]{1,4}$';
 
--- 回填 b：反推失败则退化为按 series_tag_id 反查标签当前的 series_code（标签已删除则查不到，跳过）。
+-- 回填 b：结构化解析失败则退化为按 series_tag_id 反查标签当前的 series_code（标签已删除则查不到，
+-- 跳过），拿到系列码后仍用同一套结构化反切规则反推前缀——校验 product_code 对应位置的子串确实等于
+-- 标签给出的系列码、且序号位吻合，再切出前缀并校验 1-4 位大写字母，全部满足才采信；任何一步对不上都
+-- 不写入，留给回填 c 的占位哨兵，绝不套用 @current_prefix 顶替。
 UPDATE `base_yz_series_seq_reservation` AS r
 INNER JOIN `base_tag` AS t ON t.id = r.series_tag_id
 SET r.series_code = t.series_code,
-    r.code_prefix = @current_prefix
+    r.code_prefix = SUBSTRING(r.product_code, 1, LENGTH(r.product_code) - 4)
 WHERE r.series_code IS NULL
-  AND t.series_code IS NOT NULL;
+  AND t.series_code IS NOT NULL
+  AND r.product_code IS NOT NULL
+  AND LENGTH(r.product_code) BETWEEN 5 AND 8
+  AND RIGHT(r.product_code, 2) = LPAD(r.series_seq, 2, '0')
+  AND SUBSTRING(r.product_code, LENGTH(r.product_code) - 3, 2) = t.series_code
+  AND SUBSTRING(r.product_code, 1, LENGTH(r.product_code) - 4) REGEXP '^[A-Z]{1,4}$';
 
 -- 回填 c：两条都反推不出的记录，写入不合法格式的占位哨兵，标记为待人工核对，不影响新查询逻辑判断唯一性。
 UPDATE `base_yz_series_seq_reservation`

@@ -1808,6 +1808,144 @@ async function main() {
       'P1-B：回填登记后，该商品被删除，同序号导入仍应被永久占用拒绝',
     )
     pass('P1-B：模拟占用表为空但已有存活 YZ 商品——重新跑结构初始化后回填登记已补齐；商品删除后同序号导入仍被拒绝')
+
+    // ============ 第 12 批：PR #109 第七轮评审修复（P1-A）============
+
+    // 用例 53（P1-A）：升级冲突检查的排除粒度从"整件商品"收窄到"候选编码所属的那条 SKU"——同一商品
+    // 内 SKU A 的旧编码恰好等于 SKU B 升级后将生成的新编码时必须被拒绝。此前用 Not(productId) 排除
+    // 整件商品自身，是为了放行"SKU 自己的新编码等于自己的旧编码"，但连带放过了同商品内部、不同 SKU
+    // 之间的真实碰撞。
+    const p12IntraTag = await createSeriesTag('SU')
+    const p12IntraProduct = await productService.create({
+      productName: `p12-intra-conflict-${verifySeed}`,
+      pinyinAbbr: 'SU',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+      specGroups: [{ name: '颜色', values: ['红色', '蓝色'] }],
+      skus: [
+        { specValues: { 颜色: '红色' }, defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 0 },
+        { specValues: { 颜色: '蓝色' }, defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 1 },
+      ],
+    } as Parameters<typeof productService.create>[0], actor)
+    assert.equal(p12IntraProduct.skus.length, 2)
+    const p12SkuRed = p12IntraProduct.skus.find((sku) => sku.specValues['颜色'] === '红色')
+    const p12SkuBlue = p12IntraProduct.skus.find((sku) => sku.specValues['颜色'] === '蓝色')
+    assert.ok(p12SkuRed && p12SkuBlue, '应存在红色/蓝色两条 SKU')
+
+    const p12PreviewBefore = await productService.previewProductYzUpgrade(p12IntraProduct.id, p12IntraTag.id)
+    assert.equal(p12PreviewBefore.blockingReason, null, '设置冲突前预检不应有 blockingReason')
+    const p12BlueChange = p12PreviewBefore.skuChanges.find((change) => change.skuId === String(p12SkuBlue!.id))
+    assert.ok(p12BlueChange, '预检应包含蓝色 SKU 的编码变化')
+    const p12PredictedBlueCode = p12BlueChange!.newSkuCode
+
+    // 把红色 SKU 当前的 skuCode 显式改成"蓝色 SKU 升级后将生成的新编码"，制造"SKU A 的旧编码恰好
+    // 等于 SKU B 升级后新编码"的场景。此时这个编码字符串还不属于任何一条现存 SKU（蓝色还没升级），
+    // 普通保存应能放行（两条不同商品也没有其它 SKU 占用它）。
+    const p12AfterSetRedCode = await productService.update(p12IntraProduct.id, {
+      specGroups: [{ name: '颜色', values: ['红色', '蓝色'] }],
+      skus: [
+        { id: p12SkuRed!.id, specValues: { 颜色: '红色' }, defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 0, skuCode: p12PredictedBlueCode },
+        { id: p12SkuBlue!.id, specValues: { 颜色: '蓝色' }, defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 1 },
+      ],
+    } as Parameters<typeof productService.update>[1], actor)
+    const p12RedAfterSet = p12AfterSetRedCode.skus.find((sku) => sku.id === p12SkuRed!.id)
+    assert.equal(p12RedAfterSet!.skuCode, p12PredictedBlueCode, '红色 SKU 的当前 skuCode 应已改为蓝色 SKU 升级后将生成的编码')
+
+    const p12PreviewAfter = await productService.previewProductYzUpgrade(p12IntraProduct.id, p12IntraTag.id)
+    assert.ok(p12PreviewAfter.blockingReason, 'P1-A：本商品内 SKU A 的旧编码等于 SKU B 升级后新编码时，预检应给出 blockingReason')
+    assert.ok(
+      p12PreviewAfter.blockingReason!.includes(p12PredictedBlueCode),
+      'blockingReason 应指明具体冲突的编码',
+    )
+
+    await assert.rejects(
+      () => productService.upgradeProductToYzCode(p12IntraProduct.id, { primarySeriesTagId: p12IntraTag.id }, actor),
+      (error: unknown) => assertBizErrorWithStatus(error, 409),
+      'P1-A：本商品内 SKU 之间的旧编码/新编码碰撞，正式升级应抛 409（排除粒度已收窄到候选编码所属的 SKU，不能再用 Not(productId) 放过同商品内部碰撞）',
+    )
+    pass('P1-A：升级冲突排除粒度收窄到"候选编码所属的那条 SKU"——同商品内 SKU A 旧编码=SKU B 新编码时，预检给出 blockingReason，正式升级抛 409')
+
+    // 用例 54（P1-A 自证）：合法情形仍须放行——某条 SKU 自己的新编码恰好等于它自己升级前的旧编码时
+    // 不应被拦截，证明收窄后的排除逻辑仍保留了这唯一合法的豁免。
+    const p12SelfTag = await createSeriesTag('SV')
+    const p12SelfProduct = await productService.create({
+      productName: `p12-self-exempt-${verifySeed}`,
+      pinyinAbbr: 'SV',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+    } as Parameters<typeof productService.create>[0], actor)
+    const p12SelfPreview = await productService.previewProductYzUpgrade(p12SelfProduct.id, p12SelfTag.id)
+    const p12SelfPredictedCode = p12SelfPreview.skuChanges[0]?.newSkuCode
+    assert.ok(p12SelfPredictedCode, '预检应能给出升级后的 skuCode')
+
+    const p12SelfSku = p12SelfProduct.skus[0]
+    await productService.update(p12SelfProduct.id, {
+      skus: [
+        { id: p12SelfSku.id, specValues: {}, defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 0, skuCode: p12SelfPredictedCode },
+      ],
+    } as Parameters<typeof productService.update>[1], actor)
+
+    const p12SelfPreviewAfter = await productService.previewProductYzUpgrade(p12SelfProduct.id, p12SelfTag.id)
+    assert.equal(
+      p12SelfPreviewAfter.blockingReason,
+      null,
+      'P1-A：某条 SKU 自己的新编码等于自己升级前的旧编码，属于唯一合法豁免，不应被拦截',
+    )
+    const p12SelfUpgraded = await productService.upgradeProductToYzCode(p12SelfProduct.id, { primarySeriesTagId: p12SelfTag.id }, actor)
+    assert.equal(p12SelfUpgraded.skus[0].skuCode, p12SelfPredictedCode, '升级后 skuCode 应等于预测值')
+    assert.equal(p12SelfUpgraded.skus[0].legacySkuCode, p12SelfPredictedCode, '升级后 legacySkuCode 应等于升级前的旧编码（与新编码相同）')
+    pass('P1-A 自证：某条 SKU 自己的新编码等于自己的旧编码属于唯一合法豁免，预检不拦截，正式升级成功')
+
+    // 用例 55（P1-A）：普通保存路径（assertSkuRelationsValid）同样要纳入"本商品内其它 SKU 的历史编码"
+    // ——此前只查跨商品（Not(product.id)），批内 seen Map 又只覆盖 skuCode/barcode 两列，本商品内某条
+    // SKU 的 skuCode 等于本商品另一条 SKU 的 legacySkuCode 时两边都漏判。
+    const p12SiblingLegacyCode = `P12-SIBLING-LEGACY-${verifySeed}`
+    const p12OrdinaryProduct = await productService.create({
+      productName: `p12-ordinary-intra-${verifySeed}`,
+      pinyinAbbr: 'SW',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+      specGroups: [{ name: '颜色', values: ['紫色', '橙色'] }],
+      skus: [
+        { specValues: { 颜色: '紫色' }, defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 0 },
+        { specValues: { 颜色: '橙色' }, defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 1 },
+      ],
+    } as Parameters<typeof productService.create>[0], actor)
+    const p12SkuPurple = p12OrdinaryProduct.skus.find((sku) => sku.specValues['颜色'] === '紫色')
+    const p12SkuOrange = p12OrdinaryProduct.skus.find((sku) => sku.specValues['颜色'] === '橙色')
+    assert.ok(p12SkuPurple && p12SkuOrange, '应存在紫色/橙色两条 SKU')
+
+    // legacySkuCode 不经普通建档/编辑接口写入，这里沿用文件里已有的直接写库惯例，模拟"橙色 SKU 曾经历
+    // 过一次编码搬迁，留下了历史编码"。
+    await skuRepo.update({ id: p12SkuOrange!.id }, { legacySkuCode: p12SiblingLegacyCode })
+
+    await assert.rejects(
+      () => productService.update(p12OrdinaryProduct.id, {
+        specGroups: [{ name: '颜色', values: ['紫色', '橙色'] }],
+        skus: [
+          { id: p12SkuPurple!.id, specValues: { 颜色: '紫色' }, defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 0, skuCode: p12SiblingLegacyCode },
+          { id: p12SkuOrange!.id, specValues: { 颜色: '橙色' }, defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 1 },
+        ],
+      } as Parameters<typeof productService.update>[1], actor),
+      (error: unknown) => assertBizErrorWithStatus(error, 409) && (error as InstanceType<typeof BizError>).message.includes(p12SiblingLegacyCode),
+      'P1-A：本商品内某条 SKU 的 skuCode 等于另一条 SKU 的历史编码（legacySkuCode）时，普通保存路径应抛 409',
+    )
+
+    const p12PurpleUnchanged = await skuRepo.findOneBy({ id: p12SkuPurple!.id })
+    assert.equal(p12PurpleUnchanged!.skuCode, p12SkuPurple!.skuCode, '被拒绝的写入不应残留，紫色 SKU 的 skuCode 应保持原样')
+    pass('P1-A：assertSkuRelationsValid 已纳入本商品内其它 SKU 的 legacySkuCode 冲突检查——普通保存路径同样抛 409，且不残留写入')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()

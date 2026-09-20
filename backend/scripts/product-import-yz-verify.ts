@@ -318,6 +318,55 @@ async function main() {
     const p1NextSeq = await runInTransaction((manager) => allocateSeriesSeq(manager, p1Tag.id, 'ZP', prefix))
     assert.equal(p1NextSeq, 6, `已删除商品占用过序号 5，allocateSeriesSeq 应跳到序号 6，实际 ${p1NextSeq}`)
     pass('系列内序号永久占用（P1）：商品被物理删除后，导入预览阶段对同一系列同一序号给出行级错误（带历史编码），allocateSeriesSeq 自动跳过该序号')
+
+    // ============ 用例 9：真实遍历上界（P2-C，PR #109 第七轮评审） ============
+    // ExcelJS 在工作表仅有格式、没有数据的靠后行上，会给出很小的 actualRowCount 但极大的 rowCount。
+    // 构造一个只在第 1,000,000 行设置过行高（不写任何单元格值）的工作簿：修复前的行数上限检查用
+    // actualRowCount 校验，循环却用 Math.max(actualRowCount, rowCount) 撑大上界，导致每次预览/导入
+    // 都要执行近百万次 getRow，绕开行数限制并长时间占用服务进程。改用
+    // sheet.eachRow({ includeEmpty: false }, ...) 后应该只遍历真正带值的行。
+    const hugeRowCountWorkbook = new ExcelJS.Workbook()
+    const hugeRowCountSheet = hugeRowCountWorkbook.addWorksheet('导入')
+    hugeRowCountSheet.addRow(['品类', '序号', '商品', '款式/颜色', '尺码', '价格'])
+    hugeRowCountSheet.addRow(['P2C 复测类', 1, 'P2C 复测商品', '', '', 1])
+    // 只设置行高，不写任何单元格值——制造 actualRowCount 很小但 rowCount 极大的场景，复现缺陷前提。
+    hugeRowCountSheet.getRow(1_000_000).height = 20
+    const hugeRowCountBuffer = Buffer.from(await hugeRowCountWorkbook.xlsx.writeBuffer())
+
+    // 独立探测一遍，确认这份夹具确实复现了 actualRowCount 很小、rowCount 极大的失真元数据，
+    // 而不是巧合通过下面的耗时断言。
+    const probeWorkbook = new ExcelJS.Workbook()
+    await probeWorkbook.xlsx.load(hugeRowCountBuffer as unknown as Parameters<typeof probeWorkbook.xlsx.load>[0])
+    const probeSheet = probeWorkbook.worksheets[0]
+    assert.ok(probeSheet, '探测工作簿应能读出工作表')
+    assert.equal(probeSheet!.actualRowCount, 2, `夹具应只有 2 行带值（表头 + 1 行数据），实际 actualRowCount=${probeSheet!.actualRowCount}`)
+    assert.ok(probeSheet!.rowCount >= 1_000_000, `夹具应因为设置过行高而把 rowCount 撑到百万级，实际 rowCount=${probeSheet!.rowCount}`)
+
+    const hugeRowCountStart = Date.now()
+    const hugeRowCountPreview = await productImportYzService.preview(hugeRowCountBuffer)
+    const hugeRowCountElapsedMs = Date.now() - hugeRowCountStart
+    assert.ok(
+      hugeRowCountElapsedMs < 5000,
+      `P2-C：actualRowCount 很小、rowCount 极大的工作簿，预览必须在合理时间内返回（实际耗时 ${hugeRowCountElapsedMs}ms），不能被拖到近百万次 getRow`,
+    )
+    assert.equal(hugeRowCountPreview.rows.length, 1, `P2-C：预览应只解析出真正带值的 1 行数据，实际 ${hugeRowCountPreview.rows.length}`)
+    pass(`P2-C：真实遍历上界——actualRowCount 很小但 rowCount 达百万级的工作簿，预览在 ${hugeRowCountElapsedMs}ms 内返回且仅解析出真实的 1 行数据`)
+
+    // 行数上限检查必须作用在真实上界上：构造一份真正超过上限（2000 行）的夹具，预览应明确拒绝，
+    // 而不是被某个失真的计数值放过。
+    const overLimitWorkbook = new ExcelJS.Workbook()
+    const overLimitSheet = overLimitWorkbook.addWorksheet('导入')
+    overLimitSheet.addRow(['品类', '序号', '商品', '款式/颜色', '尺码', '价格'])
+    for (let i = 0; i < 2001; i += 1) {
+      overLimitSheet.addRow(['P2C 超限类', (i % 99) + 1, `P2C 超限商品${i}`, '', '', 1])
+    }
+    const overLimitBuffer = Buffer.from(await overLimitWorkbook.xlsx.writeBuffer())
+    await assert.rejects(
+      productImportYzService.preview(overLimitBuffer),
+      (error: unknown) => error instanceof BizError && error.statusCode === 400,
+      'P2-C：真实数据行数超过上限时预览应拒绝（上限检查作用在真实遍历到的行数上）',
+    )
+    pass('P2-C：行数上限检查作用在真实遍历上界——超过上限的真实数据行数会被拒绝')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()

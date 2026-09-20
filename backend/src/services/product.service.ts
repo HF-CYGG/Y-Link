@@ -984,7 +984,7 @@ export class ProductService {
         manager,
         savedProduct.id,
         newProductCode,
-        updatedSkus.map((sku) => sku.skuCode),
+        updatedSkus.map((sku) => ({ skuId: String(sku.id), newSkuCode: sku.skuCode })),
       )
 
       if (updatedSkus.length) {
@@ -1335,7 +1335,12 @@ export class ProductService {
     // 预检阶段同样要检测跨列编码冲突，让前端在提交升级前就能拦住并展示原因。
     const codeConflictReason = capacityBlockingReason
       ? null
-      : await this.detectUpgradeCodeConflict(manager, product.id, newProductCode, skuChanges.map((change) => change.newSkuCode))
+      : await this.detectUpgradeCodeConflict(
+        manager,
+        product.id,
+        newProductCode,
+        skuChanges.map((change) => ({ skuId: change.skuId, newSkuCode: change.newSkuCode })),
+      )
 
     return {
       productId: normalizeEntityId(product.id),
@@ -2087,14 +2092,21 @@ export class ProductService {
    * 命中给出统一的中文错误文案，而不是让请求方看到 DB 唯一键报错）。
    *
    * 职责划分：本函数是所有 SKU 写入路径（新建、编辑、默认 SKU 编辑、YZ 生成）共用的最终冲突守门人，
-   * 覆盖范围是 {本批 skuCode, 本批 barcode} × {他家 skuCode, 他家 barcode, 他家 legacySkuCode}。
+   * 覆盖范围是 {本批 skuCode, 本批 barcode} × {他家 skuCode, 他家 barcode, 他家 legacySkuCode}，
+   * 以及（P1-A 第七轮修复起）{本批 skuCode, 本批 barcode} × {本商品其它现存/同批 SKU 的 skuCode,
+   * barcode, legacySkuCode}。
    * 原来紧邻 replaceProductSkus 调用点的 assertNoYzSkuCodeConflict 只检查 YZ 派生出的 skuCode 一列，
    * 是本函数覆盖范围的真子集（本函数还多查了 barcode 一列），且两者作用于同一批 skuEntities、紧挨着
    * 调用，继续保留只会重复同一次数据库查询、还可能输出不一致的错误文案，因此本轮已将其合并进本函数，
    * 删除了 assertNoYzSkuCodeConflict 本身——不是覆盖变窄，而是本函数已完整吸收了它的检查范围。
+   * P1-A 修复（PR #109 第七轮评审）：本函数原本只查"其他商品"（Not(product.id)）是否有重复编码，
+   * 遗漏了"本商品内部"的 legacySkuCode 碰撞——本批某条 SKU 的 skuCode/barcode 完全可能等于本商品
+   * 另一条 SKU（无论是否在本批内）的 legacySkuCode，跨商品那段查询按 productId 排除掉了本商品，批内
+   * 的 seen Map 又只覆盖本批数组自身，两边都漏。现在批内 seen Map 纳入 legacySkuCode 字段，并新增一次
+   * 按本商品 id 查询、以 SKU 自身 id 精确排除（而不是整商品排除）的同商品冲突检查，补齐这个缺口。
    * detectUpgradeCodeConflict/assertNoUpgradeCodeConflict（编码升级预检与正式升级路径）职责不同，
    * 继续保留独立实现：它们检查的是升级动作算出来、但尚未写入任何 BaseProductSku 实体的候选编码
-   * （newProductCode/newSkuCodes 是字符串数组，此时对应的 SKU 行在 DB 里还是旧编码），不是本函数
+   * （skuCodeChanges 是 {skuId, newSkuCode} 数组，此时对应的 SKU 行在 DB 里还是旧编码），不是本函数
    * 接受的 BaseProductSku 实体数组，签名和调用时机都不同，不能合并。
    */
   private async assertSkuRelationsValid(product: BaseProduct, skus: BaseProductSku[], manager: EntityManager) {
@@ -2116,17 +2128,46 @@ export class ProductService {
       }
     }
 
+    // 本批内部去重：字段集合覆盖 {skuCode, barcode, legacySkuCode}，避免遗漏历史编码——P1-A 修复
+    // （PR #109 第七轮评审）：此前只收集 skuCode/barcode 两列，若本批某条 SKU 的 skuCode/barcode
+    // 恰好等于本批另一条 SKU 的 legacySkuCode（例如升级留下的历史编码被后续编辑误设成别的规格的新
+    // 编码），这里查不出来，跨商品的那段查询又用 Not(product.id) 排除了本商品，两边都会漏判。
+    // owner 用 sku.id（已存在的行）或数组下标（尚未落库的新行）标识，豁免仅限"同一条 SKU 自己"。
     const seen = new Map<string, string>()
-    for (const sku of skus) {
-      for (const code of [sku.skuCode, sku.barcode]) {
+    skus.forEach((sku, index) => {
+      const owner = sku.id ? String(sku.id) : `__new_${index}`
+      for (const code of [sku.skuCode, sku.barcode, sku.legacySkuCode]) {
         if (!code) continue
-        const owner = seen.get(code)
-        if (owner !== undefined && owner !== sku.skuCode) {
+        const existingOwner = seen.get(code)
+        if (existingOwner !== undefined && existingOwner !== owner) {
           throw new BizError(`条码或编码「${code}」在本商品的多个规格中重复`, 409)
         }
-        seen.set(code, sku.skuCode)
+        seen.set(code, owner)
+      }
+    })
+
+    // P1-A 修复（PR #109 第七轮评审）：上面的 seen Map 只能查出"本批提交的数组内部"的重复——若本批
+    // 只是单条 SKU 编辑（如 applyDefaultSkuExtras 只传 [sku]），本商品其余现存 SKU 根本不在 skus
+    // 参数里，批内去重查不出来，必须显式查库比对本商品其它行的 legacySkuCode/skuCode/barcode。
+    // 豁免同样只针对"该 SKU 自己"，用 id 精确排除，不能像升级路径修复前那样直接排除整个商品。
+    const sameProductOthers = await skuRepo.find({
+      where: { productId: product.id },
+      select: ['id', 'skuCode', 'barcode', 'legacySkuCode'],
+    })
+    for (const sku of skus) {
+      const selfId = sku.id ? String(sku.id) : null
+      for (const code of [sku.skuCode, sku.barcode]) {
+        if (!code) continue
+        const hit = sameProductOthers.find((other) =>
+          String(other.id) !== selfId
+          && (other.skuCode === code || other.barcode === code || other.legacySkuCode === code),
+        )
+        if (!hit) continue
+        const conflictField = hit.skuCode === code ? '当前编码' : (hit.barcode === code ? '原厂条码' : '历史编码')
+        throw new BizError(`条码或编码「${code}」与本商品另一规格（ID ${normalizeEntityId(hit.id)}）的${conflictField}重复`, 409)
       }
     }
+
     const submittedCodes = [
       ...new Set(skus.flatMap((sku) => [sku.skuCode, sku.barcode]).filter((code): code is string => Boolean(code))),
     ]
@@ -2605,35 +2646,59 @@ export class ProductService {
 
   /**
    * 升级编码冲突检测：sku_code 与 barcode 只各自唯一，不做跨列约束；lookupByCode 扫码时条码优先命中。
-   * 如果升级生成的 newProductCode / newSkuCode 恰好等于*其他*商品 SKU 的原厂条码或编码，扫描这个刚打印
-   * 出来的 YZ 编码会返回错误的商品。这里用一次批量 IN 查询（不 N+1）检测，命中则返回中文冲突说明；
+   * 如果升级生成的 newProductCode / newSkuCode 恰好等于*其他* SKU 的原厂条码或编码，扫描这个刚打印
+   * 出来的 YZ 编码会返回错误的商品/规格。这里用一次批量 IN 查询（不 N+1）检测，命中则返回中文冲突说明；
    * 预检（previewProductYzUpgrade）把它当 blockingReason 展示，正式升级则据此抛 409 拦截保存。
    * P1-B 修复（PR #109 第五轮评审）：legacySkuCode（历史编码）必须与 barcode/skuCode 同批纳入冲突集合——
    * 另一件已升级商品的历史编码若恰好等于本次升级生成的编码，lookupByCode 里当前 skuCode 的匹配优先级
    * 高于历史编码，那件商品升级前已打印的旧标签会静默指向本商品，这条专用路径不能绕过 legacySkuCode 检查。
+   * P1-A 修复（PR #109 第七轮评审）：排除粒度从"整件商品"收窄到"候选编码所属的那一条 SKU"——此前用
+   * Not(productId) 排除整件商品自身，是为了放行"升级后 SKU 的新编码等于它自己升级前的旧编码"这一合法
+   * 情形，但排除力度过大：同一商品内 SKU A 的旧编码完全可能等于 SKU B 升级后将生成的新编码，两列之间
+   * 没有跨列唯一约束拦得住，升级后 legacySkuCode(A) === skuCode(B)，lookupByCode 按"当前编码优先于历史
+   * 编码"命中 B，A 升级前已打印的标签会静默指向错误规格。现在不再按 productId 过滤（同商品与跨商品的
+   * SKU 一视同仁全部纳入候选冲突集合），改为按"候选编码归属的那条 SKU 自身"逐条判断豁免——只有当命中
+   * 的行恰好就是产生该候选编码的那条 SKU 本身时才放行，其余一律视为冲突（无论是本商品的兄弟 SKU 还是
+   * 别的商品的 SKU）。newProductCode 不属于任何一条 SKU（不是某条 SKU 升级出来的候选），不享有任何豁免。
    */
   private async detectUpgradeCodeConflict(
     manager: EntityManager,
     productId: string,
     newProductCode: string,
-    newSkuCodes: string[],
+    skuCodeChanges: Array<{ skuId: string; newSkuCode: string }>,
   ): Promise<string | null> {
-    const codes = [...new Set([newProductCode, ...newSkuCodes].filter(Boolean))]
+    // codeOwners：候选编码 -> 产生该编码的 SKU id。newProductCode 没有归属 SKU，记 null，不享有任何豁免。
+    const codeOwners = new Map<string, string | null>()
+    if (newProductCode) codeOwners.set(newProductCode, null)
+    for (const change of skuCodeChanges) {
+      if (change.newSkuCode && !codeOwners.has(change.newSkuCode)) {
+        codeOwners.set(change.newSkuCode, change.skuId)
+      }
+    }
+    const codes = [...codeOwners.keys()]
     if (!codes.length) return null
     const skuRepo = manager.getRepository(BaseProductSku)
     const conflicts = await skuRepo.find({
       where: [
-        { productId: Not(productId), barcode: In(codes) },
-        { productId: Not(productId), skuCode: In(codes) },
-        { productId: Not(productId), legacySkuCode: In(codes) },
+        { barcode: In(codes) },
+        { skuCode: In(codes) },
+        { legacySkuCode: In(codes) },
       ],
       select: ['id', 'productId', 'skuCode', 'barcode', 'legacySkuCode'],
     })
     if (!conflicts.length) return null
-    const first = conflicts.find((row) => row.barcode && codes.includes(row.barcode)) ?? conflicts[0]
-    const conflictCode = codes.find((code) => code === first.barcode || code === first.skuCode || code === first.legacySkuCode) ?? codes[0]
-    const conflictField = first.barcode === conflictCode ? '原厂条码' : (first.skuCode === conflictCode ? 'SKU 编码' : '历史编码')
-    return `升级生成的编码「${conflictCode}」与其他商品（ID ${normalizeEntityId(first.productId)}）SKU 的${conflictField}冲突，请先处理该冲突后再升级`
+    for (const row of conflicts) {
+      const rowId = String(row.id)
+      for (const [code, ownerId] of codeOwners) {
+        const matchesField = code === row.barcode || code === row.skuCode || code === row.legacySkuCode
+        if (!matchesField) continue
+        if (ownerId !== null && ownerId === rowId) continue // 唯一合法豁免：该 SKU 自己的新编码等于自己的历史/当前编码
+        const conflictField = row.barcode === code ? '原厂条码' : (row.skuCode === code ? 'SKU 编码' : '历史编码')
+        const scope = String(row.productId) === productId ? '本商品' : `其他商品（ID ${normalizeEntityId(row.productId)}）`
+        return `升级生成的编码「${code}」与${scope} SKU 的${conflictField}冲突，请先处理该冲突后再升级`
+      }
+    }
+    return null
   }
 
   /** 正式升级路径专用：冲突时直接抛 409，阻止保存。 */
@@ -2641,9 +2706,9 @@ export class ProductService {
     manager: EntityManager,
     productId: string,
     newProductCode: string,
-    newSkuCodes: string[],
+    skuCodeChanges: Array<{ skuId: string; newSkuCode: string }>,
   ): Promise<void> {
-    const reason = await this.detectUpgradeCodeConflict(manager, productId, newProductCode, newSkuCodes)
+    const reason = await this.detectUpgradeCodeConflict(manager, productId, newProductCode, skuCodeChanges)
     if (reason) {
       throw new BizError(reason, 409)
     }

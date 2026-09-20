@@ -544,8 +544,12 @@ async function resolveSqliteYzCodePrefix(dataSource: DataSource): Promise<string
 
 /**
  * 按当前前缀反推某条 product_code 对应的系列码：定长格式 `${prefix}${两位大写系列码}${两位数字序号}`，
- * 且反推出的两位数字序号必须与传入的 seriesSeq 完全一致才算匹配成功。与 053 脚本「回填 a」、
- * MySQL 053 新增的存活商品回填段口径完全一致。反推失败返回 null，调用方应跳过、不猜测。
+ * 且反推出的两位数字序号必须与传入的 seriesSeq 完全一致才算匹配成功。与 MySQL 053 新增的存活商品
+ * 回填段口径完全一致（backfillSqliteLiveYzProductReservations 专用）。反推失败返回 null，调用方应
+ * 跳过、不猜测。
+ * 注意：这个函数只适用于"当前仍存活的商品"场景——这类商品的 product_code 理应反映当前配置。历史
+ * 存量登记记录（series_code/code_prefix 回填）不应再用这个函数，见下面 parseYzProductCodeStructure
+ * 的注释（P2-B 修复，PR #109 第七轮评审）。
  */
 function deriveYzSeriesCodeFromProductCode(productCode: string | null | undefined, seriesSeq: number, currentPrefix: string): string | null {
   const code = productCode ?? ''
@@ -555,6 +559,53 @@ function deriveYzSeriesCodeFromProductCode(productCode: string | null | undefine
     && /^[A-Z]{2}$/.test(code.slice(currentPrefix.length, currentPrefix.length + 2))
     && code.slice(currentPrefix.length + 2) === String(seriesSeq).padStart(2, '0')
   return matches ? code.slice(currentPrefix.length, currentPrefix.length + 2) : null
+}
+
+/**
+ * 结构化解析 product_code 快照，还原登记当时的真实前缀与系列码，不依赖当前全局前缀（P2-B 修复，
+ * PR #109 第七轮评审）。
+ * 背景：若某环境在写入占用记录之后修改过全局前缀，旧实现按"当前前缀"反推——反推失败后退化到按标签
+ * 反查 series_code，但 code_prefix 却被强制写成当前前缀，例如历史编码 `ABPX01` 会被错误登记成
+ * `YZ/PX/01`：把前缀切回 AB 之后 `ABPX01` 可以被重新分配（旧标签指向新商品），同时还错误占用了一个
+ * 根本不存在的 `YZPX01`。
+ * 口径：YZ 编码定长格式 `${前缀 1-4 位大写字母}${系列码 2 位大写字母}${序号 2 位数字}`，序号位已知
+ * （等于这条占用记录自己的 series_seq 列，不需要反推），因此可以从字符串尾部反切：末两位必须等于该行
+ * series_seq 补零后的值，其前两位是系列码，再往前剩下的部分就是前缀——全程不假设前缀等于当前配置，
+ * 前缀曾经改过也能正确还原，也不依赖标签是否还存在。
+ * 解析失败（长度不在 5-8 位区间、序号位不匹配、系列码位不是两位大写字母、前缀位不是 1-4 位大写字母）
+ * 一律返回 null，调用方必须让该行保持待人工处理，绝不能用当前前缀顶替。
+ */
+function parseYzProductCodeStructure(
+  productCode: string | null | undefined,
+  seriesSeq: number,
+): { seriesCode: string; codePrefix: string } | null {
+  const code = productCode ?? ''
+  if (code.length < 5 || code.length > 8) return null
+  const expectedSeqSuffix = String(seriesSeq).padStart(2, '0')
+  if (!code.endsWith(expectedSeqSuffix)) return null
+  const seriesCode = code.slice(-4, -2)
+  if (!/^[A-Z]{2}$/.test(seriesCode)) return null
+  const codePrefix = code.slice(0, -4)
+  if (!/^[A-Z]{1,4}$/.test(codePrefix)) return null
+  return { seriesCode, codePrefix }
+}
+
+/**
+ * 结构化解析的第二优先级：series_code 已知（通常来自标签反查），只需要反推 codePrefix。同样要求
+ * product_code 末尾恰好是 `${knownSeriesCode}${series_seq 补零}`，且剩余前缀部分满足 1-4 位大写
+ * 字母才采信——校验的是"标签给出的系列码确实出现在 product_code 该有的位置"，而不是盲目采信任意
+ * 两位大写字母，因此比 parseYzProductCodeStructure 多一层交叉验证。解析失败返回 null。
+ */
+function parseYzCodePrefixWithKnownSeriesCode(
+  productCode: string | null | undefined,
+  seriesSeq: number,
+  knownSeriesCode: string,
+): string | null {
+  const code = productCode ?? ''
+  const suffix = `${knownSeriesCode}${String(seriesSeq).padStart(2, '0')}`
+  if (!code.endsWith(suffix)) return null
+  const codePrefix = code.slice(0, code.length - suffix.length)
+  return /^[A-Z]{1,4}$/.test(codePrefix) ? codePrefix : null
 }
 
 /**
@@ -650,9 +701,12 @@ async function backfillSqliteLegacySkuCodeFromBarcode(dataSource: DataSource): P
  * 这里用等价口径补齐：先以可空列补齐，再按与 053 脚本相同的优先级在 JS 里逐行回填——SQLite 没有
  * REGEXP，行数也远小于生产 MySQL 规模（这张表只在 YZ 商品建档/升级/导入时才追加一行），逐行处理比
  * 拼一段用不上索引的正则 SQL 更直接、更易读。
- * 回填口径（与 053 脚本一致，见该文件注释）：
- *   a) 用当前全局前缀反推 product_code（最可靠，标签可能已删但 product_code 是登记时的快照）；
- *   b) 反推失败则按 series_tag_id 反查 base_tag.series_code（标签已删除则查不到，跳过）；
+ * 回填口径（与 053 脚本一致，见该文件注释；P2-B 修复后两者均改为结构化解析，不再依赖当前前缀）：
+ *   a) 结构化解析 product_code 快照（parseYzProductCodeStructure）：不依赖当前前缀，仅用这行自己的
+ *      series_seq 列 + product_code 的定长结构直接反切出 series_code 与 code_prefix；
+ *   b) 结构化解析失败则按 series_tag_id 反查 base_tag.series_code（标签已删除则查不到，跳过），拿到
+ *      系列码后仍用同一套结构化反切规则反推前缀（parseYzCodePrefixWithKnownSeriesCode），反推失败
+ *      同样不采信，绝不会退回到套用当前前缀这种做法；
  *   c) 两条都反推不出的记录，写入不合法格式的占位哨兵 series_code='??'、code_prefix='?'，标记待人工核对。
  * 列先以可空列补齐，值全部回填完成后再收紧 NOT NULL——收紧动作本身不在这里做（P2-C 修复见下面
  * rebuildSqliteYzReservationConstraints 的说明：不依赖 synchronize()，由准备函数自己完成整表重建）。
@@ -691,14 +745,29 @@ async function prepareSqliteYzReservationSeriesCodeColumns(dataSource: DataSourc
     }
 
     for (const row of pendingRows) {
-      // 回填 a：按当前前缀反推 product_code。
-      let seriesCode = deriveYzSeriesCodeFromProductCode(row.product_code, Number(row.series_seq), currentPrefix)
-      // 回填 b：反推失败则退化为按 series_tag_id 反查标签当前的 series_code。
-      if (!seriesCode) {
-        seriesCode = tagSeriesCodeById.get(String(row.series_tag_id)) ?? null
+      const seriesSeqNumber = Number(row.series_seq)
+      // 回填 a：结构化解析 product_code 自身结构，不依赖当前前缀（P2-B 修复，PR #109 第七轮评审）。
+      let seriesCode: string | null = null
+      let codePrefix: string | null = null
+      const structural = parseYzProductCodeStructure(row.product_code, seriesSeqNumber)
+      if (structural) {
+        seriesCode = structural.seriesCode
+        codePrefix = structural.codePrefix
+      } else {
+        // 回填 b：结构化解析失败则退化为按 series_tag_id 反查标签当前的 series_code，再用同一套
+        // 结构化反切规则校验并反推前缀，绝不直接套用当前前缀。
+        const tagSeriesCode = tagSeriesCodeById.get(String(row.series_tag_id)) ?? null
+        if (tagSeriesCode) {
+          const parsedPrefix = parseYzCodePrefixWithKnownSeriesCode(row.product_code, seriesSeqNumber, tagSeriesCode)
+          if (parsedPrefix) {
+            seriesCode = tagSeriesCode
+            codePrefix = parsedPrefix
+          }
+        }
       }
+      // 回填 c：两条都反推不出，写入占位哨兵，标记待人工核对——绝不用当前前缀顶替 codePrefix。
       const finalSeriesCode = seriesCode ?? '??'
-      const finalCodePrefix = seriesCode ? currentPrefix : '?'
+      const finalCodePrefix = codePrefix ?? '?'
       await dataSource.query(
         'UPDATE "base_yz_series_seq_reservation" SET series_code = ?, code_prefix = ? WHERE id = ? AND (series_code IS NULL OR code_prefix IS NULL)',
         [finalSeriesCode, finalCodePrefix, row.id],
