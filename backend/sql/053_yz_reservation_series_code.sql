@@ -59,16 +59,6 @@ SET @ddl = IF(
 );
 PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
--- 当前全局前缀（读不到则回退默认值 'YZ'，与 product-code.service.ts 的 getProductCodePrefix 口径一致）。
--- P2-B 修复后，@current_prefix 不再用于下面两步回填（结构化解析不依赖它），仅保留给本文件末尾
--- "仍存活 YZ 商品" 的补登记段使用——那一段面向的是当下仍在用当前前缀的活跃商品，语义与历史存量数据
--- 的反推不同，继续沿用当前前缀是合理的（见该段落自己的注释）。
-SET @current_prefix := (
-  SELECT IF(config_value REGEXP '^[A-Z]{1,4}$', config_value, 'YZ')
-  FROM system_configs WHERE config_key = 'product.yz_code.prefix' LIMIT 1
-);
-SET @current_prefix := COALESCE(@current_prefix, 'YZ');
-
 -- 回填 a：结构化解析 product_code 快照，不依赖当前前缀——已知 series_seq（本行自带），从字符串尾部
 -- 反切：长度落在 5-8 位区间内，末两位须等于 series_seq 补零后的值，其前两位切作系列码（须为两位大写
 -- 字母），再往前剩下的部分切作前缀（须为 1-4 位大写字母），两项校验都通过才采信。
@@ -85,7 +75,7 @@ WHERE series_code IS NULL
 -- 回填 b：结构化解析失败则退化为按 series_tag_id 反查标签当前的 series_code（标签已删除则查不到，
 -- 跳过），拿到系列码后仍用同一套结构化反切规则反推前缀——校验 product_code 对应位置的子串确实等于
 -- 标签给出的系列码、且序号位吻合，再切出前缀并校验 1-4 位大写字母，全部满足才采信；任何一步对不上都
--- 不写入，留给回填 c 的占位哨兵，绝不套用 @current_prefix 顶替。
+-- 不写入，留给回填 c 的占位哨兵，绝不套用当前全局前缀顶替。
 UPDATE `base_yz_series_seq_reservation` AS r
 INNER JOIN `base_tag` AS t ON t.id = r.series_tag_id
 SET r.series_code = t.series_code,
@@ -149,15 +139,19 @@ PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 --       product_code 明明还在，完全具备回填条件，此前漏掉了）。这批商品一旦后续被删除，其（系列, 序号）
 --       组合此前从未登记为永久占用，导入相同序号仍会成功，静默复用旧印刷标签对应的编码指向新商品。
 --       053 才引入 series_code/code_prefix 两列，因此回填写在这里，不改 052 的建表段。
--- 口径：与上面「回填 a」保持一致——按当前全局前缀 @current_prefix 反推 base_product.product_code
---       （`${prefix}${系列码}${两位序号补零}` 定长格式），且反推出的两位数字序号必须与
---       base_product.series_seq 完全一致才登记；不追加回填 b/c 那样的标签反查或占位哨兵——这里要
---       补登记的是"确实存活、结构完整"的商品，反推失败大概率意味着 product_code 是手工改过的脏数据
---       或前缀在这期间变过，登记一个猜测出来的 series_code 比不登记更危险（会错误拦住真实合法的序号），
---       因此反推失败的行跳过不登记，留给人工核对，不写占位哨兵。
+-- 口径（P1-B 修复，PR #109 第八轮评审）：不再依赖当前全局前缀反推，改成与上面「回填 a」完全一致的
+--       结构化反切——已知 series_seq（本行 base_product.series_seq 自带），从 product_code 字符串
+--       尾部反切：末两位须等于该行 series_seq 补零后的值，其前两位切作系列码（须两位大写字母），
+--       再往前剩下的部分切作前缀（须 1-4 位大写字母），长度落在 5-8 位区间，全部满足才采信。
+--       旧实现按当前全局前缀 @current_prefix 反推——如果某环境先用旧前缀创建过 YZ 商品、随后又切换
+--       了前缀，这些旧前缀商品的 product_code 不匹配当前前缀，回填时会被 REGEXP 过滤掉、完全不会
+--       写入占用表；这些商品一旦被删除，只要前缀再切回旧值，导入侧显式指定原序号就能重新分配出与
+--       已打印旧标签完全相同的编码，静默指向新商品。改成结构化反切后不再受前缀是否变过的影响。
+--       不追加回填 b/c 那样的标签反查或占位哨兵——这里要补登记的是"确实存活、结构完整"的商品，
+--       反推失败大概率意味着 product_code 是手工改过的脏数据，登记一个猜测出来的 series_code 比
+--       不登记更危险（会错误拦住真实合法的序号），因此反推失败的行跳过不登记，留给人工核对。
 -- 范围：base_product.code_scheme = 'yz' 且 primary_series_tag_id / series_seq / product_code 三者
---       均非空（这是"曾经完整走过 YZ 生成路径"的判定条件），且这三个字段拼出的编码符合当前前缀下的
---       定长规则。
+--       均非空（这是"曾经完整走过 YZ 生成路径"的判定条件），且 product_code 满足上述结构化反切规则。
 -- 幂等：NOT EXISTS 子查询按权威唯一键 (code_prefix, series_code, series_seq) 判断是否已登记，可安全
 --       重放；不区分该记录是此前已存在还是本次新插入，重复执行不会产生重复行或触发唯一索引冲突。
 INSERT INTO `base_yz_series_seq_reservation` (`series_tag_id`, `series_seq`, `product_code`, `series_code`, `code_prefix`)
@@ -165,18 +159,20 @@ SELECT
   p.`primary_series_tag_id`,
   p.`series_seq`,
   p.`product_code`,
-  SUBSTRING(p.`product_code`, LENGTH(@current_prefix) + 1, 2),
-  @current_prefix
+  SUBSTRING(p.`product_code`, LENGTH(p.`product_code`) - 3, 2),
+  SUBSTRING(p.`product_code`, 1, LENGTH(p.`product_code`) - 4)
 FROM `base_product` AS p
 WHERE p.`code_scheme` = 'yz'
   AND p.`primary_series_tag_id` IS NOT NULL
   AND p.`series_seq` IS NOT NULL
   AND p.`product_code` IS NOT NULL
-  AND p.`product_code` REGEXP CONCAT('^', @current_prefix, '[A-Z]{2}[0-9]{2}$')
-  AND CAST(SUBSTRING(p.`product_code`, LENGTH(@current_prefix) + 3, 2) AS UNSIGNED) = p.`series_seq`
+  AND LENGTH(p.`product_code`) BETWEEN 5 AND 8
+  AND RIGHT(p.`product_code`, 2) = LPAD(p.`series_seq`, 2, '0')
+  AND SUBSTRING(p.`product_code`, LENGTH(p.`product_code`) - 3, 2) REGEXP '^[A-Z]{2}$'
+  AND SUBSTRING(p.`product_code`, 1, LENGTH(p.`product_code`) - 4) REGEXP '^[A-Z]{1,4}$'
   AND NOT EXISTS (
     SELECT 1 FROM `base_yz_series_seq_reservation` AS r
-    WHERE r.`code_prefix` = @current_prefix
-      AND r.`series_code` = SUBSTRING(p.`product_code`, LENGTH(@current_prefix) + 1, 2)
+    WHERE r.`code_prefix` = SUBSTRING(p.`product_code`, 1, LENGTH(p.`product_code`) - 4)
+      AND r.`series_code` = SUBSTRING(p.`product_code`, LENGTH(p.`product_code`) - 3, 2)
       AND r.`series_seq` = p.`series_seq`
   );

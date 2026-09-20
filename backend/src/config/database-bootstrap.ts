@@ -532,35 +532,6 @@ async function prepareSqliteOrderSourceDocColumns(dataSource: DataSource): Promi
   )
 }
 
-/** 当前 YZ 编码全局前缀：读不到或格式不合法（不是 1-4 位大写字母）时回退默认值 'YZ'，与
- * product-code.service.ts 的 getProductCodePrefix、053 脚本的 @current_prefix 口径一致。 */
-async function resolveSqliteYzCodePrefix(dataSource: DataSource): Promise<string> {
-  const prefixConfigRows: Array<{ config_value: string | null }> = await dataSource.query(
-    "SELECT config_value FROM system_configs WHERE config_key = 'product.yz_code.prefix' LIMIT 1",
-  ).catch(() => [])
-  const configuredPrefix = (prefixConfigRows[0]?.config_value ?? '').trim()
-  return /^[A-Z]{1,4}$/.test(configuredPrefix) ? configuredPrefix : 'YZ'
-}
-
-/**
- * 按当前前缀反推某条 product_code 对应的系列码：定长格式 `${prefix}${两位大写系列码}${两位数字序号}`，
- * 且反推出的两位数字序号必须与传入的 seriesSeq 完全一致才算匹配成功。与 MySQL 053 新增的存活商品
- * 回填段口径完全一致（backfillSqliteLiveYzProductReservations 专用）。反推失败返回 null，调用方应
- * 跳过、不猜测。
- * 注意：这个函数只适用于"当前仍存活的商品"场景——这类商品的 product_code 理应反映当前配置。历史
- * 存量登记记录（series_code/code_prefix 回填）不应再用这个函数，见下面 parseYzProductCodeStructure
- * 的注释（P2-B 修复，PR #109 第七轮评审）。
- */
-function deriveYzSeriesCodeFromProductCode(productCode: string | null | undefined, seriesSeq: number, currentPrefix: string): string | null {
-  const code = productCode ?? ''
-  const expectedLength = currentPrefix.length + 4
-  const matches = code.length === expectedLength
-    && code.startsWith(currentPrefix)
-    && /^[A-Z]{2}$/.test(code.slice(currentPrefix.length, currentPrefix.length + 2))
-    && code.slice(currentPrefix.length + 2) === String(seriesSeq).padStart(2, '0')
-  return matches ? code.slice(currentPrefix.length, currentPrefix.length + 2) : null
-}
-
 /**
  * 结构化解析 product_code 快照，还原登记当时的真实前缀与系列码，不依赖当前全局前缀（P2-B 修复，
  * PR #109 第七轮评审）。
@@ -609,16 +580,20 @@ function parseYzCodePrefixWithKnownSeriesCode(
 }
 
 /**
- * P1-B 修复（PR #109 第六轮评审）：补登记迁移执行时仍存活的 YZ 商品占用。
+ * P1-B 修复（PR #109 第六轮评审；第八轮评审修正口径）：补登记迁移执行时仍存活的 YZ 商品占用。
  * 背景与口径见 backend/sql/053_yz_reservation_series_code.sql 同名新增段落——如果这个 SQLite 库在
  * 补齐 series_code/code_prefix 两列之前就已经有存活的 YZ 商品（primary_series_tag_id/series_seq/
  * product_code 三者齐全），这些商品的占用此前从未写进登记表；该商品一旦后续被删除，其（系列, 序号）
  * 组合就没有永久占用记录，导致导入相同序号仍会成功，静默复用旧印刷标签对应的编码指向新商品。
- * 口径与 MySQL 053 的新增回填段一致：只按当前全局前缀反推 product_code，反推失败的行跳过不登记，
- * 不追加标签反查或占位哨兵——这里要补的是"确实存活、结构完整"的商品，猜错 series_code 比不登记更
- * 危险。表行数很小（只在 YZ 商品建档/升级/导入时追加一行），逐行处理没有性能问题。
+ * 口径（第八轮评审修正）：改用与 parseYzProductCodeStructure 完全一致的结构化反切，不再按当前全局
+ * 前缀反推——已知该商品自带的 series_seq，直接从 product_code 尾部反切出系列码与前缀。旧实现按当前
+ * 前缀反推：如果这个环境先用旧前缀创建过 YZ 商品、之后又切换了前缀，这些旧前缀商品因为不匹配当前
+ * 前缀而完全不会写入占用表；该商品被删除后只要前缀切回旧值，导入侧显式指定原序号就能复用旧编码，
+ * 使已打印标签指向新商品——与 053 脚本此前要修的问题完全相同，只是发生在 SQLite 侧的等价实现里。
+ * 反推失败的行跳过不登记，不追加标签反查或占位哨兵——这里要补的是"确实存活、结构完整"的商品，猜错
+ * series_code 比不登记更危险。表行数很小（只在 YZ 商品建档/升级/导入时追加一行），逐行处理没有性能问题。
  */
-async function backfillSqliteLiveYzProductReservations(dataSource: DataSource, currentPrefix: string): Promise<void> {
+async function backfillSqliteLiveYzProductReservations(dataSource: DataSource): Promise<void> {
   const productColumns = await listSqliteTableColumns(dataSource, 'base_product')
   if (!productColumns.has('code_scheme') || !productColumns.has('primary_series_tag_id') || !productColumns.has('series_seq') || !productColumns.has('product_code')) {
     return
@@ -635,16 +610,17 @@ async function backfillSqliteLiveYzProductReservations(dataSource: DataSource, c
 
   for (const product of liveYzProducts) {
     const seriesSeq = Number(product.series_seq)
-    const seriesCode = deriveYzSeriesCodeFromProductCode(product.product_code, seriesSeq, currentPrefix)
-    if (!seriesCode) continue // 反推失败，跳过不登记，留给人工核对
+    const structural = parseYzProductCodeStructure(product.product_code, seriesSeq)
+    if (!structural) continue // 反推失败，跳过不登记，留给人工核对
+    const { seriesCode, codePrefix } = structural
     const existing: Array<{ id: number | string }> = await dataSource.query(
       'SELECT id FROM "base_yz_series_seq_reservation" WHERE code_prefix = ? AND series_code = ? AND series_seq = ?',
-      [currentPrefix, seriesCode, seriesSeq],
+      [codePrefix, seriesCode, seriesSeq],
     )
     if (existing.length) continue // 已登记，幂等跳过，可安全重放
     await dataSource.query(
       'INSERT INTO "base_yz_series_seq_reservation" (series_tag_id, series_seq, product_code, series_code, code_prefix) VALUES (?, ?, ?, ?, ?)',
-      [product.primary_series_tag_id, seriesSeq, product.product_code, seriesCode, currentPrefix],
+      [product.primary_series_tag_id, seriesSeq, product.product_code, seriesCode, codePrefix],
     )
   }
 }
@@ -726,8 +702,6 @@ async function prepareSqliteYzReservationSeriesCodeColumns(dataSource: DataSourc
     await dataSource.query('ALTER TABLE "base_yz_series_seq_reservation" ADD COLUMN "code_prefix" varchar(4) NULL')
   }
 
-  const currentPrefix = await resolveSqliteYzCodePrefix(dataSource)
-
   const pendingRows: Array<{ id: number | string; product_code: string; series_seq: number; series_tag_id: number | string }> = await dataSource.query(
     'SELECT id, product_code, series_seq, series_tag_id FROM "base_yz_series_seq_reservation" WHERE series_code IS NULL OR code_prefix IS NULL',
   )
@@ -775,7 +749,7 @@ async function prepareSqliteYzReservationSeriesCodeColumns(dataSource: DataSourc
     }
   }
 
-  await backfillSqliteLiveYzProductReservations(dataSource, currentPrefix)
+  await backfillSqliteLiveYzProductReservations(dataSource)
   await rebuildSqliteYzReservationConstraints(dataSource)
 }
 

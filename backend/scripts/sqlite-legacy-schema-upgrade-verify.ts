@@ -348,6 +348,36 @@ try {
     codeScheme: 'yz',
   }))
 
+  // P1-B 修复验收（PR #109 第八轮评审修正）：另一条存活 YZ 商品，其 product_code 使用非当前前缀
+  // （当前默认前缀是 'YZ'，这里模拟某环境曾经先用前缀 'AB' 建过档、后来才把全局前缀改成 'YZ'），
+  // 且占用表里完全没有对应记录。上一轮修复只把「已存在 052 占用行」的回填改成了结构化解析，却漏改了
+  // 「存活商品回填」这一段——旧实现仍按当前全局前缀反推，这类旧前缀商品因为不匹配当前前缀而完全不会
+  // 写入占用表，商品删除后若前缀切回旧值，导入侧显式指定原序号就能复用旧编码，使已打印标签指向新商品。
+  const liveYzTagNonCurrentPrefix = await liveYzTagRepo.save(liveYzTagRepo.create({
+    tagName: 'p1b-live-yz-tag-non-current-prefix',
+    tagCode: null,
+    seriesCode: 'MN',
+  }))
+  const liveYzProductNonCurrentPrefix = await liveYzProductRepo.save(liveYzProductRepo.create({
+    productCode: 'ABMN05',
+    productName: 'p1b live yz product non-current prefix',
+    pinyinAbbr: 'MN',
+    defaultPrice: '10.00',
+    discountRate: '10.0',
+    isActive: true,
+    o2oStatus: 'unlisted',
+    o2oRecommended: false,
+    thumbnail: null,
+    detailContent: null,
+    limitPerUser: 5,
+    currentStock: 0,
+    categoryId: null,
+    preOrderedStock: 0,
+    primarySeriesTagId: liveYzTagNonCurrentPrefix.id,
+    seriesSeq: 5,
+    codeScheme: 'yz',
+  }))
+
   // 把占用表整表降级重建为 052 时代的旧结构：无 series_code/code_prefix，唯一索引仍按标签维度。
   await AppDataSource.query('DROP INDEX IF EXISTS "uk_yz_series_seq_reservation_code"')
   await AppDataSource.query('DROP INDEX IF EXISTS "idx_yz_series_seq_reservation_tag"')
@@ -452,7 +482,27 @@ try {
     'P1-B：回填登记后，该商品被删除，同序号导入仍应被永久占用拒绝',
   )
 
-  console.log('OK P1-B/P2-B/P2-C：SQLite 旧库占用表结构补齐（新唯一索引 + 非空约束 + 旧索引降级）、存活 YZ 商品占用自动回填、以及历史前缀记录按 product_code 结构反推（不套用当前前缀）均验收通过')
+  // P1-B 修复验收（PR #109 第八轮评审修正）：存活商品用的是非当前前缀（AB），回填必须按该行自带的
+  // series_seq 从 product_code 结构反切出原始前缀，不能因为不匹配当前全局前缀（YZ）就漏登记。
+  const p1bNonCurrentPrefixRow = await AppDataSource.query(
+    'SELECT product_code AS productCode, series_code AS seriesCode, code_prefix AS codePrefix FROM "base_yz_series_seq_reservation" WHERE series_tag_id = ? AND series_seq = 5',
+    [liveYzTagNonCurrentPrefix.id],
+  ) as Array<{ productCode: string; seriesCode: string; codePrefix: string }>
+  assert.deepEqual(
+    p1bNonCurrentPrefixRow[0],
+    { productCode: 'ABMN05', seriesCode: 'MN', codePrefix: 'AB' },
+    'P1-B（第八轮评审修正）：存活商品的 product_code 使用非当前前缀（AB）时，回填登记的 code_prefix 应为 AB，而不是当前全局前缀 YZ',
+  )
+
+  // 该商品被删除后，同前缀（AB）同序号仍应被永久占用拒绝——证明非当前前缀的补登记同样真实生效。
+  await liveYzProductRepo.delete({ id: liveYzProductNonCurrentPrefix.id })
+  await assert.rejects(
+    () => runInTransaction((manager) => reserveSeriesSeq(manager, liveYzTagNonCurrentPrefix.id, 5, 'MN', 'AB')),
+    (error: unknown) => error instanceof BizError && error.statusCode === 409,
+    'P1-B（第八轮评审修正）：该商品删除后，同前缀（AB）同序号仍应被永久占用拒绝',
+  )
+
+  console.log('OK P1-B/P2-B/P2-C：SQLite 旧库占用表结构补齐（新唯一索引 + 非空约束 + 旧索引降级）、存活 YZ 商品占用自动回填（含非当前前缀场景）、以及历史前缀记录按 product_code 结构反推（不套用当前前缀）均验收通过')
 } finally {
   if (dataSource?.isInitialized) {
     await dataSource.destroy()
