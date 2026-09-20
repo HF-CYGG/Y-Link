@@ -1663,14 +1663,12 @@ export class ProductService {
       // P1-A 修复（PR #109 第五轮评审）：YZ 编码是定长规则，任何后缀都会使其非法，因此 YZ 分支的
       // skuCode 冲突只能拒绝、不能像 legacy/WC 路径那样交给 allocateSkuCode 追加 `-2`/`-3` 后缀兜底
       // ——那会产出一个与 variantCode/sizeCode 不对应、也不符合定长规则的非法编码。这里直接跳过
-      // allocateSkuCode，冲突判定统一交给循环结束后的 assertNoYzSkuCodeConflict 批量处理。
+      // allocateSkuCode，冲突判定统一交给循环结束后的 assertSkuRelationsValid 批量处理（第六轮评审
+      // 已把原来专用的 assertNoYzSkuCodeConflict 合并进 assertSkuRelationsValid，见该函数注释）。
       if (product.codeScheme !== 'yz') {
         allocateSkuCode(skuEntity, matchedSku, skuInput)
       }
       skuEntities.push(skuEntity)
-    }
-    if (product.codeScheme === 'yz') {
-      await this.assertNoYzSkuCodeConflict(product.id, skuEntities, manager)
     }
     await this.assertSkuRelationsValid(product, skuEntities, manager)
     const specTextSet = new Set<string>()
@@ -1727,40 +1725,6 @@ export class ProductService {
     product.currentStock = summarySkus.reduce((sum, sku) => sum + Math.max(0, Number(sku.currentStock ?? 0)), 0)
     product.preOrderedStock = summarySkus.reduce((sum, sku) => sum + Math.max(0, Number(sku.preOrderedStock ?? 0)), 0)
     await manager.getRepository(BaseProduct).save(product)
-  }
-
-  /**
-   * P1-A 修复（PR #109 第五轮评审）：YZ 分支派生出的 skuCode 自己做冲突判定，命中即拒绝，不交给
-   * allocateSkuCode 的后缀兜底改写——见 replaceProductSkus 调用处注释。冲突范围覆盖其他商品的
-   * skuCode（当前编码）、barcode（原厂条码）、legacySkuCode（历史编码）三列，一次批量 IN 查询判定
-   * （不 N+1）；`productId: Not(productId)` 排除本商品自身的行，避免编辑自己被误判为冲突。
-   * 命中冲突统一抛 409，不在此处做任何"重新分配系列序号"之类的自动改写——那会让编码静默漂移、
-   * 难以预期，冲突只能留给人工处理。
-   */
-  private async assertNoYzSkuCodeConflict(
-    productId: string,
-    skuEntities: BaseProductSku[],
-    manager: EntityManager,
-  ): Promise<void> {
-    const codes = [...new Set(skuEntities.map((sku) => sku.skuCode).filter(Boolean))]
-    if (!codes.length) return
-    const skuRepo = manager.getRepository(BaseProductSku)
-    const conflicts = await skuRepo.find({
-      where: [
-        { productId: Not(productId), skuCode: In(codes) },
-        { productId: Not(productId), barcode: In(codes) },
-        { productId: Not(productId), legacySkuCode: In(codes) },
-      ],
-      select: ['id', 'productId', 'skuCode', 'barcode', 'legacySkuCode'],
-    })
-    if (!conflicts.length) return
-    const first = conflicts[0]
-    const conflictCode = codes.find((code) => code === first.skuCode || code === first.barcode || code === first.legacySkuCode) ?? codes[0]
-    const conflictField = first.skuCode === conflictCode ? '当前编码' : (first.barcode === conflictCode ? '原厂条码' : '历史编码')
-    throw new BizError(
-      `YZ 编码「${conflictCode}」与其他商品（ID ${normalizeEntityId(first.productId)}）的${conflictField}冲突，请先处理该冲突后再操作`,
-      409,
-    )
   }
 
   /** 单规格商品编辑时写入默认规格的条码、成本价与库位；多规格商品必须通过 skus 逐行提交。 */
@@ -2111,7 +2075,27 @@ export class ProductService {
   /**
    * 规格关联校验：
    * - 库位必须存在，新指定的库位必须启用；
-   * - 扫码时条码与 SKU 编码共用一个命名空间，任何 SKU 的条码都不能与其他 SKU 的条码或编码相同。
+   * - 扫码时条码、SKU 编码、历史编码共用一个命名空间，本批提交的条码或编码不能与其他商品的
+   *   条码、编码、历史编码中的任意一列相同。
+   *
+   * P1-A 修复（PR #109 第六轮评审）：此前只查 skuCode/barcode 两列，遗漏 legacySkuCode——商品升级后
+   * 留下的历史编码只有普通索引、没有 DB 唯一约束兜底，另一件商品若通过普通编辑（改条码/改编码）把值
+   * 设成这个历史编码，这里查不出来，扫码会同时命中两件商品，且按「当前版本+条码优先」返回后者，让旧
+   * 印刷标签静默指向错误商品。现在本批提交的 skuCode、barcode 两列，都会去查其他商品的 skuCode、
+   * barcode、legacySkuCode 三列（双向：其他商品的历史编码不能被本批占用，反之其他商品的当前编码/
+   * 条码也不能等于本批要写入的值——后者已由各自列的 DB 唯一索引兜底，这里仍显式查询是为了跨列
+   * 命中给出统一的中文错误文案，而不是让请求方看到 DB 唯一键报错）。
+   *
+   * 职责划分：本函数是所有 SKU 写入路径（新建、编辑、默认 SKU 编辑、YZ 生成）共用的最终冲突守门人，
+   * 覆盖范围是 {本批 skuCode, 本批 barcode} × {他家 skuCode, 他家 barcode, 他家 legacySkuCode}。
+   * 原来紧邻 replaceProductSkus 调用点的 assertNoYzSkuCodeConflict 只检查 YZ 派生出的 skuCode 一列，
+   * 是本函数覆盖范围的真子集（本函数还多查了 barcode 一列），且两者作用于同一批 skuEntities、紧挨着
+   * 调用，继续保留只会重复同一次数据库查询、还可能输出不一致的错误文案，因此本轮已将其合并进本函数，
+   * 删除了 assertNoYzSkuCodeConflict 本身——不是覆盖变窄，而是本函数已完整吸收了它的检查范围。
+   * detectUpgradeCodeConflict/assertNoUpgradeCodeConflict（编码升级预检与正式升级路径）职责不同，
+   * 继续保留独立实现：它们检查的是升级动作算出来、但尚未写入任何 BaseProductSku 实体的候选编码
+   * （newProductCode/newSkuCodes 是字符串数组，此时对应的 SKU 行在 DB 里还是旧编码），不是本函数
+   * 接受的 BaseProductSku 实体数组，签名和调用时机都不同，不能合并。
    */
   private async assertSkuRelationsValid(product: BaseProduct, skus: BaseProductSku[], manager: EntityManager) {
     const skuRepo = manager.getRepository(BaseProductSku)
@@ -2143,17 +2127,28 @@ export class ProductService {
         seen.set(code, sku.skuCode)
       }
     }
-    const barcodes = skus.map((sku) => sku.barcode).filter((code): code is string => Boolean(code))
-    const allCodes = [...new Set([...barcodes, ...skus.map((sku) => sku.skuCode)])]
-    const query = skuRepo.createQueryBuilder('sku')
-      .select(['sku.id', 'sku.skuCode', 'sku.barcode', 'sku.productId'])
-      .where('sku.barcode IN (:...allCodes)', { allCodes })
-    if (barcodes.length) query.orWhere('sku.skuCode IN (:...barcodes)', { barcodes })
-    const conflicts = await query.getMany()
-    for (const other of conflicts) {
-      if (String(other.productId) === String(product.id)) continue
-      const hit = [other.barcode, other.skuCode].find((code) => code && allCodes.includes(code))
-      throw new BizError(`条码或编码「${hit}」已被其他商品的规格使用`, 409)
+    const submittedCodes = [
+      ...new Set(skus.flatMap((sku) => [sku.skuCode, sku.barcode]).filter((code): code is string => Boolean(code))),
+    ]
+    if (submittedCodes.length) {
+      const conflicts = await skuRepo.find({
+        where: [
+          { productId: Not(product.id), skuCode: In(submittedCodes) },
+          { productId: Not(product.id), barcode: In(submittedCodes) },
+          { productId: Not(product.id), legacySkuCode: In(submittedCodes) },
+        ],
+        select: ['id', 'productId', 'skuCode', 'barcode', 'legacySkuCode'],
+      })
+      for (const other of conflicts) {
+        const hit = submittedCodes.find((code) => code === other.skuCode || code === other.barcode || code === other.legacySkuCode)
+        if (!hit) continue
+        const conflictField = other.skuCode === hit ? '当前编码' : (other.barcode === hit ? '原厂条码' : '历史编码')
+        const legacyHint = conflictField === '历史编码' ? '，历史编码仍被旧标签使用，不可占用' : ''
+        throw new BizError(
+          `条码或编码「${hit}」与其他商品（ID ${normalizeEntityId(other.productId)}）的${conflictField}冲突${legacyHint}`,
+          409,
+        )
+      }
     }
   }
 

@@ -117,3 +117,42 @@ SET @ddl = IF(
   'SELECT 1'
 );
 PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- P1-B 修复（PR #109 第六轮评审）：回填迁移执行时仍存活的 YZ 商品的占用登记。
+-- 背景：052 只建表，不回填历史数据——如果某环境先上线了 050 并已经创建过 YZ 商品，052/053 执行时这些
+--       仍存活商品的占用完全没有写进 base_yz_series_seq_reservation（052 的建表注释里"只加结构、不回填
+--       历史数据"针对的是"已删除商品无法反推"的场景，但仍存活商品的 primary_series_tag_id/series_seq/
+--       product_code 明明还在，完全具备回填条件，此前漏掉了）。这批商品一旦后续被删除，其（系列, 序号）
+--       组合此前从未登记为永久占用，导入相同序号仍会成功，静默复用旧印刷标签对应的编码指向新商品。
+--       053 才引入 series_code/code_prefix 两列，因此回填写在这里，不改 052 的建表段。
+-- 口径：与上面「回填 a」保持一致——按当前全局前缀 @current_prefix 反推 base_product.product_code
+--       （`${prefix}${系列码}${两位序号补零}` 定长格式），且反推出的两位数字序号必须与
+--       base_product.series_seq 完全一致才登记；不追加回填 b/c 那样的标签反查或占位哨兵——这里要
+--       补登记的是"确实存活、结构完整"的商品，反推失败大概率意味着 product_code 是手工改过的脏数据
+--       或前缀在这期间变过，登记一个猜测出来的 series_code 比不登记更危险（会错误拦住真实合法的序号），
+--       因此反推失败的行跳过不登记，留给人工核对，不写占位哨兵。
+-- 范围：base_product.code_scheme = 'yz' 且 primary_series_tag_id / series_seq / product_code 三者
+--       均非空（这是"曾经完整走过 YZ 生成路径"的判定条件），且这三个字段拼出的编码符合当前前缀下的
+--       定长规则。
+-- 幂等：NOT EXISTS 子查询按权威唯一键 (code_prefix, series_code, series_seq) 判断是否已登记，可安全
+--       重放；不区分该记录是此前已存在还是本次新插入，重复执行不会产生重复行或触发唯一索引冲突。
+INSERT INTO `base_yz_series_seq_reservation` (`series_tag_id`, `series_seq`, `product_code`, `series_code`, `code_prefix`)
+SELECT
+  p.`primary_series_tag_id`,
+  p.`series_seq`,
+  p.`product_code`,
+  SUBSTRING(p.`product_code`, LENGTH(@current_prefix) + 1, 2),
+  @current_prefix
+FROM `base_product` AS p
+WHERE p.`code_scheme` = 'yz'
+  AND p.`primary_series_tag_id` IS NOT NULL
+  AND p.`series_seq` IS NOT NULL
+  AND p.`product_code` IS NOT NULL
+  AND p.`product_code` REGEXP CONCAT('^', @current_prefix, '[A-Z]{2}[0-9]{2}$')
+  AND CAST(SUBSTRING(p.`product_code`, LENGTH(@current_prefix) + 3, 2) AS UNSIGNED) = p.`series_seq`
+  AND NOT EXISTS (
+    SELECT 1 FROM `base_yz_series_seq_reservation` AS r
+    WHERE r.`code_prefix` = @current_prefix
+      AND r.`series_code` = SUBSTRING(p.`product_code`, LENGTH(@current_prefix) + 1, 2)
+      AND r.`series_seq` = p.`series_seq`
+  );

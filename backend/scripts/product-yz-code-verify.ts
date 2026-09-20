@@ -45,6 +45,7 @@ async function main() {
   const { BaseProduct } = await import('../src/entities/base-product.entity.js')
   const { BaseProductSku } = await import('../src/entities/base-product-sku.entity.js')
   const { BaseProductVariantCodeRegistry } = await import('../src/entities/base-product-variant-code-registry.entity.js')
+  const { BaseYzSeriesSeqReservation } = await import('../src/entities/base-yz-series-seq-reservation.entity.js')
   const {
     allocateSeriesSeq,
     reserveSeriesSeq,
@@ -71,6 +72,7 @@ async function main() {
     const productRepo = AppDataSource.getRepository(BaseProduct)
     const skuRepo = AppDataSource.getRepository(BaseProductSku)
     const registryRepo = AppDataSource.getRepository(BaseProductVariantCodeRegistry)
+    const reservationRepo = AppDataSource.getRepository(BaseYzSeriesSeqReservation)
 
     let productCodeCounter = 0
     const nextProductCode = () => {
@@ -1114,8 +1116,13 @@ async function main() {
 
     // 用例 35：优先级正确——构造「A 商品的 skuCode」恰好等于「B 商品的 legacySkuCode」的场景，
     // 断言 lookupByCode 优先返回 A（SKU 编码命中优先于历史编码命中）。这里复用用例 33 里蓝色 SKU
-    // 升级前的旧编码：升级后它只活在 legacyCodeUpgraded 蓝色 SKU 的 legacySkuCode 里（不受唯一约束），
-    // 因此可以把同一个字符串显式指定为另一个新商品 B 的真实 skuCode。
+    // 升级前的旧编码：升级后它只活在 legacyCodeUpgraded 蓝色 SKU 的 legacySkuCode 里（不受唯一约束）。
+    // 第六轮评审 P1-A 修复后，assertSkuRelationsValid 会拒绝任何普通写入把 skuCode/barcode 显式设成
+    // 其他商品的 legacySkuCode——这正是本轮要堵住的口子，因此不能再像之前那样直接经 productService.create
+    // 传入冲突的 skuCode 来构造场景（会被正确拒绝，语义变化是预期内的）。这里改为绕过服务层直接改写
+    // 底层行，模拟"服务层校验之外已经存在的歧义数据"（例如本修复上线前的历史数据、或未来某条尚未纳入
+    // 校验的写入路径遗留下来的数据）：lookupByCode 的优先级兜底就是为这类场景准备的最后一道防线，
+    // 依然需要覆盖，用例本身要验证的不变量没有变化，只是构造手段必须换成服务层校验拦不住的路径。
     const oldBlueSkuCode = oldLegacyCodeSkuCodeById.get(
       legacyCodeUpgraded.skus.find((sku) => sku.specValues['颜色'] === '蓝色')!.id,
     )
@@ -1130,10 +1137,8 @@ async function main() {
       o2oStatus: 'unlisted',
       currentStock: 0,
       limitPerUser: 5,
-      skus: [
-        { defaultPrice: 15, currentStock: 0, isActive: true, sortOrder: 0, skuCode: oldBlueSkuCode },
-      ],
     } as Parameters<typeof productService.create>[0], actor)
+    await skuRepo.update({ id: priorityProduct.skus[0].id }, { skuCode: oldBlueSkuCode! })
     const priorityLookup = await productService.lookupByCode(oldBlueSkuCode!)
     assert.equal(priorityLookup.matchedBy, 'sku_code', 'SKU 编码命中应优先于历史编码命中')
     assert.equal(priorityLookup.product.id, priorityProduct.id, '应返回当前 SKU 编码命中的商品 A，而不是历史编码命中的商品 B')
@@ -1698,6 +1703,111 @@ async function main() {
     const p9NextProductCode = formatProductCode(defaultPrefix, 'QE', p9NextSeq)
     assert.notEqual(p9NextProductCode, p9HistoryProductCode, '新分配的产品编码不应与旧标签生成过的历史编码重复')
     pass('P1-C：系列最后一个商品被删除后删除标签被拒绝（409）；绕过防护后新建同 seriesCode 不同 tagId 的标签，分配序号仍跳过历史已占用的 01，不产生重复编码')
+
+    // ============ 第 10 批：PR #109 第六轮评审修复（P1-A）============
+
+    // 用例 51（P1-A）：普通编辑路径（assertSkuRelationsValid）必须纳入 legacySkuCode 冲突校验。
+    // A 商品升级后留下历史编码 L；B 商品是完全不相关的 legacy 商品，通过"普通编辑"（不经过任何 YZ
+    // 专用校验）把某 SKU 的原厂条码/SKU 编码设成 L，两个方向都必须被拒绝；且用 L 扫码全程只命中 A。
+    const p10SeriesTagA = await createSeriesTag('RA')
+    const p10LegacyCode = `P10-LEGACY-${verifySeed}`
+    const p10OwnerProductA = await productService.create({
+      productCode: nextProductCode(),
+      productName: `p10-owner-a-${verifySeed}`,
+      pinyinAbbr: 'RA',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+      skus: [
+        { defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 0, skuCode: p10LegacyCode },
+      ],
+    } as Parameters<typeof productService.create>[0], actor)
+    assert.equal(p10OwnerProductA.skus[0].skuCode, p10LegacyCode, 'A 商品升级前的 skuCode 应等于显式指定值（本用例的历史编码 L）')
+    const p10UpgradedA = await productService.upgradeProductToYzCode(p10OwnerProductA.id, { primarySeriesTagId: p10SeriesTagA.id }, actor)
+    assert.equal(p10UpgradedA.skus[0].legacySkuCode, p10LegacyCode, 'A 商品升级后应把升级前的 skuCode 落到 legacySkuCode（即 L）')
+
+    const p10ProductB = await productService.create({
+      productName: `p10-product-b-${verifySeed}`,
+      pinyinAbbr: 'RB',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+    } as Parameters<typeof productService.create>[0], actor)
+    const p10SkuB = p10ProductB.skus[0]
+
+    // 正向之一：B 通过默认 SKU 编辑（applyDefaultSkuExtras，多规格商品之外的编辑入口）把原厂条码设为 L。
+    await assert.rejects(
+      () => productService.update(p10ProductB.id, { defaultSku: { barcode: p10LegacyCode } } as Parameters<typeof productService.update>[1], actor),
+      (error: unknown) => assertBizErrorWithStatus(error, 409) && (error as InstanceType<typeof BizError>).message.includes(p10LegacyCode),
+      'P1-A：普通编辑（默认 SKU 编辑）把原厂条码设为其他商品的历史编码（legacySkuCode）应抛 409',
+    )
+
+    // 正向之二：B 通过多规格 SKU 编辑入口（replaceProductSkus）直接把 skuCode 设为 L。
+    await assert.rejects(
+      () => productService.update(p10ProductB.id, {
+        skus: [
+          { id: p10SkuB.id, specValues: {}, defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 0, skuCode: p10LegacyCode },
+        ],
+      } as Parameters<typeof productService.update>[1], actor),
+      (error: unknown) => assertBizErrorWithStatus(error, 409) && (error as InstanceType<typeof BizError>).message.includes(p10LegacyCode),
+      'P1-A：普通编辑把 SKU 编码直接设为其他商品的历史编码（legacySkuCode）应抛 409',
+    )
+
+    // 两次失败写入都不应残留任何影响：B 的条码/编码保持原样，扫描 L 全程只命中 A。
+    const p10BAfterRejects = await productService.detail(p10ProductB.id)
+    assert.equal(p10BAfterRejects.skus[0].barcode, null, 'B 的原厂条码应保持未设置，未被拒绝的写入污染')
+    assert.equal(p10BAfterRejects.skus[0].skuCode, p10SkuB.skuCode, 'B 的 SKU 编码应保持原样，未被拒绝的写入污染')
+    const p10Scan = await productService.lookupByCode(p10LegacyCode)
+    assert.equal(p10Scan.matchedBy, 'legacy_sku_code', '扫描历史编码 L 应命中 legacy_sku_code 路径')
+    assert.equal(String(p10Scan.product.id), String(p10UpgradedA.id), '扫描历史编码 L 应且只应命中 A 商品，不能被 B 抢占')
+    pass('P1-A：assertSkuRelationsValid 已纳入 legacySkuCode 冲突校验——普通编辑（默认 SKU 编辑/多规格编辑）把条码或编码设为其他商品的历史编码均抛 409，且扫码结果不受影响')
+
+    // ============ 第 11 批：PR #109 第六轮评审修复（P1-B）============
+
+    // 用例 52（P1-B）：模拟"占用表为空但已有存活 YZ 商品"的状态——直接用 repository 删除该商品的占用行，
+    // 重新跑一次结构初始化（会触发 database-bootstrap.ts 新增的存活商品回填逻辑）后，断言登记已补齐；
+    // 该商品被删除后，同序号导入仍应被拒绝，证明补齐的登记确实生效为永久占用，不是摆设。
+    const p11Tag = await createSeriesTag('RB')
+    const p11Product = await productService.create({
+      productName: `p11-backfill-${verifySeed}`,
+      pinyinAbbr: 'RB',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+      primarySeriesTagId: p11Tag.id,
+    } as Parameters<typeof productService.create>[0], actor)
+    assert.equal(p11Product.seriesSeq, 1, '首个 P11 系列商品应分配到序号 1')
+
+    const p11ReservationBeforeDelete = await reservationRepo.findOneBy({ seriesTagId: p11Tag.id, seriesSeq: 1 })
+    assert.ok(p11ReservationBeforeDelete, '正常建档流程应已写入占用登记')
+    await reservationRepo.delete({ id: p11ReservationBeforeDelete!.id })
+    const p11ReservationAfterManualDelete = await reservationRepo.findOneBy({ seriesTagId: p11Tag.id, seriesSeq: 1 })
+    assert.equal(p11ReservationAfterManualDelete, null, '模拟"占用表为空但已有存活 YZ 商品"：登记行已被删除')
+
+    // 重新跑一次结构初始化，触发 prepareSqliteYzReservationSeriesCodeColumns 里新增的存活商品回填。
+    await initializeDatabaseSchemaIfNeeded(AppDataSource)
+    const p11ReservationAfterBackfill = await reservationRepo.findOneBy({ seriesTagId: p11Tag.id, seriesSeq: 1 })
+    assert.ok(p11ReservationAfterBackfill, 'P1-B：回填逻辑应为仍存活的 YZ 商品补齐占用登记')
+    assert.equal(p11ReservationAfterBackfill!.productCode, p11Product.productCode, '回填的 productCode 应等于该商品当前的 productCode')
+    assert.equal(p11ReservationAfterBackfill!.seriesCode, 'RB', '回填的 seriesCode 应等于该商品所属系列的系列码')
+
+    // 该商品被删除后，同序号导入仍应被拒绝——证明补齐的登记确实生效为永久占用。
+    await productRepo.delete({ id: p11Product.id })
+    await assert.rejects(
+      () => runInTransaction((manager) => reserveSeriesSeq(manager, p11Tag.id, 1, 'RB', defaultPrefix)),
+      (error: unknown) => assertBizErrorWithStatus(error, 409),
+      'P1-B：回填登记后，该商品被删除，同序号导入仍应被永久占用拒绝',
+    )
+    pass('P1-B：模拟占用表为空但已有存活 YZ 商品——重新跑结构初始化后回填登记已补齐；商品删除后同序号导入仍被拒绝')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()
