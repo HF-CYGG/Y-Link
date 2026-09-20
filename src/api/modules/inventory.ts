@@ -52,7 +52,8 @@ export interface LocationPayload {
 }
 
 export interface ProductLookupResult {
-  matchedBy: 'barcode' | 'sku_code'
+  /** legacy_sku_code：命中历史 SKU 编码（升级前旧码），仅作扫码兼容，优先级低于条码与当前 SKU 编码。 */
+  matchedBy: 'barcode' | 'sku_code' | 'legacy_sku_code'
   stockHidden: boolean
   product: {
     id: string
@@ -70,12 +71,23 @@ export interface ProductLookupResult {
 export interface ProductLabelRecord {
   skuId: string
   skuCode: string
+  /** 原厂条码优先，否则退回 SKU 编码（历史合并值，语义不变）。 */
   barcode: string
+  /** SKU 原厂条码原值，未录入时为 null。 */
+  factoryBarcode: string | null
   productName: string
   specText: string
   price: string
   categoryName: string | null
   locationCode: string | null
+  /** YZ 编码体系专用：一级变体码，legacy 商品或历史规格组合编码的 SKU 恒为 null。 */
+  variantCode: string | null
+  /** YZ 编码体系专用：尺码码，legacy 商品或无尺码位的 SKU 恒为 null。 */
+  sizeCode: string | null
+  /** 主系列标签名称，legacy 商品恒为 null。 */
+  seriesName: string | null
+  /** 编码体系：legacy=历史编码，yz=新版定长编码。 */
+  codeScheme: string
 }
 
 export interface ProductImportRow {
@@ -98,6 +110,61 @@ export interface ProductImportPreview {
   productCount: number
   skuCount: number
   errorCount: number
+}
+
+// ---- YZ 通用 SKU 编码体系：Excel 建库导入 ----
+export interface YzImportRow {
+  rowNumber: number
+  category: string
+  seriesSeq: number | null
+  productName: string
+  variantAxisValue: string
+  sizeAxisValue: string
+  price: string
+  predictedSkuCode: string | null
+  errors: string[]
+}
+
+export interface YzImportPendingConfirm {
+  kind: 'multi_product_name' | 'axis_ambiguous'
+  groupKey: string
+  description: string
+  options: Array<{ value: string; label: string }>
+  suggestion: string | null
+  resolved: string | null
+}
+
+export interface YzImportGroup {
+  groupKey: string
+  seriesCode: string
+  seriesSeq: number
+  productNames: string[]
+  chosenProductName: string | null
+  variantValues: string[]
+  sizeValues: string[]
+  skuCount: number
+  pendingConfirms: YzImportPendingConfirm[]
+}
+
+export interface YzImportPreview {
+  rows: YzImportRow[]
+  groups: YzImportGroup[]
+  productCount: number
+  skuCount: number
+  errorCount: number
+  pendingConfirmCount: number
+}
+
+export interface YzImportResolution {
+  groupKey: string
+  kind: 'multi_product_name' | 'axis_ambiguous'
+  value: string
+}
+
+export interface YzImportResult {
+  productCount: number
+  skuCount: number
+  products: Array<{ id: string; productCode: string; productName: string; skuCount: number }>
 }
 
 export interface StockRow {
@@ -356,6 +423,17 @@ const uploadProductFile = <T>(url: string, file: File) => {
 export const previewProductImport = (file: File) => uploadProductFile<ProductImportPreview>('/products/import/preview', file)
 export const importProducts = (file: File) =>
   uploadProductFile<{ productCount: number; skuCount: number }>('/products/import', file)
+
+// ---- YZ 通用 SKU 编码体系：Excel 建库导入 ----
+export const downloadProductYzImportTemplate = () =>
+  downloadInventoryFile('/products/import-yz/template', 'product-import-yz-template.xlsx')
+export const previewProductYzImport = (file: File) => uploadProductFile<YzImportPreview>('/products/import-yz/preview', file)
+export const importProductsYz = (file: File, resolutions: YzImportResolution[]) => {
+  const formData = new FormData()
+  formData.append('file', file)
+  formData.append('resolutions', JSON.stringify(resolutions))
+  return request<YzImportResult>({ method: 'POST', url: '/products/import-yz', data: formData, headers: { 'Content-Type': 'multipart/form-data' } })
+}
 
 // ---- 当前库存与流水 ----
 export const getStocks = (params: StockQuery, config: RequestConfig = {}) =>

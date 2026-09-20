@@ -248,6 +248,12 @@ const ensureProductOptionsFromDetail = (detail: InboundOrderDetail) => {
         isActive: true,
         isCurrent: true,
       }] : [],
+      // 历史入库记录里未匹配到当前商品库的兜底占位记录，统一按 legacy 编码体系展示，不涉及 YZ 编码。
+      primarySeriesTagId: null,
+      seriesCode: null,
+      seriesSeq: null,
+      codeScheme: 'legacy' as const,
+      legacyProductCode: null,
     }))
 
   if (fallbackProducts.length) {

@@ -224,6 +224,285 @@ try {
   )
 
   console.log('OK SQLite 旧库结构、库存模式、默认 SKU、入库关联与商城索引升级验收通过')
+
+  // ============ PR #109 第六轮评审复核追加：051 历史编码回填在 SQLite 侧的等价实现验收 ============
+  //
+  // 背景：051_product_legacy_code.sql 把此前升级路径误回填进 barcode 的历史编码搬到 legacy_sku_code
+  // 并清空 barcode，但该脚本只面向 MySQL（用了 INNER JOIN...SET 与 REGEXP），SQLite 环境这条回填
+  // 从未执行过。这里直接构造"SQLite 库里已经有历史遗留错误状态"的 SKU 行，验证
+  // backfillSqliteLegacySkuCodeFromBarcode 用 JS 实现的等价口径：P-/WC 两种历史编码格式的行应被
+  // 搬运，真实原厂条码格式的行必须保持原样不动（判定必须保守）。
+  const { BaseProduct: BaseProductForLegacyBarcodeFixture } = await import('../src/entities/base-product.entity.js')
+  const { BaseProductSku: BaseProductSkuForLegacyBarcodeFixture } = await import('../src/entities/base-product-sku.entity.js')
+
+  const legacyBarcodeProductRepo = AppDataSource.getRepository(BaseProductForLegacyBarcodeFixture)
+  const legacyBarcodeProduct = await legacyBarcodeProductRepo.save(legacyBarcodeProductRepo.create({
+    productCode: 'YZLB01',
+    productName: '051 legacy barcode fixture product',
+    pinyinAbbr: 'LB',
+    defaultPrice: '10.00',
+    discountRate: '10.0',
+    isActive: true,
+    o2oStatus: 'unlisted',
+    o2oRecommended: false,
+    thumbnail: null,
+    detailContent: null,
+    limitPerUser: 5,
+    currentStock: 0,
+    categoryId: null,
+    preOrderedStock: 0,
+    primarySeriesTagId: null,
+    seriesSeq: null,
+    codeScheme: 'yz',
+  }))
+
+  const legacyBarcodeSkuRepo = AppDataSource.getRepository(BaseProductSkuForLegacyBarcodeFixture)
+  const buildLegacyBarcodeFixtureSku = (suffix: string, barcode: string) => legacyBarcodeSkuRepo.create({
+    productId: legacyBarcodeProduct.id,
+    skuCode: `YZLB01-${suffix}`,
+    barcode,
+    legacySkuCode: null,
+    specValuesJson: JSON.stringify({ 规格: suffix }),
+    specText: suffix,
+    defaultPrice: '10.00',
+    discountRate: '10.0',
+    isActive: true,
+    isCurrent: true,
+    o2oRecommended: false,
+    sortOrder: 0,
+    variantCode: null,
+    sizeCode: null,
+  })
+  const [legacyPStyleSku, legacyWcStyleSku, realBarcodeSku] = await legacyBarcodeSkuRepo.save([
+    buildLegacyBarcodeFixtureSku('P', 'P-240101-0001-DEFAULT'), // 旧 P- 系编码：应被搬运
+    buildLegacyBarcodeFixtureSku('WC', 'WC12345'), // 旧 WC 系编码：应被搬运
+    buildLegacyBarcodeFixtureSku('REAL', '6901234567892'), // 真实原厂条码格式：不应被搬运
+  ])
+
+  await initializeDatabaseSchemaIfNeeded(AppDataSource)
+
+  const legacyBarcodeSkuIds = [legacyPStyleSku.id, legacyWcStyleSku.id, realBarcodeSku.id]
+  const legacyBarcodeSkusAfterBackfill = await AppDataSource.query(
+    `SELECT id, barcode, legacy_sku_code AS legacySkuCode FROM "base_product_sku" WHERE id IN (${legacyBarcodeSkuIds.map(() => '?').join(', ')})`,
+    legacyBarcodeSkuIds,
+  ) as Array<{ id: string | number; barcode: string | null; legacySkuCode: string | null }>
+  const legacyBarcodeSkuById = new Map(legacyBarcodeSkusAfterBackfill.map((row) => [String(row.id), row]))
+
+  assert.deepEqual(
+    legacyBarcodeSkuById.get(String(legacyPStyleSku.id)),
+    { id: legacyPStyleSku.id, barcode: null, legacySkuCode: 'P-240101-0001-DEFAULT' },
+    '051 回填：P- 系历史编码应从 barcode 搬到 legacy_sku_code，barcode 置空',
+  )
+  assert.deepEqual(
+    legacyBarcodeSkuById.get(String(legacyWcStyleSku.id)),
+    { id: legacyWcStyleSku.id, barcode: null, legacySkuCode: 'WC12345' },
+    '051 回填：WC 系历史编码应从 barcode 搬到 legacy_sku_code，barcode 置空',
+  )
+  assert.deepEqual(
+    legacyBarcodeSkuById.get(String(realBarcodeSku.id)),
+    { id: realBarcodeSku.id, barcode: '6901234567892', legacySkuCode: null },
+    '051 回填：真实原厂条码格式必须保持原样，不能被误判为历史编码搬运',
+  )
+  console.log('OK 051 历史编码回填的 SQLite 等价实现验收通过：P-/WC 两种历史编码格式已搬运到 legacy_sku_code，真实原厂条码保持不动')
+
+  // ============ PR #109 第六轮评审修复 + 复核追加：P1-B（存活 YZ 商品占用回填）/ P2-C（占用表
+  // 唯一索引与非空约束的结构补齐）联合验收 ============
+  //
+  // 场景还原：先直接用 repository 落一条"已经建档、但从未在占用表登记过"的存活 YZ 商品（对应
+  // P1-B——例如该商品是在占用表还没上线时创建的）；再把此时已经是最终结构的占用表整表降级重建成
+  // 052 时代的旧结构（缺 series_code/code_prefix 两列，唯一索引仍按 series_tag_id+series_seq，
+  // 对应 P2-C 的问题前提），并插入一条反推不出系列码的历史脏数据行（标签早已不存在、product_code
+  // 也不符合当前前缀格式）。重新跑一次结构初始化后，一次性验证两个修复点。
+  const { BaseTag: BaseTagForLiveYzFixture } = await import('../src/entities/base-tag.entity.js')
+  const { BaseProduct: BaseProductForLiveYzFixture } = await import('../src/entities/base-product.entity.js')
+  const { reserveSeriesSeq } = await import('../src/services/product-code.service.js')
+  const { runInTransaction } = await import('../src/config/transaction-runner.js')
+  const { BizError } = await import('../src/utils/errors.js')
+
+  const liveYzTagRepo = AppDataSource.getRepository(BaseTagForLiveYzFixture)
+  const liveYzTag = await liveYzTagRepo.save(liveYzTagRepo.create({
+    tagName: 'p1b-live-yz-tag',
+    tagCode: null,
+    seriesCode: 'LG',
+  }))
+
+  // 直接用 repository 落存活 YZ 商品，刻意不经过 productService，模拟占用表从未替它登记过这一事实。
+  const liveYzProductRepo = AppDataSource.getRepository(BaseProductForLiveYzFixture)
+  const liveYzProduct = await liveYzProductRepo.save(liveYzProductRepo.create({
+    productCode: 'YZLG03',
+    productName: 'p1b live yz product',
+    pinyinAbbr: 'LG',
+    defaultPrice: '10.00',
+    discountRate: '10.0',
+    isActive: true,
+    o2oStatus: 'unlisted',
+    o2oRecommended: false,
+    thumbnail: null,
+    detailContent: null,
+    limitPerUser: 5,
+    currentStock: 0,
+    categoryId: null,
+    preOrderedStock: 0,
+    primarySeriesTagId: liveYzTag.id,
+    seriesSeq: 3,
+    codeScheme: 'yz',
+  }))
+
+  // P1-B 修复验收（PR #109 第八轮评审修正）：另一条存活 YZ 商品，其 product_code 使用非当前前缀
+  // （当前默认前缀是 'YZ'，这里模拟某环境曾经先用前缀 'AB' 建过档、后来才把全局前缀改成 'YZ'），
+  // 且占用表里完全没有对应记录。上一轮修复只把「已存在 052 占用行」的回填改成了结构化解析，却漏改了
+  // 「存活商品回填」这一段——旧实现仍按当前全局前缀反推，这类旧前缀商品因为不匹配当前前缀而完全不会
+  // 写入占用表，商品删除后若前缀切回旧值，导入侧显式指定原序号就能复用旧编码，使已打印标签指向新商品。
+  const liveYzTagNonCurrentPrefix = await liveYzTagRepo.save(liveYzTagRepo.create({
+    tagName: 'p1b-live-yz-tag-non-current-prefix',
+    tagCode: null,
+    seriesCode: 'MN',
+  }))
+  const liveYzProductNonCurrentPrefix = await liveYzProductRepo.save(liveYzProductRepo.create({
+    productCode: 'ABMN05',
+    productName: 'p1b live yz product non-current prefix',
+    pinyinAbbr: 'MN',
+    defaultPrice: '10.00',
+    discountRate: '10.0',
+    isActive: true,
+    o2oStatus: 'unlisted',
+    o2oRecommended: false,
+    thumbnail: null,
+    detailContent: null,
+    limitPerUser: 5,
+    currentStock: 0,
+    categoryId: null,
+    preOrderedStock: 0,
+    primarySeriesTagId: liveYzTagNonCurrentPrefix.id,
+    seriesSeq: 5,
+    codeScheme: 'yz',
+  }))
+
+  // 把占用表整表降级重建为 052 时代的旧结构：无 series_code/code_prefix，唯一索引仍按标签维度。
+  await AppDataSource.query('DROP INDEX IF EXISTS "uk_yz_series_seq_reservation_code"')
+  await AppDataSource.query('DROP INDEX IF EXISTS "idx_yz_series_seq_reservation_tag"')
+  await AppDataSource.query(`
+    CREATE TABLE "base_yz_series_seq_reservation__v052" (
+      "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+      "series_tag_id" integer NOT NULL,
+      "series_seq" smallint NOT NULL,
+      "product_code" varchar(64) NOT NULL,
+      "created_at" datetime NOT NULL DEFAULT (datetime('now')),
+      "updated_at" datetime NOT NULL DEFAULT (datetime('now'))
+    )
+  `)
+  await AppDataSource.query(`
+    INSERT INTO "base_yz_series_seq_reservation__v052"
+      ("id", "series_tag_id", "series_seq", "product_code", "created_at", "updated_at")
+    SELECT "id", "series_tag_id", "series_seq", "product_code", "created_at", "updated_at"
+    FROM "base_yz_series_seq_reservation"
+  `)
+  await AppDataSource.query('DROP TABLE "base_yz_series_seq_reservation"')
+  await AppDataSource.query('ALTER TABLE "base_yz_series_seq_reservation__v052" RENAME TO "base_yz_series_seq_reservation"')
+  await AppDataSource.query(
+    'CREATE UNIQUE INDEX "uk_yz_series_seq_reservation" ON "base_yz_series_seq_reservation" ("series_tag_id", "series_seq")',
+  )
+  // 一条反推不出系列码的历史脏数据：series_tag_id=999999 查无此标签，product_code 也不符合当前前缀格式。
+  await AppDataSource.query(
+    'INSERT INTO "base_yz_series_seq_reservation" ("series_tag_id", "series_seq", "product_code") VALUES (999999, 1, ?)',
+    ['YZLEGACY01'],
+  )
+  // P2-B 修复验收（PR #109 第七轮评审）：登记时用的是历史前缀 'AB'（当前全局前缀是默认值 'YZ'），
+  // 标签也查无此标签（series_tag_id=999998），只能靠 product_code 自身结构反推。product_code
+  // 'ABPX01' = 前缀 'AB' + 系列码 'PX' + 序号 '01'，序号与本行 series_seq=1 一致。回填后必须解析出
+  // code_prefix='AB'，不能像旧实现那样套用当前前缀 'YZ'（那样会把 'ABPX01' 错误登记进 YZ 命名空间，
+  // 导致前缀切回 AB 后 'ABPX01' 可以被重新分配，同时还多占了一个根本不存在的 'YZPX01'）。
+  await AppDataSource.query(
+    'INSERT INTO "base_yz_series_seq_reservation" ("series_tag_id", "series_seq", "product_code") VALUES (999998, 1, ?)',
+    ['ABPX01'],
+  )
+
+  // 注意：P2-C 的修复方式是准备函数自己直接完成表重建（见 database-bootstrap.ts 的
+  // rebuildSqliteYzReservationConstraints），不依赖 shouldSynchronizeSqliteSchema 触发整体
+  // synchronize()——因此这里的 action 可能是 'skipped'（没有其它原因触发整体同步），
+  // 不能像上面 client_user 的索引修复用例那样断言 action 必须是 'synchronized'；
+  // 真正要验证的是占用表的实际结构，见下面的列/索引断言。
+  await initializeDatabaseSchemaIfNeeded(AppDataSource)
+
+  const reservationColumns = await AppDataSource.query('PRAGMA table_info("base_yz_series_seq_reservation")') as Array<{ name: string; notnull: number }>
+  const seriesCodeColumn = reservationColumns.find((column) => column.name === 'series_code')
+  const codePrefixColumn = reservationColumns.find((column) => column.name === 'code_prefix')
+  assert.ok(seriesCodeColumn && Number(seriesCodeColumn.notnull) === 1, 'P2-C：series_code 结构补齐后必须是 NOT NULL')
+  assert.ok(codePrefixColumn && Number(codePrefixColumn.notnull) === 1, 'P2-C：code_prefix 结构补齐后必须是 NOT NULL')
+
+  const reservationIndexes = await AppDataSource.query('PRAGMA index_list("base_yz_series_seq_reservation")') as Array<{ name: string; unique: number }>
+  assert.ok(
+    reservationIndexes.some((index) => index.name === 'uk_yz_series_seq_reservation_code' && Number(index.unique) === 1),
+    'P2-C：结构补齐后必须建出 (code_prefix, series_code, series_seq) 唯一索引',
+  )
+  assert.ok(
+    !reservationIndexes.some((index) => index.name === 'uk_yz_series_seq_reservation' && Number(index.unique) === 1),
+    'P2-C：旧的按标签唯一索引不能再以唯一索引形态存在（降级为普通索引或直接消失均可）',
+  )
+  const newUniqueIndexColumns = await AppDataSource.query('PRAGMA index_info("uk_yz_series_seq_reservation_code")') as Array<{ seqno: number; name: string }>
+  assert.deepEqual(
+    newUniqueIndexColumns.sort((left, right) => Number(left.seqno) - Number(right.seqno)).map((column) => column.name),
+    ['code_prefix', 'series_code', 'series_seq'],
+    'P2-C：新唯一索引必须精确绑定 (code_prefix, series_code, series_seq) 三列，不能只按索引名称误判',
+  )
+
+  const legacyReservationRow = await AppDataSource.query(
+    'SELECT series_code AS seriesCode, code_prefix AS codePrefix FROM "base_yz_series_seq_reservation" WHERE series_tag_id = 999999 AND series_seq = 1',
+  ) as Array<{ seriesCode: string; codePrefix: string }>
+  assert.deepEqual(
+    legacyReservationRow[0],
+    { seriesCode: '??', codePrefix: '?' },
+    'P2-C 附带：反推不出系列码（标签已删除且 product_code 不匹配当前前缀）的历史行应落入占位哨兵，标记待人工核对',
+  )
+
+  const p2bHistoricalPrefixRow = await AppDataSource.query(
+    'SELECT series_code AS seriesCode, code_prefix AS codePrefix FROM "base_yz_series_seq_reservation" WHERE series_tag_id = 999998 AND series_seq = 1',
+  ) as Array<{ seriesCode: string; codePrefix: string }>
+  assert.deepEqual(
+    p2bHistoricalPrefixRow[0],
+    { seriesCode: 'PX', codePrefix: 'AB' },
+    'P2-B：product_code 用的是历史前缀（AB）时，回填必须从 product_code 结构本身解析出原始前缀 AB，不能套用当前全局前缀 YZ',
+  )
+
+  const p1bBackfilledRow = await AppDataSource.query(
+    'SELECT product_code AS productCode, series_code AS seriesCode, code_prefix AS codePrefix FROM "base_yz_series_seq_reservation" WHERE series_tag_id = ? AND series_seq = 3',
+    [liveYzTag.id],
+  ) as Array<{ productCode: string; seriesCode: string; codePrefix: string }>
+  assert.deepEqual(
+    p1bBackfilledRow[0],
+    { productCode: 'YZLG03', seriesCode: 'LG', codePrefix: 'YZ' },
+    'P1-B：结构初始化时应为仍存活、但从未登记过的 YZ 商品自动补齐占用登记',
+  )
+
+  // 该商品被删除后，同序号导入仍应被永久占用拒绝——证明补齐的登记确实生效，不是摆设。
+  await liveYzProductRepo.delete({ id: liveYzProduct.id })
+  await assert.rejects(
+    () => runInTransaction((manager) => reserveSeriesSeq(manager, liveYzTag.id, 3, 'LG', 'YZ')),
+    (error: unknown) => error instanceof BizError && error.statusCode === 409,
+    'P1-B：回填登记后，该商品被删除，同序号导入仍应被永久占用拒绝',
+  )
+
+  // P1-B 修复验收（PR #109 第八轮评审修正）：存活商品用的是非当前前缀（AB），回填必须按该行自带的
+  // series_seq 从 product_code 结构反切出原始前缀，不能因为不匹配当前全局前缀（YZ）就漏登记。
+  const p1bNonCurrentPrefixRow = await AppDataSource.query(
+    'SELECT product_code AS productCode, series_code AS seriesCode, code_prefix AS codePrefix FROM "base_yz_series_seq_reservation" WHERE series_tag_id = ? AND series_seq = 5',
+    [liveYzTagNonCurrentPrefix.id],
+  ) as Array<{ productCode: string; seriesCode: string; codePrefix: string }>
+  assert.deepEqual(
+    p1bNonCurrentPrefixRow[0],
+    { productCode: 'ABMN05', seriesCode: 'MN', codePrefix: 'AB' },
+    'P1-B（第八轮评审修正）：存活商品的 product_code 使用非当前前缀（AB）时，回填登记的 code_prefix 应为 AB，而不是当前全局前缀 YZ',
+  )
+
+  // 该商品被删除后，同前缀（AB）同序号仍应被永久占用拒绝——证明非当前前缀的补登记同样真实生效。
+  await liveYzProductRepo.delete({ id: liveYzProductNonCurrentPrefix.id })
+  await assert.rejects(
+    () => runInTransaction((manager) => reserveSeriesSeq(manager, liveYzTagNonCurrentPrefix.id, 5, 'MN', 'AB')),
+    (error: unknown) => error instanceof BizError && error.statusCode === 409,
+    'P1-B（第八轮评审修正）：该商品删除后，同前缀（AB）同序号仍应被永久占用拒绝',
+  )
+
+  console.log('OK P1-B/P2-B/P2-C：SQLite 旧库占用表结构补齐（新唯一索引 + 非空约束 + 旧索引降级）、存活 YZ 商品占用自动回填（含非当前前缀场景）、以及历史前缀记录按 product_code 结构反推（不套用当前前缀）均验收通过')
 } finally {
   if (dataSource?.isInitialized) {
     await dataSource.destroy()

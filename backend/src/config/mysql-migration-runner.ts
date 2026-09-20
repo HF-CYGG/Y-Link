@@ -80,6 +80,8 @@ const MYSQL_REQUIRED_TABLES = [
   'inv_stock_doc_item',
   'inv_stocktake',
   'inv_stocktake_item',
+  'base_product_variant_code_registry',
+  'base_yz_series_seq_reservation',
 ]
 
 // 每个必需表由哪个迁移脚本创建，用于在报错时给出精确指引，而不是笼统建议“从头跑一遍”。
@@ -120,6 +122,8 @@ const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
   inv_stock_doc_item: '049_inventory_sku_barcode_stocktake.sql',
   inv_stocktake: '049_inventory_sku_barcode_stocktake.sql',
   inv_stocktake_item: '049_inventory_sku_barcode_stocktake.sql',
+  base_product_variant_code_registry: '050_product_yz_sku_code.sql',
+  base_yz_series_seq_reservation: '052_yz_series_seq_reservation.sql',
 }
 
 interface MysqlRequiredColumn {
@@ -201,6 +205,24 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
   { tableName: 'base_product', columnName: 'category_id', introducingScript: '049_inventory_sku_barcode_stocktake.sql', expectedNullable: true },
   ...['barcode', 'cost_price', 'location_id']
     .map((columnName) => ({ tableName: 'base_product_sku', columnName, introducingScript: '049_inventory_sku_barcode_stocktake.sql', expectedNullable: true })),
+  // 050：YZ 通用 SKU 编码体系新增字段，均由 050_product_yz_sku_code.sql 引入。
+  { tableName: 'base_tag', columnName: 'series_code', introducingScript: '050_product_yz_sku_code.sql', expectedNullable: true },
+  { tableName: 'base_product', columnName: 'primary_series_tag_id', introducingScript: '050_product_yz_sku_code.sql', expectedNullable: true },
+  { tableName: 'base_product', columnName: 'series_seq', introducingScript: '050_product_yz_sku_code.sql', expectedNullable: true },
+  {
+    tableName: 'base_product',
+    columnName: 'code_scheme',
+    introducingScript: '050_product_yz_sku_code.sql',
+    expectedDataType: 'varchar',
+    expectedColumnType: 'varchar(8)',
+    expectedCharacterMaximumLength: 8,
+    expectedNullable: false,
+  },
+  ...['variant_code', 'size_code']
+    .map((columnName) => ({ tableName: 'base_product_sku', columnName, introducingScript: '050_product_yz_sku_code.sql', expectedNullable: true })),
+  // 051：历史编码字段（B9 批次），legacy 产品编码/SKU 编码追溯展示与扫码兼容匹配。
+  { tableName: 'base_product', columnName: 'legacy_product_code', introducingScript: '051_product_legacy_code.sql', expectedNullable: true },
+  { tableName: 'base_product_sku', columnName: 'legacy_sku_code', introducingScript: '051_product_legacy_code.sql', expectedNullable: true },
   {
     tableName: 'biz_outbound_order_item',
     columnName: 'sku_id',
@@ -394,6 +416,25 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
   { tableName: 'order_revision', columnName: 'ip_address', introducingScript: '042_order_business_no_amendment.sql' },
   { tableName: 'order_revision', columnName: 'user_agent', introducingScript: '042_order_business_no_amendment.sql' },
   { tableName: 'order_revision', columnName: 'created_at', introducingScript: '042_order_business_no_amendment.sql' },
+  // 053：系列内序号永久占用登记表命名空间从 tagId 迁移到系列码维度（PR #109 第五轮评审 P1-C 修复）。
+  {
+    tableName: 'base_yz_series_seq_reservation',
+    columnName: 'series_code',
+    introducingScript: '053_yz_reservation_series_code.sql',
+    expectedDataType: 'varchar',
+    expectedColumnType: 'varchar(2)',
+    expectedCharacterMaximumLength: 2,
+    expectedNullable: false,
+  },
+  {
+    tableName: 'base_yz_series_seq_reservation',
+    columnName: 'code_prefix',
+    introducingScript: '053_yz_reservation_series_code.sql',
+    expectedDataType: 'varchar',
+    expectedColumnType: 'varchar(4)',
+    expectedCharacterMaximumLength: 4,
+    expectedNullable: false,
+  },
 ]
 
 // 不只按索引名判断，还校验列顺序与唯一性，避免旧库中存在同名但错误的索引时误判为可启动。
@@ -601,6 +642,44 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
     unique: true,
     introducingScript: '049_inventory_sku_barcode_stocktake.sql',
   })),
+  // 050：YZ 编码体系的系列码唯一、系列内序号唯一与变体码登记表唯一键，缺失时同样必须在启动期阻断。
+  {
+    tableName: 'base_product',
+    indexName: 'idx_base_product_primary_series_tag_id',
+    columns: ['primary_series_tag_id'],
+    unique: false,
+    introducingScript: '050_product_yz_sku_code.sql',
+  },
+  ...([
+    ['base_tag', 'uk_base_tag_series_code', ['series_code']],
+    ['base_product', 'uk_base_product_series_seq', ['primary_series_tag_id', 'series_seq']],
+    ['base_product_variant_code_registry', 'uk_registry_lookup', ['product_id', 'axis', 'spec_value']],
+    ['base_product_variant_code_registry', 'uk_registry_code', ['product_id', 'axis', 'code']],
+  ] as const).map(([tableName, indexName, columns]) => ({
+    tableName,
+    indexName,
+    columns: [...columns],
+    unique: true,
+    introducingScript: '050_product_yz_sku_code.sql',
+  })),
+  // 051：历史 SKU 编码要支持扫码按它查，普通索引，不加唯一约束（历史编码理论上可能重复）。
+  {
+    tableName: 'base_product_sku',
+    indexName: 'idx_base_product_sku_legacy_code',
+    columns: ['legacy_sku_code'],
+    unique: false,
+    introducingScript: '051_product_legacy_code.sql',
+  },
+  // 053：系列内序号永久占用登记表的权威唯一键改为 (code_prefix, series_code, series_seq)，缺失时同一
+  // 序号可能被并发重复登记（PR #109 第五轮评审 P1-C 修复）。旧的按 tagId 的唯一索引已在 053 里降级并
+  // 改名为普通索引 idx_yz_series_seq_reservation_tag，仅供追溯，不再纳入启动期必需校验。
+  {
+    tableName: 'base_yz_series_seq_reservation',
+    indexName: 'uk_yz_series_seq_reservation_code',
+    columns: ['code_prefix', 'series_code', 'series_seq'],
+    unique: true,
+    introducingScript: '053_yz_reservation_series_code.sql',
+  },
 ]
 
 const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [
@@ -670,6 +749,17 @@ const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [
     deleteRule,
     introducingScript: '049_inventory_sku_barcode_stocktake.sql',
   })),
+  ...[
+    ['base_product', 'primary_series_tag_id', 'base_tag', 'RESTRICT'],
+    ['base_product_variant_code_registry', 'product_id', 'base_product', 'CASCADE'],
+  ].map(([tableName, columnName, referencedTableName, deleteRule]) => ({
+    tableName,
+    columnName,
+    referencedTableName,
+    referencedColumnName: 'id',
+    deleteRule,
+    introducingScript: '050_product_yz_sku_code.sql',
+  })),
 ]
 
 const MYSQL_REQUIRED_TRIGGERS: readonly MysqlRequiredTrigger[] = [
@@ -721,6 +811,10 @@ const AUTO_MIGRATABLE_FILES = [
   '047_o2o_preorder_pickup_at.sql',
   '048_inbound_order_expected_arrival.sql',
   '049_inventory_sku_barcode_stocktake.sql',
+  '050_product_yz_sku_code.sql',
+  '051_product_legacy_code.sql',
+  '052_yz_series_seq_reservation.sql',
+  '053_yz_reservation_series_code.sql',
 ]
 
 /**

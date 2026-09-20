@@ -294,6 +294,12 @@ const DEFAULT_SYSTEM_CONFIGS = [
     configGroup: 'notification',
     remark: '通知中心离线判定窗口（秒）',
   },
+  {
+    configKey: 'product.yz_code.prefix',
+    configValue: 'YZ',
+    configGroup: 'product',
+    remark: 'YZ 商品编码全局前缀（1-4 位大写字母）',
+  },
 ] as const
 
 /**

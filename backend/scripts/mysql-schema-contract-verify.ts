@@ -52,9 +52,21 @@ const REQUIRED_TABLES = [
   'inv_stock_doc_item',
   'inv_stocktake',
   'inv_stocktake_item',
+  'base_product_variant_code_registry',
+  'base_yz_series_seq_reservation',
 ] as const
 
 const REQUIRED_COLUMNS = [
+  // 050：YZ 通用 SKU 编码体系新增字段，需与 mysql-migration-runner 的 MYSQL_REQUIRED_COLUMNS 保持同一口径。
+  ['base_tag', 'series_code'],
+  ['base_product', 'primary_series_tag_id'],
+  ['base_product', 'series_seq'],
+  ['base_product', 'code_scheme'],
+  ['base_product_sku', 'variant_code'],
+  ['base_product_sku', 'size_code'],
+  // 051：历史编码字段（B9 批次），需与 MYSQL_REQUIRED_COLUMNS 保持同一口径。
+  ['base_product', 'legacy_product_code'],
+  ['base_product_sku', 'legacy_sku_code'],
   ...['deactivated_at', 'deactivation_reason', 'deactivated_by_user_id', 'deactivated_by_username', 'deactivated_by_display_name', 'restored_at', 'restored_by_user_id', 'restored_by_username', 'restored_by_display_name']
     .flatMap((columnName) => [
       ['sys_user', columnName] as const,
@@ -150,6 +162,10 @@ const REQUIRED_COLUMNS = [
   ['order_revision', 'ip_address'],
   ['order_revision', 'user_agent'],
   ['order_revision', 'created_at'],
+  // 053：系列内序号永久占用登记表命名空间从 tagId 迁移到系列码维度（PR #109 第五轮评审 P1-C 修复），
+  // 需与 mysql-migration-runner 的 MYSQL_REQUIRED_COLUMNS 保持同一口径。
+  ['base_yz_series_seq_reservation', 'series_code'],
+  ['base_yz_series_seq_reservation', 'code_prefix'],
 ] as const
 
 const REQUIRED_COLUMN_LENGTHS = new Map<string, number>([
@@ -167,6 +183,12 @@ interface ColumnFixture {
 }
 
 const REQUIRED_MANUAL_OUTBOUND_COLUMN_DEFINITIONS = new Map<string, ColumnFixture>([
+  ['base_product.code_scheme', {
+    dataType: 'varchar',
+    columnType: 'varchar(8)',
+    isNullable: 'NO',
+    characterMaximumLength: 8,
+  }],
   ['biz_outbound_order.source_doc_type', {
     dataType: 'varchar',
     columnType: 'varchar(32)',
@@ -281,6 +303,18 @@ const REQUIRED_MANUAL_OUTBOUND_COLUMN_DEFINITIONS = new Map<string, ColumnFixtur
     isNullable: 'NO',
     characterMaximumLength: 4294967295,
   }],
+  ['base_yz_series_seq_reservation.series_code', {
+    dataType: 'varchar',
+    columnType: 'varchar(2)',
+    isNullable: 'NO',
+    characterMaximumLength: 2,
+  }],
+  ['base_yz_series_seq_reservation.code_prefix', {
+    dataType: 'varchar',
+    columnType: 'varchar(4)',
+    isNullable: 'NO',
+    characterMaximumLength: 4,
+  }],
 ])
 
 interface IndexFixture {
@@ -312,6 +346,52 @@ interface CheckFixture {
 }
 
 const REQUIRED_INDEXES: readonly IndexFixture[] = [
+  // 050：系列码唯一、系列内序号唯一与变体码登记表的两个唯一键。
+  {
+    tableName: 'base_product',
+    indexName: 'idx_base_product_primary_series_tag_id',
+    columns: ['primary_series_tag_id'],
+    unique: false,
+  },
+  {
+    tableName: 'base_tag',
+    indexName: 'uk_base_tag_series_code',
+    columns: ['series_code'],
+    unique: true,
+  },
+  {
+    tableName: 'base_product',
+    indexName: 'uk_base_product_series_seq',
+    columns: ['primary_series_tag_id', 'series_seq'],
+    unique: true,
+  },
+  {
+    tableName: 'base_product_variant_code_registry',
+    indexName: 'uk_registry_lookup',
+    columns: ['product_id', 'axis', 'spec_value'],
+    unique: true,
+  },
+  {
+    tableName: 'base_product_variant_code_registry',
+    indexName: 'uk_registry_code',
+    columns: ['product_id', 'axis', 'code'],
+    unique: true,
+  },
+  // 051：历史 SKU 编码要支持扫码按它查，普通索引。
+  {
+    tableName: 'base_product_sku',
+    indexName: 'idx_base_product_sku_legacy_code',
+    columns: ['legacy_sku_code'],
+    unique: false,
+  },
+  // 053：系列内序号永久占用登记表的权威唯一键改为系列码维度（PR #109 第五轮评审 P1-C 修复）；
+  // 旧的按 tagId 唯一键已降级为普通索引，不再纳入启动期必需校验，见 mysql-migration-runner.ts 同款注释。
+  {
+    tableName: 'base_yz_series_seq_reservation',
+    indexName: 'uk_yz_series_seq_reservation_code',
+    columns: ['code_prefix', 'series_code', 'series_seq'],
+    unique: true,
+  },
   {
     tableName: 'account_lifecycle_event',
     indexName: 'idx_account_lifecycle_event_account',
@@ -546,6 +626,9 @@ const REQUIRED_FOREIGN_KEYS: readonly ForeignKeyFixture[] = [
     ['inv_stocktake_item', 'fk_inv_stocktake_item_stocktake_id', 'stocktake_id', 'inv_stocktake', 'CASCADE'],
     ['inv_stocktake_item', 'fk_inv_stocktake_item_product_id', 'product_id', 'base_product', 'RESTRICT'],
     ['inv_stocktake_item', 'fk_inv_stocktake_item_sku_id', 'sku_id', 'base_product_sku', 'RESTRICT'],
+    // 050：主系列标签禁止级联删除（编码权威），变体码登记随商品级联清理。
+    ['base_product', 'fk_base_product_primary_series_tag_id', 'primary_series_tag_id', 'base_tag', 'RESTRICT'],
+    ['base_product_variant_code_registry', 'fk_base_product_variant_code_registry_product_id', 'product_id', 'base_product', 'CASCADE'],
   ].map(([tableName, constraintName, columnName, referencedTableName, deleteRule]) => ({
     tableName,
     constraintName,
@@ -1072,6 +1155,28 @@ missingLifecycleUpdateTrigger.triggers.delete('trg_account_lifecycle_event_no_up
 await expectSchemaFailure(missingLifecycleUpdateTrigger, [
   '触发器 trg_account_lifecycle_event_no_update',
   '044_account_lifecycle_governance.sql',
+])
+
+// 053：系列内序号永久占用登记表命名空间从 tagId 迁移到系列码维度（PR #109 第五轮评审 P1-C 修复）。
+const missingReservationSeriesCode = createCompleteFixture()
+missingReservationSeriesCode.columns.delete(objectKey('base_yz_series_seq_reservation', 'series_code'))
+await expectSchemaFailure(missingReservationSeriesCode, [
+  '字段 base_yz_series_seq_reservation.series_code',
+  '053_yz_reservation_series_code.sql',
+])
+
+const missingReservationCodePrefix = createCompleteFixture()
+missingReservationCodePrefix.columns.delete(objectKey('base_yz_series_seq_reservation', 'code_prefix'))
+await expectSchemaFailure(missingReservationCodePrefix, [
+  '字段 base_yz_series_seq_reservation.code_prefix',
+  '053_yz_reservation_series_code.sql',
+])
+
+const missingReservationSeriesCodeUniqueIndex = createCompleteFixture()
+missingReservationSeriesCodeUniqueIndex.indexes.delete(objectKey('base_yz_series_seq_reservation', 'uk_yz_series_seq_reservation_code'))
+await expectSchemaFailure(missingReservationSeriesCodeUniqueIndex, [
+  '索引 base_yz_series_seq_reservation.uk_yz_series_seq_reservation_code',
+  '053_yz_reservation_series_code.sql',
 ])
 
 console.log('[mysql-schema-contract-verify] MySQL 启动结构契约验证通过')

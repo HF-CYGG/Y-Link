@@ -1,7 +1,7 @@
 /**
  * 模块说明：产品管理 API 模块。
- * 文件职责：封装产品列表查询、详情、增删改、批量操作与字段归一化能力，供基础资料与 O2O 场景复用。
- * 维护说明：维护时重点关注价格与库存字段类型、标签关联结构以及批量接口的参数兼容边界。
+ * 文件职责：封装产品列表查询、详情、增删改、批量操作、YZ 通用 SKU 编码升级与字段归一化能力，供基础资料与 O2O 场景复用。
+ * 维护说明：维护时重点关注价格与库存字段类型、标签关联结构、批量接口的参数兼容边界，以及 codeScheme/primarySeriesTagId 等 YZ 编码字段的透传口径。
  */
 
 import { request, type RequestConfig } from '@/api/http'
@@ -35,6 +35,16 @@ export interface ProductRecord {
   categoryCode?: string | null
   categoryName?: string | null
   skus?: ProductSkuRecord[]
+  /** YZ 编码体系专用：主系列标签ID，legacy 商品恒为 null。 */
+  primarySeriesTagId: string | null
+  /** 主系列标签的系列码（取自标签的 seriesCode），legacy 商品或未设置系列码的标签恒为 null。 */
+  seriesCode: string | null
+  /** 系列内商品序号（1-99），legacy 商品恒为 null。 */
+  seriesSeq: number | null
+  /** 编码体系：legacy=历史 P-/WC 编码，yz=新版定长编码。 */
+  codeScheme: 'legacy' | 'yz'
+  /** 升级到 YZ 编码前的历史产品编码，仅作追溯展示；未升级过（含 legacy 商品）恒为 null。 */
+  legacyProductCode: string | null
 }
 
 export interface ProductSpecGroup {
@@ -66,6 +76,12 @@ export interface ProductSkuRecord {
   costPrice?: string | number | null
   locationId?: string | null
   locationCode?: string | null
+  /** YZ 编码体系专用：一级变体码（0-9）。历史 legacy 商品的 SKU 恒为 null。 */
+  variantCode?: string | null
+  /** YZ 编码体系专用：尺码码（A-E），无尺码位为 null。历史 legacy 商品的 SKU 恒为 null。 */
+  sizeCode?: string | null
+  /** 升级到 YZ 编码前的历史 SKU 编码，仅作追溯展示；未升级过（含 legacy 商品）恒为 null。 */
+  legacySkuCode?: string | null
 }
 
 export interface ProductDefaultSkuDto {
@@ -96,6 +112,8 @@ export interface CreateProductDto {
   skus?: ProductSkuRecord[]
   /** 仅编辑复用同一 payload 时携带；新增接口不识别该字段。 */
   stockBaseline?: ProductStockBaseline
+  /** 非空时走 YZ 通用 SKU 编码体系：productCode 由系统按该系列生成，不能手工填写。 */
+  primarySeriesTagId?: string | null
 }
 
 export interface UpdateProductDto {
@@ -120,6 +138,8 @@ export interface UpdateProductDto {
   skus?: ProductSkuRecord[]
   /** 编辑弹窗打开时的库存基线：提交库存变动时服务端据此拦截“期间已被出入库改动”的覆盖。 */
   stockBaseline?: ProductStockBaseline
+  /** YZ 编码商品本批不支持切换系列，传入与当前值不同的值会被服务层拒绝；legacy 商品传非空值同样会被拒绝。 */
+  primarySeriesTagId?: string | null
 }
 
 export interface ProductStockBaseline {
@@ -188,6 +208,11 @@ interface ProductRawRecord {
   categoryCode?: PrimitiveValue
   categoryName?: PrimitiveValue
   skus?: ProductSkuRecord[] | null
+  primarySeriesTagId?: PrimitiveValue
+  seriesCode?: PrimitiveValue
+  seriesSeq?: PrimitiveValue
+  codeScheme?: PrimitiveValue
+  legacyProductCode?: PrimitiveValue
 }
 
 interface ProductDetailRawResult {
@@ -254,6 +279,8 @@ const normalizeInteger = (value: PrimitiveValue, fallback = 0): number => {
   return Math.floor(normalized)
 }
 
+const normalizeCodeScheme = (value: PrimitiveValue): 'legacy' | 'yz' => (normalizeText(value) === 'yz' ? 'yz' : 'legacy')
+
 const normalizeTagRecord = (tag: ProductTagRawRecord) => ({
   id: normalizeId(tag.id),
   tagName: normalizeText(tag.tagName),
@@ -293,6 +320,9 @@ const normalizeProductSkuRecord = (record: ProductSkuRecord): ProductSkuRecord =
   costPrice: record.costPrice === null || record.costPrice === undefined || record.costPrice === '' ? null : normalizeDecimal(record.costPrice),
   locationId: normalizeId(record.locationId) || null,
   locationCode: normalizeText(record.locationCode) || null,
+  variantCode: normalizeText(record.variantCode) || null,
+  sizeCode: normalizeText(record.sizeCode) || null,
+  legacySkuCode: normalizeText(record.legacySkuCode) || null,
 })
 
 const normalizeProductRecord = (record: ProductRawRecord): ProductRecord => {
@@ -322,6 +352,13 @@ const normalizeProductRecord = (record: ProductRawRecord): ProductRecord => {
     categoryCode: normalizeText(record.categoryCode) || null,
     categoryName: normalizeText(record.categoryName) || null,
     skus: Array.isArray(record.skus) ? record.skus.map(normalizeProductSkuRecord).filter((sku) => sku.id) : [],
+    primarySeriesTagId: normalizeId(record.primarySeriesTagId) || null,
+    seriesCode: normalizeText(record.seriesCode) || null,
+    seriesSeq: record.seriesSeq === null || record.seriesSeq === undefined || record.seriesSeq === ''
+      ? null
+      : normalizeInteger(record.seriesSeq),
+    codeScheme: normalizeCodeScheme(record.codeScheme),
+    legacyProductCode: normalizeText(record.legacyProductCode) || null,
   }
 }
 
@@ -452,3 +489,96 @@ export const deleteProduct = (id: string) =>
     method: 'DELETE',
     url: `/products/${id}`,
   })
+
+/**
+ * 存量商品升级到 YZ 编码：单条 SKU 编码变化视图，供升级预检 / 执行弹窗共用。
+ * B9 批次：旧编码统一写入 legacySkuCode 用于扫码兼容，不再有“是否回填条码”的分支，原
+ * willBackfillBarcode 字段已随后端一并移除。
+ */
+export interface ProductYzUpgradeSkuChange {
+  skuId: string
+  specText: string
+  oldSkuCode: string
+  newSkuCode: string
+}
+
+/** 升级预检结果：blockingReason 非空时前端应禁止提交升级。 */
+export interface ProductYzUpgradePreview {
+  productId: string
+  oldProductCode: string
+  newProductCode: string
+  seriesCode: string
+  seriesSeq: number
+  skuChanges: ProductYzUpgradeSkuChange[]
+  retiredSkuCount: number
+  blockingReason: string | null
+}
+
+/**
+ * 预检存量商品升级到 YZ 编码：
+ * - 只读接口，不会真正分配序号或编码，供升级弹窗展示“升级后会变成什么”。
+ */
+export const previewProductYzUpgrade = (productId: string, primarySeriesTagId: string): Promise<ProductYzUpgradePreview> =>
+  request<ProductYzUpgradePreview>({
+    method: 'POST',
+    url: `/products/${productId}/yz-code-upgrade/preview`,
+    data: { primarySeriesTagId },
+  })
+
+/**
+ * 执行存量商品升级到 YZ 编码：
+ * - 返回升级后的完整产品详情，供页面直接回填编辑态与刷新列表。
+ */
+export const upgradeProductToYzCode = async (productId: string, primarySeriesTagId: string): Promise<ProductRecord> => {
+  const result = await request<ProductRawRecord | ProductDetailRawResult>({
+    method: 'POST',
+    url: `/products/${productId}/yz-code-upgrade`,
+    data: { primarySeriesTagId },
+  })
+
+  return normalizeProductDetail(result)
+}
+
+/** 规格轴：variant=一级变体轴（颜色/款式），size=尺码轴。 */
+export type ProductSpecAxis = 'variant' | 'size'
+
+export interface ProductSpecValueRenamePayload {
+  axis: ProductSpecAxis
+  oldValue: string
+  newValue: string
+}
+
+/**
+ * 规格取值重命名：只改显示名称，skuCode / variantCode / sizeCode 均不变。
+ * 仅 YZ 编码商品可用，legacy 商品会被后端拒绝（400）。
+ */
+export const renameProductSpecValue = async (productId: string, payload: ProductSpecValueRenamePayload): Promise<ProductRecord> => {
+  const result = await request<ProductRawRecord | ProductDetailRawResult>({
+    method: 'POST',
+    url: `/products/${productId}/spec-value-rename`,
+    data: payload,
+  })
+
+  return normalizeProductDetail(result)
+}
+
+export interface ProductZeroSpecEvolvePayload {
+  axis: ProductSpecAxis
+  mode: 'inherit' | 'retain'
+  /** mode='inherit' 时必填：把原本"无该轴规格"的 SKU 继承为这个具体取值。 */
+  inheritValue?: string
+}
+
+/**
+ * 0 号规格演进：把商品原本"无该轴规格"的 SKU 继承为具体取值（inherit，skuCode 不变），
+ * 或退役保留（retain，行保留不删除）。仅 YZ 编码商品可用，legacy 商品会被后端拒绝（400）。
+ */
+export const evolveProductZeroSpec = async (productId: string, payload: ProductZeroSpecEvolvePayload): Promise<ProductRecord> => {
+  const result = await request<ProductRawRecord | ProductDetailRawResult>({
+    method: 'POST',
+    url: `/products/${productId}/zero-spec-evolve`,
+    data: payload,
+  })
+
+  return normalizeProductDetail(result)
+}

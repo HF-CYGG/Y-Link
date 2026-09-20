@@ -14,6 +14,7 @@ import type { AuthenticatedRequest } from '../types/auth.js'
 const createTagSchema = z.object({
   tagName: z.string().min(1, 'tagName 不能为空'),
   tagCode: z.string().optional().nullable(),
+  seriesCode: z.string().optional().nullable(),
 })
 
 const updateTagSchema = createTagSchema.partial()

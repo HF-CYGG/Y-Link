@@ -9,28 +9,35 @@
 import { In, Not, type Repository } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
+import { BaseProduct } from '../entities/base-product.entity.js'
 import { BaseTag } from '../entities/base-tag.entity.js'
+import { BaseYzSeriesSeqReservation } from '../entities/base-yz-series-seq-reservation.entity.js'
 import { RelProductTag } from '../entities/rel-product-tag.entity.js'
 import { isUniqueConstraintError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
 import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
+import { acquireSequenceMutex } from './inventory-sequence.service.js'
+import { buildSeriesCodeMutexKey } from './product-code.service.js'
 
 export interface CreateTagInput {
   tagName: string
   tagCode?: string | null
+  seriesCode?: string | null
 }
 
 export interface UpdateTagInput {
   tagName?: string
   tagCode?: string | null
+  seriesCode?: string | null
 }
 
 export interface TagView {
   id: string
   tagName: string
   tagCode: string | null
+  seriesCode: string | null
   createdAt: string
   updatedAt: string
 }
@@ -58,6 +65,14 @@ const TAG_CODE_CONSTRAINT_MATCHER = {
   sqliteColumns: ['base_tag.tag_code'],
 } as const
 
+const TAG_SERIES_CODE_CONSTRAINT_MATCHER = {
+  mysqlConstraint: 'uk_base_tag_series_code',
+  sqliteColumns: ['base_tag.series_code'],
+} as const
+
+// 系列编码格式：两位大写字母，供 YZ 商品编码体系拼接使用（如 PX → YZPX18）。
+const SERIES_CODE_PATTERN = /^[A-Z]{2}$/
+
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export class TagService {
   private readonly tagRepo = AppDataSource.getRepository(BaseTag)
@@ -84,9 +99,26 @@ export class TagService {
     return normalizedValue
   }
 
+  /**
+   * 归一化文创系列码：
+   * - 空字符串、纯空白、undefined、null 统一归一化为 null（表示未设置系列）；
+   * - 非空时去除首尾空白并转大写，必须为两位大写字母，否则拒绝保存。
+   */
+  private normalizeSeriesCode(value: string | null | undefined): string | null {
+    const normalizedValue = value?.trim().toUpperCase() ?? ''
+    if (!normalizedValue) {
+      return null
+    }
+    if (!SERIES_CODE_PATTERN.test(normalizedValue)) {
+      throw new BizError('系列编码必须是两位大写字母', 400)
+    }
+    return normalizedValue
+  }
+
   private async assertTagUniqueness(repo: Repository<BaseTag>, input: {
     tagName: string
     tagCode: string | null
+    seriesCode: string | null
     excludeTagId?: string
   }) {
     const tagNameConflict = await repo.findOne({
@@ -100,19 +132,30 @@ export class TagService {
       throw new BizError('标签名称已存在，请更换后再试', 409)
     }
 
-    if (!input.tagCode) {
-      return
+    if (input.tagCode) {
+      const tagCodeConflict = await repo.findOne({
+        where: {
+          tagCode: input.tagCode,
+          ...(input.excludeTagId ? { id: Not(input.excludeTagId) } : {}),
+        },
+        select: ['id'],
+      })
+      if (tagCodeConflict) {
+        throw new BizError('标签编码已存在，请更换后再试', 409)
+      }
     }
 
-    const tagCodeConflict = await repo.findOne({
-      where: {
-        tagCode: input.tagCode,
-        ...(input.excludeTagId ? { id: Not(input.excludeTagId) } : {}),
-      },
-      select: ['id'],
-    })
-    if (tagCodeConflict) {
-      throw new BizError('标签编码已存在，请更换后再试', 409)
+    if (input.seriesCode) {
+      const seriesCodeConflict = await repo.findOne({
+        where: {
+          seriesCode: input.seriesCode,
+          ...(input.excludeTagId ? { id: Not(input.excludeTagId) } : {}),
+        },
+        select: ['id'],
+      })
+      if (seriesCodeConflict) {
+        throw new BizError('系列编码已被其他标签占用', 409)
+      }
     }
   }
 
@@ -122,6 +165,9 @@ export class TagService {
     }
     if (isUniqueConstraintError(error, TAG_CODE_CONSTRAINT_MATCHER)) {
       throw new BizError('标签编码已存在，请更换后再试', 409)
+    }
+    if (isUniqueConstraintError(error, TAG_SERIES_CODE_CONSTRAINT_MATCHER)) {
+      throw new BizError('系列编码已被其他标签占用', 409)
     }
     throw error
   }
@@ -136,16 +182,19 @@ export class TagService {
   async create(input: CreateTagInput, actor: AuthUserContext): Promise<TagView> {
     const normalizedTagName = this.normalizeTagName(input.tagName)
     const normalizedTagCode = this.normalizeTagCode(input.tagCode)
+    const normalizedSeriesCode = this.normalizeSeriesCode(input.seriesCode)
     const result = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
       const tagRepo = manager.getRepository(BaseTag)
       await this.assertTagUniqueness(tagRepo, {
         tagName: normalizedTagName,
         tagCode: normalizedTagCode,
+        seriesCode: normalizedSeriesCode,
       })
       const entity = tagRepo.create({
         tagName: normalizedTagName,
         tagCode: normalizedTagCode,
+        seriesCode: normalizedSeriesCode,
       })
       try {
         return this.buildTagView(await tagRepo.save(entity))
@@ -168,13 +217,38 @@ export class TagService {
 
       const nextTagName = typeof input.tagName === 'string' ? this.normalizeTagName(input.tagName) : tag.tagName
       const nextTagCode = 'tagCode' in input ? this.normalizeTagCode(input.tagCode) : tag.tagCode
+      const nextSeriesCode = 'seriesCode' in input ? this.normalizeSeriesCode(input.seriesCode) : tag.seriesCode
+
+      // seriesCode 一旦被某商品当作主系列生成过 YZ 编码，就不能再改（含清空）：已有商品/SKU 的编码不会
+      // 随之重算，商品视图却会从标签实时读取新系列码，导致编码元数据与实际编码脱节；旧系列码之后若分配
+      // 给另一个标签，新标签的序号还会从 1 重新开始，持续撞上已有的全局商品编码。两侧都归一化（去空白转
+      // 大写）后比较，避免大小写或空白差异误判为"变了"。
+      const currentSeriesCodeNormalized = (tag.seriesCode ?? '').trim().toUpperCase()
+      const nextSeriesCodeNormalized = (nextSeriesCode ?? '').trim().toUpperCase()
+      if (nextSeriesCodeNormalized !== currentSeriesCodeNormalized) {
+        // P2-C 修复：usageCount 门禁本身是无锁读，与 YZ 建档/升级路径读取系列码
+        // （product.service.ts 的 loadAndLockSeriesTagForYzScheme）并发时，两者都可能各自读到"改前"
+        // 状态后各自继续，导致新建商品的编码与标签保存后的系列码不一致。改系列码与建档/升级读取系列码
+        // 必须用同一把互斥锁串行化，这里持锁直到事务提交，期间对方任何一次加锁读取都会等待本次变更落定。
+        await acquireSequenceMutex(manager, buildSeriesCodeMutexKey(id))
+        const usageCount = await manager.getRepository(BaseProduct).count({ where: { primarySeriesTagId: id } })
+        if (usageCount > 0) {
+          throw new BizError(
+            `标签「${tag.tagName}」已被 ${usageCount} 个商品用作文创系列并生成了编码，系列编码不可修改；如确需变更请另建标签`,
+            409,
+          )
+        }
+      }
+
       await this.assertTagUniqueness(tagRepo, {
         tagName: nextTagName,
         tagCode: nextTagCode,
+        seriesCode: nextSeriesCode,
         excludeTagId: id,
       })
       tag.tagName = nextTagName
       tag.tagCode = nextTagCode
+      tag.seriesCode = nextSeriesCode
       try {
         return this.buildTagView(await tagRepo.save(tag))
       } catch (error) {
@@ -193,6 +267,29 @@ export class TagService {
       if (manager.connection.options.type === 'mysql') tagQuery.setLock('pessimistic_write')
       const tag = await tagQuery.getOne()
       if (!tag) throw new BizError('标签不存在', 404)
+      // 直接查 primarySeriesTagId：普通标签编辑允许用户把 tagIds 改得不再包含该标签（关系行会被删除），
+      // 但 YZ 商品的 primarySeriesTagId 列本身不可切换（见 applyUpdateInputToProduct），因此不能只靠
+      // RelProductTag 关联数判断——那条关联可能已被移除，而商品仍然以该标签作为主系列。
+      const primarySeriesUsageCount = await manager.getRepository(BaseProduct).count({ where: { primarySeriesTagId: id } })
+      if (primarySeriesUsageCount > 0) {
+        throw new BizError(`标签「${tag.tagName}」已被 ${primarySeriesUsageCount} 个商品用作文创系列，暂不能删除`, 409)
+      }
+      // P1-C 修复（PR #109 第五轮评审）：主系列引用计数只能拦住"当前还有存活商品"的情况。若该系列最后一个
+      // YZ 商品已被删除、引用计数归零，标签本身仍可能对应永久占用登记表（base_yz_series_seq_reservation）
+      // 里已经分配过的系列内序号——删除标签后若有人新建一个 seriesCode 相同但 tagId 不同的新标签，序号会
+      // 从 01 重新分配，生成与旧印刷标签完全相同的商品编码/SKU 编码。因此按该标签的 seriesCode 查占用表，
+      // 命中即拒绝删除（不按 series_tag_id 查，因为占用表的权威唯一性维度已迁移到 seriesCode，见该表实体
+      // 文件头说明）；没有 seriesCode 的标签从未被用作 YZ 主系列，不会有占用记录，直接跳过。
+      if (tag.seriesCode) {
+        const seriesCodeReservationCount = await manager.getRepository(BaseYzSeriesSeqReservation)
+          .count({ where: { seriesCode: tag.seriesCode } })
+        if (seriesCodeReservationCount > 0) {
+          throw new BizError(
+            `标签「${tag.tagName}」的系列编码「${tag.seriesCode}」下已分配过 ${seriesCodeReservationCount} 个商品序号，删除后若被其他标签复用该系列编码会导致编码重复，为保留编码的追溯信息不允许删除；这些序号已永久登记，即使标签被删除也不会被重新分配`,
+            409,
+          )
+        }
+      }
       const relationCount = await manager.getRepository(RelProductTag).count({ where: { tagId: id } })
       if (relationCount > 0) throw new BizError(`标签「${tag.tagName}」已关联商品，暂不能删除`, 409)
       const result = await tagRepo.delete({ id })
@@ -215,6 +312,7 @@ export class TagService {
       id: normalizeEntityId(tag.id),
       tagName: tag.tagName,
       tagCode: tag.tagCode,
+      seriesCode: tag.seriesCode,
       createdAt: normalizeDateTime(tag.createdAt),
       updatedAt: normalizeDateTime(tag.updatedAt),
     }

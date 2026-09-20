@@ -60,6 +60,8 @@ const SQLITE_REQUIRED_TABLES = [
   'inv_stock_doc_item',
   'inv_stocktake',
   'inv_stocktake_item',
+  'base_product_variant_code_registry',
+  'base_yz_series_seq_reservation',
 ]
 
 /**
@@ -227,8 +229,17 @@ const SQLITE_REQUIRED_PRODUCT_COLUMNS = [
   'current_stock',
   'pre_ordered_stock',
   'category_id',
+  'primary_series_tag_id',
+  'series_seq',
+  'code_scheme',
+  'legacy_product_code',
 ]
-const SQLITE_REQUIRED_PRODUCT_SKU_COLUMNS = ['o2o_recommended', 'is_current', 'barcode', 'cost_price', 'location_id']
+const SQLITE_REQUIRED_PRODUCT_SKU_COLUMNS = ['o2o_recommended', 'is_current', 'barcode', 'cost_price', 'location_id', 'variant_code', 'size_code', 'legacy_sku_code']
+// YZ 通用 SKU 编码体系：base_tag 此前没有需要增量检测的列，series_code 是第一个，新增独立清单沿用既有命名规范。
+const SQLITE_REQUIRED_TAG_COLUMNS = ['series_code']
+// 053：系列内序号永久占用登记表命名空间从 tagId 迁移到系列码维度（PR #109 第五轮评审 P1-C 修复），
+// 新增两列需与 MYSQL_REQUIRED_COLUMNS 保持同一口径。
+const SQLITE_REQUIRED_RESERVATION_COLUMNS = ['series_code', 'code_prefix']
 const SQLITE_REQUIRED_O2O_PREORDER_ITEM_COLUMNS = [
   'original_price',
   'discount_rate',
@@ -519,6 +530,298 @@ async function prepareSqliteOrderSourceDocColumns(dataSource: DataSource): Promi
   await dataSource.query(
     'CREATE INDEX IF NOT EXISTS "idx_biz_outbound_source_doc" ON "biz_outbound_order" ("source_doc_type", "source_doc_id")',
   )
+}
+
+/**
+ * 结构化解析 product_code 快照，还原登记当时的真实前缀与系列码，不依赖当前全局前缀（P2-B 修复，
+ * PR #109 第七轮评审）。
+ * 背景：若某环境在写入占用记录之后修改过全局前缀，旧实现按"当前前缀"反推——反推失败后退化到按标签
+ * 反查 series_code，但 code_prefix 却被强制写成当前前缀，例如历史编码 `ABPX01` 会被错误登记成
+ * `YZ/PX/01`：把前缀切回 AB 之后 `ABPX01` 可以被重新分配（旧标签指向新商品），同时还错误占用了一个
+ * 根本不存在的 `YZPX01`。
+ * 口径：YZ 编码定长格式 `${前缀 1-4 位大写字母}${系列码 2 位大写字母}${序号 2 位数字}`，序号位已知
+ * （等于这条占用记录自己的 series_seq 列，不需要反推），因此可以从字符串尾部反切：末两位必须等于该行
+ * series_seq 补零后的值，其前两位是系列码，再往前剩下的部分就是前缀——全程不假设前缀等于当前配置，
+ * 前缀曾经改过也能正确还原，也不依赖标签是否还存在。
+ * 解析失败（长度不在 5-8 位区间、序号位不匹配、系列码位不是两位大写字母、前缀位不是 1-4 位大写字母）
+ * 一律返回 null，调用方必须让该行保持待人工处理，绝不能用当前前缀顶替。
+ */
+function parseYzProductCodeStructure(
+  productCode: string | null | undefined,
+  seriesSeq: number,
+): { seriesCode: string; codePrefix: string } | null {
+  const code = productCode ?? ''
+  if (code.length < 5 || code.length > 8) return null
+  const expectedSeqSuffix = String(seriesSeq).padStart(2, '0')
+  if (!code.endsWith(expectedSeqSuffix)) return null
+  const seriesCode = code.slice(-4, -2)
+  if (!/^[A-Z]{2}$/.test(seriesCode)) return null
+  const codePrefix = code.slice(0, -4)
+  if (!/^[A-Z]{1,4}$/.test(codePrefix)) return null
+  return { seriesCode, codePrefix }
+}
+
+/**
+ * 结构化解析的第二优先级：series_code 已知（通常来自标签反查），只需要反推 codePrefix。同样要求
+ * product_code 末尾恰好是 `${knownSeriesCode}${series_seq 补零}`，且剩余前缀部分满足 1-4 位大写
+ * 字母才采信——校验的是"标签给出的系列码确实出现在 product_code 该有的位置"，而不是盲目采信任意
+ * 两位大写字母，因此比 parseYzProductCodeStructure 多一层交叉验证。解析失败返回 null。
+ */
+function parseYzCodePrefixWithKnownSeriesCode(
+  productCode: string | null | undefined,
+  seriesSeq: number,
+  knownSeriesCode: string,
+): string | null {
+  const code = productCode ?? ''
+  const suffix = `${knownSeriesCode}${String(seriesSeq).padStart(2, '0')}`
+  if (!code.endsWith(suffix)) return null
+  const codePrefix = code.slice(0, code.length - suffix.length)
+  return /^[A-Z]{1,4}$/.test(codePrefix) ? codePrefix : null
+}
+
+/**
+ * P1-B 修复（PR #109 第六轮评审；第八轮评审修正口径）：补登记迁移执行时仍存活的 YZ 商品占用。
+ * 背景与口径见 backend/sql/053_yz_reservation_series_code.sql 同名新增段落——如果这个 SQLite 库在
+ * 补齐 series_code/code_prefix 两列之前就已经有存活的 YZ 商品（primary_series_tag_id/series_seq/
+ * product_code 三者齐全），这些商品的占用此前从未写进登记表；该商品一旦后续被删除，其（系列, 序号）
+ * 组合就没有永久占用记录，导致导入相同序号仍会成功，静默复用旧印刷标签对应的编码指向新商品。
+ * 口径（第八轮评审修正）：改用与 parseYzProductCodeStructure 完全一致的结构化反切，不再按当前全局
+ * 前缀反推——已知该商品自带的 series_seq，直接从 product_code 尾部反切出系列码与前缀。旧实现按当前
+ * 前缀反推：如果这个环境先用旧前缀创建过 YZ 商品、之后又切换了前缀，这些旧前缀商品因为不匹配当前
+ * 前缀而完全不会写入占用表；该商品被删除后只要前缀切回旧值，导入侧显式指定原序号就能复用旧编码，
+ * 使已打印标签指向新商品——与 053 脚本此前要修的问题完全相同，只是发生在 SQLite 侧的等价实现里。
+ * 反推失败的行跳过不登记，不追加标签反查或占位哨兵——这里要补的是"确实存活、结构完整"的商品，猜错
+ * series_code 比不登记更危险。表行数很小（只在 YZ 商品建档/升级/导入时追加一行），逐行处理没有性能问题。
+ */
+async function backfillSqliteLiveYzProductReservations(dataSource: DataSource): Promise<void> {
+  const productColumns = await listSqliteTableColumns(dataSource, 'base_product')
+  if (!productColumns.has('code_scheme') || !productColumns.has('primary_series_tag_id') || !productColumns.has('series_seq') || !productColumns.has('product_code')) {
+    return
+  }
+  const liveYzProducts: Array<{ primary_series_tag_id: number | string; series_seq: number; product_code: string }> = await dataSource.query(`
+    SELECT primary_series_tag_id, series_seq, product_code
+    FROM "base_product"
+    WHERE code_scheme = 'yz'
+      AND primary_series_tag_id IS NOT NULL
+      AND series_seq IS NOT NULL
+      AND product_code IS NOT NULL
+  `).catch(() => [])
+  if (!liveYzProducts.length) return
+
+  for (const product of liveYzProducts) {
+    const seriesSeq = Number(product.series_seq)
+    const structural = parseYzProductCodeStructure(product.product_code, seriesSeq)
+    if (!structural) continue // 反推失败，跳过不登记，留给人工核对
+    const { seriesCode, codePrefix } = structural
+    const existing: Array<{ id: number | string }> = await dataSource.query(
+      'SELECT id FROM "base_yz_series_seq_reservation" WHERE code_prefix = ? AND series_code = ? AND series_seq = ?',
+      [codePrefix, seriesCode, seriesSeq],
+    )
+    if (existing.length) continue // 已登记，幂等跳过，可安全重放
+    await dataSource.query(
+      'INSERT INTO "base_yz_series_seq_reservation" (series_tag_id, series_seq, product_code, series_code, code_prefix) VALUES (?, ?, ?, ?, ?)',
+      [product.primary_series_tag_id, seriesSeq, product.product_code, seriesCode, codePrefix],
+    )
+  }
+}
+
+/**
+ * 051 SQLite 侧回填（PR #109 第六轮评审复核追加）：051_product_legacy_code.sql 把此前
+ * upgradeProductToYzCode 误回填进 base_product_sku.barcode 的历史编码搬到 legacy_sku_code、并把
+ * barcode 置空，但该脚本用了 MySQL 专有的 `INNER JOIN ... SET` 多表更新语法与 `REGEXP`，backend/sql/
+ * 不面向 SQLite 执行（只有 MySQL 走启动期自动迁移）。这意味着 SQLite 环境（本地开发库、onebox 容器）
+ * 里这条数据搬运从未发生过：在 051 上线前就已经升级过的商品，其 SKU 至今仍是"历史编码占着 barcode、
+ * legacy_sku_code 为空"的错误状态——原厂条码语义被污染，且这些历史编码不会被 lookupByCode 第三路
+ * （legacySkuCode）扫码命中。
+ * 这里用 JS 逐行实现与 051 完全相同的判定口径（该表规模小，逐行处理没有性能问题）：
+ *   仅当该 SKU 所属商品 code_scheme = 'yz'，且 barcode 非空、legacy_sku_code 为空，且 barcode
+ *   形如历史编码格式时才搬运：
+ *     - 以 'P-' 开头，且包含 '-DEFAULT' 或 '-SKU-'（旧 P- 系编码商品/SKU 编码的常见后缀）；
+ *     - 或以 'WC' 开头，紧跟一位数字（旧 WC 系编码格式）。
+ *   两条规则都不满足的 barcode 一律不动——判定必须保守，宁可漏判也不能误删真实原厂条码（EAN/UPC 等）。
+ * 幂等：迁移后这些行的 barcode 已被置空，`barcode IS NOT NULL AND legacy_sku_code IS NULL` 两个
+ * 条件保证可安全重放，不会重复搬运或覆盖已有的历史编码。
+ */
+async function backfillSqliteLegacySkuCodeFromBarcode(dataSource: DataSource): Promise<void> {
+  const skuColumns = await listSqliteTableColumns(dataSource, 'base_product_sku')
+  const productColumns = await listSqliteTableColumns(dataSource, 'base_product')
+  if (!skuColumns.has('legacy_sku_code') || !skuColumns.has('barcode') || !productColumns.has('code_scheme')) {
+    return
+  }
+
+  const candidates: Array<{ id: number | string; barcode: string | null }> = await dataSource.query(`
+    SELECT sku."id" AS id, sku."barcode" AS barcode
+    FROM "base_product_sku" AS sku
+    INNER JOIN "base_product" AS p ON p."id" = sku."product_id"
+    WHERE p."code_scheme" = 'yz'
+      AND sku."barcode" IS NOT NULL
+      AND sku."legacy_sku_code" IS NULL
+  `).catch(() => [])
+  if (!candidates.length) return
+
+  for (const row of candidates) {
+    const barcode = row.barcode ?? ''
+    const matchesLegacyProductCodeStyle = barcode.startsWith('P-') && (barcode.includes('-DEFAULT') || barcode.includes('-SKU-'))
+    const matchesLegacyWcStyle = /^WC[0-9]/.test(barcode)
+    if (!matchesLegacyProductCodeStyle && !matchesLegacyWcStyle) continue // 不像历史编码格式，可能是真实原厂条码，不动
+    await dataSource.query(
+      'UPDATE "base_product_sku" SET legacy_sku_code = ?, barcode = NULL WHERE id = ? AND barcode IS NOT NULL AND legacy_sku_code IS NULL',
+      [barcode, row.id],
+    )
+  }
+}
+
+/**
+ * 053：系列内序号永久占用登记表命名空间从 tagId 迁移到系列码维度（PR #109 第五轮评审 P1-C 修复）。
+ * SQLite 侧没有 backend/sql/053_yz_reservation_series_code.sql 可执行（该脚本只面向 MySQL），
+ * 这里用等价口径补齐：先以可空列补齐，再按与 053 脚本相同的优先级在 JS 里逐行回填——SQLite 没有
+ * REGEXP，行数也远小于生产 MySQL 规模（这张表只在 YZ 商品建档/升级/导入时才追加一行），逐行处理比
+ * 拼一段用不上索引的正则 SQL 更直接、更易读。
+ * 回填口径（与 053 脚本一致，见该文件注释；P2-B 修复后两者均改为结构化解析，不再依赖当前前缀）：
+ *   a) 结构化解析 product_code 快照（parseYzProductCodeStructure）：不依赖当前前缀，仅用这行自己的
+ *      series_seq 列 + product_code 的定长结构直接反切出 series_code 与 code_prefix；
+ *   b) 结构化解析失败则按 series_tag_id 反查 base_tag.series_code（标签已删除则查不到，跳过），拿到
+ *      系列码后仍用同一套结构化反切规则反推前缀（parseYzCodePrefixWithKnownSeriesCode），反推失败
+ *      同样不采信，绝不会退回到套用当前前缀这种做法；
+ *   c) 两条都反推不出的记录，写入不合法格式的占位哨兵 series_code='??'、code_prefix='?'，标记待人工核对。
+ * 列先以可空列补齐，值全部回填完成后再收紧 NOT NULL——收紧动作本身不在这里做（P2-C 修复见下面
+ * rebuildSqliteYzReservationConstraints 的说明：不依赖 synchronize()，由准备函数自己完成整表重建）。
+ * P1-B 修复（PR #109 第六轮评审）：上述 a/b/c 只处理登记表里已存在、但 series_code/code_prefix
+ * 还是 NULL 的行；仍存活 YZ 商品从未在本表登记过的情况（P1-B 场景）不在这批 pendingRows 里，因此
+ * 无论 pendingRows 是否为空，都要接着跑 backfillSqliteLiveYzProductReservations 补登记，不能提前
+ * return 跳过。补登记之后再跑 rebuildSqliteYzReservationConstraints 收紧列约束与索引，顺序不能颠倒
+ * ——收紧 NOT NULL 前必须保证所有行（含刚补登记的新行）都已有合法的 series_code/code_prefix 取值。
+ */
+async function prepareSqliteYzReservationSeriesCodeColumns(dataSource: DataSource): Promise<void> {
+  const reservationColumns = await listSqliteTableColumns(dataSource, 'base_yz_series_seq_reservation')
+  if (reservationColumns.size === 0) return
+  if (!reservationColumns.has('series_code')) {
+    await dataSource.query('ALTER TABLE "base_yz_series_seq_reservation" ADD COLUMN "series_code" varchar(2) NULL')
+  }
+  if (!reservationColumns.has('code_prefix')) {
+    await dataSource.query('ALTER TABLE "base_yz_series_seq_reservation" ADD COLUMN "code_prefix" varchar(4) NULL')
+  }
+
+  const pendingRows: Array<{ id: number | string; product_code: string; series_seq: number; series_tag_id: number | string }> = await dataSource.query(
+    'SELECT id, product_code, series_seq, series_tag_id FROM "base_yz_series_seq_reservation" WHERE series_code IS NULL OR code_prefix IS NULL',
+  )
+
+  if (pendingRows.length) {
+    const tagSeriesCodeById = new Map<string, string | null>()
+    for (const row of pendingRows) {
+      const tagId = String(row.series_tag_id)
+      if (tagSeriesCodeById.has(tagId)) continue
+      const tagRows: Array<{ series_code: string | null }> = await dataSource.query(
+        'SELECT series_code FROM base_tag WHERE id = ?',
+        [row.series_tag_id],
+      ).catch(() => [])
+      tagSeriesCodeById.set(tagId, tagRows[0]?.series_code ?? null)
+    }
+
+    for (const row of pendingRows) {
+      const seriesSeqNumber = Number(row.series_seq)
+      // 回填 a：结构化解析 product_code 自身结构，不依赖当前前缀（P2-B 修复，PR #109 第七轮评审）。
+      let seriesCode: string | null = null
+      let codePrefix: string | null = null
+      const structural = parseYzProductCodeStructure(row.product_code, seriesSeqNumber)
+      if (structural) {
+        seriesCode = structural.seriesCode
+        codePrefix = structural.codePrefix
+      } else {
+        // 回填 b：结构化解析失败则退化为按 series_tag_id 反查标签当前的 series_code，再用同一套
+        // 结构化反切规则校验并反推前缀，绝不直接套用当前前缀。
+        const tagSeriesCode = tagSeriesCodeById.get(String(row.series_tag_id)) ?? null
+        if (tagSeriesCode) {
+          const parsedPrefix = parseYzCodePrefixWithKnownSeriesCode(row.product_code, seriesSeqNumber, tagSeriesCode)
+          if (parsedPrefix) {
+            seriesCode = tagSeriesCode
+            codePrefix = parsedPrefix
+          }
+        }
+      }
+      // 回填 c：两条都反推不出，写入占位哨兵，标记待人工核对——绝不用当前前缀顶替 codePrefix。
+      const finalSeriesCode = seriesCode ?? '??'
+      const finalCodePrefix = codePrefix ?? '?'
+      await dataSource.query(
+        'UPDATE "base_yz_series_seq_reservation" SET series_code = ?, code_prefix = ? WHERE id = ? AND (series_code IS NULL OR code_prefix IS NULL)',
+        [finalSeriesCode, finalCodePrefix, row.id],
+      )
+    }
+  }
+
+  await backfillSqliteLiveYzProductReservations(dataSource)
+  await rebuildSqliteYzReservationConstraints(dataSource)
+}
+
+/**
+ * P2-C 修复（PR #109 第六轮评审）：052 时代建的 SQLite 库只靠上面几步把 series_code/code_prefix 补成
+ * 可空列、回填好值，此前寄希望于"后续 synchronize() 会收紧 NOT NULL、重建索引"——但
+ * shouldSynchronizeSqliteSchema 只按"列是否存在"判断结构是否就绪，列一旦存在就判定无需同步，
+ * synchronize() 根本不会被触发，于是这张表永远停在"两列可空 + 新唯一索引缺失 + 旧唯一索引仍在"的
+ * 半吊子状态，与 MySQL、与实体声明三方分裂。不能再让这张表的收尾依赖"恰好因为别的原因触发了整体
+ * synchronize()"这种间接路径，这里直接在准备函数内部自己完成收尾，不依赖 synchronize：
+ * - 索引变更（新增 uk_yz_series_seq_reservation_code / 降级旧的 uk_yz_series_seq_reservation）
+ *   SQLite 原生支持 DROP INDEX / CREATE INDEX 直接执行，不需要建表；
+ * - 列 NOT NULL 收紧 SQLite 不支持原地 ALTER COLUMN，只能"建同构新表（约束已收紧）→ 按列名搬数据→
+ *   删旧表 → 改名"。新表 DDL 已对照本地起一次 synchronize() 后 sqlite_master 里的真实建表语句核对过，
+ *   与 TypeORM 会为该实体生成的结构完全一致，确保收紧之后 TypeORM 的 synchronize()（例如 DB_SYNC=true
+ *   本地调试场景）不会再检测出"结构不一致"而重复触发无意义的重建。
+ * 前提：调用时 series_code/code_prefix 必须已经没有 NULL 值——由本函数前面的补列 + 回填两步保证，
+ * 这也是本函数必须排在 backfillSqliteLiveYzProductReservations 之后调用的原因。
+ * 全程幂等：动手前先探测当前是否已经是目标形状（新唯一索引存在、旧唯一索引已不在、两列已是 NOT NULL），
+ * 已就绪直接跳过，可安全在每次启动时重复调用。
+ */
+async function rebuildSqliteYzReservationConstraints(dataSource: DataSource): Promise<void> {
+  const tableName = 'base_yz_series_seq_reservation'
+  const columns = await listSqliteTableColumns(dataSource, tableName)
+  if (!columns.has('series_code') || !columns.has('code_prefix')) return // 列还没补齐，交给上一步先处理
+
+  const hasTargetUniqueIndex = await hasSqliteUniqueIndexShape(
+    dataSource,
+    tableName,
+    'uk_yz_series_seq_reservation_code',
+    ['code_prefix', 'series_code', 'series_seq'],
+  )
+  const hasOldUniqueIndex = (await listSqliteUniqueIndexes(dataSource, tableName)).has('uk_yz_series_seq_reservation')
+  const columnsAlreadyNotNull = await hasSqliteNotNullColumn(dataSource, tableName, 'series_code')
+    && await hasSqliteNotNullColumn(dataSource, tableName, 'code_prefix')
+
+  if (hasTargetUniqueIndex && !hasOldUniqueIndex && columnsAlreadyNotNull) {
+    return // 已是目标形状，幂等跳过
+  }
+
+  if (!columnsAlreadyNotNull) {
+    // 列约束需要收紧，只能整表重建；重建后旧表的全部索引会一并消失，下面统一重新建齐。
+    await dataSource.query(`DROP TABLE IF EXISTS "${tableName}__rebuild"`)
+    await dataSource.query(`
+      CREATE TABLE "${tableName}__rebuild" (
+        "id" integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+        "series_tag_id" integer NOT NULL,
+        "series_seq" smallint NOT NULL,
+        "product_code" varchar(64) NOT NULL,
+        "series_code" varchar(2) NOT NULL,
+        "code_prefix" varchar(4) NOT NULL,
+        "created_at" datetime NOT NULL DEFAULT (datetime('now')),
+        "updated_at" datetime NOT NULL DEFAULT (datetime('now'))
+      )
+    `)
+    await dataSource.query(`
+      INSERT INTO "${tableName}__rebuild"
+        ("id", "series_tag_id", "series_seq", "product_code", "series_code", "code_prefix", "created_at", "updated_at")
+      SELECT "id", "series_tag_id", "series_seq", "product_code", "series_code", "code_prefix", "created_at", "updated_at"
+      FROM "${tableName}"
+    `)
+    await dataSource.query(`DROP TABLE "${tableName}"`)
+    await dataSource.query(`ALTER TABLE "${tableName}__rebuild" RENAME TO "${tableName}"`)
+  } else if (hasOldUniqueIndex) {
+    // 列已经是 NOT NULL，只是旧唯一索引还在：直接降级，不需要整表重建。
+    await dataSource.query(`DROP INDEX "uk_yz_series_seq_reservation"`)
+  }
+
+  // 走过整表重建分支时旧索引已随旧表一起消失；未走重建分支时上面已单独降级旧索引。
+  // 这里统一（重新）建齐两个索引，IF NOT EXISTS 保证幂等。
+  await dataSource.query(`CREATE INDEX IF NOT EXISTS "idx_yz_series_seq_reservation_tag" ON "${tableName}" ("series_tag_id", "series_seq")`)
+  await dataSource.query(`CREATE UNIQUE INDEX IF NOT EXISTS "uk_yz_series_seq_reservation_code" ON "${tableName}" ("code_prefix", "series_code", "series_seq")`)
 }
 
 /**
@@ -1519,6 +1822,24 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
     return true
   }
 
+  const tagColumnSet = await listSqliteTableColumns(dataSource, 'base_tag')
+  if (SQLITE_REQUIRED_TAG_COLUMNS.some((column) => !tagColumnSet.has(column))) {
+    return true
+  }
+
+  const reservationColumnSet = await listSqliteTableColumns(dataSource, 'base_yz_series_seq_reservation')
+  if (SQLITE_REQUIRED_RESERVATION_COLUMNS.some((column) => !reservationColumnSet.has(column))) {
+    return true
+  }
+  // P2-C 修复（PR #109 第六轮评审）：此前这里只查列是否存在，列存在就判定无需同步，
+  // 052 时代建的库因此永远停在"两列可空 + 新唯一索引缺失 + 旧唯一索引仍在"的半吊子状态——
+  // 单靠"列存在性判断触发 synchronize()"这条间接路径并不可靠：如果这张表当次启动是唯一的结构缺口，
+  // 根本不会有别的原因触发整体 synchronize()。不能让这张表的收尾依赖"恰好因为别的原因顺带同步了"。
+  // 现在改为由 prepareSqliteYzReservationSeriesCodeColumns 末尾的 rebuildSqliteYzReservationConstraints
+  // 在准备阶段自己完成 NOT NULL 收紧与索引重建（不依赖 synchronize，见该函数注释），在
+  // initializeDatabaseSchemaIfNeeded 里排在本函数之前执行，因此走到这里时索引形状与列约束应该已经
+  // 就绪，这里不需要也不应该再重复判断——重复判断只会形成两处"谁才是权威收尾逻辑"的疑惑。
+
   const clientUserColumnSet = await listSqliteTableColumns(dataSource, 'client_user')
   if (SQLITE_REQUIRED_CLIENT_USER_COLUMNS.some((column) => !clientUserColumnSet.has(column))) {
     return true
@@ -1646,6 +1967,8 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
     await prepareSqliteOrderAmendmentColumns(dataSource)
     await prepareSqliteOrderContentInventoryColumns(dataSource)
     await prepareSqliteOrderSourceDocColumns(dataSource)
+    await backfillSqliteLegacySkuCodeFromBarcode(dataSource)
+    await prepareSqliteYzReservationSeriesCodeColumns(dataSource)
     await prepareSqliteOrderMergeOperationResultSnapshot(dataSource)
     await normalizeSqliteOutboundItemColumns(dataSource)
     await normalizeSqliteO2oDiscountColumns(dataSource)

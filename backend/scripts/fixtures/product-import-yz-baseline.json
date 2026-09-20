@@ -1,0 +1,13 @@
+[
+  { "row": 2, "series": "测试甲类", "seriesCode": "TA", "seriesSeq": 1, "productName": "测试摆件甲", "productCode": "YZTA01", "variantValue": null, "variantCode": "0", "sizeValue": null, "sizeCode": null, "skuCode": "YZTA010", "price": "12.5" },
+  { "row": 3, "series": "测试甲类", "seriesCode": "TA", "seriesSeq": 2, "productName": "测试文具乙", "productCode": "YZTA02", "variantValue": "红色", "variantCode": "1", "sizeValue": "S", "sizeCode": "A", "skuCode": "YZTA021A", "price": "39" },
+  { "row": 4, "series": "测试甲类", "seriesCode": "TA", "seriesSeq": 2, "productName": "测试文具乙", "productCode": "YZTA02", "variantValue": "红色", "variantCode": "1", "sizeValue": "M", "sizeCode": "B", "skuCode": "YZTA021B", "price": "39" },
+  { "row": 5, "series": "测试甲类", "seriesCode": "TA", "seriesSeq": 2, "productName": "测试文具乙", "productCode": "YZTA02", "variantValue": "蓝色", "variantCode": "2", "sizeValue": "S", "sizeCode": "A", "skuCode": "YZTA022A", "price": "39" },
+  { "row": 6, "series": "测试甲类", "seriesCode": "TA", "seriesSeq": 2, "productName": "测试文具乙", "productCode": "YZTA02", "variantValue": "蓝色", "variantCode": "2", "sizeValue": "M", "sizeCode": "B", "skuCode": "YZTA022B", "price": "39" },
+  { "row": 7, "series": "测试甲类", "seriesCode": "TA", "seriesSeq": 3, "productName": "测试书签丙", "productCode": "YZTA03", "variantValue": "图案A", "variantCode": "1", "sizeValue": null, "sizeCode": null, "skuCode": "YZTA031", "price": "15" },
+  { "row": 8, "series": "测试甲类", "seriesCode": "TA", "seriesSeq": 3, "productName": "测试书签丙", "productCode": "YZTA03", "variantValue": "图案B", "variantCode": "2", "sizeValue": null, "sizeCode": null, "skuCode": "YZTA032", "price": "15" },
+  { "row": 9, "series": "测试乙类", "seriesCode": "TB", "seriesSeq": 1, "productName": "测试乙款埃菲尔挂件", "productCode": "YZTB01", "variantValue": "银色", "variantCode": "1", "sizeValue": null, "sizeCode": null, "skuCode": "YZTB011", "price": "18" },
+  { "row": 10, "series": "测试乙类", "seriesCode": "TB", "seriesSeq": 1, "productName": "测试乙款自由女神挂件", "productCode": "YZTB01", "variantValue": "金色", "variantCode": "2", "sizeValue": null, "sizeCode": null, "skuCode": "YZTB012", "price": "18" },
+  { "row": 11, "series": "测试乙类", "seriesCode": "TB", "seriesSeq": 2, "productName": "测试鞋款丁", "productCode": "YZTB02", "variantValue": "38", "variantCode": "1", "sizeValue": null, "sizeCode": null, "skuCode": "YZTB021", "price": "99" },
+  { "row": 12, "series": "测试乙类", "seriesCode": "TB", "seriesSeq": 2, "productName": "测试鞋款丁", "productCode": "YZTB02", "variantValue": "39", "variantCode": "2", "sizeValue": null, "sizeCode": null, "skuCode": "YZTB022", "price": "99" }
+]

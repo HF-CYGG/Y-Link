@@ -1,11 +1,15 @@
 /**
- * 模块说明：库存域业务编号分配（SKU 的 WC 编码、库存单据号、盘点单号）。
+ * 模块说明：库存域业务编号分配（SKU 的 WC 编码、库存单据号、盘点单号），以及供其他编码体系
+ *          （如 YZ 通用 SKU 编码）复用的 business_sequence 行锁原语。
  * 文件职责：基于 business_sequence 行锁在调用方事务内分配递增流水，保证并发下编号不重复。
  * 实现逻辑：
  * - 与订单流水同一套“先无锁判断存在 → 缺行幂等插入 → 再加行锁递增”流程，规避 MySQL 间隙锁死锁；
  * - 序列首次建行时由调用方提供初始值（如已有 WC 编码的最大流水号），兼容历史手工编码；
- * - SQLite 由写事务单队列串行化，不需要显式行锁。
- * 维护重点：编号格式调整只改本文件的 format 函数，序列键前缀保持不变以免流水回退。
+ * - SQLite 由写事务单队列串行化，不需要显式行锁；
+ * - `raiseSequenceFloor` 复用同一套行锁流程，把序列当前值抬高到指定下限而不是 +1，
+ *   供“导入必须保留原序号”这类场景（如 YZ 编码 Excel 导入）预占指定值后再继续走 `allocateSequenceValue`。
+ * 维护重点：编号格式调整只改本文件的 format 函数，序列键前缀保持不变以免流水回退；
+ *          新增复用函数时只允许追加导出，不得改变 `allocateSequenceValue` / `acquireSequenceMutex` 的既有行为。
  */
 
 import type { EntityManager } from 'typeorm'
@@ -69,6 +73,35 @@ export async function acquireSequenceMutex(manager: EntityManager, mutexKey: str
     await ensureSequenceRow(manager, mutexKey, 0)
   }
   if (!(await loadSequenceForUpdate(manager, mutexKey))) throw new BizError('业务互斥锁初始化失败，请稍后重试', 500)
+}
+
+/**
+ * 把序列当前值抬高到 minValue（取两者较大值），不做 +1 递增。
+ * 用于“必须保留指定编号”的预占场景：预占后序列游标停在 minValue，
+ * 后续 `allocateSequenceValue` 会从 minValue + 1 继续分配，不会重新从头分配导致撞号。
+ */
+export async function raiseSequenceFloor(
+  manager: EntityManager,
+  sequenceKey: string,
+  minValue: number,
+): Promise<void> {
+  if (!Number.isSafeInteger(minValue) || minValue < 0) {
+    throw new BizError('序列下限值非法', 500)
+  }
+  let sequence = manager.connection.options.type === 'mysql'
+    && !(await manager.getRepository(BusinessSequence).existsBy({ sequenceKey }))
+    ? null
+    : await loadSequenceForUpdate(manager, sequenceKey)
+  if (!sequence) {
+    await ensureSequenceRow(manager, sequenceKey, minValue)
+    sequence = await loadSequenceForUpdate(manager, sequenceKey)
+  }
+  if (!sequence) throw new BizError('编号序列初始化失败，请稍后重试', 500)
+  const current = Number(sequence.currentValue ?? 0)
+  if (minValue > current) {
+    sequence.currentValue = minValue
+    await manager.getRepository(BusinessSequence).save(sequence)
+  }
 }
 
 const formatLocalDate = (date: Date) => {

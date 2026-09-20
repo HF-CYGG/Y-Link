@@ -10,6 +10,7 @@ export interface Tag {
   id: string
   tagName: string
   tagCode: string | null
+  seriesCode: string | null
   createdAt: string
   updatedAt: string
 }
@@ -17,11 +18,13 @@ export interface Tag {
 export interface CreateTagDto {
   tagName: string
   tagCode?: string | null
+  seriesCode?: string | null
 }
 
 export interface UpdateTagDto {
   tagName?: string
   tagCode?: string | null
+  seriesCode?: string | null
 }
 
 type PrimitiveValue = string | number | null | undefined
@@ -30,6 +33,7 @@ interface TagRawRecord {
   id?: PrimitiveValue
   tagName?: PrimitiveValue
   tagCode?: PrimitiveValue
+  seriesCode?: PrimitiveValue
   createdAt?: PrimitiveValue
   updatedAt?: PrimitiveValue
 }
@@ -47,6 +51,7 @@ const normalizeTag = (tag: TagRawRecord): Tag => ({
   id: normalizeText(tag.id),
   tagName: normalizeText(tag.tagName),
   tagCode: normalizeText(tag.tagCode) || null,
+  seriesCode: normalizeText(tag.seriesCode) || null,
   createdAt: normalizeText(tag.createdAt),
   updatedAt: normalizeText(tag.updatedAt),
 })
