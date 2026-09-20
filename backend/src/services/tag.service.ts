@@ -17,6 +17,8 @@ import { BizError } from '../utils/errors.js'
 import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
+import { acquireSequenceMutex } from './inventory-sequence.service.js'
+import { buildSeriesCodeMutexKey } from './product-code.service.js'
 
 export interface CreateTagInput {
   tagName: string
@@ -223,6 +225,11 @@ export class TagService {
       const currentSeriesCodeNormalized = (tag.seriesCode ?? '').trim().toUpperCase()
       const nextSeriesCodeNormalized = (nextSeriesCode ?? '').trim().toUpperCase()
       if (nextSeriesCodeNormalized !== currentSeriesCodeNormalized) {
+        // P2-C 修复：usageCount 门禁本身是无锁读，与 YZ 建档/升级路径读取系列码
+        // （product.service.ts 的 loadAndLockSeriesTagForYzScheme）并发时，两者都可能各自读到"改前"
+        // 状态后各自继续，导致新建商品的编码与标签保存后的系列码不一致。改系列码与建档/升级读取系列码
+        // 必须用同一把互斥锁串行化，这里持锁直到事务提交，期间对方任何一次加锁读取都会等待本次变更落定。
+        await acquireSequenceMutex(manager, buildSeriesCodeMutexKey(id))
         const usageCount = await manager.getRepository(BaseProduct).count({ where: { primarySeriesTagId: id } })
         if (usageCount > 0) {
           throw new BizError(

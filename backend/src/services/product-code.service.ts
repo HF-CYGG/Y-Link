@@ -32,6 +32,17 @@ const PRODUCT_CODE_PREFIX_PATTERN = /^[A-Z]{1,4}$/
 /** 空尺码位继承的哨兵 code：不在 A-E 候选池内，仅用于占位、不产生尺码字母，也不计入 5 个容量上限。 */
 export const EMPTY_SIZE_SENTINEL_CODE = '-'
 
+/**
+ * 规格取值登记表 base_product_variant_code_registry.spec_value 列的最大长度（VARCHAR(64)）。
+ * P2-D 修复：路由 schema、服务层重命名校验与 Excel 导入校验必须共用同一常量，避免各处各写一份
+ * 魔法数字导致数据库列上限调整时遗漏某处、或三处口径不一致。
+ */
+export const SPEC_VALUE_MAX_LENGTH = 64
+
+/** 系列码互斥键：标签改系列码（tag.service.ts）与 YZ 建档/升级读取系列码（product.service.ts）
+ *  必须用这同一把互斥锁串行化，见 P2-C 修复。 */
+export const buildSeriesCodeMutexKey = (tagId: string): string => `tag_series_code.${tagId}`
+
 // 导出候选池仅供“存量商品升级到 YZ 编码”的只读预检（previewProductYzUpgrade）模拟推算使用，
 // 预检不能调用 resolveVariantCode/resolveSizeCode（那会真的写登记表），只能照同一份候选池自行模拟。
 export const VARIANT_CODE_POOL = ['1', '2', '3', '4', '5', '6', '7', '8', '9'] as const
@@ -109,10 +120,21 @@ export async function resolveVariantCode(
   options?: ResolveVariantCodeOptions,
 ): Promise<string> {
   const normalized = normalizeSpecValue(specValue)
-  if (!normalized) return '0'
+  const registryRepo = manager.getRepository(BaseProductVariantCodeRegistry)
+
+  if (!normalized) {
+    // P1-B 修复：0 号编码位一旦通过 inheritZeroCode 正式继承给某个具体取值，就不能再被空规格（未选
+    // 一级变体）重新占用——否则空规格与已继承的具体取值会拼出完全相同的 skuCode（规格组合不同、编码
+    // 却相同），被下游的重复编码兜底逻辑追加非法的 `-2` 后缀。加锁后查登记表，保证与继承操作互斥。
+    await acquireSequenceMutex(manager, buildRegistryMutexKey(productId, 'variant'))
+    const inherited = await registryRepo.findOneBy({ productId, axis: 'variant', code: '0' })
+    if (inherited) {
+      throw new BizError('该商品的 0 号编码位已继承给某个具体规格取值，不能再用空规格占用，请为该规格轴指定取值', 409)
+    }
+    return '0'
+  }
 
   await acquireSequenceMutex(manager, buildRegistryMutexKey(productId, 'variant'))
-  const registryRepo = manager.getRepository(BaseProductVariantCodeRegistry)
 
   const existing = await registryRepo.findOneBy({ productId, axis: 'variant', specValue: normalized })
   if (existing) return existing.code
@@ -148,10 +170,20 @@ export async function resolveSizeCode(
   options?: ResolveSizeCodeOptions,
 ): Promise<string | null> {
   const normalized = normalizeSpecValue(specValue)
-  if (!normalized) return null
+  const registryRepo = manager.getRepository(BaseProductVariantCodeRegistry)
+
+  if (!normalized) {
+    // P1-B 修复：空尺码位一旦通过 inheritEmptySize 正式继承（哨兵 code='-'）给某个具体取值，就不能再被
+    // 空尺码重新占用，理由与 resolveVariantCode 的 0 号继承检查完全一致。
+    await acquireSequenceMutex(manager, buildRegistryMutexKey(productId, 'size'))
+    const inherited = await registryRepo.findOneBy({ productId, axis: 'size', code: EMPTY_SIZE_SENTINEL_CODE })
+    if (inherited) {
+      throw new BizError('该商品的空尺码编码位已继承给某个具体规格取值，不能再用空规格占用，请为该规格轴指定取值', 409)
+    }
+    return null
+  }
 
   await acquireSequenceMutex(manager, buildRegistryMutexKey(productId, 'size'))
-  const registryRepo = manager.getRepository(BaseProductVariantCodeRegistry)
 
   const existing = await registryRepo.findOneBy({ productId, axis: 'size', specValue: normalized })
   if (existing) return existing.code === EMPTY_SIZE_SENTINEL_CODE ? null : existing.code

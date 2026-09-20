@@ -57,7 +57,9 @@ async function main() {
     buildSkuCodePattern,
     assertSeriesCode,
     getProductCodePrefix,
+    buildSeriesCodeMutexKey,
   } = await import('../src/services/product-code.service.js')
+  const { acquireSequenceMutex } = await import('../src/services/inventory-sequence.service.js')
 
   prepareDatabaseRuntime()
   await AppDataSource.initialize()
@@ -1366,6 +1368,146 @@ async function main() {
       '显式带上主系列标签时同样不能产生重复关联行',
     )
     pass('YZ 商品编辑：即使提交的 tagIds 不含主系列标签，保存后仍强制保留该关联，且强制并入具备幂等性')
+
+    // ============ 第 8 批：PR #109 第三轮评审修复（P1-A / P1-B / P2-D）============
+
+    // 用例 42（P1-A）：YZ 商品更新时禁止自定义 skuCode——派生值不一致必须拒绝，原样回传当前 skuCode 必须放行。
+    const p1aTag = await createSeriesTag('MA')
+    const p1aProduct = await productService.create({
+      productName: `p1a-sku-code-${verifySeed}`,
+      pinyinAbbr: 'MA',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+      primarySeriesTagId: p1aTag.id,
+      specGroups: [{ name: '颜色/款式', values: ['红色'] }],
+      skus: [
+        { specValues: { '颜色/款式': '红色' }, defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 0 },
+      ],
+    } as Parameters<typeof productService.create>[0], actor)
+    const p1aSku = p1aProduct.skus[0]
+    assert.ok(yzSkuPattern.test(p1aSku.skuCode), `P1-A 测试商品的 SKU 码应符合 YZ 正则，实际 ${p1aSku.skuCode}`)
+
+    await assert.rejects(
+      () => productService.update(p1aProduct.id, {
+        specGroups: [{ name: '颜色/款式', values: ['红色'] }],
+        skus: [
+          {
+            id: p1aSku.id,
+            specValues: { '颜色/款式': '红色' },
+            defaultPrice: 10,
+            currentStock: 0,
+            isActive: true,
+            sortOrder: 0,
+            skuCode: `${p1aSku.skuCode}-FAKE`,
+          },
+        ],
+      } as Parameters<typeof productService.update>[1], actor),
+      (error: unknown) => assertBizErrorWithStatus(error, 400),
+      'YZ 商品更新时传入与派生值不同的自定义 skuCode 应抛 400',
+    )
+
+    const p1aResaved = await productService.update(p1aProduct.id, {
+      specGroups: [{ name: '颜色/款式', values: ['红色'] }],
+      skus: [
+        {
+          id: p1aSku.id,
+          specValues: { '颜色/款式': '红色' },
+          defaultPrice: 10,
+          currentStock: 0,
+          isActive: true,
+          sortOrder: 0,
+          skuCode: p1aSku.skuCode,
+        },
+      ],
+    } as Parameters<typeof productService.update>[1], actor)
+    assert.equal(p1aResaved.skus[0].skuCode, p1aSku.skuCode, '原样回传当前 skuCode 应放行，编码保持不变')
+    pass('P1-A：YZ 商品更新时传入与派生值不同的自定义 skuCode 抛 400；原样回传当前 skuCode 正常放行')
+
+    // 用例 43（P1-B）：0 号一级变体继承给具体取值后，空规格不能再占用该 0 号；未继承过的商品清空规格轴仍正常返回 0。
+    const p1bTag = await createSeriesTag('ZB')
+    const p1bProduct = await createProduct(p1bTag.id, 1)
+    const p1bInheritedCode = await runInTransaction((manager) =>
+      resolveVariantCode(manager, p1bProduct.id, '红色', { inheritZeroCode: true }))
+    assert.equal(p1bInheritedCode, '0', '0 号继承给红色应成功且编码为 0')
+    await assert.rejects(
+      runInTransaction((manager) => resolveVariantCode(manager, p1bProduct.id, null)),
+      (error: unknown) => assertBizErrorWithStatus(error, 409),
+      '0 号已继承给具体取值后，空一级变体轴不能再占用 0 号',
+    )
+    const p1bFreshTag = await createSeriesTag('ZF')
+    const p1bFreshProduct = await createProduct(p1bFreshTag.id, 1)
+    const p1bFreshZeroCode = await runInTransaction((manager) => resolveVariantCode(manager, p1bFreshProduct.id, null))
+    assert.equal(p1bFreshZeroCode, '0', '未发生过 0 号继承的商品，空一级变体轴应正常返回 0，不能矫枉过正')
+    pass('P1-B（一级变体轴）：0 号继承给红色后，空规格再解析抛 409；未继承过的商品空规格仍正常返回 0')
+
+    // 尺码轴同理：空尺码位继承给「均码」后，空尺码不能再占用该位；未继承过的商品空尺码仍正常返回 null。
+    const p1bSizeTag = await createSeriesTag('ZS')
+    const p1bSizeProduct = await createProduct(p1bSizeTag.id, 1)
+    const p1bInheritedSizeCode = await runInTransaction((manager) =>
+      resolveSizeCode(manager, p1bSizeProduct.id, '均码', { inheritEmptySize: true }))
+    assert.equal(p1bInheritedSizeCode, null, '空尺码位继承给均码应成功且返回 null（不占用 A-E 候选池）')
+    await assert.rejects(
+      runInTransaction((manager) => resolveSizeCode(manager, p1bSizeProduct.id, null)),
+      (error: unknown) => assertBizErrorWithStatus(error, 409),
+      '空尺码位已继承给具体取值后，空尺码轴不能再占用该位',
+    )
+    const p1bSizeFreshTag = await createSeriesTag('ZT')
+    const p1bSizeFreshProduct = await createProduct(p1bSizeFreshTag.id, 1)
+    const p1bFreshSizeCode = await runInTransaction((manager) => resolveSizeCode(manager, p1bSizeFreshProduct.id, null))
+    assert.equal(p1bFreshSizeCode, null, '未发生过空尺码位继承的商品，空尺码轴应正常返回 null，不能矫枉过正')
+    pass('P1-B（尺码轴）：空尺码位继承给均码后，空尺码再解析抛 409；未继承过的商品空尺码仍正常返回 null')
+
+    // 用例 44（P2-D）：renameProductSpecValue 传超长 newValue 应抛 400 且文案包含长度提示。
+    const p2dTag = await createSeriesTag('SL')
+    const p2dProduct = await productService.create({
+      productName: `p2d-spec-length-${verifySeed}`,
+      pinyinAbbr: 'SL',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+      primarySeriesTagId: p2dTag.id,
+      specGroups: [{ name: '颜色/款式', values: ['米色'] }],
+      skus: [
+        { specValues: { '颜色/款式': '米色' }, defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 0 },
+      ],
+    } as Parameters<typeof productService.create>[0], actor)
+    const overLongValue = '长'.repeat(65)
+    await assert.rejects(
+      () => productService.renameProductSpecValue(
+        p2dProduct.id,
+        { axis: 'variant', oldValue: '米色', newValue: overLongValue },
+        actor,
+      ),
+      (error: unknown) => error instanceof BizError
+        && error.statusCode === 400
+        && error.message.includes('64')
+        && error.message.includes('65'),
+      '规格取值重命名传入 65 字符的 newValue 应抛 400 且文案含长度提示',
+    )
+    pass('P2-D：renameProductSpecValue 传入超过 64 字符的 newValue 抛 400，文案含上限与当前字符数')
+
+    // ============ P2-C 说明 ============
+    // 系列码变更与 YZ 建档/升级读取系列码现在共用 buildSeriesCodeMutexKey(tagId) 这把互斥锁
+    // （tag.service.ts 的 update() 与 product.service.ts 的 loadAndLockSeriesTagForYzScheme）。
+    // 真正的并发竞态（改系列码事务与建档事务同时进行）依赖数据库行锁在多个数据库连接间生效，只有
+    // MySQL 才有意义；单进程、单连接的 SQLite 验证脚本无法可靠构造两个真正并发的数据库事务，勉强模拟
+    // 出来的"竞态"要么因为写事务队列串行化而必然不竞态、要么是脆弱的时序巧合，因此这里不构造不可靠的
+    // 竞态测试。改为验证加锁本身可用：同一把互斥键在同一事务内可以重复获取而不抛错、不死锁，作为
+    // acquireSequenceMutex(manager, buildSeriesCodeMutexKey(tagId)) 这条调用链未被破坏的回归信号；
+    // 真正的跨连接并发序列化需要另外在 MySQL 环境下做端到端验证，本次未做，详见任务回报。
+    const mutexSmokeTag = await createSeriesTag('MX')
+    await runInTransaction(async (manager) => {
+      await acquireSequenceMutex(manager, buildSeriesCodeMutexKey(mutexSmokeTag.id))
+      await acquireSequenceMutex(manager, buildSeriesCodeMutexKey(mutexSmokeTag.id))
+    })
+    pass('P2-C：改用 buildSeriesCodeMutexKey(tagId) 互斥键串行化（tag.service.ts 改系列码 / product.service.ts 建档与升级共用），同键同事务内可重复获取不报错；真正的跨连接并发竞态未做端到端验证，原因见回报说明')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()

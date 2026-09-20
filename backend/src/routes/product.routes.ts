@@ -12,6 +12,7 @@ import { requireAnyPermission, requirePermission } from '../middleware/auth.midd
 import { productExcelService } from '../services/product-excel.service.js'
 import { productImportYzService, type YzImportResolution } from '../services/product-import-yz.service.js'
 import { batchCreateProducts, productService, type ProductView } from '../services/product.service.js'
+import { SPEC_VALUE_MAX_LENGTH } from '../services/product-code.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
@@ -521,8 +522,10 @@ const specAxisSchema = z.enum(['variant', 'size'])
 
 const specValueRenameSchema = z.object({
   axis: specAxisSchema,
-  oldValue: z.string().min(1, '请提供原取值'),
-  newValue: z.string().min(1, '请提供新取值'),
+  // P2-D 修复：与登记表 spec_value 列（VARCHAR(64)）上限对齐，避免超长值绕过前端直达服务层才报错，
+  // 或在 MySQL/SQLite 两库间行为不一致（MySQL 严格模式抛异常，SQLite 静默截断/接受）。
+  oldValue: z.string().min(1, '请提供原取值').max(SPEC_VALUE_MAX_LENGTH, `原取值不能超过 ${SPEC_VALUE_MAX_LENGTH} 个字符`),
+  newValue: z.string().min(1, '请提供新取值').max(SPEC_VALUE_MAX_LENGTH, `新取值不能超过 ${SPEC_VALUE_MAX_LENGTH} 个字符`),
 })
 
 productRouter.post(

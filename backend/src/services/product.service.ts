@@ -32,12 +32,13 @@ import { assertDiscountRateInRange, calculateDiscountedPrice, normalizeDiscountR
 import type { RequestMeta } from '../utils/request-meta.js'
 import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
-import { allocateWcSkuCode } from './inventory-sequence.service.js'
+import { acquireSequenceMutex, allocateWcSkuCode } from './inventory-sequence.service.js'
 import { auditService } from './audit.service.js'
 import {
   allocateSeriesSeq,
   reserveSeriesSeq,
   assertSeriesCode,
+  buildSeriesCodeMutexKey,
   EMPTY_SIZE_SENTINEL_CODE,
   formatProductCode,
   formatSkuCode,
@@ -46,6 +47,7 @@ import {
   resolveSizeCode,
   resolveVariantCode,
   SIZE_CODE_POOL,
+  SPEC_VALUE_MAX_LENGTH,
   VARIANT_CODE_POOL,
 } from './product-code.service.js'
 
@@ -928,7 +930,7 @@ export class ProductService {
         throw new BizError('该商品已经使用 YZ 编码，无需升级', 400)
       }
 
-      const seriesTag = await this.loadSeriesTagForYzScheme(seriesTagId, manager)
+      const seriesTag = await this.loadAndLockSeriesTagForYzScheme(seriesTagId, manager)
 
       // 只处理当前有效 SKU；已退役 SKU 一律不读不写，保留旧编码。按 Excel 出现顺序（sortOrder，其次 id）
       // 稳定排序，保证变体码/尺码码的分配顺序与预检模拟、前端展示口径一致。
@@ -1030,6 +1032,14 @@ export class ProductService {
     const newValue = normalizeSpecTextValue(input?.newValue)
     if (!oldValue || !newValue) {
       throw new BizError('请提供有效的原取值与新取值', 400)
+    }
+    // P2-D 修复：服务层与路由 schema 都要校验，不能只依赖路由——防止绕过路由直接调用服务方法时写入
+    // 超过登记表 spec_value 列（VARCHAR(64)）上限的值，导致 MySQL 严格模式抛异常、SQLite 静默接受。
+    if (oldValue.length > SPEC_VALUE_MAX_LENGTH) {
+      throw new BizError(`原取值不能超过 ${SPEC_VALUE_MAX_LENGTH} 个字符（当前 ${oldValue.length} 个字符）`, 400)
+    }
+    if (newValue.length > SPEC_VALUE_MAX_LENGTH) {
+      throw new BizError(`新取值不能超过 ${SPEC_VALUE_MAX_LENGTH} 个字符（当前 ${newValue.length} 个字符）`, 400)
     }
 
     const result = await runInTransaction(async (manager) => {
@@ -1619,8 +1629,18 @@ export class ProductService {
         const sizeCode = await resolveSizeCode(manager, product.id, specValues[SIZE_AXIS_SPEC_KEY])
         skuEntity.variantCode = variantCode
         skuEntity.sizeCode = sizeCode
+        // P1-A 修复：已存在 SKU 的基准编码取其保留值（可能是升级/导入遗留的历史格式，不一定等于现场
+        // 按当前规则拼接的结果），新增 SKU 的基准编码则现场按 formatSkuCode 派生；两种情况都不允许被
+        // 调用方显式传入的自定义 skuCode 覆盖——YZ 商品的 SKU 编码必须始终由服务端按编码规则生成。
+        const baselineSkuCode = matchedSku ? matchedSku.skuCode : formatSkuCode(product.productCode, variantCode, sizeCode)
         if (!matchedSku && skuInput.skuCode === undefined) {
-          skuEntity.skuCode = formatSkuCode(product.productCode, variantCode, sizeCode)
+          skuEntity.skuCode = baselineSkuCode
+        }
+        const submittedSkuCode = normalizeSpecTextValue(skuInput.skuCode)
+        // 前端编辑已有 SKU 时会原样回传当前 skuCode（与 baselineSkuCode 一致），必须放行；
+        // 只拒绝与基准编码不一致的自定义值，空字符串视为未提交，不触发校验。
+        if (submittedSkuCode && submittedSkuCode !== baselineSkuCode) {
+          throw new BizError('YZ 商品的 SKU 编码由系统按编码规则生成，不接受自定义', 400)
         }
       } else if (!matchedSku && skuInput.skuCode === undefined && categoryCode) {
         // 已归类商品的新规格按 WC + 分类码 + 流水号编码；流水号与手工编码或原厂条码撞码时继续取下一个。
@@ -2127,7 +2147,7 @@ export class ProductService {
         let seriesInfo: { primarySeriesTagId: string; seriesSeq: number } | undefined
         if (isYzScheme) {
           // YZ 路径：系列标签是编码唯一权威；序号在当前事务内原子分配，重试时会重新分配，不会撞号。
-          const seriesTag = await this.loadSeriesTagForYzScheme(seriesTagId as string, manager)
+          const seriesTag = await this.loadAndLockSeriesTagForYzScheme(seriesTagId as string, manager)
           // 导入场景显式指定序号时精确占用该号；普通新建仍在事务内顺序分配，重试会重新取号不会撞号。
           const requestedSeriesSeq = normalizedCreateInput.seriesSeq ?? null
           let seriesSeq: number
@@ -2483,6 +2503,18 @@ export class ProductService {
     }
     assertSeriesCode(tag.seriesCode)
     return tag
+  }
+
+  /**
+   * YZ 路径专用（建档/升级两条写路径调用，P2-C 修复）：与 loadSeriesTagForYzScheme 相比多一步——先获取
+   * 与 tag.service.ts 改系列码共用的互斥锁再读标签，把"标签改系列码"与"建档/升级读取系列码"串行化，
+   * 避免两者并发时本事务读到另一事务提交前的旧系列码。锁持有到本次调用方事务提交为止。
+   * previewProductYzUpgrade 是只读预检、且不在显式事务内运行，不能调用本方法（加锁会退化成读完即释放的
+   * 空锁，还会在 business_sequence 表留下多余的互斥键行），继续调用不加锁的 loadSeriesTagForYzScheme。
+   */
+  private async loadAndLockSeriesTagForYzScheme(seriesTagId: string, manager: EntityManager): Promise<BaseTag> {
+    await acquireSequenceMutex(manager, buildSeriesCodeMutexKey(seriesTagId))
+    return this.loadSeriesTagForYzScheme(seriesTagId, manager)
   }
 
   /**

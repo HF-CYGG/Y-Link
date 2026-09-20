@@ -43,6 +43,7 @@ import {
   getProductCodePrefix,
   reserveSeriesSeq,
   SIZE_CODE_POOL,
+  SPEC_VALUE_MAX_LENGTH,
   VARIANT_CODE_POOL,
 } from './product-code.service.js'
 import { productService, type CreateProductInput, type ProductView } from './product.service.js'
@@ -57,13 +58,11 @@ const AXIS_AMBIGUOUS_PATTERN = /^\d{2}码?$/
 // B8 批次改名：与 product.service.ts 的新 key 保持一致，新写入直接用新 key，不再写旧 key。
 const VARIANT_AXIS_SPEC_KEY = '颜色/款式'
 const SIZE_AXIS_SPEC_KEY = '尺码'
-/**
- * P2-D 修复：规格取值（款式/颜色、尺码）最终会写入 base_product_variant_code_registry.spec_value
- * （varchar(64)），必须与该列的实际长度保持一致。超长时 MySQL 严格模式会在提交阶段才报错、SQLite 却会
- * 静默接受，预览阶段不拦截会导致预览通过但真正导入失败（或双数据库行为分裂），因此解析阶段就要按这个
- * 上限校验，与品类、商品名称的长度校验放在同一层级。
- */
-const SPEC_VALUE_MAX_LENGTH = 64
+// 规格取值（款式/颜色、尺码）最终会写入 base_product_variant_code_registry.spec_value（varchar(64)），
+// 长度上限改为从 product-code.service.js 引入 SPEC_VALUE_MAX_LENGTH 统一常量（PR #109 第三轮评审
+// P2-D：与路由 schema、renameProductSpecValue 服务层共用同一份定义，不再各处各写一份魔法数字）。
+// 超长时 MySQL 严格模式会在提交阶段才报错、SQLite 却会静默接受，预览阶段不拦截会导致预览通过但真正
+// 导入失败（或双数据库行为分裂），因此解析阶段就要按这个上限校验，与品类、商品名称的长度校验放在同一层级。
 
 const TEMPLATE_HEADERS = ['品类', '序号', '商品', '款式/颜色', '尺码', '价格'] as const
 
