@@ -8,7 +8,10 @@
  *    逐条与 yz-import-baseline.json 的 skuCode 完全一致；
  * 4. 导入后续号——导入后对品宣、海右标签调用 allocateSeriesSeq 应分别得到 27、11；
  * 5. 重复导入被拒——同一文件再次确认导入应因序号已占用而报错；
- * 6. 缺系列编码报错——清空某标签的 seriesCode 后预览，对应行应报错且文案包含“系列编码”。
+ * 6. 缺系列编码报错——清空某标签的 seriesCode 后预览，对应行应报错且文案包含“系列编码”；
+ * 7. 规格取值超长报错（P2-D）——「款式/颜色」「尺码」单元格超过 64 字符（base_product_variant_code_
+ *    registry.spec_value 的列长度）时，预览阶段即报错且文案包含长度提示，不能等到真正导入才在数据库层
+ *    报错。该用例用 ExcelJS 在内存里现造一份最小夹具，不改评审提供的真实 Excel。
  * 若找不到评审提供的 Excel/基准 JSON，直接报错退出，不跳过用例。
  */
 
@@ -17,6 +20,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import ExcelJS from 'exceljs'
 import type { AuthUserContext } from '../src/types/auth.js'
 
 const currentFilePath = fileURLToPath(import.meta.url)
@@ -199,6 +203,32 @@ async function main() {
     assert.ok(dwRows.every((row) => row.errors.some((message) => message.includes('系列编码'))), '大汶口品类清空系列编码后，对应行应报错且文案包含“系列编码”')
     assert.ok(previewMissingSeriesCode.errorCount > 0, '清空系列编码后预览应出现错误行')
     pass('缺系列编码报错：清空大汶口标签的系列编码后，对应行报错且文案包含“系列编码”')
+
+    // ============ 用例 7：规格取值超长报错（P2-D） ============
+    // 内存构造最小夹具：两行分别把「款式/颜色」「尺码」撑到 65 字符（超过 spec_value varchar(64) 上限）。
+    const overlongWorkbook = new ExcelJS.Workbook()
+    const overlongSheet = overlongWorkbook.addWorksheet('导入')
+    overlongSheet.addRow(['品类', '序号', '商品', '款式/颜色', '尺码', '价格'])
+    overlongSheet.addRow(['品宣', 90, '超长规格测试商品A', 'A'.repeat(65), '均码', 10])
+    overlongSheet.addRow(['品宣', 91, '超长规格测试商品B', '均码', 'B'.repeat(65), 10])
+    const overlongBuffer = Buffer.from(await overlongWorkbook.xlsx.writeBuffer())
+
+    const overlongPreview = await productImportYzService.preview(overlongBuffer)
+    assert.equal(overlongPreview.rows.length, 2, `超长规格夹具应解析出 2 行，实际 ${overlongPreview.rows.length}`)
+    const overlongVariantRow = overlongPreview.rows.find((row) => row.productName === '超长规格测试商品A')
+    const overlongSizeRow = overlongPreview.rows.find((row) => row.productName === '超长规格测试商品B')
+    assert.ok(overlongVariantRow, '应能找到款式/颜色超长的那一行')
+    assert.ok(overlongSizeRow, '应能找到尺码超长的那一行')
+    assert.ok(
+      overlongVariantRow!.errors.some((message) => message.includes('款式/颜色') && message.includes('64') && message.includes('65')),
+      `款式/颜色超长行应报错且文案包含长度提示，实际错误：${overlongVariantRow!.errors.join('；') || '无'}`,
+    )
+    assert.ok(
+      overlongSizeRow!.errors.some((message) => message.includes('尺码') && message.includes('64') && message.includes('65')),
+      `尺码超长行应报错且文案包含长度提示，实际错误：${overlongSizeRow!.errors.join('；') || '无'}`,
+    )
+    assert.ok(overlongPreview.errorCount > 0, '超长规格夹具预览应出现错误行')
+    pass('规格取值超长报错：「款式/颜色」「尺码」超过 64 字符时预览阶段即报错，且文案包含长度提示')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()

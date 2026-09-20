@@ -57,6 +57,13 @@ const AXIS_AMBIGUOUS_PATTERN = /^\d{2}码?$/
 // B8 批次改名：与 product.service.ts 的新 key 保持一致，新写入直接用新 key，不再写旧 key。
 const VARIANT_AXIS_SPEC_KEY = '颜色/款式'
 const SIZE_AXIS_SPEC_KEY = '尺码'
+/**
+ * P2-D 修复：规格取值（款式/颜色、尺码）最终会写入 base_product_variant_code_registry.spec_value
+ * （varchar(64)），必须与该列的实际长度保持一致。超长时 MySQL 严格模式会在提交阶段才报错、SQLite 却会
+ * 静默接受，预览阶段不拦截会导致预览通过但真正导入失败（或双数据库行为分裂），因此解析阶段就要按这个
+ * 上限校验，与品类、商品名称的长度校验放在同一层级。
+ */
+const SPEC_VALUE_MAX_LENGTH = 64
 
 const TEMPLATE_HEADERS = ['品类', '序号', '商品', '款式/颜色', '尺码', '价格'] as const
 
@@ -365,6 +372,13 @@ export class ProductImportYzService {
 
       if (!productName) errors.push('商品名称不能为空')
       else if (productName.length > 128) errors.push('商品名称不能超过 128 个字符')
+
+      if (variantAxisValue.length > SPEC_VALUE_MAX_LENGTH) {
+        errors.push(`款式/颜色不能超过 ${SPEC_VALUE_MAX_LENGTH} 个字符（当前 ${variantAxisValue.length} 个字符）`)
+      }
+      if (sizeAxisValue.length > SPEC_VALUE_MAX_LENGTH) {
+        errors.push(`尺码不能超过 ${SPEC_VALUE_MAX_LENGTH} 个字符（当前 ${sizeAxisValue.length} 个字符）`)
+      }
 
       let price: number | null = null
       if (!priceRaw) {

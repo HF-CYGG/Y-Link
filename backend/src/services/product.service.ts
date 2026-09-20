@@ -635,7 +635,15 @@ export class ProductService {
 
       const saved = await repo.save(product)
       if (Array.isArray(input.tagIds)) {
-        await this.replaceProductTags(saved.id, input.tagIds, manager)
+        // P2-C 修复：YZ 商品的主系列标签必须始终出现在标签关联里（与创建、升级路径的不变量一致）。
+        // 这里的 primarySeriesTagId 没变不代表 tagIds 没变——用户可能在独立的“关联标签”选择器里把主
+        // 系列标签移除，若照单全收地整体替换，会导致商品仍有 primarySeriesTagId/seriesCode，却不再
+        // 出现在该系列的标签筛选与报表中。强制把当前主系列标签并入 tagIds 后再替换，已包含时不重复插入。
+        const effectiveTagIds = saved.codeScheme === 'yz' && saved.primarySeriesTagId
+          && !input.tagIds.some((tagId) => normalizeEntityId(tagId) === normalizeEntityId(saved.primarySeriesTagId as string))
+          ? [...input.tagIds, saved.primarySeriesTagId]
+          : input.tagIds
+        await this.replaceProductTags(saved.id, effectiveTagIds, manager)
       }
       if (Array.isArray(input.skus) || Array.isArray(input.specGroups)) {
         await this.replaceProductSkus(saved, input, manager, { stockBaseline: input.stockBaseline, enforceSkuStockBaseline: true })
@@ -1231,6 +1239,12 @@ export class ProductService {
         if (Number(targetSku.preOrderedStock ?? 0) > 0) {
           throw new BizError(`SKU「${targetSku.specText}」仍有 ${targetSku.preOrderedStock} 件预订占用，释放或核销完成前不能退役`, 409)
         }
+        // P1-B 修复：retain 模式退役 0 号 SKU 时，若它仍有物理库存，移出商品汇总会让 product.currentStock
+        // 直接变化。此前这里没有像普通商品编辑路径（recordManualStockAdjustments）那样写 InventoryLog，
+        // 导致汇总库存的变化在库存流水里找不到对应记录、按流水核对会对不上。这里先拍下退役前的库存快照，
+        // 退役落库后复用同一套流水生成逻辑——它会按“该 SKU 从计入汇总变为不计入汇总”自动补一条流水，
+        // 口径与普通商品编辑移出/停用 SKU 完全一致，不需要额外定制一套记账逻辑。
+        const stockSnapshot = await this.captureProductStockSnapshot(product, manager)
         targetSku.isActive = false
         targetSku.isCurrent = false
         targetSku.o2oRecommended = false
@@ -1244,6 +1258,7 @@ export class ProductService {
         product.currentStock = summarySkus.reduce((sum, sku) => sum + Math.max(0, Number(sku.currentStock ?? 0)), 0)
         product.preOrderedStock = summarySkus.reduce((sum, sku) => sum + Math.max(0, Number(sku.preOrderedStock ?? 0)), 0)
         await productRepo.save(product)
+        await this.recordManualStockAdjustments(product, stockSnapshot, actor, manager)
       }
 
       await auditService.record({
@@ -1490,15 +1505,27 @@ export class ProductService {
     // 索引约束），因此下面这段“按 productCode 前缀纳入 barcode 去重集合”对新产生的数据而言通常查不到东西。
     // 仍然保留：051 迁移脚本是保守判定，历史库里可能仍有个别未被迁移语句覆盖到的、按旧方案回填进 barcode
     // 的记录（真实原厂条码本就不该长这个前缀，不会被误伤）；留着这段查询当作过渡期的防御性兜底，等历史
-    // 数据全部迁清后可以再评估是否移除。同一原理下，legacy 商品编码由 generateProductCode 按“当日最大值 + 1”
-    // 生成，升级腾出的日期流水号可能被当天新建的商品重新取到，`${productCode}-DEFAULT` / `-SKU-N` 若撞上
-    // 这类历史遗留 barcode，会被下面的 allocateSkuCode 自动避开，不至于等到落库才抛唯一约束错误。
+    // 数据全部迁清后可以再评估是否移除。真正承接“升级腾出的日期流水号被当天新建商品重新取到”这一撞码
+    // 场景的是下面紧接着的 legacySkuCodeRows 查询——generateProductCode 已同时避开 legacy_product_code，
+    // 但手工填写 productCode（如导入脚本）仍可能绕开该保护，这里作为最后一道防线。
     const prefixedBarcodeRows = await skuRepo.createQueryBuilder('sku')
       .select('sku.barcode', 'barcode')
       .where('sku.barcode LIKE :codePrefix', { codePrefix: `${product.productCode}%` })
       .getRawMany<{ barcode: string | null }>()
     prefixedBarcodeRows.forEach((row) => {
       if (row.barcode) existingSkuCodeSet.add(row.barcode)
+    })
+    // P1-A 修复：legacy_sku_code 不受唯一索引约束，理论上可能与当前商品新分配的 skuCode 撞成同一字符串
+    // （典型场景：升级商品腾出的日期流水号被当天新建商品重新取到，二者拼出的 `${productCode}-DEFAULT`
+    // 恰好相同）。虽然不会撞唯一索引导致建档失败，但会造成扫码歧义——旧标签本该扫出历史商品，却因为
+    // lookupByCode 里 sku_code 命中优先级高于 legacy_sku_code 而跳到新商品。预先查出以本商品 productCode
+    // 为前缀的全部历史编码，纳入去重集合，让下面已有的 allocateSkuCode 自动避开，从根源上消除这种撞码。
+    const legacySkuCodeRows = await skuRepo.createQueryBuilder('sku')
+      .select('sku.legacySkuCode', 'legacySkuCode')
+      .where('sku.legacySkuCode LIKE :codePrefix', { codePrefix: `${product.productCode}%` })
+      .getRawMany<{ legacySkuCode: string | null }>()
+    legacySkuCodeRows.forEach((row) => {
+      if (row.legacySkuCode) existingSkuCodeSet.add(row.legacySkuCode)
     })
     const usedSkuCodeSet = new Set<string>()
 

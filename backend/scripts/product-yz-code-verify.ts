@@ -615,12 +615,13 @@ async function main() {
     )
     pass('legacy update 防护：普通编辑接口传非空 primarySeriesTagId 会被拒绝（400）')
 
-    // 用例 23（B9 批次修正）：升级腾出的日期流水号被当天新建商品重新取到时，不能因撞唯一索引而建档失败。
-    // 复现路径：legacy 商品自动生成 P-YYMMDD-NNNN 且为当日最大 → 升级到 YZ（旧 skuCode 不再回填进 barcode，
-    // 改写入不受唯一约束限制的 legacySkuCode）→ 当天再自动生成一个 legacy 商品，generateProductCode 按
-    // “当日最大值 + 1”会重新取到腾出的那个号，其 `${productCode}-DEFAULT` 恰好等于上一个商品升级前的旧
-    // skuCode——该字符串此时只活在 legacySkuCode 里（无唯一约束），不再占用 skuCode/barcode 的唯一索引位，
-    // 所以新商品应当能直接拿到这个字符串作为自己的 skuCode，建档不受阻。
+    // 用例 23（P1-A 修复后回退）：升级腾出的日期流水号被当天新建商品重新取到时，新商品的默认 SKU 码
+    // 必须避开被占用的历史编码——不是因为会撞唯一索引（legacySkuCode 本就不受唯一约束），而是防止扫码
+    // 歧义：那张已打印的旧标签本该扫出升级前的商品 A，若新商品 B 直接复用同一字符串当 skuCode，扫码反而
+    // 会跳到 B。B9 批次曾把这条断言改成“可以直接复用”，只顾了建档不因撞唯一索引失败，忽略了扫码歧义，
+    // 这里改回来。
+    // 复现路径：legacy 商品自动生成 P-YYMMDD-NNNN 且为当日最大 → 升级到 YZ（旧 skuCode 写入不受唯一约束
+    // 限制的 legacySkuCode，旧 productCode 写入 legacyProductCode）→ 当天再建一个 legacy 商品。
     const recycleTag = await createSeriesTag('RC')
     const recycleProduct = await productService.create({
       productName: `yz-recycle-${verifySeed}`,
@@ -645,11 +646,32 @@ async function main() {
     assert.ok(legacyCodeRow, '升级后旧 skuCode 应已写入 legacySkuCode')
     assert.equal(legacyCodeRow!.barcode, null, '该 SKU 原厂条码为空，升级后 barcode 不应被回填')
 
-    // 这一步在 B9 批次之前会因“旧 skuCode 回填进 barcode”而抛 uk_base_product_sku_barcode 唯一约束错误；
-    // 现在旧编码只活在 legacySkuCode（无唯一约束），新商品应能直接拿到这个字符串作为自己的 skuCode，建档不受阻。
+    // P1-A 同时修复了 generateProductCode：查当日最大值时同时考虑 legacy_product_code 列，自动生成不应
+    // 再自然复现“重新取到腾出的号”这一幕。先验证这层保护确实生效。
+    const autoNextAfterRecycle = await productService.create({
+      productName: `yz-recycle-auto-next-${verifySeed}`,
+      pinyinAbbr: 'AN',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+    } as Parameters<typeof productService.create>[0], actor)
+    assert.notEqual(
+      autoNextAfterRecycle.productCode,
+      recycledProductCode,
+      'generateProductCode 修复后应避开已被占用的历史产品编码（legacy_product_code），自动生成不应再自然撞回腾出的号',
+    )
+    pass('generateProductCode 已避开 legacy_product_code：自动生成不再自然复现流水号被重新取到的场景')
+
+    // 但手工填写 productCode（例如数据修复脚本、导入场景直接指定编号）仍可能绕开 generateProductCode
+    // 这层保护，精确复现“新商品 B 与 A 升级前的旧编码相同”——这才是 replaceProductSkus 兜底要防的场景，
+    // 与 generateProductCode 的修复互为补充，不是互相替代。
     const afterRecycle = await productService.create({
       productName: `yz-recycle-next-${verifySeed}`,
       pinyinAbbr: 'RN',
+      productCode: recycledProductCode,
       defaultPrice: 10,
       discountRate: 10,
       isActive: true,
@@ -660,14 +682,21 @@ async function main() {
     assert.equal(
       afterRecycle.productCode,
       recycledProductCode,
-      '当日流水号应被重新取到，否则本用例没有真正复现撞车场景',
+      '当日流水号（历史编码）确实被新商品复用，场景真实复现',
     )
-    assert.equal(
+    assert.notEqual(
       afterRecycle.skus[0].skuCode,
       recycledSkuCode,
-      '旧编码已不占用 skuCode/barcode 的唯一索引位，新商品的默认 SKU 码应能直接复用这个字符串',
+      '新商品的默认 SKU 码必须避开被占用的历史编码，防止扫码歧义',
     )
-    pass('升级腾出的日期流水号被重新取到时，旧编码只留在 legacySkuCode、不再占用唯一索引位，新商品默认 SKU 码可直接复用，建档不失败')
+    const recycleScan = await productService.lookupByCode(recycledSkuCode)
+    assert.equal(recycleScan.matchedBy, 'legacy_sku_code', '扫描该历史编码应命中 legacy_sku_code 路径')
+    assert.equal(
+      String(recycleScan.product.id),
+      String(recycleProduct.id),
+      '扫码应命中历史编码所属的升级前商品 A，而不是复用了同一产品编码的新商品 B',
+    )
+    pass('升级腾出的日期流水号被新商品复用产品编码时，新商品默认 SKU 码会自动避开历史编码；扫描旧标签仍准确命中升级前的商品')
 
     // 用例 24：Excel 导入可乱序精确占用系列内序号，不依赖“分组必须按序号升序处理”的调用顺序前提。
     // 早期实现是“把序列游标垫高到目标序号 - 1 再让内部 +1”，一旦分组顺序被打乱就会分配出错误的 productCode；
@@ -1233,6 +1262,110 @@ async function main() {
       '已被 YZ 商品用作主系列的标签应拒绝删除',
     )
     pass('禁止修改已被 YZ 商品使用的系列编码：改 seriesCode 抛 409，只改名放行，未使用的标签可正常修改 seriesCode；删除同样被拦')
+
+    // 用例 39（P1-B）：retain 模式退役 0 号 SKU 时，若它没有预订占用但仍有物理库存，移出商品汇总导致的
+    // currentStock 变化必须能在库存流水里找到对应记录——方案一：复用商品编辑路径已有的
+    // captureProductStockSnapshot / recordManualStockAdjustments，退役前拍快照、退役落库后按快照与
+    // 落库结果的差异自动生成流水，口径与普通商品编辑停用/退役 SKU 完全一致。
+    const { InventoryLog } = await import('../src/entities/inventory-log.entity.js')
+    const inventoryLogRepo = AppDataSource.getRepository(InventoryLog)
+    const stockRetainTag = await createSeriesTag('SK')
+    const stockRetainProduct = await productService.create({
+      productName: `yz-stock-retain-${verifySeed}`,
+      pinyinAbbr: 'SK',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 6,
+      limitPerUser: 5,
+      primarySeriesTagId: stockRetainTag.id,
+    } as Parameters<typeof productService.create>[0], actor)
+    const stockRetainSkuBefore = stockRetainProduct.skus[0]
+    assert.equal(stockRetainSkuBefore.variantCode, '0', '退役前应是 0 号一级变体')
+    assert.equal(stockRetainSkuBefore.currentStock, 6, '退役前 0 号 SKU 应携带商品级初始物理库存')
+    assert.equal(stockRetainProduct.currentStock, 6, '商品汇总库存应等于该唯一 SKU 的物理库存')
+
+    const stockRetained = await productService.evolveProductZeroSpec(
+      stockRetainProduct.id,
+      { axis: 'variant', mode: 'retain' },
+      actor,
+    )
+    assert.equal(stockRetained.currentStock, 0, '唯一有库存的 0 号 SKU 退役后，商品汇总库存应归零')
+
+    const retainLogs = await inventoryLogRepo.find({
+      where: { productId: stockRetainProduct.id },
+      order: { id: 'ASC' },
+    })
+    // 建档时已经写过一条初始库存流水（changeQty=+6），这里要找的是退役这一步新产生的那条
+    // （changeQty=-6，SKU 从计入汇总变为不计入汇总），按 skuId 命中的第一条会是创建时的旧记录，必须
+    // 用符号区分开。
+    assert.ok(retainLogs.length > 1, '退役有物理库存的 0 号 SKU 必须在建档流水之外再写入一条库存流水，不能只改汇总不留痕迹')
+    const retireLog = retainLogs.find((log) => String(log.skuId) === String(stockRetainSkuBefore.id) && Number(log.changeQty) < 0)
+    assert.ok(retireLog, '应能找到该 SKU 对应的退役流水（changeQty 为负）')
+    assert.equal(Number(retireLog!.changeQty), -6, '退役流水的变化量应等于该 SKU 被移出汇总前的物理库存')
+    assert.equal(Number(retireLog!.beforeCurrentStock), 6, '流水记录的退役前商品汇总库存应为 6')
+    assert.equal(Number(retireLog!.afterCurrentStock), 0, '流水记录的退役后商品汇总库存应为 0')
+    const productAfterStockRetain = await productRepo.findOneBy({ id: stockRetainProduct.id })
+    assert.equal(Number(productAfterStockRetain!.currentStock), 0, '数据库里的商品汇总库存应与流水记录的退役后库存一致')
+    pass('retain 模式退役有物理库存的 0 号 SKU：写入库存流水，流水记录的前后汇总与落库汇总一致（复用 recordManualStockAdjustments）')
+
+    // 用例 40（P2-C）：编辑 YZ 商品时，即使 primarySeriesTagId 没变，只要请求里的 tagIds 不含当前主系列
+    // 标签，也必须强制把它并入后再执行标签关联替换，保证“主系列标签必须存在于标签关联”这一不变量
+    // 在创建、升级、编辑三条路径下始终成立。
+    const dropSeriesTag = await createSeriesTag('DS')
+    const otherTag = await tagService.create({ tagName: `other-tag-${verifySeed}` }, actor)
+    const dropSeriesProduct = await productService.create({
+      productName: `yz-drop-series-tag-${verifySeed}`,
+      pinyinAbbr: 'DS',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+      primarySeriesTagId: dropSeriesTag.id,
+    } as Parameters<typeof productService.create>[0], actor)
+    const relRepoModule = await import('../src/entities/rel-product-tag.entity.js')
+    const relTagRepo = AppDataSource.getRepository(relRepoModule.RelProductTag)
+    const relsBeforeDrop = await relTagRepo.find({ where: { productId: dropSeriesProduct.id } })
+    assert.ok(
+      relsBeforeDrop.some((rel) => String(rel.tagId) === String(dropSeriesTag.id)),
+      '创建时主系列标签应已自动出现在标签关联里',
+    )
+
+    // 提交的 tagIds 只带一个不相关的标签，刻意不带主系列标签——模拟用户在独立的“关联标签”选择器里把它移除。
+    const afterDropSeriesTag = await productService.update(dropSeriesProduct.id, {
+      tagIds: [otherTag.id],
+    } as Parameters<typeof productService.update>[1], actor)
+    assert.equal(String(afterDropSeriesTag.primarySeriesTagId), String(dropSeriesTag.id), 'primarySeriesTagId 不应被改动')
+    const relsAfterDrop = await relTagRepo.find({ where: { productId: dropSeriesProduct.id } })
+    assert.ok(
+      relsAfterDrop.some((rel) => String(rel.tagId) === String(dropSeriesTag.id)),
+      '即使提交的 tagIds 不含主系列标签，保存后该商品的标签关联里仍必须包含主系列标签',
+    )
+    assert.ok(
+      relsAfterDrop.some((rel) => String(rel.tagId) === String(otherTag.id)),
+      '用户显式提交的其它标签也应正常保留',
+    )
+    assert.equal(
+      relsAfterDrop.filter((rel) => String(rel.tagId) === String(dropSeriesTag.id)).length,
+      1,
+      '强制并入主系列标签必须幂等，不能产生重复关联行',
+    )
+
+    // 再提交一次已经包含主系列标签的 tagIds，确认幂等，不会因为“已包含”而报错或产生第二条重复行。
+    const afterKeepSeriesTag = await productService.update(dropSeriesProduct.id, {
+      tagIds: [otherTag.id, dropSeriesTag.id],
+    } as Parameters<typeof productService.update>[1], actor)
+    assert.equal(String(afterKeepSeriesTag.primarySeriesTagId), String(dropSeriesTag.id), 'primarySeriesTagId 不应被改动')
+    const relsAfterKeep = await relTagRepo.find({ where: { productId: dropSeriesProduct.id } })
+    assert.equal(
+      relsAfterKeep.filter((rel) => String(rel.tagId) === String(dropSeriesTag.id)).length,
+      1,
+      '显式带上主系列标签时同样不能产生重复关联行',
+    )
+    pass('YZ 商品编辑：即使提交的 tagIds 不含主系列标签，保存后仍强制保留该关联，且强制并入具备幂等性')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()
