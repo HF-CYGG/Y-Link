@@ -239,6 +239,7 @@ async function main() {
 
     // ============ 第 3 批：product.service.ts 接入用例（全部走 productService 公开方法的真实链路） ============
     const { productService } = await import('../src/services/product.service.js')
+    const { tagService } = await import('../src/services/tag.service.js')
     const { SysUser } = await import('../src/entities/sys-user.entity.js')
 
     const userRepo = AppDataSource.getRepository(SysUser)
@@ -1086,6 +1087,152 @@ async function main() {
     assert.equal(priorityLookup.product.id, priorityProduct.id, '应返回当前 SKU 编码命中的商品 A，而不是历史编码命中的商品 B')
     assert.equal(priorityLookup.sku.id, priorityProduct.skus[0].id, '应返回 A 商品的 SKU，而不是 B 商品退役的历史编码')
     pass('优先级正确：A 商品当前 skuCode 恰好等于 B 商品的 legacySkuCode 时，lookupByCode 优先返回 A（SKU 编码命中优先于历史编码命中）')
+
+    // ============ 第 6 批：PR #109 评审修复（P1-1 / P1-2 / P1-3）============
+
+    // 用例 36（P1-1）：拒绝把 0 号规格继承给已登记的取值。
+    // 商品同时有一条"无一级变体"的 SKU（variantCode='0'）和一条已登记的「红色」SKU（variantCode='1'），
+    // 对 0 号 SKU 以 inherit 模式传已登记的「红色」必须被拒绝；传全新取值「紫色」则应正常继承、编码仍为 0。
+    const dupInheritTag = await createSeriesTag('DI')
+    const dupInheritProduct = await productService.create({
+      productName: `dup-inherit-${verifySeed}`,
+      pinyinAbbr: 'DI',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+      primarySeriesTagId: dupInheritTag.id,
+      specGroups: [{ name: '颜色/款式', values: ['红色'] }],
+      skus: [
+        { specValues: {}, defaultPrice: 10, currentStock: 5, isActive: true, sortOrder: 0 },
+        { specValues: { '颜色/款式': '红色' }, defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 1 },
+      ],
+    } as Parameters<typeof productService.create>[0], actor)
+    assert.equal(dupInheritProduct.skus.length, 2)
+    const dupZeroSku = dupInheritProduct.skus.find((sku) => sku.variantCode === '0')
+    const dupRedSku = dupInheritProduct.skus.find((sku) => sku.variantCode === '1')
+    assert.ok(dupZeroSku, '应存在一条无一级变体（0 号）的 SKU')
+    assert.ok(dupRedSku, '应存在一条已登记为红色（变体码 1）的 SKU')
+    await assert.rejects(
+      () => productService.evolveProductZeroSpec(
+        dupInheritProduct.id,
+        { axis: 'variant', mode: 'inherit', inheritValue: '红色' },
+        actor,
+      ),
+      (error) => assertBizErrorWithStatus(error, 400),
+      '继承已登记过的取值「红色」应抛 400',
+    )
+    const dupInheritedOk = await productService.evolveProductZeroSpec(
+      dupInheritProduct.id,
+      { axis: 'variant', mode: 'inherit', inheritValue: '紫色' },
+      actor,
+    )
+    const dupZeroSkuAfter = dupInheritedOk.skus.find((sku) => sku.id === dupZeroSku!.id)
+    assert.ok(dupZeroSkuAfter, '继承成功后应仍能找到同一条 SKU')
+    assert.equal(dupZeroSkuAfter!.variantCode, '0', '继承一个全新取值后编码应仍为 0')
+    assert.equal(dupZeroSkuAfter!.specValues['颜色/款式'], '紫色', 'specValues 应更新为紫色')
+    pass('拒绝把 0 号规格继承给已登记的取值（红色→400），全新取值（紫色）正常继承且编码为 0')
+
+    // 用例 37（P1-2）：升级前校验新编码与全局条码的冲突。
+    // 先对商品 B 预检拿到升级后会生成的 skuCode，再建商品 A 并把某个 SKU 的原厂条码手工设成这个字符串，
+    // 之后 B 的预检应给出 blockingReason，正式升级应抛 409。
+    const conflictSeriesTag = await createSeriesTag('CX')
+    const conflictUpgradeProductB = await productService.create({
+      productCode: nextProductCode(),
+      productName: `conflict-upgrade-b-${verifySeed}`,
+      pinyinAbbr: 'CB',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+    } as Parameters<typeof productService.create>[0], actor)
+    const previewBeforeConflict = await productService.previewProductYzUpgrade(conflictUpgradeProductB.id, conflictSeriesTag.id)
+    assert.equal(previewBeforeConflict.blockingReason, null, '未产生冲突前预检不应有 blockingReason')
+    const predictedConflictSkuCode = previewBeforeConflict.skuChanges[0]?.newSkuCode
+    assert.ok(predictedConflictSkuCode, '预检应能给出升级后的 skuCode')
+
+    const conflictOwnerProductA = await productService.create({
+      productCode: nextProductCode(),
+      productName: `conflict-upgrade-a-${verifySeed}`,
+      pinyinAbbr: 'CA',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+      skus: [
+        { defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 0, barcode: predictedConflictSkuCode },
+      ],
+    } as Parameters<typeof productService.create>[0], actor)
+    assert.equal(conflictOwnerProductA.skus[0].barcode, predictedConflictSkuCode, 'A 商品 SKU 的原厂条码应等于 B 升级后会生成的编码')
+
+    const previewAfterConflict = await productService.previewProductYzUpgrade(conflictUpgradeProductB.id, conflictSeriesTag.id)
+    assert.ok(previewAfterConflict.blockingReason, '预检应识别出跨列冲突并给出 blockingReason')
+    assert.ok(
+      previewAfterConflict.blockingReason!.includes(predictedConflictSkuCode!),
+      'blockingReason 应指明具体冲突的编码',
+    )
+
+    await assert.rejects(
+      () => productService.upgradeProductToYzCode(
+        conflictUpgradeProductB.id,
+        { primarySeriesTagId: conflictSeriesTag.id },
+        actor,
+      ),
+      (error) => assertBizErrorWithStatus(error, 409),
+      '新编码与其他商品 SKU 原厂条码冲突时正式升级应抛 409',
+    )
+    pass('升级前校验新编码与全局条码的冲突：预检给出 blockingReason，正式升级抛 409')
+
+    // 用例 38（P1-3）：禁止修改已被 YZ 商品使用的系列编码。
+    const guardedSeriesTag = await tagService.create(
+      { tagName: `guarded-series-${verifySeed}`, seriesCode: 'TG' },
+      actor,
+    )
+    await productService.create({
+      productName: `guarded-series-product-${verifySeed}`,
+      pinyinAbbr: 'TG',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+      primarySeriesTagId: guardedSeriesTag.id,
+    } as Parameters<typeof productService.create>[0], actor)
+
+    await assert.rejects(
+      () => tagService.update(guardedSeriesTag.id, { seriesCode: 'ZZ' }, actor),
+      (error) => assertBizErrorWithStatus(error, 409),
+      '已被 YZ 商品使用的标签修改 seriesCode 应抛 409',
+    )
+    const guardedRenamed = await tagService.update(
+      guardedSeriesTag.id,
+      { tagName: `guarded-series-renamed-${verifySeed}` },
+      actor,
+    )
+    assert.equal(guardedRenamed.tagName, `guarded-series-renamed-${verifySeed}`, '只改标签名不动 seriesCode 应放行')
+    assert.equal(guardedRenamed.seriesCode, 'TG', 'seriesCode 应保持不变')
+
+    const freeSeriesTag = await tagService.create(
+      { tagName: `free-series-${verifySeed}`, seriesCode: 'UZ' },
+      actor,
+    )
+    const freeSeriesUpdated = await tagService.update(freeSeriesTag.id, { seriesCode: 'UY' }, actor)
+    assert.equal(freeSeriesUpdated.seriesCode, 'UY', '未被任何商品使用的标签修改 seriesCode 应放行')
+
+    // 顺带确认标签删除同样被拦：即使 RelProductTag 关联被移除，primarySeriesTagId 仍指向该标签时也不能删。
+    await assert.rejects(
+      () => tagService.delete(guardedSeriesTag.id, actor),
+      (error) => assertBizErrorWithStatus(error, 409),
+      '已被 YZ 商品用作主系列的标签应拒绝删除',
+    )
+    pass('禁止修改已被 YZ 商品使用的系列编码：改 seriesCode 抛 409，只改名放行，未使用的标签可正常修改 seriesCode；删除同样被拦')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()

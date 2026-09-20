@@ -6,7 +6,7 @@
  * 3. 同时向管理端和 O2O 业务提供稳定的商品查询与写入能力，保证商品治理口径统一。
  */
 
-import { In, type EntityManager, type Repository } from 'typeorm'
+import { In, Not, type EntityManager, type Repository } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { BaseCategory } from '../entities/base-category.entity.js'
@@ -967,6 +967,15 @@ export class ProductService {
         auditSkuChanges.push({ skuId: String(sku.id), oldSkuCode, newSkuCode })
       }
 
+      // 保存前做跨列冲突校验：新编码不能撞上其他商品 SKU 的原厂条码或编码，否则扫码会指向错商品。
+      // 抛错会回滚本事务内已执行的 product / registry 写入，不会落下半成品数据。
+      await this.assertNoUpgradeCodeConflict(
+        manager,
+        savedProduct.id,
+        newProductCode,
+        updatedSkus.map((sku) => sku.skuCode),
+      )
+
       if (updatedSkus.length) {
         await skuRepo.save(updatedSkus)
       }
@@ -1160,13 +1169,59 @@ export class ProductService {
       ]
 
       if (mode === 'inherit') {
-        if (axis === 'variant') {
-          await resolveVariantCode(manager, product.id, inheritValue, { inheritZeroCode: true })
-        } else {
-          await resolveSizeCode(manager, product.id, inheritValue, { inheritEmptySize: true })
-        }
-        const specValues = normalizeSpecValuesKeys(parseSpecValuesJson(targetSku.specValuesJson))
         const axisKey = axis === 'variant' ? VARIANT_AXIS_SPEC_KEY : SIZE_AXIS_SPEC_KEY
+
+        // 继承前先查登记表：inheritValue 如果已经通过常规规格编辑登记过（对应某个真实编码），
+        // 说明这是一个“已存在”的规格取值，不能再借 0 号继承语义强行复用——resolveVariantCode/
+        // resolveSizeCode 命中登记表会直接返回旧编码而不会执行继承逻辑，静默放行会让目标 SKU
+        // 的规格元数据与实际编码脱节，还会和已存在的同名规格 SKU 撞成重复组合。
+        const registeredConflict = await registryRepo.findOneBy({
+          productId: product.id,
+          axis,
+          specValue: inheritValue,
+        })
+        if (registeredConflict) {
+          throw new BizError(
+            `规格取值「${inheritValue}」已存在于本商品的规格中（编码 ${registeredConflict.code}），不能用于 0 号继承，请改用其它尚未登记的取值，或直接新增规格`,
+            400,
+          )
+        }
+
+        // 继承后产生的规格组合不能与该商品已有的当前 SKU 重复。
+        const targetSpecValues = normalizeSpecValuesKeys(parseSpecValuesJson(targetSku.specValuesJson))
+        const nextVariantValue = axis === 'variant' ? inheritValue : (targetSpecValues[VARIANT_AXIS_SPEC_KEY] ?? '')
+        const nextSizeValue = axis === 'size' ? inheritValue : (targetSpecValues[SIZE_AXIS_SPEC_KEY] ?? '')
+        const duplicateSku = currentSkus.find((sku) => {
+          if (sku.id === targetSku.id) return false
+          const specValues = normalizeSpecValuesKeys(parseSpecValuesJson(sku.specValuesJson))
+          return (specValues[VARIANT_AXIS_SPEC_KEY] ?? '') === nextVariantValue
+            && (specValues[SIZE_AXIS_SPEC_KEY] ?? '') === nextSizeValue
+        })
+        if (duplicateSku) {
+          throw new BizError(`继承后的规格组合与现有 SKU「${duplicateSku.specText}」重复，不能继承`, 409)
+        }
+
+        // 校验返回值：命中上面的前置检查后这里理应必定拿到 0 号 / 空位，若不是说明登记表出现了
+        // 竞态或其他内部状态异常，不能静默继续——直接抛 500 交由人工核查。
+        if (axis === 'variant') {
+          const resolvedCode = await resolveVariantCode(manager, product.id, inheritValue, { inheritZeroCode: true })
+          if (resolvedCode !== '0') {
+            throw new BizError(
+              `0 号一级变体继承内部状态异常：编码分配结果为「${resolvedCode}」而非预期的 0 号，请联系管理员核查`,
+              500,
+            )
+          }
+        } else {
+          const resolvedSizeCode = await resolveSizeCode(manager, product.id, inheritValue, { inheritEmptySize: true })
+          if (resolvedSizeCode !== null) {
+            throw new BizError(
+              `空尺码位继承内部状态异常：编码分配结果为「${resolvedSizeCode}」而非预期的空位，请联系管理员核查`,
+              500,
+            )
+          }
+        }
+
+        const specValues = targetSpecValues
         specValues[axisKey] = inheritValue
         targetSku.specValuesJson = JSON.stringify(specValues)
         targetSku.specText = buildSpecText(specValues, specTextSpecGroups)
@@ -1242,12 +1297,17 @@ export class ProductService {
       this.predictNextSeriesSeq(manager, seriesTag.id),
     ])
 
-    const blockingReason = this.detectUpgradeCapacityBlockingReason(currentSkus)
+    const capacityBlockingReason = this.detectUpgradeCapacityBlockingReason(currentSkus)
     const newProductCode = formatProductCode(prefix, seriesTag.seriesCode as string, predictedSeriesSeq)
 
-    const skuChanges: ProductYzUpgradeSkuChange[] = blockingReason
+    const skuChanges: ProductYzUpgradeSkuChange[] = capacityBlockingReason
       ? []
       : await this.simulateUpgradeSkuChanges(product.id, currentSkus, newProductCode, manager)
+
+    // 预检阶段同样要检测跨列编码冲突，让前端在提交升级前就能拦住并展示原因。
+    const codeConflictReason = capacityBlockingReason
+      ? null
+      : await this.detectUpgradeCodeConflict(manager, product.id, newProductCode, skuChanges.map((change) => change.newSkuCode))
 
     return {
       productId: normalizeEntityId(product.id),
@@ -1257,7 +1317,7 @@ export class ProductService {
       seriesSeq: predictedSeriesSeq,
       skuChanges,
       retiredSkuCount,
-      blockingReason,
+      blockingReason: capacityBlockingReason ?? codeConflictReason,
     }
   }
 
@@ -2438,6 +2498,48 @@ export class ProductService {
 
   private assertUpgradeCapacity(currentSkus: BaseProductSku[]): void {
     const reason = this.detectUpgradeCapacityBlockingReason(currentSkus)
+    if (reason) {
+      throw new BizError(reason, 409)
+    }
+  }
+
+  /**
+   * 升级编码冲突检测：sku_code 与 barcode 只各自唯一，不做跨列约束；lookupByCode 扫码时条码优先命中。
+   * 如果升级生成的 newProductCode / newSkuCode 恰好等于*其他*商品 SKU 的原厂条码或编码，扫描这个刚打印
+   * 出来的 YZ 编码会返回错误的商品。这里用一次批量 IN 查询（不 N+1）检测，命中则返回中文冲突说明；
+   * 预检（previewProductYzUpgrade）把它当 blockingReason 展示，正式升级则据此抛 409 拦截保存。
+   */
+  private async detectUpgradeCodeConflict(
+    manager: EntityManager,
+    productId: string,
+    newProductCode: string,
+    newSkuCodes: string[],
+  ): Promise<string | null> {
+    const codes = [...new Set([newProductCode, ...newSkuCodes].filter(Boolean))]
+    if (!codes.length) return null
+    const skuRepo = manager.getRepository(BaseProductSku)
+    const conflicts = await skuRepo.find({
+      where: [
+        { productId: Not(productId), barcode: In(codes) },
+        { productId: Not(productId), skuCode: In(codes) },
+      ],
+      select: ['id', 'productId', 'skuCode', 'barcode'],
+    })
+    if (!conflicts.length) return null
+    const first = conflicts.find((row) => row.barcode && codes.includes(row.barcode)) ?? conflicts[0]
+    const conflictCode = codes.find((code) => code === first.barcode || code === first.skuCode) ?? codes[0]
+    const conflictField = first.barcode === conflictCode ? '原厂条码' : 'SKU 编码'
+    return `升级生成的编码「${conflictCode}」与其他商品（ID ${normalizeEntityId(first.productId)}）SKU 的${conflictField}冲突，请先处理该冲突后再升级`
+  }
+
+  /** 正式升级路径专用：冲突时直接抛 409，阻止保存。 */
+  private async assertNoUpgradeCodeConflict(
+    manager: EntityManager,
+    productId: string,
+    newProductCode: string,
+    newSkuCodes: string[],
+  ): Promise<void> {
+    const reason = await this.detectUpgradeCodeConflict(manager, productId, newProductCode, newSkuCodes)
     if (reason) {
       throw new BizError(reason, 409)
     }

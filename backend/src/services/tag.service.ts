@@ -9,6 +9,7 @@
 import { In, Not, type Repository } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
+import { BaseProduct } from '../entities/base-product.entity.js'
 import { BaseTag } from '../entities/base-tag.entity.js'
 import { RelProductTag } from '../entities/rel-product-tag.entity.js'
 import { isUniqueConstraintError } from '../utils/database-errors.js'
@@ -214,6 +215,23 @@ export class TagService {
       const nextTagName = typeof input.tagName === 'string' ? this.normalizeTagName(input.tagName) : tag.tagName
       const nextTagCode = 'tagCode' in input ? this.normalizeTagCode(input.tagCode) : tag.tagCode
       const nextSeriesCode = 'seriesCode' in input ? this.normalizeSeriesCode(input.seriesCode) : tag.seriesCode
+
+      // seriesCode 一旦被某商品当作主系列生成过 YZ 编码，就不能再改（含清空）：已有商品/SKU 的编码不会
+      // 随之重算，商品视图却会从标签实时读取新系列码，导致编码元数据与实际编码脱节；旧系列码之后若分配
+      // 给另一个标签，新标签的序号还会从 1 重新开始，持续撞上已有的全局商品编码。两侧都归一化（去空白转
+      // 大写）后比较，避免大小写或空白差异误判为"变了"。
+      const currentSeriesCodeNormalized = (tag.seriesCode ?? '').trim().toUpperCase()
+      const nextSeriesCodeNormalized = (nextSeriesCode ?? '').trim().toUpperCase()
+      if (nextSeriesCodeNormalized !== currentSeriesCodeNormalized) {
+        const usageCount = await manager.getRepository(BaseProduct).count({ where: { primarySeriesTagId: id } })
+        if (usageCount > 0) {
+          throw new BizError(
+            `标签「${tag.tagName}」已被 ${usageCount} 个商品用作文创系列并生成了编码，系列编码不可修改；如确需变更请另建标签`,
+            409,
+          )
+        }
+      }
+
       await this.assertTagUniqueness(tagRepo, {
         tagName: nextTagName,
         tagCode: nextTagCode,
@@ -241,6 +259,13 @@ export class TagService {
       if (manager.connection.options.type === 'mysql') tagQuery.setLock('pessimistic_write')
       const tag = await tagQuery.getOne()
       if (!tag) throw new BizError('标签不存在', 404)
+      // 直接查 primarySeriesTagId：普通标签编辑允许用户把 tagIds 改得不再包含该标签（关系行会被删除），
+      // 但 YZ 商品的 primarySeriesTagId 列本身不可切换（见 applyUpdateInputToProduct），因此不能只靠
+      // RelProductTag 关联数判断——那条关联可能已被移除，而商品仍然以该标签作为主系列。
+      const primarySeriesUsageCount = await manager.getRepository(BaseProduct).count({ where: { primarySeriesTagId: id } })
+      if (primarySeriesUsageCount > 0) {
+        throw new BizError(`标签「${tag.tagName}」已被 ${primarySeriesUsageCount} 个商品用作文创系列，暂不能删除`, 409)
+      }
       const relationCount = await manager.getRepository(RelProductTag).count({ where: { tagId: id } })
       if (relationCount > 0) throw new BizError(`标签「${tag.tagName}」已关联商品，暂不能删除`, 409)
       const result = await tagRepo.delete({ id })
