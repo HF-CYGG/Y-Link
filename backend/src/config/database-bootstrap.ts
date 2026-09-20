@@ -61,6 +61,7 @@ const SQLITE_REQUIRED_TABLES = [
   'inv_stocktake',
   'inv_stocktake_item',
   'base_product_variant_code_registry',
+  'base_yz_series_seq_reservation',
 ]
 
 /**

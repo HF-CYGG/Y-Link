@@ -4,6 +4,10 @@
  * - 系列内序号复用 inventory-sequence.service 的 business_sequence 行锁原语：新建商品走
  *   `allocateSequenceValue` 严格 +1；Excel 导入走新增的 `raiseSequenceFloor` 把序列游标抬高到导入
  *   携带的原序号，保证导入原序号不被后续新建分配占用，也不会重新从 1 分配造成撞号；
+ * - PR #109 第四轮评审 P1 修复：仅凭 business_sequence 的最高水位无法拦住"删除商品后重新分配到完全
+ *   相同序号"的问题（物理删除会让该序号看起来"没人用"）。因此新增永久占用登记表
+ *   `base_yz_series_seq_reservation`：`allocateSeriesSeq` 取号与 `reserveSeriesSeq` 预占号都会跳过 /
+ *   拒绝已登记过的序号，并在成功后写入登记，登记只增不减，不随商品删除而清除；
  * - 一级变体码 / 尺码码在 `acquireSequenceMutex` 持锁后按登记表 `base_product_variant_code_registry`
  *   的现状分配：命中已登记的规格取值直接复用其 code（这就是“不回收”的落地方式），未命中则从候选池
  *   （变体 '1'-'9'、尺码 'A'-'E'）取最小未占用码写入登记表；
@@ -21,6 +25,7 @@
 import type { EntityManager } from 'typeorm'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { BaseProductVariantCodeRegistry } from '../entities/base-product-variant-code-registry.entity.js'
+import { BaseYzSeriesSeqReservation } from '../entities/base-yz-series-seq-reservation.entity.js'
 import { SystemConfig } from '../entities/system-config.entity.js'
 import { BizError } from '../utils/errors.js'
 import { acquireSequenceMutex, allocateSequenceValue, raiseSequenceFloor } from './inventory-sequence.service.js'
@@ -79,34 +84,90 @@ export async function getProductCodePrefix(manager: EntityManager): Promise<stri
 }
 
 /**
+ * 只读查询：某个系列的某个序号是否已被永久占用登记表登记过（PR #109 第四轮评审 P1 修复）。
+ * 导入预览阶段与 allocateSeriesSeq/reserveSeriesSeq 共用这个查询，保证“预览提示的冲突”与
+ * “真正执行时会抛出的冲突”完全是同一个判断口径。
+ */
+export async function findYzSeriesSeqReservation(
+  manager: EntityManager,
+  seriesTagId: string,
+  seq: number,
+): Promise<BaseYzSeriesSeqReservation | null> {
+  return manager.getRepository(BaseYzSeriesSeqReservation).findOneBy({ seriesTagId, seriesSeq: seq })
+}
+
+/**
  * 新建商品时分配该系列的下一个序号（1-99）。
  * 首次分配时以库内该系列已有商品的最大 series_seq 为起点，兼容导入时预占过的序号。
+ * P1 修复：取号时同时参考永久占用登记表——一个序号即使当前没有任何商品在用（例如对应商品已被物理
+ * 删除），只要历史上被分配/预占过，就必须跳过，不能被重新分配出去，否则会与已经打印过的旧标签撞码。
+ * 分配到号后立即写入登记表，登记永久生效，不会因商品后续被删除而清除。
  */
-export async function allocateSeriesSeq(manager: EntityManager, seriesTagId: string): Promise<number> {
+export async function allocateSeriesSeq(
+  manager: EntityManager,
+  seriesTagId: string,
+  seriesCode: string,
+  prefix: string,
+): Promise<number> {
   const sequenceKey = `product_series_seq.${seriesTagId}`
-  const value = await allocateSequenceValue(manager, sequenceKey, async () => {
-    const row = await manager.getRepository(BaseProduct)
-      .createQueryBuilder('product')
-      .select('MAX(product.seriesSeq)', 'maxSeq')
-      .where('product.primarySeriesTagId = :seriesTagId', { seriesTagId })
-      .getRawOne<{ maxSeq: string | number | null }>()
-    return Number(row?.maxSeq ?? 0)
-  })
-  if (value > 99) {
-    throw new BizError('该系列商品数量已达上限（99），无法继续分配序号', 409)
+  const reservationRepo = manager.getRepository(BaseYzSeriesSeqReservation)
+
+  let value: number
+  for (;;) {
+    // 序号需要逐个试探是否已被永久占用登记，只能按候选顺序依次等待上一次结果，不能并发发起。
+    value = await allocateSequenceValue(manager, sequenceKey, async () => {
+      const row = await manager.getRepository(BaseProduct)
+        .createQueryBuilder('product')
+        .select('MAX(product.seriesSeq)', 'maxSeq')
+        .where('product.primarySeriesTagId = :seriesTagId', { seriesTagId })
+        .getRawOne<{ maxSeq: string | number | null }>()
+      return Number(row?.maxSeq ?? 0)
+    })
+    if (value > 99) {
+      throw new BizError('该系列商品数量已达上限（99），无法继续分配序号', 409)
+    }
+    const reserved = await reservationRepo.exists({ where: { seriesTagId, seriesSeq: value } })
+    if (!reserved) break
+    // 该号历史上已被分配/预占过（对应商品可能已被删除），跳过继续取下一个，不重新分配给新商品。
   }
+
+  const productCode = formatProductCode(prefix, seriesCode, value)
+  await reservationRepo.insert(reservationRepo.create({ seriesTagId, seriesSeq: value, productCode }))
   return value
 }
 
 /**
  * Excel 导入专用：占用一个指定序号。导入必须保留 Excel 原序号，不能像新建那样重新分配。
  * 把序列游标抬高到 seq（而不是 +1），后续 allocateSeriesSeq 会从 seq 继续分配。
+ * P1 修复：写入前先查永久占用登记表，命中则说明该系列的该序号此前已经分配过（不论对应商品是否还
+ * 存在），为避免旧标签指向新商品，一律拒绝复用，抛 409 并在文案中带出历史 productCode 供人工核对。
  */
-export async function reserveSeriesSeq(manager: EntityManager, seriesTagId: string, seq: number): Promise<void> {
+export async function reserveSeriesSeq(
+  manager: EntityManager,
+  seriesTagId: string,
+  seq: number,
+  seriesCode: string,
+  prefix: string,
+): Promise<void> {
   if (!Number.isInteger(seq) || seq < 1 || seq > 99) {
     throw new BizError('预占的系列内序号必须是 1 到 99 之间的整数', 400)
   }
+  // 与 allocateSeriesSeq 共用同一把序列行锁，串行化“查占用登记 + 抬升游标 + 写占用登记”整个过程，
+  // 避免并发导入两次都读到“未占用”后同时写入登记表撞唯一键。
+  await acquireSequenceMutex(manager, `product_series_seq.${seriesTagId}`)
+
+  const existing = await findYzSeriesSeqReservation(manager, seriesTagId, seq)
+  if (existing) {
+    throw new BizError(
+      `该系列的序号 ${seq} 此前已分配过（历史编码 ${existing.productCode}），为避免旧标签指向新商品，不允许复用，请改用其它序号`,
+      409,
+    )
+  }
+
   await raiseSequenceFloor(manager, `product_series_seq.${seriesTagId}`, seq)
+  const productCode = formatProductCode(prefix, seriesCode, seq)
+  const reservationRepo = manager.getRepository(BaseYzSeriesSeqReservation)
+  await reservationRepo.insert(reservationRepo.create({ seriesTagId, seriesSeq: seq, productCode }))
 }
 
 /**

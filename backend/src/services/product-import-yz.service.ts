@@ -17,7 +17,10 @@
  * - 预览阶段只做只读模拟：复用 product-code.service 导出的候选池（VARIANT_CODE_POOL/SIZE_CODE_POOL）在内存
  *   按行序模拟分配，不调用 resolveVariantCode/resolveSizeCode（那会真的写登记表）；
  * - 两类待确认项（同序号多商品名、疑似轴错位）都不允许自动采信：resolutions 未覆盖到的待确认项一律视为未解决，
- *   确认导入接口在事务内重新解析并重新校验，只信任 resolutions，不信任前端回传的预览结果。
+ *   确认导入接口在事务内重新解析并重新校验，只信任 resolutions，不信任前端回传的预览结果；
+ * - PR #109 第四轮评审 P1 修复：系列+序号占用校验不能只看当前存活的 base_product，还要看永久占用登记表
+ *   base_yz_series_seq_reservation——即使对应商品已被物理删除，该序号也永久视为已用过；预览阶段就直接
+ *   把命中登记表的分组标为行级错误，不留到确认导入阶段才在事务里被 reserveSeriesSeq 拒绝。
  * 维护重点：
  * - 六列表头与两条轴的语义调整需要同步前端说明文案与模板“填写说明”页；
  * - 容量上限（变体 9、尺码 5）与轴错位识别正则改动需要同步这里与前端展示；
@@ -29,6 +32,7 @@ import { In, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
+import { BaseYzSeriesSeqReservation } from '../entities/base-yz-series-seq-reservation.entity.js'
 import { BaseTag } from '../entities/base-tag.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
@@ -468,6 +472,32 @@ export class ProductImportYzService {
         const existingName = occupiedMap.get(`${group.tagId}|${group.seriesSeq}`)
         if (existingName) {
           const message = `系列「${group.seriesCode}」序号 ${group.seriesSeq} 已被商品「${existingName}」占用`
+          group.rows.forEach((row) => row.errors.push(message))
+        }
+      }
+
+      // P1 修复（PR #109 第四轮评审）：系列+序号即使当前没有任何存活商品占用，也可能在永久占用登记表
+      // 里被登记过（对应商品已被物理删除）。预览阶段就要拦住，不能等到确认导入时才在事务里报错，
+      // 否则用户会在预览通过后才发现整批失败。已经被上面「存活商品占用」报过错的分组不重复报错。
+      const reservedRows = await Promise.all(
+        [...seqsByTag.entries()].map(([tagId, seqs]) => manager.getRepository(BaseYzSeriesSeqReservation)
+          .createQueryBuilder('reservation')
+          .select(['reservation.seriesTagId', 'reservation.seriesSeq', 'reservation.productCode'])
+          .where('reservation.seriesTagId = :tagId AND reservation.seriesSeq IN (:...seqs)', { tagId, seqs })
+          .getMany()),
+      )
+      const reservedMap = new Map<string, string>()
+      for (const list of reservedRows) {
+        for (const reservation of list) {
+          reservedMap.set(`${reservation.seriesTagId}|${reservation.seriesSeq}`, reservation.productCode)
+        }
+      }
+      for (const group of groups.values()) {
+        const key = `${group.tagId}|${group.seriesSeq}`
+        if (occupiedMap.has(key)) continue
+        const historyProductCode = reservedMap.get(key)
+        if (historyProductCode) {
+          const message = `系列「${group.seriesCode}」序号 ${group.seriesSeq} 此前已分配过（历史编码 ${historyProductCode}），对应商品已被删除，为避免旧标签指向新商品，不允许复用该序号，请改用其它序号`
           group.rows.forEach((row) => row.errors.push(message))
         }
       }

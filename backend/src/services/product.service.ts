@@ -13,6 +13,7 @@ import { BaseCategory } from '../entities/base-category.entity.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { BaseProductSku } from '../entities/base-product-sku.entity.js'
 import { BaseProductVariantCodeRegistry } from '../entities/base-product-variant-code-registry.entity.js'
+import { BaseYzSeriesSeqReservation } from '../entities/base-yz-series-seq-reservation.entity.js'
 import { BaseStorageLocation } from '../entities/base-storage-location.entity.js'
 import { BusinessSequence } from '../entities/business-sequence.entity.js'
 import { RelProductTag } from '../entities/rel-product-tag.entity.js'
@@ -937,8 +938,8 @@ export class ProductService {
       const currentSkus = await this.loadCurrentSkusForUpgrade(product.id, manager, true)
       this.assertUpgradeCapacity(currentSkus)
 
-      const seriesSeq = await allocateSeriesSeq(manager, seriesTag.id)
       const prefix = await getProductCodePrefix(manager)
+      const seriesSeq = await allocateSeriesSeq(manager, seriesTag.id, seriesTag.seriesCode as string, prefix)
       const oldProductCode = product.productCode
       const newProductCode = formatProductCode(prefix, seriesTag.seriesCode as string, seriesSeq)
 
@@ -2148,16 +2149,16 @@ export class ProductService {
         if (isYzScheme) {
           // YZ 路径：系列标签是编码唯一权威；序号在当前事务内原子分配，重试时会重新分配，不会撞号。
           const seriesTag = await this.loadAndLockSeriesTagForYzScheme(seriesTagId as string, manager)
+          const prefix = await getProductCodePrefix(manager)
           // 导入场景显式指定序号时精确占用该号；普通新建仍在事务内顺序分配，重试会重新取号不会撞号。
           const requestedSeriesSeq = normalizedCreateInput.seriesSeq ?? null
           let seriesSeq: number
           if (requestedSeriesSeq !== null) {
-            await reserveSeriesSeq(manager, seriesTag.id, requestedSeriesSeq)
+            await reserveSeriesSeq(manager, seriesTag.id, requestedSeriesSeq, seriesTag.seriesCode as string, prefix)
             seriesSeq = requestedSeriesSeq
           } else {
-            seriesSeq = await allocateSeriesSeq(manager, seriesTag.id)
+            seriesSeq = await allocateSeriesSeq(manager, seriesTag.id, seriesTag.seriesCode as string, prefix)
           }
-          const prefix = await getProductCodePrefix(manager)
           productCode = formatProductCode(prefix, seriesTag.seriesCode as string, seriesSeq)
           seriesInfo = { primarySeriesTagId: seriesTag.id, seriesSeq }
         } else {
@@ -2608,19 +2609,28 @@ export class ProductService {
    * 预检专用：预测该系列下一个 series_seq，不调用 allocateSeriesSeq（那会真的递增序列游标）。
    * 逻辑照抄 allocateSeriesSeq 的初始值来源（序列行的当前值，或库内该系列已有商品的最大 series_seq），
    * 只是最终不写回，纯预测。
+   * P1 修复：预测也要跳过永久占用登记表里已登记但当前无商品的序号，否则这里预测的号与真正调用
+   * allocateSeriesSeq 时实际分配到的号可能对不上（真正分配会跳过历史已删除商品占用过的号）。
    */
   private async predictNextSeriesSeq(manager: EntityManager, seriesTagId: string): Promise<number> {
     const sequenceKey = `product_series_seq.${seriesTagId}`
     const sequence = await manager.getRepository(BusinessSequence).findOneBy({ sequenceKey })
+    let candidate: number
     if (sequence) {
-      return Number(sequence.currentValue ?? 0) + 1
+      candidate = Number(sequence.currentValue ?? 0) + 1
+    } else {
+      const row = await manager.getRepository(BaseProduct)
+        .createQueryBuilder('product')
+        .select('MAX(product.seriesSeq)', 'maxSeq')
+        .where('product.primarySeriesTagId = :seriesTagId', { seriesTagId })
+        .getRawOne<{ maxSeq: string | number | null }>()
+      candidate = Number(row?.maxSeq ?? 0) + 1
     }
-    const row = await manager.getRepository(BaseProduct)
-      .createQueryBuilder('product')
-      .select('MAX(product.seriesSeq)', 'maxSeq')
-      .where('product.primarySeriesTagId = :seriesTagId', { seriesTagId })
-      .getRawOne<{ maxSeq: string | number | null }>()
-    return Number(row?.maxSeq ?? 0) + 1
+    const reservationRepo = manager.getRepository(BaseYzSeriesSeqReservation)
+    while (candidate <= 99 && await reservationRepo.exists({ where: { seriesTagId, seriesSeq: candidate } })) {
+      candidate += 1
+    }
+    return candidate
   }
 
   /**

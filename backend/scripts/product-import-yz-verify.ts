@@ -1,18 +1,25 @@
 /**
  * 文件说明：YZ 通用 SKU 编码体系「Excel 建库导入」验收脚本。
+ * PR #109 第四轮评审 P2 修复：原脚本把 Excel 与基准 JSON 的路径写死在某台开发机的 Windows 临时目录，
+ * 这两个文件未提交进仓库，其他开发机与 CI 执行本脚本必然在用例开始前失败。现在默认使用仓库内的脱敏
+ * 夹具（backend/scripts/fixtures/product-import-yz-fixture.ts 现场生成 Excel + 同目录
+ * product-import-yz-baseline.json 提供基准），不依赖任何外部文件、不设置任何环境变量也能独立跑通；
+ * 同时支持 YZ_IMPORT_FIXTURE_XLSX / YZ_IMPORT_BASELINE_JSON 两个环境变量覆盖为真实数据做全量比对
+ * （两者必须同时提供，缺一视为配置错误直接报错，不做静默降级）。
  * 用例说明：
- * 1. 真实 Excel 全量比对——读取评审提供的 yz-source.xlsx（123 行、46 组），预览应零错误、命中 3 条待确认项
- *    （品宣 11、品宣 20 两条多商品名 + 海右 9 一条轴歧义）；
+ * 1. 全量比对——预览应零错误，且命中夹具设计好的待确认项（脱敏夹具为 2 条：TB-1 多商品名 +
+ *    TB-2 轴歧义；真实数据模式沿用评审原始口径：123 行、46 组、3 条待确认项）；
  * 2. 未确认拒绝——不传 resolutions 直接确认导入应抛 400；
- * 3. 全量导入比对——传入与基准 JSON 口径一致的 resolutions 后确认导入，落库 46 个商品、123 条 SKU，
- *    逐条与 yz-import-baseline.json 的 skuCode 完全一致；
- * 4. 导入后续号——导入后对品宣、海右标签调用 allocateSeriesSeq 应分别得到 27、11；
- * 5. 重复导入被拒——同一文件再次确认导入应因序号已占用而报错；
- * 6. 缺系列编码报错——清空某标签的 seriesCode 后预览，对应行应报错且文案包含“系列编码”；
- * 7. 规格取值超长报错（P2-D）——「款式/颜色」「尺码」单元格超过 64 字符（base_product_variant_code_
- *    registry.spec_value 的列长度）时，预览阶段即报错且文案包含长度提示，不能等到真正导入才在数据库层
- *    报错。该用例用 ExcelJS 在内存里现造一份最小夹具，不改评审提供的真实 Excel。
- * 若找不到评审提供的 Excel/基准 JSON，直接报错退出，不跳过用例。
+ * 3. 全量导入比对——传入 resolutions 后确认导入，落库数量与基准一致，逐条与基准 JSON 的 skuCode/
+ *    productCode 完全一致（双向比对）；
+ * 4. 导入后续号——导入后对涉及的系列标签调用 allocateSeriesSeq 应得到基准数据之外的下一个序号；
+ * 5. 重复导入被拒——同一份夹具再次确认导入应因序号已占用而报错；
+ * 6. 缺系列编码报错——清空某标签的 seriesCode 后预览，对应行应报错且文案包含"系列编码"；
+ * 7. 规格取值超长报错（P2-D）——「款式/颜色」「尺码」单元格超过 64 字符时预览阶段即报错，与所选夹具
+ *    模式无关，用 ExcelJS 在内存里现造一份最小夹具；
+ * 8. 系列内序号永久占用（P1，PR #109 第四轮评审）——建一个 YZ 商品后用现有删除接口物理删除，
+ *    再对同一系列同一序号发起导入预览，该行应报行级错误且文案带出历史编码，证明预览阶段就能拦住，
+ *    不需要等到确认导入才在事务里失败。
  */
 
 import 'reflect-metadata'
@@ -22,6 +29,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ExcelJS from 'exceljs'
 import type { AuthUserContext } from '../src/types/auth.js'
+import { buildProductImportYzFixtureWorkbook, FIXTURE_SERIES_TAGS } from './fixtures/product-import-yz-fixture.js'
 
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
@@ -35,9 +43,9 @@ process.env.DB_SYNC = 'false'
 process.env.SQLITE_DB_PATH = sqlitePath
 process.env.INIT_ADMIN_PASSWORD = `Admin_${verifySeed}_Aa1!`
 
-const SCRATCHPAD_DIR = 'C:/Users/闫奕衡/AppData/Local/Temp/claude/F--Y-Link/fec18325-2de2-4b16-92c4-aa8a19e4a78d/scratchpad'
-const EXCEL_PATH = path.join(SCRATCHPAD_DIR, 'yz-source.xlsx')
-const BASELINE_PATH = path.join(SCRATCHPAD_DIR, 'yz-import-baseline.json')
+const DEFAULT_BASELINE_PATH = path.resolve(backendRoot, 'scripts', 'fixtures', 'product-import-yz-baseline.json')
+const ENV_EXCEL_PATH = process.env.YZ_IMPORT_FIXTURE_XLSX
+const ENV_BASELINE_PATH = process.env.YZ_IMPORT_BASELINE_JSON
 
 interface BaselineRow {
   row: number
@@ -68,15 +76,38 @@ function cleanupSqliteFile() {
 }
 
 async function main() {
-  if (!fs.existsSync(EXCEL_PATH)) {
-    throw new Error(`未找到评审提供的 Excel 文件：${EXCEL_PATH}，本脚本不允许跳过该用例，请确认文件存在后重跑`)
+  // 两个环境变量必须同时提供才走"真实数据全量比对"模式，缺一律视为配置错误直接报错，
+  // 不静默降级到脱敏夹具——避免误以为跑了真实数据，实际却悄悄换成了合成夹具。
+  if (Boolean(ENV_EXCEL_PATH) !== Boolean(ENV_BASELINE_PATH)) {
+    throw new Error('YZ_IMPORT_FIXTURE_XLSX 与 YZ_IMPORT_BASELINE_JSON 必须同时设置才能启用真实数据全量比对，请两者都设置或两者都不设置')
   }
-  if (!fs.existsSync(BASELINE_PATH)) {
-    throw new Error(`未找到评审提供的基准 JSON：${BASELINE_PATH}，本脚本不允许跳过该用例，请确认文件存在后重跑`)
+  const usingExternalFixture = Boolean(ENV_EXCEL_PATH && ENV_BASELINE_PATH)
+
+  let excelBuffer: Buffer
+  let baseline: BaselineRow[]
+  let seriesTags: Array<{ tagName: string; seriesCode: string }>
+
+  if (usingExternalFixture) {
+    if (!fs.existsSync(ENV_EXCEL_PATH as string)) {
+      throw new Error(`YZ_IMPORT_FIXTURE_XLSX 指向的文件不存在：${ENV_EXCEL_PATH}`)
+    }
+    if (!fs.existsSync(ENV_BASELINE_PATH as string)) {
+      throw new Error(`YZ_IMPORT_BASELINE_JSON 指向的文件不存在：${ENV_BASELINE_PATH}`)
+    }
+    excelBuffer = fs.readFileSync(ENV_EXCEL_PATH as string)
+    baseline = JSON.parse(fs.readFileSync(ENV_BASELINE_PATH as string, 'utf8')) as BaselineRow[]
+    seriesTags = [...new Set(baseline.map((item) => item.seriesCode))].map((seriesCode) => ({
+      tagName: baseline.find((item) => item.seriesCode === seriesCode)!.series,
+      seriesCode,
+    }))
+  } else {
+    if (!fs.existsSync(DEFAULT_BASELINE_PATH)) {
+      throw new Error(`未找到仓库内脱敏基准 JSON：${DEFAULT_BASELINE_PATH}，本脚本不允许跳过该用例`)
+    }
+    excelBuffer = await buildProductImportYzFixtureWorkbook()
+    baseline = JSON.parse(fs.readFileSync(DEFAULT_BASELINE_PATH, 'utf8')) as BaselineRow[]
+    seriesTags = FIXTURE_SERIES_TAGS
   }
-  const excelBuffer = fs.readFileSync(EXCEL_PATH)
-  const baseline = JSON.parse(fs.readFileSync(BASELINE_PATH, 'utf8')) as BaselineRow[]
-  assert.equal(baseline.length, 123, `基准 JSON 应有 123 条，实际 ${baseline.length}`)
 
   fs.mkdirSync(sqliteRoot, { recursive: true })
 
@@ -89,7 +120,8 @@ async function main() {
   const { BaseProductSku } = await import('../src/entities/base-product-sku.entity.js')
   const { SysUser } = await import('../src/entities/sys-user.entity.js')
   const { productImportYzService } = await import('../src/services/product-import-yz.service.js')
-  const { allocateSeriesSeq } = await import('../src/services/product-code.service.js')
+  const { productService } = await import('../src/services/product.service.js')
+  const { allocateSeriesSeq, getProductCodePrefix } = await import('../src/services/product-code.service.js')
   const { runInTransaction } = await import('../src/config/transaction-runner.js')
 
   prepareDatabaseRuntime()
@@ -103,14 +135,8 @@ async function main() {
     const skuRepo = AppDataSource.getRepository(BaseProductSku)
     const userRepo = AppDataSource.getRepository(SysUser)
 
-    const SERIES_TAGS: Array<{ tagName: string; seriesCode: string }> = [
-      { tagName: '大汶口', seriesCode: 'DW' },
-      { tagName: '品宣', seriesCode: 'PX' },
-      { tagName: '海右', seriesCode: 'HY' },
-      { tagName: '非遗', seriesCode: 'FY' },
-    ]
     const tagByName = new Map<string, InstanceType<typeof BaseTag>>()
-    for (const item of SERIES_TAGS) {
+    for (const item of seriesTags) {
       const tag = await tagRepo.save(tagRepo.create({ tagName: item.tagName, tagCode: null, seriesCode: item.seriesCode }))
       tagByName.set(item.tagName, tag)
     }
@@ -130,20 +156,43 @@ async function main() {
       sessionToken: 'product-import-yz-verify', authSource: 'bearer',
     }
 
-    // ============ 用例 1：真实 Excel 全量比对 ============
-    const preview = await productImportYzService.preview(excelBuffer)
-    assert.equal(preview.rows.length, 123, `预览应解析出 123 行，实际 ${preview.rows.length}`)
-    assert.equal(preview.groups.length, 46, `预览应分出 46 组，实际 ${preview.groups.length}`)
-    assert.equal(preview.errorCount, 0, `预览应零错误，实际 ${preview.errorCount}；首个错误：${preview.rows.find((row) => row.errors.length)?.errors.join('；') ?? '无'}`)
-    assert.equal(preview.pendingConfirmCount, 3, `预览应命中 3 条待确认项，实际 ${preview.pendingConfirmCount}`)
+    const prefix = await runInTransaction((manager) => getProductCodePrefix(manager))
 
-    const px11 = preview.groups.find((group) => group.seriesCode === 'PX' && group.seriesSeq === 11)
-    const px20 = preview.groups.find((group) => group.seriesCode === 'PX' && group.seriesSeq === 20)
-    const hy9 = preview.groups.find((group) => group.seriesCode === 'HY' && group.seriesSeq === 9)
-    assert.ok(px11 && px11.pendingConfirms.some((item) => item.kind === 'multi_product_name'), '品宣 11 应命中多商品名待确认项')
-    assert.ok(px20 && px20.pendingConfirms.some((item) => item.kind === 'multi_product_name'), '品宣 20 应命中多商品名待确认项')
-    assert.ok(hy9 && hy9.pendingConfirms.some((item) => item.kind === 'axis_ambiguous'), '海右 9 应命中轴歧义待确认项')
-    pass('真实 Excel 全量比对：rows=123、groups=46、errorCount=0、pendingConfirmCount=3，且待确认项精确落在品宣 11/20、海右 9')
+    // ============ 用例 1：预览全量比对 ============
+    const preview = await productImportYzService.preview(excelBuffer)
+    assert.equal(preview.rows.length, baseline.length, `预览应解析出 ${baseline.length} 行，实际 ${preview.rows.length}`)
+    const expectedGroupCount = new Set(baseline.map((item) => `${item.seriesCode}|${item.seriesSeq}`)).size
+    assert.equal(preview.groups.length, expectedGroupCount, `预览应分出 ${expectedGroupCount} 组，实际 ${preview.groups.length}`)
+    assert.equal(preview.errorCount, 0, `预览应零错误，实际 ${preview.errorCount}；首个错误：${preview.rows.find((row) => row.errors.length)?.errors.join('；') ?? '无'}`)
+
+    let resolutions: Array<{ groupKey: string; kind: 'multi_product_name' | 'axis_ambiguous'; value: string }>
+    if (usingExternalFixture) {
+      // 真实数据模式沿用评审原始给定口径：品宣 11、品宣 20 两条多商品名 + 海右 9 一条轴歧义。
+      assert.equal(preview.pendingConfirmCount, 3, `预览应命中 3 条待确认项，实际 ${preview.pendingConfirmCount}`)
+      const px11 = preview.groups.find((group) => group.seriesCode === 'PX' && group.seriesSeq === 11)
+      const px20 = preview.groups.find((group) => group.seriesCode === 'PX' && group.seriesSeq === 20)
+      const hy9 = preview.groups.find((group) => group.seriesCode === 'HY' && group.seriesSeq === 9)
+      assert.ok(px11 && px11.pendingConfirms.some((item) => item.kind === 'multi_product_name'), '品宣 11 应命中多商品名待确认项')
+      assert.ok(px20 && px20.pendingConfirms.some((item) => item.kind === 'multi_product_name'), '品宣 20 应命中多商品名待确认项')
+      assert.ok(hy9 && hy9.pendingConfirms.some((item) => item.kind === 'axis_ambiguous'), '海右 9 应命中轴歧义待确认项')
+      resolutions = [
+        { groupKey: 'PX|11', kind: 'multi_product_name', value: px11!.productNames[0] },
+        { groupKey: 'PX|20', kind: 'multi_product_name', value: px20!.productNames[0] },
+        { groupKey: 'HY|9', kind: 'axis_ambiguous', value: 'variant' },
+      ]
+    } else {
+      // 脱敏夹具口径：TB-1 同序号多商品名 + TB-2 轴错位，共 2 条待确认项。
+      assert.equal(preview.pendingConfirmCount, 2, `预览应命中 2 条待确认项，实际 ${preview.pendingConfirmCount}`)
+      const tb1 = preview.groups.find((group) => group.seriesCode === 'TB' && group.seriesSeq === 1)
+      const tb2 = preview.groups.find((group) => group.seriesCode === 'TB' && group.seriesSeq === 2)
+      assert.ok(tb1 && tb1.pendingConfirms.some((item) => item.kind === 'multi_product_name'), 'TB-1 应命中多商品名待确认项')
+      assert.ok(tb2 && tb2.pendingConfirms.some((item) => item.kind === 'axis_ambiguous'), 'TB-2 应命中轴歧义待确认项')
+      resolutions = [
+        { groupKey: 'TB|1', kind: 'multi_product_name', value: '测试乙款埃菲尔挂件' },
+        { groupKey: 'TB|2', kind: 'axis_ambiguous', value: 'variant' },
+      ]
+    }
+    pass(`预览全量比对：rows=${preview.rows.length}、groups=${preview.groups.length}、errorCount=0、pendingConfirmCount=${preview.pendingConfirmCount}，待确认项精确落在预期分组`)
 
     // ============ 用例 2：未确认拒绝 ============
     await assert.rejects(
@@ -154,37 +203,41 @@ async function main() {
     pass('未确认拒绝：不传 resolutions 直接确认导入抛 400')
 
     // ============ 用例 3：全量导入比对 ============
-    const resolutions = [
-      { groupKey: `PX|11`, kind: 'multi_product_name' as const, value: px11!.productNames[0] },
-      { groupKey: `PX|20`, kind: 'multi_product_name' as const, value: px20!.productNames[0] },
-      { groupKey: `HY|9`, kind: 'axis_ambiguous' as const, value: 'variant' },
-    ]
     const importResult = await productImportYzService.importProducts(excelBuffer, resolutions, actor)
-    assert.equal(importResult.productCount, 46, `应落库 46 个商品，实际 ${importResult.productCount}`)
-    assert.equal(importResult.skuCount, 123, `应落库 123 条 SKU，实际 ${importResult.skuCount}`)
+    const expectedProductCount = expectedGroupCount
+    assert.equal(importResult.productCount, expectedProductCount, `应落库 ${expectedProductCount} 个商品，实际 ${importResult.productCount}`)
+    assert.equal(importResult.skuCount, baseline.length, `应落库 ${baseline.length} 条 SKU，实际 ${importResult.skuCount}`)
 
     const allSkus = await skuRepo.find()
     const allProducts = await productRepo.find()
-    const productById = new Map(allProducts.map((product) => [product.id, product]))
     const skuCodeSet = new Set(allSkus.map((sku) => sku.skuCode))
-    assert.equal(skuCodeSet.size, 123, `库内应有 123 个互不重复的 SKU 编码，实际 ${skuCodeSet.size}`)
+    assert.equal(skuCodeSet.size, baseline.length, `库内应有 ${baseline.length} 个互不重复的 SKU 编码，实际 ${skuCodeSet.size}`)
 
     for (const expected of baseline) {
       assert.ok(skuCodeSet.has(expected.skuCode), `基准 SKU 编码 ${expected.skuCode}（第 ${expected.row} 行，${expected.productName}）应存在于库内`)
     }
-    // 反向比对：库内每条 SKU 也必须能在基准中找到（数量已相等，逐一存在即保证一一对应）。
     const baselineCodeSet = new Set(baseline.map((item) => item.skuCode))
     for (const sku of allSkus) {
-      assert.ok(baselineCodeSet.has(sku.skuCode), `库内 SKU 编码 ${sku.skuCode} 不在基准 JSON 中，产品：${productById.get(sku.productId)?.productName ?? sku.productId}`)
+      assert.ok(baselineCodeSet.has(sku.skuCode), `库内 SKU 编码 ${sku.skuCode} 不在基准 JSON 中`)
     }
-    pass('全量导入比对：落库 46 个商品、123 条 SKU，逐条 skuCode 与基准 JSON 完全一致（双向比对）')
+    // 商品级编码同样逐一比对，不止比对 SKU 编码。
+    const baselineProductCodeSet = new Set(baseline.map((item) => item.productCode))
+    for (const product of allProducts) {
+      assert.ok(baselineProductCodeSet.has(product.productCode), `库内产品编码 ${product.productCode} 不在基准 JSON 中`)
+    }
+    pass(`全量导入比对：落库 ${importResult.productCount} 个商品、${importResult.skuCount} 条 SKU，逐条 skuCode/productCode 与基准 JSON 完全一致（双向比对）`)
 
     // ============ 用例 4：导入后续号 ============
-    const pxNextSeq = await runInTransaction((manager) => allocateSeriesSeq(manager, tagByName.get('品宣')!.id))
-    assert.equal(pxNextSeq, 27, `品宣系列导入后下一个序号应为 27，实际 ${pxNextSeq}`)
-    const hyNextSeq = await runInTransaction((manager) => allocateSeriesSeq(manager, tagByName.get('海右')!.id))
-    assert.equal(hyNextSeq, 11, `海右系列导入后下一个序号应为 11，实际 ${hyNextSeq}`)
-    pass('导入后续号：品宣 allocateSeriesSeq=27，海右 allocateSeriesSeq=11')
+    const maxSeqByTag = new Map<string, number>()
+    for (const item of baseline) {
+      maxSeqByTag.set(item.seriesCode, Math.max(maxSeqByTag.get(item.seriesCode) ?? 0, item.seriesSeq))
+    }
+    for (const [seriesCode, maxSeq] of maxSeqByTag) {
+      const tag = [...tagByName.values()].find((candidate) => candidate.seriesCode === seriesCode)!
+      const nextSeq = await runInTransaction((manager) => allocateSeriesSeq(manager, tag.id, seriesCode, prefix))
+      assert.equal(nextSeq, maxSeq + 1, `系列「${seriesCode}」导入后下一个序号应为 ${maxSeq + 1}，实际 ${nextSeq}`)
+    }
+    pass('导入后续号：每个涉及系列的 allocateSeriesSeq 均从基准最大序号之后继续分配')
 
     // ============ 用例 5：重复导入被拒 ============
     await assert.rejects(
@@ -195,22 +248,22 @@ async function main() {
     pass('重复导入被拒：再次确认导入同一文件因序号已占用而报错')
 
     // ============ 用例 6：缺系列编码报错 ============
-    const dwTag = tagByName.get('大汶口')!
-    await tagRepo.update({ id: dwTag.id }, { seriesCode: null })
+    const firstTagName = seriesTags[0].tagName
+    const firstTag = tagByName.get(firstTagName)!
+    await tagRepo.update({ id: firstTag.id }, { seriesCode: null })
     const previewMissingSeriesCode = await productImportYzService.preview(excelBuffer)
-    const dwRows = previewMissingSeriesCode.rows.filter((row) => row.category === '大汶口')
-    assert.ok(dwRows.length > 0, '大汶口品类应仍有对应行')
-    assert.ok(dwRows.every((row) => row.errors.some((message) => message.includes('系列编码'))), '大汶口品类清空系列编码后，对应行应报错且文案包含“系列编码”')
+    const affectedRows = previewMissingSeriesCode.rows.filter((row) => row.category === firstTagName)
+    assert.ok(affectedRows.length > 0, `品类「${firstTagName}」应仍有对应行`)
+    assert.ok(affectedRows.every((row) => row.errors.some((message) => message.includes('系列编码'))), `品类「${firstTagName}」清空系列编码后，对应行应报错且文案包含"系列编码"`)
     assert.ok(previewMissingSeriesCode.errorCount > 0, '清空系列编码后预览应出现错误行')
-    pass('缺系列编码报错：清空大汶口标签的系列编码后，对应行报错且文案包含“系列编码”')
+    pass(`缺系列编码报错：清空「${firstTagName}」标签的系列编码后，对应行报错且文案包含"系列编码"`)
 
     // ============ 用例 7：规格取值超长报错（P2-D） ============
-    // 内存构造最小夹具：两行分别把「款式/颜色」「尺码」撑到 65 字符（超过 spec_value varchar(64) 上限）。
     const overlongWorkbook = new ExcelJS.Workbook()
     const overlongSheet = overlongWorkbook.addWorksheet('导入')
     overlongSheet.addRow(['品类', '序号', '商品', '款式/颜色', '尺码', '价格'])
-    overlongSheet.addRow(['品宣', 90, '超长规格测试商品A', 'A'.repeat(65), '均码', 10])
-    overlongSheet.addRow(['品宣', 91, '超长规格测试商品B', '均码', 'B'.repeat(65), 10])
+    overlongSheet.addRow(['规格超长测试品类', 90, '超长规格测试商品A', 'A'.repeat(65), '均码', 10])
+    overlongSheet.addRow(['规格超长测试品类', 91, '超长规格测试商品B', '均码', 'B'.repeat(65), 10])
     const overlongBuffer = Buffer.from(await overlongWorkbook.xlsx.writeBuffer())
 
     const overlongPreview = await productImportYzService.preview(overlongBuffer)
@@ -229,6 +282,42 @@ async function main() {
     )
     assert.ok(overlongPreview.errorCount > 0, '超长规格夹具预览应出现错误行')
     pass('规格取值超长报错：「款式/颜色」「尺码」超过 64 字符时预览阶段即报错，且文案包含长度提示')
+
+    // ============ 用例 8：系列内序号永久占用（P1，PR #109 第四轮评审） ============
+    // 建一个独立的品类/标签，避免与上面几条用例的落库数据互相干扰。
+    const p1TagName = '测试P1复测类'
+    const p1Tag = await tagRepo.save(tagRepo.create({ tagName: p1TagName, tagCode: null, seriesCode: 'ZP' }))
+    const p1Workbook = new ExcelJS.Workbook()
+    const p1Sheet = p1Workbook.addWorksheet('导入')
+    p1Sheet.addRow(['品类', '序号', '商品', '款式/颜色', '尺码', '价格'])
+    p1Sheet.addRow([p1TagName, 5, 'P1 复测商品', '', '', 1])
+    const p1Buffer = Buffer.from(await p1Workbook.xlsx.writeBuffer())
+
+    const p1ImportResult = await productImportYzService.importProducts(p1Buffer, [], actor)
+    assert.equal(p1ImportResult.productCount, 1, 'P1 用例应先成功导入 1 个商品')
+    const p1Product = p1ImportResult.products[0]
+    assert.equal(p1Product.productCode, 'YZZP05', `P1 用例商品编码应为 YZZP05，实际 ${p1Product.productCode}`)
+
+    // 用现有删除接口物理删除该商品——这正是 P1 修复要拦住的场景。
+    await productService.delete(p1Product.id, actor)
+    const deletedStillExists = await productRepo.existsBy({ id: p1Product.id })
+    assert.equal(deletedStillExists, false, 'P1 用例商品应已被物理删除')
+
+    // 再次预览同一系列同一序号：即使商品已删除，该序号也必须被永久占用登记表拦住，报行级错误。
+    const p1PreviewAfterDelete = await productImportYzService.preview(p1Buffer)
+    const p1Row = p1PreviewAfterDelete.rows[0]
+    assert.ok(p1Row, 'P1 复测预览应能解析出一行')
+    assert.ok(
+      p1Row.errors.some((message) => message.includes('历史编码') && message.includes('YZZP05')),
+      `商品删除后同一系列同一序号再次预览应报行级错误且带出历史编码，实际错误：${p1Row.errors.join('；') || '无'}`,
+    )
+    assert.equal(p1Row.predictedSkuCode, null, '存在行级错误时预测编码应为 null')
+    assert.ok(p1PreviewAfterDelete.errorCount > 0, '商品删除后再次预览同一序号应出现错误行')
+
+    // allocateSeriesSeq 顺序分配也必须跳过该已删除商品占用过的序号。
+    const p1NextSeq = await runInTransaction((manager) => allocateSeriesSeq(manager, p1Tag.id, 'ZP', prefix))
+    assert.equal(p1NextSeq, 6, `已删除商品占用过序号 5，allocateSeriesSeq 应跳到序号 6，实际 ${p1NextSeq}`)
+    pass('系列内序号永久占用（P1）：商品被物理删除后，导入预览阶段对同一系列同一序号给出行级错误（带历史编码），allocateSeriesSeq 自动跳过该序号')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()

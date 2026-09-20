@@ -78,6 +78,10 @@ async function main() {
       return `YZTEST${productCodeCounter}-${verifySeed}`
     }
 
+    // allocateSeriesSeq/reserveSeriesSeq 现在需要 seriesCode + prefix 用于写永久占用登记（P1 修复），
+    // 本脚本内除专门验证自定义前缀的用例外都复用这份默认前缀。
+    const defaultPrefix = await runInTransaction((manager) => getProductCodePrefix(manager))
+
     const createSeriesTag = async (seriesCode: string) => tagRepo.save(tagRepo.create({
       tagName: `series-${seriesCode}-${verifySeed}`,
       tagCode: null,
@@ -113,7 +117,7 @@ async function main() {
     // 用例 1：并发分配系列内序号不撞码。
     const concurrentTag = await createSeriesTag('CC')
     const concurrentResults = await Promise.all(
-      Array.from({ length: 8 }, () => runInTransaction((manager) => allocateSeriesSeq(manager, concurrentTag.id))),
+      Array.from({ length: 8 }, () => runInTransaction((manager) => allocateSeriesSeq(manager, concurrentTag.id, 'CC', defaultPrefix))),
     )
     assert.deepEqual([...concurrentResults].sort((left, right) => left - right), [1, 2, 3, 4, 5, 6, 7, 8])
     pass('并发 8 次 allocateSeriesSeq 得到互不重复且构成 1..8 的序号')
@@ -149,11 +153,28 @@ async function main() {
     // 用例 3：序号预占——reserveSeriesSeq 依次占用 1..26 后，allocateSeriesSeq 从 27 继续。
     const reserveTag = await createSeriesTag('RS')
     for (let seq = 1; seq <= 26; seq += 1) {
-      await runInTransaction((manager) => reserveSeriesSeq(manager, reserveTag.id, seq))
+      await runInTransaction((manager) => reserveSeriesSeq(manager, reserveTag.id, seq, 'RS', defaultPrefix))
     }
-    const nextAllocatedSeq = await runInTransaction((manager) => allocateSeriesSeq(manager, reserveTag.id))
+    const nextAllocatedSeq = await runInTransaction((manager) => allocateSeriesSeq(manager, reserveTag.id, 'RS', defaultPrefix))
     assert.equal(nextAllocatedSeq, 27)
     pass('reserveSeriesSeq 预占 1..26 后 allocateSeriesSeq 返回 27')
+
+    // 用例 3.5（P1 修复，PR #109 第四轮评审）：商品被物理删除后，系列内序号仍被永久占用登记表拦住，
+    // 不会被重新分配给新商品——否则已打印的旧标签会悄悄指向新商品。
+    const deletedTag = await createSeriesTag('DL')
+    const deletedSeq = await runInTransaction((manager) => allocateSeriesSeq(manager, deletedTag.id, 'DL', defaultPrefix))
+    assert.equal(deletedSeq, 1, '首次分配应得到序号 1')
+    const deletedHistoryProductCode = formatProductCode(defaultPrefix, 'DL', deletedSeq)
+    const deletedProduct = await createProduct(deletedTag.id, deletedSeq)
+    await productRepo.delete({ id: deletedProduct.id })
+    await assert.rejects(
+      runInTransaction((manager) => reserveSeriesSeq(manager, deletedTag.id, deletedSeq, 'DL', defaultPrefix)),
+      (error: unknown) => assertBizErrorWithStatus(error, 409) && (error as InstanceType<typeof BizError>).message.includes(deletedHistoryProductCode),
+      '已删除商品占用过的序号，reserveSeriesSeq 应拒绝复用并抛 409，且文案带出历史编码',
+    )
+    const nextSeqAfterDeletion = await runInTransaction((manager) => allocateSeriesSeq(manager, deletedTag.id, 'DL', defaultPrefix))
+    assert.equal(nextSeqAfterDeletion, 2, 'allocateSeriesSeq 应跳过已删除商品占用过的序号 1，直接取下一个序号 2')
+    pass('P1 修复：商品被物理删除后，其系列内序号仍被永久占用——reserveSeriesSeq 抛 409（文案带历史编码），allocateSeriesSeq 自动跳号')
 
     // 用例 4：容量超限——变体码 9 个上限、尺码码 5 个上限（A-E）。
     const capacityTag = await createSeriesTag('CP')

@@ -81,6 +81,7 @@ const MYSQL_REQUIRED_TABLES = [
   'inv_stocktake',
   'inv_stocktake_item',
   'base_product_variant_code_registry',
+  'base_yz_series_seq_reservation',
 ]
 
 // 每个必需表由哪个迁移脚本创建，用于在报错时给出精确指引，而不是笼统建议“从头跑一遍”。
@@ -122,6 +123,7 @@ const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
   inv_stocktake: '049_inventory_sku_barcode_stocktake.sql',
   inv_stocktake_item: '049_inventory_sku_barcode_stocktake.sql',
   base_product_variant_code_registry: '050_product_yz_sku_code.sql',
+  base_yz_series_seq_reservation: '052_yz_series_seq_reservation.sql',
 }
 
 interface MysqlRequiredColumn {
@@ -649,6 +651,14 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
     unique: false,
     introducingScript: '051_product_legacy_code.sql',
   },
+  // 052：系列内序号永久占用登记表的唯一键，缺失时同一序号可能被并发重复登记，必须启动期阻断。
+  {
+    tableName: 'base_yz_series_seq_reservation',
+    indexName: 'uk_yz_series_seq_reservation',
+    columns: ['series_tag_id', 'series_seq'],
+    unique: true,
+    introducingScript: '052_yz_series_seq_reservation.sql',
+  },
 ]
 
 const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [
@@ -782,6 +792,7 @@ const AUTO_MIGRATABLE_FILES = [
   '049_inventory_sku_barcode_stocktake.sql',
   '050_product_yz_sku_code.sql',
   '051_product_legacy_code.sql',
+  '052_yz_series_seq_reservation.sql',
 ]
 
 /**

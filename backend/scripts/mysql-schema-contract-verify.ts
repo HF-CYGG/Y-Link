@@ -53,6 +53,7 @@ const REQUIRED_TABLES = [
   'inv_stocktake',
   'inv_stocktake_item',
   'base_product_variant_code_registry',
+  'base_yz_series_seq_reservation',
 ] as const
 
 const REQUIRED_COLUMNS = [
@@ -366,6 +367,13 @@ const REQUIRED_INDEXES: readonly IndexFixture[] = [
     indexName: 'idx_base_product_sku_legacy_code',
     columns: ['legacy_sku_code'],
     unique: false,
+  },
+  // 052：系列内序号永久占用登记表的唯一键（PR #109 第四轮评审 P1 修复）。
+  {
+    tableName: 'base_yz_series_seq_reservation',
+    indexName: 'uk_yz_series_seq_reservation',
+    columns: ['series_tag_id', 'series_seq'],
+    unique: true,
   },
   {
     tableName: 'account_lifecycle_event',

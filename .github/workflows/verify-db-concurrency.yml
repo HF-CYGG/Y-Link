@@ -74,6 +74,12 @@ jobs:
       - name: 执行 MySQL 启动结构契约验收
         run: npm --prefix ./backend run verify:mysql:schema-contract
 
+      - name: 执行 YZ 通用 SKU 编码体系验收
+        run: npm --prefix ./backend run product:yz-code:verify
+
+      - name: 执行 YZ 建库 Excel 导入验收
+        run: npm --prefix ./backend run product:import-yz:verify
+
       - name: 执行路由权限契约检查
         run: npm --prefix ./backend run task2:route-contract:verify
 

@@ -13,6 +13,7 @@ import { databasePerformanceLogger } from '../database/database-performance-logg
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { BaseProductSku } from '../entities/base-product-sku.entity.js'
 import { BaseProductVariantCodeRegistry } from '../entities/base-product-variant-code-registry.entity.js'
+import { BaseYzSeriesSeqReservation } from '../entities/base-yz-series-seq-reservation.entity.js'
 import { BaseTag } from '../entities/base-tag.entity.js'
 import { RelProductTag } from '../entities/rel-product-tag.entity.js'
 import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
@@ -58,6 +59,7 @@ export const appEntities = [
   BaseProduct,
   BaseProductSku,
   BaseProductVariantCodeRegistry,
+  BaseYzSeriesSeqReservation,
   BaseTag,
   RelProductTag,
   BizOutboundOrder,
