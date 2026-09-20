@@ -1316,12 +1316,14 @@ export class ProductService {
     }
     const seriesTag = await this.loadSeriesTagForYzScheme(seriesTagId, manager)
 
-    const [currentSkus, retiredSkuCount, prefix, predictedSeriesSeq] = await Promise.all([
+    const [currentSkus, retiredSkuCount, prefix] = await Promise.all([
       this.loadCurrentSkusForUpgrade(product.id, manager, false),
       manager.getRepository(BaseProductSku).count({ where: { productId: product.id, isCurrent: false } }),
       getProductCodePrefix(manager),
-      this.predictNextSeriesSeq(manager, seriesTag.id),
     ])
+    // P1-C 修复：predictNextSeriesSeq 现在按 (code_prefix, series_code, series_seq) 判定占用，必须先
+    // 拿到 prefix 才能调用，因此从上面的 Promise.all 中拆出来单独串行执行。
+    const predictedSeriesSeq = await this.predictNextSeriesSeq(manager, seriesTag.id, seriesTag.seriesCode as string, prefix)
 
     const capacityBlockingReason = this.detectUpgradeCapacityBlockingReason(currentSkus)
     const newProductCode = formatProductCode(prefix, seriesTag.seriesCode as string, predictedSeriesSeq)
@@ -1658,8 +1660,17 @@ export class ProductService {
       } else if (!matchedSku && skuInput.skuCode === undefined && isSynthesizedDefaultMatrix) {
         skuEntity.skuCode = `${product.productCode}-DEFAULT`
       }
-      allocateSkuCode(skuEntity, matchedSku, skuInput)
+      // P1-A 修复（PR #109 第五轮评审）：YZ 编码是定长规则，任何后缀都会使其非法，因此 YZ 分支的
+      // skuCode 冲突只能拒绝、不能像 legacy/WC 路径那样交给 allocateSkuCode 追加 `-2`/`-3` 后缀兜底
+      // ——那会产出一个与 variantCode/sizeCode 不对应、也不符合定长规则的非法编码。这里直接跳过
+      // allocateSkuCode，冲突判定统一交给循环结束后的 assertNoYzSkuCodeConflict 批量处理。
+      if (product.codeScheme !== 'yz') {
+        allocateSkuCode(skuEntity, matchedSku, skuInput)
+      }
       skuEntities.push(skuEntity)
+    }
+    if (product.codeScheme === 'yz') {
+      await this.assertNoYzSkuCodeConflict(product.id, skuEntities, manager)
     }
     await this.assertSkuRelationsValid(product, skuEntities, manager)
     const specTextSet = new Set<string>()
@@ -1716,6 +1727,40 @@ export class ProductService {
     product.currentStock = summarySkus.reduce((sum, sku) => sum + Math.max(0, Number(sku.currentStock ?? 0)), 0)
     product.preOrderedStock = summarySkus.reduce((sum, sku) => sum + Math.max(0, Number(sku.preOrderedStock ?? 0)), 0)
     await manager.getRepository(BaseProduct).save(product)
+  }
+
+  /**
+   * P1-A 修复（PR #109 第五轮评审）：YZ 分支派生出的 skuCode 自己做冲突判定，命中即拒绝，不交给
+   * allocateSkuCode 的后缀兜底改写——见 replaceProductSkus 调用处注释。冲突范围覆盖其他商品的
+   * skuCode（当前编码）、barcode（原厂条码）、legacySkuCode（历史编码）三列，一次批量 IN 查询判定
+   * （不 N+1）；`productId: Not(productId)` 排除本商品自身的行，避免编辑自己被误判为冲突。
+   * 命中冲突统一抛 409，不在此处做任何"重新分配系列序号"之类的自动改写——那会让编码静默漂移、
+   * 难以预期，冲突只能留给人工处理。
+   */
+  private async assertNoYzSkuCodeConflict(
+    productId: string,
+    skuEntities: BaseProductSku[],
+    manager: EntityManager,
+  ): Promise<void> {
+    const codes = [...new Set(skuEntities.map((sku) => sku.skuCode).filter(Boolean))]
+    if (!codes.length) return
+    const skuRepo = manager.getRepository(BaseProductSku)
+    const conflicts = await skuRepo.find({
+      where: [
+        { productId: Not(productId), skuCode: In(codes) },
+        { productId: Not(productId), barcode: In(codes) },
+        { productId: Not(productId), legacySkuCode: In(codes) },
+      ],
+      select: ['id', 'productId', 'skuCode', 'barcode', 'legacySkuCode'],
+    })
+    if (!conflicts.length) return
+    const first = conflicts[0]
+    const conflictCode = codes.find((code) => code === first.skuCode || code === first.barcode || code === first.legacySkuCode) ?? codes[0]
+    const conflictField = first.skuCode === conflictCode ? '当前编码' : (first.barcode === conflictCode ? '原厂条码' : '历史编码')
+    throw new BizError(
+      `YZ 编码「${conflictCode}」与其他商品（ID ${normalizeEntityId(first.productId)}）的${conflictField}冲突，请先处理该冲突后再操作`,
+      409,
+    )
   }
 
   /** 单规格商品编辑时写入默认规格的条码、成本价与库位；多规格商品必须通过 skus 逐行提交。 */
@@ -2568,6 +2613,9 @@ export class ProductService {
    * 如果升级生成的 newProductCode / newSkuCode 恰好等于*其他*商品 SKU 的原厂条码或编码，扫描这个刚打印
    * 出来的 YZ 编码会返回错误的商品。这里用一次批量 IN 查询（不 N+1）检测，命中则返回中文冲突说明；
    * 预检（previewProductYzUpgrade）把它当 blockingReason 展示，正式升级则据此抛 409 拦截保存。
+   * P1-B 修复（PR #109 第五轮评审）：legacySkuCode（历史编码）必须与 barcode/skuCode 同批纳入冲突集合——
+   * 另一件已升级商品的历史编码若恰好等于本次升级生成的编码，lookupByCode 里当前 skuCode 的匹配优先级
+   * 高于历史编码，那件商品升级前已打印的旧标签会静默指向本商品，这条专用路径不能绕过 legacySkuCode 检查。
    */
   private async detectUpgradeCodeConflict(
     manager: EntityManager,
@@ -2582,13 +2630,14 @@ export class ProductService {
       where: [
         { productId: Not(productId), barcode: In(codes) },
         { productId: Not(productId), skuCode: In(codes) },
+        { productId: Not(productId), legacySkuCode: In(codes) },
       ],
-      select: ['id', 'productId', 'skuCode', 'barcode'],
+      select: ['id', 'productId', 'skuCode', 'barcode', 'legacySkuCode'],
     })
     if (!conflicts.length) return null
     const first = conflicts.find((row) => row.barcode && codes.includes(row.barcode)) ?? conflicts[0]
-    const conflictCode = codes.find((code) => code === first.barcode || code === first.skuCode) ?? codes[0]
-    const conflictField = first.barcode === conflictCode ? '原厂条码' : 'SKU 编码'
+    const conflictCode = codes.find((code) => code === first.barcode || code === first.skuCode || code === first.legacySkuCode) ?? codes[0]
+    const conflictField = first.barcode === conflictCode ? '原厂条码' : (first.skuCode === conflictCode ? 'SKU 编码' : '历史编码')
     return `升级生成的编码「${conflictCode}」与其他商品（ID ${normalizeEntityId(first.productId)}）SKU 的${conflictField}冲突，请先处理该冲突后再升级`
   }
 
@@ -2611,8 +2660,11 @@ export class ProductService {
    * 只是最终不写回，纯预测。
    * P1 修复：预测也要跳过永久占用登记表里已登记但当前无商品的序号，否则这里预测的号与真正调用
    * allocateSeriesSeq 时实际分配到的号可能对不上（真正分配会跳过历史已删除商品占用过的号）。
+   * P1-C 修复（PR #109 第五轮评审）：占用判定改为按 (code_prefix, series_code, series_seq) 命中，
+   * 必须与 allocateSeriesSeq 保持完全一致的判定维度，否则预测号与真正分配号会再次对不上——见调用处
+   * previewProductYzUpgrade 改为先取 prefix 再调用本方法。
    */
-  private async predictNextSeriesSeq(manager: EntityManager, seriesTagId: string): Promise<number> {
+  private async predictNextSeriesSeq(manager: EntityManager, seriesTagId: string, seriesCode: string, prefix: string): Promise<number> {
     const sequenceKey = `product_series_seq.${seriesTagId}`
     const sequence = await manager.getRepository(BusinessSequence).findOneBy({ sequenceKey })
     let candidate: number
@@ -2627,7 +2679,7 @@ export class ProductService {
       candidate = Number(row?.maxSeq ?? 0) + 1
     }
     const reservationRepo = manager.getRepository(BaseYzSeriesSeqReservation)
-    while (candidate <= 99 && await reservationRepo.exists({ where: { seriesTagId, seriesSeq: candidate } })) {
+    while (candidate <= 99 && await reservationRepo.exists({ where: { codePrefix: prefix, seriesCode, seriesSeq: candidate } })) {
       candidate += 1
     }
     return candidate

@@ -416,6 +416,25 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
   { tableName: 'order_revision', columnName: 'ip_address', introducingScript: '042_order_business_no_amendment.sql' },
   { tableName: 'order_revision', columnName: 'user_agent', introducingScript: '042_order_business_no_amendment.sql' },
   { tableName: 'order_revision', columnName: 'created_at', introducingScript: '042_order_business_no_amendment.sql' },
+  // 053：系列内序号永久占用登记表命名空间从 tagId 迁移到系列码维度（PR #109 第五轮评审 P1-C 修复）。
+  {
+    tableName: 'base_yz_series_seq_reservation',
+    columnName: 'series_code',
+    introducingScript: '053_yz_reservation_series_code.sql',
+    expectedDataType: 'varchar',
+    expectedColumnType: 'varchar(2)',
+    expectedCharacterMaximumLength: 2,
+    expectedNullable: false,
+  },
+  {
+    tableName: 'base_yz_series_seq_reservation',
+    columnName: 'code_prefix',
+    introducingScript: '053_yz_reservation_series_code.sql',
+    expectedDataType: 'varchar',
+    expectedColumnType: 'varchar(4)',
+    expectedCharacterMaximumLength: 4,
+    expectedNullable: false,
+  },
 ]
 
 // 不只按索引名判断，还校验列顺序与唯一性，避免旧库中存在同名但错误的索引时误判为可启动。
@@ -651,13 +670,15 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
     unique: false,
     introducingScript: '051_product_legacy_code.sql',
   },
-  // 052：系列内序号永久占用登记表的唯一键，缺失时同一序号可能被并发重复登记，必须启动期阻断。
+  // 053：系列内序号永久占用登记表的权威唯一键改为 (code_prefix, series_code, series_seq)，缺失时同一
+  // 序号可能被并发重复登记（PR #109 第五轮评审 P1-C 修复）。旧的按 tagId 的唯一索引已在 053 里降级并
+  // 改名为普通索引 idx_yz_series_seq_reservation_tag，仅供追溯，不再纳入启动期必需校验。
   {
     tableName: 'base_yz_series_seq_reservation',
-    indexName: 'uk_yz_series_seq_reservation',
-    columns: ['series_tag_id', 'series_seq'],
+    indexName: 'uk_yz_series_seq_reservation_code',
+    columns: ['code_prefix', 'series_code', 'series_seq'],
     unique: true,
-    introducingScript: '052_yz_series_seq_reservation.sql',
+    introducingScript: '053_yz_reservation_series_code.sql',
   },
 ]
 
@@ -793,6 +814,7 @@ const AUTO_MIGRATABLE_FILES = [
   '050_product_yz_sku_code.sql',
   '051_product_legacy_code.sql',
   '052_yz_series_seq_reservation.sql',
+  '053_yz_reservation_series_code.sql',
 ]
 
 /**

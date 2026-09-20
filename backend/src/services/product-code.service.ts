@@ -84,16 +84,19 @@ export async function getProductCodePrefix(manager: EntityManager): Promise<stri
 }
 
 /**
- * 只读查询：某个系列的某个序号是否已被永久占用登记表登记过（PR #109 第四轮评审 P1 修复）。
- * 导入预览阶段与 allocateSeriesSeq/reserveSeriesSeq 共用这个查询，保证“预览提示的冲突”与
- * “真正执行时会抛出的冲突”完全是同一个判断口径。
+ * 只读查询：某个系列（按前缀+系列码维度，P1-C 修复）的某个序号是否已被永久占用登记表登记过
+ * （PR #109 第四轮评审 P1 修复；第五轮评审 P1-C 修复把判定维度从 series_tag_id 迁移到
+ * code_prefix+seriesCode，见 base-yz-series-seq-reservation.entity.ts 文件头说明）。
+ * allocateSeriesSeq/reserveSeriesSeq 共用这个查询，保证“预览提示的冲突”与“真正执行时会抛出的冲突”
+ * 完全是同一个判断口径。
  */
 export async function findYzSeriesSeqReservation(
   manager: EntityManager,
-  seriesTagId: string,
+  codePrefix: string,
+  seriesCode: string,
   seq: number,
 ): Promise<BaseYzSeriesSeqReservation | null> {
-  return manager.getRepository(BaseYzSeriesSeqReservation).findOneBy({ seriesTagId, seriesSeq: seq })
+  return manager.getRepository(BaseYzSeriesSeqReservation).findOneBy({ codePrefix, seriesCode, seriesSeq: seq })
 }
 
 /**
@@ -102,6 +105,10 @@ export async function findYzSeriesSeqReservation(
  * P1 修复：取号时同时参考永久占用登记表——一个序号即使当前没有任何商品在用（例如对应商品已被物理
  * 删除），只要历史上被分配/预占过，就必须跳过，不能被重新分配出去，否则会与已经打印过的旧标签撞码。
  * 分配到号后立即写入登记表，登记永久生效，不会因商品后续被删除而清除。
+ * P1-C 修复（PR #109 第五轮评审）：占用判定改为按 (code_prefix, series_code, series_seq) 命中——
+ * series_tag_id 不再是唯一性判定维度，避免“系列最后一个商品与标签都被删除后，新建同 seriesCode 的
+ * 新标签重新从 01 分配、生成与旧标签重复的编码”这一漏洞（详见占用表实体文件头说明）。写入登记行时仍
+ * 保留 series_tag_id 字段，只作追溯展示。
  */
 export async function allocateSeriesSeq(
   manager: EntityManager,
@@ -126,13 +133,13 @@ export async function allocateSeriesSeq(
     if (value > 99) {
       throw new BizError('该系列商品数量已达上限（99），无法继续分配序号', 409)
     }
-    const reserved = await reservationRepo.exists({ where: { seriesTagId, seriesSeq: value } })
+    const reserved = await reservationRepo.exists({ where: { codePrefix: prefix, seriesCode, seriesSeq: value } })
     if (!reserved) break
-    // 该号历史上已被分配/预占过（对应商品可能已被删除），跳过继续取下一个，不重新分配给新商品。
+    // 该号历史上已被分配/预占过（对应商品甚至标签可能已被删除），跳过继续取下一个，不重新分配给新商品。
   }
 
   const productCode = formatProductCode(prefix, seriesCode, value)
-  await reservationRepo.insert(reservationRepo.create({ seriesTagId, seriesSeq: value, productCode }))
+  await reservationRepo.insert(reservationRepo.create({ seriesTagId, seriesSeq: value, productCode, seriesCode, codePrefix: prefix }))
   return value
 }
 
@@ -141,6 +148,8 @@ export async function allocateSeriesSeq(
  * 把序列游标抬高到 seq（而不是 +1），后续 allocateSeriesSeq 会从 seq 继续分配。
  * P1 修复：写入前先查永久占用登记表，命中则说明该系列的该序号此前已经分配过（不论对应商品是否还
  * 存在），为避免旧标签指向新商品，一律拒绝复用，抛 409 并在文案中带出历史 productCode 供人工核对。
+ * P1-C 修复（PR #109 第五轮评审）：占用判定改为按 (code_prefix, series_code, series_seq) 命中，
+ * 理由同 allocateSeriesSeq；写入登记行时仍保留 series_tag_id 字段，只作追溯展示。
  */
 export async function reserveSeriesSeq(
   manager: EntityManager,
@@ -156,7 +165,7 @@ export async function reserveSeriesSeq(
   // 避免并发导入两次都读到“未占用”后同时写入登记表撞唯一键。
   await acquireSequenceMutex(manager, `product_series_seq.${seriesTagId}`)
 
-  const existing = await findYzSeriesSeqReservation(manager, seriesTagId, seq)
+  const existing = await findYzSeriesSeqReservation(manager, prefix, seriesCode, seq)
   if (existing) {
     throw new BizError(
       `该系列的序号 ${seq} 此前已分配过（历史编码 ${existing.productCode}），为避免旧标签指向新商品，不允许复用，请改用其它序号`,
@@ -167,7 +176,7 @@ export async function reserveSeriesSeq(
   await raiseSequenceFloor(manager, `product_series_seq.${seriesTagId}`, seq)
   const productCode = formatProductCode(prefix, seriesCode, seq)
   const reservationRepo = manager.getRepository(BaseYzSeriesSeqReservation)
-  await reservationRepo.insert(reservationRepo.create({ seriesTagId, seriesSeq: seq, productCode }))
+  await reservationRepo.insert(reservationRepo.create({ seriesTagId, seriesSeq: seq, productCode, seriesCode, codePrefix: prefix }))
 }
 
 /**

@@ -1529,6 +1529,175 @@ async function main() {
       await acquireSequenceMutex(manager, buildSeriesCodeMutexKey(mutexSmokeTag.id))
     })
     pass('P2-C：改用 buildSeriesCodeMutexKey(tagId) 互斥键串行化（tag.service.ts 改系列码 / product.service.ts 建档与升级共用），同键同事务内可重复获取不报错；真正的跨连接并发竞态未做端到端验证，原因见回报说明')
+
+    // ============ 第 9 批：PR #109 第五轮评审修复（P1-A / P1-B / P1-C）============
+
+    // 用例 48（P1-A）：YZ 编码冲突必须拒绝，不能用 legacy 的后缀兜底——库里先有一条 barcode 恰好等于某
+    // YZ 商品即将派生出的编码，建档应直接抛 409，且不能产生任何带 `-2` 后缀的非法 SKU 编码。
+    const p5aTag = await createSeriesTag('QA')
+    const p5aConflictCode = formatSkuCode(formatProductCode(defaultPrefix, 'QA', 1), '0', null)
+    const p5aBarcodeOwner = await productService.create({
+      productName: `p5a-barcode-owner-${verifySeed}`,
+      pinyinAbbr: 'QA',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+      skus: [
+        { defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 0, barcode: p5aConflictCode },
+      ],
+    } as Parameters<typeof productService.create>[0], actor)
+    assert.equal(p5aBarcodeOwner.skus[0].barcode, p5aConflictCode, '占位商品的条码应等于稍后 YZ 建档会派生出的编码')
+
+    await assert.rejects(
+      () => productService.create({
+        productName: `p5a-yz-conflict-${verifySeed}`,
+        pinyinAbbr: 'QA',
+        defaultPrice: 10,
+        discountRate: 10,
+        isActive: true,
+        o2oStatus: 'unlisted',
+        currentStock: 0,
+        limitPerUser: 5,
+        primarySeriesTagId: p5aTag.id,
+      } as Parameters<typeof productService.create>[0], actor),
+      (error: unknown) => assertBizErrorWithStatus(error, 409) && (error as InstanceType<typeof BizError>).message.includes(p5aConflictCode),
+      'YZ 建档派生出的 skuCode 撞上其他商品条码时应直接抛 409，而不是静默改写成带后缀的编码',
+    )
+    const suffixedAfterBarcodeConflict = await skuRepo.count({ where: { skuCode: `${p5aConflictCode}-2` } })
+    assert.equal(suffixedAfterBarcodeConflict, 0, '条码冲突时不能产生带 -2 后缀的非法 SKU 编码')
+
+    // 同一 YZ 分支对 legacySkuCode 冲突做同样断言。legacySkuCode 不经普通建档/编辑接口写入，
+    // 这里直接构造一条历史行模拟"另一商品升级后遗留的历史编码"恰好等于目标编码的场景。
+    const p6aTag = await createSeriesTag('QB')
+    const p6aConflictCode = formatSkuCode(formatProductCode(defaultPrefix, 'QB', 1), '0', null)
+    const p6aLegacyOwner = await createProduct(null, null)
+    await skuRepo.save(skuRepo.create({
+      productId: p6aLegacyOwner.id,
+      skuCode: `${p6aLegacyOwner.productCode}-LEGACY-SRC`,
+      legacySkuCode: p6aConflictCode,
+      specValuesJson: JSON.stringify({}),
+      specText: '默认规格',
+      defaultPrice: '10.00',
+      discountRate: '10.0',
+      isActive: true,
+      isCurrent: true,
+      o2oRecommended: false,
+      sortOrder: 0,
+      variantCode: null,
+      sizeCode: null,
+    }))
+
+    await assert.rejects(
+      () => productService.create({
+        productName: `p6a-yz-conflict-${verifySeed}`,
+        pinyinAbbr: 'QB',
+        defaultPrice: 10,
+        discountRate: 10,
+        isActive: true,
+        o2oStatus: 'unlisted',
+        currentStock: 0,
+        limitPerUser: 5,
+        primarySeriesTagId: p6aTag.id,
+      } as Parameters<typeof productService.create>[0], actor),
+      (error: unknown) => assertBizErrorWithStatus(error, 409) && (error as InstanceType<typeof BizError>).message.includes(p6aConflictCode),
+      'YZ 建档派生出的 skuCode 撞上其他商品历史编码（legacySkuCode）时应直接抛 409',
+    )
+    const suffixedAfterLegacyConflict = await skuRepo.count({ where: { skuCode: `${p6aConflictCode}-2` } })
+    assert.equal(suffixedAfterLegacyConflict, 0, '历史编码冲突时同样不能产生带 -2 后缀的非法 SKU 编码')
+    pass('P1-A：YZ 建档编码撞上其他商品条码 / 历史编码（legacySkuCode）均直接抛 409，且都不产生 -2 后缀的非法编码')
+
+    // 用例 49（P1-B）：升级冲突检查必须纳入其他商品的历史编码（legacySkuCode）——A 商品升级后的历史
+    // 编码恰好等于 B 商品升级将生成的编码时，B 的正式升级应抛 409，预检应给出 blockingReason。
+    const p7SeriesTagB = await createSeriesTag('QC')
+    const p7UpgradeProductB = await productService.create({
+      productCode: nextProductCode(),
+      productName: `p7-upgrade-b-${verifySeed}`,
+      pinyinAbbr: 'QC',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+    } as Parameters<typeof productService.create>[0], actor)
+    const p7PreviewBeforeConflict = await productService.previewProductYzUpgrade(p7UpgradeProductB.id, p7SeriesTagB.id)
+    assert.equal(p7PreviewBeforeConflict.blockingReason, null, '未产生冲突前预检不应有 blockingReason')
+    const p7PredictedSkuCode = p7PreviewBeforeConflict.skuChanges[0]?.newSkuCode
+    assert.ok(p7PredictedSkuCode, '预检应能给出升级后的 skuCode')
+
+    // 商品 A：先用一个显式 skuCode（等于 B 升级后会生成的编码）建一个 legacy 商品，再把它升级到 YZ——
+    // 升级会把这个旧 skuCode 无条件写入 legacySkuCode（B9 批次的落位规则），从而制造出目标冲突。
+    const p7SeriesTagA = await createSeriesTag('QD')
+    const p7OwnerProductA = await productService.create({
+      productCode: nextProductCode(),
+      productName: `p7-upgrade-a-${verifySeed}`,
+      pinyinAbbr: 'QC',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+      skus: [
+        { defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 0, skuCode: p7PredictedSkuCode },
+      ],
+    } as Parameters<typeof productService.create>[0], actor)
+    assert.equal(p7OwnerProductA.skus[0].skuCode, p7PredictedSkuCode, 'A 商品的初始 skuCode 应等于 B 升级后会生成的编码')
+    const p7UpgradedA = await productService.upgradeProductToYzCode(p7OwnerProductA.id, { primarySeriesTagId: p7SeriesTagA.id }, actor)
+    assert.equal(p7UpgradedA.skus[0].legacySkuCode, p7PredictedSkuCode, 'A 商品升级后历史编码应等于其升级前的 skuCode')
+
+    const p7PreviewAfterConflict = await productService.previewProductYzUpgrade(p7UpgradeProductB.id, p7SeriesTagB.id)
+    assert.ok(p7PreviewAfterConflict.blockingReason, '预检应识别出与其他商品历史编码的冲突并给出 blockingReason')
+    assert.ok(
+      p7PreviewAfterConflict.blockingReason!.includes(p7PredictedSkuCode!),
+      'blockingReason 应指明具体冲突的编码',
+    )
+
+    await assert.rejects(
+      () => productService.upgradeProductToYzCode(p7UpgradeProductB.id, { primarySeriesTagId: p7SeriesTagB.id }, actor),
+      (error) => assertBizErrorWithStatus(error, 409),
+      '新编码与其他商品历史编码（legacySkuCode）冲突时正式升级应抛 409',
+    )
+    pass('P1-B：升级冲突检查纳入其他商品历史编码（legacySkuCode）——预检给出 blockingReason，正式升级抛 409')
+
+    // 用例 50（P1-C）：序号永久占用按系列码建命名空间，并禁止删除仍有占用记录的标签。
+    const p9SeriesTag = await createSeriesTag('QE')
+    const p9Product = await productService.create({
+      productName: `p9-namespace-${verifySeed}`,
+      pinyinAbbr: 'QE',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+      primarySeriesTagId: p9SeriesTag.id,
+    } as Parameters<typeof productService.create>[0], actor)
+    assert.equal(p9Product.seriesSeq, 1, '首个 P9 系列商品应分配到序号 1')
+    const p9HistoryProductCode = p9Product.productCode
+
+    await productRepo.delete({ id: p9Product.id })
+
+    // 商品被物理删除后，主系列引用计数归零，但该系列编码下已分配过序号，删除标签应被拒绝。
+    await assert.rejects(
+      () => tagService.delete(p9SeriesTag.id, actor),
+      (error: unknown) => assertBizErrorWithStatus(error, 409),
+      'P1-C：系列编码下已分配过商品序号时，即使引用计数归零，删除标签也应被拒绝',
+    )
+
+    // 绕开服务层的删除防护（模拟历史数据或非常规操作），实际制造出"同 seriesCode、不同 tagId"的场景，
+    // 验证真正兜底的是 allocateSeriesSeq 按系列码维度的占用判定，而不是依赖标签删除防护这一道闸门。
+    await tagRepo.delete({ id: p9SeriesTag.id })
+    const p9NewTag = await createSeriesTag('QE')
+    assert.notEqual(String(p9NewTag.id), String(p9SeriesTag.id), '新标签应拿到与旧标签不同的 tagId')
+    const p9NextSeq = await runInTransaction((manager) => allocateSeriesSeq(manager, p9NewTag.id, 'QE', defaultPrefix))
+    assert.equal(p9NextSeq, 2, '新标签（不同 tagId、相同 seriesCode）分配序号时应跳过已被占用的 01，直接取 02')
+    const p9NextProductCode = formatProductCode(defaultPrefix, 'QE', p9NextSeq)
+    assert.notEqual(p9NextProductCode, p9HistoryProductCode, '新分配的产品编码不应与旧标签生成过的历史编码重复')
+    pass('P1-C：系列最后一个商品被删除后删除标签被拒绝（409）；绕过防护后新建同 seriesCode 不同 tagId 的标签，分配序号仍跳过历史已占用的 01，不产生重复编码')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()

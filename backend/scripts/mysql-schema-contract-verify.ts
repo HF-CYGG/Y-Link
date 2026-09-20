@@ -162,6 +162,10 @@ const REQUIRED_COLUMNS = [
   ['order_revision', 'ip_address'],
   ['order_revision', 'user_agent'],
   ['order_revision', 'created_at'],
+  // 053：系列内序号永久占用登记表命名空间从 tagId 迁移到系列码维度（PR #109 第五轮评审 P1-C 修复），
+  // 需与 mysql-migration-runner 的 MYSQL_REQUIRED_COLUMNS 保持同一口径。
+  ['base_yz_series_seq_reservation', 'series_code'],
+  ['base_yz_series_seq_reservation', 'code_prefix'],
 ] as const
 
 const REQUIRED_COLUMN_LENGTHS = new Map<string, number>([
@@ -299,6 +303,18 @@ const REQUIRED_MANUAL_OUTBOUND_COLUMN_DEFINITIONS = new Map<string, ColumnFixtur
     isNullable: 'NO',
     characterMaximumLength: 4294967295,
   }],
+  ['base_yz_series_seq_reservation.series_code', {
+    dataType: 'varchar',
+    columnType: 'varchar(2)',
+    isNullable: 'NO',
+    characterMaximumLength: 2,
+  }],
+  ['base_yz_series_seq_reservation.code_prefix', {
+    dataType: 'varchar',
+    columnType: 'varchar(4)',
+    isNullable: 'NO',
+    characterMaximumLength: 4,
+  }],
 ])
 
 interface IndexFixture {
@@ -368,11 +384,12 @@ const REQUIRED_INDEXES: readonly IndexFixture[] = [
     columns: ['legacy_sku_code'],
     unique: false,
   },
-  // 052：系列内序号永久占用登记表的唯一键（PR #109 第四轮评审 P1 修复）。
+  // 053：系列内序号永久占用登记表的权威唯一键改为系列码维度（PR #109 第五轮评审 P1-C 修复）；
+  // 旧的按 tagId 唯一键已降级为普通索引，不再纳入启动期必需校验，见 mysql-migration-runner.ts 同款注释。
   {
     tableName: 'base_yz_series_seq_reservation',
-    indexName: 'uk_yz_series_seq_reservation',
-    columns: ['series_tag_id', 'series_seq'],
+    indexName: 'uk_yz_series_seq_reservation_code',
+    columns: ['code_prefix', 'series_code', 'series_seq'],
     unique: true,
   },
   {
@@ -1138,6 +1155,28 @@ missingLifecycleUpdateTrigger.triggers.delete('trg_account_lifecycle_event_no_up
 await expectSchemaFailure(missingLifecycleUpdateTrigger, [
   '触发器 trg_account_lifecycle_event_no_update',
   '044_account_lifecycle_governance.sql',
+])
+
+// 053：系列内序号永久占用登记表命名空间从 tagId 迁移到系列码维度（PR #109 第五轮评审 P1-C 修复）。
+const missingReservationSeriesCode = createCompleteFixture()
+missingReservationSeriesCode.columns.delete(objectKey('base_yz_series_seq_reservation', 'series_code'))
+await expectSchemaFailure(missingReservationSeriesCode, [
+  '字段 base_yz_series_seq_reservation.series_code',
+  '053_yz_reservation_series_code.sql',
+])
+
+const missingReservationCodePrefix = createCompleteFixture()
+missingReservationCodePrefix.columns.delete(objectKey('base_yz_series_seq_reservation', 'code_prefix'))
+await expectSchemaFailure(missingReservationCodePrefix, [
+  '字段 base_yz_series_seq_reservation.code_prefix',
+  '053_yz_reservation_series_code.sql',
+])
+
+const missingReservationSeriesCodeUniqueIndex = createCompleteFixture()
+missingReservationSeriesCodeUniqueIndex.indexes.delete(objectKey('base_yz_series_seq_reservation', 'uk_yz_series_seq_reservation_code'))
+await expectSchemaFailure(missingReservationSeriesCodeUniqueIndex, [
+  '索引 base_yz_series_seq_reservation.uk_yz_series_seq_reservation_code',
+  '053_yz_reservation_series_code.sql',
 ])
 
 console.log('[mysql-schema-contract-verify] MySQL 启动结构契约验证通过')

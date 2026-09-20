@@ -237,6 +237,9 @@ const SQLITE_REQUIRED_PRODUCT_COLUMNS = [
 const SQLITE_REQUIRED_PRODUCT_SKU_COLUMNS = ['o2o_recommended', 'is_current', 'barcode', 'cost_price', 'location_id', 'variant_code', 'size_code', 'legacy_sku_code']
 // YZ 通用 SKU 编码体系：base_tag 此前没有需要增量检测的列，series_code 是第一个，新增独立清单沿用既有命名规范。
 const SQLITE_REQUIRED_TAG_COLUMNS = ['series_code']
+// 053：系列内序号永久占用登记表命名空间从 tagId 迁移到系列码维度（PR #109 第五轮评审 P1-C 修复），
+// 新增两列需与 MYSQL_REQUIRED_COLUMNS 保持同一口径。
+const SQLITE_REQUIRED_RESERVATION_COLUMNS = ['series_code', 'code_prefix']
 const SQLITE_REQUIRED_O2O_PREORDER_ITEM_COLUMNS = [
   'original_price',
   'discount_rate',
@@ -527,6 +530,80 @@ async function prepareSqliteOrderSourceDocColumns(dataSource: DataSource): Promi
   await dataSource.query(
     'CREATE INDEX IF NOT EXISTS "idx_biz_outbound_source_doc" ON "biz_outbound_order" ("source_doc_type", "source_doc_id")',
   )
+}
+
+/**
+ * 053：系列内序号永久占用登记表命名空间从 tagId 迁移到系列码维度（PR #109 第五轮评审 P1-C 修复）。
+ * SQLite 侧没有 backend/sql/053_yz_reservation_series_code.sql 可执行（该脚本只面向 MySQL），
+ * 这里用等价口径补齐：先以可空列补齐，再按与 053 脚本相同的优先级在 JS 里逐行回填——SQLite 没有
+ * REGEXP，行数也远小于生产 MySQL 规模（这张表只在 YZ 商品建档/升级/导入时才追加一行），逐行处理比
+ * 拼一段用不上索引的正则 SQL 更直接、更易读。
+ * 回填口径（与 053 脚本一致，见该文件注释）：
+ *   a) 用当前全局前缀反推 product_code（最可靠，标签可能已删但 product_code 是登记时的快照）；
+ *   b) 反推失败则按 series_tag_id 反查 base_tag.series_code（标签已删除则查不到，跳过）；
+ *   c) 两条都反推不出的记录，写入不合法格式的占位哨兵 series_code='??'、code_prefix='?'，标记待人工核对。
+ * 列提前补齐为可空列即可满足 shouldSynchronizeSqliteSchema 的列存在性检查；后续 synchronize() 会把
+ * entity 声明的 NOT NULL 落实到表结构，此时所有行已经有值，不会因收紧约束而失败。
+ */
+async function prepareSqliteYzReservationSeriesCodeColumns(dataSource: DataSource): Promise<void> {
+  const reservationColumns = await listSqliteTableColumns(dataSource, 'base_yz_series_seq_reservation')
+  if (reservationColumns.size === 0) return
+  if (!reservationColumns.has('series_code')) {
+    await dataSource.query('ALTER TABLE "base_yz_series_seq_reservation" ADD COLUMN "series_code" varchar(2) NULL')
+  }
+  if (!reservationColumns.has('code_prefix')) {
+    await dataSource.query('ALTER TABLE "base_yz_series_seq_reservation" ADD COLUMN "code_prefix" varchar(4) NULL')
+  }
+
+  const pendingRows: Array<{ id: number | string; product_code: string; series_seq: number; series_tag_id: number | string }> = await dataSource.query(
+    'SELECT id, product_code, series_seq, series_tag_id FROM "base_yz_series_seq_reservation" WHERE series_code IS NULL OR code_prefix IS NULL',
+  )
+  if (!pendingRows.length) return
+
+  let currentPrefix = 'YZ'
+  const prefixConfigRows: Array<{ config_value: string | null }> = await dataSource.query(
+    "SELECT config_value FROM system_configs WHERE config_key = 'product.yz_code.prefix' LIMIT 1",
+  ).catch(() => [])
+  const configuredPrefix = (prefixConfigRows[0]?.config_value ?? '').trim()
+  if (/^[A-Z]{1,4}$/.test(configuredPrefix)) {
+    currentPrefix = configuredPrefix
+  }
+
+  const tagSeriesCodeById = new Map<string, string | null>()
+  for (const row of pendingRows) {
+    const tagId = String(row.series_tag_id)
+    if (tagSeriesCodeById.has(tagId)) continue
+    const tagRows: Array<{ series_code: string | null }> = await dataSource.query(
+      'SELECT series_code FROM base_tag WHERE id = ?',
+      [row.series_tag_id],
+    ).catch(() => [])
+    tagSeriesCodeById.set(tagId, tagRows[0]?.series_code ?? null)
+  }
+
+  for (const row of pendingRows) {
+    let seriesCode: string | null = null
+    // 回填 a：按当前前缀反推 product_code。
+    const productCode = row.product_code ?? ''
+    const expectedLength = currentPrefix.length + 4
+    if (
+      productCode.length === expectedLength
+      && productCode.startsWith(currentPrefix)
+      && /^[A-Z]{2}$/.test(productCode.slice(currentPrefix.length, currentPrefix.length + 2))
+      && productCode.slice(currentPrefix.length + 2) === String(row.series_seq).padStart(2, '0')
+    ) {
+      seriesCode = productCode.slice(currentPrefix.length, currentPrefix.length + 2)
+    }
+    // 回填 b：反推失败则退化为按 series_tag_id 反查标签当前的 series_code。
+    if (!seriesCode) {
+      seriesCode = tagSeriesCodeById.get(String(row.series_tag_id)) ?? null
+    }
+    const finalSeriesCode = seriesCode ?? '??'
+    const finalCodePrefix = seriesCode ? currentPrefix : '?'
+    await dataSource.query(
+      'UPDATE "base_yz_series_seq_reservation" SET series_code = ?, code_prefix = ? WHERE id = ? AND (series_code IS NULL OR code_prefix IS NULL)',
+      [finalSeriesCode, finalCodePrefix, row.id],
+    )
+  }
 }
 
 /**
@@ -1532,6 +1609,11 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
     return true
   }
 
+  const reservationColumnSet = await listSqliteTableColumns(dataSource, 'base_yz_series_seq_reservation')
+  if (SQLITE_REQUIRED_RESERVATION_COLUMNS.some((column) => !reservationColumnSet.has(column))) {
+    return true
+  }
+
   const clientUserColumnSet = await listSqliteTableColumns(dataSource, 'client_user')
   if (SQLITE_REQUIRED_CLIENT_USER_COLUMNS.some((column) => !clientUserColumnSet.has(column))) {
     return true
@@ -1659,6 +1741,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
     await prepareSqliteOrderAmendmentColumns(dataSource)
     await prepareSqliteOrderContentInventoryColumns(dataSource)
     await prepareSqliteOrderSourceDocColumns(dataSource)
+    await prepareSqliteYzReservationSeriesCodeColumns(dataSource)
     await prepareSqliteOrderMergeOperationResultSnapshot(dataSource)
     await normalizeSqliteOutboundItemColumns(dataSource)
     await normalizeSqliteO2oDiscountColumns(dataSource)

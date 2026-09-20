@@ -11,6 +11,7 @@ import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { BaseTag } from '../entities/base-tag.entity.js'
+import { BaseYzSeriesSeqReservation } from '../entities/base-yz-series-seq-reservation.entity.js'
 import { RelProductTag } from '../entities/rel-product-tag.entity.js'
 import { isUniqueConstraintError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
@@ -272,6 +273,22 @@ export class TagService {
       const primarySeriesUsageCount = await manager.getRepository(BaseProduct).count({ where: { primarySeriesTagId: id } })
       if (primarySeriesUsageCount > 0) {
         throw new BizError(`标签「${tag.tagName}」已被 ${primarySeriesUsageCount} 个商品用作文创系列，暂不能删除`, 409)
+      }
+      // P1-C 修复（PR #109 第五轮评审）：主系列引用计数只能拦住"当前还有存活商品"的情况。若该系列最后一个
+      // YZ 商品已被删除、引用计数归零，标签本身仍可能对应永久占用登记表（base_yz_series_seq_reservation）
+      // 里已经分配过的系列内序号——删除标签后若有人新建一个 seriesCode 相同但 tagId 不同的新标签，序号会
+      // 从 01 重新分配，生成与旧印刷标签完全相同的商品编码/SKU 编码。因此按该标签的 seriesCode 查占用表，
+      // 命中即拒绝删除（不按 series_tag_id 查，因为占用表的权威唯一性维度已迁移到 seriesCode，见该表实体
+      // 文件头说明）；没有 seriesCode 的标签从未被用作 YZ 主系列，不会有占用记录，直接跳过。
+      if (tag.seriesCode) {
+        const seriesCodeReservationCount = await manager.getRepository(BaseYzSeriesSeqReservation)
+          .count({ where: { seriesCode: tag.seriesCode } })
+        if (seriesCodeReservationCount > 0) {
+          throw new BizError(
+            `标签「${tag.tagName}」的系列编码「${tag.seriesCode}」下已分配过 ${seriesCodeReservationCount} 个商品序号，删除后若被其他标签复用该系列编码会导致编码重复，为保留编码的追溯信息不允许删除；这些序号已永久登记，即使标签被删除也不会被重新分配`,
+            409,
+          )
+        }
       }
       const relationCount = await manager.getRepository(RelProductTag).count({ where: { tagId: id } })
       if (relationCount > 0) throw new BizError(`标签「${tag.tagName}」已关联商品，暂不能删除`, 409)

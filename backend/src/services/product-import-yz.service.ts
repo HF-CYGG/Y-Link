@@ -479,22 +479,35 @@ export class ProductImportYzService {
       // P1 修复（PR #109 第四轮评审）：系列+序号即使当前没有任何存活商品占用，也可能在永久占用登记表
       // 里被登记过（对应商品已被物理删除）。预览阶段就要拦住，不能等到确认导入时才在事务里报错，
       // 否则用户会在预览通过后才发现整批失败。已经被上面「存活商品占用」报过错的分组不重复报错。
+      // 按 (前缀, 系列码, 序号) 判定，与 reserveSeriesSeq 的写入闸门保持同一命名空间。
+      // 不能按 series_tag_id 判定：标签可被删除后以相同系列码重建，新标签 ID 不同，
+      // 按标签维度查会漏判，预览通过却在确认导入时才失败。
+      const importPrefix = await getProductCodePrefix(manager)
+      const seqsBySeriesCode = new Map<string, number[]>()
+      for (const group of groups.values()) {
+        const list = seqsBySeriesCode.get(group.seriesCode) ?? []
+        list.push(group.seriesSeq)
+        seqsBySeriesCode.set(group.seriesCode, list)
+      }
       const reservedRows = await Promise.all(
-        [...seqsByTag.entries()].map(([tagId, seqs]) => manager.getRepository(BaseYzSeriesSeqReservation)
+        [...seqsBySeriesCode.entries()].map(([seriesCode, seqs]) => manager.getRepository(BaseYzSeriesSeqReservation)
           .createQueryBuilder('reservation')
-          .select(['reservation.seriesTagId', 'reservation.seriesSeq', 'reservation.productCode'])
-          .where('reservation.seriesTagId = :tagId AND reservation.seriesSeq IN (:...seqs)', { tagId, seqs })
+          .select(['reservation.seriesCode', 'reservation.seriesSeq', 'reservation.productCode'])
+          .where(
+            'reservation.codePrefix = :prefix AND reservation.seriesCode = :seriesCode AND reservation.seriesSeq IN (:...seqs)',
+            { prefix: importPrefix, seriesCode, seqs },
+          )
           .getMany()),
       )
       const reservedMap = new Map<string, string>()
       for (const list of reservedRows) {
         for (const reservation of list) {
-          reservedMap.set(`${reservation.seriesTagId}|${reservation.seriesSeq}`, reservation.productCode)
+          reservedMap.set(`${reservation.seriesCode}|${reservation.seriesSeq}`, reservation.productCode)
         }
       }
       for (const group of groups.values()) {
-        const key = `${group.tagId}|${group.seriesSeq}`
-        if (occupiedMap.has(key)) continue
+        const key = `${group.seriesCode}|${group.seriesSeq}`
+        if (occupiedMap.has(`${group.tagId}|${group.seriesSeq}`)) continue
         const historyProductCode = reservedMap.get(key)
         if (historyProductCode) {
           const message = `系列「${group.seriesCode}」序号 ${group.seriesSeq} 此前已分配过（历史编码 ${historyProductCode}），对应商品已被删除，为避免旧标签指向新商品，不允许复用该序号，请改用其它序号`
