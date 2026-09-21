@@ -82,7 +82,8 @@ function buildFixtureValue(metadata: EntityMetadata, column: ColumnMetadata): un
   if (
     (metadata.tableName === 'biz_outbound_order'
       || metadata.tableName === 'order_business_no_occupancy'
-      || metadata.tableName === 'order_revision')
+      || metadata.tableName === 'order_revision'
+      || metadata.tableName === 'order_business_no_reuse_event')
     && columnName === 'order_uuid'
   ) {
     return '00000000-0000-4000-8000-000000000072'
@@ -94,16 +95,32 @@ function buildFixtureValue(metadata: EntityMetadata, column: ColumnMetadata): un
     return 'manual_applied'
   }
   if (
-    (metadata.tableName === 'biz_outbound_order' || metadata.tableName === 'order_business_no_occupancy')
+    (metadata.tableName === 'biz_outbound_order'
+      || metadata.tableName === 'order_business_no_occupancy'
+      || metadata.tableName === 'order_business_no_reuse_event')
     && columnName === 'business_no'
   ) {
     return 'hyyzjd900001'
   }
-  if (metadata.tableName === 'order_business_no_occupancy' && columnName === 'business_namespace') {
+  if (
+    (metadata.tableName === 'order_business_no_occupancy' || metadata.tableName === 'order_business_no_reuse_event')
+    && columnName === 'business_namespace'
+  ) {
     return 'hyyzjd'
   }
-  if (metadata.tableName === 'order_business_no_occupancy' && columnName === 'serial_value') {
+  if (
+    (metadata.tableName === 'order_business_no_occupancy' || metadata.tableName === 'order_business_no_reuse_event')
+    && columnName === 'serial_value'
+  ) {
     return 900001
+  }
+  if (metadata.tableName === 'order_business_no_occupancy' && columnName === 'last_assigned_order_uuid') {
+    return '00000000-0000-4000-8000-000000000072'
+  }
+  if (metadata.tableName === 'order_business_no_reuse_event' && (columnName === 'from_order_uuid' || columnName === 'to_order_uuid')) {
+    return columnName === 'from_order_uuid'
+      ? '00000000-0000-4000-8000-000000000071'
+      : '00000000-0000-4000-8000-000000000072'
   }
 
   if (column.enum?.length) {

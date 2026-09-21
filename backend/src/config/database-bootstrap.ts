@@ -50,6 +50,7 @@ const SQLITE_REQUIRED_TABLES = [
   'business_sequence',
   'sms_verification_record',
   'order_business_no_occupancy',
+  'order_business_no_reuse_event',
   'order_revision',
   'account_lifecycle_event',
   'order_merge_operation',
@@ -120,6 +121,24 @@ async function ensureSqliteAccountLifecycleAppendOnly(dataSource: DataSource): P
     BEFORE DELETE ON account_lifecycle_event
     BEGIN
       SELECT RAISE(ABORT, 'ACCOUNT_LIFECYCLE_EVENT_APPEND_ONLY');
+    END
+  `)
+}
+
+/** 业务号复用事件与账号生命周期事件一样只允许追加，SQLite 用触发器提供数据库级最终防线。 */
+async function ensureSqliteOrderBusinessNoReuseAppendOnly(dataSource: DataSource): Promise<void> {
+  await dataSource.query(`
+    CREATE TRIGGER IF NOT EXISTS trg_order_business_no_reuse_event_no_update
+    BEFORE UPDATE ON order_business_no_reuse_event
+    BEGIN
+      SELECT RAISE(ABORT, 'ORDER_BUSINESS_NO_REUSE_EVENT_APPEND_ONLY');
+    END
+  `)
+  await dataSource.query(`
+    CREATE TRIGGER IF NOT EXISTS trg_order_business_no_reuse_event_no_delete
+    BEFORE DELETE ON order_business_no_reuse_event
+    BEGIN
+      SELECT RAISE(ABORT, 'ORDER_BUSINESS_NO_REUSE_EVENT_APPEND_ONLY');
     END
   `)
 }
@@ -209,6 +228,11 @@ const SQLITE_REQUIRED_ORDER_ITEM_COLUMNS = [
   'source_order_item_id',
 ]
 const SQLITE_REQUIRED_ORDER_MERGE_OPERATION_COLUMNS = ['result_json']
+const SQLITE_REQUIRED_ORDER_BUSINESS_NO_OCCUPANCY_COLUMNS = [
+  'last_assigned_order_uuid',
+  'last_assigned_at',
+  'reuse_count',
+]
 const SQLITE_REQUIRED_INVENTORY_LOG_COLUMNS = [
   'sku_id',
   'before_sku_current_stock',
@@ -487,6 +511,31 @@ async function prepareSqliteOrderAmendmentColumns(dataSource: DataSource): Promi
     SET "edit_version" = 1
     WHERE "edit_version" IS NULL OR "edit_version" < 1
   `)
+
+  const occupancyColumns = await listSqliteTableColumns(dataSource, 'order_business_no_occupancy')
+  if (occupancyColumns.size === 0) return
+  if (!occupancyColumns.has('last_assigned_order_uuid')) {
+    await dataSource.query('ALTER TABLE "order_business_no_occupancy" ADD COLUMN "last_assigned_order_uuid" varchar(36) NULL')
+  }
+  if (!occupancyColumns.has('last_assigned_at')) {
+    await dataSource.query('ALTER TABLE "order_business_no_occupancy" ADD COLUMN "last_assigned_at" datetime NULL')
+  }
+  if (!occupancyColumns.has('reuse_count')) {
+    await dataSource.query('ALTER TABLE "order_business_no_occupancy" ADD COLUMN "reuse_count" integer NOT NULL DEFAULT (0)')
+  }
+  await dataSource.query(`
+    UPDATE "order_business_no_occupancy"
+    SET
+      "last_assigned_order_uuid" = COALESCE("last_assigned_order_uuid", "order_uuid"),
+      "last_assigned_at" = COALESCE("last_assigned_at", "created_at"),
+      "reuse_count" = COALESCE("reuse_count", 0)
+    WHERE "last_assigned_order_uuid" IS NULL
+       OR "last_assigned_at" IS NULL
+       OR "reuse_count" IS NULL
+  `)
+  await dataSource.query(
+    'CREATE INDEX IF NOT EXISTS "idx_order_business_no_occupancy_last_assigned_order_uuid" ON "order_business_no_occupancy" ("last_assigned_order_uuid")',
+  )
 }
 
 /**
@@ -941,9 +990,10 @@ export async function backfillSqliteOrderAmendmentData(dataSource: DataSource): 
       }
       await manager.query(
         `INSERT OR IGNORE INTO "order_business_no_occupancy"
-         ("business_namespace", "serial_value", "business_no", "order_uuid", "assigned_reason", "created_at")
-         VALUES (?, ?, ?, ?, 'history_backfill', ?)`,
-        [namespace, serialValue, order.businessNo, order.orderUuid, order.createdAt],
+         ("business_namespace", "serial_value", "business_no", "order_uuid", "assigned_reason", "created_at",
+          "last_assigned_order_uuid", "last_assigned_at", "reuse_count")
+         VALUES (?, ?, ?, ?, 'history_backfill', ?, ?, ?, 0)`,
+        [namespace, serialValue, order.businessNo, order.orderUuid, order.createdAt, order.orderUuid, order.createdAt],
       )
     }
 
@@ -1795,6 +1845,17 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
   if (SQLITE_REQUIRED_ORDER_MERGE_OPERATION_COLUMNS.some((column) => !orderMergeOperationColumnSet.has(column))) {
     return true
   }
+
+  const occupancyColumnSet = await listSqliteTableColumns(dataSource, 'order_business_no_occupancy')
+  if (SQLITE_REQUIRED_ORDER_BUSINESS_NO_OCCUPANCY_COLUMNS.some((column) => !occupancyColumnSet.has(column))) {
+    return true
+  }
+  if (
+    !await hasSqliteNotNullColumn(dataSource, 'order_business_no_occupancy', 'last_assigned_order_uuid')
+    || !await hasSqliteNotNullColumn(dataSource, 'order_business_no_occupancy', 'last_assigned_at')
+  ) {
+    return true
+  }
   if (!await hasSqliteNotNullColumn(dataSource, 'order_merge_operation', 'result_json')) {
     return true
   }
@@ -1991,7 +2052,10 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
     }
     await migrateClientUserDepartmentGovernance(dataSource)
     await migrateLegacyFeedbackAttachments(dataSource)
-    if (env.DB_TYPE === 'sqlite') await ensureSqliteAccountLifecycleAppendOnly(dataSource)
+    if (env.DB_TYPE === 'sqlite') {
+      await ensureSqliteAccountLifecycleAppendOnly(dataSource)
+      await ensureSqliteOrderBusinessNoReuseAppendOnly(dataSource)
+    }
     return {
       action: 'synchronized',
       reason: 'forced_by_db_sync',
@@ -2024,6 +2088,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
     await backfillSqliteOrderSourceDocs(dataSource)
     await migrateClientUserDepartmentGovernance(dataSource)
     await ensureSqliteAccountLifecycleAppendOnly(dataSource)
+    await ensureSqliteOrderBusinessNoReuseAppendOnly(dataSource)
     await migrateLegacyFeedbackAttachments(dataSource)
     return {
       action: 'skipped',
@@ -2041,6 +2106,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   await backfillSqliteOrderSourceDocs(dataSource)
   await migrateClientUserDepartmentGovernance(dataSource)
   await ensureSqliteAccountLifecycleAppendOnly(dataSource)
+  await ensureSqliteOrderBusinessNoReuseAppendOnly(dataSource)
   await migrateLegacyFeedbackAttachments(dataSource)
   return {
     action: 'synchronized',

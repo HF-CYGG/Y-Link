@@ -1,6 +1,6 @@
 /**
- * 模块说明：Issue #72 历史 SQLite 订单升级专项验证。
- * 文件职责：从不含 businessNo/editVersion/永久占号表的真实旧结构启动，验证自动升级、原值回填与重复执行安全。
+ * 模块说明：Issue #72/#110 历史 SQLite 订单升级专项验证。
+ * 文件职责：从不含 businessNo/editVersion/永久占号与复用事件表的真实旧结构启动，验证自动升级、原值回填与重复执行安全。
  * 实现逻辑：先用当前实体建立完整夹具，再降级为旧结构，最后只通过正式 bootstrap 恢复并核对业务不变量。
  */
 
@@ -39,6 +39,7 @@ async function main() {
       [orderUuid, legacyShowNo, legacyShowNo, `legacy-${verifySeed}`],
     )
     await AppDataSource.query('DROP TABLE "order_business_no_occupancy"')
+    await AppDataSource.query('DROP TABLE "order_business_no_reuse_event"')
     await AppDataSource.query('DROP TABLE "order_revision"')
     await AppDataSource.query('DROP INDEX "uk_biz_outbound_business_no"')
     await AppDataSource.query('ALTER TABLE "biz_outbound_order" DROP COLUMN "business_no"')
@@ -55,14 +56,24 @@ async function main() {
     assert.equal(Number(orderRows[0]?.editVersion), 1)
 
     const occupancyRows = await AppDataSource.query(
-      'SELECT "business_namespace" AS "namespace", "serial_value" AS "serialValue", "order_uuid" AS "orderUuid" FROM "order_business_no_occupancy" WHERE "business_no" = ?',
+      `SELECT "business_namespace" AS "namespace", "serial_value" AS "serialValue", "order_uuid" AS "orderUuid",
+              "last_assigned_order_uuid" AS "lastAssignedOrderUuid", "last_assigned_at" AS "lastAssignedAt",
+              "reuse_count" AS "reuseCount"
+       FROM "order_business_no_occupancy" WHERE "business_no" = ?`,
       [legacyShowNo],
-    ) as Array<{ namespace: string; serialValue: number; orderUuid: string }>
+    ) as Array<{ namespace: string; serialValue: number; orderUuid: string; lastAssignedOrderUuid: string; lastAssignedAt: string; reuseCount: number }>
     assert.equal(occupancyRows.length, 1)
     assert.deepEqual(
       [occupancyRows[0]?.namespace, Number(occupancyRows[0]?.serialValue), occupancyRows[0]?.orderUuid],
       ['hyyzjd', 72, orderUuid],
     )
+    assert.equal(occupancyRows[0]?.lastAssignedOrderUuid, orderUuid, '存量占用必须回填最后持有人为首次持有人')
+    assert.ok(occupancyRows[0]?.lastAssignedAt, '存量占用必须回填最后分配时间')
+    assert.equal(Number(occupancyRows[0]?.reuseCount), 0, '存量占用复用次数必须回填为 0')
+    const reuseEventTable = await AppDataSource.query(
+      'SELECT COUNT(1) AS "total" FROM "order_business_no_reuse_event"',
+    ) as Array<{ total: number }>
+    assert.equal(Number(reuseEventTable[0]?.total), 0, '历史升级必须创建空的复用事件表')
     const sequenceRows = await AppDataSource.query(
       'SELECT "current_value" AS "currentValue" FROM "business_sequence" WHERE "sequence_key" = ?',
       ['order.business.department'],

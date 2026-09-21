@@ -14,7 +14,7 @@ import type { RequestMeta } from '../utils/request-meta.js'
 import { BizError } from '../utils/errors.js'
 import { auditService } from './audit.service.js'
 import { orderBusinessNoService } from './order-business-no.service.js'
-import type { BusinessNoCursorPlan, ParsedBusinessNo } from './order-business-no.service.js'
+import type { BusinessNoCursorPlan, BusinessNoReclaimCandidate, ParsedBusinessNo } from './order-business-no.service.js'
 import type { OrderType } from './order-serial.service.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 import { orderMergeService } from './order-merge.service.js'
@@ -31,6 +31,7 @@ export interface OrderAmendmentInput {
   isSystemApplied?: boolean
   remark?: string | null
   reason?: string
+  reclaimBusinessNo?: boolean
 }
 
 export interface OrderAmendmentBatchInput {
@@ -55,6 +56,7 @@ export interface OrderAmendmentPreviewItem {
   blockingReasons: string[]
   before: OrderAmendmentSnapshot
   after: OrderAmendmentSnapshot
+  reclaimCandidate: BusinessNoReclaimCandidate | null
 }
 
 export interface OrderAmendmentPreviewResult {
@@ -69,6 +71,13 @@ interface EvaluatedAmendment extends OrderAmendmentPreviewItem {
   businessNoChanged: boolean
   parsedBusinessNo: ParsedBusinessNo | null
 }
+
+type EvaluationMode = 'preview' | 'ordinary_commit' | 'reclaim_commit'
+
+// MySQL 默认 REPEATABLE READ 会让锁序列后的普通物理最大号查询复用旧快照；
+// 回收事务单独使用 READ COMMITTED，配合“目标订单 -> sequence -> occupancy”的既有锁序，
+// 保证游标校准读取 sequence 锁取得后最新已提交的订单当前号。其他事务默认语义不变。
+const RECLAIM_TRANSACTION_OPTIONS = { mysqlIsolationLevel: 'READ COMMITTED' } as const
 
 const FIELD_LIMITS = {
   batchSize: 100,
@@ -89,14 +98,17 @@ const truncateByCodePoint = (value: string | null | undefined, maxLength: number
 }
 
 export class OrderAmendmentService {
-  async preview(input: OrderAmendmentBatchInput, _actor: AuthUserContext): Promise<OrderAmendmentPreviewResult> {
-    const evaluated = await this.evaluate(input, AppDataSource.manager, false)
-    const cursorPlans = await orderBusinessNoService.previewCursorPlans(
-      evaluated
-        .filter((item) => item.businessNoChanged && item.parsedBusinessNo && item.blockingReasons.length === 0)
-        .map((item) => item.parsedBusinessNo as ParsedBusinessNo),
-      AppDataSource.manager,
-    )
+  async preview(input: OrderAmendmentBatchInput, actor: AuthUserContext): Promise<OrderAmendmentPreviewResult> {
+    const evaluated = await this.evaluate(input, AppDataSource.manager, false, actor, 'preview')
+    const reclaimItem = evaluated.find((item) => item.input.reclaimBusinessNo === true && item.blockingReasons.length === 0)
+    const cursorPlans = reclaimItem?.parsedBusinessNo
+      ? [await orderBusinessNoService.previewReclaimCursorPlan(reclaimItem.parsedBusinessNo, reclaimItem.orderId, AppDataSource.manager)]
+      : await orderBusinessNoService.previewCursorPlans(
+          evaluated
+            .filter((item) => item.input.reclaimBusinessNo !== true && item.businessNoChanged && item.parsedBusinessNo && item.blockingReasons.length === 0)
+            .map((item) => item.parsedBusinessNo as ParsedBusinessNo),
+          AppDataSource.manager,
+        )
     return this.toPreviewResult(evaluated, cursorPlans)
   }
 
@@ -114,7 +126,7 @@ export class OrderAmendmentService {
     return runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
       // 预览不是授权凭证：正式提交必须在同一事务中重新锁行、重查占用并计算全部阻断原因。
-      const evaluated = await this.evaluate(normalizedInput, manager, true)
+      const evaluated = await this.evaluate(normalizedInput, manager, true, actor, 'ordinary_commit')
       const preliminaryPlans = await orderBusinessNoService.previewCursorPlans(
         evaluated
           .filter((item) => item.businessNoChanged && item.parsedBusinessNo && item.blockingReasons.length === 0)
@@ -193,10 +205,101 @@ export class OrderAmendmentService {
     })
   }
 
+  /**
+   * 管理员单张回收专用提交。永久删除密码仅由路由校验，不进入本服务；预览结果也不是授权凭证，
+   * 正式提交会在同一事务中重新锁单、锁游标、锁占用行并复核最后持有人已物理消失。
+   */
+  async reclaimBusinessNo(
+    input: { amendment: OrderAmendmentInput },
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ): Promise<OrderAmendmentPreviewResult> {
+    if (actor.role !== 'admin') throw new BizError('仅管理员可回收并复用已永久删除订单业务号', 403)
+    const normalizedInput: OrderAmendmentBatchInput = {
+      amendments: [{
+        ...input.amendment,
+        reclaimBusinessNo: true,
+        reason: this.normalizeRequiredReason(input.amendment.reason),
+      }],
+    }
+    return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const evaluated = await this.evaluate(normalizedInput, manager, true, actor, 'reclaim_commit')
+      const item = evaluated[0]
+      if (!item) throw new BizError('必须提交一张待回收修订订单', 400)
+      const preliminaryPlans = item.parsedBusinessNo && item.blockingReasons.length === 0
+        ? [await orderBusinessNoService.previewReclaimCursorPlan(item.parsedBusinessNo, item.orderId, manager)]
+        : []
+      const preview = this.toPreviewResult(evaluated, preliminaryPlans)
+      if (!preview.ready || !item.parsedBusinessNo) {
+        throw new BizError(`业务号回收存在冲突：${item.blockingReasons.join('；') || '资格校验失败'}`, 409)
+      }
+
+      const reason = this.normalizeRequiredReason(item.input.reason)
+      const reclaim = await orderBusinessNoService.reclaimConfirmed({
+        businessNo: item.after.businessNo,
+        orderType: item.after.orderType,
+        targetOrderId: String(item.order.id),
+        targetOrderUuid: item.order.orderUuid,
+        targetShowNo: item.order.showNo,
+        reason,
+        actor,
+        requestMeta,
+      }, manager)
+
+      const orderRepo = manager.getRepository(BizOutboundOrder)
+      item.order.businessNo = item.after.businessNo
+      item.order.customerDepartmentName = item.after.customerDepartmentName
+      item.order.customerName = item.after.customerName
+      item.order.issuerName = item.after.issuerName
+      item.order.hasCustomerOrder = item.after.hasCustomerOrder
+      item.order.isSystemApplied = item.after.isSystemApplied
+      item.order.remark = item.after.remark
+      item.order.editVersion = item.before.editVersion + 1
+      await orderRepo.save(item.order)
+      item.after.editVersion = item.order.editVersion
+
+      await manager.getRepository(OrderRevision).insert({
+        orderIdSnapshot: String(item.order.id),
+        orderUuid: item.order.orderUuid,
+        revisionNo: item.order.editVersion,
+        beforeSnapshotJson: JSON.stringify(item.before),
+        afterSnapshotJson: JSON.stringify(item.after),
+        reason,
+        actorUserId: actor.userId,
+        actorUsername: actor.username,
+        actorDisplayName: actor.displayName,
+        ipAddress: truncateByCodePoint(requestMeta?.ipAddress, 64),
+        userAgent: truncateByCodePoint(requestMeta?.userAgent, 255),
+      })
+      const cursorPlan = await orderBusinessNoService.recalibrateCursorFromPhysicalOrders(item.after.orderType, manager)
+      await auditService.record({
+        actionType: 'order.business_no_reclaim',
+        actionLabel: '回收并复用已永久删除订单业务号',
+        targetType: 'order',
+        targetId: String(item.order.id),
+        targetCode: item.order.showNo,
+        actor,
+        requestMeta,
+        detail: {
+          reason,
+          before: item.before,
+          after: item.after,
+          businessNo: item.after.businessNo,
+          reuseCount: reclaim.reuseCount,
+          cursorPlan,
+        },
+      }, manager)
+      return this.toPreviewResult(evaluated, [cursorPlan])
+    }, RECLAIM_TRANSACTION_OPTIONS)
+  }
+
   private async evaluate(
     input: OrderAmendmentBatchInput,
     manager: EntityManager,
     lockOrders: boolean,
+    actor: AuthUserContext,
+    mode: EvaluationMode,
   ): Promise<EvaluatedAmendment[]> {
     if (!Array.isArray(input.amendments) || input.amendments.length === 0) {
       throw new BizError('至少提交一张待修订订单', 400)
@@ -239,6 +342,7 @@ export class OrderAmendmentService {
           input: amendment,
           businessNoChanged: false,
           parsedBusinessNo: null,
+          reclaimCandidate: null,
         })
         continue
       }
@@ -264,6 +368,20 @@ export class OrderAmendmentService {
 
       const orderTypeChanged = after.orderType !== before.orderType
       const businessNoChanged = after.businessNo !== before.businessNo
+      const reclaimRequested = amendment.reclaimBusinessNo === true
+      let reclaimCandidate: BusinessNoReclaimCandidate | null = null
+      if (reclaimRequested && mode === 'ordinary_commit') {
+        blockingReasons.push('普通修订接口不允许回收业务号，请使用管理员专用回收接口')
+      }
+      if (reclaimRequested && input.amendments.length !== 1) {
+        blockingReasons.push('业务号回收仅支持单张订单，不支持批量修订')
+      }
+      if (reclaimRequested && actor.role !== 'admin') {
+        blockingReasons.push('仅管理员可回收并复用已永久删除订单业务号')
+      }
+      if (reclaimRequested && orderTypeChanged) {
+        blockingReasons.push('回收业务号时不得改变订单类型，必须保持同类型命名空间')
+      }
       if (
         mergeMetadata?.role === 'parent'
         && (
@@ -290,7 +408,20 @@ export class OrderAmendmentService {
       if (businessNoChanged) {
         const inspection = await orderBusinessNoService.inspectConfirmed(after.businessNo, after.orderType, manager)
         parsedBusinessNo = inspection.parsed
-        if (inspection.blockingReason) blockingReasons.push(inspection.blockingReason)
+        if (inspection.blockingReason) {
+          const reclaimInspection = await orderBusinessNoService.inspectReclaimCandidate(after.businessNo, after.orderType, manager)
+          parsedBusinessNo = reclaimInspection.parsed ?? parsedBusinessNo
+          if (actor.role === 'admin') reclaimCandidate = reclaimInspection.candidate
+          if (reclaimRequested && mode !== 'ordinary_commit' && actor.role === 'admin' && !orderTypeChanged && input.amendments.length === 1) {
+            if (reclaimInspection.blockingReason) blockingReasons.push(reclaimInspection.blockingReason)
+          } else {
+            blockingReasons.push(inspection.blockingReason)
+          }
+        } else if (reclaimRequested) {
+          blockingReasons.push('该业务号尚未被永久占用，无需通过回收入口提交')
+        }
+      } else if (reclaimRequested) {
+        blockingReasons.push('回收业务号必须填写与当前业务号不同的历史占用号')
       }
 
       const comparableBefore = JSON.stringify(before)
@@ -307,6 +438,7 @@ export class OrderAmendmentService {
         input: amendment,
         businessNoChanged,
         parsedBusinessNo,
+        reclaimCandidate,
       })
     }
 
@@ -422,11 +554,12 @@ export class OrderAmendmentService {
     return {
       ready: items.every((item) => item.blockingReasons.length === 0),
       cursorPlans,
-      items: items.map(({ orderId, blockingReasons, before, after }) => ({
+      items: items.map(({ orderId, blockingReasons, before, after, reclaimCandidate }) => ({
         orderId,
         blockingReasons,
         before,
         after,
+        reclaimCandidate,
       })),
     }
   }

@@ -31,6 +31,7 @@ import { auditService } from './audit.service.js'
 import {
   orderAmendmentService,
   type OrderAmendmentBatchInput,
+  type OrderAmendmentInput,
   type OrderAmendmentPreviewResult,
 } from './order-amendment.service.js'
 import { orderBusinessNoService } from './order-business-no.service.js'
@@ -544,6 +545,14 @@ export class OrderService {
     requestMeta?: RequestMeta,
   ): Promise<OrderAmendmentPreviewResult> {
     return orderAmendmentService.commit(input, actor, requestMeta)
+  }
+
+  async reclaimBusinessNo(
+    input: { amendment: OrderAmendmentInput },
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ): Promise<OrderAmendmentPreviewResult> {
+    return orderAmendmentService.reclaimBusinessNo(input, actor, requestMeta)
   }
 
   async updateContent(

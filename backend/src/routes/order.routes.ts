@@ -74,6 +74,7 @@ const orderAmendmentSchema = z.object({
   isSystemApplied: z.boolean().optional(),
   remark: z.string().max(500).nullable().optional(),
   reason: z.string().max(500).optional(),
+  reclaimBusinessNo: z.boolean().optional(),
 })
 
 const orderAmendmentBatchSchema = z.object({
@@ -86,6 +87,13 @@ const orderAmendmentCommitSchema = orderAmendmentSchema.extend({
 
 const orderAmendmentCommitBatchSchema = z.object({
   amendments: z.array(orderAmendmentCommitSchema).min(1).max(100),
+})
+
+const orderBusinessNoReclaimSchema = z.object({
+  amendment: orderAmendmentCommitSchema.extend({
+    reclaimBusinessNo: z.literal(true),
+  }),
+  permanentDeletePassword: z.string().min(1, '请输入永久删除密码').max(256, '永久删除密码长度非法'),
 })
 
 const amendmentBusinessNoSuggestionSchema = z.object({
@@ -262,6 +270,23 @@ orderRouter.post(
     const authReq = req as AuthenticatedRequest
     const payload = orderAmendmentCommitBatchSchema.parse(req.body ?? {})
     const data = await orderService.commitAmendments(payload, authReq.auth, extractRequestMeta(req))
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+orderRouter.post(
+  '/amendments/reclaim-business-no',
+  requirePermission('orders:update'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = orderBusinessNoReclaimSchema.parse(req.body ?? {})
+    assertPermanentDeletePassword(payload.permanentDeletePassword)
+    const data = await orderService.reclaimBusinessNo(
+      { amendment: payload.amendment },
+      authReq.auth,
+      extractRequestMeta(req),
+    )
     res.json({ code: 0, message: 'ok', data })
   }),
 )

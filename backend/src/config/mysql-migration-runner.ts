@@ -70,6 +70,7 @@ const MYSQL_REQUIRED_TABLES = [
   'client_mobile_session',
   'sms_verification_record',
   'order_business_no_occupancy',
+  'order_business_no_reuse_event',
   'order_revision',
   'account_lifecycle_event',
   'order_merge_operation',
@@ -112,6 +113,7 @@ const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
   client_mobile_session: '037_mobile_auth_session.sql',
   sms_verification_record: '039_aliyun_pnvs_sms_verification.sql',
   order_business_no_occupancy: '042_order_business_no_amendment.sql',
+  order_business_no_reuse_event: '054_order_business_no_reuse.sql',
   order_revision: '042_order_business_no_amendment.sql',
   account_lifecycle_event: '044_account_lifecycle_governance.sql',
   order_merge_operation: '045_order_merge_governance.sql',
@@ -404,6 +406,11 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
   { tableName: 'order_business_no_occupancy', columnName: 'order_uuid', introducingScript: '042_order_business_no_amendment.sql' },
   { tableName: 'order_business_no_occupancy', columnName: 'assigned_reason', introducingScript: '042_order_business_no_amendment.sql' },
   { tableName: 'order_business_no_occupancy', columnName: 'created_at', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_business_no_occupancy', columnName: 'last_assigned_order_uuid', introducingScript: '054_order_business_no_reuse.sql', expectedDataType: 'char', expectedColumnType: 'char(36)', expectedCharacterMaximumLength: 36, expectedNullable: false },
+  { tableName: 'order_business_no_occupancy', columnName: 'last_assigned_at', introducingScript: '054_order_business_no_reuse.sql', expectedDataType: 'datetime', expectedColumnType: 'datetime(6)', expectedNullable: false },
+  { tableName: 'order_business_no_occupancy', columnName: 'reuse_count', introducingScript: '054_order_business_no_reuse.sql', expectedDataType: 'int', expectedColumnType: 'int', expectedNullable: false },
+  ...['business_namespace', 'serial_value', 'business_no', 'from_order_uuid', 'to_order_uuid', 'target_order_id_snapshot', 'target_show_no_snapshot', 'reuse_count', 'reason', 'actor_user_id', 'actor_username', 'actor_display_name', 'ip_address', 'user_agent', 'created_at']
+    .map((columnName) => ({ tableName: 'order_business_no_reuse_event', columnName, introducingScript: '054_order_business_no_reuse.sql' })),
   { tableName: 'order_revision', columnName: 'order_id_snapshot', introducingScript: '042_order_business_no_amendment.sql' },
   { tableName: 'order_revision', columnName: 'order_uuid', introducingScript: '042_order_business_no_amendment.sql' },
   { tableName: 'order_revision', columnName: 'revision_no', introducingScript: '042_order_business_no_amendment.sql' },
@@ -588,6 +595,27 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
   },
   {
     tableName: 'order_business_no_occupancy',
+    indexName: 'idx_order_business_no_occupancy_last_assigned_order_uuid',
+    columns: ['last_assigned_order_uuid'],
+    unique: false,
+    introducingScript: '054_order_business_no_reuse.sql',
+  },
+  {
+    tableName: 'order_business_no_reuse_event',
+    indexName: 'idx_order_business_no_reuse_event_business_no',
+    columns: ['business_no'],
+    unique: false,
+    introducingScript: '054_order_business_no_reuse.sql',
+  },
+  {
+    tableName: 'order_business_no_reuse_event',
+    indexName: 'idx_order_business_no_reuse_event_to_order_uuid',
+    columns: ['to_order_uuid'],
+    unique: false,
+    introducingScript: '054_order_business_no_reuse.sql',
+  },
+  {
+    tableName: 'order_business_no_occupancy',
     indexName: 'uk_order_business_no_occupancy_namespace_serial',
     columns: ['business_namespace', 'serial_value'],
     unique: true,
@@ -764,6 +792,18 @@ const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [
 
 const MYSQL_REQUIRED_TRIGGERS: readonly MysqlRequiredTrigger[] = [
   {
+    triggerName: 'trg_order_business_no_reuse_event_no_update',
+    eventManipulation: 'UPDATE',
+    actionTiming: 'BEFORE',
+    introducingScript: '054_order_business_no_reuse.sql',
+  },
+  {
+    triggerName: 'trg_order_business_no_reuse_event_no_delete',
+    eventManipulation: 'DELETE',
+    actionTiming: 'BEFORE',
+    introducingScript: '054_order_business_no_reuse.sql',
+  },
+  {
     triggerName: 'trg_account_lifecycle_event_no_update',
     eventManipulation: 'UPDATE',
     actionTiming: 'BEFORE',
@@ -778,6 +818,11 @@ const MYSQL_REQUIRED_TRIGGERS: readonly MysqlRequiredTrigger[] = [
 ]
 
 const MYSQL_REQUIRED_CHECKS: readonly MysqlRequiredCheck[] = [
+  {
+    tableName: 'order_business_no_reuse_event',
+    constraintName: 'ck_order_business_no_reuse_event_namespace',
+    introducingScript: '054_order_business_no_reuse.sql',
+  },
   {
     tableName: 'order_merge_relation',
     constraintName: 'ck_order_merge_relation_distinct_orders',
@@ -815,6 +860,7 @@ const AUTO_MIGRATABLE_FILES = [
   '051_product_legacy_code.sql',
   '052_yz_series_seq_reservation.sql',
   '053_yz_reservation_series_code.sql',
+  '054_order_business_no_reuse.sql',
 ]
 
 /**

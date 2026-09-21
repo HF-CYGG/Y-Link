@@ -1,7 +1,7 @@
 /**
- * 文件说明：订单业务号永久占用表，记录每个业务号的首次分配事实。
- * 实现逻辑：业务号与“命名空间 + 数值流水”双重唯一，且不建立订单外键，保证订单永久删除后占用仍保留。
- * 维护重点：任何删除、作废或改单流程都不得删除占用记录，也不得把旧号重新分配给原订单或其他订单。
+ * 文件说明：订单业务号永久占用表，记录每个业务号的首次分配与最后一次获配事实。
+ * 实现逻辑：业务号与“命名空间 + 数值流水”双重唯一，且不建立订单外键；首次持有人不可改，最后持有人仅能由管理员回收事务推进。
+ * 维护重点：任何删除、作废或普通改单流程都不得删除占用记录；复用必须同时追加不可变事件并递增 reuseCount。
  */
 
 import { Check, Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 'typeorm'
@@ -14,6 +14,7 @@ const serialValueColumnOptions = entityColumnOptions.isSqlite
 @Index('uk_order_business_no_occupancy_business_no', ['businessNo'], { unique: true })
 @Index('uk_order_business_no_occupancy_namespace_serial', ['namespace', 'serialValue'], { unique: true })
 @Index('idx_order_business_no_occupancy_order_uuid', ['orderUuid'])
+@Index('idx_order_business_no_occupancy_last_assigned_order_uuid', ['lastAssignedOrderUuid'])
 @Entity({ name: 'order_business_no_occupancy' })
 @Check('ck_order_business_no_occupancy_namespace', "`business_namespace` IN ('hyyzjd', 'hyyz')")
 export class OrderBusinessNoOccupancy {
@@ -37,4 +38,13 @@ export class OrderBusinessNoOccupancy {
 
   @CreateDateColumn({ name: 'created_at', ...entityColumnOptions.timestamp })
   createdAt!: Date
+
+  @Column({ name: 'last_assigned_order_uuid', ...entityColumnOptions.uuid, length: 36, comment: '最后一次获配该号码的订单 UUID 快照' })
+  lastAssignedOrderUuid!: string
+
+  @Column({ name: 'last_assigned_at', ...entityColumnOptions.timestamp, comment: '最后一次分配时间' })
+  lastAssignedAt!: Date
+
+  @Column({ name: 'reuse_count', type: 'integer', default: 0, comment: '管理员回收复用次数' })
+  reuseCount!: number
 }

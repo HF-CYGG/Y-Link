@@ -428,6 +428,9 @@ async function main() {
       businessNo: 'hyyz000201',
       orderUuid: 'historical-occupancy-without-order',
       assignedReason: '专项验证永久占用',
+      lastAssignedOrderUuid: 'historical-occupancy-without-order',
+      lastAssignedAt: new Date(),
+      reuseCount: 0,
     } as never)
 
     // 修订切换类型的自动编排建议：从游标顺延，跳过永久占用号与同批排除号，且只读不占号、不推进游标。

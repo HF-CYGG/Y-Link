@@ -14,6 +14,22 @@ import type { EntityManager } from 'typeorm'
 import { AppDataSource } from './data-source.js'
 import { initializeDatabaseInfrastructure } from '../database/database-strategy.js'
 
+export interface RunInTransactionOptions {
+  /** 仅 MySQL 使用；SQLite 继续走原事务入口，避免改变其协调器与隔离语义。 */
+  mysqlIsolationLevel?: 'READ COMMITTED'
+}
+
+/**
+ * 把调用方的隔离级别意图限制在目标数据库。该纯函数同时用于专项验证，防止未来误把
+ * MySQL 的隔离级别覆盖传给 SQLite，或让普通事务在未声明时改变默认语义。
+ */
+export function resolveTransactionIsolation(
+  databaseType: string,
+  options: RunInTransactionOptions = {},
+): 'READ COMMITTED' | undefined {
+  return databaseType === 'mysql' ? options.mysqlIsolationLevel : undefined
+}
+
 /**
  * 统一的写事务入口。
  *
@@ -23,8 +39,13 @@ import { initializeDatabaseInfrastructure } from '../database/database-strategy.
  */
 export async function runInTransaction<T>(
   runInManager: (manager: EntityManager) => Promise<T>,
+  options: RunInTransactionOptions = {},
 ): Promise<T> {
   await initializeDatabaseInfrastructure(AppDataSource)
+  const isolationLevel = resolveTransactionIsolation(AppDataSource.options.type, options)
+  if (isolationLevel) {
+    return AppDataSource.transaction(isolationLevel, runInManager)
+  }
   return AppDataSource.transaction(runInManager)
 }
 

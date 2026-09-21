@@ -579,6 +579,7 @@ export interface OrderAmendmentInput {
   isSystemApplied?: boolean
   remark?: string | null
   reason?: string
+  reclaimBusinessNo?: boolean
 }
 
 export interface OrderAmendmentSnapshot {
@@ -599,6 +600,12 @@ export interface OrderAmendmentPreviewItem {
   blockingReasons: string[]
   before: OrderAmendmentSnapshot
   after: OrderAmendmentSnapshot
+  reclaimCandidate: {
+    businessNo: string
+    firstAssignedAt: string
+    lastAssignedAt: string
+    reuseCount: number
+  } | null
 }
 
 export interface OrderAmendmentResult {
@@ -742,6 +749,14 @@ export const commitOrderAmendments = (amendments: OrderAmendmentInput[]) =>
     method: 'POST',
     url: '/orders/amendments',
     data: { amendments },
+  })
+
+/** 管理员单张回收专用提交；永久删除密码仅随本次请求发送，不进入 amendment/revision。 */
+export const reclaimOrderBusinessNo = (amendment: OrderAmendmentInput, permanentDeletePassword: string) =>
+  request<OrderAmendmentResult>({
+    method: 'POST',
+    url: '/orders/amendments/reclaim-business-no',
+    data: { amendment: { ...amendment, reclaimBusinessNo: true }, permanentDeletePassword },
   })
 
 /** 订单合并预检：服务端是唯一的库存、版本与业务不变量裁决方。 */
