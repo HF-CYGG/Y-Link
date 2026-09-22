@@ -1,4 +1,4 @@
--- Issue #110 扩展：正式出库单、O2O 预订单与永久业务号拆分独立命名空间。
+-- Issue #110 扩展：正式出库单、O2O 预订单与业务单号拆分独立命名空间。
 -- 只初始化配置和并发流水高水位；历史 show_no/business_no 原值均不改写。
 
 -- 只有 start/current/width 三项都存在才算完成首迁；部分新配置必须继续安全领养缺失 shape 和 legacy 高水位。
@@ -129,32 +129,31 @@ SET @order_business_walkin_width = COALESCE(
 SET @order_system_department_current = COALESCE((
   SELECT MAX(CAST(SUBSTRING(`show_no`, 7) AS UNSIGNED))
   FROM `biz_outbound_order`
-  WHERE `order_type` = 'department' AND `show_no` REGEXP '^OUT-D-[0-9]{6}$'
+  WHERE `show_no` REGEXP '^OUT-D-[0-9]{6}$'
 ), 0);
 SET @order_system_walkin_current = COALESCE((
   SELECT MAX(CAST(SUBSTRING(`show_no`, 7) AS UNSIGNED))
   FROM `biz_outbound_order`
-  WHERE `order_type` = 'walkin' AND `show_no` REGEXP '^OUT-W-[0-9]{6}$'
+  WHERE `show_no` REGEXP '^OUT-W-[0-9]{6}$'
 ), 0);
 SET @o2o_preorder_department_current = COALESCE((
   SELECT MAX(CAST(SUBSTRING(`show_no`, 7) AS UNSIGNED))
   FROM `o2o_preorder`
-  WHERE `client_order_type` = 'department' AND `show_no` REGEXP '^PRE-D-[0-9]{6}$'
+  WHERE `show_no` REGEXP '^PRE-D-[0-9]{6}$'
 ), 0);
 SET @o2o_preorder_walkin_current = COALESCE((
   SELECT MAX(CAST(SUBSTRING(`show_no`, 7) AS UNSIGNED))
   FROM `o2o_preorder`
-  WHERE `client_order_type` = 'walkin' AND `show_no` REGEXP '^PRE-W-[0-9]{6}$'
+  WHERE `show_no` REGEXP '^PRE-W-[0-9]{6}$'
 ), 0);
 SET @order_business_department_current = GREATEST(
   IF(CAST(@order_business_department_start AS UNSIGNED) > 0, CAST(@order_business_department_start AS UNSIGNED) - 1, 0),
   CAST(COALESCE((SELECT `config_value` FROM `system_configs` WHERE `config_key` = 'order.business.department.current'), '0') AS UNSIGNED),
   COALESCE((SELECT `current_value` FROM `business_sequence` WHERE `sequence_key` = 'order.business.department'), 0),
-  COALESCE((SELECT MAX(`serial_value`) FROM `order_business_no_occupancy` WHERE `business_namespace` = 'hyyzjd'), 0),
   COALESCE((
     SELECT MAX(CAST(SUBSTRING(`business_no`, 7) AS UNSIGNED))
     FROM `biz_outbound_order`
-    WHERE `order_type` = 'department' AND `business_no` REGEXP '^hyyzjd[0-9]+$'
+    WHERE `business_no` REGEXP '^hyyzjd[0-9]+$'
   ), 0),
   IF(
     @order_business_department_marker_complete = 0,
@@ -171,11 +170,10 @@ SET @order_business_walkin_current = GREATEST(
   IF(CAST(@order_business_walkin_start AS UNSIGNED) > 0, CAST(@order_business_walkin_start AS UNSIGNED) - 1, 0),
   CAST(COALESCE((SELECT `config_value` FROM `system_configs` WHERE `config_key` = 'order.business.walkin.current'), '0') AS UNSIGNED),
   COALESCE((SELECT `current_value` FROM `business_sequence` WHERE `sequence_key` = 'order.business.walkin'), 0),
-  COALESCE((SELECT MAX(`serial_value`) FROM `order_business_no_occupancy` WHERE `business_namespace` = 'hyyz'), 0),
   COALESCE((
     SELECT MAX(CAST(SUBSTRING(`business_no`, 5) AS UNSIGNED))
     FROM `biz_outbound_order`
-    WHERE `order_type` = 'walkin' AND `business_no` REGEXP '^hyyz[0-9]+$'
+    WHERE `business_no` REGEXP '^hyyz[0-9]+$'
   ), 0),
   IF(
     @order_business_walkin_marker_complete = 0,
@@ -202,8 +200,12 @@ FROM (
 WHERE `needs_migration` = 1
 ORDER BY `lock_order`
 ON DUPLICATE KEY UPDATE
-  `updated_at` = IF(VALUES(`current_value`) > `current_value`, UTC_TIMESTAMP(6), `updated_at`),
-  `current_value` = GREATEST(`current_value`, VALUES(`current_value`));
+  `updated_at` = IF(
+    VALUES(`current_value`) > `business_sequence`.`current_value`,
+    UTC_TIMESTAMP(6),
+    `business_sequence`.`updated_at`
+  ),
+  `current_value` = GREATEST(`business_sequence`.`current_value`, VALUES(`current_value`));
 
 -- 锁顺序必须与业务分配一致：先锁/领养 sequence，再补 config 镜像。
 INSERT INTO `system_configs` (`config_key`, `config_value`, `config_group`, `remark`)
@@ -215,18 +217,18 @@ FROM (
   UNION ALL SELECT 'o2o.preorder.walkin.current', CAST(@o2o_preorder_walkin_current AS CHAR), 'order_identifier', 'O2O 散客预订单当前流水镜像', @o2o_preorder_walkin_needs_migration, 201
   UNION ALL SELECT 'o2o.preorder.walkin.start', '1', 'order_identifier', 'O2O 散客预订单起始流水', @o2o_preorder_walkin_needs_migration, 202
   UNION ALL SELECT 'o2o.preorder.walkin.width', '6', 'order_identifier', 'O2O 散客预订单流水位数', @o2o_preorder_walkin_needs_migration, 203
-  UNION ALL SELECT 'order.business.walkin.current', CAST(@order_business_walkin_current AS CHAR), 'order_identifier', '散客永久业务号当前高水位镜像', @order_business_walkin_needs_migration, 301
-  UNION ALL SELECT 'order.business.walkin.start', @order_business_walkin_start, 'order_identifier', '散客永久业务号起始流水', @order_business_walkin_needs_migration, 302
-  UNION ALL SELECT 'order.business.walkin.width', @order_business_walkin_width, 'order_identifier', '散客永久业务号流水位数', @order_business_walkin_needs_migration, 303
+  UNION ALL SELECT 'order.business.walkin.current', CAST(@order_business_walkin_current AS CHAR), 'order_identifier', '散客业务号当前高水位镜像', @order_business_walkin_needs_migration, 301
+  UNION ALL SELECT 'order.business.walkin.start', CONVERT(@order_business_walkin_start USING utf8mb4) COLLATE utf8mb4_unicode_ci, 'order_identifier', '散客业务单号起始流水', @order_business_walkin_needs_migration, 302
+  UNION ALL SELECT 'order.business.walkin.width', CONVERT(@order_business_walkin_width USING utf8mb4) COLLATE utf8mb4_unicode_ci, 'order_identifier', '散客业务单号流水位数', @order_business_walkin_needs_migration, 303
   UNION ALL SELECT 'order.system.department.current', CAST(@order_system_department_current AS CHAR), 'order_identifier', '正式出库单部门单当前流水镜像', @order_system_department_needs_migration, 401
   UNION ALL SELECT 'order.system.department.start', '1', 'order_identifier', '正式出库单部门单起始流水', @order_system_department_needs_migration, 402
   UNION ALL SELECT 'order.system.department.width', '6', 'order_identifier', '正式出库单部门单流水位数', @order_system_department_needs_migration, 403
   UNION ALL SELECT 'o2o.preorder.department.current', CAST(@o2o_preorder_department_current AS CHAR), 'order_identifier', 'O2O 部门预订单当前流水镜像', @o2o_preorder_department_needs_migration, 501
   UNION ALL SELECT 'o2o.preorder.department.start', '1', 'order_identifier', 'O2O 部门预订单起始流水', @o2o_preorder_department_needs_migration, 502
   UNION ALL SELECT 'o2o.preorder.department.width', '6', 'order_identifier', 'O2O 部门预订单流水位数', @o2o_preorder_department_needs_migration, 503
-  UNION ALL SELECT 'order.business.department.current', CAST(@order_business_department_current AS CHAR), 'order_identifier', '部门永久业务号当前高水位镜像', @order_business_department_needs_migration, 601
-  UNION ALL SELECT 'order.business.department.start', @order_business_department_start, 'order_identifier', '部门永久业务号起始流水', @order_business_department_needs_migration, 602
-  UNION ALL SELECT 'order.business.department.width', @order_business_department_width, 'order_identifier', '部门永久业务号流水位数', @order_business_department_needs_migration, 603
+  UNION ALL SELECT 'order.business.department.current', CAST(@order_business_department_current AS CHAR), 'order_identifier', '部门业务号当前高水位镜像', @order_business_department_needs_migration, 601
+  UNION ALL SELECT 'order.business.department.start', CONVERT(@order_business_department_start USING utf8mb4) COLLATE utf8mb4_unicode_ci, 'order_identifier', '部门业务单号起始流水', @order_business_department_needs_migration, 602
+  UNION ALL SELECT 'order.business.department.width', CONVERT(@order_business_department_width USING utf8mb4) COLLATE utf8mb4_unicode_ci, 'order_identifier', '部门业务单号流水位数', @order_business_department_needs_migration, 603
 ) AS `pending_configs`
 WHERE `needs_migration` = 1
 ORDER BY `lock_order`
@@ -239,8 +241,11 @@ ON DUPLICATE KEY UPDATE
       AND @order_business_walkin_marker_complete = 0
       THEN VALUES(`config_value`)
     WHEN VALUES(`config_key`) LIKE '%.current'
-      THEN CAST(GREATEST(CAST(`config_value` AS UNSIGNED), CAST(VALUES(`config_value`) AS UNSIGNED)) AS CHAR)
-    ELSE `config_value`
+      THEN CAST(GREATEST(
+        CAST(`system_configs`.`config_value` AS UNSIGNED),
+        CAST(VALUES(`config_value`) AS UNSIGNED)
+      ) AS CHAR)
+    ELSE `system_configs`.`config_value`
   END,
   `config_group` = VALUES(`config_group`),
   `remark` = VALUES(`remark`);

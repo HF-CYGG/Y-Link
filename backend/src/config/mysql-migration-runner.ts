@@ -36,6 +36,11 @@ import { env } from './env.js'
 
 const SQL_DIR = path.resolve(process.cwd(), 'sql')
 const MIGRATION_TABLE = 'schema_migrations'
+const ORDER_BUSINESS_NO_REUSE_MIGRATION = '054_order_business_no_reuse.sql'
+const ORDER_BUSINESS_NO_RETIREMENT_MIGRATION = '056_disable_order_business_no_permanent_occupancy.sql'
+const SUPERSEDED_AUTO_MIGRATIONS = new Map<string, string>([
+  [ORDER_BUSINESS_NO_REUSE_MIGRATION, ORDER_BUSINESS_NO_RETIREMENT_MIGRATION],
+])
 // GET_LOCK 的锁名在同一 MySQL 服务端是全局的（不区分 database），
 // 因此必须把库名拼进锁名，否则同一实例上部署的多套 Y-Link 库会互相阻塞迁移。
 const buildMigrationAdvisoryLockName = (databaseName: string) => `y_link:schema_migration:${databaseName}`
@@ -69,8 +74,6 @@ const MYSQL_REQUIRED_TABLES = [
   'business_sequence',
   'client_mobile_session',
   'sms_verification_record',
-  'order_business_no_occupancy',
-  'order_business_no_reuse_event',
   'order_revision',
   'account_lifecycle_event',
   'order_merge_operation',
@@ -84,6 +87,12 @@ const MYSQL_REQUIRED_TABLES = [
   'base_product_variant_code_registry',
   'base_yz_series_seq_reservation',
 ]
+
+/** 056 后必须物理移除的历史业务号永久占用结构。 */
+const MYSQL_FORBIDDEN_TABLES = [
+  'order_business_no_occupancy',
+  'order_business_no_reuse_event',
+] as const
 
 // 每个必需表由哪个迁移脚本创建，用于在报错时给出精确指引，而不是笼统建议“从头跑一遍”。
 // auth_risk_state 现同时存在于 001（供全新库一次建齐）与 033（供存量库补建），
@@ -112,8 +121,6 @@ const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
   business_sequence: '035_o2o_idempotency_business_sequence.sql',
   client_mobile_session: '037_mobile_auth_session.sql',
   sms_verification_record: '039_aliyun_pnvs_sms_verification.sql',
-  order_business_no_occupancy: '042_order_business_no_amendment.sql',
-  order_business_no_reuse_event: '054_order_business_no_reuse.sql',
   order_revision: '042_order_business_no_amendment.sql',
   account_lifecycle_event: '044_account_lifecycle_governance.sql',
   order_merge_operation: '045_order_merge_governance.sql',
@@ -400,17 +407,6 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
   { tableName: 'inventory_log', columnName: 'after_sku_current_stock', introducingScript: '043_order_content_inventory_mode.sql', expectedDataType: 'int', expectedColumnType: 'int', expectedNullable: true },
   { tableName: 'inventory_log', columnName: 'before_sku_preordered_stock', introducingScript: '043_order_content_inventory_mode.sql', expectedDataType: 'int', expectedColumnType: 'int', expectedNullable: true },
   { tableName: 'inventory_log', columnName: 'after_sku_preordered_stock', introducingScript: '043_order_content_inventory_mode.sql', expectedDataType: 'int', expectedColumnType: 'int', expectedNullable: true },
-  { tableName: 'order_business_no_occupancy', columnName: 'business_namespace', introducingScript: '042_order_business_no_amendment.sql' },
-  { tableName: 'order_business_no_occupancy', columnName: 'serial_value', introducingScript: '042_order_business_no_amendment.sql' },
-  { tableName: 'order_business_no_occupancy', columnName: 'business_no', introducingScript: '042_order_business_no_amendment.sql' },
-  { tableName: 'order_business_no_occupancy', columnName: 'order_uuid', introducingScript: '042_order_business_no_amendment.sql' },
-  { tableName: 'order_business_no_occupancy', columnName: 'assigned_reason', introducingScript: '042_order_business_no_amendment.sql' },
-  { tableName: 'order_business_no_occupancy', columnName: 'created_at', introducingScript: '042_order_business_no_amendment.sql' },
-  { tableName: 'order_business_no_occupancy', columnName: 'last_assigned_order_uuid', introducingScript: '054_order_business_no_reuse.sql', expectedDataType: 'char', expectedColumnType: 'char(36)', expectedCharacterMaximumLength: 36, expectedNullable: false },
-  { tableName: 'order_business_no_occupancy', columnName: 'last_assigned_at', introducingScript: '054_order_business_no_reuse.sql', expectedDataType: 'datetime', expectedColumnType: 'datetime(6)', expectedNullable: false },
-  { tableName: 'order_business_no_occupancy', columnName: 'reuse_count', introducingScript: '054_order_business_no_reuse.sql', expectedDataType: 'int', expectedColumnType: 'int', expectedNullable: false },
-  ...['business_namespace', 'serial_value', 'business_no', 'from_order_uuid', 'to_order_uuid', 'target_order_id_snapshot', 'target_show_no_snapshot', 'reuse_count', 'reason', 'actor_user_id', 'actor_username', 'actor_display_name', 'ip_address', 'user_agent', 'created_at']
-    .map((columnName) => ({ tableName: 'order_business_no_reuse_event', columnName, introducingScript: '054_order_business_no_reuse.sql' })),
   { tableName: 'order_revision', columnName: 'order_id_snapshot', introducingScript: '042_order_business_no_amendment.sql' },
   { tableName: 'order_revision', columnName: 'order_uuid', introducingScript: '042_order_business_no_amendment.sql' },
   { tableName: 'order_revision', columnName: 'revision_no', introducingScript: '042_order_business_no_amendment.sql' },
@@ -587,48 +583,6 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
     introducingScript: '042_order_business_no_amendment.sql',
   },
   {
-    tableName: 'order_business_no_occupancy',
-    indexName: 'uk_order_business_no_occupancy_business_no',
-    columns: ['business_no'],
-    unique: true,
-    introducingScript: '042_order_business_no_amendment.sql',
-  },
-  {
-    tableName: 'order_business_no_occupancy',
-    indexName: 'idx_order_business_no_occupancy_last_assigned_order_uuid',
-    columns: ['last_assigned_order_uuid'],
-    unique: false,
-    introducingScript: '054_order_business_no_reuse.sql',
-  },
-  {
-    tableName: 'order_business_no_reuse_event',
-    indexName: 'idx_order_business_no_reuse_event_business_no',
-    columns: ['business_no'],
-    unique: false,
-    introducingScript: '054_order_business_no_reuse.sql',
-  },
-  {
-    tableName: 'order_business_no_reuse_event',
-    indexName: 'idx_order_business_no_reuse_event_to_order_uuid',
-    columns: ['to_order_uuid'],
-    unique: false,
-    introducingScript: '054_order_business_no_reuse.sql',
-  },
-  {
-    tableName: 'order_business_no_occupancy',
-    indexName: 'uk_order_business_no_occupancy_namespace_serial',
-    columns: ['business_namespace', 'serial_value'],
-    unique: true,
-    introducingScript: '042_order_business_no_amendment.sql',
-  },
-  {
-    tableName: 'order_business_no_occupancy',
-    indexName: 'idx_order_business_no_occupancy_order_uuid',
-    columns: ['order_uuid'],
-    unique: false,
-    introducingScript: '042_order_business_no_amendment.sql',
-  },
-  {
     tableName: 'order_revision',
     indexName: 'uk_order_revision_uuid_version',
     columns: ['order_uuid', 'revision_no'],
@@ -792,18 +746,6 @@ const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [
 
 const MYSQL_REQUIRED_TRIGGERS: readonly MysqlRequiredTrigger[] = [
   {
-    triggerName: 'trg_order_business_no_reuse_event_no_update',
-    eventManipulation: 'UPDATE',
-    actionTiming: 'BEFORE',
-    introducingScript: '054_order_business_no_reuse.sql',
-  },
-  {
-    triggerName: 'trg_order_business_no_reuse_event_no_delete',
-    eventManipulation: 'DELETE',
-    actionTiming: 'BEFORE',
-    introducingScript: '054_order_business_no_reuse.sql',
-  },
-  {
     triggerName: 'trg_account_lifecycle_event_no_update',
     eventManipulation: 'UPDATE',
     actionTiming: 'BEFORE',
@@ -818,11 +760,6 @@ const MYSQL_REQUIRED_TRIGGERS: readonly MysqlRequiredTrigger[] = [
 ]
 
 const MYSQL_REQUIRED_CHECKS: readonly MysqlRequiredCheck[] = [
-  {
-    tableName: 'order_business_no_reuse_event',
-    constraintName: 'ck_order_business_no_reuse_event_namespace',
-    introducingScript: '054_order_business_no_reuse.sql',
-  },
   {
     tableName: 'order_merge_relation',
     constraintName: 'ck_order_merge_relation_distinct_orders',
@@ -862,6 +799,7 @@ const AUTO_MIGRATABLE_FILES = [
   '053_yz_reservation_series_code.sql',
   '054_order_business_no_reuse.sql',
   '055_order_identifier_namespaces.sql',
+  '056_disable_order_business_no_permanent_occupancy.sql',
 ]
 
 /**
@@ -944,6 +882,31 @@ async function ensureMigrationTrackingTable(dataSource: DataSource): Promise<voi
   `)
 }
 
+function readMigrationFile(filename: string): { content: string; checksum: string; statements: string[] } {
+  const filePath = path.join(SQL_DIR, filename)
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`[启动失败] 缺少 MySQL 迁移脚本：${filename}`)
+  }
+  const content = fs.readFileSync(filePath, 'utf8')
+  return {
+    content,
+    checksum: createHash('sha256').update(content).digest('hex'),
+    statements: splitSqlStatements(content),
+  }
+}
+
+async function recordAppliedMigration(
+  queryRunner: QueryRunner,
+  filename: string,
+  checksum: string,
+): Promise<void> {
+  await queryRunner.query(
+    `INSERT INTO ${MIGRATION_TABLE} (filename, checksum) VALUES (?, ?)
+     ON DUPLICATE KEY UPDATE checksum = VALUES(checksum), applied_at = CURRENT_TIMESTAMP(6)`,
+    [filename, checksum],
+  )
+}
+
 /**
  * 用 MySQL advisory lock（GET_LOCK）串行化"检查 + 执行"整段流程。
  *
@@ -1008,6 +971,50 @@ export async function runMysqlSchemaMigrations(dataSource: DataSource): Promise<
     MIGRATION_ADVISORY_LOCK_TIMEOUT_SECONDS,
     (queryRunner) => applyPendingMigrations(queryRunner),
   )
+}
+
+/**
+ * DB_SYNC=true 不会进入常规自动迁移分支，但 056 属于当前版本必须成立的结构清退不变量。
+ * 这里只重放经过审计且完全幂等的 056，不扫描或执行其它历史迁移。
+ */
+export async function retireMysqlOrderBusinessNoPermanentOccupancy(dataSource: DataSource): Promise<void> {
+  if (env.DB_TYPE !== 'mysql') return
+
+  await ensureMigrationTrackingTable(dataSource)
+
+  await withMysqlAdvisoryLock(
+    dataSource,
+    buildMigrationAdvisoryLockName(env.DB_NAME),
+    MIGRATION_ADVISORY_LOCK_TIMEOUT_SECONDS,
+    async (queryRunner) => {
+      const migration = readMigrationFile(ORDER_BUSINESS_NO_RETIREMENT_MIGRATION)
+      for (const statement of migration.statements) {
+        await queryRunner.query(statement)
+      }
+      await recordAppliedMigration(
+        queryRunner,
+        ORDER_BUSINESS_NO_RETIREMENT_MIGRATION,
+        migration.checksum,
+      )
+    },
+  )
+}
+
+/** DB_SYNC=true 启动也必须只读确认 056 的两个历史表没有残留。 */
+export async function assertMysqlOrderBusinessNoPermanentOccupancyRetired(dataSource: DataSource): Promise<void> {
+  if (env.DB_TYPE !== 'mysql') return
+  const rows = await dataSource.query(
+    `SELECT TABLE_NAME FROM information_schema.TABLES
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME IN (${MYSQL_FORBIDDEN_TABLES.map(() => '?').join(', ')})`,
+    [...MYSQL_FORBIDDEN_TABLES],
+  ) as MysqlTableRow[]
+  if (rows.length > 0) {
+    throw new Error(
+      `[启动失败] 业务号永久占用功能已停用，但历史表仍存在：${rows.map((row) => row.TABLE_NAME).join(', ')}。`
+      + '请核查 backend/sql/056_disable_order_business_no_permanent_occupancy.sql。',
+    )
+  }
 }
 
 type MysqlOrderIdentifierMigrationStatus = Partial<Record<
@@ -1239,16 +1246,19 @@ async function applyPendingMigrations(queryRunner: QueryRunner): Promise<{ appli
       continue
     }
 
+    const supersedingFilename = SUPERSEDED_AUTO_MIGRATIONS.get(filename)
+    if (supersedingFilename && appliedSet.has(supersedingFilename)) {
+      continue
+    }
+
     const filePath = path.join(SQL_DIR, filename)
     if (!fs.existsSync(filePath)) {
       continue
     }
-    const content = fs.readFileSync(filePath, 'utf8')
-    const checksum = createHash('sha256').update(content).digest('hex')
-    const statements = splitSqlStatements(content)
+    const migration = readMigrationFile(filename)
 
     try {
-      for (const statement of statements) {
+      for (const statement of migration.statements) {
         await queryRunner.query(statement)
       }
       await assertAutoMigrationResult(queryRunner, filename)
@@ -1260,11 +1270,7 @@ async function applyPendingMigrations(queryRunner: QueryRunner): Promise<{ appli
       )
     }
 
-    await queryRunner.query(
-      `INSERT INTO ${MIGRATION_TABLE} (filename, checksum) VALUES (?, ?)
-       ON DUPLICATE KEY UPDATE checksum = VALUES(checksum), applied_at = CURRENT_TIMESTAMP(6)`,
-      [filename, checksum],
-    )
+    await recordAppliedMigration(queryRunner, filename, migration.checksum)
     appliedFiles.push(filename)
   }
 
@@ -1415,6 +1421,12 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
   )
   const existingTableSet = new Set(tableRows.map((row) => row.TABLE_NAME))
   const missingTables = MYSQL_REQUIRED_TABLES.filter((table) => !existingTableSet.has(table))
+  const forbiddenTableRows: MysqlTableRow[] = await dataSource.query(
+    `SELECT TABLE_NAME FROM information_schema.TABLES
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (${MYSQL_FORBIDDEN_TABLES.map(() => '?').join(', ')})`,
+    [...MYSQL_FORBIDDEN_TABLES],
+  )
+  const forbiddenTables = forbiddenTableRows.map((row) => row.TABLE_NAME)
 
   const requiredColumnsOnExistingTables = MYSQL_REQUIRED_COLUMNS.filter((requirement) => (
     existingTableSet.has(requirement.tableName)
@@ -1530,6 +1542,7 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
 
   if (
     missingTables.length === 0
+    && forbiddenTables.length === 0
     && missingColumns.length === 0
     && undersizedColumns.length === 0
     && invalidColumnDefinitions.length === 0
@@ -1553,6 +1566,10 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
       label: `表 ${table}`,
       script: TABLE_INTRODUCING_SCRIPT[table]
         ?? '（未登记，请检查 mysql-migration-runner.ts 的 TABLE_INTRODUCING_SCRIPT）',
+    })),
+    ...forbiddenTables.map((table) => ({
+      label: `已停用表 ${table} 仍存在`,
+      script: '056_disable_order_business_no_permanent_occupancy.sql',
     })),
     ...missingColumns.map((requirement) => ({
       label: `字段 ${requirement.tableName}.${requirement.columnName}`,
@@ -1588,6 +1605,7 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
 
   const problemSummary = [
     missingTables.length > 0 ? `缺少必需表：${missingTables.join(', ')}` : null,
+    forbiddenTables.length > 0 ? `仍存在已停用表：${forbiddenTables.join(', ')}` : null,
     missingColumns.length > 0
       ? `缺少必需字段：${missingColumns.map((item) => `${item.tableName}.${item.columnName}`).join(', ')}`
       : null,

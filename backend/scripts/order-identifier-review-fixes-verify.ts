@@ -524,7 +524,7 @@ try {
   assert.match(markerStatement, /ORDER BY\s+`lock_order`/i, '055 marker 输出必须显式按 lock_order 排序')
   assert.match(
     migrationSqlSource,
-    /`updated_at`\s*=\s*IF\(VALUES\(`current_value`\)\s*>\s*`current_value`,\s*UTC_TIMESTAMP\(6\),\s*`updated_at`\)/i,
+    /`updated_at`\s*=\s*IF\(\s*VALUES\(`current_value`\)\s*>\s*`business_sequence`\.`current_value`,\s*UTC_TIMESTAMP\(6\),\s*`business_sequence`\.`updated_at`\s*\)/i,
     '055 sequence 无高水位变化时不得改写 updated_at',
   )
   assert.match(mysqlMigrationRunnerSource, /export async function reconcileMysqlOrderIdentifierNamespaces\(/, '缺少 DB_AUTO_MIGRATE=false 也会执行的 MySQL 编号领养入口')
@@ -741,14 +741,14 @@ try {
     inventoryMode: 'o2o_preapplied',
   })
   await o2oPreorderService.deleteConsoleOrder({ orderId: String(auditPreorder.id), confirmPreorderNo: auditPreorder.preorderNo }, actor)
-  const purgeAudit = await AppDataSource.getRepository(SysAuditLog).findOneByOrFail({
-    actionType: 'o2o.preorder.delete',
-    targetId: String(auditPreorder.id),
+  const purgeAudit = await AppDataSource.getRepository(SysAuditLog).findOneOrFail({
+    where: { actionType: 'o2o.preorder.delete' },
+    order: { id: 'DESC' },
   })
-  const purgeAuditDetail = JSON.parse(purgeAudit.detailJson ?? '{}') as Record<string, unknown>
-  assert.equal(purgeAuditDetail.preorderNo, auditPreorder.preorderNo, '预订单永久删除审计必须保存 preorderNo 快照')
-  assert.equal(purgeAuditDetail.outboundOrderSystemNo, auditOutbound.systemNo, '预订单永久删除审计必须保存关联正式单 systemNo')
-  assert.equal(purgeAuditDetail.outboundOrderBusinessNo, auditOutbound.businessNo, '预订单永久删除审计必须保存关联正式单 businessNo')
+  assert.equal(purgeAudit.targetId, null, 'O2O 永久删除审计不得保留已删除主键')
+  assert.match(purgeAudit.targetCode ?? '', /^o2o:deleted:[0-9a-f-]{36}$/, 'O2O 永久删除审计只保留随机脱敏标识')
+  assert.doesNotMatch(purgeAudit.detailJson ?? '', new RegExp(auditPreorder.preorderNo, 'i'))
+  assert.doesNotMatch(purgeAudit.detailJson ?? '', new RegExp(auditOutbound.businessNo, 'i'))
 
   const sourcePreorder = await AppDataSource.getRepository(O2oPreorder).save({
     preorderNo: 'PRE-D-880001',

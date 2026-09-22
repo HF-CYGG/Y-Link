@@ -1040,7 +1040,7 @@ const handleBatchPurgeCancelledOrders = async () => {
   const selectedSnapshot = selectedCancelledOrders.value.slice(0, 50).map((order) => ({ id: order.id, confirmPreorderNo: order.preorderNo }))
   batchInteractionActive.value = true
   try {
-    await ElMessageBox.confirm(`确认永久删除已选 ${selectedSnapshot.length} 笔已取消订单吗？此操作不可撤销。`, '批量永久删除确认', { type: 'error', closeOnClickModal: false })
+    await ElMessageBox.confirm(`确认永久删除已选 ${selectedSnapshot.length} 笔已取消订单吗？此操作不可撤销，批量清理以服务端逐项结果为准。`, '批量永久删除确认', { type: 'error', closeOnClickModal: false })
     const password = await ElMessageBox.prompt('请输入永久删除密码。', '永久删除密码', { inputType: 'password', closeOnClickModal: false, inputValidator: (value: string) => value.trim() ? true : '请输入永久删除密码' })
     batchPurging.value = true
     const data = await batchPurgeCancelledO2oOrders({ orders: selectedSnapshot, permanentDeletePassword: password.value.trim() })
@@ -1075,7 +1075,7 @@ const handleDeleteCurrentOrder = async () => {
   let permanentDeletePassword = ''
   try {
     await ElMessageBox.confirm(
-      `确认删除预订单“${preorderNo}”？将移除订单池记录及关联数据，此操作不可撤销。`,
+      `确认删除预订单“${preorderNo}”？关联正式出库单与预订单会整链清理并释放业务号，此操作不可撤销。`,
       '删除订单确认',
       {
         type: 'warning',

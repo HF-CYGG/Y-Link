@@ -2,7 +2,7 @@
 /**
  * 模块说明：src/views/system/components/SystemConfigSerialSection.vue
  * 文件职责：按正式出库系统编号、出库业务单号、O2O 预订单号三类独立命名空间展示编号配置。
- * 实现逻辑：system/preorder 仅允许管理员在服务端安全规则下提高当前号；business 完全只读，避免把永久占用号误当作可回收流水。
+ * 实现逻辑：system/preorder 仅允许管理员在服务端安全规则下提高当前号；business 高水位只读，人工复用不改变自动流水。
  * 维护说明：固定前缀、六位宽度和并发安全规则均由后端校验，本组件只承载明确的管理操作入口。
  */
 
@@ -22,7 +22,7 @@ defineProps<{
 const ORDER_TYPE_LABELS = { department: '部门单', walkin: '散客单' } as const
 const SECTION_META: Array<{ kind: OrderIdentifierKind; title: string; description: string; editable: boolean }> = [
   { kind: 'system', title: '正式出库系统编号', description: 'OUT-D / OUT-W 六位流水，仅用于管理员技术追溯。', editable: true },
-  { kind: 'business', title: '出库业务单号', description: 'hyyzjd / hyyz 永久占用；仅管理员明确回收且原订单物理删除时才可复用。', editable: false },
+  { kind: 'business', title: '出库业务单号', description: 'hyyzjd / hyyz 高水位只读；原单永久删除后可由普通修订人工复用，自动开单不回填释放低号。', editable: false },
   { kind: 'preorder', title: 'O2O 预订单号', description: 'PRE-D / PRE-W 六位流水，供核销台与客户端订单识别。', editable: true },
 ]
 </script>

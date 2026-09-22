@@ -64,6 +64,10 @@ import { buildSkuLogFields, snapshotSkuStock } from './inventory-ledger.service.
 import type { PaginationResult } from '../types/api.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import {
+  buildRedactedDeleteTarget,
+  cleanupOrderIdentifiableData,
+} from './order-permanent-delete-cleanup.service.js'
+import {
   buildDiscountPriceSnapshot,
   calculateDiscountedPrice,
   formatMoneyFromCents,
@@ -4091,6 +4095,9 @@ class O2oPreorderService {
 
       const linkedOutboundOrder = await this.loadLinkedOutboundOrderInManager(manager, String(order.id))
       if (linkedOutboundOrder) {
+        if (linkedOutboundOrder.inventoryMode === 'manual_applied') {
+          throw new BizError('关联手工出库单仍承载库存影响，禁止永久删除', 409)
+        }
         await orderMergeService.assertNotMergeMember(
           manager,
           String(linkedOutboundOrder.id),
@@ -4102,6 +4109,19 @@ class O2oPreorderService {
       })
       const returnRequestIds = returnRequests.map((item) => String(item.id))
       const releasedPreorderedQty = await this.releasePendingPreorderStockForDeleteInManager(manager, order, actor)
+      await cleanupOrderIdentifiableData(manager, {
+        orderIds: linkedOutboundOrder ? [String(linkedOutboundOrder.id)] : [],
+        orderUuids: linkedOutboundOrder ? [linkedOutboundOrder.orderUuid] : [],
+        preorderIds: [String(order.id)],
+        returnRequestIds,
+        stableFeedbackRefs: [
+          order.preorderNo,
+          order.verifyCode,
+          linkedOutboundOrder?.orderUuid,
+          linkedOutboundOrder?.systemNo,
+          linkedOutboundOrder?.businessNo,
+        ].filter((value): value is string => Boolean(value)),
+      })
       if (linkedOutboundOrder) {
         await outboundOrderItemRepo.delete({ orderId: String(linkedOutboundOrder.id) })
         const deleteOutboundResult = await outboundOrderRepo.delete({ id: String(linkedOutboundOrder.id) })
@@ -4138,30 +4158,16 @@ class O2oPreorderService {
       const preorderSerialRolledBack = Boolean(preorderSerialCalibration?.rolledBack)
       const outboundSerialRolledBack = Boolean(outboundSerialCalibration?.rolledBack)
 
+      const redactedTarget = buildRedactedDeleteTarget('o2o')
       await auditService.record(
         {
           actionType: 'o2o.preorder.delete',
-          actionLabel: '删除订单池订单',
+          actionLabel: '永久删除 O2O 订单链',
           targetType: 'o2o_order',
-          targetId: String(order.id),
-          targetCode: order.preorderNo,
+          targetId: null,
+          targetCode: redactedTarget,
           actor,
-          requestMeta,
-          detail: {
-            preorderNo: order.preorderNo,
-            status: order.status,
-            clientOrderType: order.clientOrderType,
-            releasedPreorderedQty,
-            returnRequestCount: returnRequests.length,
-            outboundOrderId: linkedOutboundOrder ? String(linkedOutboundOrder.id) : null,
-            outboundOrderSystemNo: linkedOutboundOrder?.systemNo ?? null,
-            outboundOrderShowNo: linkedOutboundOrder?.systemNo ?? null,
-            outboundOrderBusinessNo: linkedOutboundOrder?.businessNo ?? null,
-            outboundOrderDeleted: Boolean(linkedOutboundOrder),
-            outboundSerialRolledBack,
-            preorderSerialRolledBack,
-            serialCalibrations,
-          },
+          detail: { redactedTarget },
         },
         manager,
       )
@@ -4338,7 +4344,10 @@ class O2oPreorderService {
           ])
           if (returnRequestCount > 0) return { id: item.id, preorderNo: order.preorderNo, showNo: order.preorderNo, outcome: 'skipped', code: 'RETURN_REQUEST_EXISTS', message: '订单存在退货申请，无法永久删除' }
           if (linkedOutboundOrder) return { id: item.id, preorderNo: order.preorderNo, showNo: order.preorderNo, outcome: 'skipped', code: 'OUTBOUND_ORDER_EXISTS', message: '订单关联正式出库单，无法永久删除' }
-          const preorderItems = await manager.getRepository(O2oPreorderItem).find({ where: { orderId: String(order.id) } })
+          await cleanupOrderIdentifiableData(manager, {
+            preorderIds: [String(order.id)],
+            stableFeedbackRefs: [order.preorderNo, order.verifyCode].filter((value): value is string => Boolean(value)),
+          })
           await manager.getRepository(O2oPreorderItem).delete({ orderId: String(order.id) })
           const deleted = await preorderRepo.delete({ id: String(order.id), status: 'cancelled', isDeleted: false })
           if ((deleted.affected ?? 0) !== 1) throw new BizError('订单状态已变化，请刷新后重试', 409)
@@ -4349,9 +4358,15 @@ class O2oPreorderService {
             [order.preorderNo],
             manager,
           )
+          const redactedTarget = buildRedactedDeleteTarget('o2o')
           await auditService.record({
-            actionType: 'o2o.preorder.purge_cancelled', actionLabel: '批量永久删除已取消预订单', targetType: 'o2o_order', targetId: String(order.id), targetCode: order.preorderNo, actor: input.actor, requestMeta: input.requestMeta,
-            detail: { batchId, serialCalibration, snapshot: { preorderNo: order.preorderNo, status: order.status, cancelReason: order.cancelReason, cancellationSource: order.cancellationSource, cancellationRemark: order.cancellationRemark, cancelledAt: order.cancelledAt, totalQty: order.totalQty, itemCount: preorderItems.length } },
+            actionType: 'o2o.preorder.purge_cancelled',
+            actionLabel: '永久删除已取消 O2O 预订单',
+            targetType: 'o2o_order',
+            targetId: null,
+            targetCode: redactedTarget,
+            actor: input.actor,
+            detail: { redactedTarget },
           }, manager)
           return { id: item.id, preorderNo: order.preorderNo, showNo: order.preorderNo, outcome: 'deleted', code: 'DELETED', message: '已永久删除' }
         }))
@@ -4361,9 +4376,6 @@ class O2oPreorderService {
     }
     results.sort((left, right) => (inputOrderIndex.get(left.id) ?? 0) - (inputOrderIndex.get(right.id) ?? 0))
     const summary = { requested: orders.length, deleted: results.filter((item) => item.outcome === 'deleted').length, skipped: results.filter((item) => item.outcome === 'skipped').length, failed: results.filter((item) => item.outcome === 'failed').length }
-    // 单笔删除及其审计已在各自事务内提交；汇总日志属于辅助索引，失败时不能
-    // 把已完成的物理删除伪装成整批失败，否则客户端重试会丢失首次结果语义。
-    await auditService.safeRecord({ actionType: 'o2o.preorder.purge_cancelled_batch', actionLabel: '批量永久删除已取消预订单汇总', targetType: 'o2o_order_batch', targetId: batchId, actor: input.actor, requestMeta: input.requestMeta, detail: { batchId, summary, results } })
     return { batchId, summary, results }
   }
 

@@ -349,8 +349,6 @@ const CRITICAL_VALIDATION_TABLES = new Set([
   'client_user',
   'biz_outbound_order',
   'biz_outbound_order_item',
-  'order_business_no_occupancy',
-  'order_business_no_reuse_event',
   'order_revision',
   'order_merge_operation',
   'order_merge_relation',

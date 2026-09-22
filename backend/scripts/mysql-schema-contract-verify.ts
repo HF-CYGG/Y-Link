@@ -41,8 +41,6 @@ const REQUIRED_TABLES = [
   'business_sequence',
   'client_mobile_session',
   'sms_verification_record',
-  'order_business_no_occupancy',
-  'order_business_no_reuse_event',
   'order_revision',
   'account_lifecycle_event',
   'order_merge_operation',
@@ -145,17 +143,6 @@ const REQUIRED_COLUMNS = [
   ['inventory_log', 'after_sku_current_stock'],
   ['inventory_log', 'before_sku_preordered_stock'],
   ['inventory_log', 'after_sku_preordered_stock'],
-  ['order_business_no_occupancy', 'business_namespace'],
-  ['order_business_no_occupancy', 'serial_value'],
-  ['order_business_no_occupancy', 'business_no'],
-  ['order_business_no_occupancy', 'order_uuid'],
-  ['order_business_no_occupancy', 'assigned_reason'],
-  ['order_business_no_occupancy', 'created_at'],
-  ['order_business_no_occupancy', 'last_assigned_order_uuid'],
-  ['order_business_no_occupancy', 'last_assigned_at'],
-  ['order_business_no_occupancy', 'reuse_count'],
-  ...['business_namespace', 'serial_value', 'business_no', 'from_order_uuid', 'to_order_uuid', 'target_order_id_snapshot', 'target_show_no_snapshot', 'reuse_count', 'reason', 'actor_user_id', 'actor_username', 'actor_display_name', 'ip_address', 'user_agent', 'created_at']
-    .map((columnName) => ['order_business_no_reuse_event', columnName] as const),
   ['order_revision', 'order_id_snapshot'],
   ['order_revision', 'order_uuid'],
   ['order_revision', 'revision_no'],
@@ -189,24 +176,6 @@ interface ColumnFixture {
 }
 
 const REQUIRED_MANUAL_OUTBOUND_COLUMN_DEFINITIONS = new Map<string, ColumnFixture>([
-  ['order_business_no_occupancy.last_assigned_order_uuid', {
-    dataType: 'char',
-    columnType: 'char(36)',
-    isNullable: 'NO',
-    characterMaximumLength: 36,
-  }],
-  ['order_business_no_occupancy.last_assigned_at', {
-    dataType: 'datetime',
-    columnType: 'datetime(6)',
-    isNullable: 'NO',
-    characterMaximumLength: null,
-  }],
-  ['order_business_no_occupancy.reuse_count', {
-    dataType: 'int',
-    columnType: 'int',
-    isNullable: 'NO',
-    characterMaximumLength: null,
-  }],
   ['base_product.code_scheme', {
     dataType: 'varchar',
     columnType: 'varchar(8)',
@@ -537,42 +506,6 @@ const REQUIRED_INDEXES: readonly IndexFixture[] = [
     unique: true,
   },
   {
-    tableName: 'order_business_no_occupancy',
-    indexName: 'uk_order_business_no_occupancy_business_no',
-    columns: ['business_no'],
-    unique: true,
-  },
-  {
-    tableName: 'order_business_no_occupancy',
-    indexName: 'uk_order_business_no_occupancy_namespace_serial',
-    columns: ['business_namespace', 'serial_value'],
-    unique: true,
-  },
-  {
-    tableName: 'order_business_no_occupancy',
-    indexName: 'idx_order_business_no_occupancy_order_uuid',
-    columns: ['order_uuid'],
-    unique: false,
-  },
-  {
-    tableName: 'order_business_no_occupancy',
-    indexName: 'idx_order_business_no_occupancy_last_assigned_order_uuid',
-    columns: ['last_assigned_order_uuid'],
-    unique: false,
-  },
-  {
-    tableName: 'order_business_no_reuse_event',
-    indexName: 'idx_order_business_no_reuse_event_business_no',
-    columns: ['business_no'],
-    unique: false,
-  },
-  {
-    tableName: 'order_business_no_reuse_event',
-    indexName: 'idx_order_business_no_reuse_event_to_order_uuid',
-    columns: ['to_order_uuid'],
-    unique: false,
-  },
-  {
     tableName: 'order_revision',
     indexName: 'uk_order_revision_uuid_version',
     columns: ['order_uuid', 'revision_no'],
@@ -683,14 +616,11 @@ const REQUIRED_FOREIGN_KEYS: readonly ForeignKeyFixture[] = [
 ]
 
 const REQUIRED_TRIGGERS: readonly TriggerFixture[] = [
-  { triggerName: 'trg_order_business_no_reuse_event_no_update', eventManipulation: 'UPDATE', actionTiming: 'BEFORE' },
-  { triggerName: 'trg_order_business_no_reuse_event_no_delete', eventManipulation: 'DELETE', actionTiming: 'BEFORE' },
   { triggerName: 'trg_account_lifecycle_event_no_update', eventManipulation: 'UPDATE', actionTiming: 'BEFORE' },
   { triggerName: 'trg_account_lifecycle_event_no_delete', eventManipulation: 'DELETE', actionTiming: 'BEFORE' },
 ]
 
 const REQUIRED_CHECKS: readonly CheckFixture[] = [
-  { tableName: 'order_business_no_reuse_event', constraintName: 'ck_order_business_no_reuse_event_namespace' },
   { tableName: 'order_merge_relation', constraintName: 'ck_order_merge_relation_distinct_orders' },
 ]
 
@@ -735,9 +665,12 @@ function createCompleteFixture(): SchemaFixture {
 
 function createDataSource(fixture: SchemaFixture): DataSource {
   return {
-    query: async (sql: string) => {
+    query: async (sql: string, params?: unknown[]) => {
       if (sql.includes('information_schema.TABLES')) {
-        return [...fixture.tables].map((tableName) => ({ TABLE_NAME: tableName }))
+        const requested = new Set((params ?? []).map(String))
+        return [...fixture.tables]
+          .filter((tableName) => requested.size === 0 || requested.has(tableName))
+          .map((tableName) => ({ TABLE_NAME: tableName }))
       }
       if (sql.includes('information_schema.COLUMNS')) {
         return [...fixture.columns]
@@ -817,6 +750,14 @@ async function expectSchemaFailure(
 
 await assert.doesNotReject(() => assertMysqlRequiredSchemaExists(createDataSource(createCompleteFixture())))
 
+const obsoleteBusinessNoTables = createCompleteFixture()
+obsoleteBusinessNoTables.tables.add('order_business_no_occupancy')
+obsoleteBusinessNoTables.tables.add('order_business_no_reuse_event')
+await expectSchemaFailure(obsoleteBusinessNoTables, [
+  '仍存在已停用表',
+  '056_disable_order_business_no_permanent_occupancy.sql',
+])
+
 const missingSequence = createCompleteFixture()
 missingSequence.tables.delete('business_sequence')
 await expectSchemaFailure(missingSequence, [
@@ -843,27 +784,6 @@ missingSmsVerificationRecord.tables.delete('sms_verification_record')
 await expectSchemaFailure(missingSmsVerificationRecord, [
   '表 sms_verification_record',
   '039_aliyun_pnvs_sms_verification.sql',
-])
-
-const missingOrderBusinessNoOccupancy = createCompleteFixture()
-missingOrderBusinessNoOccupancy.tables.delete('order_business_no_occupancy')
-await expectSchemaFailure(missingOrderBusinessNoOccupancy, [
-  '表 order_business_no_occupancy',
-  '042_order_business_no_amendment.sql',
-])
-
-const missingOrderBusinessNoReuseEvent = createCompleteFixture()
-missingOrderBusinessNoReuseEvent.tables.delete('order_business_no_reuse_event')
-await expectSchemaFailure(missingOrderBusinessNoReuseEvent, [
-  '表 order_business_no_reuse_event',
-  '054_order_business_no_reuse.sql',
-])
-
-const missingOrderBusinessNoLastAssignee = createCompleteFixture()
-missingOrderBusinessNoLastAssignee.columns.delete(objectKey('order_business_no_occupancy', 'last_assigned_order_uuid'))
-await expectSchemaFailure(missingOrderBusinessNoLastAssignee, [
-  '字段 order_business_no_occupancy.last_assigned_order_uuid',
-  '054_order_business_no_reuse.sql',
 ])
 
 const missingOrderBusinessNo = createCompleteFixture()

@@ -12,7 +12,6 @@ import { BizOutboundOrderItem } from '../src/entities/biz-outbound-order-item.en
 import { BaseProduct } from '../src/entities/base-product.entity.js'
 import { BaseProductSku } from '../src/entities/base-product-sku.entity.js'
 import { BusinessSequence } from '../src/entities/business-sequence.entity.js'
-import { OrderBusinessNoOccupancy } from '../src/entities/order-business-no-occupancy.entity.js'
 import { InventoryLog } from '../src/entities/inventory-log.entity.js'
 import { SystemConfig } from '../src/entities/system-config.entity.js'
 import { SysAuditLog } from '../src/entities/sys-audit-log.entity.js'
@@ -210,6 +209,24 @@ function createOrderRepository(
     async find() {
       return []
     },
+    createQueryBuilder() {
+      let businessNo = ''
+      let orderUuid = ''
+      return {
+        where(_sql: string, params: { businessNo?: string }) {
+          businessNo = params.businessNo ?? ''
+          return this
+        },
+        andWhere(_sql: string, params: { orderUuid?: string }) {
+          orderUuid = params.orderUuid ?? ''
+          return this
+        },
+        setLock() { return this },
+        async getExists() {
+          return stagedOrders.some((order) => order.businessNo === businessNo && order.orderUuid !== orderUuid)
+        },
+      }
+    },
   }
 }
 
@@ -372,12 +389,6 @@ function createMockManager(
         }
         if (entity === BusinessSequence) {
           return createSequenceRepository(serialConfigState)
-        }
-        if (entity === OrderBusinessNoOccupancy) {
-          return {
-            create(args: unknown) { return args },
-            async insert(args: unknown) { return { identifiers: [], generatedMaps: [], raw: args } },
-          }
         }
         if (entity === InventoryLog) {
           return {

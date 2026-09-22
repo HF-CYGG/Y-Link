@@ -313,11 +313,13 @@ try {
     '正式单永久删除不得接受 systemNo 确认',
   )
   await orderService.purgeById(String(purgeOutbound.id), actor, purgeOutbound.businessNo)
-  const outboundPurgeAudit = await AppDataSource.getRepository(SysAuditLog).findOneByOrFail({
-    actionType: 'order.purge',
-    targetId: String(purgeOutbound.id),
+  const outboundPurgeAudit = await AppDataSource.getRepository(SysAuditLog).findOneOrFail({
+    where: { actionType: 'order.purge' },
+    order: { id: 'DESC' },
   })
-  assert.equal(outboundPurgeAudit.targetCode, purgeOutbound.businessNo, '正式单审计 targetCode 必须使用事件时 businessNo')
+  assert.equal(outboundPurgeAudit.targetId, null, '永久删除审计不得保留已删除主键')
+  assert.match(outboundPurgeAudit.targetCode ?? '', /^order:deleted:[0-9a-f-]{36}$/, '正式单永久删除审计只保留随机脱敏标识')
+  assert.doesNotMatch(outboundPurgeAudit.detailJson ?? '', new RegExp(purgeOutbound.businessNo, 'i'))
 
   const purgePreorder = await AppDataSource.transaction(async (manager) => {
     const preorderNo = await orderSerialService.generatePreorderNo('walkin', manager)
@@ -336,11 +338,13 @@ try {
     requestMeta: { ipAddress: '127.0.0.1', userAgent: 'identifier-separation-verify' },
   })
   assert.equal(preorderPurge.summary.deleted, 1)
-  const preorderPurgeAudit = await AppDataSource.getRepository(SysAuditLog).findOneByOrFail({
-    actionType: 'o2o.preorder.purge_cancelled',
-    targetId: String(purgePreorder.id),
+  const preorderPurgeAudit = await AppDataSource.getRepository(SysAuditLog).findOneOrFail({
+    where: { actionType: 'o2o.preorder.purge_cancelled' },
+    order: { id: 'DESC' },
   })
-  assert.equal(preorderPurgeAudit.targetCode, purgePreorder.preorderNo, '预订单审计 targetCode 必须使用 preorderNo')
+  assert.equal(preorderPurgeAudit.targetId, null, '预订单永久删除审计不得保留已删除主键')
+  assert.match(preorderPurgeAudit.targetCode ?? '', /^o2o:deleted:[0-9a-f-]{36}$/, '预订单永久删除审计只保留随机脱敏标识')
+  assert.doesNotMatch(preorderPurgeAudit.detailJson ?? '', new RegExp(purgePreorder.preorderNo, 'i'))
 
   const legacySystemCurrentAfterPurges = await configRepo.findOneByOrFail({ configKey: 'order.serial.walkin.current' })
   assert.equal(legacySystemCurrentAfterPurges.configValue, '0', '永久删除回拨不得触碰旧 order.serial.*')

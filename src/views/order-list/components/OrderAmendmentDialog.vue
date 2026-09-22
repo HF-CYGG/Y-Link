@@ -9,19 +9,17 @@
  *    切回原类型时恢复原业务号；建议号不占号，过期响应按请求序号丢弃；
  *    客户部门与开单页一致，为可搜索、可选择、可手动录入的组合输入，选项来自系统部门配置的完整路径，
  *    加载失败或配置为空只做提示，不阻断手动填写，修订只保存部门快照文本、不回写系统配置；
- * 4. 单选管理员首次预览命中“最后持有人已永久删除”时展示回收风险区；勾选后必须重新预览，提交时临时询问永久删除密码；
+ * 4. 业务号只和物理存在订单校验唯一性；永久删除后释放的号码可通过普通修订再次填写，自动建议不会主动回填低号；
  * 5. 批量提交共享一次确认动作，服务端任一阻断都会整体回滚，不在前端模拟部分成功。
  * 维护说明：该组件只允许修改订单治理字段，不得在此增加商品明细、库存扣减或库存流水能力。
  */
 
 import { computed, ref, watch } from 'vue'
-import { ElMessageBox } from 'element-plus'
 import {
   commitOrderAmendments,
   getOrderAmendmentBusinessNoSuggestions,
   getOrderDepartmentOptions,
   previewOrderAmendments,
-  reclaimOrderBusinessNo,
   type OrderAmendmentInput,
   type OrderDepartmentOption,
   type OrderAmendmentResult,
@@ -71,14 +69,11 @@ const reason = ref('')
 const previewing = ref(false)
 const committing = ref(false)
 const previewResult = ref<OrderAmendmentResult | null>(null)
-const reclaimRequested = ref(false)
-const reclaimCandidate = ref<OrderAmendmentResult['items'][number]['reclaimCandidate']>(null)
 const dialogTitle = computed(() => drafts.value.length > 1 ? `批量修订单据（${drafts.value.length} 张）` : '修订单据')
 const departmentOptions = ref<OrderDepartmentOption[]>([])
 const departmentOptionsLoading = ref(false)
 const departmentOptionsLoadFailed = ref(false)
 const isAdmin = computed(() => authStore.currentUser?.role === 'admin')
-const isSingleAdmin = computed(() => drafts.value.length === 1 && authStore.currentUser?.role === 'admin')
 
 /** 按完整路径去重：路径即订单保存的部门快照，也是展示与搜索文本。 */
 const departmentPathOptions = computed(() => {
@@ -141,8 +136,6 @@ const initializeDrafts = () => {
   }))
   reason.value = ''
   previewResult.value = null
-  reclaimRequested.value = false
-  reclaimCandidate.value = null
 }
 
 watch(
@@ -158,19 +151,11 @@ watch(
   drafts,
   () => {
     previewResult.value = null
-    reclaimRequested.value = false
-    reclaimCandidate.value = null
   },
   { deep: true },
 )
 
 watch(reason, () => {
-  previewResult.value = null
-  reclaimRequested.value = false
-  reclaimCandidate.value = null
-})
-
-watch(reclaimRequested, () => {
   previewResult.value = null
 })
 
@@ -241,7 +226,6 @@ const buildInputs = (): OrderAmendmentInput[] => drafts.value.map((draft) => ({
   isSystemApplied: draft.orderType === 'department' ? draft.isSystemApplied : false,
   remark: normalizeOptionalText(draft.remark),
   reason: reason.value.trim(),
-  reclaimBusinessNo: isSingleAdmin.value && reclaimRequested.value,
 }))
 
 const validateDrafts = (): boolean => {
@@ -279,11 +263,8 @@ const handlePreview = async () => {
   previewing.value = true
   try {
     previewResult.value = await previewOrderAmendments(buildInputs())
-    reclaimCandidate.value = previewResult.value.items[0]?.reclaimCandidate ?? null
     if (previewResult.value.ready) {
-      showAppSuccess(reclaimRequested.value ? '回收预览校验通过，可回收并提交' : '预览校验通过，可提交修订')
-    } else if (isSingleAdmin.value && reclaimCandidate.value && !reclaimRequested.value) {
-      showAppWarning('该业务号的最后持有人已永久删除；如需复用，请阅读风险提示、勾选确认后重新预览')
+      showAppSuccess('预览校验通过，可提交修订')
     } else {
       showAppWarning('预览发现阻断项，请按提示修改后重新预览')
     }
@@ -301,30 +282,9 @@ const handlePreview = async () => {
 const handleCommit = async () => {
   if (!canCommit.value || !validateDrafts()) return
   committing.value = true
-  let permanentDeletePassword = ''
   try {
-    let result: OrderAmendmentResult
-    if (reclaimRequested.value) {
-      const passwordResult = await ElMessageBox.prompt(
-        '请输入永久删除密码。密码仅用于本次回收校验，不会写入修订、事件或审计。',
-        '回收并复用业务单号',
-        {
-          inputType: 'password',
-          closeOnClickModal: false,
-          confirmButtonText: '回收并提交',
-          cancelButtonText: '取消',
-          inputValidator: (value: string) => value.trim() ? true : '请输入永久删除密码',
-        },
-      )
-      permanentDeletePassword = passwordResult.value.trim()
-      const amendment = buildInputs()[0]
-      if (!amendment) return
-      result = await reclaimOrderBusinessNo(amendment, permanentDeletePassword)
-      showAppSuccess('业务单号已回收并提交')
-    } else {
-      result = await commitOrderAmendments(buildInputs())
-      showAppSuccess(drafts.value.length > 1 ? '批量修订已原子提交' : '订单修订已提交')
-    }
+    const result = await commitOrderAmendments(buildInputs())
+    showAppSuccess(drafts.value.length > 1 ? '批量修订已原子提交' : '订单修订已提交')
     emit('committed', result)
     emit('update:modelValue', false)
   } catch (error) {
@@ -336,7 +296,6 @@ const handleCommit = async () => {
       operation: '提交订单修订',
     })
   } finally {
-    permanentDeletePassword = ''
     committing.value = false
   }
 }
@@ -472,25 +431,6 @@ const handleCommit = async () => {
         </el-table>
       </section>
 
-      <section
-        v-if="isSingleAdmin && reclaimCandidate"
-        class="rounded-2xl border border-amber-300 bg-amber-50 p-4"
-      >
-        <el-alert
-          title="高风险：回收会把已永久删除订单最后持有的业务单号转移给当前订单，并永久记录复用链路。"
-          type="warning"
-          :closable="false"
-          show-icon
-          class="mb-3"
-        />
-        <div class="mb-3 text-sm leading-6 text-amber-900">
-          候选号 {{ reclaimCandidate.businessNo }}；首次分配 {{ reclaimCandidate.firstAssignedAt }}；
-          最后分配 {{ reclaimCandidate.lastAssignedAt }}；已复用 {{ reclaimCandidate.reuseCount }} 次。
-        </div>
-        <el-checkbox v-model="reclaimRequested">
-          我确认仅回收这一张同类型订单的业务单号，并将在重新预览通过后输入永久删除密码
-        </el-checkbox>
-      </section>
     </div>
 
     <template #footer="{ close }">
@@ -498,7 +438,7 @@ const handleCommit = async () => {
         <el-button @click="close">取消</el-button>
         <el-button type="primary" plain :loading="previewing" :disabled="committing || suggestingBusinessNo" @click="handlePreview">重新预览</el-button>
         <el-button type="primary" :loading="committing" :disabled="!canCommit" @click="handleCommit">
-          {{ reclaimRequested ? '回收并提交' : '原子提交' }}
+          原子提交
         </el-button>
       </div>
     </template>

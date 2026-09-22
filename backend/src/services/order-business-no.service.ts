@@ -1,19 +1,14 @@
 /**
  * 模块说明：订单独立业务号服务。
- * 文件职责：维护 hyyzjd/hyyz 两个永久占用命名空间，并在事务中严格按 cursor + 1 分配新号。
- * 实现逻辑：游标复用 business_sequence 的独立 key，号码占用写入不可删除表；冲突一律 409，禁止扫描跳号。
+ * 文件职责：维护 hyyzjd/hyyz 两个业务号命名空间，并在事务中严格按 cursor + 1 分配新号。
+ * 实现逻辑：业务号只在物理存在的订单之间唯一；软删除仍占用，永久删除后可由普通改单复用。
  */
 
 import type { EntityManager } from 'typeorm'
 import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BusinessSequence } from '../entities/business-sequence.entity.js'
-import { OrderBusinessNoOccupancy } from '../entities/order-business-no-occupancy.entity.js'
-import { OrderBusinessNoReuseEvent } from '../entities/order-business-no-reuse-event.entity.js'
 import { SystemConfig } from '../entities/system-config.entity.js'
-import type { AuthUserContext } from '../types/auth.js'
-import { isUniqueConstraintError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
-import type { RequestMeta } from '../utils/request-meta.js'
 import type { OrderType } from './order-serial.service.js'
 
 const BUSINESS_NO_RULES: Record<OrderType, {
@@ -32,19 +27,6 @@ const BUSINESS_NO_RULES: Record<OrderType, {
     configKeyPrefix: 'order.business.walkin',
   },
 }
-
-const BUSINESS_NO_UNIQUE_MATCHER = {
-  mysqlConstraints: [
-    'uk_order_business_no_occupancy_business_no',
-    'uk_order_business_no_occupancy_namespace_serial',
-    'uk_biz_outbound_business_no',
-  ],
-  sqliteColumns: [
-    'order_business_no_occupancy.business_no',
-    'order_business_no_occupancy.business_namespace, order_business_no_occupancy.serial_value',
-    'biz_outbound_order.business_no',
-  ],
-} as const
 
 interface BusinessNoConfig {
   start: number
@@ -75,22 +57,7 @@ export interface BusinessNoSuggestion {
   skippedBusinessNos: string[]
 }
 
-export interface BusinessNoReclaimCandidate {
-  businessNo: string
-  firstAssignedAt: Date
-  lastAssignedAt: Date
-  reuseCount: number
-}
-
-export interface BusinessNoReclaimResult {
-  parsed: ParsedBusinessNo
-  fromOrderUuid: string
-  toOrderUuid: string
-  reuseCount: number
-  assignedAt: Date
-}
-
-/** 建议号每批按区间查询占用表，并限制最大扫描跨度，避免异常占用数据导致长时间扫描。 */
+/** 建议号每批按区间查询物理订单，并限制最大扫描跨度，避免异常数据导致长时间扫描。 */
 const SUGGESTION_WINDOW_SIZE = 200
 const SUGGESTION_SCAN_LIMIT = 5000
 
@@ -113,13 +80,7 @@ export class OrderBusinessNoService {
     }
 
     const businessNo = `${rule.namespace}${String(next).padStart(config.width, '0')}`
-    await this.insertOccupancy({
-      namespace: rule.namespace,
-      serialValue: next,
-      businessNo,
-      orderUuid,
-      assignedReason: 'order_create',
-    }, manager)
+    await this.assertBusinessNoAvailable(businessNo, orderUuid, manager)
     sequence.currentValue = next
     await manager.getRepository(BusinessSequence).save(sequence)
     await this.updateCurrentMirror(config.currentKey, next, manager)
@@ -163,15 +124,7 @@ export class OrderBusinessNoService {
         || left.orderUuid.localeCompare(right.orderUuid),
       )
       for (const target of sortedTargets) {
-        await this.insertOccupancy({
-          namespace,
-          serialValue: target.parsed.serialValue,
-          businessNo: target.parsed.businessNo,
-          orderUuid: target.orderUuid,
-          assignedReason: target.reason
-            ? `order_amendment:${target.reason}`.slice(0, 128)
-            : 'order_amendment',
-        }, manager)
+        await this.assertBusinessNoAvailable(target.parsed.businessNo, target.orderUuid, manager)
       }
       const afterCursor = Math.max(beforeCursor, sortedTargets.at(-1)?.parsed.serialValue ?? beforeCursor)
       sequence.currentValue = afterCursor
@@ -201,8 +154,8 @@ export class OrderBusinessNoService {
   }
 
   /**
-   * 修订弹窗切换订单类型时的业务号建议：只读游标与占用表，不加锁、不占号、不推进游标。
-   * 从 cursor + 1 起顺延，跳过已永久占用号与调用方排除号（同批其他草稿），结果仅作为可手改的默认值；
+   * 修订弹窗切换订单类型时的业务号建议：只读游标与物理订单，不加锁、不占号、不推进游标。
+   * 从 cursor + 1 起顺延，跳过当前仍在用的号与调用方排除号（同批其他草稿），结果仅作为可手改的默认值；
    * 最终是否可用仍以预览/提交时的事务内校验为准，因此这里的跳过不改变新单分配“禁止扫描跳号”的约束。
    */
   async suggestForAmendment(
@@ -226,16 +179,19 @@ export class OrderBusinessNoService {
         throw new BizError(`业务号游标之后连续 ${SUGGESTION_SCAN_LIMIT} 个号均不可用，请手动填写业务单号`, 409)
       }
       const windowEnd = Math.min(maxSerial, windowStart + SUGGESTION_WINDOW_SIZE - 1)
-      const occupiedRows = await manager.getRepository(OrderBusinessNoOccupancy)
-        .createQueryBuilder('occupancy')
-        .select('occupancy.serialValue', 'serialValue')
-        .where('occupancy.namespace = :namespace', { namespace: rule.namespace })
-        .andWhere('occupancy.serialValue BETWEEN :windowStart AND :windowEnd', { windowStart, windowEnd })
-        .getRawMany<{ serialValue: string | number }>()
-      const occupied = new Set(occupiedRows.map((row) => Number(row.serialValue)))
+      const occupiedRows = await manager.getRepository(BizOutboundOrder)
+        .createQueryBuilder('order')
+        .select('order.businessNo', 'businessNo')
+        .where('order.orderType = :orderType', { orderType })
+        .andWhere('order.businessNo BETWEEN :startBusinessNo AND :endBusinessNo', {
+          startBusinessNo: formatSerial(windowStart),
+          endBusinessNo: formatSerial(windowEnd),
+        })
+        .getRawMany<{ businessNo: string }>()
+      const occupied = new Set(occupiedRows.map((row) => String(row.businessNo).trim().toLowerCase()))
       for (let serial = windowStart; serial <= windowEnd && businessNos.length < count; serial += 1) {
         const businessNo = formatSerial(serial)
-        if (occupied.has(serial)) {
+        if (occupied.has(businessNo)) {
           skippedBusinessNos.push(businessNo)
         } else if (!excluded.has(businessNo)) {
           businessNos.push(businessNo)
@@ -267,145 +223,10 @@ export class OrderBusinessNoService {
         blockingReason: error instanceof Error ? error.message : '业务号格式非法',
       }
     }
-    const occupied = await manager.getRepository(OrderBusinessNoOccupancy).existsBy({ businessNo: parsed.businessNo })
+    const occupied = await manager.getRepository(BizOutboundOrder).existsBy({ businessNo: parsed.businessNo })
     return occupied
-      ? { parsed, blockingReason: `业务号 ${parsed.businessNo} 已被永久占用` }
+      ? { parsed, blockingReason: `业务号 ${parsed.businessNo} 当前已被其他订单使用` }
       : { parsed, blockingReason: null }
-  }
-
-  /**
-   * 只读判断永久占用号是否满足回收条件。资格只取决于“最后获配 UUID 的主单是否已物理消失”；
-   * 软删除仍保留主单，因此与正常订单一样不可回收。返回值不暴露任何历史订单标识。
-   */
-  async inspectReclaimCandidate(
-    businessNo: string,
-    orderType: OrderType,
-    manager: EntityManager,
-  ): Promise<{ parsed: ParsedBusinessNo | null; candidate: BusinessNoReclaimCandidate | null; blockingReason: string | null }> {
-    let parsed: ParsedBusinessNo
-    try {
-      parsed = await this.parseForOrderType(businessNo, orderType, manager)
-    } catch (error) {
-      return {
-        parsed: null,
-        candidate: null,
-        blockingReason: error instanceof Error ? error.message : '业务号格式非法',
-      }
-    }
-    const occupancy = await manager.getRepository(OrderBusinessNoOccupancy).findOneBy({ businessNo: parsed.businessNo })
-    if (!occupancy) {
-      return { parsed, candidate: null, blockingReason: `业务号 ${parsed.businessNo} 尚未被占用，请使用普通修订` }
-    }
-    const lastAssignedOrderUuid = occupancy.lastAssignedOrderUuid || occupancy.orderUuid
-    const lastHolderExists = await manager.getRepository(BizOutboundOrder).existsBy({ orderUuid: lastAssignedOrderUuid })
-    if (lastHolderExists) {
-      return { parsed, candidate: null, blockingReason: `业务号 ${parsed.businessNo} 的最后持有人仍存在，不可回收` }
-    }
-    const currentOrderExists = await manager.getRepository(BizOutboundOrder).existsBy({ businessNo: parsed.businessNo })
-    if (currentOrderExists) {
-      return { parsed, candidate: null, blockingReason: `业务号 ${parsed.businessNo} 当前仍被订单使用，不可回收` }
-    }
-    return {
-      parsed,
-      candidate: {
-        businessNo: occupancy.businessNo,
-        firstAssignedAt: occupancy.createdAt,
-        lastAssignedAt: occupancy.lastAssignedAt || occupancy.createdAt,
-        reuseCount: Number(occupancy.reuseCount ?? 0),
-      },
-      blockingReason: null,
-    }
-  }
-
-  /**
-   * 在调用方已锁定目标订单后，按“游标 -> 占用行”的固定顺序加锁并重新验证资格，
-   * 随后转移最后持有人并追加不可变事件。同号并发争抢会在占用行重验时只放行一笔。
-   */
-  async reclaimConfirmed(
-    input: {
-      businessNo: string
-      orderType: OrderType
-      targetOrderId: string
-      targetOrderUuid: string
-      targetSystemNo: string
-      reason: string
-      actor: AuthUserContext
-      requestMeta?: RequestMeta
-    },
-    manager: EntityManager,
-  ): Promise<BusinessNoReclaimResult> {
-    const parsed = await this.parseForOrderType(input.businessNo, input.orderType, manager)
-    const rule = BUSINESS_NO_RULES[input.orderType]
-    const config = await this.loadConfig(rule.configKeyPrefix, manager)
-    await this.loadOrCreateSequence(rule.sequenceKey, Math.max(config.start - 1, config.current), manager)
-
-    const occupancyQuery = manager.getRepository(OrderBusinessNoOccupancy)
-      .createQueryBuilder('occupancy')
-      .where('occupancy.businessNo = :businessNo', { businessNo: parsed.businessNo })
-    if (manager.connection.options.type !== 'sqlite') occupancyQuery.setLock('pessimistic_write')
-    const occupancy = await occupancyQuery.getOne()
-    if (!occupancy) throw new BizError(`业务号 ${parsed.businessNo} 尚未被占用，请使用普通修订`, 409)
-
-    const fromOrderUuid = occupancy.lastAssignedOrderUuid || occupancy.orderUuid
-    if (fromOrderUuid === input.targetOrderUuid) {
-      throw new BizError('同一订单不能通过回收入口切回自己曾获配的旧业务号', 409)
-    }
-    const lastHolderExists = await manager.getRepository(BizOutboundOrder).existsBy({ orderUuid: fromOrderUuid })
-    if (lastHolderExists) throw new BizError(`业务号 ${parsed.businessNo} 的最后持有人仍存在，不可回收`, 409)
-    const currentOrderExists = await manager.getRepository(BizOutboundOrder).existsBy({ businessNo: parsed.businessNo })
-    if (currentOrderExists) throw new BizError(`业务号 ${parsed.businessNo} 当前仍被订单使用，不可回收`, 409)
-
-    const assignedAt = new Date()
-    const reuseCount = Number(occupancy.reuseCount ?? 0) + 1
-    occupancy.lastAssignedOrderUuid = input.targetOrderUuid
-    occupancy.lastAssignedAt = assignedAt
-    occupancy.reuseCount = reuseCount
-    await manager.getRepository(OrderBusinessNoOccupancy).save(occupancy)
-    await manager.getRepository(OrderBusinessNoReuseEvent).insert({
-      namespace: parsed.namespace,
-      serialValue: parsed.serialValue,
-      businessNo: parsed.businessNo,
-      fromOrderUuid,
-      toOrderUuid: input.targetOrderUuid,
-      targetOrderIdSnapshot: input.targetOrderId,
-      targetSystemNoSnapshot: input.targetSystemNo,
-      reuseCount,
-      reason: input.reason,
-      actorUserId: input.actor.userId,
-      actorUsername: input.actor.username,
-      actorDisplayName: input.actor.displayName,
-      ipAddress: this.truncateByCodePoint(input.requestMeta?.ipAddress, 64),
-      userAgent: this.truncateByCodePoint(input.requestMeta?.userAgent, 255),
-    })
-    return { parsed, fromOrderUuid, toOrderUuid: input.targetOrderUuid, reuseCount, assignedAt }
-  }
-
-  /** 回收预览按“排除目标旧值、纳入目标新值”计算物理仍存在主单的目标命名空间最大当前号。 */
-  async previewReclaimCursorPlan(
-    parsed: ParsedBusinessNo,
-    targetOrderId: string,
-    manager: EntityManager,
-  ): Promise<BusinessNoCursorPlan> {
-    const orderType = parsed.orderType
-    const rule = BUSINESS_NO_RULES[orderType]
-    const config = await this.loadConfig(rule.configKeyPrefix, manager)
-    const beforeCursor = await this.readCursorWithoutLock(orderType, config, manager)
-    const physicalMax = await this.readPhysicalMaxSerial(orderType, config, manager, targetOrderId)
-    const afterCursor = Math.max(beforeCursor, config.start - 1, physicalMax, parsed.serialValue)
-    return this.buildCursorPlan(parsed.namespace, beforeCursor, afterCursor, config.width)
-  }
-
-  /** 正式回收完成后，以所有物理仍存在主单（含软删除）的当前 businessNo 重新校准目标命名空间游标。 */
-  async recalibrateCursorFromPhysicalOrders(orderType: OrderType, manager: EntityManager): Promise<BusinessNoCursorPlan> {
-    const rule = BUSINESS_NO_RULES[orderType]
-    const config = await this.loadConfig(rule.configKeyPrefix, manager)
-    const sequence = await this.loadOrCreateSequence(rule.sequenceKey, Math.max(config.start - 1, config.current), manager)
-    const beforeCursor = Math.max(config.current, this.parseNonNegativeInteger(sequence.currentValue, '订单业务号游标异常'))
-    const afterCursor = Math.max(beforeCursor, config.start - 1, await this.readPhysicalMaxSerial(orderType, config, manager))
-    sequence.currentValue = afterCursor
-    await manager.getRepository(BusinessSequence).save(sequence)
-    await this.updateCurrentMirror(config.currentKey, afterCursor, manager)
-    return this.buildCursorPlan(rule.namespace, beforeCursor, afterCursor, config.width)
   }
 
   async parseForOrderType(businessNo: string, orderType: OrderType, manager: EntityManager): Promise<ParsedBusinessNo> {
@@ -423,24 +244,14 @@ export class OrderBusinessNoService {
     return { orderType, namespace: rule.namespace, serialValue, businessNo: normalizedBusinessNo }
   }
 
-  private async insertOccupancy(
-    input: Pick<OrderBusinessNoOccupancy, 'namespace' | 'serialValue' | 'businessNo' | 'orderUuid' | 'assignedReason'>,
-    manager: EntityManager,
-  ): Promise<void> {
-    const repository = manager.getRepository(OrderBusinessNoOccupancy)
-    try {
-      const assignedAt = new Date()
-      await repository.insert(repository.create({
-        ...input,
-        lastAssignedOrderUuid: input.orderUuid,
-        lastAssignedAt: assignedAt,
-        reuseCount: 0,
-      }))
-    } catch (error) {
-      if (isUniqueConstraintError(error, BUSINESS_NO_UNIQUE_MATCHER)) {
-        throw new BizError(`业务号 ${input.businessNo} 已被永久占用`, 409)
-      }
-      throw error
+  private async assertBusinessNoAvailable(businessNo: string, orderUuid: string, manager: EntityManager): Promise<void> {
+    const query = manager.getRepository(BizOutboundOrder)
+      .createQueryBuilder('order')
+      .where('order.businessNo = :businessNo', { businessNo })
+      .andWhere('order.orderUuid <> :orderUuid', { orderUuid })
+    if (manager.connection.options.type !== 'sqlite') query.setLock('pessimistic_read')
+    if (await query.getExists()) {
+      throw new BizError(`业务号 ${businessNo} 当前已被其他订单使用`, 409)
     }
   }
 
@@ -498,25 +309,14 @@ export class OrderBusinessNoService {
     return maxSerial
   }
 
-  private truncateByCodePoint(value: string | null | undefined, maxLength: number): string | null {
-    if (value == null) return null
-    const characters = Array.from(value)
-    return characters.length <= maxLength ? value : characters.slice(0, maxLength).join('')
-  }
-
-  /** 无锁读取命名空间游标；游标行尚未创建时与分配逻辑一致，取 start - 1 与历史最大占用号的较大值。 */
+  /** 无锁读取命名空间游标；游标行尚未创建时取 start - 1 与物理现存订单最大号的较大值。 */
   private async readCursorWithoutLock(orderType: OrderType, config: BusinessNoConfig, manager: EntityManager): Promise<number> {
     const rule = BUSINESS_NO_RULES[orderType]
     const existingSequence = await manager.getRepository(BusinessSequence).findOneBy({ sequenceKey: rule.sequenceKey })
     if (existingSequence) {
       return Math.max(config.current, this.parseNonNegativeInteger(existingSequence.currentValue, '订单业务号游标异常'))
     }
-    const maxRow = await manager.getRepository(OrderBusinessNoOccupancy)
-      .createQueryBuilder('occupancy')
-      .select('MAX(occupancy.serialValue)', 'maxSerial')
-      .where('occupancy.namespace = :namespace', { namespace: rule.namespace })
-      .getRawOne<{ maxSerial: string | number | null }>()
-    return Math.max(config.start - 1, Number(maxRow?.maxSerial ?? config.start - 1))
+    return Math.max(config.start - 1, config.current, await this.readPhysicalMaxSerial(orderType, config, manager))
   }
 
   private groupTargets(targets: BusinessNoReservationTarget[]) {
@@ -548,15 +348,10 @@ export class OrderBusinessNoService {
   private async loadOrCreateSequence(sequenceKey: string, initialValue: number, manager: EntityManager) {
     let sequence = await this.loadSequenceForUpdateIfPresent(sequenceKey, manager)
     if (!sequence) {
-      const occupancyMaxRow = await manager.getRepository(OrderBusinessNoOccupancy)
-        .createQueryBuilder('occupancy')
-        .select('MAX(occupancy.serialValue)', 'maxSerial')
-        .where('occupancy.namespace = :namespace', {
-          namespace: sequenceKey.endsWith('.department') ? 'hyyzjd' : 'hyyz',
-        })
-        .getRawOne<{ maxSerial: string | number | null }>()
-      const maxOccupied = Math.max(initialValue, Number(occupancyMaxRow?.maxSerial ?? initialValue))
-      await this.ensureSequenceRow(sequenceKey, maxOccupied, manager)
+      const orderType: OrderType = sequenceKey.endsWith('.department') ? 'department' : 'walkin'
+      const config = await this.loadConfig(BUSINESS_NO_RULES[orderType].configKeyPrefix, manager)
+      const maxCurrent = Math.max(initialValue, await this.readPhysicalMaxSerial(orderType, config, manager))
+      await this.ensureSequenceRow(sequenceKey, maxCurrent, manager)
       sequence = await this.loadSequenceForUpdate(sequenceKey, manager)
     }
     if (!sequence) {

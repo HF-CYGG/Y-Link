@@ -15,8 +15,10 @@ import { ClientFeedbackAttachment } from '../entities/client-feedback-attachment
 import { ClientFeedbackConversation } from '../entities/client-feedback-conversation.entity.js'
 import { ClientFeedbackMessage, type ClientFeedbackMessageAttachment } from '../entities/client-feedback-message.entity.js'
 import {
+  assertMysqlOrderBusinessNoPermanentOccupancyRetired,
   assertMysqlRequiredSchemaExists,
   reconcileMysqlOrderIdentifierNamespaces,
+  retireMysqlOrderBusinessNoPermanentOccupancy,
   runMysqlSchemaMigrations,
 } from './mysql-migration-runner.js'
 import { BizError } from '../utils/errors.js'
@@ -53,8 +55,6 @@ const SQLITE_REQUIRED_TABLES = [
   'auth_risk_state',
   'business_sequence',
   'sms_verification_record',
-  'order_business_no_occupancy',
-  'order_business_no_reuse_event',
   'order_revision',
   'account_lifecycle_event',
   'order_merge_operation',
@@ -129,22 +129,12 @@ async function ensureSqliteAccountLifecycleAppendOnly(dataSource: DataSource): P
   `)
 }
 
-/** 业务号复用事件与账号生命周期事件一样只允许追加，SQLite 用触发器提供数据库级最终防线。 */
-async function ensureSqliteOrderBusinessNoReuseAppendOnly(dataSource: DataSource): Promise<void> {
-  await dataSource.query(`
-    CREATE TRIGGER IF NOT EXISTS trg_order_business_no_reuse_event_no_update
-    BEFORE UPDATE ON order_business_no_reuse_event
-    BEGIN
-      SELECT RAISE(ABORT, 'ORDER_BUSINESS_NO_REUSE_EVENT_APPEND_ONLY');
-    END
-  `)
-  await dataSource.query(`
-    CREATE TRIGGER IF NOT EXISTS trg_order_business_no_reuse_event_no_delete
-    BEFORE DELETE ON order_business_no_reuse_event
-    BEGIN
-      SELECT RAISE(ABORT, 'ORDER_BUSINESS_NO_REUSE_EVENT_APPEND_ONLY');
-    END
-  `)
+/** 056：业务号永久占用功能停用，SQLite 启动时幂等移除历史表与触发器。 */
+async function dropSqliteOrderBusinessNoPermanentOccupancy(dataSource: DataSource): Promise<void> {
+  await dataSource.query('DROP TRIGGER IF EXISTS "trg_order_business_no_reuse_event_no_update"')
+  await dataSource.query('DROP TRIGGER IF EXISTS "trg_order_business_no_reuse_event_no_delete"')
+  await dataSource.query('DROP TABLE IF EXISTS "order_business_no_reuse_event"')
+  await dataSource.query('DROP TABLE IF EXISTS "order_business_no_occupancy"')
 }
 
 async function migrateLegacyFeedbackAttachments(dataSource: DataSource) {
@@ -232,11 +222,6 @@ const SQLITE_REQUIRED_ORDER_ITEM_COLUMNS = [
   'source_order_item_id',
 ]
 const SQLITE_REQUIRED_ORDER_MERGE_OPERATION_COLUMNS = ['result_json']
-const SQLITE_REQUIRED_ORDER_BUSINESS_NO_OCCUPANCY_COLUMNS = [
-  'last_assigned_order_uuid',
-  'last_assigned_at',
-  'reuse_count',
-]
 const SQLITE_REQUIRED_INVENTORY_LOG_COLUMNS = [
   'sku_id',
   'before_sku_current_stock',
@@ -516,30 +501,6 @@ async function prepareSqliteOrderAmendmentColumns(dataSource: DataSource): Promi
     WHERE "edit_version" IS NULL OR "edit_version" < 1
   `)
 
-  const occupancyColumns = await listSqliteTableColumns(dataSource, 'order_business_no_occupancy')
-  if (occupancyColumns.size === 0) return
-  if (!occupancyColumns.has('last_assigned_order_uuid')) {
-    await dataSource.query('ALTER TABLE "order_business_no_occupancy" ADD COLUMN "last_assigned_order_uuid" varchar(36) NULL')
-  }
-  if (!occupancyColumns.has('last_assigned_at')) {
-    await dataSource.query('ALTER TABLE "order_business_no_occupancy" ADD COLUMN "last_assigned_at" datetime NULL')
-  }
-  if (!occupancyColumns.has('reuse_count')) {
-    await dataSource.query('ALTER TABLE "order_business_no_occupancy" ADD COLUMN "reuse_count" integer NOT NULL DEFAULT (0)')
-  }
-  await dataSource.query(`
-    UPDATE "order_business_no_occupancy"
-    SET
-      "last_assigned_order_uuid" = COALESCE("last_assigned_order_uuid", "order_uuid"),
-      "last_assigned_at" = COALESCE("last_assigned_at", "created_at"),
-      "reuse_count" = COALESCE("reuse_count", 0)
-    WHERE "last_assigned_order_uuid" IS NULL
-       OR "last_assigned_at" IS NULL
-       OR "reuse_count" IS NULL
-  `)
-  await dataSource.query(
-    'CREATE INDEX IF NOT EXISTS "idx_order_business_no_occupancy_last_assigned_order_uuid" ON "order_business_no_occupancy" ("last_assigned_order_uuid")',
-  )
 }
 
 /**
@@ -1024,7 +985,7 @@ async function backfillSqliteOrderIdentifierNamespaces(manager: EntityManager): 
     const sequenceKey = `order.business.${orderType}`
     const namespace = orderType === 'department' ? 'hyyzjd' : 'hyyz'
     const migrationMarkerKey = `${sequenceKey}.migration.055`
-    const [migrationMarkerCount, newConfigStartValue, newConfigWidthValue, newConfigCurrent, sequenceCurrent, occupancyCurrent] = await Promise.all([
+    const [migrationMarkerCount, newConfigStartValue, newConfigWidthValue, newConfigCurrent, sequenceCurrent] = await Promise.all([
       readInteger(
         'SELECT COUNT(1) AS "value" FROM "system_configs" WHERE "config_key" = ? AND "config_value" = ?',
         [migrationMarkerKey, '1'],
@@ -1033,7 +994,6 @@ async function backfillSqliteOrderIdentifierNamespaces(manager: EntityManager): 
       readConfigInteger(`${sequenceKey}.width`),
       readInteger('SELECT "config_value" AS "value" FROM "system_configs" WHERE "config_key" = ? LIMIT 1', [`${sequenceKey}.current`]),
       readInteger('SELECT "current_value" AS "value" FROM "business_sequence" WHERE "sequence_key" = ? LIMIT 1', [sequenceKey]),
-      readInteger('SELECT MAX("serial_value") AS "value" FROM "order_business_no_occupancy" WHERE "business_namespace" = ?', [namespace]),
     ])
     const absorbLegacyHistory = migrationMarkerCount !== 1
     const [legacyStartValue, legacyCurrent, legacyWidthValue, legacySequenceCurrent] = absorbLegacyHistory
@@ -1073,7 +1033,6 @@ async function backfillSqliteOrderIdentifierNamespaces(manager: EntityManager): 
         legacySequenceCurrent,
         newConfigCurrent,
         sequenceCurrent,
-        occupancyCurrent,
         physicalCurrent,
       ),
       start,
@@ -1161,7 +1120,7 @@ async function backfillSqliteOrderIdentifierNamespaces(manager: EntityManager): 
 }
 
 /**
- * 幂等领养历史订单：businessNo 初始值固定等于 showNo，永久占用和双命名空间游标只在缺失时补齐。
+ * 幂等领养历史订单：businessNo 初始值固定等于 showNo，双命名空间游标只在缺失时补齐。
  * 已存在的游标绝不按历史最大值重写，避免覆盖管理员手工重编后确认的游标位置。
  */
 export async function backfillSqliteOrderAmendmentData(dataSource: DataSource): Promise<void> {
@@ -1170,10 +1129,9 @@ export async function backfillSqliteOrderAmendmentData(dataSource: DataSource): 
   await initializeDatabaseInfrastructure(dataSource)
   await dataSource.transaction(async (manager) => {
     const orders = await manager.query(`
-      SELECT "order_uuid" AS "orderUuid", "business_no" AS "businessNo", "order_type" AS "orderType",
-             "created_at" AS "createdAt"
+      SELECT "order_uuid" AS "orderUuid", "business_no" AS "businessNo", "order_type" AS "orderType"
       FROM "biz_outbound_order"
-    `) as Array<{ orderUuid: string; businessNo: string; orderType: string; createdAt: string }>
+    `) as Array<{ orderUuid: string; businessNo: string; orderType: string }>
     for (const order of orders) {
       const namespace = order.orderType === 'department' ? 'hyyzjd' : order.orderType === 'walkin' ? 'hyyz' : null
       const pattern = namespace === 'hyyzjd' ? /^hyyzjd(\d+)$/ : /^hyyz(\d+)$/
@@ -1185,34 +1143,6 @@ export async function backfillSqliteOrderAmendmentData(dataSource: DataSource): 
       if (!Number.isSafeInteger(serialValue) || serialValue <= 0) {
         throw new BizError(`历史出库单 ${order.orderUuid} 的业务号流水非法`, 409)
       }
-      await manager.query(
-        `INSERT OR IGNORE INTO "order_business_no_occupancy"
-         ("business_namespace", "serial_value", "business_no", "order_uuid", "assigned_reason", "created_at",
-          "last_assigned_order_uuid", "last_assigned_at", "reuse_count")
-         VALUES (?, ?, ?, ?, 'history_backfill', ?, ?, ?, 0)`,
-        [namespace, serialValue, order.businessNo, order.orderUuid, order.createdAt, order.orderUuid, order.createdAt],
-      )
-    }
-
-    const unmatchedRows = await manager.query(`
-      SELECT "order"."order_uuid" AS "orderUuid"
-      FROM "biz_outbound_order" "order"
-      LEFT JOIN "order_business_no_occupancy" "occupancy"
-        ON "occupancy"."business_no" = "order"."business_no"
-       AND "occupancy"."order_uuid" = "order"."order_uuid"
-       AND "occupancy"."business_namespace" = CASE
-             WHEN "order"."order_type" = 'department' THEN 'hyyzjd'
-             WHEN "order"."order_type" = 'walkin' THEN 'hyyz'
-           END
-       AND "occupancy"."serial_value" = CAST(SUBSTR(
-             "order"."business_no",
-             CASE WHEN "order"."order_type" = 'department' THEN 7 ELSE 5 END
-           ) AS INTEGER)
-      WHERE "occupancy"."id" IS NULL
-      LIMIT 1
-    `) as Array<{ orderUuid: string }>
-    if (unmatchedRows.length > 0) {
-      throw new BizError(`历史出库单 ${unmatchedRows[0].orderUuid} 的业务号永久占用存在冲突`, 409)
     }
 
     await backfillSqliteOrderIdentifierNamespaces(manager)
@@ -2021,16 +1951,6 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
     return true
   }
 
-  const occupancyColumnSet = await listSqliteTableColumns(dataSource, 'order_business_no_occupancy')
-  if (SQLITE_REQUIRED_ORDER_BUSINESS_NO_OCCUPANCY_COLUMNS.some((column) => !occupancyColumnSet.has(column))) {
-    return true
-  }
-  if (
-    !await hasSqliteNotNullColumn(dataSource, 'order_business_no_occupancy', 'last_assigned_order_uuid')
-    || !await hasSqliteNotNullColumn(dataSource, 'order_business_no_occupancy', 'last_assigned_at')
-  ) {
-    return true
-  }
   if (!await hasSqliteNotNullColumn(dataSource, 'order_merge_operation', 'result_json')) {
     return true
   }
@@ -2199,6 +2119,7 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
 
 export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): Promise<DatabaseSchemaInitResult> {
   if (env.DB_TYPE === 'sqlite') {
+    await dropSqliteOrderBusinessNoPermanentOccupancy(dataSource)
     await ensureSqliteMobileSessionSchema(dataSource)
     await prepareSqliteOrderAmendmentColumns(dataSource)
     await prepareSqliteOrderContentInventoryColumns(dataSource)
@@ -2216,6 +2137,8 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   if (env.DB_SYNC === true) {
     await dataSource.synchronize()
     if (env.DB_TYPE === 'mysql') {
+      await retireMysqlOrderBusinessNoPermanentOccupancy(dataSource)
+      await assertMysqlOrderBusinessNoPermanentOccupancyRetired(dataSource)
       await reconcileMysqlOrderIdentifierNamespaces(dataSource)
     }
     if (env.DB_TYPE === 'sqlite') {
@@ -2232,7 +2155,6 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
     await migrateLegacyFeedbackAttachments(dataSource)
     if (env.DB_TYPE === 'sqlite') {
       await ensureSqliteAccountLifecycleAppendOnly(dataSource)
-      await ensureSqliteOrderBusinessNoReuseAppendOnly(dataSource)
     }
     return {
       action: 'synchronized',
@@ -2269,7 +2191,6 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
     await backfillSqliteOrderSourceDocs(dataSource)
     await migrateClientUserDepartmentGovernance(dataSource)
     await ensureSqliteAccountLifecycleAppendOnly(dataSource)
-    await ensureSqliteOrderBusinessNoReuseAppendOnly(dataSource)
     await migrateLegacyFeedbackAttachments(dataSource)
     return {
       action: 'skipped',
@@ -2287,7 +2208,6 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   await backfillSqliteOrderSourceDocs(dataSource)
   await migrateClientUserDepartmentGovernance(dataSource)
   await ensureSqliteAccountLifecycleAppendOnly(dataSource)
-  await ensureSqliteOrderBusinessNoReuseAppendOnly(dataSource)
   await migrateLegacyFeedbackAttachments(dataSource)
   return {
     action: 'synchronized',

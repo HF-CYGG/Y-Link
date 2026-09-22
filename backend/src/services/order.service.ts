@@ -32,7 +32,6 @@ import { auditService } from './audit.service.js'
 import {
   orderAmendmentService,
   type OrderAmendmentBatchInput,
-  type OrderAmendmentInput,
   type OrderAmendmentPreviewResult,
 } from './order-amendment.service.js'
 import { orderBusinessNoService } from './order-business-no.service.js'
@@ -57,6 +56,10 @@ import {
   type OrderMergeInput,
   type OrderMergeMetadata,
 } from './order-merge.service.js'
+import {
+  buildRedactedDeleteTarget,
+  cleanupOrderIdentifiableData,
+} from './order-permanent-delete-cleanup.service.js'
 
 /**
  * 开单页客户部门选项：
@@ -589,14 +592,6 @@ export class OrderService {
     return orderAmendmentService.commit(input, actor, requestMeta)
   }
 
-  async reclaimBusinessNo(
-    input: { amendment: OrderAmendmentInput },
-    actor: AuthUserContext,
-    requestMeta?: RequestMeta,
-  ): Promise<OrderAmendmentPreviewResult> {
-    return orderAmendmentService.reclaimBusinessNo(input, actor, requestMeta)
-  }
-
   async updateContent(
     orderId: string,
     input: UpdateOrderContentInput,
@@ -907,7 +902,15 @@ export class OrderService {
       }
       await orderMergeService.assertNotMergeMember(manager, normalizeEntityId(order.id))
 
-      const linkedO2oPreorderSync = await this.syncLinkedO2oPreorderVisibilityInManager(manager, order, actor, true)
+      if (order.sourceDocType === 'o2o_preorder') {
+        throw new BizError('O2O 关联正式出库单必须从 O2O 管理入口整链永久删除', 409)
+      }
+
+      await cleanupOrderIdentifiableData(manager, {
+        orderIds: [normalizeEntityId(order.id)],
+        orderUuids: [order.orderUuid],
+        stableFeedbackRefs: [order.orderUuid, order.systemNo, order.businessNo],
+      })
       const deleteResult = await orderRepo.delete({ id: order.id })
       if ((deleteResult.affected ?? 0) <= 0) {
         throw new BizError('永久删除出库单失败，请稍后重试', 500)
@@ -920,23 +923,17 @@ export class OrderService {
         manager,
       )
       const serialRolledBack = serialCalibration.rolledBack
-      const auditDetail = {
-        ...this.buildOrderAuditDetail(order),
-        serialRolledBack,
-        serialCalibration,
-        linkedO2oPreorderSync,
-      }
+      const redactedTarget = buildRedactedDeleteTarget('order')
 
       await auditService.record(
         {
           actionType: 'order.purge',
           actionLabel: '永久删除出库单',
           targetType: 'order',
-          targetId: String(order.id),
-          targetCode: order.businessNo,
+          targetId: null,
+          targetCode: redactedTarget,
           actor,
-          requestMeta,
-          detail: auditDetail,
+          detail: { redactedTarget },
         },
         manager,
       )

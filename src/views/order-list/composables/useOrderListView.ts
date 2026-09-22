@@ -753,8 +753,8 @@ export const useOrderListView = () => {
 
   /**
    * 永久删除出库单：
-   * - 仅对已软删除单据开放，彻底移除主单与明细；
-   * - 若命中“最后一个流水号”，后端会同步回拨流水，便于测试场景连续重建首单。
+   * - 仅对已软删除单据开放，清理订单文档与修订数据，业务号随后可人工复用；
+   * - 仅保留脱敏安全审计；若命中最后一个流水号，后端会安全回拨出库系统编号流水。
    */
   const handlePurgeOrder = async (row: OrderRecord, confirmBusinessNo: string, permanentDeletePassword: string) => {
     if (!ensurePermission('orders:delete', '永久删除出库单')) {
@@ -767,7 +767,7 @@ export const useOrderListView = () => {
     const result = await purgeOrderById(row.id, { confirmBusinessNo, permanentDeletePassword })
     showAppSuccess(
       result.serialRolledBack
-        ? `已永久删除单据：${row.businessNo}，系统兼容流水已安全回拨`
+        ? `已永久删除单据：${row.businessNo}，出库系统编号流水已安全回拨`
         : `已永久删除单据：${row.businessNo}`,
     )
     await loadData()
@@ -776,14 +776,15 @@ export const useOrderListView = () => {
   /**
    * 永久删除二次确认：
    * - 仍要求输入完整业务单号，避免把“测试删库”误点到正式历史单据；
-   * - 明确提示该操作不可恢复，并说明只有最后一张单据才会触发安全回拨。
+   * - 明确提示该操作不可恢复、会清理订单文档与修订数据，业务号随后可人工复用；
+   * - 仅保留脱敏安全审计，且只有最后一张单据才会触发出库系统编号流水安全回拨。
    */
   const handlePurgeOrderWithConfirm = async (row: OrderRecord) => {
     if (!ensurePermission('orders:delete', '永久删除出库单')) {
       return
     }
     const result = await ElMessageBox.prompt(
-      `请输入业务单号 ${row.businessNo} 以确认永久删除。永久删除后不可恢复；业务号占用和修订历史会永久保留。`,
+      `请输入业务单号 ${row.businessNo} 以确认永久删除。永久删除后订单文档与修订数据会被清理，业务号随后可人工复用；仅保留脱敏安全审计。`,
       '永久删除确认',
       {
         confirmButtonText: '确认永久删除',
