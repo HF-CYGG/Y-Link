@@ -26,12 +26,12 @@ import {
 } from '@/constants/o2o-order-status'
 import {
   getO2oVerifyDetail,
-  getO2oVerifyDetailByShowNo,
+  getO2oVerifyDetailByPreorderNo,
   rejectO2oReturnRequest,
   updateO2oOrderComplianceFlags,
   updateO2oOrderOnsite,
   verifyO2oPreorder,
-  type O2oPreorderDetail,
+  type O2oConsolePreorderDetail,
   type O2oReturnRequestDetail,
   type O2oVerifyDetailResult,
 } from '@/api/modules/o2o'
@@ -41,7 +41,7 @@ import { useDevice } from '@/composables/useDevice'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import {
   buildOnsiteEditableItemsFromDetail,
-  isBizShowNo,
+  isPreorderNo,
   isPreorderDetail,
   isReturnRequestDetail,
   normalizeVerifyCode,
@@ -152,7 +152,7 @@ const showVerifyActionButton = computed(() => {
 
 const currentDocumentTitle = computed(() => {
   if (preorderDetail.value) {
-    return preorderDetail.value.order.showNo
+    return preorderDetail.value.order.preorderNo
   }
   if (returnRequestDetail.value) {
     return returnRequestDetail.value.returnNo
@@ -329,7 +329,7 @@ const notifyPreorderChanged = (orderId: string, reason: 'verified' | 'updated' |
   })
 }
 
-const replacePreorderDetail = (detail: O2oPreorderDetail) => {
+const replacePreorderDetail = (detail: O2oConsolePreorderDetail) => {
   verifyResult.value = {
     verifyTargetType: 'preorder',
     detail,
@@ -397,8 +397,8 @@ const handleSearch = async () => {
   loading.value = true
   await verifyDetailRequest.runLatest({
     executor: () =>
-      isBizShowNo(normalizedCode)
-        ? getO2oVerifyDetailByShowNo(normalizedCode)
+      isPreorderNo(normalizedCode)
+        ? getO2oVerifyDetailByPreorderNo(normalizedCode)
         : getO2oVerifyDetail(normalizedCode),
     onSuccess: (result) => {
       verifyResult.value = result
@@ -651,7 +651,7 @@ const handleSubmitOnsiteAdjust = async () => {
 
   try {
     await ElMessageBox.confirm(
-      `确认保存订单“${preorderDetail.value.order.showNo}”的现场改单结果吗？保存后核销依据会切换为最新商品与数量。`,
+      `确认保存预订单“${preorderDetail.value.order.preorderNo}”的现场改单结果吗？保存后核销依据会切换为最新商品与数量。`,
       '现场改单',
       {
         type: 'warning',
@@ -686,7 +686,7 @@ const handleSubmitOnsiteAdjust = async () => {
   }
 }
 
-const syncComplianceFormFromDetail = (detail: O2oPreorderDetail | null) => {
+const syncComplianceFormFromDetail = (detail: O2oConsolePreorderDetail | null) => {
   complianceForm.value = {
     hasCustomerOrder: Boolean(detail?.order.hasCustomerOrder),
     isSystemApplied: Boolean(detail?.order.isSystemApplied),
@@ -831,14 +831,14 @@ watch(
             {{ scanModeLabel }}
           </span>
         </div>
-        <p class="mt-2 text-sm text-slate-500">支持手机扫码后自动填入；也支持直接粘贴二维码链接、业务单号，系统会自动识别取货码或退货码。</p>
+        <p class="mt-2 text-sm text-slate-500">支持手机扫码后自动填入；核销码和预订单号查询入口语义独立。</p>
 
         <div class="mt-4">
           <el-input
             ref="inputRef"
             v-model="verifyCode"
             class="verify-console-input"
-            placeholder="请扫描二维码或输入取货码 / 退货码 / 业务单号"
+            placeholder="请扫描二维码或输入取货码 / 退货码 / 预订单号"
             clearable
             @keyup.enter="handleSearch"
           >
@@ -962,6 +962,10 @@ watch(
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">核销码</p>
               <p class="mt-1 break-all text-sm text-slate-700">{{ preorderDetail.order.verifyCode }}</p>
+            </div>
+            <div v-if="preorderDetail.order.customerOrderBusinessNo" class="rounded-2xl bg-teal-50 px-4 py-3">
+              <p class="text-sm text-teal-600">关联出库业务单号</p>
+              <p class="mt-1 break-all text-sm font-semibold text-teal-800">{{ preorderDetail.order.customerOrderBusinessNo }}</p>
             </div>
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">订单备注</p>

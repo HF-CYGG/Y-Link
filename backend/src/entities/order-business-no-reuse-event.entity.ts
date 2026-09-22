@@ -37,8 +37,8 @@ export class OrderBusinessNoReuseEvent {
   @Column({ name: 'target_order_id_snapshot', type: 'varchar', length: 64, comment: '目标订单主键快照' })
   targetOrderIdSnapshot!: string
 
-  @Column({ name: 'target_show_no_snapshot', type: 'varchar', length: 64, comment: '目标订单不可变 showNo 快照' })
-  targetShowNoSnapshot!: string
+  @Column({ name: 'target_show_no_snapshot', type: 'varchar', length: 64, comment: '目标订单不可变 systemNo 快照' })
+  targetSystemNoSnapshot!: string
 
   @Column({ name: 'reuse_count', type: 'integer', comment: '本次完成后的累计复用次数' })
   reuseCount!: number

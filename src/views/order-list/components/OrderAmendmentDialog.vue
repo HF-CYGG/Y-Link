@@ -41,7 +41,7 @@ interface Props {
 interface AmendmentDraft {
   orderId: string
   editVersion: number
-  showNo: string
+  systemNo: string
   businessNo: string
   orderType: 'department' | 'walkin'
   customerDepartmentName: string
@@ -77,6 +77,7 @@ const dialogTitle = computed(() => drafts.value.length > 1 ? `批量修订单据
 const departmentOptions = ref<OrderDepartmentOption[]>([])
 const departmentOptionsLoading = ref(false)
 const departmentOptionsLoadFailed = ref(false)
+const isAdmin = computed(() => authStore.currentUser?.role === 'admin')
 const isSingleAdmin = computed(() => drafts.value.length === 1 && authStore.currentUser?.role === 'admin')
 
 /** 按完整路径去重：路径即订单保存的部门快照，也是展示与搜索文本。 */
@@ -122,7 +123,7 @@ const initializeDrafts = () => {
   drafts.value = props.orders.map((order) => ({
     orderId: order.id,
     editVersion: order.editVersion,
-    showNo: order.showNo,
+    systemNo: order.systemNo,
     businessNo: order.businessNo,
     orderType: order.orderType,
     customerDepartmentName: order.customerDepartmentName || '',
@@ -258,7 +259,7 @@ const validateDrafts = (): boolean => {
   }
   for (const draft of drafts.value) {
     if (!draft.businessNo.trim()) {
-      showAppWarning(`系统键 ${draft.showNo} 的业务单号不能为空`)
+      showAppWarning('订单业务单号不能为空')
       return false
     }
     if (draft.orderType === 'department' && !draft.customerDepartmentName.trim()) {
@@ -354,7 +355,7 @@ const handleCommit = async () => {
   >
     <div class="space-y-4">
       <el-alert
-        title="showNo 是永久不可修改的系统键；部门单使用 hyyzjd，散客单使用 hyyz。切换订单类型会自动编排目标类型的下一个业务单号，可手动修改；预览不会占号，提交时会重新校验。"
+        title="业务单号是对外展示编号；出库系统编号仅供技术追溯且不可修改。部门单使用 hyyzjd，散客单使用 hyyz。切换订单类型会自动编排目标类型的下一个业务单号，可手动修改；预览不会占号，提交时会重新校验。"
         type="warning"
         :closable="false"
         show-icon
@@ -366,7 +367,10 @@ const handleCommit = async () => {
         class="rounded-2xl border border-slate-200 bg-slate-50 p-4"
       >
         <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <strong class="text-sm text-slate-800">第 {{ index + 1 }} 张 · 系统键 {{ draft.showNo }}</strong>
+          <strong class="text-sm text-slate-800">
+            第 {{ index + 1 }} 张 · 业务单号 {{ draft.businessNo }}
+            <span v-if="isAdmin">· 出库系统编号（不可修改，仅用于系统追溯）{{ draft.systemNo }}</span>
+          </strong>
           <el-tag effect="plain">版本 {{ draft.editVersion }}</el-tag>
         </div>
         <div class="grid gap-3 md:grid-cols-2">
@@ -450,8 +454,8 @@ const handleCommit = async () => {
           </el-tag>
         </div>
         <el-table :data="previewResult.items" border size="small" table-layout="auto">
-          <el-table-column label="系统键" min-width="150">
-            <template #default="{ row }">{{ row.before.showNo }}</template>
+          <el-table-column v-if="isAdmin" label="出库系统编号" min-width="150">
+            <template #default="{ row }">{{ row.before.systemNo }}</template>
           </el-table-column>
           <el-table-column label="业务号变化" min-width="240">
             <template #default="{ row }">{{ row.before.businessNo }} → {{ row.after.businessNo }}</template>

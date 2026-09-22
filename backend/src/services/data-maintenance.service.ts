@@ -150,11 +150,14 @@ class DataMaintenanceService {
             .getMany(),
         )
       case 'preorders':
-        return cloneForExportRows(
+        return cloneForExportRows((
           await manager.getRepository(O2oPreorder).find({
             order: { id: 'ASC' },
-          }),
-        )
+          })
+        ).map((preorder) => ({
+          ...preorder,
+          showNo: preorder.preorderNo,
+        })))
       case 'preorderItems':
         return cloneForExportRows(
           await manager.getRepository(O2oPreorderItem).find({

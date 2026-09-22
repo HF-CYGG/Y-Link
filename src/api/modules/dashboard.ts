@@ -49,7 +49,7 @@ export interface DashboardRecentActivity {
   orderId: string
   actionType: 'order.create' | 'order.delete' | 'order.restore' | 'order.purge'
   actionLabel: string
-  showNo: string
+  /** 首页近期动态只使用对外业务单号。 */
   businessNo: string
   actorDisplayName: string
   displayName: string
@@ -94,7 +94,10 @@ export interface DashboardAnalyticsResult {
 
 export interface DashboardDrilldownOrderRecord {
   orderId: string
-  showNo: string
+  /** 管理员技术追溯字段；普通下钻不依赖也不展示。 */
+  systemNo?: string | null
+  /** @deprecated 管理员兼容响应字段；普通下钻不依赖也不展示。 */
+  showNo?: string | null
   businessNo: string
   orderType: 'department' | 'walkin'
   createdAt: string
@@ -150,7 +153,18 @@ export interface DashboardPieDataResult {
   }
 }
 
-// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
+type DashboardStatsRaw = Omit<DashboardStats, 'recentActivities'> & {
+  recentActivities: Array<Omit<DashboardRecentActivity, 'businessNo'> & { businessNo?: string | null }>
+}
+
+const normalizeDashboardStats = (result: DashboardStatsRaw): DashboardStats => ({
+  ...result,
+  recentActivities: result.recentActivities.map((activity) => ({
+    ...activity,
+    businessNo: String(activity.businessNo ?? '').trim(),
+  })),
+})
+
 const buildDashboardDateFilterParams = (query: DashboardDateFilterQuery) => {
   const params: Record<string, string> = {}
   if (query.orderType) {
@@ -174,11 +188,11 @@ const buildDashboardDateFilterParams = (query: DashboardDateFilterQuery) => {
  * - 包含今日/本月订单量、销售额、七日趋势、商品与客户排行及最近活动。
  */
 export const getDashboardStats = (requestConfig: RequestConfig = {}) => {
-  return request<DashboardStats>({
+  return request<DashboardStatsRaw>({
     ...requestConfig,
     url: '/dashboard/stats',
     method: 'GET',
-  })
+  }).then(normalizeDashboardStats)
 }
 
 /**

@@ -207,6 +207,7 @@ export const AUDIT_ACTION_CATALOG: Readonly<Record<string, AuditActionDefinition
 
   // 系统配置
   'system_config.update_order_serial': { label: '更新订单流水配置', category: 'system_config' },
+  'system_config.update_order_identifiers': { label: '更新订单编号配置', category: 'system_config' },
   'system_config.update_o2o_rules': { label: '更新线上预订规则配置', category: 'system_config' },
   'system_config.update_customer_service': { label: '更新客服中心配置', category: 'system_config' },
   'system_config.update_client_departments': { label: '更新客户端部门配置', category: 'system_config' },

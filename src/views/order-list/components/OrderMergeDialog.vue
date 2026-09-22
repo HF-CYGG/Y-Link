@@ -119,7 +119,7 @@ const formatAmount = (value: string | number) => {
   return Number.isFinite(amount) ? amount.toFixed(2) : '0.00'
 }
 
-const getOrderLabel = (order: Pick<OrderRecord, 'businessNo' | 'showNo'>) => order.businessNo || order.showNo
+const getOrderLabel = (order: Pick<OrderRecord, 'businessNo'>) => order.businessNo
 
 const handlePreview = async () => {
   if (!canPreview.value) {

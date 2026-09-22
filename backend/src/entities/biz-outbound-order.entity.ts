@@ -1,5 +1,5 @@
 /**
- * 文件说明：出库订单主表实体，记录业务单号、订单类型、客户信息、金额汇总和软删除状态等核心字段。
+ * 文件说明：出库订单主表实体，记录系统号、永久业务号、订单类型、客户信息、金额汇总和软删除状态等核心字段。
  * 实现逻辑：通过唯一索引、检查约束和与明细表的一对多关系描述完整单据结构，供下单、查询和审计流程共用。
  * 维护重点：调整订单主表字段时，需要同步检查单号生成规则、幂等键约束以及报表统计所依赖的汇总列。
  */
@@ -26,7 +26,7 @@ export type OrderStatus = (typeof ORDER_STATUSES)[number]
 export const ORDER_SOURCE_DOC_TYPES = ['o2o_preorder'] as const
 export type OrderSourceDocType = (typeof ORDER_SOURCE_DOC_TYPES)[number]
 
-@Index('uk_biz_outbound_show_no_is_deleted', ['showNo', 'isDeleted'], { unique: true })
+@Index('uk_biz_outbound_show_no_is_deleted', ['systemNo', 'isDeleted'], { unique: true })
 @Index('idx_biz_outbound_source_doc', ['sourceDocType', 'sourceDocId'])
 @Index('uk_biz_outbound_business_no', ['businessNo'], { unique: true })
 @Index('idx_biz_outbound_order_type_created_at', ['orderType', 'createdAt'])
@@ -43,8 +43,8 @@ export class BizOutboundOrder {
   @Column({ name: 'order_uuid', ...entityColumnOptions.uuid, length: 36, comment: '系统唯一UUID' })
   orderUuid!: string
 
-  @Column({ name: 'show_no', type: 'varchar', length: 32, comment: '业务展示单号' })
-  showNo!: string
+  @Column({ name: 'show_no', type: 'varchar', length: 32, comment: '正式出库单系统号' })
+  systemNo!: string
 
   @Column({ name: 'business_no', type: 'varchar', length: 32, comment: '独立可修订业务单号' })
   businessNo!: string

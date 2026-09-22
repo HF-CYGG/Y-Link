@@ -10,6 +10,7 @@ import { requirePermission } from '../middleware/auth.middleware.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { dashboardService } from '../services/dashboard.service.js'
 import { BizError } from '../utils/errors.js'
+import type { AuthenticatedRequest } from '../types/auth.js'
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export const dashboardRouter = Router()
@@ -79,8 +80,9 @@ dashboardRouter.get(
   '/stats',
   // 看板统计数据属于 dashboard:view 范围，避免低权限账户直接读取经营指标。
   requirePermission('dashboard:view'),
-  asyncHandler(async (_req, res) => {
-    const data = await dashboardService.getStats()
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const data = await dashboardService.getStats(authReq.auth)
     res.json({
       code: 0,
       message: 'ok',
@@ -94,6 +96,7 @@ dashboardRouter.get(
   // 区间分析与看板统计同属经营指标，统一要求 dashboard:view。
   requirePermission('dashboard:view'),
   asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
     const query = analyticsQuerySchema.parse(req.query)
     const filter = resolveDateRangeQuery(query)
     const data = await dashboardService.getAnalytics({
@@ -102,7 +105,7 @@ dashboardRouter.get(
       productSpecMode: query.productSpecMode,
       productId: query.productId,
       topN: query.topN,
-    })
+    }, authReq.auth)
     res.json({
       code: 0,
       message: 'ok',
@@ -116,13 +119,14 @@ dashboardRouter.get(
   // 商品下钻会暴露细粒度经营数据，统一纳入 dashboard:view。
   requirePermission('dashboard:view'),
   asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
     const query = productDrilldownQuerySchema.parse(req.query)
     const filter = resolveDateRangeQuery(query)
     const data = await dashboardService.getProductRankDrilldown({
       productId: query.productId,
       nameSnapshot: query.nameSnapshot,
       ...filter,
-    })
+    }, authReq.auth)
     res.json({
       code: 0,
       message: 'ok',
@@ -136,12 +140,13 @@ dashboardRouter.get(
   // 客户下钻与统计同属看板能力，需要 dashboard:view。
   requirePermission('dashboard:view'),
   asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
     const query = customerDrilldownQuerySchema.parse(req.query)
     const filter = resolveDateRangeQuery(query)
     const data = await dashboardService.getCustomerRankDrilldown({
       customerName: query.customerName,
       ...filter,
-    })
+    }, authReq.auth)
     res.json({
       code: 0,
       message: 'ok',
@@ -155,12 +160,13 @@ dashboardRouter.get(
   // 标签聚合统计属于看板查询能力，需要 dashboard:view。
   requirePermission('dashboard:view'),
   asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
     const query = tagAggregateQuerySchema.parse(req.query)
     const filter = resolveDateRangeQuery(query)
     const data = await dashboardService.getTagAggregate({
       tagId: query.tagId,
       ...filter,
-    })
+    }, authReq.auth)
     res.json({
       code: 0,
       message: 'ok',
@@ -174,9 +180,10 @@ dashboardRouter.get(
   // 饼图统计与其它看板接口保持同一权限口径，统一要求 dashboard:view。
   requirePermission('dashboard:view'),
   asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
     const query = dashboardFilterQuerySchema.parse(req.query)
     const filter = resolveDateRangeQuery(query)
-    const data = await dashboardService.getDashboardPieData(filter)
+    const data = await dashboardService.getDashboardPieData(filter, authReq.auth)
     res.json({
       code: 0,
       message: 'ok',

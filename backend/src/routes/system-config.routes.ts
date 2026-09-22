@@ -23,15 +23,30 @@ import { extractRequestMeta } from '../utils/request-meta.js'
 
 const CLIENT_DEPARTMENT_NODE_LIMIT = 3000
 
-const orderSerialConfigValueSchema = z.object({
-  start: z.number().int().positive(),
-  current: z.number().int().nonnegative(),
-  width: z.number().int().min(1).max(12),
+const canonicalIdentifierConfigValueSchema = z.object({
+  start: z.literal(1),
+  current: z.number().int().safe().nonnegative().max(999_999),
+  width: z.literal(6),
 })
 
-const updateOrderSerialConfigsSchema = z.object({
-  department: orderSerialConfigValueSchema,
-  walkin: orderSerialConfigValueSchema,
+const readonlyBusinessIdentifierConfigValueSchema = z.object({
+  start: z.number().int().safe().positive(),
+  current: z.number().int().safe().nonnegative(),
+  width: z.number().int().safe().min(1).max(12),
+})
+
+const canonicalIdentifierGroupSchema = z.object({
+  department: canonicalIdentifierConfigValueSchema,
+  walkin: canonicalIdentifierConfigValueSchema,
+})
+
+const updateOrderIdentifierConfigsSchema = z.object({
+  system: canonicalIdentifierGroupSchema,
+  preorder: canonicalIdentifierGroupSchema,
+  business: z.object({
+    department: readonlyBusinessIdentifierConfigValueSchema,
+    walkin: readonlyBusinessIdentifierConfigValueSchema,
+  }),
 })
 
 const updateO2oRuleConfigsSchema = z.object({
@@ -233,15 +248,29 @@ systemConfigRouter.put(
   '/order-serial',
   requirePermission('system_configs:update'),
   requireRole('admin'),
+  asyncHandler(async () => {
+    throw new BizError('PUT /order-serial 已弃用，请改用 PUT /order-identifiers', 410)
+  }),
+)
+
+systemConfigRouter.get(
+  '/order-identifiers',
+  requirePermission('system_configs:view'),
+  asyncHandler(async (_req, res) => {
+    const data = await systemConfigService.getOrderIdentifierConfigs()
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+systemConfigRouter.put(
+  '/order-identifiers',
+  requirePermission('system_configs:update'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
-    const payload = updateOrderSerialConfigsSchema.parse(req.body)
-    const data = await systemConfigService.updateOrderSerialConfigs(payload, authReq.auth, extractRequestMeta(req))
-    res.json({
-      code: 0,
-      message: 'ok',
-      data,
-    })
+    const payload = updateOrderIdentifierConfigsSchema.parse(req.body)
+    const data = await systemConfigService.updateOrderIdentifierConfigs(payload, authReq.auth, extractRequestMeta(req))
+    res.json({ code: 0, message: 'ok', data })
   }),
 )
 

@@ -30,7 +30,10 @@ export interface OrderMergeCommitInput extends OrderMergePreviewInput {
 
 export interface OrderMergeOrderReference {
   id: string
-  showNo: string
+  /** 正式出库内部追溯编号；不作为业务主展示。 */
+  systemNo: string
+  /** @deprecated 仅兼容一发布周期的旧响应字段，等同 systemNo。 */
+  showNo?: string
   businessNo: string
   editVersion: number
   status: OutboundOrderMergeStatus
@@ -46,8 +49,10 @@ export interface OrderMergeOrderReference {
   remark: string | null
   /** 来源单据类型：线上预订单核销生成的正式出库单为 o2o_preorder，其余为 null。 */
   sourceDocType: 'o2o_preorder' | null
-  /** 来源单据号快照，与人工备注分离。 */
-  sourceDocNo: string | null
+  /** 来源预订单号快照，与人工备注分离。 */
+  sourcePreorderNo: string | null
+  /** @deprecated 仅兼容一发布周期的旧响应字段，等同 sourcePreorderNo。 */
+  sourceDocNo?: string | null
   creatorUserId: string | null
   creatorUsername: string | null
   creatorDisplayName: string | null
@@ -127,11 +132,14 @@ export interface O2oPreorderSummary {
   totalAmount: string
   expireInSeconds: number
   id: string
-  showNo: string
-  customerOrderShowNo: string | null
+  /** O2O 预订单主编号。 */
+  preorderNo: string
+  /** 关联正式出库单的业务主编号；客户端不得接收系统追溯号。 */
   customerOrderBusinessNo: string | null
-  originalCustomerOrderShowNo?: string | null
   originalCustomerOrderBusinessNo?: string | null
+  /** 统一搜索命中的编号类型；非编号搜索时为空。 */
+  matchedIdentifierType?: 'businessNo' | 'preorderNo' | null
+  matchedIdentifierValue?: string | null
   verifyCode: string
   status: O2oOrderStatus
   businessStatus: O2oOrderBusinessStatus | null
@@ -184,11 +192,12 @@ export interface O2oPreorderDetailOrder {
   totalAmount: string
   expireInSeconds: number
   id: string
-  showNo: string
-  customerOrderShowNo: string | null
+  /** O2O 预订单主编号。 */
+  preorderNo: string
   customerOrderBusinessNo: string | null
-  originalCustomerOrderShowNo?: string | null
   originalCustomerOrderBusinessNo?: string | null
+  matchedIdentifierType?: 'businessNo' | 'preorderNo' | null
+  matchedIdentifierValue?: string | null
   verifyCode: string
   status: O2oOrderStatus
   businessStatus: O2oOrderBusinessStatus | null

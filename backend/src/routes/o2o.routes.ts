@@ -24,6 +24,8 @@ import {
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { CLIENT_USER_ACCOUNT_TYPES } from '../entities/client-user.entity.js'
 import { assertPermanentDeletePassword } from '../utils/permanent-delete-password.js'
+import { resolveCompatibleIdentifierInput } from '../services/order-serial.service.js'
+import { projectSystemIdentifiersForRole } from '../utils/system-identifier-visibility.js'
 
 import { MAX_DATABASE_INT, MAX_O2O_ORDER_ITEM_COUNT } from '../constants/web-resource-limits.js'
 
@@ -136,7 +138,8 @@ const complianceFlagsSchema = z
   })
 
 const deleteConsoleOrderSchema = z.object({
-  confirmShowNo: z.string().trim().min(1, '请填写订单号完成二次确认'),
+  confirmPreorderNo: z.string().trim().min(1).optional(),
+  confirmShowNo: z.string().trim().min(1).optional(),
   permanentDeletePassword: z.string().optional(),
 })
 
@@ -145,7 +148,11 @@ const adminCancelOrderSchema = z.object({
 })
 
 const batchPurgeCancelledOrdersSchema = z.object({
-  orders: z.array(z.object({ id: z.string().trim().min(1), confirmShowNo: z.string().trim().min(1, '请填写订单号完成二次确认') }))
+  orders: z.array(z.object({
+    id: z.string().trim().min(1),
+    confirmPreorderNo: z.string().trim().min(1).optional(),
+    confirmShowNo: z.string().trim().min(1).optional(),
+  }))
     .min(1).max(50).superRefine((orders, context) => {
       const ids = new Set<string>()
       orders.forEach((order, index) => {
@@ -209,6 +216,21 @@ const sendPublicJsonSnapshot = <T>(
 
 export const o2oRouter = Router()
 const o2oAdminRouter = Router()
+
+// 公共、客户端与管理端共用同一响应边界；执行 res.json 时管理端鉴权上下文已完成注入。
+o2oRouter.use((req, res, next) => {
+  // 商品目录/门店配置等高频公共响应不含订单标识，避免对大对象做无意义深复制。
+  if (!/^\/(?:mall\/preorders(?:\/|$)|orders(?:\/|$)|verify(?:\/|$))/.test(req.path)) {
+    next()
+    return
+  }
+  const originalJson = res.json.bind(res)
+  res.json = ((body: unknown) => originalJson(projectSystemIdentifiersForRole(
+    body,
+    (req as AuthenticatedRequest).auth?.role,
+  ))) as typeof res.json
+  next()
+})
 
 // 管理端 O2O 接口统一在子路由入口完成登录态和 CSRF 校验，避免新增接口时遗漏写操作保护。
 o2oAdminRouter.use(requireAuth, requireAdminCsrf)
@@ -299,7 +321,7 @@ o2oRouter.post(
         actionLabel: '客户端标记部门订单已打印',
         targetType: 'o2o_order',
         targetId: result.detail.order.id,
-        targetCode: result.detail.order.showNo,
+        targetCode: result.detail.order.preorderNo,
         actor: {
           userId: authReq.clientAuth.userId,
           username: authReq.clientAuth.account || authReq.clientAuth.mobile,
@@ -339,7 +361,7 @@ o2oRouter.patch(
       actionLabel: '客户端修改订单',
       targetType: 'o2o_order',
       targetId: data.order.id,
-      targetCode: data.order.showNo,
+      targetCode: data.order.preorderNo,
       actor: {
         userId: authReq.clientAuth.userId,
         username: authReq.clientAuth.account,
@@ -406,10 +428,22 @@ o2oRouter.post(
 
 // 管理端扫码前可先读取核销详情，便于展示订单内容与状态确认。
 o2oAdminRouter.get(
+  '/verify/preorder-no/:preorderNo',
+  requirePermission('orders:view'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const data = await o2oPreorderService.getVerifyDetailByPreorderNo(req.params.preorderNo, authReq.auth)
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+o2oAdminRouter.get(
+  // @deprecated 兼容一个发布周期；showNo 只是旧参数名，实际映射 returnNo/preorderNo，不代表 businessNo/systemNo。
   '/verify/show-no/:showNo',
   requirePermission('orders:view'),
   asyncHandler(async (req, res) => {
-    const data = await o2oPreorderService.getVerifyDetailByShowNo(req.params.showNo)
+    const authReq = req as AuthenticatedRequest
+    const data = await o2oPreorderService.getVerifyDetailByShowNo(req.params.showNo, authReq.auth)
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -438,7 +472,15 @@ o2oAdminRouter.post(
     const authReq = req as AuthenticatedRequest
     const payload = batchPurgeCancelledOrdersSchema.parse(req.body ?? {})
     assertPermanentDeletePassword(payload.permanentDeletePassword)
-    const data = await o2oPreorderService.batchPurgeCancelledOrders({ orders: payload.orders, actor: authReq.auth, requestMeta: extractRequestMeta(req) })
+    const orders = payload.orders.map((order) => ({
+      id: order.id,
+      confirmPreorderNo: resolveCompatibleIdentifierInput({
+        canonicalValue: order.confirmPreorderNo,
+        legacyValue: order.confirmShowNo,
+        fieldLabel: '预订单号',
+      }),
+    }))
+    const data = await o2oPreorderService.batchPurgeCancelledOrders({ orders, actor: authReq.auth, requestMeta: extractRequestMeta(req) })
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -448,8 +490,9 @@ o2oAdminRouter.get(
   '/orders',
   requirePermission('orders:view'),
   asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
     const query = consoleOrderQuerySchema.parse(req.query)
-    const data = await o2oPreorderService.listConsoleOrders(query)
+    const data = await o2oPreorderService.listConsoleOrders(query, authReq.auth)
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -460,8 +503,9 @@ o2oAdminRouter.get(
   '/orders/pool',
   requirePermission('orders:view'),
   asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
     const query = consoleOrderPoolQuerySchema.parse(req.query)
-    const data = await o2oPreorderService.listConsoleOrderPool(query)
+    const data = await o2oPreorderService.listConsoleOrderPool(query, authReq.auth)
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -471,7 +515,8 @@ o2oAdminRouter.get(
   '/orders/:id',
   requirePermission('orders:view'),
   asyncHandler(async (req, res) => {
-    const data = await o2oPreorderService.detailById(req.params.id)
+    const authReq = req as AuthenticatedRequest
+    const data = await o2oPreorderService.detailById(req.params.id, authReq.auth)
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -488,7 +533,11 @@ o2oAdminRouter.delete(
     const data = await o2oPreorderService.deleteConsoleOrder(
       {
         orderId: req.params.id,
-        confirmShowNo: payload.confirmShowNo,
+        confirmPreorderNo: resolveCompatibleIdentifierInput({
+          canonicalValue: payload.confirmPreorderNo,
+          legacyValue: payload.confirmShowNo,
+          fieldLabel: '预订单号',
+        }),
       },
       authReq.auth,
       extractRequestMeta(req),
@@ -527,7 +576,7 @@ o2oAdminRouter.patch(
       actionLabel,
       targetType: 'o2o_order',
       targetId: data.order.id,
-      targetCode: data.order.showNo,
+      targetCode: data.order.preorderNo,
       actor: authReq.auth,
       requestMeta: extractRequestMeta(req),
       detail: {
@@ -561,7 +610,7 @@ o2oAdminRouter.patch(
       actionLabel: '门店现场改单',
       targetType: 'o2o_order',
       targetId: data.order.id,
-      targetCode: data.order.showNo,
+      targetCode: data.order.preorderNo,
       actor: authReq.auth,
       requestMeta: extractRequestMeta(req),
       detail: {
@@ -617,7 +666,7 @@ o2oAdminRouter.patch(
         actionLabel,
         targetType: 'o2o_order',
         targetId: data.order.id,
-        targetCode: data.order.showNo,
+        targetCode: data.order.preorderNo,
         actor: authReq.auth,
         requestMeta: extractRequestMeta(req),
         detail: {
@@ -652,7 +701,8 @@ o2oAdminRouter.get(
   '/verify/:verifyCode',
   requirePermission('orders:view'),
   asyncHandler(async (req, res) => {
-    const data = await o2oPreorderService.getVerifyDetail(req.params.verifyCode)
+    const authReq = req as AuthenticatedRequest
+    const data = await o2oPreorderService.getVerifyDetail(req.params.verifyCode, authReq.auth)
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -701,32 +751,11 @@ o2oAdminRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = verifySchema.parse(req.body)
-    const data = await o2oPreorderService.verifyByCode(payload.verifyCode, authReq.auth)
-    const isReturnVerify = data.operationType === 'return_verify'
-    const targetDetail = data.detail
-    // 核销结果详情存在“预订单详情”和“退货申请详情”两种结构：
-    // - 退货申请详情的主键位于顶层 `id`
-    // - 预订单详情的主键位于 `order.id`
-    // 这里通过返回单号字段做类型守卫，统一提取审计日志所需的目标主键与展示编号。
-    const targetId = 'returnNo' in targetDetail ? targetDetail.id : targetDetail.order.id
-    const targetCode = 'returnNo' in targetDetail ? targetDetail.returnNo : targetDetail.order.showNo
-
-    await auditService.record({
-      actionType: isReturnVerify ? 'o2o.return_request.verify' : 'o2o.preorder.verify',
-      actionLabel: isReturnVerify ? '核销退货申请并回库' : '核销预订单并出库',
-      targetType: isReturnVerify ? 'o2o_return_request' : 'o2o_order',
-      targetId,
-      targetCode,
-      actor: authReq.auth,
-      requestMeta: extractRequestMeta(req),
-      detail: {
-        verifyCode: payload.verifyCode,
-        operationType: data.operationType,
-        verifyTargetType: data.verifyTargetType,
-        // 预订单核销生成的正式出库单号，便于从审计日志追溯到结构化来源字段对应的出库单。
-        outboundOrderShowNo: 'returnNo' in targetDetail ? null : (targetDetail.order.customerOrderShowNo ?? null),
-      },
-    })
+    const data = await o2oPreorderService.verifyByCode(
+      payload.verifyCode,
+      authReq.auth,
+      extractRequestMeta(req),
+    )
 
     res.json({ code: 0, message: 'ok', data })
   }),

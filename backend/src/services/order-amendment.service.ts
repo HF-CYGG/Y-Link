@@ -40,6 +40,8 @@ export interface OrderAmendmentBatchInput {
 
 export interface OrderAmendmentSnapshot {
   businessNo: string
+  systemNo: string
+  /** @deprecated 兼容一个发布周期。 */
   showNo: string
   orderType: OrderType
   customerDepartmentName: string | null
@@ -186,8 +188,7 @@ export class OrderAmendmentService {
           actionLabel: '修订出库单',
           targetType: 'order',
           targetId: String(item.order.id),
-          // 仪表盘动态跳转仍以不可变 showNo 为系统定位键；可编辑 businessNo 只放入审计详情。
-          targetCode: item.order.showNo,
+          targetCode: item.order.businessNo,
           actor,
           requestMeta,
           detail: {
@@ -241,7 +242,7 @@ export class OrderAmendmentService {
         orderType: item.after.orderType,
         targetOrderId: String(item.order.id),
         targetOrderUuid: item.order.orderUuid,
-        targetShowNo: item.order.showNo,
+        targetSystemNo: item.order.systemNo,
         reason,
         actor,
         requestMeta,
@@ -278,7 +279,7 @@ export class OrderAmendmentService {
         actionLabel: '回收并复用已永久删除订单业务号',
         targetType: 'order',
         targetId: String(item.order.id),
-        targetCode: item.order.showNo,
+        targetCode: item.order.businessNo,
         actor,
         requestMeta,
         detail: {
@@ -499,7 +500,8 @@ export class OrderAmendmentService {
   private snapshot(order: BizOutboundOrder): OrderAmendmentSnapshot {
     return {
       businessNo: order.businessNo,
-      showNo: order.showNo,
+      systemNo: order.systemNo,
+      showNo: order.systemNo,
       orderType: order.orderType as OrderType,
       customerDepartmentName: order.customerDepartmentName,
       customerName: order.customerName,
@@ -514,6 +516,7 @@ export class OrderAmendmentService {
   private emptySnapshot(): OrderAmendmentSnapshot {
     return {
       businessNo: '',
+      systemNo: '',
       showNo: '',
       orderType: 'walkin',
       customerDepartmentName: null,

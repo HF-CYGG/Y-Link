@@ -153,7 +153,7 @@ async function main() {
       orderSequence += 1
       const client = clients[clientIndex]!
       const preorder = await preorderRepo.save(preorderRepo.create({
-        showNo: `O2O-ISSUE71-${seed}-${orderSequence}`,
+        preorderNo: `PRE-D-${String(orderSequence).padStart(6, '0')}`,
         clientUserId: client.entity.id,
         clientRequestId: `issue71-request-${seed}-${orderSequence}`,
         clientRequestHash: randomUUID().replaceAll('-', ''),
@@ -198,7 +198,7 @@ async function main() {
       }))
       const outbound = await outboundRepo.save(outboundRepo.create({
         orderUuid: randomUUID(),
-        showNo: `CK-ISSUE71-${seed}-${orderSequence}`,
+        systemNo: `OUT-D-${String(orderSequence).padStart(6, '0')}`,
         businessNo: `yy${String(710000 + orderSequence)}`,
         editVersion: 1,
         status: 'active',
@@ -209,8 +209,11 @@ async function main() {
         issuerName: actor.displayName,
         customerDepartmentName: '海右书院/信息中心',
         idempotencyKey: `o2o-preorder-verify:${preorder.id}`,
+        sourceDocType: 'o2o_preorder',
+        sourceDocId: String(preorder.id),
+        sourceDocNo: preorder.preorderNo,
         customerName: client.entity.realName,
-        remark: `preorder:${preorder.showNo}`,
+        remark: `preorder:${preorder.preorderNo}`,
         totalQty: qty.toFixed(2),
         totalAmount: (qty * 10).toFixed(2),
         isDeleted: false,
@@ -233,7 +236,7 @@ async function main() {
         qty: qty.toFixed(2),
         unitPrice: '10.00',
         lineAmount: (qty * 10).toFixed(2),
-        remark: preorder.showNo,
+        remark: preorder.preorderNo,
         sourceOrderId: null,
         sourceOrderUuid: null,
         sourceOrderItemId: null,
@@ -349,10 +352,24 @@ async function main() {
 
     const targetDetail = await o2oPreorderService.getMyOrderDetail(target.client.auth, String(target.preorder.id))
     const sourceDetail = await o2oPreorderService.getMyOrderDetail(source.client.auth, String(source.preorder.id))
-    assert.equal(targetDetail.order.customerOrderShowNo, target.outbound.showNo)
-    assert.equal(targetDetail.order.originalCustomerOrderShowNo, target.outbound.showNo)
-    assert.equal(sourceDetail.order.customerOrderShowNo, target.outbound.showNo, '来源客户端当前正式单号必须解析为父单号')
-    assert.equal(sourceDetail.order.originalCustomerOrderShowNo, source.outbound.showNo, '来源客户端必须保留原正式单号')
+    assert.equal(targetDetail.order.customerOrderBusinessNo, target.outbound.businessNo)
+    assert.equal(targetDetail.order.originalCustomerOrderBusinessNo, target.outbound.businessNo)
+    assert.equal(sourceDetail.order.customerOrderBusinessNo, target.outbound.businessNo, '来源客户端当前业务单号必须解析为父单业务号')
+    assert.equal(sourceDetail.order.originalCustomerOrderBusinessNo, source.outbound.businessNo, '来源客户端必须保留原业务单号')
+    for (const clientDetail of [targetDetail, sourceDetail]) {
+      assert.equal(Object.hasOwn(clientDetail.order, 'customerOrderSystemNo'), false, '客户端不得返回当前正式单 systemNo')
+      assert.equal(Object.hasOwn(clientDetail.order, 'originalCustomerOrderSystemNo'), false, '客户端不得返回原正式单 systemNo')
+      assert.equal(Object.hasOwn(clientDetail.order, 'customerOrderShowNo'), false, '客户端不得返回旧 systemNo 兼容别名')
+      assert.equal(Object.hasOwn(clientDetail.order, 'originalCustomerOrderShowNo'), false, '客户端不得返回旧原单 systemNo 兼容别名')
+    }
+    const targetAdminDetail = await o2oPreorderService.detailById(String(target.preorder.id), actor)
+    const sourceAdminDetail = await o2oPreorderService.detailById(String(source.preorder.id), actor)
+    assert.equal(targetAdminDetail.order.customerOrderSystemNo, target.outbound.systemNo)
+    assert.equal(targetAdminDetail.order.customerOrderShowNo, target.outbound.systemNo, '管理员兼容别名必须等于 canonical systemNo')
+    assert.equal(targetAdminDetail.order.originalCustomerOrderSystemNo, target.outbound.systemNo)
+    assert.equal(sourceAdminDetail.order.customerOrderSystemNo, target.outbound.systemNo, '管理员查看来源单时当前 systemNo 必须解析为父单')
+    assert.equal(sourceAdminDetail.order.originalCustomerOrderSystemNo, source.outbound.systemNo, '管理员查看来源单时必须保留原 systemNo')
+    assert.equal(sourceAdminDetail.order.originalCustomerOrderShowNo, source.outbound.systemNo, '管理员原单兼容别名必须等于 canonical systemNo')
     assert.deepEqual(sourceDetail.items.map((item) => String(item.id)), [String(source.preorderItem.id)], '客户端详情只能返回本人原预订单明细')
     await assert.rejects(
       () => o2oPreorderService.getMyOrderDetail(target.client.auth, String(source.preorder.id)),
@@ -428,7 +445,9 @@ async function main() {
       reason: '合规组同步失败回滚验证',
       idempotencyKey: `issue71-o2o-compliance-rollback-${seed}`,
     }, actor)
-    rollbackTarget.outbound.idempotencyKey = `broken-o2o-link:${rollbackTarget.preorder.id}`
+    rollbackTarget.outbound.sourceDocType = null
+    rollbackTarget.outbound.sourceDocId = null
+    rollbackTarget.outbound.sourceDocNo = null
     await outboundRepo.save(rollbackTarget.outbound)
     await assert.rejects(
       () => o2oPreorderService.updateComplianceFlagsByAdmin({
@@ -461,7 +480,7 @@ async function main() {
       () => orderService.softDeleteById(
         String(deleteTarget.outbound.id),
         actor,
-        deleteTarget.outbound.showNo,
+        deleteTarget.outbound.businessNo,
       ),
       (error: unknown) => error instanceof BizError && error.statusCode === 409,
       '合并组任一原预订单存在 pending 退货时必须原子阻断父单软删',
@@ -472,7 +491,7 @@ async function main() {
     const deleteGuardVerify = await o2oPreorderService.verifyByCode(deleteGuardReturn.verifyCode, actor)
     assert.equal(deleteGuardVerify?.verifyTargetType, 'return_request', '软删被阻断后原退货申请必须仍可正常核销')
 
-    await orderService.softDeleteById(String(target.outbound.id), actor, target.outbound.showNo)
+    await orderService.softDeleteById(String(target.outbound.id), actor, target.outbound.businessNo)
     assert.equal(Boolean((await preorderRepo.findOneByOrFail({ id: target.preorder.id })).isDeleted), true)
     assert.equal(Boolean((await preorderRepo.findOneByOrFail({ id: source.preorder.id })).isDeleted), true, '父单软删必须联动所有来源预订单')
     await orderService.restoreById(String(target.outbound.id), actor)
@@ -482,7 +501,7 @@ async function main() {
     await assert.rejects(
       () => o2oPreorderService.deleteConsoleOrder({
         orderId: String(source.preorder.id),
-        confirmShowNo: source.preorder.showNo,
+        confirmPreorderNo: source.preorder.preorderNo,
       }, actor),
       (error: unknown) => error instanceof BizError && error.statusCode === 409,
       '任意合并成员关联的 O2O 预订单必须阻断永久删除',

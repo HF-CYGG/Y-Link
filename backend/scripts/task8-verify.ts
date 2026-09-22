@@ -73,8 +73,8 @@ const pass = (title: string) => {
   console.log(`✅ ${title}`)
 }
 
-const getTodayText = () => {
-  const now = new Date()
+const getTodayText = (value: Date = new Date()) => {
+  const now = value
   const month = String(now.getMonth() + 1).padStart(2, '0')
   const day = String(now.getDate()).padStart(2, '0')
   return `${now.getFullYear()}-${month}-${day}`
@@ -212,16 +212,16 @@ const verifyConcurrentSerialAndDrilldown = async () => {
     Promise.all(createDepartmentOrders),
   ])
 
-  const walkinShowNos = walkinOrders.map((item) => item.order.showNo)
-  const departmentShowNos = departmentOrders.map((item) => item.order.showNo)
+  const walkinSystemNos = walkinOrders.map((item) => item.order.systemNo)
+  const departmentSystemNos = departmentOrders.map((item) => item.order.systemNo)
 
-  assert.equal(new Set(walkinShowNos).size, walkinShowNos.length)
-  assert.equal(new Set(departmentShowNos).size, departmentShowNos.length)
-  assert.equal(walkinShowNos.every((showNo) => /^hyyz\d{6}$/.test(showNo)), true)
-  assert.equal(departmentShowNos.every((showNo) => /^hyyzjd\d{6}$/.test(showNo)), true)
+  assert.equal(new Set(walkinSystemNos).size, walkinSystemNos.length)
+  assert.equal(new Set(departmentSystemNos).size, departmentSystemNos.length)
+  assert.equal(walkinSystemNos.every((systemNo) => /^OUT-W-\d{6}$/.test(systemNo)), true)
+  assert.equal(departmentSystemNos.every((systemNo) => /^OUT-D-\d{6}$/.test(systemNo)), true)
 
-  const walkinSerials = walkinShowNos.map((showNo) => parseSerial(showNo, 'hyyz'))
-  const departmentSerials = departmentShowNos.map((showNo) => parseSerial(showNo, 'hyyzjd'))
+  const walkinSerials = walkinSystemNos.map((systemNo) => parseSerial(systemNo, 'OUT-W-'))
+  const departmentSerials = departmentSystemNos.map((systemNo) => parseSerial(systemNo, 'OUT-D-'))
   expectContinuousSequence(walkinSerials)
   expectContinuousSequence(departmentSerials)
 
@@ -235,34 +235,33 @@ const verifyConcurrentSerialAndDrilldown = async () => {
   )
   pass('并发单号生成通过：同类无重复、双类型不串号且流水连续')
 
-  const todayText = getTodayText()
+  const todayText = getTodayText(savedOrders[0]?.createdAt ?? new Date())
   const productDrilldown = await dashboardService.getProductRankDrilldown({
     productId: productA.id,
     startDate: todayText,
     endDate: todayText,
     orderType: 'walkin',
-  })
+  }, mockActor)
   assert.equal(productDrilldown.records.length >= 1, true)
   assert.equal(productDrilldown.records.every((record) => record.orderType === 'walkin'), true)
 
-  // 看板的"客户"维度取的是申请部门（`COALESCE(NULLIF(TRIM(customerDepartmentName), ''), '散客')`），
-  // 散客单没有部门、统一归到 `散客` 这一个桶里——不是按订单的 customerName 逐个成桶。
-  // 因此这里要按桶名 `散客` 下钻，早先按 `散客1` 查是查不到任何记录的。
+  // 当前客户榜只统计部门单，并按部门名称聚合；使用已落库的部门快照做下钻。
   const customerDrilldown = await dashboardService.getCustomerRankDrilldown({
-    customerName: '散客',
+    customerName: '后勤1组',
     startDate: todayText,
     endDate: todayText,
-    orderType: 'walkin',
-  })
+    orderType: 'department',
+  }, mockActor)
   assert.equal(customerDrilldown.records.length >= 1, true)
-  assert.equal(customerDrilldown.records.every((record) => record.showNo.startsWith('hyyz')), true)
+  assert.equal(customerDrilldown.records.every((record) => record.systemNo.startsWith('OUT-D-')), true)
+  assert.equal(customerDrilldown.records.every((record) => record.showNo === record.systemNo), true)
 
   const tagAggregate = await dashboardService.getTagAggregate({
     tagId: analyticsTag.id,
     startDate: todayText,
     endDate: todayText,
     orderType: 'walkin',
-  })
+  }, mockActor)
   assert.equal(Number(tagAggregate.totalQuantity) > 0, true)
   assert.equal(Number(tagAggregate.totalAmount) > 0, true)
   pass('看板下钻与标签聚合回归通过')

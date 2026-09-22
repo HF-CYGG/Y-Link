@@ -13,6 +13,8 @@
 import dayjs from 'dayjs'
 import { ref, watch } from 'vue'
 import { getOrderRevisions, type OrderDetailResult, type OrderRevisionRecord } from '@/api/modules/order'
+import { useAuthStore } from '@/store'
+import pinia from '@/store/pinia'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 
 /**
@@ -28,6 +30,8 @@ const props = defineProps<{
   detailGridClass: string
 }>()
 const emit = defineEmits<{ navigate: [orderId: string] }>()
+const authStore = useAuthStore(pinia)
+const canViewSystemNo = () => authStore.currentUser?.role === 'admin'
 
 const revisions = ref<OrderRevisionRecord[]>([])
 const revisionsLoading = ref(false)
@@ -97,9 +101,9 @@ const hasItemProvenance = () => props.order.items.some((item) => Boolean(item.so
  * - 读取结构化来源快照，不解析备注或幂等键；
  * - 目前仅线上预订单核销生成的正式出库单有来源，其余返回 null 不展示。
  */
-const formatSourceDoc = (order: { sourceDocType?: string | null; sourceDocNo?: string | null }) => {
-  if (order.sourceDocType === 'o2o_preorder' && order.sourceDocNo) {
-    return `线上预订单 ${order.sourceDocNo}`
+const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderNo?: string | null }) => {
+  if (order.sourceDocType === 'o2o_preorder' && order.sourcePreorderNo) {
+    return `线上预订单 ${order.sourcePreorderNo}`
   }
   return null
 }
@@ -118,6 +122,7 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourceDocNo?: s
     </div>
     <el-descriptions :column="isPhone ? 1 : 2" border size="small">
       <el-descriptions-item label="业务单号">{{ order.businessNo }}</el-descriptions-item>
+      <el-descriptions-item v-if="canViewSystemNo()" label="出库系统编号（仅技术追溯）">{{ order.systemNo }}</el-descriptions-item>
       <el-descriptions-item label="库存模式">{{ formatInventoryMode(order) }}</el-descriptions-item>
       <el-descriptions-item label="订单类型">{{ formatOrderType(order.orderType) }}</el-descriptions-item>
       <el-descriptions-item label="开单时间">{{ dayjs(order.createdAt).format('YYYY-MM-DD HH:mm:ss') }}</el-descriptions-item>
@@ -146,7 +151,7 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourceDocNo?: s
     <p v-if="order.merge.role === 'source'" class="mt-2 text-sm text-teal-800">
       当前为来源单，已合并至
       <el-button v-if="order.merge.parent" link type="primary" @click="emit('navigate', order.merge.parent.id)">
-        {{ order.merge.parent.businessNo || order.merge.parent.showNo }}
+        {{ order.merge.parent.businessNo }}
       </el-button>
       <span v-else>父单</span>，仅支持查看。
     </p>
@@ -154,7 +159,7 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourceDocNo?: s
       <p class="text-sm text-teal-800">当前为父单，包含 {{ order.merge.children.length }} 张来源单。</p>
       <div class="mt-2 flex flex-wrap gap-2">
         <el-button v-for="child in order.merge.children" :key="child.id" link type="primary" @click="emit('navigate', child.id)">
-          {{ child.businessNo || child.showNo }}<span v-if="formatSourceDoc(child)">（{{ formatSourceDoc(child) }}）</span>
+          {{ child.businessNo }}<span v-if="formatSourceDoc(child)">（{{ formatSourceDoc(child) }}）</span>
         </el-button>
       </div>
     </div>

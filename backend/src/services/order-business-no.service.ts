@@ -24,12 +24,12 @@ const BUSINESS_NO_RULES: Record<OrderType, {
   department: {
     namespace: 'hyyzjd',
     sequenceKey: 'order.business.department',
-    configKeyPrefix: 'order.serial.department',
+    configKeyPrefix: 'order.business.department',
   },
   walkin: {
     namespace: 'hyyz',
     sequenceKey: 'order.business.walkin',
-    configKeyPrefix: 'order.serial.walkin',
+    configKeyPrefix: 'order.business.walkin',
   },
 }
 
@@ -48,7 +48,9 @@ const BUSINESS_NO_UNIQUE_MATCHER = {
 
 interface BusinessNoConfig {
   start: number
+  current: number
   width: number
+  currentKey: string
 }
 
 export interface ParsedBusinessNo {
@@ -102,8 +104,8 @@ export class OrderBusinessNoService {
   async allocate(orderType: OrderType, orderUuid: string, manager: EntityManager): Promise<string> {
     const rule = BUSINESS_NO_RULES[orderType]
     const config = await this.loadConfig(rule.configKeyPrefix, manager)
-    const sequence = await this.loadOrCreateSequence(rule.sequenceKey, config.start - 1, manager)
-    const current = this.parseNonNegativeInteger(sequence.currentValue, '订单业务号游标异常')
+    const sequence = await this.loadOrCreateSequence(rule.sequenceKey, Math.max(config.start - 1, config.current), manager)
+    const current = Math.max(config.current, this.parseNonNegativeInteger(sequence.currentValue, '订单业务号游标异常'))
     const next = current + 1
     const maxSerial = 10 ** config.width - 1
     if (next < config.start || next > maxSerial) {
@@ -120,6 +122,7 @@ export class OrderBusinessNoService {
     }, manager)
     sequence.currentValue = next
     await manager.getRepository(BusinessSequence).save(sequence)
+    await this.updateCurrentMirror(config.currentKey, next, manager)
     return businessNo
   }
 
@@ -149,8 +152,12 @@ export class OrderBusinessNoService {
       const orderType = namespace === 'hyyzjd' ? 'department' : 'walkin'
       const rule = BUSINESS_NO_RULES[orderType]
       const config = await this.loadConfig(rule.configKeyPrefix, manager)
-      const sequence = await this.loadOrCreateSequence(rule.sequenceKey, config.start - 1, manager)
-      const beforeCursor = this.parseNonNegativeInteger(sequence.currentValue, '订单业务号游标异常')
+      const sequence = await this.loadOrCreateSequence(rule.sequenceKey, Math.max(config.start - 1, config.current), manager)
+      const beforeCursor = Math.max(
+        config.start - 1,
+        config.current,
+        this.parseNonNegativeInteger(sequence.currentValue, '订单业务号游标异常'),
+      )
       const sortedTargets = [...namespaceTargets].sort((left, right) =>
         left.parsed.serialValue - right.parsed.serialValue
         || left.orderUuid.localeCompare(right.orderUuid),
@@ -166,9 +173,10 @@ export class OrderBusinessNoService {
             : 'order_amendment',
         }, manager)
       }
-      const afterCursor = sortedTargets.at(-1)?.parsed.serialValue ?? beforeCursor
+      const afterCursor = Math.max(beforeCursor, sortedTargets.at(-1)?.parsed.serialValue ?? beforeCursor)
       sequence.currentValue = afterCursor
       await manager.getRepository(BusinessSequence).save(sequence)
+      await this.updateCurrentMirror(config.currentKey, afterCursor, manager)
       plans.push(this.buildCursorPlan(namespace, beforeCursor, afterCursor, config.width))
     }
     return plans
@@ -186,7 +194,7 @@ export class OrderBusinessNoService {
       const rule = BUSINESS_NO_RULES[orderType]
       const config = await this.loadConfig(rule.configKeyPrefix, manager)
       const beforeCursor = await this.readCursorWithoutLock(orderType, config, manager)
-      const afterCursor = Math.max(...namespaceTargets.map((target) => target.parsed.serialValue))
+      const afterCursor = Math.max(beforeCursor, ...namespaceTargets.map((target) => target.parsed.serialValue))
       plans.push(this.buildCursorPlan(namespace, beforeCursor, afterCursor, config.width))
     }
     return plans
@@ -319,7 +327,7 @@ export class OrderBusinessNoService {
       orderType: OrderType
       targetOrderId: string
       targetOrderUuid: string
-      targetShowNo: string
+      targetSystemNo: string
       reason: string
       actor: AuthUserContext
       requestMeta?: RequestMeta
@@ -329,7 +337,7 @@ export class OrderBusinessNoService {
     const parsed = await this.parseForOrderType(input.businessNo, input.orderType, manager)
     const rule = BUSINESS_NO_RULES[input.orderType]
     const config = await this.loadConfig(rule.configKeyPrefix, manager)
-    await this.loadOrCreateSequence(rule.sequenceKey, config.start - 1, manager)
+    await this.loadOrCreateSequence(rule.sequenceKey, Math.max(config.start - 1, config.current), manager)
 
     const occupancyQuery = manager.getRepository(OrderBusinessNoOccupancy)
       .createQueryBuilder('occupancy')
@@ -360,7 +368,7 @@ export class OrderBusinessNoService {
       fromOrderUuid,
       toOrderUuid: input.targetOrderUuid,
       targetOrderIdSnapshot: input.targetOrderId,
-      targetShowNoSnapshot: input.targetShowNo,
+      targetSystemNoSnapshot: input.targetSystemNo,
       reuseCount,
       reason: input.reason,
       actorUserId: input.actor.userId,
@@ -383,7 +391,7 @@ export class OrderBusinessNoService {
     const config = await this.loadConfig(rule.configKeyPrefix, manager)
     const beforeCursor = await this.readCursorWithoutLock(orderType, config, manager)
     const physicalMax = await this.readPhysicalMaxSerial(orderType, config, manager, targetOrderId)
-    const afterCursor = Math.max(config.start - 1, physicalMax, parsed.serialValue)
+    const afterCursor = Math.max(beforeCursor, config.start - 1, physicalMax, parsed.serialValue)
     return this.buildCursorPlan(parsed.namespace, beforeCursor, afterCursor, config.width)
   }
 
@@ -391,11 +399,12 @@ export class OrderBusinessNoService {
   async recalibrateCursorFromPhysicalOrders(orderType: OrderType, manager: EntityManager): Promise<BusinessNoCursorPlan> {
     const rule = BUSINESS_NO_RULES[orderType]
     const config = await this.loadConfig(rule.configKeyPrefix, manager)
-    const sequence = await this.loadOrCreateSequence(rule.sequenceKey, config.start - 1, manager)
-    const beforeCursor = this.parseNonNegativeInteger(sequence.currentValue, '订单业务号游标异常')
-    const afterCursor = Math.max(config.start - 1, await this.readPhysicalMaxSerial(orderType, config, manager))
+    const sequence = await this.loadOrCreateSequence(rule.sequenceKey, Math.max(config.start - 1, config.current), manager)
+    const beforeCursor = Math.max(config.current, this.parseNonNegativeInteger(sequence.currentValue, '订单业务号游标异常'))
+    const afterCursor = Math.max(beforeCursor, config.start - 1, await this.readPhysicalMaxSerial(orderType, config, manager))
     sequence.currentValue = afterCursor
     await manager.getRepository(BusinessSequence).save(sequence)
+    await this.updateCurrentMirror(config.currentKey, afterCursor, manager)
     return this.buildCursorPlan(rule.namespace, beforeCursor, afterCursor, config.width)
   }
 
@@ -437,18 +446,26 @@ export class OrderBusinessNoService {
 
   private async loadConfig(configKeyPrefix: string, manager: EntityManager): Promise<BusinessNoConfig> {
     const startKey = `${configKeyPrefix}.start`
+    const currentKey = `${configKeyPrefix}.current`
     const widthKey = `${configKeyPrefix}.width`
     const rows = await manager.getRepository(SystemConfig).findBy([
       { configKey: startKey },
+      { configKey: currentKey },
       { configKey: widthKey },
     ])
     const configMap = new Map(rows.map((row) => [row.configKey, row.configValue]))
     const start = this.parsePositiveInteger(configMap.get(startKey), '订单业务号起始配置异常')
+    const current = this.parseNonNegativeInteger(configMap.get(currentKey), '订单业务号当前值配置异常')
     const width = this.parsePositiveInteger(configMap.get(widthKey), '订单业务号位宽配置异常')
     if (width > 12) {
       throw new BizError('订单业务号位宽配置异常：位宽必须在 1 到 12 之间', 500)
     }
-    return { start, width }
+    if (current < start - 1) throw new BizError('订单业务号当前值配置异常', 500)
+    return { start, current, width, currentKey }
+  }
+
+  private async updateCurrentMirror(currentKey: string, current: number, manager: EntityManager): Promise<void> {
+    await manager.getRepository(SystemConfig).update({ configKey: currentKey }, { configValue: String(current) })
   }
 
   private async readPhysicalMaxSerial(
@@ -492,7 +509,7 @@ export class OrderBusinessNoService {
     const rule = BUSINESS_NO_RULES[orderType]
     const existingSequence = await manager.getRepository(BusinessSequence).findOneBy({ sequenceKey: rule.sequenceKey })
     if (existingSequence) {
-      return this.parseNonNegativeInteger(existingSequence.currentValue, '订单业务号游标异常')
+      return Math.max(config.current, this.parseNonNegativeInteger(existingSequence.currentValue, '订单业务号游标异常'))
     }
     const maxRow = await manager.getRepository(OrderBusinessNoOccupancy)
       .createQueryBuilder('occupancy')

@@ -861,6 +861,7 @@ const AUTO_MIGRATABLE_FILES = [
   '052_yz_series_seq_reservation.sql',
   '053_yz_reservation_series_code.sql',
   '054_order_business_no_reuse.sql',
+  '055_order_identifier_namespaces.sql',
 ]
 
 /**
@@ -1006,6 +1007,92 @@ export async function runMysqlSchemaMigrations(dataSource: DataSource): Promise<
     buildMigrationAdvisoryLockName(env.DB_NAME),
     MIGRATION_ADVISORY_LOCK_TIMEOUT_SECONDS,
     (queryRunner) => applyPendingMigrations(queryRunner),
+  )
+}
+
+type MysqlOrderIdentifierMigrationStatus = Partial<Record<
+  | 'departmentConfigCount'
+  | 'departmentMarkerCount'
+  | 'departmentSequenceCount'
+  | 'walkinConfigCount'
+  | 'walkinMarkerCount'
+  | 'walkinSequenceCount',
+  number | string
+>>
+
+export function resolvePendingMysqlOrderIdentifierNamespaces(
+  status: MysqlOrderIdentifierMigrationStatus,
+): Array<'department' | 'walkin'> {
+  return [
+    Number(status.walkinConfigCount ?? 0) === 3
+      && Number(status.walkinMarkerCount ?? 0) === 1
+      && Number(status.walkinSequenceCount ?? 0) === 1
+      ? null
+      : 'walkin',
+    Number(status.departmentConfigCount ?? 0) === 3
+      && Number(status.departmentMarkerCount ?? 0) === 1
+      && Number(status.departmentSequenceCount ?? 0) === 1
+      ? null
+      : 'department',
+  ].filter((namespace): namespace is 'department' | 'walkin' => namespace !== null)
+}
+
+/**
+ * DB_AUTO_MIGRATE=false 时也要在默认配置写入前领养订单编号历史真相。
+ * advisory lock 内先只读检查两个 business namespace 的三项配置、sequence 与完成 marker：
+ * 全部完成时零写返回；仅有未完成 namespace 时才在事务内执行 055。
+ */
+export async function reconcileMysqlOrderIdentifierNamespaces(dataSource: DataSource): Promise<void> {
+  if (env.DB_TYPE !== 'mysql') return
+
+  await withMysqlAdvisoryLock(
+    dataSource,
+    buildMigrationAdvisoryLockName(env.DB_NAME),
+    MIGRATION_ADVISORY_LOCK_TIMEOUT_SECONDS,
+    async (queryRunner) => {
+      const statusRows = await queryRunner.query(`
+        SELECT
+          (SELECT COUNT(1) FROM system_configs
+           WHERE config_key IN ('order.business.department.start', 'order.business.department.current', 'order.business.department.width'))
+            AS departmentConfigCount,
+          (SELECT COUNT(1) FROM system_configs
+           WHERE config_key = 'order.business.department.migration.055' AND config_value = '1')
+            AS departmentMarkerCount,
+          (SELECT COUNT(1) FROM business_sequence WHERE sequence_key = 'order.business.department')
+            AS departmentSequenceCount,
+          (SELECT COUNT(1) FROM system_configs
+           WHERE config_key IN ('order.business.walkin.start', 'order.business.walkin.current', 'order.business.walkin.width'))
+            AS walkinConfigCount,
+          (SELECT COUNT(1) FROM system_configs
+           WHERE config_key = 'order.business.walkin.migration.055' AND config_value = '1')
+            AS walkinMarkerCount,
+          (SELECT COUNT(1) FROM business_sequence WHERE sequence_key = 'order.business.walkin')
+            AS walkinSequenceCount
+      `) as Array<Record<string, number | string>>
+      const pendingNamespaces = resolvePendingMysqlOrderIdentifierNamespaces(statusRows[0] ?? {})
+      if (pendingNamespaces.length === 0) return
+
+      await queryRunner.startTransaction()
+      const filename = '055_order_identifier_namespaces.sql'
+      try {
+        const filePath = path.join(SQL_DIR, filename)
+        if (!fs.existsSync(filePath)) {
+          throw new Error(`缺少订单编号领养脚本：${filename}`)
+        }
+        const statements = splitSqlStatements(fs.readFileSync(filePath, 'utf8'))
+        for (const statement of statements) {
+          await queryRunner.query(statement)
+        }
+        await queryRunner.commitTransaction()
+      } catch (error) {
+        if (queryRunner.isTransactionActive) await queryRunner.rollbackTransaction()
+        throw new Error(
+          `[启动失败] MySQL 订单编号历史领养失败，服务已阻止默认配置写入：${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        )
+      }
+    },
   )
 }
 

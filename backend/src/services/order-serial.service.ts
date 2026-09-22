@@ -3,14 +3,12 @@
  * 实现逻辑：
  * 1. business_sequence 每种流水只维护一行，生成时通过 MySQL 行锁或 SQLite 单写事务原子递增；
  * 2. 首次升级时才用数据库聚合校准历史最大值，正常下单不再把全部历史订单号载入 Node 内存；
- * 3. system_configs.current 继续作为管理端兼容镜像，删除治理仍可显式触发聚合校准。
+ * 3. system_configs.current 继续作为管理端兼容镜像，物理删除只能按锁定游标回收连续尾号。
  */
 
 import type { EntityManager } from 'typeorm'
 import { runInTransaction } from '../config/transaction-runner.js'
-import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BusinessSequence } from '../entities/business-sequence.entity.js'
-import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
 import { SystemConfig } from '../entities/system-config.entity.js'
 import {
   isRetryableMysqlTransactionError,
@@ -21,45 +19,53 @@ import { BizError } from '../utils/errors.js'
 const ORDER_TYPE_VALUES = ['department', 'walkin'] as const
 export type OrderType = (typeof ORDER_TYPE_VALUES)[number]
 
-const ORDER_SERIAL_RULES: Record<OrderType, { prefix: string; configKeyPrefix: string; sequenceKey: string }> = {
-  department: {
-    prefix: 'hyyzjd',
-    configKeyPrefix: 'order.serial.department',
-    sequenceKey: 'order.serial.department',
+type OrderIdentifierKind = 'system' | 'preorder'
+
+const ORDER_IDENTIFIER_RULES: Record<OrderIdentifierKind, Record<OrderType, {
+  prefix: string
+  configKeyPrefix: string
+  sequenceKey: string
+  tableName: 'biz_outbound_order' | 'o2o_preorder'
+}>> = {
+  system: {
+    department: {
+      prefix: 'OUT-D-',
+      configKeyPrefix: 'order.system.department',
+      sequenceKey: 'order.system.department',
+      tableName: 'biz_outbound_order',
+    },
+    walkin: {
+      prefix: 'OUT-W-',
+      configKeyPrefix: 'order.system.walkin',
+      sequenceKey: 'order.system.walkin',
+      tableName: 'biz_outbound_order',
+    },
   },
-  walkin: {
-    prefix: 'hyyz',
-    configKeyPrefix: 'order.serial.walkin',
-    sequenceKey: 'order.serial.walkin',
+  preorder: {
+    department: {
+      prefix: 'PRE-D-',
+      configKeyPrefix: 'o2o.preorder.department',
+      sequenceKey: 'o2o.preorder.department',
+      tableName: 'o2o_preorder',
+    },
+    walkin: {
+      prefix: 'PRE-W-',
+      configKeyPrefix: 'o2o.preorder.walkin',
+      sequenceKey: 'o2o.preorder.walkin',
+      tableName: 'o2o_preorder',
+    },
   },
 }
 
-export interface OrderSerialRollbackResult {
-  applied: boolean
-  current: number
-  removedSerial: number | null
-}
-
-export interface OrderSerialRecalibrationResult {
+export interface IdentifierSerialRollbackResult {
+  kind: OrderIdentifierKind
   orderType: OrderType
   applied: boolean
   rolledBack: boolean
   beforeCurrent: number
   current: number
   start: number
-  maxOccupiedSerial: number
-  outboundCount: number
-  preorderCount: number
-  latestOutboundShowNo: string | null
-  latestPreorderShowNo: string | null
-}
-
-interface OrderSerialOccupancySnapshot {
-  outboundCount: number
-  preorderCount: number
-  maxOccupiedSerial: number
-  latestOutboundShowNo: string | null
-  latestPreorderShowNo: string | null
+  removedSerials: number[]
 }
 
 interface SerialConfigSnapshot {
@@ -69,189 +75,211 @@ interface SerialConfigSnapshot {
   currentKey: string
 }
 
+export function resolveCompatibleIdentifierInput(input: {
+  canonicalValue?: string | null
+  legacyValue?: string | null
+  fieldLabel: string
+}): string {
+  const canonicalValue = input.canonicalValue?.trim() ?? ''
+  const legacyValue = input.legacyValue?.trim() ?? ''
+  if (canonicalValue && legacyValue && canonicalValue !== legacyValue) {
+    throw new BizError(`${input.fieldLabel} 与兼容字段 showNo 不一致`, 400)
+  }
+  const resolved = canonicalValue || legacyValue
+  if (!resolved) throw new BizError(`请填写${input.fieldLabel}`, 400)
+  return resolved
+}
+
 class OrderSerialService {
-  async generateOrderNo(orderType: string, manager?: EntityManager): Promise<string> {
+  async generateSystemNo(orderType: string, manager?: EntityManager): Promise<string> {
+    return this.generateIdentifierNo('system', orderType, manager)
+  }
+
+  async generatePreorderNo(orderType: string, manager?: EntityManager): Promise<string> {
+    return this.generateIdentifierNo('preorder', orderType, manager)
+  }
+
+  /**
+   * 物理删除后的编号回收只比较锁定游标，不扫描表内最大值。
+   * 批量输入按流水倒序处理，只有从当前游标开始连续命中的删除后缀会逐位回收；
+   * 先删中间号、再删尾号时最多回退一位，绝不会跨过此前形成的缺口复用旧号。
+   */
+  async rollbackDeletedIdentifierBatch(
+    kind: OrderIdentifierKind,
+    orderType: string,
+    deletedIdentifiers: string[],
+    manager?: EntityManager,
+  ): Promise<IdentifierSerialRollbackResult> {
     const normalizedOrderType = this.normalizeOrderType(orderType)
-    if (!normalizedOrderType) {
-      throw new BizError('订单类型非法，仅支持 department 或 walkin', 400)
-    }
-
+    if (!normalizedOrderType) throw new BizError('订单类型非法，仅支持 department 或 walkin', 400)
     if (manager) {
-      return this.generateOrderNoWithManager(normalizedOrderType, manager)
+      return this.rollbackDeletedIdentifierBatchWithManager(kind, normalizedOrderType, deletedIdentifiers, manager)
     }
-
-    let lastError: unknown
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
-      try {
-        return await runInTransaction(async (transactionManager) =>
-          this.generateOrderNoWithManager(normalizedOrderType, transactionManager),
-        )
-      } catch (error) {
-        lastError = error
-        const retryable = isRetryableSqliteLockError(error)
-          || isRetryableMysqlTransactionError(error)
-        if (attempt < 3 && retryable) {
-          // MySQL 要求死锁/锁等待超时后重放完整事务；短抖动避免同一批请求
-          // 立即按原节奏再次争抢相同行锁。流水号事务没有事务外副作用，回滚后可安全重试。
-          await new Promise((resolve) => {
-            setTimeout(resolve, attempt * 15 + Math.floor(Math.random() * 20))
-          })
-          continue
-        }
-        throw error
-      }
-    }
-
-    throw lastError ?? new BizError('订单流水号生成失败，请稍后重试', 500)
+    return runInTransaction((transactionManager) => this.rollbackDeletedIdentifierBatchWithManager(
+      kind,
+      normalizedOrderType,
+      deletedIdentifiers,
+      transactionManager,
+    ))
   }
 
-  async rollbackCurrentIfMatches(orderType: string, showNo: string, manager?: EntityManager): Promise<OrderSerialRollbackResult> {
-    const normalizedOrderType = this.normalizeOrderType(orderType)
-    if (!normalizedOrderType) {
-      throw new BizError('订单类型非法，仅支持 department 或 walkin', 400)
-    }
-
-    if (manager) {
-      return this.rollbackCurrentIfMatchesWithManager(normalizedOrderType, showNo, manager)
-    }
-    return runInTransaction((transactionManager) =>
-      this.rollbackCurrentIfMatchesWithManager(normalizedOrderType, showNo, transactionManager),
-    )
-  }
-
-  async recalibrateCurrentFromOccupancy(orderType: string, manager?: EntityManager): Promise<OrderSerialRecalibrationResult> {
-    const normalizedOrderType = this.normalizeOrderType(orderType)
-    if (!normalizedOrderType) {
-      throw new BizError('订单类型非法，仅支持 department 或 walkin', 400)
-    }
-
-    if (manager) {
-      return this.recalibrateCurrentFromOccupancyWithManager(normalizedOrderType, manager)
-    }
-    return runInTransaction((transactionManager) =>
-      this.recalibrateCurrentFromOccupancyWithManager(normalizedOrderType, transactionManager),
-    )
-  }
-
-  private async generateOrderNoWithManager(orderType: OrderType, manager: EntityManager): Promise<string> {
-    const serialRule = ORDER_SERIAL_RULES[orderType]
-    const config = await this.loadSerialConfig(serialRule.configKeyPrefix, manager)
-    this.assertSerialWidth(config.width)
-
-    let sequence = await this.loadSequenceForUpdateIfPresent(serialRule.sequenceKey, manager)
-    if (!sequence) {
-      // 仅首次升级/首次使用时聚合历史占用；正常生成永远只读取单行 sequence。
-      const occupancy = await this.loadOccupancySnapshotWithManager(orderType, manager, config.width)
-      const initialCurrent = Math.max(config.start - 1, config.current, occupancy.maxOccupiedSerial)
-      await this.ensureSequenceRow(manager, serialRule.sequenceKey, initialCurrent)
-      sequence = await this.loadSequenceForUpdate(serialRule.sequenceKey, manager)
-    }
-    if (!sequence) {
-      throw new BizError('订单流水序列初始化失败，请稍后重试', 500)
-    }
-
-    const sequenceCurrent = this.parseNonNegativeInteger(String(sequence.currentValue), '订单流水序列值异常')
-    const effectiveCurrent = Math.max(config.start - 1, config.current, sequenceCurrent)
-    const maxSerial = 10 ** config.width - 1
-    const nextSerial = await this.findNextAvailableSerial(
-      manager,
-      serialRule.prefix,
-      Math.max(config.start, effectiveCurrent + 1),
-      maxSerial,
-      config.width,
-    )
-
-    sequence.currentValue = nextSerial
-    await manager.getRepository(BusinessSequence).save(sequence)
-    await manager.getRepository(SystemConfig).update(
-      { configKey: config.currentKey },
-      { configValue: String(nextSerial) },
-    )
-    return `${serialRule.prefix}${String(nextSerial).padStart(config.width, '0')}`
-  }
-
-  private async rollbackCurrentIfMatchesWithManager(
+  private async rollbackDeletedIdentifierBatchWithManager(
+    kind: OrderIdentifierKind,
     orderType: OrderType,
-    showNo: string,
+    deletedIdentifiers: string[],
     manager: EntityManager,
-  ): Promise<OrderSerialRollbackResult> {
-    const serialRule = ORDER_SERIAL_RULES[orderType]
-    const config = await this.loadSerialConfig(serialRule.configKeyPrefix, manager)
-    this.assertSerialWidth(config.width)
-    const removedSerial = this.parseSerialFromShowNo(showNo, serialRule.prefix)
-
-    let sequence = await this.loadSequenceForUpdateIfPresent(serialRule.sequenceKey, manager)
+  ): Promise<IdentifierSerialRollbackResult> {
+    const rule = ORDER_IDENTIFIER_RULES[kind][orderType]
+    const initialConfig = await this.loadSerialConfig(rule.configKeyPrefix, manager)
+    this.assertSerialWidth(initialConfig.width)
+    let sequence = await this.loadSequenceForUpdateIfPresent(rule.sequenceKey, manager)
     if (!sequence) {
-      const occupancy = await this.loadOccupancySnapshotWithManager(orderType, manager, config.width)
-      await this.ensureSequenceRow(
-        manager,
-        serialRule.sequenceKey,
-        Math.max(config.start - 1, config.current, occupancy.maxOccupiedSerial),
-      )
-      sequence = await this.loadSequenceForUpdate(serialRule.sequenceKey, manager)
+      await this.ensureSequenceRow(manager, rule.sequenceKey, Math.max(initialConfig.start - 1, initialConfig.current))
+      sequence = await this.loadSequenceForUpdate(rule.sequenceKey, manager)
     }
-    if (!sequence) {
-      throw new BizError('订单流水序列初始化失败，请稍后重试', 500)
-    }
-
-    const current = Math.max(
-      config.current,
-      this.parseNonNegativeInteger(String(sequence.currentValue), '订单流水序列值异常'),
-    )
-    if (removedSerial === null || removedSerial !== current) {
-      return { applied: false, current, removedSerial }
-    }
-
-    const nextCurrent = Math.max(config.start - 1, current - 1)
-    sequence.currentValue = nextCurrent
-    await manager.getRepository(BusinessSequence).save(sequence)
-    await manager.getRepository(SystemConfig).update(
-      { configKey: config.currentKey },
-      { configValue: String(nextCurrent) },
-    )
-    return { applied: true, current: nextCurrent, removedSerial }
-  }
-
-  private async recalibrateCurrentFromOccupancyWithManager(
-    orderType: OrderType,
-    manager: EntityManager,
-  ): Promise<OrderSerialRecalibrationResult> {
-    const serialRule = ORDER_SERIAL_RULES[orderType]
-    const config = await this.loadSerialConfig(serialRule.configKeyPrefix, manager)
+    if (!sequence) throw new BizError('订单编号序列初始化失败，请稍后重试', 500)
+    const config = await this.loadSerialConfig(rule.configKeyPrefix, manager, true)
     this.assertSerialWidth(config.width)
-    const existingSequence = await this.loadSequenceForUpdateIfPresent(serialRule.sequenceKey, manager)
+
     const beforeCurrent = Math.max(
+      config.start - 1,
       config.current,
-      existingSequence
-        ? this.parseNonNegativeInteger(String(existingSequence.currentValue), '订单流水序列值异常')
-        : config.start - 1,
+      this.parseNonNegativeInteger(String(sequence.currentValue), '订单编号序列值异常'),
     )
-    const snapshot = await this.loadOccupancySnapshotWithManager(orderType, manager, config.width)
-    const current = Math.max(config.start - 1, snapshot.maxOccupiedSerial)
-
-    if (!existingSequence) {
-      await this.ensureSequenceRow(manager, serialRule.sequenceKey, current)
+    const removedSerials = [...new Set(deletedIdentifiers
+      .map((identifier) => this.parseSerialFromShowNo(identifier, rule.prefix))
+      .filter((serial): serial is number => serial !== null))]
+      .sort((left, right) => right - left)
+    let current = beforeCurrent
+    for (const removedSerial of removedSerials) {
+      if (removedSerial === current) current = Math.max(config.start - 1, current - 1)
     }
-    const sequence = existingSequence ?? await this.loadSequenceForUpdate(serialRule.sequenceKey, manager)
-    if (!sequence) {
-      throw new BizError('订单流水序列初始化失败，请稍后重试', 500)
+    if (current !== beforeCurrent) {
+      sequence.currentValue = current
+      await manager.getRepository(BusinessSequence).save(sequence)
+      await manager.getRepository(SystemConfig).update(
+        { configKey: config.currentKey },
+        { configValue: String(current) },
+      )
     }
-    sequence.currentValue = current
-    await manager.getRepository(BusinessSequence).save(sequence)
-    await manager.getRepository(SystemConfig).update(
-      { configKey: config.currentKey },
-      { configValue: String(current) },
-    )
-
     return {
+      kind,
       orderType,
       applied: current !== beforeCurrent,
       rolledBack: current < beforeCurrent,
       beforeCurrent,
       current,
       start: config.start,
-      ...snapshot,
+      removedSerials,
     }
+  }
+
+  private async generateIdentifierNo(
+    kind: OrderIdentifierKind,
+    orderType: string,
+    manager?: EntityManager,
+  ): Promise<string> {
+    const normalizedOrderType = this.normalizeOrderType(orderType)
+    if (!normalizedOrderType) {
+      throw new BizError('订单类型非法，仅支持 department 或 walkin', 400)
+    }
+    if (manager) {
+      return this.generateIdentifierNoWithManager(kind, normalizedOrderType, manager)
+    }
+    let lastError: unknown
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        return await runInTransaction((transactionManager) =>
+          this.generateIdentifierNoWithManager(kind, normalizedOrderType, transactionManager),
+        )
+      } catch (error) {
+        lastError = error
+        const retryable = isRetryableSqliteLockError(error) || isRetryableMysqlTransactionError(error)
+        if (attempt < 3 && retryable) {
+          await new Promise((resolve) => setTimeout(resolve, attempt * 15 + Math.floor(Math.random() * 20)))
+          continue
+        }
+        throw error
+      }
+    }
+    throw lastError ?? new BizError('订单编号生成失败，请稍后重试', 500)
+  }
+
+  private async generateIdentifierNoWithManager(
+    kind: OrderIdentifierKind,
+    orderType: OrderType,
+    manager: EntityManager,
+  ): Promise<string> {
+    const rule = ORDER_IDENTIFIER_RULES[kind][orderType]
+    const initialConfig = await this.loadSerialConfig(rule.configKeyPrefix, manager)
+    this.assertSerialWidth(initialConfig.width)
+    let sequence = await this.loadSequenceForUpdateIfPresent(rule.sequenceKey, manager)
+    if (!sequence) {
+      const historicalMax = await this.loadIdentifierMaxSerial(rule.tableName, rule.prefix, initialConfig.width, manager)
+      await this.ensureSequenceRow(
+        manager,
+        rule.sequenceKey,
+        Math.max(initialConfig.start - 1, initialConfig.current, historicalMax),
+      )
+      sequence = await this.loadSequenceForUpdate(rule.sequenceKey, manager)
+    }
+    if (!sequence) throw new BizError('订单编号序列初始化失败，请稍后重试', 500)
+    const config = await this.loadSerialConfig(rule.configKeyPrefix, manager, true)
+    this.assertSerialWidth(config.width)
+
+    const current = Math.max(
+      config.start - 1,
+      config.current,
+      this.parseNonNegativeInteger(String(sequence.currentValue), '订单编号序列值异常'),
+    )
+    const maxSerial = 10 ** config.width - 1
+    const nextSerial = await this.findNextAvailableIdentifierSerial(
+      manager,
+      rule.tableName,
+      rule.prefix,
+      Math.max(config.start, current + 1),
+      maxSerial,
+      config.width,
+    )
+    sequence.currentValue = nextSerial
+    await manager.getRepository(BusinessSequence).save(sequence)
+    await manager.getRepository(SystemConfig).update(
+      { configKey: config.currentKey },
+      { configValue: String(nextSerial) },
+    )
+    return `${rule.prefix}${String(nextSerial).padStart(config.width, '0')}`
+  }
+
+  private async loadIdentifierMaxSerial(
+    tableName: 'biz_outbound_order' | 'o2o_preorder',
+    prefix: string,
+    width: number,
+    manager: EntityManager,
+  ): Promise<number> {
+    const castType = manager.connection.options.type === 'mysql' ? 'UNSIGNED' : 'INTEGER'
+    const rows = await manager.query(
+      `SELECT MAX(CAST(SUBSTR(show_no, ?) AS ${castType})) AS maxSerial
+       FROM ${tableName}
+       WHERE show_no LIKE ?`,
+      [prefix.length + 1, `${prefix}${'_'.repeat(width)}`],
+    ) as Array<{ maxSerial?: string | number | null }>
+    return Math.max(0, Number(rows[0]?.maxSerial ?? 0))
+  }
+
+  private async findNextAvailableIdentifierSerial(
+    manager: EntityManager,
+    tableName: 'biz_outbound_order' | 'o2o_preorder',
+    prefix: string,
+    startSerial: number,
+    maxSerial: number,
+    width: number,
+  ): Promise<number> {
+    for (let serial = startSerial; serial <= maxSerial; serial += 1) {
+      const identifier = `${prefix}${String(serial).padStart(width, '0')}`
+      const rows = await manager.query(`SELECT 1 AS occupied FROM ${tableName} WHERE show_no = ? LIMIT 1`, [identifier]) as Array<{ occupied?: number }>
+      if (!rows.length) return serial
+    }
+    throw new BizError('订单编号已超出位宽上限，请联系管理员调整配置', 409)
   }
 
   private async loadSequenceForUpdate(sequenceKey: string, manager: EntityManager) {
@@ -301,77 +329,11 @@ class OrderSerialService {
     )
   }
 
-  /** 精确检查候选号是否已被异常导入数据占用；命中唯一索引，不扫描历史表。 */
-  private async findNextAvailableSerial(
+  private async loadSerialConfig(
+    configKeyPrefix: string,
     manager: EntityManager,
-    prefix: string,
-    startSerial: number,
-    maxSerial: number,
-    width: number,
-  ): Promise<number> {
-    for (let serial = startSerial; serial <= maxSerial; serial += 1) {
-      const showNo = `${prefix}${String(serial).padStart(width, '0')}`
-      const rows = await manager.query(
-        `
-          SELECT 1 AS occupied FROM biz_outbound_order WHERE show_no = ?
-          UNION ALL
-          SELECT 1 AS occupied FROM o2o_preorder WHERE show_no = ?
-          LIMIT 1
-        `,
-        [showNo, showNo],
-      ) as Array<{ occupied?: number }>
-      if (!rows.length) {
-        return serial
-      }
-    }
-    throw new BizError('订单流水号已超出位宽上限，请联系管理员调整配置', 409)
-  }
-
-  /**
-   * 历史聚合只返回 count/max 两行摘要，不再把全部 showNo 传回 Node。
-   * 该方法只用于序列表首次领养旧库，以及管理员永久删除后的显式重校准。
-   */
-  private async loadOccupancySnapshotWithManager(
-    orderType: OrderType,
-    manager: EntityManager,
-    width: number,
-  ): Promise<OrderSerialOccupancySnapshot> {
-    const serialRule = ORDER_SERIAL_RULES[orderType]
-    const castType = manager.connection.options.type === 'mysql' ? 'UNSIGNED' : 'INTEGER'
-    const serialStart = serialRule.prefix.length + 1
-    const outboundRow = await manager.getRepository(BizOutboundOrder)
-      .createQueryBuilder('outboundOrder')
-      .select('COUNT(1)', 'totalCount')
-      .addSelect(`MAX(CAST(SUBSTR(outboundOrder.showNo, ${serialStart}) AS ${castType}))`, 'maxSerial')
-      .where('outboundOrder.orderType = :orderType', { orderType })
-      .andWhere('outboundOrder.showNo LIKE :showNoPrefix', { showNoPrefix: `${serialRule.prefix}%` })
-      .getRawOne<{ totalCount: string | number | null; maxSerial: string | number | null }>()
-    const preorderRow = await manager.getRepository(O2oPreorder)
-      .createQueryBuilder('preorder')
-      .select('COUNT(1)', 'totalCount')
-      .addSelect(`MAX(CAST(SUBSTR(preorder.showNo, ${serialStart}) AS ${castType}))`, 'maxSerial')
-      .where('preorder.clientOrderType = :orderType', { orderType })
-      .andWhere('preorder.showNo LIKE :showNoPrefix', { showNoPrefix: `${serialRule.prefix}%` })
-      .getRawOne<{ totalCount: string | number | null; maxSerial: string | number | null }>()
-
-    const outboundCount = Math.max(0, Number(outboundRow?.totalCount ?? 0))
-    const preorderCount = Math.max(0, Number(preorderRow?.totalCount ?? 0))
-    const outboundMaxSerial = Math.max(0, Number(outboundRow?.maxSerial ?? 0))
-    const preorderMaxSerial = Math.max(0, Number(preorderRow?.maxSerial ?? 0))
-    return {
-      outboundCount,
-      preorderCount,
-      maxOccupiedSerial: Math.max(outboundMaxSerial, preorderMaxSerial),
-      latestOutboundShowNo: outboundMaxSerial > 0
-        ? `${serialRule.prefix}${String(outboundMaxSerial).padStart(width, '0')}`
-        : null,
-      latestPreorderShowNo: preorderMaxSerial > 0
-        ? `${serialRule.prefix}${String(preorderMaxSerial).padStart(width, '0')}`
-        : null,
-    }
-  }
-
-  private async loadSerialConfig(configKeyPrefix: string, manager: EntityManager): Promise<SerialConfigSnapshot> {
+    lockForUpdate = false,
+  ): Promise<SerialConfigSnapshot> {
     const startKey = `${configKeyPrefix}.start`
     const currentKey = `${configKeyPrefix}.current`
     const widthKey = `${configKeyPrefix}.width`
@@ -382,7 +344,7 @@ class OrderSerialService {
         SELECT config_key AS configKey, config_value AS configValue
         FROM system_configs
         WHERE config_key IN (${placeholders})
-        ${manager.connection.options.type === 'mysql' ? 'FOR UPDATE' : ''}
+        ${lockForUpdate && manager.connection.options.type === 'mysql' ? 'FOR UPDATE' : ''}
       `,
       keys,
     )

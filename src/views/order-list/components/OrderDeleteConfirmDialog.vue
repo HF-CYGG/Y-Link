@@ -25,10 +25,10 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
-  confirm: [payload: { confirmShowNo: string; releaseInventory: boolean }]
+  confirm: [payload: { confirmBusinessNo: string; releaseInventory: boolean }]
 }>()
 
-const confirmShowNo = ref('')
+const confirmBusinessNo = ref('')
 const inventoryChoice = ref<'release' | 'keep' | ''>('')
 const countdown = ref(CONFIRM_DELAY_SECONDS)
 const items = ref<OrderItemRecord[]>([])
@@ -49,7 +49,7 @@ const requiresInventoryChoice = computed(() => isInventoryOrder.value && !isMerg
 const totalReleaseQty = computed(() => items.value.reduce((sum, item) => sum + (Number(item.qty) || 0), 0))
 
 const confirmDisabled = computed(() => {
-  if (props.submitting || countdown.value > 0 || !confirmShowNo.value.trim()) return true
+  if (props.submitting || countdown.value > 0 || !confirmBusinessNo.value.trim()) return true
   if (requiresInventoryChoice.value && !inventoryChoice.value) return true
   // 选择回补时必须已加载明细，确保管理员看过将回补的数量。
   return requiresInventoryChoice.value && inventoryChoice.value === 'release' && (itemsLoading.value || Boolean(itemsLoadError.value))
@@ -95,7 +95,7 @@ watch(
       stopCountdown()
       return
     }
-    confirmShowNo.value = ''
+    confirmBusinessNo.value = ''
     inventoryChoice.value = ''
     startCountdown()
     if (props.order.inventoryMode === 'manual_applied' && props.order.merge?.role !== 'parent') {
@@ -130,7 +130,7 @@ const handleConfirm = async () => {
   } catch {
     return
   }
-  emit('confirm', { confirmShowNo: confirmShowNo.value.trim(), releaseInventory })
+  emit('confirm', { confirmBusinessNo: confirmBusinessNo.value.trim(), releaseInventory })
 }
 </script>
 
@@ -150,7 +150,7 @@ const handleConfirm = async () => {
       </el-alert>
 
       <el-input
-        v-model="confirmShowNo"
+        v-model="confirmBusinessNo"
         placeholder="请输入完整业务单号"
         clearable
         :disabled="submitting"

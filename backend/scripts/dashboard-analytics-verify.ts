@@ -36,6 +36,7 @@ process.env.SQLITE_DB_PATH = sqlitePath
 type AppDataSourceRef = (typeof import('../src/config/data-source.js'))['AppDataSource']
 type BizOutboundOrderRef = (typeof import('../src/entities/biz-outbound-order.entity.js'))['BizOutboundOrder']
 type BizOutboundOrderItemRef = (typeof import('../src/entities/biz-outbound-order-item.entity.js'))['BizOutboundOrderItem']
+type SysAuditLogRef = (typeof import('../src/entities/sys-audit-log.entity.js'))['SysAuditLog']
 type DashboardServiceRef = (typeof import('../src/services/dashboard.service.js'))['dashboardService']
 type ProductServiceRef = (typeof import('../src/services/product.service.js'))['productService']
 type SystemConfigServiceRef = (typeof import('../src/services/system-config.service.js'))['systemConfigService']
@@ -44,6 +45,7 @@ type InitializeSchemaRef = (typeof import('../src/config/database-bootstrap.js')
 let AppDataSource: AppDataSourceRef
 let BizOutboundOrder: BizOutboundOrderRef
 let BizOutboundOrderItem: BizOutboundOrderItemRef
+let SysAuditLog: SysAuditLogRef
 let dashboardService: DashboardServiceRef
 let productService: ProductServiceRef
 let systemConfigService: SystemConfigServiceRef
@@ -64,6 +66,7 @@ const loadRuntimeModules = async () => {
   AppDataSource = (await import('../src/config/data-source.js')).AppDataSource
   BizOutboundOrder = (await import('../src/entities/biz-outbound-order.entity.js')).BizOutboundOrder
   BizOutboundOrderItem = (await import('../src/entities/biz-outbound-order-item.entity.js')).BizOutboundOrderItem
+  SysAuditLog = (await import('../src/entities/sys-audit-log.entity.js')).SysAuditLog
   dashboardService = (await import('../src/services/dashboard.service.js')).dashboardService
   productService = (await import('../src/services/product.service.js')).productService
   systemConfigService = (await import('../src/services/system-config.service.js')).systemConfigService
@@ -108,7 +111,7 @@ async function seedOutboundOrder(input: {
   const order = await orderRepo.save(
     orderRepo.create({
       orderUuid: globalThis.crypto.randomUUID(),
-      showNo: `DA-VERIFY-${String(orderSequence).padStart(5, '0')}`,
+      systemNo: `OUT-${input.orderType === 'department' ? 'D' : 'W'}-${String(orderSequence).padStart(6, '0')}`,
       businessNo: `${input.orderType === 'department' ? 'hyyzjd' : 'hyyz'}${String(orderSequence).padStart(6, '0')}`,
       orderType: input.orderType,
       issuerName: '区间分析验证',
@@ -174,6 +177,12 @@ async function main() {
       status: 'enabled',
       sessionToken: 'dashboard-analytics-verify',
       authSource: 'bearer',
+    }
+    const operatorActor: AuthUserContext = {
+      ...actor,
+      username: `dashboard-analytics-operator-${verifySeed}`,
+      displayName: '区间分析普通操作员',
+      role: 'operator',
     }
     const canvasBag = await productService.create({
       productName: '帆布包',
@@ -413,8 +422,16 @@ async function main() {
       productId: canvasBag.id,
       nameSnapshot: specRow.nameSnapshot,
       ...baseRange,
-    })
+    }, actor)
     assert.equal(specDrilldown.totalQty, '5.00', '细分下钻应只统计该规格的数量')
+    assert.ok(specDrilldown.records[0]?.systemNo, '管理员商品下钻必须保留 canonical systemNo')
+    assert.equal(specDrilldown.records[0]?.showNo, specDrilldown.records[0]?.systemNo, '管理员商品下钻 legacy showNo 必须等于 systemNo')
+    const operatorSpecDrilldown = await dashboardService.getProductRankDrilldown({
+      productId: canvasBag.id,
+      nameSnapshot: specRow.nameSnapshot,
+      ...baseRange,
+    }, operatorActor)
+    assert.equal(operatorSpecDrilldown.records.every((record) => !('systemNo' in record) && !('showNo' in record)), true, '普通操作员商品下钻不得返回 systemNo 或 legacy showNo')
     const mergedDrilldown = await dashboardService.getProductRankDrilldown({
       productId: canvasBag.id,
       ...baseRange,
@@ -442,7 +459,7 @@ async function main() {
     )
     const topOneDepartment = await dashboardService.getAnalytics({ ...baseRange, topN: 5 })
     assert.equal(topOneDepartment.topCustomers[0]?.customerName, '行政部', '排除散客后应重新排序，榜首为金额最高的部门')
-    const departmentDrilldown = await dashboardService.getCustomerRankDrilldown({ customerName: '行政部', ...baseRange })
+    const departmentDrilldown = await dashboardService.getCustomerRankDrilldown({ customerName: '行政部', ...baseRange }, actor)
     assert.equal(departmentDrilldown.orderCount, 2, '部门下钻应与榜单口径一致，只含该部门的部门单')
     assert.equal(departmentDrilldown.totalAmount, '160.00')
     assert.equal(
@@ -450,6 +467,12 @@ async function main() {
       true,
       '部门下钻明细不得混入散客单',
     )
+    assert.ok(departmentDrilldown.records[0]?.systemNo, '管理员客户下钻必须保留 canonical systemNo')
+    const operatorDepartmentDrilldown = await dashboardService.getCustomerRankDrilldown(
+      { customerName: '行政部', ...baseRange },
+      operatorActor,
+    )
+    assert.equal(operatorDepartmentDrilldown.records.every((record) => !('systemNo' in record) && !('showNo' in record)), true, '普通操作员客户下钻不得返回 systemNo 或 legacy showNo')
     const walkinDrilldown = await dashboardService.getCustomerRankDrilldown({ customerName: '散客', ...baseRange })
     assert.equal(walkinDrilldown.orderCount, 0, '部门榜下钻不再提供“散客”分组')
     const walkinOnlyRank = await dashboardService.getAnalytics({ ...baseRange, orderType: 'walkin' })
@@ -464,12 +487,61 @@ async function main() {
     pass('经常购买部门榜在后端排除散客单后再排序截断，下钻口径一致且不影响其他模块')
 
     // ---- 9. 概览接口瘦身回归 ----
-    const stats = await dashboardService.getStats()
+    const recentOrder = await AppDataSource.getRepository(BizOutboundOrder).findOneOrFail({
+      where: { businessNo: 'hyyzjd000003' },
+    })
+    await AppDataSource.getRepository(SysAuditLog).save({
+      actionType: 'order.create',
+      actionLabel: '创建出库单',
+      actorUserId: actor.userId,
+      actorUsername: actor.username,
+      actorDisplayName: actor.displayName,
+      targetType: 'order',
+      targetId: String(recentOrder.id),
+      targetCode: recentOrder.businessNo,
+      resultStatus: 'success',
+      detailJson: JSON.stringify({
+        businessNo: recentOrder.businessNo,
+        systemNo: recentOrder.systemNo,
+        showNo: recentOrder.systemNo,
+        totalQty: recentOrder.totalQty,
+        totalAmount: recentOrder.totalAmount,
+      }),
+      ipAddress: null,
+      userAgent: null,
+    })
+    const ambiguousLegacySystemNo = 'OUT-W-999998'
+    await AppDataSource.getRepository(SysAuditLog).save({
+      actionType: 'order.restore',
+      actionLabel: '恢复出库单',
+      actorUserId: actor.userId,
+      actorUsername: actor.username,
+      actorDisplayName: actor.displayName,
+      targetType: 'order',
+      targetId: 'legacy-ambiguous-order',
+      targetCode: ambiguousLegacySystemNo,
+      resultStatus: 'success',
+      detailJson: null,
+      ipAddress: null,
+      userAgent: null,
+    })
+    const stats = await dashboardService.getStats(actor)
     assert.equal(typeof stats.todayOrderCount, 'number')
     assert.equal(typeof stats.totalProductCount, 'number')
     assert.equal(Array.isArray(stats.recentActivities), true)
     assert.equal('topProducts' in stats, false, '区间相关榜单已迁移到 /dashboard/analytics，概览接口不应再返回')
     assert.equal('trend7Days' in stats, false, '区间相关趋势已迁移到 /dashboard/analytics，概览接口不应再返回')
+    const adminRecent = stats.recentActivities.find((item) => item.orderId === String(recentOrder.id))
+    assert.equal(adminRecent?.businessNo, recentOrder.businessNo, '管理员近期动态必须保留业务号')
+    assert.equal(adminRecent?.systemNo, recentOrder.systemNo, '管理员近期动态必须保留 canonical systemNo')
+    assert.equal(adminRecent?.showNo, recentOrder.systemNo, '管理员近期动态 legacy showNo 必须等于 systemNo')
+    const operatorStats = await dashboardService.getStats(operatorActor)
+    const operatorRecent = operatorStats.recentActivities.find((item) => item.orderId === String(recentOrder.id)) as Record<string, unknown> | undefined
+    assert.equal(operatorRecent?.businessNo, recentOrder.businessNo, '普通操作员近期动态仍须保留业务号')
+    assert.equal(operatorRecent ? 'systemNo' in operatorRecent : true, false, '普通操作员近期动态不得返回 systemNo')
+    assert.equal(operatorRecent ? 'showNo' in operatorRecent : true, false, '普通操作员近期动态不得返回承载 systemNo 的 legacy showNo')
+    assert.equal(JSON.stringify(operatorStats).includes(ambiguousLegacySystemNo), false, '语义不明的历史 targetCode 不得伪装成 businessNo 向普通操作员泄漏')
+    assert.equal(JSON.stringify(stats).includes(ambiguousLegacySystemNo), false, '语义不明的历史 targetCode 也不得被管理员响应误标为 systemNo')
     pass('概览接口只保留四宫格与近期动态，区间统计统一由分析接口提供')
   } finally {
     if (AppDataSource.isInitialized) {

@@ -240,17 +240,18 @@ async function main() {
       businessNo: string
       editVersion: number
     }
-    const originalShowNo = originalWalkin.showNo
+    const originalSystemNo = originalWalkin.systemNo
     const createAudit = await AppDataSource.getRepository(SysAuditLog).findOneByOrFail({
       actionType: 'order.create',
       targetId: walkin.order.id,
     })
     assert.equal(JSON.parse(createAudit.detailJson ?? '{}').businessNo, originalWalkin.businessNo, '创建审计必须记录创建当时的 businessNo')
-    assert.equal(createAudit.targetCode, originalShowNo, '创建审计 targetCode 必须保留不可变 showNo')
+    assert.equal(createAudit.targetCode, originalWalkin.businessNo, '创建审计 targetCode 必须使用事件时 businessNo')
     assert.equal(await occupancyRepo.count(), 2, '新单业务号必须立即永久占用')
 
     const cursorExampleTarget = await submitOrder('cursor-example-target', 'walkin')
     await sequenceRepo.update({ sequenceKey: 'order.business.walkin' }, { currentValue: 3 })
+    await AppDataSource.query('UPDATE "system_configs" SET "config_value" = ? WHERE "config_key" = ?', ['3', 'order.business.walkin.current'])
     await amendmentApi.commitAmendments!({ amendments: [{
       orderId: cursorExampleTarget.order.id,
       editVersion: 1,
@@ -260,6 +261,7 @@ async function main() {
     const cursorAfterSeven = await submitOrder('cursor-example-eight', 'walkin')
     assert.equal((cursorAfterSeven.order as typeof cursorAfterSeven.order & { businessNo: string }).businessNo, 'hyyz000008', '003→007 后下一单必须为 008')
     await sequenceRepo.update({ sequenceKey: 'order.business.walkin' }, { currentValue: 15 })
+    await AppDataSource.query('UPDATE "system_configs" SET "config_value" = ? WHERE "config_key" = ?', ['15', 'order.business.walkin.current'])
     await amendmentApi.commitAmendments!({ amendments: [{
       orderId: cursorExampleTarget.order.id,
       editVersion: 2,
@@ -267,7 +269,7 @@ async function main() {
       reason: '验证 015 向下重编为 009',
     }] }, actor)
     const cursorAfterNine = await submitOrder('cursor-example-ten', 'walkin')
-    assert.equal((cursorAfterNine.order as typeof cursorAfterNine.order & { businessNo: string }).businessNo, 'hyyz000010', '015→009 后下一单必须为 010')
+    assert.equal((cursorAfterNine.order as typeof cursorAfterNine.order & { businessNo: string }).businessNo, 'hyyz000016', '低号重编不得降低业务号高水位，015→009 后下一单必须为 016')
 
     await assert.rejects(
       () => amendmentApi.commitAmendments!({ amendments: [{
@@ -294,7 +296,7 @@ async function main() {
     assert.deepEqual(preview.items[0]?.blockingReasons, [])
     assert.deepEqual(preview.cursorPlans, [{
       namespace: 'hyyz',
-      beforeCursor: 10,
+      beforeCursor: 16,
       afterCursor: 123,
       nextBusinessNo: 'hyyz000124',
     }])
@@ -311,13 +313,13 @@ async function main() {
     assert.equal(amendedWalkin.businessNo, 'hyyz000123')
     assert.equal(amendedWalkin.customerName, '预览后的散客名称')
     assert.equal(amendedWalkin.editVersion, 2)
-    assert.equal(amendedWalkin.showNo, originalShowNo, '改单不得修改 showNo')
+    assert.equal(amendedWalkin.systemNo, originalSystemNo, '改单不得修改 systemNo')
     assert.equal(await occupancyRepo.count(), beforePreviewOccupancy + 1)
     assert.equal(await revisionRepo.count(), beforePreviewRevision + 1)
     assert.equal(Number((await sequenceRepo.findOneByOrFail({ sequenceKey: 'order.business.walkin' })).currentValue), 123)
     assert.deepEqual(committed.cursorPlans, preview.cursorPlans)
 
-    await orderService.softDeleteById(walkin.order.id, actor, originalShowNo)
+    await orderService.softDeleteById(walkin.order.id, actor, amendedWalkin.businessNo)
     await orderService.restoreById(walkin.order.id, actor)
     const lifecycleAudits = await AppDataSource.getRepository(SysAuditLog).find({
       where: { targetId: walkin.order.id },
@@ -327,16 +329,17 @@ async function main() {
       const audit = lifecycleAudits.find((item) => item.actionType === actionType)
       assert.ok(audit, `${actionType} 必须写入审计`)
       assert.equal(JSON.parse(audit.detailJson ?? '{}').businessNo, 'hyyz000123', `${actionType} 必须记录操作当时的 businessNo`)
-      assert.equal(audit.targetCode, originalShowNo, `${actionType} targetCode 必须继续保留不可变 showNo`)
+      assert.equal(audit.targetCode, 'hyyz000123', `${actionType} targetCode 必须使用操作时 businessNo`)
     }
-    const lifecycleStats = await dashboardService.getStats()
+    const lifecycleStats = await dashboardService.getStats(actor)
     for (const actionType of ['order.delete', 'order.restore'] as const) {
       const activity = lifecycleStats.recentActivities.find((item) => (
         item.orderId === walkin.order.id && item.actionType === actionType
       ))
       assert.ok(activity, `工作台近期动态必须包含 ${actionType}`)
       assert.equal(activity.businessNo, 'hyyz000123', `工作台 ${actionType} 必须展示修订后的业务号`)
-      assert.equal(activity.showNo, originalShowNo, `工作台 ${actionType} 必须保留 showNo 作为内部键`)
+      assert.equal(activity.systemNo, originalSystemNo, `管理员工作台 ${actionType} 必须通过审计详情保留 canonical systemNo`)
+      assert.equal(activity.showNo, originalSystemNo, `管理员工作台 ${actionType} 的 legacy showNo 必须严格等于 systemNo`)
     }
 
     const lowered = await amendmentApi.commitAmendments!({ amendments: [{
@@ -348,10 +351,10 @@ async function main() {
     assert.deepEqual(lowered.cursorPlans, [{
       namespace: 'hyyz',
       beforeCursor: 123,
-      afterCursor: 100,
-      nextBusinessNo: 'hyyz000101',
-    }], '单笔重编允许把命名空间游标下调到确认号')
-    assert.equal(Number((await sequenceRepo.findOneByOrFail({ sequenceKey: 'order.business.walkin' })).currentValue), 100)
+      afterCursor: 123,
+      nextBusinessNo: 'hyyz000124',
+    }], '单笔低号重编不得降低业务号单调高水位')
+    assert.equal(Number((await sequenceRepo.findOneByOrFail({ sequenceKey: 'order.business.walkin' })).currentValue), 123)
 
     await assert.rejects(
       () => amendmentApi.commitAmendments!({ amendments: [previewInput] }, actor),
@@ -462,7 +465,7 @@ async function main() {
 
     const deletedTarget = await submitOrder('deleted-amendment-target', 'department')
     const deletedTargetEntity = await orderRepo.findOneByOrFail({ id: deletedTarget.order.id })
-    await orderService.softDeleteById(deletedTarget.order.id, actor, deletedTargetEntity.showNo)
+    await orderService.softDeleteById(deletedTarget.order.id, actor, deletedTargetEntity.businessNo)
     const deletedPreviewInput: AmendmentInput = {
       orderId: deletedTarget.order.id,
       editVersion: deletedTargetEntity.editVersion,
@@ -510,14 +513,14 @@ async function main() {
     const amendedPurgeEntity = await orderRepo.findOneByOrFail({ id: purgeTarget.order.id })
     amendedPurgeEntity.inventoryMode = 'legacy_none'
     await orderRepo.save(amendedPurgeEntity)
-    await orderService.softDeleteById(purgeTarget.order.id, actor, amendedPurgeEntity.showNo)
-    await orderService.purgeById(purgeTarget.order.id, actor, amendedPurgeEntity.showNo)
+    await orderService.softDeleteById(purgeTarget.order.id, actor, amendedPurgeEntity.businessNo)
+    await orderService.purgeById(purgeTarget.order.id, actor, amendedPurgeEntity.businessNo)
     const purgeAudit = await AppDataSource.getRepository(SysAuditLog).findOneByOrFail({
       actionType: 'order.purge',
       targetId: purgeTarget.order.id,
     })
     assert.equal(JSON.parse(purgeAudit.detailJson ?? '{}').businessNo, 'hyyzjd000400', '永久删除审计必须记录删除当时的 businessNo')
-    assert.equal(purgeAudit.targetCode, amendedPurgeEntity.showNo, '永久删除审计 targetCode 必须保留不可变 showNo')
+    assert.equal(purgeAudit.targetCode, amendedPurgeEntity.businessNo, '永久删除审计 targetCode 必须使用删除时 businessNo')
     assert.equal(await occupancyRepo.count({ where: { orderUuid: purgeOrderUuid } }), 2, '永久删除后新旧业务号占用都必须保留')
     assert.equal(await revisionRepo.count({ where: { orderUuid: purgeOrderUuid } }), 1, '永久删除后 revision 必须保留')
 

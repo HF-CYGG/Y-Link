@@ -20,7 +20,6 @@ import {
   cancelMyO2oPreorder,
   getMyO2oPreorderSummary,
   getMyO2oPreorders,
-  resolveO2oDisplayShowNo,
   type O2oPreorderSummary,
 } from '@/api/modules/o2o'
 import { BaseRequestState } from '@/components/common'
@@ -198,24 +197,22 @@ const handleStatusChange = (value: 'all' | O2oPreorderSummary['status']) => {
   void loadOrders(true)
 }
 
-const normalizeSummaryDisplayShowNo = (order: O2oPreorderSummary): O2oPreorderSummary => {
+const normalizeSummaryIdentifiers = (order: O2oPreorderSummary): O2oPreorderSummary => {
   return {
     ...order,
-    showNo: resolveO2oDisplayShowNo(order),
-    customerOrderShowNo: order.customerOrderShowNo ?? null,
+    preorderNo: order.preorderNo,
     customerOrderBusinessNo: order.customerOrderBusinessNo ?? null,
-    originalCustomerOrderShowNo: order.originalCustomerOrderShowNo ?? null,
     originalCustomerOrderBusinessNo: order.originalCustomerOrderBusinessNo ?? null,
   }
 }
 
-const getOriginalCustomerOrderShowNo = (order: Pick<O2oPreorderSummary, 'originalCustomerOrderShowNo' | 'originalCustomerOrderBusinessNo'>) => {
-  return order.originalCustomerOrderBusinessNo?.trim() || order.originalCustomerOrderShowNo?.trim() || ''
+const getOriginalCustomerOrderBusinessNo = (order: Pick<O2oPreorderSummary, 'originalCustomerOrderBusinessNo'>) => {
+  return order.originalCustomerOrderBusinessNo?.trim() || ''
 }
 
 const isMergedCustomerOrder = (order: PersistedO2oPreorderSummary) => {
-  const originalShowNo = getOriginalCustomerOrderShowNo(order)
-  return Boolean(originalShowNo && originalShowNo !== order.showNo)
+  const originalBusinessNo = getOriginalCustomerOrderBusinessNo(order)
+  return Boolean(originalBusinessNo && originalBusinessNo !== order.customerOrderBusinessNo)
 }
 
 const getBusinessStatusMeta = (order: PersistedO2oPreorderSummary) => {
@@ -254,7 +251,7 @@ const hasOrderCardChanged = (previous: PersistedO2oPreorderSummary | undefined, 
     return true
   }
   return (
-    previous.showNo !== next.showNo
+    previous.preorderNo !== next.preorderNo
     || previous.verifyCode !== next.verifyCode
     || previous.status !== next.status
     || previous.businessStatus !== next.businessStatus
@@ -500,7 +497,7 @@ const triggerSilentOrderRefresh = async () => {
 
 const refreshSingleOrderSummary = async (orderId: string, options?: { silent?: boolean }) => {
   try {
-    const result = normalizeSummaryDisplayShowNo(await getMyO2oPreorderSummary(orderId))
+    const result = normalizeSummaryIdentifiers(await getMyO2oPreorderSummary(orderId))
     clientOrderStore.syncOrderSummary(result, { preserveFresh: true })
     markRefreshedOrders([result.id])
   } catch (error) {
@@ -617,7 +614,7 @@ const loadOrders = async (force = false, options?: { append?: boolean; silent?: 
         : getMyO2oPreorders(buildListQuery(targetPage), { signal }),
     onSuccess: async (result) => {
       if (append) {
-        clientOrderStore.appendOrders(result.records.map(normalizeSummaryDisplayShowNo), {
+        clientOrderStore.appendOrders(result.records.map(normalizeSummaryIdentifiers), {
           page: result.page,
           pageSize: result.pageSize,
           total: result.total,
@@ -625,7 +622,7 @@ const loadOrders = async (force = false, options?: { append?: boolean; silent?: 
         return
       }
       const previousOrderMap = new Map(clientOrderStore.orders.map((item) => [item.id, item]))
-      const normalizedRecords = result.records.map(normalizeSummaryDisplayShowNo)
+      const normalizedRecords = result.records.map(normalizeSummaryIdentifiers)
       const nextRecords = silent ? resolveSilentRefreshRecords(normalizedRecords) : normalizedRecords
       const logicalPageSize = clientOrderStore.pageSize || DEFAULT_ORDER_PAGE_SIZE
       clientOrderStore.setOrders(nextRecords, {
@@ -700,7 +697,7 @@ const handleRecallOrder = async (order: PersistedO2oPreorderSummary) => {
 
   try {
     await ElMessageBox.confirm(
-      `确认撤回订单“${order.showNo}”吗？撤回后将释放预订库存，二维码会立即失效。`,
+      `确认撤回预订单“${order.preorderNo}”吗？撤回后将释放预订库存，二维码会立即失效。`,
       '撤回订单',
       {
         type: 'warning',
@@ -884,7 +881,7 @@ onBeforeUnmount(() => {
                 <div class="min-w-0 flex-1">
                   <div class="flex flex-wrap items-center gap-2">
                     <p class="min-w-0 flex-1 truncate text-[0.98rem] font-semibold text-slate-900 sm:flex-none sm:text-base">
-                      {{ card.order.showNo }}
+                      {{ card.order.preorderNo }}
                     </p>
                     <span class="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-600 sm:text-xs">
                       {{ getClientOrderTypeLabel(card.order) }}
@@ -898,8 +895,11 @@ onBeforeUnmount(() => {
                       </span>
                     </Transition>
                   </div>
+                  <p v-if="card.order.customerOrderBusinessNo" class="mt-1 text-xs text-teal-700">
+                    关联出库业务单号：{{ card.order.customerOrderBusinessNo }}
+                  </p>
                   <p v-if="isMergedCustomerOrder(card.order)" class="mt-1 text-xs text-teal-700">
-                    当前正式出库单 · 已合并（原始单号：{{ getOriginalCustomerOrderShowNo(card.order) }}）
+                    关联正式出库单已合并（原始出库业务单号：{{ getOriginalCustomerOrderBusinessNo(card.order) }}）
                   </p>
                 </div>
                 <div class="flex items-center gap-2 self-start">

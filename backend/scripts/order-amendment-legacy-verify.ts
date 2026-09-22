@@ -30,6 +30,19 @@ async function main() {
   try {
     await AppDataSource.synchronize()
     await AppDataSource.query(
+      `INSERT INTO "system_configs" ("config_key", "config_value", "config_group", "remark", "created_at", "updated_at")
+       VALUES ('order.serial.walkin.start', '50', 'order_serial', '专项验证自定义起始号', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+       ON CONFLICT("config_key") DO UPDATE SET "config_value" = '50', "updated_at" = CURRENT_TIMESTAMP`,
+    )
+    await AppDataSource.query(
+      `DELETE FROM "system_configs"
+       WHERE "config_key" IN ('order.business.walkin.start', 'order.business.walkin.current', 'order.business.walkin.width')`,
+    )
+    await AppDataSource.query(
+      'DELETE FROM "business_sequence" WHERE "sequence_key" = ?',
+      ['order.business.walkin'],
+    )
+    await AppDataSource.query(
       `INSERT INTO "biz_outbound_order"
        ("order_uuid", "show_no", "business_no", "edit_version", "order_type", "has_customer_order",
         "is_system_applied", "issuer_name", "customer_department_name", "idempotency_key", "customer_name",
@@ -79,6 +92,21 @@ async function main() {
       ['order.business.department'],
     ) as Array<{ currentValue: number }>
     assert.equal(Number(sequenceRows[0]?.currentValue), 72)
+    const emptyNamespaceFirstMigrationRows = await AppDataSource.query(
+      'SELECT "current_value" AS "currentValue" FROM "business_sequence" WHERE "sequence_key" = ?',
+      ['order.business.walkin'],
+    ) as Array<{ currentValue: number }>
+    assert.equal(
+      Number(emptyNamespaceFirstMigrationRows[0]?.currentValue),
+      49,
+      '空命名空间首次迁移必须从旧配置自定义 start - 1 初始化',
+    )
+    const migrationMarkerRows = await AppDataSource.query(
+      `SELECT COUNT(1) AS "total" FROM "system_configs"
+       WHERE "config_key" IN ('order.business.department.migration.055', 'order.business.walkin.migration.055')
+         AND "config_value" = '1'`,
+    ) as Array<{ total: number }>
+    assert.equal(Number(migrationMarkerRows[0]?.total), 2, '两类 business namespace 首迁完成后必须原子写入 marker')
 
     await AppDataSource.query(
       `UPDATE "order_business_no_occupancy"
@@ -100,8 +128,13 @@ async function main() {
 
     await AppDataSource.query(
       `INSERT INTO "system_configs" ("config_key", "config_value", "config_group", "remark", "created_at", "updated_at")
-       VALUES ('order.serial.walkin.start', '50', 'order_serial', '专项验证自定义起始号', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-       ON CONFLICT("config_key") DO UPDATE SET "config_value" = '50', "updated_at" = CURRENT_TIMESTAMP`,
+       VALUES ('order.serial.walkin.start', '60', 'order_serial', '专项验证旧配置后续抬高', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+       ON CONFLICT("config_key") DO UPDATE SET "config_value" = '60', "updated_at" = CURRENT_TIMESTAMP`,
+    )
+    await AppDataSource.query(
+      `INSERT INTO "business_sequence" ("sequence_key", "current_value", "created_at", "updated_at")
+       VALUES ('order.serial.walkin', 900, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+       ON CONFLICT("sequence_key") DO UPDATE SET "current_value" = 900, "updated_at" = CURRENT_TIMESTAMP`,
     )
     await AppDataSource.query(
       'DELETE FROM "business_sequence" WHERE "sequence_key" = ?',
@@ -115,7 +148,7 @@ async function main() {
     assert.equal(
       Number(emptyNamespaceSequenceRows[0]?.currentValue),
       49,
-      '空命名空间游标必须从自定义 start - 1 初始化',
+      '命名空间三项新配置齐全后不得再次回灌旧配置或旧序列',
     )
 
     const secondResult = await initializeDatabaseSchemaIfNeeded(AppDataSource)

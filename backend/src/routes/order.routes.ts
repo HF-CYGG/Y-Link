@@ -13,6 +13,8 @@ import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
 import { assertPermanentDeletePassword } from '../utils/permanent-delete-password.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
+import { resolveCompatibleIdentifierInput } from '../services/order-serial.service.js'
+import { projectSystemIdentifiersForRole } from '../utils/system-identifier-visibility.js'
 
 const submitOrderSchema = z.object({
   idempotencyKey: z.string().min(8, 'idempotencyKey 长度至少为 8'),
@@ -39,7 +41,8 @@ const submitOrderSchema = z.object({
 })
 
 const deleteOrderSchema = z.object({
-  confirmShowNo: z.string().trim().min(1, '请填写业务单号完成二次确认'),
+  confirmBusinessNo: z.string().trim().min(1).optional(),
+  confirmShowNo: z.string().trim().min(1).optional(),
 })
 
 const softDeleteOrderSchema = deleteOrderSchema.extend({
@@ -135,11 +138,22 @@ const orderMergeCommitSchema = orderMergePreviewSchema.extend({
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export const orderRouter = Router()
 
+// 在统一序列化边界执行最后一道可见性投影，防止新增写接口误把技术号带给普通账号。
+orderRouter.use((req, res, next) => {
+  const originalJson = res.json.bind(res)
+  res.json = ((body: unknown) => originalJson(projectSystemIdentifiersForRole(
+    body,
+    (req as AuthenticatedRequest).auth?.role,
+  ))) as typeof res.json
+  next()
+})
+
 orderRouter.get(
   '/',
   // 订单列表属于业务数据查询，需要具备 orders:view 权限才可访问。
   requirePermission('orders:view'),
   asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
     const page = Number(req.query.page ?? 1)
     const pageSize = Number(req.query.pageSize ?? 20)
     const keyword = typeof req.query.keyword === 'string' ? req.query.keyword : undefined
@@ -160,7 +174,7 @@ orderRouter.get(
       endDate,
       includeDeleted,
       onlyDeleted,
-    })
+    }, authReq.auth)
 
     res.json({
       code: 0,
@@ -186,9 +200,20 @@ orderRouter.get(
 )
 
 orderRouter.get(
-  '/show-no/:showNo',
-  // 通过业务单号查询明细同样属于订单查看能力，统一纳入 orders:view 控制。
+  '/system-no/:systemNo',
   requirePermission('orders:view'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const data = await orderService.detailBySystemNo(req.params.systemNo)
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+orderRouter.get(
+  '/show-no/:showNo',
+  // 旧 systemNo 兼容查询别名，@deprecated，仅保留一个发布周期；技术追溯仅允许管理员访问。
+  requirePermission('orders:view'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const data = await orderService.detailByShowNo(req.params.showNo)
     res.json({
@@ -296,7 +321,8 @@ orderRouter.get(
   // 通过主键查询明细也必须满足订单查看权限，避免越权探测订单数据。
   requirePermission('orders:view'),
   asyncHandler(async (req, res) => {
-    const data = await orderService.detailById(req.params.id)
+    const authReq = req as AuthenticatedRequest
+    const data = await orderService.detailById(req.params.id, authReq.auth)
     res.json({
       code: 0,
       message: 'ok',
@@ -335,10 +361,15 @@ orderRouter.delete(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = softDeleteOrderSchema.parse(req.body ?? {})
+    const confirmBusinessNo = resolveCompatibleIdentifierInput({
+      canonicalValue: payload.confirmBusinessNo,
+      legacyValue: payload.confirmShowNo,
+      fieldLabel: '业务单号',
+    })
     const data = await orderService.softDeleteById(
       req.params.id,
       authReq.auth,
-      payload.confirmShowNo,
+      confirmBusinessNo,
       extractRequestMeta(req),
       { releaseInventory: payload.releaseInventory === true },
     )
@@ -372,7 +403,12 @@ orderRouter.delete(
     const authReq = req as AuthenticatedRequest
     const payload = purgeOrderSchema.parse(req.body ?? {})
     assertPermanentDeletePassword(payload.permanentDeletePassword)
-    const data = await orderService.purgeById(req.params.id, authReq.auth, payload.confirmShowNo, extractRequestMeta(req))
+    const confirmBusinessNo = resolveCompatibleIdentifierInput({
+      canonicalValue: payload.confirmBusinessNo,
+      legacyValue: payload.confirmShowNo,
+      fieldLabel: '业务单号',
+    })
+    const data = await orderService.purgeById(req.params.id, authReq.auth, confirmBusinessNo, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',

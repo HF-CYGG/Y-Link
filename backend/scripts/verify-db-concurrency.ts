@@ -454,29 +454,27 @@ async function verifyOrderSerialConcurrency(mysqlConfig: VerifyMysqlRuntimeConfi
     assert.equal(unchangedBoundDepartmentUser.realName, 'MySQL 已绑定部门账号')
     pass('真实 MySQL 启动迁移保留已绑定部门账号，仅转换未绑定存量账号')
 
-    const walkinTasks = Array.from({ length: CONCURRENCY_SIZE }, () => orderSerialService.generateOrderNo('walkin'))
-    const departmentTasks = Array.from({ length: CONCURRENCY_SIZE }, () => orderSerialService.generateOrderNo('department'))
-    const [walkinShowNos, departmentShowNos] = await Promise.all([
+    const walkinTasks = Array.from({ length: CONCURRENCY_SIZE }, () => orderSerialService.generateSystemNo('walkin'))
+    const departmentTasks = Array.from({ length: CONCURRENCY_SIZE }, () => orderSerialService.generateSystemNo('department'))
+    const [walkinSystemNos, departmentSystemNos] = await Promise.all([
       Promise.all(walkinTasks),
       Promise.all(departmentTasks),
     ])
 
-    assert.equal(new Set(walkinShowNos).size, walkinShowNos.length)
-    assert.equal(new Set(departmentShowNos).size, departmentShowNos.length)
-    assert.equal(walkinShowNos.every((showNo) => /^hyyz\d{6}$/.test(showNo)), true)
-    assert.equal(departmentShowNos.every((showNo) => /^hyyzjd\d{6}$/.test(showNo)), true)
+    assert.equal(new Set(walkinSystemNos).size, walkinSystemNos.length)
+    assert.equal(new Set(departmentSystemNos).size, departmentSystemNos.length)
+    assert.equal(walkinSystemNos.every((systemNo) => /^OUT-W-\d{6}$/.test(systemNo)), true)
+    assert.equal(departmentSystemNos.every((systemNo) => /^OUT-D-\d{6}$/.test(systemNo)), true)
 
-    const walkinSerials = walkinShowNos.map((showNo) => parseSerial(showNo, 'hyyz'))
-    const departmentSerials = departmentShowNos.map((showNo) => parseSerial(showNo, 'hyyzjd'))
+    const walkinSerials = walkinSystemNos.map((systemNo) => parseSerial(systemNo, 'OUT-W-'))
+    const departmentSerials = departmentSystemNos.map((systemNo) => parseSerial(systemNo, 'OUT-D-'))
     expectContinuousSequence(walkinSerials)
     expectContinuousSequence(departmentSerials)
     pass('并发流水号校验通过：同类无重复、双类型不串号且流水连续')
 
-    const serialConfigs = await systemConfigService.getOrderSerialConfigs()
-    const walkinConfig = serialConfigs.list.find((item) => item.orderType === 'walkin')
-    const departmentConfig = serialConfigs.list.find((item) => item.orderType === 'department')
-    assert.ok(walkinConfig)
-    assert.ok(departmentConfig)
+    const serialConfigs = await systemConfigService.getOrderIdentifierConfigs()
+    const walkinConfig = serialConfigs.system.walkin
+    const departmentConfig = serialConfigs.system.department
     assert.equal(walkinConfig.current, Math.max(...walkinSerials))
     assert.equal(departmentConfig.current, Math.max(...departmentSerials))
     pass('并发写入后的 current 值与最终流水一致，没有发生回退或跳号')
@@ -498,7 +496,7 @@ async function verifyOrderSerialConcurrency(mysqlConfig: VerifyMysqlRuntimeConfi
     }))
     const preorderRepo = AppDataSource.getRepository(O2oPreorder)
     const preorder = await preorderRepo.save(preorderRepo.create({
-      showNo: `TX-${Date.now()}`,
+      preorderNo: `PRE-D-${String(Date.now()).slice(-6)}`,
       clientUserId: String(clientUser.id),
       verifyCode: randomUUID(),
       status: 'pending',
@@ -576,7 +574,7 @@ async function verifyOrderSerialConcurrency(mysqlConfig: VerifyMysqlRuntimeConfi
       })
       await o2oPreorderService.verifyByCode(preorderResult.order.verifyCode, concurrencyActor)
       const outbound = await AppDataSource.getRepository(BizOutboundOrder).findOneOrFail({
-        where: { idempotencyKey: `o2o-preorder-verify:${preorderResult.order.id}` },
+        where: { sourceDocType: 'o2o_preorder', sourceDocId: preorderResult.order.id },
       })
       return { preorder: preorderResult.order, outbound }
     }
@@ -661,7 +659,7 @@ async function verifyOrderSerialConcurrency(mysqlConfig: VerifyMysqlRuntimeConfi
         'MySQL CHECK 必须拒绝 parent_order_id = source_order_id',
       )
       const alternateParent = await AppDataSource.getRepository(BizOutboundOrder).findOneOrFail({
-        where: { idempotencyKey: `o2o-preorder-verify:${returnOrder.order.id}` },
+        where: { sourceDocType: 'o2o_preorder', sourceDocId: returnOrder.order.id },
       })
       await assert.rejects(
         () => blockerConnection.execute(

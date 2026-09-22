@@ -38,8 +38,8 @@ import {
   updateO2oOrderMerchantMessage,
   type O2oConsoleOrderPoolCounts,
   type O2oConsoleOrderPoolKey,
-  type O2oPreorderDetail,
-  type O2oPreorderSummary,
+  type O2oConsolePreorderDetail,
+  type O2oConsolePreorderSummary,
   type O2oOrderStatusReport,
   type O2oReturnRequestDetail,
 } from '@/api/modules/o2o'
@@ -102,8 +102,8 @@ const adminCancelling = ref(false)
 const batchPurging = ref(false)
 const batchInteractionActive = ref(false)
 const selectedCancelledOrderIds = ref<string[]>([])
-const batchPurgeResults = ref<Array<{ id: string; showNo?: string; outcome: 'deleted' | 'skipped' | 'failed'; code: string; message: string }>>([])
-const orders = ref<O2oPreorderSummary[]>([])
+const batchPurgeResults = ref<Array<{ id: string; preorderNo?: string; outcome: 'deleted' | 'skipped' | 'failed'; code: string; message: string }>>([])
+const orders = ref<O2oConsolePreorderSummary[]>([])
 // 订单池分页状态：orders 仅保存当前页数据，total 与各分栏数量均以服务端返回为准。
 const poolPagination = reactive({ page: 1, pageSize: ORDER_POOL_DEFAULT_PAGE_SIZE, total: 0 })
 const poolCounts = ref<O2oConsoleOrderPoolCounts>({ all: 0, pending: 0, completed: 0, cancelled: 0, returns: 0 })
@@ -111,7 +111,7 @@ const poolCounts = ref<O2oConsoleOrderPoolCounts>({ all: 0, pending: 0, complete
 const latestOrderIdBaseline = ref<string | null>(null)
 const activePool = ref<OrderPoolKey>('all')
 const activeOrderId = ref('')
-const activeOrderDetail = ref<O2oPreorderDetail | null>(null)
+const activeOrderDetail = ref<O2oConsolePreorderDetail | null>(null)
 const autoRefreshEnabled = ref(true)
 const pollIntervalSeconds = ref<(typeof POLL_INTERVAL_OPTIONS)[number]>(15)
 const soundNoticeEnabled = ref(false)
@@ -126,6 +126,7 @@ const detailRefreshNoticeExpiresAt = ref(0)
 const lastSilentListRefreshAt = ref(0)
 const router = useRouter()
 const authStore = useAuthStore(pinia)
+const isAdmin = computed(() => authStore.currentUser?.role === 'admin')
 const { hasPermission, ensurePermission } = usePermissionAction()
 const orderListRequest = useStableRequest()
 const orderDetailRequest = useStableRequest()
@@ -167,7 +168,7 @@ const getAccountTypeLabel = (accountType: ClientUserAccountType) => {
   return ACCOUNT_TYPE_LABEL_MAP[accountType]
 }
 
-const getOrderAccountType = (orderType: O2oPreorderSummary['clientOrderType']): ClientUserAccountType => {
+const getOrderAccountType = (orderType: O2oConsolePreorderSummary['clientOrderType']): ClientUserAccountType => {
   return orderType === 'department' ? 'department' : 'personal'
 }
 
@@ -338,11 +339,11 @@ const orderCustomerProfile = computed(() => {
   }
 })
 
-const getOrderTypeLabel = (orderType: O2oPreorderSummary['clientOrderType']) => {
+const getOrderTypeLabel = (orderType: O2oConsolePreorderSummary['clientOrderType']) => {
   return ORDER_TYPE_LABEL_MAP[orderType]
 }
 
-const isDepartmentOrder = (orderType: O2oPreorderSummary['clientOrderType']) => orderType === 'department'
+const isDepartmentOrder = (orderType: O2oConsolePreorderSummary['clientOrderType']) => orderType === 'department'
 
 const loadDepartmentOptions = async () => {
   departmentOptionsLoading.value = true
@@ -356,7 +357,7 @@ const loadDepartmentOptions = async () => {
   }
 }
 
-const buildOwnershipLabel = (orderType: O2oPreorderSummary['clientOrderType'], departmentNameSnapshot: string | null) => {
+const buildOwnershipLabel = (orderType: O2oConsolePreorderSummary['clientOrderType'], departmentNameSnapshot: string | null) => {
   const orderTypeLabel = getOrderTypeLabel(orderType)
   const departmentLabel = isDepartmentOrder(orderType) && departmentNameSnapshot ? ` / ${departmentNameSnapshot}` : ''
   return `${orderTypeLabel}${departmentLabel}`
@@ -527,12 +528,12 @@ const formatCountdown = (order: { status: O2oOrderStatus; expireInSeconds?: numb
 
 // 详细注释：订单池静默刷新只高亮新增或摘要变更的订单，
 // 这样操作员可以快速感知关键变化，但不会因为整个列表轮询而失去视觉焦点。
-const hasOrderSummaryChanged = (previous: O2oPreorderSummary | undefined, next: O2oPreorderSummary) => {
+const hasOrderSummaryChanged = (previous: O2oConsolePreorderSummary | undefined, next: O2oConsolePreorderSummary) => {
   if (!previous) {
     return true
   }
   return (
-    previous.showNo !== next.showNo
+    previous.preorderNo !== next.preorderNo
     || previous.verifyCode !== next.verifyCode
     || previous.status !== next.status
     || previous.businessStatus !== next.businessStatus
@@ -550,7 +551,7 @@ const hasOrderSummaryChanged = (previous: O2oPreorderSummary | undefined, next: 
   )
 }
 
-const hasOrderDetailChanged = (previous: O2oPreorderDetail | null, next: O2oPreorderDetail) => {
+const hasOrderDetailChanged = (previous: O2oConsolePreorderDetail | null, next: O2oConsolePreorderDetail) => {
   if (!previous) {
     return true
   }
@@ -713,15 +714,15 @@ const loadOrderDetail = async (
   return outcome
 }
 
-const mergeOrderSummaryFromDetail = (detail: O2oPreorderDetail) => {
+const mergeOrderSummaryFromDetail = (detail: O2oConsolePreorderDetail) => {
   const nextOrder = detail.order
   const latestReturnRequest = detail.returnRequests
     .slice()
     .sort((prev, next) => parseTimeMs(next.createdAt) - parseTimeMs(prev.createdAt))[0] ?? null
-  const nextSummary: O2oPreorderSummary = {
+  const nextSummary: O2oConsolePreorderSummary = {
     id: nextOrder.id,
-    showNo: nextOrder.showNo,
-    customerOrderShowNo: nextOrder.customerOrderShowNo,
+    preorderNo: nextOrder.preorderNo,
+    customerOrderSystemNo: nextOrder.customerOrderSystemNo,
     customerOrderBusinessNo: nextOrder.customerOrderBusinessNo,
     verifyCode: nextOrder.verifyCode,
     status: nextOrder.status,
@@ -1010,7 +1011,7 @@ const handleCancelCurrentOrder = async () => {
         return length >= 2 && length <= 200 ? true : '取消原因长度应为 2-200 个字符'
       }, closeOnClickModal: false,
     })
-    await ElMessageBox.confirm(`确认取消订单“${detail.order.showNo}”吗？预占库存将被释放。`, '二次确认取消', { type: 'warning', closeOnClickModal: false })
+    await ElMessageBox.confirm(`确认取消预订单“${detail.order.preorderNo}”吗？预占库存将被释放。`, '二次确认取消', { type: 'warning', closeOnClickModal: false })
     adminCancelling.value = true
     const data = await cancelO2oConsoleOrder(detail.order.id, { reason: prompt.value.trim() })
     activeOrderDetail.value = data
@@ -1036,7 +1037,7 @@ const handleSelectAllCancelled = () => {
 
 const handleBatchPurgeCancelledOrders = async () => {
   if (!canBatchPurgeCancelledOrders.value || !selectedCancelledOrders.value.length) return
-  const selectedSnapshot = selectedCancelledOrders.value.slice(0, 50).map((order) => ({ id: order.id, confirmShowNo: order.showNo }))
+  const selectedSnapshot = selectedCancelledOrders.value.slice(0, 50).map((order) => ({ id: order.id, confirmPreorderNo: order.preorderNo }))
   batchInteractionActive.value = true
   try {
     await ElMessageBox.confirm(`确认永久删除已选 ${selectedSnapshot.length} 笔已取消订单吗？此操作不可撤销。`, '批量永久删除确认', { type: 'error', closeOnClickModal: false })
@@ -1070,11 +1071,11 @@ const handleDeleteCurrentOrder = async () => {
     return
   }
 
-  const showNo = detail.order.showNo
+  const preorderNo = detail.order.preorderNo
   let permanentDeletePassword = ''
   try {
     await ElMessageBox.confirm(
-      `确认删除订单“${showNo}”？将移除订单池记录及关联数据，此操作不可撤销。`,
+      `确认删除预订单“${preorderNo}”？将移除订单池记录及关联数据，此操作不可撤销。`,
       '删除订单确认',
       {
         type: 'warning',
@@ -1083,7 +1084,7 @@ const handleDeleteCurrentOrder = async () => {
         closeOnClickModal: false,
       },
     )
-    await ElMessageBox.confirm(`再次确认删除“${showNo}”？`, '二次确认删除', {
+    await ElMessageBox.confirm(`再次确认删除“${preorderNo}”？`, '二次确认删除', {
       type: 'error',
       confirmButtonText: '确认删除订单',
       cancelButtonText: '取消',
@@ -1115,7 +1116,7 @@ const handleDeleteCurrentOrder = async () => {
 
   orderDeleting.value = true
   try {
-    const result = await deleteO2oConsoleOrder(detail.order.id, { confirmShowNo: showNo, permanentDeletePassword })
+    const result = await deleteO2oConsoleOrder(detail.order.id, { confirmPreorderNo: preorderNo, permanentDeletePassword })
     orders.value = orders.value.filter((item) => item.id !== detail.order.id)
     if (activeOrderId.value === detail.order.id) {
       activeOrderId.value = ''
@@ -1123,7 +1124,7 @@ const handleDeleteCurrentOrder = async () => {
     }
     await loadOrders({ silent: true })
     const rollbackText = result.preorderSerialRolledBack || result.outboundSerialRolledBack ? '，相关流水已回拨' : ''
-    showAppSuccess(`订单“${showNo}”已删除${rollbackText}`)
+    showAppSuccess(`预订单“${preorderNo}”已删除${rollbackText}`)
   } catch (error) {
     showAppError(extractErrorMessage(error, '删除订单池订单失败，请稍后重试'))
   } finally {
@@ -1142,8 +1143,8 @@ const handleBusinessStatusChange = async (value: O2oOrderBusinessStatus | null) 
 
   const nextMeta = getO2oOrderBusinessStatusMeta(value)
   const confirmMessage = value
-    ? `确认将订单“${activeOrderDetail.value.order.showNo}”的商家特殊状态更新为“${nextMeta?.label ?? value}”吗？`
-    : `确认清除订单“${activeOrderDetail.value.order.showNo}”的商家特殊状态吗？`
+    ? `确认将预订单“${activeOrderDetail.value.order.preorderNo}”的商家特殊状态更新为“${nextMeta?.label ?? value}”吗？`
+    : `确认清除预订单“${activeOrderDetail.value.order.preorderNo}”的商家特殊状态吗？`
 
   try {
     await ElMessageBox.confirm(confirmMessage, '确认更新特殊状态', {
@@ -1189,11 +1190,11 @@ const handleSaveMerchantMessage = async () => {
     return
   }
 
-  let confirmMessage = `确认清空订单“${activeOrderDetail.value.order.showNo}”的商家留言吗？`
+  let confirmMessage = `确认清空预订单“${activeOrderDetail.value.order.preorderNo}”的商家留言吗？`
   if (nextValue) {
     confirmMessage = previousValue
-      ? `确认更新订单“${activeOrderDetail.value.order.showNo}”的商家留言吗？`
-      : `确认设置订单“${activeOrderDetail.value.order.showNo}”的商家留言吗？`
+      ? `确认更新预订单“${activeOrderDetail.value.order.preorderNo}”的商家留言吗？`
+      : `确认设置预订单“${activeOrderDetail.value.order.preorderNo}”的商家留言吗？`
   }
 
   try {
@@ -1475,7 +1476,7 @@ onBeforeUnmount(() => {
           <p class="font-semibold">批量删除未完成项</p>
           <ul class="mt-1 space-y-1">
             <li v-for="result in batchPurgeResults" :key="`${result.id}:${result.code}`">
-              {{ result.showNo || result.id }}：{{ result.code }} - {{ result.message }}
+              {{ result.preorderNo || result.id }}：{{ result.code }} - {{ result.message }}
             </li>
           </ul>
         </div>
@@ -1513,7 +1514,10 @@ onBeforeUnmount(() => {
               <div class="flex min-w-0 items-start justify-between gap-2">
                 <div class="min-w-0">
                   <div class="flex min-w-0 flex-wrap items-center gap-2">
-                    <p class="min-w-0 break-words text-sm font-semibold text-slate-900">{{ order.showNo }}</p>
+                    <p class="min-w-0 break-words text-sm font-semibold text-slate-900">{{ order.preorderNo }}</p>
+                    <el-tag v-if="order.matchedIdentifierType && order.matchedIdentifierValue && (order.matchedIdentifierType !== 'systemNo' || isAdmin)" size="small" effect="plain" type="warning">
+                      命中{{ order.matchedIdentifierType === 'businessNo' ? '出库业务单号' : order.matchedIdentifierType === 'systemNo' ? '出库系统编号' : '预订单号' }}：{{ order.matchedIdentifierValue }}
+                    </el-tag>
                     <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">
                       {{ getOrderTypeLabel(order.clientOrderType) }}
                     </span>
@@ -1583,7 +1587,7 @@ onBeforeUnmount(() => {
           <div class="flex flex-col gap-3 2xl:flex-row 2xl:items-start 2xl:justify-between">
             <div class="min-w-0">
               <div class="flex flex-wrap items-center gap-2">
-                <p class="break-words text-lg font-semibold text-slate-900">{{ activeOrderDetail.order.showNo }}</p>
+                <p class="break-words text-lg font-semibold text-slate-900">{{ activeOrderDetail.order.preorderNo }}</p>
                 <Transition name="detail-refresh-notice">
                   <span
                     v-if="showDetailRefreshNotice"
@@ -1594,6 +1598,9 @@ onBeforeUnmount(() => {
                 </Transition>
               </div>
               <p class="mt-1 break-all text-sm text-slate-400">核销码：{{ activeOrderDetail.order.verifyCode }}</p>
+              <p v-if="activeOrderDetail.order.customerOrderBusinessNo" class="mt-1 break-all text-sm text-teal-700">
+                关联出库业务单号：{{ activeOrderDetail.order.customerOrderBusinessNo }}
+              </p>
             </div>
             <!-- 窄屏两列网格，平板及以上改为弹性单行；!ml-0 抵消 Element Plus 相邻按钮自带的左边距，避免与 gap 叠加后提前换行。 -->
             <div class="order-detail-actions grid min-w-0 grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center">

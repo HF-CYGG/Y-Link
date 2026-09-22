@@ -275,6 +275,13 @@ async function main() {
     const revisionRepo = AppDataSource.getRepository(OrderRevision)
     const sequenceRepo = AppDataSource.getRepository(BusinessSequence)
     const auditRepo = AppDataSource.getRepository(SysAuditLog)
+    const setWalkinBusinessCursorFixture = async (currentValue: number) => {
+      await sequenceRepo.update({ sequenceKey: 'order.business.walkin' }, { currentValue })
+      await AppDataSource.query(
+        'UPDATE "system_configs" SET "config_value" = ? WHERE "config_key" = ?',
+        [String(currentValue), 'order.business.walkin.current'],
+      )
+    }
 
     const assignBusinessNo = async (orderId: string, businessNo: string) => {
       const entity = await orderRepo.findOneByOrFail({ id: orderId })
@@ -291,8 +298,8 @@ async function main() {
       const entity = await orderRepo.findOneByOrFail({ id: orderId })
       entity.inventoryMode = 'legacy_none'
       await orderRepo.save(entity)
-      if (!entity.isDeleted) await orderService.softDeleteById(orderId, adminActor, entity.showNo)
-      await orderService.purgeById(orderId, adminActor, entity.showNo)
+      if (!entity.isDeleted) await orderService.softDeleteById(orderId, adminActor, entity.businessNo)
+      await orderService.purgeById(orderId, adminActor, entity.businessNo)
       assert.equal(await orderRepo.existsBy({ id: orderId }), false)
       return entity
     }
@@ -311,7 +318,7 @@ async function main() {
     assert.equal(source100Occupancy.lastAssignedOrderUuid, source100Entity.orderUuid, '存量/首次分配必须回填最后持有人')
     assert.equal(Number(source100Occupancy.reuseCount), 0)
 
-    await sequenceRepo.update({ sequenceKey: 'order.business.walkin' }, { currentValue: 99 })
+    await setWalkinBusinessCursorFixture(99)
     const occupancyCountBeforeSuggestion = await occupancyRepo.count()
     const suggestion = await orderService.suggestAmendmentBusinessNos({ orderType: 'walkin', count: 1, exclude: [] })
     assert.equal(suggestion.businessNos[0], 'hyyz000102', '自动建议必须继续跳过可回收但仍永久占用的 100/101')
@@ -359,7 +366,7 @@ async function main() {
       '普通改单提交接口不得接受回收授权',
     )
 
-    await sequenceRepo.update({ sequenceKey: 'order.business.walkin' }, { currentValue: 101 })
+    await setWalkinBusinessCursorFixture(101)
     const batchOther = await submitOrder('walkin')
     const batchOtherEntity = await assignBusinessNo(String(batchOther.order.id), 'hyyz000030')
     const batchPreview = await api.previewAmendments({ amendments: [
@@ -398,7 +405,7 @@ async function main() {
       orderId: String(activeTarget.order.id), editVersion: 1, businessNo: 'hyyz000040', reclaimBusinessNo: true, reason: '正常订单不可回收',
     }] }, adminActor)
     assert.equal(activePreview.ready, false, '正常持有人仍存在时不可回收')
-    await orderService.softDeleteById(String(activeHolder.order.id), adminActor, activeHolderEntity.showNo)
+    await orderService.softDeleteById(String(activeHolder.order.id), adminActor, activeHolderEntity.businessNo)
     const softDeletedPreview = await api.previewAmendments({ amendments: [{
       orderId: String(activeTarget.order.id), editVersion: 1, businessNo: 'hyyz000040', reclaimBusinessNo: true, reason: '软删除订单不可回收',
     }] }, adminActor)
@@ -461,10 +468,10 @@ async function main() {
     assert.equal(committed.ready, true)
     assert.deepEqual(committed.cursorPlans, [{
       namespace: 'hyyz',
-      beforeCursor: 41,
-      afterCursor: 101,
-      nextBusinessNo: 'hyyz000102',
-    }], '正式提交必须按事务时点重新校准 100/029/101，而不是信任旧预览')
+      beforeCursor: 104,
+      afterCursor: 104,
+      nextBusinessNo: 'hyyz000105',
+    }], '正式提交必须保留事务时点业务号单调高水位，不得因物理占用降低游标')
     const targetAfterFirstReuse = await orderRepo.findOneByOrFail({ id: target029.order.id })
     assert.equal(targetAfterFirstReuse.businessNo, 'hyyz000100')
     assert.equal(Number(targetAfterFirstReuse.editVersion), Number(target029Entity.editVersion) + 1)
@@ -472,13 +479,13 @@ async function main() {
     assert.equal(occupancyAfterFirstReuse.orderUuid, source100Entity.orderUuid, '首次持有人必须保持不变')
     assert.equal(occupancyAfterFirstReuse.lastAssignedOrderUuid, targetAfterFirstReuse.orderUuid)
     assert.equal(Number(occupancyAfterFirstReuse.reuseCount), 1)
-    assert.equal(Number((await sequenceRepo.findOneByOrFail({ sequenceKey: 'order.business.walkin' })).currentValue), 101)
+    assert.equal(Number((await sequenceRepo.findOneByOrFail({ sequenceKey: 'order.business.walkin' })).currentValue), 104)
     assert.equal(Number((await sequenceRepo.findOneByOrFail({ sequenceKey: 'order.business.department' })).currentValue), departmentCursorBefore, '另一命名空间游标不得变化')
     const firstEvent = await eventRepo.findOneByOrFail({ businessNo: 'hyyz000100', reuseCount: 1 })
     assert.equal(firstEvent.fromOrderUuid, source100Entity.orderUuid)
     assert.equal(firstEvent.toOrderUuid, targetAfterFirstReuse.orderUuid)
     assert.equal(firstEvent.targetOrderIdSnapshot, String(targetAfterFirstReuse.id))
-    assert.equal(firstEvent.targetShowNoSnapshot, targetAfterFirstReuse.showNo)
+    assert.equal(firstEvent.targetSystemNoSnapshot, targetAfterFirstReuse.systemNo)
     await assert.rejects(
       () => eventRepo.update({ id: firstEvent.id }, { reason: '不应允许篡改' }),
       /ORDER_BUSINESS_NO_REUSE_EVENT_APPEND_ONLY/,
@@ -493,7 +500,7 @@ async function main() {
     const firstAudit = await auditRepo.findOneByOrFail({ actionType: 'order.business_no_reclaim', targetId: String(targetAfterFirstReuse.id) })
     const sensitiveDump = `${firstRevision.beforeSnapshotJson}${firstRevision.afterSnapshotJson}${firstRevision.reason}${firstAudit.detailJson}${JSON.stringify(firstEvent)}`
     assert.equal(sensitiveDump.includes(permanentDeletePassword), false, 'revision/audit/reuse event 不得记录永久删除密码')
-    assert.equal(firstAudit.targetCode, targetAfterFirstReuse.showNo, '审计 targetCode 必须保留不可变 showNo')
+    assert.equal(firstAudit.targetCode, targetAfterFirstReuse.businessNo, '审计 targetCode 必须使用事件时 businessNo')
 
     // 多次复用链：第一次目标永久删除后，第二个目标可继续回收同一号码，事件链必须连续。
     await purgeAsLegacy(String(targetAfterFirstReuse.id))
@@ -515,7 +522,7 @@ async function main() {
     assert.equal(chainEvents[1]?.toOrderUuid, occupancyAfterSecondReuse.lastAssignedOrderUuid)
 
     // 失败回滚：审计异常必须连同订单、占用转移、事件和 revision 全部回滚。
-    await sequenceRepo.update({ sequenceKey: 'order.business.walkin' }, { currentValue: 699 })
+    await setWalkinBusinessCursorFixture(699)
     const rollbackSource = await submitOrder('walkin')
     const rollbackSourceEntity = await assignBusinessNo(String(rollbackSource.order.id), 'hyyz000500')
     await purgeAsLegacy(String(rollbackSource.order.id))

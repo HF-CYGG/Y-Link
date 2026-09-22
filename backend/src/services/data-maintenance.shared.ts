@@ -373,9 +373,16 @@ function validatePreorderRows(rows: ExportRow[]) {
       assertEnumValue(cancellationSource, '预订单取消来源', PREORDER_CANCELLATION_SOURCE_SET, true)
       assertEnumValue(businessStatus, '预订单商家状态', PREORDER_BUSINESS_STATUS_SET, true)
       assertEnumValue(clientOrderType, '预订单归属类型', PREORDER_CLIENT_ORDER_TYPE_SET)
+      const canonicalPreorderNo = readOptionalText(rawRow, 'preorderNo', 48)
+      const legacyShowNo = readOptionalText(rawRow, 'showNo', 48)
+      if (canonicalPreorderNo && legacyShowNo && canonicalPreorderNo !== legacyShowNo) {
+        throw new BizError('preorders.preorderNo 与兼容字段 showNo 不一致', 400)
+      }
+      const preorderNo = canonicalPreorderNo ?? legacyShowNo
+      if (!preorderNo) throw new BizError('预订单号不能为空', 400)
       return {
         id: readRequiredIdentifier(rawRow, 'id', '预订单ID'),
-        showNo: readRequiredText(rawRow, 'showNo', '预订单号', 48),
+        preorderNo,
         clientUserId: readRequiredIdentifier(rawRow, 'clientUserId', '预订单客户端用户ID'),
         verifyCode: readRequiredText(rawRow, 'verifyCode', '预订单核销码', 64),
         status,
@@ -406,7 +413,7 @@ function validatePreorderRows(rows: ExportRow[]) {
     },
     [
       { field: 'id', label: 'preorders.id' },
-      { field: 'showNo', label: 'preorders.showNo' },
+      { field: 'preorderNo', label: 'preorders.preorderNo' },
       { field: 'verifyCode', label: 'preorders.verifyCode' },
     ],
   )

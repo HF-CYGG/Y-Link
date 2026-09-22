@@ -18,7 +18,6 @@ import {
   getO2oMallProducts,
   getO2oPreorderDetail,
   markMyO2oPreorderCustomerOrderPrinted,
-  resolveO2oDisplayShowNo,
   submitO2oReturnRequest,
   updateMyO2oPreorder,
   type O2oMallProduct,
@@ -219,21 +218,19 @@ const orderTypeLabel = computed(() => {
   return detail.value ? ORDER_TYPE_LABEL_MAP[detail.value.order.clientOrderType] : '散客'
 })
 
-const shouldShowVoucherButton = computed(() => {
-  return detail.value?.order.clientOrderType === 'department'
-})
-const displayOrderShowNo = computed(() => {
+const shouldShowVoucherButton = computed(() => Boolean(detail.value?.order.customerOrderBusinessNo))
+const displayPreorderNo = computed(() => {
   if (!detail.value) {
     return ''
   }
-  return resolveO2oDisplayShowNo(detail.value.order)
+  return detail.value.order.preorderNo
 })
-const originalCustomerOrderShowNo = computed(() => {
+const originalCustomerOrderBusinessNo = computed(() => {
   const order = detail.value?.order
-  return order?.originalCustomerOrderBusinessNo?.trim() || order?.originalCustomerOrderShowNo?.trim() || ''
+  return order?.originalCustomerOrderBusinessNo?.trim() || ''
 })
 const isMergedCustomerOrder = computed(() => {
-  return Boolean(originalCustomerOrderShowNo.value && originalCustomerOrderShowNo.value !== displayOrderShowNo.value)
+  return Boolean(originalCustomerOrderBusinessNo.value && originalCustomerOrderBusinessNo.value !== detail.value?.order.customerOrderBusinessNo)
 })
 
 const voucherOrientationLabel = computed(() => (voucherOrientation.value === 'landscape' ? '横版' : '竖版'))
@@ -330,13 +327,16 @@ const voucherOrder = computed<OrderDetailResult | null>(() => {
     return null
   }
   const { order, items, customerProfile } = detail.value
-  const displayShowNo = resolveO2oDisplayShowNo(order)
+  const businessNo = order.customerOrderBusinessNo?.trim()
+  if (!businessNo) {
+    return null
+  }
   const customerDisplayName = customerProfile?.realName || customerProfile?.username || null
   const normalizedTotalAmount = toVoucherMoneyText(order.totalAmount ?? totalAmount.value)
   return {
     id: order.id,
-    showNo: displayShowNo,
-    businessNo: displayShowNo,
+    systemNo: '',
+    businessNo,
     editVersion: 1,
     inventoryMode: 'o2o_preapplied',
     contentEditable: false,
@@ -356,7 +356,9 @@ const voucherOrder = computed<OrderDetailResult | null>(() => {
     // 客户端预览/打印以当前预订单为来源单据，与管理端正式出库单的结构化来源口径一致。
     sourceDocType: 'o2o_preorder',
     sourceDocId: order.id,
-    sourceDocNo: order.showNo,
+    sourcePreorderNo: order.preorderNo,
+    matchedIdentifierType: null,
+    matchedIdentifierValue: null,
     creatorUserId: customerProfile?.id || null,
     creatorUsername: customerProfile?.username || null,
     creatorDisplayName: customerDisplayName,
@@ -1065,7 +1067,7 @@ const handleExportVoucherPdf = async () => {
     }
     await exportVoucherPdf({
       sourceElement,
-      filename: `${voucherOrder.value.showNo || 'client-order'}-正式出库单.pdf`,
+      filename: `${voucherOrder.value.businessNo || 'client-order'}-正式出库单.pdf`,
       marginMm: 8,
       scale: 2,
       orientation: voucherOrientation.value,
@@ -1210,7 +1212,7 @@ const handleRecallOrder = async () => {
 
   try {
     await ElMessageBox.confirm(
-      `确认撤回订单“${displayOrderShowNo.value}”吗？撤回后将释放预订库存，二维码会立即失效。`,
+      `确认撤回预订单“${displayPreorderNo.value}”吗？撤回后将释放预订库存，二维码会立即失效。`,
       '撤回订单',
       {
         type: 'warning',
@@ -1296,7 +1298,7 @@ const handleSubmitOrderEdit = async () => {
 
   try {
     await ElMessageBox.confirm(
-      `确认修改订单“${displayOrderShowNo.value}”吗？保存后将按最新商品和数量重算预订库存。`,
+      `确认修改预订单“${displayPreorderNo.value}”吗？保存后将按最新商品和数量重算预订库存。`,
       '修改订单',
       {
         type: 'warning',
@@ -1486,7 +1488,7 @@ onBeforeUnmount(() => {
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div class="flex flex-wrap items-center gap-2">
-              <p class="text-lg font-semibold text-slate-900">{{ displayOrderShowNo }}</p>
+              <p class="text-lg font-semibold text-slate-900">{{ displayPreorderNo }}</p>
               <span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">{{ orderTypeLabel }}</span>
               <Transition name="detail-refresh-notice">
                 <span
@@ -1497,7 +1499,7 @@ onBeforeUnmount(() => {
                 </span>
               </Transition>
             </div>
-            <p v-if="isMergedCustomerOrder" class="mt-2 text-xs text-teal-700">当前正式出库单 · 已合并（原始单号：{{ originalCustomerOrderShowNo }}）</p>
+            <p v-if="isMergedCustomerOrder" class="mt-2 text-xs text-teal-700">关联正式出库单已合并（原始出库业务单号：{{ originalCustomerOrderBusinessNo }}）</p>
             <p class="mt-1 text-sm text-slate-400">状态：{{ statusLabel }}</p>
             <p class="mt-1 text-xs text-slate-400">{{ detailAutoRefreshStatusText }}</p>
           </div>
@@ -1582,6 +1584,10 @@ onBeforeUnmount(() => {
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">创建时间</p>
               <p class="mt-1 text-sm text-slate-700">{{ formatOrderDateTime(detail.order.createdAt) }}</p>
+            </div>
+            <div v-if="detail.order.customerOrderBusinessNo" class="rounded-2xl bg-teal-50 px-4 py-3">
+              <p class="text-sm text-teal-600">关联出库业务单号</p>
+              <p class="mt-1 break-all text-sm font-semibold text-teal-800">{{ detail.order.customerOrderBusinessNo }}</p>
             </div>
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">下单归属</p>

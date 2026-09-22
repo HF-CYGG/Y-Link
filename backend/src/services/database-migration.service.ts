@@ -344,6 +344,7 @@ const MIGRATION_BATCH_SIZE = 300
 const CRITICAL_VALIDATION_TABLES = new Set([
   'sys_user',
   'system_configs',
+  'business_sequence',
   'base_product',
   'client_user',
   'biz_outbound_order',

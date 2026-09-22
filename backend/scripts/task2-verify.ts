@@ -55,6 +55,7 @@ async function main() {
     { BaseProduct },
     { BaseProductSku },
     { BizOutboundOrder },
+    { BusinessSequence },
     { ClientUser },
     { O2oPreorder },
     { SystemConfig },
@@ -69,6 +70,7 @@ async function main() {
       import('../src/entities/base-product.entity.js'),
       import('../src/entities/base-product-sku.entity.js'),
       import('../src/entities/biz-outbound-order.entity.js'),
+      import('../src/entities/business-sequence.entity.js'),
       import('../src/entities/client-user.entity.js'),
       import('../src/entities/o2o-preorder.entity.js'),
       import('../src/entities/system-config.entity.js'),
@@ -133,7 +135,11 @@ async function main() {
       },
       mockActor,
     )
-    assert.match(walkinOrder.order.showNo, /^hyyz\d{6}$/)
+    assert.equal('systemNo' in walkinOrder.order, false, '普通操作员提交响应不得暴露 systemNo')
+    const orderRepo = AppDataSource.getRepository(BizOutboundOrder)
+    const walkinSystemNo = (await orderRepo.findOneByOrFail({ id: walkinOrder.order.id })).systemNo
+    assert.match(walkinSystemNo, /^OUT-W-\d{6}$/)
+    assert.match(walkinOrder.order.businessNo, /^hyyz\d{6}$/)
 
     const departmentOrder = await orderService.submit(
       {
@@ -146,8 +152,11 @@ async function main() {
       },
       mockActor,
     )
-    assert.match(departmentOrder.order.showNo, /^hyyzjd\d{6}$/)
-    pass('创建接口已按 orderType 生成 showNo，且双流水前缀正确')
+    assert.equal('systemNo' in departmentOrder.order, false, '普通操作员提交响应不得暴露部门单 systemNo')
+    const departmentSystemNo = (await orderRepo.findOneByOrFail({ id: departmentOrder.order.id })).systemNo
+    assert.match(departmentSystemNo, /^OUT-D-\d{6}$/)
+    assert.match(departmentOrder.order.businessNo, /^hyyzjd\d{6}$/)
+    pass('创建接口已按 orderType 分别生成 systemNo 与 businessNo，且双流水前缀正确')
 
     const secondWalkinOrder = await orderService.submit(
       {
@@ -158,12 +167,12 @@ async function main() {
       },
       mockActor,
     )
-    const walkinSerialA = Number.parseInt(walkinOrder.order.showNo.replace('hyyz', ''), 10)
-    const walkinSerialB = Number.parseInt(secondWalkinOrder.order.showNo.replace('hyyz', ''), 10)
+    const secondWalkinSystemNo = (await orderRepo.findOneByOrFail({ id: secondWalkinOrder.order.id })).systemNo
+    const walkinSerialA = Number.parseInt(walkinSystemNo.replace('OUT-W-', ''), 10)
+    const walkinSerialB = Number.parseInt(secondWalkinSystemNo.replace('OUT-W-', ''), 10)
     assert.equal(walkinSerialB, walkinSerialA + 1)
     pass('散客流水号连续递增且不受部门流水影响')
 
-    const orderRepo = AppDataSource.getRepository(BizOutboundOrder)
     const thirdWalkinOrder = await orderService.submit(
       {
         idempotencyKey: `task2-walkin-third-${Date.now()}`,
@@ -173,26 +182,32 @@ async function main() {
       },
       mockActor,
     )
-    const thirdWalkinSerial = Number.parseInt(thirdWalkinOrder.order.showNo.replace('hyyz', ''), 10)
+    const thirdWalkinSystemNo = (await orderRepo.findOneByOrFail({ id: thirdWalkinOrder.order.id })).systemNo
+    const thirdWalkinSerial = Number.parseInt(thirdWalkinSystemNo.replace('OUT-W-', ''), 10)
     assert.equal(thirdWalkinSerial, walkinSerialB + 1)
 
     await orderRepo.update({ id: thirdWalkinOrder.order.id }, { isDeleted: true, deletedAt: new Date() })
-    let recalibrationResult = await orderSerialService.recalibrateCurrentFromOccupancy('walkin')
-    assert.equal(recalibrationResult.current, thirdWalkinSerial)
-    assert.equal(recalibrationResult.maxOccupiedSerial, thirdWalkinSerial)
+    const systemSequenceRepo = AppDataSource.getRepository(BusinessSequence)
+    assert.equal(
+      Number((await systemSequenceRepo.findOneByOrFail({ sequenceKey: 'order.system.walkin' })).currentValue),
+      thirdWalkinSerial,
+    )
     pass('软删除出库单仍占用流水，避免恢复时单号冲突')
 
     await orderRepo.delete({ id: thirdWalkinOrder.order.id })
-    recalibrationResult = await orderSerialService.recalibrateCurrentFromOccupancy('walkin')
-    assert.equal(recalibrationResult.current, walkinSerialB)
-    assert.equal(recalibrationResult.maxOccupiedSerial, walkinSerialB)
-    assert.equal(recalibrationResult.rolledBack, true)
-    pass('永久删除最大流水单后，current 按剩余最大单号重算')
+    const rollbackResult = await orderSerialService.rollbackDeletedIdentifierBatch(
+      'system',
+      'walkin',
+      [thirdWalkinSystemNo],
+    )
+    assert.equal(rollbackResult.current, walkinSerialB)
+    assert.equal(rollbackResult.rolledBack, true)
+    pass('永久删除当前尾号后，current 只按锁定游标单步回收')
 
     const clientUserRepo = AppDataSource.getRepository(ClientUser)
     const preorderRepo = AppDataSource.getRepository(O2oPreorder)
-    const serialOccupiedByPreorder = walkinSerialB + 1
-    const occupiedPreorderShowNo = `hyyz${String(serialOccupiedByPreorder).padStart(6, '0')}`
+    const serialOccupiedByPreorder = 1
+    const occupiedPreorderNo = `PRE-W-${String(serialOccupiedByPreorder).padStart(6, '0')}`
     const serialClientUser = await clientUserRepo.save(
       clientUserRepo.create({
         mobile: `139${String(Date.now()).slice(-8)}`,
@@ -208,7 +223,7 @@ async function main() {
     )
     await preorderRepo.save(
       preorderRepo.create({
-        showNo: occupiedPreorderShowNo,
+        preorderNo: occupiedPreorderNo,
         clientUserId: serialClientUser.id,
         verifyCode: `task2-verify-${Date.now()}`,
         status: 'pending',
@@ -234,15 +249,15 @@ async function main() {
         deletedByDisplayName: null,
       }),
     )
-    const generatedAfterStaleCurrent = await orderSerialService.generateOrderNo('walkin')
-    const generatedAfterStaleSerial = Number.parseInt(generatedAfterStaleCurrent.replace('hyyz', ''), 10)
+    const generatedAfterStaleCurrent = await orderSerialService.generatePreorderNo('walkin')
+    const generatedAfterStaleSerial = Number.parseInt(generatedAfterStaleCurrent.replace('PRE-W-', ''), 10)
     assert.equal(generatedAfterStaleSerial, serialOccupiedByPreorder + 1)
     pass('流水 current 落后于已有预订单时会自动跳过已占用单号')
 
     const serialOccupiedByHiddenVerifiedPreorder = generatedAfterStaleSerial + 1
     await preorderRepo.save(
       preorderRepo.create({
-        showNo: `hyyz${String(serialOccupiedByHiddenVerifiedPreorder).padStart(6, '0')}`,
+        preorderNo: `PRE-W-${String(serialOccupiedByHiddenVerifiedPreorder).padStart(6, '0')}`,
         clientUserId: serialClientUser.id,
         verifyCode: `task2-hidden-verified-${Date.now()}`,
         status: 'verified',
@@ -268,8 +283,8 @@ async function main() {
         deletedByDisplayName: 'Task2隐藏已核销客户',
       }),
     )
-    const generatedAfterHiddenVerified = await orderSerialService.generateOrderNo('walkin')
-    const generatedAfterHiddenVerifiedSerial = Number.parseInt(generatedAfterHiddenVerified.replace('hyyz', ''), 10)
+    const generatedAfterHiddenVerified = await orderSerialService.generatePreorderNo('walkin')
+    const generatedAfterHiddenVerifiedSerial = Number.parseInt(generatedAfterHiddenVerified.replace('PRE-W-', ''), 10)
     assert.equal(generatedAfterHiddenVerifiedSerial, serialOccupiedByHiddenVerifiedPreorder + 1)
     pass('已核销或客户端隐藏的预订单仍参与流水占用校准')
 
@@ -487,25 +502,25 @@ async function main() {
     )
 
     const configRepo = AppDataSource.getRepository(SystemConfig)
-    await configRepo.delete({ configKey: 'order.serial.walkin.current' })
-    await expectBizError('配置缺失校验', () => orderSerialService.generateOrderNo('walkin'), 500, '配置缺失', BizError)
+    await configRepo.delete({ configKey: 'order.system.walkin.current' })
+    await expectBizError('配置缺失校验', () => orderSerialService.generateSystemNo('walkin'), 500, '配置缺失', BizError)
 
     await configRepo.insert({
-      configKey: 'order.serial.walkin.current',
+      configKey: 'order.system.walkin.current',
       configValue: '999999',
       configGroup: 'order_serial',
       remark: '散客单号当前值',
     })
-    await expectBizError('序号上限校验', () => orderSerialService.generateOrderNo('walkin'), 409, '位宽上限', BizError)
+    await expectBizError('序号上限校验', () => orderSerialService.generateSystemNo('walkin'), 409, '位宽上限', BizError)
     pass('参数校验与错误码行为符合预期')
 
     const generatedDepartmentOrderNos: string[] = []
     for (let i = 0; i < 6; i += 1) {
-      generatedDepartmentOrderNos.push(await orderSerialService.generateOrderNo('department'))
+      generatedDepartmentOrderNos.push(await orderSerialService.generateSystemNo('department'))
     }
     const uniqueOrderNos = new Set(generatedDepartmentOrderNos)
     assert.equal(uniqueOrderNos.size, generatedDepartmentOrderNos.length)
-    assert.equal(generatedDepartmentOrderNos.every((item) => /^hyyzjd\d{6}$/.test(item)), true)
+    assert.equal(generatedDepartmentOrderNos.every((item) => /^OUT-D-\d{6}$/.test(item)), true)
     pass('OrderSerialService 连续生成场景下无重复单号')
   } finally {
     await AppDataSource.destroy()
