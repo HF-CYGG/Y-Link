@@ -9,6 +9,7 @@ import path from 'node:path'
 import type { DataSource, EntityManager } from 'typeorm'
 import { env } from './env.js'
 import { initializeDatabaseInfrastructure } from '../database/database-strategy.js'
+import { runDatabaseExclusive } from '../database/transaction-coordinator.js'
 import { ClientStaffDirectory } from '../entities/client-staff-directory.entity.js'
 import { ClientUser } from '../entities/client-user.entity.js'
 import { ClientFeedbackAttachment } from '../entities/client-feedback-attachment.entity.js'
@@ -22,6 +23,7 @@ import {
   runMysqlSchemaMigrations,
 } from './mysql-migration-runner.js'
 import { BizError } from '../utils/errors.js'
+import { backupOrderBusinessNoRetirementTables } from './order-business-no-retirement-backup.js'
 
 const SQLITE_REQUIRED_TABLES = [
   'base_product',
@@ -131,10 +133,22 @@ async function ensureSqliteAccountLifecycleAppendOnly(dataSource: DataSource): P
 
 /** 056：业务号永久占用功能停用，SQLite 启动时幂等移除历史表与触发器。 */
 async function dropSqliteOrderBusinessNoPermanentOccupancy(dataSource: DataSource): Promise<void> {
-  await dataSource.query('DROP TRIGGER IF EXISTS "trg_order_business_no_reuse_event_no_update"')
-  await dataSource.query('DROP TRIGGER IF EXISTS "trg_order_business_no_reuse_event_no_delete"')
-  await dataSource.query('DROP TABLE IF EXISTS "order_business_no_reuse_event"')
-  await dataSource.query('DROP TABLE IF EXISTS "order_business_no_occupancy"')
+  await runDatabaseExclusive(dataSource, async () => {
+    const backup = await backupOrderBusinessNoRetirementTables({
+      dialect: 'sqlite',
+      query: dataSource.query.bind(dataSource),
+    })
+    if (backup.status === 'created') {
+      console.log(
+        `[y-link-backend] 056 清退前备份已校验：${backup.fileName}；`
+        + `表摘要=${backup.tables.map((table) => `${table.name}:${table.rowCount}`).join(',')}`,
+      )
+    }
+    await dataSource.query('DROP TRIGGER IF EXISTS "trg_order_business_no_reuse_event_no_update"')
+    await dataSource.query('DROP TRIGGER IF EXISTS "trg_order_business_no_reuse_event_no_delete"')
+    await dataSource.query('DROP TABLE IF EXISTS "order_business_no_reuse_event"')
+    await dataSource.query('DROP TABLE IF EXISTS "order_business_no_occupancy"')
+  })
 }
 
 async function migrateLegacyFeedbackAttachments(dataSource: DataSource) {

@@ -11,6 +11,7 @@ import path from 'node:path'
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqliteRoot = path.resolve(process.cwd(), 'data', 'local-dev')
 const sqlitePath = path.resolve(sqliteRoot, `order-amendment-legacy-${verifySeed}.sqlite`)
+const appDataRoot = path.resolve(sqliteRoot, `order-amendment-legacy-data-${verifySeed}`)
 const orderUuid = '00000000-0000-4000-8000-000000000072'
 const legacyShowNo = 'hyyzjd000072'
 
@@ -18,12 +19,20 @@ process.env.APP_PROFILE = `order-amendment-legacy-${verifySeed}`
 process.env.DB_TYPE = 'sqlite'
 process.env.DB_SYNC = 'false'
 process.env.SQLITE_DB_PATH = sqlitePath
+process.env.Y_LINK_DATA_DIR = appDataRoot
 
 async function main() {
   fs.mkdirSync(sqliteRoot, { recursive: true })
-  const [{ AppDataSource }, { backfillSqliteOrderAmendmentData, initializeDatabaseSchemaIfNeeded }] = await Promise.all([
+  const [
+    { AppDataSource },
+    { backfillSqliteOrderAmendmentData, initializeDatabaseSchemaIfNeeded },
+    { appDataPaths },
+    { parseAndVerifyOrderBusinessNoRetirementBundle },
+  ] = await Promise.all([
     import('../src/config/data-source.js'),
     import('../src/config/database-bootstrap.js'),
+    import('../src/config/app-data-paths.js'),
+    import('../src/config/order-business-no-retirement-backup.js'),
   ])
 
   await AppDataSource.initialize()
@@ -89,6 +98,20 @@ async function main() {
        WHERE "type" = 'table' AND "name" IN ('order_business_no_occupancy', 'order_business_no_reuse_event')`,
     ) as Array<{ name: string }>
     assert.equal(legacyTableRows.length, 0, '056 语义必须移除历史永久占号与复用事件表')
+    const retirementBackupNames = fs.readdirSync(appDataPaths.migrationBackupDir)
+      .filter((name) => name.endsWith('.json'))
+    assert.equal(retirementBackupNames.length, 1, 'SQLite 存量升级清退旧表前必须自动备份')
+    const retirementBundle = parseAndVerifyOrderBusinessNoRetirementBundle(
+      fs.readFileSync(path.join(appDataPaths.migrationBackupDir, retirementBackupNames[0]!), 'utf8'),
+    )
+    assert.deepEqual(retirementBundle.tables.map((table) => ({
+      name: table.name,
+      rowCount: table.rowCount,
+    })), [
+      { name: 'order_business_no_occupancy', rowCount: 1 },
+      { name: 'order_business_no_reuse_event', rowCount: 0 },
+    ])
+    assert.equal(JSON.stringify(retirementBundle).includes(legacyShowNo), true)
     const sequenceRows = await AppDataSource.query(
       'SELECT "current_value" AS "currentValue" FROM "business_sequence" WHERE "sequence_key" = ?',
       ['order.business.department'],
@@ -142,10 +165,16 @@ async function main() {
        WHERE "type" = 'table' AND "name" IN ('order_business_no_occupancy', 'order_business_no_reuse_event')`,
     ) as Array<{ name: string }>
     assert.equal(legacyTableRowsAfterSecondRun.length, 0, '重复 bootstrap 不得重建已停用表')
+    assert.equal(
+      fs.readdirSync(appDataPaths.migrationBackupDir).filter((name) => name.endsWith('.json')).length,
+      1,
+      '旧表已清退后重复 bootstrap 不得生成空备份',
+    )
     console.log('✅ Issue #72/#110 历史 SQLite 订单升级专项验证通过')
   } finally {
     if (AppDataSource.isInitialized) await AppDataSource.destroy()
     fs.rmSync(sqlitePath, { force: true })
+    fs.rmSync(appDataRoot, { recursive: true, force: true })
   }
 }
 

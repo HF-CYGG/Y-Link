@@ -33,11 +33,15 @@ import path from 'node:path'
 import { createHash } from 'node:crypto'
 import type { DataSource, QueryRunner } from 'typeorm'
 import { env } from './env.js'
+import {
+  backupOrderBusinessNoRetirementTables,
+  ORDER_BUSINESS_NO_RETIREMENT_MIGRATION,
+  type OrderBusinessNoRetirementBackupPublishOptions,
+} from './order-business-no-retirement-backup.js'
 
 const SQL_DIR = path.resolve(process.cwd(), 'sql')
 const MIGRATION_TABLE = 'schema_migrations'
 const ORDER_BUSINESS_NO_REUSE_MIGRATION = '054_order_business_no_reuse.sql'
-const ORDER_BUSINESS_NO_RETIREMENT_MIGRATION = '056_disable_order_business_no_permanent_occupancy.sql'
 const SUPERSEDED_AUTO_MIGRATIONS = new Map<string, string>([
   [ORDER_BUSINESS_NO_REUSE_MIGRATION, ORDER_BUSINESS_NO_RETIREMENT_MIGRATION],
 ])
@@ -908,6 +912,61 @@ async function recordAppliedMigration(
 }
 
 /**
+ * 在任何历史 054 回放前完成 056 清退：
+ * - 旧表存在时，先在持有 MySQL advisory lock 的同一 QueryRunner 上读取并校验备份；
+ * - 旧表不存在但 056 tracking 缺失时，仍执行幂等 056 并写 tracking，使 054 明确失效；
+ * - 不使用 LOCK TABLES，避免额外权限要求。advisory lock 只能协调新版本实例，部署方仍须先停写旧节点。
+ */
+async function runMysqlOrderBusinessNoRetirementPreflight(
+  queryRunner: QueryRunner,
+  appliedSet: Set<string>,
+  backupOptions: OrderBusinessNoRetirementBackupPublishOptions = {},
+): Promise<{ executed: boolean }> {
+  const backup = await backupOrderBusinessNoRetirementTables({
+    ...backupOptions,
+    dialect: 'mysql',
+    query: (sql, parameters) => queryRunner.query(sql, parameters),
+  })
+  const alreadyTracked = appliedSet.has(ORDER_BUSINESS_NO_RETIREMENT_MIGRATION)
+  if (backup.status === 'skipped' && alreadyTracked) return { executed: false }
+
+  const migration = readMigrationFile(ORDER_BUSINESS_NO_RETIREMENT_MIGRATION)
+  try {
+    for (const statement of migration.statements) {
+      await queryRunner.query(statement)
+    }
+    const remainingTables = await queryRunner.query(
+      `SELECT TABLE_NAME FROM information_schema.TABLES
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME IN (${MYSQL_FORBIDDEN_TABLES.map(() => '?').join(', ')})`,
+      [...MYSQL_FORBIDDEN_TABLES],
+    ) as MysqlTableRow[]
+    if (remainingTables.length > 0) {
+      throw new Error(`清退后仍存在历史表：${remainingTables.map((row) => row.TABLE_NAME).join(', ')}`)
+    }
+  } catch (error) {
+    throw new Error(
+      `[启动失败] MySQL 迁移 ${ORDER_BUSINESS_NO_RETIREMENT_MIGRATION} 的备份后清退失败；`
+      + `已生成的备份会保留，服务已阻止启动：${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+
+  await recordAppliedMigration(
+    queryRunner,
+    ORDER_BUSINESS_NO_RETIREMENT_MIGRATION,
+    migration.checksum,
+  )
+  appliedSet.add(ORDER_BUSINESS_NO_RETIREMENT_MIGRATION)
+  if (backup.status === 'created') {
+    console.log(
+      `[y-link-backend] 056 清退前备份已校验：${backup.fileName}；`
+      + `表摘要=${backup.tables.map((table) => `${table.name}:${table.rowCount}`).join(',')}`,
+    )
+  }
+  return { executed: true }
+}
+
+/**
  * 用 MySQL advisory lock（GET_LOCK）串行化"检查 + 执行"整段流程。
  *
  * 多实例同时以 DB_AUTO_MIGRATE=true 启动时，两边都可能读到某个脚本尚未应用并同时执行它。
@@ -958,7 +1017,14 @@ async function withMysqlAdvisoryLock<T>(
  * - 每个文件内的语句顺序执行，全部成功后才写入执行记录；
  * - 单个文件内某条语句失败会中止本次启动，日志会指出具体文件名，避免带着不完整结构继续运行。
  */
-export async function runMysqlSchemaMigrations(dataSource: DataSource): Promise<{ appliedFiles: string[] }> {
+export interface RunMysqlSchemaMigrationsOptions {
+  retirementBackup?: OrderBusinessNoRetirementBackupPublishOptions
+}
+
+export async function runMysqlSchemaMigrations(
+  dataSource: DataSource,
+  options: RunMysqlSchemaMigrationsOptions = {},
+): Promise<{ appliedFiles: string[] }> {
   if (env.DB_TYPE !== 'mysql' || !env.DB_AUTO_MIGRATE) {
     return { appliedFiles: [] }
   }
@@ -969,7 +1035,7 @@ export async function runMysqlSchemaMigrations(dataSource: DataSource): Promise<
     dataSource,
     buildMigrationAdvisoryLockName(env.DB_NAME),
     MIGRATION_ADVISORY_LOCK_TIMEOUT_SECONDS,
-    (queryRunner) => applyPendingMigrations(queryRunner),
+    (queryRunner) => applyPendingMigrations(queryRunner, options),
   )
 }
 
@@ -987,14 +1053,12 @@ export async function retireMysqlOrderBusinessNoPermanentOccupancy(dataSource: D
     buildMigrationAdvisoryLockName(env.DB_NAME),
     MIGRATION_ADVISORY_LOCK_TIMEOUT_SECONDS,
     async (queryRunner) => {
-      const migration = readMigrationFile(ORDER_BUSINESS_NO_RETIREMENT_MIGRATION)
-      for (const statement of migration.statements) {
-        await queryRunner.query(statement)
-      }
-      await recordAppliedMigration(
+      const appliedRows = await queryRunner.query(
+        `SELECT filename FROM ${MIGRATION_TABLE}`,
+      ) as Array<{ filename: string }>
+      await runMysqlOrderBusinessNoRetirementPreflight(
         queryRunner,
-        ORDER_BUSINESS_NO_RETIREMENT_MIGRATION,
-        migration.checksum,
+        new Set(appliedRows.map((row) => row.filename)),
       )
     },
   )
@@ -1232,7 +1296,10 @@ async function assertAutoMigrationResult(queryRunner: QueryRunner, filename: str
 }
 
 /** 实际的迁移执行体；必须在 withMysqlAdvisoryLock 内调用，保证跨实例互斥。 */
-async function applyPendingMigrations(queryRunner: QueryRunner): Promise<{ appliedFiles: string[] }> {
+async function applyPendingMigrations(
+  queryRunner: QueryRunner,
+  options: RunMysqlSchemaMigrationsOptions = {},
+): Promise<{ appliedFiles: string[] }> {
   // 已应用记录必须在持锁之后再读：若在锁外读取，另一个实例可能在我们拿到锁之前刚写入记录，
   // 我们仍会拿着过期的快照重复执行脚本。
   const appliedRows: Array<{ filename: string }> = await queryRunner.query(
@@ -1242,6 +1309,23 @@ async function applyPendingMigrations(queryRunner: QueryRunner): Promise<{ appli
   const appliedFiles: string[] = []
 
   for (const filename of AUTO_MIGRATABLE_FILES) {
+    // 042 会在旧库/空库补建永久占用表，因此 retirement preflight 必须位于 042 之后、
+    // 054 是否 applied/superseded 的判断之前。这样同次启动只备份一次当前真相，
+    // 随即用 056 清退并写 tracking，下面的 054 才会被明确跳过。
+    if (filename === ORDER_BUSINESS_NO_REUSE_MIGRATION) {
+      const retirement = await runMysqlOrderBusinessNoRetirementPreflight(
+        queryRunner,
+        appliedSet,
+        options.retirementBackup,
+      )
+      if (
+        retirement.executed
+        && !appliedFiles.includes(ORDER_BUSINESS_NO_RETIREMENT_MIGRATION)
+      ) {
+        appliedFiles.push(ORDER_BUSINESS_NO_RETIREMENT_MIGRATION)
+      }
+    }
+
     if (appliedSet.has(filename)) {
       continue
     }

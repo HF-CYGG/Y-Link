@@ -10,12 +10,20 @@
 
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import fsPromises from 'node:fs/promises'
+import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { createConnection } from 'mysql2/promise'
 
 const VERIFY_TEMP_DATABASE_NAME = 'y_link_verify_db_concurrency'
 const VERIFY_APP_PROFILE = 'verify-db-concurrency'
 const CONCURRENCY_SIZE = 12
+const VERIFY_RUNTIME_ROOT = path.resolve(
+  process.cwd(),
+  'data',
+  'local-dev',
+  `verify-db-concurrency-runtime-${process.pid}-${randomUUID().slice(0, 8)}`,
+)
 
 interface VerifyMysqlRuntimeConfig {
   host: string
@@ -120,6 +128,7 @@ function configureRuntimeEnv(config: VerifyMysqlRuntimeConfig) {
   process.env.DB_NAME = VERIFY_TEMP_DATABASE_NAME
   process.env.DB_SYNC = 'true'
   process.env.DB_AUTO_MIGRATE = 'true'
+  process.env.Y_LINK_DATA_DIR = VERIFY_RUNTIME_ROOT
 }
 
 function parseSerial(showNo: string, prefix: string): number {
@@ -207,6 +216,8 @@ async function verifyOrderSerialConcurrency(mysqlConfig: VerifyMysqlRuntimeConfi
     { initializeDatabaseSchemaIfNeeded, migrateClientUserDepartmentGovernance },
     { assertMysqlRequiredSchemaExists, runMysqlSchemaMigrations },
     { env },
+    { appDataPaths },
+    { parseAndVerifyOrderBusinessNoRetirementBundle },
   ] = await Promise.all([
     import('../src/config/data-source.js'),
     import('../src/database/database-strategy.js'),
@@ -234,7 +245,76 @@ async function verifyOrderSerialConcurrency(mysqlConfig: VerifyMysqlRuntimeConfi
     import('../src/config/database-bootstrap.js'),
     import('../src/config/mysql-migration-runner.js'),
     import('../src/config/env.js'),
+    import('../src/config/app-data-paths.js'),
+    import('../src/config/order-business-no-retirement-backup.js'),
   ])
+
+  const createLegacyBusinessNoTables = async (serial: number | string) => {
+    const serialText = String(serial)
+    const businessNo = `hyyzjd${serialText.padStart(6, '0')}`
+    const uuidSuffix = serialText.slice(-12).padStart(12, '0')
+    const fromOrderUuid = `00000000-0000-4000-8000-${uuidSuffix}`
+    const toOrderUuid = `10000000-0000-4000-8000-${uuidSuffix}`
+    await AppDataSource.query(`
+      CREATE TABLE order_business_no_occupancy (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        business_namespace VARCHAR(16) NOT NULL,
+        serial_value BIGINT UNSIGNED NOT NULL,
+        business_no VARCHAR(32) NOT NULL,
+        order_uuid CHAR(36) NOT NULL,
+        assigned_reason VARCHAR(128) NOT NULL,
+        created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+        last_assigned_order_uuid CHAR(36) NOT NULL,
+        last_assigned_at DATETIME(6) NOT NULL,
+        reuse_count INT NOT NULL DEFAULT 0,
+        PRIMARY KEY (id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `)
+    await AppDataSource.query(`
+      CREATE TABLE order_business_no_reuse_event (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        business_namespace VARCHAR(16) NOT NULL,
+        serial_value BIGINT UNSIGNED NOT NULL,
+        business_no VARCHAR(32) NOT NULL,
+        from_order_uuid CHAR(36) NOT NULL,
+        to_order_uuid CHAR(36) NOT NULL,
+        target_order_id_snapshot VARCHAR(64) NOT NULL,
+        target_show_no_snapshot VARCHAR(64) NOT NULL,
+        reuse_count INT NOT NULL,
+        reason VARCHAR(500) NOT NULL,
+        actor_user_id VARCHAR(64) NULL,
+        actor_username VARCHAR(64) NOT NULL,
+        actor_display_name VARCHAR(64) NOT NULL,
+        ip_address VARCHAR(64) NULL,
+        user_agent VARCHAR(255) NULL,
+        decimal_snapshot DECIMAL(30,6) NULL,
+        binary_snapshot VARBINARY(8) NULL,
+        created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+        PRIMARY KEY (id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `)
+    await AppDataSource.query(
+      `INSERT INTO order_business_no_occupancy
+        (business_namespace, serial_value, business_no, order_uuid, assigned_reason, created_at,
+         last_assigned_order_uuid, last_assigned_at, reuse_count)
+       VALUES ('hyyzjd', ?, ?, ?, '历史首次分配', '2026-09-21 01:02:03.123456', ?,
+               '2026-09-22 04:05:06.654321', 2)`,
+      [serial, businessNo, fromOrderUuid, toOrderUuid],
+    )
+    await AppDataSource.query(
+      `INSERT INTO order_business_no_reuse_event
+        (business_namespace, serial_value, business_no, from_order_uuid, to_order_uuid,
+         target_order_id_snapshot, target_show_no_snapshot, reuse_count, reason, actor_user_id,
+         actor_username, actor_display_name, ip_address, user_agent, decimal_snapshot, binary_snapshot, created_at)
+       VALUES ('hyyzjd', ?, ?, ?, ?, '29', 'OUT-D-000029', 2, '历史回收原因', '1',
+               'admin', '系统管理员', '127.0.0.1', 'verify-agent',
+               '12345678901234567890.123456', UNHEX('0001FF'), '2026-09-22 04:05:06.654321')`,
+      [serial, businessNo, fromOrderUuid, toOrderUuid],
+    )
+    await AppDataSource.query("CREATE TRIGGER trg_order_business_no_reuse_event_no_update BEFORE UPDATE ON order_business_no_reuse_event FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'VERIFY_APPEND_ONLY'")
+    await AppDataSource.query("CREATE TRIGGER trg_order_business_no_reuse_event_no_delete BEFORE DELETE ON order_business_no_reuse_event FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'VERIFY_APPEND_ONLY'")
+    return { businessNo, fromOrderUuid, toOrderUuid }
+  }
 
   await AppDataSource.initialize()
   try {
@@ -263,23 +343,20 @@ async function verifyOrderSerialConcurrency(mysqlConfig: VerifyMysqlRuntimeConfi
       '真实 MySQL 临时库应执行 038 扩展部门路径快照容量',
     )
     await assertMysqlRequiredSchemaExists(AppDataSource)
+    const freshDatabaseBackupNames = fs.readdirSync(appDataPaths.migrationBackupDir)
+      .filter((name) => name.endsWith('.json'))
+    assert.equal(freshDatabaseBackupNames.length, 1, 'fresh DB 经 042 建空旧表后也必须先备份 schema 再清退')
+    const freshDatabaseBundle = parseAndVerifyOrderBusinessNoRetirementBundle(
+      fs.readFileSync(path.join(appDataPaths.migrationBackupDir, freshDatabaseBackupNames[0]!), 'utf8'),
+    )
+    assert.deepEqual(freshDatabaseBundle.tables.map((table) => ({
+      name: table.name,
+      rowCount: table.rowCount,
+    })), [{ name: 'order_business_no_occupancy', rowCount: 0 }])
     await AppDataSource.query(
       'DELETE FROM schema_migrations WHERE CAST(LEFT(filename, 3) AS UNSIGNED) > 42',
     )
-    await AppDataSource.query(`
-      CREATE TABLE order_business_no_occupancy (
-        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-        PRIMARY KEY (id)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    `)
-    await AppDataSource.query(`
-      CREATE TABLE order_business_no_reuse_event (
-        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-        PRIMARY KEY (id)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    `)
-    await AppDataSource.query("CREATE TRIGGER trg_order_business_no_reuse_event_no_update BEFORE UPDATE ON order_business_no_reuse_event FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'VERIFY_APPEND_ONLY'")
-    await AppDataSource.query("CREATE TRIGGER trg_order_business_no_reuse_event_no_delete BEFORE DELETE ON order_business_no_reuse_event FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'VERIFY_APPEND_ONLY'")
+    const firstLegacySnapshot = await createLegacyBusinessNoTables('9007199254740995')
     const mutableEnv = env as unknown as { DB_SYNC: boolean }
     mutableEnv.DB_SYNC = true
     const syncStartup = await initializeDatabaseSchemaIfNeeded(AppDataSource)
@@ -291,6 +368,43 @@ async function verifyOrderSerialConcurrency(mysqlConfig: VerifyMysqlRuntimeConfi
         AND TABLE_NAME IN ('order_business_no_occupancy', 'order_business_no_reuse_event')
     `) as Array<{ TABLE_NAME: string }>
     assert.deepEqual(obsoleteTableRowsAfterSync, [], 'DB_SYNC=true 启动必须幂等清退已停用业务号表')
+    const firstRetirementBackupNames = fs.readdirSync(appDataPaths.migrationBackupDir)
+      .filter((name) => name.endsWith('.json'))
+    assert.equal(firstRetirementBackupNames.length, 2, 'DB_SYNC=true 定向清退必须新增一个 MySQL bundle')
+    const firstRetirementBackupName = firstRetirementBackupNames.find(
+      (name) => !freshDatabaseBackupNames.includes(name),
+    )
+    assert.ok(firstRetirementBackupName)
+    const firstRetirementBundle = parseAndVerifyOrderBusinessNoRetirementBundle(
+      fs.readFileSync(path.join(appDataPaths.migrationBackupDir, firstRetirementBackupName), 'utf8'),
+    )
+    assert.equal(firstRetirementBundle.dialect, 'mysql')
+    assert.deepEqual(firstRetirementBundle.tables.map((table) => ({
+      name: table.name,
+      rowCount: table.rowCount,
+    })), [
+      { name: 'order_business_no_occupancy', rowCount: 1 },
+      { name: 'order_business_no_reuse_event', rowCount: 1 },
+    ])
+    assert.match(firstRetirementBundle.tables[0]?.createSql ?? '', /^CREATE TABLE `order_business_no_occupancy`/i)
+    const firstRetirementRaw = JSON.stringify(firstRetirementBundle)
+    assert.equal(firstRetirementRaw.includes(firstLegacySnapshot.businessNo), true)
+    assert.equal(firstRetirementRaw.includes(firstLegacySnapshot.fromOrderUuid), true)
+    assert.equal(firstRetirementRaw.includes(firstLegacySnapshot.toOrderUuid), true)
+    const firstOccupancyRow = firstRetirementBundle.tables
+      .find((table) => table.name === 'order_business_no_occupancy')?.rows[0]
+    const firstReuseRow = firstRetirementBundle.tables
+      .find((table) => table.name === 'order_business_no_reuse_event')?.rows[0]
+    assert.equal(firstOccupancyRow?.serial_value, '9007199254740995', 'BIGINT 必须按十进制字符串无损备份')
+    assert.equal(firstOccupancyRow?.created_at, '2026-09-21 01:02:03.123456', 'DATETIME(6) 必须保留微秒')
+    assert.equal(firstOccupancyRow?.last_assigned_at, '2026-09-22 04:05:06.654321', 'DATETIME(6) 必须保留微秒')
+    assert.equal(firstReuseRow?.created_at, '2026-09-22 04:05:06.654321', '复用事件时间必须保留微秒')
+    assert.equal(firstReuseRow?.decimal_snapshot, '12345678901234567890.123456', 'DECIMAL 必须按十进制字符串无损备份')
+    assert.deepEqual(firstReuseRow?.binary_snapshot, {
+      $ylinkType: 'buffer',
+      encoding: 'base64',
+      value: 'AAH/',
+    }, 'VARBINARY 必须按 typed base64 无损备份')
     mutableEnv.DB_SYNC = false
     const externalStartup = await initializeDatabaseSchemaIfNeeded(AppDataSource)
     assert.equal(externalStartup.reason, 'mysql_external')
@@ -329,8 +443,243 @@ async function verifyOrderSerialConcurrency(mysqlConfig: VerifyMysqlRuntimeConfi
         AND TABLE_NAME IN ('order_business_no_occupancy', 'order_business_no_reuse_event')
     `) as Array<{ TABLE_NAME: string }>
     assert.deepEqual(obsoleteTableRowsAfterExternal, [], 'DB_SYNC=false 重启不得重新出现已停用业务号表')
+    assert.equal(
+      fs.readdirSync(appDataPaths.migrationBackupDir).filter((name) => name.endsWith('.json')).length,
+      2,
+      '表已完全清退时 DB_SYNC=false 重启不得生成空备份',
+    )
+
+    // 常规 auto-migrate 必须在 pending loop 的 054 边界执行 retirement preflight，不能先重放 054。
+    await AppDataSource.query(
+      `DELETE FROM schema_migrations
+       WHERE filename IN (
+         '054_order_business_no_reuse.sql',
+         '055_order_identifier_namespaces.sql',
+         '056_disable_order_business_no_permanent_occupancy.sql'
+       )`,
+    )
+    const secondLegacySnapshot = await createLegacyBusinessNoTables('9007199254740997')
+    const directAutoMigration = await runMysqlSchemaMigrations(AppDataSource)
+    assert.equal(directAutoMigration.appliedFiles.includes('056_disable_order_business_no_permanent_occupancy.sql'), true)
+    assert.equal(directAutoMigration.appliedFiles.includes('055_order_identifier_namespaces.sql'), true)
+    assert.equal(directAutoMigration.appliedFiles.includes('054_order_business_no_reuse.sql'), false)
+    const directBackupNames = fs.readdirSync(appDataPaths.migrationBackupDir).filter((name) => name.endsWith('.json'))
+    assert.equal(directBackupNames.length, 3, '常规 auto-migrate retirement preflight 必须新增一次当前内容备份')
+    const secondBundleName = directBackupNames.find((name) => !firstRetirementBackupNames.includes(name))
+    assert.ok(secondBundleName)
+    const secondBundle = parseAndVerifyOrderBusinessNoRetirementBundle(
+      fs.readFileSync(path.join(appDataPaths.migrationBackupDir, secondBundleName), 'utf8'),
+    )
+    assert.equal(JSON.stringify(secondBundle).includes(secondLegacySnapshot.businessNo), true)
+
+    const assertMysqlRetirementFailureState = async (
+      label: string,
+      backupDir: string,
+      expectedResidualFinalFiles = 0,
+    ) => {
+      const retainedTables = await AppDataSource.query(`
+        SELECT TABLE_NAME
+        FROM information_schema.TABLES
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME IN ('order_business_no_occupancy', 'order_business_no_reuse_event')
+        ORDER BY TABLE_NAME
+      `) as Array<{ TABLE_NAME: string }>
+      assert.deepEqual(retainedTables.map((row) => row.TABLE_NAME), [
+        'order_business_no_occupancy',
+        'order_business_no_reuse_event',
+      ], `${label}不得删除旧表`)
+      const retainedTriggers = await AppDataSource.query(`
+        SELECT TRIGGER_NAME
+        FROM information_schema.TRIGGERS
+        WHERE TRIGGER_SCHEMA = DATABASE()
+          AND TRIGGER_NAME IN (
+            'trg_order_business_no_reuse_event_no_update',
+            'trg_order_business_no_reuse_event_no_delete'
+          )
+      `) as Array<{ TRIGGER_NAME: string }>
+      assert.equal(retainedTriggers.length, 2, `${label}不得删除旧触发器`)
+      const trackingRows = await AppDataSource.query(
+        `SELECT COUNT(1) AS total FROM schema_migrations
+         WHERE filename = '056_disable_order_business_no_permanent_occupancy.sql'`,
+      ) as Array<{ total: number | string }>
+      assert.equal(Number(trackingRows[0]?.total), 0, `${label}不得写入 056 tracking`)
+      const residualFinalFiles = fs.existsSync(backupDir)
+        ? fs.readdirSync(backupDir).filter((name) => name.endsWith('.json'))
+        : []
+      assert.equal(
+        residualFinalFiles.length,
+        expectedResidualFinalFiles,
+        expectedResidualFinalFiles === 0
+          ? `${label}不得留下正式备份文件`
+          : `${label}必须把无法清理/隔离的正式文件作为人工处置对象保留`,
+      )
+    }
+
+    const cleanupLegacyBusinessNoTables = async () => {
+      await AppDataSource.query('DROP TRIGGER IF EXISTS trg_order_business_no_reuse_event_no_update')
+      await AppDataSource.query('DROP TRIGGER IF EXISTS trg_order_business_no_reuse_event_no_delete')
+      await AppDataSource.query('DROP TABLE IF EXISTS order_business_no_reuse_event')
+      await AppDataSource.query('DROP TABLE IF EXISTS order_business_no_occupancy')
+    }
+
+    const publicationFailures = [
+      {
+        label: 'hard link 发布后 chmod 失败',
+        serial: '9007199254741001',
+        createFileSystem: (_backupDir: string) => ({
+          ...fsPromises,
+          chmod: async (target: Parameters<typeof fsPromises.chmod>[0], mode: number) => {
+            if (String(target).endsWith('.json')) {
+              const error = new Error('injected chmod failure') as NodeJS.ErrnoException
+              error.code = 'EIO'
+              throw error
+            }
+            await fsPromises.chmod(target, mode)
+          },
+        }),
+      },
+      {
+        label: 'hard link 发布后 finalPath 回读损坏',
+        serial: '9007199254741003',
+        createFileSystem: (_backupDir: string) => {
+          let readCount = 0
+          return {
+            ...fsPromises,
+            readFile: (async (...args: Parameters<typeof fsPromises.readFile>) => {
+              readCount += 1
+              if (readCount === 2) return '{}'
+              return fsPromises.readFile(...args)
+            }) as typeof fsPromises.readFile,
+          }
+        },
+      },
+      {
+        label: 'hard link 发布后目录 fsync 失败',
+        serial: '9007199254741005',
+        createFileSystem: (backupDir: string) => ({
+          ...fsPromises,
+          open: (async (
+            target: Parameters<typeof fsPromises.open>[0],
+            flags: Parameters<typeof fsPromises.open>[1],
+            mode?: number,
+          ) => {
+            if (path.resolve(String(target)) === path.resolve(backupDir) && flags === 'r') {
+              return {
+                sync: async () => {
+                  const error = new Error('injected directory fsync failure') as NodeJS.ErrnoException
+                  error.code = 'EIO'
+                  throw error
+                },
+                close: async () => undefined,
+              } as Awaited<ReturnType<typeof fsPromises.open>>
+            }
+            return fsPromises.open(target, flags, mode)
+          }) as typeof fsPromises.open,
+        }),
+      },
+      {
+        label: 'hard link 发布后失败且 rm/quarantine 双失败',
+        serial: '9007199254741007',
+        expectsManualCleanup: true,
+        createFileSystem: (_backupDir: string) => ({
+          ...fsPromises,
+          chmod: async (target: Parameters<typeof fsPromises.chmod>[0], mode: number) => {
+            if (String(target).endsWith('.json')) {
+              const error = new Error('injected chmod failure') as NodeJS.ErrnoException
+              error.code = 'EIO'
+              throw error
+            }
+            await fsPromises.chmod(target, mode)
+          },
+          rm: async (target: Parameters<typeof fsPromises.rm>[0], options?: Parameters<typeof fsPromises.rm>[1]) => {
+            if (String(target).endsWith('.json')) {
+              const error = new Error('injected final rm failure') as NodeJS.ErrnoException
+              error.code = 'EBUSY'
+              throw error
+            }
+            await fsPromises.rm(target, options)
+          },
+          rename: async (
+            oldPath: Parameters<typeof fsPromises.rename>[0],
+            newPath: Parameters<typeof fsPromises.rename>[1],
+          ) => {
+            if (String(oldPath).endsWith('.json')) {
+              const error = new Error('injected quarantine rename failure') as NodeJS.ErrnoException
+              error.code = 'EACCES'
+              throw error
+            }
+            await fsPromises.rename(oldPath, newPath)
+          },
+        }),
+      },
+    ]
+
+    for (const failure of publicationFailures) {
+      await AppDataSource.query(
+        `DELETE FROM schema_migrations
+         WHERE filename IN ('054_order_business_no_reuse.sql', '056_disable_order_business_no_permanent_occupancy.sql')`,
+      )
+      await createLegacyBusinessNoTables(failure.serial)
+      const failureBackupDir = path.join(VERIFY_RUNTIME_ROOT, `publication-failure-${failure.serial}`)
+      await assert.rejects(
+        () => runMysqlSchemaMigrations(AppDataSource, {
+          retirementBackup: {
+            backupDir: failureBackupDir,
+            fileSystem: failure.createFileSystem(failureBackupDir),
+          },
+        }),
+        (error: unknown) => {
+          const message = String(error)
+          if (failure.expectsManualCleanup) {
+            assert.match(message, /YLINK_RETIREMENT_BACKUP_CLEANUP_REQUIRED/)
+            assert.match(message, /removeCode=EBUSY/)
+            assert.match(message, /quarantineCode=EACCES/)
+            assert.equal(message.includes(failureBackupDir), false, '人工处置错误不得泄露备份绝对路径')
+          }
+          return true
+        },
+      )
+      await assertMysqlRetirementFailureState(
+        failure.label,
+        failureBackupDir,
+        failure.expectsManualCleanup ? 1 : 0,
+      )
+      await cleanupLegacyBusinessNoTables()
+      fs.rmSync(failureBackupDir, { recursive: true, force: true })
+    }
+
+    // 备份目录故障必须在任何 DROP 和 056 tracking 之前阻断。
+    await AppDataSource.query(
+      `DELETE FROM schema_migrations
+       WHERE filename IN ('054_order_business_no_reuse.sql', '056_disable_order_business_no_permanent_occupancy.sql')`,
+    )
+    await createLegacyBusinessNoTables('9007199254740999')
+    const preservedBackupDir = `${appDataPaths.migrationBackupDir}.preserved`
+    fs.renameSync(appDataPaths.migrationBackupDir, preservedBackupDir)
+    fs.writeFileSync(appDataPaths.migrationBackupDir, 'blocked', 'utf8')
+    await assert.rejects(() => runMysqlSchemaMigrations(AppDataSource))
+    const retainedOnBackupFailure = await AppDataSource.query(`
+      SELECT TABLE_NAME
+      FROM information_schema.TABLES
+      WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME IN ('order_business_no_occupancy', 'order_business_no_reuse_event')
+      ORDER BY TABLE_NAME
+    `) as Array<{ TABLE_NAME: string }>
+    assert.deepEqual(retainedOnBackupFailure.map((row) => row.TABLE_NAME), [
+      'order_business_no_occupancy',
+      'order_business_no_reuse_event',
+    ])
+    const trackingAfterBackupFailure = await AppDataSource.query(
+      `SELECT COUNT(1) AS total FROM schema_migrations
+       WHERE filename = '056_disable_order_business_no_permanent_occupancy.sql'`,
+    ) as Array<{ total: number | string }>
+    assert.equal(Number(trackingAfterBackupFailure[0]?.total), 0, '备份失败不得写入 056 tracking')
+    fs.rmSync(appDataPaths.migrationBackupDir, { force: true })
+    fs.renameSync(preservedBackupDir, appDataPaths.migrationBackupDir)
+    const retryAfterBackupFailure = await runMysqlSchemaMigrations(AppDataSource)
+    assert.equal(retryAfterBackupFailure.appliedFiles.includes('056_disable_order_business_no_permanent_occupancy.sql'), true)
     mutableEnv.DB_SYNC = true
-    pass('真实 MySQL partial tracking 经 DB_SYNC=true/false 连续启动后跳过 054、执行 055 并保留 056 checksum')
+    pass('真实 MySQL 两条 056 路径均先备份，故障时保留旧表，且 preflight 跳过 054 并保留 055/056 tracking')
     const restoredDepartmentNodeIndexes = await AppDataSource.query(
       `SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE
        FROM information_schema.STATISTICS
@@ -1031,6 +1380,7 @@ async function main() {
     await verifyOrderSerialConcurrency(mysqlConfig)
   } finally {
     await dropVerifyDatabase(mysqlConfig)
+    fs.rmSync(VERIFY_RUNTIME_ROOT, { recursive: true, force: true })
     pass('固定 MySQL 临时库已清理完成')
   }
 }
