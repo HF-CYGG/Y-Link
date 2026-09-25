@@ -712,15 +712,34 @@ try {
   const preorderBatchNine = await createPreorder('PRE-W-000029')
   const preorderBatchTen = await createPreorder('PRE-W-000030')
   await setCursor('o2o.preorder.walkin', 'o2o.preorder.walkin.current', 30)
+  const batchPurgeRequestMeta = {
+    ipAddress: '127.0.0.31',
+    userAgent: 'identifier-review-batch-purge',
+  }
   const batchResult = await o2oPreorderService.batchPurgeCancelledOrders({
     orders: [
       { id: String(preorderBatchNine.id), confirmPreorderNo: preorderBatchNine.preorderNo },
       { id: String(preorderBatchTen.id), confirmPreorderNo: preorderBatchTen.preorderNo },
     ],
     actor,
+    requestMeta: batchPurgeRequestMeta,
   })
   assert.equal(batchResult.summary.deleted, 2)
   assert.equal(await readCursor('o2o.preorder.walkin'), 28, '实际批量删除必须倒序回收连续 preorderNo 后缀')
+  const batchPurgeAudits = await AppDataSource.getRepository(SysAuditLog).find({
+    where: { actionType: 'o2o.preorder.purge_cancelled' },
+    order: { id: 'DESC' },
+    take: 2,
+  })
+  assert.equal(batchPurgeAudits.length, 2, '批量永久删除的每张订单都必须保留最小安全审计')
+  batchPurgeAudits.forEach((audit) => {
+    assert.equal(audit.targetId, null, '批量永久删除审计不得保留已删除主键')
+    assert.match(audit.targetCode ?? '', /^o2o:deleted:[0-9a-f-]{36}$/, '批量永久删除审计只保留随机脱敏标识')
+    assert.equal(audit.ipAddress, batchPurgeRequestMeta.ipAddress, '批量永久删除审计必须保留请求 IP')
+    assert.equal(audit.userAgent, batchPurgeRequestMeta.userAgent, '批量永久删除审计必须保留 User-Agent')
+    assert.deepEqual(Object.keys(JSON.parse(audit.detailJson ?? '{}')), ['redactedTarget'], '批量永久删除审计详情只能保留脱敏目标')
+    assert.doesNotMatch(audit.detailJson ?? '', /PRE-W-0000(?:29|30)/i, '批量永久删除审计不得泄露预订单号')
+  })
 
   const preorderGapNine = await createPreorder('PRE-W-000039')
   const preorderGapTen = await createPreorder('PRE-W-000040')
@@ -740,13 +759,24 @@ try {
     sourceDocNo: auditPreorder.preorderNo,
     inventoryMode: 'o2o_preapplied',
   })
-  await o2oPreorderService.deleteConsoleOrder({ orderId: String(auditPreorder.id), confirmPreorderNo: auditPreorder.preorderNo }, actor)
+  const singlePurgeRequestMeta = {
+    ipAddress: '127.0.0.32',
+    userAgent: 'identifier-review-single-purge',
+  }
+  await o2oPreorderService.deleteConsoleOrder(
+    { orderId: String(auditPreorder.id), confirmPreorderNo: auditPreorder.preorderNo },
+    actor,
+    singlePurgeRequestMeta,
+  )
   const purgeAudit = await AppDataSource.getRepository(SysAuditLog).findOneOrFail({
     where: { actionType: 'o2o.preorder.delete' },
     order: { id: 'DESC' },
   })
   assert.equal(purgeAudit.targetId, null, 'O2O 永久删除审计不得保留已删除主键')
   assert.match(purgeAudit.targetCode ?? '', /^o2o:deleted:[0-9a-f-]{36}$/, 'O2O 永久删除审计只保留随机脱敏标识')
+  assert.equal(purgeAudit.ipAddress, singlePurgeRequestMeta.ipAddress, '单笔永久删除审计必须保留请求 IP')
+  assert.equal(purgeAudit.userAgent, singlePurgeRequestMeta.userAgent, '单笔永久删除审计必须保留 User-Agent')
+  assert.deepEqual(Object.keys(JSON.parse(purgeAudit.detailJson ?? '{}')), ['redactedTarget'], '单笔永久删除审计详情只能保留脱敏目标')
   assert.doesNotMatch(purgeAudit.detailJson ?? '', new RegExp(auditPreorder.preorderNo, 'i'))
   assert.doesNotMatch(purgeAudit.detailJson ?? '', new RegExp(auditOutbound.businessNo, 'i'))
 
@@ -802,6 +832,38 @@ try {
     sourceOrderUuid: child.orderUuid,
     sourceBusinessNoSnapshot: child.businessNo,
   })
+  const standaloneManualOrder = await orderRepo.save({
+    orderUuid: randomUUID(),
+    systemNo: 'OUT-D-880003',
+    businessNo: 'hyyzjd880003',
+    idempotencyKey: `standalone-manual-${randomUUID()}`,
+    inventoryMode: 'legacy_none',
+    orderType: 'department',
+    status: 'active',
+  })
+  const resolveMatchedPreorderIds = (o2oPreorderService as unknown as {
+    resolveMatchedPreorderIdsByCustomerOrderKeyword(keyword: string, exposeSystemNo?: boolean): Promise<string[]>
+  }).resolveMatchedPreorderIdsByCustomerOrderKeyword.bind(o2oPreorderService)
+  assert.deepEqual(
+    await resolveMatchedPreorderIds(parent.businessNo),
+    [String(sourcePreorder.id)],
+    '界面展示的合并父单 businessNo 必须反查到来源预订单',
+  )
+  assert.deepEqual(
+    await resolveMatchedPreorderIds(parent.systemNo, true),
+    [String(sourcePreorder.id)],
+    '管理员按合并父单 systemNo 搜索必须反查到来源预订单',
+  )
+  assert.deepEqual(
+    await resolveMatchedPreorderIds(parent.systemNo, false),
+    [],
+    '未暴露 systemNo 时不得用父单 systemNo 反查预订单',
+  )
+  assert.deepEqual(
+    await resolveMatchedPreorderIds(standaloneManualOrder.businessNo),
+    [],
+    '无 O2O 来源的手工单不得误命中预订单',
+  )
   for (const [keyword, expectedType] of [
     [child.businessNo, 'businessNo'],
     [child.systemNo, 'systemNo'],
@@ -847,6 +909,8 @@ try {
   for (const [keyword, expectedType] of [
     [child.businessNo, 'businessNo'],
     [child.systemNo, 'systemNo'],
+    [parent.businessNo, 'businessNo'],
+    [parent.systemNo, 'systemNo'],
   ] as const) {
     const consoleRows = await o2oPreorderService.listConsoleOrders({ keyword, limit: 20 }, actor)
     const consoleMatched = consoleRows.find((item) => item.id === String(sourcePreorder.id))
@@ -875,6 +939,11 @@ try {
       assert.equal(operatorRows.length, 0, '普通管理账号不得按正式单 systemNo 搜索 O2O 订单')
     }
   }
+  const standaloneManualRows = await o2oPreorderService.listConsoleOrders({
+    keyword: standaloneManualOrder.businessNo,
+    limit: 20,
+  }, actor)
+  assert.equal(standaloneManualRows.length, 0, '无 O2O 来源的手工单 businessNo 不得返回预订单')
 
   const adminConsoleDetail = await o2oPreorderService.detailById(String(sourcePreorder.id), actor)
   assert.equal(adminConsoleDetail.order.customerOrderSystemNo, parent.systemNo, '管理员 O2O 详情必须保留当前关联正式单 systemNo')

@@ -1708,10 +1708,10 @@ class O2oPreorderService {
       .createQueryBuilder('outboundOrder')
       .select([
         'outboundOrder.id AS orderId',
+        'outboundOrder.sourceDocType AS sourceDocType',
         'outboundOrder.sourceDocId AS sourceDocId',
       ])
       .where('outboundOrder.isDeleted = :isDeleted', { isDeleted: false })
-      .andWhere('outboundOrder.sourceDocType = :sourceDocType', { sourceDocType: 'o2o_preorder' })
       .andWhere(
         new Brackets((numberQb) => {
           numberQb
@@ -1724,7 +1724,7 @@ class O2oPreorderService {
           }
         }),
       )
-      .getRawMany<{ orderId: string; sourceDocId: string | null }>()
+      .getRawMany<{ orderId: string; sourceDocType: string | null; sourceDocId: string | null }>()
     const matchedOrderIds = rows.map((row) => String(row.orderId).trim()).filter(Boolean)
     const childRelations = matchedOrderIds.length
       ? await AppDataSource.getRepository(OrderMergeRelation).find({
@@ -1740,7 +1740,7 @@ class O2oPreorderService {
       : []
     const preorderIdSet = new Set<string>()
     ;[...rows, ...childRows].forEach((row) => {
-      if ('sourceDocType' in row && row.sourceDocType !== 'o2o_preorder') return
+      if (row.sourceDocType !== 'o2o_preorder') return
       const preorderId = String(row.sourceDocId ?? '').trim()
       if (!preorderId) {
         return
@@ -4167,6 +4167,7 @@ class O2oPreorderService {
           targetId: null,
           targetCode: redactedTarget,
           actor,
+          requestMeta,
           detail: { redactedTarget },
         },
         manager,
@@ -4366,6 +4367,7 @@ class O2oPreorderService {
             targetId: null,
             targetCode: redactedTarget,
             actor: input.actor,
+            requestMeta: input.requestMeta,
             detail: { redactedTarget },
           }, manager)
           return { id: item.id, preorderNo: order.preorderNo, showNo: order.preorderNo, outcome: 'deleted', code: 'DELETED', message: '已永久删除' }
