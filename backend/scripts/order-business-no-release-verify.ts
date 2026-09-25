@@ -209,7 +209,13 @@ async function main() {
       userAgent: null,
     })
     await orderService.softDeleteById(String(sourceEntity.id), actor, sourceEntity.businessNo)
-    await orderService.purgeById(String(sourceEntity.id), actor, sourceEntity.businessNo)
+    const purgeRequestMeta = {
+      ipAddress: '198.51.100.110',
+      userAgent: 'order-business-no-release-verify',
+      clientRiskBrowserId: null,
+      clientRiskSessionId: null,
+    }
+    await orderService.purgeById(String(sourceEntity.id), actor, sourceEntity.businessNo, purgeRequestMeta)
     assert.equal(await orderRepo.existsBy({ id: String(sourceEntity.id) }), false, '主单必须物理删除')
     assert.equal(await AppDataSource.getRepository(OrderRevision).countBy({ orderUuid: sourceEntity.orderUuid }), 0, 'revision 必须删除')
     const inventoryFact = await AppDataSource.getRepository(InventoryLog).findOneByOrFail({ changeType: 'issue110_release_fixture' })
@@ -227,7 +233,16 @@ async function main() {
     assert.equal(purgeAudits.length, 1, '永久删除后只保留一条最小审计')
     assert.equal(purgeAudits[0]?.targetId, null)
     assert.match(purgeAudits[0]?.targetCode ?? '', /^order:deleted:[0-9a-f-]{36}$/)
+    assert.equal(purgeAudits[0]?.ipAddress, purgeRequestMeta.ipAddress, '最小永久删除审计必须保留请求 IP')
+    assert.equal(purgeAudits[0]?.userAgent, purgeRequestMeta.userAgent, '最小永久删除审计必须保留 User-Agent')
+    assert.deepEqual(
+      JSON.parse(purgeAudits[0]?.detailJson ?? '{}'),
+      { redactedTarget: purgeAudits[0]?.targetCode },
+      '永久删除审计详情只能保留随机脱敏目标',
+    )
     assert.doesNotMatch(purgeAudits[0]?.detailJson ?? '', new RegExp(releasedBusinessNo, 'i'))
+    assert.doesNotMatch(purgeAudits[0]?.detailJson ?? '', new RegExp(sourceEntity.systemNo, 'i'))
+    assert.doesNotMatch(purgeAudits[0]?.detailJson ?? '', new RegExp(sourceEntity.orderUuid, 'i'))
     const randomTargetA = buildRedactedDeleteTarget('order')
     const randomTargetB = buildRedactedDeleteTarget('order')
     assert.notEqual(randomTargetA, randomTargetB, '删除审计目标必须使用不可预测随机值，禁止由稳定主键推导')

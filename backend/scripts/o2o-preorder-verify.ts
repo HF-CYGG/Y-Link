@@ -850,6 +850,46 @@ const run = async () => {
   assert.equal(operatorVerifyAuditDetail.outboundOrderBusinessNo, operatorVerifiedOutbound.businessNo, '核销审计必须保留正式单 businessNo')
   assert.equal(operatorVerifyAuditDetail.outboundOrderSystemNo, operatorVerifiedOutbound.systemNo, '核销审计内部技术快照必须保留 systemNo')
   assert.equal('outboundOrderShowNo' in operatorVerifyAuditDetail, false, '新核销审计不得继续写入含混 legacy showNo')
+  assert.equal('verifyCode' in operatorVerifyAuditDetail, false, '预订单核销审计不得保存完整核销码')
+  assert.equal(
+    (operatorVerifyAudit.detailJson ?? '').includes(operatorVerifiedPreorder.order.verifyCode),
+    false,
+    '预订单核销审计详情不得包含实际核销码',
+  )
+
+  const operatorReturnRequest = await o2oPreorderService.createReturnRequest(
+    clientAuth,
+    operatorVerifiedPreorder.order.id,
+    {
+      reason: '核销审计敏感字段验证',
+      items: [{
+        productId: operatorVerifiedDetail.items[0]!.productId,
+        skuId: operatorVerifiedDetail.items[0]!.skuId,
+        qty: 1,
+      }],
+    },
+  )
+  const operatorReturnVerified = await o2oPreorderService.verifyByCode(
+    operatorReturnRequest.verifyCode,
+    operatorVerifyActor,
+    { ipAddress: '127.0.0.2', userAgent: 'o2o-return-audit-verify', clientRiskBrowserId: null, clientRiskSessionId: null },
+  )
+  assert.equal(operatorReturnVerified?.verifyTargetType, 'return_request', '退货核销必须成功完成')
+  const operatorReturnAudit = await AppDataSource.getRepository(SysAuditLog).findOneOrFail({
+    where: { actionType: 'o2o.return_request.verify', targetId: operatorReturnRequest.id },
+    order: { id: 'DESC' },
+  })
+  const operatorReturnAuditDetail = JSON.parse(operatorReturnAudit.detailJson ?? '{}') as Record<string, unknown>
+  assert.equal(operatorReturnAuditDetail.operationType, 'return_verify', '退货核销审计必须保留操作类型')
+  assert.equal(operatorReturnAuditDetail.verifyTargetType, 'return_request', '退货核销审计必须保留核销目标类型')
+  assert.equal(operatorReturnAuditDetail.returnNo, operatorReturnRequest.returnNo, '退货核销审计必须保留退货单号')
+  assert.equal(operatorReturnAuditDetail.preorderNo, operatorVerifiedPreorder.order.preorderNo, '退货核销审计必须保留预订单号')
+  assert.equal('verifyCode' in operatorReturnAuditDetail, false, '退货核销审计不得保存完整核销码')
+  assert.equal(
+    (operatorReturnAudit.detailJson ?? '').includes(operatorReturnRequest.verifyCode),
+    false,
+    '退货核销审计详情不得包含实际核销码',
+  )
   await expectBizError(() => o2oPreorderService.cancelMyOrder(clientAuth, verifiedPreorder.order.id), '订单已核销，无法撤回')
   await o2oPreorderService.inboundStock(product.id, 3, verifyActor, '自动化补货')
   log('管理端核销、已核销不可撤回与入库流程通过')

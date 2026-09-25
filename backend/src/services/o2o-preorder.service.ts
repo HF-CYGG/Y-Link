@@ -4771,7 +4771,6 @@ class O2oPreorderService {
             actor,
             requestMeta,
             detail: {
-              verifyCode: normalizedVerifyCode,
               operationType: detail.operationType,
               verifyTargetType: detail.verifyTargetType,
               returnNo: returnRequest.returnNo,
@@ -4807,7 +4806,6 @@ class O2oPreorderService {
         actor,
         requestMeta,
         detail: {
-          verifyCode: normalizedVerifyCode,
           operationType: detail.operationType,
           verifyTargetType: detail.verifyTargetType,
           preorderNo: order.preorderNo,

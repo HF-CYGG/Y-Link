@@ -186,9 +186,9 @@ const normalizeOptionalTrimmedText = (value: unknown) => {
     : null
 }
 
-/** 仅把确认为历史预订单格式的 showNo 升级为 preorderNo，绝不把正式出库系统号写入客户端缓存。 */
+/** 仅把历史预订单号或旧版业务号 showNo 升级为 preorderNo，绝不把正式出库系统号写入客户端缓存。 */
 const isLegacyPreorderShowNo = (value: unknown): value is string => {
-  return typeof value === 'string' && /^PRE-(?:D|W)-\d{6}$/i.test(value.trim())
+  return typeof value === 'string' && /^(?:PRE-(?:D|W)-\d{6}|hyyz(?:jd)?\d{1,12})$/i.test(value.trim())
 }
 
 const normalizeLatestReturnRequest = (value: unknown): O2oPreorderSummary['latestReturnRequest'] => {

@@ -6,6 +6,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { createServer } from 'vite'
 
 const root = process.cwd()
 const files = [
@@ -171,6 +172,115 @@ const clientO2oNormalizerSource = (source.get('src/api/modules/o2o.ts') || '').s
 )
 if (clientO2oNormalizerSource.includes('raw.showNo')) {
   failures.push('src/api/modules/o2o.ts 客户端 O2O normalizer 不得从 showNo 回退')
+}
+
+const createMemoryStorage = () => {
+  const values = new Map()
+  return {
+    get length() {
+      return values.size
+    },
+    clear() {
+      values.clear()
+    },
+    getItem(key) {
+      return values.has(key) ? values.get(key) : null
+    },
+    key(index) {
+      return [...values.keys()][index] ?? null
+    },
+    removeItem(key) {
+      values.delete(key)
+    },
+    setItem(key, value) {
+      values.set(key, String(value))
+    },
+  }
+}
+
+const assertLegacySnapshotRestored = (snapshot, expectedPreorderNo, description) => {
+  const restored = snapshot?.orders?.[0]?.preorderNo
+  if (restored !== expectedPreorderNo) {
+    failures.push(`${description}：期望 ${expectedPreorderNo}，实际 ${String(restored)}`)
+  }
+}
+
+const vite = await createServer({
+  root,
+  server: { middlewareMode: true },
+  appType: 'custom',
+  logLevel: 'silent',
+})
+try {
+  const storage = createMemoryStorage()
+  globalThis.window = { localStorage: storage }
+  const { readPersistedClientOrderSnapshot } = await vite.ssrLoadModule('/src/utils/client-order-storage.ts')
+  const buildLegacyRow = (identifierField) => ({
+    id: 'legacy-order-id',
+    ...identifierField,
+    verifyCode: 'legacy-verify-code',
+    status: 'pending',
+  })
+  const readLegacyRow = (clientUserId, row) => {
+    storage.setItem(`y-link.client-order.snapshot:${clientUserId}`, JSON.stringify({
+      activeStatus: 'all',
+      keyword: '',
+      orders: [row],
+      page: 1,
+      pageSize: 20,
+      total: 1,
+      updatedAt: 1,
+    }))
+    return readPersistedClientOrderSnapshot(clientUserId)
+  }
+
+  assertLegacySnapshotRestored(
+    readLegacyRow('legacy-department-business-no', buildLegacyRow({ showNo: 'hyyzjd000004' })),
+    'hyyzjd000004',
+    '旧版部门业务号 showNo 必须恢复为 preorderNo',
+  )
+  assertLegacySnapshotRestored(
+    readLegacyRow('legacy-walkin-business-no', buildLegacyRow({ showNo: 'hyyz000005' })),
+    'hyyz000005',
+    '旧版散客业务号 showNo 必须恢复为 preorderNo',
+  )
+  assertLegacySnapshotRestored(
+    readLegacyRow('legacy-short-walkin-business-no', buildLegacyRow({ showNo: 'hyyz1' })),
+    'hyyz1',
+    '旧版短位宽散客业务号 showNo 必须恢复为 preorderNo',
+  )
+  assertLegacySnapshotRestored(
+    readLegacyRow('legacy-wide-department-business-no', buildLegacyRow({ showNo: 'hyyzjd0000001' })),
+    'hyyzjd0000001',
+    '旧版非六位部门业务号 showNo 必须恢复为 preorderNo',
+  )
+  assertLegacySnapshotRestored(
+    readLegacyRow('legacy-preorder-no', buildLegacyRow({ showNo: 'PRE-W-000006' })),
+    'PRE-W-000006',
+    '旧版 PRE showNo 必须继续兼容恢复',
+  )
+  assertLegacySnapshotRestored(
+    readLegacyRow('canonical-preorder-no', buildLegacyRow({ preorderNo: 'PRE-D-000007' })),
+    'PRE-D-000007',
+    'canonical preorderNo 必须继续兼容恢复',
+  )
+  const outboundSnapshot = readLegacyRow(
+    'legacy-outbound-system-no',
+    buildLegacyRow({ showNo: 'OUT-W-000008' }),
+  )
+  if ((outboundSnapshot?.orders?.length ?? 0) !== 0) {
+    failures.push('正式出库系统号 OUT-* 不得误恢复为 O2O preorderNo')
+  }
+  const overlongBusinessNoSnapshot = readLegacyRow(
+    'legacy-overlong-business-no',
+    buildLegacyRow({ showNo: 'hyyz1234567890123' }),
+  )
+  if ((overlongBusinessNoSnapshot?.orders?.length ?? 0) !== 0) {
+    failures.push('超过业务号最大位宽的 hyyz showNo 不得恢复为 O2O preorderNo')
+  }
+} finally {
+  delete globalThis.window
+  await vite.close()
 }
 
 if (failures.length) {

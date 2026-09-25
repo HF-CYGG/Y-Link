@@ -933,6 +933,7 @@ export class OrderService {
           targetId: null,
           targetCode: redactedTarget,
           actor,
+          requestMeta,
           detail: { redactedTarget },
         },
         manager,
