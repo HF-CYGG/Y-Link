@@ -31,7 +31,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
-import type { DataSource, QueryRunner } from 'typeorm'
+import type { DataSource, EntityManager, QueryRunner } from 'typeorm'
 import { env } from './env.js'
 import {
   backupOrderBusinessNoRetirementTables,
@@ -1108,6 +1108,19 @@ export function resolvePendingMysqlOrderIdentifierNamespaces(
   ].filter((namespace): namespace is 'department' | 'walkin' => namespace !== null)
 }
 
+/** 在调用方已有的 MySQL 事务中重放 055 的纯数据领养语句，不另开连接或事务。 */
+export async function applyMysqlOrderIdentifierNamespacesInTransaction(manager: EntityManager): Promise<void> {
+  if (manager.connection.options.type !== 'mysql' || !manager.queryRunner?.isTransactionActive) {
+    throw new Error('055 订单编号领养必须在 MySQL 写事务内执行')
+  }
+  const filename = '055_order_identifier_namespaces.sql'
+  const filePath = path.join(SQL_DIR, filename)
+  if (!fs.existsSync(filePath)) throw new Error(`缺少订单编号领养脚本：${filename}`)
+  for (const statement of splitSqlStatements(fs.readFileSync(filePath, 'utf8'))) {
+    await manager.query(statement)
+  }
+}
+
 /**
  * DB_AUTO_MIGRATE=false 时也要在默认配置写入前领养订单编号历史真相。
  * advisory lock 内先只读检查两个 business namespace 的三项配置、sequence 与完成 marker：
@@ -1144,16 +1157,8 @@ export async function reconcileMysqlOrderIdentifierNamespaces(dataSource: DataSo
       if (pendingNamespaces.length === 0) return
 
       await queryRunner.startTransaction()
-      const filename = '055_order_identifier_namespaces.sql'
       try {
-        const filePath = path.join(SQL_DIR, filename)
-        if (!fs.existsSync(filePath)) {
-          throw new Error(`缺少订单编号领养脚本：${filename}`)
-        }
-        const statements = splitSqlStatements(fs.readFileSync(filePath, 'utf8'))
-        for (const statement of statements) {
-          await queryRunner.query(statement)
-        }
+        await applyMysqlOrderIdentifierNamespacesInTransaction(queryRunner.manager)
         await queryRunner.commitTransaction()
       } catch (error) {
         if (queryRunner.isTransactionActive) await queryRunner.rollbackTransaction()

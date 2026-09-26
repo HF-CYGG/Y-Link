@@ -16,7 +16,7 @@ import { initializeDatabaseInfrastructure } from '../database/database-strategy.
 
 export interface RunInTransactionOptions {
   /** 仅 MySQL 使用；SQLite 继续走原事务入口，避免改变其协调器与隔离语义。 */
-  mysqlIsolationLevel?: 'READ COMMITTED'
+  mysqlIsolationLevel?: 'READ COMMITTED' | 'REPEATABLE READ'
 }
 
 /**
@@ -26,7 +26,7 @@ export interface RunInTransactionOptions {
 export function resolveTransactionIsolation(
   databaseType: string,
   options: RunInTransactionOptions = {},
-): 'READ COMMITTED' | undefined {
+): 'READ COMMITTED' | 'REPEATABLE READ' | undefined {
   return databaseType === 'mysql' ? options.mysqlIsolationLevel : undefined
 }
 

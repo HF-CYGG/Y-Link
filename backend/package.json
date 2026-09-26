@@ -91,6 +91,8 @@
     "order:business-no-retirement-backup:verify": "tsx scripts/order-business-no-retirement-backup-verify.ts",
     "order:identifier-separation:verify": "tsx scripts/order-identifier-separation-verify.ts",
     "order:identifier-review-fixes:verify": "tsx scripts/order-identifier-review-fixes-verify.ts",
+    "data-maintenance:identifier-import:verify": "tsx scripts/data-maintenance-identifier-import-verify.ts",
+    "data-maintenance:identifier-import:mysql:verify": "tsx scripts/data-maintenance-identifier-import-mysql-verify.ts",
     "order:content-edit:verify": "tsx scripts/order-content-edit-verify.ts",
     "order:inventory:verify": "tsx scripts/manual-outbound-inventory-verify.ts",
     "inventory:reconcile:audit": "tsx scripts/inventory-reconcile-audit.ts",

@@ -951,7 +951,7 @@ const SQLITE_ORDER_IDENTIFIER_NAMESPACE_LOCK_ORDER = [
   'order.business.department',
 ] as const
 
-async function backfillSqliteOrderIdentifierNamespaces(manager: EntityManager): Promise<void> {
+export async function backfillSqliteOrderIdentifierNamespaces(manager: EntityManager): Promise<void> {
   const outboundRows = await manager.query(
     'SELECT "show_no" AS "showNo", "business_no" AS "businessNo", "order_type" AS "orderType" FROM "biz_outbound_order"',
   ) as Array<{ showNo: string; businessNo: string; orderType: string }>

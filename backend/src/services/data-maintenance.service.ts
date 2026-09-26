@@ -35,6 +35,11 @@ import {
   type ImportSummary,
   validateExportPayload,
 } from './data-maintenance.shared.js'
+import {
+  captureOrderIdentifierConfigsBeforeImport,
+  reconcileOrderIdentifierConfigsAfterImport,
+} from './data-maintenance-identifier-reconcile.js'
+import { assertDataMaintenanceImportBoundary } from './data-maintenance-import-boundary.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 
 class DataMaintenanceService {
@@ -207,12 +212,16 @@ class DataMaintenanceService {
     const importSummary: ImportSummary = buildImportSummary(normalizedPayload)
     return runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
-      await manager.getRepository(InventoryLog).clear()
-      await manager.getRepository(O2oPreorderItem).clear()
-      await manager.getRepository(O2oPreorder).clear()
-      await manager.getRepository(ClientUser).clear()
-      await manager.getRepository(BaseProduct).clear()
-      await manager.getRepository(SystemConfig).clear()
+      const previousIdentifierConfigs = await captureOrderIdentifierConfigsBeforeImport(manager)
+      await assertDataMaintenanceImportBoundary(manager)
+      // TypeORM 在 MySQL 上把 clear() 实现为不可回滚的 TRUNCATE；这里仅删除六张导入表，
+      // 让外键阻断、插入失败和编号领养失败都能回滚到导入前原状。
+      await manager.createQueryBuilder().delete().from(InventoryLog).execute()
+      await manager.createQueryBuilder().delete().from(O2oPreorderItem).execute()
+      await manager.createQueryBuilder().delete().from(O2oPreorder).execute()
+      await manager.createQueryBuilder().delete().from(ClientUser).execute()
+      await manager.createQueryBuilder().delete().from(BaseProduct).execute()
+      await manager.createQueryBuilder().delete().from(SystemConfig).execute()
 
       if (normalizedPayload.tables.systemConfigs.length > 0) {
         await manager.getRepository(SystemConfig).insert(normalizedPayload.tables.systemConfigs)
@@ -233,6 +242,8 @@ class DataMaintenanceService {
         await manager.getRepository(InventoryLog).insert(normalizedPayload.tables.inventoryLogs)
       }
 
+      await reconcileOrderIdentifierConfigsAfterImport(manager, previousIdentifierConfigs)
+
       await auditService.record(
         {
           actionType: 'data_maintenance.import_json',
@@ -252,7 +263,7 @@ class DataMaintenanceService {
       return {
         imported: importSummary,
       }
-    })
+    }, { mysqlIsolationLevel: 'REPEATABLE READ' })
   }
 }
 
