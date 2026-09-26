@@ -22,6 +22,7 @@ import type { OrderDetailResult } from '@/api/modules/order'
 import { extractErrorMessage } from '@/utils/error'
 import { exportVoucherPdf } from '@/utils/pdf/export-voucher-pdf'
 import { aggregateOrderVoucherItems } from '../order-voucher-aggregation'
+import type { VoucherRenderRow } from '../order-voucher-pagination'
 import OrderVoucherTemplate from './OrderVoucherTemplate.vue'
 
 
@@ -58,7 +59,7 @@ const emit = defineEmits<{
  * - 在线补填字段只存在当前弹窗会话里，关闭或切换单据后会重新初始化。
  */
 const ORDER_VOUCHER_FIXED_FIELDS_TEXT = '固定版式字段：标题区、基础信息区、明细区、汇总区与签字区'
-const ORDER_VOUCHER_AUTO_FIELDS_TEXT = '自动填充字段：申请部门、商品名称、产品编码、单价、数量、小计、总计、业务单号'
+const ORDER_VOUCHER_AUTO_FIELDS_TEXT = '自动填充字段：申请部门、来源领取人、到店取货时间、商品名称、规格、单价、数量、小计、总计、业务单号'
 const ORDER_VOUCHER_EDITABLE_FIELDS_TEXT = '在线补填字段：部门经办人、金蝶单据编号、领取人签字、完成日期'
 const ORDER_VOUCHER_OFFLINE_SIGNATURE_TEXT = '线下手写字段：文创工坊管理员签字、出库人签字'
 const VOUCHER_PRINT_STYLE_ID = 'y-link-order-voucher-print-page-style'
@@ -74,12 +75,37 @@ const dialogVisible = computed({
   get: () => props.modelValue,
   set: (value: boolean) => emit('update:modelValue', value),
 })
-const voucherPrintRootRef = ref<HTMLElement | null>(null)
+const voucherPreviewRootRef = ref<HTMLElement | null>(null)
+const voucherPages = ref<VoucherRenderRow[][]>([])
+const voucherFillerCounts = ref<number[]>([])
 const exportPdfLoading = ref(false)
 const voucherEditableForm = reactive<OrderVoucherEditableFields>(createEmptyVoucherEditableFields())
 const voucherOrientation = ref<VoucherOrientation>('landscape')
+const paginationRevision = ref(0)
+const readyPaginationRevision = ref(-1)
+const isVoucherPaginationReady = computed(() => voucherPages.value.length > 0 && readyPaginationRevision.value === paginationRevision.value)
 const voucherOrientationLabel = computed(() => (voucherOrientation.value === 'landscape' ? '横版' : '竖版'))
 const voucherItemCount = computed(() => aggregateOrderVoucherItems(props.order.items).length)
+const voucherPageCount = computed(() => isVoucherPaginationReady.value ? voucherPages.value.length * 2 : 0)
+const invalidateVoucherPagination = () => {
+  paginationRevision.value += 1
+  readyPaginationRevision.value = -1
+  voucherPages.value = []
+  voucherFillerCounts.value = []
+}
+const updateVoucherPages = async (pages: VoucherRenderRow[][], fillerCounts: number[]) => {
+  const revision = paginationRevision.value
+  const orderId = props.order.id
+  const orientation = voucherOrientation.value
+  await nextTick()
+  const sourceElement = voucherPreviewRootRef.value?.querySelector('.voucher-print-document')
+  if (!dialogVisible.value || revision !== paginationRevision.value || orderId !== props.order.id || orientation !== voucherOrientation.value
+    || !(sourceElement instanceof HTMLElement) || !sourceElement.isConnected
+    || sourceElement.querySelectorAll('.voucher-sheet').length !== pages.length * 2) return
+  voucherPages.value = pages
+  voucherFillerCounts.value = fillerCounts
+  readyPaginationRevision.value = revision
+}
 
 /**
  * 切换单据时重置补填字段：
@@ -88,6 +114,7 @@ const voucherItemCount = computed(() => aggregateOrderVoucherItems(props.order.i
  */
 const resetVoucherEditableForm = () => {
   Object.assign(voucherEditableForm, createEmptyVoucherEditableFields())
+  invalidateVoucherPagination()
 }
 
 watch(
@@ -97,8 +124,13 @@ watch(
   },
   {
     immediate: true,
+    flush: 'sync',
   },
 )
+
+watch(voucherEditableForm, invalidateVoucherPagination, { deep: true, flush: 'sync' })
+watch(voucherOrientation, invalidateVoucherPagination, { flush: 'sync' })
+watch(() => props.order, invalidateVoucherPagination, { flush: 'sync' })
 
 watch(
   () => props.order.orderType,
@@ -132,12 +164,31 @@ const clearVoucherPrintPageStyle = () => {
   styleElement?.remove()
 }
 
+/** 复制已完成分页的预览纸面，避免 PDF 模块异步加载时读取仍在变化的响应式 DOM。 */
+const createVoucherExportSnapshot = (sourceElement: HTMLElement) => {
+  const host = document.createElement('div')
+  host.setAttribute('aria-hidden', 'true')
+  host.style.position = 'fixed'
+  host.style.left = '-100000px'
+  host.style.top = '0'
+  host.style.pointerEvents = 'none'
+  host.style.width = `${sourceElement.getBoundingClientRect().width}px`
+  const snapshot = sourceElement.cloneNode(true) as HTMLElement
+  host.appendChild(snapshot)
+  document.body.appendChild(host)
+  return { sourceElement: snapshot, dispose: () => host.remove() }
+}
+
 /**
  * 打印正式出库单：
  * - 直接触发浏览器打印；
  * - 打印专用 DOM 通过 Teleport 输出到 body 根层，避免受弹窗滚动容器裁剪。
  */
 const handlePrintVoucher = async () => {
+  if (exportPdfLoading.value || !isVoucherPaginationReady.value) {
+    showAppWarning('凭证分页尚未准备完成，请稍后重试')
+    return
+  }
   applyVoucherPrintPageStyle(voucherOrientation.value)
   const cleanup = () => {
     clearVoucherPrintPageStyle()
@@ -155,32 +206,41 @@ const handlePrintVoucher = async () => {
  * - 导出的文件天然带上当前补填内容与当前横竖版方向。
  */
 const handleExportVoucherPdf = async () => {
+  if (exportPdfLoading.value) return
+  if (!isVoucherPaginationReady.value) {
+    showAppWarning('凭证分页尚未准备完成，请稍后重试')
+    return
+  }
   if (!props.enableHtml2pdfExport) {
     showAppInfo('PDF 导出开关未启用，当前仅支持打印')
     return
   }
 
-  const sourceElement = voucherPrintRootRef.value?.querySelector('.voucher-print-document')
-  if (!(sourceElement instanceof HTMLElement)) {
+  const sourceElement = voucherPreviewRootRef.value?.querySelector('.voucher-print-document')
+  if (!(sourceElement instanceof HTMLElement) || !sourceElement.isConnected || sourceElement.getBoundingClientRect().width <= 0) {
     showAppWarning('凭证模板尚未准备完成，请稍后重试')
     return
   }
 
+  const orderId = props.order.id
+  const orientation = voucherOrientation.value
   const outputFileName = `${props.order.businessNo || 'order-voucher'}-正式出库单.pdf`
-
+  let exportSnapshot: ReturnType<typeof createVoucherExportSnapshot> | null = null
   exportPdfLoading.value = true
   try {
+    exportSnapshot = createVoucherExportSnapshot(sourceElement)
     await exportVoucherPdf({
-      sourceElement,
+      sourceElement: exportSnapshot.sourceElement,
       filename: outputFileName,
       marginMm: 8,
       scale: 2,
-      orientation: voucherOrientation.value,
+      orientation,
     })
-    showAppSuccess('PDF 导出成功')
+    if (dialogVisible.value && props.order.id === orderId) showAppSuccess('PDF 导出成功')
   } catch (error) {
     showAppError(extractErrorMessage(error, 'PDF 导出失败，请稍后重试'))
   } finally {
+    exportSnapshot?.dispose()
     exportPdfLoading.value = false
   }
 }
@@ -196,6 +256,9 @@ const handleExportVoucherPdf = async () => {
     append-to-body
     :modal-append-to-body="true"
     :lock-scroll="true"
+    :show-close="!exportPdfLoading"
+    :close-on-click-modal="!exportPdfLoading"
+    :close-on-press-escape="!exportPdfLoading"
   >
     <div class="voucher-editor-banner">
       <div class="voucher-editor-banner__title">正式出库单字段说明</div>
@@ -221,25 +284,26 @@ const handleExportVoucherPdf = async () => {
         </div>
         <div class="voucher-orientation-toolbar">
           <span class="voucher-orientation-toolbar__label">页面方向</span>
-          <el-radio-group v-model="voucherOrientation" size="small">
-            <el-radio-button label="landscape">横版</el-radio-button>
-            <el-radio-button label="portrait">竖版</el-radio-button>
+          <el-radio-group v-model="voucherOrientation" :disabled="exportPdfLoading" size="small">
+            <el-radio-button value="landscape">横版</el-radio-button>
+            <el-radio-button value="portrait">竖版</el-radio-button>
           </el-radio-group>
         </div>
         <el-form label-position="top" class="voucher-editor-form">
           <div class="voucher-editor-form__grid">
             <el-form-item label="部门经办人">
-              <el-input v-model="voucherEditableForm.departmentOperator" placeholder="请输入部门经办人" clearable />
+              <el-input v-model="voucherEditableForm.departmentOperator" :disabled="exportPdfLoading" placeholder="请输入部门经办人" clearable />
             </el-form-item>
             <el-form-item label="金蝶单据编号">
-              <el-input v-model="voucherEditableForm.kingdeeVoucherNo" placeholder="请输入金蝶单据编号" clearable />
+              <el-input v-model="voucherEditableForm.kingdeeVoucherNo" :disabled="exportPdfLoading" placeholder="请输入金蝶单据编号" clearable />
             </el-form-item>
             <el-form-item label="领取人签字">
-              <el-input v-model="voucherEditableForm.receiverSignature" placeholder="请输入领取人签字" clearable />
+              <el-input v-model="voucherEditableForm.receiverSignature" :disabled="exportPdfLoading" placeholder="请输入领取人签字" clearable />
             </el-form-item>
             <el-form-item label="完成日期">
               <el-input
                 v-model="voucherEditableForm.completionDate"
+                :disabled="exportPdfLoading"
                 placeholder="请输入完成日期，例如：2026-04-28"
                 clearable
               />
@@ -253,20 +317,21 @@ const handleExportVoucherPdf = async () => {
           <div>
             <h3 class="voucher-preview-panel__title">正式出库单预览</h3>
             <p class="voucher-preview-panel__desc">
-              当前方向：{{ voucherOrientationLabel }}，共 2 页，每页 1 联；申请部门：{{ props.order.customerDepartmentName || '散客' }}
+              当前方向：{{ voucherOrientationLabel }}，共 {{ voucherPageCount }} 页，每联 {{ Math.max(1, voucherPages.length) }} 页；申请部门：{{ props.order.customerDepartmentName || '散客' }}
             </p>
           </div>
           <div class="voucher-preview-panel__summary">
-            <span>商品 {{ voucherItemCount }} 行</span>
+            <span>商品 {{ voucherItemCount }} 组</span>
             <span>总金额 ¥{{ Number(props.order.totalAmount).toFixed(2) }}</span>
           </div>
         </div>
         <div class="voucher-preview-panel__body">
-          <div class="order-voucher-preview-scope" :class="`is-${voucherOrientation}`">
+          <div ref="voucherPreviewRootRef" class="order-voucher-preview-scope" :class="`is-${voucherOrientation}`">
             <OrderVoucherTemplate
               :order="props.order"
               :editable-fields="voucherEditableForm"
               :orientation="voucherOrientation"
+              @pages-change="updateVoucherPages"
             />
           </div>
         </div>
@@ -274,9 +339,9 @@ const handleExportVoucherPdf = async () => {
     </div>
     <template #footer>
       <span class="flex flex-wrap justify-end gap-2">
-        <el-button @click="dialogVisible = false">关闭</el-button>
-        <el-button type="primary" plain @click="handlePrintVoucher">打印</el-button>
-        <el-button type="primary" :disabled="!props.enableHtml2pdfExport" :loading="exportPdfLoading" @click="handleExportVoucherPdf">
+        <el-button :disabled="exportPdfLoading" @click="dialogVisible = false">关闭</el-button>
+        <el-button type="primary" plain :disabled="exportPdfLoading || !isVoucherPaginationReady" @click="handlePrintVoucher">打印</el-button>
+        <el-button type="primary" :disabled="exportPdfLoading || !props.enableHtml2pdfExport || !isVoucherPaginationReady" :loading="exportPdfLoading" @click="handleExportVoucherPdf">
           导出PDF
         </el-button>
       </span>
@@ -286,7 +351,6 @@ const handleExportVoucherPdf = async () => {
   <Teleport to="body">
     <div
       v-if="dialogVisible"
-      ref="voucherPrintRootRef"
       class="order-voucher-print-root"
       aria-hidden="true"
     >
@@ -295,6 +359,9 @@ const handleExportVoucherPdf = async () => {
           :order="props.order"
           :editable-fields="voucherEditableForm"
           :orientation="voucherOrientation"
+          :pages="voucherPages.length ? voucherPages : undefined"
+          :page-filler-counts="voucherFillerCounts"
+          :measure-pages="false"
         />
       </div>
     </div>
@@ -474,6 +541,7 @@ const handleExportVoucherPdf = async () => {
   min-width: 194mm;
 }
 
+
 @media (max-width: 768px) {
   .voucher-workbench {
     grid-template-columns: minmax(0, 1fr);
@@ -507,11 +575,8 @@ const handleExportVoucherPdf = async () => {
     padding: 10px;
   }
 
-  .order-voucher-preview-scope.is-landscape,
-  .order-voucher-preview-scope.is-portrait {
-    width: 100%;
-    min-width: 100%;
-  }
+  .order-voucher-preview-scope.is-landscape { width: 281mm; min-width: 281mm; }
+  .order-voucher-preview-scope.is-portrait { width: 194mm; min-width: 194mm; }
 }
 </style>
 
@@ -559,7 +624,8 @@ const handleExportVoucherPdf = async () => {
   .order-voucher-print-root .order-voucher-print-scope.is-portrait {
     width: 194mm;
     max-width: 194mm;
-    min-height: 279mm;
+    min-height: 281mm;
   }
+
 }
 </style>

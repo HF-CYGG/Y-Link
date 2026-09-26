@@ -1284,7 +1284,9 @@ class O2oPreorderService {
       idempotencyKey,
       // 正式出库单上的客户名称应优先使用下单时填写的提货人，
       // 这样线下打印/核销后回看单据时，仍能还原真实领取人而不是账号用户名。
-      customerName: input.preorder.pickupContact?.trim() || clientUser?.realName?.trim() || null,
+      customerName: input.preorder.pickupContact?.trim()
+        || (outboundOrderType === 'walkin' ? clientUser?.realName?.trim() : null)
+        || null,
       // 单据备注只承载人工填写内容；来源预订单写入结构化来源快照，预订单后续变更或清理后仍可追溯。
       remark: null,
       sourceDocType: 'o2o_preorder',
@@ -2104,7 +2106,8 @@ class O2oPreorderService {
     const nowMs = Date.now()
     const totalAmount = formatMoneyFromCents(totalAmountCents)
     const updateCount = this.normalizeOrderUpdateCount(order.updateCount)
-    const resolvedPickupContact = order.pickupContact?.trim() || clientUser?.realName?.trim() || clientUser?.mobile?.trim() || null
+    const resolvedPickupContact = order.pickupContact?.trim()
+      || (order.clientOrderType === 'department' ? null : clientUser?.realName?.trim() || clientUser?.mobile?.trim() || null)
     const o2oRules = await systemConfigService.getO2oRuleConfigs(manager)
     return {
       order: {
@@ -2829,8 +2832,14 @@ class O2oPreorderService {
     const normalizedItems = this.normalizePreorderItems(input.items)
     const normalizedRemark = this.normalizePreorderRemark(input.remark)
     const normalizedClientRequestId = this.normalizeClientRequestId(input.clientRequestId)
+    const normalizedPickupContact = this.normalizePickupContact(input.pickupContact)
     const normalizedPickupAt = this.normalizePickupAtInput(input.pickupAt)
-    const clientRequestHash = this.buildClientRequestHash(input, normalizedRemark, normalizedItems, normalizedPickupAt)
+    const clientRequestHash = this.buildClientRequestHash(
+      { isSystemApplied: input.isSystemApplied, pickupContact: normalizedPickupContact },
+      normalizedRemark,
+      normalizedItems,
+      normalizedPickupAt,
+    )
     // 详细注释：是否系统申请必须以客户端本次明确选择为准，不再使用服务端默认兜底。
     const normalizedIsSystemApplied = Boolean(input.isSystemApplied)
 
@@ -2896,12 +2905,6 @@ class O2oPreorderService {
         const normalizedClientOrderType = this.normalizeClientOrderType(clientUser.accountType === 'department' ? 'department' : 'walkin')
         const departmentNameSnapshot = this.resolveDepartmentNameSnapshot(normalizedClientOrderType, clientUser)
         const staffNoSnapshot = this.resolveStaffNoSnapshot(normalizedClientOrderType, clientUser)
-        const normalizedPickupContact = this.normalizePickupContact(
-          normalizedClientOrderType === 'department'
-            ? (clientUser.realName || auth.realName)
-            : input.pickupContact,
-        )
-
         const timeoutAt = o2oRules.autoCancelEnabled ? new Date(Date.now() + o2oRules.autoCancelHours * 60 * 60 * 1000) : null
         // 取货时间校验放在生成单号与写库存之前，失败时整个事务回滚，不占用单号与库存。
         const pickupAt = normalizedClientOrderType === 'department'
