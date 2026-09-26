@@ -137,6 +137,12 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourceDocNo?: s
         <span class="text-base font-bold text-red-500">¥{{ formatAmount(order.totalAmount) }}</span>
       </el-descriptions-item>
       <el-descriptions-item v-if="formatSourceDoc(order)" label="来源单据" :span="isPhone ? 1 : 2">{{ formatSourceDoc(order) }}</el-descriptions-item>
+      <el-descriptions-item v-if="order.sourceDocType === 'o2o_preorder'" label="来源预订单领取人">
+        {{ order.sourcePreorderPickupContact || '未记录' }}
+      </el-descriptions-item>
+      <el-descriptions-item v-if="order.sourceDocType === 'o2o_preorder'" label="来源预订单取货时间">
+        {{ order.sourcePreorderPickupAt ? dayjs(order.sourcePreorderPickupAt).format('YYYY-MM-DD HH:mm') : '未记录' }}
+      </el-descriptions-item>
       <el-descriptions-item label="单据备注" :span="isPhone ? 1 : 2">{{ order.remark || '-' }}</el-descriptions-item>
     </el-descriptions>
   </section>

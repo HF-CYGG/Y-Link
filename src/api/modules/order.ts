@@ -297,6 +297,8 @@ export interface OrderItemRecord {
 }
 
 export interface OrderDetailResult extends OrderRecord {
+  sourcePreorderPickupContact: string | null
+  sourcePreorderPickupAt: string | null
   items: OrderItemRecord[]
 }
 
@@ -372,6 +374,8 @@ interface OrderItemRawRecord {
 interface OrderDetailOrderRaw extends Omit<OrderRecord, 'totalAmount' | 'totalQty'> {
   totalAmount: PrimitiveTextValue
   totalQty: PrimitiveTextValue
+  sourcePreorderPickupContact?: PrimitiveTextValue
+  sourcePreorderPickupAt?: PrimitiveTextValue
 }
 
 interface OrderDetailRawResult {
@@ -515,6 +519,8 @@ const normalizeOrderItem = (item: OrderItemRawRecord): OrderItemRecord => ({
  */
 const normalizeOrderDetail = (payload: OrderDetailRawResult): OrderDetailResult => ({
   ...normalizeOrderRecord(payload.order),
+  sourcePreorderPickupContact: normalizeNullableTextField(payload.order.sourcePreorderPickupContact),
+  sourcePreorderPickupAt: normalizeNullableTextField(payload.order.sourcePreorderPickupAt),
   items: payload.items.map(normalizeOrderItem),
 })
 

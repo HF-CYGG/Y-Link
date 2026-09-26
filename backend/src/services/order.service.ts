@@ -172,6 +172,12 @@ export interface OrderSummaryView {
   createdAt: string
 }
 
+export interface OrderDetailSummaryView extends OrderSummaryView {
+  /** 仅从实际来源预订单读取；历史来源记录缺失时保持 null。 */
+  sourcePreorderPickupContact: string | null
+  sourcePreorderPickupAt: string | null
+}
+
 export interface SoftDeleteOrderOptions {
   /** 仅 `manual_applied` 手工单可选择删除时回补商品与 SKU 库存。 */
   releaseInventory?: boolean
@@ -475,7 +481,7 @@ export class OrderService {
   async detailById(
     id: string,
     manager: EntityManager = AppDataSource.manager,
-  ): Promise<{ order: OrderSummaryView; items: OrderDetailItemView[] }> {
+  ): Promise<{ order: OrderDetailSummaryView; items: OrderDetailItemView[] }> {
     const order = await manager.getRepository(BizOutboundOrder).findOne({ where: { id } })
     if (!order) {
       throw new BizError('出库单不存在', 404)
@@ -486,19 +492,19 @@ export class OrderService {
       manager,
     )).get(normalizeEntityId(order.id))
     return {
-      order: this.buildOrderSummaryView(order, metadata, await this.isOrderInventoryReleased(order, manager)),
+      order: await this.buildOrderDetailSummaryView(order, metadata, manager),
       items,
     }
   }
 
-  async detailByShowNo(showNo: string): Promise<{ order: OrderSummaryView; items: OrderDetailItemView[] }> {
+  async detailByShowNo(showNo: string): Promise<{ order: OrderDetailSummaryView; items: OrderDetailItemView[] }> {
     const order = await this.orderRepo.findOne({ where: { showNo } })
     if (!order) {
       throw new BizError('出库单不存在', 404)
     }
     const items = await this.loadDetailItems(order.id)
     const metadata = (await orderMergeService.getMetadataMap([normalizeEntityId(order.id)])).get(normalizeEntityId(order.id))
-    return { order: this.buildOrderSummaryView(order, metadata, await this.isOrderInventoryReleased(order)), items }
+    return { order: await this.buildOrderDetailSummaryView(order, metadata), items }
   }
 
   /** 只有已删除的手工库存单才可能处于“已回补”状态，其余订单直接返回 false，避免多余查询。 */
@@ -1514,6 +1520,27 @@ export class OrderService {
       deletedByDisplayName: order.deletedByDisplayName,
       inventoryReleased,
       createdAt: normalizeDateTime(order.createdAt),
+    }
+  }
+
+  private async buildOrderDetailSummaryView(
+    order: BizOutboundOrder,
+    metadata?: OrderMergeMetadata,
+    manager: EntityManager = AppDataSource.manager,
+  ): Promise<OrderDetailSummaryView> {
+    const summary = this.buildOrderSummaryView(order, metadata, await this.isOrderInventoryReleased(order, manager))
+    const sourcePreorderId = this.resolveLinkedO2oPreorderId(order)
+      ?? (order.sourceDocType === 'o2o_preorder' ? normalizeNullableEntityId(order.sourceDocId) : null)
+    const sourcePreorder = sourcePreorderId
+      ? await manager.getRepository(O2oPreorder).findOne({
+        where: { id: sourcePreorderId },
+        select: ['id', 'pickupContact', 'pickupAt'],
+      })
+      : null
+    return {
+      ...summary,
+      sourcePreorderPickupContact: sourcePreorder?.pickupContact?.trim() || null,
+      sourcePreorderPickupAt: sourcePreorder?.pickupAt ? normalizeDateTime(sourcePreorder.pickupAt) : null,
     }
   }
 
