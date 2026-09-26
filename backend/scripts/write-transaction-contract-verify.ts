@@ -250,10 +250,11 @@ const ALLOWED_DIRECT_TRANSACTION_CALLS: Array<{
     receiver: 'AppDataSource',
     method: 'transaction',
     enclosingFunction: 'runInTransaction',
-    expectedCount: 1,
+    // MySQL isolation overload 与默认 overload 是互斥分支，都会落到已接管的 TypeORM 事务。
+    expectedCount: 2,
     reason:
-      '闸门自身的实现：先 initializeDatabaseInfrastructure 装好事务协调器，'
-      + '再落到（已被协调器接管的）TypeORM 事务上',
+      '闸门自身的两个互斥分支：均先 initializeDatabaseInfrastructure 装好事务协调器，'
+      + '再分别通过 MySQL isolation overload 或默认 overload 落到已被协调器接管的 TypeORM 事务上',
   },
   {
     relativePath: 'src/database/transaction-coordinator.ts',
@@ -334,6 +335,17 @@ const ALLOWED_DIRECT_TRANSACTION_CALLS: Array<{
       '仅 MySQL 分支先 initializeDatabaseInfrastructure，再在同一固定连接上开启事务并持有 GET_LOCK；'
       + '命名锁必须跨提交后的附件文件处理保持到显式释放，不能改为短生命周期 runInTransaction；'
       + 'SQLite 分支已使用 runInTransaction，因此不会绕过单连接串行化闸门',
+  },
+  {
+    relativePath: 'src/config/mysql-migration-runner.ts',
+    receiver: 'queryRunner',
+    method: 'startTransaction',
+    enclosingFunction: 'reconcileMysqlOrderIdentifierNamespaces',
+    expectedCount: 1,
+    reason:
+      '仅 MySQL 分支在同一条持有 GET_LOCK advisory lock 的固定 QueryRunner 上执行 055；'
+      + '055 的多语句领养必须作为一个原子批次提交或回滚，不能改由绑定全局 AppDataSource 的 runInTransaction 执行；'
+      + 'SQLite 在函数入口已直接返回，不会走此直接事务分支或绕过单连接串行化闸门',
   },
   {
     relativePath: 'src/commands/seed-database-migration-e2e.ts',

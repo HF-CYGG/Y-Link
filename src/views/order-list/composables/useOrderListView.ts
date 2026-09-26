@@ -39,6 +39,8 @@ import { captureOrderRefreshAnchor, restoreOrderRefreshAnchor, type OrderRefresh
 import { showAppError, showAppSuccess } from '@/utils/app-alert'
 
 const ORDER_LIST_TARGET_ORDER_ID_QUERY_KEY = 'focusOrderId'
+const ORDER_LIST_TARGET_ORDER_SYSTEM_NO_QUERY_KEY = 'focusOrderSystemNo'
+/** @deprecated 兼容一次旧路由参数读取，页面不会再写入该参数。 */
 const ORDER_LIST_TARGET_ORDER_SHOW_NO_QUERY_KEY = 'focusOrderShowNo'
 const ORDER_LIST_TARGET_REFRESH_QUERY_KEY = 'focusRefreshToken'
 const ORDER_AUTO_REFRESH_INTERVAL_MS = 15 * 1000
@@ -159,7 +161,7 @@ export const useOrderListView = () => {
 
   /**
    * 查询表单：
-   * - showNo 对应业务单号模糊筛选；
+   * - keyword 可匹配业务单号、系统编号和来源预订单号；
    * - dateRange 保持最近日期筛选交互方式不变。
    */
   const searchForm = ref<OrderListSearchFormState>(createDefaultSearchForm())
@@ -268,7 +270,9 @@ export const useOrderListView = () => {
 
   const getTargetRefreshPayload = () => {
     const orderId = normalizeRouteQueryValue(route.query[ORDER_LIST_TARGET_ORDER_ID_QUERY_KEY])
-    const showNo = normalizeRouteQueryValue(route.query[ORDER_LIST_TARGET_ORDER_SHOW_NO_QUERY_KEY])
+    const systemNo = normalizeRouteQueryValue(
+      route.query[ORDER_LIST_TARGET_ORDER_SYSTEM_NO_QUERY_KEY] ?? route.query[ORDER_LIST_TARGET_ORDER_SHOW_NO_QUERY_KEY],
+    )
     const refreshToken = normalizeRouteQueryValue(route.query[ORDER_LIST_TARGET_REFRESH_QUERY_KEY])
 
     if (!orderId || !refreshToken) {
@@ -277,13 +281,18 @@ export const useOrderListView = () => {
 
     return {
       orderId,
-      showNo,
+      systemNo,
       refreshToken,
     }
   }
 
   const clearTargetRefreshQuery = async () => {
-    const hasTargetQuery = [ORDER_LIST_TARGET_ORDER_ID_QUERY_KEY, ORDER_LIST_TARGET_ORDER_SHOW_NO_QUERY_KEY, ORDER_LIST_TARGET_REFRESH_QUERY_KEY]
+    const hasTargetQuery = [
+      ORDER_LIST_TARGET_ORDER_ID_QUERY_KEY,
+      ORDER_LIST_TARGET_ORDER_SYSTEM_NO_QUERY_KEY,
+      ORDER_LIST_TARGET_ORDER_SHOW_NO_QUERY_KEY,
+      ORDER_LIST_TARGET_REFRESH_QUERY_KEY,
+    ]
       .some((key) => key in route.query)
 
     if (!hasTargetQuery) {
@@ -292,6 +301,7 @@ export const useOrderListView = () => {
 
     const nextQuery = { ...route.query }
     delete nextQuery[ORDER_LIST_TARGET_ORDER_ID_QUERY_KEY]
+    delete nextQuery[ORDER_LIST_TARGET_ORDER_SYSTEM_NO_QUERY_KEY]
     delete nextQuery[ORDER_LIST_TARGET_ORDER_SHOW_NO_QUERY_KEY]
     delete nextQuery[ORDER_LIST_TARGET_REFRESH_QUERY_KEY]
 
@@ -658,11 +668,11 @@ export const useOrderListView = () => {
    * - 管理员需输入业务单号完成二次确认；
    * - 删除采用软删除，后续可在“已删除”筛选下恢复。
    */
-  const handleDeleteOrder = async (row: OrderRecord, confirmShowNo: string, releaseInventory = false) => {
+  const handleDeleteOrder = async (row: OrderRecord, confirmBusinessNo: string, releaseInventory = false) => {
     if (!ensurePermission('orders:delete', '删除出库单')) {
       return
     }
-    await deleteOrderById(row.id, { confirmShowNo, releaseInventory })
+    await deleteOrderById(row.id, { confirmBusinessNo, releaseInventory })
     showAppSuccess(releaseInventory ? `已删除单据并回补库存：${row.businessNo}` : `已删除单据：${row.businessNo}`)
     await loadData()
   }
@@ -689,14 +699,14 @@ export const useOrderListView = () => {
    * - 成功后关闭弹窗并刷新列表；
    * - 失败时保持弹窗打开，便于修正业务单号或改选回补方式（错误提示由请求层统一弹出）。
    */
-  const handleDeleteDialogConfirm = async (payload: { confirmShowNo: string; releaseInventory: boolean }) => {
+  const handleDeleteDialogConfirm = async (payload: { confirmBusinessNo: string; releaseInventory: boolean }) => {
     const row = deleteDialogOrder.value
     if (!row || deleteDialogSubmitting.value) {
       return
     }
     deleteDialogSubmitting.value = true
     try {
-      await handleDeleteOrder(row, payload.confirmShowNo, payload.releaseInventory)
+      await handleDeleteOrder(row, payload.confirmBusinessNo, payload.releaseInventory)
       deleteDialogVisible.value = false
     } catch (error) {
       // 请求层不弹统一提示，这里明确展示失败原因（如业务单号不匹配、非库存单不能回补）。
@@ -743,10 +753,10 @@ export const useOrderListView = () => {
 
   /**
    * 永久删除出库单：
-   * - 仅对已软删除单据开放，彻底移除主单与明细；
-   * - 若命中“最后一个流水号”，后端会同步回拨流水，便于测试场景连续重建首单。
+   * - 仅对已软删除单据开放，清理订单文档与修订数据，业务号随后可人工复用；
+   * - 仅保留脱敏安全审计；若命中最后一个流水号，后端会安全回拨出库系统编号流水。
    */
-  const handlePurgeOrder = async (row: OrderRecord, confirmShowNo: string, permanentDeletePassword: string) => {
+  const handlePurgeOrder = async (row: OrderRecord, confirmBusinessNo: string, permanentDeletePassword: string) => {
     if (!ensurePermission('orders:delete', '永久删除出库单')) {
       return
     }
@@ -754,10 +764,10 @@ export const useOrderListView = () => {
       showAppError('仅管理员可永久删除出库单')
       return
     }
-    const result = await purgeOrderById(row.id, { confirmShowNo, permanentDeletePassword })
+    const result = await purgeOrderById(row.id, { confirmBusinessNo, permanentDeletePassword })
     showAppSuccess(
       result.serialRolledBack
-        ? `已永久删除单据：${row.businessNo}，系统兼容流水已安全回拨`
+        ? `已永久删除单据：${row.businessNo}，出库系统编号流水已安全回拨`
         : `已永久删除单据：${row.businessNo}`,
     )
     await loadData()
@@ -766,14 +776,15 @@ export const useOrderListView = () => {
   /**
    * 永久删除二次确认：
    * - 仍要求输入完整业务单号，避免把“测试删库”误点到正式历史单据；
-   * - 明确提示该操作不可恢复，并说明只有最后一张单据才会触发安全回拨。
+   * - 明确提示该操作不可恢复、会清理订单文档与修订数据，业务号随后可人工复用；
+   * - 仅保留脱敏安全审计，且只有最后一张单据才会触发出库系统编号流水安全回拨。
    */
   const handlePurgeOrderWithConfirm = async (row: OrderRecord) => {
     if (!ensurePermission('orders:delete', '永久删除出库单')) {
       return
     }
     const result = await ElMessageBox.prompt(
-      `请输入业务单号 ${row.businessNo} 以确认永久删除。永久删除后不可恢复；业务号占用和修订历史会永久保留。`,
+      `请输入业务单号 ${row.businessNo} 以确认永久删除。永久删除后订单文档与修订数据会被清理，业务号随后可人工复用；仅保留脱敏安全审计。`,
       '永久删除确认',
       {
         confirmButtonText: '确认永久删除',
@@ -827,7 +838,7 @@ export const useOrderListView = () => {
         highlightNewOrders: true,
       })
 
-      const targetOrder = listState.records.find((record) => record.id === payload.orderId || record.showNo === payload.showNo)
+      const targetOrder = listState.records.find((record) => record.id === payload.orderId || record.systemNo === payload.systemNo)
       await loadOrderDetail({
         id: targetOrder?.id ?? payload.orderId,
       })

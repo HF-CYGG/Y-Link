@@ -26,6 +26,7 @@ const { O2oPreorder } = await import('../src/entities/o2o-preorder.entity.js')
 const { BusinessSequence } = await import('../src/entities/business-sequence.entity.js')
 const { SystemConfig } = await import('../src/entities/system-config.entity.js')
 const { SysAuditLog } = await import('../src/entities/sys-audit-log.entity.js')
+const { SysUser } = await import('../src/entities/sys-user.entity.js')
 
 try {
   prepareDatabaseRuntime()
@@ -33,18 +34,19 @@ try {
   await initializeDatabaseSchemaIfNeeded(AppDataSource)
   await systemConfigService.ensureDefaultConfigs()
   const user = await AppDataSource.getRepository(ClientUser).save({ realName: '流水回归', passwordHash: 'test-only', status: 'enabled' })
-  const actor = { userId: '1', username: 'test-admin', displayName: '测试管理员', role: 'admin' as const, permissions: [], status: 'enabled' as const, sessionToken: 'test-only' }
+  const admin = await AppDataSource.getRepository(SysUser).save({ username: 'test-admin', passwordHash: 'test-only', displayName: '测试管理员', role: 'admin', status: 'enabled' })
+  const actor = { userId: String(admin.id), username: admin.username, displayName: admin.displayName, role: 'admin' as const, permissions: [], status: 'enabled' as const, sessionToken: 'test-only' }
   const repo = AppDataSource.getRepository(O2oPreorder)
   const create = async (clientOrderType: 'walkin' | 'department', status: 'pending' | 'cancelled' = 'cancelled') => repo.save({
     clientUserId: user.id,
-    showNo: await orderSerialService.generateOrderNo(clientOrderType),
+    preorderNo: await orderSerialService.generatePreorderNo(clientOrderType),
     verifyCode: randomUUID(), clientOrderType, status, cancelReason: status === 'cancelled' ? 'manual' as const : null,
   })
-  const purge = (orders: Array<{ id: string; showNo: string }>) => o2oPreorderService.batchPurgeCancelledOrders({
-    orders: orders.map((order) => ({ id: String(order.id), confirmShowNo: order.showNo })), actor,
+  const purge = (orders: Array<{ id: string; preorderNo: string }>) => o2oPreorderService.batchPurgeCancelledOrders({
+    orders: orders.map((order) => ({ id: String(order.id), confirmPreorderNo: order.preorderNo })), actor,
   })
   const current = async (type: string) => {
-    const sequenceKey = `order.serial.${type}`
+    const sequenceKey = `o2o.preorder.${type}`
     const sequence = await AppDataSource.getRepository(BusinessSequence).findOneByOrFail({ sequenceKey })
     const config = await AppDataSource.getRepository(SystemConfig).findOneByOrFail({ configKey: `${sequenceKey}.current` })
     assert.equal(Number(sequence.currentValue), Number(config.configValue), '序列表与管理配置镜像必须一致')
@@ -61,7 +63,7 @@ try {
     assert.equal(result.summary.skipped, 1)
     assert.equal(await current(type), baseline, `${type} 批删尾部订单应回拨到仍存在的占用流水`)
     assert.equal(await repo.countBy({ id: occupied.id }), 1)
-    assert.equal(await orderSerialService.generateOrderNo(type), tailOne.showNo, '下一笔单号应复用释放的连续尾号')
+    assert.equal(await orderSerialService.generatePreorderNo(type), tailOne.preorderNo, '下一笔预订单号应复用释放的连续尾号')
   }
 
   const lower = await create('walkin')
@@ -73,15 +75,15 @@ try {
 
   const rollbackOrder = await create('walkin')
   const beforeRollback = await current('walkin')
-  const originalRecalibrate = orderSerialService.recalibrateCurrentFromOccupancy.bind(orderSerialService)
-  orderSerialService.recalibrateCurrentFromOccupancy = async (...args) => {
-    await originalRecalibrate(...args)
+  const originalRollback = orderSerialService.rollbackDeletedIdentifierBatch.bind(orderSerialService)
+  orderSerialService.rollbackDeletedIdentifierBatch = async (...args) => {
+    await originalRollback(...args)
     throw new Error('测试注入：流水校准后事务失败')
   }
   try {
     assert.equal((await purge([rollbackOrder])).summary.failed, 1)
   } finally {
-    orderSerialService.recalibrateCurrentFromOccupancy = originalRecalibrate
+    orderSerialService.rollbackDeletedIdentifierBatch = originalRollback
   }
   assert.equal(await repo.countBy({ id: rollbackOrder.id }), 1, '流水校准失败必须回滚删除')
   assert.equal(await current('walkin'), beforeRollback, '回滚必须恢复序列及配置镜像')

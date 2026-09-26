@@ -89,7 +89,6 @@ const FIELD_LIMITS = {
   reason: 500,
 } as const
 
-const O2O_ORDER_PREFIX = 'o2o-preorder-verify:'
 const MAX_TRANSACTION_ATTEMPTS = 3
 
 const normalizeId = (value: unknown): string => String(value ?? '').trim()
@@ -107,7 +106,7 @@ export class OrderContentEditService {
     if (order.isDeleted) blockers.push('已删除订单不可编辑')
     if (order.hasCustomerOrder) blockers.push('已关联客户订单')
     if (order.isSystemApplied) blockers.push('系统申请订单')
-    if (order.inventoryMode === 'o2o_preapplied' || order.idempotencyKey.startsWith(O2O_ORDER_PREFIX)) {
+    if (order.inventoryMode === 'o2o_preapplied' || order.sourceDocType === 'o2o_preorder') {
       blockers.push('O2O 正式出库单已锁定')
     }
     if (order.status === 'merged') blockers.push('合并来源单只允许查看')
@@ -271,7 +270,7 @@ export class OrderContentEditService {
       actionLabel: '编辑出库单内容',
       targetType: 'order',
       targetId: normalizeId(order.id),
-      targetCode: order.showNo,
+      targetCode: order.businessNo,
       actor,
       requestMeta,
       detail: {
@@ -459,7 +458,8 @@ export class OrderContentEditService {
 
   private buildSnapshot(order: BizOutboundOrder, items: BizOutboundOrderItem[]) {
     return {
-      showNo: order.showNo,
+      systemNo: order.systemNo,
+      showNo: order.systemNo,
       businessNo: order.businessNo,
       editVersion: Number(order.editVersion),
       inventoryMode: order.inventoryMode,
@@ -482,7 +482,8 @@ export class OrderContentEditService {
   private buildOrderView(order: BizOutboundOrder) {
     return {
       id: normalizeId(order.id),
-      showNo: order.showNo,
+      systemNo: order.systemNo,
+      showNo: order.systemNo,
       businessNo: order.businessNo,
       editVersion: Number(order.editVersion),
       inventoryMode: order.inventoryMode,

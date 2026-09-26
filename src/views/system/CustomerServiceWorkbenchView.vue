@@ -146,7 +146,7 @@ const handleDetailTabChange = (value: string | number) => {
 }
 
 /**
- * - 关键字覆盖标题、Issue 编号、用户、订单号和标签；
+ * - 关键字覆盖标题、Issue 编号、用户、关联编号和标签；
  * - 分配范围让客服可快速查看“我的工单”或“待分配”工单。
  */
 const searchForm = reactive({
@@ -1665,7 +1665,7 @@ onBeforeUnmount(() => {
                   v-model="searchForm.keyword"
                   maxlength="80"
                   clearable
-                  placeholder="搜索标题、Issue 编号、用户、订单号、标签"
+                  placeholder="搜索标题、Issue 编号、用户、关联编号、标签"
                   @keyup.enter="handleSearch"
                 />
               </el-form-item>
@@ -2095,11 +2095,11 @@ onBeforeUnmount(() => {
                           </el-form-item>
                         </div>
 
-                        <el-form-item label="关联订单号">
+                        <el-form-item label="关联编号">
                           <el-input
                             v-model="issueForm.orderRef"
                             maxlength="64"
-                            placeholder="如问题关联订单，可补充订单号或提货码"
+                            placeholder="可填写预订单号、出库业务单号或核销码"
                           />
                         </el-form-item>
 

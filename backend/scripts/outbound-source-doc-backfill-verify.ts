@@ -168,7 +168,7 @@ const runAssertions = async (
   assert.doesNotMatch(mysqlMigration, /DELETE\s+FROM|DROP\s+TABLE/i, '046 不得删除任何数据')
 
   const migrationRunner = fs.readFileSync(path.join(backendRoot, 'src/config/mysql-migration-runner.ts'), 'utf8')
-  assert.match(migrationRunner, /'046_outbound_order_source_doc\.sql',\s*\n\]/, '046 必须登记到自动迁移白名单末尾')
+  assert.match(migrationRunner, /'046_outbound_order_source_doc\.sql'/, '046 必须登记到自动迁移白名单')
   for (const column of ['source_doc_type', 'source_doc_id', 'source_doc_no', 'idx_biz_outbound_source_doc']) {
     assert.ok(migrationRunner.includes(column), `MySQL 结构契约缺少 ${column}`)
   }

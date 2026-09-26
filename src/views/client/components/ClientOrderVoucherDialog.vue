@@ -101,7 +101,7 @@ const emitEditableFieldUpdate = (key: VoucherEditableFieldKey, value: string | n
             <p class="voucher-editor-panel__desc">填写后会立即同步到下方正式出库单预览与打印结果。</p>
           </div>
           <div class="voucher-editor-panel__meta">
-            <span>业务单号：{{ voucherOrder.showNo }}</span>
+            <span>业务单号：{{ voucherOrder.businessNo }}</span>
             <span>开单时间：{{ dayjs(voucherOrder.createdAt).format('YYYY-MM-DD HH:mm:ss') }}</span>
           </div>
         </div>

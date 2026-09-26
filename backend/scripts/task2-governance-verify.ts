@@ -45,7 +45,7 @@ async function expectBizError(
 }
 
 async function main() {
-  const [{ AppDataSource }, { authService }, { systemConfigService }, { dataMaintenanceService }, { verificationCodeService }, { auditService }, { BizError }] =
+  const [{ AppDataSource }, { authService }, { systemConfigService }, { dataMaintenanceService }, { VerificationCodeService }, { auditService }, { BizError }, { SystemConfig }] =
     await Promise.all([
       import('../src/config/data-source.js'),
       import('../src/services/auth.service.js'),
@@ -54,6 +54,7 @@ async function main() {
       import('../src/services/verification-code.service.js'),
       import('../src/services/audit.service.js'),
       import('../src/utils/errors.js'),
+      import('../src/entities/system-config.entity.js'),
     ])
 
   const requestMeta = {
@@ -62,7 +63,12 @@ async function main() {
   }
 
   let createdBackupPath = ''
-  const originalFetch = globalThis.fetch
+  let providerResponseStatus = 200
+  const outboundUrls: string[] = []
+  const verificationCodeService = new VerificationCodeService(async (url) => {
+    outboundUrls.push(String(url))
+    return { statusCode: providerResponseStatus, headers: {}, body: Buffer.from(providerResponseStatus === 200 ? 'ok' : 'failed') }
+  })
 
   fs.mkdirSync(runtimeRoot, { recursive: true })
   await AppDataSource.initialize()
@@ -94,11 +100,21 @@ async function main() {
     assert.equal(backupAudit.targetCode, backupResult.fileName)
     pass('SQLite 备份接口已记录操作者与请求上下文审计')
 
+    // JSON 导入会替换整张 system_configs；为后续验证码审计场景保留仅测试所需的默认配置。
+    const verificationConfigs = JSON.parse(JSON.stringify(
+      (await AppDataSource.getRepository(SystemConfig).find())
+        .filter((row) => row.configKey.startsWith('verification.')),
+    )) as Array<{ configKey: string; configValue: string }>
+    assert.ok(verificationConfigs.some((row) => row.configKey === 'verification.mobile.enabled'))
+    assert.ok(verificationConfigs.some((row) => row.configKey === 'verification.email.enabled'))
+    assert.ok(verificationConfigs.some((row) => row.configValue === ''), '验证码默认配置应覆盖合法空字符串')
+    const importedConfigCount = verificationConfigs.length + 1
     const importPayload = {
       exportedAt: new Date().toISOString(),
       version: 'data-maintenance-v2',
       tables: {
         systemConfigs: [
+          ...verificationConfigs,
           {
             id: '900001',
             configKey: 'task2.audit.marker',
@@ -117,7 +133,8 @@ async function main() {
       },
     }
     const importResult = await dataMaintenanceService.importJson(importPayload, adminActor, requestMeta)
-    assert.equal(importResult.imported.systemConfigs, 1)
+    assert.equal(importResult.imported.systemConfigs, importedConfigCount)
+    await systemConfigService.getVerificationProviderConfigs({ maskSensitiveValues: false })
     const importAuditPage = await auditService.list({
       page: 1,
       pageSize: 20,
@@ -130,10 +147,9 @@ async function main() {
     assert.equal(importAudit.targetCode, importPayload.version)
     assert.match(importAudit.detailJson ?? '', /data-maintenance-v2/)
     assert.match(importAudit.detailJson ?? '', /"imported"/)
-    assert.match(importAudit.detailJson ?? '', /"systemConfigs":1/)
+    assert.match(importAudit.detailJson ?? '', new RegExp(`"systemConfigs":${importedConfigCount}`))
     pass('JSON 导入接口已记录操作者、请求上下文与导入摘要')
 
-    globalThis.fetch = async () => new Response('ok', { status: 200 })
     const sendTestSuccess = await verificationCodeService.sendTest({
       channel: 'mobile',
       target: '13800138000',
@@ -149,6 +165,7 @@ async function main() {
       requestMeta,
     })
     assert.equal(sendTestSuccess.channel, 'mobile')
+    assert.deepEqual(outboundUrls, ['https://example.com/send-sms'], '成功测试必须经过注入的受控 HTTP 客户端')
 
     const sendSuccessAuditPage = await auditService.list({
       page: 1,
@@ -162,7 +179,7 @@ async function main() {
     assert.equal(sendSuccessAudit?.ipAddress, requestMeta.ipAddress)
     pass('验证码平台测试发送成功场景已记录审计')
 
-    globalThis.fetch = async () => new Response('failed', { status: 500 })
+    providerResponseStatus = 500
     await expectBizError(
       '验证码平台测试发送失败审计',
       () =>
@@ -193,10 +210,11 @@ async function main() {
     assert.ok(sendFailureAudit, '缺少验证码平台测试发送失败审计日志')
     assert.equal(sendFailureAudit?.actorUserId, adminActor.userId)
     assert.equal(sendFailureAudit?.targetCode, 'email')
-    assert.match(sendFailureAudit?.detailJson ?? '', /errorMessage/)
+    assert.match(sendFailureAudit?.detailJson ?? '', /验证码平台请求失败（HTTP 500）/)
+    assert.deepEqual(outboundUrls, ['https://example.com/send-sms', 'https://example.com/send-email'],
+      '失败测试必须经过注入的受控 HTTP 客户端')
     pass('验证码平台测试发送失败场景已记录失败审计')
   } finally {
-    globalThis.fetch = originalFetch
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()
     }

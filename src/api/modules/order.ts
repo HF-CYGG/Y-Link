@@ -72,12 +72,14 @@ export const getOrderDepartmentOptions = async (): Promise<OrderDepartmentOption
 
 /**
  * 出库主单（精简返回）：
- * - 仅声明开单页成功提示所需的 showNo；
+ * - 仅声明开单页成功提示所需的业务单号与系统追溯号；
  * - 如后续详情页需要更多字段可在此扩展。
  */
 export interface SubmittedOrderRecord {
   id: string
-  showNo: string
+  systemNo: string
+  /** @deprecated 仅兼容一发布周期的旧响应字段，等同 systemNo。 */
+  showNo?: string
   businessNo: string
   editVersion: number
   inventoryMode: OrderInventoryMode
@@ -85,7 +87,7 @@ export interface SubmittedOrderRecord {
 
 /**
  * 提交结果：
- * - 返回主单与明细，开单页当前仅使用 order.showNo 做反馈；
+ * - 返回主单与明细，开单页当前仅使用 order.businessNo 做反馈；
  * - 保留 items 结构以便后续扩展提交成功回显。
  */
 export interface SubmittedOrderItemRecord extends SubmitOrderItemPayload {
@@ -113,7 +115,9 @@ export const submitOrder = async (payload: SubmitOrderPayload): Promise<SubmitOr
   const result = await request<{
     order: {
       id: PrimitiveTextValue
-      showNo: PrimitiveTextValue
+      systemNo?: PrimitiveTextValue
+      /** @deprecated 后端旧响应别名。 */
+      showNo?: PrimitiveTextValue
       businessNo: PrimitiveTextValue
       editVersion: number
       inventoryMode: OrderInventoryMode
@@ -139,7 +143,7 @@ export const submitOrder = async (payload: SubmitOrderPayload): Promise<SubmitOr
   return {
     order: {
       id: normalizeTextField(result.order.id),
-      showNo: normalizeTextField(result.order.showNo),
+      systemNo: normalizeTextField(result.order.systemNo ?? result.order.showNo),
       businessNo: normalizeTextField(result.order.businessNo),
       editVersion: Number(result.order.editVersion),
       inventoryMode: normalizeInventoryMode(result.order.inventoryMode),
@@ -161,6 +165,7 @@ export const submitOrder = async (payload: SubmitOrderPayload): Promise<SubmitOr
 
 export interface OrderListQuery extends PaginationQueryInput {
   keyword?: string
+  /** @deprecated 旧筛选别名；新调用统一使用 keyword。 */
   showNo?: string
   orderType?: 'department' | 'walkin'
   startDate?: string
@@ -179,7 +184,10 @@ export type OrderMergeStatus = 'active' | 'merged'
 
 export interface OrderRecord {
   id: string
-  showNo: string
+  /** 正式出库内部追溯编号。 */
+  systemNo: string
+  /** @deprecated 仅兼容一发布周期的旧响应字段，等同 systemNo。 */
+  showNo?: string
   businessNo: string
   editVersion: number
   inventoryMode: OrderInventoryMode
@@ -199,7 +207,12 @@ export interface OrderRecord {
   /** 来源单据快照：线上预订单核销生成的正式出库单为 o2o_preorder，与人工备注分离。 */
   sourceDocType: 'o2o_preorder' | null
   sourceDocId: string | null
-  sourceDocNo: string | null
+  /** 来源预订单号快照。 */
+  sourcePreorderNo: string | null
+  /** @deprecated 仅兼容一发布周期的旧响应字段，等同 sourcePreorderNo。 */
+  sourceDocNo?: string | null
+  matchedIdentifierType: 'businessNo' | 'systemNo' | 'preorderNo' | null
+  matchedIdentifierValue: string | null
   creatorUserId: string | null
   creatorUsername: string | null
   creatorDisplayName: string | null
@@ -224,8 +237,10 @@ export type OrderListResult = PaginationResult<OrderRecord>
 
 interface OrderRecordRaw {
   id: PrimitiveTextValue
-  showNo: PrimitiveTextValue
-  businessNo: PrimitiveTextValue
+  systemNo?: PrimitiveTextValue
+  /** @deprecated 后端旧响应别名。 */
+  showNo?: PrimitiveTextValue
+  businessNo?: PrimitiveTextValue
   editVersion: number | PrimitiveTextValue
   inventoryMode?: PrimitiveTextValue
   contentEditable?: boolean | PrimitiveTextValue
@@ -243,7 +258,11 @@ interface OrderRecordRaw {
   remark: PrimitiveTextValue
   sourceDocType?: PrimitiveTextValue
   sourceDocId?: PrimitiveTextValue
+  sourcePreorderNo?: PrimitiveTextValue
+  /** @deprecated 后端旧响应别名。 */
   sourceDocNo?: PrimitiveTextValue
+  matchedIdentifierType?: PrimitiveTextValue
+  matchedIdentifierValue?: PrimitiveTextValue
   creatorUserId: PrimitiveTextValue
   creatorUsername: PrimitiveTextValue
   creatorDisplayName: PrimitiveTextValue
@@ -308,8 +327,8 @@ const normalizeNullableTextField = (value: PrimitiveTextValue): string | null =>
 
 const normalizeOrderRecord = (record: OrderRecordRaw): OrderRecord => ({
   id: normalizeTextField(record.id),
-  showNo: normalizeTextField(record.showNo),
-  businessNo: normalizeTextField(record.businessNo, normalizeTextField(record.showNo)),
+  systemNo: normalizeTextField(record.systemNo ?? record.showNo),
+  businessNo: normalizeTextField(record.businessNo),
   editVersion: Number(record.editVersion) || 1,
   inventoryMode: normalizeInventoryMode(record.inventoryMode),
   contentEditable: normalizeBooleanField(record.contentEditable),
@@ -329,7 +348,9 @@ const normalizeOrderRecord = (record: OrderRecordRaw): OrderRecord => ({
   remark: normalizeNullableTextField(record.remark),
   sourceDocType: normalizeTextField(record.sourceDocType) === 'o2o_preorder' ? 'o2o_preorder' : null,
   sourceDocId: normalizeNullableTextField(record.sourceDocId),
-  sourceDocNo: normalizeNullableTextField(record.sourceDocNo),
+  sourcePreorderNo: normalizeNullableTextField(record.sourcePreorderNo ?? record.sourceDocNo),
+  matchedIdentifierType: normalizeMatchedIdentifierType(record.matchedIdentifierType),
+  matchedIdentifierValue: normalizeNullableTextField(record.matchedIdentifierValue),
   creatorUserId: normalizeNullableTextField(record.creatorUserId),
   creatorUsername: normalizeNullableTextField(record.creatorUsername),
   creatorDisplayName: normalizeNullableTextField(record.creatorDisplayName),
@@ -439,11 +460,20 @@ const normalizeOrderMergeStatus = (value: PrimitiveTextValue): OrderMergeStatus 
   return normalizeTextField(value).toLowerCase() === 'merged' ? 'merged' : 'active'
 }
 
+const normalizeMatchedIdentifierType = (
+  value: PrimitiveTextValue,
+): 'businessNo' | 'systemNo' | 'preorderNo' | null => {
+  const normalized = normalizeTextField(value)
+  return normalized === 'businessNo' || normalized === 'systemNo' || normalized === 'preorderNo'
+    ? normalized
+    : null
+}
+
 const normalizeOrderMergeReference = (value: unknown): OrderMergeOrderReference => {
   const record = value && typeof value === 'object' ? value as Record<string, unknown> : {}
   return {
     id: normalizeTextField(record.id as PrimitiveTextValue),
-    showNo: normalizeTextField(record.showNo as PrimitiveTextValue),
+    systemNo: normalizeTextField((record.systemNo ?? record.showNo) as PrimitiveTextValue),
     businessNo: normalizeTextField(record.businessNo as PrimitiveTextValue),
     editVersion: Number(record.editVersion) || 1,
     status: normalizeOrderMergeStatus(record.status as PrimitiveTextValue),
@@ -458,7 +488,7 @@ const normalizeOrderMergeReference = (value: unknown): OrderMergeOrderReference 
     totalAmount: normalizeDecimalField(record.totalAmount as PrimitiveTextValue),
     remark: normalizeNullableTextField(record.remark as PrimitiveTextValue),
     sourceDocType: normalizeTextField(record.sourceDocType as PrimitiveTextValue) === 'o2o_preorder' ? 'o2o_preorder' : null,
-    sourceDocNo: normalizeNullableTextField(record.sourceDocNo as PrimitiveTextValue),
+    sourcePreorderNo: normalizeNullableTextField((record.sourcePreorderNo ?? record.sourceDocNo) as PrimitiveTextValue),
     creatorUserId: normalizeNullableTextField(record.creatorUserId as PrimitiveTextValue),
     creatorUsername: normalizeNullableTextField(record.creatorUsername as PrimitiveTextValue),
     creatorDisplayName: normalizeNullableTextField(record.creatorDisplayName as PrimitiveTextValue),
@@ -532,7 +562,7 @@ export const getOrderDetailById = async (id: string, requestConfig: RequestConfi
 }
 
 /**
- * 根据业务单号获取出库单详情
+ * @deprecated 仅兼容一发布周期的旧系统号路由；新调用使用 getOrderDetailBySystemNo。
  */
 export const getOrderDetailByShowNo = async (
   showNo: string,
@@ -541,14 +571,29 @@ export const getOrderDetailByShowNo = async (
   const result = await request<OrderDetailRawResult>({
     ...requestConfig,
     method: 'GET',
-    url: `/orders/show-no/${showNo}`,
+    url: `/orders/show-no/${encodeURIComponent(showNo)}`,
   })
 
   return normalizeOrderDetail(result)
 }
 
+/** 根据正式出库系统编号获取详情。 */
+export const getOrderDetailBySystemNo = async (
+  systemNo: string,
+  requestConfig: RequestConfig = {},
+): Promise<OrderDetailResult> => {
+  const result = await request<OrderDetailRawResult>({
+    ...requestConfig,
+    method: 'GET',
+    url: `/orders/system-no/${encodeURIComponent(systemNo)}`,
+  })
+  return normalizeOrderDetail(result)
+}
+
 export interface DeleteOrderPayload {
-  confirmShowNo: string
+  confirmBusinessNo: string
+  /** @deprecated 仅兼容一发布周期；服务端按业务单号解释。 */
+  confirmShowNo?: string
   permanentDeletePassword?: string
   /** 仅软删除手工库存单时生效：true 表示删除同时回补商品与 SKU 库存。 */
   releaseInventory?: boolean
@@ -556,7 +601,9 @@ export interface DeleteOrderPayload {
 
 export interface PurgeOrderResult {
   id: string
-  showNo: string
+  systemNo: string
+  /** @deprecated 仅兼容一发布周期的旧响应字段，等同 systemNo。 */
+  showNo?: string
   orderType: 'department' | 'walkin'
   serialRolledBack: boolean
 }
@@ -583,7 +630,7 @@ export interface OrderAmendmentInput {
 
 export interface OrderAmendmentSnapshot {
   businessNo: string
-  showNo: string
+  systemNo: string
   orderType: 'department' | 'walkin'
   customerDepartmentName: string | null
   customerName: string | null
@@ -626,7 +673,8 @@ export const deleteOrderById = (id: string, payload: DeleteOrderPayload) =>
 
 /**
  * 永久删除已软删除出库单（管理员）：
- * - 仅对已删除单据生效，主单与明细会被物理移除；
+ * - 仅对已删除单据生效，订单文档与修订数据会被清理，业务号随后可人工复用；
+ * - 仅保留脱敏安全审计，不保留可识别订单内容；
  * - 若该单据正好是当前类型最新流水号，后端会安全回拨一位流水。
  */
 export const purgeOrderById = (id: string, payload: DeleteOrderPayload) =>

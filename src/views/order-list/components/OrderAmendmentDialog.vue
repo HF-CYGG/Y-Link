@@ -9,7 +9,8 @@
  *    切回原类型时恢复原业务号；建议号不占号，过期响应按请求序号丢弃；
  *    客户部门与开单页一致，为可搜索、可选择、可手动录入的组合输入，选项来自系统部门配置的完整路径，
  *    加载失败或配置为空只做提示，不阻断手动填写，修订只保存部门快照文本、不回写系统配置；
- * 4. 批量提交共享一次确认动作，服务端任一阻断都会整体回滚，不在前端模拟部分成功。
+ * 4. 业务号只和物理存在订单校验唯一性；永久删除后释放的号码可通过普通修订再次填写，自动建议不会主动回填低号；
+ * 5. 批量提交共享一次确认动作，服务端任一阻断都会整体回滚，不在前端模拟部分成功。
  * 维护说明：该组件只允许修改订单治理字段，不得在此增加商品明细、库存扣减或库存流水能力。
  */
 
@@ -25,6 +26,8 @@ import {
   type OrderRecord,
 } from '@/api/modules/order'
 import { BizCrudDialogShell } from '@/components/common'
+import { useAuthStore } from '@/store'
+import pinia from '@/store/pinia'
 import { showAppSuccess, showAppWarning } from '@/utils/app-alert'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 
@@ -36,7 +39,7 @@ interface Props {
 interface AmendmentDraft {
   orderId: string
   editVersion: number
-  showNo: string
+  systemNo: string
   businessNo: string
   orderType: 'department' | 'walkin'
   customerDepartmentName: string
@@ -55,6 +58,7 @@ interface AmendmentDraft {
 }
 
 const props = defineProps<Props>()
+const authStore = useAuthStore(pinia)
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
   committed: [result: OrderAmendmentResult]
@@ -69,6 +73,7 @@ const dialogTitle = computed(() => drafts.value.length > 1 ? `批量修订单据
 const departmentOptions = ref<OrderDepartmentOption[]>([])
 const departmentOptionsLoading = ref(false)
 const departmentOptionsLoadFailed = ref(false)
+const isAdmin = computed(() => authStore.currentUser?.role === 'admin')
 
 /** 按完整路径去重：路径即订单保存的部门快照，也是展示与搜索文本。 */
 const departmentPathOptions = computed(() => {
@@ -113,7 +118,7 @@ const initializeDrafts = () => {
   drafts.value = props.orders.map((order) => ({
     orderId: order.id,
     editVersion: order.editVersion,
-    showNo: order.showNo,
+    systemNo: order.systemNo,
     businessNo: order.businessNo,
     orderType: order.orderType,
     customerDepartmentName: order.customerDepartmentName || '',
@@ -238,7 +243,7 @@ const validateDrafts = (): boolean => {
   }
   for (const draft of drafts.value) {
     if (!draft.businessNo.trim()) {
-      showAppWarning(`系统键 ${draft.showNo} 的业务单号不能为空`)
+      showAppWarning('订单业务单号不能为空')
       return false
     }
     if (draft.orderType === 'department' && !draft.customerDepartmentName.trim()) {
@@ -283,6 +288,7 @@ const handleCommit = async () => {
     emit('committed', result)
     emit('update:modelValue', false)
   } catch (error) {
+    if (error === 'cancel' || error === 'close') return
     previewResult.value = null
     void showCriticalErrorDialog(error, {
       title: '订单修订提交失败',
@@ -308,7 +314,7 @@ const handleCommit = async () => {
   >
     <div class="space-y-4">
       <el-alert
-        title="showNo 是永久不可修改的系统键；部门单使用 hyyzjd，散客单使用 hyyz。切换订单类型会自动编排目标类型的下一个业务单号，可手动修改；预览不会占号，提交时会重新校验。"
+        title="业务单号是对外展示编号；出库系统编号仅供技术追溯且不可修改。部门单使用 hyyzjd，散客单使用 hyyz。切换订单类型会自动编排目标类型的下一个业务单号，可手动修改；预览不会占号，提交时会重新校验。"
         type="warning"
         :closable="false"
         show-icon
@@ -320,7 +326,10 @@ const handleCommit = async () => {
         class="rounded-2xl border border-slate-200 bg-slate-50 p-4"
       >
         <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <strong class="text-sm text-slate-800">第 {{ index + 1 }} 张 · 系统键 {{ draft.showNo }}</strong>
+          <strong class="text-sm text-slate-800">
+            第 {{ index + 1 }} 张 · 业务单号 {{ draft.businessNo }}
+            <span v-if="isAdmin">· 出库系统编号（不可修改，仅用于系统追溯）{{ draft.systemNo }}</span>
+          </strong>
           <el-tag effect="plain">版本 {{ draft.editVersion }}</el-tag>
         </div>
         <div class="grid gap-3 md:grid-cols-2">
@@ -404,8 +413,8 @@ const handleCommit = async () => {
           </el-tag>
         </div>
         <el-table :data="previewResult.items" border size="small" table-layout="auto">
-          <el-table-column label="系统键" min-width="150">
-            <template #default="{ row }">{{ row.before.showNo }}</template>
+          <el-table-column v-if="isAdmin" label="出库系统编号" min-width="150">
+            <template #default="{ row }">{{ row.before.systemNo }}</template>
           </el-table-column>
           <el-table-column label="业务号变化" min-width="240">
             <template #default="{ row }">{{ row.before.businessNo }} → {{ row.after.businessNo }}</template>
@@ -421,13 +430,16 @@ const handleCommit = async () => {
           </el-table-column>
         </el-table>
       </section>
+
     </div>
 
     <template #footer="{ close }">
       <div class="flex flex-wrap justify-end gap-2">
         <el-button @click="close">取消</el-button>
         <el-button type="primary" plain :loading="previewing" :disabled="committing || suggestingBusinessNo" @click="handlePreview">重新预览</el-button>
-        <el-button type="primary" :loading="committing" :disabled="!canCommit" @click="handleCommit">原子提交</el-button>
+        <el-button type="primary" :loading="committing" :disabled="!canCommit" @click="handleCommit">
+          原子提交
+        </el-button>
       </div>
     </template>
   </BizCrudDialogShell>

@@ -28,19 +28,20 @@ import {
   getClientDepartmentConfigs,
   getCustomerServiceConfigs,
   getO2oRuleConfigs,
-  getOrderSerialConfigs,
+  getOrderIdentifierConfigs,
   getVerificationProviderConfigs,
   testVerificationProviderSend,
   updateClientDepartmentConfigs,
   updateCustomerServiceConfigs,
   updateO2oRuleConfigs,
-  updateOrderSerialConfigs,
+  updateOrderIdentifierConfigs,
   updateVerificationProviderConfigs,
   type ClientDepartmentConfigRecord,
   type ClientDepartmentTreeNode,
   type CustomerServiceConfigRecord,
   type O2oRuleConfigRecord,
-  type OrderSerialConfigRecord,
+  type OrderIdentifierConfigs,
+  type OrderIdentifierKind,
   type SmsVerificationProviderType,
   type VerificationProviderConfigsResult,
 } from '@/api/modules/system-config'
@@ -62,12 +63,6 @@ import {
   DATABASE_MIGRATION_ASSISTANT_NAME,
   DATABASE_MIGRATION_RECOMMENDED_FLOW_TEXT,
 } from './database-migration-copy'
-
-type SerialFormValue = {
-  start: number
-  current: number
-  width: number
-}
 
 type VerificationFormValue = {
   enabled: boolean
@@ -119,7 +114,14 @@ const loadError = ref('')
 const testSendingChannel = ref<'mobile' | 'email' | ''>('')
 const activeSection = ref<ConfigSectionKey>('order_serial')
 const selectedDepartmentNodeId = ref('')
-const configMap = ref<Record<'department' | 'walkin', OrderSerialConfigRecord> | null>(null)
+const identifierConfigs = ref<OrderIdentifierConfigs | null>(null)
+const identifierForm = reactive<{
+  system: Record<'department' | 'walkin', { current: number }>
+  preorder: Record<'department' | 'walkin', { current: number }>
+}>({
+  system: { department: { current: 0 }, walkin: { current: 0 } },
+  preorder: { department: { current: 0 }, walkin: { current: 0 } },
+})
 const o2oRuleConfig = ref<O2oRuleConfigRecord | null>(null)
 const customerServiceConfig = ref<CustomerServiceConfigRecord | null>(null)
 const verificationConfigMap = ref<VerificationProviderConfigsResult | null>(null)
@@ -174,8 +176,6 @@ const handleSectionChange = (value: string | number) => {
 }
 
 const serialForm = reactive<{
-  department: SerialFormValue
-  walkin: SerialFormValue
   o2o: {
     autoCancelEnabled: boolean
     autoCancelHours: number
@@ -196,16 +196,6 @@ const serialForm = reactive<{
   }
   clientDepartmentTree: DepartmentTreeNode[]
 }>({
-  department: {
-    start: 1,
-    current: 0,
-    width: 6,
-  },
-  walkin: {
-    start: 1,
-    current: 0,
-    width: 6,
-  },
   o2o: {
     autoCancelEnabled: true,
     autoCancelHours: 24,
@@ -310,21 +300,18 @@ const activeSectionInteractionLoading = computed(() => {
   return loading.value || activeSectionLoading.value
 })
 
-const formatSerialPreview = (prefix: string | undefined, current: number, width: number) => {
-  const safePrefix = String(prefix ?? '').trim() || '-'
-  const safeCurrent = Math.max(0, Number(current) || 0)
-  const safeWidth = Math.max(1, Number(width) || 1)
-  const nextSerial = String(safeCurrent + 1).padStart(safeWidth, '0')
-  return `${safePrefix}${nextSerial}`
+const applyIdentifierConfigs = (configs: OrderIdentifierConfigs) => {
+  identifierConfigs.value = configs
+  identifierForm.system.department.current = configs.system.department.current
+  identifierForm.system.walkin.current = configs.system.walkin.current
+  identifierForm.preorder.department.current = configs.preorder.department.current
+  identifierForm.preorder.walkin.current = configs.preorder.walkin.current
 }
 
-const departmentPreview = computed(() =>
-  formatSerialPreview(configMap.value?.department.prefix, serialForm.department.current, serialForm.department.width),
-)
-
-const walkinPreview = computed(() =>
-  formatSerialPreview(configMap.value?.walkin.prefix, serialForm.walkin.current, serialForm.walkin.width),
-)
+const getIdentifierUpdatedAtLabel = (kind: OrderIdentifierKind, orderType: 'department' | 'walkin') => {
+  const updatedAt = identifierConfigs.value?.[kind][orderType].updatedAt
+  return updatedAt ? dayjs(updatedAt).format('YYYY-MM-DD HH:mm:ss') : '-'
+}
 
 const createDepartmentNodeId = (prefix: string) => {
   const normalizedPrefix = prefix.trim().replaceAll(/\s+/g, '-').slice(0, 16)
@@ -413,15 +400,9 @@ const selectedDepartmentNode = computed(() => {
 
 const snapshotForm = () =>
   JSON.stringify({
-    department: {
-      start: Number(serialForm.department.start),
-      current: Number(serialForm.department.current),
-      width: Number(serialForm.department.width),
-    },
-    walkin: {
-      start: Number(serialForm.walkin.start),
-      current: Number(serialForm.walkin.current),
-      width: Number(serialForm.walkin.width),
+    identifiers: {
+      system: { department: identifierForm.system.department.current, walkin: identifierForm.system.walkin.current },
+      preorder: { department: identifierForm.preorder.department.current, walkin: identifierForm.preorder.walkin.current },
     },
     o2o: {
       autoCancelEnabled: Boolean(serialForm.o2o.autoCancelEnabled),
@@ -484,116 +465,10 @@ const snapshotForm = () =>
 
 const isDirty = computed(() => snapshotForm() !== initialSnapshot.value)
 
-const buildOrderSerialNoChangeWarning = () => {
-  const savedConfig = configMap.value
-  if (!savedConfig) {
-    return '配置未变更：订单流水配置尚未加载完成，请刷新后重试'
-  }
-
-  const departmentNextNo = formatSerialPreview(savedConfig.department.prefix, savedConfig.department.current, savedConfig.department.width)
-  const walkinNextNo = formatSerialPreview(savedConfig.walkin.prefix, savedConfig.walkin.current, savedConfig.walkin.width)
-  return [
-    '配置未变更：订单流水的起始号、当前号和位宽都与已保存配置一致。',
-    `部门订单当前号为 ${savedConfig.department.current}，下一单将生成 ${departmentNextNo}；`,
-    `散客订单当前号为 ${savedConfig.walkin.current}，下一单将生成 ${walkinNextNo}。`,
-    '当前号表示已经使用到的流水；如果要改变下一单号，请把当前号设置为目标流水减 1。',
-  ].join('')
-}
-
-const buildOrderSerialServerSyncedWarning = (list: OrderSerialConfigRecord[]) => {
-  const savedConfig = {
-    department: list.find((item) => item.orderType === 'department'),
-    walkin: list.find((item) => item.orderType === 'walkin'),
-  }
-  if (!savedConfig.department || !savedConfig.walkin) {
-    return buildOrderSerialNoChangeWarning()
-  }
-
-  const departmentNextNo = formatSerialPreview(
-    savedConfig.department.prefix,
-    savedConfig.department.current,
-    savedConfig.department.width,
-  )
-  const walkinNextNo = formatSerialPreview(savedConfig.walkin.prefix, savedConfig.walkin.current, savedConfig.walkin.width)
-  return [
-    '订单流水未写入新变更：服务端当前配置已经等于本次提交内容，页面已同步最新值。',
-    `部门订单当前号 ${savedConfig.department.current}，下一单号 ${departmentNextNo}。`,
-    `散客订单当前号 ${savedConfig.walkin.current}，下一单号 ${walkinNextNo}。`,
-    '如果你想继续降低当前号但保存失败，请查看错误提示里的“具体占用”单号，并先处理订单池或出库单中仍占用该流水的订单。',
-  ].join('')
-}
-
-const buildOrderSerialRejectedWarning = (
-  payload: {
-    department: { start: number; current: number; width: number }
-    walkin: { start: number; current: number; width: number }
-  },
-  list: OrderSerialConfigRecord[],
-) => {
-  const savedConfig = {
-    department: list.find((item) => item.orderType === 'department'),
-    walkin: list.find((item) => item.orderType === 'walkin'),
-  }
-  const diffParts: string[] = []
-  const fieldLabels = {
-    start: '起始号',
-    current: '当前号',
-    width: '位宽',
-  } as const
-  const typeLabels = {
-    department: '部门订单',
-    walkin: '散客订单',
-  } as const
-
-  ;(['department', 'walkin'] as const).forEach((orderType) => {
-    const saved = savedConfig[orderType]
-    if (!saved) {
-      diffParts.push(`${typeLabels[orderType]}配置未返回`)
-      return
-    }
-    ;(['start', 'current', 'width'] as const).forEach((field) => {
-      if (payload[orderType][field] !== saved[field]) {
-        diffParts.push(`${typeLabels[orderType]}${fieldLabels[field]}提交 ${payload[orderType][field]}，服务端仍为 ${saved[field]}`)
-      }
-    })
-  })
-
-  if (diffParts.length === 0) {
-    return buildOrderSerialServerSyncedWarning(list)
-  }
-
-  return [
-    '订单流水未写入本次输入：服务端返回值与提交值不一致。',
-    diffParts.join('；'),
-    '请根据后端错误提示中的具体占用单号处理订单池或出库单后重试；若没有看到错误提示，请刷新页面后再保存一次。',
-  ].join('')
-}
-
 const rules: FormRules = {
-  'department.start': [{ required: true, message: '请输入部门单起始号', trigger: 'blur' }],
-  'department.width': [{ required: true, message: '请输入部门单位宽', trigger: 'blur' }],
-  'walkin.start': [{ required: true, message: '请输入散客单起始号', trigger: 'blur' }],
-  'walkin.width': [{ required: true, message: '请输入散客单位宽', trigger: 'blur' }],
   'o2o.autoCancelHours': [{ required: true, message: '请输入超时取消时长', trigger: 'blur' }],
   'o2o.limitQty': [{ required: true, message: '请输入限购数量', trigger: 'blur' }],
   'o2o.clientPreorderUpdateLimit': [{ required: true, message: '请输入改单次数上限', trigger: 'blur' }],
-}
-
-const applyList = (list: OrderSerialConfigRecord[]) => {
-  const department = list.find((item) => item.orderType === 'department')
-  const walkin = list.find((item) => item.orderType === 'walkin')
-
-  if (!department || !walkin) {
-    return
-  }
-
-  configMap.value = { department, walkin }
-  serialForm.department.start = department.start
-  serialForm.department.current = department.current
-  serialForm.department.width = department.width
-  serialForm.walkin.start = walkin.start
-  serialForm.walkin.current = walkin.current
-  serialForm.walkin.width = walkin.width
 }
 
 const applyO2oRules = (config: O2oRuleConfigRecord) => {
@@ -1173,7 +1048,7 @@ const loadData = async () => {
       // - 订单流水与线上预定规则属于系统配置首页最先需要看到的核心信息；
       // - 客服中心、验证码配置与部门配置继续在后台补齐，避免首次进入时同时叠加过多接口与重分区渲染。
       const [orderSerialResult, o2oRuleResult] = await Promise.allSettled([
-        getOrderSerialConfigs(),
+        getOrderIdentifierConfigs(),
         getO2oRuleConfigs(),
       ])
 
@@ -1186,7 +1061,7 @@ const loadData = async () => {
       let successCount = 0
 
       if (result.orderSerialResult.status === 'fulfilled') {
-        applyList(result.orderSerialResult.value.list)
+        applyIdentifierConfigs(result.orderSerialResult.value)
         successCount += 1
       }
       if (result.o2oRuleResult.status === 'fulfilled') {
@@ -1320,8 +1195,8 @@ const refreshOrderSerialConfigsOnActivated = async () => {
 
   sectionLoadingState.order_serial = true
   try {
-    const result = await getOrderSerialConfigs()
-    applyList(result.list)
+    const result = await getOrderIdentifierConfigs()
+    applyIdentifierConfigs(result)
     sectionErrorState.order_serial = ''
     initialSnapshot.value = snapshotForm()
   } catch (error) {
@@ -1376,19 +1251,23 @@ const handleSubmit = async () => {
       return
     }
     // SQLite 单连接下并发写事务会互相冲突，这里改为串行提交，避免 “cannot start a transaction within a transaction”。
-    const orderSerialPayload = {
-      department: {
-        start: Number(serialForm.department.start),
-        current: Number(serialForm.department.current),
-        width: Number(serialForm.department.width),
-      },
-      walkin: {
-        start: Number(serialForm.walkin.start),
-        current: Number(serialForm.walkin.current),
-        width: Number(serialForm.walkin.width),
-      },
+    const currentIdentifierConfigs = identifierConfigs.value
+    if (!currentIdentifierConfigs) {
+      showTopWarning('订单编号配置尚未加载完成，暂不可保存')
+      return
     }
-    const result = await updateOrderSerialConfigs(orderSerialPayload)
+    const identifierPayload = {
+      system: {
+        department: { ...currentIdentifierConfigs.system.department, current: Number(identifierForm.system.department.current) },
+        walkin: { ...currentIdentifierConfigs.system.walkin, current: Number(identifierForm.system.walkin.current) },
+      },
+      preorder: {
+        department: { ...currentIdentifierConfigs.preorder.department, current: Number(identifierForm.preorder.department.current) },
+        walkin: { ...currentIdentifierConfigs.preorder.walkin, current: Number(identifierForm.preorder.walkin.current) },
+      },
+      business: currentIdentifierConfigs.business,
+    }
+    const result = await updateOrderIdentifierConfigs(identifierPayload)
     const o2oResult = await updateO2oRuleConfigs({
       autoCancelEnabled: serialForm.o2o.autoCancelEnabled,
       autoCancelHours: Number(serialForm.o2o.autoCancelHours),
@@ -1457,7 +1336,7 @@ const handleSubmit = async () => {
       })),
     })
 
-    applyList(result.list)
+    applyIdentifierConfigs(result.configs)
     applyO2oRules(o2oResult.config)
     applyCustomerServiceConfigs(customerServiceResult.config)
     applyVerificationConfigs(verificationResult.config)
@@ -1476,7 +1355,7 @@ const handleSubmit = async () => {
     } else {
       showTopWarning(
         activeSection.value === 'order_serial'
-          ? buildOrderSerialRejectedWarning(orderSerialPayload, result.list)
+          ? '编号配置未变更：当前号与服务端已保存值一致，或未满足安全提高规则。'
           : '配置未变更：当前内容与已保存配置一致',
       )
     }
@@ -1485,14 +1364,6 @@ const handleSubmit = async () => {
   } finally {
     saving.value = false
   }
-}
-
-const getUpdatedAtLabel = (orderType: 'department' | 'walkin') => {
-  const value = configMap.value?.[orderType]?.updatedAt
-  if (!value) {
-    return '-'
-  }
-  return dayjs(value).format('YYYY-MM-DD HH:mm:ss')
 }
 
 const o2oUpdatedAtLabel = computed(() => {
@@ -1612,13 +1483,11 @@ onActivated(() => {
               >
                 <SystemConfigSerialSection
                   v-if="activeSection === 'order_serial'"
-                  :config-map="configMap"
-                  :department-preview="departmentPreview"
-                  :walkin-preview="walkinPreview"
-                  :serial-form="serialForm"
+                  :config="identifierConfigs"
+                  :form="identifierForm"
                   :can-update-configs="canUpdateConfigs"
                   :loading="activeSectionInteractionLoading"
-                  :get-updated-at-label="getUpdatedAtLabel"
+                  :get-updated-at-label="getIdentifierUpdatedAtLabel"
                 />
 
                 <SystemConfigO2oRulesSection

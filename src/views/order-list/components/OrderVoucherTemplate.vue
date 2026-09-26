@@ -136,8 +136,8 @@ const getItemRemark = (value: string | null | undefined) => {
  * - 明细备注与总计行备注只保留人工备注，不再承载来源信息。
  */
 const sourceDocText = computed(() => {
-  if (props.order.sourceDocType === 'o2o_preorder' && props.order.sourceDocNo) {
-    return `线上预订单 ${props.order.sourceDocNo}`
+  if (props.order.sourceDocType === 'o2o_preorder' && props.order.sourcePreorderNo) {
+    return `线上预订单 ${props.order.sourcePreorderNo}`
   }
   return '-'
 })

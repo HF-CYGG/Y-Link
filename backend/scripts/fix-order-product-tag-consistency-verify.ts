@@ -22,7 +22,7 @@ type VerificationItem = {
 
 type RequestOptions = {
   method?: string
-  token?: string
+  authenticated?: boolean
   body?: unknown
   expectedStatus?: number
 }
@@ -44,6 +44,7 @@ const verifyCredentials = {
   username: 'admin',
   password: process.env.Y_LINK_SPEC_VERIFY_PASSWORD ?? `SpecVerify@${Date.now()}`,
 }
+const authCookies = new Map<string, string>()
 
 const verificationItems: VerificationItem[] = []
 
@@ -111,6 +112,7 @@ const startIsolatedBackend = async () => {
       DB_TYPE: 'sqlite',
       SQLITE_DB_PATH: verifyDbPath,
       DB_SYNC: 'true',
+      Y_LINK_SKIP_DATABASE_RUNTIME_OVERRIDE: 'true',
       INIT_ADMIN_USERNAME: verifyCredentials.username,
       INIT_ADMIN_PASSWORD: verifyCredentials.password,
       INIT_ADMIN_DISPLAY_NAME: 'Task7验收管理员',
@@ -191,21 +193,36 @@ const stopIsolatedBackend = async (backendProcess?: ChildProcess) => {
 
 const requestApi = async <T>(pathname: string, options: RequestOptions = {}) => {
   const startedAt = performance.now()
+  const method = options.method ?? 'GET'
+  const csrfToken = authCookies.get('y_link_admin_csrf')
   const response = await fetch(`${apiBaseUrl}${pathname}`, {
-    method: options.method ?? 'GET',
+    method,
     headers: {
       ...(options.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
+      ...(options.authenticated && authCookies.size
+        ? { Cookie: [...authCookies.entries()].map(([name, value]) => `${name}=${value}`).join('; ') }
+        : {}),
+      ...(options.authenticated && !['GET', 'HEAD', 'OPTIONS'].includes(method) && csrfToken
+        ? { 'x-csrf-token': decodeURIComponent(csrfToken) }
+        : {}),
     },
     body: options.body ? JSON.stringify(options.body) : undefined,
   })
   const durationMs = performance.now() - startedAt
   const responseText = await response.text()
 
+  for (const setCookie of response.headers.getSetCookie()) {
+    const [cookiePair] = setCookie.split(';', 1)
+    const separatorIndex = cookiePair.indexOf('=')
+    if (separatorIndex > 0) {
+      authCookies.set(cookiePair.slice(0, separatorIndex), cookiePair.slice(separatorIndex + 1))
+    }
+  }
+
   assert.equal(
     response.status,
     options.expectedStatus ?? 200,
-    `${options.method ?? 'GET'} ${pathname} 返回状态异常：${response.status}\n${responseText}`,
+    `${method} ${pathname} 返回状态异常：${response.status}\n${responseText}`,
   )
 
   const payload = JSON.parse(responseText) as {
@@ -214,7 +231,7 @@ const requestApi = async <T>(pathname: string, options: RequestOptions = {}) => 
     data: T
   }
 
-  assert.equal(payload.code, 0, `${options.method ?? 'GET'} ${pathname} 业务返回失败：${payload.message ?? 'unknown error'}`)
+  assert.equal(payload.code, 0, `${method} ${pathname} 业务返回失败：${payload.message ?? 'unknown error'}`)
 
   return {
     data: payload.data,
@@ -274,7 +291,8 @@ const assertOrderDetailShape = (payload: Record<string, unknown>) => {
   const items = payload.items as Array<Record<string, unknown>>
 
   assert.equal(typeof order.id, 'string', '订单详情缺少 order.id')
-  assert.equal(typeof order.showNo, 'string', '订单详情缺少 order.showNo')
+  assert.equal(typeof order.systemNo, 'string', '订单详情缺少 order.systemNo')
+  assert.equal(typeof order.businessNo, 'string', '订单详情缺少 order.businessNo')
   assert.ok(Array.isArray(items), '订单详情缺少 items 数组')
   assert.equal(items.length > 0, true, '订单详情 items 为空')
   assert.equal(typeof items[0]?.productCode, 'string', '订单详情缺少 item.productCode')
@@ -287,6 +305,7 @@ const verifyFrontendStaticCoverage = async () => {
   const orderEntryPath = path.resolve(projectRoot, 'src/views/order-entry/composables/useOrderEntryForm.ts')
   const orderListPath = path.resolve(projectRoot, 'src/views/order-list/composables/useOrderListView.ts')
   const productManagerPath = path.resolve(projectRoot, 'src/views/base-data/components/ProductManager.vue')
+  const productManagerHelpersPath = path.resolve(projectRoot, 'src/views/base-data/components/product-manager.helpers.ts')
   const tagManagerPath = path.resolve(projectRoot, 'src/views/base-data/components/TagManager.vue')
   const productApiPath = path.resolve(projectRoot, 'src/api/modules/product.ts')
   const tagApiPath = path.resolve(projectRoot, 'src/api/modules/tag.ts')
@@ -294,27 +313,42 @@ const verifyFrontendStaticCoverage = async () => {
   const orderEntrySource = readText(orderEntryPath)
   const orderListSource = readText(orderListPath)
   const productManagerSource = readText(productManagerPath)
+  const productManagerHelpersSource = readText(productManagerHelpersPath)
   const tagManagerSource = readText(tagManagerPath)
   const productApiSource = readText(productApiPath)
   const tagApiSource = readText(tagApiPath)
 
   assert.match(
     orderEntrySource,
-    /router\.push\(\{[\s\S]*path:\s*'\/order-list'[\s\S]*focusOrderId:\s*result\.order\.id[\s\S]*focusOrderShowNo:\s*result\.order\.showNo[\s\S]*focusRefreshToken:/,
+    /router\.push\(\{[\s\S]*path:\s*'\/order-list'[\s\S]*focusOrderId:\s*result\.order\.id[\s\S]*focusOrderSystemNo:\s*result\.order\.systemNo[\s\S]*focusRefreshToken:/,
+  )
+  assert.doesNotMatch(orderEntrySource, /focusOrderShowNo:\s*result\.order\.showNo/)
+  assert.match(orderListSource, /const ORDER_LIST_TARGET_ORDER_SYSTEM_NO_QUERY_KEY = 'focusOrderSystemNo'/)
+  assert.match(orderListSource, /const ORDER_LIST_TARGET_ORDER_SHOW_NO_QUERY_KEY = 'focusOrderShowNo'/)
+  assert.match(
+    orderListSource,
+    /route\.query\[ORDER_LIST_TARGET_ORDER_SYSTEM_NO_QUERY_KEY\]\s*\?\?\s*route\.query\[ORDER_LIST_TARGET_ORDER_SHOW_NO_QUERY_KEY\]/,
   )
   assert.match(orderListSource, /const refreshForSubmittedOrder = async \(\) =>/)
-  assert.match(orderListSource, /await loadData\(\)[\s\S]*loadOrderDetail\(targetOrder\?\.id \?\? payload\.orderId\)/)
-  assert.match(orderListSource, /onActivated\(\(\) =>[\s\S]*void refreshListView\(\)/)
-  assert.match(orderEntrySource, /productApi\.createProduct\(\{[\s\S]*productName:\s*normalizedValue[\s\S]*isActive:\s*true[\s\S]*\}\)/)
-  assert.doesNotMatch(orderEntrySource, /productApi\.createProduct\(\{[\s\S]*?productCode:/)
+  assert.match(
+    orderListSource,
+    /await loadData\(\{\s*highlightNewOrders:\s*true,\s*\}\)[\s\S]*loadOrderDetail\(\{\s*id:\s*targetOrder\?\.id \?\? payload\.orderId,\s*\}\)/,
+  )
+  assert.match(orderListSource, /onActivated\(\(\) =>[\s\S]*scheduleAutoRefresh\(\)[\s\S]*void triggerSilentRefresh\(\)/)
+  assert.match(
+    orderEntrySource,
+    /productApi\.getProductList\(\{\s*isActive:\s*true,?\s*\}\)[\s\S]*loadedProducts\.filter\(\(product\) => getSelectableProductSkus\(product\)\.length > 0\)/,
+  )
+  assert.doesNotMatch(orderEntrySource, /productApi\.createProduct\(/)
 
-  assert.match(productManagerSource, /const normalizeSelectValue = \(value: string \| number \| null \| undefined\): string =>/)
-  assert.match(productManagerSource, /const resolveTagIds = async \(tagValues: Array<string \| number>\): Promise<string\[]> =>/)
-  assert.match(productManagerSource, /const buildEditForm = \(row: ProductRecord\): ProductForm => \(\{[\s\S]*isActive:\s*row\.isActive[\s\S]*tagIds:\s*row\.tagIds/)
+  assert.match(productManagerSource, /normalizeSelectValue,/)
+  assert.match(productManagerHelpersSource, /export const normalizeSelectValue = \(value: string \| number \| null \| undefined\): string =>/)
+  assert.match(productManagerSource, /const resolveTagIds = async \(tagValues: Array<string \| number>, silent = false\): Promise<string\[]> =>/)
+  assert.match(productManagerSource, /const buildEditForm = \(row: ProductRecord\): ProductForm => \{[\s\S]*return \{[\s\S]*isActive:\s*row\.isActive[\s\S]*tagIds:\s*row\.tagIds/)
   assert.match(productManagerSource, /await batchUpdateProducts\(\{[\s\S]*ids:\s*selectedProductIds\.value[\s\S]*isActive,/)
   assert.match(productManagerSource, /onActivated\(\(\) =>[\s\S]*void refreshProductView\(\)/)
 
-  assert.match(tagManagerSource, /onActivated\(\(\) =>[\s\S]*void refreshTagView\(\)/)
+  assert.match(tagManagerSource, /onActivated\(\(\) =>[\s\S]*refreshTagView\(\)\.then\(\(\) => handleAggregateSearch\(\)\)\.catch\(\(\) => undefined\)/)
   assert.match(productApiSource, /return String\(value\)\.trim\(\)/)
   assert.match(tagApiSource, /const normalizedValue = String\(value\)\.trim\(\)/)
 
@@ -323,6 +357,7 @@ const verifyFrontendStaticCoverage = async () => {
       orderEntryPath,
       orderListPath,
       productManagerPath,
+      productManagerHelpersPath,
       tagManagerPath,
       productApiPath,
       tagApiPath,
@@ -332,7 +367,7 @@ const verifyFrontendStaticCoverage = async () => {
 
 const loginAsAdmin = async () => {
   const loginResult = await requestApi<{
-    token: string
+    expiresAt: string
     user: {
       id: string
       username: string
@@ -343,20 +378,21 @@ const loginAsAdmin = async () => {
   })
 
   assert.equal(loginResult.data.user.username, verifyCredentials.username)
-  assert.ok(loginResult.data.token)
+  assert.ok(loginResult.data.expiresAt)
+  assert.ok(authCookies.get('y_link_admin_session'), '登录响应未设置管理端会话 Cookie')
+  assert.ok(authCookies.get('y_link_admin_csrf'), '登录响应未设置管理端 CSRF Cookie')
 
   return {
-    token: loginResult.data.token,
     loginDurationMs: Number(loginResult.durationMs.toFixed(2)),
   }
 }
 
-const verifyChecklistFlow = async (token: string) => {
+const verifyChecklistFlow = async () => {
   const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
   const createdTagAResult = await requestApi<Record<string, unknown>>('/tags', {
     method: 'POST',
-    token,
+    authenticated: true,
     body: {
       tagName: `  验收标签A-${suffix}  `,
       tagCode: '#409EFF',
@@ -368,7 +404,7 @@ const verifyChecklistFlow = async (token: string) => {
 
   const updatedTagAResult = await requestApi<Record<string, unknown>>(`/tags/${createdTagAId}`, {
     method: 'PUT',
-    token,
+    authenticated: true,
     body: {
       tagName: `  验收标签A已更新-${suffix}  `,
       tagCode: '#67C23A',
@@ -380,7 +416,7 @@ const verifyChecklistFlow = async (token: string) => {
 
   const createdTagBResult = await requestApi<Record<string, unknown>>('/tags', {
     method: 'POST',
-    token,
+    authenticated: true,
     body: {
       tagName: `验收标签B-${suffix}`,
       tagCode: '#E6A23C',
@@ -391,22 +427,24 @@ const verifyChecklistFlow = async (token: string) => {
 
   const createdProductAResult = await requestApi<Record<string, unknown>>('/products', {
     method: 'POST',
-    token,
+    authenticated: true,
     body: {
       productName: `验收产品A-${suffix}`,
       pinyinAbbr: 'YSCPA',
       defaultPrice: 10,
+      currentStock: 10,
       isActive: true,
       tagIds: [Number(createdTagAId)],
     },
   })
   const createdProductBResult = await requestApi<Record<string, unknown>>('/products', {
     method: 'POST',
-    token,
+    authenticated: true,
     body: {
       productName: `验收产品B-${suffix}`,
       pinyinAbbr: 'YSCPB',
       defaultPrice: 12.5,
+      currentStock: 10,
       isActive: true,
       tagIds: [createdTagBId],
     },
@@ -425,7 +463,7 @@ const verifyChecklistFlow = async (token: string) => {
 
   const productListBeforeBatchResult = await requestApi<Array<Record<string, unknown>>>('/products', {
     method: 'GET',
-    token,
+    authenticated: true,
   })
   const createdProductAInList = productListBeforeBatchResult.data.find((item) => item.id === createdProductAId)
   assert.ok(createdProductAInList, '产品列表未返回产品A')
@@ -434,7 +472,7 @@ const verifyChecklistFlow = async (token: string) => {
 
   const batchUpdateResult = await requestApi<Array<Record<string, unknown>>>('/products/batch', {
     method: 'POST',
-    token,
+    authenticated: true,
     body: {
       ids: [createdProductAId, createdProductBId],
       isActive: false,
@@ -448,14 +486,14 @@ const verifyChecklistFlow = async (token: string) => {
 
   const productADetailAfterBatchResult = await requestApi<Record<string, unknown>>(`/products/${createdProductAId}`, {
     method: 'GET',
-    token,
+    authenticated: true,
   })
   assertProductView(productADetailAfterBatchResult.data, '批量后产品A详情')
   assert.equal(productADetailAfterBatchResult.data.isActive, false)
 
   const productAUpdatedResult = await requestApi<Record<string, unknown>>(`/products/${createdProductAId}`, {
     method: 'PUT',
-    token,
+    authenticated: true,
     body: {
       isActive: true,
       defaultPrice: 10,
@@ -470,7 +508,7 @@ const verifyChecklistFlow = async (token: string) => {
 
   const productADetailBeforeOrderResult = await requestApi<Record<string, unknown>>(`/products/${createdProductAId}`, {
     method: 'GET',
-    token,
+    authenticated: true,
   })
   assert.equal(productADetailBeforeOrderResult.data.isActive, true)
   assert.equal(productADetailBeforeOrderResult.data.defaultPrice, '10.00')
@@ -478,12 +516,14 @@ const verifyChecklistFlow = async (token: string) => {
   const submitOrderResult = await requestApi<{
     order: {
       id: string
+      systemNo: string
+      businessNo: string
       showNo: string
     }
     items: Array<Record<string, unknown>>
   }>('/orders/submit', {
     method: 'POST',
-    token,
+    authenticated: true,
     body: {
       idempotencyKey: `task7-check-${suffix}`,
       customerName: 'Task7验收客户',
@@ -499,39 +539,40 @@ const verifyChecklistFlow = async (token: string) => {
     },
   })
   assert.ok(submitOrderResult.data.order.id)
-  assert.match(submitOrderResult.data.order.showNo, /^hyyz(?:jd)?\d{1,12}$/i)
+  assert.match(submitOrderResult.data.order.systemNo, /^OUT-(?:D|W)-\d{6}$/)
+  assert.match(submitOrderResult.data.order.businessNo, /^hyyz(?:jd)?\d{6}$/i)
 
   const orderListResult = await requestApi<{
     list: Array<Record<string, unknown>>
     total: number
     page: number
     pageSize: number
-  }>(`/orders?page=1&pageSize=20&showNo=${encodeURIComponent(submitOrderResult.data.order.showNo)}`, {
+  }>(`/orders?page=1&pageSize=20&keyword=${encodeURIComponent(submitOrderResult.data.order.systemNo)}`, {
     method: 'GET',
-    token,
+    authenticated: true,
   })
   assert.ok(orderListResult.data.list.some((item) => item.id === submitOrderResult.data.order.id))
 
   const orderDetailByIdResult = await requestApi<Record<string, unknown>>(`/orders/${submitOrderResult.data.order.id}`, {
     method: 'GET',
-    token,
+    authenticated: true,
   })
   assertOrderDetailShape(orderDetailByIdResult.data)
   assert.equal((orderDetailByIdResult.data.order as Record<string, unknown>).id, submitOrderResult.data.order.id)
 
   const orderDetailByShowNoResult = await requestApi<Record<string, unknown>>(
-    `/orders/show-no/${encodeURIComponent(submitOrderResult.data.order.showNo)}`,
+    `/orders/system-no/${encodeURIComponent(submitOrderResult.data.order.systemNo)}`,
     {
       method: 'GET',
-      token,
+      authenticated: true,
     },
   )
   assertOrderDetailShape(orderDetailByShowNoResult.data)
-  assert.equal((orderDetailByShowNoResult.data.order as Record<string, unknown>).showNo, submitOrderResult.data.order.showNo)
+  assert.equal((orderDetailByShowNoResult.data.order as Record<string, unknown>).systemNo, submitOrderResult.data.order.systemNo)
 
   const productADetailAfterOrderResult = await requestApi<Record<string, unknown>>(`/products/${createdProductAId}`, {
     method: 'GET',
-    token,
+    authenticated: true,
   })
   assert.equal(productADetailAfterOrderResult.data.defaultPrice, '18.80')
   assert.equal(productADetailAfterOrderResult.data.isActive, true)
@@ -540,7 +581,7 @@ const verifyChecklistFlow = async (token: string) => {
     `/products?keyword=${encodeURIComponent(createdProductAName)}`,
     {
       method: 'GET',
-      token,
+      authenticated: true,
     },
   )
   const productAAfterOrderInList = productListAfterOrderResult.data.find((item) => item.id === createdProductAId)
@@ -550,7 +591,7 @@ const verifyChecklistFlow = async (token: string) => {
 
   const tagListResult = await requestApi<Array<Record<string, unknown>>>('/tags', {
     method: 'GET',
-    token,
+    authenticated: true,
   })
   assert.ok(tagListResult.data.some((item) => item.id === updatedTagAResult.data.id))
   assert.ok(tagListResult.data.some((item) => item.id === createdTagBResult.data.id))
@@ -598,12 +639,12 @@ const main = async () => {
   try {
     backendContext = await startIsolatedBackend()
 
-    const { token, loginDurationMs } = await loginAsAdmin()
+    const { loginDurationMs } = await loginAsAdmin()
 
     await recordVerification('出库单刷新/详情与基础数据回归链路通过', async () => {
       return {
         loginDurationMs,
-        ...(await verifyChecklistFlow(token)),
+        ...(await verifyChecklistFlow()),
       }
     })
 

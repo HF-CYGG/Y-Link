@@ -65,7 +65,7 @@ const getSystemApplyStatusMeta = (order: Pick<OrderRecord, 'orderType' | 'isSyst
       <el-checkbox :model-value="selected" @change="emit('select', Boolean($event))">选择单据</el-checkbox>
     </div>
     <div class="mobile-order-card__head">
-      <div class="min-w-0"><div class="mobile-order-card__show-no">{{ item.businessNo }}</div><div class="mobile-order-card__time">{{ dayjs(item.createdAt).format('YYYY-MM-DD HH:mm') }}</div></div>
+      <div class="min-w-0"><div class="mobile-order-card__business-no">{{ item.businessNo }}</div><div class="mobile-order-card__time">{{ dayjs(item.createdAt).format('YYYY-MM-DD HH:mm') }}</div></div>
       <div class="mobile-order-card__head-tags"><span class="mobile-order-card__chip is-brand">{{ item.isDeleted ? '已删除' : '正常' }}</span><span class="mobile-order-card__chip is-brand-soft">{{ getOrderTypeLabel(item.orderType) }}</span></div>
     </div>
     <div class="mobile-order-card__primary"><p class="mobile-order-card__primary-label">领用对象</p><p class="mobile-order-card__primary-value">{{ getOrderDisplayName(item) }}</p></div>
@@ -75,7 +75,7 @@ const getSystemApplyStatusMeta = (order: Pick<OrderRecord, 'orderType' | 'isSyst
       <div class="mobile-order-card__merge-head"><span class="mobile-order-card__merge-title">已合并 {{ item.merge.children.length }} 张来源单</span><el-button link type="primary" :aria-expanded="parentExpanded" @click="emit('toggleParent', item.id)">{{ parentExpanded ? '收起来源单' : '展开来源单' }}</el-button></div>
       <div v-if="parentExpanded" class="mobile-order-card__merge-list">
         <div v-for="child in item.merge.children" :key="child.id" class="mobile-order-card__merge-child">
-          <div class="mobile-order-card__merge-child-head"><span class="mobile-order-card__merge-child-title">{{ child.businessNo || child.showNo }}</span><el-button link type="primary" @click="emit('viewId', child.id)">查看</el-button></div>
+          <div class="mobile-order-card__merge-child-head"><span class="mobile-order-card__merge-child-title">{{ child.businessNo }}</span><el-button link type="primary" @click="emit('viewId', child.id)">查看</el-button></div>
           <p class="mobile-order-card__merge-child-meta">已合并至父单 · {{ child.totalQty }} 件 · ¥{{ Number(child.totalAmount).toFixed(2) }}</p>
         </div>
       </div>
@@ -124,7 +124,7 @@ const getSystemApplyStatusMeta = (order: Pick<OrderRecord, 'orderType' | 'isSyst
   gap: 12px;
 }
 
-.mobile-order-card__show-no {
+.mobile-order-card__business-no {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -318,7 +318,7 @@ const getSystemApplyStatusMeta = (order: Pick<OrderRecord, 'orderType' | 'isSyst
   gap: 14px;
 }
 
-.dark .mobile-order-card__show-no {
+.dark .mobile-order-card__business-no {
   color: #e2e8f0;
 }
 

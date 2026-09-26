@@ -175,7 +175,8 @@ const notificationListRulesSource = sliceMethod(notificationServiceSource, '  as
 const notificationRulesSource = sliceMethod(notificationServiceSource, '  async updateRules(', '  async getPresenceSnapshot(')
 const notificationInboxReadSource = sliceMethod(notificationServiceSource, '  async markInboxRead(', '  async getUnreadCount(')
 const authChangeOwnPasswordSource = sliceMethod(authServiceSource, '  async changeOwnPassword(', '  async resolveAuthUserByToken(')
-const orderSerialConfigReadSource = sliceMethod(systemConfigServiceSource, '  async getOrderSerialConfigs(', '  async updateOrderSerialConfigs(')
+const legacyOrderSerialConfigReadSource = sliceMethod(systemConfigServiceSource, '  async getOrderSerialConfigs(', '  /** canonical 编号默认值只允许')
+const orderIdentifierConfigReadSource = sliceMethod(systemConfigServiceSource, '  async getOrderIdentifierConfigs(', '  async updateOrderIdentifierConfigs(')
 const o2oConfigReadSource = sliceMethod(systemConfigServiceSource, '  async getO2oRuleConfigs(', '  private isTransactionalManager(')
 const customerServiceConfigReadSource = sliceMethod(systemConfigServiceSource, '  private async getCustomerServiceBaseConfig(', '  async updateCustomerServiceConfigs(')
 const verificationConfigReadSource = sliceMethod(systemConfigServiceSource, '  private async loadVerificationConfigMap(', '  private resolveSensitiveVerificationFieldValue(')
@@ -198,7 +199,8 @@ assert.ok(feedbackDetailGuardIndex < feedbackDetailConversationIndex, '客服详
 assert.match(feedbackConversationLookupSource, /setLock\('pessimistic_write'\)/, '客服写事务必须在账号锁后获取会话写锁')
 assert.doesNotMatch(notificationListRulesSource, /ensureDefaultRules/, '通知规则 GET 必须保持纯读，不得惰性写入默认数据')
 for (const [source, label] of [
-  [orderSerialConfigReadSource, '订单流水配置 GET'],
+  [legacyOrderSerialConfigReadSource, '旧订单流水配置 GET'],
+  [orderIdentifierConfigReadSource, '订单编号配置 GET'],
   [o2oConfigReadSource, 'O2O 配置 GET'],
   [customerServiceConfigReadSource, '客服配置 GET'],
   [verificationConfigReadSource, '验证码配置 GET'],
@@ -224,7 +226,7 @@ const managementWriteContracts = [
   [sliceMethod(clientStaffDirectoryServiceSource, '  async updateStatus(', '  async deleteBatch('), 'manager.getRepository(ClientStaffDirectory)', '启停教职工目录'],
   [sliceMethod(clientStaffDirectoryServiceSource, '  async deleteBatch(', '  async previewImport('), 'manager.getRepository(ClientStaffDirectory)', '批量删除教职工目录'],
   [sliceMethod(clientStaffDirectoryServiceSource, '  async importRows(', '\n}\n\nexport const clientStaffDirectoryService'), 'manager.getRepository(ClientStaffDirectory)', '导入教职工目录'],
-  [sliceMethod(systemConfigServiceSource, '  async updateOrderSerialConfigs(', '  async getO2oRuleConfigs('), 'manager.query(', '更新订单流水配置'],
+  [sliceMethod(systemConfigServiceSource, '  async updateOrderIdentifierConfigs(', '  async getO2oRuleConfigs('), 'manager.query(', '更新订单编号配置'],
   [sliceMethod(systemConfigServiceSource, '  async updateO2oRuleConfigs(', '  async getCustomerServiceConfigs('), 'manager.query(', '更新 O2O 规则'],
   [sliceMethod(systemConfigServiceSource, '  async updateCustomerServiceConfigs(', '  async getClientDepartmentConfigs('), 'manager.query(', '更新客服配置'],
   [sliceMethod(systemConfigServiceSource, '  async updateClientDepartmentConfigs(', '  async ensureClientDepartmentOptions('), 'manager.query(', '更新客户端部门配置'],
@@ -275,7 +277,7 @@ for (const [source, expectedCall, label] of [
   [clientRoutesSource, 'clientUserManageService.updateProfile(req.params.id, payload, authReq.auth, extractRequestMeta(req))', '客户端账号修改路由'],
   [clientRoutesSource, 'clientUserManageService.updateStatus(req.params.id, payload.status, authReq.auth, extractRequestMeta(req))', '客户端账号启停路由'],
   [clientRoutesSource, 'clientUserManageService.resetPassword(req.params.id, payload, authReq.auth, extractRequestMeta(req))', '客户端账号重置密码路由'],
-  [systemConfigRoutesSource, 'systemConfigService.updateOrderSerialConfigs(payload, authReq.auth, extractRequestMeta(req))', '订单流水配置路由'],
+  [systemConfigRoutesSource, 'systemConfigService.updateOrderIdentifierConfigs(payload, authReq.auth, extractRequestMeta(req))', '订单编号配置路由'],
   [systemConfigRoutesSource, 'systemConfigService.updateO2oRuleConfigs(payload, authReq.auth, extractRequestMeta(req))', 'O2O 配置路由'],
   [systemConfigRoutesSource, 'systemConfigService.updateCustomerServiceConfigs(payload, authReq.auth, extractRequestMeta(req))', '客服配置路由'],
   [systemConfigRoutesSource, 'systemConfigService.updateClientDepartmentConfigs(normalizedPayload, authReq.auth, extractRequestMeta(req))', '客户端部门配置路由'],
@@ -289,6 +291,11 @@ for (const [source, expectedCall, label] of [
 ] as const) {
   assert.ok(source.includes(expectedCall), `${label}必须向服务层透传真实管理端 actor`)
 }
+assert.match(
+  systemConfigRoutesSource,
+  /systemConfigRouter\.put\([\s\S]*?'\/order-serial'[\s\S]*?throw new BizError\([^\n]*410\)/,
+  '旧订单流水配置 PUT 必须在权限门禁后直接返回 410，不得进入旧服务层写逻辑',
+)
 
 for (const [source, guard, label] of [
   [o2oSubmitSource, 'lockActiveClientAccountForBusiness', 'O2O pending 预订单'],
@@ -1764,7 +1771,7 @@ try {
 
   const clientHistory = await createClientUser('issue74-client-history')
   const preorder = await preorderRepo.save(preorderRepo.create({
-    showNo: 'O2O-ISSUE74-001',
+    preorderNo: 'PRE-W-740001',
     clientUserId: clientHistory.id,
     verifyCode: 'O2O-ISSUE74-VERIFY-001',
     status: 'pending',

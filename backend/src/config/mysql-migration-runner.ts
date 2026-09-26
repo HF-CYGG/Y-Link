@@ -31,11 +31,20 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
-import type { DataSource, QueryRunner } from 'typeorm'
+import type { DataSource, EntityManager, QueryRunner } from 'typeorm'
 import { env } from './env.js'
+import {
+  backupOrderBusinessNoRetirementTables,
+  ORDER_BUSINESS_NO_RETIREMENT_MIGRATION,
+  type OrderBusinessNoRetirementBackupPublishOptions,
+} from './order-business-no-retirement-backup.js'
 
 const SQL_DIR = path.resolve(process.cwd(), 'sql')
 const MIGRATION_TABLE = 'schema_migrations'
+const ORDER_BUSINESS_NO_REUSE_MIGRATION = '054_order_business_no_reuse.sql'
+const SUPERSEDED_AUTO_MIGRATIONS = new Map<string, string>([
+  [ORDER_BUSINESS_NO_REUSE_MIGRATION, ORDER_BUSINESS_NO_RETIREMENT_MIGRATION],
+])
 // GET_LOCK 的锁名在同一 MySQL 服务端是全局的（不区分 database），
 // 因此必须把库名拼进锁名，否则同一实例上部署的多套 Y-Link 库会互相阻塞迁移。
 const buildMigrationAdvisoryLockName = (databaseName: string) => `y_link:schema_migration:${databaseName}`
@@ -69,7 +78,6 @@ const MYSQL_REQUIRED_TABLES = [
   'business_sequence',
   'client_mobile_session',
   'sms_verification_record',
-  'order_business_no_occupancy',
   'order_revision',
   'account_lifecycle_event',
   'order_merge_operation',
@@ -83,6 +91,12 @@ const MYSQL_REQUIRED_TABLES = [
   'base_product_variant_code_registry',
   'base_yz_series_seq_reservation',
 ]
+
+/** 056 后必须物理移除的历史业务号永久占用结构。 */
+const MYSQL_FORBIDDEN_TABLES = [
+  'order_business_no_occupancy',
+  'order_business_no_reuse_event',
+] as const
 
 // 每个必需表由哪个迁移脚本创建，用于在报错时给出精确指引，而不是笼统建议“从头跑一遍”。
 // auth_risk_state 现同时存在于 001（供全新库一次建齐）与 033（供存量库补建），
@@ -111,7 +125,6 @@ const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
   business_sequence: '035_o2o_idempotency_business_sequence.sql',
   client_mobile_session: '037_mobile_auth_session.sql',
   sms_verification_record: '039_aliyun_pnvs_sms_verification.sql',
-  order_business_no_occupancy: '042_order_business_no_amendment.sql',
   order_revision: '042_order_business_no_amendment.sql',
   account_lifecycle_event: '044_account_lifecycle_governance.sql',
   order_merge_operation: '045_order_merge_governance.sql',
@@ -398,12 +411,6 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
   { tableName: 'inventory_log', columnName: 'after_sku_current_stock', introducingScript: '043_order_content_inventory_mode.sql', expectedDataType: 'int', expectedColumnType: 'int', expectedNullable: true },
   { tableName: 'inventory_log', columnName: 'before_sku_preordered_stock', introducingScript: '043_order_content_inventory_mode.sql', expectedDataType: 'int', expectedColumnType: 'int', expectedNullable: true },
   { tableName: 'inventory_log', columnName: 'after_sku_preordered_stock', introducingScript: '043_order_content_inventory_mode.sql', expectedDataType: 'int', expectedColumnType: 'int', expectedNullable: true },
-  { tableName: 'order_business_no_occupancy', columnName: 'business_namespace', introducingScript: '042_order_business_no_amendment.sql' },
-  { tableName: 'order_business_no_occupancy', columnName: 'serial_value', introducingScript: '042_order_business_no_amendment.sql' },
-  { tableName: 'order_business_no_occupancy', columnName: 'business_no', introducingScript: '042_order_business_no_amendment.sql' },
-  { tableName: 'order_business_no_occupancy', columnName: 'order_uuid', introducingScript: '042_order_business_no_amendment.sql' },
-  { tableName: 'order_business_no_occupancy', columnName: 'assigned_reason', introducingScript: '042_order_business_no_amendment.sql' },
-  { tableName: 'order_business_no_occupancy', columnName: 'created_at', introducingScript: '042_order_business_no_amendment.sql' },
   { tableName: 'order_revision', columnName: 'order_id_snapshot', introducingScript: '042_order_business_no_amendment.sql' },
   { tableName: 'order_revision', columnName: 'order_uuid', introducingScript: '042_order_business_no_amendment.sql' },
   { tableName: 'order_revision', columnName: 'revision_no', introducingScript: '042_order_business_no_amendment.sql' },
@@ -577,27 +584,6 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
     indexName: 'uk_biz_outbound_business_no',
     columns: ['business_no'],
     unique: true,
-    introducingScript: '042_order_business_no_amendment.sql',
-  },
-  {
-    tableName: 'order_business_no_occupancy',
-    indexName: 'uk_order_business_no_occupancy_business_no',
-    columns: ['business_no'],
-    unique: true,
-    introducingScript: '042_order_business_no_amendment.sql',
-  },
-  {
-    tableName: 'order_business_no_occupancy',
-    indexName: 'uk_order_business_no_occupancy_namespace_serial',
-    columns: ['business_namespace', 'serial_value'],
-    unique: true,
-    introducingScript: '042_order_business_no_amendment.sql',
-  },
-  {
-    tableName: 'order_business_no_occupancy',
-    indexName: 'idx_order_business_no_occupancy_order_uuid',
-    columns: ['order_uuid'],
-    unique: false,
     introducingScript: '042_order_business_no_amendment.sql',
   },
   {
@@ -815,6 +801,9 @@ const AUTO_MIGRATABLE_FILES = [
   '051_product_legacy_code.sql',
   '052_yz_series_seq_reservation.sql',
   '053_yz_reservation_series_code.sql',
+  '054_order_business_no_reuse.sql',
+  '055_order_identifier_namespaces.sql',
+  '056_disable_order_business_no_permanent_occupancy.sql',
 ]
 
 /**
@@ -897,6 +886,86 @@ async function ensureMigrationTrackingTable(dataSource: DataSource): Promise<voi
   `)
 }
 
+function readMigrationFile(filename: string): { content: string; checksum: string; statements: string[] } {
+  const filePath = path.join(SQL_DIR, filename)
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`[启动失败] 缺少 MySQL 迁移脚本：${filename}`)
+  }
+  const content = fs.readFileSync(filePath, 'utf8')
+  return {
+    content,
+    checksum: createHash('sha256').update(content).digest('hex'),
+    statements: splitSqlStatements(content),
+  }
+}
+
+async function recordAppliedMigration(
+  queryRunner: QueryRunner,
+  filename: string,
+  checksum: string,
+): Promise<void> {
+  await queryRunner.query(
+    `INSERT INTO ${MIGRATION_TABLE} (filename, checksum) VALUES (?, ?)
+     ON DUPLICATE KEY UPDATE checksum = VALUES(checksum), applied_at = CURRENT_TIMESTAMP(6)`,
+    [filename, checksum],
+  )
+}
+
+/**
+ * 在任何历史 054 回放前完成 056 清退：
+ * - 旧表存在时，先在持有 MySQL advisory lock 的同一 QueryRunner 上读取并校验备份；
+ * - 旧表不存在但 056 tracking 缺失时，仍执行幂等 056 并写 tracking，使 054 明确失效；
+ * - 不使用 LOCK TABLES，避免额外权限要求。advisory lock 只能协调新版本实例，部署方仍须先停写旧节点。
+ */
+async function runMysqlOrderBusinessNoRetirementPreflight(
+  queryRunner: QueryRunner,
+  appliedSet: Set<string>,
+  backupOptions: OrderBusinessNoRetirementBackupPublishOptions = {},
+): Promise<{ executed: boolean }> {
+  const backup = await backupOrderBusinessNoRetirementTables({
+    ...backupOptions,
+    dialect: 'mysql',
+    query: (sql, parameters) => queryRunner.query(sql, parameters),
+  })
+  const alreadyTracked = appliedSet.has(ORDER_BUSINESS_NO_RETIREMENT_MIGRATION)
+  if (backup.status === 'skipped' && alreadyTracked) return { executed: false }
+
+  const migration = readMigrationFile(ORDER_BUSINESS_NO_RETIREMENT_MIGRATION)
+  try {
+    for (const statement of migration.statements) {
+      await queryRunner.query(statement)
+    }
+    const remainingTables = await queryRunner.query(
+      `SELECT TABLE_NAME FROM information_schema.TABLES
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME IN (${MYSQL_FORBIDDEN_TABLES.map(() => '?').join(', ')})`,
+      [...MYSQL_FORBIDDEN_TABLES],
+    ) as MysqlTableRow[]
+    if (remainingTables.length > 0) {
+      throw new Error(`清退后仍存在历史表：${remainingTables.map((row) => row.TABLE_NAME).join(', ')}`)
+    }
+  } catch (error) {
+    throw new Error(
+      `[启动失败] MySQL 迁移 ${ORDER_BUSINESS_NO_RETIREMENT_MIGRATION} 的备份后清退失败；`
+      + `已生成的备份会保留，服务已阻止启动：${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+
+  await recordAppliedMigration(
+    queryRunner,
+    ORDER_BUSINESS_NO_RETIREMENT_MIGRATION,
+    migration.checksum,
+  )
+  appliedSet.add(ORDER_BUSINESS_NO_RETIREMENT_MIGRATION)
+  if (backup.status === 'created') {
+    console.log(
+      `[y-link-backend] 056 清退前备份已校验：${backup.fileName}；`
+      + `表摘要=${backup.tables.map((table) => `${table.name}:${table.rowCount}`).join(',')}`,
+    )
+  }
+  return { executed: true }
+}
+
 /**
  * 用 MySQL advisory lock（GET_LOCK）串行化"检查 + 执行"整段流程。
  *
@@ -948,7 +1017,14 @@ async function withMysqlAdvisoryLock<T>(
  * - 每个文件内的语句顺序执行，全部成功后才写入执行记录；
  * - 单个文件内某条语句失败会中止本次启动，日志会指出具体文件名，避免带着不完整结构继续运行。
  */
-export async function runMysqlSchemaMigrations(dataSource: DataSource): Promise<{ appliedFiles: string[] }> {
+export interface RunMysqlSchemaMigrationsOptions {
+  retirementBackup?: OrderBusinessNoRetirementBackupPublishOptions
+}
+
+export async function runMysqlSchemaMigrations(
+  dataSource: DataSource,
+  options: RunMysqlSchemaMigrationsOptions = {},
+): Promise<{ appliedFiles: string[] }> {
   if (env.DB_TYPE !== 'mysql' || !env.DB_AUTO_MIGRATE) {
     return { appliedFiles: [] }
   }
@@ -959,7 +1035,140 @@ export async function runMysqlSchemaMigrations(dataSource: DataSource): Promise<
     dataSource,
     buildMigrationAdvisoryLockName(env.DB_NAME),
     MIGRATION_ADVISORY_LOCK_TIMEOUT_SECONDS,
-    (queryRunner) => applyPendingMigrations(queryRunner),
+    (queryRunner) => applyPendingMigrations(queryRunner, options),
+  )
+}
+
+/**
+ * DB_SYNC=true 不会进入常规自动迁移分支，但 056 属于当前版本必须成立的结构清退不变量。
+ * 这里只重放经过审计且完全幂等的 056，不扫描或执行其它历史迁移。
+ */
+export async function retireMysqlOrderBusinessNoPermanentOccupancy(dataSource: DataSource): Promise<void> {
+  if (env.DB_TYPE !== 'mysql') return
+
+  await ensureMigrationTrackingTable(dataSource)
+
+  await withMysqlAdvisoryLock(
+    dataSource,
+    buildMigrationAdvisoryLockName(env.DB_NAME),
+    MIGRATION_ADVISORY_LOCK_TIMEOUT_SECONDS,
+    async (queryRunner) => {
+      const appliedRows = await queryRunner.query(
+        `SELECT filename FROM ${MIGRATION_TABLE}`,
+      ) as Array<{ filename: string }>
+      await runMysqlOrderBusinessNoRetirementPreflight(
+        queryRunner,
+        new Set(appliedRows.map((row) => row.filename)),
+      )
+    },
+  )
+}
+
+/** DB_SYNC=true 启动也必须只读确认 056 的两个历史表没有残留。 */
+export async function assertMysqlOrderBusinessNoPermanentOccupancyRetired(dataSource: DataSource): Promise<void> {
+  if (env.DB_TYPE !== 'mysql') return
+  const rows = await dataSource.query(
+    `SELECT TABLE_NAME FROM information_schema.TABLES
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME IN (${MYSQL_FORBIDDEN_TABLES.map(() => '?').join(', ')})`,
+    [...MYSQL_FORBIDDEN_TABLES],
+  ) as MysqlTableRow[]
+  if (rows.length > 0) {
+    throw new Error(
+      `[启动失败] 业务号永久占用功能已停用，但历史表仍存在：${rows.map((row) => row.TABLE_NAME).join(', ')}。`
+      + '请核查 backend/sql/056_disable_order_business_no_permanent_occupancy.sql。',
+    )
+  }
+}
+
+type MysqlOrderIdentifierMigrationStatus = Partial<Record<
+  | 'departmentConfigCount'
+  | 'departmentMarkerCount'
+  | 'departmentSequenceCount'
+  | 'walkinConfigCount'
+  | 'walkinMarkerCount'
+  | 'walkinSequenceCount',
+  number | string
+>>
+
+export function resolvePendingMysqlOrderIdentifierNamespaces(
+  status: MysqlOrderIdentifierMigrationStatus,
+): Array<'department' | 'walkin'> {
+  return [
+    Number(status.walkinConfigCount ?? 0) === 3
+      && Number(status.walkinMarkerCount ?? 0) === 1
+      && Number(status.walkinSequenceCount ?? 0) === 1
+      ? null
+      : 'walkin',
+    Number(status.departmentConfigCount ?? 0) === 3
+      && Number(status.departmentMarkerCount ?? 0) === 1
+      && Number(status.departmentSequenceCount ?? 0) === 1
+      ? null
+      : 'department',
+  ].filter((namespace): namespace is 'department' | 'walkin' => namespace !== null)
+}
+
+/** 在调用方已有的 MySQL 事务中重放 055 的纯数据领养语句，不另开连接或事务。 */
+export async function applyMysqlOrderIdentifierNamespacesInTransaction(manager: EntityManager): Promise<void> {
+  if (manager.connection.options.type !== 'mysql' || !manager.queryRunner?.isTransactionActive) {
+    throw new Error('055 订单编号领养必须在 MySQL 写事务内执行')
+  }
+  const filename = '055_order_identifier_namespaces.sql'
+  const filePath = path.join(SQL_DIR, filename)
+  if (!fs.existsSync(filePath)) throw new Error(`缺少订单编号领养脚本：${filename}`)
+  for (const statement of splitSqlStatements(fs.readFileSync(filePath, 'utf8'))) {
+    await manager.query(statement)
+  }
+}
+
+/**
+ * DB_AUTO_MIGRATE=false 时也要在默认配置写入前领养订单编号历史真相。
+ * advisory lock 内先只读检查两个 business namespace 的三项配置、sequence 与完成 marker：
+ * 全部完成时零写返回；仅有未完成 namespace 时才在事务内执行 055。
+ */
+export async function reconcileMysqlOrderIdentifierNamespaces(dataSource: DataSource): Promise<void> {
+  if (env.DB_TYPE !== 'mysql') return
+
+  await withMysqlAdvisoryLock(
+    dataSource,
+    buildMigrationAdvisoryLockName(env.DB_NAME),
+    MIGRATION_ADVISORY_LOCK_TIMEOUT_SECONDS,
+    async (queryRunner) => {
+      const statusRows = await queryRunner.query(`
+        SELECT
+          (SELECT COUNT(1) FROM system_configs
+           WHERE config_key IN ('order.business.department.start', 'order.business.department.current', 'order.business.department.width'))
+            AS departmentConfigCount,
+          (SELECT COUNT(1) FROM system_configs
+           WHERE config_key = 'order.business.department.migration.055' AND config_value = '1')
+            AS departmentMarkerCount,
+          (SELECT COUNT(1) FROM business_sequence WHERE sequence_key = 'order.business.department')
+            AS departmentSequenceCount,
+          (SELECT COUNT(1) FROM system_configs
+           WHERE config_key IN ('order.business.walkin.start', 'order.business.walkin.current', 'order.business.walkin.width'))
+            AS walkinConfigCount,
+          (SELECT COUNT(1) FROM system_configs
+           WHERE config_key = 'order.business.walkin.migration.055' AND config_value = '1')
+            AS walkinMarkerCount,
+          (SELECT COUNT(1) FROM business_sequence WHERE sequence_key = 'order.business.walkin')
+            AS walkinSequenceCount
+      `) as Array<Record<string, number | string>>
+      const pendingNamespaces = resolvePendingMysqlOrderIdentifierNamespaces(statusRows[0] ?? {})
+      if (pendingNamespaces.length === 0) return
+
+      await queryRunner.startTransaction()
+      try {
+        await applyMysqlOrderIdentifierNamespacesInTransaction(queryRunner.manager)
+        await queryRunner.commitTransaction()
+      } catch (error) {
+        if (queryRunner.isTransactionActive) await queryRunner.rollbackTransaction()
+        throw new Error(
+          `[启动失败] MySQL 订单编号历史领养失败，服务已阻止默认配置写入：${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        )
+      }
+    },
   )
 }
 
@@ -1092,7 +1301,10 @@ async function assertAutoMigrationResult(queryRunner: QueryRunner, filename: str
 }
 
 /** 实际的迁移执行体；必须在 withMysqlAdvisoryLock 内调用，保证跨实例互斥。 */
-async function applyPendingMigrations(queryRunner: QueryRunner): Promise<{ appliedFiles: string[] }> {
+async function applyPendingMigrations(
+  queryRunner: QueryRunner,
+  options: RunMysqlSchemaMigrationsOptions = {},
+): Promise<{ appliedFiles: string[] }> {
   // 已应用记录必须在持锁之后再读：若在锁外读取，另一个实例可能在我们拿到锁之前刚写入记录，
   // 我们仍会拿着过期的快照重复执行脚本。
   const appliedRows: Array<{ filename: string }> = await queryRunner.query(
@@ -1102,7 +1314,29 @@ async function applyPendingMigrations(queryRunner: QueryRunner): Promise<{ appli
   const appliedFiles: string[] = []
 
   for (const filename of AUTO_MIGRATABLE_FILES) {
+    // 042 会在旧库/空库补建永久占用表，因此 retirement preflight 必须位于 042 之后、
+    // 054 是否 applied/superseded 的判断之前。这样同次启动只备份一次当前真相，
+    // 随即用 056 清退并写 tracking，下面的 054 才会被明确跳过。
+    if (filename === ORDER_BUSINESS_NO_REUSE_MIGRATION) {
+      const retirement = await runMysqlOrderBusinessNoRetirementPreflight(
+        queryRunner,
+        appliedSet,
+        options.retirementBackup,
+      )
+      if (
+        retirement.executed
+        && !appliedFiles.includes(ORDER_BUSINESS_NO_RETIREMENT_MIGRATION)
+      ) {
+        appliedFiles.push(ORDER_BUSINESS_NO_RETIREMENT_MIGRATION)
+      }
+    }
+
     if (appliedSet.has(filename)) {
+      continue
+    }
+
+    const supersedingFilename = SUPERSEDED_AUTO_MIGRATIONS.get(filename)
+    if (supersedingFilename && appliedSet.has(supersedingFilename)) {
       continue
     }
 
@@ -1110,12 +1344,10 @@ async function applyPendingMigrations(queryRunner: QueryRunner): Promise<{ appli
     if (!fs.existsSync(filePath)) {
       continue
     }
-    const content = fs.readFileSync(filePath, 'utf8')
-    const checksum = createHash('sha256').update(content).digest('hex')
-    const statements = splitSqlStatements(content)
+    const migration = readMigrationFile(filename)
 
     try {
-      for (const statement of statements) {
+      for (const statement of migration.statements) {
         await queryRunner.query(statement)
       }
       await assertAutoMigrationResult(queryRunner, filename)
@@ -1127,11 +1359,7 @@ async function applyPendingMigrations(queryRunner: QueryRunner): Promise<{ appli
       )
     }
 
-    await queryRunner.query(
-      `INSERT INTO ${MIGRATION_TABLE} (filename, checksum) VALUES (?, ?)
-       ON DUPLICATE KEY UPDATE checksum = VALUES(checksum), applied_at = CURRENT_TIMESTAMP(6)`,
-      [filename, checksum],
-    )
+    await recordAppliedMigration(queryRunner, filename, migration.checksum)
     appliedFiles.push(filename)
   }
 
@@ -1282,6 +1510,12 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
   )
   const existingTableSet = new Set(tableRows.map((row) => row.TABLE_NAME))
   const missingTables = MYSQL_REQUIRED_TABLES.filter((table) => !existingTableSet.has(table))
+  const forbiddenTableRows: MysqlTableRow[] = await dataSource.query(
+    `SELECT TABLE_NAME FROM information_schema.TABLES
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (${MYSQL_FORBIDDEN_TABLES.map(() => '?').join(', ')})`,
+    [...MYSQL_FORBIDDEN_TABLES],
+  )
+  const forbiddenTables = forbiddenTableRows.map((row) => row.TABLE_NAME)
 
   const requiredColumnsOnExistingTables = MYSQL_REQUIRED_COLUMNS.filter((requirement) => (
     existingTableSet.has(requirement.tableName)
@@ -1397,6 +1631,7 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
 
   if (
     missingTables.length === 0
+    && forbiddenTables.length === 0
     && missingColumns.length === 0
     && undersizedColumns.length === 0
     && invalidColumnDefinitions.length === 0
@@ -1420,6 +1655,10 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
       label: `表 ${table}`,
       script: TABLE_INTRODUCING_SCRIPT[table]
         ?? '（未登记，请检查 mysql-migration-runner.ts 的 TABLE_INTRODUCING_SCRIPT）',
+    })),
+    ...forbiddenTables.map((table) => ({
+      label: `已停用表 ${table} 仍存在`,
+      script: '056_disable_order_business_no_permanent_occupancy.sql',
     })),
     ...missingColumns.map((requirement) => ({
       label: `字段 ${requirement.tableName}.${requirement.columnName}`,
@@ -1455,6 +1694,7 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
 
   const problemSummary = [
     missingTables.length > 0 ? `缺少必需表：${missingTables.join(', ')}` : null,
+    forbiddenTables.length > 0 ? `仍存在已停用表：${forbiddenTables.join(', ')}` : null,
     missingColumns.length > 0
       ? `缺少必需字段：${missingColumns.map((item) => `${item.tableName}.${item.columnName}`).join(', ')}`
       : null,

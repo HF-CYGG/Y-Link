@@ -344,11 +344,11 @@ const MIGRATION_BATCH_SIZE = 300
 const CRITICAL_VALIDATION_TABLES = new Set([
   'sys_user',
   'system_configs',
+  'business_sequence',
   'base_product',
   'client_user',
   'biz_outbound_order',
   'biz_outbound_order_item',
-  'order_business_no_occupancy',
   'order_revision',
   'order_merge_operation',
   'order_merge_relation',

@@ -46,7 +46,7 @@ import {
 } from '../utils/database-errors.js'
 import { generateOrderUuid } from '../utils/id-generator.js'
 import { orderBusinessNoService } from './order-business-no.service.js'
-import { orderSerialService, type OrderSerialRecalibrationResult } from './order-serial.service.js'
+import { orderSerialService } from './order-serial.service.js'
 import { orderMergeService, type OrderMergeMetadata } from './order-merge.service.js'
 import { systemConfigService } from './system-config.service.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
@@ -63,6 +63,10 @@ import {
 import { buildSkuLogFields, snapshotSkuStock } from './inventory-ledger.service.js'
 import type { PaginationResult } from '../types/api.js'
 import type { RequestMeta } from '../utils/request-meta.js'
+import {
+  buildRedactedDeleteTarget,
+  cleanupOrderIdentifiableData,
+} from './order-permanent-delete-cleanup.service.js'
 import {
   buildDiscountPriceSnapshot,
   calculateDiscountedPrice,
@@ -137,7 +141,7 @@ export interface RejectReturnRequestInput {
 
 export interface DeleteConsolePreorderInput {
   orderId: string
-  confirmShowNo: string
+  confirmPreorderNo: string
 }
 
 export interface CancelOrderByAdminInput {
@@ -148,13 +152,15 @@ export interface CancelOrderByAdminInput {
 }
 
 export interface BatchPurgeCancelledPreorderInput {
-  orders: Array<{ id: string; confirmShowNo: string }>
+  orders: Array<{ id: string; confirmPreorderNo: string }>
   actor: AuthUserContext
   requestMeta: RequestMeta
 }
 
 export interface BatchPurgeCancelledPreorderResult {
   id: string
+  preorderNo?: string
+  /** @deprecated 兼容一个发布周期，值始终等于 preorderNo。 */
   showNo?: string
   outcome: 'deleted' | 'skipped' | 'failed'
   code: string
@@ -169,11 +175,15 @@ export interface BatchPurgeCancelledPreordersView {
 
 export interface DeletedConsolePreorderView {
   id: string
+  preorderNo: string
+  /** @deprecated 兼容一个发布周期，值始终等于 preorderNo。 */
   showNo: string
   status: O2oPreorderStatus
   clientOrderType: O2oClientOrderType
   releasedPreorderedQty: number
   returnRequestCount: number
+  outboundOrderSystemNo: string | null
+  /** @deprecated 兼容一个发布周期，值始终等于 outboundOrderSystemNo。 */
   outboundOrderShowNo: string | null
   outboundOrderDeleted: boolean
   preorderSerialRolledBack: boolean
@@ -306,10 +316,18 @@ export interface O2oPreorderSummaryView {
   totalAmount: string
   expireInSeconds: number
   id: string
-  showNo: string
-  customerOrderShowNo: string | null
+  preorderNo: string
+  /** @deprecated 兼容一个发布周期，值始终等于 preorderNo。 */
+  showNo?: string
+  /** 关联正式单技术号仅管理员可见。 */
+  customerOrderSystemNo?: string | null
+  customerOrderShowNo?: string | null
   customerOrderBusinessNo: string | null
-  originalCustomerOrderShowNo: string | null
+  matchedIdentifierType: 'preorderNo' | 'businessNo' | 'systemNo' | null
+  matchedIdentifierValue: string | null
+  originalCustomerOrderSystemNo?: string | null
+  /** @deprecated 兼容一个发布周期，值始终等于 originalCustomerOrderSystemNo。 */
+  originalCustomerOrderShowNo?: string | null
   originalCustomerOrderBusinessNo: string | null
   verifyCode: string
   status: O2oPreorder['status']
@@ -364,10 +382,16 @@ export interface O2oPreorderDetailView {
     totalAmount: string
     expireInSeconds: number
     id: string
-    showNo: string
-    customerOrderShowNo: string | null
+    preorderNo: string
+    /** @deprecated 兼容一个发布周期，值始终等于 preorderNo。 */
+    showNo?: string
+    /** 关联正式单技术号仅管理员可见。 */
+    customerOrderSystemNo?: string | null
+    customerOrderShowNo?: string | null
     customerOrderBusinessNo: string | null
-    originalCustomerOrderShowNo: string | null
+    originalCustomerOrderSystemNo?: string | null
+    /** @deprecated 兼容一个发布周期，值始终等于 originalCustomerOrderSystemNo。 */
+    originalCustomerOrderShowNo?: string | null
     originalCustomerOrderBusinessNo: string | null
     verifyCode: string
     status: O2oPreorder['status']
@@ -471,6 +495,8 @@ const O2O_MALL_STOREFRONT_FRESH_TTL_MS = 5_000
 const O2O_MALL_STOREFRONT_STALE_TTL_MS = 60_000
 // 销量是展示统计，不参与下单正确性；单独缓存以避免反复扫描全部历史核销明细。
 const O2O_MALL_SOLD_QTY_TTL_MS = 60_000
+
+const canViewSystemNo = (actor?: Pick<AuthUserContext, 'role'>): boolean => actor?.role === 'admin'
 const MYSQL_IDEMPOTENT_TRANSACTION_MAX_ATTEMPTS = 3
 
 class O2oPreorderService {
@@ -1228,6 +1254,15 @@ class O2oPreorderService {
 
     const existed = await orderRepo.findOne({ where: { idempotencyKey } })
     if (existed) {
+      const expectedOrderType = input.preorder.clientOrderType === 'department' ? 'department' : 'walkin'
+      if (
+        existed.sourceDocType !== 'o2o_preorder'
+        || String(existed.sourceDocId ?? '') !== String(input.preorder.id)
+        || existed.inventoryMode !== 'o2o_preapplied'
+        || existed.orderType !== expectedOrderType
+      ) {
+        throw new BizError('核销幂等键已被不匹配的正式出库单占用', 409)
+      }
       return existed
     }
 
@@ -1235,7 +1270,7 @@ class O2oPreorderService {
     const outboundOrderType = input.preorder.clientOrderType === 'department' ? 'department' : 'walkin'
     const departmentNameSnapshot = this.resolveDepartmentNameSnapshotFromPreorder(input.preorder)
     const orderUuid = generateOrderUuid()
-    const showNo = await orderSerialService.generateOrderNo(outboundOrderType, manager)
+    const systemNo = await orderSerialService.generateSystemNo(outboundOrderType, manager)
     const businessNo = await orderBusinessNoService.allocate(outboundOrderType, orderUuid, manager)
 
     let totalQty = 0
@@ -1272,7 +1307,7 @@ class O2oPreorderService {
 
     const outboundOrder = orderRepo.create({
       orderUuid,
-      showNo,
+      systemNo,
       businessNo,
       editVersion: 1,
       inventoryMode: 'o2o_preapplied',
@@ -1289,7 +1324,7 @@ class O2oPreorderService {
       remark: null,
       sourceDocType: 'o2o_preorder',
       sourceDocId: input.preorder.id,
-      sourceDocNo: input.preorder.showNo,
+      sourceDocNo: input.preorder.preorderNo,
       totalQty: totalQty.toFixed(2),
       totalAmount: this.formatCentsToMoney(totalAmountCents),
       creatorUserId: input.actor.userId,
@@ -1328,10 +1363,9 @@ class O2oPreorderService {
       allowMergeMemberMutation?: boolean
     },
   ) {
-    const idempotencyKey = `o2o-preorder-verify:${preorderId}`
     const outboundOrderRepo = manager.getRepository(BizOutboundOrder)
     const outboundOrder = await outboundOrderRepo.findOne({
-      where: { idempotencyKey },
+      where: { sourceDocType: 'o2o_preorder', sourceDocId: preorderId },
       lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
     })
     if (!outboundOrder) {
@@ -1371,8 +1405,8 @@ class O2oPreorderService {
 
     const preorderIdByOrderId = new Map<string, string>()
     for (const groupOrder of groupOrders) {
-      const linkedPreorderId = groupOrder.idempotencyKey.startsWith('o2o-preorder-verify:')
-        ? groupOrder.idempotencyKey.slice('o2o-preorder-verify:'.length).trim()
+      const linkedPreorderId = groupOrder.sourceDocType === 'o2o_preorder'
+        ? String(groupOrder.sourceDocId ?? '').trim()
         : ''
       if (!linkedPreorderId) {
         throw new BizError('合并组原预订单追溯不完整，无法同步合规状态', 409)
@@ -1437,7 +1471,8 @@ class O2oPreorderService {
     const outboundOrderRepo = manager.getRepository(BizOutboundOrder)
     const beforeSnapshot = {
       businessNo: outboundOrder.businessNo,
-      showNo: outboundOrder.showNo,
+      systemNo: outboundOrder.systemNo,
+      showNo: outboundOrder.systemNo,
       orderType: outboundOrder.orderType,
       customerDepartmentName: outboundOrder.customerDepartmentName,
       customerName: outboundOrder.customerName,
@@ -1487,15 +1522,12 @@ class O2oPreorderService {
   }
 
   // 详细注释：客户端展示正式出库单号时，不能再直接复用 O2O 预订单号。
-  // 这里统一通过核销时写入的 idempotencyKey 回查正式出库单，确保客户端与管理端引用同一张正式单据。
-  private buildVerifiedPreorderOutboundOrderIdempotencyKey(preorderId: string) {
-    return `o2o-preorder-verify:${preorderId}`
-  }
-
+  // 这里统一通过结构化来源字段回查正式出库单；幂等键只负责防重，不能作为业务关联真源。
   private async loadLinkedOutboundOrderInManager(manager: EntityManager, preorderId: string) {
     return manager.getRepository(BizOutboundOrder).findOne({
       where: {
-        idempotencyKey: this.buildVerifiedPreorderOutboundOrderIdempotencyKey(preorderId),
+        sourceDocType: 'o2o_preorder',
+        sourceDocId: preorderId,
       },
     })
   }
@@ -1592,7 +1624,7 @@ class O2oPreorderService {
           operatorName: actor.displayName,
           refType: 'o2o_preorder',
           refId: String(order.id),
-          remark: `管理员删除订单池订单，释放预订库存；订单号：${order.showNo}`,
+          remark: `管理员删除订单池订单，释放预订库存；订单号：${order.preorderNo}`,
         }),
       )
       releasedQty += qty
@@ -1603,25 +1635,23 @@ class O2oPreorderService {
   // 详细注释：批量回查正式出库单号，供“我的订单列表”和“订单详情”共用。
   // - 未核销或尚未生成正式出库单时返回空映射；
   // - 命中后以预订单 ID 为键，便于前端页面继续保留原订单实体，同时替换展示单号。
-  private async resolveCustomerOrderShowNoMap(
+  private async resolveCustomerOrderIdentifierMap(
     preorderIds: string[],
     manager: EntityManager = AppDataSource.manager,
   ) {
     if (!preorderIds.length) {
       return new Map<string, {
-        showNo: string
+        systemNo: string
         businessNo: string
-        originalShowNo: string
+        originalSystemNo: string
         originalBusinessNo: string
       }>()
     }
-    const idempotencyKeyToPreorderIdMap = new Map(
-      preorderIds.map((preorderId) => [this.buildVerifiedPreorderOutboundOrderIdempotencyKey(preorderId), preorderId]),
-    )
     const outboundOrders = await manager.getRepository(BizOutboundOrder).find({
-      select: ['id', 'idempotencyKey', 'showNo', 'businessNo'],
+      select: ['id', 'sourceDocId', 'systemNo', 'businessNo'],
       where: {
-        idempotencyKey: In([...idempotencyKeyToPreorderIdMap.keys()]),
+        sourceDocType: 'o2o_preorder',
+        sourceDocId: In(preorderIds),
         isDeleted: false,
       },
     })
@@ -1642,33 +1672,33 @@ class O2oPreorderService {
       String(relation.sourceOrderId).trim(),
       String(relation.parentOrderId).trim(),
     ]))
-    const customerOrderShowNoMap = new Map<string, {
-      showNo: string
+    const customerOrderIdentifierMap = new Map<string, {
+      systemNo: string
       businessNo: string
-      originalShowNo: string
+      originalSystemNo: string
       originalBusinessNo: string
     }>()
     outboundOrders.forEach((outboundOrder) => {
-      const preorderId = idempotencyKeyToPreorderIdMap.get(outboundOrder.idempotencyKey)
-      if (!preorderId || !outboundOrder.showNo?.trim()) {
+      const preorderId = String(outboundOrder.sourceDocId ?? '').trim()
+      if (!preorderId || !outboundOrder.systemNo?.trim()) {
         return
       }
       const parentOrderId = parentIdBySourceId.get(String(outboundOrder.id).trim())
       const currentOrder = parentOrderId ? parentOrderMap.get(parentOrderId) : outboundOrder
       if (!currentOrder) return
-      customerOrderShowNoMap.set(preorderId, {
-        showNo: currentOrder.showNo.trim(),
-        businessNo: currentOrder.businessNo?.trim() || currentOrder.showNo.trim(),
-        originalShowNo: outboundOrder.showNo.trim(),
-        originalBusinessNo: outboundOrder.businessNo?.trim() || outboundOrder.showNo.trim(),
+      customerOrderIdentifierMap.set(preorderId, {
+        systemNo: currentOrder.systemNo.trim(),
+        businessNo: currentOrder.businessNo?.trim() || '',
+        originalSystemNo: outboundOrder.systemNo.trim(),
+        originalBusinessNo: outboundOrder.businessNo?.trim() || '',
       })
     })
-    return customerOrderShowNoMap
+    return customerOrderIdentifierMap
   }
 
   // 详细注释：当客户端已切换为展示正式出库单号后，关键词搜索也必须支持这个单号。
   // 这里先从正式出库单表按“精确匹配 + 前缀匹配”回查，再反推出对应预订单 ID，避免页面显示与搜索口径脱节。
-  private async resolveMatchedPreorderIdsByCustomerOrderKeyword(keyword: string) {
+  private async resolveMatchedPreorderIdsByCustomerOrderKeyword(keyword: string, exposeSystemNo = true) {
     const normalizedKeyword = keyword.trim()
     if (!normalizedKeyword) {
       return []
@@ -1678,19 +1708,23 @@ class O2oPreorderService {
       .createQueryBuilder('outboundOrder')
       .select([
         'outboundOrder.id AS orderId',
-        'outboundOrder.idempotencyKey AS idempotencyKey',
+        'outboundOrder.sourceDocType AS sourceDocType',
+        'outboundOrder.sourceDocId AS sourceDocId',
       ])
       .where('outboundOrder.isDeleted = :isDeleted', { isDeleted: false })
       .andWhere(
         new Brackets((numberQb) => {
           numberQb
-            .where('outboundOrder.showNo = :showNoExact', { showNoExact: normalizedKeyword })
-            .orWhere(String.raw`outboundOrder.showNo LIKE :showNoPrefix ESCAPE '\'`, { showNoPrefix: `${escapedKeyword}%` })
-            .orWhere('outboundOrder.businessNo = :businessNoExact', { businessNoExact: normalizedKeyword })
+            .where('outboundOrder.businessNo = :businessNoExact', { businessNoExact: normalizedKeyword })
             .orWhere(String.raw`outboundOrder.businessNo LIKE :businessNoPrefix ESCAPE '\'`, { businessNoPrefix: `${escapedKeyword}%` })
+          if (exposeSystemNo) {
+            numberQb
+              .orWhere('outboundOrder.systemNo = :showNoExact', { showNoExact: normalizedKeyword })
+              .orWhere(String.raw`outboundOrder.systemNo LIKE :showNoPrefix ESCAPE '\'`, { showNoPrefix: `${escapedKeyword}%` })
+          }
         }),
       )
-      .getRawMany<{ orderId: string; idempotencyKey: string | null }>()
+      .getRawMany<{ orderId: string; sourceDocType: string | null; sourceDocId: string | null }>()
     const matchedOrderIds = rows.map((row) => String(row.orderId).trim()).filter(Boolean)
     const childRelations = matchedOrderIds.length
       ? await AppDataSource.getRepository(OrderMergeRelation).find({
@@ -1700,18 +1734,14 @@ class O2oPreorderService {
     const childOrderIds = [...new Set(childRelations.map((relation) => String(relation.sourceOrderId).trim()))]
     const childRows = childOrderIds.length
       ? await AppDataSource.getRepository(BizOutboundOrder).find({
-        select: ['idempotencyKey'],
+        select: ['sourceDocType', 'sourceDocId'],
         where: { id: In(childOrderIds) },
       })
       : []
-    const preorderIdPrefix = this.buildVerifiedPreorderOutboundOrderIdempotencyKey('')
     const preorderIdSet = new Set<string>()
     ;[...rows, ...childRows].forEach((row) => {
-      const idempotencyKey = row.idempotencyKey?.trim() ?? ''
-      if (!idempotencyKey.startsWith(preorderIdPrefix)) {
-        return
-      }
-      const preorderId = idempotencyKey.slice(preorderIdPrefix.length).trim()
+      if (row.sourceDocType !== 'o2o_preorder') return
+      const preorderId = String(row.sourceDocId ?? '').trim()
       if (!preorderId) {
         return
       }
@@ -1927,7 +1957,7 @@ class O2oPreorderService {
       actionLabel: '系统超时取消预订单',
       targetType: 'o2o_order',
       targetId: String(order.id),
-      targetCode: order.showNo,
+      targetCode: order.preorderNo,
       actor: null,
       detail: {
         previousStatus: 'pending',
@@ -2033,14 +2063,15 @@ class O2oPreorderService {
   private async buildOrderDetail(
     order: O2oPreorder,
     manager: EntityManager = AppDataSource.manager,
+    exposeSystemNo = true,
   ): Promise<O2oPreorderDetailView> {
     const id = String(order.id)
     const clientPreorderUpdateLimit = await this.getClientPreorderUpdateLimit(manager)
-    const customerOrderShowNoMap = await this.resolveCustomerOrderShowNoMap([id], manager)
-    const customerOrderNumbers = customerOrderShowNoMap.get(id) ?? null
-    const customerOrderShowNo = customerOrderNumbers?.showNo ?? null
+    const customerOrderIdentifierMap = await this.resolveCustomerOrderIdentifierMap([id], manager)
+    const customerOrderNumbers = customerOrderIdentifierMap.get(id) ?? null
+    const customerOrderSystemNo = customerOrderNumbers?.systemNo ?? null
     const customerOrderBusinessNo = customerOrderNumbers?.businessNo ?? null
-    const originalCustomerOrderShowNo = customerOrderNumbers?.originalShowNo ?? null
+    const originalCustomerOrderSystemNo = customerOrderNumbers?.originalSystemNo ?? null
     const originalCustomerOrderBusinessNo = customerOrderNumbers?.originalBusinessNo ?? null
     const clientUser = await manager.getRepository(ClientUser).findOne({
       where: { id: String(order.clientUserId) },
@@ -2112,10 +2143,15 @@ class O2oPreorderService {
         totalAmount,
         expireInSeconds: this.resolveExpireInSeconds(order, nowMs),
         id,
-        showNo: order.showNo,
-        customerOrderShowNo,
+        preorderNo: order.preorderNo,
+        ...(exposeSystemNo ? {
+          showNo: order.preorderNo,
+          customerOrderSystemNo,
+          customerOrderShowNo: customerOrderSystemNo,
+          originalCustomerOrderSystemNo,
+          originalCustomerOrderShowNo: originalCustomerOrderSystemNo,
+        } : {}),
         customerOrderBusinessNo,
-        originalCustomerOrderShowNo,
         originalCustomerOrderBusinessNo,
         verifyCode: order.verifyCode,
         status: order.status,
@@ -2407,6 +2443,8 @@ class O2oPreorderService {
     orders: O2oPreorder[],
     options?: {
       nowMs?: number
+      matchedKeyword?: string
+      exposeSystemNo?: boolean
     },
   ): Promise<O2oPreorderSummaryView[]> {
     if (!orders.length) {
@@ -2414,20 +2452,35 @@ class O2oPreorderService {
     }
     const orderIds = orders.map((item) => String(item.id))
     const nowMs = options?.nowMs ?? Date.now()
-    const customerOrderShowNoMap = await this.resolveCustomerOrderShowNoMap(orderIds)
+    const exposeSystemNo = options?.exposeSystemNo !== false
+    const customerOrderIdentifierMap = await this.resolveCustomerOrderIdentifierMap(orderIds)
     const totalAmountMap = await this.resolveOrderTotalAmountMap(orderIds)
     const returnRequestCountMap = await this.resolveOrderReturnRequestCountMap(orderIds)
     const latestReturnRequestMap = await this.resolveLatestReturnRequestSummaryMap(orderIds)
-    return orders.map((item) => ({
+    return orders.map((item) => {
+      const customerOrderNumbers = customerOrderIdentifierMap.get(String(item.id)) ?? null
+      const matchedIdentifier = this.resolveMatchedPreorderIdentifier(
+        item,
+        customerOrderNumbers,
+        options?.matchedKeyword,
+        exposeSystemNo,
+      )
+      return {
       statusReport: this.resolveOrderStatusReport(item, nowMs),
       totalAmount: totalAmountMap.get(String(item.id)) ?? '0.00',
       expireInSeconds: this.resolveExpireInSeconds(item, nowMs),
       id: String(item.id),
-      showNo: item.showNo,
-      customerOrderShowNo: customerOrderShowNoMap.get(String(item.id))?.showNo ?? null,
-      customerOrderBusinessNo: customerOrderShowNoMap.get(String(item.id))?.businessNo ?? null,
-      originalCustomerOrderShowNo: customerOrderShowNoMap.get(String(item.id))?.originalShowNo ?? null,
-      originalCustomerOrderBusinessNo: customerOrderShowNoMap.get(String(item.id))?.originalBusinessNo ?? null,
+      preorderNo: item.preorderNo,
+      ...(exposeSystemNo ? {
+        showNo: item.preorderNo,
+        customerOrderSystemNo: customerOrderNumbers?.systemNo ?? null,
+        customerOrderShowNo: customerOrderNumbers?.systemNo ?? null,
+        originalCustomerOrderSystemNo: customerOrderNumbers?.originalSystemNo ?? null,
+        originalCustomerOrderShowNo: customerOrderNumbers?.originalSystemNo ?? null,
+      } : {}),
+      customerOrderBusinessNo: customerOrderNumbers?.businessNo ?? null,
+      ...matchedIdentifier,
+      originalCustomerOrderBusinessNo: customerOrderNumbers?.originalBusinessNo ?? null,
       verifyCode: item.verifyCode,
       status: item.status,
       businessStatus: item.businessStatus ?? null,
@@ -2444,7 +2497,34 @@ class O2oPreorderService {
       timeoutAt: item.timeoutAt,
       pickupAt: item.pickupAt ?? null,
       createdAt: item.createdAt,
-    }))
+    }
+    })
+  }
+
+  private resolveMatchedPreorderIdentifier(
+    preorder: O2oPreorder,
+    customerOrderNumbers: {
+      systemNo: string
+      businessNo: string
+      originalSystemNo: string
+      originalBusinessNo: string
+    } | null,
+    keyword?: string,
+    exposeSystemNo = true,
+  ): Pick<O2oPreorderSummaryView, 'matchedIdentifierType' | 'matchedIdentifierValue'> {
+    const normalizedKeyword = keyword?.trim().toLowerCase() ?? ''
+    if (!normalizedKeyword) return { matchedIdentifierType: null, matchedIdentifierValue: null }
+    const candidates = [
+      ['preorderNo', preorder.preorderNo],
+      ['businessNo', customerOrderNumbers?.businessNo ?? null],
+      ...(exposeSystemNo ? [['systemNo', customerOrderNumbers?.systemNo ?? null] as const] : []),
+      ['businessNo', customerOrderNumbers?.originalBusinessNo ?? null],
+      ...(exposeSystemNo ? [['systemNo', customerOrderNumbers?.originalSystemNo ?? null] as const] : []),
+    ] as const
+    const matched = candidates.find(([, value]) => value?.toLowerCase().includes(normalizedKeyword))
+    return matched
+      ? { matchedIdentifierType: matched[0], matchedIdentifierValue: matched[1] }
+      : { matchedIdentifierType: null, matchedIdentifierValue: null }
   }
 
   /**
@@ -2456,6 +2536,7 @@ class O2oPreorderService {
     order: O2oPreorder,
     options?: {
       nowMs?: number
+      exposeSystemNo?: boolean
     },
   ): Promise<O2oPreorderSummaryView> {
     const [summary] = await this.buildOrderSummaryViews([order], options)
@@ -2715,16 +2796,12 @@ class O2oPreorderService {
     return (await this.getMallStorefrontPublicSnapshot()).data
   }
 
-  private async generatePreorderShowNo(
+  private async generatePreorderNo(
     clientOrderType: O2oClientOrderType,
     manager = AppDataSource.manager,
   ): Promise<string> {
-    // 预订单展示单号与正式出库单统一前缀规则：
-    // - 部门单：hyyzjdxxxx
-    // - 散客单：hyyzxxxx
-    // 这样客户端下单后立即显示业务单号口径，不再先出现 PO 前缀。
     const orderType = clientOrderType === 'department' ? 'department' : 'walkin'
-    return orderSerialService.generateOrderNo(orderType, manager)
+    return orderSerialService.generatePreorderNo(orderType, manager)
   }
 
   // 详细注释：创建退货申请前，需要先统一校验订单是否仍处于允许售后的窗口。
@@ -2842,7 +2919,7 @@ class O2oPreorderService {
     })
     if (fastExistingOrder) {
       this.assertIdempotentRequestMatches(fastExistingOrder, clientRequestHash)
-      return this.buildOrderDetail(fastExistingOrder)
+      return this.buildOrderDetail(fastExistingOrder, AppDataSource.manager, false)
     }
 
     const o2oRules = await systemConfigService.getO2oRuleConfigs()
@@ -2907,10 +2984,10 @@ class O2oPreorderService {
         const pickupAt = normalizedClientOrderType === 'department'
           ? this.assertDepartmentPickupAt(normalizedPickupAt, timeoutAt, o2oRules.autoCancelHours)
           : null
-        const showNo = await this.generatePreorderShowNo(normalizedClientOrderType, manager)
+        const preorderNo = await this.generatePreorderNo(normalizedClientOrderType, manager)
         const savedOrder = await preorderRepo.save(
           preorderRepo.create({
-            showNo,
+            preorderNo,
             clientUserId: auth.userId,
             clientRequestId: normalizedClientRequestId,
             clientRequestHash,
@@ -2983,7 +3060,8 @@ class O2oPreorderService {
           sourceType: 'o2o_preorder',
           sourceId: String(savedOrder.id),
           payload: {
-            showNo: savedOrder.showNo,
+            preorderNo: savedOrder.preorderNo,
+            showNo: savedOrder.preorderNo,
             sourceUserId: auth.userId,
             sourceUserDisplayName: auth.realName || auth.account,
           },
@@ -3014,7 +3092,7 @@ class O2oPreorderService {
     if (transactionResult.created) {
       this.invalidateMallReadCache()
     }
-    const detail = await this.detailById(transactionResult.orderId)
+    const detail = await this.loadOrderDetailById(transactionResult.orderId, AppDataSource.manager, false)
     return detail
   }
 
@@ -3344,7 +3422,7 @@ class O2oPreorderService {
           operatorType: 'client',
           operatorId: auth.userId,
           operatorName: auth.realName || auth.mobile,
-          logRemark: `客户端修改订单，订单号：${order.showNo}`,
+          logRemark: `客户端修改订单，订单号：${order.preorderNo}`,
         },
         order,
         existingQtyMap,
@@ -3359,7 +3437,7 @@ class O2oPreorderService {
       order.remark = normalizedRemark
       order.updateCount = this.normalizeOrderUpdateCount(order.updateCount) + 1
       await orderRepo.save(order)
-      return { timedOut: false as const, detail: await this.buildOrderDetail(order, manager) }
+      return { timedOut: false as const, detail: await this.buildOrderDetail(order, manager, false) }
     })
     this.invalidateMallReadCache()
     if (result.timedOut) {
@@ -3436,7 +3514,7 @@ class O2oPreorderService {
           operatorType: 'admin',
           operatorId: auth.userId,
           operatorName: auth.displayName,
-          logRemark: `门店现场改单，订单号：${order.showNo}`,
+          logRemark: `门店现场改单，订单号：${order.preorderNo}`,
         },
         order,
         existingQtyMap,
@@ -3450,7 +3528,7 @@ class O2oPreorderService {
       order.totalQty = totalQty
       order.remark = normalizedRemark
       await orderRepo.save(order)
-      return { timedOut: false as const, detail: await this.buildOrderDetail(order, manager) }
+      return { timedOut: false as const, detail: await this.buildOrderDetail(order, manager, canViewSystemNo(auth)) }
     })
     this.invalidateMallReadCache()
     if (result.timedOut) {
@@ -3487,17 +3565,17 @@ class O2oPreorderService {
       const normalizedVerifyCodeKeyword = this.normalizeVerifyCode(normalizedKeyword)
       const escapedVerifyKeyword = this.escapeLikeKeyword(normalizedVerifyCodeKeyword)
       const matchedClientOrderType = this.resolveClientOrderTypeByKeyword(normalizedKeyword)
-      const matchedCustomerOrderPreorderIds = await this.resolveMatchedPreorderIdsByCustomerOrderKeyword(normalizedKeyword)
+      const matchedCustomerOrderPreorderIds = await this.resolveMatchedPreorderIdsByCustomerOrderKeyword(normalizedKeyword, false)
       const keywordContains = `%${escapedKeyword}%`
 
       queryBuilder.andWhere(
         new Brackets((keywordQb) => {
           keywordQb
             // 等值匹配优先命中 show_no / verify_code 唯一索引。
-            .where('order.showNo = :showNoExact', { showNoExact: normalizedKeyword })
+            .where('order.preorderNo = :showNoExact', { showNoExact: normalizedKeyword })
             .orWhere('order.verifyCode = :verifyCodeExact', { verifyCodeExact: normalizedVerifyCodeKeyword })
             // 前缀匹配在输入单号前几位时仍可利用 B-Tree 索引。
-            .orWhere(String.raw`order.showNo LIKE :showNoPrefix ESCAPE '\'`, { showNoPrefix: keywordPrefix })
+            .orWhere(String.raw`order.preorderNo LIKE :showNoPrefix ESCAPE '\'`, { showNoPrefix: keywordPrefix })
             .orWhere(String.raw`order.verifyCode LIKE :verifyCodePrefix ESCAPE '\'`, {
               verifyCodePrefix: `${escapedVerifyKeyword}%`,
             })
@@ -3529,7 +3607,11 @@ class O2oPreorderService {
       page: normalizedPage,
       pageSize: normalizedPageSize,
       total,
-      list: await this.buildOrderSummaryViews(rows, { nowMs }),
+      list: await this.buildOrderSummaryViews(rows, {
+        nowMs,
+        matchedKeyword: normalizedKeyword,
+        exposeSystemNo: false,
+      }),
     }
   }
 
@@ -3538,7 +3620,7 @@ class O2oPreorderService {
     if (!order) {
       throw new BizError('预订单不存在', 404)
     }
-    return this.buildOrderDetail(order)
+    return this.buildOrderDetail(order, AppDataSource.manager, false)
   }
 
   async getMyOrderSummary(auth: ClientAuthContext, id: string) {
@@ -3546,7 +3628,7 @@ class O2oPreorderService {
     if (!order) {
       throw new BizError('预订单不存在', 404)
     }
-    return this.buildOrderSummaryView(order)
+    return this.buildOrderSummaryView(order, { exposeSystemNo: false })
   }
 
   async createReturnRequest(auth: ClientAuthContext, orderId: string, input: SubmitReturnRequestInput) {
@@ -3638,9 +3720,10 @@ class O2oPreorderService {
   async listConsoleOrders(input: O2oConsoleOrderFilterInput & {
     status?: 'pending' | 'verified' | 'cancelled'
     limit?: number
-  }) {
+  }, actor?: Pick<AuthUserContext, 'role'>) {
+    const exposeSystemNo = canViewSystemNo(actor)
     const normalizedLimit = Math.max(1, Math.min(200, Number(input.limit) || 50))
-    const queryBuilder = this.createConsoleOrderFilteredQuery(input)
+    const queryBuilder = (await this.createConsoleOrderFilteredQuery(input, exposeSystemNo))
       .orderBy('order.id', 'DESC')
       .take(normalizedLimit)
 
@@ -3650,7 +3733,7 @@ class O2oPreorderService {
 
     const rows = await queryBuilder.getMany()
     const nowMs = Date.now()
-    return this.buildOrderSummaryViews(rows, { nowMs })
+    return this.buildOrderSummaryViews(rows, { nowMs, matchedKeyword: input.keyword, exposeSystemNo })
   }
 
   /**
@@ -3665,11 +3748,12 @@ class O2oPreorderService {
     page?: number
     pageSize?: number
     sinceOrderId?: string
-  }) {
+  }, actor?: Pick<AuthUserContext, 'role'>) {
+    const exposeSystemNo = canViewSystemNo(actor)
     const pool = input.pool ?? 'all'
     const pageSize = Math.max(1, Math.min(100, Math.floor(Number(input.pageSize) || 10)))
     const requestedPage = Math.max(1, Math.floor(Number(input.page) || 1))
-    const baseQuery = this.createConsoleOrderFilteredQuery(input)
+    const baseQuery = await this.createConsoleOrderFilteredQuery(input, exposeSystemNo)
 
     const statusRows = await baseQuery
       .clone()
@@ -3713,7 +3797,11 @@ class O2oPreorderService {
         .getCount()
     }
 
-    const list = await this.buildOrderSummaryViews(rows, { nowMs: Date.now() })
+    const list = await this.buildOrderSummaryViews(rows, {
+      nowMs: Date.now(),
+      matchedKeyword: input.keyword,
+      exposeSystemNo,
+    })
     return {
       page,
       pageSize,
@@ -3754,7 +3842,7 @@ class O2oPreorderService {
    * - 旧数组接口与分页接口共用同一套筛选口径，避免计数、分页与历史接口结果漂移；
    * - 只负责筛选条件，不追加排序、分页与分栏条件。
    */
-  private createConsoleOrderFilteredQuery(input: O2oConsoleOrderFilterInput) {
+  private async createConsoleOrderFilteredQuery(input: O2oConsoleOrderFilterInput, exposeSystemNo = true) {
     const normalizedKeyword = input.keyword?.trim() ?? ''
     const normalizedDepartmentName = input.departmentName?.trim() ?? ''
     const normalizedStaffNo = input.staffNo?.trim() ?? ''
@@ -3789,6 +3877,10 @@ class O2oPreorderService {
     }
 
     if (normalizedKeyword) {
+      const matchedCustomerOrderPreorderIds = await this.resolveMatchedPreorderIdsByCustomerOrderKeyword(
+        normalizedKeyword,
+        exposeSystemNo,
+      )
       const escapedKeyword = this.escapeLikeKeyword(normalizedKeyword)
       const keyword = `%${escapedKeyword}%`
       const clientKeywordSubQuery = this.preorderRepo
@@ -3819,7 +3911,7 @@ class O2oPreorderService {
       queryBuilder.andWhere(
         new Brackets((keywordQb) => {
           keywordQb
-            .where(String.raw`order.showNo LIKE :keyword ESCAPE '\'`, { keyword })
+            .where(String.raw`order.preorderNo LIKE :keyword ESCAPE '\'`, { keyword })
             .orWhere(String.raw`order.verifyCode LIKE :keyword ESCAPE '\'`, { keyword })
             .orWhere(String.raw`order.remark LIKE :keyword ESCAPE '\'`, { keyword })
             .orWhere(String.raw`order.verifiedBy LIKE :keyword ESCAPE '\'`, { keyword })
@@ -3827,6 +3919,9 @@ class O2oPreorderService {
             .orWhere(String.raw`order.staffNoSnapshot LIKE :keyword ESCAPE '\'`, { keyword })
             .orWhere(`EXISTS ${clientKeywordSubQuery}`, { keyword })
             .orWhere(`EXISTS ${itemKeywordSubQuery}`, { keyword })
+          if (matchedCustomerOrderPreorderIds.length > 0) {
+            keywordQb.orWhere('order.id IN (:...matchedCustomerOrderPreorderIds)', { matchedCustomerOrderPreorderIds })
+          }
         }),
       )
     }
@@ -3834,12 +3929,20 @@ class O2oPreorderService {
     return queryBuilder
   }
 
-  async detailById(id: string, manager: EntityManager = AppDataSource.manager) {
+  async detailById(
+    id: string,
+    actor?: Pick<AuthUserContext, 'role'>,
+    manager: EntityManager = AppDataSource.manager,
+  ) {
+    return this.loadOrderDetailById(id, manager, canViewSystemNo(actor))
+  }
+
+  private async loadOrderDetailById(id: string, manager: EntityManager, exposeSystemNo: boolean) {
     const order = await manager.getRepository(O2oPreorder).findOne({ where: { id, isDeleted: false } })
     if (!order) {
       throw new BizError('预订单不存在', 404)
     }
-    return this.buildOrderDetail(order, manager)
+    return this.buildOrderDetail(order, manager, exposeSystemNo)
   }
 
   async updateBusinessStatus(input: UpdateOrderBusinessStatusInput, actor: AuthUserContext) {
@@ -3855,7 +3958,7 @@ class O2oPreorderService {
       }
       order.businessStatus = this.normalizeBusinessStatus(input.businessStatus)
       await orderRepo.save(order)
-      return this.buildOrderDetail(order, manager)
+      return this.buildOrderDetail(order, manager, canViewSystemNo(actor))
     })
   }
 
@@ -3872,7 +3975,7 @@ class O2oPreorderService {
       }
       order.merchantMessage = this.normalizeMerchantMessage(input.merchantMessage)
       await orderRepo.save(order)
-      return this.buildOrderDetail(order, manager)
+      return this.buildOrderDetail(order, manager, canViewSystemNo(actor))
     })
   }
 
@@ -3909,7 +4012,7 @@ class O2oPreorderService {
         })
       }
       return {
-        detail: await this.buildOrderDetail(order, manager),
+        detail: await this.buildOrderDetail(order, manager, false),
         printedNow,
       }
     })
@@ -3956,7 +4059,7 @@ class O2oPreorderService {
           displayName: actor.displayName,
         },
       })
-      return this.buildOrderDetail(order, manager)
+      return this.buildOrderDetail(order, manager, canViewSystemNo(actor))
     })
   }
 
@@ -3965,8 +4068,8 @@ class O2oPreorderService {
     actor: AuthUserContext,
     requestMeta?: RequestMeta,
   ): Promise<DeletedConsolePreorderView> {
-    const normalizedConfirmShowNo = input.confirmShowNo.trim()
-    if (!normalizedConfirmShowNo) {
+    const normalizedConfirmPreorderNo = input.confirmPreorderNo.trim()
+    if (!normalizedConfirmPreorderNo) {
       throw new BizError('请填写订单号完成二次确认', 400)
     }
 
@@ -3986,12 +4089,15 @@ class O2oPreorderService {
       if (!order) {
         throw new BizError('订单池订单不存在', 404)
       }
-      if (order.showNo !== normalizedConfirmShowNo) {
+      if (order.preorderNo !== normalizedConfirmPreorderNo) {
         throw new BizError('二次确认失败：订单号不匹配', 400)
       }
 
       const linkedOutboundOrder = await this.loadLinkedOutboundOrderInManager(manager, String(order.id))
       if (linkedOutboundOrder) {
+        if (linkedOutboundOrder.inventoryMode === 'manual_applied') {
+          throw new BizError('关联手工出库单仍承载库存影响，禁止永久删除', 409)
+        }
         await orderMergeService.assertNotMergeMember(
           manager,
           String(linkedOutboundOrder.id),
@@ -4003,11 +4109,19 @@ class O2oPreorderService {
       })
       const returnRequestIds = returnRequests.map((item) => String(item.id))
       const releasedPreorderedQty = await this.releasePendingPreorderStockForDeleteInManager(manager, order, actor)
-      const affectedOrderTypes = new Set<string>([order.clientOrderType])
-      if (linkedOutboundOrder) {
-        affectedOrderTypes.add(linkedOutboundOrder.orderType)
-      }
-
+      await cleanupOrderIdentifiableData(manager, {
+        orderIds: linkedOutboundOrder ? [String(linkedOutboundOrder.id)] : [],
+        orderUuids: linkedOutboundOrder ? [linkedOutboundOrder.orderUuid] : [],
+        preorderIds: [String(order.id)],
+        returnRequestIds,
+        stableFeedbackRefs: [
+          order.preorderNo,
+          order.verifyCode,
+          linkedOutboundOrder?.orderUuid,
+          linkedOutboundOrder?.systemNo,
+          linkedOutboundOrder?.businessNo,
+        ].filter((value): value is string => Boolean(value)),
+      })
       if (linkedOutboundOrder) {
         await outboundOrderItemRepo.delete({ orderId: String(linkedOutboundOrder.id) })
         const deleteOutboundResult = await outboundOrderRepo.delete({ id: String(linkedOutboundOrder.id) })
@@ -4026,51 +4140,49 @@ class O2oPreorderService {
         throw new BizError('订单池订单删除失败，请稍后重试', 500)
       }
 
-      const serialCalibrations: OrderSerialRecalibrationResult[] = []
-      for (const orderType of affectedOrderTypes) {
-        serialCalibrations.push(await orderSerialService.recalibrateCurrentFromOccupancy(orderType, manager))
-      }
-      const serialCalibrationMap = new Map(serialCalibrations.map((item) => [item.orderType, item]))
-      const preorderSerialCalibration = serialCalibrationMap.get(order.clientOrderType)
+      const preorderSerialCalibration = await orderSerialService.rollbackDeletedIdentifierBatch(
+        'preorder',
+        order.clientOrderType,
+        [order.preorderNo],
+        manager,
+      )
       const outboundSerialCalibration = linkedOutboundOrder
-        ? serialCalibrationMap.get(linkedOutboundOrder.orderType as OrderSerialRecalibrationResult['orderType'])
+        ? await orderSerialService.rollbackDeletedIdentifierBatch(
+          'system',
+          linkedOutboundOrder.orderType,
+          [linkedOutboundOrder.systemNo],
+          manager,
+        )
         : undefined
+      const serialCalibrations = [preorderSerialCalibration, ...(outboundSerialCalibration ? [outboundSerialCalibration] : [])]
       const preorderSerialRolledBack = Boolean(preorderSerialCalibration?.rolledBack)
       const outboundSerialRolledBack = Boolean(outboundSerialCalibration?.rolledBack)
 
+      const redactedTarget = buildRedactedDeleteTarget('o2o')
       await auditService.record(
         {
           actionType: 'o2o.preorder.delete',
-          actionLabel: '删除订单池订单',
+          actionLabel: '永久删除 O2O 订单链',
           targetType: 'o2o_order',
-          targetId: String(order.id),
-          targetCode: order.showNo,
+          targetId: null,
+          targetCode: redactedTarget,
           actor,
           requestMeta,
-          detail: {
-            status: order.status,
-            clientOrderType: order.clientOrderType,
-            releasedPreorderedQty,
-            returnRequestCount: returnRequests.length,
-            outboundOrderId: linkedOutboundOrder ? String(linkedOutboundOrder.id) : null,
-            outboundOrderShowNo: linkedOutboundOrder?.showNo ?? null,
-            outboundOrderDeleted: Boolean(linkedOutboundOrder),
-            outboundSerialRolledBack,
-            preorderSerialRolledBack,
-            serialCalibrations,
-          },
+          detail: { redactedTarget },
         },
         manager,
       )
 
       return {
         id: String(order.id),
-        showNo: order.showNo,
+        preorderNo: order.preorderNo,
+        showNo: order.preorderNo,
         status: order.status,
         clientOrderType: order.clientOrderType,
         releasedPreorderedQty,
         returnRequestCount: returnRequests.length,
-        outboundOrderShowNo: linkedOutboundOrder?.showNo ?? null,
+        outboundOrderSystemNo: linkedOutboundOrder?.systemNo ?? null,
+        outboundOrderShowNo: linkedOutboundOrder?.systemNo ?? null,
         outboundOrderDeleted: Boolean(linkedOutboundOrder),
         preorderSerialRolledBack,
         outboundSerialRolledBack,
@@ -4126,7 +4238,7 @@ class O2oPreorderService {
         actionLabel: '客户端撤回预订单',
         targetType: 'o2o_order',
         targetId: String(order.id),
-        targetCode: order.showNo,
+        targetCode: order.preorderNo,
         actor: { userId: String(auth.userId), username: auth.account, displayName: auth.realName || auth.mobile },
         requestMeta,
         detail: {
@@ -4137,7 +4249,7 @@ class O2oPreorderService {
           releasedQty: order.totalQty,
         },
       }, manager)
-      return { timedOut: false as const, detail: await this.buildOrderDetail(order, manager) }
+      return { timedOut: false as const, detail: await this.buildOrderDetail(order, manager, false) }
     })
     this.invalidateMallReadCache()
     if (result.timedOut) {
@@ -4187,7 +4299,7 @@ class O2oPreorderService {
         actionLabel: '管理端取消预订单',
         targetType: 'o2o_order',
         targetId: String(order.id),
-        targetCode: order.showNo,
+        targetCode: order.preorderNo,
         actor: input.actor,
         requestMeta: input.requestMeta,
         detail: {
@@ -4198,7 +4310,7 @@ class O2oPreorderService {
           cancellationSource: 'admin',
         },
       }, manager)
-      return { timedOut: false as const, detail: await this.buildOrderDetail(order, manager) }
+      return { timedOut: false as const, detail: await this.buildOrderDetail(order, manager, canViewSystemNo(input.actor)) }
     })
     this.invalidateMallReadCache()
     if (result.timedOut) {
@@ -4209,46 +4321,63 @@ class O2oPreorderService {
 
   async batchPurgeCancelledOrders(input: BatchPurgeCancelledPreorderInput): Promise<BatchPurgeCancelledPreordersView> {
     if (input.orders.length < 1 || input.orders.length > 50) throw new BizError('批量永久删除订单数量应为 1-50 项', 400)
-    const orders = input.orders.map((item) => ({ id: item.id.trim(), confirmShowNo: item.confirmShowNo.trim() }))
-    if (orders.some((item) => !item.id || !item.confirmShowNo)) throw new BizError('订单 ID 与二次确认订单号不能为空', 400)
+    const orders = input.orders.map((item) => ({ id: item.id.trim(), confirmPreorderNo: item.confirmPreorderNo.trim() }))
+    if (orders.some((item) => !item.id || !item.confirmPreorderNo)) throw new BizError('订单 ID 与二次确认订单号不能为空', 400)
     if (new Set(orders.map((item) => item.id)).size !== orders.length) throw new BizError('订单 ID 不可重复', 400)
     const batchId = randomUUID()
     const results: BatchPurgeCancelledPreorderResult[] = []
-    for (const item of orders) {
+    const inputOrderIndex = new Map(orders.map((item, index) => [item.id, index]))
+    const executionOrders = [...orders].sort((left, right) =>
+      right.confirmPreorderNo.localeCompare(left.confirmPreorderNo),
+    )
+    for (const item of executionOrders) {
       try {
         results.push(await runInTransaction(async (manager): Promise<BatchPurgeCancelledPreorderResult> => {
           await lockActiveSysAccountForBusiness(manager, input.actor.userId)
           const preorderRepo = manager.getRepository(O2oPreorder)
           const order = await preorderRepo.findOne({ where: { id: item.id }, lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' } })
           if (!order) return { id: item.id, outcome: 'failed', code: 'ORDER_NOT_FOUND', message: '订单不存在' }
-          if (order.showNo !== item.confirmShowNo) return { id: item.id, showNo: order.showNo, outcome: 'failed', code: 'SHOW_NO_MISMATCH', message: '二次确认订单号不匹配' }
-          if (order.isDeleted || order.status !== 'cancelled') return { id: item.id, showNo: order.showNo, outcome: 'skipped', code: 'ORDER_NOT_CANCELLED', message: '订单当前不是可永久删除的已取消状态' }
+          if (order.preorderNo !== item.confirmPreorderNo) return { id: item.id, preorderNo: order.preorderNo, showNo: order.preorderNo, outcome: 'failed', code: 'SHOW_NO_MISMATCH', message: '二次确认订单号不匹配' }
+          if (order.isDeleted || order.status !== 'cancelled') return { id: item.id, preorderNo: order.preorderNo, showNo: order.preorderNo, outcome: 'skipped', code: 'ORDER_NOT_CANCELLED', message: '订单当前不是可永久删除的已取消状态' }
           const [returnRequestCount, linkedOutboundOrder] = await Promise.all([
             manager.getRepository(O2oReturnRequest).count({ where: { orderId: String(order.id) } }),
             this.loadLinkedOutboundOrderInManager(manager, String(order.id)),
           ])
-          if (returnRequestCount > 0) return { id: item.id, showNo: order.showNo, outcome: 'skipped', code: 'RETURN_REQUEST_EXISTS', message: '订单存在退货申请，无法永久删除' }
-          if (linkedOutboundOrder) return { id: item.id, showNo: order.showNo, outcome: 'skipped', code: 'OUTBOUND_ORDER_EXISTS', message: '订单关联正式出库单，无法永久删除' }
-          const preorderItems = await manager.getRepository(O2oPreorderItem).find({ where: { orderId: String(order.id) } })
+          if (returnRequestCount > 0) return { id: item.id, preorderNo: order.preorderNo, showNo: order.preorderNo, outcome: 'skipped', code: 'RETURN_REQUEST_EXISTS', message: '订单存在退货申请，无法永久删除' }
+          if (linkedOutboundOrder) return { id: item.id, preorderNo: order.preorderNo, showNo: order.preorderNo, outcome: 'skipped', code: 'OUTBOUND_ORDER_EXISTS', message: '订单关联正式出库单，无法永久删除' }
+          await cleanupOrderIdentifiableData(manager, {
+            preorderIds: [String(order.id)],
+            stableFeedbackRefs: [order.preorderNo, order.verifyCode].filter((value): value is string => Boolean(value)),
+          })
           await manager.getRepository(O2oPreorderItem).delete({ orderId: String(order.id) })
           const deleted = await preorderRepo.delete({ id: String(order.id), status: 'cancelled', isDeleted: false })
           if ((deleted.affected ?? 0) !== 1) throw new BizError('订单状态已变化，请刷新后重试', 409)
           // 与单笔删除共用占用校准，删除、流水镜像与审计必须同事务提交。
-          const serialCalibration = await orderSerialService.recalibrateCurrentFromOccupancy(order.clientOrderType, manager)
+          const serialCalibration = await orderSerialService.rollbackDeletedIdentifierBatch(
+            'preorder',
+            order.clientOrderType,
+            [order.preorderNo],
+            manager,
+          )
+          const redactedTarget = buildRedactedDeleteTarget('o2o')
           await auditService.record({
-            actionType: 'o2o.preorder.purge_cancelled', actionLabel: '批量永久删除已取消预订单', targetType: 'o2o_order', targetId: String(order.id), targetCode: order.showNo, actor: input.actor, requestMeta: input.requestMeta,
-            detail: { batchId, serialCalibration, snapshot: { status: order.status, cancelReason: order.cancelReason, cancellationSource: order.cancellationSource, cancellationRemark: order.cancellationRemark, cancelledAt: order.cancelledAt, totalQty: order.totalQty, itemCount: preorderItems.length } },
+            actionType: 'o2o.preorder.purge_cancelled',
+            actionLabel: '永久删除已取消 O2O 预订单',
+            targetType: 'o2o_order',
+            targetId: null,
+            targetCode: redactedTarget,
+            actor: input.actor,
+            requestMeta: input.requestMeta,
+            detail: { redactedTarget },
           }, manager)
-          return { id: item.id, showNo: order.showNo, outcome: 'deleted', code: 'DELETED', message: '已永久删除' }
+          return { id: item.id, preorderNo: order.preorderNo, showNo: order.preorderNo, outcome: 'deleted', code: 'DELETED', message: '已永久删除' }
         }))
       } catch (error) {
         results.push({ id: item.id, outcome: 'failed', code: error instanceof BizError ? 'BUSINESS_ERROR' : 'PURGE_FAILED', message: error instanceof BizError ? error.message : '永久删除失败，请稍后重试' })
       }
     }
+    results.sort((left, right) => (inputOrderIndex.get(left.id) ?? 0) - (inputOrderIndex.get(right.id) ?? 0))
     const summary = { requested: orders.length, deleted: results.filter((item) => item.outcome === 'deleted').length, skipped: results.filter((item) => item.outcome === 'skipped').length, failed: results.filter((item) => item.outcome === 'failed').length }
-    // 单笔删除及其审计已在各自事务内提交；汇总日志属于辅助索引，失败时不能
-    // 把已完成的物理删除伪装成整批失败，否则客户端重试会丢失首次结果语义。
-    await auditService.safeRecord({ actionType: 'o2o.preorder.purge_cancelled_batch', actionLabel: '批量永久删除已取消预订单汇总', targetType: 'o2o_order_batch', targetId: batchId, actor: input.actor, requestMeta: input.requestMeta, detail: { batchId, summary, results } })
     return { batchId, summary, results }
   }
 
@@ -4607,11 +4736,11 @@ class O2oPreorderService {
     return {
       operationType: 'preorder_verify',
       verifyTargetType: 'preorder',
-      detail: await this.detailById(savedOrder.id, manager),
+      detail: await this.detailById(savedOrder.id, actor, manager),
     }
   }
 
-  async verifyByCode(verifyCode: string, actor: AuthUserContext) {
+  async verifyByCode(verifyCode: string, actor: AuthUserContext, requestMeta?: RequestMeta) {
     const normalizedVerifyCode = this.normalizeVerifyCode(verifyCode)
     const result = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
@@ -4634,6 +4763,23 @@ class O2oPreorderService {
           throw new BizError('退货申请不存在', 404)
         }
         const detail = await this.verifyReturnRequestInManager(manager, returnRequest, order, actor)
+        if (detail) {
+          await auditService.record({
+            actionType: 'o2o.return_request.verify',
+            actionLabel: '核销退货申请并回库',
+            targetType: 'o2o_return_request',
+            targetId: String(returnRequest.id),
+            targetCode: returnRequest.returnNo,
+            actor,
+            requestMeta,
+            detail: {
+              operationType: detail.operationType,
+              verifyTargetType: detail.verifyTargetType,
+              returnNo: returnRequest.returnNo,
+              preorderNo: order.preorderNo,
+            },
+          }, manager)
+        }
         return detail
           ? { timedOut: null, detail }
           : { timedOut: 'return_request' as const, detail: null }
@@ -4648,7 +4794,29 @@ class O2oPreorderService {
       if (await this.cancelTimedOutOrderInManager(manager, order)) {
         return { timedOut: 'preorder' as const, detail: null }
       }
-      return { timedOut: null, detail: await this.verifyPreorderInManager(manager, order, actor) }
+      const detail = await this.verifyPreorderInManager(manager, order, actor)
+      const outboundOrder = await this.loadLinkedOutboundOrderInManager(manager, String(order.id))
+      if (!outboundOrder) {
+        throw new BizError('核销已完成但正式出库单追溯缺失', 500)
+      }
+      await auditService.record({
+        actionType: 'o2o.preorder.verify',
+        actionLabel: '核销预订单并出库',
+        targetType: 'o2o_order',
+        targetId: String(order.id),
+        targetCode: outboundOrder.businessNo,
+        actor,
+        requestMeta,
+        detail: {
+          operationType: detail.operationType,
+          verifyTargetType: detail.verifyTargetType,
+          preorderNo: order.preorderNo,
+          outboundOrderId: String(outboundOrder.id),
+          outboundOrderBusinessNo: outboundOrder.businessNo,
+          outboundOrderSystemNo: outboundOrder.systemNo,
+        },
+      }, manager)
+      return { timedOut: null, detail }
     })
     this.invalidateMallReadCache({ soldQtyChanged: result.timedOut === null })
     if (result.timedOut === 'return_request') {
@@ -4862,7 +5030,7 @@ class O2oPreorderService {
     }
   }
 
-  async getVerifyDetail(verifyCode: string) {
+  async getVerifyDetail(verifyCode: string, actor?: Pick<AuthUserContext, 'role'>) {
     const normalizedVerifyCode = this.normalizeVerifyCode(verifyCode)
     const returnRequest = await this.returnRequestRepo.findOne({ where: { verifyCode: normalizedVerifyCode } })
     if (returnRequest) {
@@ -4877,15 +5045,29 @@ class O2oPreorderService {
     }
     return {
       verifyTargetType: 'preorder',
-      detail: await this.detailById(order.id),
+      detail: await this.detailById(order.id, actor),
     } satisfies O2oVerifyDetailView
   }
 
-  async getVerifyDetailByShowNo(showNo: string) {
-    const normalizedShowNo = showNo.trim()
-    if (!normalizedShowNo) {
+  async getVerifyDetailByPreorderNo(preorderNo: string, actor?: Pick<AuthUserContext, 'role'>) {
+    const normalizedPreorderNo = preorderNo.trim()
+    if (!normalizedPreorderNo) {
       throw new BizError('单号不能为空', 400)
     }
+    const order = await this.preorderRepo.findOne({ where: { preorderNo: normalizedPreorderNo, isDeleted: false } })
+    if (!order) {
+      throw new BizError('单据不存在', 404)
+    }
+    return {
+      verifyTargetType: 'preorder',
+      detail: await this.detailById(order.id, actor),
+    } satisfies O2oVerifyDetailView
+  }
+
+  /** @deprecated 兼容一个发布周期；`showNo` 仅是旧参数名，实际只接受 returnNo 或 preorderNo，不表示 businessNo/systemNo。 */
+  async getVerifyDetailByShowNo(showNo: string, actor?: Pick<AuthUserContext, 'role'>) {
+    const normalizedShowNo = showNo.trim()
+    if (!normalizedShowNo) throw new BizError('单号不能为空', 400)
     const returnRequest = await this.returnRequestRepo.findOne({ where: { returnNo: normalizedShowNo } })
     if (returnRequest) {
       return {
@@ -4893,14 +5075,7 @@ class O2oPreorderService {
         detail: await this.buildReturnRequestDetail(returnRequest),
       } satisfies O2oVerifyDetailView
     }
-    const order = await this.preorderRepo.findOne({ where: { showNo: normalizedShowNo, isDeleted: false } })
-    if (!order) {
-      throw new BizError('单据不存在', 404)
-    }
-    return {
-      verifyTargetType: 'preorder',
-      detail: await this.detailById(order.id),
-    } satisfies O2oVerifyDetailView
+    return this.getVerifyDetailByPreorderNo(normalizedShowNo, actor)
   }
 
   async listInventoryLogs(limit = 100) {

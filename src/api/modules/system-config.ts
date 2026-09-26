@@ -8,6 +8,7 @@ import { request, type RequestConfig } from '@/api/http'
 
 export type OrderSerialType = 'department' | 'walkin'
 
+/** @deprecated 旧订单流水 API 的只读兼容类型。新页面使用 OrderIdentifierConfigValue。 */
 export interface OrderSerialConfigRecord {
   orderType: OrderSerialType
   orderTypeLabel: string
@@ -38,6 +39,28 @@ export interface UpdateOrderSerialConfigsPayload {
 
 export interface UpdateOrderSerialConfigsResult {
   list: OrderSerialConfigRecord[]
+  changed: boolean
+}
+
+export type OrderIdentifierKind = 'system' | 'preorder' | 'business'
+
+export interface OrderIdentifierConfigValue {
+  prefix: string
+  start: number
+  current: number
+  width: number
+  updatedAt: string
+}
+
+export type OrderIdentifierConfigs = Record<
+  OrderIdentifierKind,
+  Record<OrderSerialType, OrderIdentifierConfigValue>
+>
+
+export type UpdateOrderIdentifierConfigsPayload = OrderIdentifierConfigs
+
+export interface UpdateOrderIdentifierConfigsResult {
+  configs: OrderIdentifierConfigs
   changed: boolean
 }
 
@@ -378,6 +401,21 @@ export const updateOrderSerialConfigs = (payload: UpdateOrderSerialConfigsPayloa
   request<UpdateOrderSerialConfigsResult>({
     method: 'PUT',
     url: '/system-configs/order-serial',
+    data: payload,
+  })
+
+/** 获取正式系统号、出库业务号和 O2O 预订单号三套独立配置。 */
+export const getOrderIdentifierConfigs = () =>
+  request<OrderIdentifierConfigs>({
+    method: 'GET',
+    url: '/system-configs/order-identifiers',
+  })
+
+/** 更新三套编号的当前游标；业务单号字段由后端只读门禁保护。 */
+export const updateOrderIdentifierConfigs = (payload: UpdateOrderIdentifierConfigsPayload) =>
+  request<UpdateOrderIdentifierConfigsResult>({
+    method: 'PUT',
+    url: '/system-configs/order-identifiers',
     data: payload,
   })
 

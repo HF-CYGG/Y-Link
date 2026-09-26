@@ -17,6 +17,7 @@ import { BaseProduct } from '../entities/base-product.entity.js'
 import { BaseProductSku } from '../entities/base-product-sku.entity.js'
 import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
 import { O2oReturnRequest } from '../entities/o2o-return-request.entity.js'
+import { OrderMergeRelation } from '../entities/order-merge-relation.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import {
   isRetryableMysqlTransactionError,
@@ -55,6 +56,10 @@ import {
   type OrderMergeInput,
   type OrderMergeMetadata,
 } from './order-merge.service.js'
+import {
+  buildRedactedDeleteTarget,
+  cleanupOrderIdentifiableData,
+} from './order-permanent-delete-cleanup.service.js'
 
 /**
  * 开单页客户部门选项：
@@ -138,8 +143,13 @@ export interface OrderDetailItemView {
 
 export interface OrderSummaryView {
   id: string
-  showNo: string
+  /** 仅管理员技术追溯可见。 */
+  systemNo?: string
+  /** @deprecated 兼容一个发布周期，值始终等于 systemNo。 */
+  showNo?: string
   businessNo: string
+  matchedIdentifierType: 'businessNo' | 'systemNo' | 'preorderNo' | null
+  matchedIdentifierValue: string | null
   editVersion: number
   status: BizOutboundOrder['status']
   merge: OrderMergeMetadata
@@ -159,6 +169,8 @@ export interface OrderSummaryView {
   sourceDocType: BizOutboundOrder['sourceDocType']
   sourceDocId: string | null
   sourceDocNo: string | null
+  sourcePreorderId: string | null
+  sourcePreorderNo: string | null
   creatorUserId: string | null
   creatorUsername: string | null
   creatorDisplayName: string | null
@@ -188,7 +200,10 @@ export interface SubmitOrderResult {
 
 export interface SubmittedOrderView {
   id: string
-  showNo: string
+  /** 仅管理员技术追溯可见。 */
+  systemNo?: string
+  /** @deprecated 兼容一个发布周期，值始终等于 systemNo。 */
+  showNo?: string
   businessNo: string
   editVersion: number
   inventoryMode: BizOutboundOrder['inventoryMode']
@@ -207,6 +222,9 @@ export interface SubmittedOrderItemView {
 
 export interface PurgedOrderView {
   id: string
+  /** 永久删除仅管理员可执行，因此这里保留技术号快照。 */
+  systemNo: string
+  /** @deprecated 兼容一个发布周期，值始终等于 systemNo。 */
   showNo: string
   orderType: string
   serialRolledBack: boolean
@@ -264,6 +282,8 @@ const normalizeDateTime = (value: Date | string): string => {
   return value instanceof Date ? value.toISOString() : String(value)
 }
 
+const canViewSystemNo = (actor?: Pick<AuthUserContext, 'role'>): boolean => actor?.role === 'admin'
+
 const IDEMPOTENCY_CONSTRAINT_MATCHER = {
   mysqlConstraint: 'uk_biz_outbound_idempotency_key',
   sqliteColumns: ['biz_outbound_order.idempotency_key'],
@@ -293,17 +313,16 @@ export class OrderService {
   private readonly orderRepo = AppDataSource.getRepository(BizOutboundOrder)
   private readonly itemRepo = AppDataSource.getRepository(BizOutboundOrderItem)
 
-  private resolveLinkedO2oPreorderId(order: Pick<BizOutboundOrder, 'idempotencyKey'>): string | null {
-    const idempotencyKey = order.idempotencyKey?.trim() ?? ''
-    if (!idempotencyKey.startsWith(O2O_VERIFIED_PREORDER_IDEMPOTENCY_KEY_PREFIX)) {
-      return null
-    }
-    return idempotencyKey.slice(O2O_VERIFIED_PREORDER_IDEMPOTENCY_KEY_PREFIX.length).trim() || null
+  private resolveLinkedO2oPreorderId(
+    order: Pick<BizOutboundOrder, 'sourceDocType' | 'sourceDocId'>,
+  ): string | null {
+    if (order.sourceDocType !== 'o2o_preorder') return null
+    return normalizeNullableEntityId(order.sourceDocId)
   }
 
   private async syncLinkedO2oPreorderVisibilityInManager(
     manager: EntityManager,
-    order: Pick<BizOutboundOrder, 'id' | 'idempotencyKey'>,
+    order: Pick<BizOutboundOrder, 'id' | 'sourceDocType' | 'sourceDocId'>,
     actor: AuthUserContext,
     deleted: boolean,
   ) {
@@ -313,7 +332,7 @@ export class OrderService {
       relatedOrderIds.push(...mergeMetadata.children.map((child) => child.id))
     }
     const relatedOrders = await manager.getRepository(BizOutboundOrder).find({
-      select: ['id', 'idempotencyKey'],
+      select: ['id', 'sourceDocType', 'sourceDocId'],
       where: { id: In(relatedOrderIds) },
     })
     const preorderIds = [...new Set(relatedOrders
@@ -352,7 +371,7 @@ export class OrderService {
 
   private async assertLinkedO2oMergeGroupHasNoPendingReturns(
     manager: EntityManager,
-    order: Pick<BizOutboundOrder, 'id' | 'idempotencyKey'>,
+    order: Pick<BizOutboundOrder, 'id' | 'sourceDocType' | 'sourceDocId'>,
   ): Promise<void> {
     const relatedOrderIds = [normalizeEntityId(order.id)]
     const mergeMetadata = (await orderMergeService.getMetadataMap(relatedOrderIds, manager)).get(relatedOrderIds[0]!)
@@ -360,7 +379,7 @@ export class OrderService {
       relatedOrderIds.push(...mergeMetadata.children.map((child) => child.id))
     }
     const relatedOrders = await manager.getRepository(BizOutboundOrder).find({
-      select: ['id', 'idempotencyKey'],
+      select: ['id', 'sourceDocType', 'sourceDocId'],
       where: { id: In(relatedOrderIds) },
     })
     const preorderIds = [...new Set(relatedOrders
@@ -388,8 +407,9 @@ export class OrderService {
     }
   }
 
-  async list(query: OrderListQuery): Promise<PaginationResult<OrderSummaryView>> {
+  async list(query: OrderListQuery, actor?: Pick<AuthUserContext, 'role'>): Promise<PaginationResult<OrderSummaryView>> {
     const qb = this.orderRepo.createQueryBuilder('order')
+    const exposeSystemNo = canViewSystemNo(actor)
 
     const normalizedKeyword = String(query.keyword ?? query.showNo ?? '').trim()
     if (normalizedKeyword) {
@@ -399,15 +419,16 @@ export class OrderService {
           keywordQb.where(new Brackets((rootQb) => {
             rootQb
               .where('order.businessNo LIKE :keyword', { keyword: '%' + normalizedKeyword + '%' })
-              .orWhere('order.showNo LIKE :keyword', { keyword: '%' + normalizedKeyword + '%' })
-              .orWhere(isLikelyShowNo ? 'order.showNo = :exactShowNo' : '1 = 0', { exactShowNo: normalizedKeyword })
+              .orWhere(exposeSystemNo ? 'order.systemNo LIKE :keyword' : '1 = 0', { keyword: '%' + normalizedKeyword + '%' })
+              .orWhere('order.sourceDocNo LIKE :keyword', { keyword: '%' + normalizedKeyword + '%' })
+              .orWhere(exposeSystemNo && isLikelyShowNo ? 'order.systemNo = :exactShowNo' : '1 = 0', { exactShowNo: normalizedKeyword })
               .orWhere('order.customerName LIKE :keyword', { keyword: '%' + normalizedKeyword + '%' })
               .orWhere('order.customerDepartmentName LIKE :keyword', { keyword: '%' + normalizedKeyword + '%' })
               .orWhere('order.issuerName LIKE :keyword', { keyword: '%' + normalizedKeyword + '%' })
               .orWhere('order.creatorDisplayName LIKE :keyword', { keyword: '%' + normalizedKeyword + '%' })
               .orWhere('order.creatorUsername LIKE :keyword', { keyword: '%' + normalizedKeyword + '%' })
           })).orWhere(
-            'EXISTS (SELECT 1 FROM order_merge_relation relation INNER JOIN biz_outbound_order child ON child.id = relation.source_order_id WHERE relation.parent_order_id = order.id AND (child.business_no LIKE :keyword OR child.show_no LIKE :keyword OR child.customer_name LIKE :keyword OR child.customer_department_name LIKE :keyword OR child.issuer_name LIKE :keyword OR child.creator_display_name LIKE :keyword OR child.creator_username LIKE :keyword))',
+            `EXISTS (SELECT 1 FROM order_merge_relation relation INNER JOIN biz_outbound_order child ON child.id = relation.source_order_id WHERE relation.parent_order_id = order.id AND (child.business_no LIKE :keyword ${exposeSystemNo ? 'OR child.show_no LIKE :keyword' : ''} OR child.source_doc_no LIKE :keyword OR child.customer_name LIKE :keyword OR child.customer_department_name LIKE :keyword OR child.issuer_name LIKE :keyword OR child.creator_display_name LIKE :keyword OR child.creator_username LIKE :keyword))`,
             { keyword: '%' + normalizedKeyword + '%' },
           )
         }),
@@ -454,6 +475,11 @@ export class OrderService {
       .getManyAndCount()
 
     const metadataMap = await orderMergeService.getMetadataMap(list.map((order) => normalizeEntityId(order.id)))
+    const childIdentifierMatches = await this.resolveMergedChildIdentifierMatches(
+      list.map((order) => normalizeEntityId(order.id)),
+      normalizedKeyword,
+      exposeSystemNo,
+    )
     // 仅对当前页已删除的手工库存单批量判定回补状态，正常单不产生额外查询。
     const releasedOrderIds = await resolveManualOutboundReleasedOrderIds(
       AppDataSource.manager,
@@ -464,16 +490,26 @@ export class OrderService {
       page: query.page,
       pageSize: query.pageSize,
       total,
-      list: list.map((order) => this.buildOrderSummaryView(
-        order,
-        metadataMap.get(normalizeEntityId(order.id)),
-        releasedOrderIds.has(normalizeEntityId(order.id)),
-      )),
+      list: list.map((order) => ({
+        ...this.buildOrderSummaryView(
+          order,
+          metadataMap.get(normalizeEntityId(order.id)),
+          releasedOrderIds.has(normalizeEntityId(order.id)),
+          exposeSystemNo,
+        ),
+        ...(() => {
+          const directMatch = this.resolveMatchedIdentifier(order, normalizedKeyword, exposeSystemNo)
+          return directMatch.matchedIdentifierType
+            ? directMatch
+            : childIdentifierMatches.get(normalizeEntityId(order.id)) ?? directMatch
+        })(),
+      })),
     }
   }
 
   async detailById(
     id: string,
+    actor?: Pick<AuthUserContext, 'role'>,
     manager: EntityManager = AppDataSource.manager,
   ): Promise<{ order: OrderSummaryView; items: OrderDetailItemView[] }> {
     const order = await manager.getRepository(BizOutboundOrder).findOne({ where: { id } })
@@ -486,19 +522,29 @@ export class OrderService {
       manager,
     )).get(normalizeEntityId(order.id))
     return {
-      order: this.buildOrderSummaryView(order, metadata, await this.isOrderInventoryReleased(order, manager)),
+      order: this.buildOrderSummaryView(
+        order,
+        metadata,
+        await this.isOrderInventoryReleased(order, manager),
+        canViewSystemNo(actor),
+      ),
       items,
     }
   }
 
-  async detailByShowNo(showNo: string): Promise<{ order: OrderSummaryView; items: OrderDetailItemView[] }> {
-    const order = await this.orderRepo.findOne({ where: { showNo } })
+  async detailBySystemNo(systemNo: string): Promise<{ order: OrderSummaryView; items: OrderDetailItemView[] }> {
+    const order = await this.orderRepo.findOne({ where: { systemNo } })
     if (!order) {
       throw new BizError('出库单不存在', 404)
     }
     const items = await this.loadDetailItems(order.id)
     const metadata = (await orderMergeService.getMetadataMap([normalizeEntityId(order.id)])).get(normalizeEntityId(order.id))
     return { order: this.buildOrderSummaryView(order, metadata, await this.isOrderInventoryReleased(order)), items }
+  }
+
+  /** @deprecated 兼容一个发布周期；旧路由仍按 systemNo 查询。 */
+  async detailByShowNo(showNo: string): Promise<{ order: OrderSummaryView; items: OrderDetailItemView[] }> {
+    return this.detailBySystemNo(showNo)
   }
 
   /** 只有已删除的手工库存单才可能处于“已回补”状态，其余订单直接返回 false，避免多余查询。 */
@@ -526,7 +572,7 @@ export class OrderService {
       isSystemApplied: input.isSystemApplied,
       reason: '合规状态编辑',
     }] }, actor, requestMeta)
-    return this.detailById(input.orderId)
+    return this.detailById(input.orderId, actor)
   }
 
   async previewAmendments(input: OrderAmendmentBatchInput, actor: AuthUserContext): Promise<OrderAmendmentPreviewResult> {
@@ -571,7 +617,7 @@ export class OrderService {
     return orderMergeService.commit(
       input,
       actor,
-      (manager, targetOrderId) => this.detailById(targetOrderId, manager),
+      (manager, targetOrderId) => this.detailById(targetOrderId, actor, manager),
       requestMeta,
     )
   }
@@ -586,12 +632,12 @@ export class OrderService {
   async softDeleteById(
     id: string,
     actor: AuthUserContext,
-    confirmShowNo: string,
+    confirmBusinessNo: string,
     requestMeta?: RequestMeta,
     options: SoftDeleteOrderOptions = {},
   ): Promise<OrderSummaryView> {
-    const normalizedConfirmShowNo = confirmShowNo.trim()
-    if (!normalizedConfirmShowNo) {
+    const normalizedConfirmBusinessNo = confirmBusinessNo.trim()
+    if (!normalizedConfirmBusinessNo) {
       throw new BizError('请填写业务单号完成二次确认')
     }
     const releaseInventory = options.releaseInventory === true
@@ -606,7 +652,7 @@ export class OrderService {
         throw new BizError('出库单不存在', 404)
       }
 
-      if (order.showNo !== normalizedConfirmShowNo && order.businessNo !== normalizedConfirmShowNo) {
+      if (order.businessNo !== normalizedConfirmBusinessNo) {
         throw new BizError('二次确认失败：业务单号不匹配', 400)
       }
 
@@ -654,7 +700,7 @@ export class OrderService {
           actionLabel: releaseInventory ? '删除出库单并回补库存' : '删除出库单',
           targetType: 'order',
           targetId: savedOrder.id,
-          targetCode: savedOrder.showNo,
+          targetCode: savedOrder.businessNo,
           actor,
           requestMeta,
           detail: {
@@ -794,7 +840,7 @@ export class OrderService {
           actionLabel: inventoryReapplied ? '恢复出库单并重新扣减库存' : '恢复出库单',
           targetType: 'order',
           targetId: savedOrder.id,
-          targetCode: savedOrder.showNo,
+          targetCode: savedOrder.businessNo,
           actor,
           requestMeta,
           detail: {
@@ -825,11 +871,11 @@ export class OrderService {
   async purgeById(
     id: string,
     actor: AuthUserContext,
-    confirmShowNo: string,
+    confirmBusinessNo: string,
     requestMeta?: RequestMeta,
   ): Promise<PurgedOrderView> {
-    const normalizedConfirmShowNo = confirmShowNo.trim()
-    if (!normalizedConfirmShowNo) {
+    const normalizedConfirmBusinessNo = confirmBusinessNo.trim()
+    if (!normalizedConfirmBusinessNo) {
       throw new BizError('请填写业务单号完成二次确认')
     }
 
@@ -843,7 +889,7 @@ export class OrderService {
         throw new BizError('出库单不存在', 404)
       }
 
-      if (order.showNo !== normalizedConfirmShowNo && order.businessNo !== normalizedConfirmShowNo) {
+      if (order.businessNo !== normalizedConfirmBusinessNo) {
         throw new BizError('二次确认失败：业务单号不匹配', 400)
       }
 
@@ -856,38 +902,47 @@ export class OrderService {
       }
       await orderMergeService.assertNotMergeMember(manager, normalizeEntityId(order.id))
 
-      const linkedO2oPreorderSync = await this.syncLinkedO2oPreorderVisibilityInManager(manager, order, actor, true)
+      if (order.sourceDocType === 'o2o_preorder') {
+        throw new BizError('O2O 关联正式出库单必须从 O2O 管理入口整链永久删除', 409)
+      }
+
+      await cleanupOrderIdentifiableData(manager, {
+        orderIds: [normalizeEntityId(order.id)],
+        orderUuids: [order.orderUuid],
+        stableFeedbackRefs: [order.orderUuid, order.systemNo, order.businessNo],
+      })
       const deleteResult = await orderRepo.delete({ id: order.id })
       if ((deleteResult.affected ?? 0) <= 0) {
         throw new BizError('永久删除出库单失败，请稍后重试', 500)
       }
 
-      const serialCalibration = await orderSerialService.recalibrateCurrentFromOccupancy(order.orderType, manager)
+      const serialCalibration = await orderSerialService.rollbackDeletedIdentifierBatch(
+        'system',
+        order.orderType,
+        [order.systemNo],
+        manager,
+      )
       const serialRolledBack = serialCalibration.rolledBack
-      const auditDetail = {
-        ...this.buildOrderAuditDetail(order),
-        serialRolledBack,
-        serialCalibration,
-        linkedO2oPreorderSync,
-      }
+      const redactedTarget = buildRedactedDeleteTarget('order')
 
       await auditService.record(
         {
           actionType: 'order.purge',
           actionLabel: '永久删除出库单',
           targetType: 'order',
-          targetId: String(order.id),
-          targetCode: order.showNo,
+          targetId: null,
+          targetCode: redactedTarget,
           actor,
           requestMeta,
-          detail: auditDetail,
+          detail: { redactedTarget },
         },
         manager,
       )
 
       return {
         id: normalizeEntityId(order.id),
-        showNo: order.showNo,
+        systemNo: order.systemNo,
+        showNo: order.systemNo,
         orderType: order.orderType,
         serialRolledBack,
       }
@@ -961,6 +1016,10 @@ export class OrderService {
     actor: AuthUserContext,
     requestMeta?: RequestMeta,
   ): Promise<SubmitOrderResult> {
+    const submittedIdempotencyKey = String(input.idempotencyKey ?? '').trim()
+    if (submittedIdempotencyKey.startsWith(O2O_VERIFIED_PREORDER_IDEMPOTENCY_KEY_PREFIX)) {
+      throw new BizError('该幂等键前缀为 O2O 核销保留，普通出库开单禁止使用', 400)
+    }
     const normalizedItems = this.normalizeSubmitItemsInput(input.items)
     const normalizedCustomerName = this.readLimitedText(
       input.customerName,
@@ -993,7 +1052,7 @@ export class OrderService {
               order: { lineNo: 'ASC' },
             })
             return {
-              order: this.buildSubmittedOrderView(existed),
+              order: this.buildSubmittedOrderView(existed, canViewSystemNo(actor)),
               items: existedItems.map((item) => this.buildSubmittedOrderItemView(item)),
               inventory: { deductedQty: 0, lines: [] },
               idempotentReplay: true,
@@ -1019,13 +1078,13 @@ export class OrderService {
           }
           const resolvedItems = await this.resolveSubmitItemsWithSku(normalizedItems, productMap, manager)
           const orderUuid = generateOrderUuid()
-          const showNo = await orderSerialService.generateOrderNo(submitContext.normalizedOrderType, manager)
+          const systemNo = await orderSerialService.generateSystemNo(submitContext.normalizedOrderType, manager)
           const businessNo = await orderBusinessNoService.allocate(submitContext.normalizedOrderType, orderUuid, manager)
           const preparedItems = this.prepareSubmitItems(resolvedItems, productMap, itemRepo)
 
           const order = orderRepo.create({
             orderUuid,
-            showNo,
+            systemNo,
             businessNo,
             editVersion: 1,
             inventoryMode: 'manual_applied',
@@ -1076,7 +1135,7 @@ export class OrderService {
               actionLabel: '创建出库单',
               targetType: 'order',
               targetId: savedOrder.id,
-              targetCode: savedOrder.showNo,
+              targetCode: savedOrder.businessNo,
               actor,
               requestMeta,
               detail: {
@@ -1091,7 +1150,7 @@ export class OrderService {
           )
 
           return {
-            order: this.buildSubmittedOrderView(savedOrder),
+            order: this.buildSubmittedOrderView(savedOrder, canViewSystemNo(actor)),
             items: savedItems.map((item) => this.buildSubmittedOrderItemView(item)),
             inventory: {
               deductedQty: inventoryLines.reduce((sum, line) => sum + line.deltaQty, 0),
@@ -1107,7 +1166,7 @@ export class OrderService {
 
         // 并发下若另一请求已成功落库同一幂等键，则直接回查既有单据返回。
         if (isUniqueConstraintError(error, IDEMPOTENCY_CONSTRAINT_MATCHER)) {
-          return this.loadOrderByIdempotencyKey(submitContext.normalizedIdempotencyKey)
+          return this.loadOrderByIdempotencyKey(submitContext.normalizedIdempotencyKey, canViewSystemNo(actor))
         }
 
         if (this.shouldRetrySubmitError(error, attempt)) {
@@ -1397,6 +1456,7 @@ export class OrderService {
 
   private async loadOrderByIdempotencyKey(
     idempotencyKey: string,
+    exposeSystemNo = true,
   ): Promise<SubmitOrderResult> {
     const order = await this.orderRepo.findOne({ where: { idempotencyKey } })
     if (!order) {
@@ -1410,7 +1470,7 @@ export class OrderService {
 
     // 并发下另一请求已落库同一幂等键：本请求事务已回滚，不会重复扣减库存。
     return {
-      order: this.buildSubmittedOrderView(order),
+      order: this.buildSubmittedOrderView(order, exposeSystemNo),
       items: items.map((item) => this.buildSubmittedOrderItemView(item)),
       inventory: { deductedQty: 0, lines: [] },
       idempotentReplay: true,
@@ -1464,7 +1524,8 @@ export class OrderService {
   private buildOrderAuditDetail(order: BizOutboundOrder) {
     return {
       businessNo: order.businessNo,
-      showNo: order.showNo,
+      systemNo: order.systemNo,
+      showNo: order.systemNo,
       customerDepartmentName: order.customerDepartmentName,
       customerName: order.customerName,
       totalQty: order.totalQty,
@@ -1476,6 +1537,7 @@ export class OrderService {
     order: BizOutboundOrder,
     metadata?: OrderMergeMetadata,
     inventoryReleased = false,
+    exposeSystemNo = true,
   ): OrderSummaryView {
     const merge = metadata ?? { role: 'standalone' as const, parent: null, children: [] }
     const editability = orderContentEditService.describeEditability(order)
@@ -1485,8 +1547,10 @@ export class OrderService {
     }
     return {
       id: normalizeEntityId(order.id),
-      showNo: order.showNo,
+      ...(exposeSystemNo ? { systemNo: order.systemNo, showNo: order.systemNo } : {}),
       businessNo: order.businessNo,
+      matchedIdentifierType: null,
+      matchedIdentifierValue: null,
       editVersion: Number(order.editVersion),
       status: order.status,
       merge,
@@ -1504,6 +1568,8 @@ export class OrderService {
       sourceDocType: order.sourceDocType ?? null,
       sourceDocId: normalizeNullableEntityId(order.sourceDocId),
       sourceDocNo: order.sourceDocNo ?? null,
+      sourcePreorderId: order.sourceDocType === 'o2o_preorder' ? normalizeNullableEntityId(order.sourceDocId) : null,
+      sourcePreorderNo: order.sourceDocType === 'o2o_preorder' ? order.sourceDocNo ?? null : null,
       creatorUserId: normalizeNullableEntityId(order.creatorUserId),
       creatorUsername: order.creatorUsername,
       creatorDisplayName: order.creatorDisplayName,
@@ -1517,10 +1583,48 @@ export class OrderService {
     }
   }
 
-  private buildSubmittedOrderView(order: BizOutboundOrder): SubmittedOrderView {
+  private resolveMatchedIdentifier(order: BizOutboundOrder, keyword: string, exposeSystemNo = true): Pick<
+    OrderSummaryView,
+    'matchedIdentifierType' | 'matchedIdentifierValue'
+  > {
+    const normalizedKeyword = keyword.trim().toLowerCase()
+    if (!normalizedKeyword) return { matchedIdentifierType: null, matchedIdentifierValue: null }
+    const candidates = [
+      ['businessNo', order.businessNo],
+      ...(exposeSystemNo ? [['systemNo', order.systemNo] as const] : []),
+      ['preorderNo', order.sourceDocType === 'o2o_preorder' ? order.sourceDocNo : null],
+    ] as const
+    const matched = candidates.find(([, value]) => value?.toLowerCase().includes(normalizedKeyword))
+    return matched
+      ? { matchedIdentifierType: matched[0], matchedIdentifierValue: matched[1] }
+      : { matchedIdentifierType: null, matchedIdentifierValue: null }
+  }
+
+  private async resolveMergedChildIdentifierMatches(
+    parentOrderIds: string[],
+    keyword: string,
+    exposeSystemNo = true,
+  ): Promise<Map<string, Pick<OrderSummaryView, 'matchedIdentifierType' | 'matchedIdentifierValue'>>> {
+    const normalizedKeyword = keyword.trim().toLowerCase()
+    if (!normalizedKeyword || !parentOrderIds.length) return new Map()
+    const relations = await AppDataSource.getRepository(OrderMergeRelation).find({
+      where: { parentOrderId: In(parentOrderIds) },
+      relations: { sourceOrder: true },
+      order: { id: 'ASC' },
+    })
+    const result = new Map<string, Pick<OrderSummaryView, 'matchedIdentifierType' | 'matchedIdentifierValue'>>()
+    for (const relation of relations) {
+      if (result.has(normalizeEntityId(relation.parentOrderId)) || !relation.sourceOrder) continue
+      const match = this.resolveMatchedIdentifier(relation.sourceOrder, normalizedKeyword, exposeSystemNo)
+      if (match.matchedIdentifierType) result.set(normalizeEntityId(relation.parentOrderId), match)
+    }
+    return result
+  }
+
+  private buildSubmittedOrderView(order: BizOutboundOrder, exposeSystemNo = true): SubmittedOrderView {
     return {
       id: normalizeEntityId(order.id),
-      showNo: order.showNo,
+      ...(exposeSystemNo ? { systemNo: order.systemNo, showNo: order.systemNo } : {}),
       businessNo: order.businessNo,
       editVersion: Number(order.editVersion),
       inventoryMode: order.inventoryMode,

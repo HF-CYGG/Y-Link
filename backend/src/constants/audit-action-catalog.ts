@@ -104,6 +104,7 @@ export const AUDIT_ACTION_CATALOG: Readonly<Record<string, AuditActionDefinition
   'order.restore': { label: '恢复出库单', category: 'order_outbound' },
   'order.purge': { label: '永久删除出库单', category: 'order_outbound' },
   'order.amendment': { label: '修订出库单', category: 'order_outbound' },
+  'order.business_no_reclaim': { label: '回收并复用已永久删除订单业务号', category: 'order_outbound' },
   'order.content_edit': { label: '编辑出库单内容', category: 'order_outbound' },
   'order.merge': { label: '合并出库单', category: 'order_outbound' },
   'order.merge_failed': { label: '合并出库单失败', category: 'order_outbound' },
@@ -206,6 +207,7 @@ export const AUDIT_ACTION_CATALOG: Readonly<Record<string, AuditActionDefinition
 
   // 系统配置
   'system_config.update_order_serial': { label: '更新订单流水配置', category: 'system_config' },
+  'system_config.update_order_identifiers': { label: '更新订单编号配置', category: 'system_config' },
   'system_config.update_o2o_rules': { label: '更新线上预订规则配置', category: 'system_config' },
   'system_config.update_customer_service': { label: '更新客服中心配置', category: 'system_config' },
   'system_config.update_client_departments': { label: '更新客户端部门配置', category: 'system_config' },

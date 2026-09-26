@@ -10,8 +10,12 @@ import { AppDataSource } from '../src/config/data-source.js'
 import { BizOutboundOrder } from '../src/entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../src/entities/biz-outbound-order-item.entity.js'
 import { BaseProduct } from '../src/entities/base-product.entity.js'
+import { BaseProductSku } from '../src/entities/base-product-sku.entity.js'
+import { BusinessSequence } from '../src/entities/business-sequence.entity.js'
+import { InventoryLog } from '../src/entities/inventory-log.entity.js'
 import { SystemConfig } from '../src/entities/system-config.entity.js'
 import { SysAuditLog } from '../src/entities/sys-audit-log.entity.js'
+import { SysUser } from '../src/entities/sys-user.entity.js'
 import { orderService } from '../src/services/order.service.js'
 import { orderSerialService } from '../src/services/order-serial.service.js'
 import type { AuthUserContext } from '../src/types/auth.js'
@@ -30,7 +34,8 @@ import type { AuthUserContext } from '../src/types/auth.js'
 interface OrderRecord {
   id: string
   orderUuid: string
-  showNo: string
+  systemNo: string
+  businessNo: string
   idempotencyKey: string
   customerName: string | null
   remark: string | null
@@ -81,12 +86,22 @@ function pass(title: string) {
  */
 function createSerialConfigState() {
   return new Map<string, string>([
-    ['order.serial.walkin.start', '1'],
-    ['order.serial.walkin.current', '0'],
-    ['order.serial.walkin.width', '6'],
-    ['order.serial.department.start', '1'],
-    ['order.serial.department.current', '0'],
-    ['order.serial.department.width', '6'],
+    ['order.system.walkin.start', '1'],
+    ['order.system.walkin.current', '0'],
+    ['order.system.walkin.width', '6'],
+    ['order.system.department.start', '1'],
+    ['order.system.department.current', '0'],
+    ['order.system.department.width', '6'],
+    ['order.business.walkin.start', '1'],
+    ['order.business.walkin.current', '0'],
+    ['order.business.walkin.width', '6'],
+    ['order.business.department.start', '1'],
+    ['order.business.department.current', '0'],
+    ['order.business.department.width', '6'],
+    ['sequence:order.system.walkin', '0'],
+    ['sequence:order.system.department', '0'],
+    ['sequence:order.business.walkin', '0'],
+    ['sequence:order.business.department', '0'],
   ])
 }
 
@@ -95,6 +110,39 @@ function createSerialConfigRepository(serialConfigState: Map<string, string>) {
     async update(where: { configKey: string }, payload: { configValue: string }) {
       serialConfigState.set(where.configKey, payload.configValue)
       return { affected: 1 }
+    },
+    async findBy(where: Array<{ configKey: string }>) {
+      return where.map(({ configKey }) => ({ configKey, configValue: serialConfigState.get(configKey) ?? '' }))
+    },
+  }
+}
+
+function createSequenceRepository(serialConfigState: Map<string, string>) {
+  let sequenceKey = ''
+  const read = () => ({
+    sequenceKey,
+    currentValue: Number(serialConfigState.get(`sequence:${sequenceKey}`) ?? 0),
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  })
+  return {
+    createQueryBuilder() {
+      return {
+        where(_sql: string, params: { sequenceKey: string }) { sequenceKey = params.sequenceKey; return this },
+        setLock() { return this },
+        async getOne() { return serialConfigState.has(`sequence:${sequenceKey}`) ? read() : null },
+      }
+    },
+    async save(sequence: { sequenceKey: string; currentValue: number }) {
+      serialConfigState.set(`sequence:${sequence.sequenceKey}`, String(sequence.currentValue))
+      return sequence
+    },
+    async findOneBy(where: { sequenceKey: string }) {
+      sequenceKey = where.sequenceKey
+      return serialConfigState.has(`sequence:${sequenceKey}`) ? read() : null
+    },
+    async existsBy(where: { sequenceKey: string }) {
+      return serialConfigState.has(`sequence:${where.sequenceKey}`)
     },
   }
 }
@@ -106,7 +154,8 @@ function createOrderSerialManager(serialConfigState: Map<string, string>) {
         type: 'sqlite',
       },
     },
-    async query(_sql: string, params: unknown[]) {
+    async query(sql: string, params: unknown[]) {
+      if (/SELECT 1 AS occupied/i.test(sql)) return []
       const keys = params.filter((item): item is string => typeof item === 'string')
       return keys.map((configKey) => ({
         configKey,
@@ -117,6 +166,9 @@ function createOrderSerialManager(serialConfigState: Map<string, string>) {
       if (entity === SystemConfig) {
         return createSerialConfigRepository(serialConfigState)
       }
+      if (entity === BusinessSequence) {
+        return createSequenceRepository(serialConfigState)
+      }
       throw new Error('未处理的流水配置仓储类型')
     },
   }
@@ -124,7 +176,7 @@ function createOrderSerialManager(serialConfigState: Map<string, string>) {
 
 function findOrderByWhere(
   orders: OrderRecord[],
-  where: { idempotencyKey?: string; id?: string; showNo?: string },
+  where: { idempotencyKey?: string; id?: string; systemNo?: string },
 ): OrderRecord | null {
   if (where.idempotencyKey) {
     return orders.find((item) => item.idempotencyKey === where.idempotencyKey) ?? null
@@ -132,8 +184,8 @@ function findOrderByWhere(
   if (where.id) {
     return orders.find((item) => item.id === where.id) ?? null
   }
-  if (where.showNo) {
-    return orders.find((item) => item.showNo === where.showNo) ?? null
+  if (where.systemNo) {
+    return orders.find((item) => item.systemNo === where.systemNo) ?? null
   }
   return null
 }
@@ -143,7 +195,7 @@ function createOrderRepository(
   getNextOrderId: () => string,
 ) {
   return {
-    async findOne(args: { where?: { idempotencyKey?: string; id?: string; showNo?: string } }) {
+    async findOne(args: { where?: { idempotencyKey?: string; id?: string; systemNo?: string } }) {
       return findOrderByWhere(stagedOrders, args.where ?? {})
     },
     create(args: Partial<OrderRecord>) {
@@ -156,6 +208,24 @@ function createOrderRepository(
     },
     async find() {
       return []
+    },
+    createQueryBuilder() {
+      let businessNo = ''
+      let orderUuid = ''
+      return {
+        where(_sql: string, params: { businessNo?: string }) {
+          businessNo = params.businessNo ?? ''
+          return this
+        },
+        andWhere(_sql: string, params: { orderUuid?: string }) {
+          orderUuid = params.orderUuid ?? ''
+          return this
+        },
+        setLock() { return this },
+        async getExists() {
+          return stagedOrders.some((order) => order.businessNo === businessNo && order.orderUuid !== orderUuid)
+        },
+      }
     },
   }
 }
@@ -212,6 +282,9 @@ function createProductRepository(products: Array<{ id: string; productName: stri
         }
         return this
       },
+      orderBy() {
+        return this
+      },
       async getMany() {
         return filtered
       },
@@ -219,6 +292,9 @@ function createProductRepository(products: Array<{ id: string; productName: stri
   }
 
   return {
+    async update() {
+      return { affected: 1 }
+    },
     async find(args: { where: Array<{ id: string; isActive: boolean }> }) {
       const ids = new Set(args.where.map((item) => item.id))
       return products.filter((item) => ids.has(item.id) && item.isActive)
@@ -280,8 +356,59 @@ function createMockManager(
         if (entity === BaseProduct) {
           return createProductRepository(products)
         }
+        if (entity === BaseProductSku) {
+          return {
+            async update() { return { affected: 1 } },
+            async save(args: unknown) { return args },
+            createQueryBuilder() {
+              return {
+                where() { return this },
+                andWhere() { return this },
+                orderBy() { return this },
+                addOrderBy() { return this },
+                setLock() { return this },
+                async getMany() {
+                  return [{
+                    id: 'sku-1001',
+                    productId: '1001',
+                    skuCode: 'TASK6-DEFAULT',
+                    specText: '默认规格',
+                    defaultPrice: '12.50',
+                    currentStock: 100,
+                    preOrderedStock: 0,
+                    isActive: true,
+                    isCurrent: true,
+                  }]
+                },
+              }
+            },
+          }
+        }
         if (entity === SystemConfig) {
           return createSerialConfigRepository(serialConfigState)
+        }
+        if (entity === BusinessSequence) {
+          return createSequenceRepository(serialConfigState)
+        }
+        if (entity === InventoryLog) {
+          return {
+            create(args: unknown) { return args },
+            async save(args: unknown) { return args },
+          }
+        }
+        if (entity === SysUser) {
+          return {
+            createQueryBuilder() {
+              return {
+                where() { return this },
+                orderBy() { return this },
+                setLock() { return this },
+                async getMany() {
+                  return [{ id: '9001', username: 'verifier', displayName: '验证脚本', role: 'admin', status: 'enabled', deactivatedAt: null, restoredAt: null }]
+                },
+              }
+            },
+          }
         }
         if (entity === SysAuditLog) {
           return createAuditLogRepository(stagedAuditLogs, getNextAuditLogId)
@@ -326,6 +453,16 @@ async function verifyOrderTransactionAndNumbering() {
   let auditLogSeq = 0
 
   const originalTransaction = AppDataSource.transaction.bind(AppDataSource)
+  const originalQuery = AppDataSource.query.bind(AppDataSource)
+  const originalIsInitialized = AppDataSource.isInitialized
+
+  ;(AppDataSource as unknown as { isInitialized: boolean }).isInitialized = true
+  ;(AppDataSource as unknown as { query: (sql: string) => Promise<unknown[]> }).query = async (sql: string) => {
+    if (/journal_mode/i.test(sql)) return [{ journal_mode: 'wal' }]
+    if (/PRAGMA foreign_keys$/i.test(sql.trim())) return [{ foreign_keys: 1 }]
+    if (/PRAGMA busy_timeout$/i.test(sql.trim())) return [{ timeout: 5000 }]
+    return []
+  }
 
   ;(AppDataSource as unknown as { transaction: unknown }).transaction = async (
     cb: (manager: {
@@ -382,8 +519,9 @@ async function verifyOrderTransactionAndNumbering() {
 
     assert.equal(committedOrders.length, 1)
     assert.equal(committedItems.length, 1)
-    assert.equal(first.order.showNo, 'hyyz000001')
-    pass('整单提交成功：主子表均写入且散客单首张 showNo 为 hyyz000001')
+    assert.equal(first.order.systemNo, 'OUT-W-000001')
+    assert.equal(first.order.businessNo, 'hyyz000001')
+    pass('整单提交成功：主子表均写入且 systemNo/businessNo 独立生成首号')
 
     const duplicated = await orderService.submit(
       {
@@ -421,10 +559,13 @@ async function verifyOrderTransactionAndNumbering() {
       },
       mockActor,
     )
-    assert.equal(second.order.showNo, 'hyyz000002')
-    pass('编号规则生效：散客单流水按系统配置递增到 hyyz000002')
+    assert.equal(second.order.systemNo, 'OUT-W-000002')
+    assert.equal(second.order.businessNo, 'hyyz000002')
+    pass('编号规则生效：散客 systemNo/businessNo 均按各自配置递增')
   } finally {
     ;(AppDataSource as unknown as { transaction: unknown }).transaction = originalTransaction
+    ;(AppDataSource as unknown as { query: unknown }).query = originalQuery
+    ;(AppDataSource as unknown as { isInitialized: boolean }).isInitialized = originalIsInitialized
   }
 }
 
@@ -432,11 +573,11 @@ async function verifyOrderTransactionAndNumbering() {
  * 单独验证当前订单流水服务在初始配置状态下能正确生成双流水编号。
  */
 async function verifyOrderSerialStartsFromConfigStart() {
-  const walkinShowNo = await orderSerialService.generateOrderNo('walkin', createOrderSerialManager(createSerialConfigState()) as never)
-  const departmentShowNo = await orderSerialService.generateOrderNo('department', createOrderSerialManager(createSerialConfigState()) as never)
-  assert.equal(walkinShowNo, 'hyyz000001')
-  assert.equal(departmentShowNo, 'hyyzjd000001')
-  pass('订单流水服务可在初始配置下按散客/部门双流水前缀生成首号')
+  const walkinSystemNo = await orderSerialService.generateSystemNo('walkin', createOrderSerialManager(createSerialConfigState()) as never)
+  const departmentSystemNo = await orderSerialService.generateSystemNo('department', createOrderSerialManager(createSerialConfigState()) as never)
+  assert.equal(walkinSystemNo, 'OUT-W-000001')
+  assert.equal(departmentSystemNo, 'OUT-D-000001')
+  pass('订单流水服务可在初始配置下按散客/部门 systemNo 前缀生成首号')
 }
 
 /**
