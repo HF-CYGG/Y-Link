@@ -32,6 +32,18 @@ assert.equal(sameSku[0]?.details[0]?.subTotal, '6.00')
 assert.equal(sameSku[0]?.details[0]?.remark, repeatedRemark, '长备注只保留一次，不截断')
 assert.equal(sameSku[0]?.details[1]?.unitPrice, '3.00', '不同价格仍逐项展示')
 
+const mergedSameSku = aggregateOrderVoucherItems([
+  { productId: 'p-merged', skuId: 'sku-a', productName: '练习本（A5）', specText: 'A5', qty: '1.00', unitPrice: '2.00', subTotal: '2.00', sourceOrderId: null },
+  { productId: 'p-merged', skuId: 'sku-a', productName: '练习本（A5）', specText: 'A5', qty: '2.00', unitPrice: '2.00', subTotal: '4.00', sourceOrderId: 'child-1' },
+])
+assert.equal(mergedSameSku.length, 1, '合并正式单仍按商品归组')
+assert.deepEqual(mergedSameSku[0]?.details.map((item) => [item.sourceOrderId, item.qty, item.subTotal]), [
+  [null, '1', '2.00'],
+  ['child-1', '2', '4.00'],
+], '跨来源同 SKU 明细不可聚合到无法辨别领取人的一行')
+assert.equal(mergedSameSku[0]?.qty, '3', '拆分来源不改变商品汇总')
+assert.equal(mergedSameSku[0]?.subTotal, '6.00', '拆分来源不改变金额汇总')
+
 const names = aggregateOrderVoucherItems([
   { id: 'a', productId: 'p-3', productName: '笔记本（A5）限定版', specText: 'A5', qty: '0.10', unitPrice: '0.10', subTotal: '0.01' },
   { id: 'b', productId: 'p-3', productName: '笔记本（B5）', specText: 'B5', qty: '0.20', unitPrice: '0.10', subTotal: '0.02' },

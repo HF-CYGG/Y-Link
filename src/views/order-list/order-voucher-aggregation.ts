@@ -9,6 +9,7 @@ type VoucherPrimitive = string | number | null | undefined
 export interface OrderVoucherSourceItem {
   id?: VoucherPrimitive
   productId?: VoucherPrimitive
+  sourceOrderId?: VoucherPrimitive
   skuId?: VoucherPrimitive
   productName?: VoucherPrimitive
   specText?: VoucherPrimitive
@@ -20,6 +21,7 @@ export interface OrderVoucherSourceItem {
 
 export interface OrderVoucherDetailItem {
   key: string
+  sourceOrderId: string | null
   nameSnapshot: string
   showNameSnapshot: boolean
   specText: string | null
@@ -46,6 +48,7 @@ interface MutableVoucherSums {
 
 interface MutableVoucherDetailItem extends MutableVoucherSums {
   key: string
+  sourceOrderId: string | null
   nameSnapshot: string
   specText: string | null
   priceCents: number | null
@@ -118,8 +121,9 @@ export const aggregateOrderVoucherItems = (items: readonly OrderVoucherSourceIte
     const price = parseCents(source.unitPrice)
     const amount = parseCents(source.subTotal)
     const remark = normalizeDisplayText(source.remark) || null
+    const sourceOrderId = normalizeDisplayText(source.sourceOrderId) || null
     const snapshotKey = JSON.stringify([
-      normalizeDisplayText(source.skuId), name, spec,
+      sourceOrderId, normalizeDisplayText(source.skuId), name, spec,
       price === null ? `invalid:${normalizeDisplayText(source.unitPrice)}` : price,
       remark,
     ])
@@ -127,6 +131,7 @@ export const aggregateOrderVoucherItems = (items: readonly OrderVoucherSourceIte
     if (!detail) {
       detail = {
         key: `${key}:detail:${index}`,
+        sourceOrderId,
         nameSnapshot: name || '未记录商品名称',
         specText: spec || null,
         priceCents: price,
@@ -152,6 +157,7 @@ export const aggregateOrderVoucherItems = (items: readonly OrderVoucherSourceIte
     subTotal: group.invalidSubTotal ? '—' : formatCents(group.subTotalCents),
     details: group.details.map((detail) => ({
       key: detail.key,
+      sourceOrderId: detail.sourceOrderId,
       nameSnapshot: detail.nameSnapshot,
       showNameSnapshot: group.names.size > 1,
       specText: detail.specText,

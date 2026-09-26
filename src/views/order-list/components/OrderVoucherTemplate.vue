@@ -56,7 +56,11 @@ const formatAmount = (value: string | number | null | undefined) => {
   return match ? `${match[1]}.${(match[2] ?? '').padEnd(2, '0')}` : '—'
 }
 const formatDateTime = (value: string | number | Date | null | undefined) => value && dayjs(value).isValid() ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : '未记录'
-const sourceDocText = computed(() => props.order.sourceDocType === 'o2o_preorder' && props.order.sourceDocNo
+const showLineSource = computed(() => props.order.merge.role === 'parent' && props.order.inventoryMode === 'o2o_preapplied')
+const sourcePickupMap = computed(() => new Map((props.order.sourcePreorderPickups ?? []).map((item) => [item.sourceOrderId, item])))
+const sourcePickupForRow = (row: VoucherRenderRow) => sourcePickupMap.value.get(row.detail?.sourceOrderId || props.order.id)
+const sourceDocText = computed(() => showLineSource.value ? '合并来源见各明细'
+  : props.order.sourceDocType === 'o2o_preorder' && props.order.sourceDocNo
   ? `线上预订单 ${props.order.sourceDocNo}` : '未记录')
 const sourcePickupContact = computed(() => props.order.sourcePreorderPickupContact?.trim() || '未记录')
 const sourcePickupAt = computed(() => formatDateTime(props.order.sourcePreorderPickupAt))
@@ -135,14 +139,23 @@ onBeforeUnmount(() => { measurementRevision += 1 })
               <th scope="row">来源单据</th><td>{{ sourceDocText }}</td>
               <th scope="row">开单时间</th><td>{{ formatDateTime(props.order.createdAt) }}</td>
             </tr>
-            <tr class="voucher-meta-row voucher-meta-row--pickup">
+            <tr v-if="showLineSource" class="voucher-meta-row voucher-meta-row--pickup">
+              <th scope="row">来源领取信息</th><td colspan="5">各来源正式单的领取人及到店取货时间见对应明细</td>
+            </tr>
+            <tr v-else class="voucher-meta-row voucher-meta-row--pickup">
               <th scope="row">来源领取人</th><td colspan="2">{{ sourcePickupContact }}</td>
               <th scope="row">到店取货时间</th><td colspan="2">{{ sourcePickupAt }}</td>
             </tr>
             <tr class="voucher-detail-header-row"><th colspan="2" scope="colgroup">产品名称</th><th scope="col">单价</th><th scope="col">数量（规格 × 数量）</th><th scope="col">总价</th><th scope="col">备注</th></tr>
             <tr v-for="(row, rowIndex) in pageRows" :key="row.key" :data-voucher-row-key="row.key" :class="row.kind === 'detail' ? 'voucher-detail-row' : 'voucher-group-total-row'">
               <template v-if="row.kind === 'detail' && row.detail">
-                <td colspan="2" class="product-cell">{{ productLabel(row, rowIndex, pageIndex) || ' ' }}</td>
+                <td colspan="2" class="product-cell">
+                  {{ productLabel(row, rowIndex, pageIndex) || ' ' }}
+                  <small v-if="showLineSource" class="voucher-source-line">
+                    来源正式单：{{ sourcePickupForRow(row)?.businessNo || '未记录' }} · 线上预订单：{{ sourcePickupForRow(row)?.sourcePreorderNo || '未记录' }}<br>
+                    领取人：{{ sourcePickupForRow(row)?.pickupContact || '未记录' }} · 到店取货时间：{{ formatDateTime(sourcePickupForRow(row)?.pickupAt) }}
+                  </small>
+                </td>
                 <td>{{ row.detail.unitPrice }}</td>
                 <td class="quantity-cell"><span>{{ row.detail.specText ? `${row.detail.specText} × ${row.detail.qty}` : row.detail.qty }}</span><small v-if="row.detail.showNameSnapshot">原名称：{{ row.detail.nameSnapshot }}</small></td>
                 <td>{{ row.detail.subTotal }}</td>
@@ -188,6 +201,7 @@ onBeforeUnmount(() => { measurementRevision += 1 })
 .voucher-meta-row--secondary th, .voucher-meta-row--pickup th { background: #e1e1e1; }
 .voucher-detail-header-row th { background: #d0d0d0; border-top: 2px solid #3a3a3a; border-bottom: 2px solid #3a3a3a; }
 .voucher-detail-row .product-cell, .voucher-group-total-row .product-cell { text-align: left; padding-left: 8px; }
+.voucher-source-line { display: block; margin-top: 3px; font-size: 9px; font-weight: 400; color: #334155; }
 .voucher-detail-row .quantity-cell { white-space: normal; }
 .quantity-cell small { display: block; font-size: 9px; color: #475569; }
 .remark-cell { white-space: normal; }

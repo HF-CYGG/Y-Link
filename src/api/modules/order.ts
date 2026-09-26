@@ -299,7 +299,17 @@ export interface OrderItemRecord {
 export interface OrderDetailResult extends OrderRecord {
   sourcePreorderPickupContact: string | null
   sourcePreorderPickupAt: string | null
+  /** 管理端详情才返回逐来源记录；客户端合成的本人凭证可不提供。 */
+  sourcePreorderPickups?: OrderSourcePreorderPickupRecord[]
   items: OrderItemRecord[]
+}
+
+export interface OrderSourcePreorderPickupRecord {
+  sourceOrderId: string
+  businessNo: string
+  sourcePreorderNo: string | null
+  pickupContact: string | null
+  pickupAt: string | null
 }
 
 type PrimitiveTextValue = string | number | null | undefined
@@ -376,6 +386,13 @@ interface OrderDetailOrderRaw extends Omit<OrderRecord, 'totalAmount' | 'totalQt
   totalQty: PrimitiveTextValue
   sourcePreorderPickupContact?: PrimitiveTextValue
   sourcePreorderPickupAt?: PrimitiveTextValue
+  sourcePreorderPickups?: Array<{
+    sourceOrderId?: PrimitiveTextValue
+    businessNo?: PrimitiveTextValue
+    sourcePreorderNo?: PrimitiveTextValue
+    pickupContact?: PrimitiveTextValue
+    pickupAt?: PrimitiveTextValue
+  }>
 }
 
 interface OrderDetailRawResult {
@@ -521,6 +538,15 @@ const normalizeOrderDetail = (payload: OrderDetailRawResult): OrderDetailResult 
   ...normalizeOrderRecord(payload.order),
   sourcePreorderPickupContact: normalizeNullableTextField(payload.order.sourcePreorderPickupContact),
   sourcePreorderPickupAt: normalizeNullableTextField(payload.order.sourcePreorderPickupAt),
+  sourcePreorderPickups: Array.isArray(payload.order.sourcePreorderPickups)
+    ? payload.order.sourcePreorderPickups.filter((item) => item && typeof item === 'object').map((item) => ({
+      sourceOrderId: normalizeTextField(item.sourceOrderId),
+      businessNo: normalizeTextField(item.businessNo),
+      sourcePreorderNo: normalizeNullableTextField(item.sourcePreorderNo),
+      pickupContact: normalizeNullableTextField(item.pickupContact),
+      pickupAt: normalizeNullableTextField(item.pickupAt),
+    }))
+    : [],
   items: payload.items.map(normalizeOrderItem),
 })
 

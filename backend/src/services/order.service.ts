@@ -176,6 +176,14 @@ export interface OrderDetailSummaryView extends OrderSummaryView {
   /** 仅从实际来源预订单读取；历史来源记录缺失时保持 null。 */
   sourcePreorderPickupContact: string | null
   sourcePreorderPickupAt: string | null
+  /** 管理端按原正式单展示来源领取记录，不把父单领取人归给其他合并成员。 */
+  sourcePreorderPickups: Array<{
+    sourceOrderId: string
+    businessNo: string
+    sourcePreorderNo: string | null
+    pickupContact: string | null
+    pickupAt: string | null
+  }>
 }
 
 export interface SoftDeleteOrderOptions {
@@ -1529,18 +1537,48 @@ export class OrderService {
     manager: EntityManager = AppDataSource.manager,
   ): Promise<OrderDetailSummaryView> {
     const summary = this.buildOrderSummaryView(order, metadata, await this.isOrderInventoryReleased(order, manager))
-    const sourcePreorderId = this.resolveLinkedO2oPreorderId(order)
-      ?? (order.sourceDocType === 'o2o_preorder' ? normalizeNullableEntityId(order.sourceDocId) : null)
-    const sourcePreorder = sourcePreorderId
-      ? await manager.getRepository(O2oPreorder).findOne({
-        where: { id: sourcePreorderId },
-        select: ['id', 'pickupContact', 'pickupAt'],
+    const sourceOrderIds = [normalizeEntityId(order.id), ...(metadata?.role === 'parent'
+      ? metadata.children.map((child) => child.id)
+      : [])]
+    const sourceOrders = sourceOrderIds.length > 1
+      ? await manager.getRepository(BizOutboundOrder).find({ where: { id: In(sourceOrderIds) } })
+      : [order]
+    const sourceOrderMap = new Map(sourceOrders.map((sourceOrder) => [normalizeEntityId(sourceOrder.id), sourceOrder]))
+    const linkedPreorderIds = [...new Set(sourceOrderIds.flatMap((sourceOrderId) => {
+      const sourceOrder = sourceOrderMap.get(sourceOrderId)
+      if (!sourceOrder) return []
+      const preorderId = this.resolveLinkedO2oPreorderId(sourceOrder)
+        ?? (sourceOrder.sourceDocType === 'o2o_preorder' ? normalizeNullableEntityId(sourceOrder.sourceDocId) : null)
+      return preorderId ? [preorderId] : []
+    }))]
+    const preorders = linkedPreorderIds.length
+      ? await manager.getRepository(O2oPreorder).find({
+        where: { id: In(linkedPreorderIds) },
+        select: ['id', 'showNo', 'pickupContact', 'pickupAt'],
       })
-      : null
+      : []
+    const preorderMap = new Map(preorders.map((preorder) => [normalizeEntityId(preorder.id), preorder]))
+    const sourcePreorderPickups = sourceOrderIds.flatMap((sourceOrderId) => {
+      const sourceOrder = sourceOrderMap.get(sourceOrderId)
+      if (!sourceOrder) return []
+      const preorderId = this.resolveLinkedO2oPreorderId(sourceOrder)
+        ?? (sourceOrder.sourceDocType === 'o2o_preorder' ? normalizeNullableEntityId(sourceOrder.sourceDocId) : null)
+      if (!preorderId) return []
+      const preorder = preorderMap.get(preorderId)
+      return [{
+        sourceOrderId,
+        businessNo: sourceOrder.businessNo,
+        sourcePreorderNo: sourceOrder.sourceDocNo ?? preorder?.showNo ?? null,
+        pickupContact: preorder?.pickupContact?.trim() || null,
+        pickupAt: preorder?.pickupAt ? normalizeDateTime(preorder.pickupAt) : null,
+      }]
+    })
+    const ownPickup = sourcePreorderPickups.find((pickup) => pickup.sourceOrderId === normalizeEntityId(order.id))
     return {
       ...summary,
-      sourcePreorderPickupContact: sourcePreorder?.pickupContact?.trim() || null,
-      sourcePreorderPickupAt: sourcePreorder?.pickupAt ? normalizeDateTime(sourcePreorder.pickupAt) : null,
+      sourcePreorderPickupContact: ownPickup?.pickupContact ?? null,
+      sourcePreorderPickupAt: ownPickup?.pickupAt ?? null,
+      sourcePreorderPickups,
     }
   }
 

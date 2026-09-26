@@ -81,12 +81,30 @@ const voucherFillerCounts = ref<number[]>([])
 const exportPdfLoading = ref(false)
 const voucherEditableForm = reactive<OrderVoucherEditableFields>(createEmptyVoucherEditableFields())
 const voucherOrientation = ref<VoucherOrientation>('landscape')
+const paginationRevision = ref(0)
+const readyPaginationRevision = ref(-1)
+const isVoucherPaginationReady = computed(() => voucherPages.value.length > 0 && readyPaginationRevision.value === paginationRevision.value)
 const voucherOrientationLabel = computed(() => (voucherOrientation.value === 'landscape' ? '横版' : '竖版'))
 const voucherItemCount = computed(() => aggregateOrderVoucherItems(props.order.items).length)
-const voucherPageCount = computed(() => Math.max(1, voucherPages.value.length) * 2)
-const updateVoucherPages = (pages: VoucherRenderRow[][], fillerCounts: number[]) => {
+const voucherPageCount = computed(() => isVoucherPaginationReady.value ? voucherPages.value.length * 2 : 0)
+const invalidateVoucherPagination = () => {
+  paginationRevision.value += 1
+  readyPaginationRevision.value = -1
+  voucherPages.value = []
+  voucherFillerCounts.value = []
+}
+const updateVoucherPages = async (pages: VoucherRenderRow[][], fillerCounts: number[]) => {
+  const revision = paginationRevision.value
+  const orderId = props.order.id
+  const orientation = voucherOrientation.value
+  await nextTick()
+  const sourceElement = voucherPreviewRootRef.value?.querySelector('.voucher-print-document')
+  if (!dialogVisible.value || revision !== paginationRevision.value || orderId !== props.order.id || orientation !== voucherOrientation.value
+    || !(sourceElement instanceof HTMLElement) || !sourceElement.isConnected
+    || sourceElement.querySelectorAll('.voucher-sheet').length !== pages.length * 2) return
   voucherPages.value = pages
   voucherFillerCounts.value = fillerCounts
+  readyPaginationRevision.value = revision
 }
 
 /**
@@ -96,8 +114,7 @@ const updateVoucherPages = (pages: VoucherRenderRow[][], fillerCounts: number[])
  */
 const resetVoucherEditableForm = () => {
   Object.assign(voucherEditableForm, createEmptyVoucherEditableFields())
-  voucherPages.value = []
-  voucherFillerCounts.value = []
+  invalidateVoucherPagination()
 }
 
 watch(
@@ -107,13 +124,13 @@ watch(
   },
   {
     immediate: true,
+    flush: 'sync',
   },
 )
 
-watch(voucherOrientation, () => {
-  voucherPages.value = []
-  voucherFillerCounts.value = []
-})
+watch(voucherEditableForm, invalidateVoucherPagination, { deep: true, flush: 'sync' })
+watch(voucherOrientation, invalidateVoucherPagination, { flush: 'sync' })
+watch(() => props.order, invalidateVoucherPagination, { flush: 'sync' })
 
 watch(
   () => props.order.orderType,
@@ -147,13 +164,28 @@ const clearVoucherPrintPageStyle = () => {
   styleElement?.remove()
 }
 
+/** 复制已完成分页的预览纸面，避免 PDF 模块异步加载时读取仍在变化的响应式 DOM。 */
+const createVoucherExportSnapshot = (sourceElement: HTMLElement) => {
+  const host = document.createElement('div')
+  host.setAttribute('aria-hidden', 'true')
+  host.style.position = 'fixed'
+  host.style.left = '-100000px'
+  host.style.top = '0'
+  host.style.pointerEvents = 'none'
+  host.style.width = `${sourceElement.getBoundingClientRect().width}px`
+  const snapshot = sourceElement.cloneNode(true) as HTMLElement
+  host.appendChild(snapshot)
+  document.body.appendChild(host)
+  return { sourceElement: snapshot, dispose: () => host.remove() }
+}
+
 /**
  * 打印正式出库单：
  * - 直接触发浏览器打印；
  * - 打印专用 DOM 通过 Teleport 输出到 body 根层，避免受弹窗滚动容器裁剪。
  */
 const handlePrintVoucher = async () => {
-  if (!voucherPages.value.length) {
+  if (exportPdfLoading.value || !isVoucherPaginationReady.value) {
     showAppWarning('凭证分页尚未准备完成，请稍后重试')
     return
   }
@@ -174,7 +206,8 @@ const handlePrintVoucher = async () => {
  * - 导出的文件天然带上当前补填内容与当前横竖版方向。
  */
 const handleExportVoucherPdf = async () => {
-  if (!voucherPages.value.length) {
+  if (exportPdfLoading.value) return
+  if (!isVoucherPaginationReady.value) {
     showAppWarning('凭证分页尚未准备完成，请稍后重试')
     return
   }
@@ -184,26 +217,30 @@ const handleExportVoucherPdf = async () => {
   }
 
   const sourceElement = voucherPreviewRootRef.value?.querySelector('.voucher-print-document')
-  if (!(sourceElement instanceof HTMLElement)) {
+  if (!(sourceElement instanceof HTMLElement) || !sourceElement.isConnected || sourceElement.getBoundingClientRect().width <= 0) {
     showAppWarning('凭证模板尚未准备完成，请稍后重试')
     return
   }
 
+  const orderId = props.order.id
+  const orientation = voucherOrientation.value
   const outputFileName = `${props.order.businessNo || 'order-voucher'}-正式出库单.pdf`
-
+  let exportSnapshot: ReturnType<typeof createVoucherExportSnapshot> | null = null
   exportPdfLoading.value = true
   try {
+    exportSnapshot = createVoucherExportSnapshot(sourceElement)
     await exportVoucherPdf({
-      sourceElement,
+      sourceElement: exportSnapshot.sourceElement,
       filename: outputFileName,
       marginMm: 8,
       scale: 2,
-      orientation: voucherOrientation.value,
+      orientation,
     })
-    showAppSuccess('PDF 导出成功')
+    if (dialogVisible.value && props.order.id === orderId) showAppSuccess('PDF 导出成功')
   } catch (error) {
     showAppError(extractErrorMessage(error, 'PDF 导出失败，请稍后重试'))
   } finally {
+    exportSnapshot?.dispose()
     exportPdfLoading.value = false
   }
 }
@@ -219,6 +256,9 @@ const handleExportVoucherPdf = async () => {
     append-to-body
     :modal-append-to-body="true"
     :lock-scroll="true"
+    :show-close="!exportPdfLoading"
+    :close-on-click-modal="!exportPdfLoading"
+    :close-on-press-escape="!exportPdfLoading"
   >
     <div class="voucher-editor-banner">
       <div class="voucher-editor-banner__title">正式出库单字段说明</div>
@@ -244,25 +284,26 @@ const handleExportVoucherPdf = async () => {
         </div>
         <div class="voucher-orientation-toolbar">
           <span class="voucher-orientation-toolbar__label">页面方向</span>
-          <el-radio-group v-model="voucherOrientation" size="small">
-            <el-radio-button label="landscape">横版</el-radio-button>
-            <el-radio-button label="portrait">竖版</el-radio-button>
+          <el-radio-group v-model="voucherOrientation" :disabled="exportPdfLoading" size="small">
+            <el-radio-button value="landscape">横版</el-radio-button>
+            <el-radio-button value="portrait">竖版</el-radio-button>
           </el-radio-group>
         </div>
         <el-form label-position="top" class="voucher-editor-form">
           <div class="voucher-editor-form__grid">
             <el-form-item label="部门经办人">
-              <el-input v-model="voucherEditableForm.departmentOperator" placeholder="请输入部门经办人" clearable />
+              <el-input v-model="voucherEditableForm.departmentOperator" :disabled="exportPdfLoading" placeholder="请输入部门经办人" clearable />
             </el-form-item>
             <el-form-item label="金蝶单据编号">
-              <el-input v-model="voucherEditableForm.kingdeeVoucherNo" placeholder="请输入金蝶单据编号" clearable />
+              <el-input v-model="voucherEditableForm.kingdeeVoucherNo" :disabled="exportPdfLoading" placeholder="请输入金蝶单据编号" clearable />
             </el-form-item>
             <el-form-item label="领取人签字">
-              <el-input v-model="voucherEditableForm.receiverSignature" placeholder="请输入领取人签字" clearable />
+              <el-input v-model="voucherEditableForm.receiverSignature" :disabled="exportPdfLoading" placeholder="请输入领取人签字" clearable />
             </el-form-item>
             <el-form-item label="完成日期">
               <el-input
                 v-model="voucherEditableForm.completionDate"
+                :disabled="exportPdfLoading"
                 placeholder="请输入完成日期，例如：2026-04-28"
                 clearable
               />
@@ -298,9 +339,9 @@ const handleExportVoucherPdf = async () => {
     </div>
     <template #footer>
       <span class="flex flex-wrap justify-end gap-2">
-        <el-button @click="dialogVisible = false">关闭</el-button>
-        <el-button type="primary" plain :disabled="!voucherPages.length" @click="handlePrintVoucher">打印</el-button>
-        <el-button type="primary" :disabled="!props.enableHtml2pdfExport || !voucherPages.length" :loading="exportPdfLoading" @click="handleExportVoucherPdf">
+        <el-button :disabled="exportPdfLoading" @click="dialogVisible = false">关闭</el-button>
+        <el-button type="primary" plain :disabled="exportPdfLoading || !isVoucherPaginationReady" @click="handlePrintVoucher">打印</el-button>
+        <el-button type="primary" :disabled="exportPdfLoading || !props.enableHtml2pdfExport || !isVoucherPaginationReady" :loading="exportPdfLoading" @click="handleExportVoucherPdf">
           导出PDF
         </el-button>
       </span>
