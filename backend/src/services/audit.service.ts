@@ -9,6 +9,7 @@
 import { IsNull, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { escapeCsvCell } from '../utils/csv-security.js'
+import { toSafeErrorLog } from '../utils/safe-error-log.js'
 import { SysAuditLog } from '../entities/sys-audit-log.entity.js'
 import {
   AUDIT_ACTION_CATALOG,
@@ -186,7 +187,8 @@ export class AuditService {
     try {
       await this.record(input)
     } catch (error) {
-      console.error('[y-link-backend] audit log write failed:', error)
+      // 审计写入失败的 SQL 参数即审计明细本身，只记录驱动错误码。
+      console.error('[y-link-backend] audit log write failed:', toSafeErrorLog(error))
     }
   }
 
@@ -214,7 +216,7 @@ export class AuditService {
       }
     } catch (error) {
       if (options.requireSuccess) throw error
-      console.error('[y-link-backend] idempotent audit log write failed:', error)
+      console.error('[y-link-backend] idempotent audit log write failed:', toSafeErrorLog(error))
     }
   }
 

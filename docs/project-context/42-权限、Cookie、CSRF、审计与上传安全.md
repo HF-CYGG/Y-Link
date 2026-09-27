@@ -37,6 +37,7 @@
 - `requireRole` 和 `requirePermission` 在拒绝请求时会写安全审计。
 - `app.ts` 会给上传资源附加长期缓存、安全头和旧路径兼容重写逻辑。
 - 管理端与客户端图形验证码由 `captcha.service.ts` 共用生成链路：`svg-captcha` 使用包内字体绘制字符路径，`sharp` 转为 140×40 PNG，不依赖容器系统字体。答案仍由 `node:crypto` 生成；旧 `captchaSvg` 字段仅包装 PNG，不返回答案文本或字形路径。
+- body-parser 解析错误（畸形 JSON、超限、编码不支持等）在 `error-handler.ts` 按 4xx 返回；兜底 500 与审计写入失败日志只记录名称/消息/堆栈或驱动错误码（`utils/safe-error-log.ts`），不得展开错误对象属性，避免原始请求体中的密码进入日志。
 
 ## 代理、HTTPS 与救援传输边界
 
