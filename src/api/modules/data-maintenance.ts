@@ -404,12 +404,14 @@ export const exportDataAsJson = () =>
 
 /**
  * 通过 JSON 格式导入恢复系统全量数据：
- * - 覆盖现有数据，具有破坏性操作，通常在运维环境交接或系统重建时调用。
+ * - 覆盖现有数据，具有破坏性操作，通常在运维环境交接或系统重建时调用；
+ * - 服务端按永久删除类操作处理：必须携带服务端配置的永久删除口令，并受账号级频控。
  */
 export const importDataFromJson = (payload: {
   exportedAt: string
   version: string
   tables: Record<string, Array<Record<string, unknown>>>
+  permanentDeletePassword: string
 }) =>
   request<{
     imported: Record<string, number>

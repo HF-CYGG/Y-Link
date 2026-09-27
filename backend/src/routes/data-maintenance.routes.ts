@@ -18,6 +18,7 @@ import { getTransactionCoordinator } from '../database/transaction-coordinator.j
 import { issueDatabaseRescueCredential } from '../runtime/database-rescue-control.js'
 import { isSecureOrDirectLoopback } from '../utils/http-security.js'
 import { BizError } from '../utils/errors.js'
+import { assertPermanentDeletePasswordForRequest, createPermanentDeleteLimiter } from '../utils/permanent-delete-guard.js'
 
 const importPayloadSchema = z
   .object({
@@ -33,8 +34,17 @@ const importPayloadSchema = z
         inventoryLogs: z.array(z.record(z.any())).default([]),
       })
       .strict(),
+    // 导入会先清空商品、客户端账号、预订单、库存流水与系统配置再写入，属于永久删除类操作，必须校验服务端永久删除口令。
+    permanentDeletePassword: z.string().max(256).optional(),
   })
   .strict()
+
+const JSON_IMPORT_AUDIT_TARGET = {
+  actionType: 'data_maintenance.import_json',
+  actionLabel: '导入 JSON 数据',
+  targetType: 'data_maintenance',
+} as const
+const jsonImportLimiter = createPermanentDeleteLimiter({ ...JSON_IMPORT_AUDIT_TARGET, storePrefix: 'data-maintenance-import-json' })
 
 /**
  * MySQL 目标库连接参数：
@@ -137,9 +147,12 @@ dataMaintenanceRouter.post(
   '/import/json',
   requirePermission('data_maintenance:import'),
   requireRole('admin'),
+  jsonImportLimiter,
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
-    const payload = importPayloadSchema.parse(req.body)
+    const { permanentDeletePassword, ...payload } = importPayloadSchema.parse(req.body)
+    // 先核对口令再进入清表事务：被劫持的管理员会话不能凭一次请求清空业务数据。
+    await assertPermanentDeletePasswordForRequest(req, permanentDeletePassword, JSON_IMPORT_AUDIT_TARGET)
     const data = await dataMaintenanceService.importJson(payload as any, authReq.auth, extractRequestMeta(req))
     res.json({ code: 0, message: 'ok', data })
   }),
