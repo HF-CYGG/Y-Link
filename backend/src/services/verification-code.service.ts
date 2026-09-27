@@ -23,6 +23,7 @@ import {
 import { auditService } from './audit.service.js'
 import { EphemeralTicketStore } from '../utils/ephemeral-ticket-store.js'
 import { safeHttpRequest } from '../utils/safe-http-request.js'
+import { renderProviderTemplate, resolveProviderBodyFormat } from '../utils/provider-template.js'
 import { maskMobileVerificationTarget, smsVerificationRecordService, type SmsVerificationRecordService } from './sms-verification-record.service.js'
 import type { AliyunDypnsProviderConfig } from './aliyun-dypns-sms.service.js'
 import type { VerificationScene } from './system-config.service.js'
@@ -145,13 +146,6 @@ export class VerificationCodeService {
     }
   }
 
-  private renderTemplate(template: string, context: Record<string, string>) {
-    return Object.entries(context).reduce((result, [key, value]) => {
-      const pattern = new RegExp(String.raw`\{\{\s*${key}\s*\}\}`, 'g')
-      return result.replace(pattern, value)
-    }, template)
-  }
-
   private async sendByProvider(config: VerificationProviderConfigRecord, context: Record<string, string>) {
     if (!config.enabled) {
       throw new BizError('当前验证码通道未启用，请联系管理员配置', 400)
@@ -177,8 +171,8 @@ export class VerificationCodeService {
       throw new BizError(`验证码平台 API 地址命中受限主机：${formatUnsafeHostReason(unsafeReason)}`, 500)
     }
 
-    const renderedHeadersText = this.renderTemplate(config.headersTemplate, context) || '{}'
-    const renderedBodyText = this.renderTemplate(config.bodyTemplate, context)
+    // 请求头模板固定为 JSON；请求体按声明的 Content-Type 做上下文转义，防止目标值闭合字符串注入字段。
+    const renderedHeadersText = renderProviderTemplate(config.headersTemplate, context, 'json') || '{}'
 
     let headers: Record<string, string> = {}
     try {
@@ -186,6 +180,11 @@ export class VerificationCodeService {
     } catch {
       throw new BizError('验证码平台请求头模板不是合法 JSON，请联系管理员修正', 500)
     }
+    const renderedBodyText = renderProviderTemplate(
+      config.bodyTemplate,
+      context,
+      resolveProviderBodyFormat(headers, config.bodyTemplate),
+    )
 
     let response: Awaited<ReturnType<typeof safeHttpRequest>>
     let responseText: string

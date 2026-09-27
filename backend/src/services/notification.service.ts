@@ -25,6 +25,7 @@ import type { RequestMeta } from '../utils/request-meta.js'
 import { detectUnsafeHost, formatUnsafeHostReason } from '../utils/safe-network.js'
 import { hashSessionToken } from '../utils/session-token.js'
 import { maskFeishuWebhookTarget } from '../utils/notification-target-mask.js'
+import { renderProviderTemplate, resolveProviderBodyFormat } from '../utils/provider-template.js'
 import { auditService } from './audit.service.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { systemConfigService } from './system-config.service.js'
@@ -877,12 +878,12 @@ export class NotificationService {
       }
     }
 
-    const body = provider.bodyTemplate
-      .replaceAll(/\{\{\s*target\s*\}\}/g, target)
-      .replaceAll(/\{\{\s*scene\s*\}\}/g, 'notification')
-      .replaceAll(/\{\{\s*code\s*\}\}/g, '')
-      .replaceAll(/\{\{\s*subject\s*\}\}/g, subject)
-      .replaceAll(/\{\{\s*content\s*\}\}/g, content)
+    // content 含客户可控的反馈摘要与显示名，必须按请求体格式转义后再拼入邮件网关模板。
+    const body = renderProviderTemplate(
+      provider.bodyTemplate,
+      { target, scene: 'notification', code: '', subject, content },
+      resolveProviderBodyFormat(headers, provider.bodyTemplate),
+    )
 
     try {
       const response = await safeHttpRequest(providerApiUrl, {
