@@ -40,6 +40,7 @@
 - 图形验证码为一次性票据：首次校验无论对错都立即作废，前端答错后必须重新获取（管理端登录页已在“验证码”类错误时换新图）。
 - 管理端会话除 `AUTH_TOKEN_TTL_HOURS` 绝对时效外，还有 `AUTH_SESSION_IDLE_TIMEOUT_MINUTES` 空闲超时（默认 720 分钟，0 关闭）：按 `lastAccessAt` 判定，HTTP 鉴权与客服 SSE 复核共用 `utils/admin-session-idle.ts`。标签页可见时每 60 秒心跳续期，隐藏或关闭超过时长后需重新登录。
 - body-parser 解析错误（畸形 JSON、超限、编码不支持等）在 `error-handler.ts` 按 4xx 返回；兜底 500 与审计写入失败日志只记录名称/消息/堆栈或驱动错误码（`utils/safe-error-log.ts`），不得展开错误对象属性，避免原始请求体中的密码进入日志。
+- 登录失败锁定与“需要图形验证码”判定按规范账号主体计数：管理端用库中真实用户名（`authService.resolveLoginRiskSubject`），客户端 Web/Mobile 用 `uid:<用户ID>`（`clientAuthService.resolveLoginRiskSubject`），账号不存在时才退回输入原文。MySQL 常用排序规则大小写、重音、全角不敏感，按输入计数会让 `Ádmin`、全角 `ａｄｍｉｎ` 各得一份失败额度；客户端同一账号的手机号、邮箱、用户名、工号也必须共用一个桶。
 
 ## 代理、HTTPS 与救援传输边界
 

@@ -105,6 +105,25 @@ export class AuthService {
       .getOne()
   }
 
+  /**
+   * 解析登录风控主体：
+   * - 账号存在时返回数据库中的规范用户名，锁定与验证码判定都按它计数；
+   * - MySQL 常用排序规则大小写、重音、全角不敏感，`Ádmin`/`ａｄｍｉｎ` 都能命中 `admin`，
+   *   若按输入原文计数，攻击者每换一种写法就得到一个全新的失败桶，账号锁定形同虚设；
+   * - 账号不存在时退回输入原文，与失败记录口径保持一致。
+   */
+  async resolveLoginRiskSubject(username: string): Promise<string> {
+    const normalizedUsername = username.trim()
+    if (!normalizedUsername) {
+      return normalizedUsername
+    }
+    const user = await this.userRepo.findOne({
+      where: { username: normalizedUsername },
+      select: { id: true, username: true },
+    })
+    return user?.username ?? normalizedUsername
+  }
+
   private buildLoginSecuritySnapshot(user: SysUser): AdminLoginSecuritySnapshot {
     return {
       passwordHash: user.passwordHash,
@@ -265,8 +284,8 @@ export class AuthService {
       }
     })
 
-    // 登录成功后清空该来源与该账号的失败计数，避免历史失败导致后续误锁。
-    await authSecurityService.clearAdminLoginFailures(requestMeta, username)
+    // 登录成功后清空该来源与该账号的失败计数，避免历史失败导致后续误锁；按规范用户名清理，与失败记录同一个桶。
+    await authSecurityService.clearAdminLoginFailures(requestMeta, user.username)
     return data
   }
 

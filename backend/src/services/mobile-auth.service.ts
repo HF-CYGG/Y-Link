@@ -55,7 +55,12 @@ class MobileAuthService {
       allowUsername: true,
       fieldLabel: '账号',
     }).normalizedValue
-    const { captchaRequired } = await authSecurityService.guardClientLoginRequest(requestMeta, normalizedAccount)
+    // 与 Web 登录共用 authenticateCredentials 的失败记录口径，锁定判定必须按同一账号主体进行。
+    const { captchaRequired } = await authSecurityService.guardClientLoginRequest(
+      requestMeta,
+      normalizedAccount,
+      () => clientAuthService.resolveLoginRiskSubject(input.account),
+    )
     try {
       const user = await clientAuthService.authenticateCredentials(input, requestMeta, captchaRequired)
       return await mobileSessionService.createForUser(user, input.device, requestMeta, 'mobile_login')

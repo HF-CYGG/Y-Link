@@ -235,7 +235,12 @@ clientAuthRouter.post(
       allowUsername: true,
       fieldLabel: '账号',
     }).normalizedValue
-    const { captchaRequired } = await authSecurityService.guardClientLoginRequest(requestMeta, normalizedAccount)
+    // 锁定与验证码判定按账号主体（用户 ID）计数：手机号、邮箱、用户名、工号及其变体写法共用同一失败额度。
+    const { captchaRequired } = await authSecurityService.guardClientLoginRequest(
+      requestMeta,
+      normalizedAccount,
+      () => clientAuthService.resolveLoginRiskSubject(payload.account),
+    )
     const data = await clientAuthService.login(payload, requestMeta, captchaRequired)
     setClientAuthCookie(req, res, {
       sessionToken: data.token,

@@ -471,7 +471,17 @@ export class AuthSecurityService {
     return primaryConsumeResult
   }
 
-  async guardAdminLoginRequest(requestMeta: RequestMeta | undefined, username: string): Promise<{ captchaRequired: boolean }> {
+  /**
+   * 管理端登录守卫：
+   * - 先按 IP 频控，被限流的请求不再查库；
+   * - `resolveRiskSubject` 返回规范用户名（账号不存在时为输入原文），锁定与验证码判定按它计数，
+   *   与 `recordAdminLoginFailure` 使用同一主体，防止大小写/重音/全角变体各得一份失败额度。
+   */
+  async guardAdminLoginRequest(
+    requestMeta: RequestMeta | undefined,
+    username: string,
+    resolveRiskSubject?: () => Promise<string>,
+  ): Promise<{ captchaRequired: boolean }> {
     const source = normalizeRiskSource(requestMeta)
     const normalizedUsername = username.trim().toLowerCase()
     await this.consumeRateLimit(`admin-login:ip:${source}`, RATE_LIMIT_RULES.adminLoginByIp, {
@@ -481,11 +491,12 @@ export class AuthSecurityService {
       requestMeta,
       detail: { source },
     })
+    const subject = resolveRiskSubject ? (await resolveRiskSubject()).trim().toLowerCase() : normalizedUsername
     return this.assertLoginNotLockedAndCaptchaRequired(
       'admin-login',
-      [`admin-login:ip:${source}`, `admin-login:user:${normalizedUsername}`],
+      [`admin-login:ip:${source}`, `admin-login:user:${subject}`],
       requestMeta,
-      normalizedUsername,
+      subject,
     )
   }
 
@@ -656,7 +667,17 @@ export class AuthSecurityService {
     })
   }
 
-  async guardClientLoginRequest(requestMeta: RequestMeta | undefined, accountKey: string): Promise<{ captchaRequired: boolean }> {
+  /**
+   * 客户端登录守卫（Web 与 Mobile 共用）：
+   * - 先按来源频控，被限流的请求不再查库；
+   * - `resolveRiskSubject` 返回账号主体（`uid:<用户ID>`，账号不存在时为归一化输入），
+   *   必须与 `clientAuthService.authenticateCredentials` 记录失败时的主体一致。
+   */
+  async guardClientLoginRequest(
+    requestMeta: RequestMeta | undefined,
+    accountKey: string,
+    resolveRiskSubject?: () => Promise<string>,
+  ): Promise<{ captchaRequired: boolean }> {
     const riskActor = this.resolveClientRiskActor(requestMeta)
     await this.consumeClientSourceRateLimit('client-login', RATE_LIMIT_RULES.clientLoginBySource, RATE_LIMIT_RULES.clientLoginByIpFallback, {
       actionType: 'client.auth.guard.login',
@@ -665,11 +686,12 @@ export class AuthSecurityService {
       requestMeta,
       detail: {},
     })
+    const subject = resolveRiskSubject ? await resolveRiskSubject() : accountKey
     return this.assertLoginNotLockedAndCaptchaRequired(
       'client-login',
-      [`client-login:${riskActor.bucketSegment}`, `client-login:account:${accountKey}`],
+      [`client-login:${riskActor.bucketSegment}`, `client-login:account:${subject}`],
       requestMeta,
-      accountKey,
+      subject,
     )
   }
 

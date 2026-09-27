@@ -576,6 +576,22 @@ class ClientAuthService {
     })
   }
 
+  /**
+   * 登录风控主体：账号存在时统一用 `uid:<用户ID>`，不存在时退回归一化后的输入。
+   * - 同一账号可用手机号、邮箱、用户名或工号登录，按输入计数会让每种标识各得一份失败额度；
+   * - MySQL 排序规则大小写、重音、全角不敏感，变体写法也能命中同一账号，按输入计数可无限绕过锁定。
+   */
+  private buildLoginRiskSubject(user: Pick<ClientUser, 'id'> | null, account: NormalizedClientAccount): string {
+    return user ? `uid:${user.id}` : account.normalizedValue
+  }
+
+  /** Web 与 Mobile 登录在锁定判定前调用，必须与 authenticateCredentials 记录失败时使用同一主体。 */
+  async resolveLoginRiskSubject(accountInput: string): Promise<string> {
+    const account = this.resolveLoginAccount(accountInput)
+    const user = await this.findUserByAnyIdentifier(account)
+    return this.buildLoginRiskSubject(user, account)
+  }
+
   async createCaptcha(requestMeta?: RequestMeta) {
     await authSecurityService.guardClientCaptchaRequest(requestMeta)
     return captchaService.createCaptcha('client')
@@ -846,9 +862,10 @@ class ClientAuthService {
       this.verifyCaptchaIfRequired(input)
     }
     const user = await this.findUserWithPasswordByAccount(account)
+    const riskSubject = this.buildLoginRiskSubject(user, account)
     if (!user) {
       await verifyPasswordForNonexistentAccount(password)
-      const loginFailureResult = await authSecurityService.recordClientLoginFailure(requestMeta, account.normalizedValue)
+      const loginFailureResult = await authSecurityService.recordClientLoginFailure(requestMeta, riskSubject)
       await auditService.safeRecord({
         actionType: 'client.auth.login',
         actionLabel: '客户端登录',
@@ -865,7 +882,7 @@ class ClientAuthService {
     }
     const matched = await verifyPassword(password, user.passwordHash)
     if (!matched) {
-      const loginFailureResult = await authSecurityService.recordClientLoginFailure(requestMeta, account.normalizedValue)
+      const loginFailureResult = await authSecurityService.recordClientLoginFailure(requestMeta, riskSubject)
       await auditService.safeRecord({
         actionType: 'client.auth.login',
         actionLabel: '客户端登录',
@@ -884,7 +901,7 @@ class ClientAuthService {
     if (user.status !== 'enabled') {
       throw new BizError('当前账号已停用', 403)
     }
-    await authSecurityService.clearClientLoginFailures(requestMeta, account.normalizedValue)
+    await authSecurityService.clearClientLoginFailures(requestMeta, riskSubject)
     return user
   }
 

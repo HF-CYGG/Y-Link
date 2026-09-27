@@ -59,8 +59,12 @@ authRouter.post(
   asyncHandler(async (req, res) => {
     const payload = loginSchema.parse(req.body)
     const requestMeta = extractRequestMeta(req)
-    // 管理端登录先经过频控与锁定校验，再进入账号密码校验。
-    const { captchaRequired } = await authSecurityService.guardAdminLoginRequest(requestMeta, payload.username)
+    // 管理端登录先经过频控与锁定校验，再进入账号密码校验；锁定按规范用户名计数，防止大小写/重音/全角变体绕过。
+    const { captchaRequired } = await authSecurityService.guardAdminLoginRequest(
+      requestMeta,
+      payload.username,
+      () => authService.resolveLoginRiskSubject(payload.username),
+    )
     if (captchaRequired) {
       if (!payload.captchaId?.trim() || !payload.captchaCode?.trim()) {
         throw new BizError('当前登录环境需要图形验证码', 428)
