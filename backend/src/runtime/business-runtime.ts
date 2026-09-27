@@ -30,6 +30,7 @@ import { persistentRiskStateService } from '../services/persistent-risk-state.se
 import { aliyunDypnsMnsWorkerService } from '../services/aliyun-dypns-mns-worker.service.js'
 import { systemConfigService } from '../services/system-config.service.js'
 import { migrateLegacyUploadReferences } from '../utils/upload-migration.js'
+import { toSafeErrorLog } from '../utils/safe-error-log.js'
 import { registerRuntimeShutdownHandler } from './runtime-shutdown.js'
 import { registerDatabaseRescueQuiesce, hasPendingRecoveryIntent, markRecoveryFinalizing } from './database-rescue-control.js'
 import {
@@ -157,7 +158,7 @@ const shutdownRuntime = (reason: string, exitCode: number, exit = true): Promise
 
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy().catch((error) => {
-        console.error(paint('[y-link-backend] datasource shutdown failed:', 'red'), error)
+        console.error(paint('[y-link-backend] datasource shutdown failed:', 'red'), toSafeErrorLog(error))
       })
     }
     activeHttpServer = null
@@ -440,7 +441,8 @@ export async function startBusinessRuntime(startup: { mode: 'normal' | 'cutover'
       logLine('DB MIGRATION', `task=${taskId} 已调度自动续跑`, 'warn')
     }
   }).catch((error) => {
-    console.error(paint('[y-link-backend] resume automatic database migration failed:', 'red'), error)
+    // 迁移错误对象可能携带目标库连接参数与 SQL，只输出名称、消息与堆栈。
+    console.error(paint('[y-link-backend] resume automatic database migration failed:', 'red'), toSafeErrorLog(error))
   }).finally(() => {
     // 通知 outbox 定时器在维护期只空转检查，不领取新任务；维护 drain 会等待已领取批次释放。
     notificationService.startOutboxWorker()

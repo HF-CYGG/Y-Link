@@ -26,6 +26,7 @@ import { detectUnsafeHost, formatUnsafeHostReason } from '../utils/safe-network.
 import { hashSessionToken } from '../utils/session-token.js'
 import { maskFeishuWebhookTarget } from '../utils/notification-target-mask.js'
 import { renderProviderTemplate, resolveProviderBodyFormat } from '../utils/provider-template.js'
+import { toSafeErrorLog } from '../utils/safe-error-log.js'
 import { auditService } from './audit.service.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { systemConfigService } from './system-config.service.js'
@@ -1431,7 +1432,8 @@ export class NotificationService {
     }
     const trigger = () => {
       void this.runOutboxOnce().catch((error) => {
-        console.error('[notification-outbox] 后台处理周期失败', error)
+        // 数据库错误的 SQL 参数可能带通知正文（客户姓名、消息摘要），只记录脱敏摘要。
+        console.error('[notification-outbox] 后台处理周期失败', toSafeErrorLog(error))
       })
     }
     this.outboxTimer = globalThis.setInterval(trigger, NOTIFICATION_OUTBOX_INTERVAL_MS)

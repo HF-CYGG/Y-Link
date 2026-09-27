@@ -43,6 +43,7 @@ import type { AuthUserContext } from '../types/auth.js'
 import type { ClientAuthContext } from '../types/client-auth.js'
 import { isUniqueConstraintError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
+import { toSafeErrorLog } from '../utils/safe-error-log.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { ensureUploadCategoryDir, IMAGE_UPLOAD_MAX_FILE_SIZE, isUploadPublicUrlForCategory, removeClientFeedbackUploadFile, UPLOAD_PUBLIC_FILE_NAME_MATCHER } from '../utils/upload-storage.js'
 import type { RequestMeta } from '../utils/request-meta.js'
@@ -389,7 +390,7 @@ class ClientFeedbackService {
         try {
           await queryRunner.query('SELECT RELEASE_LOCK(?)', [MYSQL_FEEDBACK_ATTACHMENT_COORDINATION_LOCK])
         } catch (error) {
-          console.error('[client-feedback-attachment] 释放数据库协调锁失败', error)
+          console.error('[client-feedback-attachment] 释放数据库协调锁失败', toSafeErrorLog(error))
         }
       }
       await queryRunner.release()
@@ -833,7 +834,7 @@ class ClientFeedbackService {
           console.warn(`[client-feedback-attachment] 清理发现 ${result.anomalies.length} 个不确定项，均已保留`)
         }
       }).catch((error) => {
-        console.error('[client-feedback-attachment] 后台清理周期失败', error)
+        console.error('[client-feedback-attachment] 后台清理周期失败', toSafeErrorLog(error))
       })
     }
     this.attachmentCleanupTimer = globalThis.setInterval(trigger, CLIENT_FEEDBACK_ATTACHMENT_POLICY.cleanupIntervalMs)
