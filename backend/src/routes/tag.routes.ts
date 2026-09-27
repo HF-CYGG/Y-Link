@@ -9,6 +9,7 @@ import { z } from 'zod'
 import { requirePermission } from '../middleware/auth.middleware.js'
 import { tagService } from '../services/tag.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
+import { extractRequestMeta } from '../utils/request-meta.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 
 const createTagSchema = z.object({
@@ -43,7 +44,7 @@ tagRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = createTagSchema.parse(req.body)
-    const data = await tagService.create(payload, authReq.auth)
+    const data = await tagService.create(payload, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',
@@ -59,7 +60,7 @@ tagRouter.put(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = updateTagSchema.parse(req.body)
-    const data = await tagService.update(req.params.id, payload, authReq.auth)
+    const data = await tagService.update(req.params.id, payload, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',
@@ -74,7 +75,7 @@ tagRouter.delete(
   requirePermission('tags:manage'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
-    await tagService.delete(req.params.id, authReq.auth)
+    await tagService.delete(req.params.id, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',

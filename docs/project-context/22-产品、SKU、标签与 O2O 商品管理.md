@@ -55,6 +55,7 @@
 - 查看通常依赖 `products:view`、`tags:view`。
 - 管理产品和标签依赖 `products:manage`、`tags:manage`。
 - SKU/标签修改会影响客户端展示和 O2O 下单口径，因此即便是“前端展示优化”也必须当成业务配置改动处理。
+- 商品写入口在同一事务内写审计：`product.create`/`product.batch_create`（新建摘要）、`product.update`（编码、名称、原价、折扣、启用、上架、限购及 SKU 原价/折扣/启停的前后值差异，成本价只记“是否变更”，仅改描述或图片不产生审计）、`product.batch_update`（批量启停，只列实际变化的商品）、`product.delete`。库存数量变化继续由库存流水 `manual_stock_adjust` 记录，审计不重复。Excel/YZ 导入沿用各自的汇总审计。标签写入口同样审计：`tag.create`、`tag.update`（名称、颜色码、系列码前后值，无变化不记）、`tag.delete`。
 
 ## 常见异常与排查顺序
 

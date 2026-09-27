@@ -276,7 +276,7 @@ productRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = batchUpdateProductSchema.parse(req.body)
-    const data = await productService.batchUpdate(payload, authReq.auth)
+    const data = await productService.batchUpdate(payload, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',
@@ -292,7 +292,7 @@ productRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = batchCreateProductSchema.parse(req.body)
-    const data = await batchCreateProducts(payload.products, authReq.auth)
+    const data = await batchCreateProducts(payload.products, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',
@@ -444,7 +444,7 @@ productRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = createProductSchema.parse(req.body)
-    const data = await productService.create(payload, authReq.auth)
+    const data = await productService.create(payload, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',
@@ -460,7 +460,7 @@ productRouter.put(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = updateProductSchema.parse(req.body)
-    const data = await productService.update(req.params.id, payload, authReq.auth)
+    const data = await productService.update(req.params.id, payload, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',
@@ -475,7 +475,7 @@ productRouter.delete(
   requirePermission('products:manage'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
-    await productService.delete(req.params.id, authReq.auth)
+    await productService.delete(req.params.id, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',
