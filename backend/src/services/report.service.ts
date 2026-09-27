@@ -162,8 +162,9 @@ export class ReportExportLeasePool {
   private readonly activeActorCounts = new Map<string, number>()
   private activeCount = 0
 
-  acquire(actorId: string) {
-    const normalizedActorId = actorId.trim()
+  /** SQLite 下 integer 主键在运行时是数字（类型声明为 string），必须先转字符串，否则导出直接 500。 */
+  acquire(actorId: string | number) {
+    const normalizedActorId = String(actorId ?? '').trim()
     if (!normalizedActorId) {
       throw new BizError('导出操作者身份缺失', 401)
     }
@@ -360,7 +361,7 @@ export class ReportService {
     input: ReportQueryInput,
     output: Writable,
     onReady?: () => void,
-    actorId?: string,
+    actorId?: string | number,
   ): Promise<ReportExportResult> {
     const lease = reportExportLeasePool.acquire(actorId ?? '')
     try {
