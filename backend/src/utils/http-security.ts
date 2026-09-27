@@ -65,8 +65,9 @@ export function configureHttpSecurity(app: Express, config = readHttpSecurityCon
     if (config.production && req.secure && config.hstsMaxAge > 0) {
       res.setHeader('Strict-Transport-Security', `max-age=${config.hstsMaxAge}`)
     }
-    if (/^\/api\/(?:auth|client-auth|client-feedback|customer-service|data-maintenance|database-rescue)(?:\/|$)/.test(req.path)
-      || req.path === '/health') {
+    // 接口响应默认禁止缓存（ASVS V14.3）：用户、订单、审计、配置等数据不得落入浏览器磁盘缓存或中间代理；
+    // 公开商城目录、SSE 等确需其它缓存语义的接口在处理器内显式覆盖。
+    if (req.path === '/api' || req.path.startsWith('/api/') || req.path === '/health') {
       res.setHeader('Cache-Control', 'no-store')
     }
     next()
