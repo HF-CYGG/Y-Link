@@ -60,8 +60,8 @@ const showLineSource = computed(() => props.order.merge.role === 'parent' && pro
 const sourcePickupMap = computed(() => new Map((props.order.sourcePreorderPickups ?? []).map((item) => [item.sourceOrderId, item])))
 const sourcePickupForRow = (row: VoucherRenderRow) => sourcePickupMap.value.get(row.detail?.sourceOrderId || props.order.id)
 const sourceDocText = computed(() => showLineSource.value ? '合并来源见各明细'
-  : props.order.sourceDocType === 'o2o_preorder' && props.order.sourceDocNo
-  ? `线上预订单 ${props.order.sourceDocNo}` : '未记录')
+  : props.order.sourceDocType === 'o2o_preorder' && props.order.sourcePreorderNo
+  ? `线上预订单 ${props.order.sourcePreorderNo}` : '未记录')
 const sourcePickupContact = computed(() => props.order.sourcePreorderPickupContact?.trim() || '未记录')
 const sourcePickupAt = computed(() => formatDateTime(props.order.sourcePreorderPickupAt))
 const editableText = (value: string) => value.trim() || ' '

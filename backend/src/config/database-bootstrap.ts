@@ -9,13 +9,21 @@ import path from 'node:path'
 import type { DataSource, EntityManager } from 'typeorm'
 import { env } from './env.js'
 import { initializeDatabaseInfrastructure } from '../database/database-strategy.js'
+import { runDatabaseExclusive } from '../database/transaction-coordinator.js'
 import { ClientStaffDirectory } from '../entities/client-staff-directory.entity.js'
 import { ClientUser } from '../entities/client-user.entity.js'
 import { ClientFeedbackAttachment } from '../entities/client-feedback-attachment.entity.js'
 import { ClientFeedbackConversation } from '../entities/client-feedback-conversation.entity.js'
 import { ClientFeedbackMessage, type ClientFeedbackMessageAttachment } from '../entities/client-feedback-message.entity.js'
-import { assertMysqlRequiredSchemaExists, runMysqlSchemaMigrations } from './mysql-migration-runner.js'
+import {
+  assertMysqlOrderBusinessNoPermanentOccupancyRetired,
+  assertMysqlRequiredSchemaExists,
+  reconcileMysqlOrderIdentifierNamespaces,
+  retireMysqlOrderBusinessNoPermanentOccupancy,
+  runMysqlSchemaMigrations,
+} from './mysql-migration-runner.js'
 import { BizError } from '../utils/errors.js'
+import { backupOrderBusinessNoRetirementTables } from './order-business-no-retirement-backup.js'
 
 const SQLITE_REQUIRED_TABLES = [
   'base_product',
@@ -49,7 +57,6 @@ const SQLITE_REQUIRED_TABLES = [
   'auth_risk_state',
   'business_sequence',
   'sms_verification_record',
-  'order_business_no_occupancy',
   'order_revision',
   'account_lifecycle_event',
   'order_merge_operation',
@@ -122,6 +129,26 @@ async function ensureSqliteAccountLifecycleAppendOnly(dataSource: DataSource): P
       SELECT RAISE(ABORT, 'ACCOUNT_LIFECYCLE_EVENT_APPEND_ONLY');
     END
   `)
+}
+
+/** 056：业务号永久占用功能停用，SQLite 启动时幂等移除历史表与触发器。 */
+async function dropSqliteOrderBusinessNoPermanentOccupancy(dataSource: DataSource): Promise<void> {
+  await runDatabaseExclusive(dataSource, async () => {
+    const backup = await backupOrderBusinessNoRetirementTables({
+      dialect: 'sqlite',
+      query: dataSource.query.bind(dataSource),
+    })
+    if (backup.status === 'created') {
+      console.log(
+        `[y-link-backend] 056 清退前备份已校验：${backup.fileName}；`
+        + `表摘要=${backup.tables.map((table) => `${table.name}:${table.rowCount}`).join(',')}`,
+      )
+    }
+    await dataSource.query('DROP TRIGGER IF EXISTS "trg_order_business_no_reuse_event_no_update"')
+    await dataSource.query('DROP TRIGGER IF EXISTS "trg_order_business_no_reuse_event_no_delete"')
+    await dataSource.query('DROP TABLE IF EXISTS "order_business_no_reuse_event"')
+    await dataSource.query('DROP TABLE IF EXISTS "order_business_no_occupancy"')
+  })
 }
 
 async function migrateLegacyFeedbackAttachments(dataSource: DataSource) {
@@ -487,6 +514,7 @@ async function prepareSqliteOrderAmendmentColumns(dataSource: DataSource): Promi
     SET "edit_version" = 1
     WHERE "edit_version" IS NULL OR "edit_version" < 1
   `)
+
 }
 
 /**
@@ -914,8 +942,199 @@ async function prepareSqliteOrderMergeOperationResultSnapshot(dataSource: DataSo
   `)
 }
 
+const SQLITE_ORDER_IDENTIFIER_NAMESPACE_LOCK_ORDER = [
+  'order.system.walkin',
+  'o2o.preorder.walkin',
+  'order.business.walkin',
+  'order.system.department',
+  'o2o.preorder.department',
+  'order.business.department',
+] as const
+
+export async function backfillSqliteOrderIdentifierNamespaces(manager: EntityManager): Promise<void> {
+  const outboundRows = await manager.query(
+    'SELECT "show_no" AS "showNo", "business_no" AS "businessNo", "order_type" AS "orderType" FROM "biz_outbound_order"',
+  ) as Array<{ showNo: string; businessNo: string; orderType: string }>
+  const preorderRows = await manager.query(
+    'SELECT "show_no" AS "showNo", "client_order_type" AS "orderType" FROM "o2o_preorder"',
+  ) as Array<{ showNo: string; orderType: string }>
+  const physicalMaximum = (
+    rows: Array<{ showNo: string; orderType: string }>,
+    orderType: 'department' | 'walkin',
+    pattern: RegExp,
+  ) => rows.reduce((maximum, row) => {
+    if (row.orderType !== orderType) return maximum
+    const match = pattern.exec(String(row.showNo ?? '').trim())
+    return match ? Math.max(maximum, Number.parseInt(match[1], 10)) : maximum
+  }, 0)
+  const readInteger = async (sql: string, parameters: unknown[]) => {
+    const rows = await manager.query(sql, parameters) as Array<{ value: number | string | null }>
+    const value = Number.parseInt(String(rows[0]?.value ?? '0'), 10)
+    return Number.isSafeInteger(value) && value >= 0 ? value : 0
+  }
+  const readConfigInteger = async (configKey: string): Promise<number | null> => {
+    const rows = await manager.query(
+      'SELECT "config_value" AS "value" FROM "system_configs" WHERE "config_key" = ? LIMIT 1',
+      [configKey],
+    ) as Array<{ value: string | number | null }>
+    const text = String(rows[0]?.value ?? '').trim()
+    if (!/^\d+$/.test(text)) return null
+    const value = Number.parseInt(text, 10)
+    return Number.isSafeInteger(value) && value >= 0 ? value : null
+  }
+  const identifierNamespaces: Array<{
+    key: string
+    current: number
+    start?: number
+    width?: number
+    overwriteShape?: boolean
+    migrationMarkerKey?: string
+  }> = [
+    { key: 'order.system.walkin', current: physicalMaximum(outboundRows, 'walkin', /^OUT-W-(\d{6})$/) },
+    { key: 'o2o.preorder.walkin', current: physicalMaximum(preorderRows, 'walkin', /^PRE-W-(\d{6})$/) },
+    { key: 'order.system.department', current: physicalMaximum(outboundRows, 'department', /^OUT-D-(\d{6})$/) },
+    { key: 'o2o.preorder.department', current: physicalMaximum(preorderRows, 'department', /^PRE-D-(\d{6})$/) },
+  ]
+  for (const orderType of ['walkin', 'department'] as const) {
+    const sequenceKey = `order.business.${orderType}`
+    const namespace = orderType === 'department' ? 'hyyzjd' : 'hyyz'
+    const migrationMarkerKey = `${sequenceKey}.migration.055`
+    const [migrationMarkerCount, newConfigStartValue, newConfigWidthValue, newConfigCurrent, sequenceCurrent] = await Promise.all([
+      readInteger(
+        'SELECT COUNT(1) AS "value" FROM "system_configs" WHERE "config_key" = ? AND "config_value" = ?',
+        [migrationMarkerKey, '1'],
+      ),
+      readConfigInteger(`${sequenceKey}.start`),
+      readConfigInteger(`${sequenceKey}.width`),
+      readInteger('SELECT "config_value" AS "value" FROM "system_configs" WHERE "config_key" = ? LIMIT 1', [`${sequenceKey}.current`]),
+      readInteger('SELECT "current_value" AS "value" FROM "business_sequence" WHERE "sequence_key" = ? LIMIT 1', [sequenceKey]),
+    ])
+    const absorbLegacyHistory = migrationMarkerCount !== 1
+    const [legacyStartValue, legacyCurrent, legacyWidthValue, legacySequenceCurrent] = absorbLegacyHistory
+      ? await Promise.all([
+        readConfigInteger(`order.serial.${orderType}.start`),
+        readInteger(
+          'SELECT "config_value" AS "value" FROM "system_configs" WHERE "config_key" = ? LIMIT 1',
+          [`order.serial.${orderType}.current`],
+        ),
+        readConfigInteger(`order.serial.${orderType}.width`),
+        readInteger(
+          'SELECT "current_value" AS "value" FROM "business_sequence" WHERE "sequence_key" = ? LIMIT 1',
+          [`order.serial.${orderType}`],
+        ),
+      ])
+      : [null, 0, null, 0]
+    const newConfigStart = newConfigStartValue && newConfigStartValue > 0 ? newConfigStartValue : null
+    const newConfigWidth = newConfigWidthValue && newConfigWidthValue >= 1 && newConfigWidthValue <= 12
+      ? newConfigWidthValue
+      : null
+    const legacyStart = legacyStartValue && legacyStartValue > 0 ? legacyStartValue : null
+    const legacyWidth = legacyWidthValue && legacyWidthValue >= 1 && legacyWidthValue <= 12
+      ? legacyWidthValue
+      : null
+    const start = absorbLegacyHistory ? legacyStart ?? newConfigStart ?? 1 : newConfigStart ?? 1
+    const width = absorbLegacyHistory ? legacyWidth ?? newConfigWidth ?? 6 : newConfigWidth ?? 6
+    const physicalCurrent = physicalMaximum(
+      outboundRows.map((row) => ({ showNo: row.businessNo, orderType: row.orderType })),
+      orderType,
+      namespace === 'hyyzjd' ? /^hyyzjd(\d+)$/i : /^hyyz(\d+)$/i,
+    )
+    identifierNamespaces.push({
+      key: sequenceKey,
+      current: Math.max(
+        start - 1,
+        legacyCurrent,
+        legacySequenceCurrent,
+        newConfigCurrent,
+        sequenceCurrent,
+        physicalCurrent,
+      ),
+      start,
+      width,
+      overwriteShape: absorbLegacyHistory,
+      migrationMarkerKey,
+    })
+  }
+
+  const namespaceLockOrder = new Map<string, number>(
+    SQLITE_ORDER_IDENTIFIER_NAMESPACE_LOCK_ORDER.map((key, index) => [key, index]),
+  )
+  identifierNamespaces.sort((left, right) => (
+    (namespaceLockOrder.get(left.key) ?? Number.MAX_SAFE_INTEGER)
+    - (namespaceLockOrder.get(right.key) ?? Number.MAX_SAFE_INTEGER)
+  ))
+
+  for (const namespace of identifierNamespaces) {
+    const start = namespace.start ?? 1
+    const width = namespace.width ?? 6
+    for (const [suffix, value] of [['current', namespace.current], ['start', start], ['width', width]] as const) {
+      const configKey = `${namespace.key}.${suffix}`
+      if (suffix !== 'current' && namespace.overwriteShape) {
+        await manager.query(
+          `INSERT INTO "system_configs"
+           ("config_key", "config_value", "config_group", "remark", "created_at", "updated_at")
+           VALUES (?, ?, 'order_identifier', 'Issue #110 订单编号命名空间', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+           ON CONFLICT("config_key") DO UPDATE SET
+             "config_value" = excluded."config_value",
+             "config_group" = excluded."config_group",
+             "remark" = excluded."remark",
+             "updated_at" = CURRENT_TIMESTAMP
+           WHERE "system_configs"."config_value" <> excluded."config_value"
+              OR "system_configs"."config_group" <> excluded."config_group"
+              OR "system_configs"."remark" <> excluded."remark"`,
+          [configKey, String(value)],
+        )
+      } else {
+        await manager.query(
+          `INSERT OR IGNORE INTO "system_configs"
+           ("config_key", "config_value", "config_group", "remark", "created_at", "updated_at")
+           VALUES (?, ?, 'order_identifier', 'Issue #110 订单编号命名空间', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [configKey, String(value)],
+        )
+      }
+      if (suffix === 'current') {
+        await manager.query(
+          `UPDATE "system_configs"
+           SET "config_value" = CAST(MAX(CAST("config_value" AS INTEGER), ?) AS TEXT), "updated_at" = CURRENT_TIMESTAMP
+           WHERE "config_key" = ? AND CAST("config_value" AS INTEGER) < ?`,
+          [namespace.current, configKey, namespace.current],
+        )
+      }
+    }
+    const mirroredCurrent = await readInteger(
+      'SELECT "config_value" AS "value" FROM "system_configs" WHERE "config_key" = ? LIMIT 1',
+      [`${namespace.key}.current`],
+    )
+    await manager.query(
+      `INSERT INTO "business_sequence" ("sequence_key", "current_value", "created_at", "updated_at")
+       VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+       ON CONFLICT("sequence_key") DO UPDATE SET
+         "current_value" = MAX("current_value", excluded."current_value"),
+         "updated_at" = CURRENT_TIMESTAMP
+       WHERE excluded."current_value" > "business_sequence"."current_value"`,
+      [namespace.key, mirroredCurrent],
+    )
+    if (namespace.migrationMarkerKey) {
+      await manager.query(
+        `INSERT INTO "system_configs"
+         ("config_key", "config_value", "config_group", "remark", "created_at", "updated_at")
+         VALUES (?, '1', 'order_identifier_migration', 'Issue #110 业务号命名空间已完成首迁', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         ON CONFLICT("config_key") DO UPDATE SET
+           "config_value" = '1',
+           "config_group" = 'order_identifier_migration',
+           "remark" = 'Issue #110 业务号命名空间已完成首迁',
+           "updated_at" = CURRENT_TIMESTAMP
+         WHERE "system_configs"."config_value" <> '1'
+            OR "system_configs"."config_group" <> 'order_identifier_migration'
+            OR "system_configs"."remark" <> 'Issue #110 业务号命名空间已完成首迁'`,
+        [namespace.migrationMarkerKey],
+      )
+    }
+  }
+}
+
 /**
- * 幂等领养历史订单：businessNo 初始值固定等于 showNo，永久占用和双命名空间游标只在缺失时补齐。
+ * 幂等领养历史订单：businessNo 初始值固定等于 showNo，双命名空间游标只在缺失时补齐。
  * 已存在的游标绝不按历史最大值重写，避免覆盖管理员手工重编后确认的游标位置。
  */
 export async function backfillSqliteOrderAmendmentData(dataSource: DataSource): Promise<void> {
@@ -924,10 +1143,9 @@ export async function backfillSqliteOrderAmendmentData(dataSource: DataSource): 
   await initializeDatabaseInfrastructure(dataSource)
   await dataSource.transaction(async (manager) => {
     const orders = await manager.query(`
-      SELECT "order_uuid" AS "orderUuid", "business_no" AS "businessNo", "order_type" AS "orderType",
-             "created_at" AS "createdAt"
+      SELECT "order_uuid" AS "orderUuid", "business_no" AS "businessNo", "order_type" AS "orderType"
       FROM "biz_outbound_order"
-    `) as Array<{ orderUuid: string; businessNo: string; orderType: string; createdAt: string }>
+    `) as Array<{ orderUuid: string; businessNo: string; orderType: string }>
     for (const order of orders) {
       const namespace = order.orderType === 'department' ? 'hyyzjd' : order.orderType === 'walkin' ? 'hyyz' : null
       const pattern = namespace === 'hyyzjd' ? /^hyyzjd(\d+)$/ : /^hyyz(\d+)$/
@@ -939,58 +1157,9 @@ export async function backfillSqliteOrderAmendmentData(dataSource: DataSource): 
       if (!Number.isSafeInteger(serialValue) || serialValue <= 0) {
         throw new BizError(`历史出库单 ${order.orderUuid} 的业务号流水非法`, 409)
       }
-      await manager.query(
-        `INSERT OR IGNORE INTO "order_business_no_occupancy"
-         ("business_namespace", "serial_value", "business_no", "order_uuid", "assigned_reason", "created_at")
-         VALUES (?, ?, ?, ?, 'history_backfill', ?)`,
-        [namespace, serialValue, order.businessNo, order.orderUuid, order.createdAt],
-      )
     }
 
-    const unmatchedRows = await manager.query(`
-      SELECT "order"."order_uuid" AS "orderUuid"
-      FROM "biz_outbound_order" "order"
-      LEFT JOIN "order_business_no_occupancy" "occupancy"
-        ON "occupancy"."business_no" = "order"."business_no"
-       AND "occupancy"."order_uuid" = "order"."order_uuid"
-       AND "occupancy"."business_namespace" = CASE
-             WHEN "order"."order_type" = 'department' THEN 'hyyzjd'
-             WHEN "order"."order_type" = 'walkin' THEN 'hyyz'
-           END
-       AND "occupancy"."serial_value" = CAST(SUBSTR(
-             "order"."business_no",
-             CASE WHEN "order"."order_type" = 'department' THEN 7 ELSE 5 END
-           ) AS INTEGER)
-      WHERE "occupancy"."id" IS NULL
-      LIMIT 1
-    `) as Array<{ orderUuid: string }>
-    if (unmatchedRows.length > 0) {
-      throw new BizError(`历史出库单 ${unmatchedRows[0].orderUuid} 的业务号永久占用存在冲突`, 409)
-    }
-
-    for (const [sequenceKey, namespace] of [
-      ['order.business.department', 'hyyzjd'],
-      ['order.business.walkin', 'hyyz'],
-    ] as const) {
-      const orderType = namespace === 'hyyzjd' ? 'department' : 'walkin'
-      const startRows = await manager.query(
-        'SELECT "config_value" AS "configValue" FROM "system_configs" WHERE "config_key" = ? LIMIT 1',
-        [`order.serial.${orderType}.start`],
-      ) as Array<{ configValue: string }>
-      const configuredStart = Number.parseInt(String(startRows[0]?.configValue ?? '1'), 10)
-      const initialCursor = Number.isSafeInteger(configuredStart) && configuredStart > 0 ? configuredStart - 1 : 0
-      const maximumRows = await manager.query(
-        `SELECT COALESCE(MAX("serial_value"), 0) AS "maximum"
-         FROM "order_business_no_occupancy" WHERE "business_namespace" = ?`,
-        [namespace],
-      ) as Array<{ maximum: number | string }>
-      const currentValue = Math.max(initialCursor, Number(maximumRows[0]?.maximum ?? 0))
-      await manager.query(
-        `INSERT OR IGNORE INTO "business_sequence" ("sequence_key", "current_value", "created_at", "updated_at")
-         VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-        [sequenceKey, currentValue],
-      )
-    }
+    await backfillSqliteOrderIdentifierNamespaces(manager)
   })
 }
 
@@ -1795,6 +1964,7 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
   if (SQLITE_REQUIRED_ORDER_MERGE_OPERATION_COLUMNS.some((column) => !orderMergeOperationColumnSet.has(column))) {
     return true
   }
+
   if (!await hasSqliteNotNullColumn(dataSource, 'order_merge_operation', 'result_json')) {
     return true
   }
@@ -1963,6 +2133,7 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
 
 export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): Promise<DatabaseSchemaInitResult> {
   if (env.DB_TYPE === 'sqlite') {
+    await dropSqliteOrderBusinessNoPermanentOccupancy(dataSource)
     await ensureSqliteMobileSessionSchema(dataSource)
     await prepareSqliteOrderAmendmentColumns(dataSource)
     await prepareSqliteOrderContentInventoryColumns(dataSource)
@@ -1979,6 +2150,11 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   // DB_SYNC=true 时直接走 TypeORM 同步，便于本地快速调试实体结构。
   if (env.DB_SYNC === true) {
     await dataSource.synchronize()
+    if (env.DB_TYPE === 'mysql') {
+      await retireMysqlOrderBusinessNoPermanentOccupancy(dataSource)
+      await assertMysqlOrderBusinessNoPermanentOccupancyRetired(dataSource)
+      await reconcileMysqlOrderIdentifierNamespaces(dataSource)
+    }
     if (env.DB_TYPE === 'sqlite') {
       // synchronize 可能刚创建 SKU 表；先为历史商品补默认 SKU，再让入库明细绑定它。
       await normalizeSqliteO2oDiscountColumns(dataSource)
@@ -1991,7 +2167,9 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
     }
     await migrateClientUserDepartmentGovernance(dataSource)
     await migrateLegacyFeedbackAttachments(dataSource)
-    if (env.DB_TYPE === 'sqlite') await ensureSqliteAccountLifecycleAppendOnly(dataSource)
+    if (env.DB_TYPE === 'sqlite') {
+      await ensureSqliteAccountLifecycleAppendOnly(dataSource)
+    }
     return {
       action: 'synchronized',
       reason: 'forced_by_db_sync',
@@ -2009,6 +2187,9 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
       console.log(`[y-link-backend] MySQL 迁移脚本已自动执行：${migrationResult.appliedFiles.join(', ')}`)
     }
     await assertMysqlRequiredSchemaExists(dataSource)
+    if (!migrationResult.appliedFiles.includes('055_order_identifier_namespaces.sql')) {
+      await reconcileMysqlOrderIdentifierNamespaces(dataSource)
+    }
     await migrateClientUserDepartmentGovernance(dataSource)
     return {
       action: migrationResult.appliedFiles.length > 0 ? 'synchronized' : 'skipped',

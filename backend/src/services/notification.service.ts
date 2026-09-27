@@ -157,6 +157,8 @@ export interface NotificationPresenceSnapshot {
 }
 
 interface NotificationEventPayload {
+  preorderNo?: string
+  /** @deprecated 兼容历史通知载荷。 */
   showNo?: string
   conversationNo?: string
   sourceUserDisplayName?: string
@@ -760,10 +762,10 @@ export class NotificationService {
     content: string
   } {
     if (eventType === 'o2o_preorder_created') {
-      const showNo = payload.showNo?.trim() || '-'
+      const preorderNo = payload.preorderNo?.trim() || payload.showNo?.trim() || '-'
       return {
-        title: `新预订单 ${showNo}`,
-        content: `系统收到新的线上预订单，业务单号：${showNo}。请尽快处理。`,
+        title: `新预订单 ${preorderNo}`,
+        content: `系统收到新的线上预订单，预订单号：${preorderNo}。请尽快处理。`,
       }
     }
 

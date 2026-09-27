@@ -9,10 +9,8 @@
 import { AppDataSource } from '../config/data-source.js'
 import { env } from '../config/env.js'
 import { runInTransaction } from '../config/transaction-runner.js'
-import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BusinessSequence } from '../entities/business-sequence.entity.js'
 import { ClientUser } from '../entities/client-user.entity.js'
-import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
 import { SystemConfig } from '../entities/system-config.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
@@ -72,6 +70,33 @@ const DEFAULT_SYSTEM_CONFIGS = [
     configGroup: 'order_serial',
     remark: '散客单号位宽',
   },
+  ...([
+    ['order.system.department', '正式出库单部门系统号'],
+    ['order.system.walkin', '正式出库单散客系统号'],
+    ['o2o.preorder.department', 'O2O 部门预订单号'],
+    ['o2o.preorder.walkin', 'O2O 散客预订单号'],
+    ['order.business.department', '正式出库单部门业务号'],
+    ['order.business.walkin', '正式出库单散客业务号'],
+  ] as const).flatMap(([keyPrefix, label]) => ([
+    {
+      configKey: `${keyPrefix}.start`,
+      configValue: '1',
+      configGroup: 'order_identifier',
+      remark: `${label}起始值`,
+    },
+    {
+      configKey: `${keyPrefix}.current`,
+      configValue: '0',
+      configGroup: 'order_identifier',
+      remark: `${label}当前值`,
+    },
+    {
+      configKey: `${keyPrefix}.width`,
+      configValue: '6',
+      configGroup: 'order_identifier',
+      remark: `${label}位宽`,
+    },
+  ])),
   {
     configKey: 'client.department.options',
     configValue: '[]',
@@ -364,28 +389,46 @@ export interface OrderSerialConfigRecord extends OrderSerialConfigValue {
   updatedAt: Date
 }
 
-export interface UpdateOrderSerialConfigsInput {
-  department: OrderSerialConfigValue
-  walkin: OrderSerialConfigValue
+const ORDER_IDENTIFIER_KINDS = ['system', 'preorder', 'business'] as const
+type OrderIdentifierKind = (typeof ORDER_IDENTIFIER_KINDS)[number]
+/**
+ * canonical 编号配置一次会覆盖六个命名空间，必须与批量业务号路径统一使用
+ * walkin -> department，并在每类中固定 system -> preorder -> business。
+ * 这里显式列出而不依赖对象遍历顺序，避免后续重排常量时静默改变 MySQL 锁序。
+ */
+const ORDER_IDENTIFIER_LOCK_ORDER = [
+  { orderType: 'walkin', kind: 'system' },
+  { orderType: 'walkin', kind: 'preorder' },
+  { orderType: 'walkin', kind: 'business' },
+  { orderType: 'department', kind: 'system' },
+  { orderType: 'department', kind: 'preorder' },
+  { orderType: 'department', kind: 'business' },
+] as const
+const ORDER_IDENTIFIER_META: Record<OrderIdentifierKind, Record<OrderSerialType, {
+  prefix: string
+  keyPrefix: string
+}>> = {
+  system: {
+    department: { prefix: 'OUT-D-', keyPrefix: 'order.system.department' },
+    walkin: { prefix: 'OUT-W-', keyPrefix: 'order.system.walkin' },
+  },
+  preorder: {
+    department: { prefix: 'PRE-D-', keyPrefix: 'o2o.preorder.department' },
+    walkin: { prefix: 'PRE-W-', keyPrefix: 'o2o.preorder.walkin' },
+  },
+  business: {
+    department: { prefix: 'hyyzjd', keyPrefix: 'order.business.department' },
+    walkin: { prefix: 'hyyz', keyPrefix: 'order.business.walkin' },
+  },
 }
 
-interface OrderSerialOccupancySnapshot {
-  outboundCount: number
-  outboundActiveCount: number
-  outboundDeletedCount: number
-  preorderCount: number
-  maxSerial: number
-  latestOutboundShowNo: string | null
-  latestPreorderShowNo: string | null
-  outboundExamples: OrderSerialOccupancyDetail[]
-  preorderExamples: OrderSerialOccupancyDetail[]
+export interface OrderIdentifierConfigValue extends OrderSerialConfigValue {
+  prefix: string
+  updatedAt: Date
 }
 
-interface OrderSerialOccupancyDetail {
-  showNo: string
-  serial: number
-  statusLabel: string
-}
+export type OrderIdentifierConfigs = Record<OrderIdentifierKind, Record<OrderSerialType, OrderIdentifierConfigValue>>
+export type UpdateOrderIdentifierConfigsInput = Record<OrderIdentifierKind, Record<OrderSerialType, OrderSerialConfigValue>>
 
 export interface O2oRuleConfigRecord {
   autoCancelEnabled: boolean
@@ -638,6 +681,34 @@ class SystemConfigService {
       throw new BizError(`${field} 配置值非法`, 500)
     }
     return parsed
+  }
+
+  private parseIdentifierInteger(
+    value: string | number,
+    field: string,
+    options: { positive?: boolean; statusCode?: number } = {},
+  ) {
+    const normalized = String(value).trim()
+    const parsed = Number(normalized)
+    const minimum = options.positive ? 1 : 0
+    if (!/^\d+$/.test(normalized) || !Number.isSafeInteger(parsed) || parsed < minimum) {
+      throw new BizError(`${field} 必须为${options.positive ? '正' : '非负'}安全整数`, options.statusCode ?? 500)
+    }
+    return parsed
+  }
+
+  private getIdentifierWidthLimit(width: number, field: string, statusCode = 500) {
+    if (!Number.isSafeInteger(width) || width < 1 || width > 12) {
+      throw new BizError(`${field} 位宽必须为 1 到 12 的安全整数`, statusCode)
+    }
+    return 10 ** width - 1
+  }
+
+  private assertIdentifierValueWithinWidth(value: number, width: number, field: string, statusCode = 500) {
+    const maxValue = this.getIdentifierWidthLimit(width, field, statusCode)
+    if (value > maxValue) {
+      throw new BizError(`${field} 当前号 ${value} 超过位宽 ${width} 可表示上限 ${maxValue}`, statusCode)
+    }
   }
 
   private parseBooleanFlag(value: string, field: string) {
@@ -1261,189 +1332,6 @@ class SystemConfigService {
     }
   }
 
-  private validateInputValue(orderType: OrderSerialType, value: OrderSerialConfigValue) {
-    if (!Number.isInteger(value.start) || value.start <= 0) {
-      throw new BizError(`${ORDER_SERIAL_META[orderType].label}起始号必须为正整数`, 400)
-    }
-    if (!Number.isInteger(value.current) || value.current < 0) {
-      throw new BizError(`${ORDER_SERIAL_META[orderType].label}当前号必须为非负整数`, 400)
-    }
-    if (!Number.isInteger(value.width) || value.width <= 0 || value.width > 12) {
-      throw new BizError(`${ORDER_SERIAL_META[orderType].label}位宽必须为 1 到 12 的整数`, 400)
-    }
-
-    if (value.current < value.start - 1) {
-      throw new BizError(`${ORDER_SERIAL_META[orderType].label}当前号不能小于起始号减一`, 400)
-    }
-
-    const maxValue = 10 ** value.width - 1
-    if (value.start > maxValue || value.current > maxValue) {
-      throw new BizError(`${ORDER_SERIAL_META[orderType].label}起始号或当前号超过位宽上限`, 400)
-    }
-  }
-
-  private parseSerialFromShowNo(showNo: string | null | undefined, prefix: string): number | null {
-    const normalizedShowNo = String(showNo ?? '').trim()
-    if (!normalizedShowNo.startsWith(prefix)) {
-      return null
-    }
-
-    const serialText = normalizedShowNo.slice(prefix.length)
-    if (!/^\d+$/.test(serialText)) {
-      return null
-    }
-
-    const parsed = Number.parseInt(serialText, 10)
-    return Number.isInteger(parsed) && parsed > 0 ? parsed : null
-  }
-
-  private pickMaxSerialShowNo(rows: Array<{ showNo: string }>, prefix: string): { maxSerial: number; showNo: string | null } {
-    return rows.reduce(
-      (result, row) => {
-        const serial = this.parseSerialFromShowNo(row.showNo, prefix)
-        if (serial === null || serial <= result.maxSerial) {
-          return result
-        }
-        return {
-          maxSerial: serial,
-          showNo: row.showNo,
-        }
-      },
-      { maxSerial: 0, showNo: null as string | null },
-    )
-  }
-
-  private normalizeBooleanFlag(value: unknown) {
-    return value === true || value === 1 || value === '1' || value === 'true'
-  }
-
-  private formatPreorderStatusLabel(status: string) {
-    const statusMap: Record<string, string> = {
-      pending: '订单池待核销',
-      verified: '订单池已核销',
-      cancelled: '订单池已取消',
-    }
-    return statusMap[status] ?? `订单池状态 ${status || '未知'}`
-  }
-
-  private formatOrderSerialOccupancyExamples(examples: OrderSerialOccupancyDetail[]) {
-    if (examples.length === 0) {
-      return ''
-    }
-    return `；需处理单号示例：${examples.map((item) => `${item.showNo}（${item.statusLabel}）`).join('、')}`
-  }
-
-  private async getOrderSerialOccupancySnapshot(
-    manager: typeof AppDataSource.manager,
-    orderType: OrderSerialType,
-  ): Promise<OrderSerialOccupancySnapshot> {
-    const [outboundRows, preorderRows] = await Promise.all([
-      manager
-        .getRepository(BizOutboundOrder)
-        .createQueryBuilder('outboundOrder')
-        .select('outboundOrder.showNo', 'showNo')
-        .addSelect('outboundOrder.isDeleted', 'isDeleted')
-        .where('outboundOrder.orderType = :orderType', { orderType })
-        .getRawMany<{ showNo: string; isDeleted: boolean | number | string }>(),
-      manager
-        .getRepository(O2oPreorder)
-        .createQueryBuilder('preorder')
-        .select('preorder.showNo', 'showNo')
-        .addSelect('preorder.status', 'status')
-        .where('preorder.clientOrderType = :orderType', { orderType })
-        .andWhere('preorder.isDeleted = :isDeleted', { isDeleted: false })
-        .andWhere('preorder.status <> :verifiedStatus', { verifiedStatus: 'verified' })
-        .getRawMany<{ showNo: string; status: string }>(),
-    ])
-    const prefix = ORDER_SERIAL_META[orderType].prefix
-    const outboundMax = this.pickMaxSerialShowNo(outboundRows, prefix)
-    const preorderMax = this.pickMaxSerialShowNo(preorderRows, prefix)
-    const outboundDetails = outboundRows
-      .map((row) => ({
-        showNo: row.showNo,
-        serial: this.parseSerialFromShowNo(row.showNo, prefix),
-        statusLabel: this.normalizeBooleanFlag(row.isDeleted) ? '已删除未永久删除' : '正常出库单',
-      }))
-      .filter((item): item is OrderSerialOccupancyDetail => item.serial !== null)
-      .sort((left, right) => right.serial - left.serial)
-    const preorderDetails = preorderRows
-      .map((row) => ({
-        showNo: row.showNo,
-        serial: this.parseSerialFromShowNo(row.showNo, prefix),
-        statusLabel: this.formatPreorderStatusLabel(row.status),
-      }))
-      .filter((item): item is OrderSerialOccupancyDetail => item.serial !== null)
-      .sort((left, right) => right.serial - left.serial)
-    const outboundDeletedCount = outboundRows.filter((row) => this.normalizeBooleanFlag(row.isDeleted)).length
-
-    return {
-      outboundCount: outboundRows.length,
-      outboundActiveCount: outboundRows.length - outboundDeletedCount,
-      outboundDeletedCount,
-      preorderCount: preorderRows.length,
-      maxSerial: Math.max(outboundMax.maxSerial, preorderMax.maxSerial),
-      latestOutboundShowNo: outboundMax.showNo,
-      latestPreorderShowNo: preorderMax.showNo,
-      outboundExamples: outboundDetails.slice(0, 5),
-      preorderExamples: preorderDetails.slice(0, 5),
-    }
-  }
-
-  private formatOrderSerialOccupancyReason(
-    orderType: OrderSerialType,
-    nextCurrent: number,
-    snapshot: OrderSerialOccupancySnapshot,
-  ): string {
-    const sourceParts: string[] = []
-    if (snapshot.preorderCount > 0) {
-      sourceParts.push(
-        `订单池仍有 ${snapshot.preorderCount} 单占用流水`
-        + `${snapshot.latestPreorderShowNo ? `，最大单号 ${snapshot.latestPreorderShowNo}` : ''}`
-        + this.formatOrderSerialOccupancyExamples(snapshot.preorderExamples),
-      )
-    }
-    if (snapshot.outboundCount > 0) {
-      sourceParts.push(
-        `出库单仍有 ${snapshot.outboundCount} 单占用流水`
-        + `（正常 ${snapshot.outboundActiveCount} 单，已删除未永久删除 ${snapshot.outboundDeletedCount} 单）`
-        + `${snapshot.latestOutboundShowNo ? `，最大单号 ${snapshot.latestOutboundShowNo}` : ''}`
-        + this.formatOrderSerialOccupancyExamples(snapshot.outboundExamples),
-      )
-    }
-
-    return [
-      `${ORDER_SERIAL_META[orderType].label}当前号不能改为 ${nextCurrent}。`,
-      `原因：${ORDER_SERIAL_META[orderType].label}流水仍被订单占用，当前号不能小于已占用的最大流水 ${snapshot.maxSerial}，否则后续生成单号会冲突。`,
-      `具体占用：${sourceParts.join('；') || '未识别到可展示来源'}。`,
-      `处理方式：订单池订单请到“订单池工作台”删除；出库单请到“出库单列表”处理，正常单据需先删除，已删除单据需筛选“已删除单据”后执行永久删除。也可以把当前号设置为 ${snapshot.maxSerial} 及以上。`,
-    ].join('')
-  }
-
-  private async assertOrderSerialCurrentSafety(
-    manager: typeof AppDataSource.manager,
-    beforeList: OrderSerialConfigRecord[],
-    input: UpdateOrderSerialConfigsInput,
-  ) {
-    for (const orderType of ORDER_SERIAL_TYPES) {
-      const before = beforeList.find((item) => item.orderType === orderType)
-      if (!before) {
-        continue
-      }
-      const next = input[orderType]
-      const isLoweringCurrent = next.current < before.current
-      if (!isLoweringCurrent) {
-        continue
-      }
-
-      const occupancySnapshot = await this.getOrderSerialOccupancySnapshot(manager, orderType)
-      if (next.current >= occupancySnapshot.maxSerial) {
-        continue
-      }
-
-      throw new BizError(this.formatOrderSerialOccupancyReason(orderType, next.current, occupancySnapshot), 400)
-    }
-  }
-
   private formatVerificationProviderConfig(
     channel: VerificationChannelType,
     configMap: Map<string, Pick<SystemConfig, 'configValue' | 'updatedAt'>>,
@@ -1582,56 +1470,6 @@ class SystemConfigService {
     }
   }
 
-  private async lockOrderSerialSequences(
-    manager: EntityManager,
-    configList: OrderSerialConfigRecord[],
-  ): Promise<Map<OrderSerialType, BusinessSequence>> {
-    for (const config of configList) {
-      if (manager.connection.options.type === 'mysql') {
-        await manager.query(
-          `
-            INSERT INTO business_sequence (sequence_key, current_value, created_at, updated_at)
-            VALUES (?, ?, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
-            ON DUPLICATE KEY UPDATE sequence_key = sequence_key
-          `,
-          [ORDER_SERIAL_META[config.orderType].keyPrefix, config.current],
-        )
-      } else {
-        await manager.query(
-          `
-            INSERT OR IGNORE INTO business_sequence (sequence_key, current_value, created_at, updated_at)
-            VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-          `,
-          [ORDER_SERIAL_META[config.orderType].keyPrefix, config.current],
-        )
-      }
-    }
-
-    const sequenceKeys = ORDER_SERIAL_TYPES.map((orderType) => ORDER_SERIAL_META[orderType].keyPrefix)
-    const query = manager.getRepository(BusinessSequence)
-      .createQueryBuilder('sequence')
-      .where('sequence.sequenceKey IN (:...sequenceKeys)', { sequenceKeys })
-      .orderBy('sequence.sequenceKey', 'ASC')
-    if (manager.connection.options.type === 'mysql') {
-      query.setLock('pessimistic_write')
-    }
-    const sequences = await query.getMany()
-    if (sequences.length !== ORDER_SERIAL_TYPES.length) {
-      throw new BizError('订单流水序列缺失，请联系管理员修复数据库', 500)
-    }
-    return new Map(
-      sequences.map((sequence) => {
-        const orderType = ORDER_SERIAL_TYPES.find(
-          (candidate) => ORDER_SERIAL_META[candidate].keyPrefix === sequence.sequenceKey,
-        )
-        if (!orderType) {
-          throw new BizError(`发现未知订单流水序列：${sequence.sequenceKey}`, 500)
-        }
-        return [orderType, sequence]
-      }),
-    )
-  }
-
   private applySequenceTruth(
     configList: OrderSerialConfigRecord[],
     sequences: Map<OrderSerialType, BusinessSequence>,
@@ -1735,117 +1573,220 @@ class SystemConfigService {
     return { list }
   }
 
-  async updateOrderSerialConfigs(
-    input: UpdateOrderSerialConfigsInput,
+  /** canonical 编号默认值只允许在已鉴权的写事务内补齐；读接口不得借机改库。 */
+  private async ensureOrderIdentifierDefaultsForUpdate(manager: EntityManager) {
+    const identifierDefaults = DEFAULT_SYSTEM_CONFIGS.filter((config) => config.configGroup === 'order_identifier')
+    const configRepo = manager.getRepository(SystemConfig)
+    const existingRows = await configRepo.find({
+      where: identifierDefaults.map((config) => ({ configKey: config.configKey })),
+      select: { configKey: true },
+    })
+    const existingKeys = new Set(existingRows.map((row) => row.configKey))
+    const missingDefaults = identifierDefaults.filter((config) => !existingKeys.has(config.configKey))
+    if (missingDefaults.length > 0) {
+      await configRepo.insert(missingDefaults)
+    }
+    return missingDefaults.map((config) => config.configKey)
+  }
+
+  /** 新编号命名空间的唯一管理契约；六条流水均以 business_sequence 为并发真源。 */
+  async getOrderIdentifierConfigs(): Promise<OrderIdentifierConfigs> {
+    const entries = ORDER_IDENTIFIER_KINDS.flatMap((kind) => ORDER_SERIAL_TYPES.map((orderType) => ({
+      kind,
+      orderType,
+      ...ORDER_IDENTIFIER_META[kind][orderType],
+    })))
+    const keys = entries.flatMap(({ keyPrefix }) => [
+      `${keyPrefix}.start`,
+      `${keyPrefix}.current`,
+      `${keyPrefix}.width`,
+    ])
+    const [rows, sequences] = await Promise.all([
+      this.configRepo.find({ where: keys.map((configKey) => ({ configKey })) }),
+      AppDataSource.getRepository(BusinessSequence).find({
+        where: entries.map(({ keyPrefix }) => ({ sequenceKey: keyPrefix })),
+      }),
+    ])
+    const rowMap = new Map(rows.map((row) => [row.configKey, row]))
+    const sequenceMap = new Map(sequences.map((sequence) => [sequence.sequenceKey, sequence]))
+    const result = {} as OrderIdentifierConfigs
+    for (const kind of ORDER_IDENTIFIER_KINDS) {
+      result[kind] = {} as Record<OrderSerialType, OrderIdentifierConfigValue>
+      for (const orderType of ORDER_SERIAL_TYPES) {
+        const meta = ORDER_IDENTIFIER_META[kind][orderType]
+        const startRow = rowMap.get(`${meta.keyPrefix}.start`)
+        const currentRow = rowMap.get(`${meta.keyPrefix}.current`)
+        const widthRow = rowMap.get(`${meta.keyPrefix}.width`)
+        if (!startRow || !currentRow || !widthRow) throw new BizError(`编号配置缺失：${meta.keyPrefix}`, 500)
+        const sequence = sequenceMap.get(meta.keyPrefix)
+        const start = this.parseIdentifierInteger(startRow.configValue, `${meta.keyPrefix}.start`, { positive: true })
+        const width = this.parseIdentifierInteger(widthRow.configValue, `${meta.keyPrefix}.width`, { positive: true })
+        const configCurrent = this.parseIdentifierInteger(currentRow.configValue, `${meta.keyPrefix}.current`)
+        const sequenceCurrent = sequence
+          ? this.parseIdentifierInteger(String(sequence.currentValue), `${meta.keyPrefix} sequence`)
+          : configCurrent
+        if (kind !== 'business' && (start !== 1 || width !== 6)) {
+          throw new BizError(`${meta.keyPrefix} 编号配置非法：system/preorder 必须保持 start=1、width=6`, 500)
+        }
+        this.assertIdentifierValueWithinWidth(start, width, `${meta.keyPrefix}.start`)
+        this.assertIdentifierValueWithinWidth(configCurrent, width, `${meta.keyPrefix}.current`)
+        this.assertIdentifierValueWithinWidth(sequenceCurrent, width, `${meta.keyPrefix} sequence`)
+        result[kind][orderType] = {
+          prefix: meta.prefix,
+          start,
+          current: Math.max(configCurrent, sequenceCurrent),
+          width,
+          updatedAt: [startRow.updatedAt, currentRow.updatedAt, widthRow.updatedAt, sequence?.updatedAt]
+            .filter((value): value is Date => Boolean(value))
+            .sort((left, right) => right.getTime() - left.getTime())[0]!,
+        }
+      }
+    }
+    return result
+  }
+
+  async updateOrderIdentifierConfigs(
+    input: UpdateOrderIdentifierConfigsInput,
     actor: AuthUserContext,
     requestMeta?: RequestMeta,
-  ): Promise<{ list: OrderSerialConfigRecord[]; changed: boolean }> {
-    await this.assertAdminActor(actor, requestMeta, 'system_config.update_order_serial', '更新订单流水配置')
-    this.validateInputValue('department', input.department)
-    this.validateInputValue('walkin', input.walkin)
-    return runInTransaction(async (manager) => {
-      await lockActiveSysAccountForBusiness(manager, actor.userId)
-      await this.ensureDefaultConfigs(manager)
-      const keys = this.getOrderSerialAllKeys()
-      const placeholders = keys.map(() => '?').join(', ')
-      const useForUpdate = manager.connection.options.type === 'mysql'
-      const lockedRows: Array<{ id: string; configKey: string; configValue: string; updatedAt: string }> = await manager.query(
-        `
-          SELECT id, config_key AS configKey, config_value AS configValue, updated_at AS updatedAt
-          FROM system_configs
-          WHERE config_key IN (${placeholders})
-          ${useForUpdate ? 'FOR UPDATE' : ''}
-        `,
-        keys,
-      )
-
-      if (lockedRows.length !== keys.length) {
-        throw new BizError('订单流水配置缺失，请联系管理员补齐配置', 500)
-      }
-
-      const rowMap = new Map(
-        lockedRows.map((row) => [
-          row.configKey,
-          {
-            id: row.id,
-            configKey: row.configKey,
-            configValue: row.configValue,
-            updatedAt: new Date(row.updatedAt),
-          },
-        ]),
-      )
-
-      const configBeforeList = ORDER_SERIAL_TYPES.map((orderType) => this.formatConfigRecord(orderType, rowMap))
-      // 锁顺序固定为 system_configs -> business_sequence，与生成单号保持一致，
-      // 避免管理员更新与下单并发时形成双真源或死锁。
-      const sequences = await this.lockOrderSerialSequences(manager, configBeforeList)
-      const beforeList = this.applySequenceTruth(configBeforeList, sequences)
-      await this.assertOrderSerialCurrentSafety(manager, beforeList, input)
-      const targetMap = new Map<string, string>()
-
-      ORDER_SERIAL_TYPES.forEach((orderType) => {
-        const payload = input[orderType]
-        const keyPrefix = ORDER_SERIAL_META[orderType].keyPrefix
-        targetMap.set(`${keyPrefix}.start`, String(payload.start))
-        targetMap.set(`${keyPrefix}.current`, String(payload.current))
-        targetMap.set(`${keyPrefix}.width`, String(payload.width))
-      })
-
-      let changedCount = 0
-      for (const [configKey, targetValue] of targetMap) {
-        const currentRow = rowMap.get(configKey)
-        if (!currentRow || currentRow.configValue === targetValue) {
-          continue
-        }
-
-        await manager.getRepository(SystemConfig).update({ id: currentRow.id }, { configValue: targetValue })
-        currentRow.configValue = targetValue
-        currentRow.updatedAt = new Date()
-        changedCount += 1
-      }
-
+  ): Promise<{ configs: OrderIdentifierConfigs; changed: boolean }> {
+    await this.assertAdminActor(actor, requestMeta, 'system_config.update_order_identifiers', '更新订单编号配置')
+    for (const kind of ORDER_IDENTIFIER_KINDS) {
       for (const orderType of ORDER_SERIAL_TYPES) {
-        const sequence = sequences.get(orderType)
-        if (!sequence) {
-          throw new BizError(`订单流水序列缺失：${orderType}`, 500)
+        const value = input[kind]?.[orderType]
+        if (!value) {
+          throw new BizError(`${kind}.${orderType} 编号配置缺失`, 400)
         }
-        const targetCurrent = input[orderType].current
-        if (Number(sequence.currentValue) === targetCurrent) {
-          continue
+        if (!Number.isSafeInteger(value.current) || value.current < 0) {
+          throw new BizError(`${kind}.${orderType}.current 必须为非负安全整数`, 400)
         }
-        sequence.currentValue = targetCurrent
-        await manager.getRepository(BusinessSequence).save(sequence)
+        if (kind !== 'business' && (value.start !== 1 || value.width !== 6)) {
+          throw new BizError(`${kind}.${orderType} 编号规则必须保持 start=1、width=6`, 400)
+        }
+      }
+    }
+
+    const changed = await runInTransaction(async (manager) => {
+      const lockedActor = await lockActiveSysAccountForBusiness(manager, actor.userId)
+      if (lockedActor.role !== 'admin' || actor.role !== 'admin' || !actor.permissions.includes('system_configs:update')) {
+        throw new BizError('当前账号无权执行该操作', 403)
+      }
+
+      // 所有 sequence 先按全局稳定顺序建行并加锁；之后才允许接触 system_configs，
+      // 与生成/回收的 sequence -> config 顺序一致，避免管理员调号与开单形成反向等待。
+      const lockedSequences = new Map<string, BusinessSequence>()
+      for (const { kind, orderType } of ORDER_IDENTIFIER_LOCK_ORDER) {
+        const meta = ORDER_IDENTIFIER_META[kind][orderType]
+        if (manager.connection.options.type === 'mysql') {
+          await manager.query(
+            `INSERT INTO business_sequence (sequence_key, current_value, created_at, updated_at)
+             VALUES (?, 0, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
+             ON DUPLICATE KEY UPDATE sequence_key = sequence_key`,
+            [meta.keyPrefix],
+          )
+        } else {
+          await manager.query(
+            `INSERT OR IGNORE INTO business_sequence (sequence_key, current_value, created_at, updated_at)
+             VALUES (?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [meta.keyPrefix],
+          )
+        }
+        const sequenceQuery = manager.getRepository(BusinessSequence)
+          .createQueryBuilder('sequence')
+          .where('sequence.sequenceKey = :sequenceKey', { sequenceKey: meta.keyPrefix })
+        if (manager.connection.options.type === 'mysql') sequenceQuery.setLock('pessimistic_write')
+        const sequence = await sequenceQuery.getOne()
+        if (!sequence) throw new BizError(`编号序列缺失：${meta.keyPrefix}`, 500)
+        lockedSequences.set(meta.keyPrefix, sequence)
+      }
+
+      const initializedConfigKeys = await this.ensureOrderIdentifierDefaultsForUpdate(manager)
+      let changedCount = 0
+      const before: Record<string, number> = {}
+      const after: Record<string, number> = {}
+      const changes: Record<string, {
+        beforeConfigCurrent: number
+        beforeSequenceCurrent: number
+        targetCurrent: number
+        mode: 'increase' | 'mirror_repair'
+      }> = {}
+      for (const { kind, orderType } of ORDER_IDENTIFIER_LOCK_ORDER) {
+        const meta = ORDER_IDENTIFIER_META[kind][orderType]
+        const startKey = `${meta.keyPrefix}.start`
+        const currentKey = `${meta.keyPrefix}.current`
+        const widthKey = `${meta.keyPrefix}.width`
+        const configQuery = manager.getRepository(SystemConfig)
+          .createQueryBuilder('config')
+          .where('config.configKey IN (:...configKeys)', { configKeys: [startKey, currentKey, widthKey] })
+          .orderBy('config.configKey', 'ASC')
+        if (manager.connection.options.type === 'mysql') configQuery.setLock('pessimistic_write')
+        const configRows = await configQuery.getMany()
+        const configMap = new Map(configRows.map((row) => [row.configKey, row]))
+        const startRow = configMap.get(startKey)
+        const currentRow = configMap.get(currentKey)
+        const widthRow = configMap.get(widthKey)
+        if (!startRow || !currentRow || !widthRow) throw new BizError(`编号配置不完整：${meta.keyPrefix}`, 500)
+        const storedStart = this.parseIdentifierInteger(startRow.configValue, startKey, { positive: true, statusCode: 409 })
+        const storedWidth = this.parseIdentifierInteger(widthRow.configValue, widthKey, { positive: true, statusCode: 409 })
+        this.getIdentifierWidthLimit(storedWidth, widthKey, 409)
+        if (kind !== 'business' && (storedStart !== 1 || storedWidth !== 6)) {
+          throw new BizError(`${meta.keyPrefix} 存量编号形状非法，无法自动修复`, 409)
+        }
+        const requested = input[kind][orderType]
+        if (kind === 'business' && (requested.start !== storedStart || requested.width !== storedWidth)) {
+          throw new BizError(`business.${orderType} 业务号 start/width 为只读历史形状，不允许修改`, 400)
+        }
+        this.assertIdentifierValueWithinWidth(requested.current, storedWidth, `${kind}.${orderType}.current`, 400)
+        const sequence = lockedSequences.get(meta.keyPrefix)
+        if (!sequence) throw new BizError(`编号序列缺失：${meta.keyPrefix}`, 500)
+        const configCurrent = this.parseIdentifierInteger(currentRow.configValue, currentKey, { statusCode: 409 })
+        const sequenceCurrent = this.parseIdentifierInteger(String(sequence.currentValue), `${meta.keyPrefix} sequence`, { statusCode: 409 })
+        this.assertIdentifierValueWithinWidth(configCurrent, storedWidth, currentKey, 409)
+        this.assertIdentifierValueWithinWidth(sequenceCurrent, storedWidth, `${meta.keyPrefix} sequence`, 409)
+        const effectiveCurrent = Math.max(configCurrent, sequenceCurrent)
+        const targetCurrent = requested.current
+        if (targetCurrent < effectiveCurrent) {
+          throw new BizError(`${kind}.${orderType}.current 不能低于当前高水位 ${effectiveCurrent}`, 400)
+        }
+        if (kind === 'business' && targetCurrent !== effectiveCurrent) {
+          throw new BizError(`business.${orderType}.current 为只读高水位，不允许通过配置接口提升`, 400)
+        }
+        before[meta.keyPrefix] = effectiveCurrent
+        after[meta.keyPrefix] = targetCurrent
+        const needsMirrorRepair = configCurrent !== targetCurrent || sequenceCurrent !== targetCurrent
+        if (targetCurrent === effectiveCurrent && !needsMirrorRepair) continue
+        const mode = targetCurrent > effectiveCurrent ? 'increase' : 'mirror_repair'
+        if (sequenceCurrent !== targetCurrent) {
+          sequence.currentValue = targetCurrent
+          await manager.getRepository(BusinessSequence).save(sequence)
+        }
+        if (configCurrent !== targetCurrent) {
+          currentRow.configValue = String(targetCurrent)
+          await manager.getRepository(SystemConfig).save(currentRow)
+        }
+        changes[meta.keyPrefix] = {
+          beforeConfigCurrent: configCurrent,
+          beforeSequenceCurrent: sequenceCurrent,
+          targetCurrent,
+          mode,
+        }
         changedCount += 1
       }
-
-      const afterList = this.applySequenceTruth(
-        ORDER_SERIAL_TYPES.map((orderType) => this.formatConfigRecord(orderType, rowMap)),
-        sequences,
-      )
-
-      if (changedCount > 0) {
-        await auditService.record(
-          {
-            actionType: 'system_config.update_order_serial',
-            actionLabel: '更新订单流水配置',
-            targetType: 'system_config',
-            targetCode: 'order_serial',
-            actor,
-            requestMeta,
-            detail: {
-              before: beforeList,
-              after: afterList,
-            },
-          },
-          manager,
-        )
+      if (changedCount > 0 || initializedConfigKeys.length > 0) {
+        await auditService.record({
+          actionType: 'system_config.update_order_identifiers',
+          actionLabel: '更新订单编号配置',
+          targetType: 'system_config',
+          targetId: 'order-identifiers',
+          targetCode: 'order-identifiers',
+          actor,
+          requestMeta,
+          detail: { before, after, changes, initializedConfigKeys },
+        }, manager)
       }
-
-      return {
-        list: afterList,
-        changed: changedCount > 0,
-      }
+      return changedCount > 0 || initializedConfigKeys.length > 0
     })
+    return { configs: await this.getOrderIdentifierConfigs(), changed }
   }
 
   /**

@@ -976,7 +976,7 @@ export const useOrderEntryForm = () => {
         path: '/order-list',
         query: {
           focusOrderId: result.order.id,
-          focusOrderShowNo: result.order.showNo,
+          focusOrderSystemNo: result.order.systemNo,
           focusRefreshToken: String(Date.now()),
         },
       })

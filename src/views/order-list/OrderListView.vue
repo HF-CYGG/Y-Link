@@ -32,6 +32,8 @@ import {
   PageToolbarCard,
 } from '@/components/common'
 import { usePermissionAction } from '@/composables/usePermissionAction'
+import { useAuthStore } from '@/store'
+import pinia from '@/store/pinia'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { useOrderListView } from './composables/useOrderListView'
 import OrderDeleteConfirmDialog from './components/OrderDeleteConfirmDialog.vue'
@@ -98,6 +100,8 @@ const {
   refreshOrders,
 } = useOrderListView()
 const { hasPermission, ensurePermission } = usePermissionAction()
+const authStore = useAuthStore(pinia)
+const isAdmin = computed(() => authStore.currentUser?.role === 'admin')
 const OrderDetailDrawerContent = defineAsyncComponent(() => import('./components/OrderDetailDrawerContent.vue'))
 const OrderVoucherWorkbenchDialog = defineAsyncComponent(() => import('./components/OrderVoucherWorkbenchDialog.vue'))
 const OrderAmendmentDialog = defineAsyncComponent(() => import('./components/OrderAmendmentDialog.vue'))
@@ -565,6 +569,9 @@ const handleSaveComplianceFlags = async () => {
                 <template #default="{ row }">
                   <span>{{ row.businessNo }}</span>
                   <el-tag v-if="getMergeLabel(row)" class="ml-2" size="small" :type="isSourceOrder(row) ? 'info' : 'success'">{{ getMergeLabel(row) }}</el-tag>
+                  <el-tag v-if="row.matchedIdentifierType && row.matchedIdentifierValue && (row.matchedIdentifierType !== 'systemNo' || isAdmin)" class="ml-2" size="small" effect="plain" type="warning">
+                    命中{{ row.matchedIdentifierType === 'businessNo' ? '业务单号' : row.matchedIdentifierType === 'systemNo' ? '系统编号' : '预订单号' }}：{{ row.matchedIdentifierValue }}
+                  </el-tag>
                 </template>
               </el-table-column>
               <el-table-column label="领用对象" min-width="200" show-overflow-tooltip>

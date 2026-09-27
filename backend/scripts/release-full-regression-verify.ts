@@ -533,64 +533,52 @@ async function main() {
     assert.ok(adminProducts.some((item) => item.id === createdProduct.id))
     pass('管理端商品列表读取通过')
 
-    const orderSerialConfigs = await expectJsonOk<{
+    const orderIdentifierConfigs = await expectJsonOk<{
       data: {
-        list: Array<{
-          orderType: 'department' | 'walkin'
-          start: number
-          current: number
-          width: number
-        }>
+        system: Record<'department' | 'walkin', { start: 1; current: number; width: 6 }>
+        preorder: Record<'department' | 'walkin', { start: 1; current: number; width: 6 }>
+        business: Record<'department' | 'walkin', { start: 1; current: number; width: 6 }>
       }
     }>(
       () =>
-        fetch(`${baseUrl}/api/system-configs/order-serial`, {
+        fetch(`${baseUrl}/api/system-configs/order-identifiers`, {
           headers: {
             Authorization: `Bearer ${adminToken}`,
           },
         }),
-      '系统配置订单流水读取',
+      '系统配置订单编号读取',
     )
-    const departmentSerial = orderSerialConfigs.list.find((item) => item.orderType === 'department')
-    const walkinSerial = orderSerialConfigs.list.find((item) => item.orderType === 'walkin')
-    assert.ok(departmentSerial && walkinSerial, '订单流水配置缺失')
-    pass('系统配置订单流水读取通过')
+    assert.equal(orderIdentifierConfigs.system.department.width, 6)
+    assert.equal(orderIdentifierConfigs.preorder.walkin.width, 6)
+    assert.equal(orderIdentifierConfigs.business.department.width, 6)
+    pass('系统配置三套订单编号读取通过')
 
-    const updatedOrderSerialConfigs = await expectJsonOk<{
+    const updatedOrderIdentifierConfigs = await expectJsonOk<{
       data: {
-        list: Array<{
-          orderType: 'department' | 'walkin'
-          start: number
-          current: number
-          width: number
-        }>
+        configs: unknown
         changed: boolean
       }
     }>(
       () =>
-        fetch(`${baseUrl}/api/system-configs/order-serial`, {
+        fetch(`${baseUrl}/api/system-configs/order-identifiers`, {
           method: 'PUT',
           headers: {
             Authorization: `Bearer ${adminToken}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            department: {
-              start: departmentSerial.start,
-              current: departmentSerial.current + 1,
-              width: departmentSerial.width,
+            system: {
+              department: { ...orderIdentifierConfigs.system.department, current: orderIdentifierConfigs.system.department.current + 1 },
+              walkin: orderIdentifierConfigs.system.walkin,
             },
-            walkin: {
-              start: walkinSerial.start,
-              current: walkinSerial.current,
-              width: walkinSerial.width,
-            },
+            preorder: orderIdentifierConfigs.preorder,
+            business: orderIdentifierConfigs.business,
           }),
         }),
-      '系统配置订单流水更新',
+      '系统配置订单编号更新',
     )
-    assert.equal(updatedOrderSerialConfigs.changed, true)
-    pass('系统配置订单流水更新通过')
+    assert.equal(updatedOrderIdentifierConfigs.changed, true)
+    pass('系统配置订单编号更新通过')
 
     const o2oRuleConfigs = await expectJsonOk<{
       data: {
@@ -750,6 +738,8 @@ async function main() {
       data: {
         order: {
           id: string
+          systemNo: string
+          businessNo: string
           showNo: string
           verifyCode: string
           status: string
@@ -789,6 +779,7 @@ async function main() {
       data: {
         order: {
           id: string
+          preorderNo: string
           showNo: string
           verifyCode: string
           status: string
@@ -898,11 +889,11 @@ async function main() {
 
     const orderList = await expectJsonOk<{
       data: {
-        list: Array<{ id: string; showNo: string }>
+        list: Array<{ id: string; systemNo: string; businessNo: string; showNo: string }>
       }
     }>(
       () =>
-        fetch(`${baseUrl}/api/orders?page=1&pageSize=20&keyword=${encodeURIComponent(submittedOrder.order.showNo)}`, {
+        fetch(`${baseUrl}/api/orders?page=1&pageSize=20&keyword=${encodeURIComponent(submittedOrder.order.systemNo)}`, {
           headers: {
             Authorization: `Bearer ${adminToken}`,
           },
@@ -916,6 +907,8 @@ async function main() {
       data: {
         order: {
           id: string
+          systemNo: string
+          businessNo: string
           showNo: string
         }
       }
@@ -928,7 +921,8 @@ async function main() {
         }),
       '管理端出库详情读取',
     )
-    assert.equal(orderDetail.order.showNo, submittedOrder.order.showNo)
+    assert.equal(orderDetail.order.systemNo, submittedOrder.order.systemNo)
+    assert.equal(orderDetail.order.businessNo, submittedOrder.order.businessNo)
     pass('管理端出库详情读取通过')
 
     const deletedOrder = await expectJsonOk<{
@@ -944,7 +938,7 @@ async function main() {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            confirmShowNo: submittedOrder.order.showNo,
+            confirmBusinessNo: submittedOrder.order.businessNo,
           }),
         }),
       '管理端删除出库单',
@@ -1351,11 +1345,12 @@ async function main() {
     assert.equal(enabledClientUser.status, 'enabled')
     pass('管理端重新启用客户端用户通过')
 
-    const showNoVerifyDetail = await expectJsonOk<{
+    const preorderNoVerifyDetail = await expectJsonOk<{
       data: {
         detail: {
           order: {
             id: string
+            preorderNo: string
             showNo: string
             status: string
           }
@@ -1363,17 +1358,17 @@ async function main() {
       }
     }>(
       () =>
-        fetch(`${baseUrl}/api/o2o/verify/show-no/${preorder.order.showNo}`, {
+        fetch(`${baseUrl}/api/o2o/verify/preorder-no/${preorder.order.preorderNo}`, {
           headers: {
             Authorization: `Bearer ${adminToken}`,
           },
         }),
-      '管理端按展示单号读取核销详情',
+      '管理端按预订单号读取核销详情',
     )
-    assert.equal(showNoVerifyDetail.detail.order.id, preorder.order.id)
-    assert.equal(showNoVerifyDetail.detail.order.showNo, preorder.order.showNo)
-    assert.equal(showNoVerifyDetail.detail.order.status, 'verified')
-    pass('管理端按展示单号读取订单详情通过')
+    assert.equal(preorderNoVerifyDetail.detail.order.id, preorder.order.id)
+    assert.equal(preorderNoVerifyDetail.detail.order.preorderNo, preorder.order.preorderNo)
+    assert.equal(preorderNoVerifyDetail.detail.order.status, 'verified')
+    pass('管理端按预订单号读取订单详情通过')
 
     const deletedTag = await expectJsonOk<{ data: boolean }>(
       () =>

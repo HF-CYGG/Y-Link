@@ -1,14 +1,13 @@
 /**
  * 模块说明：订单独立业务号服务。
- * 文件职责：维护 hyyzjd/hyyz 两个永久占用命名空间，并在事务中严格按 cursor + 1 分配新号。
- * 实现逻辑：游标复用 business_sequence 的独立 key，号码占用写入不可删除表；冲突一律 409，禁止扫描跳号。
+ * 文件职责：维护 hyyzjd/hyyz 两个业务号命名空间，并在事务中严格按 cursor + 1 分配新号。
+ * 实现逻辑：业务号只在物理存在的订单之间唯一；软删除仍占用，永久删除后可由普通改单复用。
  */
 
 import type { EntityManager } from 'typeorm'
+import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BusinessSequence } from '../entities/business-sequence.entity.js'
-import { OrderBusinessNoOccupancy } from '../entities/order-business-no-occupancy.entity.js'
 import { SystemConfig } from '../entities/system-config.entity.js'
-import { isUniqueConstraintError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
 import type { OrderType } from './order-serial.service.js'
 
@@ -20,31 +19,20 @@ const BUSINESS_NO_RULES: Record<OrderType, {
   department: {
     namespace: 'hyyzjd',
     sequenceKey: 'order.business.department',
-    configKeyPrefix: 'order.serial.department',
+    configKeyPrefix: 'order.business.department',
   },
   walkin: {
     namespace: 'hyyz',
     sequenceKey: 'order.business.walkin',
-    configKeyPrefix: 'order.serial.walkin',
+    configKeyPrefix: 'order.business.walkin',
   },
 }
 
-const BUSINESS_NO_UNIQUE_MATCHER = {
-  mysqlConstraints: [
-    'uk_order_business_no_occupancy_business_no',
-    'uk_order_business_no_occupancy_namespace_serial',
-    'uk_biz_outbound_business_no',
-  ],
-  sqliteColumns: [
-    'order_business_no_occupancy.business_no',
-    'order_business_no_occupancy.business_namespace, order_business_no_occupancy.serial_value',
-    'biz_outbound_order.business_no',
-  ],
-} as const
-
 interface BusinessNoConfig {
   start: number
+  current: number
   width: number
+  currentKey: string
 }
 
 export interface ParsedBusinessNo {
@@ -69,7 +57,7 @@ export interface BusinessNoSuggestion {
   skippedBusinessNos: string[]
 }
 
-/** 建议号每批按区间查询占用表，并限制最大扫描跨度，避免异常占用数据导致长时间扫描。 */
+/** 建议号每批按区间查询物理订单，并限制最大扫描跨度，避免异常数据导致长时间扫描。 */
 const SUGGESTION_WINDOW_SIZE = 200
 const SUGGESTION_SCAN_LIMIT = 5000
 
@@ -83,8 +71,8 @@ export class OrderBusinessNoService {
   async allocate(orderType: OrderType, orderUuid: string, manager: EntityManager): Promise<string> {
     const rule = BUSINESS_NO_RULES[orderType]
     const config = await this.loadConfig(rule.configKeyPrefix, manager)
-    const sequence = await this.loadOrCreateSequence(rule.sequenceKey, config.start - 1, manager)
-    const current = this.parseNonNegativeInteger(sequence.currentValue, '订单业务号游标异常')
+    const sequence = await this.loadOrCreateSequence(rule.sequenceKey, Math.max(config.start - 1, config.current), manager)
+    const current = Math.max(config.current, this.parseNonNegativeInteger(sequence.currentValue, '订单业务号游标异常'))
     const next = current + 1
     const maxSerial = 10 ** config.width - 1
     if (next < config.start || next > maxSerial) {
@@ -92,15 +80,10 @@ export class OrderBusinessNoService {
     }
 
     const businessNo = `${rule.namespace}${String(next).padStart(config.width, '0')}`
-    await this.insertOccupancy({
-      namespace: rule.namespace,
-      serialValue: next,
-      businessNo,
-      orderUuid,
-      assignedReason: 'order_create',
-    }, manager)
+    await this.assertBusinessNoAvailable(businessNo, orderUuid, manager)
     sequence.currentValue = next
     await manager.getRepository(BusinessSequence).save(sequence)
+    await this.updateCurrentMirror(config.currentKey, next, manager)
     return businessNo
   }
 
@@ -130,26 +113,23 @@ export class OrderBusinessNoService {
       const orderType = namespace === 'hyyzjd' ? 'department' : 'walkin'
       const rule = BUSINESS_NO_RULES[orderType]
       const config = await this.loadConfig(rule.configKeyPrefix, manager)
-      const sequence = await this.loadOrCreateSequence(rule.sequenceKey, config.start - 1, manager)
-      const beforeCursor = this.parseNonNegativeInteger(sequence.currentValue, '订单业务号游标异常')
+      const sequence = await this.loadOrCreateSequence(rule.sequenceKey, Math.max(config.start - 1, config.current), manager)
+      const beforeCursor = Math.max(
+        config.start - 1,
+        config.current,
+        this.parseNonNegativeInteger(sequence.currentValue, '订单业务号游标异常'),
+      )
       const sortedTargets = [...namespaceTargets].sort((left, right) =>
         left.parsed.serialValue - right.parsed.serialValue
         || left.orderUuid.localeCompare(right.orderUuid),
       )
       for (const target of sortedTargets) {
-        await this.insertOccupancy({
-          namespace,
-          serialValue: target.parsed.serialValue,
-          businessNo: target.parsed.businessNo,
-          orderUuid: target.orderUuid,
-          assignedReason: target.reason
-            ? `order_amendment:${target.reason}`.slice(0, 128)
-            : 'order_amendment',
-        }, manager)
+        await this.assertBusinessNoAvailable(target.parsed.businessNo, target.orderUuid, manager)
       }
-      const afterCursor = sortedTargets.at(-1)?.parsed.serialValue ?? beforeCursor
+      const afterCursor = Math.max(beforeCursor, sortedTargets.at(-1)?.parsed.serialValue ?? beforeCursor)
       sequence.currentValue = afterCursor
       await manager.getRepository(BusinessSequence).save(sequence)
+      await this.updateCurrentMirror(config.currentKey, afterCursor, manager)
       plans.push(this.buildCursorPlan(namespace, beforeCursor, afterCursor, config.width))
     }
     return plans
@@ -167,15 +147,15 @@ export class OrderBusinessNoService {
       const rule = BUSINESS_NO_RULES[orderType]
       const config = await this.loadConfig(rule.configKeyPrefix, manager)
       const beforeCursor = await this.readCursorWithoutLock(orderType, config, manager)
-      const afterCursor = Math.max(...namespaceTargets.map((target) => target.parsed.serialValue))
+      const afterCursor = Math.max(beforeCursor, ...namespaceTargets.map((target) => target.parsed.serialValue))
       plans.push(this.buildCursorPlan(namespace, beforeCursor, afterCursor, config.width))
     }
     return plans
   }
 
   /**
-   * 修订弹窗切换订单类型时的业务号建议：只读游标与占用表，不加锁、不占号、不推进游标。
-   * 从 cursor + 1 起顺延，跳过已永久占用号与调用方排除号（同批其他草稿），结果仅作为可手改的默认值；
+   * 修订弹窗切换订单类型时的业务号建议：只读游标与物理订单，不加锁、不占号、不推进游标。
+   * 从 cursor + 1 起顺延，跳过当前仍在用的号与调用方排除号（同批其他草稿），结果仅作为可手改的默认值；
    * 最终是否可用仍以预览/提交时的事务内校验为准，因此这里的跳过不改变新单分配“禁止扫描跳号”的约束。
    */
   async suggestForAmendment(
@@ -199,16 +179,19 @@ export class OrderBusinessNoService {
         throw new BizError(`业务号游标之后连续 ${SUGGESTION_SCAN_LIMIT} 个号均不可用，请手动填写业务单号`, 409)
       }
       const windowEnd = Math.min(maxSerial, windowStart + SUGGESTION_WINDOW_SIZE - 1)
-      const occupiedRows = await manager.getRepository(OrderBusinessNoOccupancy)
-        .createQueryBuilder('occupancy')
-        .select('occupancy.serialValue', 'serialValue')
-        .where('occupancy.namespace = :namespace', { namespace: rule.namespace })
-        .andWhere('occupancy.serialValue BETWEEN :windowStart AND :windowEnd', { windowStart, windowEnd })
-        .getRawMany<{ serialValue: string | number }>()
-      const occupied = new Set(occupiedRows.map((row) => Number(row.serialValue)))
+      const occupiedRows = await manager.getRepository(BizOutboundOrder)
+        .createQueryBuilder('order')
+        .select('order.businessNo', 'businessNo')
+        .where('order.orderType = :orderType', { orderType })
+        .andWhere('order.businessNo BETWEEN :startBusinessNo AND :endBusinessNo', {
+          startBusinessNo: formatSerial(windowStart),
+          endBusinessNo: formatSerial(windowEnd),
+        })
+        .getRawMany<{ businessNo: string }>()
+      const occupied = new Set(occupiedRows.map((row) => String(row.businessNo).trim().toLowerCase()))
       for (let serial = windowStart; serial <= windowEnd && businessNos.length < count; serial += 1) {
         const businessNo = formatSerial(serial)
-        if (occupied.has(serial)) {
+        if (occupied.has(businessNo)) {
           skippedBusinessNos.push(businessNo)
         } else if (!excluded.has(businessNo)) {
           businessNos.push(businessNo)
@@ -240,9 +223,9 @@ export class OrderBusinessNoService {
         blockingReason: error instanceof Error ? error.message : '业务号格式非法',
       }
     }
-    const occupied = await manager.getRepository(OrderBusinessNoOccupancy).existsBy({ businessNo: parsed.businessNo })
+    const occupied = await manager.getRepository(BizOutboundOrder).existsBy({ businessNo: parsed.businessNo })
     return occupied
-      ? { parsed, blockingReason: `业务号 ${parsed.businessNo} 已被永久占用` }
+      ? { parsed, blockingReason: `业务号 ${parsed.businessNo} 当前已被其他订单使用` }
       : { parsed, blockingReason: null }
   }
 
@@ -261,50 +244,79 @@ export class OrderBusinessNoService {
     return { orderType, namespace: rule.namespace, serialValue, businessNo: normalizedBusinessNo }
   }
 
-  private async insertOccupancy(
-    input: Pick<OrderBusinessNoOccupancy, 'namespace' | 'serialValue' | 'businessNo' | 'orderUuid' | 'assignedReason'>,
-    manager: EntityManager,
-  ): Promise<void> {
-    const repository = manager.getRepository(OrderBusinessNoOccupancy)
-    try {
-      await repository.insert(repository.create(input))
-    } catch (error) {
-      if (isUniqueConstraintError(error, BUSINESS_NO_UNIQUE_MATCHER)) {
-        throw new BizError(`业务号 ${input.businessNo} 已被永久占用`, 409)
-      }
-      throw error
+  private async assertBusinessNoAvailable(businessNo: string, orderUuid: string, manager: EntityManager): Promise<void> {
+    const query = manager.getRepository(BizOutboundOrder)
+      .createQueryBuilder('order')
+      .where('order.businessNo = :businessNo', { businessNo })
+      .andWhere('order.orderUuid <> :orderUuid', { orderUuid })
+    if (manager.connection.options.type !== 'sqlite') query.setLock('pessimistic_read')
+    if (await query.getExists()) {
+      throw new BizError(`业务号 ${businessNo} 当前已被其他订单使用`, 409)
     }
   }
 
   private async loadConfig(configKeyPrefix: string, manager: EntityManager): Promise<BusinessNoConfig> {
     const startKey = `${configKeyPrefix}.start`
+    const currentKey = `${configKeyPrefix}.current`
     const widthKey = `${configKeyPrefix}.width`
     const rows = await manager.getRepository(SystemConfig).findBy([
       { configKey: startKey },
+      { configKey: currentKey },
       { configKey: widthKey },
     ])
     const configMap = new Map(rows.map((row) => [row.configKey, row.configValue]))
     const start = this.parsePositiveInteger(configMap.get(startKey), '订单业务号起始配置异常')
+    const current = this.parseNonNegativeInteger(configMap.get(currentKey), '订单业务号当前值配置异常')
     const width = this.parsePositiveInteger(configMap.get(widthKey), '订单业务号位宽配置异常')
     if (width > 12) {
       throw new BizError('订单业务号位宽配置异常：位宽必须在 1 到 12 之间', 500)
     }
-    return { start, width }
+    if (current < start - 1) throw new BizError('订单业务号当前值配置异常', 500)
+    return { start, current, width, currentKey }
   }
 
-  /** 无锁读取命名空间游标；游标行尚未创建时与分配逻辑一致，取 start - 1 与历史最大占用号的较大值。 */
+  private async updateCurrentMirror(currentKey: string, current: number, manager: EntityManager): Promise<void> {
+    await manager.getRepository(SystemConfig).update({ configKey: currentKey }, { configValue: String(current) })
+  }
+
+  private async readPhysicalMaxSerial(
+    orderType: OrderType,
+    config: BusinessNoConfig,
+    manager: EntityManager,
+    excludeOrderId?: string,
+  ): Promise<number> {
+    const rule = BUSINESS_NO_RULES[orderType]
+    const pattern = new RegExp(`^${rule.namespace}\\d{${config.width}}$`)
+    const query = manager.getRepository(BizOutboundOrder)
+      .createQueryBuilder('order')
+      .select('order.businessNo', 'businessNo')
+      .addSelect('order.id', 'id')
+      .where('order.orderType = :orderType', { orderType })
+    if (excludeOrderId) query.andWhere('order.id <> :excludeOrderId', { excludeOrderId })
+    const rows = await query.getRawMany<{ id: string; businessNo: string }>()
+    let maxSerial = 0
+    for (const row of rows) {
+      const businessNo = String(row.businessNo ?? '').trim().toLowerCase()
+      if (!pattern.test(businessNo)) {
+        throw new BizError(`订单 ${row.id || '未知'} 的当前业务号不符合 ${rule.namespace} 命名空间，无法安全校准游标`, 500)
+      }
+      const serialValue = Number.parseInt(businessNo.slice(rule.namespace.length), 10)
+      if (!Number.isSafeInteger(serialValue) || serialValue < config.start) {
+        throw new BizError(`订单 ${row.id || '未知'} 的当前业务号流水值非法，无法安全校准游标`, 500)
+      }
+      maxSerial = Math.max(maxSerial, serialValue)
+    }
+    return maxSerial
+  }
+
+  /** 无锁读取命名空间游标；游标行尚未创建时取 start - 1 与物理现存订单最大号的较大值。 */
   private async readCursorWithoutLock(orderType: OrderType, config: BusinessNoConfig, manager: EntityManager): Promise<number> {
     const rule = BUSINESS_NO_RULES[orderType]
     const existingSequence = await manager.getRepository(BusinessSequence).findOneBy({ sequenceKey: rule.sequenceKey })
     if (existingSequence) {
-      return this.parseNonNegativeInteger(existingSequence.currentValue, '订单业务号游标异常')
+      return Math.max(config.current, this.parseNonNegativeInteger(existingSequence.currentValue, '订单业务号游标异常'))
     }
-    const maxRow = await manager.getRepository(OrderBusinessNoOccupancy)
-      .createQueryBuilder('occupancy')
-      .select('MAX(occupancy.serialValue)', 'maxSerial')
-      .where('occupancy.namespace = :namespace', { namespace: rule.namespace })
-      .getRawOne<{ maxSerial: string | number | null }>()
-    return Math.max(config.start - 1, Number(maxRow?.maxSerial ?? config.start - 1))
+    return Math.max(config.start - 1, config.current, await this.readPhysicalMaxSerial(orderType, config, manager))
   }
 
   private groupTargets(targets: BusinessNoReservationTarget[]) {
@@ -336,15 +348,10 @@ export class OrderBusinessNoService {
   private async loadOrCreateSequence(sequenceKey: string, initialValue: number, manager: EntityManager) {
     let sequence = await this.loadSequenceForUpdateIfPresent(sequenceKey, manager)
     if (!sequence) {
-      const occupancyMaxRow = await manager.getRepository(OrderBusinessNoOccupancy)
-        .createQueryBuilder('occupancy')
-        .select('MAX(occupancy.serialValue)', 'maxSerial')
-        .where('occupancy.namespace = :namespace', {
-          namespace: sequenceKey.endsWith('.department') ? 'hyyzjd' : 'hyyz',
-        })
-        .getRawOne<{ maxSerial: string | number | null }>()
-      const maxOccupied = Math.max(initialValue, Number(occupancyMaxRow?.maxSerial ?? initialValue))
-      await this.ensureSequenceRow(sequenceKey, maxOccupied, manager)
+      const orderType: OrderType = sequenceKey.endsWith('.department') ? 'department' : 'walkin'
+      const config = await this.loadConfig(BUSINESS_NO_RULES[orderType].configKeyPrefix, manager)
+      const maxCurrent = Math.max(initialValue, await this.readPhysicalMaxSerial(orderType, config, manager))
+      await this.ensureSequenceRow(sequenceKey, maxCurrent, manager)
       sequence = await this.loadSequenceForUpdate(sequenceKey, manager)
     }
     if (!sequence) {

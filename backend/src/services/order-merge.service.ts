@@ -22,7 +22,6 @@ import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 
-const O2O_ORDER_PREFIX = 'o2o-preorder-verify:'
 const MAX_TRANSACTION_ATTEMPTS = 3
 const MAX_SOURCE_ORDERS = 100
 
@@ -50,6 +49,8 @@ export interface OrderMergeBlocker {
 
 export interface OrderMergeOrderReference {
   id: string
+  systemNo: string
+  /** @deprecated 兼容一个发布周期。 */
   showNo: string
   businessNo: string
   editVersion: number
@@ -676,10 +677,8 @@ export class OrderMergeService {
     const memberOrders = [...candidates, ...existingChildren]
     const preorderIdByOrderId = new Map<string, string>()
     memberOrders.forEach((order) => {
-      const key = order.idempotencyKey?.trim() ?? ''
-      if (key.startsWith(O2O_ORDER_PREFIX)) {
-        const preorderId = key.slice(O2O_ORDER_PREFIX.length).trim()
-        if (preorderId) preorderIdByOrderId.set(normalizeId(order.id), preorderId)
+      if (order.sourceDocType === 'o2o_preorder' && normalizeId(order.sourceDocId)) {
+        preorderIdByOrderId.set(normalizeId(order.id), normalizeId(order.sourceDocId))
       } else if (order.inventoryMode === 'o2o_preapplied') {
         addBlocker(normalizeId(order.id), 'O2O_LINK_MISSING', 'O2O 正式出库单缺少原预订单追溯关系')
       }
@@ -859,7 +858,7 @@ export class OrderMergeService {
       actionLabel: '合并出库单',
       targetType: 'order',
       targetId: normalizeId(target.id),
-      targetCode: target.showNo,
+      targetCode: target.businessNo,
       actor,
       requestMeta,
       detail: {
@@ -896,7 +895,8 @@ export class OrderMergeService {
   ) {
     return {
       businessNo: order.businessNo,
-      showNo: order.showNo,
+      systemNo: order.systemNo,
+      showNo: order.systemNo,
       orderType: order.orderType,
       customerDepartmentName: order.customerDepartmentName,
       customerName: order.customerName,
@@ -961,11 +961,21 @@ export class OrderMergeService {
     error: unknown,
     requestMeta?: RequestMeta,
   ): Promise<void> {
+    let targetCode: string | undefined
+    try {
+      targetCode = (await AppDataSource.getRepository(BizOutboundOrder).findOne({
+        select: ['businessNo'],
+        where: { id: input.target.orderId },
+      }))?.businessNo
+    } catch {
+      targetCode = undefined
+    }
     await auditService.safeRecord({
       actionType: 'order.merge_failed',
       actionLabel: '合并出库单失败',
       targetType: 'order',
       targetId: input.target.orderId,
+      targetCode,
       actor,
       requestMeta,
       detail: {
@@ -983,7 +993,8 @@ export class OrderMergeService {
   private toReference(order: BizOutboundOrder): OrderMergeOrderReference {
     return {
       id: normalizeId(order.id),
-      showNo: order.showNo,
+      systemNo: order.systemNo,
+      showNo: order.systemNo,
       businessNo: order.businessNo,
       editVersion: Number(order.editVersion),
       status: order.status,

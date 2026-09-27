@@ -186,6 +186,11 @@ const normalizeOptionalTrimmedText = (value: unknown) => {
     : null
 }
 
+/** 仅把历史预订单号或旧版业务号 showNo 升级为 preorderNo，绝不把正式出库系统号写入客户端缓存。 */
+const isLegacyPreorderShowNo = (value: unknown): value is string => {
+  return typeof value === 'string' && /^(?:PRE-(?:D|W)-\d{6}|hyyz(?:jd)?\d{1,12})$/i.test(value.trim())
+}
+
 const normalizeLatestReturnRequest = (value: unknown): O2oPreorderSummary['latestReturnRequest'] => {
   if (!value || typeof value !== 'object') {
     return null
@@ -210,21 +215,20 @@ const normalizeOrderRow = (item: unknown): PersistedO2oPreorderSummary | null =>
   }
   const row = item as Record<string, unknown>
   const id = typeof row.id === 'string' ? row.id : ''
-  const showNo = typeof row.showNo === 'string' ? row.showNo : ''
+  // 旧缓存只在升级边界读取 showNo；写回后的 canonical 字段始终是 preorderNo。
+  const preorderNo = typeof row.preorderNo === 'string'
+    ? row.preorderNo
+    : (isLegacyPreorderShowNo(row.showNo) ? row.showNo.trim() : '')
   const verifyCode = typeof row.verifyCode === 'string' ? row.verifyCode : ''
   const status = isO2oOrderStatus(row.status) ? row.status : null
-  if (!id || !showNo || !verifyCode || !status) {
+  if (!id || !preorderNo || !verifyCode || !status) {
     return null
   }
   const timeoutAt = typeof row.timeoutAt === 'string' ? row.timeoutAt : null
   return {
     id,
-    showNo,
-    // 详细注释：正式出库单号一旦已经回写到订单摘要，本地缓存也必须保留，
-    // 否则刷新或离线恢复后会退回旧预订单号，导致“订单展示口径”前后不一致。
-    customerOrderShowNo: normalizeOptionalTrimmedText(row.customerOrderShowNo),
+    preorderNo,
     customerOrderBusinessNo: normalizeOptionalTrimmedText(row.customerOrderBusinessNo),
-    originalCustomerOrderShowNo: normalizeOptionalTrimmedText(row.originalCustomerOrderShowNo),
     originalCustomerOrderBusinessNo: normalizeOptionalTrimmedText(row.originalCustomerOrderBusinessNo),
     verifyCode,
     status,

@@ -233,26 +233,26 @@ async function main() {
       startDate: todayText,
       endDate: todayText,
       orderType: 'walkin',
-    })
+    }, mockActor)
     assert.equal(productDrilldown.productId, firstProduct.id)
     assert.equal(productDrilldown.records.length >= 1, true)
     assert.equal(Number(productDrilldown.totalQty) > 0, true)
 
     const customerDrilldown = await dashboardService.getCustomerRankDrilldown({
-      customerName: '散客',
+      customerName: '行政部',
       startDate: todayText,
       endDate: todayText,
-      orderType: 'walkin',
-    })
+      orderType: 'department',
+    }, mockActor)
     assert.equal(customerDrilldown.records.length >= 1, true)
-    assert.equal(customerDrilldown.records[0]?.orderType, 'walkin')
+    assert.equal(customerDrilldown.records[0]?.orderType, 'department')
 
     const tagAggregate = await dashboardService.getTagAggregate({
       tagId: analyticsTag.id,
       startDate: todayText,
       endDate: todayText,
       orderType: 'walkin',
-    })
+    }, mockActor)
     assert.equal(tagAggregate.tagId, analyticsTag.id)
     assert.equal(Number(tagAggregate.totalQuantity) > 0, true)
     assert.equal(Number(tagAggregate.totalAmount) > 0, true)
@@ -260,7 +260,7 @@ async function main() {
     const pieData = await dashboardService.getDashboardPieData({
       startDate: todayText,
       endDate: todayText,
-    })
+    }, mockActor)
     assert.equal(pieData.productPie.length >= 1, true)
     assert.equal(pieData.customerPie.length >= 1, true)
     assert.equal(pieData.orderTypePie.some((item) => item.key === 'walkin'), true)
