@@ -1517,6 +1517,7 @@ async function main() {
     assert.equal(departmentPreorder.order.clientOrderType, 'department')
     assert.equal(departmentPreorder.order.departmentNameSnapshot, '后勤处')
     assert.equal(departmentPreorder.order.staffNoSnapshot, departmentProfile.staffNo)
+    assert.equal(departmentPreorder.order.pickupContact, '部门共享账号领取', '部门账号应保存本次填写的领取人')
     pass('管理端创建的部门共享账号可按部门订单下单')
 
     const longDepartmentProfile = await clientUserManageService.createProfile(

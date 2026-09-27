@@ -1777,6 +1777,10 @@ onBeforeUnmount(() => {
               <p class="mt-1 text-sm font-semibold text-slate-900">{{ activeOrderOwnership }}</p>
             </div>
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <p class="text-sm text-slate-400">预订单登记领取人</p>
+              <p class="mt-1 break-words text-sm font-semibold text-slate-900">{{ activeOrderDetail.order.pickupContact || '未记录' }}</p>
+            </div>
+            <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">到店取货时间</p>
               <p class="mt-1 text-sm font-semibold text-slate-900">
                 {{
@@ -1818,14 +1822,14 @@ onBeforeUnmount(() => {
 
           <div class="mt-4 rounded-2xl border border-slate-200 bg-white px-4 py-4">
             <div>
-              <p class="text-base font-semibold text-slate-900">预定用户信息</p>
+              <p class="text-base font-semibold text-slate-900">下单账号信息</p>
               <p class="mt-1 text-xs leading-5 text-slate-500">
                 便于门店在特殊情况下通过电话、邮件等方式及时联系客户并同步订单变化。
               </p>
             </div>
             <div class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
               <div class="rounded-2xl bg-slate-50 px-4 py-3">
-                <p class="text-sm text-slate-400">用户名</p>
+                <p class="text-sm text-slate-400">账号用户名</p>
                 <p class="mt-1 break-words text-sm font-semibold text-slate-900">{{ orderCustomerProfile.username }}</p>
               </div>
               <div class="rounded-2xl bg-slate-50 px-4 py-3">

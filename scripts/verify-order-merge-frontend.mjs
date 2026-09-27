@@ -103,6 +103,10 @@ for (const obsoleteParentStyle of ['.mobile-order-card__head', '.mobile-order-ca
   }
 }
 expectText('src/views/order-list/components/OrderDetailDrawerContent.vue', "emit('navigate'", '父子详情跳转事件')
+expectText('src/views/order-list/components/OrderDetailDrawerContent.vue', "v-if=\"order.merge.role !== 'parent' && order.sourceDocType === 'o2o_preorder'\"", '父单不得以单一来源领取字段代表合并组')
+expectText('src/views/order-list/components/OrderDetailDrawerContent.vue', 'v-for="(pickup, index) in mergedPickupRecords"', '父单详情逐来源展示领取记录')
+expectText('src/views/order-list/components/OrderDetailDrawerContent.vue', "pickup.pickupContact || '未记录'", '历史来源领取人缺失明确展示未记录')
+expectText('src/views/order-list/components/OrderDetailDrawerContent.vue', 'pickup.pickupAt', '来源取货时间逐单展示')
 for (const file of ['src/views/client/ClientOrdersView.vue', 'src/views/client/ClientOrderDetailView.vue']) {
   expectText(file, 'originalCustomerOrderShowNo', '原始单号展示')
   expectText(file, '已合并', '合并提示')

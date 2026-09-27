@@ -938,6 +938,10 @@ watch(
               <p class="mt-1 text-base font-semibold text-slate-900">{{ preorderOwnershipLabel }}</p>
             </div>
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <p class="text-sm text-slate-400">预订单登记领取人</p>
+              <p class="mt-1 break-words text-base font-semibold text-slate-900">{{ preorderDetail.order.pickupContact || '未记录' }}</p>
+            </div>
+            <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">到店取货时间</p>
               <p class="mt-1 text-base font-semibold text-slate-900">
                 {{

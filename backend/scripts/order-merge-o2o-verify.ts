@@ -283,6 +283,37 @@ async function main() {
       idempotencyKey: `issue71-o2o-merge-${seed}`,
     }, actor)
     assert.equal(merged.targetOrderId, String(target.outbound.id), '同部门跨账号正式出库单应允许合并')
+    const sourcePickupAt = new Date('2020-03-01T10:30:00.000Z')
+    await preorderRepo.update({ id: source.preorder.id }, { pickupAt: sourcePickupAt })
+    const mergedDetail = await orderService.detailById(String(target.outbound.id))
+    assert.deepEqual(
+      mergedDetail.order.sourcePreorderPickups,
+      [
+        {
+          sourceOrderId: String(target.outbound.id),
+          businessNo: target.outbound.businessNo,
+          sourcePreorderNo: target.preorder.showNo,
+          pickupContact: target.preorder.pickupContact,
+          pickupAt: null,
+        },
+        {
+          sourceOrderId: String(source.outbound.id),
+          businessNo: source.outbound.businessNo,
+          sourcePreorderNo: source.preorder.showNo,
+          pickupContact: source.preorder.pickupContact,
+          pickupAt: sourcePickupAt.toISOString(),
+        },
+      ],
+      '父单详情应按原正式单逐张保留不同账号的来源领取人，不能把父单领取人覆盖全部来源',
+    )
+    await preorderRepo.update({ id: source.preorder.id }, { pickupContact: null })
+    try {
+      const historicalDetail = await orderService.detailById(String(target.outbound.id))
+      assert.equal(historicalDetail.order.sourcePreorderPickups[1]?.pickupContact, null, '历史来源单缺失领取人时必须明确保持未记录')
+      assert.equal(historicalDetail.order.sourcePreorderPickups[0]?.pickupContact, target.preorder.pickupContact, '来源缺失不得污染父单自身领取人')
+    } finally {
+      await preorderRepo.update({ id: source.preorder.id }, { pickupContact: source.preorder.pickupContact })
+    }
 
     const sourceComplianceSet = await o2oPreorderService.updateComplianceFlagsByAdmin({
       orderId: String(source.preorder.id),
@@ -486,6 +517,37 @@ async function main() {
       }, actor),
       (error: unknown) => error instanceof BizError && error.statusCode === 409,
       '任意合并成员关联的 O2O 预订单必须阻断永久删除',
+    )
+
+    const appendTarget = await createVerifiedPair(0, 1)
+    const appendFirst = await createVerifiedPair(1, 1)
+    const appendSecond = await createVerifiedPair(2, 1)
+    const appendMembers = [appendTarget, appendFirst, appendSecond]
+    const appendCreatedAt = localDateTime(2020, 3, 4, 10, 0)
+    await Promise.all(appendMembers.map((member) => outboundRepo.update({ id: member.outbound.id }, { createdAt: appendCreatedAt })))
+    const appendPickupAt = new Date('2020-03-04T11:00:00.000Z')
+    await preorderRepo.update({ id: appendSecond.preorder.id }, { pickupAt: appendPickupAt })
+    const firstAppend = await orderService.commitMerge({
+      target: { orderId: String(appendTarget.outbound.id), editVersion: 1 },
+      sources: [{ orderId: String(appendFirst.outbound.id), editVersion: 1 }],
+      reason: 'O2O 父单首次合并后继续追加领取记录验证',
+      idempotencyKey: `issue71-o2o-pickup-first-${seed}`,
+    }, actor)
+    await orderService.commitMerge({
+      target: { orderId: String(appendTarget.outbound.id), editVersion: firstAppend.targetEditVersion },
+      sources: [{ orderId: String(appendSecond.outbound.id), editVersion: 1 }],
+      reason: 'O2O 父单追加来源领取记录验证',
+      idempotencyKey: `issue71-o2o-pickup-second-${seed}`,
+    }, actor)
+    const appendedDetail = await orderService.detailById(String(appendTarget.outbound.id))
+    assert.deepEqual(
+      appendedDetail.order.sourcePreorderPickups.map((pickup) => [pickup.sourceOrderId, pickup.pickupContact, pickup.pickupAt]),
+      [
+        [String(appendTarget.outbound.id), appendTarget.preorder.pickupContact, null],
+        [String(appendFirst.outbound.id), appendFirst.preorder.pickupContact, null],
+        [String(appendSecond.outbound.id), appendSecond.preorder.pickupContact, appendPickupAt.toISOString()],
+      ],
+      '向既有父单追加来源后，详情应保留父单和两张来源单各自的领取记录与顺序',
     )
 
     console.log('✅ Issue #71 O2O 合并边界专项验证通过')
