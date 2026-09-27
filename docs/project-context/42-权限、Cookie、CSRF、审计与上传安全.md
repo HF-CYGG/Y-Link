@@ -39,7 +39,7 @@
 - 管理端与客户端图形验证码由 `captcha.service.ts` 共用生成链路：`svg-captcha` 使用包内字体绘制字符路径，`sharp` 转为 140×40 PNG，不依赖容器系统字体。答案仍由 `node:crypto` 生成；旧 `captchaSvg` 字段仅包装 PNG，不返回答案文本或字形路径。
 - 图形验证码为一次性票据：首次校验无论对错都立即作废，前端答错后必须重新获取（管理端登录页已在“验证码”类错误时换新图）。
 - 管理端会话除 `AUTH_TOKEN_TTL_HOURS` 绝对时效外，还有 `AUTH_SESSION_IDLE_TIMEOUT_MINUTES` 空闲超时（默认 720 分钟，0 关闭）：按 `lastAccessAt` 判定，HTTP 鉴权与客服 SSE 复核共用 `utils/admin-session-idle.ts`。标签页可见时每 60 秒心跳续期，隐藏或关闭超过时长后需重新登录。
-- body-parser 解析错误（畸形 JSON、超限、编码不支持等）在 `error-handler.ts` 按 4xx 返回；兜底 500 与审计写入失败日志只记录名称/消息/堆栈或驱动错误码（`utils/safe-error-log.ts`），不得展开错误对象属性，避免原始请求体中的密码进入日志。
+- body-parser 解析错误（畸形 JSON、超限、编码不支持等）在 `error-handler.ts` 按 4xx 返回；兜底 500 与审计写入失败日志只记录名称/消息/堆栈或驱动错误码（`utils/safe-error-log.ts`），不得展开错误对象属性，避免原始请求体中的密码进入日志。通知外发 Worker、反馈附件清理、迁移续跑等后台任务的错误日志同样走该工具（SQL 参数可能带通知正文、客户姓名或目标库连接信息）。
 - 登录失败锁定与“需要图形验证码”判定按规范账号主体计数：管理端用库中真实用户名（`authService.resolveLoginRiskSubject`），客户端 Web/Mobile 用 `uid:<用户ID>`（`clientAuthService.resolveLoginRiskSubject`），账号不存在时才退回输入原文。MySQL 常用排序规则大小写、重音、全角不敏感，按输入计数会让 `Ádmin`、全角 `ａｄｍｉｎ` 各得一份失败额度；客户端同一账号的手机号、邮箱、用户名、工号也必须共用一个桶。
 
 ## 代理、HTTPS 与救援传输边界
@@ -73,9 +73,10 @@
 - 全局永久删除口令在所有入口都必须限速：系统账号/客户端账号/供货方已入库删除沿用原限流器，供货方永久删除、O2O 订单删除与批量清理、出库单永久删除使用 `utils/permanent-delete-guard.ts` 的账号级限流（5 分钟 5 次）与脱敏失败审计。供货方永久删除在服务层先校验归属、状态与确认单号，再核对口令，避免成为全局口令的试错预言机。
 - 客户端业务写接口（反馈新建/追加消息、预订单提交/撤单）经 `authSecurityService.guardClientBusinessWrite` 按客户端账号限频，超限 429 并写 `client.auth.guard.business_write` 审计，防止刷量淹没站内信与飞书/邮件外发。
 - 管理员不能通过 `PUT /api/users/:id` 修改本人密码，必须走校验旧密码的 `/api/auth/change-password`。
-- 所有手机/邮箱发码入口（注册/找回、已登录资料改绑、补认证）共用 `guardVerificationCodeSendRequest`：每 IP 8 次/10 分钟、每目标 5 次/10 分钟，另有每目标 10 次/24 小时上限，防止已登录账号绕开图形验证码对任意号码持续短信轰炸。
+- 所有手机/邮箱发码入口（注册/找回、已登录资料改绑、补认证）共用 `guardVerificationCodeSendRequest`：每 IP 8 次/10 分钟、每目标 5 次/10 分钟，另有每目标 10 次/24 小时上限，防止已登录账号绕开图形验证码对任意号码持续短信轰炸。资料改绑发码的目标由用户任填，额外有每账号 10 次/24 小时上限（`guardClientProfileVerificationSend`），防止单账号轮换号码刷短信费。
 - multipart 上传依赖 `multer` 必须不低于 2.3.0（2.2.0 存在中断上传泄漏文件句柄、构造字段名/数组下标导致解析拒绝服务等公开漏洞，反馈附件上传对所有客户账号开放）。所有 multer 实例显式限制 `files/fields/parts`，图片上传另限单字段 1KB；商品 YZ 导入的 `resolutions` 字段沿用默认 1MB。
 - 反馈附件上传的账号级频控（默认 20 次/10 分钟）在 multer 接收文件之前计次，失败的上传同样消耗额度，避免单个账号用校验失败的大图反复占满全局图片处理队列；`createClientAttachment` 不再重复计次。
+- 前端 `resolveFeedbackAttachmentUrl` 只输出 http/https 地址，`javascript:`、`data:` 等协议视为无效附件地址，不依赖服务端附件地址白名单兜底。
 - 救援 Bearer 不复用管理端或客户端会话，响应始终 `no-store`，并按来源做一分钟窗口限流。救援 API 不接受 SQL、文件路径、数据库连接参数或普通 Cookie 登录态。
 
 ## 常见异常与排查顺序
