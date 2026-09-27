@@ -345,6 +345,8 @@ export class AuthService {
     if (currentPassword === newPassword) {
       throw new BizError('新密码不能与当前密码相同', 400)
     }
+    // 旧密码复核与登录共用失败锁定：会话被劫持时不能借改密接口无限试错当前密码。
+    await authSecurityService.assertAdminPasswordReauthAllowed(requestMeta, auth.username)
 
     let result: { changed: boolean; userId: string }
     try {
@@ -438,6 +440,8 @@ export class AuthService {
     }
 
     if (!result.changed) {
+      // 事务外计数，避免在 SQLite 单写者事务内再写风控状态。
+      await authSecurityService.recordAdminLoginFailure(requestMeta, auth.username)
       throw new BizError('当前密码错误', 400)
     }
     customerServiceRealtimeService.disconnectByOwner('service', result.userId)

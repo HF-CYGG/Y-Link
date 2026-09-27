@@ -77,6 +77,7 @@ export const AUDIT_ACTION_CATALOG: Readonly<Record<string, AuditActionDefinition
   'auth.guard.admin_captcha': { label: '管理端图形验证码频控', category: 'auth' },
   'client.auth.login': { label: '客户端登录', category: 'auth' },
   'client.auth.register': { label: '客户端注册', category: 'auth' },
+  'client.auth.reauth_failed': { label: '客户端旧密码复核失败', category: 'auth' },
   'client.auth.forgot_password.verify': { label: '客户端找回密码身份核验', category: 'auth' },
   'client.auth.verification_code.send': { label: '发送手机/邮箱验证码', category: 'auth' },
   'client.auth.guard.captcha': { label: '客户端验证码频控', category: 'auth' },

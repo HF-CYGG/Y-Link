@@ -789,6 +789,34 @@ export class AuthSecurityService {
     })
   }
 
+  /**
+   * 已登录会话内的旧密码复核（改密、改资料）：
+   * - 与登录共用“来源 + 账号主体”的失败计数与临时锁定，复核失败需调用对应的 record*LoginFailure 计数；
+   * - 否则劫持会话后可绕开登录锁定，在线逐个猜当前密码，猜中即可改密长期接管账号；
+   * - 这里只判断是否已锁定，不消耗登录频控额度。
+   */
+  async assertAdminPasswordReauthAllowed(requestMeta: RequestMeta | undefined, username: string) {
+    const source = normalizeRiskSource(requestMeta)
+    const subject = username.trim().toLowerCase()
+    await this.assertLoginNotLockedAndCaptchaRequired(
+      'admin-login',
+      [`admin-login:ip:${source}`, `admin-login:user:${subject}`],
+      requestMeta,
+      subject,
+    )
+  }
+
+  async assertClientPasswordReauthAllowed(requestMeta: RequestMeta | undefined, userId: string) {
+    const riskActor = this.resolveClientRiskActor(requestMeta)
+    const subject = `uid:${userId}`
+    await this.assertLoginNotLockedAndCaptchaRequired(
+      'client-login',
+      [`client-login:${riskActor.bucketSegment}`, `client-login:account:${subject}`],
+      requestMeta,
+      subject,
+    )
+  }
+
   /** Mobile refresh 先由服务层完成重放判定，再调用这里；无匹配会话时只进入 IP 兜底桶。 */
   async prepareMobileRefreshRequest(sessionId: string) {
     const rule = RATE_LIMIT_RULES.mobileRefreshBySession

@@ -327,7 +327,7 @@ clientAuthRouter.post(
     const authReq = req as ClientAuthenticatedRequest
     const requestMeta = extractRequestMeta(req)
     await authSecurityService.guardClientChangePasswordRequest(requestMeta, authReq.clientAuth.userId)
-    await clientAuthService.changePassword(authReq.clientAuth, changePasswordSchema.parse(req.body))
+    await clientAuthService.changePassword(authReq.clientAuth, changePasswordSchema.parse(req.body), requestMeta)
     clearClientAuthCookie(req, res)
     res.json({ code: 0, message: 'ok', data: true })
   }),

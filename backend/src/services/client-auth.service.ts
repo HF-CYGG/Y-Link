@@ -1142,15 +1142,56 @@ class ClientAuthService {
 
     const matched = await verifyPassword(input.currentPassword, user.passwordHash)
     if (!matched) {
-      throw new BizError('原密码错误', 400)
+      throw new BizError('原密码错误', 400, { reason: 'CURRENT_PASSWORD_MISMATCH' })
     }
 
     return { user, passwordHash }
   }
 
-  async changePassword(auth: ClientAuthContext, input: ClientChangePasswordInput) {
+  async changePassword(auth: ClientAuthContext, input: ClientChangePasswordInput, requestMeta?: RequestMeta) {
+    // 旧密码复核与登录共用失败锁定：会话被劫持时不能借改密接口无限试错当前密码。
+    await authSecurityService.assertClientPasswordReauthAllowed(requestMeta, auth.userId)
     // 新密码派生不依赖数据库状态，避免占用 SQLite 全局写槽。
     const passwordHash = await hashPassword(assertClientPasswordPolicy(input.newPassword, '新密码'))
+    try {
+      await this.commitPasswordChange(auth, input, passwordHash, requestMeta)
+    } catch (error) {
+      if (error instanceof BizError && (error.data as { reason?: string } | null)?.reason === 'CURRENT_PASSWORD_MISMATCH') {
+        await this.recordCurrentPasswordFailure(auth, requestMeta, 'change_password')
+      }
+      throw error
+    }
+  }
+
+  /** 会话内旧密码复核失败：计入账号失败锁定并写脱敏失败审计（事务外调用）。 */
+  private async recordCurrentPasswordFailure(
+    auth: ClientAuthContext,
+    requestMeta: RequestMeta | undefined,
+    operation: 'change_password' | 'update_profile',
+  ) {
+    await authSecurityService.recordClientLoginFailure(requestMeta, `uid:${auth.userId}`)
+    await auditService.safeRecord({
+      actionType: 'client.auth.reauth_failed',
+      actionLabel: '客户端旧密码复核失败',
+      targetType: 'client_user',
+      targetId: auth.userId,
+      actor: {
+        userId: auth.userId,
+        username: auth.account || auth.mobile || auth.email,
+        displayName: auth.realName || auth.account,
+      },
+      requestMeta,
+      resultStatus: 'failed',
+      detail: { operation },
+    })
+  }
+
+  private async commitPasswordChange(
+    auth: ClientAuthContext,
+    input: ClientChangePasswordInput,
+    passwordHash: string,
+    requestMeta?: RequestMeta,
+  ) {
     await runInTransaction(async (manager) => {
       const prepared = await this.preparePasswordChange(auth.userId, input, passwordHash, manager)
       await manager.getRepository(ClientUser).update(prepared.user.id, { passwordHash: prepared.passwordHash })
@@ -1170,6 +1211,7 @@ class ClientAuthService {
           username: prepared.user.email ?? prepared.user.mobile ?? prepared.user.realName,
           displayName: prepared.user.realName,
         },
+        requestMeta,
         detail: {
           via: 'change',
           revokedMobileCount: revokedMobile.affected ?? 0,
@@ -1353,7 +1395,12 @@ class ClientAuthService {
       throw new BizError('当前用户不存在', 404)
     }
     if (user.accountType === 'department') throw new BizError('部门账号资料由管理员维护', 403)
-    if (!(await verifyPassword(input.currentPassword, user.passwordHash))) throw new BizError('当前密码错误', 400)
+    // Web 入口（无外层事务）把旧密码复核纳入账号失败锁定；Mobile 由外层编排事务调用，不在事务内写风控状态。
+    if (!manager) await authSecurityService.assertClientPasswordReauthAllowed(requestMeta, user.id)
+    if (!(await verifyPassword(input.currentPassword, user.passwordHash))) {
+      if (!manager) await this.recordCurrentPasswordFailure(auth, requestMeta, 'update_profile')
+      throw new BizError('当前密码错误', 400, { reason: 'CURRENT_PASSWORD_MISMATCH' })
+    }
 
     const isDirectoryTeacher = Boolean(user.staffNo?.trim())
     const storedUsername = normalizeClientUsername(user.realName)
