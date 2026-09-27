@@ -200,6 +200,12 @@ const RATE_LIMIT_RULES = {
     windowMs: 10 * 60 * 1000,
     blockMessage: '撤单过于频繁，请稍后再试',
   },
+  // 退货可按 1 件拆成多张申请，每张都会写审计并通知员工，需按账号封顶。
+  clientReturnRequestCreateByUser: {
+    maxRequests: 10,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '退货申请提交过于频繁，请稍后再试',
+  },
   mobileRefreshBySession: {
     maxRequests: 60,
     windowMs: 60 * 60 * 1000,
@@ -772,13 +778,14 @@ export class AuthSecurityService {
   async guardClientBusinessWrite(
     requestMeta: RequestMeta | undefined,
     userId: string,
-    kind: 'feedback_conversation_create' | 'feedback_message' | 'preorder_submit' | 'preorder_cancel',
+    kind: 'feedback_conversation_create' | 'feedback_message' | 'preorder_submit' | 'preorder_cancel' | 'return_request_create',
   ) {
     const ruleMap = {
       feedback_conversation_create: RATE_LIMIT_RULES.clientFeedbackConversationCreateByUser,
       feedback_message: RATE_LIMIT_RULES.clientFeedbackMessageByUser,
       preorder_submit: RATE_LIMIT_RULES.clientPreorderSubmitByUser,
       preorder_cancel: RATE_LIMIT_RULES.clientPreorderCancelByUser,
+      return_request_create: RATE_LIMIT_RULES.clientReturnRequestCreateByUser,
     } as const
     await this.consumeRateLimit(`client-business-write:${kind}:user:${userId}`, ruleMap[kind], {
       actionType: 'client.auth.guard.business_write',

@@ -382,6 +382,7 @@ o2oRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const payload = submitReturnRequestSchema.parse(req.body)
+    await authSecurityService.guardClientBusinessWrite(extractRequestMeta(req), authReq.clientAuth.userId, 'return_request_create')
     const data = await o2oPreorderService.createReturnRequest(authReq.clientAuth, req.params.id, payload)
 
     await auditService.safeRecord({
