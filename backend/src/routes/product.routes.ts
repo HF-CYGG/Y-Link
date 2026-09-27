@@ -22,7 +22,8 @@ const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.s
 
 const productImportUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024, files: 1 },
+  // YZ 导入只携带 `file` 与 `resolutions` 两个分段；字段数量显式封顶，resolutions 大小沿用默认 1MB 上限。
+  limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 4, parts: 5 },
   fileFilter: (_req, file, cb) => {
     const mimeType = (file.mimetype || '').toLowerCase()
     if (path.extname(file.originalname).toLowerCase() === '.xlsx' && (!mimeType || mimeType === XLSX_MIME || mimeType === 'application/octet-stream')) {

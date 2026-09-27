@@ -74,6 +74,7 @@
 - 客户端业务写接口（反馈新建/追加消息、预订单提交/撤单）经 `authSecurityService.guardClientBusinessWrite` 按客户端账号限频，超限 429 并写 `client.auth.guard.business_write` 审计，防止刷量淹没站内信与飞书/邮件外发。
 - 管理员不能通过 `PUT /api/users/:id` 修改本人密码，必须走校验旧密码的 `/api/auth/change-password`。
 - 所有手机/邮箱发码入口（注册/找回、已登录资料改绑、补认证）共用 `guardVerificationCodeSendRequest`：每 IP 8 次/10 分钟、每目标 5 次/10 分钟，另有每目标 10 次/24 小时上限，防止已登录账号绕开图形验证码对任意号码持续短信轰炸。
+- multipart 上传依赖 `multer` 必须不低于 2.3.0（2.2.0 存在中断上传泄漏文件句柄、构造字段名/数组下标导致解析拒绝服务等公开漏洞，反馈附件上传对所有客户账号开放）。所有 multer 实例显式限制 `files/fields/parts`，图片上传另限单字段 1KB；商品 YZ 导入的 `resolutions` 字段沿用默认 1MB。
 - 救援 Bearer 不复用管理端或客户端会话，响应始终 `no-store`，并按来源做一分钟窗口限流。救援 API 不接受 SQL、文件路径、数据库连接参数或普通 Cookie 登录态。
 
 ## 常见异常与排查顺序
@@ -91,3 +92,4 @@
 - 改上传安全时回归：新图片可访问、旧图片兼容访问、响应头正确。
 - 改 CSRF 时回归：管理端写接口在 Cookie 会话下的正常提交与失败提示。
 - 改图形验证码时执行 `npm --prefix backend run captcha:rendering:verify`，覆盖无系统字体的真实 PNG 渲染、兼容字段、作用域隔离和一次性校验。
+- 升级 `multer`、`sharp` 等上传链路依赖后执行 `npm --prefix backend audit --omit=dev`，并回归 `task4:upload-security:verify` 与 `feedback:customer-service:verify`。

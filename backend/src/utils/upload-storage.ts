@@ -397,8 +397,14 @@ export const createCategorizedImageUpload = (category: UploadCategory) => {
         cb(null, `${category}-${randomUUID()}${ext}`)
       },
     }),
+    // 图片上传只携带单个 `file` 分段：显式收紧文件、字段与分段数量，
+    // 避免构造大量字段名或超大数组下标的 multipart 请求消耗解析内存（客户端反馈附件对所有客户账号开放）。
     limits: {
       fileSize: IMAGE_UPLOAD_MAX_FILE_SIZE,
+      files: 1,
+      fields: 4,
+      fieldSize: 1024,
+      parts: 5,
     },
     fileFilter: (_req, file, cb) => {
       const normalizedMime = file.mimetype.toLowerCase()
