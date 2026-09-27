@@ -11,6 +11,7 @@ import { requireAdminCsrf, requireAuth, requirePermission, requireRole } from '.
 import type { AuthenticatedRequest } from '../types/auth.js'
 import type { ClientAuthenticatedRequest } from '../types/client-auth.js'
 import { auditService } from '../services/audit.service.js'
+import { authSecurityService } from '../services/auth-security.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import {
   O2O_PREORDER_REMARK_MAX_LENGTH,
@@ -247,7 +248,9 @@ o2oRouter.post(
   requireClientAuth,
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
-    const data = await o2oPreorderService.submit(authReq.clientAuth, submitPreorderSchema.parse(req.body))
+    const payload = submitPreorderSchema.parse(req.body)
+    await authSecurityService.guardClientBusinessWrite(extractRequestMeta(req), authReq.clientAuth.userId, 'preorder_submit')
+    const data = await o2oPreorderService.submit(authReq.clientAuth, payload)
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -319,6 +322,7 @@ o2oRouter.post(
   requireClientAuth,
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
+    await authSecurityService.guardClientBusinessWrite(extractRequestMeta(req), authReq.clientAuth.userId, 'preorder_cancel')
     const data = await o2oPreorderService.cancelMyOrder(authReq.clientAuth, req.params.id, extractRequestMeta(req))
     res.json({ code: 0, message: 'ok', data })
   }),

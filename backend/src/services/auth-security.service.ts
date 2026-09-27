@@ -167,6 +167,27 @@ const RATE_LIMIT_RULES = {
     windowMs: 10 * 60 * 1000,
     blockMessage: '当前网络下工号目录查询过于频繁，请稍后再试',
   },
+  // 客户端业务写接口按账号限频：每次调用都会写审计并触发站内信/飞书/邮件外发，需防止单账号循环刷量淹没员工通知。
+  clientFeedbackConversationCreateByUser: {
+    maxRequests: 5,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '反馈提交过于频繁，请稍后再试',
+  },
+  clientFeedbackMessageByUser: {
+    maxRequests: 30,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '消息发送过于频繁，请稍后再试',
+  },
+  clientPreorderSubmitByUser: {
+    maxRequests: 20,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '下单过于频繁，请稍后再试',
+  },
+  clientPreorderCancelByUser: {
+    maxRequests: 20,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '撤单过于频繁，请稍后再试',
+  },
   mobileRefreshBySession: {
     maxRequests: 60,
     windowMs: 60 * 60 * 1000,
@@ -688,6 +709,31 @@ export class AuthSecurityService {
       targetCode: userId,
       requestMeta,
       detail: { source, dimension: 'user' },
+    })
+  }
+
+  /**
+   * 客户端业务写接口账号级频控：
+   * - 桶键只用服务端解析出的客户端账号 ID，不信任任何客户端请求头；
+   * - 超限返回 429 与 retryAfterSeconds，并写安全审计便于识别刷量账号。
+   */
+  async guardClientBusinessWrite(
+    requestMeta: RequestMeta | undefined,
+    userId: string,
+    kind: 'feedback_conversation_create' | 'feedback_message' | 'preorder_submit' | 'preorder_cancel',
+  ) {
+    const ruleMap = {
+      feedback_conversation_create: RATE_LIMIT_RULES.clientFeedbackConversationCreateByUser,
+      feedback_message: RATE_LIMIT_RULES.clientFeedbackMessageByUser,
+      preorder_submit: RATE_LIMIT_RULES.clientPreorderSubmitByUser,
+      preorder_cancel: RATE_LIMIT_RULES.clientPreorderCancelByUser,
+    } as const
+    await this.consumeRateLimit(`client-business-write:${kind}:user:${userId}`, ruleMap[kind], {
+      actionType: 'client.auth.guard.business_write',
+      actionLabel: '客户端业务写入频控',
+      targetCode: userId,
+      requestMeta,
+      detail: { kind, source: normalizeRiskSource(requestMeta) },
     })
   }
 

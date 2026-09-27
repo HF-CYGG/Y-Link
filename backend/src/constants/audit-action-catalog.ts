@@ -85,6 +85,7 @@ export const AUDIT_ACTION_CATALOG: Readonly<Record<string, AuditActionDefinition
   'client.auth.guard.login': { label: '客户端登录频控', category: 'auth' },
   'client.auth.guard.change_password': { label: '客户端修改密码频控', category: 'auth' },
   'client.auth.guard.profile_update': { label: '客户端资料更新频控', category: 'auth' },
+  'client.auth.guard.business_write': { label: '客户端业务写入频控', category: 'auth' },
   'client.auth.staff_invite.failed': { label: '教师邀请码校验失败', category: 'auth' },
   'client.auth.staff_invite.used': { label: '教师统一邀请码注册成功', category: 'auth' },
   'password_changed': { label: '客户端修改或重置密码', category: 'auth' },
