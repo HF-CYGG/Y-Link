@@ -4668,8 +4668,11 @@ class O2oPreorderService {
     skuId?: string | null,
   ) {
     const normalizedQty = Math.floor(Number(qty))
-    if (!Number.isInteger(normalizedQty) || normalizedQty <= 0) {
+    if (!Number.isSafeInteger(normalizedQty) || normalizedQty <= 0) {
       throw new BizError('入库数量必须为正整数', 400)
+    }
+    if (normalizedQty > MAX_DATABASE_INT) {
+      throw new BizError('入库数量超过系统可处理上限', 400)
     }
     const result = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
@@ -4705,6 +4708,10 @@ class O2oPreorderService {
       const beforeCurrentStock = Number(product.currentStock ?? 0)
       const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
       const skuBefore = snapshotSkuStock(sku)
+      // 累计库存同样受数据库 INT 上限约束，避免 SQLite 退化为浮点或 MySQL 溢出破坏库存不变量。
+      if (beforeCurrentStock + normalizedQty > MAX_DATABASE_INT || Number(sku.currentStock ?? 0) + normalizedQty > MAX_DATABASE_INT) {
+        throw new BizError('入库后库存超过系统可处理上限', 409)
+      }
       // 入库只增加现货库存，不改动预订占用库存，因为预订占用代表已承诺但未核销的数量。
       sku.currentStock = Number(sku.currentStock ?? 0) + normalizedQty
       product.currentStock = beforeCurrentStock + normalizedQty

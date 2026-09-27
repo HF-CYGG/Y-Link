@@ -65,12 +65,12 @@ const onsiteAdjustPreorderSchema = z.object({
 const inboundSchema = z.object({
   productId: z.string().trim().min(1),
   skuId: z.string().trim().min(1).nullable().optional(),
-  qty: z.number().int().positive(),
+  qty: z.number().int().positive().max(MAX_DATABASE_INT, '入库数量超过系统可处理上限'),
   remark: z.string().max(255).optional(),
 })
 
 const verifySchema = z.object({
-  verifyCode: z.string().trim().min(1),
+  verifyCode: z.string().trim().min(1).max(128),
 })
 
 const myOrderQuerySchema = z.object({
