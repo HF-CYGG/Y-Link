@@ -159,7 +159,12 @@ const handleSubmit = async () => {
     const message = normalizedError.message
     applySecurityHintFromMessage(message)
     if (normalizedError.status === 428 || /验证码/.test(message)) {
+      // 服务端验证码为一次性票据，答错后原票据即作废；已显示时必须换一张新图。
+      const captchaAlreadyVisible = captchaVisible.value && Boolean(captchaState.captchaId)
       await ensureCaptchaVisible()
+      if (captchaAlreadyVisible) {
+        await refreshCaptcha()
+      }
     } else if (captchaVisible.value) {
       await refreshCaptcha()
     }

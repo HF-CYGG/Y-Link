@@ -94,15 +94,19 @@ export class CaptchaService {
     }
   }
 
+  /**
+   * 一次性校验：无论答案对错，票据在首次校验时即作废，
+   * 防止同一张验证码被 OCR 多候选反复试答；调用方失败后必须重新获取验证码。
+   */
   verifyCaptcha(scope: CaptchaScope, captchaId: string, captchaCode: string): void {
     const ticket = this.stores[scope].get(captchaId)
     if (!ticket) {
       throw new BizError('验证码已失效，请刷新后重试', 400)
     }
-    if (ticket.code !== captchaCode.trim().toUpperCase()) {
-      throw new BizError('验证码错误', 400)
-    }
     this.stores[scope].delete(captchaId)
+    if (ticket.code !== captchaCode.trim().toUpperCase()) {
+      throw new BizError('验证码错误，请重新输入新验证码', 400)
+    }
   }
 }
 
