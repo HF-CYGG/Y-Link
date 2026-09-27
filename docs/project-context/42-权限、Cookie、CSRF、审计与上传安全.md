@@ -37,6 +37,7 @@
 - `requireRole` 和 `requirePermission` 在拒绝请求时会写安全审计。
 - `app.ts` 会给上传资源附加长期缓存、安全头和旧路径兼容重写逻辑。
 - 所有 `/api/*` 与 `/health` 响应默认 `Cache-Control: no-store`（`http-security.ts`，ASVS V14.3），防止用户、订单、审计与配置数据落入浏览器磁盘缓存或中间代理；公开商城目录（含 304 分支）与 SSE 在处理器内显式覆盖。新增需要缓存的公开接口必须同样在处理器内显式声明缓存头。
+- Fetch Metadata 资源隔离（`http-security.ts` 的 `resolveCrossSiteBlockReason`，主应用与救援入口共用）：`/api/*` 拒绝 `Sec-Fetch-Site: cross-site`；`same-site` 只放行 GET/HEAD/OPTIONS；浏览器未发送该头时对写方法回退为 Origin 主机名比对（忽略端口，`Origin: null` 拒绝）；移动端、脚本等不带这两个头的原生客户端照常放行，仍由会话与 CSRF 令牌把关。拒绝返回 403，并写 `security.cross_site_request_blocked`（同一来源 IP + 方法路径 10 分钟只记一次，`utils/audit-throttle.ts`）。前端与接口必须同源部署；若将来拆分到不同子域，需先调整本策略。
 - 管理端与客户端图形验证码由 `captcha.service.ts` 共用生成链路：`svg-captcha` 使用包内字体绘制字符路径，`sharp` 转为 140×40 PNG，不依赖容器系统字体。答案仍由 `node:crypto` 生成；旧 `captchaSvg` 字段仅包装 PNG，不返回答案文本或字形路径。
 - 图形验证码为一次性票据：首次校验无论对错都立即作废，前端答错后必须重新获取（管理端登录页已在“验证码”类错误时换新图）。
 - 管理端会话除 `AUTH_TOKEN_TTL_HOURS` 绝对时效外，还有 `AUTH_SESSION_IDLE_TIMEOUT_MINUTES` 空闲超时（默认 720 分钟，0 关闭）：按 `lastAccessAt` 判定，HTTP 鉴权与客服 SSE 复核共用 `utils/admin-session-idle.ts`。标签页可见时每 60 秒心跳续期，隐藏或关闭超过时长后需重新登录。

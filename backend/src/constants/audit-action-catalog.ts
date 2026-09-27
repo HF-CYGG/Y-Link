@@ -196,6 +196,7 @@ export const AUDIT_ACTION_CATALOG: Readonly<Record<string, AuditActionDefinition
 
   // 用户与权限
   'security.access_denied': { label: '接口越权访问拦截', category: 'user_permission' },
+  'security.cross_site_request_blocked': { label: '跨站请求拦截', category: 'user_permission' },
   'user.create': { label: '创建用户', category: 'user_permission' },
   'user.update': { label: '编辑用户', category: 'user_permission' },
   'user.update_status': { label: '启停用户', category: 'user_permission' },

@@ -44,6 +44,9 @@ import { DatabaseRateLimitStore } from './services/persistent-risk-state.service
 import { AppDataSource } from './config/data-source.js'
 import { configureHttpSecurity } from './utils/http-security.js'
 import { databaseRescueRouter } from './routes/database-rescue.routes.js'
+import { auditService } from './services/audit.service.js'
+import { AuditThrottle } from './utils/audit-throttle.js'
+import { extractRequestMeta } from './utils/request-meta.js'
 
 const UPLOAD_CACHE_CONTROL_VALUE = 'public, max-age=31536000, immutable'
 const UPLOAD_CONTENT_SECURITY_POLICY_VALUE = "default-src 'none'; img-src 'self' data:; style-src 'none'; sandbox"
@@ -87,7 +90,36 @@ function resolvePublicAuthRateLimit(limit: number | undefined, fallback: number,
 
 export function createApp(options: CreateAppOptions = {}) {
   const app = express()
-  configureHttpSecurity(app)
+  // 跨站拦截审计按“来源 IP + 方法路径”10 分钟只记一次，避免攻击流量灌满审计表。
+  const crossSiteAuditThrottle = new AuditThrottle({ windowMs: 10 * 60 * 1000, maxKeys: 5000 })
+  configureHttpSecurity(app, undefined, {
+    onCrossSiteRequestBlocked: (req, reason) => {
+      const requestMeta = extractRequestMeta(req)
+      const route = `${req.method.toUpperCase()} ${req.path}`
+      if (!crossSiteAuditThrottle.shouldRecord(`${requestMeta.ipAddress ?? 'unknown'}|${route}`)) {
+        return
+      }
+      let originHost: string | null = null
+      try {
+        originHost = typeof req.headers.origin === 'string' ? new URL(req.headers.origin).hostname.slice(0, 128) : null
+      } catch {
+        originHost = null
+      }
+      void auditService.safeRecord({
+        actionType: 'security.cross_site_request_blocked',
+        actionLabel: '跨站请求拦截',
+        targetType: 'api_route',
+        targetCode: route,
+        requestMeta,
+        resultStatus: 'failed',
+        detail: {
+          reason,
+          secFetchSite: typeof req.headers['sec-fetch-site'] === 'string' ? req.headers['sec-fetch-site'].slice(0, 32) : null,
+          originHost,
+        },
+      })
+    },
+  })
   // Mobile Bearer 凭据不依赖 Cookie，但成功和失败响应同样不得被设备代理或中间缓存复用。
   app.use('/api/v1/mobile-auth', (_req, res, next) => {
     res.setHeader('Cache-Control', 'no-store')
