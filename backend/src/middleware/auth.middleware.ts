@@ -15,6 +15,7 @@ import type { AuthenticatedRequest, UserRole } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import {
+  isAdminCsrfTokenValid,
   readAdminCsrfTokenFromCookie,
   readAdminSessionTokenFromCookie,
   resolveAdminCsrfHeaderValue,
@@ -129,7 +130,8 @@ export async function requireAuth(req: Request, _res: Response, next: NextFuncti
  * 管理端 CSRF 校验中间件：
  * - 仅对非安全方法执行校验，避免 GET / SSE / 预加载请求被误拦截；
  * - 仅当本次请求实际使用 Cookie 会话时校验，兼容少量 Bearer 过渡流量；
- * - 采用“双提交 Cookie”校验：前端需同时提交可读 CSRF Cookie 与 `x-csrf-token` 请求头。
+ * - 采用“会话绑定的双提交”：可读 CSRF Cookie 与 `x-csrf-token` 请求头都必须等于由当前会话令牌派生的值；
+ * - 失败原因通过 `data.reason` 下发（缺失 / 不匹配），前端据此先请求 `/auth/me` 换发 Cookie 再重试一次。
  */
 export function requireAdminCsrf(req: Request, _res: Response, next: NextFunction): void {
   if (isSafeRequestMethod(req.method)) {
@@ -150,12 +152,18 @@ export function requireAdminCsrf(req: Request, _res: Response, next: NextFunctio
 
   const csrfCookieToken = readAdminCsrfTokenFromCookie(req)
   const csrfHeaderToken = resolveAdminCsrfHeaderValue(req)
-  if (!csrfCookieToken || !csrfHeaderToken || csrfCookieToken !== csrfHeaderToken) {
+  const rejectionReason = !csrfCookieToken || !csrfHeaderToken
+    ? 'ADMIN_CSRF_MISSING'
+    : isAdminCsrfTokenValid(auth.sessionToken, csrfCookieToken, csrfHeaderToken)
+      ? null
+      : 'ADMIN_CSRF_MISMATCH'
+  if (rejectionReason) {
     recordForbiddenAudit(req, 'csrf_validation_failed', {
       csrfCookiePresent: Boolean(csrfCookieToken),
       csrfHeaderPresent: Boolean(csrfHeaderToken),
+      reason: rejectionReason,
     })
-    next(new BizError(CSRF_FORBIDDEN_MESSAGE, 403))
+    next(new BizError(CSRF_FORBIDDEN_MESSAGE, 403, { reason: rejectionReason }))
     return
   }
 

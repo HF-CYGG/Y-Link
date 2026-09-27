@@ -47,7 +47,7 @@
 ## 代理、HTTPS 与救援传输边界
 
 - Node 只通过 `Y_LINK_TRUST_PROXY` 信任明确的直接反向代理 IP/CIDR；Nginx 边缘层另以 `Y_LINK_TRUSTED_EDGE_PROXIES` 限定可影响 `X-Forwarded-Proto` 的上游地址。两者不是“信任全部内网”的开关。
-- 管理端与客户端会话 Cookie 都是 `HttpOnly + SameSite=Lax`；对应 CSRF Cookie 可读、同为 `SameSite=Lax`，写请求必须附带相应 CSRF 头。Cookie 的 `Secure` 由可信 HTTPS 请求判定，或由 `Y_LINK_FORCE_SECURE_COOKIES=true` 强制开启。
+- 管理端与客户端会话 Cookie 都是 `HttpOnly + SameSite=Lax`；对应 CSRF Cookie 可读、同为 `SameSite=Lax`，写请求必须附带相应 CSRF 头。两端 CSRF 值都由会话令牌派生（签名双提交，域分离前缀分别为 `y-link.admin.csrf.v1` / `y-link.client.csrf.v1`），Cookie 与请求头都必须等于派生值并做恒定时间比较，能向同站写 Cookie 的攻击者也无法伪造。管理端拒绝时 `data.reason` 为 `ADMIN_CSRF_MISSING`/`ADMIN_CSRF_MISMATCH`，`/auth/me` 会把缺失或升级前的随机 CSRF Cookie 换发为派生值，前端 `http.ts` 遇到这两个原因会先请求一次 `/auth/me` 再重试原请求（与客户端 `CLIENT_CSRF_MISSING` 的处理对称）。Cookie 的 `Secure` 由可信 HTTPS 请求判定，或由 `Y_LINK_FORCE_SECURE_COOKIES=true` 强制开启。
 - 局域网纯 HTTP 可在不强制 Secure Cookie 的部署中兼容普通登录和业务操作，但不能伪造 HTTPS。救援凭证签发和 `/api/database-rescue` 只接受可信 HTTPS，或没有任何转发头的真实容器/主机 loopback 连接。
 - 因此，外部 HTTP 即便被 Nginx 转到 `127.0.0.1`，也不属于“本机救援”。该边界防止外部请求借 loopback 代理获得救援能力。
 - 生产 HTTPS 请求才会按 `Y_LINK_HSTS_MAX_AGE_SECONDS` 写 HSTS；普通局域网 HTTP 不会因伪造转发头获得 HSTS。

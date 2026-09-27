@@ -1,9 +1,9 @@
 /**
  * 文件说明：管理端鉴权 Cookie 工具，统一封装后台会话 Cookie、CSRF Token 的生成、写入、清理和解析逻辑。
- * 实现逻辑：采用 HttpOnly 会话 Cookie 加双提交 CSRF Cookie 的组合方案，把后台登录态与请求防伪策略集中维护在同一处。
+ * 实现逻辑：采用 HttpOnly 会话 Cookie 加“会话绑定”的双提交 CSRF Cookie（签名双提交），把后台登录态与请求防伪策略集中维护在同一处。
  * 维护重点：若接入独立域名部署或调整 SameSite、Secure 策略，需要同步验证管理端登录链路与客户端 Cookie 隔离仍然成立。
  */
-import crypto from 'node:crypto'
+import { createHash, timingSafeEqual } from 'node:crypto'
 import type { Request, Response } from 'express'
 import { env } from '../config/env.js'
 import { resolveSecureCookieFlag } from './http-security.js'
@@ -27,12 +27,23 @@ interface CookieSerializeOptions {
 }
 
 /**
- * 统一生成安全随机串：
- * - 会话 Cookie 使用数据库中的 sessionToken；
- * - CSRF Cookie 使用额外随机串，避免直接复用会话令牌。
+ * 从高熵会话令牌派生管理端 CSRF 值（OWASP 推荐的签名双提交）：
+ * - 纯随机双提交只要求 Cookie 与请求头相等，能向同站写 Cookie 的攻击者（兄弟子域、明文 HTTP 中间人）
+ *   可以同时伪造两者；绑定会话后，不知道 HttpOnly 会话令牌就算不出正确值；
+ * - SHA-256 不可逆，脚本读到 CSRF Cookie 也反推不出会话令牌；
+ * - 域分离前缀与客户端 `y-link.client.csrf.v1` 不同，两端派生值互不通用。
  */
-export function generateAdminCsrfToken(): string {
-  return crypto.randomBytes(32).toString('base64url')
+export function deriveAdminCsrfToken(sessionToken: string): string {
+  return createHash('sha256')
+    .update('y-link.admin.csrf.v1\u0000')
+    .update(sessionToken)
+    .digest('base64url')
+}
+
+function equalCsrfToken(actual: string, expected: string): boolean {
+  const actualBuffer = Buffer.from(actual)
+  const expectedBuffer = Buffer.from(expected)
+  return actualBuffer.length === expectedBuffer.length && timingSafeEqual(actualBuffer, expectedBuffer)
 }
 
 function buildCookieValue(name: string, value: string, options: CookieSerializeOptions): string {
@@ -86,7 +97,6 @@ export function setAdminAuthCookies(
   res: Response,
   payload: {
     sessionToken: string
-    csrfToken: string
     expiresAt: Date
   },
 ): void {
@@ -112,7 +122,7 @@ export function setAdminAuthCookies(
    * - 前端请求拦截器需要读取它并放入自定义请求头；
    * - 依靠“Cookie + 自定义头同时存在”的条件阻断跨站伪造提交。
    */
-  setCookie(res, ADMIN_CSRF_COOKIE_NAME, payload.csrfToken, {
+  setCookie(res, ADMIN_CSRF_COOKIE_NAME, deriveAdminCsrfToken(payload.sessionToken), {
     secure,
     sameSite: 'Lax',
     path: '/',
@@ -143,17 +153,17 @@ export function clearAdminAuthCookies(req: Request, res: Response): void {
 }
 
 /**
- * 确保当前管理端会话拥有可读 CSRF Cookie：
+ * 确保当前管理端会话拥有与之绑定的可读 CSRF Cookie：
  * - 用户刷新页面后，前端通常会先调用 `/auth/me` 恢复登录态；
- * - 若浏览器侧仅剩 HttpOnly 会话 Cookie、可读 CSRF Cookie 被清理，则在这里静默补发即可恢复写操作能力。
+ * - 可读 CSRF Cookie 被清理，或仍是升级前签发的随机值、与会话派生值不一致时，在这里静默换发即可恢复写操作能力。
  */
-export function ensureAdminCsrfCookie(req: Request, res: Response): string {
+export function ensureAdminCsrfCookie(req: Request, res: Response, sessionToken: string): string {
+  const csrfToken = deriveAdminCsrfToken(sessionToken)
   const existedCsrfToken = readAdminCsrfTokenFromCookie(req)
-  if (existedCsrfToken) {
-    return existedCsrfToken
+  if (existedCsrfToken && equalCsrfToken(existedCsrfToken, csrfToken)) {
+    return csrfToken
   }
 
-  const csrfToken = generateAdminCsrfToken()
   setCookie(res, ADMIN_CSRF_COOKIE_NAME, csrfToken, {
     secure: resolveSecureCookieFlag(req),
     sameSite: 'Lax',
@@ -200,6 +210,12 @@ export function readAdminSessionTokenFromCookie(req: Request): string | null {
 export function readAdminCsrfTokenFromCookie(req: Request): string | null {
   const cookieValue = parseCookies(req)[ADMIN_CSRF_COOKIE_NAME]
   return typeof cookieValue === 'string' && cookieValue.trim() ? cookieValue.trim() : null
+}
+
+/** 请求头与 Cookie 都必须等于当前会话的派生值，恒定时间比较。 */
+export function isAdminCsrfTokenValid(sessionToken: string, cookieToken: string, headerToken: string): boolean {
+  const expectedToken = deriveAdminCsrfToken(sessionToken)
+  return equalCsrfToken(cookieToken, expectedToken) && equalCsrfToken(headerToken, expectedToken)
 }
 
 export function resolveAdminCsrfHeaderValue(req: Request): string | null {

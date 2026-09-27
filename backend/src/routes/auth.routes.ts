@@ -13,7 +13,6 @@ import { BizError } from '../utils/errors.js'
 import {
   clearAdminAuthCookies,
   ensureAdminCsrfCookie,
-  generateAdminCsrfToken,
   setAdminAuthCookies,
 } from '../utils/admin-auth-cookie.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
@@ -72,10 +71,9 @@ authRouter.post(
       captchaService.verifyCaptcha('admin', payload.captchaId, payload.captchaCode)
     }
     const data = await authService.login(payload, requestMeta)
-    const csrfToken = generateAdminCsrfToken()
+    // CSRF Cookie 由会话令牌派生（签名双提交），不再单独生成随机值。
     setAdminAuthCookies(req, res, {
       sessionToken: data.token,
-      csrfToken,
       expiresAt: data.expiresAt,
     })
     res.setHeader('Cache-Control', 'no-store')
@@ -113,7 +111,8 @@ authRouter.get(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const data = await authService.me(authReq.auth)
-    ensureAdminCsrfCookie(req, res)
+    // 缺失或仍是升级前随机值时按当前会话换发，已打开的页面刷新或重试后即可恢复写操作。
+    ensureAdminCsrfCookie(req, res, authReq.auth.sessionToken)
     res.setHeader('Cache-Control', 'no-store')
     res.json({
       code: 0,
