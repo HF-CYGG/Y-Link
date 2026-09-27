@@ -157,6 +157,12 @@ const RATE_LIMIT_RULES = {
     windowMs: 10 * 60 * 1000,
     blockMessage: '该账号验证码发送过于频繁，请稍后再试',
   },
+  // 同一手机号/邮箱 24 小时累计上限：短窗口频控挡不住“每 10 分钟打满一次”的持续短信轰炸与费用消耗。
+  verificationCodeSendByTargetDaily: {
+    maxRequests: 10,
+    windowMs: 24 * 60 * 60 * 1000,
+    blockMessage: '该手机号或邮箱今日验证码发送次数已达上限，请明天再试',
+  },
   staffDirectoryLookupBySource: {
     maxRequests: 20,
     windowMs: 10 * 60 * 1000,
@@ -554,6 +560,13 @@ export class AuthSecurityService {
       targetCode: target,
       requestMeta,
       detail: { source: riskActor.source, sourceType: riskActor.sourceType, channel, dimension: 'target' },
+    })
+    await this.consumeRateLimit(`verification-send-daily:${channel}:${target}`, RATE_LIMIT_RULES.verificationCodeSendByTargetDaily, {
+      actionType: 'client.auth.guard.verification_send',
+      actionLabel: '验证码发送频控',
+      targetCode: target,
+      requestMeta,
+      detail: { source: riskActor.source, sourceType: riskActor.sourceType, channel, dimension: 'target_daily' },
     })
   }
 

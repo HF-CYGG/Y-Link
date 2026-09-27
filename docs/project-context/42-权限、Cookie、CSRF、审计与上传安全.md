@@ -72,6 +72,7 @@
 - 全局永久删除口令在所有入口都必须限速：系统账号/客户端账号/供货方已入库删除沿用原限流器，供货方永久删除、O2O 订单删除与批量清理、出库单永久删除使用 `utils/permanent-delete-guard.ts` 的账号级限流（5 分钟 5 次）与脱敏失败审计。供货方永久删除在服务层先校验归属、状态与确认单号，再核对口令，避免成为全局口令的试错预言机。
 - 客户端业务写接口（反馈新建/追加消息、预订单提交/撤单）经 `authSecurityService.guardClientBusinessWrite` 按客户端账号限频，超限 429 并写 `client.auth.guard.business_write` 审计，防止刷量淹没站内信与飞书/邮件外发。
 - 管理员不能通过 `PUT /api/users/:id` 修改本人密码，必须走校验旧密码的 `/api/auth/change-password`。
+- 所有手机/邮箱发码入口（注册/找回、已登录资料改绑、补认证）共用 `guardVerificationCodeSendRequest`：每 IP 8 次/10 分钟、每目标 5 次/10 分钟，另有每目标 10 次/24 小时上限，防止已登录账号绕开图形验证码对任意号码持续短信轰炸。
 - 救援 Bearer 不复用管理端或客户端会话，响应始终 `no-store`，并按来源做一分钟窗口限流。救援 API 不接受 SQL、文件路径、数据库连接参数或普通 Cookie 登录态。
 
 ## 常见异常与排查顺序
