@@ -361,6 +361,8 @@ clientAuthRouter.post(
     const payload = profileVerificationCodeSendSchema.parse(req.body)
     const target = normalizeClientVerificationTarget(payload.channel, payload.target)
     const requestMeta = extractRequestMeta(req)
+    // 此入口无图形验证码且目标号码由用户任填，必须先按账号封顶，再走按来源/号码的通用频控。
+    await authSecurityService.guardClientProfileVerificationSend(requestMeta, authReq.clientAuth.userId)
     await authSecurityService.guardVerificationCodeSendRequest(requestMeta, target, payload.channel)
     const data = await verificationCodeService.sendCode({
       channel: payload.channel,

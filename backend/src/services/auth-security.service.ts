@@ -163,6 +163,12 @@ const RATE_LIMIT_RULES = {
     windowMs: 24 * 60 * 60 * 1000,
     blockMessage: '该手机号或邮箱今日验证码发送次数已达上限，请明天再试',
   },
+  // 已登录用户“修改资料”发码可指定任意新号码/邮箱：按号码计数挡不住单账号轮换号码刷短信费，需再按账号封顶。
+  clientProfileVerificationSendByUser: {
+    maxRequests: 10,
+    windowMs: 24 * 60 * 60 * 1000,
+    blockMessage: '当前账号今日验证码发送次数已达上限，请明天再试',
+  },
   staffDirectoryLookupBySource: {
     maxRequests: 20,
     windowMs: 10 * 60 * 1000,
@@ -578,6 +584,17 @@ export class AuthSecurityService {
       targetCode: target,
       requestMeta,
       detail: { source: riskActor.source, sourceType: riskActor.sourceType, channel, dimension: 'target_daily' },
+    })
+  }
+
+  /** 修改资料发码的账号级日上限：先于按来源/号码的通用发码频控执行，桶键只用服务端解析出的账号 ID。 */
+  async guardClientProfileVerificationSend(requestMeta: RequestMeta | undefined, userId: string) {
+    await this.consumeRateLimit(`client-profile-verification-send:user:${userId}`, RATE_LIMIT_RULES.clientProfileVerificationSendByUser, {
+      actionType: 'client.auth.guard.verification_send',
+      actionLabel: '验证码发送频控',
+      targetCode: userId,
+      requestMeta,
+      detail: { source: normalizeRiskSource(requestMeta), dimension: 'profile_user_daily' },
     })
   }
 
