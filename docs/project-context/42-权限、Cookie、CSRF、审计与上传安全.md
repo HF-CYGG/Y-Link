@@ -70,6 +70,7 @@
 - 验证码与通知邮件网关模板统一经 `utils/provider-template.ts` 渲染：按请求头 `Content-Type` 对替换值做 JSON 转义或 URL 编码，占位符一次性替换不二次展开；客服消息摘要、显示名等客户可控内容不能直接拼入请求体。验证码邮箱目标额外拒绝双引号、反斜杠、尖括号与控制字符。
 - 全局永久删除口令在所有入口都必须限速：系统账号/客户端账号/供货方已入库删除沿用原限流器，供货方永久删除、O2O 订单删除与批量清理、出库单永久删除使用 `utils/permanent-delete-guard.ts` 的账号级限流（5 分钟 5 次）与脱敏失败审计。供货方永久删除在服务层先校验归属、状态与确认单号，再核对口令，避免成为全局口令的试错预言机。
 - 客户端业务写接口（反馈新建/追加消息、预订单提交/撤单）经 `authSecurityService.guardClientBusinessWrite` 按客户端账号限频，超限 429 并写 `client.auth.guard.business_write` 审计，防止刷量淹没站内信与飞书/邮件外发。
+- 管理员不能通过 `PUT /api/users/:id` 修改本人密码，必须走校验旧密码的 `/api/auth/change-password`。
 - 救援 Bearer 不复用管理端或客户端会话，响应始终 `no-store`，并按来源做一分钟窗口限流。救援 API 不接受 SQL、文件路径、数据库连接参数或普通 Cookie 登录态。
 
 ## 常见异常与排查顺序

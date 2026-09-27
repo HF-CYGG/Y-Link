@@ -515,6 +515,10 @@ export class UserService {
     if (normalizedDisplayName !== undefined && !normalizedDisplayName) {
       throw new BizError('姓名不能为空', 400)
     }
+    // 本人改密必须走校验旧密码的专用入口，防止被劫持的会话借“编辑用户”静默改密并长期接管账号。
+    if (normalizedPassword !== undefined && actor.userId === id) {
+      throw new BizError('请使用本人修改密码入口处理自己的密码', 400)
+    }
     try {
       const result = await runInTransaction(async (manager) => {
         const user = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:update')
