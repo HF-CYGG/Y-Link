@@ -11,7 +11,7 @@ import { orderService } from '../services/order.service.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
-import { assertPermanentDeletePassword } from '../utils/permanent-delete-password.js'
+import { assertPermanentDeletePasswordForRequest, createPermanentDeleteLimiter } from '../utils/permanent-delete-guard.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 
 const submitOrderSchema = z.object({
@@ -339,14 +339,23 @@ orderRouter.post(
   }),
 )
 
+const ORDER_PURGE_AUDIT_TARGET = {
+  actionType: 'order.purge',
+  actionLabel: '永久删除出库单',
+  targetType: 'order',
+} as const
+// 永久删除口令为全局高危口令，按账号限速，避免被在线逐个试错。
+const orderPurgeLimiter = createPermanentDeleteLimiter({ ...ORDER_PURGE_AUDIT_TARGET, storePrefix: 'express-order-purge' })
+
 orderRouter.delete(
   '/:id/purge',
   requirePermission('orders:delete'),
   requireRole('admin'),
+  orderPurgeLimiter,
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = purgeOrderSchema.parse(req.body ?? {})
-    assertPermanentDeletePassword(payload.permanentDeletePassword)
+    await assertPermanentDeletePasswordForRequest(req, payload.permanentDeletePassword, ORDER_PURGE_AUDIT_TARGET)
     const data = await orderService.purgeById(req.params.id, authReq.auth, payload.confirmShowNo, extractRequestMeta(req))
     res.json({
       code: 0,

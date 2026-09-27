@@ -23,7 +23,7 @@ import {
 } from '../services/o2o-preorder.service.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { CLIENT_USER_ACCOUNT_TYPES } from '../entities/client-user.entity.js'
-import { assertPermanentDeletePassword } from '../utils/permanent-delete-password.js'
+import { assertPermanentDeletePasswordForRequest, createPermanentDeleteLimiter } from '../utils/permanent-delete-guard.js'
 
 import { MAX_DATABASE_INT, MAX_O2O_ORDER_ITEM_COUNT } from '../constants/web-resource-limits.js'
 
@@ -430,14 +430,31 @@ o2oAdminRouter.post(
   }),
 )
 
+const O2O_BATCH_PURGE_AUDIT_TARGET = {
+  actionType: 'o2o.preorder.purge_cancelled_batch',
+  actionLabel: '批量永久删除已取消预订单',
+  targetType: 'o2o_order',
+} as const
+const O2O_DELETE_AUDIT_TARGET = {
+  actionType: 'o2o.preorder.delete',
+  actionLabel: '删除订单池订单',
+  targetType: 'o2o_order',
+} as const
+// 两个入口共用同一个账号级限流桶：全局永久删除口令无论从哪个入口试错都合并计数。
+const o2oPermanentDeleteLimiter = createPermanentDeleteLimiter({
+  ...O2O_DELETE_AUDIT_TARGET,
+  storePrefix: 'express-o2o-permanent-delete',
+})
+
 o2oAdminRouter.post(
   '/orders/batch-purge-cancelled',
   requirePermission('orders:delete'),
   requireRole('admin'),
+  o2oPermanentDeleteLimiter,
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = batchPurgeCancelledOrdersSchema.parse(req.body ?? {})
-    assertPermanentDeletePassword(payload.permanentDeletePassword)
+    await assertPermanentDeletePasswordForRequest(req, payload.permanentDeletePassword, O2O_BATCH_PURGE_AUDIT_TARGET)
     const data = await o2oPreorderService.batchPurgeCancelledOrders({ orders: payload.orders, actor: authReq.auth, requestMeta: extractRequestMeta(req) })
     res.json({ code: 0, message: 'ok', data })
   }),
@@ -481,10 +498,11 @@ o2oAdminRouter.delete(
   '/orders/:id',
   requirePermission('orders:delete'),
   requireRole('admin'),
+  o2oPermanentDeleteLimiter,
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = deleteConsoleOrderSchema.parse(req.body ?? {})
-    assertPermanentDeletePassword(payload.permanentDeletePassword)
+    await assertPermanentDeletePasswordForRequest(req, payload.permanentDeletePassword, O2O_DELETE_AUDIT_TARGET)
     const data = await o2oPreorderService.deleteConsoleOrder(
       {
         orderId: req.params.id,
