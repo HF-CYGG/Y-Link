@@ -72,6 +72,7 @@ const passwordLowercase = 'abcdefghijkmnopqrstuvwxyz'
 const passwordDigits = '23456789'
 const passwordSymbols = '!#$%&()*+,./:;?@^_{}~-'
 const passwordPool = `${passwordUppercase}${passwordLowercase}${passwordDigits}${passwordSymbols}`
+const CSV_FORMULA_PREFIX_PATTERN = /^[=+\-@]/
 
 const getSecureRandomValues: RandomValuesProvider = (target) => {
   if (!globalThis.crypto?.getRandomValues) {
@@ -125,7 +126,14 @@ export const generateDepartmentAccountPassword = (length = 20, randomValues: Ran
   while (characters.length < length) {
     characters.push(chooseSecureCharacter(passwordPool, randomValues))
   }
-  return securelyShuffle(characters, randomValues)
+  const shuffled = securelyShuffle(characters, randomValues).split('')
+  // 首字符若为 CSV 公式前缀（= + - @），导出时会被加上前导单引号，管理员抄出的密码将与实际不一致；
+  // 与首个字母/数字交换位置即可，字符组成与熵不变。
+  if (CSV_FORMULA_PREFIX_PATTERN.test(shuffled[0] ?? '')) {
+    const safeIndex = shuffled.findIndex((character) => /[A-Za-z0-9]/.test(character))
+    ;[shuffled[0], shuffled[safeIndex]] = [shuffled[safeIndex], shuffled[0]]
+  }
+  return shuffled.join('')
 }
 
 export const createDepartmentAccountCredentials = (
