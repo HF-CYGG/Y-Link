@@ -347,25 +347,34 @@ function verifyClientAbuseGuards() {
 
 /**
  * JSON 导入会先清空商品、客户端账号、预订单、库存流水与系统配置：
- * 必须按永久删除类操作要求口令、限流，并且在口令通过前不得进入清表逻辑。
+ * 默认关闭；开启后必须先复核本人密码、再按永久删除类操作要求口令并限流，口令通过前不得进入清表逻辑。
  */
 async function verifyJsonImportRequiresPermanentDeletePassword() {
   const { env } = await import('../src/config/env.js')
   const { auditService } = await import('../src/services/audit.service.js')
+  const { authService } = await import('../src/services/auth.service.js')
+  const { BizError } = await import('../src/utils/errors.js')
   const { dataMaintenanceService } = await import('../src/services/data-maintenance.service.js')
   const { dataMaintenanceRouter } = await import('../src/routes/data-maintenance.routes.js')
   const { errorHandler } = await import('../src/middleware/error-handler.js')
 
-  const mutableEnv = env as { PERMANENT_DELETE_PASSWORD?: string }
+  const mutableEnv = env as { PERMANENT_DELETE_PASSWORD?: string; Y_LINK_JSON_DATA_TRANSFER_ENABLED?: boolean }
   const originalPassword = mutableEnv.PERMANENT_DELETE_PASSWORD
+  const originalTransferEnabled = mutableEnv.Y_LINK_JSON_DATA_TRANSFER_ENABLED
   const service = dataMaintenanceService as unknown as Record<string, unknown>
   const audit = auditService as unknown as Record<string, unknown>
+  const auth = authService as unknown as Record<string, unknown>
   const importedPayloads: Array<Record<string, unknown>> = []
   const failureAudits: string[] = []
   mutableEnv.PERMANENT_DELETE_PASSWORD = 'Verify-Import-Pass-123'
+  mutableEnv.Y_LINK_JSON_DATA_TRANSFER_ENABLED = false
   service.importJson = async (payload: Record<string, unknown>) => {
     importedPayloads.push(payload)
     return { imported: {} }
+  }
+  // 本人密码复核依赖数据库，这里以同签名桩替换，只验证路由的调用顺序与拒绝语义。
+  auth.verifyStepUpPassword = async (_auth: unknown, password: string) => {
+    if (password !== 'verify-current-password') throw new BizError('当前密码错误，身份复核未通过', 400)
   }
   audit.safeRecord = async (input: { resultStatus?: string; detail?: { reason?: string } }) => {
     if (input.resultStatus === 'failed') failureAudits.push(String(input.detail?.reason ?? ''))
@@ -389,7 +398,7 @@ async function verifyJsonImportRequiresPermanentDeletePassword() {
   app.use('/api/data-maintenance', dataMaintenanceRouter)
   app.use(errorHandler)
   const server = app.listen(0, '127.0.0.1')
-  const basePayload = { exportedAt: '2026-09-27T00:00:00.000Z', version: 'verify', tables: {} }
+  const basePayload = { exportedAt: '2026-09-27T00:00:00.000Z', version: 'verify', tables: {}, currentPassword: 'verify-current-password' }
   try {
     await new Promise<void>((resolve) => server.once('listening', () => resolve()))
     const { port } = server.address() as AddressInfo
@@ -398,21 +407,26 @@ async function verifyJsonImportRequiresPermanentDeletePassword() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })
+    // 频控按账号计每一次请求：以下 5 次放行、第 6 次 429。
+    assert.equal((await post({ ...basePayload, permanentDeletePassword: 'Verify-Import-Pass-123' })).status, 403, '未开启时必须拒绝')
+    mutableEnv.Y_LINK_JSON_DATA_TRANSFER_ENABLED = true
+    assert.equal((await post({ ...basePayload, currentPassword: 'wrong-current', permanentDeletePassword: 'Verify-Import-Pass-123' })).status, 400, '本人密码复核失败必须拒绝')
     assert.equal((await post(basePayload)).status, 400, '缺少永久删除口令必须拒绝')
     assert.equal((await post({ ...basePayload, permanentDeletePassword: 'wrong-pass' })).status, 403, '口令错误必须拒绝')
-    assert.equal(importedPayloads.length, 0, '口令通过前不得进入清表导入逻辑')
-    assert.deepEqual(failureAudits, ['password_missing', 'password_rejected'], '口令拒绝必须写脱敏失败审计')
+    assert.equal(importedPayloads.length, 0, '复核与口令通过前不得进入清表导入逻辑')
+    assert.deepEqual(failureAudits, ['disabled', 'password_missing', 'password_rejected'], '开关拒绝与口令拒绝必须写脱敏失败审计')
     assert.equal((await post({ ...basePayload, permanentDeletePassword: 'Verify-Import-Pass-123' })).status, 200)
     assert.equal(importedPayloads.length, 1)
     assert.ok(!('permanentDeletePassword' in importedPayloads[0]), '口令不得透传进导入服务与审计')
-    await post(basePayload)
-    await post(basePayload)
+    assert.ok(!('currentPassword' in importedPayloads[0]), '本人密码不得透传进导入服务与审计')
     assert.equal((await post(basePayload)).status, 429, 'JSON 导入必须按账号限流')
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()))
     mutableEnv.PERMANENT_DELETE_PASSWORD = originalPassword
+    mutableEnv.Y_LINK_JSON_DATA_TRANSFER_ENABLED = originalTransferEnabled
     Reflect.deleteProperty(service, 'importJson')
     Reflect.deleteProperty(audit, 'safeRecord')
+    Reflect.deleteProperty(auth, 'verifyStepUpPassword')
   }
 }
 

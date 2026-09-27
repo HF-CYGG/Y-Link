@@ -390,28 +390,31 @@ export const createSqliteBackup = () =>
 
 /**
  * 导出系统全量数据为 JSON 格式：
- * - 返回包含全部基础表数据及导出时间戳与版本号的对象，可用于跨库或环境迁移。
+ * - 返回包含全部基础表数据及导出时间戳与版本号的对象，可用于跨库或环境迁移；
+ * - 服务端默认关闭该能力（`Y_LINK_JSON_DATA_TRANSFER_ENABLED`），开启后仍须提交本人当前密码完成复核，并受账号级频控。
  */
-export const exportDataAsJson = () =>
+export const exportDataAsJson = (payload: { currentPassword: string }) =>
   request<{
     exportedAt: string
     version: string
     tables: Record<string, Array<Record<string, unknown>>>
   }>({
-    method: 'GET',
+    method: 'POST',
     url: '/data-maintenance/export/json',
+    data: payload,
   })
 
 /**
  * 通过 JSON 格式导入恢复系统全量数据：
  * - 覆盖现有数据，具有破坏性操作，通常在运维环境交接或系统重建时调用；
- * - 服务端按永久删除类操作处理：必须携带服务端配置的永久删除口令，并受账号级频控。
+ * - 服务端按永久删除类操作处理：默认关闭，开启后必须同时携带本人当前密码与服务端配置的永久删除口令，并受账号级频控。
  */
 export const importDataFromJson = (payload: {
   exportedAt: string
   version: string
   tables: Record<string, Array<Record<string, unknown>>>
   permanentDeletePassword: string
+  currentPassword: string
 }) =>
   request<{
     imported: Record<string, number>

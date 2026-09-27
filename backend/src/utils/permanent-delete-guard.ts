@@ -35,11 +35,17 @@ const normalizeAuditTargetId = (value: unknown): string | null => {
 
 /**
  * 永久删除频控中间件：必须挂在 requireAuth 之后，按当前登录账号计桶。
+ * 其它同样需要“按账号计桶 + 频控拦截留痕”的高风险入口（如 JSON 全量导出）可覆盖窗口、次数与提示语。
  */
-export function createPermanentDeleteLimiter(options: PermanentDeleteAuditTarget & { storePrefix: string }): RequestHandler {
+export function createPermanentDeleteLimiter(options: PermanentDeleteAuditTarget & {
+  storePrefix: string
+  windowMs?: number
+  limit?: number
+  blockedMessage?: string
+}): RequestHandler {
   return rateLimit({
-    windowMs: PERMANENT_DELETE_RATE_LIMIT_WINDOW_MS,
-    limit: PERMANENT_DELETE_RATE_LIMIT_MAX,
+    windowMs: options.windowMs ?? PERMANENT_DELETE_RATE_LIMIT_WINDOW_MS,
+    limit: options.limit ?? PERMANENT_DELETE_RATE_LIMIT_MAX,
     standardHeaders: 'draft-8',
     legacyHeaders: false,
     keyGenerator: (req) => `${options.storePrefix}:${(req as AuthenticatedRequest).auth?.userId ?? 'unknown'}`,
@@ -58,7 +64,7 @@ export function createPermanentDeleteLimiter(options: PermanentDeleteAuditTarget
         resultStatus: 'failed',
         detail: { reason: 'rate_limited' },
       })
-      res.status(429).json({ code: 429, message: '永久删除请求过于频繁，请稍后再试', data: null })
+      res.status(429).json({ code: 429, message: options.blockedMessage ?? '永久删除请求过于频繁，请稍后再试', data: null })
     },
   })
 }

@@ -116,6 +116,8 @@ const envSchema = z.object({
   INIT_ADMIN_PASSWORD: z.string().min(6).optional().transform(normalizeOptionalString),
   INIT_ADMIN_DISPLAY_NAME: z.string().trim().min(1).default('系统管理员'),
   PERMANENT_DELETE_PASSWORD: z.string().optional().transform(normalizeOptionalString),
+  // JSON 全量导入导出（含全部客户个人信息、密码哈希与系统配置）默认关闭，仅在迁移或运维窗口显式设为 true。
+  Y_LINK_JSON_DATA_TRANSFER_ENABLED: z.enum(['true', 'false']).optional().transform((value) => value === 'true'),
   VERIFICATION_CODE_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
   // 阿里云 PNVS 使用服务器端凭证；任何接口或日志都不得回显这三项敏感值。
   ALIBABA_CLOUD_ACCESS_KEY_ID: z.string().optional().transform(normalizeOptionalString),

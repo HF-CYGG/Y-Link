@@ -4,9 +4,11 @@
  * 维护重点：调整数据治理流程时，需要同步核对权限边界、导入导出结构版本以及迁移切换的审计留痕。
  */
 
-import { Router } from 'express'
+import { Router, type Request } from 'express'
 import { z } from 'zod'
+import { env } from '../config/env.js'
 import { requirePermission, requireRole } from '../middleware/auth.middleware.js'
+import { authService } from '../services/auth.service.js'
 import { databaseMigrationService } from '../services/database-migration.service.js'
 import { dataMaintenanceService } from '../services/data-maintenance.service.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
@@ -37,8 +39,14 @@ const importPayloadSchema = z
       .strict(),
     // 导入会先清空商品、客户端账号、预订单、库存流水与系统配置再写入，属于永久删除类操作，必须校验服务端永久删除口令。
     permanentDeletePassword: z.string().max(256).optional(),
+    // 本人当前密码复核：会话被劫持时仅凭 Cookie 不能触发全量覆盖。
+    currentPassword: z.string().max(128).optional(),
   })
   .strict()
+
+const stepUpPasswordSchema = z.object({
+  currentPassword: z.string().max(128).optional(),
+})
 
 const JSON_IMPORT_AUDIT_TARGET = {
   actionType: 'data_maintenance.import_json',
@@ -46,6 +54,44 @@ const JSON_IMPORT_AUDIT_TARGET = {
   targetType: 'data_maintenance',
 } as const
 const jsonImportLimiter = createPermanentDeleteLimiter({ ...JSON_IMPORT_AUDIT_TARGET, storePrefix: 'data-maintenance-import-json' })
+
+const JSON_EXPORT_AUDIT_TARGET = {
+  actionType: 'data_maintenance.export_json',
+  actionLabel: '导出 JSON 数据',
+  targetType: 'data_maintenance',
+} as const
+// 导出是批量外泄与重负载入口：主防线是本人密码复核，频控用于压制反复导出（验收流程单场景至多数次）。
+const jsonExportLimiter = createPermanentDeleteLimiter({
+  ...JSON_EXPORT_AUDIT_TARGET,
+  storePrefix: 'data-maintenance-export-json',
+  windowMs: 10 * 60 * 1000,
+  limit: 10,
+  blockedMessage: 'JSON 导出请求过于频繁，请稍后再试',
+})
+
+/**
+ * JSON 全量导入导出默认关闭：导出含全部客户个人信息与密码哈希，导入会清空多张业务表，
+ * 只在迁移或运维窗口通过 `Y_LINK_JSON_DATA_TRANSFER_ENABLED=true` 临时开启；关闭时拒绝并留痕。
+ */
+async function assertJsonDataTransferEnabled(
+  req: Request,
+  target: typeof JSON_EXPORT_AUDIT_TARGET | typeof JSON_IMPORT_AUDIT_TARGET,
+): Promise<void> {
+  if (env.Y_LINK_JSON_DATA_TRANSFER_ENABLED) {
+    return
+  }
+  await auditService.safeRecord({
+    actionType: target.actionType,
+    actionLabel: `${target.actionLabel}（未开启）`,
+    targetType: target.targetType,
+    targetCode: 'json_data_transfer',
+    actor: (req as AuthenticatedRequest).auth,
+    requestMeta: extractRequestMeta(req),
+    resultStatus: 'failed',
+    detail: { reason: 'disabled' },
+  })
+  throw new BizError('服务端未开启 JSON 全量导入导出，请在维护窗口设置 Y_LINK_JSON_DATA_TRANSFER_ENABLED=true 后重试', 403)
+}
 
 /** 救援凭证可绕开普通登录触发回退，签发必须落业务审计（凭证本身只在响应里交付，不进审计）。 */
 function recordRescueCredentialIssued(req: AuthenticatedRequest, taskId: string, expiresAt: string, via: 'automatic_task' | 'manual_issue') {
@@ -146,13 +192,19 @@ dataMaintenanceRouter.post(
   }),
 )
 
-dataMaintenanceRouter.get(
+// 导出改为 POST：请求体携带本人当前密码完成复核，密码不进入 URL 与访问日志。
+dataMaintenanceRouter.post(
   '/export/json',
   requirePermission('system_configs:view'),
   requireRole('admin'),
+  jsonExportLimiter,
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
-    const data = await dataMaintenanceService.exportJson(authReq.auth, extractRequestMeta(req))
+    await assertJsonDataTransferEnabled(req, JSON_EXPORT_AUDIT_TARGET)
+    const { currentPassword } = stepUpPasswordSchema.parse(req.body ?? {})
+    const requestMeta = extractRequestMeta(req)
+    await authService.verifyStepUpPassword(authReq.auth, currentPassword ?? '', requestMeta, JSON_EXPORT_AUDIT_TARGET.actionType)
+    const data = await dataMaintenanceService.exportJson(authReq.auth, requestMeta)
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -164,8 +216,10 @@ dataMaintenanceRouter.post(
   jsonImportLimiter,
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
-    const { permanentDeletePassword, ...payload } = importPayloadSchema.parse(req.body)
-    // 先核对口令再进入清表事务：被劫持的管理员会话不能凭一次请求清空业务数据。
+    await assertJsonDataTransferEnabled(req, JSON_IMPORT_AUDIT_TARGET)
+    const { permanentDeletePassword, currentPassword, ...payload } = importPayloadSchema.parse(req.body)
+    // 先复核本人密码、再核对永久删除口令，最后才进入清表事务：被劫持的管理员会话不能凭一次请求清空业务数据。
+    await authService.verifyStepUpPassword(authReq.auth, currentPassword ?? '', extractRequestMeta(req), JSON_IMPORT_AUDIT_TARGET.actionType)
     await assertPermanentDeletePasswordForRequest(req, permanentDeletePassword, JSON_IMPORT_AUDIT_TARGET)
     const data = await dataMaintenanceService.importJson(payload as any, authReq.auth, extractRequestMeta(req))
     res.json({ code: 0, message: 'ok', data })

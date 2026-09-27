@@ -447,6 +447,57 @@ export class AuthService {
     customerServiceRealtimeService.disconnectByOwner('service', result.userId)
   }
 
+  /**
+   * 敏感操作前的本人密码复核（step-up，ASVS 5.0 V6/V7 “敏感操作前重新认证”）：
+   * - 会话被劫持时，攻击者不知道当前密码就无法执行全量导出等高风险操作；
+   * - 与登录共用“来源 + 账号”失败计数与临时锁定，复核接口不能被当成在线猜密码的通道；
+   * - 失败统一返回 400（不是 401），避免前端把复核失败误判为会话失效而跳转登录页；
+   * - 审计只记录用途与失败原因，任何情况下都不记录提交的密码。
+   */
+  async verifyStepUpPassword(
+    auth: AuthUserContext,
+    password: string,
+    requestMeta: RequestMeta | undefined,
+    purpose: string,
+  ): Promise<void> {
+    const normalizedPassword = password.trim()
+    if (!normalizedPassword) {
+      throw new BizError('请输入当前登录密码完成身份复核', 400)
+    }
+    await authSecurityService.assertAdminPasswordReauthAllowed(requestMeta, auth.username)
+    const user = await this.userRepo
+      .createQueryBuilder('user')
+      .addSelect('user.passwordHash')
+      .where('user.id = :id', { id: auth.userId })
+      .getOne()
+    if (!user || user.status !== 'enabled') {
+      throw new BizError('当前账号已停用，请联系管理员', 403)
+    }
+    if (await verifyPassword(normalizedPassword, user.passwordHash)) {
+      return
+    }
+    await authSecurityService.recordAdminLoginFailure(requestMeta, user.username)
+    await auditService.safeRecord({
+      actionType: 'auth.step_up',
+      actionLabel: '敏感操作身份复核',
+      targetType: 'user',
+      targetId: user.id,
+      targetCode: user.username,
+      actor: {
+        userId: user.id,
+        username: user.username,
+        displayName: user.displayName,
+      },
+      resultStatus: 'failed',
+      requestMeta,
+      detail: {
+        purpose,
+        reason: 'password_mismatch',
+      },
+    })
+    throw new BizError('当前密码错误，身份复核未通过', 400)
+  }
+
   async resolveAuthUserByToken(sessionToken: string): Promise<AuthUserContext> {
     const now = new Date()
     const sessionTokenHash = hashSessionToken(sessionToken)

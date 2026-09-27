@@ -71,6 +71,7 @@ export const AUDIT_ACTION_CATALOG: Readonly<Record<string, AuditActionDefinition
   'auth.login': { label: '用户登录', category: 'auth' },
   'auth.logout': { label: '用户退出登录', category: 'auth' },
   'auth.change_password': { label: '本人修改密码', category: 'auth' },
+  'auth.step_up': { label: '敏感操作身份复核', category: 'auth' },
   'auth.guard.locked': { label: '认证请求被临时锁定', category: 'auth' },
   'auth.guard.lock': { label: '登录失败触发临时锁定', category: 'auth' },
   'auth.guard.admin_login': { label: '管理端登录频控', category: 'auth' },
