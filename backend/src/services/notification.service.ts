@@ -21,6 +21,7 @@ import { SysUserSession } from '../entities/sys-user-session.entity.js'
 import { SystemConfig } from '../entities/system-config.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
+import { isSealedSensitiveValue, sealSensitiveValue } from '../utils/data-encryption.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { detectUnsafeHost, formatUnsafeHostReason } from '../utils/safe-network.js'
 import { hashSessionToken } from '../utils/session-token.js'
@@ -230,12 +231,19 @@ function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
 }
 
+// 飞书 Webhook 与签名密钥落库加密后长度约为原文 4/3 再加固定前缀，原文上限需保证密文不超过 500/256 列宽。
+const FEISHU_WEBHOOK_URL_MAX_LENGTH = 300
+const FEISHU_SIGN_SECRET_MAX_LENGTH = 128
+
 function normalizeFeishuSignSecretInput(secret: string): string | null {
   const normalized = secret.trim()
   if (!normalized || normalized === FEISHU_SIGN_SECRET_PLACEHOLDER) {
     return null
   }
-  return normalized.slice(0, 256)
+  if (normalized.length > FEISHU_SIGN_SECRET_MAX_LENGTH) {
+    throw new BizError(`飞书签名密钥长度不能超过 ${FEISHU_SIGN_SECRET_MAX_LENGTH} 个字符`, 400)
+  }
+  return normalized
 }
 
 function normalizeId(value: string | number | null | undefined): string {
@@ -282,7 +290,11 @@ function normalizeFeishuWebhookUrl(rawValue: string): string {
     throw new BizError('飞书 Webhook 必须是机器人 hook 地址', 400)
   }
   url.hash = ''
-  return url.toString()
+  const normalizedUrl = url.toString()
+  if (normalizedUrl.length > FEISHU_WEBHOOK_URL_MAX_LENGTH) {
+    throw new BizError(`飞书 Webhook 地址长度不能超过 ${FEISHU_WEBHOOK_URL_MAX_LENGTH} 个字符`, 400)
+  }
+  return normalizedUrl
 }
 
 function normalizeExternalHttpUrl(rawValue: string, channelLabel: string): string {
@@ -396,6 +408,40 @@ export class NotificationService {
       select: { configValue: true },
     })
     return this.parseOnlineWindowSeconds(row?.configValue)
+  }
+
+  /**
+   * 启动时把历史明文的飞书 Webhook 与签名密钥补加密：
+   * - 实体列转换器只在写入时加密，存量明文需要一次性迁移；原始 SQL 读写，避免转换器把明文“读成已加密”而跳过；
+   * - 幂等：已是密文或为空的字段跳过；加密后超过列宽（500/256）的异常旧值保留原样并告警，不阻断启动。
+   */
+  async sealLegacyFeishuSecrets(): Promise<number> {
+    return runInTransaction(async (manager) => {
+      const rows: Array<{ id: string | number; webhookUrl: string | null; signSecret: string | null }> = await manager.query(
+        'SELECT id, feishu_webhook_url AS webhookUrl, feishu_sign_secret AS signSecret FROM notification_rule',
+      )
+      let sealedCount = 0
+      const sealIfNeeded = (context: string, value: string | null, maxLength: number): string | null => {
+        if (!value || isSealedSensitiveValue(value)) return null
+        const sealed = sealSensitiveValue(context, value)
+        if (sealed.length > maxLength) {
+          console.warn(`[notification] ${context} 存量值过长，加密后超出列宽，保持原样，请重新录入该规则的飞书配置`)
+          return null
+        }
+        return sealed
+      }
+      for (const row of rows) {
+        const nextWebhookUrl = sealIfNeeded('notification_rule.feishu_webhook_url', row.webhookUrl, 500)
+        const nextSignSecret = sealIfNeeded('notification_rule.feishu_sign_secret', row.signSecret, 256)
+        if (!nextWebhookUrl && !nextSignSecret) continue
+        await manager.query(
+          'UPDATE notification_rule SET feishu_webhook_url = ?, feishu_sign_secret = ? WHERE id = ?',
+          [nextWebhookUrl ?? row.webhookUrl, nextSignSecret ?? row.signSecret, row.id],
+        )
+        sealedCount += (nextWebhookUrl ? 1 : 0) + (nextSignSecret ? 1 : 0)
+      }
+      return sealedCount
+    })
   }
 
   async ensureDefaultRules(manager: EntityManager = AppDataSource.manager) {

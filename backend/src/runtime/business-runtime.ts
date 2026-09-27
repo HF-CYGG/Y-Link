@@ -31,6 +31,7 @@ import { aliyunDypnsMnsWorkerService } from '../services/aliyun-dypns-mns-worker
 import { systemConfigService } from '../services/system-config.service.js'
 import { migrateLegacyUploadReferences } from '../utils/upload-migration.js'
 import { toSafeErrorLog } from '../utils/safe-error-log.js'
+import { describeDataEncryptionKey } from '../utils/data-encryption.js'
 import { registerRuntimeShutdownHandler } from './runtime-shutdown.js'
 import { registerDatabaseRescueQuiesce, hasPendingRecoveryIntent, markRecoveryFinalizing } from './database-rescue-control.js'
 import {
@@ -271,10 +272,38 @@ const runMutableStartupBootstrap = async () => {
   const configBootstrap = await systemConfigService.ensureDefaultConfigs()
   logLine('STEP', 'ensure default notification rules')
   await notificationService.ensureDefaultRules()
+  logLine('STEP', 'seal legacy sensitive configs')
+  const dataEncryption = await sealLegacySensitiveConfigs()
 
   return {
     adminBootstrap,
     configBootstrap,
+    dataEncryption,
+  }
+}
+
+/**
+ * 敏感配置落库加密的启动收口：确认数据加密密钥可用后，把验证码网关与飞书配置中的历史明文补加密。
+ * 补加密是尽力而为的存量迁移：失败只记录日志（不含任何明文或密文），保持原数据不变，不阻断启动。
+ */
+const sealLegacySensitiveConfigs = async (): Promise<{
+  keySource: 'env' | 'file' | 'unavailable'
+  keyId: string | null
+  keyGenerated: boolean
+  sealedCount: number
+  failed: boolean
+}> => {
+  const key = describeDataEncryptionKey()
+  if (!key) {
+    return { keySource: 'unavailable', keyId: null, keyGenerated: false, sealedCount: 0, failed: true }
+  }
+  try {
+    const sealedCount = await systemConfigService.sealLegacySensitiveVerificationConfigs()
+      + await notificationService.sealLegacyFeishuSecrets()
+    return { keySource: key.source, keyId: key.keyId, keyGenerated: key.generated, sealedCount, failed: false }
+  } catch (error) {
+    console.error(paint('[y-link-backend] seal legacy sensitive configs failed:', 'red'), toSafeErrorLog(error))
+    return { keySource: key.source, keyId: key.keyId, keyGenerated: key.generated, sealedCount: 0, failed: true }
   }
 }
 
@@ -283,7 +312,7 @@ type MutableStartupBootstrapResult = Awaited<ReturnType<typeof runMutableStartup
 const logMutableStartupBootstrapResult = (
   result: MutableStartupBootstrapResult,
 ): void => {
-  const { adminBootstrap, configBootstrap } = result
+  const { adminBootstrap, configBootstrap, dataEncryption } = result
   logLine(
     'ADMIN',
     `username=${adminBootstrap.username} displayName=${adminBootstrap.displayName} initialized=${adminBootstrap.initialized}`,
@@ -299,6 +328,14 @@ const logMutableStartupBootstrapResult = (
     `inserted=${configBootstrap.insertedCount}/${configBootstrap.totalCount}`,
     configBootstrap.insertedCount > 0 ? 'success' : 'info',
   )
+  logLine(
+    'DATA ENCRYPTION',
+    `key=${dataEncryption.keySource} id=${dataEncryption.keyId ?? '-'} generated=${dataEncryption.keyGenerated} sealedLegacy=${dataEncryption.sealedCount}`,
+    dataEncryption.failed ? 'error' : dataEncryption.keyGenerated ? 'warn' : 'info',
+  )
+  if (dataEncryption.keyGenerated) {
+    logLine('SECURITY', '已自动生成敏感配置加密密钥（数据目录 secrets/data-encryption.key），请与数据库一起备份。', 'warn')
+  }
   if (adminBootstrap.initialized) {
     logLine('INIT CREDENTIAL', `username=${adminBootstrap.username} password=***`, 'warn')
     logLine('SECURITY', '管理员初始化已要求使用私有密码，首次登录后仍建议立即改密。', 'warn')

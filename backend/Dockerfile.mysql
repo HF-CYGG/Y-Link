@@ -33,10 +33,11 @@ ENV NODE_ENV=production \
   DB_SYNC=false \
   TZ=Asia/Shanghai
 
+# 预建 /app/data：挂载命名卷时 Docker 会沿用镜像目录的属主，node 用户才能写入维护状态与数据加密密钥文件。
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata \
   && rm -rf /var/lib/apt/lists/* \
-  && mkdir -p /app/uploads \
+  && mkdir -p /app/data /app/uploads \
   && chown -R node:node /app
 
 COPY --from=build --chown=node:node /app/package*.json ./

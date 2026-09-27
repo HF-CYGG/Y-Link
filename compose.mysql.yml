@@ -41,6 +41,9 @@ services:
       VERIFICATION_TICKET_HMAC_SECRET: ${VERIFICATION_TICKET_HMAC_SECRET:-}
       ALIYUN_DYPNS_MNS_ENABLED: ${ALIYUN_DYPNS_MNS_ENABLED:-false}
     volumes:
+      # 数据目录保存维护状态与敏感配置加密密钥（secrets/data-encryption.key），重建容器后必须保留，
+      # 否则会生成新密钥，已保存的验证码网关与飞书配置需要重新录入；备份数据库时一并备份该卷。
+      - y_link_mysql_backend_data:/app/data
       - y_link_mysql_uploads_data:/app/uploads
     extra_hosts:
       # 为 Linux / WSL 等环境补齐宿主机别名；在 Docker Desktop 下也可保持兼容。
@@ -96,6 +99,7 @@ services:
         hard: 65535
 
 volumes:
+  y_link_mysql_backend_data:
   y_link_mysql_uploads_data:
 
 # 独立网络与前端固定地址共同限定 Node 的可信代理，不信任整个 RFC1918。

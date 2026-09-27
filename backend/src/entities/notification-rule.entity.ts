@@ -1,5 +1,6 @@
 import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm'
 import { entityColumnOptions } from './entity-column-options.js'
+import { createSealedColumnTransformer } from '../utils/data-encryption.js'
 
 export const NOTIFICATION_EXTERNAL_TRIGGER_MODES = [
   'all_management_offline',
@@ -47,10 +48,25 @@ export class NotificationRule {
   @Column({ name: 'watched_user_ids_json', type: 'text', comment: '离线监测账号 ID 列表(JSON)' })
   watchedUserIdsJson!: string
 
-  @Column({ name: 'feishu_webhook_url', type: 'varchar', length: 500, nullable: true, comment: '飞书群机器人 Webhook 地址' })
+  // Webhook 与签名密钥落库加密（utils/data-encryption.ts）：实体读写自动加解密，原始 SQL 迁移与导出只见密文。
+  @Column({
+    name: 'feishu_webhook_url',
+    type: 'varchar',
+    length: 500,
+    nullable: true,
+    comment: '飞书群机器人 Webhook 地址',
+    transformer: createSealedColumnTransformer('notification_rule.feishu_webhook_url'),
+  })
   feishuWebhookUrl!: string | null
 
-  @Column({ name: 'feishu_sign_secret', type: 'varchar', length: 256, nullable: true, comment: '飞书群机器人签名密钥' })
+  @Column({
+    name: 'feishu_sign_secret',
+    type: 'varchar',
+    length: 256,
+    nullable: true,
+    comment: '飞书群机器人签名密钥',
+    transformer: createSealedColumnTransformer('notification_rule.feishu_sign_secret'),
+  })
   feishuSignSecret!: string | null
 
   @Column({ name: 'email_subject_prefix', type: 'varchar', length: 128, default: '', comment: '邮件主题前缀' })

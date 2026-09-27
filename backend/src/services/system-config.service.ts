@@ -24,7 +24,28 @@ import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.
 import type { EntityManager } from 'typeorm'
 import { createHash } from 'node:crypto'
 import { STAFF_INVITE_CONFIG_KEY } from '../utils/staff-invite-code.js'
+import { isSealedSensitiveValue, openSensitiveValue, sealSensitiveValue } from '../utils/data-encryption.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
+
+/**
+ * 验证码网关中可能携带密钥的配置项（API 地址可能带签名参数，请求头/请求体模板常含 API Key）：
+ * 落库统一 AES-256-GCM 加密，AAD 为 `system_config:<配置键>`；其余配置项保持明文，便于排障与筛选。
+ */
+const SENSITIVE_VERIFICATION_CONFIG_KEYS: ReadonlySet<string> = new Set([
+  'verification.mobile.api_url',
+  'verification.mobile.headers_template',
+  'verification.mobile.body_template',
+  'verification.email.api_url',
+  'verification.email.headers_template',
+  'verification.email.body_template',
+])
+
+const resolveSensitiveConfigContext = (configKey: string) => `system_config:${configKey}`
+
+type VerificationConfigMapEntry = Pick<SystemConfig, 'configValue' | 'updatedAt'> & {
+  /** 密文无法用当前数据加密密钥解密（密钥丢失或已更换），按未配置处理并提示重新录入。 */
+  unreadable?: boolean
+}
 
 const CLIENT_DEPARTMENT_NODE_LIMIT = 3000
 
@@ -840,8 +861,42 @@ class SystemConfigService {
     return text
   }
 
-  private buildVerificationConfigMap(rows: Array<Pick<SystemConfig, 'configKey' | 'configValue' | 'updatedAt'>>) {
-    return new Map(rows.map((row) => [row.configKey, row]))
+  /** 构建验证码网关配置映射：敏感项在这里统一解密，下游格式化、脱敏与发送逻辑只接触明文。 */
+  private buildVerificationConfigMap(
+    rows: Array<Pick<SystemConfig, 'configKey' | 'configValue' | 'updatedAt'>>,
+  ): Map<string, VerificationConfigMapEntry> {
+    return new Map(rows.map((row): [string, VerificationConfigMapEntry] => {
+      if (!SENSITIVE_VERIFICATION_CONFIG_KEYS.has(row.configKey)) {
+        return [row.configKey, { configValue: row.configValue, updatedAt: row.updatedAt }]
+      }
+      const opened = openSensitiveValue(resolveSensitiveConfigContext(row.configKey), row.configValue)
+      return [row.configKey, { configValue: opened.value, updatedAt: row.updatedAt, unreadable: opened.state === 'unreadable' }]
+    }))
+  }
+
+  /**
+   * 启动时把历史明文的网关敏感配置补加密：幂等，已是密文或为空的项跳过；维护只读期由调用方跳过。
+   * 返回本次补加密的条目数，供启动日志回显。
+   */
+  async sealLegacySensitiveVerificationConfigs(): Promise<number> {
+    return runInTransaction(async (manager) => {
+      const repository = manager.getRepository(SystemConfig)
+      const rows = await repository.find({
+        where: [...SENSITIVE_VERIFICATION_CONFIG_KEYS].map((configKey) => ({ configKey })),
+        select: { id: true, configKey: true, configValue: true },
+      })
+      let sealedCount = 0
+      for (const row of rows) {
+        if (!row.configValue || isSealedSensitiveValue(row.configValue)) continue
+        // 原始 SQL 只改密文、不刷新 updated_at：配置内容本身没有变化，页面“最近更新时间”不应被补加密改写。
+        await manager.query(
+          'UPDATE system_configs SET config_value = ? WHERE id = ?',
+          [sealSensitiveValue(resolveSensitiveConfigContext(row.configKey), row.configValue), row.id],
+        )
+        sealedCount += 1
+      }
+      return sealedCount
+    })
   }
 
   private async loadVerificationConfigMap(manager: EntityManager = AppDataSource.manager) {
@@ -1446,7 +1501,7 @@ class SystemConfigService {
 
   private formatVerificationProviderConfig(
     channel: VerificationChannelType,
-    configMap: Map<string, Pick<SystemConfig, 'configValue' | 'updatedAt'>>,
+    configMap: Map<string, VerificationConfigMapEntry>,
     options: { maskSensitiveValues?: boolean } = {},
   ): VerificationProviderConfigRecord {
     const keyPrefix = `verification.${channel}`
@@ -1504,10 +1559,13 @@ class SystemConfigService {
       test: aliyunTemplateTestConfig?.configValue ?? '',
     }).every((templateCode) => templateCode.trim().length > 0)
     const aliyunConfigReady = Boolean(aliyunSignNameConfig?.configValue.trim()) && aliyunTemplateReady
+    const sensitiveConfigUnreadable = Boolean(urlConfig.unreadable || headersConfig.unreadable || bodyConfig.unreadable)
     const ready = providerType === 'generic_http'
-      ? enabled && Boolean(urlConfig.configValue.trim())
+      ? enabled && Boolean(urlConfig.configValue.trim()) && !sensitiveConfigUnreadable
       : enabled && aliyunConfigReady && credentialsConfigured && ticketHmacConfigured
-    if (enabled && providerType === 'generic_http' && !urlConfig.configValue.trim()) {
+    if (enabled && providerType === 'generic_http' && sensitiveConfigUnreadable) {
+      statusError = `${channel === 'mobile' ? '短信' : '邮箱'}验证码平台接口配置无法解密（数据加密密钥缺失或已更换），请重新录入 API 地址与请求模板`
+    } else if (enabled && providerType === 'generic_http' && !urlConfig.configValue.trim()) {
       statusError = `${channel === 'mobile' ? '短信' : '邮箱'}验证码平台 API 未配置`
     } else if (enabled && providerType === 'aliyun_dypns' && !aliyunConfigReady) {
       statusError = '阿里云 PNVS 短信签名或场景模板码未配置完整'
@@ -2757,7 +2815,23 @@ class SystemConfigService {
       const repo = manager.getRepository(SystemConfig)
       for (const row of lockedRows) {
         const targetValue = targetMap.get(row.configKey)
-        if (targetValue == null || targetValue === row.configValue) {
+        if (targetValue == null) {
+          continue
+        }
+        if (SENSITIVE_VERIFICATION_CONFIG_KEYS.has(row.configKey)) {
+          // 敏感项按明文比对是否变化，落库一律写密文；历史明文顺带补加密，无法解密的旧密文按本次提交值覆盖。
+          const context = resolveSensitiveConfigContext(row.configKey)
+          const opened = openSensitiveValue(context, row.configValue)
+          if ((opened.state === 'sealed' || opened.state === 'empty') && targetValue === opened.value) {
+            continue
+          }
+          await repo.update({ id: row.id }, { configValue: sealSensitiveValue(context, targetValue) })
+          if (targetValue !== opened.value || opened.state === 'unreadable') {
+            changed = true
+          }
+          continue
+        }
+        if (targetValue === row.configValue) {
           continue
         }
         await repo.update({ id: row.id }, { configValue: targetValue })

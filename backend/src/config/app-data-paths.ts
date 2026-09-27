@@ -28,6 +28,10 @@ export interface AppDataPaths {
   migrationSecretDir: string
   migrationLockFile: string
   migrationCutoverFile: string
+  /** 应用级密钥目录（0700）：数据加密主密钥等不得随数据库导出的文件。 */
+  secretsDir: string
+  /** 敏感配置落库加密主密钥文件（0600），未配置环境变量时首次使用自动生成，必须与数据库一起备份。 */
+  dataEncryptionKeyFile: string
 }
 
 const backendRootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
@@ -51,6 +55,8 @@ export function resolveAppDataPaths(rootOverride?: string): AppDataPaths {
     migrationSecretDir: path.join(databaseMigrationDir, 'secrets'),
     migrationLockFile: path.join(databaseMigrationDir, 'automatic-migration.lock'),
     migrationCutoverFile: path.join(runtimeDir, 'database-migration-cutover.json'),
+    secretsDir: path.join(rootDir, 'secrets'),
+    dataEncryptionKeyFile: path.join(rootDir, 'secrets', 'data-encryption.key'),
   }
 }
 
