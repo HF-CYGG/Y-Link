@@ -24,6 +24,7 @@ import {
 } from '../utils/password.js'
 import { hashSessionToken } from '../utils/session-token.js'
 import { generateSessionToken } from '../utils/token.js'
+import { isAdminSessionIdleExpired } from '../utils/admin-session-idle.js'
 import { auditService } from './audit.service.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 import { authSecurityService } from './auth-security.service.js'
@@ -435,6 +436,12 @@ export class AuthService {
 
     if (!session) {
       throw new BizError('登录状态已失效，请重新登录', 401)
+    }
+    // 空闲超时：遗留在公共设备上的管理端会话不能凭 7 天绝对时效长期可用。
+    if (isAdminSessionIdleExpired(session, now)) {
+      await this.sessionRepo.delete({ id: session.id })
+      customerServiceRealtimeService.disconnectBySessionHash('service', sessionTokenHash)
+      throw new BizError('登录已因长时间未操作失效，请重新登录', 401)
     }
 
     const user = await this.userRepo.findOne({ where: { id: session.userId } })

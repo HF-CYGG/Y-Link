@@ -102,6 +102,8 @@ const envSchema = z.object({
   // 见 mysql-migration-runner.ts）；默认关闭，避免无人值守地对生产数据库执行结构变更。
   DB_AUTO_MIGRATE: z.string().optional().transform(parseBoolean),
   AUTH_TOKEN_TTL_HOURS: z.coerce.number().int().positive().default(168),
+  // 管理端会话空闲超时（分钟）：超过该时长无任何请求即失效；0 表示关闭，仅保留 AUTH_TOKEN_TTL_HOURS 绝对时效。
+  AUTH_SESSION_IDLE_TIMEOUT_MINUTES: z.coerce.number().int().min(0).max(10_080).default(720),
   MOBILE_ACCESS_TTL_MINUTES: z.coerce.number().int().min(1).max(1440).default(15),
   MOBILE_REFRESH_TTL_DAYS: z.coerce.number().int().min(1).max(365).default(30),
   MOBILE_SESSION_ABSOLUTE_TTL_DAYS: z.coerce.number().int().min(1).max(730).default(90),
