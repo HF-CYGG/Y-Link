@@ -219,6 +219,11 @@ export class VerificationCodeService {
     }
   }
 
+  /**
+   * 发送验证码并留审计：
+   * - 注册、找回、资料改绑、补认证与 Mobile 发码共用本入口，短信轰炸与费用滥用排查都依赖这条留痕；
+   * - 审计只记录通道、场景与脱敏目标，不记录验证码与完整号码/邮箱。
+   */
   async sendCode(input: {
     channel: VerificationChannelType
     target: string
@@ -226,6 +231,35 @@ export class VerificationCodeService {
     requestMeta?: RequestMeta
   }) {
     const normalizedTarget = normalizeClientVerificationTarget(input.channel, input.target)
+    const maskedTarget = input.channel === 'mobile'
+      ? maskMobileVerificationTarget(normalizedTarget)
+      : `${normalizedTarget.split('@')[0]?.slice(0, 1) ?? ''}***@${normalizedTarget.split('@')[1] ?? ''}`
+    const recordSendAudit = (resultStatus: 'success' | 'failed', detail: Record<string, unknown> = {}) => auditService.safeRecord({
+      actionType: 'client.auth.verification_code.send',
+      actionLabel: '发送手机/邮箱验证码',
+      targetType: 'verification_target',
+      targetCode: maskedTarget,
+      requestMeta: input.requestMeta,
+      resultStatus,
+      detail: { channel: input.channel, scene: input.scene, target: maskedTarget, ...detail },
+    })
+    try {
+      const result = await this.sendCodeToNormalizedTarget({ ...input, target: normalizedTarget })
+      await recordSendAudit('success')
+      return result
+    } catch (error) {
+      await recordSendAudit('failed', { statusCode: error instanceof BizError ? error.statusCode : 500 })
+      throw error
+    }
+  }
+
+  private async sendCodeToNormalizedTarget(input: {
+    channel: VerificationChannelType
+    target: string
+    scene: VerificationScene
+    requestMeta?: RequestMeta
+  }) {
+    const normalizedTarget = input.target
     const configs = await systemConfigService.getVerificationProviderConfigs({ maskSensitiveValues: false })
     const provider = configs[input.channel]
     if (!provider.ready) {

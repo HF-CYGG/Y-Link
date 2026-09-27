@@ -73,6 +73,7 @@
 - 全局永久删除口令在所有入口都必须限速：系统账号/客户端账号/供货方已入库删除沿用原限流器，供货方永久删除、O2O 订单删除与批量清理、出库单永久删除、JSON 全量导入使用 `utils/permanent-delete-guard.ts` 的账号级限流（5 分钟 5 次）与脱敏失败审计。供货方永久删除在服务层先校验归属、状态与确认单号，再核对口令，避免成为全局口令的试错预言机。JSON 导入会清空多张业务表，同样按永久删除类操作要求口令。
 - 客户端业务写接口（反馈新建/追加消息、预订单提交/撤单）经 `authSecurityService.guardClientBusinessWrite` 按客户端账号限频，超限 429 并写 `client.auth.guard.business_write` 审计，防止刷量淹没站内信与飞书/邮件外发。
 - 管理员不能通过 `PUT /api/users/:id` 修改本人密码，必须走校验旧密码的 `/api/auth/change-password`。
+- 中高危操作审计覆盖（2026-09-27 逐个写接口核对）：客户端登录成功/失败/停用账号尝试（`client.auth.login`）、注册（`client.auth.register`）、找回密码身份核验（`client.auth.forgot_password.verify`，成功与验证码/账号不符均记）、发码（`client.auth.verification_code.send`，只记脱敏目标）、救援凭证签发（`database_migration.issue_rescue_credential`）、MySQL 迁移预检（`database_migration.precheck`，不记密码）、客户端提交预订单（`o2o.preorder.submit`，幂等重放不重复记）、O2O 合规标记（`o2o.preorder.compliance_flags`）、O2O 手工入库（`inventory.manual_inbound`）。出库单修订/合并/内容编辑与合规标记由各自服务写 `order.amendment`/`order.merge`/`order.content_edit`。新增写接口时按同一口径补审计并登记目录。
 - 操作员也持有 `products:manage`：商品新增、编辑（价格、折扣、上下架、限购）、批量启停与删除都必须写审计，保证改价等内部操作可追溯（口径见 `22-产品、SKU、标签与 O2O 商品管理.md`）。
 - 所有手机/邮箱发码入口（注册/找回、已登录资料改绑、补认证）共用 `guardVerificationCodeSendRequest`：每 IP 8 次/10 分钟、每目标 5 次/10 分钟，另有每目标 10 次/24 小时上限，防止已登录账号绕开图形验证码对任意号码持续短信轰炸。资料改绑发码的目标由用户任填，额外有每账号 10 次/24 小时上限（`guardClientProfileVerificationSend`），防止单账号轮换号码刷短信费。
 - multipart 上传依赖 `multer` 必须不低于 2.3.0（2.2.0 存在中断上传泄漏文件句柄、构造字段名/数组下标导致解析拒绝服务等公开漏洞，反馈附件上传对所有客户账号开放）。所有 multer 实例显式限制 `files/fields/parts`，图片上传另限单字段 1KB；商品 YZ 导入的 `resolutions` 字段沿用默认 1MB。

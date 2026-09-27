@@ -19,6 +19,7 @@ import { issueDatabaseRescueCredential } from '../runtime/database-rescue-contro
 import { isSecureOrDirectLoopback } from '../utils/http-security.js'
 import { BizError } from '../utils/errors.js'
 import { assertPermanentDeletePasswordForRequest, createPermanentDeleteLimiter } from '../utils/permanent-delete-guard.js'
+import { auditService } from '../services/audit.service.js'
 
 const importPayloadSchema = z
   .object({
@@ -45,6 +46,19 @@ const JSON_IMPORT_AUDIT_TARGET = {
   targetType: 'data_maintenance',
 } as const
 const jsonImportLimiter = createPermanentDeleteLimiter({ ...JSON_IMPORT_AUDIT_TARGET, storePrefix: 'data-maintenance-import-json' })
+
+/** 救援凭证可绕开普通登录触发回退，签发必须落业务审计（凭证本身只在响应里交付，不进审计）。 */
+function recordRescueCredentialIssued(req: AuthenticatedRequest, taskId: string, expiresAt: string, via: 'automatic_task' | 'manual_issue') {
+  return auditService.safeRecord({
+    actionType: 'database_migration.issue_rescue_credential',
+    actionLabel: '签发数据库救援凭证',
+    targetType: 'database_migration_task',
+    targetId: taskId,
+    actor: req.auth,
+    requestMeta: extractRequestMeta(req),
+    detail: { via, expiresAt },
+  })
+}
 
 /**
  * MySQL 目标库连接参数：
@@ -172,6 +186,7 @@ dataMaintenanceRouter.post(
       requestMeta,
     )
     const rescueCredential = isSecureOrDirectLoopback(req) ? issueDatabaseRescueCredential(data.id) : undefined
+    if (rescueCredential) await recordRescueCredentialIssued(authReq, data.id, rescueCredential.expiresAt, 'automatic_task')
     res.setHeader('Cache-Control', 'no-store')
     res.status(202).json({ code: 0, message: 'accepted', data: { ...data, rescueCredential } })
 
@@ -200,6 +215,7 @@ dataMaintenanceRouter.post(
     if (!isSecureOrDirectLoopback(req)) throw new BizError('救援凭证需通过可信 HTTPS 或容器本地工具签发', 403)
     await databaseMigrationService.getSQLiteToMySqlTask(req.params.taskId)
     const data = issueDatabaseRescueCredential(req.params.taskId)
+    await recordRescueCredentialIssued(req as AuthenticatedRequest, data.taskId, data.expiresAt, 'manual_issue')
     res.setHeader('Cache-Control', 'no-store')
     res.json({ code: 0, message: 'ok', data })
   }),
@@ -211,7 +227,25 @@ dataMaintenanceRouter.post(
   requireRole('admin'),
   asyncHandler(async (req, res) => {
     const payload = sqliteToMysqlPrecheckSchema.parse(req.body)
-    const data = await databaseMigrationService.precheckSQLiteToMySql(payload)
+    // 预检会用管理员提供的凭据连接任意主机，需留审计以便追溯内网探测；不记录密码。
+    const recordPrecheck = (resultStatus: 'success' | 'failed', detail: Record<string, unknown> = {}) => auditService.safeRecord({
+      actionType: 'database_migration.precheck',
+      actionLabel: '预检 MySQL 迁移目标',
+      targetType: 'database',
+      targetCode: `${payload.target.host}:${payload.target.port}/${payload.target.database}`,
+      actor: (req as AuthenticatedRequest).auth,
+      requestMeta: extractRequestMeta(req),
+      resultStatus,
+      detail: { host: payload.target.host, port: payload.target.port, database: payload.target.database, user: payload.target.user, ...detail },
+    })
+    let data: Awaited<ReturnType<typeof databaseMigrationService.precheckSQLiteToMySql>>
+    try {
+      data = await databaseMigrationService.precheckSQLiteToMySql(payload)
+    } catch (error) {
+      await recordPrecheck('failed', { statusCode: error instanceof BizError ? error.statusCode : 500 })
+      throw error
+    }
+    await recordPrecheck('success')
     res.json({ code: 0, message: 'ok', data })
   }),
 )

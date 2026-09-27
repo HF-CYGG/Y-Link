@@ -250,7 +250,7 @@ o2oRouter.post(
     const authReq = req as ClientAuthenticatedRequest
     const payload = submitPreorderSchema.parse(req.body)
     await authSecurityService.guardClientBusinessWrite(extractRequestMeta(req), authReq.clientAuth.userId, 'preorder_submit')
-    const data = await o2oPreorderService.submit(authReq.clientAuth, payload)
+    const data = await o2oPreorderService.submit(authReq.clientAuth, payload, extractRequestMeta(req))
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -664,7 +664,7 @@ o2oAdminRouter.patch(
       orderId: req.params.id,
       hasCustomerOrder: payload.hasCustomerOrder,
       isSystemApplied: payload.isSystemApplied,
-    }, authReq.auth)
+    }, authReq.auth, extractRequestMeta(req))
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -767,6 +767,7 @@ o2oAdminRouter.post(
       authReq.auth,
       payload.remark,
       payload.skuId,
+      extractRequestMeta(req),
     )
     res.json({ code: 0, message: 'ok', data })
   }),

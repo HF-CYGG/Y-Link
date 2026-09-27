@@ -76,6 +76,9 @@ export const AUDIT_ACTION_CATALOG: Readonly<Record<string, AuditActionDefinition
   'auth.guard.admin_login': { label: '管理端登录频控', category: 'auth' },
   'auth.guard.admin_captcha': { label: '管理端图形验证码频控', category: 'auth' },
   'client.auth.login': { label: '客户端登录', category: 'auth' },
+  'client.auth.register': { label: '客户端注册', category: 'auth' },
+  'client.auth.forgot_password.verify': { label: '客户端找回密码身份核验', category: 'auth' },
+  'client.auth.verification_code.send': { label: '发送手机/邮箱验证码', category: 'auth' },
   'client.auth.guard.captcha': { label: '客户端验证码频控', category: 'auth' },
   'client.auth.guard.staff_directory_lookup': { label: '客户端工号目录查询频控', category: 'auth' },
   'client.auth.guard.verification_send': { label: '验证码发送频控', category: 'auth' },
@@ -110,6 +113,8 @@ export const AUDIT_ACTION_CATALOG: Readonly<Record<string, AuditActionDefinition
   'order.merge_failed': { label: '合并出库单失败', category: 'order_outbound' },
   'o2o.preorder.verify': { label: '核销预订单并出库', category: 'order_outbound' },
   'o2o.preorder.update_by_client': { label: '客户端修改订单', category: 'order_outbound' },
+  'o2o.preorder.submit': { label: '客户端提交预订单', category: 'order_outbound' },
+  'o2o.preorder.compliance_flags': { label: '修改预订单合规状态', category: 'order_outbound' },
   'o2o.preorder.onsite_adjust': { label: '门店现场改单', category: 'order_outbound' },
   'o2o.preorder.customer_order_print': { label: '客户端标记部门订单已打印', category: 'order_outbound' },
   'o2o.preorder.cancel_by_system': { label: '系统超时取消预订单', category: 'order_outbound' },
@@ -159,6 +164,7 @@ export const AUDIT_ACTION_CATALOG: Readonly<Record<string, AuditActionDefinition
   'product.zero_spec_evolve': { label: '商品 0 号规格演进', category: 'product_inventory' },
   'inventory.doc.create': { label: '提交库存单据', category: 'product_inventory' },
   'inventory.doc.void': { label: '作废库存单据', category: 'product_inventory' },
+  'inventory.manual_inbound': { label: 'O2O 手工入库', category: 'product_inventory' },
   'inventory.stocktake.create': { label: '创建盘点单', category: 'product_inventory' },
   'inventory.stocktake.submit': { label: '提交盘点结果', category: 'product_inventory' },
   'inventory.stocktake.reopen': { label: '退回重新盘点', category: 'product_inventory' },
@@ -239,6 +245,8 @@ export const AUDIT_ACTION_CATALOG: Readonly<Record<string, AuditActionDefinition
   'database_migration.apply_switch': { label: '应用数据库切换覆盖配置', category: 'data_database' },
   'database_migration.rollback_switch': { label: '回退数据库切换覆盖配置', category: 'data_database' },
   'database_migration.clear_override': { label: '清理数据库运行时覆盖配置', category: 'data_database' },
+  'database_migration.issue_rescue_credential': { label: '签发数据库救援凭证', category: 'data_database' },
+  'database_migration.precheck': { label: '预检 MySQL 迁移目标', category: 'data_database' },
 }
 
 /** 审计目标对象中文名：未登记的目标类型在页面上回退显示原始编码。 */

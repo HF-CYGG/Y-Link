@@ -2825,7 +2825,7 @@ class O2oPreorderService {
     return { mergedRequestQtyMap, totalQty }
   }
 
-  async submit(auth: ClientAuthContext, input: SubmitPreorderInput) {
+  async submit(auth: ClientAuthContext, input: SubmitPreorderInput, requestMeta?: RequestMeta) {
     const normalizedItems = this.normalizePreorderItems(input.items)
     const normalizedRemark = this.normalizePreorderRemark(input.remark)
     const normalizedClientRequestId = this.normalizeClientRequestId(input.clientRequestId)
@@ -2986,6 +2986,26 @@ class O2oPreorderService {
             showNo: savedOrder.showNo,
             sourceUserId: auth.userId,
             sourceUserDisplayName: auth.realName || auth.account,
+          },
+        }, manager)
+        // 只在真正建单时留痕，幂等重放直接返回已有订单，不重复记审计。
+        await auditService.record({
+          actionType: 'o2o.preorder.submit',
+          actionLabel: '客户端提交预订单',
+          targetType: 'o2o_order',
+          targetId: String(savedOrder.id),
+          targetCode: savedOrder.showNo,
+          actor: {
+            userId: auth.userId,
+            username: auth.account || auth.mobile || auth.email,
+            displayName: auth.realName || auth.account,
+          },
+          requestMeta,
+          detail: {
+            clientOrderType: normalizedClientOrderType,
+            totalQty,
+            itemCount: canonicalItems.length,
+            isSystemApplied: normalizedIsSystemApplied,
           },
         }, manager)
         return { orderId: String(savedOrder.id), created: true }
@@ -3915,7 +3935,7 @@ class O2oPreorderService {
     })
   }
 
-  async updateComplianceFlagsByAdmin(input: UpdateOrderComplianceFlagsInput, actor: AuthUserContext) {
+  async updateComplianceFlagsByAdmin(input: UpdateOrderComplianceFlagsInput, actor: AuthUserContext, requestMeta?: RequestMeta) {
     if (typeof input.hasCustomerOrder !== 'boolean' && typeof input.isSystemApplied !== 'boolean') {
       throw new BizError('请至少传入一个可更新字段', 400)
     }
@@ -3936,6 +3956,7 @@ class O2oPreorderService {
       const preserveMergePrintEvidence = Boolean(mergeMetadata && mergeMetadata.role !== 'standalone')
         && Boolean(order.hasCustomerOrder)
         && input.hasCustomerOrder === false
+      const complianceBefore = { hasCustomerOrder: Boolean(order.hasCustomerOrder), isSystemApplied: Boolean(order.isSystemApplied) }
       if (typeof input.hasCustomerOrder === 'boolean' && !preserveMergePrintEvidence) {
         order.hasCustomerOrder = input.hasCustomerOrder
       }
@@ -3956,6 +3977,19 @@ class O2oPreorderService {
           displayName: actor.displayName,
         },
       })
+      const complianceAfter = { hasCustomerOrder: Boolean(order.hasCustomerOrder), isSystemApplied: Boolean(order.isSystemApplied) }
+      if (JSON.stringify(complianceBefore) !== JSON.stringify(complianceAfter)) {
+        await auditService.record({
+          actionType: 'o2o.preorder.compliance_flags',
+          actionLabel: '修改预订单合规状态',
+          targetType: 'o2o_order',
+          targetId: String(order.id),
+          targetCode: order.showNo,
+          actor,
+          requestMeta,
+          detail: { before: complianceBefore, after: complianceAfter, preserveMergePrintEvidence },
+        }, manager)
+      }
       return this.buildOrderDetail(order, manager)
     })
   }
@@ -4666,6 +4700,7 @@ class O2oPreorderService {
     actor: AuthUserContext,
     remark?: string,
     skuId?: string | null,
+    requestMeta?: RequestMeta,
   ) {
     const normalizedQty = Math.floor(Number(qty))
     if (!Number.isSafeInteger(normalizedQty) || normalizedQty <= 0) {
@@ -4735,6 +4770,22 @@ class O2oPreorderService {
           remark: remark?.trim() || null,
         }),
       )
+      await auditService.record({
+        actionType: 'inventory.manual_inbound',
+        actionLabel: 'O2O 手工入库',
+        targetType: 'product',
+        targetId: String(product.id),
+        targetCode: product.productCode,
+        actor,
+        requestMeta,
+        detail: {
+          skuId: String(sku.id),
+          skuCode: sku.skuCode,
+          qty: normalizedQty,
+          beforeCurrentStock,
+          afterCurrentStock: product.currentStock,
+        },
+      }, manager)
       return {
         id: String(product.id),
         productName: product.productName,

@@ -842,6 +842,24 @@ class ClientAuthService {
   async register(input: ClientRegisterInput, requestMeta?: RequestMeta) {
     const registered = await this.registerIdentity(input, requestMeta)
     const session = await this.createSessionForUser(registered.user)
+    await auditService.safeRecord({
+      actionType: 'client.auth.register',
+      actionLabel: '客户端注册',
+      targetType: 'client_user',
+      targetId: registered.user.id,
+      targetCode: registered.user.realName,
+      actor: {
+        userId: registered.user.id,
+        username: registered.user.email ?? registered.user.mobile ?? registered.user.realName,
+        displayName: registered.user.realName,
+      },
+      requestMeta,
+      detail: {
+        registrationType: registered.user.staffNo ? 'teacher' : 'personal',
+        verificationChannel: registered.verificationChannel,
+        contactChannels: [registered.user.mobile ? 'mobile' : null, registered.user.email ? 'email' : null].filter(Boolean),
+      },
+    })
     return {
       token: session.token,
       expiresAt: session.expiresAt,
@@ -899,6 +917,16 @@ class ClientAuthService {
       throw new BizError(loginErrorMessage, 401)
     }
     if (user.status !== 'enabled') {
+      await auditService.safeRecord({
+        actionType: 'client.auth.login',
+        actionLabel: '客户端登录',
+        targetType: 'client_session',
+        targetId: user.id,
+        targetCode: user.email ?? user.mobile ?? user.realName,
+        resultStatus: 'failed',
+        requestMeta,
+        detail: { reason: 'user_disabled' },
+      })
       throw new BizError('当前账号已停用', 403)
     }
     await authSecurityService.clearClientLoginFailures(requestMeta, riskSubject)
@@ -908,6 +936,21 @@ class ClientAuthService {
   async login(input: ClientLoginInput, requestMeta?: RequestMeta, captchaRequired = false) {
     const user = await this.authenticateCredentials(input, requestMeta, captchaRequired)
     const session = await this.createSessionForUser(user)
+    // 登录成功同样留痕（含来源 IP/UA），账号被盗排查时才能还原“何时何地登录过”。
+    await auditService.safeRecord({
+      actionType: 'client.auth.login',
+      actionLabel: '客户端登录',
+      targetType: 'client_session',
+      targetId: session.user.id,
+      targetCode: session.user.email ?? session.user.mobile ?? session.user.realName,
+      actor: {
+        userId: session.user.id,
+        username: session.user.email ?? session.user.mobile ?? session.user.realName,
+        displayName: session.user.realName,
+      },
+      requestMeta,
+      detail: { via: 'web', expiresAt: session.expiresAt.toISOString() },
+    })
     return {
       token: session.token,
       expiresAt: session.expiresAt,
@@ -926,15 +969,30 @@ class ClientAuthService {
     if (!capabilities.channels[account.channel]) {
       throw new BizError(`当前账号对应的${account.channel === 'email' ? '邮箱' : '手机'}验证码通道未启用，请联系管理员配置`, 400)
     }
-    await this.verifyCodeIfRequired(
-      input,
-      {
-        channel: account.channel,
-        target: account.account,
-        scene: 'forgot_password',
-      },
-      `请输入${account.channel === 'email' ? '邮箱' : '手机'}验证码`,
-    )
+    const recordForgotVerifyAudit = (resultStatus: 'success' | 'failed', detail: Record<string, unknown>, userId?: string) => auditService.safeRecord({
+      actionType: 'client.auth.forgot_password.verify',
+      actionLabel: '客户端找回密码身份核验',
+      targetType: 'client_user',
+      targetId: userId ?? null,
+      targetCode: this.maskContactTarget(account.channel, account.account),
+      requestMeta: _requestMeta,
+      resultStatus,
+      detail: { channel: account.channel, ...detail },
+    })
+    try {
+      await this.verifyCodeIfRequired(
+        input,
+        {
+          channel: account.channel,
+          target: account.account,
+          scene: 'forgot_password',
+        },
+        `请输入${account.channel === 'email' ? '邮箱' : '手机'}验证码`,
+      )
+    } catch (error) {
+      if (error instanceof BizError) await recordForgotVerifyAudit('failed', { reason: 'verification_code_rejected' })
+      throw error
+    }
     const user = await this.userRepo
       .createQueryBuilder('user')
       .where(
@@ -945,9 +1003,11 @@ class ClientAuthService {
       )
       .getOne()
     if (!user) {
+      await recordForgotVerifyAudit('failed', { reason: 'verified_account_not_found' })
       // 找回密码不直接暴露“账号是否已注册”，降低批量枚举账号的风险。
       throw new BizError('身份校验失败，请确认用户名、验证码后重试', 400)
     }
+    await recordForgotVerifyAudit('success', { resetTicketIssued: true }, user.id)
     const resetToken = generateSessionToken()
     resetTicketStore.set(resetToken, {
       userId: user.id,
