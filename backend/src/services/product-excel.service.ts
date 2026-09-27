@@ -155,6 +155,11 @@ export class ProductExcelService {
 
   /** 导出当前版本 SKU；没有商品维护权限的账号不导出成本价列。 */
   async exportProducts(options: { includeCostPrice: boolean } = { includeCostPrice: true }): Promise<Buffer> {
+    return (await this.exportProductsWithSummary(options)).buffer
+  }
+
+  /** 导出当前版本 SKU 并返回数据行数，供路由写导出审计。 */
+  async exportProductsWithSummary(options: { includeCostPrice: boolean } = { includeCostPrice: true }): Promise<{ buffer: Buffer; rowCount: number }> {
     const [products, skus, categories, locations] = await Promise.all([
       AppDataSource.getRepository(BaseProduct).find({ order: { id: 'ASC' } }),
       AppDataSource.getRepository(BaseProductSku).find({ where: { isCurrent: true }, order: { productId: 'ASC', sortOrder: 'ASC', id: 'ASC' } }),
@@ -216,7 +221,7 @@ export class ProductExcelService {
         thumbnail: sku.thumbnail ?? product.thumbnail ?? '',
       })
     }
-    return Buffer.from(await workbook.xlsx.writeBuffer())
+    return { buffer: Buffer.from(await workbook.xlsx.writeBuffer()), rowCount: Math.max(0, sheet.rowCount - 1) }
   }
 
   async parseWorkbook(buffer: Buffer): Promise<ParsedRow[]> {

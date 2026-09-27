@@ -52,7 +52,7 @@ export const AUDIT_CATEGORIES: readonly AuditCategoryDefinition[] = [
   { key: 'notification', label: '通知中心', level: 'low', prefixes: ['notification.'] },
   { key: 'user_permission', label: '用户与权限', level: 'critical', prefixes: ['user.', 'client_user.', 'client_staff_directory.', 'security.'] },
   { key: 'system_config', label: '系统配置', level: 'high', prefixes: ['system_config.'] },
-  { key: 'data_database', label: '数据维护与数据库', level: 'critical', prefixes: ['data_maintenance.', 'database_migration.'] },
+  { key: 'data_database', label: '数据维护与数据库', level: 'critical', prefixes: ['data_maintenance.', 'database_migration.', 'data_export.'] },
   { key: 'other', label: '其他', level: 'low', prefixes: [] },
 ]
 
@@ -238,6 +238,11 @@ export const AUDIT_ACTION_CATALOG: Readonly<Record<string, AuditActionDefinition
   'data_maintenance.backup_sqlite': { label: '创建 SQLite 物理备份', category: 'data_database' },
   'data_maintenance.export_json': { label: '导出 JSON 数据', category: 'data_database' },
   'data_maintenance.import_json': { label: '导入 JSON 数据', category: 'data_database' },
+  // 批量数据导出统一留痕，便于按“数据维护与数据库”类别排查批量外泄
+  'data_export.audit_logs': { label: '导出审计日志', category: 'data_database' },
+  'data_export.report': { label: '导出报表', category: 'data_database' },
+  'data_export.inventory_logs': { label: '导出库存流水', category: 'data_database' },
+  'data_export.products': { label: '导出商品', category: 'data_database' },
   'database_migration.create_task': { label: '创建 SQLite 转 MySQL 迁移任务', category: 'data_database' },
   'database_migration.create_automatic_task': { label: '创建一键自动数据库迁移任务', category: 'data_database' },
   'database_migration.run_task': { label: '执行 SQLite 转 MySQL 迁移任务', category: 'data_database' },
@@ -256,6 +261,7 @@ export const AUDIT_ACTION_CATALOG: Readonly<Record<string, AuditActionDefinition
 export const AUDIT_TARGET_TYPE_LABELS: Readonly<Record<string, string>> = {
   api_route: '接口路由',
   security_guard: '安全频控',
+  data_export: '数据导出',
   session: '管理端会话',
   user: '管理端用户',
   client_user: '客户端用户',

@@ -98,6 +98,8 @@ export interface ReportInventorySkuDetailResult {
 
 export interface ReportExportResult {
   fileName: string
+  /** 实际写出的数据行数，供路由写导出审计。 */
+  rowCount: number
 }
 
 interface ResolvedReportQuery {
@@ -414,6 +416,7 @@ export class ReportService {
     await workbook.commit()
       return {
         fileName: `report-${type}-${new Date().toISOString().slice(0, 19).replaceAll(/[:T]/g, '-')}.xlsx`,
+        rowCount: exportedRows,
       }
     } finally {
       // `workbook.commit()` 才代表响应流真正结束；断线和异常同样必须归还容量。

@@ -16,6 +16,8 @@ import { SPEC_VALUE_MAX_LENGTH } from '../services/product-code.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
+import { dataExportLeasePool } from '../utils/export-lease-pool.js'
+import { auditService } from '../services/audit.service.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
@@ -334,8 +336,24 @@ productRouter.get(
   '/export',
   requirePermission('products:view'),
   asyncHandler(async (req, res) => {
-    const buffer = await productExcelService.exportProducts({ includeCostPrice: canViewCostPrice(req) })
-    sendXlsx(res, `products-${new Date().toISOString().slice(0, 10)}.xlsx`, buffer)
+    const authReq = req as AuthenticatedRequest
+    const includeCostPrice = canViewCostPrice(req)
+    const lease = dataExportLeasePool.acquire(authReq.auth.userId)
+    let exported: { buffer: Buffer; rowCount: number }
+    try {
+      exported = await productExcelService.exportProductsWithSummary({ includeCostPrice })
+    } finally {
+      lease.release()
+    }
+    // 成本价属于内部经营数据：是否包含成本列随导出审计一并留痕。
+    await auditService.recordDataExport({
+      exportType: 'products',
+      actor: authReq.auth,
+      requestMeta: extractRequestMeta(req),
+      rowCount: exported.rowCount,
+      filters: { includeCostPrice },
+    })
+    sendXlsx(res, `products-${new Date().toISOString().slice(0, 10)}.xlsx`, exported.buffer)
   }),
 )
 

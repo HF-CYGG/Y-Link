@@ -18,6 +18,9 @@ import {
   isNotificationEventResultStatus,
 } from '../constants/notification-event-catalog.js'
 import { BizError } from '../utils/errors.js'
+import { dataExportLeasePool } from '../utils/export-lease-pool.js'
+import { extractRequestMeta } from '../utils/request-meta.js'
+import type { AuthenticatedRequest } from '../types/auth.js'
 
 export const auditLogRouter = Router()
 
@@ -110,13 +113,35 @@ auditLogRouter.get(
   requirePermission('audit_logs:export'),
   requireRole('admin'),
   asyncHandler(async (req, res) => {
-    const csv = await auditService.exportCsv(parseAuditFilterQuery(req))
-
-    const fileName = `audit-logs-${new Date().toISOString().slice(0, 19).replaceAll(/[:T]/g, '-')}.csv`
-    res.setHeader('Content-Type', 'text/csv; charset=utf-8')
-    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`)
-    // CSV 前置 UTF-8 BOM，保证 Excel 直接打开中文不乱码。
-    res.send(String.fromCharCode(0xfeff) + csv)
+    const authReq = req as AuthenticatedRequest
+    const query = parseAuditFilterQuery(req)
+    // 每账号同时 1 个、每进程同时 3 个重型导出；租约覆盖整个流式写出过程。
+    const lease = dataExportLeasePool.acquire(authReq.auth.userId)
+    try {
+      const fileName = `audit-logs-${new Date().toISOString().slice(0, 19).replaceAll(/[:T]/g, '-')}.csv`
+      const result = await auditService.exportCsvToStream(query, res, () => {
+        // 计数与上限校验通过后才声明下载，超限错误仍能以 JSON 返回。
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8')
+        res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`)
+      })
+      await auditService.recordDataExport({
+        exportType: 'audit_logs',
+        actor: authReq.auth,
+        requestMeta: extractRequestMeta(req),
+        rowCount: result.rowCount,
+        filters: {
+          category: query.category ?? null,
+          actionType: query.actionType ?? null,
+          targetType: query.targetType ?? null,
+          actorUserId: query.actorUserId ?? null,
+          targetId: query.targetId ?? null,
+          startAt: query.startAt?.toISOString() ?? null,
+          endAt: query.endAt?.toISOString() ?? null,
+        },
+      })
+    } finally {
+      lease.release()
+    }
   }),
 )
 

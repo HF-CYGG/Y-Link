@@ -6,9 +6,12 @@
  * 3. 查询与导出共用同一套筛选口径，保证后台展示结果与导出结果保持一致。
  */
 
+import { once } from 'node:events'
+import type { Writable } from 'node:stream'
 import { IsNull, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { escapeCsvCell } from '../utils/csv-security.js'
+import { BizError } from '../utils/errors.js'
 import { toSafeErrorLog } from '../utils/safe-error-log.js'
 import { SysAuditLog } from '../entities/sys-audit-log.entity.js'
 import {
@@ -92,6 +95,18 @@ export interface AuditFilterOptions {
 }
 
 const AUDIT_FILTER_OPTIONS_CACHE_MS = 60_000
+const AUDIT_EXPORT_MAX_ROWS = 200_000
+const AUDIT_EXPORT_BATCH_SIZE = 1000
+const AUDIT_EXPORT_HEADERS = ['时间', '动作编码', '动作名称', '业务类别', '执行结果', '操作人ID', '操作人账号', '操作人姓名', '目标类型', '目标ID', '目标标识', '来源IP', '客户端UA', '详情']
+
+export type DataExportType = 'audit_logs' | 'report' | 'inventory_logs' | 'products'
+
+const DATA_EXPORT_LABELS: Readonly<Record<DataExportType, string>> = {
+  audit_logs: '导出审计日志',
+  report: '导出报表',
+  inventory_logs: '导出库存流水',
+  products: '导出商品',
+}
 
 const truncateAuditTextByCodePoint = (value: string | null | undefined, maxLength: number): string | null => {
   if (value == null) return null
@@ -315,10 +330,8 @@ export class AuditService {
    * - 完整复用当前筛选条件，确保导出结果与列表检索口径一致；
    * - 对详情 JSON 做 CSV 转义，避免换行与双引号破坏文件结构。
    */
-  async exportCsv(query: AuditLogListQuery): Promise<string> {
-    const list = await this.buildListQuery(query).orderBy('audit.id', 'DESC').getMany()
-    const headers = ['时间', '动作编码', '动作名称', '业务类别', '执行结果', '操作人ID', '操作人账号', '操作人姓名', '目标类型', '目标ID', '目标标识', '来源IP', '客户端UA', '详情']
-    const rows = list.map((item) => [
+  private toCsvLine(item: SysAuditLog): string {
+    return [
       item.createdAt.toISOString(),
       item.actionType,
       item.actionLabel,
@@ -333,15 +346,86 @@ export class AuditService {
       item.ipAddress ?? '',
       item.userAgent ?? '',
       item.detailJson ?? '',
-    ])
+    ].map(escapeCsvCell).join(',')
+  }
 
-    return [headers, ...rows]
-      .map((row) =>
-        row
-          .map(escapeCsvCell)
-          .join(','),
-      )
-      .join('\n')
+  /** 导出前先计数：超过上限直接拒绝并提示缩小范围，避免大表导出拖垮进程内存与数据库。 */
+  private async assertExportWithinLimit(query: AuditLogListQuery): Promise<number> {
+    const total = await this.buildListQuery(query).getCount()
+    if (total > AUDIT_EXPORT_MAX_ROWS) {
+      throw new BizError(`导出结果 ${total} 条，超过 ${AUDIT_EXPORT_MAX_ROWS} 条上限，请缩小时间范围或筛选条件`, 400)
+    }
+    return total
+  }
+
+  /** 一次性返回整份 CSV 文本（不含 BOM），仅供回归脚本与小结果集使用；同样受行数上限约束。 */
+  async exportCsv(query: AuditLogListQuery): Promise<string> {
+    await this.assertExportWithinLimit(query)
+    const list = await this.buildListQuery(query).orderBy('audit.id', 'DESC').getMany()
+    return [AUDIT_EXPORT_HEADERS.map(escapeCsvCell).join(','), ...list.map((item) => this.toCsvLine(item))].join('\n')
+  }
+
+  /**
+   * 流式导出 CSV：先计数校验上限，首查成功后才回调 onReady 声明下载；
+   * 再按 id 游标每批读取写出并遵守背压，内存占用与结果集大小无关。
+   */
+  async exportCsvToStream(query: AuditLogListQuery, output: Writable, onReady?: () => void): Promise<{ rowCount: number }> {
+    await this.assertExportWithinLimit(query)
+    onReady?.()
+    const write = async (chunk: string) => {
+      if (output.destroyed) {
+        throw new Error('审计日志下载连接已关闭')
+      }
+      if (!output.write(chunk)) {
+        await once(output, 'drain')
+      }
+    }
+    // CSV 前置 UTF-8 BOM，保证 Excel 直接打开中文不乱码。
+    await write(`${String.fromCharCode(0xfeff)}${AUDIT_EXPORT_HEADERS.map(escapeCsvCell).join(',')}`)
+    let rowCount = 0
+    let cursorId: string | null = null
+    while (true) {
+      const batchQuery = this.buildListQuery(query).orderBy('audit.id', 'DESC').take(AUDIT_EXPORT_BATCH_SIZE)
+      if (cursorId !== null) {
+        batchQuery.andWhere('audit.id < :cursorId', { cursorId })
+      }
+      const batch = await batchQuery.getMany()
+      if (batch.length) {
+        await write(`\n${batch.map((item) => this.toCsvLine(item)).join('\n')}`)
+        rowCount += batch.length
+      }
+      if (batch.length < AUDIT_EXPORT_BATCH_SIZE || rowCount >= AUDIT_EXPORT_MAX_ROWS) {
+        break
+      }
+      cursorId = batch[batch.length - 1].id
+    }
+    output.end()
+    return { rowCount }
+  }
+
+  /**
+   * 数据导出留痕（批量外泄检测）：只记录导出类型、筛选条件与行数，不记录导出内容本身。
+   * 导出已完成、数据已发出，审计写入失败不能反向影响响应，因此使用 safeRecord。
+   */
+  async recordDataExport(input: {
+    exportType: DataExportType
+    actor: CreateAuditLogInput['actor']
+    requestMeta?: RequestMeta
+    rowCount: number | null
+    filters: Record<string, unknown>
+  }): Promise<void> {
+    await this.safeRecord({
+      actionType: `data_export.${input.exportType}`,
+      actionLabel: DATA_EXPORT_LABELS[input.exportType],
+      targetType: 'data_export',
+      targetCode: input.exportType,
+      actor: input.actor,
+      requestMeta: input.requestMeta,
+      detail: {
+        rowCount: input.rowCount,
+        filters: input.filters,
+      },
+    })
   }
 }
 

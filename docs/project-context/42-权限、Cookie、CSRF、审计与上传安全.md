@@ -59,6 +59,7 @@
 - 上传兼容逻辑会把旧 `/uploads/<file>` 请求内部改写到 `products` 或 `client-feedback` 分类目录。
 - 审计记录至少关心：动作类型、目标对象、操作者、请求元信息、结果状态。
 - 审计业务类别由 `backend/src/constants/audit-action-catalog.ts` 统一维护：登录与认证、订单与出库、入库与供货、商品与库存、客服与消息、通知中心、用户与权限、系统配置、数据维护与数据库、其他。归类先查精确动作目录再按前缀匹配，未命中归入“其他”；类别筛选在 SQL 中翻译为精确 `IN` 与前缀 `LIKE ... ESCAPE '!'` 组合，列表与导出共用 `buildListQuery()`。`GET /api/audit-logs/filter-options`（`audit_logs:view + admin`）下发“类别 → 操作类型”、目标对象中文名与通知事件筛选项。每个业务类别在目录中声明重要程度 `level`（`critical` 高风险：用户与权限、数据维护与数据库；`high` 重要：登录与认证、系统配置；`normal` 常规业务：订单与出库、入库与供货、商品与库存；`low` 一般：客服与消息、通知中心、其他），随列表记录 `categoryLevel` 与筛选项下发，前端 `src/views/system/category-importance.ts` 映射为红/橙/主色/灰标签并展示图例。
+- 批量数据导出统一留痕（批量外泄排查）：审计日志 CSV、报表 Excel、库存流水、商品导出在成功写出后记录 `data_export.audit_logs/report/inventory_logs/products`（归入“数据维护与数据库”类别），detail 只含筛选条件与行数（商品导出另记是否含成本价），不含导出内容。审计 CSV 先计数，超过 20 万行拒绝并提示缩小范围，再按 id 游标每批 1000 行流式写出（`auditService.exportCsvToStream`，遵守背压）；审计、库存流水与商品导出共用 `utils/export-lease-pool.ts` 并发租约（每账号 1、每进程 3），报表导出沿用 `ReportExportLeasePool`。
 - 操作日志未选择业务类别与操作类型时，默认排除 `notification.rule.matched`、`notification.external.dispatch`、`notification.event.process` 三类通知内部处理记录（导出同口径，数据不删不改）；选择“通知中心”或具体动作时仍可完整查询，按事件聚合的视图见审计日志页“通知事件”页签。
 
 ## 权限与安全边界
