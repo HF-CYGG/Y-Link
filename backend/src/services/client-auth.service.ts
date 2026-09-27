@@ -188,6 +188,9 @@ export interface ClientStaffDirectoryLookupResult {
   isRegistered: boolean
 }
 
+/** 单个客户端账号同时保留的 Web 会话上限（Mobile 会话另由 MOBILE_MAX_ACTIVE_SESSIONS 控制）。 */
+const CLIENT_WEB_MAX_ACTIVE_SESSIONS = 20
+
 class ClientAuthService {
   private readonly userRepo = AppDataSource.getRepository(ClientUser)
   private readonly sessionRepo = AppDataSource.getRepository(ClientUserSession)
@@ -675,6 +678,7 @@ class ClientAuthService {
     const expiresAt = new Date(now.getTime() + env.AUTH_TOKEN_TTL_HOURS * 60 * 60 * 1000)
     const token = generateSessionToken()
     const securitySnapshot = this.buildLoginSecuritySnapshot(user)
+    let evictedSessionHashes: string[] = []
     const savedUser = await runInTransaction(async (manager) => {
       // 注册和登录共用同一签发边界；MySQL 锁账号行，SQLite 由统一事务协调器串行。
       // 事务内重新读取并复核全部认证、状态及身份关键字段，拒绝复用事务外的陈旧校验结果。
@@ -693,8 +697,21 @@ class ClientAuthService {
           lastAccessAt: now,
         }),
       )
+      // 单账号 Web 会话封顶：自助注册账号可反复登录无限制造会话行，超出上限时淘汰最久未活跃的会话。
+      const staleSessions = await manager.getRepository(ClientUserSession).find({
+        where: { userId: persistedUser.id },
+        select: { id: true, sessionToken: true },
+        order: { lastAccessAt: 'DESC', id: 'DESC' },
+        skip: CLIENT_WEB_MAX_ACTIVE_SESSIONS,
+        take: 1000,
+      })
+      if (staleSessions.length) {
+        await manager.getRepository(ClientUserSession).delete(staleSessions.map((session) => session.id))
+        evictedSessionHashes = staleSessions.map((session) => session.sessionToken)
+      }
       return persistedUser
     })
+    evictedSessionHashes.forEach((sessionHash) => customerServiceRealtimeService.disconnectBySessionHash('client', sessionHash))
     return {
       token,
       expiresAt,
