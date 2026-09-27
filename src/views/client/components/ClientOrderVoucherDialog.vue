@@ -10,10 +10,11 @@
  */
 
 import dayjs from 'dayjs'
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import type { OrderDetailResult } from '@/api/modules/order'
 import OrderVoucherTemplate from '@/views/order-list/components/OrderVoucherTemplate.vue'
 import { aggregateOrderVoucherItems } from '@/views/order-list/order-voucher-aggregation'
+import type { VoucherRenderRow } from '@/views/order-list/order-voucher-pagination'
 import type { OrderVoucherEditableFields, VoucherOrientation } from '@/views/client/client-order-detail-types'
 
 type VoucherEditableFieldKey = keyof OrderVoucherEditableFields
@@ -36,31 +37,48 @@ const props = defineProps<{
   orientationLabel: string
   enableHtml2pdfExport: boolean
   exportPdfLoading: boolean
+  pageCount: number
 }>()
 
 const voucherItemCount = computed(() => aggregateOrderVoucherItems(props.voucherOrder?.items ?? []).length)
+const previewRootRef = ref<HTMLElement | null>(null)
 
 const emit = defineEmits<{
   (event: 'update:visible', value: boolean): void
   (event: 'update:orientation', value: VoucherOrientation): void
   (event: 'update:editable-field', payload: { key: VoucherEditableFieldKey; value: string }): void
   (event: 'print'): void
-  (event: 'export-pdf'): void
+  (event: 'export-pdf', sourceElement: HTMLElement | null): void
+  (event: 'pages-change', pages: VoucherRenderRow[][], fillerCounts: number[], orderId: string, orientation: VoucherOrientation): void
   (event: 'closed'): void
 }>()
 
 const handleDialogVisibleChange = (value: boolean) => {
+  if (props.exportPdfLoading) return
   emit('update:visible', value)
 }
 
 const handleOrientationChange = (value: string | number | boolean | undefined) => {
+  if (props.exportPdfLoading) return
   if (value === 'portrait' || value === 'landscape') {
     emit('update:orientation', value)
   }
 }
 
 const emitEditableFieldUpdate = (key: VoucherEditableFieldKey, value: string | number) => {
+  if (props.exportPdfLoading) return
   emit('update:editable-field', { key, value: String(value ?? '') })
+}
+
+const handlePagesChange = (pages: VoucherRenderRow[][], fillerCounts: number[]) => {
+  if (props.visible && props.voucherOrder) {
+    emit('pages-change', pages, fillerCounts, props.voucherOrder.id, props.orientation)
+  }
+}
+
+const handleExportPdf = () => {
+  if (props.exportPdfLoading) return
+  emit('export-pdf', previewRootRef.value?.querySelector<HTMLElement>('.voucher-print-document') ?? null)
 }
 </script>
 
@@ -78,6 +96,7 @@ const emitEditableFieldUpdate = (key: VoucherEditableFieldKey, value: string | n
     destroy-on-close
     :modal-append-to-body="true"
     :lock-scroll="true"
+    :show-close="!exportPdfLoading"
     :close-on-click-modal="!exportPdfLoading"
     :close-on-press-escape="!exportPdfLoading"
     @update:model-value="handleDialogVisibleChange"
@@ -107,7 +126,7 @@ const emitEditableFieldUpdate = (key: VoucherEditableFieldKey, value: string | n
         </div>
         <div class="voucher-orientation-toolbar">
           <span class="voucher-orientation-toolbar__label">页面方向</span>
-          <el-radio-group :model-value="orientation" size="small" @update:model-value="handleOrientationChange">
+          <el-radio-group :model-value="orientation" :disabled="exportPdfLoading" size="small" @update:model-value="handleOrientationChange">
             <el-radio-button value="landscape">横版</el-radio-button>
             <el-radio-button value="portrait">竖版</el-radio-button>
           </el-radio-group>
@@ -117,6 +136,7 @@ const emitEditableFieldUpdate = (key: VoucherEditableFieldKey, value: string | n
             <el-form-item label="部门经办人">
               <el-input
                 :model-value="editableFields.departmentOperator"
+                :disabled="exportPdfLoading"
                 placeholder="请输入部门经办人"
                 clearable
                 @update:model-value="emitEditableFieldUpdate('departmentOperator', $event)"
@@ -125,6 +145,7 @@ const emitEditableFieldUpdate = (key: VoucherEditableFieldKey, value: string | n
             <el-form-item label="金蝶单据编号">
               <el-input
                 :model-value="editableFields.kingdeeVoucherNo"
+                :disabled="exportPdfLoading"
                 placeholder="请输入金蝶单据编号"
                 clearable
                 @update:model-value="emitEditableFieldUpdate('kingdeeVoucherNo', $event)"
@@ -133,6 +154,7 @@ const emitEditableFieldUpdate = (key: VoucherEditableFieldKey, value: string | n
             <el-form-item label="领取人签字">
               <el-input
                 :model-value="editableFields.receiverSignature"
+                :disabled="exportPdfLoading"
                 placeholder="请输入领取人签字"
                 clearable
                 @update:model-value="emitEditableFieldUpdate('receiverSignature', $event)"
@@ -141,6 +163,7 @@ const emitEditableFieldUpdate = (key: VoucherEditableFieldKey, value: string | n
             <el-form-item label="完成日期">
               <el-input
                 :model-value="editableFields.completionDate"
+                :disabled="exportPdfLoading"
                 placeholder="请输入完成日期，例如：2026-04-30"
                 clearable
                 @update:model-value="emitEditableFieldUpdate('completionDate', $event)"
@@ -155,7 +178,7 @@ const emitEditableFieldUpdate = (key: VoucherEditableFieldKey, value: string | n
           <div>
             <h3 class="voucher-preview-panel__title">正式出库单预览</h3>
             <p class="voucher-preview-panel__desc">
-              当前方向：{{ orientationLabel }}，共 2 页，每页 1 联；申请部门：{{ voucherOrder.customerDepartmentName || '散客' }}
+              当前方向：{{ orientationLabel }}，共 {{ pageCount || '测量中' }} 页，每联 {{ pageCount / 2 || '测量中' }} 页；申请部门：{{ voucherOrder.customerDepartmentName || '散客' }}
             </p>
           </div>
           <div class="voucher-preview-panel__summary">
@@ -164,11 +187,12 @@ const emitEditableFieldUpdate = (key: VoucherEditableFieldKey, value: string | n
           </div>
         </div>
         <div class="voucher-preview-panel__body">
-          <div class="order-voucher-preview-scope" :class="`is-${orientation}`">
+          <div ref="previewRootRef" class="order-voucher-preview-scope" :class="`is-${orientation}`">
             <OrderVoucherTemplate
               :order="voucherOrder"
               :editable-fields="editableFields"
               :orientation="orientation"
+              @pages-change="handlePagesChange"
             />
           </div>
         </div>
@@ -176,9 +200,9 @@ const emitEditableFieldUpdate = (key: VoucherEditableFieldKey, value: string | n
     </div>
     <template #footer>
       <span class="flex flex-wrap justify-end gap-2">
-        <el-button @click="emit('update:visible', false)">关闭</el-button>
-        <el-button type="primary" plain @click="emit('print')">打印</el-button>
-        <el-button type="primary" :disabled="!enableHtml2pdfExport" :loading="exportPdfLoading" @click="emit('export-pdf')">
+        <el-button :disabled="exportPdfLoading" @click="handleDialogVisibleChange(false)">关闭</el-button>
+        <el-button type="primary" plain :disabled="exportPdfLoading || pageCount === 0" @click="emit('print')">打印</el-button>
+        <el-button type="primary" :disabled="exportPdfLoading || !enableHtml2pdfExport || pageCount === 0" :loading="exportPdfLoading" @click="handleExportPdf">
           导出PDF
         </el-button>
       </span>

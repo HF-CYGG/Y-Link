@@ -184,6 +184,20 @@ export interface OrderSummaryView {
   createdAt: string
 }
 
+export interface OrderDetailSummaryView extends OrderSummaryView {
+  /** 仅从实际来源预订单读取；历史来源记录缺失时保持 null。 */
+  sourcePreorderPickupContact: string | null
+  sourcePreorderPickupAt: string | null
+  /** 管理端按原正式单展示来源领取记录，不把父单领取人归给其他合并成员。 */
+  sourcePreorderPickups: Array<{
+    sourceOrderId: string
+    businessNo: string
+    sourcePreorderNo: string | null
+    pickupContact: string | null
+    pickupAt: string | null
+  }>
+}
+
 export interface SoftDeleteOrderOptions {
   /** 仅 `manual_applied` 手工单可选择删除时回补商品与 SKU 库存。 */
   releaseInventory?: boolean
@@ -320,6 +334,27 @@ export class OrderService {
     return normalizeNullableEntityId(order.sourceDocId)
   }
 
+  /** 历史单详情只读回查：缺失结构化 ID 时，以真实预订单号快照限制幂等键候选。 */
+  private resolveLegacyPickupPreorderId(
+    order: Pick<BizOutboundOrder, 'sourceDocType' | 'sourceDocId' | 'sourceDocNo' | 'inventoryMode' | 'idempotencyKey'>,
+  ): string | null {
+    if (order.sourceDocType !== 'o2o_preorder' || order.sourceDocId || order.inventoryMode !== 'o2o_preapplied' || !order.sourceDocNo?.trim()) return null
+    const idempotencyKey = order.idempotencyKey ?? ''
+    if (!idempotencyKey.startsWith(O2O_VERIFIED_PREORDER_IDEMPOTENCY_KEY_PREFIX)) return null
+    const preorderId = idempotencyKey.slice(O2O_VERIFIED_PREORDER_IDEMPOTENCY_KEY_PREFIX.length)
+    return /^[1-9]\d*$/.test(preorderId) ? preorderId : null
+  }
+
+  private assertCompleteO2oSourceSnapshots(
+    orders: Array<Pick<BizOutboundOrder, 'sourceDocType' | 'sourceDocId' | 'inventoryMode'>>,
+  ): void {
+    if (orders.some((order) => (
+      order.sourceDocType === 'o2o_preorder' || order.inventoryMode === 'o2o_preapplied'
+    ) && (order.sourceDocType !== 'o2o_preorder' || !normalizeNullableEntityId(order.sourceDocId)))) {
+      throw new BizError('O2O 来源快照缺少可信的预订单类型或 ID，请先修复来源快照', 409)
+    }
+  }
+
   private async syncLinkedO2oPreorderVisibilityInManager(
     manager: EntityManager,
     order: Pick<BizOutboundOrder, 'id' | 'sourceDocType' | 'sourceDocId'>,
@@ -332,9 +367,10 @@ export class OrderService {
       relatedOrderIds.push(...mergeMetadata.children.map((child) => child.id))
     }
     const relatedOrders = await manager.getRepository(BizOutboundOrder).find({
-      select: ['id', 'sourceDocType', 'sourceDocId'],
+      select: ['id', 'sourceDocType', 'sourceDocId', 'inventoryMode'],
       where: { id: In(relatedOrderIds) },
     })
+    this.assertCompleteO2oSourceSnapshots(relatedOrders)
     const preorderIds = [...new Set(relatedOrders
       .map((relatedOrder) => this.resolveLinkedO2oPreorderId(relatedOrder))
       .filter((preorderId): preorderId is string => Boolean(preorderId)))]
@@ -348,6 +384,9 @@ export class OrderService {
       .orderBy('preorder.id', 'ASC')
     if (manager.connection.options.type !== 'sqlite') preorderQuery.setLock('pessimistic_write')
     const preorders = await preorderQuery.getMany()
+    if (preorders.length !== preorderIds.length) {
+      throw new BizError('O2O 来源快照指向的预订单不存在，请先修复来源快照', 409)
+    }
     const changedPreorderIds: string[] = []
     for (const preorder of preorders) {
       if (Boolean(preorder.isDeleted) === deleted) continue
@@ -379,9 +418,10 @@ export class OrderService {
       relatedOrderIds.push(...mergeMetadata.children.map((child) => child.id))
     }
     const relatedOrders = await manager.getRepository(BizOutboundOrder).find({
-      select: ['id', 'sourceDocType', 'sourceDocId'],
+      select: ['id', 'sourceDocType', 'sourceDocId', 'inventoryMode'],
       where: { id: In(relatedOrderIds) },
     })
+    this.assertCompleteO2oSourceSnapshots(relatedOrders)
     const preorderIds = [...new Set(relatedOrders
       .map((relatedOrder) => this.resolveLinkedO2oPreorderId(relatedOrder))
       .filter((preorderId): preorderId is string => Boolean(preorderId)))]
@@ -393,7 +433,10 @@ export class OrderService {
       .where('preorder.id IN (:...preorderIds)', { preorderIds })
       .orderBy('preorder.id', 'ASC')
     if (manager.connection.options.type !== 'sqlite') preorderQuery.setLock('pessimistic_write')
-    await preorderQuery.getMany()
+    const preorders = await preorderQuery.getMany()
+    if (preorders.length !== preorderIds.length) {
+      throw new BizError('O2O 来源快照指向的预订单不存在，请先修复来源快照', 409)
+    }
 
     const returnQuery = manager.getRepository(O2oReturnRequest)
       .createQueryBuilder('returnRequest')
@@ -511,7 +554,7 @@ export class OrderService {
     id: string,
     actor?: Pick<AuthUserContext, 'role'>,
     manager: EntityManager = AppDataSource.manager,
-  ): Promise<{ order: OrderSummaryView; items: OrderDetailItemView[] }> {
+  ): Promise<{ order: OrderDetailSummaryView; items: OrderDetailItemView[] }> {
     const order = await manager.getRepository(BizOutboundOrder).findOne({ where: { id } })
     if (!order) {
       throw new BizError('出库单不存在', 404)
@@ -522,28 +565,23 @@ export class OrderService {
       manager,
     )).get(normalizeEntityId(order.id))
     return {
-      order: this.buildOrderSummaryView(
-        order,
-        metadata,
-        await this.isOrderInventoryReleased(order, manager),
-        canViewSystemNo(actor),
-      ),
+      order: await this.buildOrderDetailSummaryView(order, metadata, manager, canViewSystemNo(actor)),
       items,
     }
   }
 
-  async detailBySystemNo(systemNo: string): Promise<{ order: OrderSummaryView; items: OrderDetailItemView[] }> {
+  async detailBySystemNo(systemNo: string): Promise<{ order: OrderDetailSummaryView; items: OrderDetailItemView[] }> {
     const order = await this.orderRepo.findOne({ where: { systemNo } })
     if (!order) {
       throw new BizError('出库单不存在', 404)
     }
     const items = await this.loadDetailItems(order.id)
     const metadata = (await orderMergeService.getMetadataMap([normalizeEntityId(order.id)])).get(normalizeEntityId(order.id))
-    return { order: this.buildOrderSummaryView(order, metadata, await this.isOrderInventoryReleased(order)), items }
+    return { order: await this.buildOrderDetailSummaryView(order, metadata), items }
   }
 
   /** @deprecated 兼容一个发布周期；旧路由仍按 systemNo 查询。 */
-  async detailByShowNo(showNo: string): Promise<{ order: OrderSummaryView; items: OrderDetailItemView[] }> {
+  async detailByShowNo(showNo: string): Promise<{ order: OrderDetailSummaryView; items: OrderDetailItemView[] }> {
     return this.detailBySystemNo(showNo)
   }
 
@@ -902,7 +940,7 @@ export class OrderService {
       }
       await orderMergeService.assertNotMergeMember(manager, normalizeEntityId(order.id))
 
-      if (order.sourceDocType === 'o2o_preorder') {
+      if (order.sourceDocType === 'o2o_preorder' || order.inventoryMode === 'o2o_preapplied') {
         throw new BizError('O2O 关联正式出库单必须从 O2O 管理入口整链永久删除', 409)
       }
 
@@ -1619,6 +1657,59 @@ export class OrderService {
       if (match.matchedIdentifierType) result.set(normalizeEntityId(relation.parentOrderId), match)
     }
     return result
+  }
+
+  private async buildOrderDetailSummaryView(
+    order: BizOutboundOrder,
+    metadata?: OrderMergeMetadata,
+    manager: EntityManager = AppDataSource.manager,
+    exposeSystemNo = true,
+  ): Promise<OrderDetailSummaryView> {
+    const summary = this.buildOrderSummaryView(order, metadata, await this.isOrderInventoryReleased(order, manager), exposeSystemNo)
+    const sourceOrderIds = [normalizeEntityId(order.id), ...(metadata?.role === 'parent'
+      ? metadata.children.map((child) => child.id)
+      : [])]
+    const sourceOrders = sourceOrderIds.length > 1
+      ? await manager.getRepository(BizOutboundOrder).find({ where: { id: In(sourceOrderIds) } })
+      : [order]
+    const sourceOrderMap = new Map(sourceOrders.map((sourceOrder) => [normalizeEntityId(sourceOrder.id), sourceOrder]))
+    const linkedPreorderIds = [...new Set(sourceOrderIds.flatMap((sourceOrderId) => {
+      const sourceOrder = sourceOrderMap.get(sourceOrderId)
+      if (!sourceOrder) return []
+      const preorderId = this.resolveLinkedO2oPreorderId(sourceOrder)
+        ?? this.resolveLegacyPickupPreorderId(sourceOrder)
+      return preorderId ? [preorderId] : []
+    }))]
+    const preorders = linkedPreorderIds.length
+      ? await manager.getRepository(O2oPreorder).find({
+        where: { id: In(linkedPreorderIds) },
+        select: ['id', 'preorderNo', 'pickupContact', 'pickupAt'],
+      })
+      : []
+    const preorderMap = new Map(preorders.map((preorder) => [normalizeEntityId(preorder.id), preorder]))
+    const sourcePreorderPickups = sourceOrderIds.flatMap((sourceOrderId) => {
+      const sourceOrder = sourceOrderMap.get(sourceOrderId)
+      if (!sourceOrder) return []
+      if (sourceOrder.sourceDocType !== 'o2o_preorder' && sourceOrder.inventoryMode !== 'o2o_preapplied') return []
+      const structuredPreorderId = this.resolveLinkedO2oPreorderId(sourceOrder)
+      const preorderId = structuredPreorderId ?? this.resolveLegacyPickupPreorderId(sourceOrder)
+      const candidate = preorderId ? preorderMap.get(preorderId) : null
+      const preorder = structuredPreorderId || candidate?.preorderNo === sourceOrder.sourceDocNo ? candidate : null
+      return [{
+        sourceOrderId,
+        businessNo: sourceOrder.businessNo,
+        sourcePreorderNo: sourceOrder.sourceDocNo ?? preorder?.preorderNo ?? null,
+        pickupContact: preorder?.pickupContact?.trim() || null,
+        pickupAt: preorder?.pickupAt ? normalizeDateTime(preorder.pickupAt) : null,
+      }]
+    })
+    const ownPickup = sourcePreorderPickups.find((pickup) => pickup.sourceOrderId === normalizeEntityId(order.id))
+    return {
+      ...summary,
+      sourcePreorderPickupContact: ownPickup?.pickupContact ?? null,
+      sourcePreorderPickupAt: ownPickup?.pickupAt ?? null,
+      sourcePreorderPickups,
+    }
   }
 
   private buildSubmittedOrderView(order: BizOutboundOrder, exposeSystemNo = true): SubmittedOrderView {

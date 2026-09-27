@@ -158,8 +158,9 @@ async function main() {
     o2oPurgeBlockedEntity.sourceDocType = 'o2o_preorder'
     o2oPurgeBlockedEntity.sourceDocId = '999999'
     o2oPurgeBlockedEntity.sourceDocNo = 'PRE-W-999999'
+    o2oPurgeBlockedEntity.isDeleted = true
+    o2oPurgeBlockedEntity.deletedAt = new Date()
     await orderRepo.save(o2oPurgeBlockedEntity)
-    await orderService.softDeleteById(String(o2oPurgeBlockedEntity.id), actor, o2oPurgeBlockedEntity.businessNo)
     await assert.rejects(
       () => orderService.purgeById(String(o2oPurgeBlockedEntity.id), actor, o2oPurgeBlockedEntity.businessNo),
       (error: unknown) => error instanceof BizError && error.statusCode === 409 && /O2O 管理入口/.test(error.message),

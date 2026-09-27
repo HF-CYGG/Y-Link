@@ -286,6 +286,37 @@ async function main() {
       idempotencyKey: `issue71-o2o-merge-${seed}`,
     }, actor)
     assert.equal(merged.targetOrderId, String(target.outbound.id), '同部门跨账号正式出库单应允许合并')
+    const sourcePickupAt = new Date('2020-03-01T10:30:00.000Z')
+    await preorderRepo.update({ id: source.preorder.id }, { pickupAt: sourcePickupAt })
+    const mergedDetail = await orderService.detailById(String(target.outbound.id))
+    assert.deepEqual(
+      mergedDetail.order.sourcePreorderPickups,
+      [
+        {
+          sourceOrderId: String(target.outbound.id),
+          businessNo: target.outbound.businessNo,
+          sourcePreorderNo: target.preorder.preorderNo,
+          pickupContact: target.preorder.pickupContact,
+          pickupAt: null,
+        },
+        {
+          sourceOrderId: String(source.outbound.id),
+          businessNo: source.outbound.businessNo,
+          sourcePreorderNo: source.preorder.preorderNo,
+          pickupContact: source.preorder.pickupContact,
+          pickupAt: sourcePickupAt.toISOString(),
+        },
+      ],
+      '父单详情应按原正式单逐张保留不同账号的来源领取人，不能把父单领取人覆盖全部来源',
+    )
+    await preorderRepo.update({ id: source.preorder.id }, { pickupContact: null })
+    try {
+      const historicalDetail = await orderService.detailById(String(target.outbound.id))
+      assert.equal(historicalDetail.order.sourcePreorderPickups[1]?.pickupContact, null, '历史来源单缺失领取人时必须明确保持未记录')
+      assert.equal(historicalDetail.order.sourcePreorderPickups[0]?.pickupContact, target.preorder.pickupContact, '来源缺失不得污染父单自身领取人')
+    } finally {
+      await preorderRepo.update({ id: source.preorder.id }, { pickupContact: source.preorder.pickupContact })
+    }
 
     const sourceComplianceSet = await o2oPreorderService.updateComplianceFlagsByAdmin({
       orderId: String(source.preorder.id),
@@ -491,9 +522,64 @@ async function main() {
     const deleteGuardVerify = await o2oPreorderService.verifyByCode(deleteGuardReturn.verifyCode, actor)
     assert.equal(deleteGuardVerify?.verifyTargetType, 'return_request', '软删被阻断后原退货申请必须仍可正常核销')
 
+    await outboundRepo.update({ id: source.outbound.id }, { sourceDocId: null })
+    try {
+      await assert.rejects(
+        () => orderService.softDeleteById(String(target.outbound.id), actor, target.outbound.businessNo),
+        (error: unknown) => error instanceof BizError && error.statusCode === 409 && /来源快照/.test(error.message),
+        '合并来源单缺少结构化预订单 ID 时父单软删必须拒绝',
+      )
+      assert.equal(Boolean((await outboundRepo.findOneByOrFail({ id: target.outbound.id })).isDeleted), false, '拒绝软删后父单状态不得改变')
+      assert.equal(Boolean((await preorderRepo.findOneByOrFail({ id: source.preorder.id })).isDeleted), false, '拒绝软删后来源预订单状态不得改变')
+    } finally {
+      await outboundRepo.update({ id: source.outbound.id }, { sourceDocId: source.outbound.sourceDocId })
+    }
+
+    await outboundRepo.update({ id: source.outbound.id }, { sourceDocType: null, sourceDocId: null })
+    try {
+      const incompleteDetail = await orderService.detailById(String(target.outbound.id), actor)
+      const incompletePickup = incompleteDetail.order.sourcePreorderPickups.find((pickup) => pickup.sourceOrderId === String(source.outbound.id))
+      assert.equal(incompletePickup?.businessNo, source.outbound.businessNo, '来源子单快照残缺仍须在合并凭证保留正式业务号')
+      assert.equal(incompletePickup?.sourcePreorderNo, source.outbound.sourceDocNo, '来源子单快照残缺仍须保留已记录预订单号')
+      assert.equal(incompletePickup?.pickupContact, null, '来源子单快照残缺不得从其他单据推断领取人')
+      await assert.rejects(
+        () => orderService.softDeleteById(String(target.outbound.id), actor, target.outbound.businessNo),
+        (error: unknown) => error instanceof BizError && error.statusCode === 409 && /来源快照/.test(error.message),
+        '合并来源 O2O 库存模式但类型与 ID 双空时父单软删必须拒绝',
+      )
+      assert.equal(Boolean((await outboundRepo.findOneByOrFail({ id: target.outbound.id })).isDeleted), false, '双空来源软删被拒后父单状态不得改变')
+      assert.equal(Boolean((await preorderRepo.findOneByOrFail({ id: source.preorder.id })).isDeleted), false, '双空来源软删被拒后预订单状态不得改变')
+    } finally {
+      await outboundRepo.update({ id: source.outbound.id }, { sourceDocType: source.outbound.sourceDocType, sourceDocId: source.outbound.sourceDocId })
+    }
+
     await orderService.softDeleteById(String(target.outbound.id), actor, target.outbound.businessNo)
     assert.equal(Boolean((await preorderRepo.findOneByOrFail({ id: target.preorder.id })).isDeleted), true)
     assert.equal(Boolean((await preorderRepo.findOneByOrFail({ id: source.preorder.id })).isDeleted), true, '父单软删必须联动所有来源预订单')
+    await outboundRepo.update({ id: source.outbound.id }, { sourceDocId: null })
+    try {
+      await assert.rejects(
+        () => orderService.restoreById(String(target.outbound.id), actor),
+        (error: unknown) => error instanceof BizError && error.statusCode === 409 && /来源快照/.test(error.message),
+        '合并来源单缺少结构化预订单 ID 时父单恢复必须拒绝',
+      )
+      assert.equal(Boolean((await outboundRepo.findOneByOrFail({ id: target.outbound.id })).isDeleted), true, '拒绝恢复后父单仍应保持删除态')
+      assert.equal(Boolean((await preorderRepo.findOneByOrFail({ id: source.preorder.id })).isDeleted), true, '拒绝恢复后来源预订单仍应保持删除态')
+    } finally {
+      await outboundRepo.update({ id: source.outbound.id }, { sourceDocId: source.outbound.sourceDocId })
+    }
+    await outboundRepo.update({ id: source.outbound.id }, { sourceDocType: null, sourceDocId: null })
+    try {
+      await assert.rejects(
+        () => orderService.restoreById(String(target.outbound.id), actor),
+        (error: unknown) => error instanceof BizError && error.statusCode === 409 && /来源快照/.test(error.message),
+        '合并来源 O2O 库存模式但类型与 ID 双空时父单恢复必须拒绝',
+      )
+      assert.equal(Boolean((await outboundRepo.findOneByOrFail({ id: target.outbound.id })).isDeleted), true, '双空来源恢复被拒后父单仍应保持删除态')
+      assert.equal(Boolean((await preorderRepo.findOneByOrFail({ id: source.preorder.id })).isDeleted), true, '双空来源恢复被拒后预订单仍应保持删除态')
+    } finally {
+      await outboundRepo.update({ id: source.outbound.id }, { sourceDocType: source.outbound.sourceDocType, sourceDocId: source.outbound.sourceDocId })
+    }
     await orderService.restoreById(String(target.outbound.id), actor)
     assert.equal(Boolean((await preorderRepo.findOneByOrFail({ id: target.preorder.id })).isDeleted), false)
     assert.equal(Boolean((await preorderRepo.findOneByOrFail({ id: source.preorder.id })).isDeleted), false, '父单恢复必须联动所有来源预订单')
@@ -505,6 +591,37 @@ async function main() {
       }, actor),
       (error: unknown) => error instanceof BizError && error.statusCode === 409,
       '任意合并成员关联的 O2O 预订单必须阻断永久删除',
+    )
+
+    const appendTarget = await createVerifiedPair(0, 1)
+    const appendFirst = await createVerifiedPair(1, 1)
+    const appendSecond = await createVerifiedPair(2, 1)
+    const appendMembers = [appendTarget, appendFirst, appendSecond]
+    const appendCreatedAt = localDateTime(2020, 3, 4, 10, 0)
+    await Promise.all(appendMembers.map((member) => outboundRepo.update({ id: member.outbound.id }, { createdAt: appendCreatedAt })))
+    const appendPickupAt = new Date('2020-03-04T11:00:00.000Z')
+    await preorderRepo.update({ id: appendSecond.preorder.id }, { pickupAt: appendPickupAt })
+    const firstAppend = await orderService.commitMerge({
+      target: { orderId: String(appendTarget.outbound.id), editVersion: 1 },
+      sources: [{ orderId: String(appendFirst.outbound.id), editVersion: 1 }],
+      reason: 'O2O 父单首次合并后继续追加领取记录验证',
+      idempotencyKey: `issue71-o2o-pickup-first-${seed}`,
+    }, actor)
+    await orderService.commitMerge({
+      target: { orderId: String(appendTarget.outbound.id), editVersion: firstAppend.targetEditVersion },
+      sources: [{ orderId: String(appendSecond.outbound.id), editVersion: 1 }],
+      reason: 'O2O 父单追加来源领取记录验证',
+      idempotencyKey: `issue71-o2o-pickup-second-${seed}`,
+    }, actor)
+    const appendedDetail = await orderService.detailById(String(appendTarget.outbound.id))
+    assert.deepEqual(
+      appendedDetail.order.sourcePreorderPickups.map((pickup) => [pickup.sourceOrderId, pickup.pickupContact, pickup.pickupAt]),
+      [
+        [String(appendTarget.outbound.id), appendTarget.preorder.pickupContact, null],
+        [String(appendFirst.outbound.id), appendFirst.preorder.pickupContact, null],
+        [String(appendSecond.outbound.id), appendSecond.preorder.pickupContact, appendPickupAt.toISOString()],
+      ],
+      '向既有父单追加来源后，详情应保留父单和两张来源单各自的领取记录与顺序',
     )
 
     console.log('✅ Issue #71 O2O 合并边界专项验证通过')

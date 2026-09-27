@@ -702,6 +702,37 @@ try {
   assert.equal(customerIdentifierMap.has(String(prefixTarget.id)), false, '跨账号/伪造幂等前缀不得产生客户单据关联')
   assert.equal(customerIdentifierMap.has(String(structuredTarget.id)), false, '已软删除正式单不得向客户暴露关联')
 
+  const missingSourcePreorder = await createPreorder('PRE-W-770004', 'verified')
+  const missingSourceOrder = await createOutbound({
+    systemNo: 'OUT-W-770004',
+    businessNo: 'hyyz770004',
+    idempotencyKey: `o2o-preorder-verify:${missingSourcePreorder.id}`,
+    inventoryMode: 'o2o_preapplied',
+  })
+  const missingSourceId = String(missingSourceOrder.id)
+  await AppDataSource.getRepository(BizOutboundOrder).update({ id: missingSourceOrder.id }, {
+    sourceDocType: 'o2o_preorder', sourceDocId: '999999999',
+  })
+  await expectBizError(
+    () => orderService.softDeleteById(missingSourceId, actor, missingSourceOrder.businessNo),
+    409,
+    /来源快照.*不存在/,
+  )
+  assert.equal(Boolean((await AppDataSource.getRepository(BizOutboundOrder).findOneByOrFail({ id: missingSourceOrder.id })).isDeleted), false, '结构化 ID 指向不存在预订单时软删不得改变状态')
+  await AppDataSource.getRepository(BizOutboundOrder).update({ id: missingSourceOrder.id }, { sourceDocType: null, sourceDocId: null })
+  await expectBizError(
+    () => orderService.softDeleteById(missingSourceId, actor, missingSourceOrder.businessNo),
+    409,
+    /来源快照/,
+  )
+  assert.equal(Boolean((await AppDataSource.getRepository(BizOutboundOrder).findOneByOrFail({ id: missingSourceOrder.id })).isDeleted), false, 'O2O 库存模式双空来源软删被拒后状态不得改变')
+  assert.equal(Boolean((await AppDataSource.getRepository(O2oPreorder).findOneByOrFail({ id: missingSourcePreorder.id })).isDeleted), false, '双空来源不得凭幂等键同步预订单')
+  await AppDataSource.getRepository(BizOutboundOrder).update({ id: missingSourceOrder.id }, { isDeleted: true, deletedAt: new Date() })
+  await expectBizError(() => orderService.restoreById(missingSourceId, actor), 409, /来源快照/)
+  await expectBizError(() => orderService.purgeById(missingSourceId, actor, missingSourceOrder.businessNo), 409, /O2O/)
+  assert.equal(Boolean((await AppDataSource.getRepository(BizOutboundOrder).findOneByOrFail({ id: missingSourceOrder.id })).isDeleted), true, '双空来源恢复及普通永久删除被拒后仍应保留软删单')
+  assert.equal(Boolean((await AppDataSource.getRepository(O2oPreorder).findOneByOrFail({ id: missingSourcePreorder.id })).isDeleted), false, '双空来源失败路径不得修改预订单')
+
   const systemGapNine = await createOutbound({ systemNo: 'OUT-W-000029', businessNo: 'hyyz779929', isDeleted: true })
   const systemGapTen = await createOutbound({ systemNo: 'OUT-W-000030', businessNo: 'hyyz779930', isDeleted: true })
   await setCursor('order.system.walkin', 'order.system.walkin.current', 30)
