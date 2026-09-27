@@ -449,6 +449,7 @@ class ClientAuthService {
         rawValue: account.account,
         normalizedValue: account.account,
       })
+      // 联系方式一经注册即占用，无论对方是否已验证都不得重复注册。
       if (existedByAccount) {
         throw new BizError('当前注册信息无法使用，请确认联系方式已完成验证后重试', 409)
       }
@@ -789,6 +790,15 @@ class ClientAuthService {
     }
     if (isTeacherRegister) {
       await this.guardStaffInviteAttempt(registerProfile.staffNo ?? '', input.inviteCode ?? '', _requestMeta)
+      // 教师联系方式选填；一旦填写必须与个人注册一样用验证码证明持有，
+      // 否则持有统一邀请码即可把他人手机号/邮箱写进自己账号，而联系方式全库唯一，真实持有人将无法注册或改绑。
+      if (account) {
+        this.assertRegisterVerificationChannelReady(account, verificationContext.providers)
+        if (validationMode !== 'verification_code') {
+          throw new BizError(`当前未启用${account.channel === 'email' ? '邮箱' : '手机'}验证码，教师注册请留空联系方式`, 400)
+        }
+        await this.verifyRegisterChallenge(input, validationMode, account, { forceVerificationCode: true })
+      }
     } else {
       this.assertRegisterVerificationChannelReady(account, verificationContext.providers)
       await this.verifyRegisterChallenge(input, validationMode, account)
@@ -809,8 +819,9 @@ class ClientAuthService {
           const saved = await manager.getRepository(ClientUser).save(manager.getRepository(ClientUser).create({
           mobile: account?.mobile ?? undefined,
           email: account?.email ?? undefined,
-          mobileVerifiedAt: null,
-          emailVerifiedAt: null,
+          // 填写的联系方式已在上方通过验证码校验，注册即记为已认证。
+          mobileVerifiedAt: account?.channel === 'mobile' ? new Date() : null,
+          emailVerifiedAt: account?.channel === 'email' ? new Date() : null,
           passwordHash,
           // 当前账号体系下，用户名与登录账号分离，支持用户自定义用户名。
           realName: registerProfile.usernameValue,
