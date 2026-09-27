@@ -97,4 +97,5 @@
 - 改上传安全时回归：新图片可访问、旧图片兼容访问、响应头正确。
 - 改 CSRF 时回归：管理端写接口在 Cookie 会话下的正常提交与失败提示。
 - 改图形验证码时执行 `npm --prefix backend run captcha:rendering:verify`，覆盖无系统字体的真实 PNG 渲染、兼容字段、作用域隔离和一次性校验。
+- 改上述任一边界时执行 `npm --prefix backend run security:web-deep-audit:verify`（畸形 JSON、模板转义、验证码一次性、空闲超时、永久删除限流、本人改密、客户端频控、onebox 上传边界、导入预检、登录锁定主体、multipart 加固、附件与资料发码频控）。
 - 升级 `multer`、`sharp` 等上传链路依赖后执行 `npm --prefix backend audit --omit=dev`，并回归 `task4:upload-security:verify` 与 `feedback:customer-service:verify`。
