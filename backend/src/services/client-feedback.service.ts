@@ -413,7 +413,12 @@ class ClientFeedbackService {
     return owner
   }
 
-  private consumeAttachmentUploadRate(clientUserId: string) {
+  /**
+   * 反馈附件上传频控：
+   * - 路由必须在 multer 接收文件、sharp 解码重编码之前调用，失败的上传同样计次；
+   * - 若只在建档阶段计次，校验失败的大图永远不会消耗额度，单个账号即可反复占满全局图片处理队列。
+   */
+  consumeAttachmentUploadRate(clientUserId: string) {
     const now = Date.now()
     const previous = this.attachmentUploadRateWindows.get(clientUserId)
     const window = previous && now - previous.startedAt < CLIENT_FEEDBACK_ATTACHMENT_POLICY.uploadRateWindowMs
@@ -456,7 +461,7 @@ class ClientFeedbackService {
     if (typeof sizeBytes !== 'number' || !Number.isInteger(sizeBytes) || sizeBytes <= 0 || sizeBytes > IMAGE_UPLOAD_MAX_FILE_SIZE) {
       throw new BizError('反馈附件大小非法', 400)
     }
-    this.consumeAttachmentUploadRate(clientAuth.userId)
+    // 上传频控已由路由在接收文件前通过 consumeAttachmentUploadRate 计次，这里不重复消耗额度。
     await this.assertFeedbackAttachmentDiskCapacity()
     return this.runAttachmentCoordinatedTransaction(async (manager) => {
       const filePath = path.resolve(ensureUploadCategoryDir('client-feedback'), input.storageName)

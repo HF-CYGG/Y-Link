@@ -115,6 +115,15 @@ authenticatedClientFeedbackRouter.get(
 
 authenticatedClientFeedbackRouter.post(
   '/attachments',
+  // 先按账号计次再接收文件：超限请求不落临时文件、不进入全局图片处理队列。
+  (req, _res, next) => {
+    try {
+      clientFeedbackService.consumeAttachmentUploadRate((req as ClientAuthenticatedRequest).clientAuth.userId)
+      next()
+    } catch (error) {
+      next(error)
+    }
+  },
   feedbackAttachmentUpload.single('file'),
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
