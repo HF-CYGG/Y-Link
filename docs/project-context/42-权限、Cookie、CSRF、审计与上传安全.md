@@ -46,6 +46,14 @@
 - 全局撞库态势（`GlobalLoginFailureMonitor`，阈值见 `config/load-protection-policy.ts`）：分布式撞库时单个来源、单个账号都可能低于各自阈值，因此按端在进程内统计 5 分钟全站登录失败数（含会话内密码复核失败）。管理端达到 30 次、客户端（Web 与 Mobile 共用）达到 150 次后，该端所有登录强制图形验证码 15 分钟，持续失败会顺延；进入该状态时只写一次 `auth.guard.global_captcha`。阈值可用 `YLINK_ADMIN_GLOBAL_FAILURE_THRESHOLD`、`YLINK_CLIENT_GLOBAL_FAILURE_THRESHOLD`、`YLINK_GLOBAL_CAPTCHA_HOLD_MINUTES` 调整，非法值启动即报错。多实例部署各实例独立计数。前端沿用既有“需要验证码”响应（管理端 428、客户端“请输入图形验证码”）自动显示验证码，无需改动。
 - 自研风控（登录/注册/发码/找回等频控与锁定，`normalizeRiskSource`）与救援入口的来源键经 `utils/ip-subnet.ts` 归一：IPv4 映射地址（`::ffff:a.b.c.d`）还原为 IPv4，IPv6 聚合到 /64。运营商通常给每个终端一整个 /64，按完整地址计数时攻击者在网段内轮换地址即可绕过。审计 `ipAddress` 仍记录完整 IP，`detail.source` 为聚合后的来源键。express-rate-limit 默认按 /56 聚合，无需改动；新增按 IP 计数的自研限流必须复用该工具。
 - 管理端与 Web 客户端认证入参在路由 schema 层限长（`constants/auth-input-limits.ts`）：账号与发码目标 ≤128，已有密码（登录、当前密码复核、JSON 导入导出复核）≤256（main 上客户端密码曾无上限，放宽以兼容历史口令），新密码 ≤64，图形验证码 ID ≤64、答案 ≤16，找回重置凭证 ≤256。超长输入在进入账号归一化、查库、密码派生与审计前即返回中文 400。移动端契约独立，未纳入。
+- 管理端 TOTP 两步验证（所有管理端账号自愿开启，`services/admin-mfa.service.ts`、`utils/totp.ts`、表 `sys_user_mfa`）：
+  - 绑定：`POST /api/auth/mfa/enroll` 先复核当前密码，返回 20 字节 Base32 秘钥与 `otpauth://` 地址（10 分钟内有效）；`POST /api/auth/mfa/enroll/confirm` 校验一次动态码后才落库，同时返回 10 个一次性恢复码（明文只此一次）。
+  - 存储：秘钥经 `data-encryption` 加密（AAD 绑定账号 ID），恢复码只存 HMAC-SHA256 摘要并记录生成时的数据加密密钥 ID；密钥被更换时明确返回“无法解密”，不把正确恢复码当错码计入锁定。
+  - 登录：已开启时 `POST /api/auth/login` 密码正确也不下发会话，只返回 `{ mfaRequired, mfaTicket }`（5 分钟、最多 5 次尝试，只存安全快照与可能的重哈希结果）；`POST /api/auth/login/mfa` 与登录共用匿名限流、来源频控与账号锁定，动态码错误计入账号失败锁定，成功后才清空失败计数。第二步在事务内复核第一步的安全快照，期间改密、停用或两步验证被重置都会让旧票据作废（`data.reason=ADMIN_MFA_TICKET_EXPIRED`，前端回到第一步）。
+  - 防重放：动态码允许 ±1 个时间步（30 秒）漂移，`last_used_step` 以比较并交换方式单调推进；恢复码以比较并交换方式移除，并发提交只有一个成功。服务器时间必须与 NTP 同步，否则动态码会整体失效。
+  - 自助管理：停用（`/mfa/disable`）需当前密码 + 动态码或恢复码；重生成恢复码（`/mfa/recovery-codes`）需当前密码 + 动态码。第二因素错误计入登录失败锁定。
+  - 重置：管理员（`users:reset_password` + admin 角色）可在用户管理中重置他人（`POST /api/users/:id/mfa/reset`，不能重置自己，不作废对方会话）；唯一管理员丢失认证器且恢复码用尽、或数据加密密钥丢失时，在服务器本地执行 `node dist/runtime/admin-mfa-reset-cli.js <用户名>`。账号永久删除时同一事务内清理 `sys_user_mfa`（外键 RESTRICT）。
+  - 审计：`auth.mfa.challenge/enroll_start/enable/disable/recovery_codes.regenerate`、`user.mfa.reset`（命令行来源记 `via=cli`），登录成功审计记录 `mfaMethod`；任何审计与日志不得出现秘钥或恢复码明文。
 
 ## 代理、HTTPS 与救援传输边界
 
@@ -106,6 +114,7 @@
 - 新增审计动作或调整审计类别后运行 `npm --prefix backend run audit:catalog:verify`：扫描源码中全部 `actionType` 必须已登记类别与中文名，并验证类别筛选、“其他”兜底、默认隐藏、组合筛选与导出口径一致。
 - 改上传安全时回归：新图片可访问、旧图片兼容访问、响应头正确。
 - 改 CSRF 时回归：管理端写接口在 Cookie 会话下的正常提交与失败提示。
+- 改两步验证、管理端登录流程或相关路由时执行 `npm --prefix backend run auth:mfa:verify`，覆盖绑定与加密落库、两段登录、防重放、恢复码一次性、票据次数与账号锁定、并发单次成功、停用与重生成、管理员与命令行重置、密钥不匹配降级、永久删除联动与审计不落明文。
 - 改图形验证码时执行 `npm --prefix backend run captcha:rendering:verify`，覆盖无系统字体的真实 PNG 渲染、兼容字段、作用域隔离和一次性校验。
 - 改上述任一边界时执行 `npm --prefix backend run security:web-deep-audit:verify`（畸形 JSON、模板转义、验证码一次性、空闲超时、永久删除限流、本人改密、客户端频控、onebox 上传边界、导入预检、登录锁定主体、multipart 加固、附件与资料发码频控）。
 - 升级 `multer`、`sharp` 等上传链路依赖后执行 `npm --prefix backend audit --omit=dev`，并回归 `task4:upload-security:verify` 与 `feedback:customer-service:verify`。

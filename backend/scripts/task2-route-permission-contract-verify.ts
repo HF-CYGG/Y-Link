@@ -32,7 +32,7 @@ const DATABASE_RESCUE_ROUTER_NAME = 'databaseRescueRouter'
 const ANONYMOUS_ROUTE_ALLOWLIST = new Set<string>([
   'GET /health',
   'GET /database-rescue',
-  'GET /api/auth/captcha', 'POST /api/auth/login', 'POST /api/auth/logout',
+  'GET /api/auth/captcha', 'POST /api/auth/login', 'POST /api/auth/login/mfa', 'POST /api/auth/logout',
   'GET /api/client-auth/captcha', 'POST /api/client-auth/register', 'POST /api/client-auth/login',
   'GET /api/client-auth/capabilities', 'POST /api/client-auth/verification-code/send',
   'POST /api/client-auth/forgot-password/verify', 'POST /api/client-auth/forgot-password/reset',
@@ -50,6 +50,8 @@ const AUTHENTICATED_SELF_SERVICE_ALLOWLIST = new Set<string>([
   'GET /api/auth/me', 'POST /api/auth/logout',
   'POST /api/auth/presence/heartbeat',
   'POST /api/auth/change-password',
+  'GET /api/auth/mfa/status', 'POST /api/auth/mfa/enroll', 'POST /api/auth/mfa/enroll/confirm',
+  'POST /api/auth/mfa/disable', 'POST /api/auth/mfa/recovery-codes',
 ])
 
 const log = (message: string) => console.log(`[task2-route-contract] ${message}`)

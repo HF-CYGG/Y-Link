@@ -220,3 +220,19 @@ userRouter.post(
     })
   }),
 )
+
+// 重置他人两步验证：与重置密码同一权限点，仅管理员可用。
+userRouter.post(
+  '/:id/mfa/reset',
+  requirePermission('users:reset_password'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const data = await userService.resetMfa(req.params.id, authReq.auth, extractRequestMeta(req))
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)

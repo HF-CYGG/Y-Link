@@ -579,6 +579,28 @@ export class AuthSecurityService {
     )
   }
 
+  /**
+   * 两步验证登录第二步的守卫：与登录共用来源频控和“来源 + 账号”锁定，账号已锁定时第二步同样拒绝；
+   * 图形验证码已在第一步按需校验，第二步不再要求。`username` 来自票据中的规范用户名，无需脱敏。
+   */
+  async guardAdminMfaLoginRequest(requestMeta: RequestMeta | undefined, username: string): Promise<void> {
+    const source = normalizeRiskSource(requestMeta)
+    const subject = username.trim().toLowerCase()
+    await this.consumeRateLimit(`admin-login:ip:${source}`, RATE_LIMIT_RULES.adminLoginByIp, {
+      actionType: 'auth.guard.admin_login',
+      actionLabel: '管理端登录频控',
+      targetCode: subject,
+      requestMeta,
+      detail: { source, stage: 'mfa' },
+    })
+    await this.assertLoginNotLockedAndCaptchaRequired(
+      'admin-login',
+      [`admin-login:ip:${source}`, `admin-login:user:${subject}`],
+      requestMeta,
+      subject,
+    )
+  }
+
   async guardAdminCaptchaRequest(requestMeta: RequestMeta | undefined) {
     const source = normalizeRiskSource(requestMeta)
     await this.consumeRateLimit(`admin-captcha:ip:${source}`, RATE_LIMIT_RULES.captchaBySource, {

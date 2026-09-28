@@ -166,7 +166,7 @@ export function createApp(options: CreateAppOptions = {}) {
   const adminAuthLimiter = createPublicAuthLimiter(
     'express-admin-auth',
     resolvePublicAuthRateLimit(options.publicAuthRateLimits?.admin, 60, '管理端'),
-    new Set(['/captcha', '/login']),
+    new Set(['/captcha', '/login', '/login/mfa']),
   )
   const clientAuthLimiter = createPublicAuthLimiter(
     'express-client-auth',

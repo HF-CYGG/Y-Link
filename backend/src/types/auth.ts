@@ -86,4 +86,6 @@ export interface UserSafeProfile {
   lastLoginAt: Date | null
   createdAt: Date
   updatedAt: Date
+  /** 仅用户管理列表返回：该账号是否已开启两步验证。 */
+  mfaEnabled?: boolean
 }

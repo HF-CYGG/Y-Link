@@ -17,6 +17,7 @@ import {
 } from '../utils/admin-auth-cookie.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { authService } from '../services/auth.service.js'
+import { adminMfaService } from '../services/admin-mfa.service.js'
 import { authSecurityService } from '../services/auth-security.service.js'
 import { captchaService } from '../services/captcha.service.js'
 import {
@@ -31,6 +32,39 @@ const loginSchema = z.object({
   password: existingPasswordInput('密码'),
   captchaId: optionalCaptchaIdInput(),
   captchaCode: optionalCaptchaCodeInput(),
+})
+
+const totpCodeInput = () => z.string().trim().max(16, '动态码格式不正确')
+const recoveryCodeInput = () => z.string().trim().max(32, '恢复码格式不正确')
+
+// 两步验证第二步：动态码与恢复码二选一。
+const mfaLoginSchema = z
+  .object({
+    mfaTicket: z.string().trim().min(1, '登录验证已过期，请重新登录').max(128, '登录验证已过期，请重新登录'),
+    code: totpCodeInput().optional(),
+    recoveryCode: recoveryCodeInput().optional(),
+  })
+  .refine((value) => Boolean(value.code) !== Boolean(value.recoveryCode), { message: '请输入 6 位动态码或恢复码' })
+
+const mfaStepUpSchema = z.object({
+  currentPassword: existingPasswordInput('当前密码'),
+})
+
+const mfaConfirmSchema = z.object({
+  code: totpCodeInput().min(1, '请输入 6 位动态码'),
+})
+
+const mfaDisableSchema = z
+  .object({
+    currentPassword: existingPasswordInput('当前密码'),
+    code: totpCodeInput().optional(),
+    recoveryCode: recoveryCodeInput().optional(),
+  })
+  .refine((value) => Boolean(value.code) !== Boolean(value.recoveryCode), { message: '请输入 6 位动态码或恢复码' })
+
+const mfaRegenerateSchema = z.object({
+  currentPassword: existingPasswordInput('当前密码'),
+  code: totpCodeInput().min(1, '请输入 6 位动态码'),
 })
 
 const changePasswordSchema = z.object({
@@ -77,7 +111,46 @@ authRouter.post(
       captchaService.verifyCaptcha('admin', payload.captchaId, payload.captchaCode)
     }
     const data = await authService.login(payload, requestMeta)
+    res.setHeader('Cache-Control', 'no-store')
+    // 已开启两步验证：不下发会话 Cookie，只返回第二步票据。
+    if (data.mfaRequired) {
+      res.json({
+        code: 0,
+        message: 'ok',
+        data: {
+          mfaRequired: true,
+          mfaTicket: data.mfaTicket,
+          expiresInSeconds: data.expiresInSeconds,
+        },
+      })
+      return
+    }
     // CSRF Cookie 由会话令牌派生（签名双提交），不再单独生成随机值。
+    setAdminAuthCookies(req, res, {
+      sessionToken: data.token,
+      expiresAt: data.expiresAt,
+    })
+    res.json({
+      code: 0,
+      message: 'ok',
+      data: {
+        expiresAt: data.expiresAt,
+        user: data.user,
+        securityReminder: data.securityReminder,
+      },
+    })
+  }),
+)
+
+/**
+ * 两步验证登录第二步：匿名接口，凭第一步返回的短期票据提交动态码或恢复码。
+ * 频控与账号锁定在服务层按票据中的规范用户名执行，路由层另有与登录共用的匿名认证限流。
+ */
+authRouter.post(
+  '/login/mfa',
+  asyncHandler(async (req, res) => {
+    const payload = mfaLoginSchema.parse(req.body)
+    const data = await authService.completeMfaLogin(payload, extractRequestMeta(req))
     setAdminAuthCookies(req, res, {
       sessionToken: data.token,
       expiresAt: data.expiresAt,
@@ -89,7 +162,7 @@ authRouter.post(
       data: {
         expiresAt: data.expiresAt,
         user: data.user,
-        securityReminder: data.securityReminder,
+        recoveryCodesRemaining: data.recoveryCodesRemaining,
       },
     })
   }),
@@ -140,6 +213,75 @@ authRouter.post(
       message: 'ok',
       data: true,
     })
+  }),
+)
+
+authRouter.get(
+  '/mfa/status',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const data = await adminMfaService.getStatus(authReq.auth.userId)
+    res.setHeader('Cache-Control', 'no-store')
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+// 发起绑定：先复核当前密码（与登录共用失败锁定），会话被劫持时攻击者无法替受害者绑定自己的认证器。
+authRouter.post(
+  '/mfa/enroll',
+  requireAuth,
+  requireAdminCsrf,
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const requestMeta = extractRequestMeta(req)
+    const { currentPassword } = mfaStepUpSchema.parse(req.body)
+    await authService.verifyStepUpPassword(authReq.auth, currentPassword, requestMeta, 'auth.mfa.enroll')
+    const data = await adminMfaService.beginEnrollment(authReq.auth, requestMeta)
+    res.setHeader('Cache-Control', 'no-store')
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+authRouter.post(
+  '/mfa/enroll/confirm',
+  requireAuth,
+  requireAdminCsrf,
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const { code } = mfaConfirmSchema.parse(req.body)
+    const data = await adminMfaService.confirmEnrollment(authReq.auth, code, extractRequestMeta(req))
+    res.setHeader('Cache-Control', 'no-store')
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+authRouter.post(
+  '/mfa/disable',
+  requireAuth,
+  requireAdminCsrf,
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const requestMeta = extractRequestMeta(req)
+    const payload = mfaDisableSchema.parse(req.body)
+    await authService.verifyStepUpPassword(authReq.auth, payload.currentPassword, requestMeta, 'auth.mfa.disable')
+    await adminMfaService.disable(authReq.auth, { code: payload.code, recoveryCode: payload.recoveryCode }, requestMeta)
+    res.json({ code: 0, message: 'ok', data: true })
+  }),
+)
+
+authRouter.post(
+  '/mfa/recovery-codes',
+  requireAuth,
+  requireAdminCsrf,
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const requestMeta = extractRequestMeta(req)
+    const payload = mfaRegenerateSchema.parse(req.body)
+    await authService.verifyStepUpPassword(authReq.auth, payload.currentPassword, requestMeta, 'auth.mfa.recovery_codes')
+    const data = await adminMfaService.regenerateRecoveryCodes(authReq.auth, payload.code, requestMeta)
+    res.setHeader('Cache-Control', 'no-store')
+    res.json({ code: 0, message: 'ok', data })
   }),
 )
 

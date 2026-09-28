@@ -26,6 +26,7 @@ import type { RequestMeta } from '../utils/request-meta.js'
 import { assertPermanentDeletePassword } from '../utils/permanent-delete-password.js'
 import { auditService } from './audit.service.js'
 import { sanitizeUserProfile } from './auth.service.js'
+import { adminMfaService } from './admin-mfa.service.js'
 import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
 import {
   isAccountCurrentlyDeactivated,
@@ -380,9 +381,12 @@ export class UserService {
         if (criticalCount > 0) throw new BizError('账号仍存在关键业务关联，请先完成人工交接或保留账号', 409)
 
         const sessions = await manager.getRepository(SysUserSession).delete({ userId: user.id })
+        // 两步验证记录外键为 RESTRICT，必须与账号在同一事务内删除。
+        const removedMfa = await adminMfaService.deleteForUser(manager, user.id)
         await this.recordLifecycleEvent(manager, user, actor, 'permanently_deleted', reason, {
           ...references,
           removedWebSessions: sessions.affected ?? 0,
+          removedMfaRecords: removedMfa ? 1 : 0,
         })
         await manager.getRepository(SysUser).delete({ id: user.id })
         return { deleted: true as const, accountId: user.id, accountMasked: maskAccountIdentifier(user.username) }
@@ -432,11 +436,12 @@ export class UserService {
       .take(query.pageSize)
       .getManyAndCount()
 
+    const mfaEnabledIds = await adminMfaService.listEnabledUserIds(list.map((user) => user.id))
     return {
       page: query.page,
       pageSize: query.pageSize,
       total,
-      list: list.map(sanitizeUserProfile),
+      list: list.map((user) => ({ ...sanitizeUserProfile(user), mfaEnabled: mfaEnabledIds.has(String(user.id)) })),
     }
   }
 
@@ -705,6 +710,39 @@ export class UserService {
     })
     customerServiceRealtimeService.disconnectByOwner('service', id)
     return profile
+  }
+
+  /**
+   * 管理员重置他人两步验证（对方丢失手机且恢复码用尽时使用）：
+   * - 与重置密码同一权限与锁序，先锁操作人再锁目标账号；
+   * - 不能在这里重置自己，本人应通过账号菜单用动态码或恢复码停用；
+   * - 不作废对方会话，重置后对方下次登录只需账号密码，可立即重新绑定。
+   */
+  async resetMfa(id: string, actor: AuthUserContext, requestMeta?: RequestMeta): Promise<{ reset: true }> {
+    if (String(actor.userId) === String(id)) {
+      throw new BizError('不能在这里重置自己的两步验证，请在账号菜单中停用', 400)
+    }
+    return runInTransaction(async (manager) => {
+      const user = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:reset_password')
+      const removed = await adminMfaService.deleteForUser(manager, user.id)
+      if (!removed) {
+        throw new BizError('该账号未开启两步验证', 409)
+      }
+      await auditService.record(
+        {
+          actionType: 'user.mfa.reset',
+          actionLabel: '重置两步验证',
+          targetType: 'user',
+          targetId: user.id,
+          targetCode: user.username,
+          actor,
+          requestMeta,
+          detail: { via: 'admin', displayName: user.displayName },
+        },
+        manager,
+      )
+      return { reset: true as const }
+    })
   }
 }
 

@@ -22,6 +22,7 @@ import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
 import { SysUser } from '../entities/sys-user.entity.js'
 import { SysUserSession } from '../entities/sys-user-session.entity.js'
+import { SysUserMfa } from '../entities/sys-user-mfa.entity.js'
 import { SysAuditLog } from '../entities/sys-audit-log.entity.js'
 import { SystemConfig } from '../entities/system-config.entity.js'
 import { ClientUser } from '../entities/client-user.entity.js'
@@ -68,6 +69,7 @@ export const appEntities = [
   BizOutboundOrderItem,
   SysUser,
   SysUserSession,
+  SysUserMfa,
   SysAuditLog,
   SystemConfig,
   ClientUser,

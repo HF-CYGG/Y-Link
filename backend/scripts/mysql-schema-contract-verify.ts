@@ -54,6 +54,7 @@ const REQUIRED_TABLES = [
   'inv_stocktake_item',
   'base_product_variant_code_registry',
   'base_yz_series_seq_reservation',
+  'sys_user_mfa',
 ] as const
 
 const REQUIRED_COLUMNS = [
@@ -392,6 +393,13 @@ const REQUIRED_INDEXES: readonly IndexFixture[] = [
     columns: ['code_prefix', 'series_code', 'series_seq'],
     unique: true,
   },
+  // 054：管理端两步验证一人一行。
+  {
+    tableName: 'sys_user_mfa',
+    indexName: 'uk_sys_user_mfa_user_id',
+    columns: ['user_id'],
+    unique: true,
+  },
   {
     tableName: 'account_lifecycle_event',
     indexName: 'idx_account_lifecycle_event_account',
@@ -629,6 +637,8 @@ const REQUIRED_FOREIGN_KEYS: readonly ForeignKeyFixture[] = [
     // 050：主系列标签禁止级联删除（编码权威），变体码登记随商品级联清理。
     ['base_product', 'fk_base_product_primary_series_tag_id', 'primary_series_tag_id', 'base_tag', 'RESTRICT'],
     ['base_product_variant_code_registry', 'fk_base_product_variant_code_registry_product_id', 'product_id', 'base_product', 'CASCADE'],
+    // 054：两步验证记录不随账号级联删除，永久删除账号时由服务层显式清理。
+    ['sys_user_mfa', 'fk_sys_user_mfa_user_id', 'user_id', 'sys_user', 'RESTRICT'],
   ].map(([tableName, constraintName, columnName, referencedTableName, deleteRule]) => ({
     tableName,
     constraintName,
@@ -1177,6 +1187,28 @@ missingReservationSeriesCodeUniqueIndex.indexes.delete(objectKey('base_yz_series
 await expectSchemaFailure(missingReservationSeriesCodeUniqueIndex, [
   '索引 base_yz_series_seq_reservation.uk_yz_series_seq_reservation_code',
   '053_yz_reservation_series_code.sql',
+])
+
+// 054：管理端两步验证表缺失、唯一键缺失或外键被改成级联删除，都必须在启动期阻断并指向 054。
+const missingAdminMfaTable = createCompleteFixture()
+missingAdminMfaTable.tables.delete('sys_user_mfa')
+await expectSchemaFailure(missingAdminMfaTable, [
+  'sys_user_mfa',
+  '054_admin_mfa.sql',
+])
+
+const missingAdminMfaUniqueIndex = createCompleteFixture()
+missingAdminMfaUniqueIndex.indexes.delete(objectKey('sys_user_mfa', 'uk_sys_user_mfa_user_id'))
+await expectSchemaFailure(missingAdminMfaUniqueIndex, [
+  '索引 sys_user_mfa.uk_sys_user_mfa_user_id',
+  '054_admin_mfa.sql',
+])
+
+const cascadingAdminMfaForeignKey = createCompleteFixture()
+cascadingAdminMfaForeignKey.foreignKeys.get(objectKey('sys_user_mfa', 'fk_sys_user_mfa_user_id'))!.deleteRule = 'CASCADE'
+await expectSchemaFailure(cascadingAdminMfaForeignKey, [
+  '外键 sys_user_mfa.user_id 必须使用 ON DELETE RESTRICT',
+  '054_admin_mfa.sql',
 ])
 
 console.log('[mysql-schema-contract-verify] MySQL 启动结构契约验证通过')
