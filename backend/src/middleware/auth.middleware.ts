@@ -21,6 +21,7 @@ import {
   resolveAdminCsrfHeaderValue,
 } from '../utils/admin-auth-cookie.js'
 import { authService } from '../services/auth.service.js'
+import { assertSessionRateAllowed } from '../utils/session-rate-fuse.js'
 
 const FORBIDDEN_MESSAGE = '当前账号无权执行该操作'
 const CSRF_FORBIDDEN_MESSAGE = '请求安全校验失败，请刷新页面后重试'
@@ -108,6 +109,8 @@ export async function requireAuth(req: Request, _res: Response, next: NextFuncti
     if (!credential) {
       throw new BizError('未登录或登录状态已失效', 401)
     }
+    // 按会话令牌桶熔断：在查库之前判定，单个会话的失控高频请求不再产生会话查询。
+    assertSessionRateAllowed('admin', credential.token)
 
     const auth = await authService.resolveAuthUserByToken(credential.token)
     auth.authSource = credential.source

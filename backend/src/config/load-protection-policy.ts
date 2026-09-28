@@ -87,6 +87,16 @@ if (OVERLOAD_CRITICAL_LOOP_DELAY_MS <= OVERLOAD_ELEVATED_LOOP_DELAY_MS) {
   throw new Error('YLINK_OVERLOAD_CRITICAL_LOOP_DELAY_MS 必须大于 YLINK_OVERLOAD_ELEVATED_LOOP_DELAY_MS')
 }
 
+/**
+ * 按会话的请求速率保险丝（令牌桶）：容量即允许的瞬时突发（正常页面并行加载十余个接口），按每秒速率补充。
+ * 只作用于管理端与 Web 客户端会话，移动端访问令牌不纳入。
+ */
+export const SESSION_RATE_FUSE_POLICY = {
+  capacity: readBoundedInteger('YLINK_SESSION_RATE_BURST', 200, 10, 100_000),
+  refillPerSecond: readBoundedInteger('YLINK_SESSION_RATE_PER_SECOND', 30, 1, 10_000),
+  maxSessions: 50_000,
+} as const
+
 export const OVERLOAD_SHEDDING_POLICY = {
   enabled: readBooleanFlag('YLINK_OVERLOAD_SHEDDING_ENABLED', true),
   sampleIntervalMs: 1_000,
