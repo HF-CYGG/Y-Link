@@ -6,6 +6,8 @@
  */
 
 import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto'
+import { PASSWORD_HASH_GATE_POLICY } from '../config/load-protection-policy.js'
+import { BoundedConcurrencyGate } from './bounded-concurrency.js'
 import { BizError } from './errors.js'
 import { isCommonWeakPassword } from './password-blocklist.js'
 
@@ -31,8 +33,18 @@ const LEGACY_TIMING_PAD_SALT = 'y-link-legacy-scrypt-timing-pad'
 const CURRENT_HASH_PREFIX = 's2'
 const SCRYPT_MAXMEM = 64 * 1024 * 1024
 
+/**
+ * 所有 scrypt 派生都经同一个有界并发闸门：登录洪水时线程池不会被密码派生占满，数据库查询仍有线程可用；
+ * 每次派生单独申请一次（不嵌套），满载时快速返回 503，由前端提示稍后重试。
+ */
+const passwordHashGate = new BoundedConcurrencyGate({
+  name: 'password-hash',
+  ...PASSWORD_HASH_GATE_POLICY,
+  busyMessage: '当前登录与密码校验请求较多，请稍后重试',
+})
+
 const deriveScryptKey = (plainPassword: string, salt: string, params: ScryptParams): Promise<Buffer> => (
-  new Promise((resolve, reject) => {
+  passwordHashGate.run(() => new Promise<Buffer>((resolve, reject) => {
     scryptCallback(
       plainPassword,
       salt,
@@ -40,7 +52,7 @@ const deriveScryptKey = (plainPassword: string, salt: string, params: ScryptPara
       { N: params.N, r: params.r, p: params.p, maxmem: SCRYPT_MAXMEM },
       (error, derivedKey) => (error ? reject(error) : resolve(derivedKey)),
     )
-  })
+  }))
 )
 
 type ParsedPasswordHash =

@@ -20,6 +20,8 @@ export PORT="${PORT:-3001}"
 export Y_LINK_TRUST_PROXY="${Y_LINK_TRUST_PROXY:-127.0.0.1,::1}"
 export Y_LINK_FORCE_SECURE_COOKIES="${Y_LINK_FORCE_SECURE_COOKIES:-false}"
 export TZ="${TZ:-Asia/Shanghai}"
+# libuv 线程池由 scrypt、sharp、SQLite 驱动与文件读写共用，默认 4 线程在登录洪水时会饿死数据库查询。
+export UV_THREADPOOL_SIZE="${UV_THREADPOOL_SIZE:-8}"
 export LOG_COLOR="${LOG_COLOR:-true}"
 export FORCE_COLOR="${FORCE_COLOR:-1}"
 export DB_TYPE="${DB_TYPE:-sqlite}"

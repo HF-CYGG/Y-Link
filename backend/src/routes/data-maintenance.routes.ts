@@ -23,6 +23,7 @@ import { BizError } from '../utils/errors.js'
 import { assertPermanentDeletePasswordForRequest, createPermanentDeleteLimiter } from '../utils/permanent-delete-guard.js'
 import { auditService } from '../services/audit.service.js'
 import { EXISTING_PASSWORD_INPUT_MAX_LENGTH } from '../constants/auth-input-limits.js'
+import { listConcurrencyGateSnapshots } from '../utils/bounded-concurrency.js'
 
 const importPayloadSchema = z
   .object({
@@ -177,6 +178,8 @@ dataMaintenanceRouter.get(
         supportsConcurrentWriters: capabilities.supportsConcurrentWriters,
         supportsMultipleApiInstances: capabilities.supportsMultipleApiInstances,
         writeCoordinator: transactionCoordinator?.snapshot() ?? null,
+        // 密码派生、验证码渲染、商品图处理等并发闸门：观察峰值与拒绝计数，判断是否需要调参或扩容。
+        concurrencyGates: listConcurrencyGateSnapshots(),
       },
     })
   }),

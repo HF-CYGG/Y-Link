@@ -5,6 +5,10 @@
  * 维护说明：阈值调整应同步更新文档 `42-权限、Cookie、CSRF、审计与上传安全.md` 与 `51-本地联调与部署模式.md`。
  */
 
+import os from 'node:os'
+
+const CPU_COUNT = Math.max(1, typeof os.availableParallelism === 'function' ? os.availableParallelism() : os.cpus().length)
+
 function readBoundedInteger(name: string, fallback: number, minimum: number, maximum: number): number {
   const raw = process.env[name]
   if (raw === undefined || raw.trim() === '') return fallback
@@ -28,4 +32,15 @@ export const GLOBAL_LOGIN_FAILURE_POLICY = {
   captchaHoldMs: readBoundedInteger('YLINK_GLOBAL_CAPTCHA_HOLD_MINUTES', 15, 1, 24 * 60) * 60 * 1000,
   adminThreshold: readBoundedInteger('YLINK_ADMIN_GLOBAL_FAILURE_THRESHOLD', 30, 5, 100_000),
   clientThreshold: readBoundedInteger('YLINK_CLIENT_GLOBAL_FAILURE_THRESHOLD', 150, 10, 1_000_000),
+} as const
+
+/**
+ * 密码派生闸门：scrypt 与 SQLite 驱动、sharp、文件读写共用 libuv 线程池（镜像内 UV_THREADPOOL_SIZE=8）。
+ * 并发默认 min(4, CPU-1)，给数据库查询留出线程；登录洪水时超出排队上限或等待超时即返回 503，
+ * 避免线程池被占满后正常业务查询一起卡住。
+ */
+export const PASSWORD_HASH_GATE_POLICY = {
+  maxConcurrent: readBoundedInteger('YLINK_PASSWORD_HASH_CONCURRENCY', Math.min(4, Math.max(1, CPU_COUNT - 1)), 1, 64),
+  maxQueue: readBoundedInteger('YLINK_PASSWORD_HASH_QUEUE', 64, 0, 10_000),
+  queueTimeoutMs: readBoundedInteger('YLINK_PASSWORD_HASH_QUEUE_TIMEOUT_MS', 10_000, 100, 120_000),
 } as const

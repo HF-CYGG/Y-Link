@@ -71,7 +71,7 @@ export function errorHandler(err: unknown, _req: Request, res: Response, next: N
     if (err.retryAfterSeconds !== undefined) {
       res.setHeader('Retry-After', String(err.retryAfterSeconds))
     }
-    if (err instanceof DatabaseOverloadedError || err.statusCode === 503) {
+    if ((err instanceof DatabaseOverloadedError || err.statusCode === 503) && err.retryAfterSeconds === undefined) {
       // 明确告诉浏览器/反向代理这是瞬时过载，便于幂等请求按秒级退避重试，
       // 同时避免高峰期客户端立即重放形成重试风暴。
       res.setHeader('Retry-After', '1')

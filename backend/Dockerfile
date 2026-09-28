@@ -61,10 +61,12 @@ FROM ${Y_LINK_NODE_IMAGE} AS runtime
 
 WORKDIR /app
 
+# libuv 线程池默认 4 线程，由 scrypt、sharp、SQLite 驱动与文件读写共用；登录洪水时数据库查询会被饿死，扩到 8。
 ENV NODE_ENV=production \
   PORT=3001 \
   SQLITE_DB_PATH=/app/data/y-link.sqlite \
-  TZ=Asia/Shanghai
+  TZ=Asia/Shanghai \
+  UV_THREADPOOL_SIZE=8
 
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata \
