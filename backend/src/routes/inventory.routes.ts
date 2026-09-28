@@ -16,7 +16,7 @@ import { stocktakeService } from '../services/stocktake.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
-import { dataExportLeasePool } from '../utils/export-lease-pool.js'
+import { dataExportLeasePool, holdExportLeaseUntilResponseEnds } from '../utils/export-lease-pool.js'
 import { auditService } from '../services/audit.service.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 
@@ -149,13 +149,9 @@ inventoryRouter.get('/logs', requirePermission('inventory:view'), asyncHandler(a
 inventoryRouter.get('/logs/export', requirePermission('inventory:view'), asyncHandler(async (req, res) => {
   const authReq = req as AuthenticatedRequest
   const logQuery = buildLogQuery(req.query as Record<string, unknown>)
-  const lease = dataExportLeasePool.acquire(authReq.auth.userId)
-  let exported: { buffer: Buffer; rowCount: number }
-  try {
-    exported = await inventoryQueryService.exportLogsWithSummary(logQuery)
-  } finally {
-    lease.release()
-  }
+  // 租约持有到文件完整发出或连接关闭，而不只是生成阶段，避免慢速客户端借未读完的响应叠加导出。
+  holdExportLeaseUntilResponseEnds(dataExportLeasePool.acquire(authReq.auth.userId), res)
+  const exported = await inventoryQueryService.exportLogsWithSummary(logQuery)
   // 批量导出留痕：只记筛选条件与行数，关键字截断，不记录导出内容。
   await auditService.recordDataExport({
     exportType: 'inventory_logs',

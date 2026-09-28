@@ -16,7 +16,7 @@ import { SPEC_VALUE_MAX_LENGTH } from '../services/product-code.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
-import { dataExportLeasePool } from '../utils/export-lease-pool.js'
+import { dataExportLeasePool, holdExportLeaseUntilResponseEnds } from '../utils/export-lease-pool.js'
 import { auditService } from '../services/audit.service.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 
@@ -338,13 +338,9 @@ productRouter.get(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const includeCostPrice = canViewCostPrice(req)
-    const lease = dataExportLeasePool.acquire(authReq.auth.userId)
-    let exported: { buffer: Buffer; rowCount: number }
-    try {
-      exported = await productExcelService.exportProductsWithSummary({ includeCostPrice })
-    } finally {
-      lease.release()
-    }
+    // 租约持有到文件完整发出或连接关闭，而不只是生成阶段，避免慢速客户端借未读完的响应叠加导出。
+    holdExportLeaseUntilResponseEnds(dataExportLeasePool.acquire(authReq.auth.userId), res)
+    const exported = await productExcelService.exportProductsWithSummary({ includeCostPrice })
     // 成本价属于内部经营数据：是否包含成本列随导出审计一并留痕。
     await auditService.recordDataExport({
       exportType: 'products',

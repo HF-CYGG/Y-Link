@@ -28,6 +28,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { Writable } from 'node:stream'
+import { EventEmitter } from 'node:events'
 import { fileURLToPath } from 'node:url'
 import type { AuthUserContext } from '../src/types/auth.js'
 import type { ClientAuthContext } from '../src/types/client-auth.js'
@@ -118,7 +119,7 @@ async function loadModules() {
   const encryption = await import('../src/utils/data-encryption.js')
   const { BoundedConcurrencyGate, listConcurrencyGateSnapshots } = await import('../src/utils/bounded-concurrency.js')
   const { BizError } = await import('../src/utils/errors.js')
-  const { ExportLeasePool, dataExportLeasePool } = await import('../src/utils/export-lease-pool.js')
+  const { ExportLeasePool, dataExportLeasePool, holdExportLeaseUntilResponseEnds } = await import('../src/utils/export-lease-pool.js')
   const { maskLoginInputForAudit, describeClientRiskSubjectForAudit } = await import('../src/utils/audit-subject-mask.js')
   const { toRiskSourceKey } = await import('../src/utils/ip-subnet.js')
   const { OverloadMonitor } = await import('../src/utils/overload-monitor.js')
@@ -159,6 +160,7 @@ async function loadModules() {
     BizError,
     ExportLeasePool,
     dataExportLeasePool,
+    holdExportLeaseUntilResponseEnds,
     maskLoginInputForAudit,
     describeClientRiskSubjectForAudit,
     toRiskSourceKey,
@@ -468,6 +470,15 @@ function verifyExportLeasePoolPrimitives() {
   assert.equal(pool.activeExports, 1, '重复归还不得多减')
   leaseB.release()
   assert.equal(pool.activeExports, 0)
+
+  // 一次性发送 Buffer 的导出：租约持有到响应 finish / close，而不是文件生成完就归还。
+  const response = new EventEmitter()
+  m.holdExportLeaseUntilResponseEnds(pool.acquire('slow-client'), response)
+  assert.equal(pool.activeExports, 1, '响应未发完前仍占用导出租约')
+  assert.throws(() => pool.acquire('slow-client'), /已有导出任务/)
+  response.emit('finish')
+  response.emit('close')
+  assert.equal(pool.activeExports, 0, '响应结束后归还且不重复扣减')
 }
 
 /** 第 7 项：登录输入改记为“掩码 + 密钥指纹”。 */
