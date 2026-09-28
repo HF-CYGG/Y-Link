@@ -2,8 +2,9 @@
  * 文件说明：重型导出的并发租约池，限制同一账号与整个进程同时进行的导出数量（OWASP API4 资源消耗）。
  * 实现逻辑：按操作者计数的内存租约；导出开始前获取，响应结束或失败后在 finally 中归还；超出上限立即返回 429。
  * 维护说明：
- * - 导出必须在响应完全写完（或连接关闭）后才归还租约，否则慢速客户端读取期间可以重复叠加导出、
- *   让多个大文件同时滞留在未完成的响应里；一次性发送 Buffer 的导出用 `holdExportLeaseUntilResponseEnds` 绑定响应；
+ * - 导出必须在“生成任务结束”与“响应写完或连接关闭”两者都满足后才归还租约：只等响应，客户端在生成期间断连
+ *   会提前归还而生成仍在后台跑，反复“发起即断开”可无限叠加重型任务；只等生成，慢速客户端读取期间又可叠加导出、
+ *   让多个大文件滞留在未完成的响应里。一次性发送 Buffer 的导出用 `runExportHoldingLease` 包住生成步骤；
  * - 报表导出沿用 `report.service.ts` 自己的租约池，本池覆盖审计日志、库存流水与商品导出。
  */
 import { BizError } from './errors.js'
@@ -60,15 +61,34 @@ export class ExportLeasePool {
 }
 
 /**
- * 把租约绑定到 HTTP 响应：响应发送完毕（finish）或连接关闭（close）时才归还。
- * 归还本身幂等；生成失败时错误响应同样会触发 finish，因此无需另外在 finally 中归还。
+ * 在持有租约的前提下执行导出生成：租约在生成任务结束（成功或失败）且响应发送完毕（finish）或连接关闭（close）后才归还。
+ * - 客户端在生成期间断连：生成任务不会被取消，租约继续占用直到它真正结束，同账号无法借“发起即断开”叠加任务；
+ * - 生成完成但响应未读完：租约继续占用直到响应结束；
+ * - 生成失败：错误响应写出（finish）或连接关闭后归还。归还本身幂等。
+ * 必须在 acquire 之后立即调用，确保响应事件监听在任何 await 之前注册。
  */
-export function holdExportLeaseUntilResponseEnds(
+export async function runExportHoldingLease<T>(
   lease: ExportLease,
   res: { once: (event: 'finish' | 'close', listener: () => void) => unknown },
-): void {
-  res.once('finish', lease.release)
-  res.once('close', lease.release)
+  generate: () => Promise<T>,
+): Promise<T> {
+  let generationSettled = false
+  let responseEnded = false
+  const releaseWhenBothDone = () => {
+    if (generationSettled && responseEnded) lease.release()
+  }
+  const onResponseEnded = () => {
+    responseEnded = true
+    releaseWhenBothDone()
+  }
+  res.once('finish', onResponseEnded)
+  res.once('close', onResponseEnded)
+  try {
+    return await generate()
+  } finally {
+    generationSettled = true
+    releaseWhenBothDone()
+  }
 }
 
 /** 审计日志、库存流水与商品导出共用：每账号同时 1 个，每进程同时 3 个。 */

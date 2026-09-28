@@ -120,7 +120,7 @@ async function loadModules() {
   const encryptionPreflight = await import('../src/runtime/data-encryption-preflight.js')
   const { BoundedConcurrencyGate, listConcurrencyGateSnapshots } = await import('../src/utils/bounded-concurrency.js')
   const { BizError } = await import('../src/utils/errors.js')
-  const { ExportLeasePool, dataExportLeasePool, holdExportLeaseUntilResponseEnds } = await import('../src/utils/export-lease-pool.js')
+  const { ExportLeasePool, dataExportLeasePool, runExportHoldingLease } = await import('../src/utils/export-lease-pool.js')
   const { maskLoginInputForAudit, describeClientRiskSubjectForAudit } = await import('../src/utils/audit-subject-mask.js')
   const { toRiskSourceKey } = await import('../src/utils/ip-subnet.js')
   const { OverloadMonitor } = await import('../src/utils/overload-monitor.js')
@@ -162,7 +162,7 @@ async function loadModules() {
     BizError,
     ExportLeasePool,
     dataExportLeasePool,
-    holdExportLeaseUntilResponseEnds,
+    runExportHoldingLease,
     maskLoginInputForAudit,
     describeClientRiskSubjectForAudit,
     toRiskSourceKey,
@@ -522,7 +522,7 @@ function verifyKeyFileDurability() {
 }
 
 /** 第 6 项：导出租约按账号与进程限流，数字与字符串主键视为同一账号，重复归还不多减。 */
-function verifyExportLeasePoolPrimitives() {
+async function verifyExportLeasePoolPrimitives() {
   const pool = new m.ExportLeasePool({ maxPerActor: 1, maxPerProcess: 2 })
   assert.throws(() => pool.acquire(''), /身份缺失/)
   const leaseA = pool.acquire('a')
@@ -536,14 +536,50 @@ function verifyExportLeasePoolPrimitives() {
   leaseB.release()
   assert.equal(pool.activeExports, 0)
 
-  // 一次性发送 Buffer 的导出：租约持有到响应 finish / close，而不是文件生成完就归还。
-  const response = new EventEmitter()
-  m.holdExportLeaseUntilResponseEnds(pool.acquire('slow-client'), response)
+  // 一次性发送 Buffer 的导出：租约要等“生成任务结束”与“响应 finish/close”两者都满足才归还。
+  const deferred = <T>() => {
+    let resolve!: (value: T) => void
+    let reject!: (reason: unknown) => void
+    const promise = new Promise<T>((onResolve, onReject) => { resolve = onResolve; reject = onReject })
+    return { promise, resolve, reject }
+  }
+
+  // 1) 生成期间客户端断连：close 先到，但生成仍在跑，租约不得提前归还（否则“发起即断开”可无限叠加重型任务）。
+  const abandoned = new EventEmitter()
+  const abandonedWork = deferred<string>()
+  const abandonedExport = m.runExportHoldingLease(pool.acquire('disconnecting-client'), abandoned, () => abandonedWork.promise)
+  abandoned.emit('close')
+  await sleep(0)
+  assert.equal(pool.activeExports, 1, '生成期间断连时仍占用导出租约')
+  assert.throws(() => pool.acquire('disconnecting-client'), /已有导出任务/, '断连后同账号不得立刻叠加新的导出')
+  abandonedWork.resolve('buffer')
+  assert.equal(await abandonedExport, 'buffer')
+  assert.equal(pool.activeExports, 0, '生成结束后归还')
+
+  // 2) 慢速客户端：生成已结束，但响应未发完前仍占用租约。
+  const slow = new EventEmitter()
+  await m.runExportHoldingLease(pool.acquire('slow-client'), slow, async () => 'buffer')
   assert.equal(pool.activeExports, 1, '响应未发完前仍占用导出租约')
   assert.throws(() => pool.acquire('slow-client'), /已有导出任务/)
-  response.emit('finish')
-  response.emit('close')
+  slow.emit('finish')
+  slow.emit('close')
   assert.equal(pool.activeExports, 0, '响应结束后归还且不重复扣减')
+
+  // 3) 生成失败：错误照常抛出，错误响应写出（finish）后归还。
+  const failed = new EventEmitter()
+  await assert.rejects(m.runExportHoldingLease(pool.acquire('failing-client'), failed, async () => { throw new Error('生成失败') }), /生成失败/)
+  assert.equal(pool.activeExports, 1, '错误响应写出前仍占用租约')
+  failed.emit('finish')
+  assert.equal(pool.activeExports, 0)
+
+  // 两个一次性导出路由都必须把生成步骤包进租约，而不是只绑定响应事件。
+  for (const relative of ['src/routes/inventory.routes.ts', 'src/routes/product.routes.ts']) {
+    assert.match(
+      fs.readFileSync(path.join(backendRoot, relative), 'utf8'),
+      /await runExportHoldingLease\(\s*dataExportLeasePool\.acquire\(authReq\.auth\.userId\),\s*res,\s*\(\) => /,
+      `${relative} 的导出生成必须在租约内执行`,
+    )
+  }
 }
 
 /** 第 7 项：登录输入改记为“掩码 + 密钥指纹”。 */
@@ -1763,7 +1799,7 @@ async function assertRuntimeBehaviour(runtimeBase: string, port: number) {
 async function runCorePhase() {
   verifyRiskSourceKeyPrimitives()
   verifyEncryptionPrimitives()
-  verifyExportLeasePoolPrimitives()
+  await verifyExportLeasePoolPrimitives()
   verifyAuditMaskPrimitives()
   verifyMysqlSslOptions()
   await verifyPasswordHashPrimitives()

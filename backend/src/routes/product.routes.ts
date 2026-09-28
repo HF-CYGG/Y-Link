@@ -16,7 +16,7 @@ import { SPEC_VALUE_MAX_LENGTH } from '../services/product-code.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
-import { dataExportLeasePool, holdExportLeaseUntilResponseEnds } from '../utils/export-lease-pool.js'
+import { dataExportLeasePool, runExportHoldingLease } from '../utils/export-lease-pool.js'
 import { auditService } from '../services/audit.service.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 
@@ -338,9 +338,12 @@ productRouter.get(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const includeCostPrice = canViewCostPrice(req)
-    // 租约持有到文件完整发出或连接关闭，而不只是生成阶段，避免慢速客户端借未读完的响应叠加导出。
-    holdExportLeaseUntilResponseEnds(dataExportLeasePool.acquire(authReq.auth.userId), res)
-    const exported = await productExcelService.exportProductsWithSummary({ includeCostPrice })
+    // 租约持有到“生成结束”且“文件完整发出或连接关闭”：生成期间断连不会提前归还，慢速客户端也无法借未读完的响应叠加导出。
+    const exported = await runExportHoldingLease(
+      dataExportLeasePool.acquire(authReq.auth.userId),
+      res,
+      () => productExcelService.exportProductsWithSummary({ includeCostPrice }),
+    )
     // 成本价属于内部经营数据：是否包含成本列随导出审计一并留痕。
     await auditService.recordDataExport({
       exportType: 'products',
