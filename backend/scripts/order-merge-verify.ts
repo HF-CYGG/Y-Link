@@ -209,7 +209,7 @@ async function main() {
       sequence += 1
       const order = await orderRepo.save(orderRepo.create({
         orderUuid: randomUUID(),
-        showNo: `ISSUE71-${sequence}`,
+        systemNo: `OUT-W-${String(sequence).padStart(6, '0')}`,
         businessNo: `hyyz${String(sequence).padStart(6, '0')}`,
         editVersion: 1,
         status: 'active',
@@ -392,13 +392,14 @@ async function main() {
     assert.match(stalePreview.blockers.map((item) => item.code).join(','), /ORDER_VERSION_CONFLICT/)
 
     const originalDetailById = orderService.detailById.bind(orderService)
-    orderService.detailById = async (orderId, manager) => {
+    orderService.detailById = async (orderId, detailActor, manager) => {
+      assert.equal(detailActor?.role, 'admin', '合并提交响应必须显式传递管理员可见性上下文')
       assert.equal(
         manager?.queryRunner?.isTransactionActive,
         true,
         '提交响应详情必须在合并事务提交前构造，禁止事务外二次读取',
       )
-      return originalDetailById(orderId, manager)
+      return originalDetailById(orderId, detailActor, manager)
     }
     const appendInput = {
       target: { orderId: String(target.order.id), editVersion: 2 },
@@ -496,18 +497,18 @@ async function main() {
     assert.equal(parentBusinessNoPreview.ready, false)
     assert.match(parentBusinessNoPreview.items[0]?.blockingReasons.join('；') ?? '', /合并目标父单/)
     await assert.rejects(
-      () => orderService.softDeleteById(String(source.order.id), actor, source.order.showNo),
+      () => orderService.softDeleteById(String(source.order.id), actor, source.order.businessNo),
       (error: unknown) => error instanceof BizError && error.statusCode === 409,
     )
 
-    const deletedParent = await orderService.softDeleteById(String(target.order.id), actor, target.order.showNo)
+    const deletedParent = await orderService.softDeleteById(String(target.order.id), actor, target.order.businessNo)
     assert.equal(deletedParent.merge.role, 'parent', '父单软删响应必须保留合并角色')
     assert.equal(deletedParent.merge.children.length, 2, '父单软删响应必须保留完整子树')
     const restoredParent = await orderService.restoreById(String(target.order.id), actor)
     assert.equal(restoredParent.merge.role, 'parent', '父单恢复响应必须保留合并角色')
     assert.equal(restoredParent.merge.children.length, 2, '父单恢复响应必须保留完整子树')
     await assert.rejects(
-      () => orderService.purgeById(String(target.order.id), actor, target.order.showNo),
+      () => orderService.purgeById(String(target.order.id), actor, target.order.businessNo),
       (error: unknown) => error instanceof BizError && error.statusCode === 409,
       '任意合并成员必须阻断永久删除',
     )
@@ -522,17 +523,23 @@ async function main() {
     assert.equal(childSearch.total, 1, '命中来源单时必须返回父单且不重复分页')
     assert.equal(childSearch.list[0]?.id, String(target.order.id))
     assert.equal(childSearch.list[0]?.merge.children.length, 2, '子搜索必须带完整子树')
-    const childShowNoExactSearch = await orderService.list({ page: 1, pageSize: 20, showNo: source2.order.showNo })
-    assert.equal(childShowNoExactSearch.total, 1, 'showNo 精确命中来源单时必须返回父单')
-    assert.equal(childShowNoExactSearch.list[0]?.id, String(target.order.id))
-    assert.equal(childShowNoExactSearch.list[0]?.merge.children.length, 2)
-    const childShowNoPartialSearch = await orderService.list({
+    const childSystemNoExactSearch = await orderService.list({
       page: 1,
       pageSize: 20,
-      showNo: source2.order.showNo.slice(-2),
-    })
-    assert.equal(childShowNoPartialSearch.total, 1, 'showNo 模糊命中来源单时必须返回父单且不重复 total')
-    assert.equal(childShowNoPartialSearch.list[0]?.id, String(target.order.id))
+      keyword: source2.order.systemNo,
+    }, actor)
+    assert.equal(childSystemNoExactSearch.total, 1, '管理员以 systemNo 精确命中来源单时必须返回父单')
+    assert.equal(childSystemNoExactSearch.list[0]?.id, String(target.order.id))
+    assert.equal(childSystemNoExactSearch.list[0]?.merge.children.length, 2)
+    assert.equal(childSystemNoExactSearch.list[0]?.matchedIdentifierType, 'systemNo')
+    assert.equal(childSystemNoExactSearch.list[0]?.matchedIdentifierValue, source2.order.systemNo)
+    const childSystemNoPartialSearch = await orderService.list({
+      page: 1,
+      pageSize: 20,
+      keyword: source2.order.systemNo.slice(-2),
+    }, actor)
+    assert.equal(childSystemNoPartialSearch.total, 1, '管理员以 systemNo 模糊命中来源单时必须返回父单且不重复 total')
+    assert.equal(childSystemNoPartialSearch.list[0]?.id, String(target.order.id))
     await orderRepo.update({ id: source2.order.id }, { createdAt: new Date('2020-02-03T08:00:00.000Z') })
     const childDateSearch = await orderService.list({
       page: 1,

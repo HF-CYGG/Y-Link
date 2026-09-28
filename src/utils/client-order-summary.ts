@@ -10,7 +10,7 @@
  * - 若详情返回结构新增摘要字段，优先在 `buildClientOrderSummaryFromDetail()` 中统一补齐。
  */
 
-import { resolveO2oDisplayShowNo, type O2oPreorderDetail, type O2oPreorderSummary } from '@/api/modules/o2o'
+import type { O2oPreorderDetail, O2oPreorderSummary } from '@/api/modules/o2o'
 
 const CLIENT_ORDER_TYPE_KEYWORDS: Record<O2oPreorderSummary['clientOrderType'], string[]> = {
   department: ['部门订', '部门', 'department'],
@@ -25,10 +25,8 @@ export const buildClientOrderSummaryFromDetail = (detail: O2oPreorderDetail): O2
 
   return {
     id: order.id,
-    showNo: resolveO2oDisplayShowNo(order),
-    customerOrderShowNo: order.customerOrderShowNo ?? null,
+    preorderNo: order.preorderNo,
     customerOrderBusinessNo: order.customerOrderBusinessNo ?? null,
-    originalCustomerOrderShowNo: order.originalCustomerOrderShowNo ?? null,
     originalCustomerOrderBusinessNo: order.originalCustomerOrderBusinessNo ?? null,
     verifyCode: order.verifyCode,
     status: order.status,
@@ -74,10 +72,8 @@ export const matchesClientOrderKeyword = (order: O2oPreorderSummary, keyword: st
   }
 
   const normalizedTargets = [
-    order.showNo,
-    order.customerOrderShowNo || '',
+    order.preorderNo,
     order.customerOrderBusinessNo || '',
-    order.originalCustomerOrderShowNo || '',
     order.originalCustomerOrderBusinessNo || '',
     order.verifyCode,
     order.departmentNameSnapshot || '',

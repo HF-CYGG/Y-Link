@@ -1,7 +1,7 @@
 /**
  * 模块说明：历史出库订单分类与业务号修订服务。
- * 文件职责：提供无副作用预览和全事务提交，并以 editVersion、永久号码占用与 revision 保证可追溯一致性。
- * 实现逻辑：提交阶段重新锁定并校验全部订单，任一阻断即整体回滚；只允许修改主单治理字段，不触碰商品明细或库存。
+ * 文件职责：提供无副作用预览和全事务提交，并以 editVersion、当前号码唯一约束与 revision 保证一致性。
+ * 实现逻辑：提交阶段重新锁定并校验全部订单，任一阻断即整体回滚；永久删除释放业务号后可走普通修订复用。
  */
 
 import type { EntityManager } from 'typeorm'
@@ -12,6 +12,7 @@ import { OrderRevision } from '../entities/order-revision.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { BizError } from '../utils/errors.js'
+import { isUniqueConstraintError } from '../utils/database-errors.js'
 import { auditService } from './audit.service.js'
 import { orderBusinessNoService } from './order-business-no.service.js'
 import type { BusinessNoCursorPlan, ParsedBusinessNo } from './order-business-no.service.js'
@@ -39,6 +40,8 @@ export interface OrderAmendmentBatchInput {
 
 export interface OrderAmendmentSnapshot {
   businessNo: string
+  systemNo: string
+  /** @deprecated 兼容一个发布周期。 */
   showNo: string
   orderType: OrderType
   customerDepartmentName: string | null
@@ -80,6 +83,11 @@ const FIELD_LIMITS = {
   reason: 500,
 } as const
 
+const BUSINESS_NO_UNIQUE_MATCHER = {
+  mysqlConstraint: 'uk_biz_outbound_business_no',
+  sqliteColumns: ['biz_outbound_order.business_no'],
+} as const
+
 const hasOwn = (input: object, key: PropertyKey): boolean => Object.prototype.hasOwnProperty.call(input, key)
 
 const truncateByCodePoint = (value: string | null | undefined, maxLength: number): string | null => {
@@ -89,7 +97,7 @@ const truncateByCodePoint = (value: string | null | undefined, maxLength: number
 }
 
 export class OrderAmendmentService {
-  async preview(input: OrderAmendmentBatchInput, _actor: AuthUserContext): Promise<OrderAmendmentPreviewResult> {
+  async preview(input: OrderAmendmentBatchInput, actor: AuthUserContext): Promise<OrderAmendmentPreviewResult> {
     const evaluated = await this.evaluate(input, AppDataSource.manager, false)
     const cursorPlans = await orderBusinessNoService.previewCursorPlans(
       evaluated
@@ -152,7 +160,14 @@ export class OrderAmendmentService {
         item.order.isSystemApplied = item.after.isSystemApplied
         item.order.remark = item.after.remark
         item.order.editVersion = item.before.editVersion + 1
-        await orderRepo.save(item.order)
+        try {
+          await orderRepo.save(item.order)
+        } catch (error) {
+          if (isUniqueConstraintError(error, BUSINESS_NO_UNIQUE_MATCHER)) {
+            throw new BizError(`业务号 ${item.after.businessNo} 当前已被其他订单使用`, 409)
+          }
+          throw error
+        }
 
         item.after.editVersion = item.order.editVersion
         const reason = this.normalizeNullableText(item.input.reason, FIELD_LIMITS.reason, '修订原因')
@@ -174,8 +189,7 @@ export class OrderAmendmentService {
           actionLabel: '修订出库单',
           targetType: 'order',
           targetId: String(item.order.id),
-          // 仪表盘动态跳转仍以不可变 showNo 为系统定位键；可编辑 businessNo 只放入审计详情。
-          targetCode: item.order.showNo,
+          targetCode: item.order.businessNo,
           actor,
           requestMeta,
           detail: {
@@ -290,7 +304,9 @@ export class OrderAmendmentService {
       if (businessNoChanged) {
         const inspection = await orderBusinessNoService.inspectConfirmed(after.businessNo, after.orderType, manager)
         parsedBusinessNo = inspection.parsed
-        if (inspection.blockingReason) blockingReasons.push(inspection.blockingReason)
+        if (inspection.blockingReason) {
+          blockingReasons.push(inspection.blockingReason)
+        }
       }
 
       const comparableBefore = JSON.stringify(before)
@@ -367,7 +383,8 @@ export class OrderAmendmentService {
   private snapshot(order: BizOutboundOrder): OrderAmendmentSnapshot {
     return {
       businessNo: order.businessNo,
-      showNo: order.showNo,
+      systemNo: order.systemNo,
+      showNo: order.systemNo,
       orderType: order.orderType as OrderType,
       customerDepartmentName: order.customerDepartmentName,
       customerName: order.customerName,
@@ -382,6 +399,7 @@ export class OrderAmendmentService {
   private emptySnapshot(): OrderAmendmentSnapshot {
     return {
       businessNo: '',
+      systemNo: '',
       showNo: '',
       orderType: 'walkin',
       customerDepartmentName: null,

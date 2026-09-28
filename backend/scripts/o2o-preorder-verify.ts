@@ -28,6 +28,7 @@ import { clientAuthService } from '../src/services/client-auth.service.js'
 import { installCaptchaServiceForTesting } from '../src/services/captcha.service.js'
 import { dataMaintenanceService } from '../src/services/data-maintenance.service.js'
 import { o2oPreorderService } from '../src/services/o2o-preorder.service.js'
+import { orderService } from '../src/services/order.service.js'
 import { orderBusinessNoService } from '../src/services/order-business-no.service.js'
 import { auditService } from '../src/services/audit.service.js'
 import { productService } from '../src/services/product.service.js'
@@ -133,13 +134,14 @@ const createVerificationRequestStub = (captured: CapturedVerification[]) => {
 }
 
 const expectBizError = async (executor: () => Promise<unknown>, expectedMessage: string) => {
+  let caughtError: unknown
   try {
     await executor()
-    assert.fail(`预期抛出错误：${expectedMessage}`)
   } catch (error) {
-    assert.ok(error instanceof Error)
-    assert.ok(error.message.includes(expectedMessage))
+    caughtError = error
   }
+  assert.ok(caughtError instanceof Error, `预期抛出错误：${expectedMessage}`)
+  assert.ok(caughtError.message.includes(expectedMessage), `实际错误：${caughtError.message}`)
 }
 
 // Issue #96：部门单必须携带到店取货时间。脚本统一使用同一个固定时间提交，
@@ -235,7 +237,6 @@ const run = async () => {
   const inventoryLogRepo = AppDataSource.getRepository(InventoryLog)
   const auditLogRepo = AppDataSource.getRepository(SysAuditLog)
   const outboundOrderRepo = AppDataSource.getRepository(BizOutboundOrder)
-  const expectedDepartmentPickupContact = clientAuth.realName
   const requestMeta = { ipAddress: '127.0.0.1', userAgent: 'o2o-preorder-verify', clientRiskBrowserId: null, clientRiskSessionId: null }
 
   const assertTimedOutOperationCommits = async (input: {
@@ -288,6 +289,18 @@ const run = async () => {
   // Issue #96：部门单到店取货时间必填，且必须落在“当前时间 ~ 自动取消时间”窗口内。
   const pickupRules = await systemConfigService.getO2oRuleConfigs()
   const productBeforePickupRejects = await productRepo.findOneByOrFail({ id: product.id })
+  for (const [clientRequestId, pickupContact, expectedMessage] of [
+    ['o2o-verify-contact-missing-01', '  ', '请填写提货人'],
+    ['o2o-verify-contact-long-01', '领'.repeat(33), '提货人长度不能超过32个字符'],
+  ] as const) {
+    await expectBizError(() => submitPreorderWithPickup(clientAuth, {
+      clientRequestId,
+      items: [{ productId: product.id, qty: 1 }],
+      isSystemApplied: false,
+      pickupContact,
+    }), expectedMessage)
+    assert.equal(await preorderRepo.count({ where: { clientRequestId } }), 0, '无效领取人不得生成预订单')
+  }
   await expectBizError(() => o2oPreorderService.submit(clientAuth, {
     clientRequestId: 'o2o-verify-pickup-missing-01',
     items: [{ productId: product.id, qty: 1 }],
@@ -334,7 +347,7 @@ const run = async () => {
   assert.equal(departmentOwnedResult.order.clientOrderType, 'department')
   assert.equal(departmentOwnedResult.order.departmentNameSnapshot, '脚本部门-A')
   assert.ok(departmentOwnedResult.order.staffNoSnapshot)
-  assert.equal(departmentOwnedResult.order.pickupContact, expectedDepartmentPickupContact)
+  assert.equal(departmentOwnedResult.order.pickupContact, '脚本提货人-部门账号')
   assert.equal(
     departmentOwnedResult.order.pickupAt?.toISOString(),
     SCRIPT_PICKUP_AT,
@@ -353,7 +366,14 @@ const run = async () => {
   assert.equal(departmentSnapshotPreorder.order.clientOrderType, 'department')
   assert.equal(departmentSnapshotPreorder.order.departmentNameSnapshot, '脚本部门-A')
   assert.ok(departmentSnapshotPreorder.order.staffNoSnapshot)
-  assert.equal(departmentSnapshotPreorder.order.pickupContact, expectedDepartmentPickupContact)
+  assert.equal(departmentSnapshotPreorder.order.pickupContact, '脚本提货人-部门快照')
+  try {
+    await preorderRepo.update({ id: departmentSnapshotPreorder.order.id }, { pickupContact: null })
+    const historicalDetail = await o2oPreorderService.getMyOrderDetail(clientAuth, departmentSnapshotPreorder.order.id)
+    assert.equal(historicalDetail.order.pickupContact, null, '历史预订单未记录领取人时不得用当前账号资料推断')
+  } finally {
+    await preorderRepo.update({ id: departmentSnapshotPreorder.order.id }, { pickupContact: '脚本提货人-部门快照' })
+  }
 
   // 客户端订单列表会展示工号快照，因此服务端关键词搜索也必须能直接命中该快照。
   const staffNoSearchResult = await o2oPreorderService.listMyOrders(clientAuth, {
@@ -404,8 +424,22 @@ const run = async () => {
     }),
     '请求键已被其他内容使用',
   )
+  await expectBizError(
+    () => o2oPreorderService.submit(clientAuth, {
+      ...idempotentSubmitPayload,
+      pickupContact: '另一位领取教师',
+    }),
+    '请求键已被其他内容使用',
+  )
+  await expectBizError(
+    () => o2oPreorderService.submit(clientAuth, {
+      ...idempotentSubmitPayload,
+      pickupAt: new Date(Date.parse(SCRIPT_PICKUP_AT) + 30 * 60 * 1000).toISOString(),
+    }),
+    '请求键已被其他内容使用',
+  )
   assert.equal(preorderResult.order.status, 'pending')
-  assert.equal(preorderResult.order.pickupContact, expectedDepartmentPickupContact)
+  assert.equal(preorderResult.order.pickupContact, '脚本提货人-A')
   const heldProduct = await productRepo.findOneByOrFail({ id: product.id })
   assert.equal(heldProduct.preOrderedStock, productStateBeforeRegularPreorder.preOrderedStock + 2)
   log('客户端并发幂等下单与单次库存预占通过')
@@ -658,10 +692,12 @@ const run = async () => {
     const orderUuid = randomUUID()
     const businessNo = await orderBusinessNoService.allocate('walkin', orderUuid, manager)
     await manager.getRepository(BizOutboundOrder).save({
-      orderUuid, showNo: `O2O-LINK-${Date.now()}`, businessNo, editVersion: 1,
+      orderUuid, systemNo: `O2O-LINK-${Date.now()}`, businessNo, editVersion: 1,
       orderType: 'walkin', hasCustomerOrder: false, isSystemApplied: false,
       issuerName: scriptAdminActor.displayName, customerDepartmentName: null,
       idempotencyKey: `o2o-preorder-verify:${batchPurgeOutboundLinked.order.id}`,
+      sourceDocType: 'o2o_preorder', sourceDocId: batchPurgeOutboundLinked.order.id,
+      sourceDocNo: batchPurgeOutboundLinked.order.preorderNo, inventoryMode: 'o2o_preapplied',
       customerName: '批删依赖测试', remark: '仅用于验证已取消订单的关联出库单保护', totalQty: '1.00', totalAmount: '10.00',
       isDeleted: false, deletedAt: null, deletedByUserId: null, deletedByUsername: null, deletedByDisplayName: null,
       creatorUserId: scriptAdminActor.userId, creatorUsername: scriptAdminActor.username, creatorDisplayName: scriptAdminActor.displayName,
@@ -670,11 +706,11 @@ const run = async () => {
   const productBeforeBatchPurge = await productRepo.findOneByOrFail({ id: product.id })
   const batchPurge = await o2oPreorderService.batchPurgeCancelledOrders({
     orders: [
-      { id: batchPurgeOne.order.id, confirmShowNo: batchPurgeOne.order.showNo },
-      { id: batchPurgeTwo.order.id, confirmShowNo: batchPurgeTwo.order.showNo },
-      { id: batchPurgeMismatch.order.id, confirmShowNo: '错误订单号' },
-      { id: batchPurgePending.order.id, confirmShowNo: batchPurgePending.order.showNo },
-      { id: batchPurgeOutboundLinked.order.id, confirmShowNo: batchPurgeOutboundLinked.order.showNo },
+      { id: batchPurgeOne.order.id, confirmPreorderNo: batchPurgeOne.order.preorderNo },
+      { id: batchPurgeTwo.order.id, confirmPreorderNo: batchPurgeTwo.order.preorderNo },
+      { id: batchPurgeMismatch.order.id, confirmPreorderNo: '错误订单号' },
+      { id: batchPurgePending.order.id, confirmPreorderNo: batchPurgePending.order.preorderNo },
+      { id: batchPurgeOutboundLinked.order.id, confirmPreorderNo: batchPurgeOutboundLinked.order.preorderNo },
     ],
     actor: scriptAdminActor,
     requestMeta: { ipAddress: '127.0.0.1', userAgent: 'o2o-preorder-verify', clientRiskBrowserId: null, clientRiskSessionId: null },
@@ -711,7 +747,7 @@ const run = async () => {
   let batchSummaryAuditFaultResult: Awaited<ReturnType<typeof o2oPreorderService.batchPurgeCancelledOrders>>
   try {
     batchSummaryAuditFaultResult = await o2oPreorderService.batchPurgeCancelledOrders({
-      orders: [{ id: batchSummaryAuditFaultOrder.order.id, confirmShowNo: batchSummaryAuditFaultOrder.order.showNo }],
+      orders: [{ id: batchSummaryAuditFaultOrder.order.id, confirmPreorderNo: batchSummaryAuditFaultOrder.order.preorderNo }],
       actor: scriptAdminActor,
       requestMeta,
     })
@@ -724,7 +760,7 @@ const run = async () => {
   log('批量删除汇总审计失败时仍返回已提交的逐单结果')
 
   const repeatedBatchPurge = await o2oPreorderService.batchPurgeCancelledOrders({
-    orders: [{ id: batchPurgeOne.order.id, confirmShowNo: batchPurgeOne.order.showNo }],
+    orders: [{ id: batchPurgeOne.order.id, confirmPreorderNo: batchPurgeOne.order.preorderNo }],
     actor: scriptAdminActor,
     requestMeta: { ipAddress: '127.0.0.1', userAgent: null, clientRiskBrowserId: null, clientRiskSessionId: null },
   })
@@ -733,14 +769,14 @@ const run = async () => {
   assert.equal((await productRepo.findOneByOrFail({ id: product.id })).preOrderedStock, productBeforeBatchPurge.preOrderedStock)
   await expectBizError(() => o2oPreorderService.batchPurgeCancelledOrders({
     orders: [
-      { id: batchPurgeMismatch.order.id, confirmShowNo: batchPurgeMismatch.order.showNo },
-      { id: batchPurgeMismatch.order.id, confirmShowNo: batchPurgeMismatch.order.showNo },
+      { id: batchPurgeMismatch.order.id, confirmPreorderNo: batchPurgeMismatch.order.preorderNo },
+      { id: batchPurgeMismatch.order.id, confirmPreorderNo: batchPurgeMismatch.order.preorderNo },
     ],
     actor: scriptAdminActor,
     requestMeta: { ipAddress: '127.0.0.1', userAgent: null, clientRiskBrowserId: null, clientRiskSessionId: null },
   }), '订单 ID 不可重复')
   await expectBizError(() => o2oPreorderService.batchPurgeCancelledOrders({
-    orders: Array.from({ length: 51 }, (_, index) => ({ id: `over-limit-${index}`, confirmShowNo: `over-limit-${index}` })),
+    orders: Array.from({ length: 51 }, (_, index) => ({ id: `over-limit-${index}`, confirmPreorderNo: `over-limit-${index}` })),
     actor: scriptAdminActor,
     requestMeta: { ipAddress: '127.0.0.1', userAgent: null, clientRiskBrowserId: null, clientRiskSessionId: null },
   }), '批量永久删除订单数量应为 1-50 项')
@@ -773,7 +809,51 @@ const run = async () => {
   // #70：来源预订单写入结构化来源快照，主单与明细备注不再自动写入预订单号。
   assert.equal(departmentSnapshotOutboundOrder.sourceDocType, 'o2o_preorder', '核销生成的正式出库单必须写入来源单据类型')
   assert.equal(String(departmentSnapshotOutboundOrder.sourceDocId), String(departmentSnapshotPreorder.order.id), '来源单据 ID 必须指向核销的预订单')
-  assert.equal(departmentSnapshotOutboundOrder.sourceDocNo, departmentSnapshotPreorder.order.showNo, '来源单据号必须保留预订单号快照')
+  assert.equal(departmentSnapshotOutboundOrder.sourceDocNo, departmentSnapshotPreorder.order.preorderNo, '来源单据号必须保留预订单号快照')
+  const sourceDetail = await orderService.detailById(String(departmentSnapshotOutboundOrder.id))
+  assert.equal(sourceDetail.order.sourcePreorderPickupContact, '脚本提货人-部门快照', '正式单详情应读取下单时领取人快照')
+  assert.equal(sourceDetail.order.sourcePreorderPickupAt, SCRIPT_PICKUP_AT, '正式单详情应读取来源预订单取货时间')
+  try {
+    await outboundOrderRepo.update({ id: departmentSnapshotOutboundOrder.id }, { sourceDocId: null })
+    const legacySourceDetail = await orderService.detailById(String(departmentSnapshotOutboundOrder.id))
+    assert.equal(legacySourceDetail.order.sourcePreorderPickupContact, '脚本提货人-部门快照', '缺少来源快照 ID 的历史单应按幂等关联读取真实预订单')
+    await outboundOrderRepo.update({ id: departmentSnapshotOutboundOrder.id }, { sourceDocNo: 'PRE-D-INVALID' })
+    const mismatchedSourceDetail = await orderService.detailById(String(departmentSnapshotOutboundOrder.id))
+    assert.equal(mismatchedSourceDetail.order.sourcePreorderPickupContact, null, '历史单来源号与真实预订单号不一致时不得读取领取人')
+    await outboundOrderRepo.update({ id: departmentSnapshotOutboundOrder.id }, { sourceDocNo: null })
+    const noSourceNoDetail = await orderService.detailById(String(departmentSnapshotOutboundOrder.id))
+    assert.equal(noSourceNoDetail.order.sourcePreorderPickupContact, null, '历史单缺少来源号快照时不得仅凭幂等键读取领取人')
+    await outboundOrderRepo.update({ id: departmentSnapshotOutboundOrder.id }, {
+      sourceDocType: null,
+      sourceDocNo: departmentSnapshotOutboundOrder.sourceDocNo,
+    })
+    const noSourceTypeDetail = await orderService.detailById(String(departmentSnapshotOutboundOrder.id))
+    assert.equal(noSourceTypeDetail.order.sourcePreorderPickupContact, null, '缺少结构化来源类型时不得仅凭幂等键读取领取人')
+    await outboundOrderRepo.update({ id: departmentSnapshotOutboundOrder.id }, { sourceDocType: 'o2o_preorder' })
+    await outboundOrderRepo.update({ id: departmentSnapshotOutboundOrder.id }, { inventoryMode: 'legacy_none' })
+    const legacyInventoryDetail = await orderService.detailById(String(departmentSnapshotOutboundOrder.id))
+    assert.equal(legacyInventoryDetail.order.sourcePreorderPickupContact, null, '非 O2O 预占库存模式不得使用幂等键回退领取人')
+    await outboundOrderRepo.update({ id: departmentSnapshotOutboundOrder.id }, { inventoryMode: 'o2o_preapplied' })
+    await outboundOrderRepo.update({ id: departmentSnapshotOutboundOrder.id }, { idempotencyKey: 'o2o-preorder-verify:not-a-number' })
+    const invalidKeyDetail = await orderService.detailById(String(departmentSnapshotOutboundOrder.id))
+    assert.equal(invalidKeyDetail.order.sourcePreorderPickupContact, null, '非规范预订单 ID 尾缀不得用于只读回退')
+    await outboundOrderRepo.update({ id: departmentSnapshotOutboundOrder.id }, { idempotencyKey: `test-source-missing:${departmentSnapshotOutboundOrder.id}` })
+    const missingSourceDetail = await orderService.detailById(String(departmentSnapshotOutboundOrder.id))
+    assert.equal(missingSourceDetail.order.sourcePreorderPickupContact, null, '来源预订单缺失时不得用正式单客户名推断领取人')
+    assert.equal(missingSourceDetail.order.sourcePreorderPickupAt, null, '来源预订单缺失时不得推断取货时间')
+    const missingSourcePickup = missingSourceDetail.order.sourcePreorderPickups.find((pickup) => pickup.sourceOrderId === String(departmentSnapshotOutboundOrder.id))
+    assert.equal(missingSourcePickup?.businessNo, departmentSnapshotOutboundOrder.businessNo, '领取关联失效仍须保留来源正式业务号')
+    assert.equal(missingSourcePickup?.sourcePreorderNo, departmentSnapshotOutboundOrder.sourceDocNo, '领取关联失效仍须保留可信来源号快照')
+    assert.equal(missingSourcePickup?.pickupContact, null, '领取关联失效不得推断领取人')
+  } finally {
+      await outboundOrderRepo.update({ id: departmentSnapshotOutboundOrder.id }, {
+        idempotencyKey: departmentSnapshotOutboundOrder.idempotencyKey,
+        sourceDocType: departmentSnapshotOutboundOrder.sourceDocType,
+        sourceDocId: departmentSnapshotOutboundOrder.sourceDocId,
+        sourceDocNo: departmentSnapshotOutboundOrder.sourceDocNo,
+        inventoryMode: departmentSnapshotOutboundOrder.inventoryMode,
+      })
+  }
   assert.equal(departmentSnapshotOutboundOrder.remark, null, '核销生成的正式出库单主单备注不得自动写入来源文案')
   assert.equal(
     await AppDataSource.getRepository(BizOutboundOrderItem).count({
@@ -791,7 +871,7 @@ const run = async () => {
   assert.equal(
     printedDepartmentOrder.detail.order.customerOrderBusinessNo,
     departmentSnapshotOutboundOrder.businessNo,
-    'O2O 继续以 showNo 关联，但客户端应展示正式单据 businessNo',
+    'O2O 仍以原预订单关联正式单，但客户端应展示正式单据 businessNo',
   )
   log('部门订单下单快照会稳定继承到正式出库单通过')
 
@@ -814,13 +894,116 @@ const run = async () => {
   ).customerOrderShowNo
   assert.equal(
     verifiedCustomerOrderShowNo,
-    verifiedOutboundOrder.showNo,
+    verifiedOutboundOrder.systemNo,
     '客户端订单详情应返回与管理端一致的正式出库单号',
   )
   assert.equal(verifiedDetail.order.customerOrderBusinessNo, verifiedOutboundOrder.businessNo)
+
+  const operatorVerifiedPreorder = await submitPreorderWithPickup(clientAuth, {
+    clientRequestId: 'o2o-verify-operator-audit-001',
+    items: [{ productId: product.id, qty: 1 }],
+    remark: '普通操作员核销审计验证',
+    isSystemApplied: false,
+    pickupContact: '脚本提货人-普通操作员核销',
+  })
+  const operatorVerifyActor: AuthUserContext = { ...verifyActor, role: 'operator' }
+  const operatorVerified = await o2oPreorderService.verifyByCode(
+    operatorVerifiedPreorder.order.verifyCode,
+    operatorVerifyActor,
+    { ipAddress: '127.0.0.1', userAgent: 'o2o-operator-audit-verify', clientRiskBrowserId: null, clientRiskSessionId: null },
+  )
+  const operatorVerifiedDetail = assertPreorderVerifyDetail(operatorVerified)
+  assert.equal('customerOrderSystemNo' in operatorVerifiedDetail.order, false, '普通操作员核销响应不得返回正式单 systemNo')
+  assert.equal('customerOrderShowNo' in operatorVerifiedDetail.order, false, '普通操作员核销响应不得返回旧 systemNo 别名')
+  const operatorVerifiedOutbound = await outboundOrderRepo.findOneOrFail({
+    where: { sourceDocType: 'o2o_preorder', sourceDocId: operatorVerifiedPreorder.order.id },
+  })
+  const operatorVerifyAudit = await AppDataSource.getRepository(SysAuditLog).findOneOrFail({
+    where: { actionType: 'o2o.preorder.verify', targetId: operatorVerifiedPreorder.order.id },
+    order: { id: 'DESC' },
+  })
+  const operatorVerifyAuditDetail = JSON.parse(operatorVerifyAudit.detailJson ?? '{}') as Record<string, unknown>
+  assert.equal(operatorVerifyAudit.targetCode, operatorVerifiedOutbound.businessNo, '核销审计 targetCode 必须优先使用正式单 businessNo')
+  assert.equal(operatorVerifyAuditDetail.preorderNo, operatorVerifiedPreorder.order.preorderNo, '核销审计必须保留 preorderNo')
+  assert.equal(operatorVerifyAuditDetail.outboundOrderBusinessNo, operatorVerifiedOutbound.businessNo, '核销审计必须保留正式单 businessNo')
+  assert.equal(operatorVerifyAuditDetail.outboundOrderSystemNo, operatorVerifiedOutbound.systemNo, '核销审计内部技术快照必须保留 systemNo')
+  assert.equal('outboundOrderShowNo' in operatorVerifyAuditDetail, false, '新核销审计不得继续写入含混 legacy showNo')
+  assert.equal('verifyCode' in operatorVerifyAuditDetail, false, '预订单核销审计不得保存完整核销码')
+  assert.equal(
+    (operatorVerifyAudit.detailJson ?? '').includes(operatorVerifiedPreorder.order.verifyCode),
+    false,
+    '预订单核销审计详情不得包含实际核销码',
+  )
+
+  const operatorReturnRequest = await o2oPreorderService.createReturnRequest(
+    clientAuth,
+    operatorVerifiedPreorder.order.id,
+    {
+      reason: '核销审计敏感字段验证',
+      items: [{
+        productId: operatorVerifiedDetail.items[0]!.productId,
+        skuId: operatorVerifiedDetail.items[0]!.skuId,
+        qty: 1,
+      }],
+    },
+  )
+  const operatorReturnVerified = await o2oPreorderService.verifyByCode(
+    operatorReturnRequest.verifyCode,
+    operatorVerifyActor,
+    { ipAddress: '127.0.0.2', userAgent: 'o2o-return-audit-verify', clientRiskBrowserId: null, clientRiskSessionId: null },
+  )
+  assert.equal(operatorReturnVerified?.verifyTargetType, 'return_request', '退货核销必须成功完成')
+  const operatorReturnAudit = await AppDataSource.getRepository(SysAuditLog).findOneOrFail({
+    where: { actionType: 'o2o.return_request.verify', targetId: operatorReturnRequest.id },
+    order: { id: 'DESC' },
+  })
+  const operatorReturnAuditDetail = JSON.parse(operatorReturnAudit.detailJson ?? '{}') as Record<string, unknown>
+  assert.equal(operatorReturnAuditDetail.operationType, 'return_verify', '退货核销审计必须保留操作类型')
+  assert.equal(operatorReturnAuditDetail.verifyTargetType, 'return_request', '退货核销审计必须保留核销目标类型')
+  assert.equal(operatorReturnAuditDetail.returnNo, operatorReturnRequest.returnNo, '退货核销审计必须保留退货单号')
+  assert.equal(operatorReturnAuditDetail.preorderNo, operatorVerifiedPreorder.order.preorderNo, '退货核销审计必须保留预订单号')
+  assert.equal('verifyCode' in operatorReturnAuditDetail, false, '退货核销审计不得保存完整核销码')
+  assert.equal(
+    (operatorReturnAudit.detailJson ?? '').includes(operatorReturnRequest.verifyCode),
+    false,
+    '退货核销审计详情不得包含实际核销码',
+  )
   await expectBizError(() => o2oPreorderService.cancelMyOrder(clientAuth, verifiedPreorder.order.id), '订单已核销，无法撤回')
   await o2oPreorderService.inboundStock(product.id, 3, verifyActor, '自动化补货')
   log('管理端核销、已核销不可撤回与入库流程通过')
+
+  const historicalUnrecordedPreorder = await submitPreorderWithPickup(clientAuth, {
+    clientRequestId: 'o2o-verify-historical-unrecorded-01',
+    items: [{ productId: product.id, qty: 1 }],
+    isSystemApplied: false,
+    pickupContact: '历史模拟领取人',
+  })
+  await preorderRepo.update({ id: historicalUnrecordedPreorder.order.id }, { pickupContact: null })
+  await o2oPreorderService.verifyByCode(historicalUnrecordedPreorder.order.verifyCode, scriptAdminActor)
+  const historicalOutbound = await outboundOrderRepo.findOneByOrFail({
+    idempotencyKey: `o2o-preorder-verify:${historicalUnrecordedPreorder.order.id}`,
+  })
+  assert.equal(historicalOutbound.customerName, null, '历史预订单未记录领取人时正式单不得回填账号实名')
+  const historicalOutboundDetail = await orderService.detailById(String(historicalOutbound.id))
+  assert.equal(historicalOutboundDetail.order.sourcePreorderPickupContact, null)
+  assert.equal(historicalOutboundDetail.order.sourcePreorderPickupAt, SCRIPT_PICKUP_AT)
+  log('历史部门单缺失领取人时保持未记录，不从账号实名推断')
+
+  const historicalWalkinPreorder = await submitPreorderWithPickup(otherClientAuth, {
+    clientRequestId: 'o2o-verify-historical-walkin-01',
+    items: [{ productId: product.id, qty: 1 }],
+    isSystemApplied: false,
+    pickupContact: '散客历史模拟领取人',
+  })
+  await preorderRepo.update({ id: historicalWalkinPreorder.order.id }, { pickupContact: null })
+  const historicalWalkinDetail = await o2oPreorderService.getMyOrderDetail(otherClientAuth, historicalWalkinPreorder.order.id)
+  assert.equal(historicalWalkinDetail.order.pickupContact, otherClientAuth.realName, '散客历史单保留原有账号名称兜底')
+  await o2oPreorderService.verifyByCode(historicalWalkinPreorder.order.verifyCode, scriptAdminActor)
+  const historicalWalkinOutbound = await outboundOrderRepo.findOneByOrFail({
+    idempotencyKey: `o2o-preorder-verify:${historicalWalkinPreorder.order.id}`,
+  })
+  assert.equal(historicalWalkinOutbound.customerName, otherClientAuth.realName, '散客历史正式单保留原有客户名称兜底')
+  log('历史散客单的提货人展示与正式单客户名称兼容原行为')
 
   const o2oRules = await systemConfigService.getO2oRuleConfigs()
   assert.equal(o2oRules.autoCancelHours, 24)

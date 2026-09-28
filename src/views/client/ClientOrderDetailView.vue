@@ -18,7 +18,6 @@ import {
   getO2oMallProducts,
   getO2oPreorderDetail,
   markMyO2oPreorderCustomerOrderPrinted,
-  resolveO2oDisplayShowNo,
   submitO2oReturnRequest,
   updateMyO2oPreorder,
   type O2oMallProduct,
@@ -27,6 +26,8 @@ import {
   type O2oReturnRequestDetail,
 } from '@/api/modules/o2o'
 import type { OrderDetailResult } from '@/api/modules/order'
+import type { VoucherRenderRow } from '@/views/order-list/order-voucher-pagination'
+import { createClientVoucherExportSnapshot } from '@/views/client/client-order-voucher-export'
 import { BaseRequestState, BizO2oItemSpecText } from '@/components/common'
 import { useStableRequest } from '@/composables/useStableRequest'
 import {
@@ -112,7 +113,8 @@ const returnQtyMap = ref<Record<string, number>>({})
 const requestError = ref<{ type: 'offline' | 'error'; message: string } | null>(null)
 const voucherDialogVisible = ref(false)
 const voucherDialogMounted = ref(false)
-const voucherPrintRootRef = ref<HTMLElement | null>(null)
+const voucherPages = ref<VoucherRenderRow[][]>([])
+const voucherFillerCounts = ref<number[]>([])
 const voucherCapabilityLoading = ref(false)
 const exportPdfLoading = ref(false)
 const voucherOrientation = ref<VoucherOrientation>(DEFAULT_VOUCHER_ORIENTATION)
@@ -129,6 +131,7 @@ let voucherUiModulePromise: VoucherUiModulePromise | null = null
 let voucherPdfExportModulePromise: ReturnType<typeof loadVoucherPdfExportModule> | null = null
 let qrCodeModulePromise: Promise<QrCodeModule> | null = null
 let detailAutoRefreshTimer: ReturnType<typeof globalThis.setInterval> | null = null
+let voucherDetailUnmounted = false
 clientOrderStore.initialize(clientAuthStore.currentUser?.id)
 
 const currentReportScenario = computed(() => {
@@ -219,21 +222,19 @@ const orderTypeLabel = computed(() => {
   return detail.value ? ORDER_TYPE_LABEL_MAP[detail.value.order.clientOrderType] : '散客'
 })
 
-const shouldShowVoucherButton = computed(() => {
-  return detail.value?.order.clientOrderType === 'department'
-})
-const displayOrderShowNo = computed(() => {
+const shouldShowVoucherButton = computed(() => Boolean(detail.value?.order.customerOrderBusinessNo))
+const displayPreorderNo = computed(() => {
   if (!detail.value) {
     return ''
   }
-  return resolveO2oDisplayShowNo(detail.value.order)
+  return detail.value.order.preorderNo
 })
-const originalCustomerOrderShowNo = computed(() => {
+const originalCustomerOrderBusinessNo = computed(() => {
   const order = detail.value?.order
-  return order?.originalCustomerOrderBusinessNo?.trim() || order?.originalCustomerOrderShowNo?.trim() || ''
+  return order?.originalCustomerOrderBusinessNo?.trim() || ''
 })
 const isMergedCustomerOrder = computed(() => {
-  return Boolean(originalCustomerOrderShowNo.value && originalCustomerOrderShowNo.value !== displayOrderShowNo.value)
+  return Boolean(originalCustomerOrderBusinessNo.value && originalCustomerOrderBusinessNo.value !== detail.value?.order.customerOrderBusinessNo)
 })
 
 const voucherOrientationLabel = computed(() => (voucherOrientation.value === 'landscape' ? '横版' : '竖版'))
@@ -330,13 +331,16 @@ const voucherOrder = computed<OrderDetailResult | null>(() => {
     return null
   }
   const { order, items, customerProfile } = detail.value
-  const displayShowNo = resolveO2oDisplayShowNo(order)
+  const businessNo = order.customerOrderBusinessNo?.trim()
+  if (!businessNo) {
+    return null
+  }
   const customerDisplayName = customerProfile?.realName || customerProfile?.username || null
   const normalizedTotalAmount = toVoucherMoneyText(order.totalAmount ?? totalAmount.value)
   return {
     id: order.id,
-    showNo: displayShowNo,
-    businessNo: displayShowNo,
+    systemNo: '',
+    businessNo,
     editVersion: 1,
     inventoryMode: 'o2o_preapplied',
     contentEditable: false,
@@ -346,8 +350,8 @@ const voucherOrder = computed<OrderDetailResult | null>(() => {
     isSystemApplied: Boolean(order.isSystemApplied),
     issuerName: '门店值班人员',
     customerDepartmentName: order.departmentNameSnapshot || customerProfile?.departmentName || null,
-    // 详细注释：正式出库单优先展示下单时填写的提货人，历史订单再回退到用户资料中的展示名。
-    customerName: order.pickupContact || customerDisplayName,
+    // 部门历史单未记录领取人时不得从当前账号资料推断；散客沿用原有展示名兜底。
+    customerName: order.pickupContact || (order.clientOrderType === 'department' ? null : customerDisplayName),
     totalAmount: normalizedTotalAmount,
     totalQty: String(order.totalQty ?? 0),
     status: 'active',
@@ -356,7 +360,11 @@ const voucherOrder = computed<OrderDetailResult | null>(() => {
     // 客户端预览/打印以当前预订单为来源单据，与管理端正式出库单的结构化来源口径一致。
     sourceDocType: 'o2o_preorder',
     sourceDocId: order.id,
-    sourceDocNo: order.showNo,
+    sourcePreorderNo: order.preorderNo,
+    matchedIdentifierType: null,
+    matchedIdentifierValue: null,
+    sourcePreorderPickupContact: order.pickupContact || null,
+    sourcePreorderPickupAt: order.pickupAt || null,
     creatorUserId: customerProfile?.id || null,
     creatorUsername: customerProfile?.username || null,
     creatorDisplayName: customerDisplayName,
@@ -393,6 +401,19 @@ const voucherOrder = computed<OrderDetailResult | null>(() => {
     }),
   }
 })
+
+const resetVoucherPagination = () => {
+  voucherPages.value = []
+  voucherFillerCounts.value = []
+}
+watch([voucherOrder, voucherOrientation, voucherDialogVisible], resetVoucherPagination, { flush: 'sync' })
+watch(voucherEditableForm, resetVoucherPagination, { deep: true, flush: 'sync' })
+
+const handleVoucherPagesChange = (pages: VoucherRenderRow[][], fillerCounts: number[], orderId: string, orientation: VoucherOrientation) => {
+  if (!voucherDialogVisible.value || orderId !== voucherOrder.value?.id || orientation !== voucherOrientation.value) return
+  voucherPages.value = pages
+  voucherFillerCounts.value = fillerCounts
+}
 
 const timelineItems = computed(() => {
   if (!detail.value) {
@@ -730,6 +751,7 @@ const handleVoucherEditableFieldUpdate = <TKey extends keyof OrderVoucherEditabl
   key: TKey,
   value: OrderVoucherEditableFields[TKey],
 ) => {
+  if (exportPdfLoading.value) return
   voucherEditableForm[key] = value
 }
 
@@ -791,7 +813,15 @@ const renderQrCodeDataUrl = async (payload: string, width: number) => {
 }
 
 const handleVoucherOrientationChange = (value: VoucherOrientation) => {
+  if (exportPdfLoading.value) return
+  if (value === voucherOrientation.value) return
+  resetVoucherPagination()
   voucherOrientation.value = value
+}
+
+const handleVoucherDialogVisibleChange = (value: boolean) => {
+  if (exportPdfLoading.value) return
+  voucherDialogVisible.value = value
 }
 
 const updateEditItemQty = (itemKey: string, value: number | null | undefined) => {
@@ -935,9 +965,13 @@ const markCustomerOrderPrintedIfNeeded = async () => {
   if (!detail.value || detail.value.order.clientOrderType !== 'department' || detail.value.order.hasCustomerOrder) {
     return
   }
+  const requestedOrderId = detail.value.order.id
+  const isCurrentOrder = () => !voucherDetailUnmounted
+    && String(route.params.id ?? '').trim() === requestedOrderId
+    && detail.value?.order.id === requestedOrderId
   try {
-    const nextDetail = await markMyO2oPreorderCustomerOrderPrinted(detail.value.order.id)
-    detail.value = nextDetail
+    const nextDetail = await markMyO2oPreorderCustomerOrderPrinted(requestedOrderId)
+    if (isCurrentOrder() && nextDetail.order.id === requestedOrderId) detail.value = nextDetail
     syncOrderStoreFromDetail(nextDetail, { preserveFresh: true })
     notifyClientOrderRefresh({
       orderId: nextDetail.order.id,
@@ -945,8 +979,10 @@ const markCustomerOrderPrintedIfNeeded = async () => {
       sourceId: clientOrderRefreshSourceId,
     })
   } catch (error) {
-    const normalizedError = normalizeRequestError(error, '已完成打印/导出，但出库单状态上报失败')
-    showAppWarning(normalizedError.message)
+    if (isCurrentOrder()) {
+      const normalizedError = normalizeRequestError(error, '已完成打印/导出，但出库单状态上报失败')
+      showAppWarning(normalizedError.message)
+    }
   }
 }
 
@@ -987,6 +1023,7 @@ const resetDialogTransientState = () => {
   editDialogVisible.value = false
   returnDialogVisible.value = false
   voucherDialogVisible.value = false
+  resetVoucherPagination()
   editSubmitting.value = false
   returnSubmitting.value = false
   exportPdfLoading.value = false
@@ -1007,6 +1044,7 @@ const handleOpenVoucherDialog = async () => {
     return
   }
   resetVoucherEditableForm()
+  resetVoucherPagination()
   voucherOrientation.value = DEFAULT_VOUCHER_ORIENTATION
   voucherCapabilityLoading.value = true
   try {
@@ -1024,58 +1062,66 @@ const handleOpenVoucherDialog = async () => {
 // 这样下次打开始终从干净状态开始，避免“上一次补填内容仍显示在当前订单”。
 const handleVoucherDialogClosed = () => {
   resetVoucherEditableForm()
+  resetVoucherPagination()
   voucherOrientation.value = DEFAULT_VOUCHER_ORIENTATION
   cleanupVoucherPrintSideEffects()
 }
 
 const handlePrintVoucher = async () => {
-  if (!voucherOrder.value) {
+  if (exportPdfLoading.value || !voucherOrder.value || voucherPages.value.length === 0) {
     showAppWarning('当前订单暂无可打印内容')
     return
   }
+  const orderId = voucherOrder.value.id
   cleanupVoucherPrintSideEffects()
   applyVoucherPrintPageStyle(voucherOrientation.value)
-  await markCustomerOrderPrintedIfNeeded()
   globalThis.addEventListener('afterprint', cleanupVoucherPrintSideEffects)
   await nextTick()
   globalThis.print()
+  if (voucherOrder.value?.id === orderId) await markCustomerOrderPrintedIfNeeded()
   voucherPrintCleanupTimer = globalThis.setTimeout(() => {
     cleanupVoucherPrintSideEffects()
   }, 1500)
 }
 
-const handleExportVoucherPdf = async () => {
+const handleExportVoucherPdf = async (sourceElement: HTMLElement | null) => {
+  if (exportPdfLoading.value) return
   if (!enableHtml2pdfExport) {
     showAppInfo('PDF 导出开关未启用，当前仅支持打印')
     return
   }
-  if (!voucherOrder.value) {
+  if (!voucherDialogVisible.value || !voucherOrder.value || voucherPages.value.length === 0 || !sourceElement?.isConnected || sourceElement.getBoundingClientRect().width <= 0) {
     showAppWarning('当前订单暂无可导出的凭证')
     return
   }
   exportPdfLoading.value = true
+  const orderId = voucherOrder.value.id
+  const orientation = voucherOrientation.value
+  let exportSnapshot: ReturnType<typeof createClientVoucherExportSnapshot> | null = null
   try {
+    exportSnapshot = createClientVoucherExportSnapshot(sourceElement, voucherOrder.value.businessNo)
     await ensureVoucherUiModulesReady()
     const exportVoucherPdf = await resolveExportVoucherPdf()
     await nextTick()
-    const sourceElement = voucherPrintRootRef.value?.querySelector('.voucher-print-document')
-    if (!(sourceElement instanceof HTMLElement)) {
+    if (!sourceElement.isConnected || !voucherDialogVisible.value || voucherOrder.value?.id !== orderId || voucherOrientation.value !== orientation || voucherPages.value.length === 0) {
       showAppWarning('凭证模板尚未准备完成，请稍后重试')
       return
     }
     await exportVoucherPdf({
-      sourceElement,
-      filename: `${voucherOrder.value.showNo || 'client-order'}-正式出库单.pdf`,
+      sourceElement: exportSnapshot.sourceElement,
+      filename: exportSnapshot.filename,
       marginMm: 8,
       scale: 2,
-      orientation: voucherOrientation.value,
+      orientation,
     })
+    if (voucherOrder.value?.id !== orderId || !voucherDialogVisible.value) return
     await markCustomerOrderPrintedIfNeeded()
     showAppSuccess('PDF 导出成功')
   } catch (error) {
     const normalizedError = normalizeRequestError(error, 'PDF 导出失败，请稍后重试')
     showAppError(normalizedError.message)
   } finally {
+    exportSnapshot?.dispose()
     exportPdfLoading.value = false
   }
 }
@@ -1210,7 +1256,7 @@ const handleRecallOrder = async () => {
 
   try {
     await ElMessageBox.confirm(
-      `确认撤回订单“${displayOrderShowNo.value}”吗？撤回后将释放预订库存，二维码会立即失效。`,
+      `确认撤回预订单“${displayPreorderNo.value}”吗？撤回后将释放预订库存，二维码会立即失效。`,
       '撤回订单',
       {
         type: 'warning',
@@ -1296,7 +1342,7 @@ const handleSubmitOrderEdit = async () => {
 
   try {
     await ElMessageBox.confirm(
-      `确认修改订单“${displayOrderShowNo.value}”吗？保存后将按最新商品和数量重算预订库存。`,
+      `确认修改预订单“${displayPreorderNo.value}”吗？保存后将按最新商品和数量重算预订库存。`,
       '修改订单',
       {
         type: 'warning',
@@ -1449,6 +1495,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  voucherDetailUnmounted = true
   disposeClientOrderRefresh()
   globalThis.document?.removeEventListener('visibilitychange', handleVisibilityChange)
   if (detailAutoRefreshTimer !== null) {
@@ -1486,7 +1533,7 @@ onBeforeUnmount(() => {
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div class="flex flex-wrap items-center gap-2">
-              <p class="text-lg font-semibold text-slate-900">{{ displayOrderShowNo }}</p>
+              <p class="text-lg font-semibold text-slate-900">{{ displayPreorderNo }}</p>
               <span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">{{ orderTypeLabel }}</span>
               <Transition name="detail-refresh-notice">
                 <span
@@ -1497,7 +1544,7 @@ onBeforeUnmount(() => {
                 </span>
               </Transition>
             </div>
-            <p v-if="isMergedCustomerOrder" class="mt-2 text-xs text-teal-700">当前正式出库单 · 已合并（原始单号：{{ originalCustomerOrderShowNo }}）</p>
+            <p v-if="isMergedCustomerOrder" class="mt-2 text-xs text-teal-700">关联正式出库单已合并（原始出库业务单号：{{ originalCustomerOrderBusinessNo }}）</p>
             <p class="mt-1 text-sm text-slate-400">状态：{{ statusLabel }}</p>
             <p class="mt-1 text-xs text-slate-400">{{ detailAutoRefreshStatusText }}</p>
           </div>
@@ -1582,6 +1629,10 @@ onBeforeUnmount(() => {
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">创建时间</p>
               <p class="mt-1 text-sm text-slate-700">{{ formatOrderDateTime(detail.order.createdAt) }}</p>
+            </div>
+            <div v-if="detail.order.customerOrderBusinessNo" class="rounded-2xl bg-teal-50 px-4 py-3">
+              <p class="text-sm text-teal-600">关联出库业务单号</p>
+              <p class="mt-1 break-all text-sm font-semibold text-teal-800">{{ detail.order.customerOrderBusinessNo }}</p>
             </div>
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">下单归属</p>
@@ -1894,18 +1945,19 @@ onBeforeUnmount(() => {
       :orientation-label="voucherOrientationLabel"
       :enable-html2pdf-export="enableHtml2pdfExport"
       :export-pdf-loading="exportPdfLoading"
-      @update:visible="voucherDialogVisible = $event"
+      :page-count="voucherPages.length * 2"
+      @update:visible="handleVoucherDialogVisibleChange"
       @update:orientation="handleVoucherOrientationChange"
       @update:editable-field="handleVoucherEditableFieldUpdate($event.key, $event.value)"
       @print="handlePrintVoucher"
       @export-pdf="handleExportVoucherPdf"
+      @pages-change="handleVoucherPagesChange"
       @closed="handleVoucherDialogClosed"
     />
 
     <Teleport to="body">
       <div
         v-if="voucherOrder && voucherDialogVisible"
-        ref="voucherPrintRootRef"
         class="order-voucher-print-root"
         aria-hidden="true"
       >
@@ -1914,6 +1966,9 @@ onBeforeUnmount(() => {
             :order="voucherOrder"
             :editable-fields="voucherEditableForm"
             :orientation="voucherOrientation"
+            :pages="voucherPages"
+            :page-filler-counts="voucherFillerCounts"
+            :measure-pages="false"
           />
         </div>
       </div>

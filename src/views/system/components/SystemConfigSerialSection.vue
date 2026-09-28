@@ -1,128 +1,66 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/system/components/SystemConfigSerialSection.vue
- * 文件职责：承载系统配置页中的订单流水配置分区展示。
- * 实现逻辑：
- * - 父页面保留配置加载、保存与权限判断；
- * - 本组件只负责渲染部门单与散客单两组流水号表单，减少主页面模板长度。
- * 维护说明：若订单流水新增字段，优先在这里补齐展示，再回到父页面同步保存逻辑。
+ * 文件职责：按正式出库系统编号、出库业务单号、O2O 预订单号三类独立命名空间展示编号配置。
+ * 实现逻辑：system/preorder 仅允许管理员在服务端安全规则下提高当前号；business 高水位只读，人工复用不改变自动流水。
+ * 维护说明：固定前缀、六位宽度和并发安全规则均由后端校验，本组件只承载明确的管理操作入口。
  */
 
-import type { OrderSerialConfigRecord } from '@/api/modules/system-config'
+import type { OrderIdentifierConfigs, OrderIdentifierKind } from '@/api/modules/system-config'
 import { PassiveNumberInput } from '@/components/common'
 
+type EditableIdentifierKind = 'system' | 'preorder'
+
 defineProps<{
-  configMap: Record<'department' | 'walkin', OrderSerialConfigRecord> | null
-  departmentPreview: string
-  walkinPreview: string
-  serialForm: {
-    department: {
-      start: number
-      current: number
-      width: number
-    }
-    walkin: {
-      start: number
-      current: number
-      width: number
-    }
-  }
+  config: OrderIdentifierConfigs | null
+  form: Record<EditableIdentifierKind, Record<'department' | 'walkin', { current: number }>>
   canUpdateConfigs: boolean
   loading: boolean
-  getUpdatedAtLabel: (orderType: 'department' | 'walkin') => string
+  getUpdatedAtLabel: (kind: OrderIdentifierKind, orderType: 'department' | 'walkin') => string
 }>()
+
+const ORDER_TYPE_LABELS = { department: '部门单', walkin: '散客单' } as const
+const SECTION_META: Array<{ kind: OrderIdentifierKind; title: string; description: string; editable: boolean }> = [
+  { kind: 'system', title: '正式出库系统编号', description: 'OUT-D / OUT-W 六位流水，仅用于管理员技术追溯。', editable: true },
+  { kind: 'business', title: '出库业务单号', description: 'hyyzjd / hyyz 高水位只读；原单永久删除后可由普通修订人工复用，自动开单不回填释放低号。', editable: false },
+  { kind: 'preorder', title: 'O2O 预订单号', description: 'PRE-D / PRE-W 六位流水，供核销台与客户端订单识别。', editable: true },
+]
 </script>
 
 <template>
-  <div class="config-stage__panel grid gap-6 lg:grid-cols-2">
-    <div class="apple-card flex flex-col p-5 sm:p-6 xl:p-7">
-      <div class="mb-5 flex items-center justify-between gap-2 border-b border-slate-100 pb-4 dark:border-white/5">
-        <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">部门订单流水</h2>
-        <span class="rounded-lg bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-          前缀：{{ configMap?.department.prefix || 'hyyzjd' }}
-        </span>
+  <div class="grid gap-6 xl:grid-cols-3">
+    <section v-for="section in SECTION_META" :key="section.kind" class="apple-card flex flex-col p-5 sm:p-6">
+      <div class="border-b border-slate-100 pb-4 dark:border-white/5">
+        <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">{{ section.title }}</h2>
+        <p class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">{{ section.description }}</p>
       </div>
-      <div class="grid flex-1 gap-5">
-        <div class="rounded-xl border border-teal-200/60 bg-teal-50/50 p-4 text-teal-800 dark:border-teal-900/40 dark:bg-teal-900/10 dark:text-teal-300">
-          <div class="text-xs font-medium opacity-80">订单编号示例（下一单）</div>
-          <div class="mt-1.5 text-lg font-bold tracking-wide">{{ departmentPreview }}</div>
-        </div>
-        <div class="space-y-4">
-          <el-form-item prop="department.start" class="!mb-0">
-            <template #label>
-              <span class="field-label">起始号 <span class="field-label__help">首次生效编号起点</span></span>
-            </template>
-            <PassiveNumberInput v-model="serialForm.department.start" :min="1" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
-          </el-form-item>
-          <el-form-item prop="department.current" class="!mb-0">
-            <template #label>
-              <span class="field-label">当前号 <span class="field-label__help">已使用到的流水；下一单号 = 当前号 + 1，不能小于仍占用单号的最大流水</span></span>
-            </template>
-            <PassiveNumberInput
-              v-model="serialForm.department.current"
-              :min="0"
-              :step="1"
-              :controls="false"
-              :disabled="!canUpdateConfigs || loading"
-              class="!w-full"
-            />
-          </el-form-item>
-          <el-form-item prop="department.width" class="!mb-0">
-            <template #label>
-              <span class="field-label">位宽 <span class="field-label__help">流水号补零位数（1-12）</span></span>
-            </template>
-            <PassiveNumberInput v-model="serialForm.department.width" :min="1" :max="12" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
-          </el-form-item>
-        </div>
-      </div>
-      <div class="mt-6 border-t border-slate-100 pt-4 text-xs text-slate-400 dark:border-white/5 dark:text-slate-500">
-        最近更新时间：{{ getUpdatedAtLabel('department') }}
-      </div>
-    </div>
 
-    <div class="apple-card flex flex-col p-5 sm:p-6 xl:p-7">
-      <div class="mb-5 flex items-center justify-between gap-2 border-b border-slate-100 pb-4 dark:border-white/5">
-        <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">散客订单流水</h2>
-        <span class="rounded-lg bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-          前缀：{{ configMap?.walkin.prefix || 'hyyz' }}
-        </span>
-      </div>
-      <div class="grid flex-1 gap-5">
-        <div class="rounded-xl border border-sky-200/60 bg-sky-50/50 p-4 text-sky-800 dark:border-sky-900/40 dark:bg-sky-900/10 dark:text-sky-300">
-          <div class="text-xs font-medium opacity-80">订单编号示例（下一单）</div>
-          <div class="mt-1.5 text-lg font-bold tracking-wide">{{ walkinPreview }}</div>
-        </div>
-        <div class="space-y-4">
-          <el-form-item prop="walkin.start" class="!mb-0">
-            <template #label>
-              <span class="field-label">起始号 <span class="field-label__help">首次生效编号起点</span></span>
-            </template>
-            <PassiveNumberInput v-model="serialForm.walkin.start" :min="1" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
-          </el-form-item>
-          <el-form-item prop="walkin.current" class="!mb-0">
-            <template #label>
-              <span class="field-label">当前号 <span class="field-label__help">已使用到的流水；下一单号 = 当前号 + 1，不能小于仍占用单号的最大流水</span></span>
-            </template>
+      <div class="mt-4 space-y-4">
+        <div v-for="orderType in ['department', 'walkin'] as const" :key="orderType" class="rounded-xl bg-slate-50 p-3 dark:bg-slate-800/60">
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-sm font-medium text-slate-700 dark:text-slate-200">{{ ORDER_TYPE_LABELS[orderType] }}</span>
+            <code class="rounded bg-white px-2 py-1 text-xs text-slate-600 dark:bg-slate-900 dark:text-slate-300">
+              {{ config?.[section.kind][orderType].prefix || '-' }}
+            </code>
+          </div>
+          <p class="mt-2 text-xs text-slate-500">
+            起始号 {{ config?.[section.kind][orderType].start ?? '-' }} · 位宽 {{ config?.[section.kind][orderType].width ?? '-' }}
+          </p>
+          <el-form-item v-if="section.editable" :prop="`${section.kind}.${orderType}.current`" class="mb-0 mt-3">
+            <template #label><span class="field-label">当前号 <span class="field-label__help">只能按后端安全规则提高</span></span></template>
             <PassiveNumberInput
-              v-model="serialForm.walkin.current"
+              v-model="form[section.kind as EditableIdentifierKind][orderType].current"
               :min="0"
               :step="1"
               :controls="false"
               :disabled="!canUpdateConfigs || loading"
-              class="!w-full"
+              class="w-full"
             />
           </el-form-item>
-          <el-form-item prop="walkin.width" class="!mb-0">
-            <template #label>
-              <span class="field-label">位宽 <span class="field-label__help">流水号补零位数（1-12）</span></span>
-            </template>
-            <PassiveNumberInput v-model="serialForm.walkin.width" :min="1" :max="12" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
-          </el-form-item>
+          <p v-else class="mt-3 text-sm font-semibold text-slate-700 dark:text-slate-200">当前号：{{ config?.[section.kind][orderType].current ?? '-' }}</p>
+          <p class="mt-2 text-xs text-slate-400">最近更新：{{ getUpdatedAtLabel(section.kind, orderType) }}</p>
         </div>
       </div>
-      <div class="mt-6 border-t border-slate-100 pt-4 text-xs text-slate-400 dark:border-white/5 dark:text-slate-500">
-        最近更新时间：{{ getUpdatedAtLabel('walkin') }}
-      </div>
-    </div>
+    </section>
   </div>
 </template>

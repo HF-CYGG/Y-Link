@@ -7,14 +7,6 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { AppDataSource } from '../src/config/data-source.js'
-import { authService } from '../src/services/auth.service.js'
-import { auditService } from '../src/services/audit.service.js'
-import { orderService } from '../src/services/order.service.js'
-import { userService } from '../src/services/user.service.js'
-import { BaseProduct } from '../src/entities/base-product.entity.js'
-import { BizOutboundOrder } from '../src/entities/biz-outbound-order.entity.js'
-import { BizError } from '../src/utils/errors.js'
 
 /**
  * Task 7 自动化验证脚本：
@@ -37,7 +29,7 @@ const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
 const frontendRoot = path.resolve(backendRoot, '..')
 const verifyDatabasePath = path.resolve(backendRoot, 'data/local-dev/y-link.task7-verify.sqlite')
-const defaultAdminPassword = ['Admin', '@', '123456'].join('')
+const defaultAdminPassword = ['Task7Private', '@', '907531'].join('')
 const defaultOperatorPasswordV1 = ['Task71', '@', '123'].join('')
 const defaultOperatorPasswordV2 = ['Task72', '@', '123'].join('')
 
@@ -65,10 +57,12 @@ function verifyFrontendAuthGuards() {
 
   assert.match(routerSource, /path:\s*'\/login'/)
   assert.match(routerSource, /redirect:\s*to\.fullPath/)
-  assert.match(routerSource, /resolveSafeRedirect\(to\.query\.redirect\)/)
-  assert.match(routerSource, /当前账号无权访问该页面/)
-  assert.match(routesSource, /allowedRoles:\s*\['admin'\]/)
-  assert.match(routesSource, /export const canRoleAccessRoute/)
+  assert.match(routerSource, /resolveSafeRedirect\(to\.query\.redirect,\s*authStore\.currentUser\)/)
+  assert.match(routerSource, /showPermissionDenied\('已为你切换到可访问页面'\)/)
+  assert.match(routerSource, /showPermissionDenied\(\)/)
+  assert.match(routesSource, /allowedRoles:\s*\['admin',\s*'operator'\]/)
+  assert.match(routesSource, /allowedRoles:\s*\['supplier'\]/)
+  assert.match(routesSource, /export const canAccessRoute/)
 
   pass('前端未登录拦截、登录回跳与管理员角色限制源码存在')
 }
@@ -78,9 +72,9 @@ async function expectBizError(task: string, runner: () => Promise<unknown>, stat
     await runner()
     assert.fail(`${task} 未抛出预期异常`)
   } catch (error) {
-    assert.ok(error instanceof BizError, `${task} 应抛出 BizError`)
+    assert.ok(error instanceof Error && 'statusCode' in error, `${task} 应抛出 BizError`)
     if (typeof status === 'number') {
-      assert.equal(error.statusCode, status, `${task} 状态码不符合预期`)
+      assert.equal((error as Error & { statusCode: number }).statusCode, status, `${task} 状态码不符合预期`)
     }
     if (messageIncludes) {
       assert.match(error.message, new RegExp(messageIncludes))
@@ -92,7 +86,36 @@ async function main() {
   resetVerifyDatabase()
   verifyFrontendAuthGuards()
 
+  process.env.APP_PROFILE = 'task7-verify'
+  process.env.DB_TYPE = 'sqlite'
+  process.env.DB_SYNC = 'true'
+  process.env.SQLITE_DB_PATH = verifyDatabasePath
+  process.env.Y_LINK_SKIP_DATABASE_RUNTIME_OVERRIDE = 'true'
+  process.env.INIT_ADMIN_PASSWORD = defaultAdminPassword
+  const [
+    { AppDataSource },
+    { initializeDatabaseSchemaIfNeeded },
+    { authService },
+    { auditService },
+    { orderService },
+    { userService },
+    { BaseProduct },
+    { BaseProductSku },
+    { BizOutboundOrder },
+  ] = await Promise.all([
+    import('../src/config/data-source.js'),
+    import('../src/config/database-bootstrap.js'),
+    import('../src/services/auth.service.js'),
+    import('../src/services/audit.service.js'),
+    import('../src/services/order.service.js'),
+    import('../src/services/user.service.js'),
+    import('../src/entities/base-product.entity.js'),
+    import('../src/entities/base-product-sku.entity.js'),
+    import('../src/entities/biz-outbound-order.entity.js'),
+  ])
+
   await AppDataSource.initialize()
+  await initializeDatabaseSchemaIfNeeded(AppDataSource)
 
   try {
     /**
@@ -180,9 +203,26 @@ async function main() {
         productName: 'Task7测试产品',
         pinyinAbbr: 'TSCP',
         defaultPrice: '12.50',
+        currentStock: 100,
+        preOrderedStock: 0,
         isActive: true,
       }),
     )
+    await AppDataSource.getRepository(BaseProductSku).save({
+      productId: product.id,
+      skuCode: 'TASK7P01-DEFAULT',
+      specValuesJson: '{}',
+      specText: '默认规格',
+      defaultPrice: '12.50',
+      discountRate: '10.0',
+      currentStock: 100,
+      preOrderedStock: 0,
+      isActive: true,
+      isCurrent: true,
+      o2oRecommended: false,
+      thumbnail: null,
+      sortOrder: 0,
+    })
 
     const submitResult = await orderService.submit(
       {
@@ -207,7 +247,7 @@ async function main() {
     assert.equal(orderDetail.items.length, 1)
     assert.equal(orderDetail.items[0].productCode, 'TASK7P01')
     assert.equal(orderDetail.items[0].productName, 'Task7测试产品')
-    assert.equal(String(orderDetail.items[0].subTotal), '25')
+    assert.equal(String(orderDetail.items[0].subTotal), '25.00')
     pass('开单详情可展示开单人信息与正确明细字段')
 
     const orderList = await orderService.list({
@@ -246,7 +286,7 @@ async function main() {
     assert.ok(actionTypes.has('order.create'))
 
     const orderAudit = auditPage.list.find((item) => item.actionType === 'order.create')
-    assert.equal(orderAudit?.targetCode, submitResult.order.showNo)
+    assert.equal(orderAudit?.targetCode, submitResult.order.businessNo)
     pass('审计日志可查看登录、用户管理与开单关键操作记录')
 
     const storedOrder = await AppDataSource.getRepository(BizOutboundOrder).findOne({

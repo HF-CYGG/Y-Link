@@ -223,7 +223,7 @@ const formatActivityTime = (value: string): string => {
  * - 点击首页动态后跳转到出库列表页；
  * - 通过 query 透传目标单据信息，复用列表页既有“定位并打开详情抽屉”逻辑。
  */
-const navigateToActivityOrder = (activity: { actionType: string; orderId: string; showNo: string }) => {
+const navigateToActivityOrder = (activity: { actionType: string; orderId: string }) => {
   if (!isActivityNavigable(activity)) {
     return
   }
@@ -232,7 +232,6 @@ const navigateToActivityOrder = (activity: { actionType: string; orderId: string
     path: '/order-list',
     query: {
       focusOrderId: activity.orderId,
-      focusOrderShowNo: activity.showNo,
       focusRefreshToken: String(Date.now()),
     },
   }).catch(() => undefined)

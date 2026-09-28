@@ -31,6 +31,7 @@ import type {
   DashboardTrendOrderRowRaw,
 } from '../types/dashboard.js'
 import { BizError } from '../utils/errors.js'
+import type { AuthUserContext } from '../types/auth.js'
 
 interface DashboardTrendPoint {
   date: string
@@ -72,7 +73,10 @@ interface DashboardRecentActivity {
   orderId: string
   actionType: 'order.create' | 'order.delete' | 'order.restore' | 'order.purge'
   actionLabel: string
-  showNo: string
+  /** 仅管理员技术追溯可见。 */
+  systemNo?: string
+  /** @deprecated 兼容一个发布周期，值始终等于 systemNo；仅管理员可见。 */
+  showNo?: string
   businessNo: string
   actorDisplayName: string
   displayName: string
@@ -147,7 +151,10 @@ interface DashboardAnalyticsResult {
 
 interface DashboardDrilldownOrderRecord {
   orderId: string
-  showNo: string
+  /** 仅管理员技术追溯可见。 */
+  systemNo?: string
+  /** @deprecated 兼容一个发布周期；请使用 systemNo。 */
+  showNo?: string
   businessNo: string
   orderType: DashboardOrderType
   createdAt: string
@@ -239,6 +246,8 @@ const normalizeRatio = (value: number): string => {
   }
   return value.toFixed(2)
 }
+
+const canViewSystemNo = (actor?: Pick<AuthUserContext, 'role'>): boolean => actor?.role === 'admin'
 
 const normalizeOrderTypeLabel = (orderType: DashboardOrderType): string => {
   if (orderType === 'department') {
@@ -488,7 +497,8 @@ const parseAuditDetail = (detailJson: string | null): Record<string, unknown> =>
 }
 
 export const dashboardService = {
-  async getStats(): Promise<DashboardStatsResult> {
+  async getStats(actor?: Pick<AuthUserContext, 'role'>): Promise<DashboardStatsResult> {
+    const exposeSystemNo = canViewSystemNo(actor)
     const today = new Date()
     today.setHours(0, 0, 0, 0)
 
@@ -556,6 +566,20 @@ export const dashboardService = {
 
     const recentActivities: DashboardRecentActivity[] = recentAuditLogs.map((audit) => {
       const detail = parseAuditDetail(audit.detailJson)
+      // 这四类当前审计都会在详情中显式写 businessNo/systemNo；历史记录若缺少
+      // 明确字段则保持“-”，不把语义不明的 targetCode 猜成任一编号而造成越权泄漏。
+      const businessNo = normalizeText(
+        typeof detail.businessNo === 'string' ? detail.businessNo : null,
+        '-',
+      )
+      // targetCode 对这四类新审计明确承载 businessNo。历史记录只有在详情显式提供
+      // systemNo/旧 showNo 快照时才识别为技术号，绝不凭 targetCode 的外观猜测。
+      const systemNo = normalizeText(
+        typeof detail.systemNo === 'string'
+          ? detail.systemNo
+          : typeof detail.showNo === 'string' ? detail.showNo : null,
+        '',
+      )
       const actionType =
         audit.actionType === 'order.delete' || audit.actionType === 'order.restore' || audit.actionType === 'order.purge'
           ? audit.actionType
@@ -566,11 +590,8 @@ export const dashboardService = {
         orderId: normalizeText(audit.targetId, String(audit.id)),
         actionType,
         actionLabel: normalizeText(audit.actionLabel, '出库单变更'),
-        showNo: normalizeText(audit.targetCode, '-'),
-        businessNo: normalizeText(
-          typeof detail.businessNo === 'string' ? detail.businessNo : audit.targetCode,
-          '-',
-        ),
+        ...(exposeSystemNo && systemNo ? { systemNo, showNo: systemNo } : {}),
+        businessNo,
         actorDisplayName: normalizeText(audit.actorDisplayName || audit.actorUsername, '系统'),
         displayName: normalizeRecentActivityDisplayName(detail),
         customerName: normalizeText(typeof detail.customerName === 'string' ? detail.customerName : null, '-'),
@@ -596,7 +617,10 @@ export const dashboardService = {
    * - 商品榜默认按商品合并，可切换为按规格细分，并支持锁定单个商品做款式横向比较；
    * - Top N 截断发生在 SQL 聚合之后，因此合并数量恒等于该商品全部规格数量之和。
    */
-  async getAnalytics(input: DashboardAnalyticsInput): Promise<DashboardAnalyticsResult> {
+  async getAnalytics(
+    input: DashboardAnalyticsInput,
+    _actor?: Pick<AuthUserContext, 'role'>,
+  ): Promise<DashboardAnalyticsResult> {
     const filter = resolveDashboardFilter(input, { defaultRange: 'currentMonth' })
     if (!filter.startAt || !filter.endExclusive) {
       throw new BizError('统计区间解析失败，请重新选择起止日期', 400)
@@ -710,7 +734,9 @@ export const dashboardService = {
 
   async getProductRankDrilldown(
     input: { productId: string; nameSnapshot?: string } & DashboardFilterInput,
+    actor?: Pick<AuthUserContext, 'role'>,
   ): Promise<DashboardProductRankDrilldownResult> {
+    const exposeSystemNo = canViewSystemNo(actor)
     const productId = String(input.productId ?? '').trim()
     if (!productId) {
       throw new BizError('productId 不能为空', 400)
@@ -744,7 +770,6 @@ export const dashboardService = {
       .createQueryBuilder('item')
       .innerJoin(BizOutboundOrder, 'order', 'order.id = item.orderId')
       .select('order.id', 'orderId')
-      .addSelect('order.showNo', 'showNo')
       .addSelect('order.businessNo', 'businessNo')
       .addSelect('order.orderType', 'orderType')
       .addSelect('order.createdAt', 'createdAt')
@@ -755,7 +780,6 @@ export const dashboardService = {
       .addSelect('SUM(item.lineAmount)', 'amount')
       .where('item.productId = :productId', { productId })
       .groupBy('order.id')
-      .addGroupBy('order.showNo')
       .addGroupBy('order.businessNo')
       .addGroupBy('order.orderType')
       .addGroupBy('order.createdAt')
@@ -764,6 +788,9 @@ export const dashboardService = {
       .addGroupBy('order.issuerName')
       .orderBy('order.createdAt', 'DESC')
       .limit(100)
+    if (exposeSystemNo) {
+      detailQb.addSelect('order.systemNo', 'systemNo').addGroupBy('order.systemNo')
+    }
 
     this.applyProductSnapshotFilter(detailQb, nameSnapshot)
     this.applyOrderFilter(detailQb, filter)
@@ -781,13 +808,15 @@ export const dashboardService = {
       totalQty: normalizeQty(summaryRaw?.totalQty),
       totalAmount: normalizeAmount(summaryRaw?.totalAmount),
       orderCount: Number(summaryRaw?.orderCount ?? 0),
-      records: detailRows.map((row) => this.buildDrilldownOrderRecord(row)),
+      records: detailRows.map((row) => this.buildDrilldownOrderRecord(row, exposeSystemNo)),
     }
   },
 
   async getCustomerRankDrilldown(
     input: { customerName: string } & DashboardFilterInput,
+    actor?: Pick<AuthUserContext, 'role'>,
   ): Promise<DashboardCustomerRankDrilldownResult> {
+    const exposeSystemNo = canViewSystemNo(actor)
     const customerName = String(input.customerName ?? '').trim()
     if (!customerName) {
       throw new BizError('customerName 不能为空', 400)
@@ -810,7 +839,6 @@ export const dashboardService = {
     const detailQb = orderRepo
       .createQueryBuilder('order')
       .select('order.id', 'orderId')
-      .addSelect('order.showNo', 'showNo')
       .addSelect('order.businessNo', 'businessNo')
       .addSelect('order.orderType', 'orderType')
       .addSelect('order.createdAt', 'createdAt')
@@ -822,6 +850,7 @@ export const dashboardService = {
       .where('1=1')
       .orderBy('order.createdAt', 'DESC')
       .limit(100)
+    if (exposeSystemNo) detailQb.addSelect('order.systemNo', 'systemNo')
 
     this.applyCustomerFilter(detailQb, customerName)
     this.applyOrderFilter(detailQb, filter)
@@ -832,11 +861,14 @@ export const dashboardService = {
       totalQty: normalizeQty(summaryRaw?.totalQty),
       totalAmount: normalizeAmount(summaryRaw?.totalAmount),
       orderCount: Number(summaryRaw?.orderCount ?? 0),
-      records: detailRows.map((row) => this.buildDrilldownOrderRecord(row)),
+      records: detailRows.map((row) => this.buildDrilldownOrderRecord(row, exposeSystemNo)),
     }
   },
 
-  async getTagAggregate(input: { tagId: string } & DashboardFilterInput): Promise<DashboardTagAggregateResult> {
+  async getTagAggregate(
+    input: { tagId: string } & DashboardFilterInput,
+    _actor?: Pick<AuthUserContext, 'role'>,
+  ): Promise<DashboardTagAggregateResult> {
     const tagId = String(input.tagId ?? '').trim()
     if (!tagId) {
       throw new BizError('tagId 不能为空', 400)
@@ -879,7 +911,10 @@ export const dashboardService = {
    * - 商品维度只按商品合并，同一商品的不同规格不再裂成多片；
    * - 分片截断到 Top 8 后补一片“其他”，保证卡片总额等于区间真实总额、占比之和为 100%。
    */
-  async getDashboardPieData(input: DashboardFilterInput): Promise<DashboardPiePayload> {
+  async getDashboardPieData(
+    input: DashboardFilterInput,
+    _actor?: Pick<AuthUserContext, 'role'>,
+  ): Promise<DashboardPiePayload> {
     const filter = resolveDashboardFilter(input, { defaultRange: 'currentMonth' })
     const orderRepo = AppDataSource.getRepository(BizOutboundOrder)
     const itemRepo = AppDataSource.getRepository(BizOutboundOrderItem)
@@ -1095,7 +1130,7 @@ export const dashboardService = {
 
   buildDrilldownOrderRecord(row: {
     orderId: string | number
-    showNo: string | null
+    systemNo?: string | null
     businessNo: string | null
     orderType: string | null
     createdAt: Date | string
@@ -1104,13 +1139,16 @@ export const dashboardService = {
     issuerName: string | null
     qty: string | number | null
     amount: string | number | null
-  }): DashboardDrilldownOrderRecord {
+  }, exposeSystemNo = false): DashboardDrilldownOrderRecord {
     const normalizedOrderType = String(row.orderType ?? '').trim().toLowerCase()
     const orderType: DashboardOrderType = normalizedOrderType === 'department' ? 'department' : 'walkin'
     return {
       orderId: String(row.orderId ?? '').trim(),
-      showNo: normalizeText(row.showNo, '-'),
-      businessNo: normalizeText(row.businessNo, normalizeText(row.showNo, '-')),
+      ...(exposeSystemNo ? {
+        systemNo: normalizeText(row.systemNo, '-'),
+        showNo: normalizeText(row.systemNo, '-'),
+      } : {}),
+      businessNo: normalizeText(row.businessNo, '-'),
       orderType,
       createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : String(row.createdAt),
       customerName: normalizeCustomerName(row.customerName),

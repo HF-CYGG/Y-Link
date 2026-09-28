@@ -11,8 +11,10 @@
 
 
 import dayjs from 'dayjs'
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { getOrderRevisions, type OrderDetailResult, type OrderRevisionRecord } from '@/api/modules/order'
+import { useAuthStore } from '@/store'
+import pinia from '@/store/pinia'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 
 /**
@@ -28,6 +30,8 @@ const props = defineProps<{
   detailGridClass: string
 }>()
 const emit = defineEmits<{ navigate: [orderId: string] }>()
+const authStore = useAuthStore(pinia)
+const canViewSystemNo = () => authStore.currentUser?.role === 'admin'
 
 const revisions = ref<OrderRevisionRecord[]>([])
 const revisionsLoading = ref(false)
@@ -91,15 +95,29 @@ const getOrderDisplayName = (order: OrderDetailResult) => {
   return order.customerName || order.customerDepartmentName || '-'
 }
 const hasItemProvenance = () => props.order.items.some((item) => Boolean(item.sourceOrderId))
+const mergedPickupRecords = computed(() => {
+  if (props.order.merge.role !== 'parent' || props.order.inventoryMode !== 'o2o_preapplied') return []
+  const pickupByOrderId = new Map((props.order.sourcePreorderPickups ?? []).map((item) => [item.sourceOrderId, item]))
+  return [props.order, ...props.order.merge.children].map((sourceOrder) => {
+    const pickup = pickupByOrderId.get(sourceOrder.id)
+    return {
+      sourceOrderId: sourceOrder.id,
+      businessNo: sourceOrder.businessNo || sourceOrder.showNo,
+      sourcePreorderNo: pickup?.sourcePreorderNo || sourceOrder.sourceDocNo || null,
+      pickupContact: pickup?.pickupContact || null,
+      pickupAt: pickup?.pickupAt || null,
+    }
+  })
+})
 
 /**
  * 来源单据文案：
  * - 读取结构化来源快照，不解析备注或幂等键；
  * - 目前仅线上预订单核销生成的正式出库单有来源，其余返回 null 不展示。
  */
-const formatSourceDoc = (order: { sourceDocType?: string | null; sourceDocNo?: string | null }) => {
-  if (order.sourceDocType === 'o2o_preorder' && order.sourceDocNo) {
-    return `线上预订单 ${order.sourceDocNo}`
+const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderNo?: string | null }) => {
+  if (order.sourceDocType === 'o2o_preorder' && order.sourcePreorderNo) {
+    return `线上预订单 ${order.sourcePreorderNo}`
   }
   return null
 }
@@ -118,6 +136,7 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourceDocNo?: s
     </div>
     <el-descriptions :column="isPhone ? 1 : 2" border size="small">
       <el-descriptions-item label="业务单号">{{ order.businessNo }}</el-descriptions-item>
+      <el-descriptions-item v-if="canViewSystemNo()" label="出库系统编号（仅技术追溯）">{{ order.systemNo }}</el-descriptions-item>
       <el-descriptions-item label="库存模式">{{ formatInventoryMode(order) }}</el-descriptions-item>
       <el-descriptions-item label="订单类型">{{ formatOrderType(order.orderType) }}</el-descriptions-item>
       <el-descriptions-item label="开单时间">{{ dayjs(order.createdAt).format('YYYY-MM-DD HH:mm:ss') }}</el-descriptions-item>
@@ -129,14 +148,20 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourceDocNo?: s
       <el-descriptions-item label="系统申请">
         {{ order.orderType === 'department' ? (order.isSystemApplied ? '已申请' : '未申请') : '不适用' }}
       </el-descriptions-item>
-      <el-descriptions-item v-if="order.customerName" label="客户名称">{{ order.customerName }}</el-descriptions-item>
+      <el-descriptions-item v-if="order.customerName" :label="order.merge.role === 'parent' ? '父单客户名称' : '客户名称'">{{ order.customerName }}</el-descriptions-item>
       <el-descriptions-item label="出单人">{{ order.issuerName || '-' }}</el-descriptions-item>
       <el-descriptions-item label="开单人">{{ order.creatorDisplayName || order.creatorUsername || '-' }}</el-descriptions-item>
       <el-descriptions-item label="总数量">{{ order.totalQty }}</el-descriptions-item>
       <el-descriptions-item label="总金额">
         <span class="text-base font-bold text-red-500">¥{{ formatAmount(order.totalAmount) }}</span>
       </el-descriptions-item>
-      <el-descriptions-item v-if="formatSourceDoc(order)" label="来源单据" :span="isPhone ? 1 : 2">{{ formatSourceDoc(order) }}</el-descriptions-item>
+      <el-descriptions-item v-if="formatSourceDoc(order)" :label="order.merge.role === 'parent' ? '父单来源单据' : '来源单据'" :span="isPhone ? 1 : 2">{{ formatSourceDoc(order) }}</el-descriptions-item>
+      <el-descriptions-item v-if="order.merge.role !== 'parent' && order.sourceDocType === 'o2o_preorder'" label="来源预订单领取人">
+        {{ order.sourcePreorderPickupContact || '未记录' }}
+      </el-descriptions-item>
+      <el-descriptions-item v-if="order.merge.role !== 'parent' && order.sourceDocType === 'o2o_preorder'" label="来源预订单取货时间">
+        {{ order.sourcePreorderPickupAt ? dayjs(order.sourcePreorderPickupAt).format('YYYY-MM-DD HH:mm') : '未记录' }}
+      </el-descriptions-item>
       <el-descriptions-item label="单据备注" :span="isPhone ? 1 : 2">{{ order.remark || '-' }}</el-descriptions-item>
     </el-descriptions>
   </section>
@@ -146,7 +171,7 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourceDocNo?: s
     <p v-if="order.merge.role === 'source'" class="mt-2 text-sm text-teal-800">
       当前为来源单，已合并至
       <el-button v-if="order.merge.parent" link type="primary" @click="emit('navigate', order.merge.parent.id)">
-        {{ order.merge.parent.businessNo || order.merge.parent.showNo }}
+        {{ order.merge.parent.businessNo }}
       </el-button>
       <span v-else>父单</span>，仅支持查看。
     </p>
@@ -154,8 +179,17 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourceDocNo?: s
       <p class="text-sm text-teal-800">当前为父单，包含 {{ order.merge.children.length }} 张来源单。</p>
       <div class="mt-2 flex flex-wrap gap-2">
         <el-button v-for="child in order.merge.children" :key="child.id" link type="primary" @click="emit('navigate', child.id)">
-          {{ child.businessNo || child.showNo }}<span v-if="formatSourceDoc(child)">（{{ formatSourceDoc(child) }}）</span>
+          {{ child.businessNo }}<span v-if="formatSourceDoc(child)">（{{ formatSourceDoc(child) }}）</span>
         </el-button>
+      </div>
+      <div v-if="mergedPickupRecords.length" class="mt-3 space-y-2">
+        <div class="text-sm font-medium text-teal-900">各来源领取记录</div>
+        <div v-for="(pickup, index) in mergedPickupRecords" :key="pickup.sourceOrderId" class="rounded-lg border border-teal-100 bg-white/80 px-3 py-2 text-sm text-teal-950">
+          <div class="font-medium">{{ index === 0 ? '父单' : '来源单' }} {{ pickup.businessNo }}</div>
+          <div>线上预订单：{{ pickup.sourcePreorderNo || '未记录' }}</div>
+          <div>领取人：{{ pickup.pickupContact || '未记录' }}</div>
+          <div>到店取货时间：{{ pickup.pickupAt ? dayjs(pickup.pickupAt).format('YYYY-MM-DD HH:mm') : '未记录' }}</div>
+        </div>
       </div>
     </div>
   </section>

@@ -3,7 +3,7 @@
  * 模块说明：src/views/client/ClientCheckoutView.vue
  * 文件职责：承载客户端确认订单页，展示实名归属信息、提货信息、商品明细与下单提交入口。
  * 实现逻辑：
- * - 进入页面后会恢复当前账号的提货人草稿，并同步最新商品库存快照；
+ * - 部门账号每次进入页面须填写实际领取教师姓名；个人账号恢复提货人草稿，并同步最新商品库存快照；
  * - 下单归属完全由当前登录账号类型决定，页面只负责展示部门/工号/实名信息，不允许手动篡改归属；
  * - 部门账号下单前强制校验所属部门、教职工号与金蝶申请状态，避免订单归属与实名链路脱节；
  * - 部门单必须选择到店取货时间：日期按钮（el-button）+ 半小时时段下拉，日期范围受店铺自动取消时长（pickupWindowHours）约束，
@@ -196,9 +196,6 @@ const AMBIGUOUS_PREORDER_SUBMIT_STATUS_SET = new Set<number | undefined>([undefi
 
 const resolveDefaultPickupContact = () => {
   const currentUser = clientAuthStore.currentUser
-  if (currentUser?.accountType === 'department') {
-    return currentUser.realName?.trim() || currentUser.username?.trim() || currentUser.account?.trim() || ''
-  }
   const username = currentUser?.username?.trim() || currentUser?.account?.trim()
   if (username) return username
   return currentUser?.realName?.trim() || currentUser?.mobile?.trim() || ''
@@ -214,11 +211,11 @@ const restorePickupContactDraft = () => {
   const storageKey = resolvePickupContactStorageKey()
   const defaultPickupContact = resolveDefaultPickupContact()
   if (clientAuthStore.currentUser?.accountType === 'department') {
-    pickupContact.value = defaultPickupContact
+    pickupContact.value = ''
     try {
       globalThis.window?.localStorage.removeItem(storageKey)
     } catch {
-      // 部门账号提货人由实名锁定，本地缓存清理失败不影响下单。
+      // 旧部门草稿清理失败不影响本次显式输入。
     }
     return
   }
@@ -241,7 +238,7 @@ const persistPickupContactDraft = () => {
     try {
       globalThis.window.localStorage.removeItem(storageKey)
     } catch {
-      // 部门账号提货人不可编辑，不依赖本地缓存。
+      // 部门账号不保存领取人草稿，清理失败不影响本次下单。
     }
     return
   }
@@ -259,8 +256,7 @@ const persistPickupContactDraft = () => {
 
 const handlePickupContactBlur = () => {
   if (clientAuthStore.currentUser?.accountType === 'department') {
-    pickupContact.value = resolveDefaultPickupContact()
-    persistPickupContactDraft()
+    pickupContact.value = pickupContact.value.trim()
     return
   }
   const normalizedPickupContact = pickupContact.value.trim()
@@ -292,18 +288,8 @@ watch(
 )
 
 watch(
-  () => [
-    clientAuthStore.currentUser?.accountType,
-    clientAuthStore.currentUser?.realName,
-    clientAuthStore.currentUser?.username,
-    clientAuthStore.currentUser?.account,
-  ],
-  () => {
-    if (clientAuthStore.currentUser?.accountType === 'department') {
-      pickupContact.value = resolveDefaultPickupContact()
-      persistPickupContactDraft()
-    }
-  },
+  () => clientAuthStore.currentUser?.accountType,
+  () => restorePickupContactDraft(),
 )
 
 // 结算展示和提交都必须观察全部已选行，不能把失效项过滤后静默提交剩余商品。
@@ -339,9 +325,8 @@ const enforcedClientOrderType = computed(() => (
   clientAuthStore.currentUser?.accountType === 'department' ? 'department' : 'walkin'
 ))
 const isDepartmentOrder = computed(() => enforcedClientOrderType.value === 'department')
-const pickupContactReadonly = computed(() => isDepartmentOrder.value)
 const pickupContactInputHint = computed(() => (
-  isDepartmentOrder.value ? '部门账号提货人按实名锁定，不可更改' : '可编辑并自动记忆'
+  isDepartmentOrder.value ? '每次下单填写实际领取教师姓名' : '可编辑并自动记忆'
 ))
 const currentAccountOrderHint = computed(() => (
   isDepartmentOrder.value ? '当前为部门共享账号，可提交部门订单' : '当前按散客下单'
@@ -374,10 +359,14 @@ const handleBack = () => {
 
 const handleSubmit = async () => {
   const normalizedPickupContact = isDepartmentOrder.value
-    ? resolveDefaultPickupContact()
+    ? pickupContact.value.trim()
     : (pickupContact.value.trim() || resolveDefaultPickupContact())
   if (!normalizedPickupContact) {
-    showAppWarning('请填写提货人')
+    showAppWarning(isDepartmentOrder.value ? '请填写领取人姓名（教师姓名）' : '请填写提货人')
+    return
+  }
+  if (normalizedPickupContact.length > 32) {
+    showAppWarning('领取人姓名不能超过 32 个字符')
     return
   }
   pickupContact.value = normalizedPickupContact
@@ -548,22 +537,18 @@ const handleSubmit = async () => {
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-2">
             <span class="inline-flex h-6 items-center rounded-full bg-teal-50 px-2 text-xs font-semibold text-teal-700">提货信息</span>
-            <p class="text-sm font-semibold text-slate-800">提货人</p>
+            <p class="text-sm font-semibold text-slate-800">{{ isDepartmentOrder ? '领取人姓名（教师姓名）' : '提货人' }}</p>
           </div>
           <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-500">{{ pickupContactInputHint }}</span>
         </div>
         <div class="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 focus-within:border-teal-300 focus-within:bg-white">
-          <p class="text-[11px] text-slate-400">提货姓名</p>
+          <p class="text-[11px] text-slate-400">{{ isDepartmentOrder ? '实际领取教师' : '提货姓名' }}</p>
           <input
             v-model.trim="pickupContact"
             type="text"
             maxlength="32"
-            :readonly="pickupContactReadonly"
-            :class="[
-              'mt-1 w-full border-0 bg-transparent p-0 text-base font-semibold text-slate-900 outline-none',
-              pickupContactReadonly ? 'cursor-default text-slate-900' : '',
-            ]"
-            placeholder="请输入提货人（默认用户名）"
+            class="mt-1 w-full border-0 bg-transparent p-0 text-base font-semibold text-slate-900 outline-none"
+            :placeholder="isDepartmentOrder ? '请输入实际领取教师姓名' : '请输入提货人（默认用户名）'"
             @blur="handlePickupContactBlur"
           />
         </div>
@@ -573,7 +558,7 @@ const handleSubmit = async () => {
             <span class="truncate">{{ currentAccountTypeLabel }}</span>
           </div>
           <div class="flex items-center gap-2">
-            <span class="font-medium text-slate-600">真实姓名</span>
+            <span class="font-medium text-slate-600">账号实名</span>
             <span class="truncate">{{ currentRealName }}</span>
           </div>
           <div class="flex items-center gap-2">

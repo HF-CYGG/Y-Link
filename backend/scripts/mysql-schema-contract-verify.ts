@@ -41,7 +41,6 @@ const REQUIRED_TABLES = [
   'business_sequence',
   'client_mobile_session',
   'sms_verification_record',
-  'order_business_no_occupancy',
   'order_revision',
   'account_lifecycle_event',
   'order_merge_operation',
@@ -145,12 +144,6 @@ const REQUIRED_COLUMNS = [
   ['inventory_log', 'after_sku_current_stock'],
   ['inventory_log', 'before_sku_preordered_stock'],
   ['inventory_log', 'after_sku_preordered_stock'],
-  ['order_business_no_occupancy', 'business_namespace'],
-  ['order_business_no_occupancy', 'serial_value'],
-  ['order_business_no_occupancy', 'business_no'],
-  ['order_business_no_occupancy', 'order_uuid'],
-  ['order_business_no_occupancy', 'assigned_reason'],
-  ['order_business_no_occupancy', 'created_at'],
   ['order_revision', 'order_id_snapshot'],
   ['order_revision', 'order_uuid'],
   ['order_revision', 'revision_no'],
@@ -521,24 +514,6 @@ const REQUIRED_INDEXES: readonly IndexFixture[] = [
     unique: true,
   },
   {
-    tableName: 'order_business_no_occupancy',
-    indexName: 'uk_order_business_no_occupancy_business_no',
-    columns: ['business_no'],
-    unique: true,
-  },
-  {
-    tableName: 'order_business_no_occupancy',
-    indexName: 'uk_order_business_no_occupancy_namespace_serial',
-    columns: ['business_namespace', 'serial_value'],
-    unique: true,
-  },
-  {
-    tableName: 'order_business_no_occupancy',
-    indexName: 'idx_order_business_no_occupancy_order_uuid',
-    columns: ['order_uuid'],
-    unique: false,
-  },
-  {
     tableName: 'order_revision',
     indexName: 'uk_order_revision_uuid_version',
     columns: ['order_uuid', 'revision_no'],
@@ -700,9 +675,12 @@ function createCompleteFixture(): SchemaFixture {
 
 function createDataSource(fixture: SchemaFixture): DataSource {
   return {
-    query: async (sql: string) => {
+    query: async (sql: string, params?: unknown[]) => {
       if (sql.includes('information_schema.TABLES')) {
-        return [...fixture.tables].map((tableName) => ({ TABLE_NAME: tableName }))
+        const requested = new Set((params ?? []).map(String))
+        return [...fixture.tables]
+          .filter((tableName) => requested.size === 0 || requested.has(tableName))
+          .map((tableName) => ({ TABLE_NAME: tableName }))
       }
       if (sql.includes('information_schema.COLUMNS')) {
         return [...fixture.columns]
@@ -782,6 +760,14 @@ async function expectSchemaFailure(
 
 await assert.doesNotReject(() => assertMysqlRequiredSchemaExists(createDataSource(createCompleteFixture())))
 
+const obsoleteBusinessNoTables = createCompleteFixture()
+obsoleteBusinessNoTables.tables.add('order_business_no_occupancy')
+obsoleteBusinessNoTables.tables.add('order_business_no_reuse_event')
+await expectSchemaFailure(obsoleteBusinessNoTables, [
+  '仍存在已停用表',
+  '056_disable_order_business_no_permanent_occupancy.sql',
+])
+
 const missingSequence = createCompleteFixture()
 missingSequence.tables.delete('business_sequence')
 await expectSchemaFailure(missingSequence, [
@@ -808,13 +794,6 @@ missingSmsVerificationRecord.tables.delete('sms_verification_record')
 await expectSchemaFailure(missingSmsVerificationRecord, [
   '表 sms_verification_record',
   '039_aliyun_pnvs_sms_verification.sql',
-])
-
-const missingOrderBusinessNoOccupancy = createCompleteFixture()
-missingOrderBusinessNoOccupancy.tables.delete('order_business_no_occupancy')
-await expectSchemaFailure(missingOrderBusinessNoOccupancy, [
-  '表 order_business_no_occupancy',
-  '042_order_business_no_amendment.sql',
 ])
 
 const missingOrderBusinessNo = createCompleteFixture()
@@ -1194,21 +1173,21 @@ const missingAdminMfaTable = createCompleteFixture()
 missingAdminMfaTable.tables.delete('sys_user_mfa')
 await expectSchemaFailure(missingAdminMfaTable, [
   'sys_user_mfa',
-  '054_admin_mfa.sql',
+  '057_admin_mfa.sql',
 ])
 
 const missingAdminMfaUniqueIndex = createCompleteFixture()
 missingAdminMfaUniqueIndex.indexes.delete(objectKey('sys_user_mfa', 'uk_sys_user_mfa_user_id'))
 await expectSchemaFailure(missingAdminMfaUniqueIndex, [
   '索引 sys_user_mfa.uk_sys_user_mfa_user_id',
-  '054_admin_mfa.sql',
+  '057_admin_mfa.sql',
 ])
 
 const cascadingAdminMfaForeignKey = createCompleteFixture()
 cascadingAdminMfaForeignKey.foreignKeys.get(objectKey('sys_user_mfa', 'fk_sys_user_mfa_user_id'))!.deleteRule = 'CASCADE'
 await expectSchemaFailure(cascadingAdminMfaForeignKey, [
   '外键 sys_user_mfa.user_id 必须使用 ON DELETE RESTRICT',
-  '054_admin_mfa.sql',
+  '057_admin_mfa.sql',
 ])
 
 console.log('[mysql-schema-contract-verify] MySQL 启动结构契约验证通过')

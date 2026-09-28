@@ -4,7 +4,7 @@
  * - `totp_secret_sealed` 为 AES-256-GCM 密文（`utils/data-encryption.ts`，AAD 绑定账号 ID），
  *   `recovery_codes_json` 只存未使用恢复码的 HMAC-SHA256 摘要，两列默认不随查询返回；
  * - `last_used_step` 记录最近一次成功使用的 TOTP 时间步，只能单调推进，防止同一动态码重放。
- * 维护说明：外键为 RESTRICT，永久删除账号时由服务层在同一事务内先删除本行；MySQL 结构见 `sql/054_admin_mfa.sql`。
+ * 维护说明：外键为 RESTRICT，永久删除账号时由服务层在同一事务内先删除本行；MySQL 结构见 `sql/057_admin_mfa.sql`。
  */
 
 import { Column, CreateDateColumn, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, UpdateDateColumn, type Relation } from 'typeorm'

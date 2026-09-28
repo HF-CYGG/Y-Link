@@ -95,20 +95,24 @@ expectText('src/views/order-list/OrderListView.vue', '(canAmendOrders || canMerg
 expectText('src/views/order-list/components/OrderListMobileCard.vue', '选择单据', '移动端通用选择文案')
 expectText('src/views/order-list/components/OrderListMobileCard.vue', '<style scoped>', '移动端卡片自有作用域样式')
 expectText('src/views/order-list/components/OrderListMobileCard.vue', '.mobile-order-card__merge-child', '来源子卡自有样式')
-expectText('src/views/order-list/components/OrderListMobileCard.vue', '.dark .mobile-order-card__show-no', '深色模式卡片样式')
+expectText('src/views/order-list/components/OrderListMobileCard.vue', '.dark .mobile-order-card__business-no', '深色模式卡片业务单号样式')
 expectText('src/views/order-list/components/OrderListMobileCard.vue', '@media (prefers-reduced-motion: reduce)', '卡片高亮动画降级')
-for (const obsoleteParentStyle of ['.mobile-order-card__head', '.mobile-order-card__merge-child', '.dark .mobile-order-card__show-no']) {
+for (const obsoleteParentStyle of ['.mobile-order-card__head', '.mobile-order-card__merge-child', '.dark .mobile-order-card__business-no']) {
   if (source.get('src/views/order-list/OrderListView.vue')?.includes(obsoleteParentStyle)) {
     failures.push(`OrderListView 不得保留已拆分移动卡片样式：${obsoleteParentStyle}`)
   }
 }
 expectText('src/views/order-list/components/OrderDetailDrawerContent.vue', "emit('navigate'", '父子详情跳转事件')
+expectText('src/views/order-list/components/OrderDetailDrawerContent.vue', "v-if=\"order.merge.role !== 'parent' && order.sourceDocType === 'o2o_preorder'\"", '父单不得以单一来源领取字段代表合并组')
+expectText('src/views/order-list/components/OrderDetailDrawerContent.vue', 'v-for="(pickup, index) in mergedPickupRecords"', '父单详情逐来源展示领取记录')
+expectText('src/views/order-list/components/OrderDetailDrawerContent.vue', "pickup.pickupContact || '未记录'", '历史来源领取人缺失明确展示未记录')
+expectText('src/views/order-list/components/OrderDetailDrawerContent.vue', 'pickup.pickupAt', '来源取货时间逐单展示')
 for (const file of ['src/views/client/ClientOrdersView.vue', 'src/views/client/ClientOrderDetailView.vue']) {
-  expectText(file, 'originalCustomerOrderShowNo', '原始单号展示')
+  expectText(file, 'originalCustomerOrderBusinessNo', '原始出库业务单号展示')
   expectText(file, '已合并', '合并提示')
 }
-expectText('src/utils/client-order-storage.ts', 'originalCustomerOrderShowNo', '离线缓存原始单号')
-expectText('src/utils/client-order-summary.ts', 'originalCustomerOrderShowNo', '详情回写原始单号')
+expectText('src/utils/client-order-storage.ts', 'originalCustomerOrderBusinessNo', '离线缓存原始出库业务单号')
+expectText('src/utils/client-order-summary.ts', 'originalCustomerOrderBusinessNo', '详情回写原始出库业务单号')
 
 if (existsSync(resolve(root, 'src/views/order-list/order-merge-conflict.mjs')) || existsSync(resolve(root, 'src/views/order-list/order-merge-conflict.d.mts'))) {
   failures.push('不得保留未声明的 order-merge-conflict.mjs 旁路')

@@ -985,46 +985,57 @@ async function main() {
     await ensureKnownAdmin(AppDataSource)
     await systemConfigService.ensureDefaultConfigs()
 
-    // 管理端下调 current 时必须与 business_sequence 同事务更新。先只分配、不落订单，
-    // 模拟管理员清空历史占用后的合法回退；下一号应从新 current 继续。
+    // canonical 配置写入必须在双镜像分叉时修复 config/sequence，但不允许下调高水位。
     for (let index = 0; index < 5; index += 1) {
-      await orderSerialService.generateOrderNo('walkin')
+      await orderSerialService.generateSystemNo('walkin')
     }
-    const serialsBeforeLowering = await systemConfigService.getOrderSerialConfigs()
-    const departmentSerial = serialsBeforeLowering.list.find((item) => item.orderType === 'department')
-    const walkinSerial = serialsBeforeLowering.list.find((item) => item.orderType === 'walkin')
-    assert.ok(departmentSerial && walkinSerial)
-    await systemConfigService.updateOrderSerialConfigs(
-      {
-        department: {
-          start: departmentSerial.start,
-          current: departmentSerial.current,
-          width: departmentSerial.width,
-        },
-        walkin: {
-          start: walkinSerial.start,
-          current: 1,
-          width: walkinSerial.width,
-        },
-      },
-      {
-        userId: 'db-concurrency-admin',
-        username: 'admin',
-        displayName: 'Database Concurrency Admin',
-        role: 'admin',
-        permissions: [],
-        status: 'enabled',
-        sessionToken: 'db-concurrency-session',
-        authSource: 'bearer',
-      },
+    const identifiersBeforeRepair = await systemConfigService.getOrderIdentifierConfigs()
+    const systemWalkinCurrent = identifiersBeforeRepair.system.walkin.current
+    assert.equal(systemWalkinCurrent, 5)
+    await AppDataSource.query(
+      'UPDATE system_configs SET config_value = ? WHERE config_key = ?',
+      [String(systemWalkinCurrent - 1), 'order.system.walkin.current'],
     )
-    const serialsAfterLowering = await systemConfigService.getOrderSerialConfigs()
-    assert.equal(serialsAfterLowering.list.find((item) => item.orderType === 'walkin')?.current, 1)
-    assert.equal(await orderSerialService.generateOrderNo('walkin'), 'hyyz000002')
-    addCheck('business sequence admin lowering passed', {
-      beforeCurrent: walkinSerial.current,
-      loweredCurrent: 1,
-      nextShowNo: 'hyyz000002',
+    const canonicalInput = Object.fromEntries(
+      Object.entries(identifiersBeforeRepair).map(([kind, group]) => [kind, Object.fromEntries(
+        Object.entries(group).map(([orderType, value]) => [orderType, {
+          start: value.start,
+          current: value.current,
+          width: value.width,
+        }]),
+      )]),
+    ) as Parameters<typeof systemConfigService.updateOrderIdentifierConfigs>[0]
+    const adminRows = await AppDataSource.query(
+      'SELECT id, username, display_name AS displayName FROM sys_user WHERE username = ? LIMIT 1',
+      [process.env.INIT_ADMIN_USERNAME ?? 'admin'],
+    ) as Array<{ id: string | number; username: string; displayName: string }>
+    const admin = adminRows[0]
+    assert.ok(admin, 'known admin missing')
+    const repairResult = await systemConfigService.updateOrderIdentifierConfigs(canonicalInput, {
+      userId: String(admin.id),
+      username: admin.username,
+      displayName: admin.displayName,
+      role: 'admin',
+      permissions: ['system_configs:view', 'system_configs:update'],
+      status: 'enabled',
+      sessionToken: 'db-concurrency-session',
+      authSource: 'bearer',
+    })
+    assert.equal(repairResult.changed, true)
+    const repairedConfigRows = await AppDataSource.query(
+      'SELECT config_value AS configValue FROM system_configs WHERE config_key = ?',
+      ['order.system.walkin.current'],
+    ) as Array<{ configValue: string }>
+    const repairedSequenceRows = await AppDataSource.query(
+      'SELECT current_value AS currentValue FROM business_sequence WHERE sequence_key = ?',
+      ['order.system.walkin'],
+    ) as Array<{ currentValue: string | number }>
+    assert.equal(Number(repairedConfigRows[0]?.configValue), systemWalkinCurrent)
+    assert.equal(Number(repairedSequenceRows[0]?.currentValue), systemWalkinCurrent)
+    assert.equal(await orderSerialService.generateSystemNo('walkin'), 'OUT-W-000006')
+    addCheck('canonical identifier mirror repair passed', {
+      effectiveCurrent: systemWalkinCurrent,
+      nextSystemNo: 'OUT-W-000006',
     })
 
     const app = createApp()

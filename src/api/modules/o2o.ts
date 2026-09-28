@@ -50,9 +50,26 @@ export type {
   UpdateMyO2oPreorderPayload,
 } from '../../../packages/shared-types/src/index'
 
+/**
+ * 管理端专用编号投影：正式出库系统号属于管理员技术追溯字段，不能进入客户端共享 DTO、缓存或搜索。
+ */
+export type O2oConsolePreorderSummary = Omit<O2oPreorderSummary, 'matchedIdentifierType'> & {
+  customerOrderSystemNo?: string | null
+  originalCustomerOrderSystemNo?: string | null
+  matchedIdentifierType?: 'businessNo' | 'systemNo' | 'preorderNo' | null
+}
+
+export type O2oConsolePreorderDetail = Omit<O2oPreorderDetail, 'order'> & {
+  order: Omit<O2oPreorderDetail['order'], 'matchedIdentifierType'> & {
+    customerOrderSystemNo?: string | null
+    originalCustomerOrderSystemNo?: string | null
+    matchedIdentifierType?: 'businessNo' | 'systemNo' | 'preorderNo' | null
+  }
+}
+
 export interface O2oVerifyDetailResult {
   verifyTargetType: 'preorder' | 'return_request'
-  detail: O2oPreorderDetail | O2oReturnRequestDetail
+  detail: O2oConsolePreorderDetail | O2oReturnRequestDetail
 }
 
 export interface O2oVerifyResult extends O2oVerifyDetailResult {
@@ -96,18 +113,24 @@ export interface UpdateO2oComplianceFlagsPayload {
 }
 
 export interface DeleteO2oConsoleOrderPayload {
-  confirmShowNo: string
+  confirmPreorderNo: string
+  /** @deprecated 仅兼容一发布周期；服务端按预订单号解释。 */
+  confirmShowNo?: string
   permanentDeletePassword?: string
 }
 
 export interface DeleteO2oConsoleOrderResult {
   id: string
-  showNo: string
+  preorderNo: string
+  /** @deprecated 仅兼容一发布周期的旧响应字段，等同 preorderNo。 */
+  showNo?: string
   status: O2oOrderStatus
   clientOrderType: O2oClientOrderType
   releasedPreorderedQty: number
   returnRequestCount: number
-  outboundOrderShowNo: string | null
+  outboundOrderSystemNo: string | null
+  /** @deprecated 仅兼容一发布周期的旧响应字段，等同 outboundOrderSystemNo。 */
+  outboundOrderShowNo?: string | null
   outboundOrderDeleted: boolean
   preorderSerialRolledBack: boolean
   outboundSerialRolledBack: boolean
@@ -115,13 +138,13 @@ export interface DeleteO2oConsoleOrderResult {
 
 export interface CancelO2oConsoleOrderPayload { reason: string }
 export interface BatchPurgeCancelledO2oOrdersPayload {
-  orders: Array<{ id: string; confirmShowNo: string }>
+  orders: Array<{ id: string; confirmPreorderNo: string }>
   permanentDeletePassword?: string
 }
 export interface BatchPurgeCancelledO2oOrdersResult {
   batchId: string
   summary: { requested: number; deleted: number; skipped: number; failed: number }
-  results: Array<{ id: string; showNo?: string; outcome: 'deleted' | 'skipped' | 'failed'; code: string; message: string }>
+  results: Array<{ id: string; preorderNo?: string; outcome: 'deleted' | 'skipped' | 'failed'; code: string; message: string }>
 }
 
 /**
@@ -160,14 +183,14 @@ interface O2oConsoleOrderPoolRawResult {
   page: number
   pageSize: number
   total: number
-  list: O2oPreorderSummary[]
+  list: O2oConsolePreorderSummary[]
   pool: O2oConsoleOrderPoolKey
   poolCounts: O2oConsoleOrderPoolCounts
   latestOrderId: string | null
   newOrderCount: number
 }
 
-export interface O2oConsoleOrderPoolResult extends PaginationResult<O2oPreorderSummary> {
+export interface O2oConsoleOrderPoolResult extends PaginationResult<O2oConsolePreorderSummary> {
   pool: O2oConsoleOrderPoolKey
   poolCounts: O2oConsoleOrderPoolCounts
   latestOrderId: string | null
@@ -175,23 +198,58 @@ export interface O2oConsoleOrderPoolResult extends PaginationResult<O2oPreorderS
 }
 
 /**
- * 客户端展示订单号时，优先使用核销后沉淀出的正式出库单号：
- * - 已生成管理端正式出库单时，客户端应与管理端保持完全一致；
- * - 尚未核销或历史数据未关联正式出库单时，再回退显示预订单号。
+ * O2O 主展示始终使用预订单号；关联正式出库单另行展示其业务单号。
  */
-export const resolveO2oDisplayShowNo = (
-  orderLike: Pick<O2oPreorderSummary, 'showNo' | 'customerOrderShowNo' | 'customerOrderBusinessNo'>,
-) => {
-  const normalizedCustomerOrderBusinessNo = orderLike.customerOrderBusinessNo?.trim()
-  if (normalizedCustomerOrderBusinessNo) {
-    return normalizedCustomerOrderBusinessNo
-  }
-  const normalizedCustomerOrderShowNo = orderLike.customerOrderShowNo?.trim()
-  if (normalizedCustomerOrderShowNo) {
-    return normalizedCustomerOrderShowNo
-  }
-  return orderLike.showNo
+export const resolveO2oPreorderNo = (orderLike: Pick<O2oPreorderSummary, 'preorderNo'>) => orderLike.preorderNo
+
+/** @deprecated 仅兼容旧调用；不再用正式出库号覆盖预订单号。 */
+export const resolveO2oDisplayShowNo = (orderLike: Pick<O2oPreorderSummary, 'preorderNo'>) => resolveO2oPreorderNo(orderLike)
+
+const normalizeNullableText = (value: unknown): string | null => {
+  const normalized = String(value ?? '').trim()
+  return normalized || null
 }
+
+const normalizeClientO2oOrderIdentifiers = <TOrder extends { preorderNo: string; customerOrderBusinessNo: string | null }>(rawOrder: TOrder): TOrder => {
+  const raw = rawOrder as TOrder & Record<string, unknown>
+  return {
+    ...rawOrder,
+    preorderNo: String(raw.preorderNo ?? '').trim(),
+    customerOrderBusinessNo: normalizeNullableText(raw.customerOrderBusinessNo),
+    originalCustomerOrderBusinessNo: normalizeNullableText(raw.originalCustomerOrderBusinessNo),
+  } as TOrder
+}
+
+const normalizeO2oPreorderSummary = (rawOrder: O2oPreorderSummary): O2oPreorderSummary => normalizeClientO2oOrderIdentifiers(rawOrder)
+
+const normalizeO2oPreorderDetail = (detail: O2oPreorderDetail): O2oPreorderDetail => ({
+  ...detail,
+  order: normalizeClientO2oOrderIdentifiers(detail.order),
+})
+
+const normalizeConsoleO2oOrderIdentifiers = <TOrder extends O2oConsolePreorderSummary | O2oConsolePreorderDetail['order']>(rawOrder: TOrder): TOrder => {
+  const raw = rawOrder as TOrder & Record<string, unknown>
+  return {
+    ...normalizeClientO2oOrderIdentifiers(rawOrder),
+    preorderNo: String(raw.preorderNo ?? raw.showNo ?? '').trim(),
+    customerOrderSystemNo: normalizeNullableText(raw.customerOrderSystemNo ?? raw.customerOrderShowNo),
+    originalCustomerOrderSystemNo: normalizeNullableText(raw.originalCustomerOrderSystemNo ?? raw.originalCustomerOrderShowNo),
+  } as TOrder
+}
+
+const normalizeConsoleO2oPreorderSummary = (rawOrder: O2oConsolePreorderSummary): O2oConsolePreorderSummary => normalizeConsoleO2oOrderIdentifiers(rawOrder)
+
+const normalizeConsoleO2oPreorderDetail = (detail: O2oConsolePreorderDetail): O2oConsolePreorderDetail => ({
+  ...detail,
+  order: normalizeConsoleO2oOrderIdentifiers(detail.order),
+})
+
+const normalizeVerifyDetailResult = (result: O2oVerifyDetailResult): O2oVerifyDetailResult => ({
+  ...result,
+  detail: result.verifyTargetType === 'preorder'
+    ? normalizeConsoleO2oPreorderDetail(result.detail as O2oConsolePreorderDetail)
+    : result.detail,
+})
 
 export const getO2oMallProducts = (config?: RequestConfig) =>
   request<O2oMallProductsResult>({
@@ -213,7 +271,7 @@ export const submitO2oPreorder = (payload: SubmitO2oPreorderPayload, config?: Re
     url: '/o2o/mall/preorders',
     data: payload,
     ...config,
-  })
+  }).then(normalizeO2oPreorderDetail)
 
 export const getMyO2oPreorders = async (
   params: O2oMyOrderListQuery = {},
@@ -229,7 +287,7 @@ export const getMyO2oPreorders = async (
     page: result.page,
     pageSize: result.pageSize,
     total: result.total,
-    records: result.list,
+    records: result.list.map(normalizeO2oPreorderSummary),
   }
 }
 
@@ -237,12 +295,12 @@ export const getO2oConsoleOrders = (
   params: O2oConsoleOrderListQuery,
   config?: RequestConfig,
 ) =>
-  request<O2oPreorderSummary[]>({
+  request<O2oConsolePreorderSummary[]>({
     method: 'GET',
     url: '/o2o/orders',
     params,
     ...config,
-  })
+  }).then((orders) => orders.map(normalizeConsoleO2oPreorderSummary))
 
 /**
  * 订单池分页查询：
@@ -263,7 +321,7 @@ export const getO2oConsoleOrderPool = async (
     page: result.page,
     pageSize: result.pageSize,
     total: result.total,
-    records: result.list,
+    records: result.list.map(normalizeConsoleO2oPreorderSummary),
     pool: result.pool,
     poolCounts: result.poolCounts,
     latestOrderId: result.latestOrderId,
@@ -276,7 +334,7 @@ export const getO2oPreorderDetail = (id: string, config?: RequestConfig) =>
     method: 'GET',
     url: `/o2o/mall/preorders/${id}`,
     ...config,
-  })
+  }).then(normalizeO2oPreorderDetail)
 
 /**
  * 读取当前客户端订单的轻量摘要：
@@ -289,14 +347,14 @@ export const getMyO2oPreorderSummary = (id: string, config?: RequestConfig) =>
     method: 'GET',
     url: `/o2o/mall/preorders/${id}/summary`,
     ...config,
-  })
+  }).then(normalizeO2oPreorderSummary)
 
 export const markMyO2oPreorderCustomerOrderPrinted = (id: string, config?: RequestConfig) =>
   request<O2oPreorderDetail>({
     method: 'POST',
     url: `/o2o/mall/preorders/${id}/customer-order-print`,
     ...config,
-  })
+  }).then(normalizeO2oPreorderDetail)
 
 /**
  * 客户端主动撤回自己的预订单：
@@ -309,7 +367,7 @@ export const cancelMyO2oPreorder = (id: string, config?: RequestConfig) =>
     method: 'POST',
     url: `/o2o/mall/preorders/${id}/cancel`,
     ...config,
-  })
+  }).then(normalizeO2oPreorderDetail)
 
 /**
  * 客户端修改待取货预订单：
@@ -324,7 +382,7 @@ export const updateMyO2oPreorder = (id: string, payload: UpdateMyO2oPreorderPayl
     url: `/o2o/mall/preorders/${id}`,
     data: payload,
     ...config,
-  })
+  }).then(normalizeO2oPreorderDetail)
 
 export const submitO2oReturnRequest = (id: string, payload: SubmitO2oReturnRequestPayload, config?: RequestConfig) =>
   request<O2oReturnRequestDetail>({
@@ -335,11 +393,11 @@ export const submitO2oReturnRequest = (id: string, payload: SubmitO2oReturnReque
   })
 
 export const getO2oConsoleOrderDetail = (id: string, config?: RequestConfig) =>
-  request<O2oPreorderDetail>({
+  request<O2oConsolePreorderDetail>({
     method: 'GET',
     url: `/o2o/orders/${id}`,
     ...config,
-  })
+  }).then(normalizeConsoleO2oPreorderDetail)
 
 export const deleteO2oConsoleOrder = (
   id: string,
@@ -354,7 +412,7 @@ export const deleteO2oConsoleOrder = (
   })
 
 export const cancelO2oConsoleOrder = (id: string, payload: CancelO2oConsoleOrderPayload, config?: RequestConfig) =>
-  request<O2oPreorderDetail>({ method: 'POST', url: `/o2o/orders/${id}/cancel`, data: payload, ...config })
+  request<O2oConsolePreorderDetail>({ method: 'POST', url: `/o2o/orders/${id}/cancel`, data: payload, ...config }).then(normalizeConsoleO2oPreorderDetail)
 
 export const batchPurgeCancelledO2oOrders = (payload: BatchPurgeCancelledO2oOrdersPayload, config?: RequestConfig) =>
   request<BatchPurgeCancelledO2oOrdersResult>({ method: 'POST', url: '/o2o/orders/batch-purge-cancelled', data: payload, ...config })
@@ -364,32 +422,32 @@ export const updateO2oOrderBusinessStatus = (
   businessStatus: O2oOrderBusinessStatus | null,
   config?: RequestConfig,
 ) =>
-  request<O2oPreorderDetail>({
+  request<O2oConsolePreorderDetail>({
     method: 'PATCH',
     url: `/o2o/orders/${id}/business-status`,
     data: { businessStatus },
     ...config,
-  })
+  }).then(normalizeConsoleO2oPreorderDetail)
 
 export const updateO2oOrderMerchantMessage = (id: string, merchantMessage: string | null, config?: RequestConfig) =>
-  request<O2oPreorderDetail>({
+  request<O2oConsolePreorderDetail>({
     method: 'PATCH',
     url: `/o2o/orders/${id}/merchant-message`,
     data: { merchantMessage },
     ...config,
-  })
+  }).then(normalizeConsoleO2oPreorderDetail)
 
 export const updateO2oOrderComplianceFlags = (
   id: string,
   payload: UpdateO2oComplianceFlagsPayload,
   config?: RequestConfig,
 ) =>
-  request<O2oPreorderDetail>({
+  request<O2oConsolePreorderDetail>({
     method: 'PATCH',
     url: `/o2o/orders/${id}/compliance-flags`,
     data: payload,
     ...config,
-  })
+  }).then(normalizeConsoleO2oPreorderDetail)
 
 /**
  * 门店现场改单：
@@ -402,12 +460,12 @@ export const updateO2oOrderOnsite = (
   payload: UpdateConsoleO2oPreorderPayload,
   config?: RequestConfig,
 ) =>
-  request<O2oPreorderDetail>({
+  request<O2oConsolePreorderDetail>({
     method: 'PATCH',
     url: `/o2o/orders/${id}/onsite-adjust`,
     data: payload,
     ...config,
-  })
+  }).then(normalizeConsoleO2oPreorderDetail)
 
 /**
  * 门店拒绝退货申请：
@@ -427,20 +485,28 @@ export const getO2oVerifyDetail = (verifyCode: string) =>
   request<O2oVerifyDetailResult>({
     method: 'GET',
     url: `/o2o/verify/${encodeURIComponent(verifyCode)}`,
-  })
+  }).then(normalizeVerifyDetailResult)
 
+/** 根据预订单号查询；与核销码查询语义独立。 */
+export const getO2oVerifyDetailByPreorderNo = (preorderNo: string) =>
+  request<O2oVerifyDetailResult>({
+    method: 'GET',
+    url: `/o2o/verify/preorder-no/${encodeURIComponent(preorderNo)}`,
+  }).then(normalizeVerifyDetailResult)
+
+/** @deprecated 仅兼容一发布周期的旧预订单号路由。 */
 export const getO2oVerifyDetailByShowNo = (showNo: string) =>
   request<O2oVerifyDetailResult>({
     method: 'GET',
     url: `/o2o/verify/show-no/${encodeURIComponent(showNo)}`,
-  })
+  }).then(normalizeVerifyDetailResult)
 
 export const verifyO2oPreorder = (verifyCode: string) =>
   request<O2oVerifyResult>({
     method: 'POST',
     url: '/o2o/verify',
     data: { verifyCode },
-  })
+  }).then((result) => ({ ...result, ...normalizeVerifyDetailResult(result) }))
 
 export const inboundO2oStock = (payload: { productId: string; skuId?: string | null; qty: number; remark?: string }) =>
   request<O2oInboundResult>({

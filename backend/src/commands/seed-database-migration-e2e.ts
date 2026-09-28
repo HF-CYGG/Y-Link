@@ -81,7 +81,6 @@ function buildFixtureValue(metadata: EntityMetadata, column: ColumnMetadata): un
 
   if (
     (metadata.tableName === 'biz_outbound_order'
-      || metadata.tableName === 'order_business_no_occupancy'
       || metadata.tableName === 'order_revision')
     && columnName === 'order_uuid'
   ) {
@@ -94,18 +93,11 @@ function buildFixtureValue(metadata: EntityMetadata, column: ColumnMetadata): un
     return 'manual_applied'
   }
   if (
-    (metadata.tableName === 'biz_outbound_order' || metadata.tableName === 'order_business_no_occupancy')
+    metadata.tableName === 'biz_outbound_order'
     && columnName === 'business_no'
   ) {
     return 'hyyzjd900001'
   }
-  if (metadata.tableName === 'order_business_no_occupancy' && columnName === 'business_namespace') {
-    return 'hyyzjd'
-  }
-  if (metadata.tableName === 'order_business_no_occupancy' && columnName === 'serial_value') {
-    return 900001
-  }
-
   if (column.enum?.length) {
     return column.enum[0]
   }

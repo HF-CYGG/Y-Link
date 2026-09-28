@@ -53,7 +53,7 @@
 由服务自动执行白名单内的 `033_inventory_security_invariants.sql`、
 `037_department_account_node_binding.sql` 与 `038_department_path_capacity.sql`。
 该自动执行流程由 MySQL advisory lock 串行化，多实例同时启动也不会并发执行同一脚本。
-完整白名单以 `AUTO_MIGRATABLE_FILES` 为准，其后新增的 `039`–`054`（含 `054_admin_mfa.sql` 管理端两步验证表）同样在内。
+完整白名单以 `AUTO_MIGRATABLE_FILES` 为准，其后新增的 `039`–`057`（含 `057_admin_mfa.sql` 管理端两步验证表）同样在内。
 
 `035`/`036` 不加入启动期自动迁移白名单：尤其 `036` 会合并历史通知、清理重复投递并创建唯一索引，
 必须按“备份 → 停止所有应用与通知 Worker → 执行 `035`、`036` → 启动新版本”的维护窗口流程执行。

@@ -2,7 +2,7 @@
  * 模块说明：src/views/o2o/o2o-verify-console.helpers.ts
  * 文件职责：沉淀 O2O 核销台的纯函数、类型守卫与现场改单数据转换规则，减少页面脚本对业务细节的直接堆叠。
  * 实现逻辑：
- * - 把核销码归一化、单据类型守卫、业务单号识别等“纯规则”从页面脚本中剥离；
+ * - 把核销码归一化、单据类型守卫、预订单号识别等“纯规则”从页面脚本中剥离；
  * - 把现场改单项构造与库存上限计算抽成独立函数，便于后续继续拆子组件时复用；
  * - 所有导出函数都保持无副作用，页面层只负责状态编排与交互反馈。
  * 维护说明：
@@ -10,7 +10,7 @@
  * - 若现场改单的库存口径调整，优先先改这里，再让页面模板自然消费新结果。
  */
 import type { ProductRecord } from '@/api/modules/product'
-import type { O2oPreorderDetail, O2oReturnRequestDetail, O2oVerifyDetailResult } from '@/api/modules/o2o'
+import type { O2oConsolePreorderDetail, O2oReturnRequestDetail, O2oVerifyDetailResult } from '@/api/modules/o2o'
 
 export const O2O_RETURN_REJECT_REASON_MAX_LENGTH = 500
 export const O2O_PREORDER_REMARK_MAX_LENGTH = 255
@@ -38,7 +38,7 @@ export interface EditableOnsiteOrderItem {
  */
 export const isPreorderDetail = (
   detail: O2oVerifyDetailResult['detail'] | null | undefined,
-): detail is O2oPreorderDetail => {
+): detail is O2oConsolePreorderDetail => {
   return Boolean(detail && 'order' in detail)
 }
 
@@ -54,9 +54,9 @@ export const isReturnRequestDetail = (
 }
 
 /**
- * 核销台兼容预订单号（`hyyzjd...` / `hyyz...`）与退货申请单号（`RO...`）两类单据编号。
+ * 核销台的“按预订单号查询”仅识别 PRE-D/PRE-W 命名空间；核销码入口保持独立。
  */
-export const isBizShowNo = (value: string) => /^(?:RO\d{12}|hyyzjd\d{4,}|hyyz\d{4,})$/i.test(value)
+export const isPreorderNo = (value: string) => /^PRE-[DW]-\d{6}$/i.test(value)
 
 /**
  * 统一归一化核销码：
@@ -124,7 +124,7 @@ const resolveEditableLineMaxQty = (product: ProductRecord, skuId: string | null,
  * - 对缺失商品只允许减少或删除，不允许继续增加。
  */
 export const buildOnsiteEditableItemsFromDetail = (
-  detail: O2oPreorderDetail,
+  detail: O2oConsolePreorderDetail,
   productCatalog: ProductRecord[],
 ) => {
   const productMap = new Map(productCatalog.map((item) => [item.id, item]))

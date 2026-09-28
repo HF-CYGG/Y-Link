@@ -53,7 +53,7 @@ export class O2oPreorder {
 
   @Index('uk_o2o_preorder_show_no', { unique: true })
   @Column({ name: 'show_no', type: 'varchar', length: 48, comment: '预订单号' })
-  showNo!: string
+  preorderNo!: string
 
   @Index('idx_o2o_preorder_client_user_id')
   @Column({ name: 'client_user_id', ...entityColumnOptions.foreignId, comment: '客户端用户ID' })
