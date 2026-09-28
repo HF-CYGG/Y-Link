@@ -10,7 +10,7 @@ import { requirePermission, requireRole } from '../middleware/auth.middleware.js
 import { inboundService } from '../services/inbound.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
-import { createPermanentDeleteLimiter } from '../utils/permanent-delete-guard.js'
+import { createPermanentDeleteLimiter, createPermanentDeletePasswordGuard } from '../utils/permanent-delete-guard.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 import { MAX_DATABASE_INT, MAX_INBOUND_ORDER_ITEM_COUNT } from '../constants/web-resource-limits.js'
 import { rateLimit } from 'express-rate-limit'
@@ -104,6 +104,13 @@ const verifiedSupplierDeleteLimiter = rateLimit({
   },
 })
 
+// 已入库删除同样校验全局永久删除口令：接入所有入口共享的口令失败桶。
+const verifiedSupplierDeletePasswordGuard = createPermanentDeletePasswordGuard({
+  actionType: 'inbound.supplier.delete_verified',
+  actionLabel: '供货方删除已入库送货单并冲销库存',
+  targetType: 'biz_inbound_order',
+})
+
 inboundRouter.post(
   '/supplier/submit',
   requirePermission('inbound:create'),
@@ -187,6 +194,7 @@ inboundRouter.delete(
   '/supplier/:id/verified',
   requirePermission('inbound:create'),
   verifiedSupplierDeleteLimiter,
+  verifiedSupplierDeletePasswordGuard,
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const input = deleteVerifiedSupplierInboundSchema.parse(req.body ?? {})

@@ -147,6 +147,89 @@ function verifyPermanentDeleteGuards() {
 
   const guard = read('src/utils/permanent-delete-guard.ts')
   assert.match(guard, /keyGenerator: \(req\) => `\$\{options\.storePrefix\}:\$\{\(req as AuthenticatedRequest\)\.auth\?\.userId/, '限流必须按账号而非目标计桶')
+  // 共享口令桶：计数键只含账号，不含入口前缀或操作类型；沿用各自限流器的入口也必须接入。
+  assert.match(guard, /keyGenerator: \(req\) => `account:\$\{\(req as AuthenticatedRequest\)\.auth\?\.userId/, '共享口令桶必须只按账号计数')
+  assert.match(guard, /new DatabaseRateLimitStore\('express-permanent-delete-password'\)/, '共享口令桶在 MySQL 下必须使用唯一的持久化存储前缀')
+  assert.match(read('src/routes/user.routes.ts'), /permanentDeleteLimiter,\s*permanentDeletePasswordGuard,/, '管理端账号永久删除必须接入共享口令桶')
+  assert.match(read('src/routes/client-user-manage.routes.ts'), /permanentDeleteLimiter,\s*permanentDeletePasswordGuard,/, '客户端账号永久删除必须接入共享口令桶')
+  assert.match(inboundRoutes, /verifiedSupplierDeleteLimiter,\s*verifiedSupplierDeletePasswordGuard,/, '供货方已入库删除必须接入共享口令桶')
+  assert.match(read('src/routes/data-maintenance.routes.ts'), /const jsonExportLimiter = createAccountScopedLimiter\(/, 'JSON 导出不校验永久删除口令，不得占用共享口令桶')
+}
+
+/**
+ * 永久删除口令是全局口令：同一账号在任何入口的失败尝试合并计数，轮换入口不能叠加额度；
+ * 成功请求不占用共享额度，其它账号不受影响。
+ */
+async function verifyPermanentDeletePasswordSharedBucket() {
+  const { env } = await import('../src/config/env.js')
+  const { auditService } = await import('../src/services/audit.service.js')
+  const { errorHandler } = await import('../src/middleware/error-handler.js')
+  const guard = await import('../src/utils/permanent-delete-guard.js')
+  const mutableEnv = env as { PERMANENT_DELETE_PASSWORD?: string }
+  const originalPassword = mutableEnv.PERMANENT_DELETE_PASSWORD
+  const audit = auditService as unknown as Record<string, unknown>
+  const blockedAudits: Array<{ actionType: string; scope: string }> = []
+  mutableEnv.PERMANENT_DELETE_PASSWORD = 'Verify-Shared-Pass-123'
+  audit.safeRecord = async (input: { actionType: string; detail?: { reason?: string; scope?: string } }) => {
+    if (input.detail?.reason === 'rate_limited') blockedAudits.push({ actionType: input.actionType, scope: String(input.detail.scope ?? '') })
+  }
+
+  const target = (name: string) => ({ actionType: `verify.${name}.purge`, actionLabel: `验证入口 ${name}`, targetType: 'verify' })
+  const app = express()
+  app.use(express.json())
+  app.use((req, _res, next) => {
+    const userId = String(req.headers['x-verify-user'] ?? '')
+    ;(req as unknown as { auth: Record<string, unknown> }).auth = {
+      userId, username: userId, displayName: userId, role: 'admin', permissions: [], status: 'enabled', sessionToken: userId, authSource: 'bearer',
+    }
+    next()
+  })
+  const entries = ['order', 'o2o', 'supplier', 'import', 'account']
+  for (const name of entries) {
+    // account 入口模拟“沿用自有限流器、另挂共享口令桶”的系统账号/客户端账号删除。
+    const limiter = name === 'account'
+      ? guard.createPermanentDeletePasswordGuard(target(name))
+      : guard.createPermanentDeleteLimiter({ ...target(name), storePrefix: `verify-shared-${name}` })
+    app.post(`/${name}/:id`, limiter, (req, res, next) => {
+      guard.assertPermanentDeletePasswordForRequest(req, (req.body as { password?: string }).password, target(name))
+        .then(() => res.json({ code: 0 }))
+        .catch(next)
+    })
+  }
+  app.use(errorHandler)
+  const server = app.listen(0, '127.0.0.1')
+  try {
+    await new Promise<void>((resolve) => server.once('listening', () => resolve()))
+    const { port } = server.address() as AddressInfo
+    const attempt = async (user: string, entry: string, password: string) => {
+      const response = await fetch(`http://127.0.0.1:${port}/${entry}/1`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-verify-user': user },
+        body: JSON.stringify({ password }),
+      })
+      return { status: response.status, body: await response.json() as { message?: string } }
+    }
+
+    // 每个入口只试一次，任何单入口的请求频控都不会触发；共享额度 5 次用完后，第 6 次无论走哪个入口都被拦截。
+    for (const entry of entries) {
+      assert.equal((await attempt('verify-attacker', entry, 'wrong-pass')).status, 403, `${entry} 入口口令错误应返回 403`)
+    }
+    const blocked = await attempt('verify-attacker', 'order', 'wrong-pass')
+    assert.equal(blocked.status, 429, '轮换入口不得叠加口令试错额度')
+    assert.match(blocked.body.message ?? '', /口令错误次数过多/)
+    assert.equal((await attempt('verify-attacker', 'account', 'Verify-Shared-Pass-123')).status, 429, '额度用完后正确口令同样被拦截，直至窗口结束')
+    assert.deepEqual(blockedAudits.at(-1), { actionType: 'verify.account.purge', scope: 'shared_password_failures' }, '拦截审计记录实际入口的操作类型')
+
+    // 成功请求不占共享额度：另一账号连续成功后仍保有完整的失败额度，且不受攻击账号影响。
+    for (const entry of [...entries, 'account', 'account']) {
+      assert.equal((await attempt('verify-operator', entry, 'Verify-Shared-Pass-123')).status, 200, `${entry} 入口正确口令应放行`)
+    }
+    assert.equal((await attempt('verify-operator', 'account', 'wrong-pass')).status, 403, '成功请求不占用共享口令额度')
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+    mutableEnv.PERMANENT_DELETE_PASSWORD = originalPassword
+    Reflect.deleteProperty(audit, 'safeRecord')
+  }
 }
 
 function verifySelfPasswordAndClientWriteGuards() {
@@ -550,6 +633,7 @@ async function main() {
   await verifyCaptchaOneShot()
   await verifyAdminSessionIdleTimeout()
   verifyPermanentDeleteGuards()
+  await verifyPermanentDeletePasswordSharedBucket()
   verifySelfPasswordAndClientWriteGuards()
   verifyOneboxUploadBoundaryAndImportGuard()
   await verifyLoginLockUsesCanonicalSubject()
@@ -560,7 +644,7 @@ async function main() {
   verifyCatalogWriteAudits()
   verifySensitiveOperationAuditCoverage()
   await verifyRegisteredAccountAbuseGuards()
-  console.log('[web-deep-audit] 深度审计修复回归通过：畸形 JSON、模板转义、验证码一次性、空闲超时、永久删除限流、本人改密、客户端频控、onebox 上传边界、导入预检、登录锁定主体、multipart 加固、附件与资料发码频控、JSON 导入口令、商品与标签审计、中高危操作审计覆盖、会话内旧密码锁定、联系方式接管、退货与会话封顶')
+  console.log('[web-deep-audit] 深度审计修复回归通过：畸形 JSON、模板转义、验证码一次性、空闲超时、永久删除限流与跨入口共享口令桶、本人改密、客户端频控、onebox 上传边界、导入预检、登录锁定主体、multipart 加固、附件与资料发码频控、JSON 导入口令、商品与标签审计、中高危操作审计覆盖、会话内旧密码锁定、联系方式接管、退货与会话封顶')
 }
 
 main().catch((error) => {

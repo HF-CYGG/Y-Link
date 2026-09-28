@@ -97,7 +97,7 @@
 - Webhook、通知外发 URL、上传文件资源都应视为安全边界问题，而不是普通字符串处理。
 - 可逆密钥类配置（验证码网关模板、飞书 Webhook 与签名密钥）落库一律 AES-256-GCM 加密，数据库、备份与 JSON 导出单独泄露时不暴露明文；机制与降级口径见 `43-系统配置、通知中心与数据库迁移.md`。新增此类字段时优先复用 `utils/data-encryption.ts`（实体列用 `createSealedColumnTransformer`），不得明文落库。
 - 验证码与通知邮件网关模板统一经 `utils/provider-template.ts` 渲染：按请求头 `Content-Type` 对替换值做 JSON 转义或 URL 编码，占位符一次性替换不二次展开；客服消息摘要、显示名等客户可控内容不能直接拼入请求体。验证码邮箱目标额外拒绝双引号、反斜杠、尖括号与控制字符。
-- 全局永久删除口令在所有入口都必须限速：系统账号/客户端账号/供货方已入库删除沿用原限流器，供货方永久删除、O2O 订单删除与批量清理、出库单永久删除、JSON 全量导入使用 `utils/permanent-delete-guard.ts` 的账号级限流（5 分钟 5 次）与脱敏失败审计。供货方永久删除在服务层先校验归属、状态与确认单号，再核对口令，避免成为全局口令的试错预言机。JSON 导入会清空多张业务表，同样按永久删除类操作要求口令。
+- 全局永久删除口令在所有入口都必须限速，且分两层：① 各入口的请求频控——系统账号/客户端账号/供货方已入库删除沿用原限流器，供货方永久删除、O2O 订单删除与批量清理、出库单永久删除、JSON 全量导入使用 `utils/permanent-delete-guard.ts` 的 `createPermanentDeleteLimiter`（按账号 5 分钟 5 次）；② 所有入口共享的**口令失败桶**——计数键只含账号（`account:<userId>`，MySQL 存储前缀 `express-permanent-delete-password`），同一账号在任何入口的口令缺失/错误（HTTP 400/403）合计 5 分钟 5 次，超出后任一入口都返回 429，轮换订单、O2O、供货方、账号删除或 JSON 导入入口不能叠加试错额度；成功请求不占共享额度，操作类型只用于拦截审计（`detail.scope=shared_password_failures`）。沿用自有限流器的三个入口另挂 `createPermanentDeletePasswordGuard` 接入共享桶；JSON 导出复核的是本人登录密码，改用 `createAccountScopedLimiter`，不占共享桶。频控拦截与口令拒绝均写脱敏失败审计。供货方永久删除在服务层先校验归属、状态与确认单号，再核对口令，避免成为全局口令的试错预言机。JSON 导入会清空多张业务表，同样按永久删除类操作要求口令。
 - 客户端业务写接口（反馈新建/追加消息、预订单提交/撤单）经 `authSecurityService.guardClientBusinessWrite` 按客户端账号限频，超限 429 并写 `client.auth.guard.business_write` 审计，防止刷量淹没站内信与飞书/邮件外发。
 - 管理员不能通过 `PUT /api/users/:id` 修改本人密码，必须走校验旧密码的 `/api/auth/change-password`。
 - 已登录会话内的旧密码复核（管理端本人改密、客户端改密与改资料）与登录共用“来源 + 账号主体”失败计数和临时锁定：复核前先判锁定，失败即计数并写 `client.auth.reauth_failed`（管理端沿用 `auth.change_password` 失败审计）。否则劫持会话后可绕开登录锁定在线猜当前密码，猜中即可改密长期接管。
@@ -126,5 +126,5 @@
 - 改两步验证、管理端登录流程或相关路由时执行 `npm --prefix backend run auth:mfa:verify`，覆盖绑定与加密落库、两段登录、防重放、恢复码一次性、票据次数与账号锁定、并发单次成功、停用与重生成、管理员与命令行重置、密钥不匹配降级、永久删除联动与审计不落明文。
 - 改接口缓存头、Fetch Metadata 拦截、管理端 CSRF、密钥类配置加密、JSON 全量导出、数据导出留痕与上限、审计脱敏、密码哈希/策略、风控来源聚合与负缓存、全局撞库态势、各类并发闸门、在途上限、过载削峰、会话保险丝、服务端超时或回环监听时执行 `npm --prefix backend run security:data-leak-ddos:verify`（分阶段隔离运行，详见文档 52）。
 - 改图形验证码时执行 `npm --prefix backend run captcha:rendering:verify`，覆盖无系统字体的真实 PNG 渲染、兼容字段、作用域隔离和一次性校验。
-- 改上述任一边界时执行 `npm --prefix backend run security:web-deep-audit:verify`（畸形 JSON、模板转义、验证码一次性、空闲超时、永久删除限流、本人改密、客户端频控、onebox 上传边界、导入预检、登录锁定主体、multipart 加固、附件与资料发码频控）。
+- 改上述任一边界时执行 `npm --prefix backend run security:web-deep-audit:verify`（畸形 JSON、模板转义、验证码一次性、空闲超时、永久删除限流与跨入口共享口令桶、本人改密、客户端频控、onebox 上传边界、导入预检、登录锁定主体、multipart 加固、附件与资料发码频控）。
 - 升级 `multer`、`sharp` 等上传链路依赖后执行 `npm --prefix backend audit --omit=dev`，并回归 `task4:upload-security:verify` 与 `feedback:customer-service:verify`。

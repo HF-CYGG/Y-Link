@@ -12,6 +12,7 @@ import type { AuthenticatedRequest } from '../types/auth.js'
 import { requirePermission, requireRole } from '../middleware/auth.middleware.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
+import { createPermanentDeletePasswordGuard } from '../utils/permanent-delete-guard.js'
 import { CLIENT_USER_ACCOUNT_TYPES, CLIENT_USER_STATUSES } from '../entities/client-user.entity.js'
 import { CLIENT_USER_PROFILE_KINDS, clientUserManageService } from '../services/client-user-manage.service.js'
 import { auditService } from '../services/audit.service.js'
@@ -79,6 +80,13 @@ const permanentDeleteLimiter = rateLimit({
     })
     res.status(429).json({ code: 429, message: '永久删除请求过于频繁，请稍后再试', data: null })
   },
+})
+
+// 永久删除口令为全局口令：再接入所有入口共享的口令失败桶，避免轮换入口叠加试错额度。
+const permanentDeletePasswordGuard = createPermanentDeletePasswordGuard({
+  actionType: 'client_user.permanent_delete',
+  actionLabel: '永久删除客户端用户',
+  targetType: 'client_user',
 })
 
 const departmentNodeIdsSchema = z.object({
@@ -206,6 +214,7 @@ clientUserManageRouter.delete(
   requirePermission('users:permanent_delete'),
   requireRole('admin'),
   permanentDeleteLimiter,
+  permanentDeletePasswordGuard,
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = accountPermanentDeleteSchema.parse(req.body)

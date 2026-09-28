@@ -20,7 +20,7 @@ import { getTransactionCoordinator } from '../database/transaction-coordinator.j
 import { issueDatabaseRescueCredential } from '../runtime/database-rescue-control.js'
 import { isSecureOrDirectLoopback } from '../utils/http-security.js'
 import { BizError } from '../utils/errors.js'
-import { assertPermanentDeletePasswordForRequest, createPermanentDeleteLimiter } from '../utils/permanent-delete-guard.js'
+import { assertPermanentDeletePasswordForRequest, createAccountScopedLimiter, createPermanentDeleteLimiter } from '../utils/permanent-delete-guard.js'
 import { auditService } from '../services/audit.service.js'
 import { EXISTING_PASSWORD_INPUT_MAX_LENGTH } from '../constants/auth-input-limits.js'
 import { listConcurrencyGateSnapshots } from '../utils/bounded-concurrency.js'
@@ -65,7 +65,8 @@ const JSON_EXPORT_AUDIT_TARGET = {
   targetType: 'data_maintenance',
 } as const
 // 导出是批量外泄与重负载入口：主防线是本人密码复核，频控用于压制反复导出（验收流程单场景至多数次）。
-const jsonExportLimiter = createPermanentDeleteLimiter({
+// JSON 导出复核的是本人登录密码（与登录共用失败锁定），不校验永久删除口令，因此只用账号级请求频控，不接入共享口令桶。
+const jsonExportLimiter = createAccountScopedLimiter({
   ...JSON_EXPORT_AUDIT_TARGET,
   storePrefix: 'data-maintenance-export-json',
   windowMs: 10 * 60 * 1000,
