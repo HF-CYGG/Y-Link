@@ -30,8 +30,17 @@ const scanInputRef = ref<InputInstance>()
 const pageActive = ref(true)
 let pageEpoch = 0
 let ticketSequence = 0
+let rowUidSequence = 0
 let successNotification: NotificationHandle | null = null
 const tickets = new Map<string, { code: string; epoch: number; userId: string | undefined }>()
+
+const createScanRowUid = (rows: OrderItemRow[]): string => {
+  let uid: string
+  do {
+    uid = `row-scan-${Date.now()}-${++rowUidSequence}`
+  } while (rows.some((row) => row.uid === uid))
+  return uid
+}
 
 const closeSuccessNotification = (): void => {
   successNotification?.close()
@@ -75,7 +84,7 @@ const processTicket = async (ticketId: string): Promise<void> => {
       rows,
       products,
       lookup,
-      () => `row-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      () => createScanRowUid(rows),
     )
     const error = result.rows
       ? props.commitRows(
