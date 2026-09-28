@@ -75,12 +75,13 @@ for (const file of ['docker/nginx/default.conf', 'docker/nginx/default.conf.temp
     assert.ok(pagePattern, `${file} 缺少页面路由白名单`)
     const pageRoute = new RegExp(pagePattern[1])
     assert.ok(pageRoute.test('/reports'), `${file} 报表中心直链和刷新必须进入 SPA`)
-    for (const path of ['/inventory', '/inventory/scan', '/inventory/stocks', '/inventory/stocktakes',
+    for (const path of ['/inventory', '/inventory/overview', '/inventory/scan', '/inventory/stocks', '/inventory/stocktakes',
       '/inventory/stocktakes/123', '/inventory/docs', '/inventory/logs', '/inventory/master-data']) {
       assert.ok(pageRoute.test(path), `${file} 库存路由 ${path} 直链和刷新必须进入 SPA`)
     }
     for (const path of ['/.env', '/unknown-route', '/reports.json', '/reports-malicious',
-      '/inventory/unknown', '/inventory/.env', '/inventory/stocktakes/abc', '/inventory/stocktakes/123/extra']) {
+      '/inventory/unknown', '/inventory/.env', '/inventory/overview/extra', '/inventory/overview.json',
+      '/inventory/stocktakes/abc', '/inventory/stocktakes/123/extra']) {
       assert.ok(!pageRoute.test(path), `${file} 不应把未知路径 ${path} 放行到 SPA`)
     }
   }
