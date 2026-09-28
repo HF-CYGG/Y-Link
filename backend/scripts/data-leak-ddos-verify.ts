@@ -454,6 +454,69 @@ function verifyEncryptionPrimitives() {
   assert.equal(path.resolve(key?.filePath ?? ''), path.resolve(keyFile))
   assert.equal(Buffer.from(fs.readFileSync(keyFile, 'utf8').trim(), 'base64').length, 32, '自动生成 256 位密钥')
   assert.equal(parts[2], key?.keyId, '密文记录生成它的密钥 ID')
+  verifyKeyFileDurability()
+}
+
+/**
+ * 首次生成密钥文件：硬链接落位后必须先同步所在目录及本次新建目录的父目录，再删除临时文件，
+ * 否则主机崩溃重启后正式链接可能丢失、服务另生成新密钥，已落库密文全部无法解密。
+ * Windows 无法对目录句柄 fsync（打开即失败并被忽略），因此以“打开目录”作为同步尝试的观测点。
+ */
+function verifyKeyFileDurability() {
+  const baseDir = path.resolve(tempRoot, 'key-durability')
+  fs.mkdirSync(baseDir)
+  const secretsDir = path.join(baseDir, 'nested', 'secrets')
+  const keyFile = path.join(secretsDir, 'data-encryption.key')
+  const events: string[] = []
+  const directoryFds = new Map<number, string>()
+  const original = { linkSync: fs.linkSync, openSync: fs.openSync, fsyncSync: fs.fsyncSync, rmSync: fs.rmSync }
+  const writable = fs as unknown as Record<string, unknown>
+  writable.linkSync = (from: fs.PathLike, to: fs.PathLike) => {
+    original.linkSync(from, to)
+    events.push(`link:${path.resolve(String(to))}`)
+  }
+  writable.openSync = (target: fs.PathLike, flags?: fs.OpenMode, mode?: fs.Mode | null) => {
+    const resolved = path.resolve(String(target))
+    const isDirectory = fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()
+    if (isDirectory) events.push(`open-dir:${resolved}`)
+    const fd = original.openSync(target, flags, mode)
+    if (isDirectory) directoryFds.set(fd, resolved)
+    return fd
+  }
+  writable.fsyncSync = (fd: number) => {
+    original.fsyncSync(fd)
+    const directory = directoryFds.get(fd)
+    if (directory) events.push(`fsync-dir:${directory}`)
+  }
+  writable.rmSync = (target: fs.PathLike, options?: fs.RmOptions) => {
+    events.push(`rm:${path.basename(String(target))}`)
+    original.rmSync(target, options)
+  }
+  let first: { key: Buffer; generated: boolean }
+  let second: { key: Buffer; generated: boolean }
+  try {
+    first = m.encryption.createDataEncryptionKeyFile(keyFile)
+    second = m.encryption.createDataEncryptionKeyFile(keyFile)
+  } finally {
+    Object.assign(writable, original)
+  }
+  assert.equal(first.generated, true)
+  assert.equal(second.generated, false, '正式文件已存在时改为读取，不另生成密钥')
+  assert.ok(second.key.equals(first.key))
+  const linkIndex = events.indexOf(`link:${path.resolve(keyFile)}`)
+  const removeIndex = events.findIndex((event) => event.startsWith('rm:.data-encryption.key.'))
+  assert.ok(linkIndex >= 0 && removeIndex > linkIndex, `落盘顺序异常：${events.join(' | ')}`)
+  const expectedDirectories = [secretsDir, path.join(baseDir, 'nested'), baseDir].map((item) => path.resolve(item))
+  for (const directory of expectedDirectories) {
+    const opened = events.indexOf(`open-dir:${directory}`)
+    assert.ok(opened > linkIndex && opened < removeIndex, `删除临时文件前必须同步目录 ${directory}：${events.join(' | ')}`)
+    if (process.platform !== 'win32') {
+      const synced = events.indexOf(`fsync-dir:${directory}`)
+      assert.ok(synced > linkIndex && synced < removeIndex, `目录 ${directory} 必须 fsync：${events.join(' | ')}`)
+    }
+  }
+  assert.ok(!events.includes(`open-dir:${path.dirname(baseDir)}`), '只同步本次新建目录的父目录，不向上越界')
+  assert.deepEqual(fs.readdirSync(secretsDir), ['data-encryption.key'], '临时文件已清理')
 }
 
 /** 第 6 项：导出租约按账号与进程限流，数字与字符串主键视为同一账号，重复归还不多减。 */

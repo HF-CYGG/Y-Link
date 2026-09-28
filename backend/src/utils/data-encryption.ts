@@ -5,7 +5,7 @@
  *   密文被挪到别的字段会解密失败；
  * - 密文格式 `ylenc:v1:<密钥ID>:<base64url(IV|密文|认证标签)>`，未带前缀的历史明文按原样兼容读取；
  * - 主密钥优先取可选环境变量 `Y_LINK_DATA_ENCRYPTION_KEY`（多实例部署统一密钥用），否则读取数据目录下的
- *   `secrets/data-encryption.key`，不存在时首次使用自动生成（目录 0700、文件 0600，硬链接原子落位）；
+ *   `secrets/data-encryption.key`，不存在时首次使用自动生成（目录 0700、文件 0600，硬链接原子落位并同步目录项）；
  * - 解密失败（密钥丢失、被更换或密文被篡改）返回 `unreadable`，由调用方按“需重新录入”处理，不影响进程启动。
  * 维护说明：
  * - 密钥文件必须与数据库一起备份；只备份数据库、丢失密钥文件时，这些配置需要重新录入；
@@ -18,6 +18,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type { ValueTransformer } from 'typeorm'
 import { appDataPaths } from '../config/app-data-paths.js'
+import { syncDirectory } from '../runtime/durable-control-file.js'
 import { BizError } from './errors.js'
 
 const SEALED_VALUE_PREFIX = 'ylenc:v1:'
@@ -68,10 +69,13 @@ function readKeyFile(filePath: string): Buffer {
 /**
  * 首次使用时生成密钥文件：先写入同目录临时文件并落盘，再用硬链接原子地放到正式路径；
  * 硬链接在目标已存在时失败，多个进程同时启动也只会有一个密钥生效，其余进程改为读取该文件。
+ * 链接成功后先同步所在目录（以及本次新建的各级目录的父目录），确认正式目录项已落盘，才删除临时文件并返回：
+ * 否则主机崩溃重启后正式链接可能丢失，服务会另生成一把密钥，已落库的网关、飞书与两步验证密文全部无法解密。
+ * 仅导出供回归脚本在临时路径上验证落盘顺序，业务代码统一经 loadDataKey 使用。
  */
-function createKeyFile(filePath: string): { key: Buffer; generated: boolean } {
-  const directory = path.dirname(filePath)
-  fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
+export function createDataEncryptionKeyFile(filePath: string): { key: Buffer; generated: boolean } {
+  const directory = path.resolve(path.dirname(filePath))
+  const firstCreatedDirectory = fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
   try {
     fs.chmodSync(directory, 0o700)
   } catch {
@@ -87,14 +91,28 @@ function createKeyFile(filePath: string): { key: Buffer; generated: boolean } {
     fs.closeSync(fd)
   }
   try {
-    fs.linkSync(temporaryPath, filePath)
-    return { key, generated: true }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-      return { key: readKeyFile(filePath), generated: false }
+    try {
+      fs.linkSync(temporaryPath, filePath)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        return { key: readKeyFile(filePath), generated: false }
+      }
+      throw error
     }
-    throw error
+    syncDirectory(directory)
+    if (firstCreatedDirectory) {
+      // 新建的每一级目录，其目录项都记录在父目录中，逐级同步到首个新建目录的父目录为止。
+      // Windows 下 mkdirSync 返回 `\\?\` 命名空间路径，统一转成命名空间形式再比较。
+      const toComparable = (item: string) => path.toNamespacedPath(path.resolve(item))
+      const topCreated = toComparable(firstCreatedDirectory)
+      for (let current = directory; current !== path.dirname(current); current = path.dirname(current)) {
+        syncDirectory(path.dirname(current))
+        if (toComparable(current) === topCreated) break
+      }
+    }
+    return { key, generated: true }
   } finally {
+    // 在上面的目录同步完成之后才删除临时名称；临时文件若因崩溃残留，只是带随机后缀的隐藏文件，不会被当作密钥读取。
     fs.rmSync(temporaryPath, { force: true })
   }
 }
@@ -110,7 +128,7 @@ function loadDataKey(): LoadedDataKey {
   const filePath = appDataPaths.dataEncryptionKeyFile
   const { key, generated } = fs.existsSync(filePath)
     ? { key: readKeyFile(filePath), generated: false }
-    : createKeyFile(filePath)
+    : createDataEncryptionKeyFile(filePath)
   loadedDataKey = { key, keyId: computeKeyId(key), source: 'file', filePath, generated }
   return loadedDataKey
 }
