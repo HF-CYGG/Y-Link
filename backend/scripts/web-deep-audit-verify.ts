@@ -190,9 +190,9 @@ async function verifyLoginLockUsesCanonicalSubject() {
   const adminRepo = (authService as unknown as { userRepo: { findOne: (options: unknown) => Promise<unknown> } }).userRepo
   try {
     adminRepo.findOne = async () => ({ id: '1', username: 'admin' })
-    assert.equal(await authService.resolveLoginRiskSubject(' Ádmin '), 'admin', '账号存在时锁定主体必须是库中规范用户名')
+    assert.deepEqual(await authService.resolveLoginRiskSubject(' Ádmin '), { subject: 'admin', resolved: true }, '账号存在时锁定主体必须是库中规范用户名')
     adminRepo.findOne = async () => null
-    assert.equal(await authService.resolveLoginRiskSubject(' ghost '), 'ghost', '账号不存在时退回输入原文')
+    assert.deepEqual(await authService.resolveLoginRiskSubject(' ghost '), { subject: 'ghost', resolved: false }, '账号不存在时退回输入原文并标记未命中')
   } finally {
     Reflect.deleteProperty(adminRepo, 'findOne')
   }
@@ -263,7 +263,7 @@ async function verifyLoginLockUsesCanonicalSubject() {
       '换用手机号登录同一账号时必须命中该账号的锁定',
     )
     await assert.rejects(
-      () => authSecurityService.guardAdminLoginRequest(requestMeta, 'Ádmin', async () => 'admin'),
+      () => authSecurityService.guardAdminLoginRequest(requestMeta, 'Ádmin', async () => ({ subject: 'admin', resolved: true })),
       /已临时锁定/,
       '重音变体解析到规范用户名后必须命中锁定',
     )

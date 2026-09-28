@@ -12,6 +12,13 @@ import type { RequestMeta } from '../utils/request-meta.js'
 import { BizError } from '../utils/errors.js'
 import { auditService, type CreateAuditLogInput } from './audit.service.js'
 import { persistentRiskStateService, type PersistentFailureState } from './persistent-risk-state.service.js'
+import { describeClientRiskSubjectForAudit, maskLoginInputForAudit } from '../utils/audit-subject-mask.js'
+
+/** 管理端登录风控主体：`resolved` 为 false 表示账号不存在、subject 是输入原文，写审计前必须脱敏。 */
+export interface ResolvedLoginRiskSubject {
+  subject: string
+  resolved: boolean
+}
 
 type FailureScope = 'admin-login' | 'client-login'
 
@@ -487,28 +494,32 @@ export class AuthSecurityService {
    * 管理端登录守卫：
    * - 先按 IP 频控，被限流的请求不再查库；
    * - `resolveRiskSubject` 返回规范用户名（账号不存在时为输入原文），锁定与验证码判定按它计数，
-   *   与 `recordAdminLoginFailure` 使用同一主体，防止大小写/重音/全角变体各得一份失败额度。
+   *   与 `recordAdminLoginFailure` 使用同一主体，防止大小写/重音/全角变体各得一份失败额度；
+   * - 审计中的原始输入一律脱敏（可能是误填的密码），只有命中真实账号的规范用户名原样记录。
    */
   async guardAdminLoginRequest(
     requestMeta: RequestMeta | undefined,
     username: string,
-    resolveRiskSubject?: () => Promise<string>,
+    resolveRiskSubject?: () => Promise<ResolvedLoginRiskSubject>,
   ): Promise<{ captchaRequired: boolean }> {
     const source = normalizeRiskSource(requestMeta)
     const normalizedUsername = username.trim().toLowerCase()
     await this.consumeRateLimit(`admin-login:ip:${source}`, RATE_LIMIT_RULES.adminLoginByIp, {
       actionType: 'auth.guard.admin_login',
       actionLabel: '管理端登录频控',
-      targetCode: normalizedUsername,
+      targetCode: maskLoginInputForAudit(normalizedUsername),
       requestMeta,
       detail: { source },
     })
-    const subject = resolveRiskSubject ? (await resolveRiskSubject()).trim().toLowerCase() : normalizedUsername
+    const resolvedSubject = resolveRiskSubject
+      ? await resolveRiskSubject()
+      : { subject: normalizedUsername, resolved: false }
+    const subject = resolvedSubject.subject.trim().toLowerCase()
     return this.assertLoginNotLockedAndCaptchaRequired(
       'admin-login',
       [`admin-login:ip:${source}`, `admin-login:user:${subject}`],
       requestMeta,
-      subject,
+      resolvedSubject.resolved ? subject : maskLoginInputForAudit(subject),
     )
   }
 
@@ -522,13 +533,18 @@ export class AuthSecurityService {
     })
   }
 
-  async recordAdminLoginFailure(requestMeta: RequestMeta | undefined, username: string) {
+  /** `subjectResolved: false` 表示账号不存在、username 为输入原文，触发锁定的审计只记掩码与指纹。 */
+  async recordAdminLoginFailure(
+    requestMeta: RequestMeta | undefined,
+    username: string,
+    options: { subjectResolved?: boolean } = {},
+  ) {
     const source = normalizeRiskSource(requestMeta)
     const normalizedUsername = username.trim().toLowerCase()
     await this.recordLoginFailure(
       'admin-login',
       requestMeta,
-      normalizedUsername,
+      options.subjectResolved === false ? maskLoginInputForAudit(normalizedUsername) : normalizedUsername,
       `admin-login:ip:${source}`,
       `admin-login:user:${normalizedUsername}`,
     )
@@ -557,7 +573,7 @@ export class AuthSecurityService {
       {
         actionType: 'client.auth.guard.staff_directory_lookup',
         actionLabel: '客户端工号目录查询频控',
-        targetCode: staffNo,
+        targetCode: maskLoginInputForAudit(staffNo),
         requestMeta,
         detail: {},
       },
@@ -573,21 +589,21 @@ export class AuthSecurityService {
       {
       actionType: 'client.auth.guard.verification_send',
       actionLabel: '验证码发送频控',
-      targetCode: target,
+      targetCode: maskLoginInputForAudit(target),
       requestMeta,
       detail: { channel },
     })
     await this.consumeRateLimit(`verification-send:${channel}:${target}`, RATE_LIMIT_RULES.verificationCodeSendByTarget, {
       actionType: 'client.auth.guard.verification_send',
       actionLabel: '验证码发送频控',
-      targetCode: target,
+      targetCode: maskLoginInputForAudit(target),
       requestMeta,
       detail: { source: riskActor.source, sourceType: riskActor.sourceType, channel, dimension: 'target' },
     })
     await this.consumeRateLimit(`verification-send-daily:${channel}:${target}`, RATE_LIMIT_RULES.verificationCodeSendByTargetDaily, {
       actionType: 'client.auth.guard.verification_send',
       actionLabel: '验证码发送频控',
-      targetCode: target,
+      targetCode: maskLoginInputForAudit(target),
       requestMeta,
       detail: { source: riskActor.source, sourceType: riskActor.sourceType, channel, dimension: 'target_daily' },
     })
@@ -618,7 +634,7 @@ export class AuthSecurityService {
       {
       actionType: 'client.auth.guard.register',
       actionLabel: '客户端注册频控',
-      targetCode: accountKey,
+      targetCode: maskLoginInputForAudit(accountKey),
       requestMeta,
       detail: {},
     })
@@ -640,7 +656,7 @@ export class AuthSecurityService {
     await this.consumeRateLimit(`client-register:account:${accountKey}`, RATE_LIMIT_RULES.clientRegisterByAccount, {
       actionType: 'client.auth.guard.register',
       actionLabel: '客户端注册频控',
-      targetCode: accountKey,
+      targetCode: maskLoginInputForAudit(accountKey),
       requestMeta,
       detail: { source: riskActor.source, sourceType: riskActor.sourceType, dimension: 'account' },
     })
@@ -655,14 +671,14 @@ export class AuthSecurityService {
       {
       actionType: 'client.auth.guard.forgot_verify',
       actionLabel: '客户端找回密码校验频控',
-      targetCode: accountKey,
+      targetCode: maskLoginInputForAudit(accountKey),
       requestMeta,
       detail: {},
     })
     await this.consumeRateLimit(`client-forgot-verify:account:${accountKey}`, RATE_LIMIT_RULES.clientForgotVerifyByAccount, {
       actionType: 'client.auth.guard.forgot_verify',
       actionLabel: '客户端找回密码校验频控',
-      targetCode: accountKey,
+      targetCode: maskLoginInputForAudit(accountKey),
       requestMeta,
       detail: { source: riskActor.source, sourceType: riskActor.sourceType, dimension: 'account' },
     })
@@ -677,14 +693,14 @@ export class AuthSecurityService {
       {
       actionType: 'client.auth.guard.forgot_reset',
       actionLabel: '客户端重置密码频控',
-      targetCode: accountKey,
+      targetCode: maskLoginInputForAudit(accountKey),
       requestMeta,
       detail: {},
     })
     await this.consumeRateLimit(`client-forgot-reset:account:${accountKey}`, RATE_LIMIT_RULES.clientForgotResetByAccount, {
       actionType: 'client.auth.guard.forgot_reset',
       actionLabel: '客户端重置密码频控',
-      targetCode: accountKey,
+      targetCode: maskLoginInputForAudit(accountKey),
       requestMeta,
       detail: { source: riskActor.source, sourceType: riskActor.sourceType, dimension: 'account' },
     })
@@ -705,7 +721,7 @@ export class AuthSecurityService {
     await this.consumeClientSourceRateLimit('client-login', RATE_LIMIT_RULES.clientLoginBySource, RATE_LIMIT_RULES.clientLoginByIpFallback, {
       actionType: 'client.auth.guard.login',
       actionLabel: '客户端登录频控',
-      targetCode: accountKey,
+      targetCode: maskLoginInputForAudit(accountKey),
       requestMeta,
       detail: {},
     })
@@ -714,7 +730,7 @@ export class AuthSecurityService {
       'client-login',
       [`client-login:${riskActor.bucketSegment}`, `client-login:account:${subject}`],
       requestMeta,
-      subject,
+      describeClientRiskSubjectForAudit(subject),
     )
   }
 
@@ -723,7 +739,7 @@ export class AuthSecurityService {
     return this.recordLoginFailure(
       'client-login',
       requestMeta,
-      accountKey,
+      describeClientRiskSubjectForAudit(accountKey),
       `client-login:${riskActor.bucketSegment}`,
       `client-login:account:${accountKey}`,
     )

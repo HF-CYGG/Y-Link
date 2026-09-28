@@ -24,10 +24,11 @@ import {
 } from '../utils/password.js'
 import { hashSessionToken } from '../utils/session-token.js'
 import { generateSessionToken } from '../utils/token.js'
+import { maskLoginInputForAudit } from '../utils/audit-subject-mask.js'
 import { isAdminSessionIdleExpired } from '../utils/admin-session-idle.js'
 import { auditService } from './audit.service.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
-import { authSecurityService } from './auth-security.service.js'
+import { authSecurityService, type ResolvedLoginRiskSubject } from './auth-security.service.js'
 import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
 
 export interface LoginInput {
@@ -110,18 +111,19 @@ export class AuthService {
    * - 账号存在时返回数据库中的规范用户名，锁定与验证码判定都按它计数；
    * - MySQL 常用排序规则大小写、重音、全角不敏感，`Ádmin`/`ａｄｍｉｎ` 都能命中 `admin`，
    *   若按输入原文计数，攻击者每换一种写法就得到一个全新的失败桶，账号锁定形同虚设；
-   * - 账号不存在时退回输入原文，与失败记录口径保持一致。
+   * - 账号不存在时退回输入原文，与失败记录口径保持一致；
+   * - `resolved` 标明是否命中真实账号：未命中时的原文可能是误填的密码，守卫写审计前必须脱敏。
    */
-  async resolveLoginRiskSubject(username: string): Promise<string> {
+  async resolveLoginRiskSubject(username: string): Promise<ResolvedLoginRiskSubject> {
     const normalizedUsername = username.trim()
     if (!normalizedUsername) {
-      return normalizedUsername
+      return { subject: normalizedUsername, resolved: false }
     }
     const user = await this.userRepo.findOne({
       where: { username: normalizedUsername },
       select: { id: true, username: true },
     })
-    return user?.username ?? normalizedUsername
+    return user ? { subject: user.username, resolved: true } : { subject: normalizedUsername, resolved: false }
   }
 
   private buildLoginSecuritySnapshot(user: SysUser): AdminLoginSecuritySnapshot {
@@ -167,12 +169,13 @@ export class AuthService {
 
     if (!user) {
       await verifyPasswordForNonexistentAccount(password)
-      await authSecurityService.recordAdminLoginFailure(requestMeta, username)
+      await authSecurityService.recordAdminLoginFailure(requestMeta, username, { subjectResolved: false })
       await auditService.safeRecord({
         actionType: 'auth.login',
         actionLabel: '用户登录',
         targetType: 'session',
-        targetCode: username,
+        // 账号不存在时输入原文可能是误填的密码或他人手机号，只记掩码与指纹。
+        targetCode: maskLoginInputForAudit(username),
         resultStatus: 'failed',
         requestMeta,
         detail: {

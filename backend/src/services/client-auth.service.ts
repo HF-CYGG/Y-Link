@@ -32,6 +32,7 @@ import {
   verifyPasswordForNonexistentAccount,
 } from '../utils/password.js'
 import { hashSessionToken } from '../utils/session-token.js'
+import { maskLoginInputForAudit } from '../utils/audit-subject-mask.js'
 import { generateSessionToken } from '../utils/token.js'
 import { auditService } from './audit.service.js'
 import { authSecurityService } from './auth-security.service.js'
@@ -916,7 +917,8 @@ class ClientAuthService {
         actionType: 'client.auth.login',
         actionLabel: '客户端登录',
         targetType: 'client_session',
-        targetCode: account.normalizedValue,
+        // 账号不存在时输入原文可能是误填的密码或他人手机号/邮箱，只记掩码与指纹。
+        targetCode: maskLoginInputForAudit(account.normalizedValue),
         resultStatus: 'failed',
         requestMeta,
         detail: { reason: 'user_not_found' },
