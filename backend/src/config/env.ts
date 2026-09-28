@@ -91,6 +91,10 @@ const envSchema = z.object({
   DB_IDLE_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600_000).default(60_000),
   DB_QUEUE_LIMIT: z.coerce.number().int().min(1).max(10_000).default(100),
   DB_MAX_QUERY_MS: z.coerce.number().int().min(25).max(60_000).default(200),
+  // MySQL 传输加密：disabled（默认，兼容内网直连）/ required（加密但不校验证书）/ verify-full（校验证书链与主机名）。
+  DB_SSL_MODE: z.enum(['disabled', 'required', 'verify-full']).default('disabled'),
+  // verify-full 时可指定 CA 证书文件路径（PEM）；未指定则使用 Node 内置根证书。
+  DB_SSL_CA: z.string().optional().transform(normalizeOptionalString),
   SQLITE_SYNCHRONOUS: z.enum(['FULL', 'NORMAL']).default('FULL'),
   SQLITE_BUSY_TIMEOUT_MS: z.coerce.number().int().min(250).max(60_000).default(5000),
   SQLITE_CACHE_SIZE_KIB: z.coerce.number().int().min(4096).max(1_048_576).default(65_536),

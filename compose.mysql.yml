@@ -29,6 +29,9 @@ services:
       DB_IDLE_TIMEOUT_MS: ${DB_IDLE_TIMEOUT_MS:-60000}
       DB_QUEUE_LIMIT: ${DB_QUEUE_LIMIT:-100}
       DB_MAX_QUERY_MS: ${DB_MAX_QUERY_MS:-200}
+      # 外置/云 MySQL 建议 verify-full；CA 文件需另行挂载进容器后填写容器内路径。
+      DB_SSL_MODE: ${DB_SSL_MODE:-disabled}
+      DB_SSL_CA: ${DB_SSL_CA:-}
       DB_AUTO_MIGRATE: ${DB_AUTO_MIGRATE:-false}
       INIT_ADMIN_USERNAME: ${INIT_ADMIN_USERNAME:-admin}
       INIT_ADMIN_DISPLAY_NAME: ${INIT_ADMIN_DISPLAY_NAME:-系统管理员}
