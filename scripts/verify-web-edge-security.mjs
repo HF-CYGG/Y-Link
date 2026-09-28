@@ -23,6 +23,52 @@ for (const file of ['docker/nginx/default.conf', 'docker/nginx/default.conf.temp
     const body = source.slice(offset, source.indexOf('\n    }', offset))
     assert.match(body, /include \/etc\/nginx\/ylink\/page-security-headers\.conf;/, `${file} ${needle} 必须显式包含页面头`)
   }
+  // 边缘限流、连接上限与请求体上限：三套配置口径一致，超限统一返回 JSON。
+  for (const zone of ['ylink_auth_login', 'ylink_auth_captcha', 'ylink_auth_sensitive', 'ylink_api_general']) {
+    assert.match(source, new RegExp(`limit_req_zone \\$binary_remote_addr zone=${zone}:`), `${file} 缺少限流区 ${zone}`)
+  }
+  assert.match(source, /limit_conn_zone \$binary_remote_addr zone=ylink_conn_per_ip:/, `${file} 缺少每 IP 连接区`)
+  for (const directive of [
+    /^    limit_req_status 429;$/m,
+    /^    limit_conn_status 429;$/m,
+    /^    limit_conn ylink_conn_per_ip \d+;$/m,
+    /^    client_max_body_size 1m;$/m,
+    /^    error_page 429 = @ylink_too_many_requests;$/m,
+    /^    error_page 413 = @ylink_payload_too_large;$/m,
+  ]) {
+    assert.match(source, directive, `${file} 缺少 server 级边缘约束 ${directive}`)
+  }
+  const blockOf = (declaration) => {
+    const offset = source.indexOf(`    ${declaration} {\n`)
+    assert.ok(offset >= 0, `${file} 缺少 ${declaration}`)
+    return source.slice(offset, source.indexOf('\n    }', offset))
+  }
+  for (const [name, reason] of [['@ylink_too_many_requests', 'EDGE_RATE_LIMITED'], ['@ylink_payload_too_large', 'EDGE_PAYLOAD_TOO_LARGE']]) {
+    const body = blockOf(`location ${name}`)
+    assert.match(body, /default_type application\/json;/, `${file} ${name} 必须返回 JSON`)
+    assert.ok(body.includes(`"reason":"${reason}"`), `${file} ${name} 缺少稳定原因码 ${reason}`)
+  }
+  for (const [path, zone] of [
+    ['/api/auth/login', 'ylink_auth_login'],
+    ['/api/client-auth/login', 'ylink_auth_login'],
+    ['/api/auth/login/mfa', 'ylink_auth_login'],
+    ['/api/auth/captcha', 'ylink_auth_captcha'],
+    ['/api/client-auth/captcha', 'ylink_auth_captcha'],
+    ['/api/client-auth/register', 'ylink_auth_sensitive'],
+    ['/api/client-auth/verification-code/send', 'ylink_auth_sensitive'],
+    ['/api/client-auth/forgot-password/verify', 'ylink_auth_sensitive'],
+    ['/api/client-auth/forgot-password/reset', 'ylink_auth_sensitive'],
+  ]) {
+    const body = blockOf(`location = ${path}`)
+    assert.match(body, new RegExp(`limit_req zone=${zone} `), `${file} ${path} 必须使用 ${zone} 限流区`)
+    assert.match(body, /client_max_body_size 64k;/, `${file} ${path} 认证入口请求体上限应为 64k`)
+  }
+  for (const declaration of ['location = /api/upload', 'location = /api/client-feedback/attachments', 'location ^~ /api/products/import', 'location ^~ /api/system-configs/client-staff-directory/import']) {
+    const body = blockOf(declaration)
+    assert.match(body, /client_max_body_size 10m;/, `${file} ${declaration} 上传/导入入口应放宽到 10m`)
+    assert.match(body, /limit_req zone=ylink_api_general /, `${file} ${declaration} 应计入通用限流`)
+  }
+  assert.match(blockOf('location ^~ /api/'), /limit_req zone=ylink_api_general burst=\d+ nodelay;/, `${file} /api/ 缺少通用每 IP 限流`)
   if (!file.endsWith('.template')) {
     const pagePattern = source.match(/location ~ (\^\/\(\?:database-rescue\|login\S+) \{/)
     assert.ok(pagePattern, `${file} 缺少页面路由白名单`)
@@ -45,4 +91,4 @@ for (const file of ['compose.yml', 'compose.mysql.yml', 'compose.cloud.yml']) {
   assert.match(backend, /Y_LINK_TRUST_PROXY/)
   assert.match(source, /ipv4_address: \$\{Y_LINK_FRONTEND_PROXY_IP/)
 }
-console.log('[web-edge-security] 代理头覆盖、HTML安全头与端口静态契约通过')
+console.log('[web-edge-security] 代理头覆盖、HTML安全头、端口静态契约与边缘限流/连接/请求体上限通过')

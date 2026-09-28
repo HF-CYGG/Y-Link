@@ -54,6 +54,15 @@ map $request_uri $ylink_attack_class {
 
 # 匿名商城目录是分体/MySQL 部署下的主要公开读热点。短 TTL 微缓存把同一时刻的并发
 # 浏览请求合并为一次后端回源；结算仍由后端事务读取生产库并重新校验库存。
+limit_req_zone $binary_remote_addr zone=ylink_auth_login:10m rate=12r/m;
+limit_req_zone $binary_remote_addr zone=ylink_auth_captcha:10m rate=30r/m;
+# 敏感匿名入口（注册、发码、找回校验与重置）每 IP 限流；登录第二步（两步验证）与登录共用登录区。
+limit_req_zone $binary_remote_addr zone=ylink_auth_sensitive:10m rate=30r/m;
+# /api/ 通用每 IP 限流：拦截单一来源的高频洪水；校园 NAT 等大量用户共用出口 IP 时按需调大 rate 与 burst。
+limit_req_zone $binary_remote_addr zone=ylink_api_general:20m rate=50r/s;
+# 每 IP 同时处理中的请求上限（空闲长连接不计入）。
+limit_conn_zone $binary_remote_addr zone=ylink_conn_per_ip:10m;
+
 proxy_cache_path /var/cache/nginx/ylink-public levels=1:2 keys_zone=ylink_public_catalog:16m max_size=128m inactive=30m use_temp_path=off;
 
 log_format ylink_combined '$remote_addr - $remote_user [$time_local] "$request" '
@@ -72,6 +81,15 @@ server {
     real_ip_recursive on;
 
     access_log /dev/stdout ylink_combined if=$ylink_access_log_enabled;
+
+    # 边缘限流与请求体上限：超限统一 429、请求体超限 413，均返回 JSON，前端按普通业务错误提示。
+    # 默认请求体上限 1m；认证入口收紧到 64k，上传与导入入口在各自 location 放宽到 10m，与后端上限对齐。
+    limit_req_status 429;
+    limit_conn_status 429;
+    limit_conn ylink_conn_per_ip 256;
+    client_max_body_size 1m;
+    error_page 429 = @ylink_too_many_requests;
+    error_page 413 = @ylink_payload_too_large;
     resolver 127.0.0.11 valid=30s ipv6=off;
     set $backend_upstream backend:3001;
 
@@ -167,9 +185,136 @@ server {
         add_header Cache-Control "no-store" always;
     }
 
+    location = /api/auth/login {
+        limit_req zone=ylink_auth_login burst=5 nodelay;
+        client_max_body_size 64k;
+        proxy_pass http://$backend_upstream;
+        proxy_http_version 1.1;
+        include /etc/nginx/ylink/proxy-security-headers.conf;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $ylink_forwarded_proto;
+        proxy_set_header Connection "";
+    }
+
+    location = /api/client-auth/login {
+        limit_req zone=ylink_auth_login burst=5 nodelay;
+        client_max_body_size 64k;
+        proxy_pass http://$backend_upstream;
+        proxy_http_version 1.1;
+        include /etc/nginx/ylink/proxy-security-headers.conf;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $ylink_forwarded_proto;
+        proxy_set_header Connection "";
+    }
+
+    location = /api/auth/captcha {
+        limit_req zone=ylink_auth_captcha burst=8 nodelay;
+        client_max_body_size 64k;
+        proxy_pass http://$backend_upstream;
+        proxy_http_version 1.1;
+        include /etc/nginx/ylink/proxy-security-headers.conf;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $ylink_forwarded_proto;
+        proxy_set_header Connection "";
+    }
+
+    location = /api/client-auth/captcha {
+        limit_req zone=ylink_auth_captcha burst=8 nodelay;
+        client_max_body_size 64k;
+        proxy_pass http://$backend_upstream;
+        proxy_http_version 1.1;
+        include /etc/nginx/ylink/proxy-security-headers.conf;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $ylink_forwarded_proto;
+        proxy_set_header Connection "";
+    }
+
+    location = /api/auth/login/mfa {
+        limit_req zone=ylink_auth_login burst=5 nodelay;
+        client_max_body_size 64k;
+        proxy_pass http://$backend_upstream;
+        proxy_http_version 1.1;
+        include /etc/nginx/ylink/proxy-security-headers.conf;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $ylink_forwarded_proto;
+        proxy_set_header Connection "";
+    }
+
+    location = /api/client-auth/register {
+        limit_req zone=ylink_auth_sensitive burst=10 nodelay;
+        client_max_body_size 64k;
+        proxy_pass http://$backend_upstream;
+        proxy_http_version 1.1;
+        include /etc/nginx/ylink/proxy-security-headers.conf;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $ylink_forwarded_proto;
+        proxy_set_header Connection "";
+    }
+
+    location = /api/client-auth/verification-code/send {
+        limit_req zone=ylink_auth_sensitive burst=10 nodelay;
+        client_max_body_size 64k;
+        proxy_pass http://$backend_upstream;
+        proxy_http_version 1.1;
+        include /etc/nginx/ylink/proxy-security-headers.conf;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $ylink_forwarded_proto;
+        proxy_set_header Connection "";
+    }
+
+    location = /api/client-auth/forgot-password/verify {
+        limit_req zone=ylink_auth_sensitive burst=10 nodelay;
+        client_max_body_size 64k;
+        proxy_pass http://$backend_upstream;
+        proxy_http_version 1.1;
+        include /etc/nginx/ylink/proxy-security-headers.conf;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $ylink_forwarded_proto;
+        proxy_set_header Connection "";
+    }
+
+    location = /api/client-auth/forgot-password/reset {
+        limit_req zone=ylink_auth_sensitive burst=10 nodelay;
+        client_max_body_size 64k;
+        proxy_pass http://$backend_upstream;
+        proxy_http_version 1.1;
+        include /etc/nginx/ylink/proxy-security-headers.conf;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $ylink_forwarded_proto;
+        proxy_set_header Connection "";
+    }
+
     # 这两个路由当前均为完全匿名且不按 Cookie 个性化的公开数据。
     # 若后续引入用户专属价格或可见范围，必须先移除共享缓存或把身份维度纳入 cache key。
     location = /api/o2o/mall/products {
+        limit_req zone=ylink_api_general burst=500 nodelay;
         proxy_pass http://$backend_upstream/api/o2o/mall/products;
         proxy_http_version 1.1;
         include /etc/nginx/ylink/proxy-security-headers.conf;
@@ -193,6 +338,7 @@ server {
     }
 
     location = /api/o2o/mall/storefront {
+        limit_req zone=ylink_api_general burst=500 nodelay;
         proxy_pass http://$backend_upstream/api/o2o/mall/storefront;
         proxy_http_version 1.1;
         include /etc/nginx/ylink/proxy-security-headers.conf;
@@ -218,7 +364,78 @@ server {
     # API 反向代理：
     # - 默认走同编排服务名 backend:3001；
     # - 使用变量+resolver 做延迟解析，避免容器启动阶段因 DNS 瞬态失败直接退出。
+    location @ylink_too_many_requests {
+        default_type application/json;
+        add_header Cache-Control "no-store" always;
+        add_header Retry-After "5" always;
+        return 429 '{"code":429,"message":"请求过于频繁，请稍后再试","data":{"reason":"EDGE_RATE_LIMITED"}}';
+    }
+
+    location @ylink_payload_too_large {
+        default_type application/json;
+        add_header Cache-Control "no-store" always;
+        return 413 '{"code":413,"message":"请求内容过大，请压缩或拆分后重试","data":{"reason":"EDGE_PAYLOAD_TOO_LARGE"}}';
+    }
+
+    # 上传与导入入口：请求体上限放宽到 10m，与后端 multer / JSON 上限对齐（商品图 10MB、名录导入 8MB、商品导入 5MB）。
+    location = /api/upload {
+        limit_req zone=ylink_api_general burst=500 nodelay;
+        client_max_body_size 10m;
+        proxy_pass http://$backend_upstream;
+        proxy_http_version 1.1;
+        include /etc/nginx/ylink/proxy-security-headers.conf;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $ylink_forwarded_proto;
+        proxy_set_header Connection "";
+    }
+
+    location = /api/client-feedback/attachments {
+        limit_req zone=ylink_api_general burst=500 nodelay;
+        client_max_body_size 10m;
+        proxy_pass http://$backend_upstream;
+        proxy_http_version 1.1;
+        include /etc/nginx/ylink/proxy-security-headers.conf;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $ylink_forwarded_proto;
+        proxy_set_header Connection "";
+    }
+
+    location ^~ /api/products/import {
+        limit_req zone=ylink_api_general burst=500 nodelay;
+        client_max_body_size 10m;
+        proxy_pass http://$backend_upstream;
+        proxy_http_version 1.1;
+        include /etc/nginx/ylink/proxy-security-headers.conf;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $ylink_forwarded_proto;
+        proxy_set_header Connection "";
+    }
+
+    location ^~ /api/system-configs/client-staff-directory/import {
+        limit_req zone=ylink_api_general burst=500 nodelay;
+        client_max_body_size 10m;
+        proxy_pass http://$backend_upstream;
+        proxy_http_version 1.1;
+        include /etc/nginx/ylink/proxy-security-headers.conf;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $ylink_forwarded_proto;
+        proxy_set_header Connection "";
+    }
+
     location ^~ /api/ {
+        limit_req zone=ylink_api_general burst=500 nodelay;
         proxy_pass http://$backend_upstream/api/;
         proxy_http_version 1.1;
         include /etc/nginx/ylink/proxy-security-headers.conf;

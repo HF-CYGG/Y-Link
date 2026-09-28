@@ -61,6 +61,7 @@
 - 匿名认证入口在途上限（`middleware/in-flight-limit.middleware.ts`，挂在 `/api/auth` 与 `/api/client-auth` 的限流中间件之前）：管理端 `/captcha`、`/login`、`/login/mfa` 与 Web 客户端登录/验证码/能力/注册/发码/找回入口共用一个进程级闸门，默认同时处理 64 个（`YLINK_ANONYMOUS_AUTH_MAX_IN_FLIGHT`），超出直接 503 不排队；移动端入口不纳入。图形验证码 PNG 渲染另经 `captcha-render` 闸门（默认并发 4、排队 32、超时 3 秒，`YLINK_CAPTCHA_RENDER_*` 可调，Web 与移动端共用）。所有闸门均为模块级单例，同一进程多次 `createApp` 共用。
 - 过载自适应削峰（`utils/overload-monitor.ts` + `middleware/overload-shedding.middleware.ts`，挂在 `/health` 之后、所有业务入口之前）：正式运行时每秒采样事件循环延迟 p99 与 SQLite 写队列占用，连续 3 次越线升级、连续 5 次回落到阈值一半以下降级。elevated（延迟 ≥500ms 或写队列 ≥90%）拒绝匿名认证入口、新建 SSE（`/client-feedback/stream`、`/customer-service/stream`）与各类导出；critical（延迟 ≥1 秒持续，写队列拥堵最多到 elevated）再拒绝 GET/HEAD 读请求，但保留 `/auth/me`、`/client-auth/me`。已登录写请求、`/health`、救援面与移动端 `/api/v1/*` 永不削峰；被削峰返回 503 + `Retry-After: 5`、`data.reason=SERVER_OVERLOADED`，不写审计。阈值与开关见 `YLINK_OVERLOAD_*`，等级、最近信号与削峰计数见数据库性能接口 `overload`。直接 `createApp` 的回归脚本不启动采样器（等级恒为 normal），测试削峰时用 `overloadMonitor.evaluate()` 注入信号。削峰只是自保手段，容量型 DDoS 仍需上游 CDN/高防。
 - 按会话的请求速率保险丝（`utils/session-rate-fuse.ts`）：管理端 `requireAuth` 与 Web 客户端 `requireClientAuth` 在查库之前按会话令牌哈希做令牌桶判定（默认突发 200、每秒补 30，`YLINK_SESSION_RATE_BURST/PER_SECOND` 可调，进程内 ≤5 万个会话桶，淘汰最久未活动者）。按会话而非账号计数，部门共享账号的多个会话互不影响；超出返回 429 + `Retry-After`、`data.reason=SESSION_RATE_LIMITED`。移动端访问令牌不纳入。
+- 边缘层（Nginx）另有按 IP 的登录/验证码/敏感匿名入口/通用 API 限流、每 IP 在途请求上限与分入口请求体上限，超限返回 JSON 429/413（`EDGE_RATE_LIMITED` / `EDGE_PAYLOAD_TOO_LARGE`），前端按普通业务错误展示；阈值与调参见 `51-本地联调与部署模式.md`。
 
 ## 代理、HTTPS 与救援传输边界
 
