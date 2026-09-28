@@ -261,6 +261,7 @@ export const AUDIT_TARGET_TYPE_LABELS: Readonly<Record<string, string>> = {
   base_category: '商品分类',
   base_storage_location: '库位',
   base_product: '商品',
+  base_product_sku: '商品规格',
   product_import: '商品导入',
   inv_stock_doc: '库存单据',
   inv_stocktake: '盘点单',

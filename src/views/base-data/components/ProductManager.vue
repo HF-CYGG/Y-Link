@@ -632,6 +632,9 @@ const isProductImplicitDefaultSku = (row: ProductRecord) => {
  */
 let productEditStockBaseline: { productId: string; currentStock: number; skus: Map<string, number> } | null = null
 
+/** 编辑弹窗打开时的 SKU 库位快照：未改动的库位不回传，由服务端保留锁内最新关联。 */
+let productEditLocationBaseline: { productId: string; skus: Map<string, string | null> } | null = null
+
 /** 单规格商品默认 SKU 扩展字段的打开时快照：未改动时不提交 defaultSku，避免无关保存触发服务端校验。 */
 let defaultSkuBaseline: string | null = null
 /** 单规格商品的默认 SKU 原始记录：规格弹窗的占位行据此展示 id、编码、条码、成本价与库位。 */
@@ -649,6 +652,12 @@ const buildEditForm = (row: ProductRecord): ProductForm => {
       .map((sku) => [String(sku.id), Number(sku.currentStock ?? 0)])),
   }
   const currentSkus = (row.skus ?? []).filter((sku) => sku.isCurrent !== false)
+  productEditLocationBaseline = {
+    productId: row.id,
+    skus: new Map(currentSkus
+      .filter((sku) => typeof sku.id === 'string' && sku.id)
+      .map((sku) => [String(sku.id), sku.locationId ?? null])),
+  }
   const skus = currentSkus.length && !isProductImplicitDefaultSku(row)
     ? currentSkus.map((sku) => ({
         id: sku.id,
@@ -724,7 +733,9 @@ const resolveDefaultSkuPayload = (
     defaultSku: {
       barcode: currentForm.defaultBarcode.trim() || null,
       costPrice: currentForm.defaultCostPrice === null ? null : normalizeSubmitNumber(currentForm.defaultCostPrice, { fallback: 0, min: 0 }),
-      locationId: resolvedDefaultLocationId || null,
+      ...(currentForm.id && defaultSkuSnapshot && (defaultSkuSnapshot.locationId ?? null) === (resolvedDefaultLocationId || null)
+        ? {}
+        : { locationId: resolvedDefaultLocationId || null }),
     },
   }
 }
@@ -771,9 +782,17 @@ const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProdu
   })
   // 编辑已有商品时，只提交用户改动过的库存，并附带打开弹窗时的基线；新增商品不受影响。
   const baseline = currentForm.id && productEditStockBaseline?.productId === currentForm.id ? productEditStockBaseline : null
+  const locationBaseline = currentForm.id && productEditLocationBaseline?.productId === currentForm.id
+    ? productEditLocationBaseline.skus
+    : null
   const resolveSkuStockField = (skuId: string | undefined, stock: number) => {
     if (!baseline || !skuId) return { currentStock: stock }
     return baseline.skus.get(String(skuId)) === stock ? {} : { currentStock: stock }
+  }
+  const resolveSkuLocationField = (sku: ProductSkuForm) => {
+    const locationId = resolveLocationIdValue(sku.locationId) || null
+    if (sku.id && locationBaseline?.has(String(sku.id)) && locationBaseline.get(String(sku.id)) === locationId) return {}
+    return { locationId }
   }
 
   return {
@@ -804,7 +823,7 @@ const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProdu
           sortOrder: index,
           barcode: typeof sku.barcode === 'string' && sku.barcode.trim() ? sku.barcode.trim() : null,
           costPrice: sku.costPrice === null || sku.costPrice === undefined ? null : normalizeSubmitNumber(sku.costPrice, { fallback: 0, min: 0 }),
-          locationId: resolveLocationIdValue(sku.locationId) || null,
+          ...resolveSkuLocationField(sku),
         }))
       : [],
     ...(baseline
