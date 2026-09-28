@@ -63,3 +63,14 @@ export function buildOnlineDisplayPatch(
   }
   return payload
 }
+
+export function validateOnlineDisplayPatch(payload: UpdateProductOnlineDisplayDto): string | null {
+  if (payload.limitPerUser !== undefined
+    && (!Number.isSafeInteger(payload.limitPerUser) || payload.limitPerUser < 1 || payload.limitPerUser > 999999)) {
+    return '单人限购必须为 1 至 999999 的整数'
+  }
+  if (typeof payload.detailContent === 'string' && payload.detailContent.length > 20000) {
+    return '商品详情不能超过 20000 个字符'
+  }
+  return null
+}

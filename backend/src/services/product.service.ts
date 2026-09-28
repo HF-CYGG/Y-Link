@@ -971,10 +971,18 @@ export class ProductService {
     if (input.detailContent !== undefined && input.detailContent !== null && typeof input.detailContent !== 'string') {
       throw new BizError('商品详情格式无效')
     }
-    if (input.limitPerUser !== undefined && (!Number.isSafeInteger(input.limitPerUser)
-      || input.limitPerUser < 1 || input.limitPerUser > 2_147_483_647)) {
-      throw new BizError('单人限购数量必须为正整数')
-    }
+    const normalizedDetailContent = this.readLimitedText(
+      input.detailContent,
+      '商品详情',
+      PRODUCT_FIELD_LIMITS.detailContent,
+      { allowNull: true },
+    )
+    const normalizedLimitPerUser = this.readOptionalInteger(
+      input.limitPerUser,
+      '单人限购数量',
+      1,
+      PRODUCT_FIELD_LIMITS.maxLimitPerUser,
+    )
     const recommendation = input.recommendation
     if (recommendation) {
       if (!['all', 'selected', 'none'].includes(recommendation.mode)
@@ -1009,12 +1017,12 @@ export class ProductService {
         productChanges.o2oStatus = input.o2oStatus
         changedFields.push('o2oStatus')
       }
-      if (input.detailContent !== undefined && input.detailContent !== product.detailContent) {
-        productChanges.detailContent = input.detailContent
+      if (normalizedDetailContent !== undefined && normalizedDetailContent !== product.detailContent) {
+        productChanges.detailContent = normalizedDetailContent
         changedFields.push('detailContent')
       }
-      if (input.limitPerUser !== undefined && input.limitPerUser !== Number(product.limitPerUser)) {
-        productChanges.limitPerUser = input.limitPerUser
+      if (normalizedLimitPerUser !== undefined && normalizedLimitPerUser !== Number(product.limitPerUser)) {
+        productChanges.limitPerUser = normalizedLimitPerUser
         changedFields.push('limitPerUser')
       }
 

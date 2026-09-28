@@ -30,6 +30,7 @@ import {
   clampOnlineDisplayPage,
   filterOnlineDisplayProducts,
   mergeOnlineDisplayPageSelection,
+  validateOnlineDisplayPatch,
   type OnlineDisplaySnapshot,
 } from './o2o-online-display.helpers'
 
@@ -233,10 +234,6 @@ async function refreshAfterConflict(error: unknown): Promise<boolean> {
 async function saveOnlineDisplay(): Promise<void> {
   const product = editingProduct.value
   if (!product || !originalDisplay || !ensurePermission('products:manage', '保存线上展示')) return
-  if (!Number.isSafeInteger(form.limitPerUser) || form.limitPerUser < 1 || form.limitPerUser > 2_147_483_647) {
-    showAppWarning('单人限购必须为正整数')
-    return
-  }
   if (!product.isActive && form.o2oStatus === 'listed') {
     showAppWarning('商品已停用，请先在基础资料中启用')
     return
@@ -257,6 +254,11 @@ async function saveOnlineDisplay(): Promise<void> {
     limitPerUser: form.limitPerUser,
     detailContent: form.detailContent,
   }, currentSkus(product).map((sku) => String(sku.id ?? '')).filter(Boolean))
+  const validationError = validateOnlineDisplayPatch(payload)
+  if (validationError) {
+    showAppWarning(validationError)
+    return
+  }
   if (!Object.keys(payload).length) {
     showAppWarning('线上展示没有需要保存的变更')
     return
@@ -478,7 +480,7 @@ onDeactivated(() => {
                 :disabled="!canManageProducts || (!editingProduct.isActive && form.o2oStatus !== 'listed')" />
             </el-form-item>
             <el-form-item label="单人限购">
-              <el-input-number v-model="form.limitPerUser" :min="1" :max="2147483647" :step="1" :disabled="!canManageProducts" controls-position="right" />
+              <el-input-number v-model="form.limitPerUser" :min="1" :max="Math.max(999999, editingProduct.limitPerUser)" :step="1" :disabled="!canManageProducts" controls-position="right" />
             </el-form-item>
           </div>
           <el-form-item label="客户端推荐">
@@ -494,7 +496,7 @@ onDeactivated(() => {
             </el-select>
           </el-form-item>
           <el-form-item label="客户端详情">
-            <el-input v-model="form.detailContent" type="textarea" :rows="5" placeholder="填写商品详情说明" :disabled="!canManageProducts" />
+            <el-input v-model="form.detailContent" type="textarea" :rows="5" :maxlength="20000" placeholder="填写商品详情说明" :disabled="!canManageProducts" />
           </el-form-item>
         </el-form>
         <div class="mall-editor__sku-list">

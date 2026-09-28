@@ -216,8 +216,8 @@ const onlineRecommendationSchema = z.object({
 
 const onlineDisplaySchema = z.object({
   o2oStatus: z.enum(['listed', 'unlisted']).optional(),
-  detailContent: z.string().nullable().optional(),
-  limitPerUser: z.number().int().min(1).max(2_147_483_647).optional(),
+  detailContent: z.string().trim().max(20000).nullable().optional(),
+  limitPerUser: z.number().int().min(1).max(999999).optional(),
   recommendation: onlineRecommendationSchema.optional(),
 }).strict().refine((value) => Object.keys(value).length > 0, { message: '至少提供一个线上展示字段' })
 

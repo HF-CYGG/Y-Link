@@ -9,6 +9,7 @@ import {
   clampOnlineDisplayPage,
   filterOnlineDisplayProducts,
   mergeOnlineDisplayPageSelection,
+  validateOnlineDisplayPatch,
   type OnlineDisplaySnapshot,
 } from '../src/views/o2o/o2o-online-display.helpers.js'
 
@@ -79,6 +80,16 @@ assert.deepEqual(buildOnlineDisplayPatch(original, { ...original, recommendation
   recommendation: { mode: 'all', expectedSkuIds: ['a', 'b'] },
 })
 assert.deepEqual(buildOnlineDisplayPatch(original, { ...original, detailContent: '更新' }, ['a', 'b']), { detailContent: '更新' })
+const legacy: OnlineDisplaySnapshot = {
+  ...original, limitPerUser: 1000000, detailContent: '详'.repeat(20001),
+}
+const legacyStatusPatch = buildOnlineDisplayPatch(legacy, { ...legacy, o2oStatus: 'listed' }, ['a', 'b'])
+assert.deepEqual(legacyStatusPatch, { o2oStatus: 'listed' }, '旧超限字段未编辑时不能进入最小 PATCH')
+assert.equal(validateOnlineDisplayPatch(legacyStatusPatch), null, '只改上下架时不能因旧字段超限而拦截')
+assert.equal(validateOnlineDisplayPatch(buildOnlineDisplayPatch(legacy, { ...legacy, limitPerUser: 1000001 }, ['a', 'b'])),
+  '单人限购必须为 1 至 999999 的整数', '主动修改为超限数必须拒绝')
+assert.equal(validateOnlineDisplayPatch(buildOnlineDisplayPatch(legacy, { ...legacy, detailContent: '详'.repeat(20002) }, ['a', 'b'])),
+  '商品详情不能超过 20000 个字符', '主动修改为超长详情必须拒绝')
 
 const view = readFileSync('src/views/o2o/O2oProductMallManageView.vue', 'utf8')
 const api = readFileSync('src/api/modules/product.ts', 'utf8')
@@ -87,6 +98,7 @@ assert.ok(view.includes("goToBasic('create')") && view.includes("goToBasic('batc
 assert.ok(api.includes("method: 'PATCH'") && api.includes('url: `/products/${id}/online-display`') && api.includes("url: '/products/online-display/batch'"))
 assert.ok(!view.includes('updateProduct(') && !view.includes('batchUpdateProducts('), '线上页禁止走商品全量编辑')
 assert.ok(view.includes('resolveO2oPriceView(resolveProductPreviewSku(product) ?? product)'), '管理页展示价应跟随预览 SKU')
+assert.ok(view.includes(':max="Math.max(999999, editingProduct.limitPerUser)"'), '旧超限数加载时输入组件不能自动截断并改写表单')
 const selectionRestoreStart = view.indexOf('async function restoreTableSelection()')
 const selectionRestoreEnd = view.indexOf('async function clearSelection()', selectionRestoreStart)
 const selectionRestoreSource = view.slice(selectionRestoreStart, selectionRestoreEnd)

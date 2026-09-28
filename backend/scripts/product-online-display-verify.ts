@@ -37,7 +37,7 @@ type Product = {
 
 async function json<T>(response: Response, expectedStatus: number): Promise<ApiPayload<T>> {
   const payload = await response.json() as ApiPayload<T>
-  assert.equal(response.status, expectedStatus, `HTTP ${response.status}: ${JSON.stringify(payload)}`)
+  assert.equal(response.status, expectedStatus, `HTTP ${response.status}: ${payload.message}`)
   return payload
 }
 
@@ -56,6 +56,8 @@ async function main(): Promise<void> {
   const { BaseProduct } = await import('../src/entities/base-product.entity.js')
   const { BaseProductSku } = await import('../src/entities/base-product-sku.entity.js')
   const { SysAuditLog } = await import('../src/entities/sys-audit-log.entity.js')
+  const { SysUser } = await import('../src/entities/sys-user.entity.js')
+  const { productService } = await import('../src/services/product.service.js')
   const { readMallCatalogRevision } = await import('../src/services/mall-catalog-revision.service.js')
   assert.equal(path.resolve(env.SQLITE_DB_PATH), sqlitePath, '必须使用本轮隔离 SQLite')
   let server: Server | undefined
@@ -90,6 +92,12 @@ async function main(): Promise<void> {
       return decodeURIComponent(token)
     }
     const admin = await login('admin', adminPassword)
+    const adminUser = await AppDataSource.getRepository(SysUser).findOneByOrFail({ username: 'admin' })
+    const serviceActor = {
+      userId: String(adminUser.id), username: adminUser.username, displayName: adminUser.displayName,
+      role: 'admin' as const, permissions: [], status: 'enabled' as const,
+      sessionToken: 'product-online-display-verify', authSource: 'bearer' as const,
+    }
     const category = (await json<{ id: string }>(await send(admin, 'POST', '/api/inventory/categories', {
       categoryCode: '88', categoryName: '线上展示验证分类',
     }), 200)).data
@@ -179,6 +187,46 @@ async function main(): Promise<void> {
     const actionRepo = AppDataSource.getRepository(SysAuditLog)
     assert.equal(await actionRepo.countBy({ actionType: 'product.online_display.update', targetId: created.id }), 1)
 
+    const maxDetail = '详'.repeat(20000)
+    const boundary = (await json<Product>(await send(admin, 'PATCH', itemUrl, {
+      detailContent: maxDetail,
+      limitPerUser: 999999,
+    }), 200)).data
+    assert.equal(boundary.detailContent, maxDetail)
+    assert.equal(boundary.limitPerUser, 999999)
+    const persistedBoundary = await productRepo.findOneByOrFail({ id: created.id })
+    assert.equal(persistedBoundary.detailContent, maxDetail)
+    assert.equal(Number(persistedBoundary.limitPerUser), 999999)
+    const revisionAtBoundary = readMallCatalogRevision()
+    const auditCountAtBoundary = await actionRepo.countBy({ actionType: 'product.online_display.update', targetId: created.id })
+    const paddedBoundary = (await json<Product>(await send(admin, 'PATCH', itemUrl, {
+      detailContent: ` ${maxDetail} `,
+    }), 200)).data
+    assert.equal(paddedBoundary.detailContent, maxDetail)
+    assert.equal(await actionRepo.countBy({ actionType: 'product.online_display.update', targetId: created.id }), auditCountAtBoundary)
+    for (const invalid of [
+      { detailContent: '详'.repeat(20001) },
+      { limitPerUser: 1000000 },
+      { detailContent: '新详情', limitPerUser: 1000000 },
+    ]) {
+      await json(await send(admin, 'PATCH', itemUrl, invalid), 400)
+      const unchanged = await productRepo.findOneByOrFail({ id: created.id })
+      assert.equal(unchanged.detailContent, maxDetail)
+      assert.equal(Number(unchanged.limitPerUser), 999999)
+    }
+    await assert.rejects(
+      productService.updateOnlineDisplay(created.id, { detailContent: '详'.repeat(20001) }, serviceActor),
+      { statusCode: 400, message: '商品详情长度不能超过 20000 个字符' },
+    )
+    await assert.rejects(
+      productService.updateOnlineDisplay(created.id, { limitPerUser: 1000000 }, serviceActor),
+      { statusCode: 400, message: '单人限购数量不能超过 999999' },
+    )
+    assert.equal(readMallCatalogRevision(), revisionAtBoundary)
+    assert.equal(await actionRepo.countBy({ actionType: 'product.online_display.update', targetId: created.id }), auditCountAtBoundary)
+    const normalized = (await json<Product>(await send(admin, 'PATCH', itemUrl, { detailContent: '  新详情  ' }), 200)).data
+    assert.equal(normalized.detailContent, '新详情')
+
     const staleRevision = readMallCatalogRevision()
     await json(await send(admin, 'PATCH', itemUrl, {
       recommendation: { mode: 'selected', skuIds: ['missing'], expectedSkuIds: baseline },
@@ -243,7 +291,20 @@ async function main(): Promise<void> {
       recommendation: { mode: 'all', expectedSkuIds: [red.id, green.id] },
     }), 200)
     assert.deepEqual(await skuRepo.findOneByOrFail({ id: blue.id }), retiredBefore, '退役 SKU 不得被展示更新改写')
-    assert.equal(await actionRepo.countBy({ actionType: 'product.online_display.update', targetId: created.id }), 4)
+    assert.equal(await actionRepo.countBy({ actionType: 'product.online_display.update', targetId: created.id }), 6)
+
+    // 模拟旧接口留下的超限数据：只修改上架状态时不得隐式重写未提交的展示字段。
+    const legacyDetail = '详'.repeat(20001)
+    await productRepo.update(extra.id, { detailContent: legacyDetail, limitPerUser: 1000000 })
+    const legacyStatusOnly = (await json<Product>(await send(admin, 'PATCH', `/api/products/${extra.id}/online-display`, {
+      o2oStatus: 'listed',
+    }), 200)).data
+    assert.equal(legacyStatusOnly.o2oStatus, 'listed')
+    assert.equal(legacyStatusOnly.detailContent, legacyDetail)
+    assert.equal(legacyStatusOnly.limitPerUser, 1000000)
+    const legacyPersisted = await productRepo.findOneByOrFail({ id: extra.id })
+    assert.equal(legacyPersisted.detailContent, legacyDetail)
+    assert.equal(Number(legacyPersisted.limitPerUser), 1000000)
     console.log('商品线上展示隔离回归通过：权限、参数、字段隔离、推荐基线、批量原子性、缓存和审计')
   } finally {
     if (server) await new Promise<void>((resolve) => server!.close(() => resolve()))
