@@ -10,6 +10,10 @@
  *   避免“被拒绝的请求反而比被放行的请求多消耗一次写事务”这种成本倒挂。
  * - 过期状态的清理（cleanupExpired）不再挂在请求路径上，改为独立的后台定时任务，
  *   避免个别请求承担范围删除的延迟，也避免其与请求事务竞争同一批行的加锁顺序。
+ * - 进程内负缓存只记录确定性的拒绝结论（“某桶已超限至某时刻”“某账号已锁定至某时刻”），
+ *   结论有效期内的后续请求直接拒绝、不读写数据库；攻击流量恰好集中在这些被拒绝的桶上。
+ *   数据库仍是唯一事实来源：缓存只会让本实例多拒绝到结论自然到期为止，不会放行本应拒绝的请求，
+ *   本实例内的回退、清零与重置会同步失效对应缓存。
  */
 
 import { createHash } from 'node:crypto'
@@ -27,6 +31,51 @@ export interface PersistentFailureState {
   firstFailedAt: number
   lastFailedAt: number
   lockedUntil: number
+}
+
+/** 限流窗口消费结果：`deniedFromCache` 表示由负缓存直接拒绝，未访问数据库（调用方据此跳过重复审计）。 */
+export interface RiskWindowConsumeResult extends ClientRateLimitInfo {
+  deniedFromCache?: boolean
+}
+
+const NEGATIVE_CACHE_MAX_ENTRIES = 20_000
+
+/** 有界负缓存：到期即失效；容量满时按插入顺序淘汰最早的条目，摊销 O(1)。 */
+class RiskNegativeCache<T> {
+  private readonly entries = new Map<string, { until: number; value: T }>()
+
+  get(key: string, nowMs: number): T | undefined {
+    const entry = this.entries.get(key)
+    if (!entry) return undefined
+    if (entry.until <= nowMs) {
+      this.entries.delete(key)
+      return undefined
+    }
+    return entry.value
+  }
+
+  set(key: string, until: number, value: T, nowMs: number): void {
+    this.entries.delete(key)
+    if (until <= nowMs) return
+    while (this.entries.size >= NEGATIVE_CACHE_MAX_ENTRIES) {
+      const oldestKey = this.entries.keys().next().value
+      if (oldestKey === undefined) break
+      this.entries.delete(oldestKey)
+    }
+    this.entries.set(key, { until, value })
+  }
+
+  delete(key: string): void {
+    this.entries.delete(key)
+  }
+
+  clear(): void {
+    this.entries.clear()
+  }
+
+  get size(): number {
+    return this.entries.size
+  }
 }
 
 const CLEANUP_INTERVAL_MS = 60 * 1000
@@ -54,6 +103,10 @@ const parseTimestamps = (value: string | null): number[] => {
 class PersistentRiskStateService {
   private cleanupLoopTimer: ReturnType<typeof globalThis.setInterval> | null = null
   private cleanupLoopDesired = false
+  /** 已超限的限流桶：值为窗口重新放行的时刻。 */
+  private readonly rateLimitDenials = new RiskNegativeCache<Date>()
+  /** 已锁定的失败计数桶：值为锁定期间的状态快照（锁定期内登录被拒，计数不会再变化）。 */
+  private readonly failureLocks = new RiskNegativeCache<PersistentFailureState>()
 
   constructor() {
     databaseOperationGate.registerWorker({
@@ -169,12 +222,19 @@ class PersistentRiskStateService {
     windowMs: number,
     nowMs = Date.now(),
     maxRequests?: number,
-  ): Promise<ClientRateLimitInfo> {
-    return this.runWithLockRetry(() =>
+  ): Promise<RiskWindowConsumeResult> {
+    const bucketDigest = digestBucketKey(`rate_limit:${bucketKey}`)
+    if (typeof maxRequests === 'number') {
+      const cachedResetTime = this.rateLimitDenials.get(bucketDigest, nowMs)
+      if (cachedResetTime) {
+        return { totalHits: maxRequests + 1, resetTime: cachedResetTime, deniedFromCache: true }
+      }
+    }
+    const result = await this.runWithLockRetry(() =>
       runInTransaction(async (manager) => {
         const state = await this.loadLockedState(
           manager,
-          digestBucketKey(`rate_limit:${bucketKey}`),
+          bucketDigest,
           'rate_limit',
           new Date(nowMs + windowMs),
         )
@@ -198,6 +258,11 @@ class PersistentRiskStateService {
         }
       }),
     )
+    // 超限结论写入负缓存：窗口最早的时间戳过期前不会有新的放行名额（超限请求不写时间戳）。
+    if (typeof maxRequests === 'number' && result.totalHits > maxRequests && result.resetTime) {
+      this.rateLimitDenials.set(bucketDigest, result.resetTime.getTime(), result.resetTime, nowMs)
+    }
+    return result
   }
 
   /**
@@ -269,6 +334,8 @@ class PersistentRiskStateService {
 
   async decrementWindow(bucketKey: string, windowMs: number, nowMs = Date.now()): Promise<void> {
     const bucketDigest = digestBucketKey(`rate_limit:${bucketKey}`)
+    // 回退会腾出名额，本实例的超限结论随之失效。
+    this.rateLimitDenials.delete(bucketDigest)
     await this.runWithLockRetry(() =>
       runInTransaction(async (manager) => {
         const repository = manager.getRepository(AuthRiskState)
@@ -291,12 +358,16 @@ class PersistentRiskStateService {
   }
 
   async resetWindow(bucketKey: string): Promise<void> {
-    await AppDataSource.getRepository(AuthRiskState).delete({ bucketDigest: digestBucketKey(`rate_limit:${bucketKey}`) })
+    const bucketDigest = digestBucketKey(`rate_limit:${bucketKey}`)
+    this.rateLimitDenials.delete(bucketDigest)
+    await AppDataSource.getRepository(AuthRiskState).delete({ bucketDigest })
   }
 
   async readFailure(bucketKey: string, resetWindowMs: number, nowMs = Date.now()): Promise<PersistentFailureState | null> {
     const repository = AppDataSource.getRepository(AuthRiskState)
     const bucketDigest = digestBucketKey(`login_failure:${bucketKey}`)
+    const cachedLock = this.failureLocks.get(bucketDigest, nowMs)
+    if (cachedLock) return { ...cachedLock }
     const state = await repository.findOne({ where: { bucketDigest, stateType: 'login_failure' } })
     if (!state?.lastFailedAt) return null
     const lockedUntil = state.lockedUntil?.getTime() ?? 0
@@ -304,12 +375,16 @@ class PersistentRiskStateService {
       await repository.delete({ bucketDigest })
       return null
     }
-    return {
+    const result: PersistentFailureState = {
       count: state.failureCount,
       firstFailedAt: state.firstFailedAt?.getTime() ?? state.lastFailedAt.getTime(),
       lastFailedAt: state.lastFailedAt.getTime(),
       lockedUntil,
     }
+    if (lockedUntil > nowMs) {
+      this.failureLocks.set(bucketDigest, lockedUntil, result, nowMs)
+    }
+    return result
   }
 
   async recordFailure(
@@ -320,11 +395,12 @@ class PersistentRiskStateService {
     nowMs = Date.now(),
   ): Promise<PersistentFailureState> {
     const now = new Date(nowMs)
-    return this.runWithLockRetry(() =>
+    const bucketDigest = digestBucketKey(`login_failure:${bucketKey}`)
+    const result = await this.runWithLockRetry(() =>
       runInTransaction(async (manager) => {
         const state = await this.loadLockedState(
           manager,
-          digestBucketKey(`login_failure:${bucketKey}`),
+          bucketDigest,
           'login_failure',
           new Date(nowMs + resetWindowMs),
         )
@@ -348,12 +424,33 @@ class PersistentRiskStateService {
         }
       }),
     )
+    if (result.lockedUntil > nowMs) {
+      this.failureLocks.set(bucketDigest, result.lockedUntil, result, nowMs)
+    } else {
+      this.failureLocks.delete(bucketDigest)
+    }
+    return result
   }
 
   async resetFailure(bucketKey: string): Promise<void> {
-    await AppDataSource.getRepository(AuthRiskState).delete({
-      bucketDigest: digestBucketKey(`login_failure:${bucketKey}`),
-    })
+    const bucketDigest = digestBucketKey(`login_failure:${bucketKey}`)
+    this.failureLocks.delete(bucketDigest)
+    await AppDataSource.getRepository(AuthRiskState).delete({ bucketDigest })
+  }
+
+  /** 仅供同进程回归脚本在直接清空风控表后同步清空负缓存；不接收 HTTP 入参。 */
+  resetNegativeCacheForTesting(): void {
+    this.rateLimitDenials.clear()
+    this.failureLocks.clear()
+  }
+
+  /** 负缓存规模快照，供管理员性能接口观察攻击期间的拒绝结论数量。 */
+  negativeCacheSnapshot(): { rateLimitDenials: number; failureLocks: number; maxEntries: number } {
+    return {
+      rateLimitDenials: this.rateLimitDenials.size,
+      failureLocks: this.failureLocks.size,
+      maxEntries: NEGATIVE_CACHE_MAX_ENTRIES,
+    }
   }
 
   private async cleanupExpired(): Promise<void> {

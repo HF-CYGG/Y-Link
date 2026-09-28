@@ -52,6 +52,7 @@ const { SysUser } = await import('../src/entities/sys-user.entity.js')
 const { SysUserMfa } = await import('../src/entities/sys-user-mfa.entity.js')
 const { SysAuditLog } = await import('../src/entities/sys-audit-log.entity.js')
 const { AuthRiskState } = await import('../src/entities/auth-risk-state.entity.js')
+const { persistentRiskStateService } = await import('../src/services/persistent-risk-state.service.js')
 
 interface ApiResponse {
   status: number
@@ -107,8 +108,11 @@ function sessionFrom(response: ApiResponse): HttpSession {
   }
 }
 
-/** 清空风控状态：上一阶段的失败会让本机来源需要图形验证码，阶段之间必须归零。 */
-const resetRiskState = () => AppDataSource.getRepository(AuthRiskState).clear()
+/** 清空风控状态：上一阶段的失败会让本机来源需要图形验证码，阶段之间必须归零（含进程内负缓存）。 */
+const resetRiskState = async () => {
+  await AppDataSource.getRepository(AuthRiskState).clear()
+  persistentRiskStateService.resetNegativeCacheForTesting()
+}
 
 const codeAt = (secret: string, step: number) => computeHotp(decodeBase32(secret), step)
 

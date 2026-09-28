@@ -15,6 +15,7 @@ import { persistentRiskStateService, type PersistentFailureState } from './persi
 import { describeClientRiskSubjectForAudit, maskLoginInputForAudit } from '../utils/audit-subject-mask.js'
 import { GLOBAL_LOGIN_FAILURE_POLICY } from '../config/load-protection-policy.js'
 import { toRiskSourceKey } from '../utils/ip-subnet.js'
+import { AuditThrottle } from '../utils/audit-throttle.js'
 
 /** 管理端登录风控主体：`resolved` 为 false 表示账号不存在、subject 是输入原文，写审计前必须脱敏。 */
 export interface ResolvedLoginRiskSubject {
@@ -285,6 +286,9 @@ const REGISTER_REMAINING_WARNING_THRESHOLD = 3
 // 频控与锁定按来源计数：IPv4 映射地址还原为 IPv4，IPv6 聚合到 /64，防止同网段轮换地址绕过；审计仍记完整 IP。
 const normalizeRiskSource = (meta?: RequestMeta) => toRiskSourceKey(meta?.ipAddress) ?? 'unknown-ip'
 
+// 锁定期间的重复尝试：同一端、同一主体每分钟最多记一次锁定拒绝审计，避免攻击流量灌满审计表。
+const lockedRejectionAuditThrottle = new AuditThrottle({ windowMs: 60 * 1000, maxKeys: 20_000 })
+
 export class AuthSecurityService {
   private async recordRiskEvent(input: {
     actionType: string
@@ -343,7 +347,9 @@ export class AuthSecurityService {
       if (auditInput.detail) {
         Object.assign(riskDetail, auditInput.detail)
       }
-      if (auditInput.auditOnLimit !== false) {
+      // 只在首次（走库判定）超限时写审计；负缓存直接拒绝的后续请求不再重复记录。
+      const deniedFromCache = 'deniedFromCache' in consumed && consumed.deniedFromCache === true
+      if (auditInput.auditOnLimit !== false && !deniedFromCache) {
         await this.recordRiskEvent({
           actionType: auditInput.actionType,
           actionLabel: auditInput.actionLabel,
@@ -389,16 +395,18 @@ export class AuthSecurityService {
         continue
       }
       const waitSeconds = Math.max(1, Math.ceil((state.lockedUntil - nowMs) / 1000))
-      await this.recordRiskEvent({
-        actionType: 'auth.guard.locked',
-        actionLabel: '认证请求被临时锁定',
-        targetCode,
-        requestMeta,
-        detail: {
-          scope,
-          waitSeconds,
-        },
-      })
+      if (lockedRejectionAuditThrottle.shouldRecord(`${scope}|${targetCode}`, nowMs)) {
+        await this.recordRiskEvent({
+          actionType: 'auth.guard.locked',
+          actionLabel: '认证请求被临时锁定',
+          targetCode,
+          requestMeta,
+          detail: {
+            scope,
+            waitSeconds,
+          },
+        })
+      }
       throw new BizError(`尝试次数过多，已临时锁定，请 ${waitSeconds} 秒后再试`, 429, {
         retryAfterSeconds: waitSeconds,
       })
