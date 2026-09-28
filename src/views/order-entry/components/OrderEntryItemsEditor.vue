@@ -200,6 +200,7 @@ const resolveStockHint = (productId: string, skuId: string, qty: number | null) 
             <template #default="{ row, $index }">
               <PassiveNumberInput
                 :ref="(el: unknown) => setFieldRef(row.uid, 'qty', el)"
+                data-barcode-scan-qty
                 v-model="row.qty"
                 :min="1"
                 :precision="0"
@@ -213,6 +214,7 @@ const resolveStockHint = (productId: string, skuId: string, qty: number | null) 
             <template #default="{ row, $index }">
               <PassiveNumberInput
                 :ref="(el: unknown) => setFieldRef(row.uid, 'unitPrice', el)"
+                data-barcode-scan-qty
                 v-model="row.unitPrice"
                 :min="0"
                 :precision="2"
@@ -347,10 +349,10 @@ const resolveStockHint = (productId: string, skuId: string, qty: number | null) 
             </div>
           </el-form-item>
           <el-form-item label="数量">
-            <PassiveNumberInput v-model="drawerForm.qty" :min="1" :precision="0" :step="1" class="w-full" />
+            <PassiveNumberInput v-model="drawerForm.qty" data-barcode-scan-qty :min="1" :precision="0" :step="1" class="w-full" />
           </el-form-item>
           <el-form-item label="单价">
-            <PassiveNumberInput v-model="drawerForm.unitPrice" :min="0" :precision="2" class="w-full" />
+            <PassiveNumberInput v-model="drawerForm.unitPrice" data-barcode-scan-qty :min="0" :precision="2" class="w-full" />
           </el-form-item>
           <el-form-item label="备注">
             <el-input v-model="drawerForm.remark" maxlength="255" placeholder="选填" />
