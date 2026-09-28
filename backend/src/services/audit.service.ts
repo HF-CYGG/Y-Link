@@ -6,7 +6,6 @@
  * 3. 查询与导出共用同一套筛选口径，保证后台展示结果与导出结果保持一致。
  */
 
-import { once } from 'node:events'
 import type { Writable } from 'node:stream'
 import { IsNull, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
@@ -96,6 +95,38 @@ export interface AuditFilterOptions {
 
 const AUDIT_FILTER_OPTIONS_CACHE_MS = 60_000
 const AUDIT_EXPORT_MAX_ROWS = 200_000
+
+/**
+ * 等待写缓冲排空：慢速客户端在 drain 之前断开时，响应流只会发出 close 而不会再发 drain，
+ * 必须同时监听 close / error 并拒绝，否则导出会永久挂起、租约无法归还，断连累积会耗尽导出槽位。
+ */
+function waitForDrainOrClose(output: Writable): Promise<void> {
+  if (output.destroyed) {
+    return Promise.reject(new Error('审计日志下载连接已关闭'))
+  }
+  return new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      output.off('drain', onDrain)
+      output.off('close', onClose)
+      output.off('error', onError)
+    }
+    const onDrain = () => {
+      cleanup()
+      resolve()
+    }
+    const onClose = () => {
+      cleanup()
+      reject(new Error('审计日志下载连接已关闭'))
+    }
+    const onError = (error: Error) => {
+      cleanup()
+      reject(error)
+    }
+    output.once('drain', onDrain)
+    output.once('close', onClose)
+    output.once('error', onError)
+  })
+}
 const AUDIT_EXPORT_BATCH_SIZE = 1000
 const AUDIT_EXPORT_HEADERS = ['时间', '动作编码', '动作名称', '业务类别', '执行结果', '操作人ID', '操作人账号', '操作人姓名', '目标类型', '目标ID', '目标标识', '来源IP', '客户端UA', '详情']
 
@@ -377,7 +408,7 @@ export class AuditService {
         throw new Error('审计日志下载连接已关闭')
       }
       if (!output.write(chunk)) {
-        await once(output, 'drain')
+        await waitForDrainOrClose(output)
       }
     }
     // CSV 前置 UTF-8 BOM，保证 Excel 直接打开中文不乱码。

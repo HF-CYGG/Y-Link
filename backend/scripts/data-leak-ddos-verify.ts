@@ -27,6 +27,7 @@ import type { AddressInfo } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { performance } from 'node:perf_hooks'
+import { Writable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 import type { AuthUserContext } from '../src/types/auth.js'
 import type { ClientAuthContext } from '../src/types/client-auth.js'
@@ -1065,6 +1066,16 @@ async function verifyExportGovernance() {
   assert.equal((await auditRowsSince(marker, ['data_export.audit_logs'])).length, exportsBeforeCap, '被拒绝的导出不写导出留痕')
   await m.AppDataSource.query("DELETE FROM sys_audit_log WHERE target_type = 'verify_bulk'")
   assert.equal((await call('GET', '/api/audit-logs/export?category=auth', { session })).status, 200, '被拒绝后租约已归还')
+
+  // 背压等待期间客户端断开：响应流只发 close 不再发 drain，导出必须立即失败而不是永久挂起。
+  const stalled = new Writable({ highWaterMark: 1, write: () => { /* 模拟客户端不再读取，永不回调 */ } })
+  const stalledExport = m.auditService.exportCsvToStream({ category: 'auth' }, stalled)
+  await sleep(50)
+  stalled.destroy()
+  await assert.rejects(
+    Promise.race([stalledExport, sleep(3000).then(() => { throw new Error('导出在连接关闭后仍在等待 drain') })]),
+    /下载连接已关闭/,
+  )
 }
 
 /** 第 7 项：账号不存在与频控/锁定审计只记录掩码与指纹。 */
