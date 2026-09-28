@@ -53,3 +53,18 @@ export const PRODUCT_IMAGE_GATE_POLICY = {
   maxQueue: readBoundedInteger('YLINK_PRODUCT_IMAGE_QUEUE', 16, 0, 1_000),
   queueTimeoutMs: readBoundedInteger('YLINK_PRODUCT_IMAGE_QUEUE_TIMEOUT_MS', 15_000, 100, 120_000),
 } as const
+
+/**
+ * 匿名认证入口（管理端 + Web 客户端的登录、验证码、注册、发码、找回）进程级在途上限：
+ * 超出直接 503，不排队；移动端入口有独立契约，不纳入。
+ */
+export const ANONYMOUS_AUTH_IN_FLIGHT_POLICY = {
+  maxInFlight: readBoundedInteger('YLINK_ANONYMOUS_AUTH_MAX_IN_FLIGHT', 64, 4, 10_000),
+} as const
+
+/** 图形验证码渲染闸门：svg-captcha + sharp 转 PNG，匿名即可触发，必须限并发。 */
+export const CAPTCHA_RENDER_GATE_POLICY = {
+  maxConcurrent: readBoundedInteger('YLINK_CAPTCHA_RENDER_CONCURRENCY', 4, 1, 64),
+  maxQueue: readBoundedInteger('YLINK_CAPTCHA_RENDER_QUEUE', 32, 0, 1_000),
+  queueTimeoutMs: readBoundedInteger('YLINK_CAPTCHA_RENDER_QUEUE_TIMEOUT_MS', 3_000, 100, 60_000),
+} as const

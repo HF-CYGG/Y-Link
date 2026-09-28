@@ -6,6 +6,8 @@
 
 import { randomBytes, randomUUID } from 'node:crypto'
 import sharp from 'sharp'
+import { CAPTCHA_RENDER_GATE_POLICY } from '../config/load-protection-policy.js'
+import { BoundedConcurrencyGate } from '../utils/bounded-concurrency.js'
 import svgCaptcha from 'svg-captcha'
 import { BizError } from '../utils/errors.js'
 import { EphemeralTicketStore } from '../utils/ephemeral-ticket-store.js'
@@ -53,10 +55,20 @@ const buildCaptchaSvg = (code: string) => createSvgCaptcha(code, {
   background: '',
 })
 
-const renderCaptchaPng: CaptchaRenderer = async (svg) => sharp(Buffer.from(svg))
+/**
+ * 验证码渲染闸门（模块级单例，Web 与移动端共用）：匿名即可反复请求验证码，sharp 渲染占用线程池，
+ * 满载时快速返回 503，避免验证码洪水拖慢登录与数据库查询。
+ */
+const captchaRenderGate = new BoundedConcurrencyGate({
+  name: 'captcha-render',
+  ...CAPTCHA_RENDER_GATE_POLICY,
+  busyMessage: '验证码服务繁忙，请稍后重试',
+})
+
+const renderCaptchaPng: CaptchaRenderer = (svg) => captchaRenderGate.run(() => sharp(Buffer.from(svg))
   .flatten({ background: '#ecfdf5' })
   .png()
-  .toBuffer()
+  .toBuffer())
 
 const wrapPngAsSvg = (pngDataUrl: string) => (
   `<svg xmlns="http://www.w3.org/2000/svg" width="140" height="40" viewBox="0 0 140 40" role="img" aria-label="图形验证码"><image width="140" height="40" href="${pngDataUrl}"/></svg>`

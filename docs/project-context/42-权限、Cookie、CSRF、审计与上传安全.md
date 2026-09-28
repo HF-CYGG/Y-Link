@@ -58,6 +58,7 @@
 - 商品图上传（`POST /api/upload`）的 sharp 校验与重编码经 `product-image-processing` 闸门执行（默认并发 2、排队 16、超时 15 秒，`YLINK_PRODUCT_IMAGE_*` 可调），满载返回 503 且临时文件照常清理；反馈附件仍用独立闸门，两者互不挤占。
 - 新密码 scrypt 派生一律在数据库事务外预先完成（管理端建号、编辑改密、重置他人密码，本人改密，客户端注册、找回重置、改密，管理员重置客户端密码），事务内只做账号锁定、信息校验与写入，避免在 SQLite 唯一写槽内等待并发闸门。**旧密码的最终校验仍在事务内锁定账号后进行**（账号生命周期契约与 `mobile-auth:review:verify` 的 Web 改密断言），不得改为事务外快照比对。
 - 风控负缓存（`persistent-risk-state.service.ts`，进程内 ≤2 万条）：只缓存“某限流桶已超限至某时刻”“某失败桶已锁定至某时刻”这类确定性拒绝结论，有效期内的后续请求直接拒绝、不读写数据库（`DatabaseRateLimitStore` 同样受益）；本实例的回退、清零与重置同步失效缓存，数据库仍是唯一事实来源，多实例下只会让本实例多拒绝到结论到期。拒绝审计去重：频控只在首次（走库判定）超限时记一次，锁定拒绝同一端同一主体每分钟最多记一次，避免攻击流量灌满审计表。负缓存规模见数据库性能接口 `riskNegativeCache`。直接清空 `auth_risk_state` 的同进程回归脚本须同时调用 `resetNegativeCacheForTesting()`。
+- 匿名认证入口在途上限（`middleware/in-flight-limit.middleware.ts`，挂在 `/api/auth` 与 `/api/client-auth` 的限流中间件之前）：管理端 `/captcha`、`/login`、`/login/mfa` 与 Web 客户端登录/验证码/能力/注册/发码/找回入口共用一个进程级闸门，默认同时处理 64 个（`YLINK_ANONYMOUS_AUTH_MAX_IN_FLIGHT`），超出直接 503 不排队；移动端入口不纳入。图形验证码 PNG 渲染另经 `captcha-render` 闸门（默认并发 4、排队 32、超时 3 秒，`YLINK_CAPTCHA_RENDER_*` 可调，Web 与移动端共用）。所有闸门均为模块级单例，同一进程多次 `createApp` 共用。
 
 ## 代理、HTTPS 与救援传输边界
 
