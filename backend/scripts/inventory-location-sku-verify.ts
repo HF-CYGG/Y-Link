@@ -4,6 +4,7 @@
  */
 import 'reflect-metadata'
 import assert from 'node:assert/strict'
+import { randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -11,7 +12,7 @@ import type { AuthUserContext } from '../src/types/auth.js'
 
 const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
-const seed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
+const seed = `${Date.now()}-${randomBytes(8).toString('hex')}`
 const sqlitePath = path.resolve(sqliteRoot, `inventory-location-sku-${seed}.sqlite`)
 process.env.APP_PROFILE = `inventory-location-sku-${seed}`
 process.env.DB_TYPE = 'sqlite'
@@ -38,6 +39,7 @@ async function main() {
   const { SysUser } = await import('../src/entities/sys-user.entity.js')
   const { inventoryMasterDataService } = await import('../src/services/inventory-master-data.service.js')
   const { productService } = await import('../src/services/product.service.js')
+  const { hashPassword } = await import('../src/utils/password.js')
   prepareDatabaseRuntime()
   await AppDataSource.initialize()
   try {
@@ -45,7 +47,7 @@ async function main() {
     const userRepo = AppDataSource.getRepository(SysUser)
     const user = await userRepo.save(userRepo.create({
       username: `location-verify-${seed}`,
-      passwordHash: 'verify-only',
+      passwordHash: await hashPassword(`Location_${seed}_Aa1!`),
       displayName: '库位验证管理员',
       email: null,
       role: 'admin',
