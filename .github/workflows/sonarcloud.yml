@@ -2,14 +2,15 @@
 # 文件职责：在 CI 中运行 SonarCloud 分析并导入测试覆盖率（SonarCloud 的覆盖率导入只支持 CI 分析，自动分析不支持）。
 # 实现逻辑：
 # 1. 检出完整历史，供 Sonar 判定新代码与 blame；
-# 2. 依赖安装与后端 node_modules 缓存键沿用 verify 工作流，两边可复用同一份缓存；
+# 2. 依赖安装一律禁用生命周期脚本，只为 sqlite3 单独构建原生绑定，避免依赖包的安装脚本在持有令牌的作业中执行；
 # 3. npm run coverage:report 生成 coverage/lcov.info，SonarScanner 读取仓库根的 sonar-project.properties 完成分析，
 #    PR 的检查结果由 SonarCloud 的 GitHub App 回写。
 # 维护说明：
 # - 启用前须在 SonarCloud 关闭自动分析（否则扫描报错退出），并在仓库 Secrets 中配置 SONAR_TOKEN；
 #   未配置令牌时（包括来自 fork 的 PR）只告警并跳过扫描，不会让工作流失败；
 # - 本工作流不是 Ruleset 要求的必要检查，Sonar 服务异常或质量门未通过都不阻塞合并，必要检查仍是 verify；
-# - 令牌只注入扫描步骤，依赖安装与测试步骤读不到；第三方 Action 按提交 SHA 固定，升级时同步修改行尾的版本注释。
+# - 所有 Action 按完整提交 SHA 固定，行尾注明对应版本，升级时两处同步修改；令牌只注入扫描步骤；
+# - 新增需要安装脚本才能工作的依赖时，在“安装后端依赖”中追加对应的 npm rebuild，不要去掉 --ignore-scripts。
 
 name: SonarCloud 分析
 
@@ -38,13 +39,13 @@ jobs:
       HAS_SONAR_TOKEN: ${{ secrets.SONAR_TOKEN != '' }}
     steps:
       - name: 检出代码
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
 
       - name: 安装 Node.js
         id: setup-node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -52,20 +53,24 @@ jobs:
             package-lock.json
             backend/package-lock.json
 
+      # 缓存键与 verify 分开：两边安装方式不同（本工作流禁用安装脚本），得到的 node_modules 不能互相复用。
       - name: 恢复后端依赖目录缓存
         id: backend-deps-cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: backend/node_modules
-          key: backend-node-modules-${{ runner.os }}-${{ runner.arch }}-node${{ steps.setup-node.outputs.node-version }}-${{ hashFiles('backend/package-lock.json') }}
+          key: backend-node-modules-ignore-scripts-${{ runner.os }}-${{ runner.arch }}-node${{ steps.setup-node.outputs.node-version }}-${{ hashFiles('backend/package-lock.json') }}
 
-      # 根依赖用于类型感知规则解析 Vue 与第三方库类型，保持与 verify 相同的安装方式。
+      # 根依赖只用于类型感知规则解析 Vue 与第三方库类型，不需要执行任何安装脚本。
       - name: 安装根 Web 依赖
-        run: npm ci --workspaces=false --no-audit --no-fund
+        run: npm ci --workspaces=false --ignore-scripts --no-audit --no-fund
 
       - name: 安装后端依赖
         if: steps.backend-deps-cache.outputs.cache-hit != 'true'
-        run: npm --prefix ./backend ci --no-audit --no-fund
+        run: |
+          npm --prefix ./backend ci --ignore-scripts --no-audit --no-fund
+          # 验证脚本使用临时 SQLite，只为 sqlite3 执行构建脚本以生成原生绑定。
+          npm --prefix ./backend rebuild sqlite3
 
       - name: 生成覆盖率报告
         run: npm run coverage:report
