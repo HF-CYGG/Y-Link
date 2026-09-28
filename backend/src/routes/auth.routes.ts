@@ -19,16 +19,22 @@ import { extractRequestMeta } from '../utils/request-meta.js'
 import { authService } from '../services/auth.service.js'
 import { authSecurityService } from '../services/auth-security.service.js'
 import { captchaService } from '../services/captcha.service.js'
+import {
+  AUTH_ACCOUNT_INPUT_MAX_LENGTH,
+  existingPasswordInput,
+  optionalCaptchaCodeInput,
+  optionalCaptchaIdInput,
+} from '../constants/auth-input-limits.js'
 
 const loginSchema = z.object({
-  username: z.string().min(1, '账号不能为空'),
-  password: z.string().min(1, '密码不能为空'),
-  captchaId: z.string().trim().min(1).optional(),
-  captchaCode: z.string().trim().min(1).optional(),
+  username: z.string().min(1, '账号不能为空').max(AUTH_ACCOUNT_INPUT_MAX_LENGTH, `账号长度不能超过 ${AUTH_ACCOUNT_INPUT_MAX_LENGTH} 位`),
+  password: existingPasswordInput('密码'),
+  captchaId: optionalCaptchaIdInput(),
+  captchaCode: optionalCaptchaCodeInput(),
 })
 
 const changePasswordSchema = z.object({
-  currentPassword: z.string().min(1, '当前密码不能为空'),
+  currentPassword: existingPasswordInput('当前密码'),
   newPassword: z.string().min(8, '新密码至少 8 位').max(64, '新密码长度不能超过 64 位'),
 })
 

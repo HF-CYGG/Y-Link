@@ -22,6 +22,7 @@ import { isSecureOrDirectLoopback } from '../utils/http-security.js'
 import { BizError } from '../utils/errors.js'
 import { assertPermanentDeletePasswordForRequest, createPermanentDeleteLimiter } from '../utils/permanent-delete-guard.js'
 import { auditService } from '../services/audit.service.js'
+import { EXISTING_PASSWORD_INPUT_MAX_LENGTH } from '../constants/auth-input-limits.js'
 
 const importPayloadSchema = z
   .object({
@@ -40,12 +41,12 @@ const importPayloadSchema = z
     // 导入会先清空商品、客户端账号、预订单、库存流水与系统配置再写入，属于永久删除类操作，必须校验服务端永久删除口令。
     permanentDeletePassword: z.string().max(256).optional(),
     // 本人当前密码复核：会话被劫持时仅凭 Cookie 不能触发全量覆盖。
-    currentPassword: z.string().max(128).optional(),
+    currentPassword: z.string().max(EXISTING_PASSWORD_INPUT_MAX_LENGTH).optional(),
   })
   .strict()
 
 const stepUpPasswordSchema = z.object({
-  currentPassword: z.string().max(128).optional(),
+  currentPassword: z.string().max(EXISTING_PASSWORD_INPUT_MAX_LENGTH).optional(),
 })
 
 const JSON_IMPORT_AUDIT_TARGET = {
