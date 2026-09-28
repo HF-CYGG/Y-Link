@@ -347,7 +347,7 @@ export class AuthService {
    */
   async changeOwnPassword(auth: AuthUserContext, input: ChangeOwnPasswordInput, requestMeta?: RequestMeta): Promise<void> {
     const currentPassword = input.currentPassword.trim()
-    const newPassword = assertAdminPasswordPolicy(input.newPassword, '新密码')
+    const newPassword = assertAdminPasswordPolicy(input.newPassword, '新密码', { identifiers: [auth.username] })
 
     if (!currentPassword || !newPassword) {
       throw new BizError('当前密码和新密码不能为空', 400)

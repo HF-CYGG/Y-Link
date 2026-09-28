@@ -781,7 +781,7 @@ class ClientAuthService {
     const username = isTeacherRegister
       ? null
       : normalizePersonalClientUsername(input.username ?? '')
-    const password = assertClientPasswordPolicy(input.password)
+    const password = assertClientPasswordPolicy(input.password, '密码', { identifiers: [input.username, input.account, input.staffNo] })
     const verificationContext = await this.getVerificationContext()
     const capabilities = verificationContext.capabilities
     const validationMode = account ? capabilities.registerValidationModes[account.channel] : 'captcha'
@@ -1079,7 +1079,7 @@ class ClientAuthService {
 
   async resetPassword(input: ClientResetPasswordInput, _requestMeta?: RequestMeta) {
     const account = this.resolveAccount(input.account)
-    const newPassword = assertClientPasswordPolicy(input.newPassword, '新密码')
+    const newPassword = assertClientPasswordPolicy(input.newPassword, '新密码', { identifiers: [input.account] })
     const ticket = resetTicketStore.take(input.resetToken)
     if (!ticket) {
       throw new BizError('重置凭证已失效', 400)
@@ -1209,7 +1209,9 @@ class ClientAuthService {
     // 旧密码复核与登录共用失败锁定：会话被劫持时不能借改密接口无限试错当前密码。
     await authSecurityService.assertClientPasswordReauthAllowed(requestMeta, auth.userId)
     // 新密码派生不依赖数据库状态，避免占用 SQLite 全局写槽。
-    const passwordHash = await hashPassword(assertClientPasswordPolicy(input.newPassword, '新密码'))
+    const passwordHash = await hashPassword(assertClientPasswordPolicy(input.newPassword, '新密码', {
+      identifiers: [auth.mobile, auth.email, auth.account, auth.staffNo],
+    }))
     try {
       await this.commitPasswordChange(auth, input, passwordHash, requestMeta)
     } catch (error) {

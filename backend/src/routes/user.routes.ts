@@ -13,7 +13,7 @@ import { extractRequestMeta } from '../utils/request-meta.js'
 
 const createUserSchema = z.object({
   username: z.string().min(1, '账号不能为空').max(64, '账号长度不能超过 64'),
-  password: z.string().min(8, '密码至少 8 位').max(50, '密码长度不能超过 50 位'),
+  password: z.string().min(8, '密码至少 8 位').max(64, '密码长度不能超过 64 位'),
   displayName: z.string().min(1, '姓名不能为空').max(64, '姓名长度不能超过 64'),
   email: z.string().trim().max(128, '邮箱长度不能超过 128').optional(),
   role: z.enum(USER_ROLES),
@@ -24,7 +24,7 @@ const updateUserSchema = z
   .object({
     displayName: z.string().min(1, '姓名不能为空').max(64, '姓名长度不能超过 64').optional(),
     email: z.string().trim().max(128, '邮箱长度不能超过 128').optional(),
-    password: z.string().min(8, '密码至少 8 位').max(50, '密码长度不能超过 50 位').optional(),
+    password: z.string().min(8, '密码至少 8 位').max(64, '密码长度不能超过 64 位').optional(),
     role: z.enum(USER_ROLES).optional(),
   })
   .refine((value) => Object.values(value).some((item) => item !== undefined), {
@@ -36,7 +36,7 @@ const updateUserStatusSchema = z.object({
 })
 
 const resetPasswordSchema = z.object({
-  newPassword: z.string().min(8, '新密码至少 8 位').max(50, '新密码长度不能超过 50 位'),
+  newPassword: z.string().min(8, '新密码至少 8 位').max(64, '新密码长度不能超过 64 位'),
 })
 
 const accountLifecycleReasonSchema = z.object({

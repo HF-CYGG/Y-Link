@@ -20,6 +20,7 @@ import {
   CLIENT_PASSWORD_POLICY_MIN_LENGTH,
   getClientPasswordPolicyMessage,
   isClientPasswordPolicySatisfied,
+  PASSWORD_POLICY_MAX_LENGTH,
 } from '../utils/password.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { clientAuthService } from '../services/client-auth.service.js'
@@ -37,6 +38,7 @@ const clientPasswordSchema = (fieldLabel = '密码') =>
   z
     .string()
     .min(CLIENT_PASSWORD_POLICY_MIN_LENGTH, getClientPasswordPolicyMessage(fieldLabel))
+    .max(PASSWORD_POLICY_MAX_LENGTH, `${fieldLabel}长度不能超过 ${PASSWORD_POLICY_MAX_LENGTH} 位`)
     .refine((value) => isClientPasswordPolicySatisfied(value), getClientPasswordPolicyMessage(fieldLabel))
 
 const registerSchema = z

@@ -21,6 +21,7 @@ import { redirectToAdminLogin } from '@/utils/auth-navigation'
 import { extractErrorMessage } from '@/utils/error'
 
 import { showAppError, showAppSuccess } from '@/utils/app-alert'
+import { validateAdminPasswordShape } from '@/utils/admin-password-policy'
 
 defineOptions({
   inheritAttrs: false,
@@ -65,7 +66,7 @@ const passwordRules: FormRules = {
   currentPassword: [{ required: true, message: '请输入当前密码', trigger: 'blur' }],
   newPassword: [
     { required: true, message: '请输入新密码', trigger: 'blur' },
-    { min: 6, message: '新密码长度至少为 6 位', trigger: 'blur' },
+    { validator: (_rule, value: string, callback) => validateAdminPasswordShape(value, callback), trigger: 'blur' },
   ],
   confirmPassword: [
     {

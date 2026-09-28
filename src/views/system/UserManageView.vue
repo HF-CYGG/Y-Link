@@ -54,6 +54,7 @@ import { extractErrorMessage } from '@/utils/error'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 import { showAppError, showAppSuccess } from '@/utils/app-alert'
+import { validateAdminPasswordShape } from '@/utils/admin-password-policy'
 import {
   accountTypeDescriptions,
   getAccountTypeDescription,
@@ -189,11 +190,7 @@ const rules: FormRules = {
           callback(new Error('请输入登录密码'))
           return
         }
-        if (value && value.length < 6) {
-          callback(new Error('密码长度至少为 6 位'))
-          return
-        }
-        callback()
+        validateAdminPasswordShape(value, callback)
       },
       trigger: 'blur',
     },
@@ -228,7 +225,7 @@ const rules: FormRules = {
 const resetPasswordRules: FormRules = {
   newPassword: [
     { required: true, message: '请输入新密码', trigger: 'blur' },
-    { min: 6, message: '新密码长度至少为 6 位', trigger: 'blur' },
+    { validator: (_rule, value: string, callback) => validateAdminPasswordShape(value, callback), trigger: 'blur' },
   ],
   confirmPassword: [
     {
@@ -257,7 +254,7 @@ const ownPasswordRules: FormRules = {
   currentPassword: [{ required: true, message: '请输入当前密码', trigger: 'blur' }],
   newPassword: [
     { required: true, message: '请输入新密码', trigger: 'blur' },
-    { min: 6, message: '新密码长度至少为 6 位', trigger: 'blur' },
+    { validator: (_rule, value: string, callback) => validateAdminPasswordShape(value, callback), trigger: 'blur' },
   ],
   confirmPassword: [
     {

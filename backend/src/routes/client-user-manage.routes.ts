@@ -38,12 +38,12 @@ const createClientUserSchema = z.object({
   departmentName: z.string().trim().max(271).optional(),
   departmentNodeId: z.string().trim().max(128).optional(),
   staffNo: z.string().trim().max(64).optional(),
-  password: z.string().min(8, '登录密码至少 8 位').max(50, '登录密码长度不能超过 50 位'),
+  password: z.string().min(8, '登录密码至少 8 位').max(64, '登录密码长度不能超过 64 位'),
   status: z.enum(CLIENT_USER_STATUSES),
 })
 
 const resetClientUserPasswordSchema = z.object({
-  newPassword: z.string().min(8, '新密码至少 8 位').max(50, '新密码长度不能超过 50 位'),
+  newPassword: z.string().min(8, '新密码至少 8 位').max(64, '新密码长度不能超过 64 位'),
 })
 
 const accountLifecycleReasonSchema = z.object({
@@ -91,7 +91,7 @@ const createDepartmentAccountsBatchSchema = z.object({
   items: z.array(z.object({
     departmentNodeId: z.string().trim().min(1).max(128),
     account: z.string().regex(/^DEPT-[A-F0-9]{10}$/, '部门共享账号编号格式非法'),
-    initialPassword: z.string().min(8, '登录密码至少 8 位').max(50, '登录密码长度不能超过 50 位'),
+    initialPassword: z.string().min(8, '登录密码至少 8 位').max(64, '登录密码长度不能超过 64 位'),
   })).min(1).max(100)
     .refine((items) => new Set(items.map((item) => item.departmentNodeId)).size === items.length, '部门节点不能重复')
     .refine((items) => new Set(items.map((item) => item.account)).size === items.length, '部门共享账号编号不能重复'),

@@ -7,6 +7,7 @@
 
 import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto'
 import { BizError } from './errors.js'
+import { isCommonWeakPassword } from './password-blocklist.js'
 
 const PASSWORD_SALT_BYTES = 16
 const PASSWORD_KEY_LENGTH = 64
@@ -73,6 +74,63 @@ const isWeakerThanCurrent = (params: ScryptParams) => (
 )
 export const CLIENT_PASSWORD_POLICY_MIN_LENGTH = 8
 export const ADMIN_PASSWORD_POLICY_MIN_LENGTH = 8
+/** NIST SP 800-63B-4 要求至少允许 64 位；上限同时约束单次哈希输入规模。 */
+export const PASSWORD_POLICY_MAX_LENGTH = 64
+
+export interface PasswordPolicyContext {
+  /** 用户名、手机号、邮箱、工号等账号标识：新密码不得包含其中任一（长度不少于 4 时比较，邮箱另比较 @ 前部分）。 */
+  identifiers?: Array<string | null | undefined>
+}
+
+const MIN_DISTINCT_PASSWORD_CHARACTERS = 4
+const SERVICE_NAME_TOKENS = ['ylink', 'y-link']
+
+const expandPasswordIdentifier = (identifier: string | null | undefined): string[] => {
+  const normalized = (identifier ?? '').trim().toLowerCase()
+  if (!normalized) return []
+  const atIndex = normalized.indexOf('@')
+  return atIndex > 0 ? [normalized, normalized.slice(0, atIndex)] : [normalized]
+}
+
+/**
+ * NIST SP 800-63B-4 口令检查（仅用于新设或修改密码，存量密码照常登录）：
+ * - 长度上限、字符种类过少（如 aaaa1111）、常见弱口令黑名单（整串比较）；
+ * - 不得包含系统名称或本账号的用户名、手机号、邮箱、工号等可预期信息。
+ */
+function assertPasswordNotPredictable(normalizedPassword: string, fieldLabel: string, context: PasswordPolicyContext) {
+  if (normalizedPassword.length > PASSWORD_POLICY_MAX_LENGTH) {
+    throw new BizError(`${fieldLabel}长度不能超过 ${PASSWORD_POLICY_MAX_LENGTH} 位`, 400)
+  }
+  const lowered = normalizedPassword.toLowerCase()
+  if (new Set(Array.from(lowered)).size < MIN_DISTINCT_PASSWORD_CHARACTERS) {
+    throw new BizError(`${fieldLabel}过于简单，请避免大量重复字符`, 400)
+  }
+  if (isCommonWeakPassword(lowered)) {
+    throw new BizError(`${fieldLabel}属于常见弱口令，容易被猜中，请更换`, 400)
+  }
+  if (SERVICE_NAME_TOKENS.some((token) => lowered.includes(token))) {
+    throw new BizError(`${fieldLabel}不能包含系统名称`, 400)
+  }
+  assertPasswordAvoidsAccountIdentifiers(normalizedPassword, fieldLabel, context.identifiers ?? [])
+}
+
+/**
+ * 新密码不得包含本账号的用户名、手机号、邮箱（及 @ 前部分）、工号等标识。
+ * 管理员为他人设置密码时目标账号在事务内才加载，可在加载后单独调用本函数。
+ */
+export function assertPasswordAvoidsAccountIdentifiers(
+  normalizedPassword: string,
+  fieldLabel: string,
+  identifiers: Array<string | null | undefined>,
+): void {
+  const lowered = normalizedPassword.toLowerCase()
+  const identifierHit = identifiers
+    .flatMap(expandPasswordIdentifier)
+    .some((identifier) => identifier.length >= 4 && lowered.includes(identifier))
+  if (identifierHit) {
+    throw new BizError(`${fieldLabel}不能包含用户名、手机号、邮箱或工号等账号信息`, 400)
+  }
+}
 
 /**
  * 客户端统一密码策略说明：
@@ -112,11 +170,16 @@ export function getClientPasswordPolicyMessage(fieldLabel = '密码'): string {
  * - 服务层应始终调用该方法，避免绕过路由直接调用服务时失去约束；
  * - 断言通过后返回归一化后的密码，便于后续直接参与哈希。
  */
-export function assertClientPasswordPolicy(plainPassword: string, fieldLabel = '密码'): string {
+export function assertClientPasswordPolicy(
+  plainPassword: string,
+  fieldLabel = '密码',
+  context: PasswordPolicyContext = {},
+): string {
   const normalizedPassword = normalizePassword(plainPassword)
   if (!isClientPasswordPolicySatisfied(normalizedPassword)) {
     throw new BizError(getClientPasswordPolicyMessage(fieldLabel), 400)
   }
+  assertPasswordNotPredictable(normalizedPassword, fieldLabel, context)
   return normalizedPassword
 }
 
@@ -133,11 +196,16 @@ export function getAdminPasswordPolicyMessage(fieldLabel = '密码'): string {
   return `${fieldLabel}至少 ${ADMIN_PASSWORD_POLICY_MIN_LENGTH} 位，且需包含字母和数字`
 }
 
-export function assertAdminPasswordPolicy(plainPassword: string, fieldLabel = '密码'): string {
+export function assertAdminPasswordPolicy(
+  plainPassword: string,
+  fieldLabel = '密码',
+  context: PasswordPolicyContext = {},
+): string {
   const normalizedPassword = normalizePassword(plainPassword)
   if (!isAdminPasswordPolicySatisfied(normalizedPassword)) {
     throw new BizError(getAdminPasswordPolicyMessage(fieldLabel), 400)
   }
+  assertPasswordNotPredictable(normalizedPassword, fieldLabel, context)
   return normalizedPassword
 }
 

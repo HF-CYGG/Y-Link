@@ -21,7 +21,7 @@ import { NotificationRule } from '../entities/notification-rule.entity.js'
 import type { AuthUserContext, UserRole, UserSafeProfile, UserStatus } from '../types/auth.js'
 import { isUniqueConstraintError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
-import { assertAdminPasswordPolicy, hashPassword } from '../utils/password.js'
+import { assertAdminPasswordPolicy, assertPasswordAvoidsAccountIdentifiers, hashPassword } from '../utils/password.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { assertPermanentDeletePassword } from '../utils/permanent-delete-password.js'
 import { auditService } from './audit.service.js'
@@ -444,7 +444,7 @@ export class UserService {
     const username = input.username.trim()
     const displayName = input.displayName.trim()
     const email = this.normalizeEmail(input.email)
-    const password = assertAdminPasswordPolicy(input.password)
+    const password = assertAdminPasswordPolicy(input.password, '密码', { identifiers: [input.username, input.email] })
 
     if (!username) {
       throw new BizError('账号不能为空', 400)
@@ -534,6 +534,9 @@ export class UserService {
 
         const changeSummary: Record<string, string | null> = {}
         const roleChanged = input.role !== undefined && input.role !== user.role
+        if (normalizedPassword !== undefined) {
+          assertPasswordAvoidsAccountIdentifiers(normalizedPassword, '密码', [user.username, user.email])
+        }
 
         if (normalizedDisplayName !== undefined && normalizedDisplayName !== user.displayName) {
           changeSummary.displayNameBefore = user.displayName
@@ -673,6 +676,7 @@ export class UserService {
 
     const profile = await runInTransaction(async (manager) => {
       const user = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:reset_password')
+      assertPasswordAvoidsAccountIdentifiers(newPassword, '新密码', [user.username, user.email])
       const userRepo = manager.getRepository(SysUser)
       const sessionRepo = manager.getRepository(SysUserSession)
 
