@@ -438,6 +438,7 @@ const layoutChildren: AppRouteRecord[] = [
         component: routeViewLoaders['inventory-stocks'],
         meta: {
           title: '当前库存',
+          menu: false,
           menuOrder: 20,
           activeMenu: '/inventory',
           requiredPermissions: ['inventory:view'],
@@ -450,6 +451,7 @@ const layoutChildren: AppRouteRecord[] = [
         component: routeViewLoaders['inventory-stocktakes'],
         meta: {
           title: '库存盘点',
+          menu: false,
           menuOrder: 30,
           activeMenu: '/inventory',
           requiredPermissions: ['stocktake:view'],
