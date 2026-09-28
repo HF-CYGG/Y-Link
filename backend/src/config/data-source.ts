@@ -5,6 +5,8 @@
  */
 
 import 'reflect-metadata'
+import fs from 'node:fs'
+import path from 'node:path'
 import { DataSource, type DataSourceOptions } from 'typeorm'
 import { resolveSqliteDatabasePath } from './database-bootstrap.js'
 import { env } from './env.js'
@@ -20,6 +22,7 @@ import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
 import { SysUser } from '../entities/sys-user.entity.js'
 import { SysUserSession } from '../entities/sys-user-session.entity.js'
+import { SysUserMfa } from '../entities/sys-user-mfa.entity.js'
 import { SysAuditLog } from '../entities/sys-audit-log.entity.js'
 import { SystemConfig } from '../entities/system-config.entity.js'
 import { ClientUser } from '../entities/client-user.entity.js'
@@ -65,6 +68,7 @@ export const appEntities = [
   BizOutboundOrderItem,
   SysUser,
   SysUserSession,
+  SysUserMfa,
   SysAuditLog,
   SystemConfig,
   ClientUser,
@@ -99,6 +103,35 @@ export const appEntities = [
   InvStocktake,
   InvStocktakeItem,
 ]
+
+/**
+ * MySQL 传输加密选项（外置或云数据库场景下，凭据与客户个人数据不应明文经过网络）：
+ * - disabled：不启用 TLS，保持现有内网直连部署的兼容行为；
+ * - required：启用 TLS 但不校验证书，可防被动窃听，无法防中间人，仅作过渡；
+ * - verify-full：校验证书链与主机名（DB_HOST 须与证书一致），可用 DB_SSL_CA 指定私有 CA。
+ * 运行时覆盖与迁移目标库共用本函数，因此开启后迁移目标 MySQL 也必须支持相同的 TLS 要求。
+ */
+export function resolveMysqlSslOptions(
+  mode: typeof env.DB_SSL_MODE,
+  caPath: string | undefined,
+): { ssl?: { rejectUnauthorized: boolean; ca?: string } } {
+  if (mode === 'disabled') {
+    return {}
+  }
+  if (mode === 'required') {
+    return { ssl: { rejectUnauthorized: false } }
+  }
+  if (!caPath) {
+    return { ssl: { rejectUnauthorized: true } }
+  }
+  let ca: string
+  try {
+    ca = fs.readFileSync(path.resolve(caPath), 'utf8')
+  } catch {
+    throw new Error('DB_SSL_CA 指定的 CA 证书文件不存在或不可读')
+  }
+  return { ssl: { rejectUnauthorized: true, ca } }
+}
 
 function resolveEffectiveDatabaseConfig(
   runtimeOverride?: DatabaseRuntimeOverrideConfig,
@@ -168,6 +201,7 @@ export function createDataSourceOptions(runtimeOverride?: DatabaseRuntimeOverrid
     connectTimeout: env.DB_CONNECT_TIMEOUT_MS,
     poolSize: env.DB_POOL_SIZE,
     multipleStatements: false,
+    ...resolveMysqlSslOptions(env.DB_SSL_MODE, env.DB_SSL_CA),
     extra: {
       waitForConnections: true,
       connectionLimit: env.DB_POOL_SIZE,

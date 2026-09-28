@@ -27,16 +27,19 @@ FROM ${Y_LINK_NODE_IMAGE} AS runtime
 
 WORKDIR /app
 
+# libuv 线程池默认 4 线程，由 scrypt、sharp、数据库驱动与文件读写共用；登录洪水时业务查询会被饿死，扩到 8。
 ENV NODE_ENV=production \
   PORT=3001 \
   DB_TYPE=mysql \
   DB_SYNC=false \
-  TZ=Asia/Shanghai
+  TZ=Asia/Shanghai \
+  UV_THREADPOOL_SIZE=8
 
+# 预建 /app/data：挂载命名卷时 Docker 会沿用镜像目录的属主，node 用户才能写入维护状态与数据加密密钥文件。
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata \
   && rm -rf /var/lib/apt/lists/* \
-  && mkdir -p /app/uploads \
+  && mkdir -p /app/data /app/uploads \
   && chown -R node:node /app
 
 COPY --from=build --chown=node:node /app/package*.json ./

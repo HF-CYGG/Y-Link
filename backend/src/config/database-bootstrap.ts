@@ -34,6 +34,7 @@ const SQLITE_REQUIRED_TABLES = [
   'biz_outbound_order_item',
   'sys_user',
   'sys_user_session',
+  'sys_user_mfa',
   'sys_audit_log',
   'system_configs',
   'client_user',
@@ -2107,6 +2108,7 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
   }
   const accountForeignKeys = [
     ['sys_user_session', 'user_id', 'sys_user'],
+    ['sys_user_mfa', 'user_id', 'sys_user'],
     ['client_user_session', 'user_id', 'client_user'],
     ['client_mobile_session', 'client_user_id', 'client_user'],
     ['biz_inbound_order', 'supplier_id', 'sys_user'],

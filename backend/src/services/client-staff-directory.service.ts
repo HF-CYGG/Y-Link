@@ -21,6 +21,9 @@ import { auditService } from './audit.service.js'
 import { type EntityManager, type Repository } from 'typeorm'
 import { systemConfigService } from './system-config.service.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
+import { assertXlsxArchiveWithinLimits } from '../utils/xlsx-archive-guard.js'
+
+const STAFF_DIRECTORY_IMPORT_ARCHIVE_LIMITS = { maxEntries: 2000, maxTotalUncompressedBytes: 40 * 1024 * 1024 }
 
 export interface ClientStaffDirectoryListQuery {
   page: number
@@ -446,6 +449,8 @@ export class ClientStaffDirectoryService {
   }
 
   private async parseWorkbookRows(buffer: Buffer): Promise<ImportClientStaffDirectoryRowInput[]> {
+    // exceljs 会把整包解压进内存建模，先按真实解压体积预检，防止 8MB 上传解压成超大文件拖垮进程。
+    assertXlsxArchiveWithinLimits(buffer, STAFF_DIRECTORY_IMPORT_ARCHIVE_LIMITS)
     const workbook = new ExcelJS.Workbook()
     try {
       // `exceljs` 的 Buffer 类型定义仍停留在旧版 Node 声明，这里按其入参签名显式收窄，避免与 Node 24 的泛型 Buffer 冲突。

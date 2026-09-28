@@ -5,13 +5,14 @@
  * 实现逻辑：
  * - 从应用与认证 Store 读取侧栏状态、当前用户和权限信息，集中输出顶栏交互；
  * - 复用共享弹窗壳承接修改密码流程，把表单校验、提交反馈与关闭行为收口到顶部组件；
+ * - “两步验证”设置弹窗属于低频入口，首次点击才异步加载并挂载，避免进入首屏包；
  * - 对退出登录、改密重登等高频全局动作统一做确认与跳转，避免分散在各页面重复实现。
  */
 
 
-import { ArrowDown, Lock, Menu, SwitchButton } from '@element-plus/icons-vue'
+import { ArrowDown, Key, Lock, Menu, SwitchButton } from '@element-plus/icons-vue'
 import { ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
-import { computed, reactive, ref, useAttrs } from 'vue'
+import { computed, defineAsyncComponent, reactive, ref, useAttrs } from 'vue'
 import { BizCrudDialogShell } from '@/components/common'
 import QuoteBanner from '@/layout/components/QuoteBanner.vue'
 import { changePassword, ROLE_LABEL_MAP } from '@/api/modules/auth'
@@ -21,6 +22,7 @@ import { redirectToAdminLogin } from '@/utils/auth-navigation'
 import { extractErrorMessage } from '@/utils/error'
 
 import { showAppError, showAppSuccess } from '@/utils/app-alert'
+import { validateAdminPasswordShape } from '@/utils/admin-password-policy'
 
 defineOptions({
   inheritAttrs: false,
@@ -45,6 +47,16 @@ const passwordDialogVisible = ref(false)
 const passwordSubmitting = ref(false)
 const passwordFormRef = ref<FormInstance>()
 
+// 两步验证设置弹窗：低频入口，首次打开时才下载组件与二维码依赖，之后保持挂载复用。
+const AdminMfaDialog = defineAsyncComponent(() => import('@/components/account/AdminMfaDialog.vue'))
+const mfaDialogMounted = ref(false)
+const mfaDialogVisible = ref(false)
+
+const handleOpenMfaDialog = () => {
+  mfaDialogMounted.value = true
+  mfaDialogVisible.value = true
+}
+
 /**
  * 修改密码表单：
  * - currentPassword 用于校验本人身份；
@@ -65,7 +77,7 @@ const passwordRules: FormRules = {
   currentPassword: [{ required: true, message: '请输入当前密码', trigger: 'blur' }],
   newPassword: [
     { required: true, message: '请输入新密码', trigger: 'blur' },
-    { min: 6, message: '新密码长度至少为 6 位', trigger: 'blur' },
+    { validator: (_rule, value: string, callback) => validateAdminPasswordShape(value, callback), trigger: 'blur' },
   ],
   confirmPassword: [
     {
@@ -243,6 +255,10 @@ const handleLogout = async () => {
               <el-icon><Lock /></el-icon>
               修改密码
             </el-dropdown-item>
+            <el-dropdown-item @click="handleOpenMfaDialog">
+              <el-icon><Key /></el-icon>
+              两步验证
+            </el-dropdown-item>
             <el-dropdown-item divided @click="handleLogout">
               <el-icon><SwitchButton /></el-icon>
               退出登录
@@ -303,4 +319,6 @@ const handleLogout = async () => {
       </el-form-item>
     </el-form>
   </BizCrudDialogShell>
+
+  <AdminMfaDialog v-if="mfaDialogMounted" v-model="mfaDialogVisible" />
 </template>

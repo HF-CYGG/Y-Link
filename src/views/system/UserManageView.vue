@@ -4,7 +4,8 @@
  * 文件职责：提供管理端用户治理页，承接账号查询、创建编辑、启停控制、密码维护与角色配置等操作。
  * 实现逻辑：
  * - 页面统一收口管理端用户的筛选、表格展示和弹窗编辑流程，避免治理入口分散；
- * - 用户状态变更、密码处理和角色字段都在同一页闭环，便于系统管理员集中维护账号权限。
+ * - 用户状态变更、密码处理和角色字段都在同一页闭环，便于系统管理员集中维护账号权限；
+ * - 列表展示各账号两步验证状态，管理员可为丢失手机的他人重置两步验证（与重置密码同一权限，不能重置自己）。
  * 维护说明：
  * - 若后续新增治理字段，需要同步检查查询表单、弹窗表单、表格列和提交参数是否一致；
  * - 管理端用户与客户端用户的治理边界必须继续分开，避免字段和权限语义互相污染。
@@ -36,6 +37,7 @@ import {
   getUserList,
   getUserDeactivationPreview,
   permanentlyDeleteUser,
+  resetUserMfa,
   resetUserPassword,
   restoreUser,
   updateUser,
@@ -54,6 +56,7 @@ import { extractErrorMessage } from '@/utils/error'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 import { showAppError, showAppSuccess } from '@/utils/app-alert'
+import { validateAdminPasswordShape } from '@/utils/admin-password-policy'
 import {
   accountTypeDescriptions,
   getAccountTypeDescription,
@@ -189,11 +192,7 @@ const rules: FormRules = {
           callback(new Error('请输入登录密码'))
           return
         }
-        if (value && value.length < 6) {
-          callback(new Error('密码长度至少为 6 位'))
-          return
-        }
-        callback()
+        validateAdminPasswordShape(value, callback)
       },
       trigger: 'blur',
     },
@@ -228,7 +227,7 @@ const rules: FormRules = {
 const resetPasswordRules: FormRules = {
   newPassword: [
     { required: true, message: '请输入新密码', trigger: 'blur' },
-    { min: 6, message: '新密码长度至少为 6 位', trigger: 'blur' },
+    { validator: (_rule, value: string, callback) => validateAdminPasswordShape(value, callback), trigger: 'blur' },
   ],
   confirmPassword: [
     {
@@ -257,7 +256,7 @@ const ownPasswordRules: FormRules = {
   currentPassword: [{ required: true, message: '请输入当前密码', trigger: 'blur' }],
   newPassword: [
     { required: true, message: '请输入新密码', trigger: 'blur' },
-    { min: 6, message: '新密码长度至少为 6 位', trigger: 'blur' },
+    { validator: (_rule, value: string, callback) => validateAdminPasswordShape(value, callback), trigger: 'blur' },
   ],
   confirmPassword: [
     {
@@ -563,6 +562,41 @@ const handleSubmitResetPassword = async () => {
 }
 
 /**
+ * 管理员重置他人两步验证：
+ * - 对方丢失手机且恢复码用尽时使用，确认后对方下次登录只需账号密码；
+ * - 不作废对方已有会话，提示管理员提醒对方尽快重新绑定。
+ */
+const handleResetMfa = async (row: UserSafeProfile) => {
+  if (!ensurePermission('users:reset_password', '重置两步验证')) {
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      `确认重置“${row.displayName}”的两步验证吗？重置后该账号下次登录只需账号密码，请提醒对方尽快重新绑定。`,
+      '重置两步验证',
+      {
+        type: 'warning',
+        confirmButtonText: '重置',
+        cancelButtonText: '取消',
+      },
+    )
+    await resetUserMfa(row.id)
+    showAppSuccess(`已重置“${row.displayName}”的两步验证`)
+    await loadData()
+  } catch (error) {
+    if (error === 'cancel') {
+      return
+    }
+    void showCriticalErrorDialog(error, {
+      title: '重置两步验证失败',
+      fallback: '重置两步验证失败',
+      operation: '重置管理端用户两步验证',
+    })
+  }
+}
+
+/**
  * 提交本人修改密码：
  * - 成功后服务端会使当前账号已有会话失效；
  * - 前端主动退出并跳转登录页，要求用新密码重新登录。
@@ -729,6 +763,8 @@ const isSelfRow = (row: UserSafeProfile) => row.id === authStore.currentUser?.id
  */
 const canShowEditAction = (row: UserSafeProfile) => canEditUser.value && row.accountState !== 'deactivated' && Boolean(row.id)
 const canShowResetPasswordAction = (row: UserSafeProfile) => canResetUserPassword.value && row.accountState !== 'deactivated' && !isSelfRow(row)
+// 重置他人两步验证与重置密码同一权限；本人应在账号菜单中用动态码或恢复码自行停用。
+const canShowResetMfaAction = (row: UserSafeProfile) => canResetUserPassword.value && Boolean(row.mfaEnabled) && row.accountState !== 'deactivated' && !isSelfRow(row)
 const canShowToggleStatusAction = (row: UserSafeProfile) => canToggleUser.value && row.accountState !== 'deactivated' && !(isSelfRow(row) && row.status === 'enabled')
 
 onMounted(() => {
@@ -864,6 +900,11 @@ onMounted(() => {
                   <el-tag :type="getAccountStateTagType(row.accountState)" effect="light">{{ getAccountStateLabel(row.accountState) }}</el-tag>
                 </template>
               </el-table-column>
+              <el-table-column label="两步验证" width="110">
+                <template #default="{ row }">
+                  <el-tag :type="row.mfaEnabled ? 'success' : 'info'" effect="plain" size="small">{{ row.mfaEnabled ? '已开启' : '未开启' }}</el-tag>
+                </template>
+              </el-table-column>
               <el-table-column label="生命周期" min-width="210" show-overflow-tooltip>
                 <template #default="{ row }">
                   <span v-if="row.accountState === 'deactivated'">
@@ -908,6 +949,7 @@ onMounted(() => {
                   <div class="flex flex-wrap items-center justify-end gap-x-3 gap-y-2 py-1">
                     <el-button v-if="canShowEditAction(row)" link type="primary" @click="handleOpenEdit(row)">编辑</el-button>
                     <el-button v-if="canShowResetPasswordAction(row)" link type="primary" @click="handleOpenResetPassword(row)">重置密码</el-button>
+                    <el-button v-if="canShowResetMfaAction(row)" link type="warning" @click="handleResetMfa(row)">重置两步验证</el-button>
                     <el-button
                       v-if="canShowToggleStatusAction(row)"
                       link
@@ -963,6 +1005,10 @@ onMounted(() => {
                   </div>
                 </div>
                 <div class="flex items-center justify-between gap-3">
+                  <span class="text-slate-400">两步验证</span>
+                  <el-tag size="small" :type="item.mfaEnabled ? 'success' : 'info'" effect="plain">{{ item.mfaEnabled ? '已开启' : '未开启' }}</el-tag>
+                </div>
+                <div class="flex items-center justify-between gap-3">
                   <span class="text-slate-400">最后登录</span>
                   <span>{{ item.lastLoginAt ? dayjs(item.lastLoginAt).format('YYYY-MM-DD HH:mm') : '-' }}</span>
                 </div>
@@ -979,6 +1025,7 @@ onMounted(() => {
               <div v-if="canOperateUsers" class="flex items-center justify-end gap-3 border-t border-slate-100 pt-3 dark:border-white/10">
                 <el-button v-if="canShowEditAction(item)" link type="primary" @click="handleOpenEdit(item)">编辑</el-button>
                 <el-button v-if="canShowResetPasswordAction(item)" link type="primary" @click="handleOpenResetPassword(item)">重置密码</el-button>
+                <el-button v-if="canShowResetMfaAction(item)" link type="warning" @click="handleResetMfa(item)">重置两步验证</el-button>
                 <el-button
                   v-if="canShowToggleStatusAction(item)"
                   link

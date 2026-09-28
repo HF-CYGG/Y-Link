@@ -11,6 +11,7 @@ import { requireAdminCsrf, requireAuth, requirePermission, requireRole } from '.
 import type { AuthenticatedRequest } from '../types/auth.js'
 import type { ClientAuthenticatedRequest } from '../types/client-auth.js'
 import { auditService } from '../services/audit.service.js'
+import { authSecurityService } from '../services/auth-security.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import {
   O2O_PREORDER_REMARK_MAX_LENGTH,
@@ -23,7 +24,7 @@ import {
 } from '../services/o2o-preorder.service.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { CLIENT_USER_ACCOUNT_TYPES } from '../entities/client-user.entity.js'
-import { assertPermanentDeletePassword } from '../utils/permanent-delete-password.js'
+import { assertPermanentDeletePasswordForRequest, createPermanentDeleteLimiter } from '../utils/permanent-delete-guard.js'
 import { resolveCompatibleIdentifierInput } from '../services/order-serial.service.js'
 import { projectSystemIdentifiersForRole } from '../utils/system-identifier-visibility.js'
 
@@ -66,12 +67,12 @@ const onsiteAdjustPreorderSchema = z.object({
 const inboundSchema = z.object({
   productId: z.string().trim().min(1),
   skuId: z.string().trim().min(1).nullable().optional(),
-  qty: z.number().int().positive(),
+  qty: z.number().int().positive().max(MAX_DATABASE_INT, '入库数量超过系统可处理上限'),
   remark: z.string().max(255).optional(),
 })
 
 const verifySchema = z.object({
-  verifyCode: z.string().trim().min(1),
+  verifyCode: z.string().trim().min(1).max(128),
 })
 
 const myOrderQuerySchema = z.object({
@@ -269,7 +270,9 @@ o2oRouter.post(
   requireClientAuth,
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
-    const data = await o2oPreorderService.submit(authReq.clientAuth, submitPreorderSchema.parse(req.body))
+    const payload = submitPreorderSchema.parse(req.body)
+    await authSecurityService.guardClientBusinessWrite(extractRequestMeta(req), authReq.clientAuth.userId, 'preorder_submit')
+    const data = await o2oPreorderService.submit(authReq.clientAuth, payload, extractRequestMeta(req))
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -341,6 +344,7 @@ o2oRouter.post(
   requireClientAuth,
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
+    await authSecurityService.guardClientBusinessWrite(extractRequestMeta(req), authReq.clientAuth.userId, 'preorder_cancel')
     const data = await o2oPreorderService.cancelMyOrder(authReq.clientAuth, req.params.id, extractRequestMeta(req))
     res.json({ code: 0, message: 'ok', data })
   }),
@@ -400,6 +404,7 @@ o2oRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const payload = submitReturnRequestSchema.parse(req.body)
+    await authSecurityService.guardClientBusinessWrite(extractRequestMeta(req), authReq.clientAuth.userId, 'return_request_create')
     const data = await o2oPreorderService.createReturnRequest(authReq.clientAuth, req.params.id, payload)
 
     await auditService.safeRecord({
@@ -464,14 +469,31 @@ o2oAdminRouter.post(
   }),
 )
 
+const O2O_BATCH_PURGE_AUDIT_TARGET = {
+  actionType: 'o2o.preorder.purge_cancelled_batch',
+  actionLabel: '批量永久删除已取消预订单',
+  targetType: 'o2o_order',
+} as const
+const O2O_DELETE_AUDIT_TARGET = {
+  actionType: 'o2o.preorder.delete',
+  actionLabel: '删除订单池订单',
+  targetType: 'o2o_order',
+} as const
+// 两个入口共用同一个账号级限流桶：全局永久删除口令无论从哪个入口试错都合并计数。
+const o2oPermanentDeleteLimiter = createPermanentDeleteLimiter({
+  ...O2O_DELETE_AUDIT_TARGET,
+  storePrefix: 'express-o2o-permanent-delete',
+})
+
 o2oAdminRouter.post(
   '/orders/batch-purge-cancelled',
   requirePermission('orders:delete'),
   requireRole('admin'),
+  o2oPermanentDeleteLimiter,
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = batchPurgeCancelledOrdersSchema.parse(req.body ?? {})
-    assertPermanentDeletePassword(payload.permanentDeletePassword)
+    await assertPermanentDeletePasswordForRequest(req, payload.permanentDeletePassword, O2O_BATCH_PURGE_AUDIT_TARGET)
     const orders = payload.orders.map((order) => ({
       id: order.id,
       confirmPreorderNo: resolveCompatibleIdentifierInput({
@@ -526,10 +548,11 @@ o2oAdminRouter.delete(
   '/orders/:id',
   requirePermission('orders:delete'),
   requireRole('admin'),
+  o2oPermanentDeleteLimiter,
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = deleteConsoleOrderSchema.parse(req.body ?? {})
-    assertPermanentDeletePassword(payload.permanentDeletePassword)
+    await assertPermanentDeletePasswordForRequest(req, payload.permanentDeletePassword, O2O_DELETE_AUDIT_TARGET)
     const data = await o2oPreorderService.deleteConsoleOrder(
       {
         orderId: req.params.id,
@@ -691,7 +714,7 @@ o2oAdminRouter.patch(
       orderId: req.params.id,
       hasCustomerOrder: payload.hasCustomerOrder,
       isSystemApplied: payload.isSystemApplied,
-    }, authReq.auth)
+    }, authReq.auth, extractRequestMeta(req))
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -774,6 +797,7 @@ o2oAdminRouter.post(
       authReq.auth,
       payload.remark,
       payload.skuId,
+      extractRequestMeta(req),
     )
     res.json({ code: 0, message: 'ok', data })
   }),

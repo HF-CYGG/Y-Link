@@ -1242,13 +1242,29 @@ async function main() {
     const capturedMobileCode = capturedVerifications.find((item) => item.target === '13800001001')?.code
     assert.ok(capturedMobileCode, '应捕获教师注册短信验证码')
 
+    await expectBizError(
+      () =>
+        clientAuthService.register({
+          accountType: 'personal',
+          staffNo: 'T1001',
+          account: '13800001001',
+          inviteCode: '00123456',
+          password: clientPassword,
+        }),
+      '教师注册填写联系方式但未提交验证码',
+      '请输入手机验证码',
+    )
+    pass('教师注册填写联系方式时必须提交验证码')
+
     const teacherRegisterResult = await clientAuthService.register({
       accountType: 'personal',
       staffNo: 'T1001',
       account: '13800001001',
       inviteCode: '00123456',
       password: clientPassword,
+      verificationCode: capturedMobileCode,
     })
+    assert.ok(teacherRegisterResult.user.mobileVerifiedAt, '教师注册经验证码核验的手机号必须记为已认证')
     assert.equal(teacherRegisterResult.user.accountType, 'personal')
     assert.equal(teacherRegisterResult.user.username, '张老师')
     assert.equal(teacherRegisterResult.user.departmentName, '资产处')

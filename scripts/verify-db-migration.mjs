@@ -619,7 +619,11 @@ const assertExportNormalizationContract = () => {
 assertExportNormalizationContract()
 
 const readExportSnapshot = async (client) => {
-  const { payload } = await client.request('/api/data-maintenance/export/json')
+  // JSON 全量导出需在验收编排中显式开启，并以 POST 携带本人当前密码完成复核。
+  const { payload } = await client.request('/api/data-maintenance/export/json', {
+    method: 'POST',
+    body: { currentPassword: adminPassword },
+  })
   assert.equal(payload?.code, 0, 'JSON 导出 envelope code 必须为 0')
   assert.ok(payload?.data?.tables && typeof payload.data.tables === 'object', 'JSON 导出必须包含 tables')
   const tableRows = Object.values(payload.data.tables)

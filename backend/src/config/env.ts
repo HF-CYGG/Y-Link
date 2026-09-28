@@ -91,6 +91,10 @@ const envSchema = z.object({
   DB_IDLE_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600_000).default(60_000),
   DB_QUEUE_LIMIT: z.coerce.number().int().min(1).max(10_000).default(100),
   DB_MAX_QUERY_MS: z.coerce.number().int().min(25).max(60_000).default(200),
+  // MySQL 传输加密：disabled（默认，兼容内网直连）/ required（加密但不校验证书）/ verify-full（校验证书链与主机名）。
+  DB_SSL_MODE: z.enum(['disabled', 'required', 'verify-full']).default('disabled'),
+  // verify-full 时可指定 CA 证书文件路径（PEM）；未指定则使用 Node 内置根证书。
+  DB_SSL_CA: z.string().optional().transform(normalizeOptionalString),
   SQLITE_SYNCHRONOUS: z.enum(['FULL', 'NORMAL']).default('FULL'),
   SQLITE_BUSY_TIMEOUT_MS: z.coerce.number().int().min(250).max(60_000).default(5000),
   SQLITE_CACHE_SIZE_KIB: z.coerce.number().int().min(4096).max(1_048_576).default(65_536),
@@ -102,6 +106,8 @@ const envSchema = z.object({
   // 见 mysql-migration-runner.ts）；默认关闭，避免无人值守地对生产数据库执行结构变更。
   DB_AUTO_MIGRATE: z.string().optional().transform(parseBoolean),
   AUTH_TOKEN_TTL_HOURS: z.coerce.number().int().positive().default(168),
+  // 管理端会话空闲超时（分钟）：超过该时长无任何请求即失效；0 表示关闭，仅保留 AUTH_TOKEN_TTL_HOURS 绝对时效。
+  AUTH_SESSION_IDLE_TIMEOUT_MINUTES: z.coerce.number().int().min(0).max(10_080).default(720),
   MOBILE_ACCESS_TTL_MINUTES: z.coerce.number().int().min(1).max(1440).default(15),
   MOBILE_REFRESH_TTL_DAYS: z.coerce.number().int().min(1).max(365).default(30),
   MOBILE_SESSION_ABSOLUTE_TTL_DAYS: z.coerce.number().int().min(1).max(730).default(90),
@@ -114,6 +120,8 @@ const envSchema = z.object({
   INIT_ADMIN_PASSWORD: z.string().min(6).optional().transform(normalizeOptionalString),
   INIT_ADMIN_DISPLAY_NAME: z.string().trim().min(1).default('系统管理员'),
   PERMANENT_DELETE_PASSWORD: z.string().optional().transform(normalizeOptionalString),
+  // JSON 全量导入导出（含全部客户个人信息、密码哈希与系统配置）默认关闭，仅在迁移或运维窗口显式设为 true。
+  Y_LINK_JSON_DATA_TRANSFER_ENABLED: z.enum(['true', 'false']).optional().transform((value) => value === 'true'),
   VERIFICATION_CODE_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
   // 阿里云 PNVS 使用服务器端凭证；任何接口或日志都不得回显这三项敏感值。
   ALIBABA_CLOUD_ACCESS_KEY_ID: z.string().optional().transform(normalizeOptionalString),

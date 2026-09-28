@@ -44,10 +44,29 @@ import { DatabaseRateLimitStore } from './services/persistent-risk-state.service
 import { AppDataSource } from './config/data-source.js'
 import { configureHttpSecurity } from './utils/http-security.js'
 import { databaseRescueRouter } from './routes/database-rescue.routes.js'
+import { auditService } from './services/audit.service.js'
+import { AuditThrottle } from './utils/audit-throttle.js'
+import { BoundedConcurrencyGate } from './utils/bounded-concurrency.js'
+import { createInFlightLimitMiddleware } from './middleware/in-flight-limit.middleware.js'
+import { ANONYMOUS_AUTH_IN_FLIGHT_POLICY } from './config/load-protection-policy.js'
+import { overloadSheddingMiddleware } from './middleware/overload-shedding.middleware.js'
+import { extractRequestMeta } from './utils/request-meta.js'
 
 const UPLOAD_CACHE_CONTROL_VALUE = 'public, max-age=31536000, immutable'
 const UPLOAD_CONTENT_SECURITY_POLICY_VALUE = "default-src 'none'; img-src 'self' data:; style-src 'none'; sandbox"
 const PUBLIC_JSON_BODY_LIMIT = '256kb'
+
+/**
+ * 匿名认证入口（管理端 + Web 客户端）的进程级在途上限：模块级单例，
+ * 回归脚本在同一进程内多次 createApp 时共用同一闸门，避免重复登记。
+ */
+const anonymousAuthInFlightGate = new BoundedConcurrencyGate({
+  name: 'anonymous-auth-in-flight',
+  maxConcurrent: ANONYMOUS_AUTH_IN_FLIGHT_POLICY.maxInFlight,
+  maxQueue: 0,
+  queueTimeoutMs: 1_000,
+  busyMessage: '当前登录与注册请求较多，请稍后重试',
+})
 const PROTECTED_JSON_BODY_LIMIT = '1mb'
 const STAFF_DIRECTORY_IMPORT_JSON_BODY_LIMIT = '8mb'
 
@@ -87,7 +106,36 @@ function resolvePublicAuthRateLimit(limit: number | undefined, fallback: number,
 
 export function createApp(options: CreateAppOptions = {}) {
   const app = express()
-  configureHttpSecurity(app)
+  // 跨站拦截审计按“来源 IP + 方法路径”10 分钟只记一次，避免攻击流量灌满审计表。
+  const crossSiteAuditThrottle = new AuditThrottle({ windowMs: 10 * 60 * 1000, maxKeys: 5000 })
+  configureHttpSecurity(app, undefined, {
+    onCrossSiteRequestBlocked: (req, reason) => {
+      const requestMeta = extractRequestMeta(req)
+      const route = `${req.method.toUpperCase()} ${req.path}`
+      if (!crossSiteAuditThrottle.shouldRecord(`${requestMeta.ipAddress ?? 'unknown'}|${route}`)) {
+        return
+      }
+      let originHost: string | null = null
+      try {
+        originHost = typeof req.headers.origin === 'string' ? new URL(req.headers.origin).hostname.slice(0, 128) : null
+      } catch {
+        originHost = null
+      }
+      void auditService.safeRecord({
+        actionType: 'security.cross_site_request_blocked',
+        actionLabel: '跨站请求拦截',
+        targetType: 'api_route',
+        targetCode: route,
+        requestMeta,
+        resultStatus: 'failed',
+        detail: {
+          reason,
+          secFetchSite: typeof req.headers['sec-fetch-site'] === 'string' ? req.headers['sec-fetch-site'].slice(0, 32) : null,
+          originHost,
+        },
+      })
+    },
+  })
   // Mobile Bearer 凭据不依赖 Cookie，但成功和失败响应同样不得被设备代理或中间缓存复用。
   app.use('/api/v1/mobile-auth', (_req, res, next) => {
     res.setHeader('Cache-Control', 'no-store')
@@ -131,15 +179,8 @@ export function createApp(options: CreateAppOptions = {}) {
       },
     })
   }
-  const adminAuthLimiter = createPublicAuthLimiter(
-    'express-admin-auth',
-    resolvePublicAuthRateLimit(options.publicAuthRateLimits?.admin, 60, '管理端'),
-    new Set(['/captcha', '/login']),
-  )
-  const clientAuthLimiter = createPublicAuthLimiter(
-    'express-client-auth',
-    resolvePublicAuthRateLimit(options.publicAuthRateLimits?.client, 180, '客户端'),
-    new Set([
+  const adminAnonymousAuthPaths = new Set(['/captcha', '/login', '/login/mfa'])
+  const clientAnonymousAuthPaths = new Set([
     '/captcha',
     '/capabilities',
     '/verification-code/send',
@@ -147,8 +188,20 @@ export function createApp(options: CreateAppOptions = {}) {
     '/login',
     '/forgot-password/verify',
     '/forgot-password/reset',
-    ]),
+  ])
+  const adminAuthLimiter = createPublicAuthLimiter(
+    'express-admin-auth',
+    resolvePublicAuthRateLimit(options.publicAuthRateLimits?.admin, 60, '管理端'),
+    adminAnonymousAuthPaths,
   )
+  const clientAuthLimiter = createPublicAuthLimiter(
+    'express-client-auth',
+    resolvePublicAuthRateLimit(options.publicAuthRateLimits?.client, 180, '客户端'),
+    clientAnonymousAuthPaths,
+  )
+  // 在途上限挂在限流之前：被拦下的请求不再消耗限流存储（MySQL 模式下为数据库读写）。
+  const adminAnonymousAuthInFlight = createInFlightLimitMiddleware({ gate: anonymousAuthInFlightGate, limitedPaths: adminAnonymousAuthPaths })
+  const clientAnonymousAuthInFlight = createInFlightLimitMiddleware({ gate: anonymousAuthInFlightGate, limitedPaths: clientAnonymousAuthPaths })
   const mobileAuthLimiter = createPublicAuthLimiter('express-mobile-auth', 180, new Set([
     '/captcha',
     '/capabilities',
@@ -235,10 +288,13 @@ export function createApp(options: CreateAppOptions = {}) {
     })
   })
 
+  // 过载分级削峰：挂在健康检查之后、所有业务入口之前；正常负载时只做一次等级判断。
+  app.use(overloadSheddingMiddleware)
+
   // 认证接口允许匿名访问，其中 logout / me 已在子路由内部再次做鉴权。
   const publicJsonParser = express.json({ limit: PUBLIC_JSON_BODY_LIMIT })
-  app.use('/api/auth', adminAuthLimiter, publicJsonParser, authRouter)
-  app.use('/api/client-auth', clientAuthLimiter, publicJsonParser, clientAuthRouter)
+  app.use('/api/auth', adminAnonymousAuthInFlight, adminAuthLimiter, publicJsonParser, authRouter)
+  app.use('/api/client-auth', clientAnonymousAuthInFlight, clientAuthLimiter, publicJsonParser, clientAuthRouter)
   app.use('/api/v1/mobile-auth', mobileAuthLimiter, publicJsonParser, mobileAuthRouter)
   app.use('/api/client-feedback', publicJsonParser, clientFeedbackRouter)
   app.use('/api/o2o', publicJsonParser, o2oRouter)

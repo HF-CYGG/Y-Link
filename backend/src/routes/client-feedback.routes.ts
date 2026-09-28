@@ -11,6 +11,7 @@ import { requireClientAuth } from '../middleware/client-auth.middleware.js'
 import type { ClientAuthenticatedRequest } from '../types/client-auth.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
+import { authSecurityService } from '../services/auth-security.service.js'
 import {
   CLIENT_FEEDBACK_CONVERSATION_STATUSES,
   CLIENT_FEEDBACK_ISSUE_TYPES,
@@ -114,6 +115,15 @@ authenticatedClientFeedbackRouter.get(
 
 authenticatedClientFeedbackRouter.post(
   '/attachments',
+  // 先按账号计次再接收文件：超限请求不落临时文件、不进入全局图片处理队列。
+  (req, _res, next) => {
+    try {
+      clientFeedbackService.consumeAttachmentUploadRate((req as ClientAuthenticatedRequest).clientAuth.userId)
+      next()
+    } catch (error) {
+      next(error)
+    }
+  },
   feedbackAttachmentUpload.single('file'),
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
@@ -161,6 +171,7 @@ authenticatedClientFeedbackRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const payload = createConversationSchema.parse(req.body)
+    await authSecurityService.guardClientBusinessWrite(extractRequestMeta(req), authReq.clientAuth.userId, 'feedback_conversation_create')
     const data = await clientFeedbackService.createConversation(
       { ...payload, attachmentIds: payload.attachments?.map((item) => item.id) ?? [] },
       authReq.clientAuth,
@@ -184,6 +195,7 @@ authenticatedClientFeedbackRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const payload = appendMessageSchema.parse(req.body)
+    await authSecurityService.guardClientBusinessWrite(extractRequestMeta(req), authReq.clientAuth.userId, 'feedback_message')
     const data = await clientFeedbackService.appendClientMessage(
       req.params.id,
       { ...payload, attachmentIds: payload.attachments?.map((item) => item.id) ?? [] },

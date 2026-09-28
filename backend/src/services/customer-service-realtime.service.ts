@@ -15,6 +15,7 @@ import { ClientUserSession } from '../entities/client-user-session.entity.js'
 import { SysUser } from '../entities/sys-user.entity.js'
 import { SysUserSession } from '../entities/sys-user-session.entity.js'
 import { hashSessionToken } from '../utils/session-token.js'
+import { isAdminSessionIdleExpired } from '../utils/admin-session-idle.js'
 import { isMobileAccessToken } from '../utils/mobile-token.js'
 import { BizError } from '../utils/errors.js'
 import { CUSTOMER_SERVICE_REALTIME_POLICY } from './client-feedback-security-policy.js'
@@ -197,9 +198,10 @@ class CustomerServiceRealtimeService {
       return
     }
 
-    const session = await AppDataSource.getRepository(SysUserSession).findOne({
+    const activeSession = await AppDataSource.getRepository(SysUserSession).findOne({
       where: { userId: ticket.ownerKey, sessionToken: sessionHash, expiresAt: MoreThan(now) },
     })
+    const session = activeSession && !isAdminSessionIdleExpired(activeSession, now) ? activeSession : null
     const user = session
       ? await AppDataSource.getRepository(SysUser).findOne({ where: { id: ticket.ownerKey } })
       : null
@@ -328,7 +330,9 @@ class CustomerServiceRealtimeService {
           }
           continue
         }
-        const sessions = await AppDataSource.getRepository(SysUserSession).find({ where: { sessionToken: In(hashes), expiresAt: MoreThan(now) } })
+        // 管理端 SSE 复核与 HTTP 鉴权共用空闲超时口径，避免 API 已失效而后台推送仍继续。
+        const sessions = (await AppDataSource.getRepository(SysUserSession).find({ where: { sessionToken: In(hashes), expiresAt: MoreThan(now) } }))
+          .filter((item) => !isAdminSessionIdleExpired(item, now))
         const users = sessions.length
           ? await AppDataSource.getRepository(SysUser).find({ where: { id: In([...new Set(sessions.map((item) => item.userId))]), status: 'enabled' } })
           : []

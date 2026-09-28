@@ -1116,18 +1116,28 @@ export const summarizeSupportFeedbackConversations = (records: FeedbackConversat
 /**
  * 统一把后端返回的相对附件地址解析成前端可直接访问的 URL：
  * - 同源部署时直接保留 `/uploads/...`；
- * - API 独立域名部署时自动补齐资源域名来源，避免详情页缩略图与新窗口预览失效。
+ * - API 独立域名部署时自动补齐资源域名来源，避免详情页缩略图与新窗口预览失效；
+ * - 解析结果只允许 http/https：附件地址会进入 `href` 与 `window.open`，
+ *   `javascript:`、`data:` 等协议一律视为无效地址，不依赖服务端校验兜底。
  */
 export const resolveFeedbackAttachmentUrl = (url?: string | null) => {
   const normalizedUrl = url?.trim()
   if (!normalizedUrl) {
     return ''
   }
-  if (/^https?:\/\//.test(normalizedUrl)) {
+  if (/^https?:\/\//i.test(normalizedUrl)) {
     return normalizedUrl
   }
   const origin = resolveApiOrigin()
-  return origin ? new URL(normalizedUrl.replace(/^\//, ''), `${origin}/`).toString() : normalizedUrl
+  if (!origin) {
+    return normalizedUrl.startsWith('/') && !normalizedUrl.startsWith('//') ? normalizedUrl : ''
+  }
+  try {
+    const resolvedUrl = new URL(normalizedUrl.replace(/^\//, ''), `${origin}/`)
+    return resolvedUrl.protocol === 'http:' || resolvedUrl.protocol === 'https:' ? resolvedUrl.toString() : ''
+  } catch {
+    return ''
+  }
 }
 
 export const getClientFeedbackPortalConfig = async (requestConfig: RequestConfig = {}): Promise<FeedbackPortalConfig> => {

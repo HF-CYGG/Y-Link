@@ -220,6 +220,7 @@ const createRules: FormRules = {
   password: [
     { required: true, message: '请输入登录密码', trigger: 'blur' },
     { min: 8, message: '登录密码至少 8 位', trigger: 'blur' },
+    { max: 64, message: '登录密码不能超过 64 位', trigger: 'blur' },
   ],
   confirmPassword: [
     {

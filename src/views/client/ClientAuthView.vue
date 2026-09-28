@@ -225,6 +225,8 @@ const registerValidationMode = computed<ClientValidationMode>(() => {
   return authCapabilities.value?.registerValidationModes[channel] ?? 'captcha'
 })
 const registerUsesVerificationCode = computed(() => registerValidationMode.value === 'verification_code')
+// 教师注册联系方式选填；一旦填写就与个人注册一样，必须先用图形验证码发码并提交手机/邮箱验证码。
+const teacherContactRequiresVerification = computed(() => isDepartmentRegisterMode.value && Boolean(registerAccountChannel.value))
 const shouldPrepareCaptcha = computed(() => isRegisterMode.value || loginCaptchaVisible.value)
 const isCapabilityHintVisible = computed(() => capabilityLoading.value && !authCapabilities.value)
 const isCapabilityFallbackVisible = computed(() => !capabilityLoading.value && !!capabilityErrorMessage.value && !authCapabilities.value)
@@ -846,7 +848,7 @@ const handleLogin = async () => {
   }
 }
 
-// 教师注册只提交工号与统一教师邀请码；姓名和部门由后端目录在注册事务中绑定。
+// 教师注册必填工号与统一教师邀请码，联系方式选填但填写后必须提交验证码；姓名和部门由后端目录在注册事务中绑定。
 const validateDepartmentRegisterFields = () => {
   if (!isDepartmentRegisterMode.value) {
     return true
@@ -869,7 +871,18 @@ const validateDepartmentRegisterFields = () => {
 
 // 注册验证码校验与部门字段校验拆开维护，便于后续继续扩展不同通道策略。
 const validateRegisterChallengeFields = () => {
-  if (isDepartmentRegisterMode.value) return true
+  if (isDepartmentRegisterMode.value) {
+    if (!teacherContactRequiresVerification.value) return true
+    if (!registerUsesVerificationCode.value) {
+      showAppWarning('当前未启用该联系方式的验证码，教师注册请留空手机号或邮箱')
+      return false
+    }
+    if (!registerForm.verificationCode.trim()) {
+      showAppWarning('请输入手机/邮箱验证码')
+      return false
+    }
+    return true
+  }
   if (registerUsesVerificationCode.value) {
     if (!registerForm.verificationCode.trim()) {
       showAppWarning('请输入手机/邮箱验证码')
@@ -932,7 +945,9 @@ const buildRegisterRequestPayload = (registeredAccount: string, registeredUserna
     staffNo: isDepartmentRegisterMode.value ? registerForm.staffNo.trim() : undefined,
     inviteCode: isDepartmentRegisterMode.value ? registerForm.inviteCode.trim() : undefined,
     password: registerForm.password,
-    verificationCode: !isDepartmentRegisterMode.value && registerUsesVerificationCode.value ? normalizeInputText(registerForm.verificationCode) : undefined,
+    verificationCode: (!isDepartmentRegisterMode.value || teacherContactRequiresVerification.value) && registerUsesVerificationCode.value
+      ? normalizeInputText(registerForm.verificationCode)
+      : undefined,
     captchaId: !isDepartmentRegisterMode.value && !registerUsesVerificationCode.value ? captcha.captchaId : undefined,
     captchaCode: !isDepartmentRegisterMode.value && !registerUsesVerificationCode.value ? normalizeInputText(registerForm.captcha) : undefined,
   }
@@ -1574,7 +1589,7 @@ onUnmounted(() => {
                       <el-icon class="input-icon"><User /></el-icon>
                     </template>
                   </el-input>
-                  <div v-if="!isDepartmentRegisterMode" class="captcha-row">
+                  <div v-if="teacherContactRequiresVerification" class="captcha-row">
                     <el-input
                       v-model="registerForm.captcha"
                       :placeholder="registerUsesVerificationCode ? '先输入图形验证码，再发送手机/邮箱验证码' : '图形验证码'"
@@ -1598,10 +1613,10 @@ onUnmounted(() => {
                       />
                     </button>
                   </div>
-                  <p v-if="!isDepartmentRegisterMode" class="captcha-hint-text">{{ captchaHintText }}</p>
+                  <p v-if="teacherContactRequiresVerification" class="captcha-hint-text">{{ captchaHintText }}</p>
                   <Transition name="verification-code">
                     <div
-                      v-if="!isDepartmentRegisterMode && registerUsesVerificationCode"
+                      v-if="teacherContactRequiresVerification && registerUsesVerificationCode"
                       class="verification-code-reveal"
                     >
                       <div class="verification-code-reveal__inner">

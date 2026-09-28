@@ -1,15 +1,17 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/auth/LoginView.vue
- * 文件职责：负责管理端登录、验证码补录与登录后安全提示展示，并保证登录成功后的跳转优先级高于装饰动画与预热任务。
+ * 文件职责：负责管理端登录、验证码补录、两步验证第二步与登录后安全提示展示，并保证登录成功后的跳转优先级高于装饰动画与预热任务。
  * 实现逻辑：
  * - 先执行表单校验，再按需携带图形验证码发起登录；
+ * - 账号已开启两步验证时，第一步只拿到短期票据，表单切换为动态码 / 恢复码输入，票据过期或失效时回到第一步重新输入密码；
  * - 风控触发后固定展示安全提示，并按需拉取验证码，避免用户只看到一闪而过的错误消息；
  * - 登录成功后仅投递非阻塞预热任务，先保证真正的页面跳转立即发生；
  * - 登录页视觉层采用了融合 Apple / Microsoft Fluent 设计美学的动态几何流体背景，利用 CSS `transform` 硬件加速进行渲染，兼顾了高级视觉表现与主线程性能，避免了输入、点击延迟。
  * 维护说明：
  * - 动态几何图形的动画已使用 `will-change: transform` 并限定在 GPU 层面计算，若后续要叠加更多层，请注意内存与合成层数量，不要使用耗费 CPU 的 `background-position` 或 `box-shadow` 动画；
- * - 验证码展示必须继续使用图片 data URL，避免改回 `v-html` 注入 SVG。
+ * - 验证码展示必须继续使用图片 data URL，避免改回 `v-html` 注入 SVG；
+ * - 第二步是否回到第一步只看服务端原因码 `ADMIN_MFA_TICKET_EXPIRED`，不要按提示文案判断。
  */
 
 
@@ -20,9 +22,9 @@ import { useRoute, useRouter } from 'vue-router'
 import { resolveDefaultManagementRedirect, resolveSafeRedirect } from '@/router'
 import { useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
-import { getAdminCaptcha } from '@/api/modules/auth'
+import { ADMIN_MFA_TICKET_EXPIRED_REASON, getAdminCaptcha, type LoginResult } from '@/api/modules/auth'
 import { APP_META } from '@/constants/app-meta'
-import { extractErrorMessage, normalizeRequestError } from '@/utils/error'
+import { extractErrorMessage, extractRequestErrorReason, normalizeRequestError } from '@/utils/error'
 
 
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
@@ -54,10 +56,24 @@ const rules: FormRules = {
   password:[{ required: true, message: '请输入密码', trigger: 'blur' }],
 }
 
+// 两步验证第二步：票据只保存在内存，刷新页面即回到第一步。
+const mfaChallenge = ref<{ ticket: string } | null>(null)
+const mfaMode = ref<'totp' | 'recovery'>('totp')
+const mfaForm = reactive({
+  code: '',
+  recoveryCode: '',
+})
+
 const submitButtonLabel = computed(() => {
   if (submitPhase.value === 'submitting') return '验证中...'
   if (submitPhase.value === 'success') return '进入系统'
-  return '继续'
+  return mfaChallenge.value ? '验证并登录' : '继续'
+})
+
+const formTitle = computed(() => (mfaChallenge.value ? '两步验证' : '登录'))
+const formSubtitle = computed(() => {
+  if (!mfaChallenge.value) return '请输入您的访问凭证'
+  return mfaMode.value === 'totp' ? '请输入身份验证器应用中的 6 位动态码' : '请输入一个未使用过的恢复码'
 })
 
 // 安全说明：验证码后端返回的是 SVG 字符串，
@@ -112,7 +128,110 @@ onBeforeUnmount(() => {
   document.documentElement.classList.remove('route-login')
 })
 
+const resetCaptchaState = () => {
+  captchaVisible.value = false
+  captchaState.captchaId = ''
+  captchaState.captchaImage = ''
+  captchaState.captchaSvg = ''
+  form.captcha = ''
+}
+
+const resetMfaChallenge = () => {
+  mfaChallenge.value = null
+  mfaMode.value = 'totp'
+  mfaForm.code = ''
+  mfaForm.recoveryCode = ''
+}
+
+const toggleMfaMode = () => {
+  mfaMode.value = mfaMode.value === 'totp' ? 'recovery' : 'totp'
+  mfaForm.code = ''
+  mfaForm.recoveryCode = ''
+}
+
+/**
+ * 登录成功收尾：普通登录与两步验证第二步共用。
+ * 先投递跳转，再处理安全提醒；恢复码登录后提醒剩余数量，引导及时重新生成。
+ */
+const finishLogin = async (result: LoginResult) => {
+  submitPhase.value = 'success'
+  securityHint.value = ''
+  resetCaptchaState()
+  resetMfaChallenge()
+  showAppSuccess(`欢迎回来，${result.user.displayName}`)
+  if (result.securityReminder) {
+    ElMessageBox.alert(result.securityReminder, '安全提醒', {
+      type: 'warning',
+      confirmButtonText: '我知道了',
+    }).catch(() => undefined)
+  }
+  if (typeof result.recoveryCodesRemaining === 'number') {
+    ElMessageBox.alert(
+      `本次使用了一个恢复码，还剩 ${result.recoveryCodesRemaining} 个。建议进入系统后在右上角账号菜单的“两步验证”中重新生成恢复码。`,
+      '恢复码提醒',
+      {
+        type: 'warning',
+        confirmButtonText: '我知道了',
+      },
+    ).catch(() => undefined)
+  }
+  const redirectPath = ref(
+    typeof route.query.redirect === 'string'
+      ? resolveSafeRedirect(route.query.redirect, result.user)
+      : resolveDefaultManagementRedirect(result.user),
+  )
+
+  // 登录成功后仅投递非阻塞预热任务，不等待其完成，优先保证真正的页面跳转立即发生。
+  authStore.warmupPostLoginEntry(redirectPath.value).catch(() => undefined)
+  await router.replace(redirectPath.value)
+}
+
+/**
+ * 两步验证第二步：
+ * - 动态码与恢复码二选一提交；
+ * - 票据过期、次数用尽、账号安全设置变化或账号被锁定时回到第一步，其余错误留在本步清空输入重试。
+ */
+const handleMfaSubmit = async (ticket: string) => {
+  const code = mfaForm.code.replace(/\s/g, '')
+  const recoveryCode = mfaForm.recoveryCode.trim()
+  if (mfaMode.value === 'totp' && !/^\d{6}$/.test(code)) {
+    showAppWarning('请输入 6 位数字动态码')
+    return
+  }
+  if (mfaMode.value === 'recovery' && !recoveryCode) {
+    showAppWarning('请输入恢复码')
+    return
+  }
+
+  submitPhase.value = 'submitting'
+  try {
+    const result = await authStore.completeMfaLogin({
+      mfaTicket: ticket,
+      ...(mfaMode.value === 'totp' ? { code } : { recoveryCode }),
+    })
+    await finishLogin(result)
+  } catch (error) {
+    submitPhase.value = 'idle'
+    const normalizedError = normalizeRequestError(error, '验证失败，请稍后重试')
+    applySecurityHintFromMessage(normalizedError.message)
+    if (extractRequestErrorReason(error) === ADMIN_MFA_TICKET_EXPIRED_REASON || normalizedError.status === 429) {
+      resetMfaChallenge()
+    } else {
+      mfaForm.code = ''
+      mfaForm.recoveryCode = ''
+    }
+    showAppError(normalizedError.message)
+  }
+}
+
 const handleSubmit = async () => {
+  // 第二步只有一个输入框，回车会同时触发表单隐式提交与 keyup.enter；进行中的提交必须拦截，
+  // 否则同一票据被并发提交两次，后到的请求会因票据已被取走而把页面错误地退回第一步。
+  if (submitPhase.value !== 'idle') return
+  if (mfaChallenge.value) {
+    await handleMfaSubmit(mfaChallenge.value.ticket)
+    return
+  }
   const valid = await formRef.value?.validate().catch(() => false)
   if (!valid) return
   if (captchaVisible.value && !form.captcha.trim()) {
@@ -130,36 +249,32 @@ const handleSubmit = async () => {
       captchaCode: captchaVisible.value ? form.captcha : undefined,
     })
 
-    submitPhase.value = 'success'
-    securityHint.value = ''
-    captchaVisible.value = false
-    captchaState.captchaId = ''
-    captchaState.captchaImage = ''
-    captchaState.captchaSvg = ''
-    form.captcha = ''
-    showAppSuccess(`欢迎回来，${result.user.displayName}`)
-    if (result.securityReminder) {
-      ElMessageBox.alert(result.securityReminder, '安全提醒', {
-        type: 'warning',
-        confirmButtonText: '我知道了',
-      }).catch(() => undefined)
+    // 已开启两步验证：密码正确，进入第二步；密码不再需要，尽早从表单内存中清除。
+    if (result.mfaRequired) {
+      submitPhase.value = 'idle'
+      securityHint.value = ''
+      resetCaptchaState()
+      form.password = ''
+      mfaMode.value = 'totp'
+      mfaForm.code = ''
+      mfaForm.recoveryCode = ''
+      mfaChallenge.value = { ticket: result.mfaTicket }
+      return
     }
-    const redirectPath = ref(
-      typeof route.query.redirect === 'string'
-        ? resolveSafeRedirect(route.query.redirect, result.user)
-        : resolveDefaultManagementRedirect(result.user),
-    )
 
-    // 登录成功后仅投递非阻塞预热任务，不等待其完成，优先保证真正的页面跳转立即发生。
-    authStore.warmupPostLoginEntry(redirectPath.value).catch(() => undefined)
-    await router.replace(redirectPath.value)
+    await finishLogin(result)
   } catch (error) {
     submitPhase.value = 'idle'
     const normalizedError = normalizeRequestError(error, '登录失败，请稍后重试')
     const message = normalizedError.message
     applySecurityHintFromMessage(message)
     if (normalizedError.status === 428 || /验证码/.test(message)) {
+      // 服务端验证码为一次性票据，答错后原票据即作废；已显示时必须换一张新图。
+      const captchaAlreadyVisible = captchaVisible.value && Boolean(captchaState.captchaId)
       await ensureCaptchaVisible()
+      if (captchaAlreadyVisible) {
+        await refreshCaptcha()
+      }
     } else if (captchaVisible.value) {
       await refreshCaptcha()
     }
@@ -249,8 +364,8 @@ const handleSubmit = async () => {
 
         <div class="form-content">
           <div class="form-header">
-            <h2 class="form-title">登录</h2>
-            <p class="form-subtitle">请输入您的访问凭证</p>
+            <h2 class="form-title">{{ formTitle }}</h2>
+            <p class="form-subtitle">{{ formSubtitle }}</p>
           </div>
 
           <el-alert
@@ -270,60 +385,94 @@ const handleSubmit = async () => {
             autocomplete="off"
             @submit.prevent="handleSubmit"
           >
-            <el-form-item prop="username" class="geo-input-1">
-              <el-input
-                v-model.trim="form.username"
-                class="geo-input"
-                placeholder="账号"
-                :prefix-icon="User"
-                autocomplete="username"
-                clearable
-                @keyup.enter="handleSubmit"
-              />
-            </el-form-item>
-
-            <el-form-item prop="password" class="geo-input-2">
-              <el-input
-                v-model="form.password"
-                class="geo-input"
-                type="password"
-                placeholder="密码"
-                show-password
-                :prefix-icon="Lock"
-                autocomplete="current-password"
-                @keyup.enter="handleSubmit"
-              />
-            </el-form-item>
-
-            <el-form-item v-if="captchaVisible" class="geo-input-2">
-              <div class="captcha-row">
+            <template v-if="mfaChallenge">
+              <el-form-item class="geo-input-1">
                 <el-input
-                  v-model.trim="form.captcha"
-                  class="geo-input captcha-input"
-                  placeholder="图形验证码"
+                  v-if="mfaMode === 'totp'"
+                  v-model.trim="mfaForm.code"
+                  class="geo-input"
+                  placeholder="6 位动态码"
                   :prefix-icon="Key"
-                  autocomplete="off"
-                  maxlength="8"
+                  inputmode="numeric"
+                  autocomplete="one-time-code"
+                  maxlength="7"
                   @keyup.enter="handleSubmit"
                 />
-                <button
-                  class="captcha-image"
-                  type="button"
-                  :disabled="captchaLoading"
-                  title="点击刷新验证码"
-                  @click="refreshCaptcha"
-                >
-                  <span v-if="captchaLoading">刷新中</span>
-                  <img
-                    v-else-if="captchaImageSrc"
-                    :src="captchaImageSrc"
-                    alt="图形验证码"
-                    class="captcha-render-image"
-                  />
-                  <span v-else>刷新</span>
-                </button>
+                <el-input
+                  v-else
+                  v-model.trim="mfaForm.recoveryCode"
+                  class="geo-input"
+                  placeholder="恢复码，例如 ABCD-EFGH-JKLM"
+                  :prefix-icon="Key"
+                  autocomplete="off"
+                  maxlength="20"
+                  @keyup.enter="handleSubmit"
+                />
+              </el-form-item>
+              <div class="mfa-switch-row">
+                <el-button link type="primary" @click="toggleMfaMode">
+                  {{ mfaMode === 'totp' ? '手机不在身边？使用恢复码' : '改用动态码' }}
+                </el-button>
+                <el-button link @click="resetMfaChallenge">返回重新登录</el-button>
               </div>
-            </el-form-item>
+            </template>
+
+            <template v-else>
+              <el-form-item prop="username" class="geo-input-1">
+                <el-input
+                  v-model.trim="form.username"
+                  class="geo-input"
+                  placeholder="账号"
+                  :prefix-icon="User"
+                  autocomplete="username"
+                  clearable
+                  @keyup.enter="handleSubmit"
+                />
+              </el-form-item>
+
+              <el-form-item prop="password" class="geo-input-2">
+                <el-input
+                  v-model="form.password"
+                  class="geo-input"
+                  type="password"
+                  placeholder="密码"
+                  show-password
+                  :prefix-icon="Lock"
+                  autocomplete="current-password"
+                  @keyup.enter="handleSubmit"
+                />
+              </el-form-item>
+
+              <el-form-item v-if="captchaVisible" class="geo-input-2">
+                <div class="captcha-row">
+                  <el-input
+                    v-model.trim="form.captcha"
+                    class="geo-input captcha-input"
+                    placeholder="图形验证码"
+                    :prefix-icon="Key"
+                    autocomplete="off"
+                    maxlength="8"
+                    @keyup.enter="handleSubmit"
+                  />
+                  <button
+                    class="captcha-image"
+                    type="button"
+                    :disabled="captchaLoading"
+                    title="点击刷新验证码"
+                    @click="refreshCaptcha"
+                  >
+                    <span v-if="captchaLoading">刷新中</span>
+                    <img
+                      v-else-if="captchaImageSrc"
+                      :src="captchaImageSrc"
+                      alt="图形验证码"
+                      class="captcha-render-image"
+                    />
+                    <span v-else>刷新</span>
+                  </button>
+                </div>
+              </el-form-item>
+            </template>
 
             <el-button
               class="geo-submit group"
@@ -348,6 +497,14 @@ const handleSubmit = async () => {
 </template>
 
 <style scoped>
+.mfa-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: -6px 0 18px;
+}
+
 .login-page {
   --bg-primary: #f5f5f7;
   --bg-panel: #ffffff;

@@ -10,10 +10,11 @@ import { auditService } from '../services/audit.service.js'
 import { DatabaseRateLimitStore } from '../services/persistent-risk-state.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
+import { createPermanentDeletePasswordGuard } from '../utils/permanent-delete-guard.js'
 
 const createUserSchema = z.object({
   username: z.string().min(1, '账号不能为空').max(64, '账号长度不能超过 64'),
-  password: z.string().min(8, '密码至少 8 位').max(50, '密码长度不能超过 50 位'),
+  password: z.string().min(8, '密码至少 8 位').max(64, '密码长度不能超过 64 位'),
   displayName: z.string().min(1, '姓名不能为空').max(64, '姓名长度不能超过 64'),
   email: z.string().trim().max(128, '邮箱长度不能超过 128').optional(),
   role: z.enum(USER_ROLES),
@@ -24,7 +25,7 @@ const updateUserSchema = z
   .object({
     displayName: z.string().min(1, '姓名不能为空').max(64, '姓名长度不能超过 64').optional(),
     email: z.string().trim().max(128, '邮箱长度不能超过 128').optional(),
-    password: z.string().min(8, '密码至少 8 位').max(50, '密码长度不能超过 50 位').optional(),
+    password: z.string().min(8, '密码至少 8 位').max(64, '密码长度不能超过 64 位').optional(),
     role: z.enum(USER_ROLES).optional(),
   })
   .refine((value) => Object.values(value).some((item) => item !== undefined), {
@@ -36,7 +37,7 @@ const updateUserStatusSchema = z.object({
 })
 
 const resetPasswordSchema = z.object({
-  newPassword: z.string().min(8, '新密码至少 8 位').max(50, '新密码长度不能超过 50 位'),
+  newPassword: z.string().min(8, '新密码至少 8 位').max(64, '新密码长度不能超过 64 位'),
 })
 
 const accountLifecycleReasonSchema = z.object({
@@ -72,6 +73,13 @@ const permanentDeleteLimiter = rateLimit({
     })
     res.status(429).json({ code: 429, message: '永久删除请求过于频繁，请稍后再试', data: null })
   },
+})
+
+// 永久删除口令为全局口令：再接入所有入口共享的口令失败桶，避免轮换入口叠加试错额度。
+const permanentDeletePasswordGuard = createPermanentDeletePasswordGuard({
+  actionType: 'user.permanent_delete',
+  actionLabel: '永久删除管理端用户',
+  targetType: 'user',
 })
 
 export const userRouter = Router()
@@ -149,6 +157,7 @@ userRouter.delete(
   requirePermission('users:permanent_delete'),
   requireRole('admin'),
   permanentDeleteLimiter,
+  permanentDeletePasswordGuard,
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = accountPermanentDeleteSchema.parse(req.body)
@@ -213,6 +222,22 @@ userRouter.post(
     const authReq = req as AuthenticatedRequest
     const payload = resetPasswordSchema.parse(req.body)
     const data = await userService.resetPassword(req.params.id, payload, authReq.auth, extractRequestMeta(req))
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+// 重置他人两步验证：与重置密码同一权限点，仅管理员可用。
+userRouter.post(
+  '/:id/mfa/reset',
+  requirePermission('users:reset_password'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const data = await userService.resetMfa(req.params.id, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',

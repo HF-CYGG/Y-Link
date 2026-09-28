@@ -58,9 +58,15 @@ const reportPath = path.join(runtimeRoot, 'enterprise-performance-budget-report.
  * 升级弹窗与导入弹窗均走 defineAsyncComponent 不进首屏，首屏依赖图、首屏 JS/CSS 与低频重包预算
  * 均未超额；"总产物"统计的是全部 chunk，拆包无法降低该项。经人工评估批准后总量上限调整为 4550 KB
  * （约 0.45% 余量），其余各项预算维持不变。
+ *
+ * 管理端 TOTP 两步验证（安全加固第三轮）：同一环境下 main@3aec01d 实测 4540.96 KB，本分支此前的
+ * 安全修复叠加后 4542.05 KB，加入两步验证前端后实测 4559.97 KB（+17.92 KB）。增量来源：顶栏首次点击才
+ * 异步加载的 AdminMfaDialog 独立块 12.41 KB、登录页第二步（动态码 / 恢复码）约 2.56 KB、用户管理页的
+ * 两步验证状态列与重置入口约 1.40 KB；首屏 JS/CSS 仅 +0.42 / +0.13 KB，首屏依赖图、低频重包与路由分包
+ * 预算均无新增超额，因此总量上限上调为 4570 KB（约 0.22% 余量），其余各项预算维持不变。
  */
 const performanceBudget = {
-  totalAssetsMaxKB: 4550,
+  totalAssetsMaxKB: 4570,
   criticalAssetsMaxKB: 1180,
   initialLoadJsMaxKB: 850,
   initialLoadCssMaxKB: 320,

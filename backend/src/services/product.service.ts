@@ -170,6 +170,29 @@ interface ProductStockSnapshot {
   skus: Map<string, { currentStock: number; preOrderedStock: number; contributes: boolean }>
 }
 
+/**
+ * 商品审计快照：只保留编码、名称、价格、折扣、上下架与限购等业务关键字段，用于生成“编辑商品”审计差异；
+ * 库存变化已由库存流水逐条记录，这里不重复；成本价只记录是否变更，不把成本数值展开进审计明细。
+ */
+interface ProductAuditSnapshot {
+  productCode: string
+  productName: string
+  defaultPrice: string
+  discountRate: string
+  isActive: boolean
+  o2oStatus: string
+  limitPerUser: number
+  skus: Map<string, { skuCode: string; defaultPrice: string; discountRate: string; costPrice: string | null; isActive: boolean }>
+}
+
+const PRODUCT_AUDIT_FIELDS = ['productCode', 'productName', 'defaultPrice', 'discountRate', 'isActive', 'o2oStatus', 'limitPerUser'] as const
+const PRODUCT_AUDIT_MAX_LISTED_ITEMS = 50
+
+const normalizeAuditDecimal = (value: unknown, scale: number): string => {
+  const numeric = Number(value)
+  return value !== null && value !== undefined && Number.isFinite(numeric) ? numeric.toFixed(scale) : String(value ?? '')
+}
+
 export interface BatchUpdateProductInput {
   ids: Array<string | number>
   isActive?: boolean
@@ -589,16 +612,18 @@ export class ProductService {
     return this.buildProductView(product)
   }
 
-  async create(input: CreateProductInput, actor: AuthUserContext): Promise<ProductView> {
+  async create(input: CreateProductInput, actor: AuthUserContext, requestMeta?: RequestMeta): Promise<ProductView> {
     const result = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
-      return this.createWithManager(input, manager, actor)
+      const created = await this.createWithManager(input, manager, actor)
+      await this.recordProductCreateAudit([created], actor, requestMeta, manager)
+      return created
     })
     invalidateMallCatalogReadCache()
     return result
   }
 
-  async batchCreate(inputs: CreateProductInput[], actor: AuthUserContext): Promise<ProductView[]> {
+  async batchCreate(inputs: CreateProductInput[], actor: AuthUserContext, requestMeta?: RequestMeta): Promise<ProductView[]> {
     if (!Array.isArray(inputs) || !inputs.length) {
       throw new BizError('至少新增一个产品')
     }
@@ -625,13 +650,14 @@ export class ProductService {
         }
       }
 
+      await this.recordProductCreateAudit(createdProducts, actor, requestMeta, manager)
       return createdProducts
     })
     invalidateMallCatalogReadCache()
     return result
   }
 
-  async update(id: string, input: UpdateProductInput, actor: AuthUserContext): Promise<ProductView> {
+  async update(id: string, input: UpdateProductInput, actor: AuthUserContext, requestMeta?: RequestMeta): Promise<ProductView> {
     const result = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
       const repo = manager.getRepository(BaseProduct)
@@ -645,6 +671,8 @@ export class ProductService {
 
       // 先在锁内拍下库存快照并校验基线，避免把打开弹窗时的旧库存写回、覆盖期间发生的出入库。
       const stockSnapshot = await this.captureProductStockSnapshot(product, manager)
+      // 价格、折扣、上下架、限购变更没有库存流水可追溯，锁内先拍审计快照，保存后生成差异审计。
+      const auditBefore = await this.captureProductAuditSnapshot(product, manager)
       this.assertProductLevelStockBaseline(product, input)
 
       this.applyUpdateInputToProduct(product, input)
@@ -675,10 +703,106 @@ export class ProductService {
         }
       }
       await this.recordManualStockAdjustments(saved, stockSnapshot, actor, manager)
+      const auditChanges = this.buildProductAuditChanges(auditBefore, await this.captureProductAuditSnapshot(saved, manager))
+      if (auditChanges) {
+        await auditService.record({
+          actionType: 'product.update',
+          actionLabel: '编辑商品',
+          targetType: 'product',
+          targetId: String(saved.id),
+          targetCode: saved.productCode,
+          actor,
+          requestMeta,
+          detail: auditChanges,
+        }, manager)
+      }
       return this.buildProductView(saved, manager)
     })
     invalidateMallCatalogReadCache()
     return result
+  }
+
+  private async captureProductAuditSnapshot(product: BaseProduct, manager: EntityManager): Promise<ProductAuditSnapshot> {
+    const skus = await manager.getRepository(BaseProductSku).find({
+      where: { productId: product.id },
+      select: { id: true, skuCode: true, defaultPrice: true, discountRate: true, costPrice: true, isActive: true },
+      order: { id: 'ASC' },
+    })
+    return {
+      productCode: product.productCode,
+      productName: product.productName,
+      defaultPrice: normalizeAuditDecimal(product.defaultPrice, 2),
+      discountRate: normalizeAuditDecimal(product.discountRate, 1),
+      isActive: isDatabaseFlagEnabled(product.isActive),
+      o2oStatus: product.o2oStatus,
+      limitPerUser: Number(product.limitPerUser ?? 0),
+      skus: new Map(skus.map((sku) => [String(sku.id), {
+        skuCode: sku.skuCode,
+        defaultPrice: normalizeAuditDecimal(sku.defaultPrice, 2),
+        discountRate: normalizeAuditDecimal(sku.discountRate, 1),
+        costPrice: sku.costPrice === null || sku.costPrice === undefined ? null : normalizeAuditDecimal(sku.costPrice, 2),
+        isActive: isDatabaseFlagEnabled(sku.isActive),
+      }])),
+    }
+  }
+
+  /** 生成商品编辑审计差异；无业务关键字段变化时返回 null，避免只改描述或图片也刷出审计。 */
+  private buildProductAuditChanges(before: ProductAuditSnapshot, after: ProductAuditSnapshot) {
+    const changedFields: Record<string, { before: unknown; after: unknown }> = {}
+    for (const field of PRODUCT_AUDIT_FIELDS) {
+      if (before[field] !== after[field]) changedFields[field] = { before: before[field], after: after[field] }
+    }
+    const skuChanges: Array<Record<string, unknown>> = []
+    for (const skuId of new Set([...before.skus.keys(), ...after.skus.keys()])) {
+      const previous = before.skus.get(skuId)
+      const next = after.skus.get(skuId)
+      if (!previous || !next) {
+        skuChanges.push({ skuId, skuCode: (next ?? previous)?.skuCode ?? null, change: previous ? 'removed' : 'added' })
+        continue
+      }
+      const change: Record<string, unknown> = {}
+      if (previous.defaultPrice !== next.defaultPrice) change.defaultPrice = { before: previous.defaultPrice, after: next.defaultPrice }
+      if (previous.discountRate !== next.discountRate) change.discountRate = { before: previous.discountRate, after: next.discountRate }
+      if (previous.isActive !== next.isActive) change.isActive = { before: previous.isActive, after: next.isActive }
+      if (previous.costPrice !== next.costPrice) change.costPriceChanged = true
+      if (Object.keys(change).length) skuChanges.push({ skuId, skuCode: next.skuCode, ...change })
+    }
+    if (!Object.keys(changedFields).length && !skuChanges.length) return null
+    return {
+      changedFields,
+      skuChangeCount: skuChanges.length,
+      skuChanges: skuChanges.slice(0, PRODUCT_AUDIT_MAX_LISTED_ITEMS),
+    }
+  }
+
+  private async recordProductCreateAudit(
+    products: ProductView[],
+    actor: AuthUserContext,
+    requestMeta: RequestMeta | undefined,
+    manager: EntityManager,
+  ): Promise<void> {
+    const summaries = products.map((product) => ({
+      productId: product.id,
+      productCode: product.productCode,
+      productName: product.productName,
+      defaultPrice: normalizeAuditDecimal(product.defaultPrice, 2),
+      discountRate: normalizeAuditDecimal(product.discountRate, 1),
+      isActive: product.isActive,
+      o2oStatus: product.o2oStatus,
+      limitPerUser: product.limitPerUser,
+      skuCount: product.skus.length,
+    }))
+    const single = summaries.length === 1 ? summaries[0] : null
+    await auditService.record({
+      actionType: single ? 'product.create' : 'product.batch_create',
+      actionLabel: single ? '新增商品' : '批量新增商品',
+      targetType: 'product',
+      targetId: single?.productId ?? null,
+      targetCode: single?.productCode ?? null,
+      actor,
+      requestMeta,
+      detail: single ?? { count: summaries.length, products: summaries.slice(0, PRODUCT_AUDIT_MAX_LISTED_ITEMS) },
+    }, manager)
   }
 
   /**
@@ -994,7 +1118,7 @@ export class ProductService {
     return { ids: productIds, updatedCount }
   }
 
-  async batchUpdate(input: BatchUpdateProductInput, actor: AuthUserContext): Promise<ProductView[]> {
+  async batchUpdate(input: BatchUpdateProductInput, actor: AuthUserContext, requestMeta?: RequestMeta): Promise<ProductView[]> {
     const productIds = [...new Set(input.ids.map((item) => normalizeEntityId(item)).filter(Boolean))]
       .sort((left, right) => left.localeCompare(right))
     if (!productIds.length) {
@@ -1018,25 +1142,42 @@ export class ProductService {
         throw new BizError('存在无效产品，批量更新失败')
       }
 
+      const changedProducts = products
+        .filter((product) => isDatabaseFlagEnabled(product.isActive) !== input.isActive)
+        .map((product) => ({ productId: String(product.id), productCode: product.productCode, productName: product.productName }))
       products.forEach((product) => {
         product.isActive = input.isActive as boolean
         product.o2oStatus = resolveEffectiveO2oStatus(product.isActive, undefined, product.o2oStatus)
       })
 
       const saved = await repo.save(products)
+      if (changedProducts.length) {
+        await auditService.record({
+          actionType: 'product.batch_update',
+          actionLabel: input.isActive ? '批量启用商品' : '批量停用商品',
+          targetType: 'product',
+          actor,
+          requestMeta,
+          detail: {
+            isActive: input.isActive,
+            count: changedProducts.length,
+            products: changedProducts.slice(0, PRODUCT_AUDIT_MAX_LISTED_ITEMS),
+          },
+        }, manager)
+      }
       return this.buildProductViews(saved, manager)
     })
     invalidateMallCatalogReadCache()
     return result
   }
 
-  async delete(id: string, actor: AuthUserContext): Promise<void> {
+  async delete(id: string, actor: AuthUserContext, requestMeta?: RequestMeta): Promise<void> {
     await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
       const productRepo = manager.getRepository(BaseProduct)
       const product = await productRepo.findOne({
         where: { id },
-        select: ['id', 'productName'],
+        select: ['id', 'productCode', 'productName'],
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
       if (!product) {
@@ -1071,6 +1212,16 @@ export class ProductService {
       if (!result.affected) {
         throw new BizError('产品不存在', 404)
       }
+      await auditService.record({
+        actionType: 'product.delete',
+        actionLabel: '删除商品',
+        targetType: 'product',
+        targetId: String(product.id),
+        targetCode: product.productCode,
+        actor,
+        requestMeta,
+        detail: { productName: product.productName },
+      }, manager)
     })
     invalidateMallCatalogReadCache()
   }
@@ -3100,4 +3251,4 @@ export const productService = new ProductService()
  * 批量新增产品（函数导出）：
  * - 供路由层按函数形式调用，减少类型服务对类实例成员增量感知不一致导致的误报。
  */
-export const batchCreateProducts = (inputs: CreateProductInput[], actor: AuthUserContext) => productService.batchCreate(inputs, actor)
+export const batchCreateProducts = (inputs: CreateProductInput[], actor: AuthUserContext, requestMeta?: RequestMeta) => productService.batchCreate(inputs, actor, requestMeta)

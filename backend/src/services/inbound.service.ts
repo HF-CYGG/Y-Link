@@ -657,41 +657,82 @@ class InboundService {
     })
   }
 
-  async purgeSupplierDelivery(actor: AuthUserContext, orderId: string, confirmShowNo?: string, requestMeta?: RequestMeta) {
-    return runInTransaction(async (manager) => {
-      await lockActiveSysAccountForBusiness(manager, actor.userId)
-      const order = await this.findSupplierOwnedOrder(orderId, actor, manager)
-      if (!this.isDeleted(order)) {
-        throw new BizError(`送货单“${order.showNo}”未删除，请先删除后再永久删除`, 409)
+  /**
+   * 供货方永久删除已软删除且未入库的送货单：
+   * - 永久删除口令在归属、状态与确认单号全部通过后才校验，避免接口沦为全局口令的试错预言机；
+   * - 口令为纯内存比较，不占用事务外连接；口令拒绝在事务回滚后写脱敏失败审计。
+   */
+  async purgeSupplierDelivery(
+    actor: AuthUserContext,
+    orderId: string,
+    confirmShowNo?: string,
+    requestMeta?: RequestMeta,
+    permanentDeletePassword?: string | null,
+  ) {
+    let passwordRejectedTarget: { id: string; showNo: string } | null = null
+    try {
+      return await runInTransaction(async (manager) => {
+        await lockActiveSysAccountForBusiness(manager, actor.userId)
+        const order = await this.findSupplierOwnedOrder(orderId, actor, manager)
+        if (!this.isDeleted(order)) {
+          throw new BizError(`送货单“${order.showNo}”未删除，请先删除后再永久删除`, 409)
+        }
+        if (order.status === 'verified') {
+          throw new BizError(`送货单“${order.showNo}”已入库，不能永久删除入库凭证`, 409)
+        }
+        if (!confirmShowNo || confirmShowNo.trim().toUpperCase() !== order.showNo.toUpperCase()) {
+          throw new BizError('确认单号不一致，已取消永久删除', 400)
+        }
+        passwordRejectedTarget = { id: order.id, showNo: order.showNo }
+        assertPermanentDeletePassword(permanentDeletePassword)
+        passwordRejectedTarget = null
+        return await this.purgeSupplierDeliveryInManager(manager, order, actor, requestMeta)
+      })
+    } catch (error) {
+      const rejectedTarget = passwordRejectedTarget as { id: string; showNo: string } | null
+      if (rejectedTarget && error instanceof BizError) {
+        await auditService.safeRecord({
+          actionType: 'inbound.supplier.purge',
+          actionLabel: '供货方永久删除送货单',
+          targetType: 'biz_inbound_order',
+          targetId: rejectedTarget.id,
+          targetCode: rejectedTarget.showNo,
+          actor,
+          requestMeta,
+          resultStatus: 'failed',
+          detail: { reason: error.statusCode === 400 ? 'password_missing' : 'password_rejected' },
+        })
       }
-      if (order.status === 'verified') {
-        throw new BizError(`送货单“${order.showNo}”已入库，不能永久删除入库凭证`, 409)
-      }
-      if (!confirmShowNo || confirmShowNo.trim().toUpperCase() !== order.showNo.toUpperCase()) {
-        throw new BizError('确认单号不一致，已取消永久删除', 400)
-      }
+      throw error
+    }
+  }
 
-      const items = await manager.getRepository(BizInboundOrderItem).find({ where: { orderId: order.id } })
-      await manager.getRepository(BizInboundOrderItem).delete({ orderId: order.id })
-      await manager.getRepository(BizInboundOrder).delete({ id: order.id })
-      await auditService.record({
-        actionType: 'inbound.supplier.purge',
-        actionLabel: '供货方永久删除送货单',
-        targetType: 'biz_inbound_order',
-        targetId: order.id,
-        targetCode: order.showNo,
-        actor,
-        requestMeta,
-        detail: {
-          status: order.status,
-          supplierId: order.supplierId,
-          supplierName: order.supplierName,
-          itemCount: items.length,
-        },
-      }, manager)
+  private async purgeSupplierDeliveryInManager(
+    manager: EntityManager,
+    order: BizInboundOrder,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ) {
+    const items = await manager.getRepository(BizInboundOrderItem).find({ where: { orderId: order.id } })
+    await manager.getRepository(BizInboundOrderItem).delete({ orderId: order.id })
+    await manager.getRepository(BizInboundOrder).delete({ id: order.id })
+    await auditService.record({
+      actionType: 'inbound.supplier.purge',
+      actionLabel: '供货方永久删除送货单',
+      targetType: 'biz_inbound_order',
+      targetId: order.id,
+      targetCode: order.showNo,
+      actor,
+      requestMeta,
+      detail: {
+        status: order.status,
+        supplierId: order.supplierId,
+        supplierName: order.supplierName,
+        itemCount: items.length,
+      },
+    }, manager)
 
-      return { order, items }
-    })
+    return { order, items }
   }
 
   /**

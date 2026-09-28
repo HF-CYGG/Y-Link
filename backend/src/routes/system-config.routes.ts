@@ -211,8 +211,12 @@ const STAFF_DIRECTORY_IMPORT_MAX_FILE_SIZE = 8 * 1024 * 1024
 
 const staffDirectoryImportUpload = multer({
   storage: multer.memoryStorage(),
+  // 导入只携带单个 `file` 分段，显式限制分段数量，避免超量字段拖垮 multipart 解析。
   limits: {
     fileSize: STAFF_DIRECTORY_IMPORT_MAX_FILE_SIZE,
+    files: 1,
+    fields: 4,
+    parts: 5,
   },
   fileFilter: (_req, file, cb) => {
     const normalizedExtension = path.extname(file.originalname).toLowerCase()

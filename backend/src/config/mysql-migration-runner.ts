@@ -90,6 +90,7 @@ const MYSQL_REQUIRED_TABLES = [
   'inv_stocktake_item',
   'base_product_variant_code_registry',
   'base_yz_series_seq_reservation',
+  'sys_user_mfa',
 ]
 
 /** 056 后必须物理移除的历史业务号永久占用结构。 */
@@ -137,6 +138,7 @@ const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
   inv_stocktake_item: '049_inventory_sku_barcode_stocktake.sql',
   base_product_variant_code_registry: '050_product_yz_sku_code.sql',
   base_yz_series_seq_reservation: '052_yz_series_seq_reservation.sql',
+  sys_user_mfa: '057_admin_mfa.sql',
 }
 
 interface MysqlRequiredColumn {
@@ -666,6 +668,14 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
     unique: true,
     introducingScript: '053_yz_reservation_series_code.sql',
   },
+  // 054：两步验证一人一行，缺唯一键时并发开启可能写出两条记录，登录时无法确定以哪条为准。
+  {
+    tableName: 'sys_user_mfa',
+    indexName: 'uk_sys_user_mfa_user_id',
+    columns: ['user_id'],
+    unique: true,
+    introducingScript: '057_admin_mfa.sql',
+  },
 ]
 
 const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [
@@ -746,6 +756,14 @@ const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [
     deleteRule,
     introducingScript: '050_product_yz_sku_code.sql',
   })),
+  {
+    tableName: 'sys_user_mfa',
+    columnName: 'user_id',
+    referencedTableName: 'sys_user',
+    referencedColumnName: 'id',
+    deleteRule: 'RESTRICT',
+    introducingScript: '057_admin_mfa.sql',
+  },
 ]
 
 const MYSQL_REQUIRED_TRIGGERS: readonly MysqlRequiredTrigger[] = [
@@ -804,6 +822,7 @@ const AUTO_MIGRATABLE_FILES = [
   '054_order_business_no_reuse.sql',
   '055_order_identifier_namespaces.sql',
   '056_disable_order_business_no_permanent_occupancy.sql',
+  '057_admin_mfa.sql',
 ]
 
 /**

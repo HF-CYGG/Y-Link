@@ -22,6 +22,7 @@ interface NormalizeClientAccountOptions {
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const MOBILE_PATTERN = /^1\d{10}$/
 const PERSONAL_USERNAME_PATTERN = /^[\p{Script=Han}A-Za-z]{2,20}$/u
+const VERIFICATION_EMAIL_FORBIDDEN_CHAR_PATTERN = /["\\<>\u0000-\u001F\u007F]/
 
 export const CLIENT_PERSONAL_USERNAME_RULE_MESSAGE = '用户名仅支持 2-20 位中文或英文字母，不能包含空格、数字或特殊字符'
 
@@ -124,6 +125,11 @@ export function normalizeClientVerificationTarget(channel: 'mobile' | 'email', t
   })
   if (normalizedAccount.channel !== channel) {
     throw new BizError(channel === 'email' ? '邮箱格式不正确' : '手机号格式不正确', 400)
+  }
+  // 验证码目标会被拼进第三方网关请求模板：拒绝双引号、反斜杠、尖括号与控制字符（保留合法的单引号邮箱），作为模板转义之外的第二道防线。
+  // 仅约束“发码/校验”目标，不影响历史账号使用原邮箱登录。
+  if (channel === 'email' && VERIFICATION_EMAIL_FORBIDDEN_CHAR_PATTERN.test(normalizedAccount.normalizedValue)) {
+    throw new BizError('邮箱格式不正确', 400)
   }
   return normalizedAccount.normalizedValue
 }

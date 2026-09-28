@@ -29,11 +29,16 @@ services:
       DB_IDLE_TIMEOUT_MS: ${DB_IDLE_TIMEOUT_MS:-60000}
       DB_QUEUE_LIMIT: ${DB_QUEUE_LIMIT:-100}
       DB_MAX_QUERY_MS: ${DB_MAX_QUERY_MS:-200}
+      # 外置/云 MySQL 建议 verify-full；CA 文件需另行挂载进容器后填写容器内路径。
+      DB_SSL_MODE: ${DB_SSL_MODE:-disabled}
+      DB_SSL_CA: ${DB_SSL_CA:-}
       DB_AUTO_MIGRATE: ${DB_AUTO_MIGRATE:-false}
       INIT_ADMIN_USERNAME: ${INIT_ADMIN_USERNAME:-admin}
       INIT_ADMIN_DISPLAY_NAME: ${INIT_ADMIN_DISPLAY_NAME:-系统管理员}
       INIT_ADMIN_PASSWORD: ${INIT_ADMIN_PASSWORD:?请在容器面板环境变量中手动配置 INIT_ADMIN_PASSWORD 私有强密码}
       PERMANENT_DELETE_PASSWORD: ${PERMANENT_DELETE_PASSWORD:-}
+      # JSON 全量导入导出默认关闭，仅维护窗口临时开启。
+      Y_LINK_JSON_DATA_TRANSFER_ENABLED: ${Y_LINK_JSON_DATA_TRANSFER_ENABLED:-false}
       INVITE_CODE_PEPPER: ${INVITE_CODE_PEPPER:-}
       VERIFICATION_CODE_REQUEST_TIMEOUT_MS: ${VERIFICATION_CODE_REQUEST_TIMEOUT_MS:-8000}
       ALIBABA_CLOUD_ACCESS_KEY_ID: ${ALIBABA_CLOUD_ACCESS_KEY_ID:-}
@@ -41,6 +46,9 @@ services:
       VERIFICATION_TICKET_HMAC_SECRET: ${VERIFICATION_TICKET_HMAC_SECRET:-}
       ALIYUN_DYPNS_MNS_ENABLED: ${ALIYUN_DYPNS_MNS_ENABLED:-false}
     volumes:
+      # 数据目录保存维护状态与敏感配置加密密钥（secrets/data-encryption.key），重建容器后必须保留，
+      # 否则会生成新密钥，已保存的验证码网关与飞书配置需要重新录入；备份数据库时一并备份该卷。
+      - y_link_mysql_backend_data:/app/data
       - y_link_mysql_uploads_data:/app/uploads
     extra_hosts:
       # 为 Linux / WSL 等环境补齐宿主机别名；在 Docker Desktop 下也可保持兼容。
@@ -96,6 +104,7 @@ services:
         hard: 65535
 
 volumes:
+  y_link_mysql_backend_data:
   y_link_mysql_uploads_data:
 
 # 独立网络与前端固定地址共同限定 Node 的可信代理，不信任整个 RFC1918。

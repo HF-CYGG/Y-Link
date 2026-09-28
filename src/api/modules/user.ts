@@ -163,6 +163,17 @@ export const resetUserPassword = async (id: string, payload: ResetUserPasswordPa
   return normalizeUserSafeProfile(result)
 }
 
+/**
+ * 管理员重置他人两步验证：
+ * - 用于对方丢失手机且恢复码用尽的场景，不能重置自己；
+ * - 不作废对方已有会话，重置后对方下次登录只需账号密码，应提醒其尽快重新绑定。
+ */
+export const resetUserMfa = (id: string) =>
+  request<{ reset: true }>({
+    method: 'POST',
+    url: `/users/${id}/mfa/reset`,
+  })
+
 export const getUserDeactivationPreview = (id: string) =>
   request<AccountLifecyclePreview>({ method: 'GET', url: `/users/${id}/deactivation-preview` })
 

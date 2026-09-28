@@ -412,7 +412,8 @@ async function main() {
     assert.equal(Array.from(httpSuccessAudit.userAgent ?? '').length, 255)
 
     const httpFailureDelivery = await createDelivery([{ ...(await createProduct('长UA失败商品')), qty: 1 }], true)
-    for (let index = 0; index < 7; index += 1) {
+    // 错误口令计入所有永久删除入口共享的账号级口令失败桶（5 分钟 5 次），先于本入口 8 次的请求频控触发。
+    for (let index = 0; index < 5; index += 1) {
       await expectStatus(() => fetch(`${baseUrl}/api/inbound/supplier/${httpFailureDelivery.order.id}/verified`, {
         method: 'DELETE',
         headers: writeHeaders(session, longUserAgent),
@@ -431,9 +432,9 @@ async function main() {
         resultStatus: 'failed',
       },
     })
-    assert.equal(httpFailureAudits.length, 8)
+    assert.equal(httpFailureAudits.length, 6)
     assert.ok(httpFailureAudits.every((audit) => audit.userAgent === expectedUserAgent))
-    assert.ok(httpFailureAudits.some((audit) => audit.detailJson?.includes('rate_limited')))
+    assert.ok(httpFailureAudits.some((audit) => audit.detailJson?.includes('shared_password_failures')), '由跨入口共享的口令失败桶拦截并留痕')
     assert.equal(JSON.stringify(httpFailureAudits).includes('wrong-password'), false)
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))

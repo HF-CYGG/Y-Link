@@ -22,7 +22,8 @@ export function inspectControlFile<T>(filePath: string, validate: (value: unknow
   }
 }
 
-function syncDirectory(directory: string): void {
+/** 同步目录项（新建、改名、硬链接后调用），确保崩溃重启后正式文件名仍然存在；敏感配置加密密钥文件落位同样复用。 */
+export function syncDirectory(directory: string): void {
   let fd: number | undefined
   try {
     fd = fs.openSync(directory, 'r')
