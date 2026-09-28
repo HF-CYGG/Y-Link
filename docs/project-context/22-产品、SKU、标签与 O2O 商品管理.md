@@ -36,6 +36,9 @@
   - SKU 归一化与保存
   - 默认 SKU 与产品主记录同步
   - 产品视图构建与库存聚合
+- 线上展示专用写入使用 `PATCH /api/products/:id/online-display`：仅接受 `o2oStatus`、`detailContent`、`limitPerUser` 和 `recommendation`，返回最新商品视图；不调用商品全量编辑或 SKU 替换。`recommendation.mode` 为 `all`、`selected`、`none`，必须提交打开编辑时所有当前 SKU（含停用、不含退役）的 `expectedSkuIds`；`selected.skuIds` 只允许当前启用 SKU。集合变化或推荐失效返回 409，停用商品上架也返回 409。
+- 批量上下架使用 `PATCH /api/products/online-display/batch`，提交商品 ID 与 `o2oStatus`；去重后最多 100 个商品，全部锁定和校验后在同一事务内写入，返回排序后的 `ids` 和实际变更数 `updatedCount`。任一商品无效或停用商品拟上架时整批失败。
+- 两个专用接口均要求 `products:manage`，Cookie 请求继承全局 CSRF 校验；按“操作账号 → 商品 → 当前 SKU”锁序写入，审计与业务写入同事务提交，提交后使商城目录缓存失效。价格、库存、条码、库位、图片、SKU 启停及退役状态均不在专用接口写入范围内。
 - SKU 处理重点：
   - 若未显式传 `skus`，会回退到默认规格逻辑
   - 同一产品下 `skuCode` 和 `specText` 不能重复
