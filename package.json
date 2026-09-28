@@ -18,6 +18,7 @@
     "cloud:down": "node ./scripts/run-cloud-compose-command.mjs stop",
     "build": "node ./scripts/run-frontend-build.mjs",
     "preview": "vite preview",
+    "coverage:report": "node ./scripts/run-coverage-report.mjs",
     "verify:release:functional": "node ./scripts/verify-release-functional-suite.mjs",
     "verify:release": "node ./scripts/verify-release-full-suite.mjs",
     "verify:unit:functional": "node ./scripts/verify-unit-functional-suite.mjs",

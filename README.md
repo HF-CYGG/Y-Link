@@ -530,6 +530,7 @@ docker compose --env-file .env.docker.mysql -f compose.mysql.yml up -d --force-r
 ### 环境要求
 
 - Node.js 20+
+- 覆盖率命令 `npm run coverage:report` 需要 Node.js 22.6 及以上（与 CI、Docker 镜像一致使用 Node.js 22 即可）
 - npm
 - Docker 可选，用于容器验证和 MySQL 并发验收
 
