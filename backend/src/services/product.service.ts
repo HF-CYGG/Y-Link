@@ -1029,8 +1029,8 @@ export class ProductService {
       let changedSkuIds: string[] = []
       if (recommendation) {
         const currentSkus = await this.loadCurrentSkusForUpgrade(product.id, manager, true)
-        const currentIds = currentSkus.map((sku) => String(sku.id)).sort()
-        const expectedIds = [...recommendation.expectedSkuIds].sort()
+        const currentIds = currentSkus.map((sku) => String(sku.id)).sort((left, right) => left.localeCompare(right))
+        const expectedIds = [...recommendation.expectedSkuIds].sort((left, right) => left.localeCompare(right))
         if (currentIds.length !== expectedIds.length || currentIds.some((skuId, index) => skuId !== expectedIds[index])) {
           throw new BizError('商品规格已变化，请刷新后重试', 409)
         }
