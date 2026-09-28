@@ -2825,6 +2825,34 @@ class O2oPreorderService {
     return { mergedRequestQtyMap, totalQty }
   }
 
+  /**
+   * 客户端提交预订单审计：与订单、库存流水、outbox 事件在同一事务内写入。
+   * 只在真正建单时调用，幂等重放直接返回已有订单，不重复记审计；
+   * 单独成方法并放在 outbox 事件之前，是为了让建单事务保持“库存流水 → outbox 事件 → 返回 created”的紧凑结构（通知 outbox 静态契约据此校验同事务提交）。
+   */
+  private async recordPreorderSubmitAudit(
+    manager: EntityManager,
+    auth: ClientAuthContext,
+    order: O2oPreorder,
+    requestMeta: RequestMeta | undefined,
+    detail: { clientOrderType: O2oClientOrderType; totalQty: number; itemCount: number; isSystemApplied: boolean },
+  ) {
+    await auditService.record({
+      actionType: 'o2o.preorder.submit',
+      actionLabel: '客户端提交预订单',
+      targetType: 'o2o_order',
+      targetId: String(order.id),
+      targetCode: order.showNo,
+      actor: {
+        userId: auth.userId,
+        username: auth.account || auth.mobile || auth.email,
+        displayName: auth.realName || auth.account,
+      },
+      requestMeta,
+      detail,
+    }, manager)
+  }
+
   async submit(auth: ClientAuthContext, input: SubmitPreorderInput, requestMeta?: RequestMeta) {
     const normalizedItems = this.normalizePreorderItems(input.items)
     const normalizedRemark = this.normalizePreorderRemark(input.remark)
@@ -2978,6 +3006,13 @@ class O2oPreorderService {
         await manager.getRepository(BaseProductSku).save([...skuMap.values()])
         await manager.getRepository(BaseProduct).save([...productMap.values()])
         await inventoryLogRepo.save(inventoryLogs)
+        // 只在真正建单时留痕，幂等重放直接返回已有订单，不重复记审计。
+        await this.recordPreorderSubmitAudit(manager, auth, savedOrder, requestMeta, {
+          clientOrderType: normalizedClientOrderType,
+          totalQty,
+          itemCount: canonicalItems.length,
+          isSystemApplied: normalizedIsSystemApplied,
+        })
         await notificationService.emitEvent({
           eventType: 'o2o_preorder_created',
           sourceType: 'o2o_preorder',
@@ -2986,26 +3021,6 @@ class O2oPreorderService {
             showNo: savedOrder.showNo,
             sourceUserId: auth.userId,
             sourceUserDisplayName: auth.realName || auth.account,
-          },
-        }, manager)
-        // 只在真正建单时留痕，幂等重放直接返回已有订单，不重复记审计。
-        await auditService.record({
-          actionType: 'o2o.preorder.submit',
-          actionLabel: '客户端提交预订单',
-          targetType: 'o2o_order',
-          targetId: String(savedOrder.id),
-          targetCode: savedOrder.showNo,
-          actor: {
-            userId: auth.userId,
-            username: auth.account || auth.mobile || auth.email,
-            displayName: auth.realName || auth.account,
-          },
-          requestMeta,
-          detail: {
-            clientOrderType: normalizedClientOrderType,
-            totalQty,
-            itemCount: canonicalItems.length,
-            isSystemApplied: normalizedIsSystemApplied,
           },
         }, manager)
         return { orderId: String(savedOrder.id), created: true }
