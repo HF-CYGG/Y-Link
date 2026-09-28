@@ -20,6 +20,7 @@ import {
   assertAdminPasswordPolicy,
   hashPassword,
   verifyPassword,
+  verifyPasswordDetailed,
   verifyPasswordForNonexistentAccount,
 } from '../utils/password.js'
 import { hashSessionToken } from '../utils/session-token.js'
@@ -185,8 +186,8 @@ export class AuthService {
       throw new BizError('账号或密码错误', 401)
     }
 
-    const passwordMatched = await verifyPassword(password, user.passwordHash)
-    if (!passwordMatched) {
+    const passwordVerification = await verifyPasswordDetailed(password, user.passwordHash)
+    if (!passwordVerification.matched) {
       await authSecurityService.recordAdminLoginFailure(requestMeta, user.username)
       await auditService.safeRecord({
         actionType: 'auth.login',
@@ -232,6 +233,8 @@ export class AuthService {
     const expiresAt = new Date(now.getTime() + env.AUTH_TOKEN_TTL_HOURS * 60 * 60 * 1000)
     const token = generateSessionToken()
     const securitySnapshot = this.buildLoginSecuritySnapshot(user)
+    // 旧参数哈希透明升级：新哈希在事务外算好（CPU 密集），事务内确认安全快照未变后随会话一并写入。
+    const upgradedPasswordHash = passwordVerification.needsRehash ? await hashPassword(password) : null
 
     const data = await runInTransaction(async (manager) => {
       const sessionRepo = manager.getRepository(SysUserSession)
@@ -249,6 +252,9 @@ export class AuthService {
       })
 
       lockedUser.lastLoginAt = now
+      if (upgradedPasswordHash) {
+        lockedUser.passwordHash = upgradedPasswordHash
+      }
       const savedUser = await userRepo.save(lockedUser)
       const session = await sessionRepo.save(
         sessionRepo.create({
@@ -275,6 +281,7 @@ export class AuthService {
           detail: {
             sessionId: session.id,
             expiresAt: expiresAt.toISOString(),
+            passwordHashUpgraded: Boolean(upgradedPasswordHash),
           },
         },
         manager,

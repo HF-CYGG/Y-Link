@@ -29,6 +29,7 @@ import {
   assertClientPasswordPolicy,
   hashPassword,
   verifyPassword,
+  verifyPasswordDetailed,
   verifyPasswordForNonexistentAccount,
 } from '../utils/password.js'
 import { hashSessionToken } from '../utils/session-token.js'
@@ -928,8 +929,8 @@ class ClientAuthService {
         : '用户名或密码错误'
       throw new BizError(loginErrorMessage, 401)
     }
-    const matched = await verifyPassword(password, user.passwordHash)
-    if (!matched) {
+    const passwordVerification = await verifyPasswordDetailed(password, user.passwordHash)
+    if (!passwordVerification.matched) {
       const loginFailureResult = await authSecurityService.recordClientLoginFailure(requestMeta, riskSubject)
       await auditService.safeRecord({
         actionType: 'client.auth.login',
@@ -959,8 +960,34 @@ class ClientAuthService {
       })
       throw new BizError('当前账号已停用', 403)
     }
+    if (passwordVerification.needsRehash) {
+      await this.upgradePasswordHashIfUnchanged(user, password)
+    }
     await authSecurityService.clearClientLoginFailures(requestMeta, riskSubject)
     return user
+  }
+
+  /**
+   * 旧参数哈希在登录成功后透明升级（Web 与 Mobile 共用本入口）：
+   * - 以“哈希仍等于读取时的旧值”为条件更新，并发改密或重置不会被旧密码覆盖；
+   * - 升级失败（如维护只读期）保持旧哈希，下次登录再试，不影响本次登录。
+   */
+  private async upgradePasswordHashIfUnchanged(user: ClientUser, password: string) {
+    try {
+      const upgradedPasswordHash = await hashPassword(password)
+      const result = await this.userRepo
+        .createQueryBuilder()
+        .update(ClientUser)
+        .set({ passwordHash: upgradedPasswordHash })
+        .where('id = :id AND password_hash = :previousPasswordHash', { id: user.id, previousPasswordHash: user.passwordHash })
+        .execute()
+      if (result.affected !== 0) {
+        // 随后的会话签发会在事务内复核安全快照，这里同步内存中的哈希，避免把刚升级的哈希误判为“密码已被修改”。
+        user.passwordHash = upgradedPasswordHash
+      }
+    } catch {
+      // 保持旧哈希即可，校验逻辑兼容旧格式。
+    }
   }
 
   async login(input: ClientLoginInput, requestMeta?: RequestMeta, captchaRequired = false) {

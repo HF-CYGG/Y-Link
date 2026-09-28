@@ -1,16 +1,76 @@
 /**
  * 文件说明：密码工具文件，统一维护客户端与管理端密码策略、强度校验、哈希生成和密码比对能力。
  * 实现逻辑：集中定义密码长度与复杂度规则，并基于安全哈希算法提供无状态的加密与校验实现。
- * 维护重点：调整密码策略或哈希参数时，需要同步核对注册、改密、找回密码和后台登录等所有入口。
+ * 维护重点：调整密码策略或哈希参数时，需要同步核对注册、改密、找回密码和后台登录等所有入口；
+ *   哈希参数随哈希一起保存，旧哈希在登录成功时透明升级，调参无需一次性迁移全部账号。
  */
 
 import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto'
-import { promisify } from 'node:util'
 import { BizError } from './errors.js'
 
-const scrypt = promisify(scryptCallback)
 const PASSWORD_SALT_BYTES = 16
 const PASSWORD_KEY_LENGTH = 64
+
+interface ScryptParams {
+  N: number
+  r: number
+  p: number
+}
+
+/** 历史格式 `salt:hash` 使用 Node 默认参数（N=2^14、r=8、p=1），约为 OWASP 基线的 1/5。 */
+const LEGACY_SCRYPT_PARAMS: ScryptParams = { N: 16384, r: 8, p: 1 }
+/**
+ * 当前参数：OWASP 密码存储速查表给出的等价组合之一（N=2^14、r=8、p=5）。
+ * 与 N=2^17/p=1 同等强度，但单次只占约 16 MiB 内存，并发登录时不易把内存打满；单次耗时仍远低于 1 秒。
+ */
+const CURRENT_SCRYPT_PARAMS: ScryptParams = { N: 16384, r: 8, p: 5 }
+/** 旧格式校验时补做的等量计算（p=1 + p=4 ≈ p=5），让未升级账号与新格式、账号不存在时的登录耗时一致。 */
+const LEGACY_TIMING_PAD_PARAMS: ScryptParams = { N: 16384, r: 8, p: 4 }
+const LEGACY_TIMING_PAD_SALT = 'y-link-legacy-scrypt-timing-pad'
+const CURRENT_HASH_PREFIX = 's2'
+const SCRYPT_MAXMEM = 64 * 1024 * 1024
+
+const deriveScryptKey = (plainPassword: string, salt: string, params: ScryptParams): Promise<Buffer> => (
+  new Promise((resolve, reject) => {
+    scryptCallback(
+      plainPassword,
+      salt,
+      PASSWORD_KEY_LENGTH,
+      { N: params.N, r: params.r, p: params.p, maxmem: SCRYPT_MAXMEM },
+      (error, derivedKey) => (error ? reject(error) : resolve(derivedKey)),
+    )
+  })
+)
+
+type ParsedPasswordHash =
+  | { format: 'current'; params: ScryptParams; salt: string; hash: Buffer }
+  | { format: 'legacy'; salt: string; hash: Buffer }
+
+/**
+ * 解析持久化哈希：
+ * - 新格式 `s2$N$r$p$salt$hash`，参数随哈希保存，后续调参无需一次性迁移；
+ * - 参数必须落在安全区间内（N 为 2 的幂且不超过 2^20），防止导入的畸形哈希制造超大计算量；
+ * - 无法识别时返回 null，校验按不匹配处理。
+ */
+function parsePasswordHash(persistedPasswordHash: string): ParsedPasswordHash | null {
+  if (persistedPasswordHash.startsWith(`${CURRENT_HASH_PREFIX}$`)) {
+    const [, rawN, rawR, rawP, salt, hash] = persistedPasswordHash.split('$')
+    const params = { N: Number(rawN), r: Number(rawR), p: Number(rawP) }
+    const validParams = Number.isInteger(params.N) && params.N >= 1024 && params.N <= 1_048_576 && (params.N & (params.N - 1)) === 0
+      && Number.isInteger(params.r) && params.r >= 1 && params.r <= 32
+      && Number.isInteger(params.p) && params.p >= 1 && params.p <= 16
+    if (!validParams || !salt || !hash) return null
+    return { format: 'current', params, salt, hash: Buffer.from(hash, 'hex') }
+  }
+  const [salt, storedHash] = persistedPasswordHash.split(':')
+  if (!salt || !storedHash) return null
+  return { format: 'legacy', salt, hash: Buffer.from(storedHash, 'hex') }
+}
+
+const isWeakerThanCurrent = (params: ScryptParams) => (
+  params.N * params.r * params.p < CURRENT_SCRYPT_PARAMS.N * CURRENT_SCRYPT_PARAMS.r * CURRENT_SCRYPT_PARAMS.p
+  || params.N < CURRENT_SCRYPT_PARAMS.N
+)
 export const CLIENT_PASSWORD_POLICY_MIN_LENGTH = 8
 export const ADMIN_PASSWORD_POLICY_MIN_LENGTH = 8
 
@@ -83,14 +143,15 @@ export function assertAdminPasswordPolicy(plainPassword: string, fieldLabel = '�
 
 /**
  * 生成密码哈希：
- * - 使用 Node.js 原生 scrypt，避免额外引入第三方依赖；
- * - 以 `salt:hash` 格式持久化，便于后续统一校验。
+ * - 使用 Node.js 原生 scrypt（生产镜像固定 Node 22，原生 Argon2 需 Node 24.19+，暂不可用），不引入第三方依赖；
+ * - 以 `s2$N$r$p$salt$hash` 格式持久化，参数随哈希保存。
  */
 export async function hashPassword(plainPassword: string): Promise<string> {
   const normalizedPassword = normalizePassword(plainPassword)
   const salt = randomBytes(PASSWORD_SALT_BYTES).toString('hex')
-  const derivedKey = (await scrypt(normalizedPassword, salt, PASSWORD_KEY_LENGTH)) as Buffer
-  return `${salt}:${derivedKey.toString('hex')}`
+  const { N, r, p } = CURRENT_SCRYPT_PARAMS
+  const derivedKey = await deriveScryptKey(normalizedPassword, salt, CURRENT_SCRYPT_PARAMS)
+  return `${CURRENT_HASH_PREFIX}$${N}$${r}$${p}$${salt}$${derivedKey.toString('hex')}`
 }
 
 // 不存在账号也执行同等 scrypt 工作量，减少按登录耗时枚举账号的信号。
@@ -102,23 +163,31 @@ export async function verifyPasswordForNonexistentAccount(plainPassword: string)
 }
 
 /**
- * 校验密码是否匹配：
+ * 校验密码并告知是否需要升级哈希：
  * - 使用 timingSafeEqual 避免因字符串比较短路引入时序侧信道；
- * - 若历史数据格式异常，直接返回 false，避免抛出底层异常影响登录接口稳定性。
+ * - 旧格式校验后补做等量计算，保持与新格式一致的耗时；匹配成功时 needsRehash=true，由登录流程透明升级；
+ * - 历史数据格式异常时直接返回不匹配，避免抛出底层异常影响登录接口稳定性。
  */
-export async function verifyPassword(plainPassword: string, persistedPasswordHash: string): Promise<boolean> {
-  const [salt, storedHash] = persistedPasswordHash.split(':')
-  if (!salt || !storedHash) {
-    return false
+export async function verifyPasswordDetailed(
+  plainPassword: string,
+  persistedPasswordHash: string,
+): Promise<{ matched: boolean; needsRehash: boolean }> {
+  const parsed = parsePasswordHash(persistedPasswordHash)
+  if (!parsed) {
+    return { matched: false, needsRehash: false }
   }
-
   const normalizedPassword = normalizePassword(plainPassword)
-  const derivedKey = (await scrypt(normalizedPassword, salt, PASSWORD_KEY_LENGTH)) as Buffer
-  const storedBuffer = Buffer.from(storedHash, 'hex')
-
-  if (storedBuffer.length !== derivedKey.length) {
-    return false
+  if (parsed.format === 'legacy') {
+    const derivedKey = await deriveScryptKey(normalizedPassword, parsed.salt, LEGACY_SCRYPT_PARAMS)
+    await deriveScryptKey(normalizedPassword, LEGACY_TIMING_PAD_SALT, LEGACY_TIMING_PAD_PARAMS)
+    const matched = parsed.hash.length === derivedKey.length && timingSafeEqual(parsed.hash, derivedKey)
+    return { matched, needsRehash: matched }
   }
+  const derivedKey = await deriveScryptKey(normalizedPassword, parsed.salt, parsed.params)
+  const matched = parsed.hash.length === derivedKey.length && timingSafeEqual(parsed.hash, derivedKey)
+  return { matched, needsRehash: matched && isWeakerThanCurrent(parsed.params) }
+}
 
-  return timingSafeEqual(storedBuffer, derivedKey)
+export async function verifyPassword(plainPassword: string, persistedPasswordHash: string): Promise<boolean> {
+  return (await verifyPasswordDetailed(plainPassword, persistedPasswordHash)).matched
 }
