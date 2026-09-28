@@ -2,6 +2,10 @@ import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, Update
 import { entityColumnOptions } from './entity-column-options.js'
 import { createSealedColumnTransformer } from '../utils/data-encryption.js'
 
+/** 飞书配置列的加密上下文（AAD），服务层读取原始密文判断能否解密时必须使用同一值。 */
+export const FEISHU_WEBHOOK_SEAL_CONTEXT = 'notification_rule.feishu_webhook_url'
+export const FEISHU_SIGN_SECRET_SEAL_CONTEXT = 'notification_rule.feishu_sign_secret'
+
 export const NOTIFICATION_EXTERNAL_TRIGGER_MODES = [
   'all_management_offline',
   'watched_accounts_offline',
@@ -55,7 +59,7 @@ export class NotificationRule {
     length: 500,
     nullable: true,
     comment: '飞书群机器人 Webhook 地址',
-    transformer: createSealedColumnTransformer('notification_rule.feishu_webhook_url'),
+    transformer: createSealedColumnTransformer(FEISHU_WEBHOOK_SEAL_CONTEXT),
   })
   feishuWebhookUrl!: string | null
 
@@ -65,7 +69,7 @@ export class NotificationRule {
     length: 256,
     nullable: true,
     comment: '飞书群机器人签名密钥',
-    transformer: createSealedColumnTransformer('notification_rule.feishu_sign_secret'),
+    transformer: createSealedColumnTransformer(FEISHU_SIGN_SECRET_SEAL_CONTEXT),
   })
   feishuSignSecret!: string | null
 

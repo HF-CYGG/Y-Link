@@ -106,7 +106,7 @@ async function loadModules() {
   const { authSecurityService } = await import('../src/services/auth-security.service.js')
   const { persistentRiskStateService } = await import('../src/services/persistent-risk-state.service.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
-  const { notificationService } = await import('../src/services/notification.service.js')
+  const { notificationService, FEISHU_SIGN_SECRET_PLACEHOLDER } = await import('../src/services/notification.service.js')
   const { userService } = await import('../src/services/user.service.js')
   const { clientAuthService } = await import('../src/services/client-auth.service.js')
   const { clientUserManageService } = await import('../src/services/client-user-manage.service.js')
@@ -144,6 +144,7 @@ async function loadModules() {
     persistentRiskStateService,
     systemConfigService,
     notificationService,
+    FEISHU_SIGN_SECRET_PLACEHOLDER,
     userService,
     clientAuthService,
     clientUserManageService,
@@ -874,6 +875,9 @@ async function verifySensitiveConfigEncryption() {
   const rawRule = (await m.AppDataSource.query('SELECT feishu_webhook_url AS webhook, feishu_sign_secret AS secret FROM notification_rule WHERE id = ?', [targetRule.id]) as Array<{ webhook: string; secret: string }>)[0]
   assert.ok(rawRule.webhook.startsWith('ylenc:v1:') && rawRule.secret.startsWith('ylenc:v1:'), '飞书配置库内必须是密文')
   const ruleRepo = m.AppDataSource.getRepository(m.NotificationRule)
+  const readRawRuleSecrets = async (ruleId: unknown) => (
+    await m.AppDataSource.query('SELECT feishu_webhook_url AS webhook, feishu_sign_secret AS secret FROM notification_rule WHERE id = ?', [ruleId]) as Array<{ webhook: string; secret: string }>
+  )[0]
   const entity = await ruleRepo.findOneByOrFail({ id: String(targetRule.id) })
   assert.equal(entity.feishuWebhookUrl, FEISHU_WEBHOOK)
   assert.equal(entity.feishuSignSecret, 'FEISHU-SIGN-SECRET-abc')
@@ -890,11 +894,48 @@ async function verifySensitiveConfigEncryption() {
     assert.equal(degraded.mobile.ready, false)
     assert.match(degraded.mobile.statusError ?? '', /无法解密/)
     assert.equal((await ruleRepo.findOneByOrFail({ id: String(targetRule.id) })).feishuWebhookUrl, '', '无法解密的飞书地址按未配置处理')
+
+    // 密钥异常期间保存其它字段：未重新填写的飞书密文与验证码网关密文必须原样保留，不能被读出的空值覆盖。
+    const rawRuleBefore = await readRawRuleSecrets(targetRule.id)
+    const unrelatedSave = await call('PUT', '/api/notifications/rules', {
+      session,
+      body: { ...rulePayload, rules: [{ ...rulePayload.rules[0], feishuEnabled: false, feishuWebhookUrl: '', feishuSignSecret: '', emailSubjectPrefix: '[Y-Link-密钥异常]' }] },
+    })
+    assert.equal(unrelatedSave.status, 200, unrelatedSave.text)
+    assert.deepEqual(await readRawRuleSecrets(targetRule.id), rawRuleBefore, '无法解密的飞书密文未重录时保留原密文')
+    const enableWithoutWebhook = await call('PUT', '/api/notifications/rules', {
+      session,
+      body: { ...rulePayload, rules: [{ ...rulePayload.rules[0], feishuWebhookUrl: '', feishuSignSecret: '' }] },
+    })
+    assert.equal(enableWithoutWebhook.status, 409, '启用飞书但 Webhook 无法解密且未重录时明确拒绝')
+
+    const sensitiveKeys = ['verification.mobile.api_url', 'verification.mobile.headers_template', 'verification.mobile.body_template', 'verification.email.api_url']
+    const rawProvidersBefore = await Promise.all(sensitiveKeys.map(async (key) => (await readRaw(key)).value))
+    const emptyChannel = { enabled: false, httpMethod: 'POST', apiUrl: '', headersTemplate: '', bodyTemplate: '', successMatch: '' }
+    const providerSave = await call('PUT', '/api/system-configs/verification-providers', {
+      session,
+      body: { mobile: { ...emptyChannel, providerType: 'generic_http' }, email: emptyChannel },
+    })
+    assert.equal(providerSave.status, 200, providerSave.text)
+    assert.deepEqual(await Promise.all(sensitiveKeys.map(async (key) => (await readRaw(key)).value)), rawProvidersBefore, '无法解密的验证码网关密文未重录也未显式清空时保留原密文')
   } finally {
     delete process.env.Y_LINK_DATA_ENCRYPTION_KEY
     m.encryption.resetDataEncryptionKeyCacheForTesting()
   }
-  assert.equal((await m.systemConfigService.getVerificationProviderConfigs({ maskSensitiveValues: false })).mobile.ready, true, '恢复原密钥后正常解密')
+  // 上一步为模拟“只改无关字段”关闭了短信通道与飞书外发，这里恢复，便于后续断言。
+  await m.AppDataSource.query("UPDATE system_configs SET config_value = '1' WHERE config_key = 'verification.mobile.enabled'")
+  // 前端对未修改的签名密钥回传占位符、Webhook 回传空串，服务端据此保留库内原值。
+  const restoredRule = await call('PUT', '/api/notifications/rules', {
+    session,
+    body: { ...rulePayload, rules: [{ ...rulePayload.rules[0], feishuWebhookUrl: '', feishuSignSecret: m.FEISHU_SIGN_SECRET_PLACEHOLDER }] },
+  })
+  assert.equal(restoredRule.status, 200, restoredRule.text)
+  const restoredEntity = await ruleRepo.findOneByOrFail({ id: String(targetRule.id) })
+  assert.equal(restoredEntity.feishuWebhookUrl, FEISHU_WEBHOOK, '恢复原密钥后保留下来的飞书 Webhook 可继续使用')
+  assert.equal(restoredEntity.feishuSignSecret, LEGACY_PLAINTEXTS[1])
+  const restoredProviders = await m.systemConfigService.getVerificationProviderConfigs({ maskSensitiveValues: false })
+  assert.equal(restoredProviders.mobile.apiUrl, providerPayload.mobile.apiUrl, '恢复原密钥后保留下来的网关配置可继续使用')
+  assert.equal(restoredProviders.mobile.ready, true, '恢复原密钥后正常解密')
 
   const tooLong = await call('PUT', '/api/notifications/rules', {
     session,

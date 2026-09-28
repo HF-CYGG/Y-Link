@@ -5,6 +5,8 @@ import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { databaseOperationGate } from '../database/operation-gate.js'
 import {
+  FEISHU_SIGN_SECRET_SEAL_CONTEXT,
+  FEISHU_WEBHOOK_SEAL_CONTEXT,
   NotificationRule,
   NOTIFICATION_EXTERNAL_TRIGGER_MODES,
   type NotificationExternalTriggerMode,
@@ -21,7 +23,7 @@ import { SysUserSession } from '../entities/sys-user-session.entity.js'
 import { SystemConfig } from '../entities/system-config.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
-import { isSealedSensitiveValue, sealSensitiveValue } from '../utils/data-encryption.js'
+import { isSealedSensitiveValue, openSensitiveValue, sealSensitiveValue } from '../utils/data-encryption.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { detectUnsafeHost, formatUnsafeHostReason } from '../utils/safe-network.js'
 import { hashSessionToken } from '../utils/session-token.js'
@@ -433,8 +435,8 @@ export class NotificationService {
         return sealed
       }
       for (const row of rows) {
-        const nextWebhookUrl = sealIfNeeded('notification_rule.feishu_webhook_url', row.webhookUrl, 500)
-        const nextSignSecret = sealIfNeeded('notification_rule.feishu_sign_secret', row.signSecret, 256)
+        const nextWebhookUrl = sealIfNeeded(FEISHU_WEBHOOK_SEAL_CONTEXT, row.webhookUrl, 500)
+        const nextSignSecret = sealIfNeeded(FEISHU_SIGN_SECRET_SEAL_CONTEXT, row.signSecret, 256)
         if (!nextWebhookUrl && !nextSignSecret) continue
         await manager.query(
           'UPDATE notification_rule SET feishu_webhook_url = ?, feishu_sign_secret = ? WHERE id = ?',
@@ -589,6 +591,27 @@ export class NotificationService {
     }
   }
 
+  /**
+   * 读取库内原始密文（绕过列转换器），找出无法用当前数据加密密钥解密的飞书配置。
+   * 转换器会把这类密文读成空值；保存时若据此覆盖，恢复正确密钥后原配置也无法找回。
+   */
+  private async readUnreadableFeishuSecrets(manager: EntityManager): Promise<Map<string, { webhook: boolean; signSecret: boolean }>> {
+    const rawRows = await manager.getRepository(NotificationRule).createQueryBuilder('rule')
+      .select('rule.id', 'id')
+      .addSelect('rule.feishu_webhook_url', 'webhook')
+      .addSelect('rule.feishu_sign_secret', 'signSecret')
+      .getRawMany<{ id: string | number; webhook: string | null; signSecret: string | null }>()
+    const result = new Map<string, { webhook: boolean; signSecret: boolean }>()
+    for (const raw of rawRows) {
+      const webhook = openSensitiveValue(FEISHU_WEBHOOK_SEAL_CONTEXT, raw.webhook).state === 'unreadable'
+      const signSecret = openSensitiveValue(FEISHU_SIGN_SECRET_SEAL_CONTEXT, raw.signSecret).state === 'unreadable'
+      if (webhook || signSecret) {
+        result.set(normalizeId(raw.id), { webhook, signSecret })
+      }
+    }
+    return result
+  }
+
   async updateRules(
     input: UpdateNotificationRuleInput[],
     offlineWindowSeconds: number,
@@ -612,6 +635,8 @@ export class NotificationService {
       const rows = await txRuleRepo.find()
       const rowById = new Map(rows.map((item) => [normalizeId(item.id), item]))
       const rowByCode = new Map(rows.map((item) => [item.ruleCode, item]))
+      const unreadableSecretsById = await this.readUnreadableFeishuSecrets(manager)
+      const explicitSecretInputById = new Map<string, { webhook: boolean; signSecret: boolean }>()
       const normalizedById = new Map<string, UpdateNotificationRuleInput>()
       for (const row of input) {
         const normalizedId = normalizeId(row.id)
@@ -620,6 +645,15 @@ export class NotificationService {
         if (!persistedRule) {
           throw new BizError('通知规则不存在', 404)
         }
+        const unreadable = unreadableSecretsById.get(normalizeId(persistedRule.id))
+        if (unreadable?.webhook && row.feishuEnabled && !row.feishuWebhookUrl.trim()) {
+          throw new BizError('已保存的飞书 Webhook 无法用当前数据加密密钥解密，请检查密钥或重新填写 Webhook 后再启用', 409)
+        }
+        const rawSignSecretInput = row.feishuSignSecret.trim()
+        explicitSecretInputById.set(normalizeId(persistedRule.id), {
+          webhook: Boolean(row.clearFeishuWebhook) || Boolean(row.feishuWebhookUrl.trim()),
+          signSecret: Boolean(rawSignSecretInput) && rawSignSecretInput !== FEISHU_SIGN_SECRET_PLACEHOLDER,
+        })
         const normalized = this.normalizeRuleDraft(row, persistedRule)
         normalizedById.set(normalizeId(persistedRule.id), {
           id: normalizeId(persistedRule.id),
@@ -657,6 +691,11 @@ export class NotificationService {
         const nextFeishuWebhookUrl = payload.feishuWebhookUrl || null
         const nextFeishuSignSecret = normalizeFeishuSignSecretInput(payload.feishuSignSecret)
         const nextEmailPrefix = payload.emailSubjectPrefix || '[Y-Link]'
+        // 库内密文无法用当前密钥解密时读出为空：未显式重录或清空的敏感列不写入，保留原密文，恢复正确密钥后即可继续使用。
+        const unreadable = unreadableSecretsById.get(normalizeId(row.id))
+        const explicit = explicitSecretInputById.get(normalizeId(row.id))
+        const preserveWebhookCipher = Boolean(unreadable?.webhook) && !explicit?.webhook
+        const preserveSignSecretCipher = Boolean(unreadable?.signSecret) && !explicit?.signSecret
         const isChanged = row.enabled !== (payload.enabled ? 1 : 0)
           || row.emailRecipientAdminUserIdsJson !== nextEmailAdminRecipientJson
           || row.emailRecipientSupplierUserIdsJson !== nextEmailSupplierRecipientJson
@@ -665,8 +704,8 @@ export class NotificationService {
           || row.externalTriggerMode !== payload.externalTriggerMode
           || row.recipientUserIdsJson !== nextRecipientJson
           || row.watchedUserIdsJson !== nextWatchedJson
-          || (row.feishuWebhookUrl ?? '') !== (nextFeishuWebhookUrl ?? '')
-          || (row.feishuSignSecret ?? '') !== (nextFeishuSignSecret ?? '')
+          || (!preserveWebhookCipher && (row.feishuWebhookUrl ?? '') !== (nextFeishuWebhookUrl ?? ''))
+          || (!preserveSignSecretCipher && (row.feishuSignSecret ?? '') !== (nextFeishuSignSecret ?? ''))
           || row.emailSubjectPrefix !== nextEmailPrefix
         if (!isChanged) {
           continue
@@ -683,8 +722,8 @@ export class NotificationService {
             externalTriggerMode: payload.externalTriggerMode,
             recipientUserIdsJson: nextRecipientJson,
             watchedUserIdsJson: nextWatchedJson,
-            feishuWebhookUrl: nextFeishuWebhookUrl,
-            feishuSignSecret: nextFeishuSignSecret,
+            ...(preserveWebhookCipher ? {} : { feishuWebhookUrl: nextFeishuWebhookUrl }),
+            ...(preserveSignSecretCipher ? {} : { feishuSignSecret: nextFeishuSignSecret }),
             emailSubjectPrefix: nextEmailPrefix,
           },
         )

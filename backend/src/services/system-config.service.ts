@@ -2729,6 +2729,13 @@ class SystemConfigService {
       }
       const normalizedMobile = this.normalizeVerificationProviderInput('mobile', input.mobile, before.mobile)
       const normalizedEmail = this.normalizeVerificationProviderInput('email', input.email, before.email)
+      // 管理员显式勾选“清空”的敏感项；其余敏感项在库内密文无法解密时，空提交不得覆盖原密文。
+      const explicitlyClearedKeys = new Set<string>()
+      for (const [channelType, channel] of [['mobile', input.mobile], ['email', input.email]] as const) {
+        if (channel.clearApiUrl) explicitlyClearedKeys.add(`verification.${channelType}.api_url`)
+        if (channel.clearHeadersTemplate) explicitlyClearedKeys.add(`verification.${channelType}.headers_template`)
+        if (channel.clearBodyTemplate) explicitlyClearedKeys.add(`verification.${channelType}.body_template`)
+      }
 
       const targetMap = new Map<string, string>([
         ['verification.mobile.enabled', normalizedMobile.enabled ? '1' : '0'],
@@ -2760,10 +2767,14 @@ class SystemConfigService {
           continue
         }
         if (SENSITIVE_VERIFICATION_CONFIG_KEYS.has(row.configKey)) {
-          // 敏感项按明文比对是否变化，落库一律写密文；历史明文顺带补加密，无法解密的旧密文按本次提交值覆盖。
+          // 敏感项按明文比对是否变化，落库一律写密文；历史明文顺带补加密，无法解密的旧密文只在重新填写或显式清空时覆盖。
           const context = resolveSensitiveConfigContext(row.configKey)
           const opened = openSensitiveValue(context, row.configValue)
           if ((opened.state === 'sealed' || opened.state === 'empty') && targetValue === opened.value) {
+            continue
+          }
+          // 密钥暂时缺失或配置错误时密文读出为空：未重新填写也未显式清空就保留原密文，恢复正确密钥后即可继续使用。
+          if (opened.state === 'unreadable' && !targetValue && !explicitlyClearedKeys.has(row.configKey)) {
             continue
           }
           await repo.update({ id: row.id }, { configValue: sealSensitiveValue(context, targetValue) })
