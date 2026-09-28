@@ -43,6 +43,7 @@
 - 管理端会话除 `AUTH_TOKEN_TTL_HOURS` 绝对时效外，还有 `AUTH_SESSION_IDLE_TIMEOUT_MINUTES` 空闲超时（默认 720 分钟，0 关闭）：按 `lastAccessAt` 判定，HTTP 鉴权与客服 SSE 复核共用 `utils/admin-session-idle.ts`。标签页可见时每 60 秒心跳续期，隐藏或关闭超过时长后需重新登录。
 - body-parser 解析错误（畸形 JSON、超限、编码不支持等）在 `error-handler.ts` 按 4xx 返回；兜底 500 与审计写入失败日志只记录名称/消息/堆栈或驱动错误码（`utils/safe-error-log.ts`），不得展开错误对象属性，避免原始请求体中的密码进入日志。通知外发 Worker、反馈附件清理、迁移续跑等后台任务的错误日志同样走该工具（SQL 参数可能带通知正文、客户姓名或目标库连接信息）。
 - 登录失败锁定与“需要图形验证码”判定按规范账号主体计数：管理端用库中真实用户名（`authService.resolveLoginRiskSubject`），客户端 Web/Mobile 用 `uid:<用户ID>`（`clientAuthService.resolveLoginRiskSubject`），账号不存在时才退回输入原文。MySQL 常用排序规则大小写、重音、全角不敏感，按输入计数会让 `Ádmin`、全角 `ａｄｍｉｎ` 各得一份失败额度；客户端同一账号的手机号、邮箱、用户名、工号也必须共用一个桶。
+- 全局撞库态势（`GlobalLoginFailureMonitor`，阈值见 `config/load-protection-policy.ts`）：分布式撞库时单个来源、单个账号都可能低于各自阈值，因此按端在进程内统计 5 分钟全站登录失败数（含会话内密码复核失败）。管理端达到 30 次、客户端（Web 与 Mobile 共用）达到 150 次后，该端所有登录强制图形验证码 15 分钟，持续失败会顺延；进入该状态时只写一次 `auth.guard.global_captcha`。阈值可用 `YLINK_ADMIN_GLOBAL_FAILURE_THRESHOLD`、`YLINK_CLIENT_GLOBAL_FAILURE_THRESHOLD`、`YLINK_GLOBAL_CAPTCHA_HOLD_MINUTES` 调整，非法值启动即报错。多实例部署各实例独立计数。前端沿用既有“需要验证码”响应（管理端 428、客户端“请输入图形验证码”）自动显示验证码，无需改动。
 
 ## 代理、HTTPS 与救援传输边界
 

@@ -13,6 +13,7 @@ import { BizError } from '../utils/errors.js'
 import { auditService, type CreateAuditLogInput } from './audit.service.js'
 import { persistentRiskStateService, type PersistentFailureState } from './persistent-risk-state.service.js'
 import { describeClientRiskSubjectForAudit, maskLoginInputForAudit } from '../utils/audit-subject-mask.js'
+import { GLOBAL_LOGIN_FAILURE_POLICY } from '../config/load-protection-policy.js'
 
 /** 管理端登录风控主体：`resolved` 为 false 表示账号不存在、subject 是输入原文，写审计前必须脱敏。 */
 export interface ResolvedLoginRiskSubject {
@@ -242,6 +243,42 @@ const FAILURE_RESET_WINDOW_MS = {
   'client-login': 15 * 60 * 1000,
 } as const satisfies Record<FailureScope, number>
 
+/**
+ * 全局登录失败态势（进程内）：分布式撞库时单个 IP、单个账号都可能低于阈值，
+ * 这里按端统计 5 分钟内全站失败次数，超过阈值后该端所有登录强制图形验证码一段时间（分级响应）。
+ * 多实例部署时各实例独立判断，任一实例触发即对打到该实例的请求生效。
+ */
+class GlobalLoginFailureMonitor {
+  private readonly failureTimes: Record<FailureScope, number[]> = { 'admin-login': [], 'client-login': [] }
+  private readonly forcedCaptchaUntil: Record<FailureScope, number> = { 'admin-login': 0, 'client-login': 0 }
+
+  private threshold(scope: FailureScope) {
+    return scope === 'admin-login' ? GLOBAL_LOGIN_FAILURE_POLICY.adminThreshold : GLOBAL_LOGIN_FAILURE_POLICY.clientThreshold
+  }
+
+  /** 记录一次失败；返回本次是否刚刚进入“全员验证码”状态，供调用方只写一次审计。 */
+  record(scope: FailureScope, nowMs: number): { activated: boolean; recentFailures: number } {
+    const times = this.failureTimes[scope]
+    times.push(nowMs)
+    while (times.length && nowMs - times[0] >= GLOBAL_LOGIN_FAILURE_POLICY.windowMs) times.shift()
+    // 只需要知道是否达到阈值：保留的时间戳有上限，攻击流量不会让数组无限增长。
+    const threshold = this.threshold(scope)
+    if (times.length > threshold * 2) times.splice(0, times.length - threshold * 2)
+    if (times.length < threshold) {
+      return { activated: false, recentFailures: times.length }
+    }
+    const wasActive = this.forcedCaptchaUntil[scope] > nowMs
+    this.forcedCaptchaUntil[scope] = nowMs + GLOBAL_LOGIN_FAILURE_POLICY.captchaHoldMs
+    return { activated: !wasActive, recentFailures: times.length }
+  }
+
+  isCaptchaForced(scope: FailureScope, nowMs: number): boolean {
+    return this.forcedCaptchaUntil[scope] > nowMs
+  }
+}
+
+const globalLoginFailureMonitor = new GlobalLoginFailureMonitor()
+
 const LOGIN_REMAINING_WARNING_RATIO = 0.2
 const REGISTER_REMAINING_WARNING_THRESHOLD = 3
 const normalizeRiskSource = (meta?: RequestMeta) => meta?.ipAddress?.trim() || 'unknown-ip'
@@ -366,7 +403,8 @@ export class AuthSecurityService {
     }
 
     return {
-      captchaRequired: states.some((state) => Boolean(state && state.count > 0)),
+      captchaRequired: states.some((state) => Boolean(state && state.count > 0))
+        || globalLoginFailureMonitor.isCaptchaForced(scope, nowMs),
     }
   }
 
@@ -388,6 +426,22 @@ export class AuthSecurityService {
         nowMs,
       )
       if (storeKey === subjectKey) currentSubjectState = next
+    }
+
+    const globalState = globalLoginFailureMonitor.record(scope, nowMs)
+    if (globalState.activated) {
+      await this.recordRiskEvent({
+        actionType: 'auth.guard.global_captcha',
+        actionLabel: '撞库态势触发全员图形验证码',
+        targetCode: scope,
+        requestMeta,
+        detail: {
+          scope,
+          recentFailures: globalState.recentFailures,
+          windowSeconds: Math.round(GLOBAL_LOGIN_FAILURE_POLICY.windowMs / 1000),
+          holdSeconds: Math.round(GLOBAL_LOGIN_FAILURE_POLICY.captchaHoldMs / 1000),
+        },
+      })
     }
 
     const remainingAttempts = Math.max(0, FAILURE_LOCK_THRESHOLD[scope] - (currentSubjectState?.count ?? 0))

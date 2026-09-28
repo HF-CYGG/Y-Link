@@ -74,6 +74,7 @@ export const AUDIT_ACTION_CATALOG: Readonly<Record<string, AuditActionDefinition
   'auth.step_up': { label: '敏感操作身份复核', category: 'auth' },
   'auth.guard.locked': { label: '认证请求被临时锁定', category: 'auth' },
   'auth.guard.lock': { label: '登录失败触发临时锁定', category: 'auth' },
+  'auth.guard.global_captcha': { label: '撞库态势触发全员图形验证码', category: 'auth' },
   'auth.guard.admin_login': { label: '管理端登录频控', category: 'auth' },
   'auth.guard.admin_captcha': { label: '管理端图形验证码频控', category: 'auth' },
   'client.auth.login': { label: '客户端登录', category: 'auth' },
