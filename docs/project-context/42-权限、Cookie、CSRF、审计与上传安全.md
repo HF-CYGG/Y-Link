@@ -124,6 +124,7 @@
 - 改上传安全时回归：新图片可访问、旧图片兼容访问、响应头正确。
 - 改 CSRF 时回归：管理端写接口在 Cookie 会话下的正常提交与失败提示。
 - 改两步验证、管理端登录流程或相关路由时执行 `npm --prefix backend run auth:mfa:verify`，覆盖绑定与加密落库、两段登录、防重放、恢复码一次性、票据次数与账号锁定、并发单次成功、停用与重生成、管理员与命令行重置、密钥不匹配降级、永久删除联动与审计不落明文。
+- 改接口缓存头、Fetch Metadata 拦截、管理端 CSRF、密钥类配置加密、JSON 全量导出、数据导出留痕与上限、审计脱敏、密码哈希/策略、风控来源聚合与负缓存、全局撞库态势、各类并发闸门、在途上限、过载削峰、会话保险丝、服务端超时或回环监听时执行 `npm --prefix backend run security:data-leak-ddos:verify`（分阶段隔离运行，详见文档 52）。
 - 改图形验证码时执行 `npm --prefix backend run captcha:rendering:verify`，覆盖无系统字体的真实 PNG 渲染、兼容字段、作用域隔离和一次性校验。
 - 改上述任一边界时执行 `npm --prefix backend run security:web-deep-audit:verify`（畸形 JSON、模板转义、验证码一次性、空闲超时、永久删除限流、本人改密、客户端频控、onebox 上传边界、导入预检、登录锁定主体、multipart 加固、附件与资料发码频控）。
 - 升级 `multer`、`sharp` 等上传链路依赖后执行 `npm --prefix backend audit --omit=dev`，并回归 `task4:upload-security:verify` 与 `feedback:customer-service:verify`。

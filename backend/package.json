@@ -31,6 +31,7 @@
     "security:hardening:verify": "tsx scripts/security-hardening-verify.ts",
     "security:auth-depth:verify": "node --import tsx scripts/security-hardening-auth-verify.ts",
     "auth:mfa:verify": "node --import tsx scripts/admin-mfa-verify.ts",
+    "security:data-leak-ddos:verify": "node --import tsx scripts/data-leak-ddos-verify.ts",
     "captcha:rendering:verify": "node --import tsx scripts/captcha-rendering-verify.ts",
     "security:auth-sse-final:verify": "node --import tsx scripts/auth-sse-final-regression-verify.ts",
     "security:http-boundary:verify": "node --import tsx scripts/http-security-verify.ts",
