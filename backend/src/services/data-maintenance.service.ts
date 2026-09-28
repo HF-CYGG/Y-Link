@@ -22,6 +22,7 @@ import { O2oPreorderItem } from '../entities/o2o-preorder-item.entity.js'
 import { SystemConfig } from '../entities/system-config.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
+import { peekDataEncryptionKey } from '../utils/data-encryption.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
 import {
@@ -113,6 +114,10 @@ class DataMaintenanceService {
       await fs.rm(targetPath, { force: true })
       throw error
     }
+    // 备份中的验证码网关、飞书与两步验证秘钥是密文，只能用对应的数据加密密钥解密；密钥本身不写入备份目录，
+    // 这里记录其来源与密钥 ID，提醒运维把 secrets/data-encryption.key 与备份分开但配套保存。
+    // 只拿备份在新数据目录恢复、缺少配套密钥时，启动预检会阻断启动而不是生成新密钥。
+    const dataEncryptionKey = this.describeBackupEncryptionKey()
     await auditService.safeRecord({
       actionType: 'data_maintenance.backup_sqlite',
       actionLabel: '创建 SQLite 物理备份',
@@ -124,11 +129,29 @@ class DataMaintenanceService {
         sourcePath,
         fileName,
         filePath: targetPath,
+        dataEncryptionKey,
       },
     })
     return {
       fileName,
       filePath: targetPath,
+      dataEncryptionKey,
+    }
+  }
+
+  /** 备份配套的数据加密密钥说明：只含来源与密钥 ID，绝不包含密钥本身；密钥尚未生成时 keyId 为 null（库内也没有密文）。 */
+  private describeBackupEncryptionKey(): { source: 'env' | 'file' | 'unavailable'; keyId: string | null; notice: string } {
+    try {
+      const { source, keyId } = peekDataEncryptionKey()
+      return {
+        source,
+        keyId,
+        notice: keyId
+          ? `备份中的敏感配置由密钥 ID ${keyId} 加密，恢复时须同时恢复${source === 'env' ? '环境变量 Y_LINK_DATA_ENCRYPTION_KEY' : '数据目录 secrets/data-encryption.key'}中的同一密钥`
+          : '当前尚未生成数据加密密钥，备份中没有需要配套密钥的密文',
+      }
+    } catch {
+      return { source: 'unavailable', keyId: null, notice: '数据加密密钥当前不可用，备份中的敏感配置密文须用原密钥恢复' }
     }
   }
 

@@ -32,6 +32,7 @@ import { systemConfigService } from '../services/system-config.service.js'
 import { migrateLegacyUploadReferences } from '../utils/upload-migration.js'
 import { toSafeErrorLog } from '../utils/safe-error-log.js'
 import { describeDataEncryptionKey } from '../utils/data-encryption.js'
+import { DataEncryptionKeyMissingError, runDataEncryptionPreflight } from './data-encryption-preflight.js'
 import { overloadMonitor } from '../middleware/overload-shedding.middleware.js'
 import { getTransactionCoordinator } from '../database/transaction-coordinator.js'
 import { applyHttpServerHardening, resolveListenHost } from './http-server-hardening.js'
@@ -356,6 +357,20 @@ export async function startBusinessRuntime(startup: { mode: 'normal' | 'cutover'
   logLine('STEP', 'initialize datasource')
   await AppDataSource.initialize()
   await initializeDatabaseInfrastructure(AppDataSource)
+  // 必须早于任何读取加密列的启动步骤：库里已有密文而密钥文件缺失时阻断启动，而不是自动生成一把新密钥。
+  logLine('STEP', 'data encryption key preflight')
+  const dataEncryptionPreflight = await runDataEncryptionPreflight(AppDataSource).catch((error: unknown) => {
+    if (error instanceof DataEncryptionKeyMissingError) logLine('DATA ENCRYPTION', error.detail, 'error')
+    throw error
+  })
+  if (dataEncryptionPreflight && dataEncryptionPreflight.mismatchedKeyIds.length > 0) {
+    logLine(
+      'DATA ENCRYPTION',
+      `库内存在无法用当前密钥（ID ${dataEncryptionPreflight.keyId}）解密的敏感配置（密钥 ID ${dataEncryptionPreflight.mismatchedKeyIds.join('、')}），`
+        + '请恢复与该数据库配套的 secrets/data-encryption.key；在此之前这些配置按“需重新录入”处理。',
+      'warn',
+    )
+  }
   const cutoverMarkerInspection = inspectDatabaseMigrationCutoverMarker()
   if (cutoverMarkerInspection.state === 'corrupted') {
     const recoveryTaskId = (

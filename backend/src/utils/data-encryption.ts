@@ -133,6 +133,29 @@ function loadDataKey(): LoadedDataKey {
   return loadedDataKey
 }
 
+/**
+ * 启动预检用：查看当前可用的主密钥，但密钥文件缺失时不自动生成。
+ * 调用方据此判断“库里已有密文却缺密钥文件”（如只拿 SQLite 备份在新数据目录恢复），避免静默生成新密钥。
+ * 密钥格式错误或文件不可读时抛错，由调用方决定是否阻断。
+ */
+export function peekDataEncryptionKey(): { source: 'env' | 'file'; keyId: string; filePath: string | null } | { source: 'file'; keyId: null; filePath: string } {
+  const envValue = process.env[KEY_ENV_NAME]?.trim()
+  const filePath = appDataPaths.dataEncryptionKeyFile
+  if (!envValue && !fs.existsSync(filePath)) {
+    return { source: 'file', keyId: null, filePath }
+  }
+  const { source, keyId, filePath: loadedPath } = loadDataKey()
+  return { source, keyId, filePath: loadedPath }
+}
+
+/** 从密文前缀 `ylenc:v1:<密钥ID>:` 中取出密钥 ID；不是本工具生成的密文时返回 null。 */
+export function readSealedValueKeyId(value: string | null | undefined): string | null {
+  if (!isSealedSensitiveValue(value)) return null
+  const body = (value as string).slice(SEALED_VALUE_PREFIX.length)
+  const separatorIndex = body.indexOf(':')
+  return separatorIndex > 0 ? body.slice(0, separatorIndex) : null
+}
+
 /** 启动日志用：只返回来源与密钥 ID，不返回密钥本身；密钥不可用时返回 null（错误已单独记录）。 */
 export function describeDataEncryptionKey(): { source: 'env' | 'file'; keyId: string; filePath: string | null; generated: boolean } | null {
   const loaded = tryLoadDataKey()

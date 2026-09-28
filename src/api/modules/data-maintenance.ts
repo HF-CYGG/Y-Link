@@ -383,7 +383,12 @@ export interface ClearDatabaseMigrationRuntimeOverrideResult {
  * - 仅适用于本地 SQLite 运行环境，供系统管理员做数据快照兜底。
  */
 export const createSqliteBackup = () =>
-  request<{ fileName: string; filePath: string }>({
+  request<{
+    fileName: string
+    filePath: string
+    /** 备份配套的数据加密密钥来源与 ID（不含密钥本身），恢复时须一并恢复同一密钥。 */
+    dataEncryptionKey: { source: 'env' | 'file' | 'unavailable'; keyId: string | null; notice: string }
+  }>({
     method: 'POST',
     url: '/data-maintenance/backup/sqlite',
   })

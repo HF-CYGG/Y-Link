@@ -117,6 +117,7 @@ async function loadModules() {
   const { resolvePermissionsByRole } = await import('../src/constants/auth-permissions.js')
   const password = await import('../src/utils/password.js')
   const encryption = await import('../src/utils/data-encryption.js')
+  const encryptionPreflight = await import('../src/runtime/data-encryption-preflight.js')
   const { BoundedConcurrencyGate, listConcurrencyGateSnapshots } = await import('../src/utils/bounded-concurrency.js')
   const { BizError } = await import('../src/utils/errors.js')
   const { ExportLeasePool, dataExportLeasePool, holdExportLeaseUntilResponseEnds } = await import('../src/utils/export-lease-pool.js')
@@ -155,6 +156,7 @@ async function loadModules() {
     resolvePermissionsByRole,
     password,
     encryption,
+    encryptionPreflight,
     BoundedConcurrencyGate,
     listConcurrencyGateSnapshots,
     BizError,
@@ -1024,6 +1026,86 @@ async function verifySensitiveConfigEncryption() {
   }
 }
 
+/**
+ * 第 4 项补充：只拿 SQLite 备份在全新数据目录恢复（库里有密文、密钥文件缺失）时，启动预检必须阻断而不是生成新密钥；
+ * 密钥不一致时只告警；SQLite 备份结果记录配套密钥 ID，但绝不包含密钥本身。
+ */
+async function verifyEncryptionKeyPreflightAndBackup() {
+  const { runDataEncryptionPreflight, DataEncryptionKeyMissingError, SEALED_COLUMNS } = m.encryptionPreflight
+  const currentKeyId = m.encryption.describeDataEncryptionKey()?.keyId
+  assert.ok(currentKeyId)
+  const healthy = await runDataEncryptionPreflight(m.AppDataSource)
+  assert.deepEqual(healthy, { keySource: 'file', keyId: currentKeyId, databaseKeyIds: [currentKeyId], mismatchedKeyIds: [] }, '库内密文与当前密钥配套')
+
+  // 所有经转换器或 sealSensitiveValue 落库的列都必须登记，否则恢复场景会漏检：
+  // 新增加密落库的源文件时本断言失败，提醒同步 SEALED_COLUMNS 与这里的清单。
+  const listSources = (directory: string): string[] => fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => (
+    entry.isDirectory() ? listSources(path.join(directory, entry.name)) : entry.name.endsWith('.ts') ? [path.join(directory, entry.name)] : []
+  ))
+  const sealingFiles = listSources(path.join(backendRoot, 'src'))
+    .filter((file) => !file.endsWith(path.join('utils', 'data-encryption.ts')))
+    .filter((file) => /createSealedColumnTransformer\(|sealSensitiveValue\(/.test(fs.readFileSync(file, 'utf8')))
+    .map((file) => path.relative(backendRoot, file).replaceAll('\\', '/'))
+    .sort()
+  assert.deepEqual(sealingFiles, [
+    'src/entities/notification-rule.entity.ts',
+    'src/services/admin-mfa.service.ts',
+    'src/services/notification.service.ts',
+    'src/services/system-config.service.ts',
+  ], '出现新的加密落库位置，须登记到 data-encryption-preflight.ts 的 SEALED_COLUMNS')
+  assert.deepEqual(SEALED_COLUMNS.map((item) => `${item.table}.${item.column}`).sort(), [
+    'notification_rule.feishu_sign_secret',
+    'notification_rule.feishu_webhook_url',
+    'sys_user_mfa.totp_secret_sealed',
+    'system_configs.config_value',
+  ])
+  // 启动流程必须先预检，再做任何可能读取加密列（从而触发自动生成密钥）的步骤。
+  const runtimeSource = fs.readFileSync(path.join(backendRoot, 'src/runtime/business-runtime.ts'), 'utf8')
+  const startSource = runtimeSource.slice(runtimeSource.indexOf('export async function startBusinessRuntime('))
+  const preflightIndex = startSource.indexOf('await runDataEncryptionPreflight(AppDataSource)')
+  assert.ok(preflightIndex > startSource.indexOf('await initializeDatabaseInfrastructure(AppDataSource)'), '预检须在数据源就绪之后')
+  assert.ok(preflightIndex < startSource.indexOf('initializeDatabaseSchemaIfNeeded(AppDataSource)'), '预检须早于 schema 初始化与启动引导')
+
+  const keyFile = path.join(process.env.Y_LINK_DATA_DIR!, 'secrets', 'data-encryption.key')
+  const parkedKeyFile = path.join(tempRoot, 'parked-data-encryption.key')
+  fs.renameSync(keyFile, parkedKeyFile)
+  m.encryption.resetDataEncryptionKeyCacheForTesting()
+  try {
+    const error = await runDataEncryptionPreflight(m.AppDataSource).then(() => null, (reason: unknown) => reason)
+    assert.ok(error instanceof DataEncryptionKeyMissingError, '库里已有密文而密钥文件缺失时必须阻断启动')
+    assert.equal(error.message, 'DATA_ENCRYPTION_KEY_MISSING', '救援入口只透传稳定码')
+    assert.ok(error.detail.includes(currentKeyId) && error.detail.includes('secrets/data-encryption.key'), '处置说明需指明缺失的密钥 ID 与恢复位置')
+    assert.equal(fs.existsSync(keyFile), false, '预检不得自动生成新密钥文件')
+  } finally {
+    fs.renameSync(parkedKeyFile, keyFile)
+    m.encryption.resetDataEncryptionKeyCacheForTesting()
+  }
+
+  process.env.Y_LINK_DATA_ENCRYPTION_KEY = Buffer.alloc(32, 9).toString('base64')
+  m.encryption.resetDataEncryptionKeyCacheForTesting()
+  try {
+    const mismatched = await runDataEncryptionPreflight(m.AppDataSource)
+    assert.equal(mismatched?.keySource, 'env')
+    assert.deepEqual(mismatched?.mismatchedKeyIds, [currentKeyId], '密钥不一致时只告警并列出无法解密的密钥 ID')
+  } finally {
+    delete process.env.Y_LINK_DATA_ENCRYPTION_KEY
+    m.encryption.resetDataEncryptionKeyCacheForTesting()
+  }
+
+  const session = await loginAdmin()
+  const backupMarker = await auditMarker()
+  const backup = await call('POST', '/api/data-maintenance/backup/sqlite', { session })
+  assert.equal(backup.status, 200, backup.text)
+  const backupData = backup.body?.data as { filePath: string; dataEncryptionKey: { source: string; keyId: string; notice: string } }
+  assert.equal(backupData.dataEncryptionKey.keyId, currentKeyId, '备份结果记录配套的数据加密密钥 ID')
+  assert.match(backupData.dataEncryptionKey.notice, /secrets\/data-encryption\.key/)
+  const keyMaterial = fs.readFileSync(keyFile, 'utf8').trim()
+  assert.ok(!backup.text.includes(keyMaterial), '备份结果不得包含密钥本身')
+  assert.deepEqual(fs.readdirSync(path.dirname(backupData.filePath)).filter((name) => name.endsWith('.key')), [], '密钥不得与备份放在同一目录')
+  const backupAudit = JSON.stringify(await settledAuditRows(backupMarker, ['data_maintenance.backup_sqlite'], 1))
+  assert.ok(backupAudit.includes(currentKeyId) && !backupAudit.includes(keyMaterial), '备份审计记录密钥 ID 而不含密钥本身')
+}
+
 /** 第 5 项：JSON 全量导出导入默认关闭；开启后导出改 POST、本人密码复核与登录共用锁定，并按账号限频。 */
 async function verifyJsonDataTransferGate() {
   const session = await loginAdmin()
@@ -1578,14 +1660,16 @@ async function verifyRealRuntime() {
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       const port = await pickRuntimePort()
       const runtimeBase = `http://127.0.0.1:${port}`
-      const runtime = spawnRuntime(path.join(runtimeRoot, `attempt-${attempt}`), port)
+      const attemptRoot = path.join(runtimeRoot, `attempt-${attempt}`)
+      const runtime = spawnRuntime(attemptRoot, port)
+      let verified = false
       try {
         if (!(await waitForRuntimeHealth(runtime, runtimeBase))) {
           failures.push(`第 ${attempt} 次（端口 ${port}）未就绪：\n${runtime.output().slice(-1500)}`)
           continue
         }
         await assertRuntimeBehaviour(runtimeBase, port)
-        return
+        verified = true
       } catch (error) {
         console.error(runtime.output().slice(-3000))
         throw error
@@ -1593,10 +1677,60 @@ async function verifyRealRuntime() {
         runtime.child.kill()
         await runtime.exited
       }
+      if (verified) {
+        await assertRestoreWithoutKeyIsBlocked(attemptRoot)
+        return
+      }
     }
     assert.fail(`真实服务进程三次均未能在回环地址上就绪：\n${failures.join('\n')}`)
   } finally {
     fs.rmSync(runtimeRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+  }
+}
+
+/**
+ * 第 4 项补充（真实启动）：模拟“只拿 SQLite 备份在全新数据目录恢复”——库里已有密文、密钥文件缺失。
+ * 服务必须进入救援模式并在 /health 返回稳定码，日志给出处置说明，且不得自动生成新密钥文件。
+ */
+async function assertRestoreWithoutKeyIsBlocked(attemptRoot: string) {
+  const keyFile = path.join(attemptRoot, 'data', 'secrets', 'data-encryption.key')
+  assert.ok(fs.existsSync(keyFile), '首次启动应已生成数据加密密钥文件')
+  const { DataSource } = await import('typeorm')
+  const restored = new DataSource({ type: 'sqlite', database: path.join(attemptRoot, 'runtime.sqlite'), entities: [], synchronize: false })
+  await restored.initialize()
+  try {
+    const sealed = m.encryption.sealSensitiveValue('system_config:verification.mobile.api_url', 'https://sms.example.com/restore-probe')
+    await restored.query("UPDATE system_configs SET config_value = ? WHERE config_key = 'verification.mobile.api_url'", [sealed])
+    const rows = await restored.query("SELECT COUNT(*) AS total FROM system_configs WHERE config_value LIKE 'ylenc:v1:%'") as Array<{ total: number }>
+    assert.ok(Number(rows[0]?.total) > 0, '恢复库中应含密文')
+  } finally {
+    await restored.destroy()
+  }
+  fs.rmSync(keyFile)
+
+  const port = await pickRuntimePort()
+  const runtime = spawnRuntime(attemptRoot, port)
+  try {
+    let health: { status?: string; code?: string } | null = null
+    const deadline = Date.now() + 45_000
+    while (!health && Date.now() < deadline && runtime.child.exitCode === null) {
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2000) })
+        const body = await response.json() as { status?: string; code?: string }
+        if (response.status === 503 && body.status === 'RESCUE') health = body
+        else assert.fail(`缺少密钥时不得正常启动：HTTP ${response.status}`)
+      } catch (error) {
+        if (error instanceof assert.AssertionError) throw error
+        await sleep(250)
+      }
+    }
+    assert.equal(health?.code, 'DATA_ENCRYPTION_KEY_MISSING', `应进入救援模式并返回稳定码：\n${runtime.output().slice(-2000)}`)
+    assert.match(runtime.output(), /已阻止启动/, '启动日志须给出缺少密钥的处置说明')
+    assert.equal(fs.existsSync(keyFile), false, '不得自动生成新密钥覆盖原密钥位置')
+    console.log('[data-leak-ddos-verify:core] 真实启动：库内有密文而缺少密钥文件时进入救援模式，未生成新密钥')
+  } finally {
+    runtime.child.kill()
+    await runtime.exited
   }
 }
 
@@ -1645,6 +1779,7 @@ async function runCorePhase() {
   await verifyFetchMetadataIsolation()
   await verifyAdminCsrfBinding()
   await verifySensitiveConfigEncryption()
+  await verifyEncryptionKeyPreflightAndBackup()
   await verifyJsonDataTransferGate()
   await verifyExportGovernance()
   await verifyAuditSubjectMasking()
