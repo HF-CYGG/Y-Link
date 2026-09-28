@@ -34,6 +34,7 @@ import { toSafeErrorLog } from '../utils/safe-error-log.js'
 import { describeDataEncryptionKey } from '../utils/data-encryption.js'
 import { overloadMonitor } from '../middleware/overload-shedding.middleware.js'
 import { getTransactionCoordinator } from '../database/transaction-coordinator.js'
+import { applyHttpServerHardening, resolveListenHost } from './http-server-hardening.js'
 import { registerRuntimeShutdownHandler } from './runtime-shutdown.js'
 import { registerDatabaseRescueQuiesce, hasPendingRecoveryIntent, markRecoveryFinalizing } from './database-rescue-control.js'
 import {
@@ -390,7 +391,8 @@ export async function startBusinessRuntime(startup: { mode: 'normal' | 'cutover'
 
   const app = createApp()
   await new Promise<void>((resolve, reject) => {
-    const server = app.listen(env.PORT)
+    const server = app.listen(env.PORT, resolveListenHost())
+    applyHttpServerHardening(server)
     activeHttpServer = server
     const onError = (error: Error) => {
       activeHttpServer = null
