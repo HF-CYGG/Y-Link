@@ -24,6 +24,7 @@
  * - B9 批次：「默认库位」与规格表格里的库位选择支持 allow-create 直接新建库位，交互方式对齐「关联标签」的自动
  *   创建（resolveTagIds/hasAutoCreatedTags），提交前统一由 resolveLocationIds 解析真实库位ID、按
  *   LOCATION_CODE_PATTERN 前端预校验并调用 createLocation 建库位，仅 products:manage 权限可见。
+ * - 基础资料列表按服务端状态筛选，编辑弹窗分区展示；线上展示传入的一次性 productAction 只在产品路由消费。
  * 维护说明：
  * - 后续扩展尺码、容量等规格维度时，优先扩展 SKU 表单和后端规格归一化逻辑，不要绕过商品服务直接写库存；
  * - 删除或停用已有 SKU 前需保留占用库存汇总，避免已下单未核销记录丢失库存占用；
@@ -33,8 +34,8 @@
  */
 
 
-import { computed, defineAsyncComponent, h, nextTick, onActivated, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, defineAsyncComponent, h, nextTick, onActivated, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ArrowDown } from '@element-plus/icons-vue'
 import { type FormInstance, type FormRules, type TableInstance, type UploadRequestOptions } from 'element-plus'
 import type { RequestConfig } from '@/api/http'
@@ -124,6 +125,7 @@ const selectedProductIds = ref<string[]>([])
 const yzUpgradeDialogVisible = ref(false)
 const specValueRenameDialogVisible = ref(false)
 const zeroSpecEvolveDialogVisible = ref(false)
+const route = useRoute()
 const router = useRouter()
 
 const searchKeyword = ref('')
@@ -1584,14 +1586,75 @@ const handleBatchCreate = async () => {
   }
 }
 
+let consumingProductAction = false
+
+/** 线上展示传来的动作只消费一次，保留其他查询参数，避免刷新后重新打开弹窗。 */
+const consumeProductAction = async () => {
+  if (route.name !== 'products' || consumingProductAction) return
+  const rawAction = route.query.productAction
+  const rawProductId = route.query.productId
+  if (rawAction === undefined && rawProductId === undefined) {
+    if (globalThis.sessionStorage.getItem('ylink:o2o-batch-create') === '1') {
+      globalThis.sessionStorage.removeItem('ylink:o2o-batch-create')
+      openBatchCreateDialog()
+    }
+    return
+  }
+
+  consumingProductAction = true
+  const consumedFullPath = route.fullPath
+  globalThis.sessionStorage.removeItem('ylink:o2o-batch-create')
+  const action = typeof rawAction === 'string' ? rawAction : ''
+  const productId = typeof rawProductId === 'string' ? rawProductId : ''
+  const nextQuery = { ...route.query }
+  delete nextQuery.productAction
+  delete nextQuery.productId
+  try {
+    await router.replace({ path: route.path, query: nextQuery, hash: route.hash })
+    if (action !== 'create' && action !== 'batch-create' && action !== 'sku-config') {
+      showAppWarning('产品操作入口无效，请重新选择')
+      return
+    }
+    if (!ensurePermission('products:manage', '管理产品')) return
+    if (action === 'create') {
+      await handleAdd()
+      return
+    }
+    if (action === 'batch-create') {
+      openBatchCreateDialog()
+      return
+    }
+    if (!/^\d{1,32}$/.test(productId)) {
+      showAppWarning('产品 ID 无效，无法打开规格配置')
+      return
+    }
+    await productDetailRequest.runLatest({
+      executor: (signal) => getProductDetail(productId, { signal }),
+      onSuccess: (detail) => {
+        if (route.name === 'products') handleOpenSkuConfig(detail)
+      },
+      onError: (error) => {
+        showAppError(extractErrorMessage(error, '获取产品详情失败'))
+      },
+    })
+  } catch (error) {
+    showAppError(extractErrorMessage(error, '打开产品操作失败'))
+  } finally {
+    consumingProductAction = false
+    if (route.name === 'products' && route.fullPath !== consumedFullPath
+      && (route.query.productAction !== undefined || route.query.productId !== undefined)) {
+      void consumeProductAction()
+    }
+  }
+}
+
 onMounted(() => {
   pageReady.value = true
   void refreshProductView()
-  if (globalThis.sessionStorage.getItem('ylink:o2o-batch-create') === '1') {
-    globalThis.sessionStorage.removeItem('ylink:o2o-batch-create')
-    openBatchCreateDialog()
-  }
+  void consumeProductAction()
 })
+
+watch(() => route.fullPath, () => { void consumeProductAction() })
 
 onActivated(() => {
   if (!pageReady.value) {

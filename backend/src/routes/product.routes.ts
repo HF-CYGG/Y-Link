@@ -198,6 +198,31 @@ const batchUpdateProductSchema = z
     message: '至少提供一个可更新字段',
   })
 
+const onlineRecommendationSchema = z.object({
+  mode: z.enum(['all', 'selected', 'none']),
+  skuIds: z.array(z.string().trim().min(1)).optional(),
+  expectedSkuIds: z.array(z.string().trim().min(1)),
+}).strict().superRefine((value, context) => {
+  if (value.mode === 'selected' && !value.skuIds?.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: '请选择至少一个推荐规格' })
+  }
+  if (value.mode !== 'selected' && value.skuIds !== undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: '此推荐模式不能提交 skuIds' })
+  }
+})
+
+const onlineDisplaySchema = z.object({
+  o2oStatus: z.enum(['listed', 'unlisted']).optional(),
+  detailContent: z.string().nullable().optional(),
+  limitPerUser: z.number().int().min(1).max(2_147_483_647).optional(),
+  recommendation: onlineRecommendationSchema.optional(),
+}).strict().refine((value) => Object.keys(value).length > 0, { message: '至少提供一个线上展示字段' })
+
+const batchOnlineDisplaySchema = z.object({
+  ids: z.array(z.string().trim().min(1)).min(1),
+  o2oStatus: z.enum(['listed', 'unlisted']),
+}).strict()
+
 const batchCreateProductSchema = z.object({
   products: z.array(createProductSchema).min(1, '至少新增一个产品').max(50, '单次最多新增 50 个产品'),
 })
@@ -281,6 +306,28 @@ productRouter.post(
       message: 'ok',
       data,
     })
+  }),
+)
+
+productRouter.patch(
+  '/online-display/batch',
+  requirePermission('products:manage'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = batchOnlineDisplaySchema.parse(req.body)
+    const data = await productService.batchUpdateOnlineDisplay(payload, authReq.auth, extractRequestMeta(req))
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+productRouter.patch(
+  '/:id/online-display',
+  requirePermission('products:manage'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = onlineDisplaySchema.parse(req.body)
+    const data = await productService.updateOnlineDisplay(req.params.id, payload, authReq.auth, extractRequestMeta(req))
+    res.json({ code: 0, message: 'ok', data })
   }),
 )
 

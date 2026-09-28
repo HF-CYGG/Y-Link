@@ -149,6 +149,8 @@ export const AUDIT_ACTION_CATALOG: Readonly<Record<string, AuditActionDefinition
   'product.yz_code_upgrade': { label: '存量商品升级为 YZ 编码', category: 'product_inventory' },
   'product.spec_value_rename': { label: '重命名商品规格取值', category: 'product_inventory' },
   'product.zero_spec_evolve': { label: '商品 0 号规格演进', category: 'product_inventory' },
+  'product.online_display.update': { label: '更新商品线上展示', category: 'product_inventory' },
+  'product.online_display.batch_status': { label: '批量更新商品线上状态', category: 'product_inventory' },
   'inventory.doc.create': { label: '提交库存单据', category: 'product_inventory' },
   'inventory.doc.void': { label: '作废库存单据', category: 'product_inventory' },
   'inventory.stocktake.create': { label: '创建盘点单', category: 'product_inventory' },
