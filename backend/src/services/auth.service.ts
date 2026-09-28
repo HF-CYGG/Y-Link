@@ -6,7 +6,7 @@
  * 3. 认证过程会联动风控服务和审计服务，兼顾登录安全、问题追溯与后续治理扩展。
  */
 
-import { LessThan, MoreThan, type EntityManager } from 'typeorm'
+import { LessThan, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { env } from '../config/env.js'
@@ -683,12 +683,14 @@ export class AuthService {
   async resolveAuthUserByToken(sessionToken: string): Promise<AuthUserContext> {
     const now = new Date()
     const sessionTokenHash = hashSessionToken(sessionToken)
-    const session = await this.sessionRepo.findOne({
-      where: {
-        sessionToken: sessionTokenHash,
-        expiresAt: MoreThan(now),
-      },
-    })
+    // 每个管理端请求都要鉴权：会话与账号一次联表取回，不再先查会话、再按 userId 查账号（密码哈希列默认不选取）。
+    // 用 QueryBuilder 的 getOne：findOne 带关联时 TypeORM 会拆成“先取主键、再取数据”两条查询。
+    const session = await this.sessionRepo
+      .createQueryBuilder('session')
+      .leftJoinAndSelect('session.user', 'user')
+      .where('session.sessionToken = :sessionToken', { sessionToken: sessionTokenHash })
+      .andWhere('session.expiresAt > :now', { now })
+      .getOne()
 
     if (!session) {
       throw new BizError('登录状态已失效，请重新登录', 401)
@@ -700,7 +702,7 @@ export class AuthService {
       throw new BizError('登录已因长时间未操作失效，请重新登录', 401)
     }
 
-    const user = await this.userRepo.findOne({ where: { id: session.userId } })
+    const user = session.user
     if (!user) {
       await this.sessionRepo.delete({ id: session.id })
       throw new BizError('登录状态无效，请重新登录', 401)
