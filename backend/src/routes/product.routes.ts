@@ -16,13 +16,16 @@ import { SPEC_VALUE_MAX_LENGTH } from '../services/product-code.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
+import { dataExportLeasePool, runExportHoldingLease } from '../utils/export-lease-pool.js'
+import { auditService } from '../services/audit.service.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
 const productImportUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024, files: 1 },
+  // YZ 导入只携带 `file` 与 `resolutions` 两个分段；字段数量显式封顶，resolutions 大小沿用默认 1MB 上限。
+  limits: { fileSize: 5 * 1024 * 1024, files: 1, fields: 4, parts: 5 },
   fileFilter: (_req, file, cb) => {
     const mimeType = (file.mimetype || '').toLowerCase()
     if (path.extname(file.originalname).toLowerCase() === '.xlsx' && (!mimeType || mimeType === XLSX_MIME || mimeType === 'application/octet-stream')) {
@@ -275,7 +278,7 @@ productRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = batchUpdateProductSchema.parse(req.body)
-    const data = await productService.batchUpdate(payload, authReq.auth)
+    const data = await productService.batchUpdate(payload, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',
@@ -291,7 +294,7 @@ productRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = batchCreateProductSchema.parse(req.body)
-    const data = await batchCreateProducts(payload.products, authReq.auth)
+    const data = await batchCreateProducts(payload.products, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',
@@ -333,8 +336,23 @@ productRouter.get(
   '/export',
   requirePermission('products:view'),
   asyncHandler(async (req, res) => {
-    const buffer = await productExcelService.exportProducts({ includeCostPrice: canViewCostPrice(req) })
-    sendXlsx(res, `products-${new Date().toISOString().slice(0, 10)}.xlsx`, buffer)
+    const authReq = req as AuthenticatedRequest
+    const includeCostPrice = canViewCostPrice(req)
+    // 租约持有到“生成结束”且“文件完整发出或连接关闭”：生成期间断连不会提前归还，慢速客户端也无法借未读完的响应叠加导出。
+    const exported = await runExportHoldingLease(
+      dataExportLeasePool.acquire(authReq.auth.userId),
+      res,
+      () => productExcelService.exportProductsWithSummary({ includeCostPrice }),
+    )
+    // 成本价属于内部经营数据：是否包含成本列随导出审计一并留痕。
+    await auditService.recordDataExport({
+      exportType: 'products',
+      actor: authReq.auth,
+      requestMeta: extractRequestMeta(req),
+      rowCount: exported.rowCount,
+      filters: { includeCostPrice },
+    })
+    sendXlsx(res, `products-${new Date().toISOString().slice(0, 10)}.xlsx`, exported.buffer)
   }),
 )
 
@@ -443,7 +461,7 @@ productRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = createProductSchema.parse(req.body)
-    const data = await productService.create(payload, authReq.auth)
+    const data = await productService.create(payload, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',
@@ -459,7 +477,7 @@ productRouter.put(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = updateProductSchema.parse(req.body)
-    const data = await productService.update(req.params.id, payload, authReq.auth)
+    const data = await productService.update(req.params.id, payload, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',
@@ -474,7 +492,7 @@ productRouter.delete(
   requirePermission('products:manage'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
-    await productService.delete(req.params.id, authReq.auth)
+    await productService.delete(req.params.id, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',

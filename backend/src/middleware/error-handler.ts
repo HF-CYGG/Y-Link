@@ -4,25 +4,40 @@
  * 实现逻辑：
  * 1. `notFoundHandler` 处理所有未匹配接口，固定返回结构化 404 JSON；
  * 2. `errorHandler` 优先识别业务异常与上传异常，避免把底层错误细节直接暴露给前端；
- * 3. 对数据库约束类错误先转换成可读业务提示，其余未知异常统一按 500 记录并返回。
+ * 3. body-parser 解析错误按 4xx 返回，不进入兜底日志（其 `body` 属性含原始请求体）；
+ * 4. 对数据库约束类错误先转换成可读业务提示，其余未知异常统一按 500 记录脱敏日志并返回。
  */
 
 import type { NextFunction, Request, Response } from 'express'
 import multer from 'multer'
-import { isQueryFailedError, mapDatabaseErrorToBizError } from '../utils/database-errors.js'
+import { mapDatabaseErrorToBizError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
+import { toSafeErrorLog } from '../utils/safe-error-log.js'
 import { DatabaseOverloadedError } from '../database/database-errors.js'
 import { DatabaseWriteFrozenError } from '../database/operation-gate.js'
 
-const toSafeDatabaseLog = (error: unknown) => {
-  if (!isQueryFailedError(error)) return { name: 'DatabaseError' }
-  const driverError = (error.driverError ?? {}) as { code?: unknown; errno?: unknown; sqlState?: unknown }
-  return {
-    name: 'QueryFailedError',
-    code: typeof driverError.code === 'string' ? driverError.code.slice(0, 64) : null,
-    errno: typeof driverError.errno === 'number' ? driverError.errno : null,
-    sqlState: typeof driverError.sqlState === 'string' ? driverError.sqlState.slice(0, 16) : null,
+/**
+ * body-parser 解析阶段错误：
+ * - 这类错误带有 `type` 与 4xx `status`，其中 `entity.parse.failed` 还会把原始请求体挂在 `body` 属性上；
+ * - 必须在兜底日志之前识别并按客户端错误返回，否则畸形的登录 JSON 会把明文密码写进错误日志。
+ */
+const BODY_PARSER_ERROR_RESPONSES: Record<string, { status: number; message: string }> = {
+  'entity.parse.failed': { status: 400, message: '请求体不是合法的 JSON，请检查后重试' },
+  'entity.too.large': { status: 413, message: '请求体过大，请减少单次提交的数据量或改用文件导入' },
+  'encoding.unsupported': { status: 415, message: '不支持的请求体编码' },
+  'charset.unsupported': { status: 415, message: '不支持的请求体字符集' },
+  'parameters.too.many': { status: 413, message: '请求参数过多' },
+  'request.aborted': { status: 400, message: '请求已中断，请重试' },
+  'request.size.invalid': { status: 400, message: '请求体长度与声明不一致' },
+  'entity.verify.failed': { status: 400, message: '请求体校验失败' },
+  'stream.encoding.set': { status: 500, message: '服务端异常，请稍后重试' },
+}
+
+function resolveBodyParserError(err: unknown): { status: number; message: string } | null {
+  if (typeof err !== 'object' || err === null || !('type' in err) || typeof err.type !== 'string') {
+    return null
   }
+  return BODY_PARSER_ERROR_RESPONSES[err.type] ?? null
 }
 
 /**
@@ -56,7 +71,7 @@ export function errorHandler(err: unknown, _req: Request, res: Response, next: N
     if (err.retryAfterSeconds !== undefined) {
       res.setHeader('Retry-After', String(err.retryAfterSeconds))
     }
-    if (err instanceof DatabaseOverloadedError || err.statusCode === 503) {
+    if ((err instanceof DatabaseOverloadedError || err.statusCode === 503) && err.retryAfterSeconds === undefined) {
       // 明确告诉浏览器/反向代理这是瞬时过载，便于幂等请求按秒级退避重试，
       // 同时避免高峰期客户端立即重放形成重试风暴。
       res.setHeader('Retry-After', '1')
@@ -84,15 +99,11 @@ export function errorHandler(err: unknown, _req: Request, res: Response, next: N
     return
   }
 
-  if (
-    typeof err === 'object'
-    && err !== null
-    && 'type' in err
-    && err.type === 'entity.too.large'
-  ) {
-    res.status(413).json({
-      code: 413,
-      message: '请求体过大，请减少单次提交的数据量或改用文件导入',
+  const bodyParserError = resolveBodyParserError(err)
+  if (bodyParserError) {
+    res.status(bodyParserError.status).json({
+      code: bodyParserError.status,
+      message: bodyParserError.message,
       data: null,
     })
     return
@@ -101,7 +112,7 @@ export function errorHandler(err: unknown, _req: Request, res: Response, next: N
   const mappedDatabaseError = mapDatabaseErrorToBizError(err)
   if (mappedDatabaseError) {
     // QueryFailedError 会携带 SQL 与 parameters；Mobile 会话参数包含完整 token hash，禁止原样记录。
-    console.error('[y-link-backend] database error:', toSafeDatabaseLog(err))
+    console.error('[y-link-backend] database error:', toSafeErrorLog(err))
     res.status(mappedDatabaseError.statusCode).json({
       code: mappedDatabaseError.statusCode,
       message: mappedDatabaseError.message,
@@ -110,7 +121,8 @@ export function errorHandler(err: unknown, _req: Request, res: Response, next: N
     return
   }
 
-  console.error('[y-link-backend] unexpected error:', err)
+  // 未知异常只记录名称、消息与堆栈：错误对象的自有属性可能携带请求体、SQL 参数或令牌，禁止原样打印。
+  console.error('[y-link-backend] unexpected error:', toSafeErrorLog(err))
   res.status(500).json({
     code: 500,
     message: '服务端异常，请稍后重试',

@@ -29,9 +29,11 @@ import {
   assertClientPasswordPolicy,
   hashPassword,
   verifyPassword,
+  verifyPasswordDetailed,
   verifyPasswordForNonexistentAccount,
 } from '../utils/password.js'
 import { hashSessionToken } from '../utils/session-token.js'
+import { maskLoginInputForAudit } from '../utils/audit-subject-mask.js'
 import { generateSessionToken } from '../utils/token.js'
 import { auditService } from './audit.service.js'
 import { authSecurityService } from './auth-security.service.js'
@@ -187,6 +189,9 @@ export interface ClientStaffDirectoryLookupResult {
   departmentName: string | null
   isRegistered: boolean
 }
+
+/** 单个客户端账号同时保留的 Web 会话上限（Mobile 会话另由 MOBILE_MAX_ACTIVE_SESSIONS 控制）。 */
+const CLIENT_WEB_MAX_ACTIVE_SESSIONS = 20
 
 class ClientAuthService {
   private readonly userRepo = AppDataSource.getRepository(ClientUser)
@@ -446,6 +451,7 @@ class ClientAuthService {
         rawValue: account.account,
         normalizedValue: account.account,
       })
+      // 联系方式一经注册即占用，无论对方是否已验证都不得重复注册。
       if (existedByAccount) {
         throw new BizError('当前注册信息无法使用，请确认联系方式已完成验证后重试', 409)
       }
@@ -576,6 +582,22 @@ class ClientAuthService {
     })
   }
 
+  /**
+   * 登录风控主体：账号存在时统一用 `uid:<用户ID>`，不存在时退回归一化后的输入。
+   * - 同一账号可用手机号、邮箱、用户名或工号登录，按输入计数会让每种标识各得一份失败额度；
+   * - MySQL 排序规则大小写、重音、全角不敏感，变体写法也能命中同一账号，按输入计数可无限绕过锁定。
+   */
+  private buildLoginRiskSubject(user: Pick<ClientUser, 'id'> | null, account: NormalizedClientAccount): string {
+    return user ? `uid:${user.id}` : account.normalizedValue
+  }
+
+  /** Web 与 Mobile 登录在锁定判定前调用，必须与 authenticateCredentials 记录失败时使用同一主体。 */
+  async resolveLoginRiskSubject(accountInput: string): Promise<string> {
+    const account = this.resolveLoginAccount(accountInput)
+    const user = await this.findUserByAnyIdentifier(account)
+    return this.buildLoginRiskSubject(user, account)
+  }
+
   async createCaptcha(requestMeta?: RequestMeta) {
     await authSecurityService.guardClientCaptchaRequest(requestMeta)
     return captchaService.createCaptcha('client')
@@ -659,6 +681,7 @@ class ClientAuthService {
     const expiresAt = new Date(now.getTime() + env.AUTH_TOKEN_TTL_HOURS * 60 * 60 * 1000)
     const token = generateSessionToken()
     const securitySnapshot = this.buildLoginSecuritySnapshot(user)
+    let evictedSessionHashes: string[] = []
     const savedUser = await runInTransaction(async (manager) => {
       // 注册和登录共用同一签发边界；MySQL 锁账号行，SQLite 由统一事务协调器串行。
       // 事务内重新读取并复核全部认证、状态及身份关键字段，拒绝复用事务外的陈旧校验结果。
@@ -677,8 +700,21 @@ class ClientAuthService {
           lastAccessAt: now,
         }),
       )
+      // 单账号 Web 会话封顶：自助注册账号可反复登录无限制造会话行，超出上限时淘汰最久未活跃的会话。
+      const staleSessions = await manager.getRepository(ClientUserSession).find({
+        where: { userId: persistedUser.id },
+        select: { id: true, sessionToken: true },
+        order: { lastAccessAt: 'DESC', id: 'DESC' },
+        skip: CLIENT_WEB_MAX_ACTIVE_SESSIONS,
+        take: 1000,
+      })
+      if (staleSessions.length) {
+        await manager.getRepository(ClientUserSession).delete(staleSessions.map((session) => session.id))
+        evictedSessionHashes = staleSessions.map((session) => session.sessionToken)
+      }
       return persistedUser
     })
+    evictedSessionHashes.forEach((sessionHash) => customerServiceRealtimeService.disconnectBySessionHash('client', sessionHash))
     return {
       token,
       expiresAt,
@@ -745,7 +781,7 @@ class ClientAuthService {
     const username = isTeacherRegister
       ? null
       : normalizePersonalClientUsername(input.username ?? '')
-    const password = assertClientPasswordPolicy(input.password)
+    const password = assertClientPasswordPolicy(input.password, '密码', { identifiers: [input.username, input.account, input.staffNo] })
     const verificationContext = await this.getVerificationContext()
     const capabilities = verificationContext.capabilities
     const validationMode = account ? capabilities.registerValidationModes[account.channel] : 'captcha'
@@ -756,6 +792,15 @@ class ClientAuthService {
     }
     if (isTeacherRegister) {
       await this.guardStaffInviteAttempt(registerProfile.staffNo ?? '', input.inviteCode ?? '', _requestMeta)
+      // 教师联系方式选填；一旦填写必须与个人注册一样用验证码证明持有，
+      // 否则持有统一邀请码即可把他人手机号/邮箱写进自己账号，而联系方式全库唯一，真实持有人将无法注册或改绑。
+      if (account) {
+        this.assertRegisterVerificationChannelReady(account, verificationContext.providers)
+        if (validationMode !== 'verification_code') {
+          throw new BizError(`当前未启用${account.channel === 'email' ? '邮箱' : '手机'}验证码，教师注册请留空联系方式`, 400)
+        }
+        await this.verifyRegisterChallenge(input, validationMode, account, { forceVerificationCode: true })
+      }
     } else {
       this.assertRegisterVerificationChannelReady(account, verificationContext.providers)
       await this.verifyRegisterChallenge(input, validationMode, account)
@@ -776,8 +821,9 @@ class ClientAuthService {
           const saved = await manager.getRepository(ClientUser).save(manager.getRepository(ClientUser).create({
           mobile: account?.mobile ?? undefined,
           email: account?.email ?? undefined,
-          mobileVerifiedAt: null,
-          emailVerifiedAt: null,
+          // 填写的联系方式已在上方通过验证码校验，注册即记为已认证。
+          mobileVerifiedAt: account?.channel === 'mobile' ? new Date() : null,
+          emailVerifiedAt: account?.channel === 'email' ? new Date() : null,
           passwordHash,
           // 当前账号体系下，用户名与登录账号分离，支持用户自定义用户名。
           realName: registerProfile.usernameValue,
@@ -826,6 +872,24 @@ class ClientAuthService {
   async register(input: ClientRegisterInput, requestMeta?: RequestMeta) {
     const registered = await this.registerIdentity(input, requestMeta)
     const session = await this.createSessionForUser(registered.user)
+    await auditService.safeRecord({
+      actionType: 'client.auth.register',
+      actionLabel: '客户端注册',
+      targetType: 'client_user',
+      targetId: registered.user.id,
+      targetCode: registered.user.realName,
+      actor: {
+        userId: registered.user.id,
+        username: registered.user.email ?? registered.user.mobile ?? registered.user.realName,
+        displayName: registered.user.realName,
+      },
+      requestMeta,
+      detail: {
+        registrationType: registered.user.staffNo ? 'teacher' : 'personal',
+        verificationChannel: registered.verificationChannel,
+        contactChannels: [registered.user.mobile ? 'mobile' : null, registered.user.email ? 'email' : null].filter(Boolean),
+      },
+    })
     return {
       token: session.token,
       expiresAt: session.expiresAt,
@@ -846,14 +910,16 @@ class ClientAuthService {
       this.verifyCaptchaIfRequired(input)
     }
     const user = await this.findUserWithPasswordByAccount(account)
+    const riskSubject = this.buildLoginRiskSubject(user, account)
     if (!user) {
       await verifyPasswordForNonexistentAccount(password)
-      const loginFailureResult = await authSecurityService.recordClientLoginFailure(requestMeta, account.normalizedValue)
+      const loginFailureResult = await authSecurityService.recordClientLoginFailure(requestMeta, riskSubject)
       await auditService.safeRecord({
         actionType: 'client.auth.login',
         actionLabel: '客户端登录',
         targetType: 'client_session',
-        targetCode: account.normalizedValue,
+        // 账号不存在时输入原文可能是误填的密码或他人手机号/邮箱，只记掩码与指纹。
+        targetCode: maskLoginInputForAudit(account.normalizedValue),
         resultStatus: 'failed',
         requestMeta,
         detail: { reason: 'user_not_found' },
@@ -863,9 +929,9 @@ class ClientAuthService {
         : '用户名或密码错误'
       throw new BizError(loginErrorMessage, 401)
     }
-    const matched = await verifyPassword(password, user.passwordHash)
-    if (!matched) {
-      const loginFailureResult = await authSecurityService.recordClientLoginFailure(requestMeta, account.normalizedValue)
+    const passwordVerification = await verifyPasswordDetailed(password, user.passwordHash)
+    if (!passwordVerification.matched) {
+      const loginFailureResult = await authSecurityService.recordClientLoginFailure(requestMeta, riskSubject)
       await auditService.safeRecord({
         actionType: 'client.auth.login',
         actionLabel: '客户端登录',
@@ -882,15 +948,66 @@ class ClientAuthService {
       throw new BizError(loginErrorMessage, 401)
     }
     if (user.status !== 'enabled') {
+      await auditService.safeRecord({
+        actionType: 'client.auth.login',
+        actionLabel: '客户端登录',
+        targetType: 'client_session',
+        targetId: user.id,
+        targetCode: user.email ?? user.mobile ?? user.realName,
+        resultStatus: 'failed',
+        requestMeta,
+        detail: { reason: 'user_disabled' },
+      })
       throw new BizError('当前账号已停用', 403)
     }
-    await authSecurityService.clearClientLoginFailures(requestMeta, account.normalizedValue)
+    if (passwordVerification.needsRehash) {
+      await this.upgradePasswordHashIfUnchanged(user, password)
+    }
+    await authSecurityService.clearClientLoginFailures(requestMeta, riskSubject)
     return user
+  }
+
+  /**
+   * 旧参数哈希在登录成功后透明升级（Web 与 Mobile 共用本入口）：
+   * - 以“哈希仍等于读取时的旧值”为条件更新，并发改密或重置不会被旧密码覆盖；
+   * - 升级失败（如维护只读期）保持旧哈希，下次登录再试，不影响本次登录。
+   */
+  private async upgradePasswordHashIfUnchanged(user: ClientUser, password: string) {
+    try {
+      const upgradedPasswordHash = await hashPassword(password)
+      const result = await this.userRepo
+        .createQueryBuilder()
+        .update(ClientUser)
+        .set({ passwordHash: upgradedPasswordHash })
+        .where('id = :id AND password_hash = :previousPasswordHash', { id: user.id, previousPasswordHash: user.passwordHash })
+        .execute()
+      if (result.affected !== 0) {
+        // 随后的会话签发会在事务内复核安全快照，这里同步内存中的哈希，避免把刚升级的哈希误判为“密码已被修改”。
+        user.passwordHash = upgradedPasswordHash
+      }
+    } catch {
+      // 保持旧哈希即可，校验逻辑兼容旧格式。
+    }
   }
 
   async login(input: ClientLoginInput, requestMeta?: RequestMeta, captchaRequired = false) {
     const user = await this.authenticateCredentials(input, requestMeta, captchaRequired)
     const session = await this.createSessionForUser(user)
+    // 登录成功同样留痕（含来源 IP/UA），账号被盗排查时才能还原“何时何地登录过”。
+    await auditService.safeRecord({
+      actionType: 'client.auth.login',
+      actionLabel: '客户端登录',
+      targetType: 'client_session',
+      targetId: session.user.id,
+      targetCode: session.user.email ?? session.user.mobile ?? session.user.realName,
+      actor: {
+        userId: session.user.id,
+        username: session.user.email ?? session.user.mobile ?? session.user.realName,
+        displayName: session.user.realName,
+      },
+      requestMeta,
+      detail: { via: 'web', expiresAt: session.expiresAt.toISOString() },
+    })
     return {
       token: session.token,
       expiresAt: session.expiresAt,
@@ -909,15 +1026,30 @@ class ClientAuthService {
     if (!capabilities.channels[account.channel]) {
       throw new BizError(`当前账号对应的${account.channel === 'email' ? '邮箱' : '手机'}验证码通道未启用，请联系管理员配置`, 400)
     }
-    await this.verifyCodeIfRequired(
-      input,
-      {
-        channel: account.channel,
-        target: account.account,
-        scene: 'forgot_password',
-      },
-      `请输入${account.channel === 'email' ? '邮箱' : '手机'}验证码`,
-    )
+    const recordForgotVerifyAudit = (resultStatus: 'success' | 'failed', detail: Record<string, unknown>, userId?: string) => auditService.safeRecord({
+      actionType: 'client.auth.forgot_password.verify',
+      actionLabel: '客户端找回密码身份核验',
+      targetType: 'client_user',
+      targetId: userId ?? null,
+      targetCode: this.maskContactTarget(account.channel, account.account),
+      requestMeta: _requestMeta,
+      resultStatus,
+      detail: { channel: account.channel, ...detail },
+    })
+    try {
+      await this.verifyCodeIfRequired(
+        input,
+        {
+          channel: account.channel,
+          target: account.account,
+          scene: 'forgot_password',
+        },
+        `请输入${account.channel === 'email' ? '邮箱' : '手机'}验证码`,
+      )
+    } catch (error) {
+      if (error instanceof BizError) await recordForgotVerifyAudit('failed', { reason: 'verification_code_rejected' })
+      throw error
+    }
     const user = await this.userRepo
       .createQueryBuilder('user')
       .where(
@@ -928,9 +1060,11 @@ class ClientAuthService {
       )
       .getOne()
     if (!user) {
+      await recordForgotVerifyAudit('failed', { reason: 'verified_account_not_found' })
       // 找回密码不直接暴露“账号是否已注册”，降低批量枚举账号的风险。
       throw new BizError('身份校验失败，请确认用户名、验证码后重试', 400)
     }
+    await recordForgotVerifyAudit('success', { resetTicketIssued: true }, user.id)
     const resetToken = generateSessionToken()
     resetTicketStore.set(resetToken, {
       userId: user.id,
@@ -945,7 +1079,7 @@ class ClientAuthService {
 
   async resetPassword(input: ClientResetPasswordInput, _requestMeta?: RequestMeta) {
     const account = this.resolveAccount(input.account)
-    const newPassword = assertClientPasswordPolicy(input.newPassword, '新密码')
+    const newPassword = assertClientPasswordPolicy(input.newPassword, '新密码', { identifiers: [input.account] })
     const ticket = resetTicketStore.take(input.resetToken)
     if (!ticket) {
       throw new BizError('重置凭证已失效', 400)
@@ -1065,15 +1199,58 @@ class ClientAuthService {
 
     const matched = await verifyPassword(input.currentPassword, user.passwordHash)
     if (!matched) {
-      throw new BizError('原密码错误', 400)
+      throw new BizError('原密码错误', 400, { reason: 'CURRENT_PASSWORD_MISMATCH' })
     }
 
     return { user, passwordHash }
   }
 
-  async changePassword(auth: ClientAuthContext, input: ClientChangePasswordInput) {
+  async changePassword(auth: ClientAuthContext, input: ClientChangePasswordInput, requestMeta?: RequestMeta) {
+    // 旧密码复核与登录共用失败锁定：会话被劫持时不能借改密接口无限试错当前密码。
+    await authSecurityService.assertClientPasswordReauthAllowed(requestMeta, auth.userId)
     // 新密码派生不依赖数据库状态，避免占用 SQLite 全局写槽。
-    const passwordHash = await hashPassword(assertClientPasswordPolicy(input.newPassword, '新密码'))
+    const passwordHash = await hashPassword(assertClientPasswordPolicy(input.newPassword, '新密码', {
+      identifiers: [auth.mobile, auth.email, auth.account, auth.staffNo],
+    }))
+    try {
+      await this.commitPasswordChange(auth, input, passwordHash, requestMeta)
+    } catch (error) {
+      if (error instanceof BizError && (error.data as { reason?: string } | null)?.reason === 'CURRENT_PASSWORD_MISMATCH') {
+        await this.recordCurrentPasswordFailure(auth, requestMeta, 'change_password')
+      }
+      throw error
+    }
+  }
+
+  /** 会话内旧密码复核失败：计入账号失败锁定并写脱敏失败审计（事务外调用）。 */
+  private async recordCurrentPasswordFailure(
+    auth: ClientAuthContext,
+    requestMeta: RequestMeta | undefined,
+    operation: 'change_password' | 'update_profile',
+  ) {
+    await authSecurityService.recordClientLoginFailure(requestMeta, `uid:${auth.userId}`)
+    await auditService.safeRecord({
+      actionType: 'client.auth.reauth_failed',
+      actionLabel: '客户端旧密码复核失败',
+      targetType: 'client_user',
+      targetId: auth.userId,
+      actor: {
+        userId: auth.userId,
+        username: auth.account || auth.mobile || auth.email,
+        displayName: auth.realName || auth.account,
+      },
+      requestMeta,
+      resultStatus: 'failed',
+      detail: { operation },
+    })
+  }
+
+  private async commitPasswordChange(
+    auth: ClientAuthContext,
+    input: ClientChangePasswordInput,
+    passwordHash: string,
+    requestMeta?: RequestMeta,
+  ) {
     await runInTransaction(async (manager) => {
       const prepared = await this.preparePasswordChange(auth.userId, input, passwordHash, manager)
       await manager.getRepository(ClientUser).update(prepared.user.id, { passwordHash: prepared.passwordHash })
@@ -1093,6 +1270,7 @@ class ClientAuthService {
           username: prepared.user.email ?? prepared.user.mobile ?? prepared.user.realName,
           displayName: prepared.user.realName,
         },
+        requestMeta,
         detail: {
           via: 'change',
           revokedMobileCount: revokedMobile.affected ?? 0,
@@ -1276,7 +1454,12 @@ class ClientAuthService {
       throw new BizError('当前用户不存在', 404)
     }
     if (user.accountType === 'department') throw new BizError('部门账号资料由管理员维护', 403)
-    if (!(await verifyPassword(input.currentPassword, user.passwordHash))) throw new BizError('当前密码错误', 400)
+    // Web 入口（无外层事务）把旧密码复核纳入账号失败锁定；Mobile 由外层编排事务调用，不在事务内写风控状态。
+    if (!manager) await authSecurityService.assertClientPasswordReauthAllowed(requestMeta, user.id)
+    if (!(await verifyPassword(input.currentPassword, user.passwordHash))) {
+      if (!manager) await this.recordCurrentPasswordFailure(auth, requestMeta, 'update_profile')
+      throw new BizError('当前密码错误', 400, { reason: 'CURRENT_PASSWORD_MISMATCH' })
+    }
 
     const isDirectoryTeacher = Boolean(user.staffNo?.trim())
     const storedUsername = normalizeClientUsername(user.realName)

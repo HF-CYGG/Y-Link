@@ -43,6 +43,7 @@ import type { AuthUserContext } from '../types/auth.js'
 import type { ClientAuthContext } from '../types/client-auth.js'
 import { isUniqueConstraintError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
+import { toSafeErrorLog } from '../utils/safe-error-log.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { ensureUploadCategoryDir, IMAGE_UPLOAD_MAX_FILE_SIZE, isUploadPublicUrlForCategory, removeClientFeedbackUploadFile, UPLOAD_PUBLIC_FILE_NAME_MATCHER } from '../utils/upload-storage.js'
 import type { RequestMeta } from '../utils/request-meta.js'
@@ -389,7 +390,7 @@ class ClientFeedbackService {
         try {
           await queryRunner.query('SELECT RELEASE_LOCK(?)', [MYSQL_FEEDBACK_ATTACHMENT_COORDINATION_LOCK])
         } catch (error) {
-          console.error('[client-feedback-attachment] 释放数据库协调锁失败', error)
+          console.error('[client-feedback-attachment] 释放数据库协调锁失败', toSafeErrorLog(error))
         }
       }
       await queryRunner.release()
@@ -413,7 +414,12 @@ class ClientFeedbackService {
     return owner
   }
 
-  private consumeAttachmentUploadRate(clientUserId: string) {
+  /**
+   * 反馈附件上传频控：
+   * - 路由必须在 multer 接收文件、sharp 解码重编码之前调用，失败的上传同样计次；
+   * - 若只在建档阶段计次，校验失败的大图永远不会消耗额度，单个账号即可反复占满全局图片处理队列。
+   */
+  consumeAttachmentUploadRate(clientUserId: string) {
     const now = Date.now()
     const previous = this.attachmentUploadRateWindows.get(clientUserId)
     const window = previous && now - previous.startedAt < CLIENT_FEEDBACK_ATTACHMENT_POLICY.uploadRateWindowMs
@@ -456,7 +462,7 @@ class ClientFeedbackService {
     if (typeof sizeBytes !== 'number' || !Number.isInteger(sizeBytes) || sizeBytes <= 0 || sizeBytes > IMAGE_UPLOAD_MAX_FILE_SIZE) {
       throw new BizError('反馈附件大小非法', 400)
     }
-    this.consumeAttachmentUploadRate(clientAuth.userId)
+    // 上传频控已由路由在接收文件前通过 consumeAttachmentUploadRate 计次，这里不重复消耗额度。
     await this.assertFeedbackAttachmentDiskCapacity()
     return this.runAttachmentCoordinatedTransaction(async (manager) => {
       const filePath = path.resolve(ensureUploadCategoryDir('client-feedback'), input.storageName)
@@ -828,7 +834,7 @@ class ClientFeedbackService {
           console.warn(`[client-feedback-attachment] 清理发现 ${result.anomalies.length} 个不确定项，均已保留`)
         }
       }).catch((error) => {
-        console.error('[client-feedback-attachment] 后台清理周期失败', error)
+        console.error('[client-feedback-attachment] 后台清理周期失败', toSafeErrorLog(error))
       })
     }
     this.attachmentCleanupTimer = globalThis.setInterval(trigger, CLIENT_FEEDBACK_ATTACHMENT_POLICY.cleanupIntervalMs)

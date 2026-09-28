@@ -10,6 +10,8 @@ import { requirePermission } from '../middleware/auth.middleware.js'
 import { reportService, REPORT_TYPES, type ReportQueryInput, type ReportType } from '../services/report.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
+import { extractRequestMeta } from '../utils/request-meta.js'
+import { auditService } from '../services/audit.service.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 
 export const reportRouter = Router()
@@ -80,9 +82,10 @@ reportRouter.get(
     const authReq = req as AuthenticatedRequest
     const type = parseReportType(req.params.type)
     const fileName = `report-${type}-${new Date().toISOString().slice(0, 19).replaceAll(/[:T]/g, '-')}.xlsx`
-    await reportService.exportExcel(
+    const reportQuery = buildReportQuery(req.query as Record<string, unknown>)
+    const result = await reportService.exportExcel(
       type,
-      buildReportQuery(req.query as Record<string, unknown>),
+      reportQuery,
       res,
       () => {
         // 首批查询成功后才声明下载，避免参数/数据库错误被浏览器误存为损坏的 xlsx。
@@ -91,5 +94,19 @@ reportRouter.get(
       },
       authReq.auth.userId,
     )
+    // 经营数据批量导出留痕：只记报表类型、时间段、字段与行数。
+    await auditService.recordDataExport({
+      exportType: 'report',
+      actor: authReq.auth,
+      requestMeta: extractRequestMeta(req),
+      rowCount: result.rowCount,
+      filters: {
+        reportType: type,
+        startDate: reportQuery.startDate ?? null,
+        endDate: reportQuery.endDate ?? null,
+        tagCount: reportQuery.tagIds?.length ?? 0,
+        fields: (reportQuery.fields ?? []).slice(0, 50).map((field) => field.slice(0, 64)),
+      },
+    })
   }),
 )

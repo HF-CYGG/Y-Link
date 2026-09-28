@@ -12,6 +12,7 @@ import type { AuthenticatedRequest } from '../types/auth.js'
 import { requirePermission, requireRole } from '../middleware/auth.middleware.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
+import { createPermanentDeletePasswordGuard } from '../utils/permanent-delete-guard.js'
 import { CLIENT_USER_ACCOUNT_TYPES, CLIENT_USER_STATUSES } from '../entities/client-user.entity.js'
 import { CLIENT_USER_PROFILE_KINDS, clientUserManageService } from '../services/client-user-manage.service.js'
 import { auditService } from '../services/audit.service.js'
@@ -38,12 +39,12 @@ const createClientUserSchema = z.object({
   departmentName: z.string().trim().max(271).optional(),
   departmentNodeId: z.string().trim().max(128).optional(),
   staffNo: z.string().trim().max(64).optional(),
-  password: z.string().min(8, '登录密码至少 8 位').max(50, '登录密码长度不能超过 50 位'),
+  password: z.string().min(8, '登录密码至少 8 位').max(64, '登录密码长度不能超过 64 位'),
   status: z.enum(CLIENT_USER_STATUSES),
 })
 
 const resetClientUserPasswordSchema = z.object({
-  newPassword: z.string().min(8, '新密码至少 8 位').max(50, '新密码长度不能超过 50 位'),
+  newPassword: z.string().min(8, '新密码至少 8 位').max(64, '新密码长度不能超过 64 位'),
 })
 
 const accountLifecycleReasonSchema = z.object({
@@ -81,6 +82,13 @@ const permanentDeleteLimiter = rateLimit({
   },
 })
 
+// 永久删除口令为全局口令：再接入所有入口共享的口令失败桶，避免轮换入口叠加试错额度。
+const permanentDeletePasswordGuard = createPermanentDeletePasswordGuard({
+  actionType: 'client_user.permanent_delete',
+  actionLabel: '永久删除客户端用户',
+  targetType: 'client_user',
+})
+
 const departmentNodeIdsSchema = z.object({
   departmentNodeIds: z.array(z.string().trim().min(1).max(128)).min(1).max(100)
     .refine((items) => new Set(items).size === items.length, '部门节点不能重复'),
@@ -91,7 +99,7 @@ const createDepartmentAccountsBatchSchema = z.object({
   items: z.array(z.object({
     departmentNodeId: z.string().trim().min(1).max(128),
     account: z.string().regex(/^DEPT-[A-F0-9]{10}$/, '部门共享账号编号格式非法'),
-    initialPassword: z.string().min(8, '登录密码至少 8 位').max(50, '登录密码长度不能超过 50 位'),
+    initialPassword: z.string().min(8, '登录密码至少 8 位').max(64, '登录密码长度不能超过 64 位'),
   })).min(1).max(100)
     .refine((items) => new Set(items.map((item) => item.departmentNodeId)).size === items.length, '部门节点不能重复')
     .refine((items) => new Set(items.map((item) => item.account)).size === items.length, '部门共享账号编号不能重复'),
@@ -206,6 +214,7 @@ clientUserManageRouter.delete(
   requirePermission('users:permanent_delete'),
   requireRole('admin'),
   permanentDeleteLimiter,
+  permanentDeletePasswordGuard,
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = accountPermanentDeleteSchema.parse(req.body)

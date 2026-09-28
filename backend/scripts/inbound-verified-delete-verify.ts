@@ -817,19 +817,21 @@ async function main() {
     assert.equal(routeData.order?.status, 'verified')
     assert.equal(routeData.order?.isDeleted, true)
 
+    // 全局永久删除口令的失败尝试计入所有入口共享的账号级口令桶（5 分钟 5 次），先于本入口 8 次的请求频控触发。
     const rateFixture = await createVerifiedDelivery(actorOf(rateSupplier))
-    for (let index = 0; index < 8; index += 1) {
+    for (let index = 0; index < 5; index += 1) {
       await expectStatus(() => fetch(`${baseUrl}/api/inbound/supplier/${rateFixture.orderId}/verified`, {
         method: 'DELETE',
         headers: writeHeaders(rateSupplierSession),
         body: JSON.stringify({ confirmShowNo: rateFixture.showNo, permanentDeletePassword: 'wrong-password-value' }),
       }), 403, `高危删除失败尝试 ${index + 1}`)
     }
-    await expectStatus(() => fetch(`${baseUrl}/api/inbound/supplier/${rateFixture.orderId}/verified`, {
+    const rateLimited = await expectStatus(() => fetch(`${baseUrl}/api/inbound/supplier/${rateFixture.orderId}/verified`, {
       method: 'DELETE',
       headers: writeHeaders(rateSupplierSession),
       body: JSON.stringify({ confirmShowNo: rateFixture.showNo, permanentDeletePassword: 'wrong-password-value' }),
     }), 429, '高危删除账号频控')
+    assert.match(String(rateLimited.message ?? ''), /永久删除口令错误次数过多/, '由跨入口共享的口令失败桶拦截')
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
   }

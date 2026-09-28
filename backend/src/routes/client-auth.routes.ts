@@ -20,6 +20,7 @@ import {
   CLIENT_PASSWORD_POLICY_MIN_LENGTH,
   getClientPasswordPolicyMessage,
   isClientPasswordPolicySatisfied,
+  PASSWORD_POLICY_MAX_LENGTH,
 } from '../utils/password.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { clientAuthService } from '../services/client-auth.service.js'
@@ -27,6 +28,15 @@ import { mobileSessionService } from '../services/mobile-session.service.js'
 import { authSecurityService } from '../services/auth-security.service.js'
 import { verificationCodeService } from '../services/verification-code.service.js'
 import { clearClientAuthCookie, ensureClientCsrfCookie, setClientAuthCookie } from '../utils/client-auth-cookie.js'
+import {
+  AUTH_ACCOUNT_INPUT_MAX_LENGTH,
+  CAPTCHA_CODE_INPUT_MAX_LENGTH,
+  CAPTCHA_ID_INPUT_MAX_LENGTH,
+  existingPasswordInput,
+  optionalCaptchaCodeInput,
+  optionalCaptchaIdInput,
+  RESET_TOKEN_INPUT_MAX_LENGTH,
+} from '../constants/auth-input-limits.js'
 
 /**
  * 客户端密码字段统一请求校验：
@@ -37,6 +47,7 @@ const clientPasswordSchema = (fieldLabel = '密码') =>
   z
     .string()
     .min(CLIENT_PASSWORD_POLICY_MIN_LENGTH, getClientPasswordPolicyMessage(fieldLabel))
+    .max(PASSWORD_POLICY_MAX_LENGTH, `${fieldLabel}长度不能超过 ${PASSWORD_POLICY_MAX_LENGTH} 位`)
     .refine((value) => isClientPasswordPolicySatisfied(value), getClientPasswordPolicyMessage(fieldLabel))
 
 const registerSchema = z
@@ -50,8 +61,8 @@ const registerSchema = z
     password: clientPasswordSchema('密码'),
     departmentName: z.string().optional(),
     verificationCode: z.string().trim().min(4).max(8).optional(),
-    captchaId: z.string().trim().min(1).optional(),
-    captchaCode: z.string().trim().min(1).optional(),
+    captchaId: optionalCaptchaIdInput(),
+    captchaCode: optionalCaptchaCodeInput(),
   })
   .superRefine((payload, ctx) => {
     if (payload.accountType === 'personal') {
@@ -77,36 +88,39 @@ const registerSchema = z
     }
   })
 
+const accountInput = () =>
+  z.string().trim().min(1, '请输入账号').max(AUTH_ACCOUNT_INPUT_MAX_LENGTH, `账号长度不能超过 ${AUTH_ACCOUNT_INPUT_MAX_LENGTH} 位`)
+
 const loginSchema = z.object({
-  account: z.string().trim().min(1),
-  password: z.string().min(1),
-  captchaId: z.string().trim().min(1).optional(),
-  captchaCode: z.string().trim().min(1).optional(),
+  account: accountInput(),
+  password: existingPasswordInput('密码'),
+  captchaId: optionalCaptchaIdInput(),
+  captchaCode: optionalCaptchaCodeInput(),
 })
 
 const forgotVerifySchema = z.object({
-  account: z.string().trim().min(1),
+  account: accountInput(),
   verificationCode: z.string().trim().min(4).max(8).optional(),
-  captchaId: z.string().trim().min(1).optional(),
-  captchaCode: z.string().trim().min(1).optional(),
+  captchaId: optionalCaptchaIdInput(),
+  captchaCode: optionalCaptchaCodeInput(),
 })
 
 const resetPasswordSchema = z.object({
-  account: z.string().trim().min(1),
-  resetToken: z.string().trim().min(1),
+  account: accountInput(),
+  resetToken: z.string().trim().min(1).max(RESET_TOKEN_INPUT_MAX_LENGTH, '重置凭证无效，请重新验证'),
   newPassword: clientPasswordSchema('新密码'),
 })
 
 const verificationCodeSendSchema = z.object({
   channel: z.enum(['mobile', 'email']),
-  target: z.string().trim().min(1),
+  target: z.string().trim().min(1, '请输入手机号或邮箱').max(AUTH_ACCOUNT_INPUT_MAX_LENGTH, `手机号或邮箱长度不能超过 ${AUTH_ACCOUNT_INPUT_MAX_LENGTH} 位`),
   scene: z.enum(['register', 'forgot_password']),
-  captchaId: z.string().trim().min(1),
-  captchaCode: z.string().trim().min(1),
+  captchaId: z.string().trim().min(1).max(CAPTCHA_ID_INPUT_MAX_LENGTH, '图形验证码已失效，请刷新后重试'),
+  captchaCode: z.string().trim().min(1).max(CAPTCHA_CODE_INPUT_MAX_LENGTH, '图形验证码格式不正确'),
 })
 
 const changePasswordSchema = z.object({
-  currentPassword: z.string().min(1),
+  currentPassword: existingPasswordInput('当前密码'),
   newPassword: clientPasswordSchema('新密码'),
 })
 
@@ -116,7 +130,7 @@ const updateProfileSchema = z.object({
     .max(128, CLIENT_PERSONAL_USERNAME_RULE_MESSAGE),
   mobile: z.string().trim().max(20).optional(),
   email: z.string().trim().max(128).optional(),
-  currentPassword: z.string().min(1),
+  currentPassword: existingPasswordInput('当前密码'),
   mobileVerificationCode: z.string().trim().min(4).max(8).optional(),
   emailVerificationCode: z.string().trim().min(4).max(8).optional(),
 })
@@ -235,7 +249,12 @@ clientAuthRouter.post(
       allowUsername: true,
       fieldLabel: '账号',
     }).normalizedValue
-    const { captchaRequired } = await authSecurityService.guardClientLoginRequest(requestMeta, normalizedAccount)
+    // 锁定与验证码判定按账号主体（用户 ID）计数：手机号、邮箱、用户名、工号及其变体写法共用同一失败额度。
+    const { captchaRequired } = await authSecurityService.guardClientLoginRequest(
+      requestMeta,
+      normalizedAccount,
+      () => clientAuthService.resolveLoginRiskSubject(payload.account),
+    )
     const data = await clientAuthService.login(payload, requestMeta, captchaRequired)
     setClientAuthCookie(req, res, {
       sessionToken: data.token,
@@ -322,7 +341,7 @@ clientAuthRouter.post(
     const authReq = req as ClientAuthenticatedRequest
     const requestMeta = extractRequestMeta(req)
     await authSecurityService.guardClientChangePasswordRequest(requestMeta, authReq.clientAuth.userId)
-    await clientAuthService.changePassword(authReq.clientAuth, changePasswordSchema.parse(req.body))
+    await clientAuthService.changePassword(authReq.clientAuth, changePasswordSchema.parse(req.body), requestMeta)
     clearClientAuthCookie(req, res)
     res.json({ code: 0, message: 'ok', data: true })
   }),
@@ -356,6 +375,8 @@ clientAuthRouter.post(
     const payload = profileVerificationCodeSendSchema.parse(req.body)
     const target = normalizeClientVerificationTarget(payload.channel, payload.target)
     const requestMeta = extractRequestMeta(req)
+    // 此入口无图形验证码且目标号码由用户任填，必须先按账号封顶，再走按来源/号码的通用频控。
+    await authSecurityService.guardClientProfileVerificationSend(requestMeta, authReq.clientAuth.userId)
     await authSecurityService.guardVerificationCodeSendRequest(requestMeta, target, payload.channel)
     const data = await verificationCodeService.sendCode({
       channel: payload.channel,

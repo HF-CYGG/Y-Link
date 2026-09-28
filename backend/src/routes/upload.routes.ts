@@ -11,7 +11,7 @@ import { BizError } from '../utils/errors.js'
 import {
   buildUploadPublicUrl,
   createCategorizedImageUpload,
-  finalizeUploadedImageFile,
+  finalizeProductImageFile,
 } from '../utils/upload-storage.js'
 
 export const uploadRouter = Router()
@@ -34,8 +34,8 @@ uploadRouter.post(
     }
 
     // 商品图片与反馈截图统一走“先落临时目录，再校验转正”的安全链路，
-    // 避免仅凭扩展名与 MIME 就把异常文件直接暴露为可访问静态资源。
-    const finalizedFile = await finalizeUploadedImageFile('products', req.file)
+    // 避免仅凭扩展名与 MIME 就把异常文件直接暴露为可访问静态资源；商品图重编码另经并发闸门限流。
+    const finalizedFile = await finalizeProductImageFile(req.file)
     const url = buildUploadPublicUrl('products', finalizedFile.fileName)
     res.json({ code: 0, message: 'ok', data: { url } })
   }),

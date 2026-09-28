@@ -10,7 +10,7 @@ import { requirePermission, requireRole } from '../middleware/auth.middleware.js
 import { inboundService } from '../services/inbound.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
-import { assertPermanentDeletePassword } from '../utils/permanent-delete-password.js'
+import { createPermanentDeleteLimiter, createPermanentDeletePasswordGuard } from '../utils/permanent-delete-guard.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 import { MAX_DATABASE_INT, MAX_INBOUND_ORDER_ITEM_COUNT } from '../constants/web-resource-limits.js'
 import { rateLimit } from 'express-rate-limit'
@@ -104,6 +104,13 @@ const verifiedSupplierDeleteLimiter = rateLimit({
   },
 })
 
+// 已入库删除同样校验全局永久删除口令：接入所有入口共享的口令失败桶。
+const verifiedSupplierDeletePasswordGuard = createPermanentDeletePasswordGuard({
+  actionType: 'inbound.supplier.delete_verified',
+  actionLabel: '供货方删除已入库送货单并冲销库存',
+  targetType: 'biz_inbound_order',
+})
+
 inboundRouter.post(
   '/supplier/submit',
   requirePermission('inbound:create'),
@@ -187,6 +194,7 @@ inboundRouter.delete(
   '/supplier/:id/verified',
   requirePermission('inbound:create'),
   verifiedSupplierDeleteLimiter,
+  verifiedSupplierDeletePasswordGuard,
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const input = deleteVerifiedSupplierInboundSchema.parse(req.body ?? {})
@@ -219,15 +227,29 @@ inboundRouter.post(
   }),
 )
 
+// 供货方永久删除同样使用全局永久删除口令：按账号限速，并由服务层在归属/单号校验通过后再核对口令。
+const supplierPurgeLimiter = createPermanentDeleteLimiter({
+  actionType: 'inbound.supplier.purge',
+  actionLabel: '供货方永久删除送货单',
+  targetType: 'biz_inbound_order',
+  storePrefix: 'express-inbound-supplier-purge',
+})
+
 // 供货方：永久删除已软删除送货单
 inboundRouter.delete(
   '/supplier/:id/permanent',
   requirePermission('inbound:create'),
+  supplierPurgeLimiter,
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const input = permanentDeleteSupplierInboundSchema.parse(req.body ?? {})
-    assertPermanentDeletePassword(input.permanentDeletePassword)
-    const result = await inboundService.purgeSupplierDelivery(authReq.auth, req.params.id, input.confirmShowNo, extractRequestMeta(req))
+    const result = await inboundService.purgeSupplierDelivery(
+      authReq.auth,
+      req.params.id,
+      input.confirmShowNo,
+      extractRequestMeta(req),
+      input.permanentDeletePassword,
+    )
     res.json({
       code: 0,
       message: '永久删除成功',

@@ -12,6 +12,16 @@ import type { RequestMeta } from '../utils/request-meta.js'
 import { BizError } from '../utils/errors.js'
 import { auditService, type CreateAuditLogInput } from './audit.service.js'
 import { persistentRiskStateService, type PersistentFailureState } from './persistent-risk-state.service.js'
+import { describeClientRiskSubjectForAudit, maskLoginInputForAudit } from '../utils/audit-subject-mask.js'
+import { GLOBAL_LOGIN_FAILURE_POLICY } from '../config/load-protection-policy.js'
+import { toRiskSourceKey } from '../utils/ip-subnet.js'
+import { AuditThrottle } from '../utils/audit-throttle.js'
+
+/** 管理端登录风控主体：`resolved` 为 false 表示账号不存在、subject 是输入原文，写审计前必须脱敏。 */
+export interface ResolvedLoginRiskSubject {
+  subject: string
+  resolved: boolean
+}
 
 type FailureScope = 'admin-login' | 'client-login'
 
@@ -157,6 +167,18 @@ const RATE_LIMIT_RULES = {
     windowMs: 10 * 60 * 1000,
     blockMessage: '该账号验证码发送过于频繁，请稍后再试',
   },
+  // 同一手机号/邮箱 24 小时累计上限：短窗口频控挡不住“每 10 分钟打满一次”的持续短信轰炸与费用消耗。
+  verificationCodeSendByTargetDaily: {
+    maxRequests: 10,
+    windowMs: 24 * 60 * 60 * 1000,
+    blockMessage: '该手机号或邮箱今日验证码发送次数已达上限，请明天再试',
+  },
+  // 已登录用户“修改资料”发码可指定任意新号码/邮箱：按号码计数挡不住单账号轮换号码刷短信费，需再按账号封顶。
+  clientProfileVerificationSendByUser: {
+    maxRequests: 10,
+    windowMs: 24 * 60 * 60 * 1000,
+    blockMessage: '当前账号今日验证码发送次数已达上限，请明天再试',
+  },
   staffDirectoryLookupBySource: {
     maxRequests: 20,
     windowMs: 10 * 60 * 1000,
@@ -166,6 +188,33 @@ const RATE_LIMIT_RULES = {
     maxRequests: 80,
     windowMs: 10 * 60 * 1000,
     blockMessage: '当前网络下工号目录查询过于频繁，请稍后再试',
+  },
+  // 客户端业务写接口按账号限频：每次调用都会写审计并触发站内信/飞书/邮件外发，需防止单账号循环刷量淹没员工通知。
+  clientFeedbackConversationCreateByUser: {
+    maxRequests: 5,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '反馈提交过于频繁，请稍后再试',
+  },
+  clientFeedbackMessageByUser: {
+    maxRequests: 30,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '消息发送过于频繁，请稍后再试',
+  },
+  clientPreorderSubmitByUser: {
+    maxRequests: 20,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '下单过于频繁，请稍后再试',
+  },
+  clientPreorderCancelByUser: {
+    maxRequests: 20,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '撤单过于频繁，请稍后再试',
+  },
+  // 退货可按 1 件拆成多张申请，每张都会写审计并通知员工，需按账号封顶。
+  clientReturnRequestCreateByUser: {
+    maxRequests: 10,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '退货申请提交过于频繁，请稍后再试',
   },
   mobileRefreshBySession: {
     maxRequests: 60,
@@ -196,9 +245,49 @@ const FAILURE_RESET_WINDOW_MS = {
   'client-login': 15 * 60 * 1000,
 } as const satisfies Record<FailureScope, number>
 
+/**
+ * 全局登录失败态势（进程内）：分布式撞库时单个 IP、单个账号都可能低于阈值，
+ * 这里按端统计 5 分钟内全站失败次数，超过阈值后该端所有登录强制图形验证码一段时间（分级响应）。
+ * 多实例部署时各实例独立判断，任一实例触发即对打到该实例的请求生效。
+ */
+class GlobalLoginFailureMonitor {
+  private readonly failureTimes: Record<FailureScope, number[]> = { 'admin-login': [], 'client-login': [] }
+  private readonly forcedCaptchaUntil: Record<FailureScope, number> = { 'admin-login': 0, 'client-login': 0 }
+
+  private threshold(scope: FailureScope) {
+    return scope === 'admin-login' ? GLOBAL_LOGIN_FAILURE_POLICY.adminThreshold : GLOBAL_LOGIN_FAILURE_POLICY.clientThreshold
+  }
+
+  /** 记录一次失败；返回本次是否刚刚进入“全员验证码”状态，供调用方只写一次审计。 */
+  record(scope: FailureScope, nowMs: number): { activated: boolean; recentFailures: number } {
+    const times = this.failureTimes[scope]
+    times.push(nowMs)
+    while (times.length && nowMs - times[0] >= GLOBAL_LOGIN_FAILURE_POLICY.windowMs) times.shift()
+    // 只需要知道是否达到阈值：保留的时间戳有上限，攻击流量不会让数组无限增长。
+    const threshold = this.threshold(scope)
+    if (times.length > threshold * 2) times.splice(0, times.length - threshold * 2)
+    if (times.length < threshold) {
+      return { activated: false, recentFailures: times.length }
+    }
+    const wasActive = this.forcedCaptchaUntil[scope] > nowMs
+    this.forcedCaptchaUntil[scope] = nowMs + GLOBAL_LOGIN_FAILURE_POLICY.captchaHoldMs
+    return { activated: !wasActive, recentFailures: times.length }
+  }
+
+  isCaptchaForced(scope: FailureScope, nowMs: number): boolean {
+    return this.forcedCaptchaUntil[scope] > nowMs
+  }
+}
+
+const globalLoginFailureMonitor = new GlobalLoginFailureMonitor()
+
 const LOGIN_REMAINING_WARNING_RATIO = 0.2
 const REGISTER_REMAINING_WARNING_THRESHOLD = 3
-const normalizeRiskSource = (meta?: RequestMeta) => meta?.ipAddress?.trim() || 'unknown-ip'
+// 频控与锁定按来源计数：IPv4 映射地址还原为 IPv4，IPv6 聚合到 /64，防止同网段轮换地址绕过；审计仍记完整 IP。
+const normalizeRiskSource = (meta?: RequestMeta) => toRiskSourceKey(meta?.ipAddress) ?? 'unknown-ip'
+
+// 锁定期间的重复尝试：同一端、同一主体每分钟最多记一次锁定拒绝审计，避免攻击流量灌满审计表。
+const lockedRejectionAuditThrottle = new AuditThrottle({ windowMs: 60 * 1000, maxKeys: 20_000 })
 
 export class AuthSecurityService {
   private async recordRiskEvent(input: {
@@ -258,7 +347,9 @@ export class AuthSecurityService {
       if (auditInput.detail) {
         Object.assign(riskDetail, auditInput.detail)
       }
-      if (auditInput.auditOnLimit !== false) {
+      // 只在首次（走库判定）超限时写审计；负缓存直接拒绝的后续请求不再重复记录。
+      const deniedFromCache = 'deniedFromCache' in consumed && consumed.deniedFromCache === true
+      if (auditInput.auditOnLimit !== false && !deniedFromCache) {
         await this.recordRiskEvent({
           actionType: auditInput.actionType,
           actionLabel: auditInput.actionLabel,
@@ -304,23 +395,26 @@ export class AuthSecurityService {
         continue
       }
       const waitSeconds = Math.max(1, Math.ceil((state.lockedUntil - nowMs) / 1000))
-      await this.recordRiskEvent({
-        actionType: 'auth.guard.locked',
-        actionLabel: '认证请求被临时锁定',
-        targetCode,
-        requestMeta,
-        detail: {
-          scope,
-          waitSeconds,
-        },
-      })
+      if (lockedRejectionAuditThrottle.shouldRecord(`${scope}|${targetCode}`, nowMs)) {
+        await this.recordRiskEvent({
+          actionType: 'auth.guard.locked',
+          actionLabel: '认证请求被临时锁定',
+          targetCode,
+          requestMeta,
+          detail: {
+            scope,
+            waitSeconds,
+          },
+        })
+      }
       throw new BizError(`尝试次数过多，已临时锁定，请 ${waitSeconds} 秒后再试`, 429, {
         retryAfterSeconds: waitSeconds,
       })
     }
 
     return {
-      captchaRequired: states.some((state) => Boolean(state && state.count > 0)),
+      captchaRequired: states.some((state) => Boolean(state && state.count > 0))
+        || globalLoginFailureMonitor.isCaptchaForced(scope, nowMs),
     }
   }
 
@@ -342,6 +436,22 @@ export class AuthSecurityService {
         nowMs,
       )
       if (storeKey === subjectKey) currentSubjectState = next
+    }
+
+    const globalState = globalLoginFailureMonitor.record(scope, nowMs)
+    if (globalState.activated) {
+      await this.recordRiskEvent({
+        actionType: 'auth.guard.global_captcha',
+        actionLabel: '撞库态势触发全员图形验证码',
+        targetCode: scope,
+        requestMeta,
+        detail: {
+          scope,
+          recentFailures: globalState.recentFailures,
+          windowSeconds: Math.round(GLOBAL_LOGIN_FAILURE_POLICY.windowMs / 1000),
+          holdSeconds: Math.round(GLOBAL_LOGIN_FAILURE_POLICY.captchaHoldMs / 1000),
+        },
+      })
     }
 
     const remainingAttempts = Math.max(0, FAILURE_LOCK_THRESHOLD[scope] - (currentSubjectState?.count ?? 0))
@@ -444,21 +554,58 @@ export class AuthSecurityService {
     return primaryConsumeResult
   }
 
-  async guardAdminLoginRequest(requestMeta: RequestMeta | undefined, username: string): Promise<{ captchaRequired: boolean }> {
+  /**
+   * 管理端登录守卫：
+   * - 先按 IP 频控，被限流的请求不再查库；
+   * - `resolveRiskSubject` 返回规范用户名（账号不存在时为输入原文），锁定与验证码判定按它计数，
+   *   与 `recordAdminLoginFailure` 使用同一主体，防止大小写/重音/全角变体各得一份失败额度；
+   * - 审计中的原始输入一律脱敏（可能是误填的密码），只有命中真实账号的规范用户名原样记录。
+   */
+  async guardAdminLoginRequest(
+    requestMeta: RequestMeta | undefined,
+    username: string,
+    resolveRiskSubject?: () => Promise<ResolvedLoginRiskSubject>,
+  ): Promise<{ captchaRequired: boolean }> {
     const source = normalizeRiskSource(requestMeta)
     const normalizedUsername = username.trim().toLowerCase()
     await this.consumeRateLimit(`admin-login:ip:${source}`, RATE_LIMIT_RULES.adminLoginByIp, {
       actionType: 'auth.guard.admin_login',
       actionLabel: '管理端登录频控',
-      targetCode: normalizedUsername,
+      targetCode: maskLoginInputForAudit(normalizedUsername),
       requestMeta,
       detail: { source },
     })
+    const resolvedSubject = resolveRiskSubject
+      ? await resolveRiskSubject()
+      : { subject: normalizedUsername, resolved: false }
+    const subject = resolvedSubject.subject.trim().toLowerCase()
     return this.assertLoginNotLockedAndCaptchaRequired(
       'admin-login',
-      [`admin-login:ip:${source}`, `admin-login:user:${normalizedUsername}`],
+      [`admin-login:ip:${source}`, `admin-login:user:${subject}`],
       requestMeta,
-      normalizedUsername,
+      resolvedSubject.resolved ? subject : maskLoginInputForAudit(subject),
+    )
+  }
+
+  /**
+   * 两步验证登录第二步的守卫：与登录共用来源频控和“来源 + 账号”锁定，账号已锁定时第二步同样拒绝；
+   * 图形验证码已在第一步按需校验，第二步不再要求。`username` 来自票据中的规范用户名，无需脱敏。
+   */
+  async guardAdminMfaLoginRequest(requestMeta: RequestMeta | undefined, username: string): Promise<void> {
+    const source = normalizeRiskSource(requestMeta)
+    const subject = username.trim().toLowerCase()
+    await this.consumeRateLimit(`admin-login:ip:${source}`, RATE_LIMIT_RULES.adminLoginByIp, {
+      actionType: 'auth.guard.admin_login',
+      actionLabel: '管理端登录频控',
+      targetCode: subject,
+      requestMeta,
+      detail: { source, stage: 'mfa' },
+    })
+    await this.assertLoginNotLockedAndCaptchaRequired(
+      'admin-login',
+      [`admin-login:ip:${source}`, `admin-login:user:${subject}`],
+      requestMeta,
+      subject,
     )
   }
 
@@ -472,13 +619,18 @@ export class AuthSecurityService {
     })
   }
 
-  async recordAdminLoginFailure(requestMeta: RequestMeta | undefined, username: string) {
+  /** `subjectResolved: false` 表示账号不存在、username 为输入原文，触发锁定的审计只记掩码与指纹。 */
+  async recordAdminLoginFailure(
+    requestMeta: RequestMeta | undefined,
+    username: string,
+    options: { subjectResolved?: boolean } = {},
+  ) {
     const source = normalizeRiskSource(requestMeta)
     const normalizedUsername = username.trim().toLowerCase()
     await this.recordLoginFailure(
       'admin-login',
       requestMeta,
-      normalizedUsername,
+      options.subjectResolved === false ? maskLoginInputForAudit(normalizedUsername) : normalizedUsername,
       `admin-login:ip:${source}`,
       `admin-login:user:${normalizedUsername}`,
     )
@@ -507,7 +659,7 @@ export class AuthSecurityService {
       {
         actionType: 'client.auth.guard.staff_directory_lookup',
         actionLabel: '客户端工号目录查询频控',
-        targetCode: staffNo,
+        targetCode: maskLoginInputForAudit(staffNo),
         requestMeta,
         detail: {},
       },
@@ -523,16 +675,34 @@ export class AuthSecurityService {
       {
       actionType: 'client.auth.guard.verification_send',
       actionLabel: '验证码发送频控',
-      targetCode: target,
+      targetCode: maskLoginInputForAudit(target),
       requestMeta,
       detail: { channel },
     })
     await this.consumeRateLimit(`verification-send:${channel}:${target}`, RATE_LIMIT_RULES.verificationCodeSendByTarget, {
       actionType: 'client.auth.guard.verification_send',
       actionLabel: '验证码发送频控',
-      targetCode: target,
+      targetCode: maskLoginInputForAudit(target),
       requestMeta,
       detail: { source: riskActor.source, sourceType: riskActor.sourceType, channel, dimension: 'target' },
+    })
+    await this.consumeRateLimit(`verification-send-daily:${channel}:${target}`, RATE_LIMIT_RULES.verificationCodeSendByTargetDaily, {
+      actionType: 'client.auth.guard.verification_send',
+      actionLabel: '验证码发送频控',
+      targetCode: maskLoginInputForAudit(target),
+      requestMeta,
+      detail: { source: riskActor.source, sourceType: riskActor.sourceType, channel, dimension: 'target_daily' },
+    })
+  }
+
+  /** 修改资料发码的账号级日上限：先于按来源/号码的通用发码频控执行，桶键只用服务端解析出的账号 ID。 */
+  async guardClientProfileVerificationSend(requestMeta: RequestMeta | undefined, userId: string) {
+    await this.consumeRateLimit(`client-profile-verification-send:user:${userId}`, RATE_LIMIT_RULES.clientProfileVerificationSendByUser, {
+      actionType: 'client.auth.guard.verification_send',
+      actionLabel: '验证码发送频控',
+      targetCode: userId,
+      requestMeta,
+      detail: { source: normalizeRiskSource(requestMeta), dimension: 'profile_user_daily' },
     })
   }
 
@@ -550,7 +720,7 @@ export class AuthSecurityService {
       {
       actionType: 'client.auth.guard.register',
       actionLabel: '客户端注册频控',
-      targetCode: accountKey,
+      targetCode: maskLoginInputForAudit(accountKey),
       requestMeta,
       detail: {},
     })
@@ -572,7 +742,7 @@ export class AuthSecurityService {
     await this.consumeRateLimit(`client-register:account:${accountKey}`, RATE_LIMIT_RULES.clientRegisterByAccount, {
       actionType: 'client.auth.guard.register',
       actionLabel: '客户端注册频控',
-      targetCode: accountKey,
+      targetCode: maskLoginInputForAudit(accountKey),
       requestMeta,
       detail: { source: riskActor.source, sourceType: riskActor.sourceType, dimension: 'account' },
     })
@@ -587,14 +757,14 @@ export class AuthSecurityService {
       {
       actionType: 'client.auth.guard.forgot_verify',
       actionLabel: '客户端找回密码校验频控',
-      targetCode: accountKey,
+      targetCode: maskLoginInputForAudit(accountKey),
       requestMeta,
       detail: {},
     })
     await this.consumeRateLimit(`client-forgot-verify:account:${accountKey}`, RATE_LIMIT_RULES.clientForgotVerifyByAccount, {
       actionType: 'client.auth.guard.forgot_verify',
       actionLabel: '客户端找回密码校验频控',
-      targetCode: accountKey,
+      targetCode: maskLoginInputForAudit(accountKey),
       requestMeta,
       detail: { source: riskActor.source, sourceType: riskActor.sourceType, dimension: 'account' },
     })
@@ -609,33 +779,44 @@ export class AuthSecurityService {
       {
       actionType: 'client.auth.guard.forgot_reset',
       actionLabel: '客户端重置密码频控',
-      targetCode: accountKey,
+      targetCode: maskLoginInputForAudit(accountKey),
       requestMeta,
       detail: {},
     })
     await this.consumeRateLimit(`client-forgot-reset:account:${accountKey}`, RATE_LIMIT_RULES.clientForgotResetByAccount, {
       actionType: 'client.auth.guard.forgot_reset',
       actionLabel: '客户端重置密码频控',
-      targetCode: accountKey,
+      targetCode: maskLoginInputForAudit(accountKey),
       requestMeta,
       detail: { source: riskActor.source, sourceType: riskActor.sourceType, dimension: 'account' },
     })
   }
 
-  async guardClientLoginRequest(requestMeta: RequestMeta | undefined, accountKey: string): Promise<{ captchaRequired: boolean }> {
+  /**
+   * 客户端登录守卫（Web 与 Mobile 共用）：
+   * - 先按来源频控，被限流的请求不再查库；
+   * - `resolveRiskSubject` 返回账号主体（`uid:<用户ID>`，账号不存在时为归一化输入），
+   *   必须与 `clientAuthService.authenticateCredentials` 记录失败时的主体一致。
+   */
+  async guardClientLoginRequest(
+    requestMeta: RequestMeta | undefined,
+    accountKey: string,
+    resolveRiskSubject?: () => Promise<string>,
+  ): Promise<{ captchaRequired: boolean }> {
     const riskActor = this.resolveClientRiskActor(requestMeta)
     await this.consumeClientSourceRateLimit('client-login', RATE_LIMIT_RULES.clientLoginBySource, RATE_LIMIT_RULES.clientLoginByIpFallback, {
       actionType: 'client.auth.guard.login',
       actionLabel: '客户端登录频控',
-      targetCode: accountKey,
+      targetCode: maskLoginInputForAudit(accountKey),
       requestMeta,
       detail: {},
     })
+    const subject = resolveRiskSubject ? await resolveRiskSubject() : accountKey
     return this.assertLoginNotLockedAndCaptchaRequired(
       'client-login',
-      [`client-login:${riskActor.bucketSegment}`, `client-login:account:${accountKey}`],
+      [`client-login:${riskActor.bucketSegment}`, `client-login:account:${subject}`],
       requestMeta,
-      accountKey,
+      describeClientRiskSubjectForAudit(subject),
     )
   }
 
@@ -644,7 +825,7 @@ export class AuthSecurityService {
     return this.recordLoginFailure(
       'client-login',
       requestMeta,
-      accountKey,
+      describeClientRiskSubjectForAudit(accountKey),
       `client-login:${riskActor.bucketSegment}`,
       `client-login:account:${accountKey}`,
     )
@@ -689,6 +870,60 @@ export class AuthSecurityService {
       requestMeta,
       detail: { source, dimension: 'user' },
     })
+  }
+
+  /**
+   * 客户端业务写接口账号级频控：
+   * - 桶键只用服务端解析出的客户端账号 ID，不信任任何客户端请求头；
+   * - 超限返回 429 与 retryAfterSeconds，并写安全审计便于识别刷量账号。
+   */
+  async guardClientBusinessWrite(
+    requestMeta: RequestMeta | undefined,
+    userId: string,
+    kind: 'feedback_conversation_create' | 'feedback_message' | 'preorder_submit' | 'preorder_cancel' | 'return_request_create',
+  ) {
+    const ruleMap = {
+      feedback_conversation_create: RATE_LIMIT_RULES.clientFeedbackConversationCreateByUser,
+      feedback_message: RATE_LIMIT_RULES.clientFeedbackMessageByUser,
+      preorder_submit: RATE_LIMIT_RULES.clientPreorderSubmitByUser,
+      preorder_cancel: RATE_LIMIT_RULES.clientPreorderCancelByUser,
+      return_request_create: RATE_LIMIT_RULES.clientReturnRequestCreateByUser,
+    } as const
+    await this.consumeRateLimit(`client-business-write:${kind}:user:${userId}`, ruleMap[kind], {
+      actionType: 'client.auth.guard.business_write',
+      actionLabel: '客户端业务写入频控',
+      targetCode: userId,
+      requestMeta,
+      detail: { kind, source: normalizeRiskSource(requestMeta) },
+    })
+  }
+
+  /**
+   * 已登录会话内的旧密码复核（改密、改资料）：
+   * - 与登录共用“来源 + 账号主体”的失败计数与临时锁定，复核失败需调用对应的 record*LoginFailure 计数；
+   * - 否则劫持会话后可绕开登录锁定，在线逐个猜当前密码，猜中即可改密长期接管账号；
+   * - 这里只判断是否已锁定，不消耗登录频控额度。
+   */
+  async assertAdminPasswordReauthAllowed(requestMeta: RequestMeta | undefined, username: string) {
+    const source = normalizeRiskSource(requestMeta)
+    const subject = username.trim().toLowerCase()
+    await this.assertLoginNotLockedAndCaptchaRequired(
+      'admin-login',
+      [`admin-login:ip:${source}`, `admin-login:user:${subject}`],
+      requestMeta,
+      subject,
+    )
+  }
+
+  async assertClientPasswordReauthAllowed(requestMeta: RequestMeta | undefined, userId: string) {
+    const riskActor = this.resolveClientRiskActor(requestMeta)
+    const subject = `uid:${userId}`
+    await this.assertLoginNotLockedAndCaptchaRequired(
+      'client-login',
+      [`client-login:${riskActor.bucketSegment}`, `client-login:account:${subject}`],
+      requestMeta,
+      subject,
+    )
   }
 
   /** Mobile refresh 先由服务层完成重放判定，再调用这里；无匹配会话时只进入 IP 兜底桶。 */

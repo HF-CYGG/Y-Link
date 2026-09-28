@@ -27,7 +27,7 @@ import { O2oReturnRequest } from '../entities/o2o-return-request.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
 import { isUniqueConstraintError } from '../utils/database-errors.js'
-import { assertClientPasswordPolicy, hashPassword } from '../utils/password.js'
+import { assertClientPasswordPolicy, assertPasswordAvoidsAccountIdentifiers, hashPassword } from '../utils/password.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { assertPermanentDeletePassword } from '../utils/permanent-delete-password.js'
 import { auditService } from './audit.service.js'
@@ -598,7 +598,7 @@ export class ClientUserManageService {
     const passwordCheckedItems = input.items.map((item, index) => ({
       departmentNodeId: requestedDepartmentNodeIds[index]!,
       account: this.normalizeDepartmentAccountNo(item.account),
-      initialPassword: assertClientPasswordPolicy(item.initialPassword, '初始密码'),
+      initialPassword: assertClientPasswordPolicy(item.initialPassword, '初始密码', { identifiers: [item.account] }),
     }))
     const passwordHashes = await this.hashDepartmentAccountPasswords(passwordCheckedItems)
     if (new Set(passwordCheckedItems.map((item) => item.account)).size !== passwordCheckedItems.length) {
@@ -761,7 +761,9 @@ export class ClientUserManageService {
     const profileKind = this.normalizeProfileKind(input.profileKind)
     const mobile = this.normalizeMobile(input.mobile)
     const email = this.normalizeEmail(input.email)
-    const password = assertClientPasswordPolicy(input.password, '登录密码')
+    const password = assertClientPasswordPolicy(input.password, '登录密码', {
+      identifiers: [input.username, mobile, email, input.staffNo],
+    })
     // scrypt 属于高开销 CPU 操作，必须在锁定部门配置和账号行之前完成。
     const passwordHash = await hashPassword(password)
     let staffNo = profileKind === 'teacher'
@@ -1191,6 +1193,8 @@ export class ClientUserManageService {
       throw new BizError('新密码不能为空', 400)
     }
 
+    // scrypt 在事务外预先计算，避免在锁定账号行期间占用 SQLite 唯一写槽或在并发闸门排队。
+    const newPasswordHash = await hashPassword(newPassword)
     const profile = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
       const userRepo = manager.getRepository(ClientUser)
@@ -1205,8 +1209,9 @@ export class ClientUserManageService {
       if (!user) {
         throw new BizError('客户端用户不存在', 404)
       }
+      assertPasswordAvoidsAccountIdentifiers(newPassword, '新密码', [user.realName, user.mobile, user.email, user.staffNo])
 
-      user.passwordHash = await hashPassword(newPassword)
+      user.passwordHash = newPasswordHash
       const savedUser = await userRepo.save(user)
       const deletedSessions = await sessionRepo.delete({ userId: savedUser.id })
       const revokedMobileSessions = await mobileSessionRepo.createQueryBuilder()

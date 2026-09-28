@@ -270,6 +270,20 @@ export const extractErrorMessage = (error: unknown, fallback: string): string =>
 }
 
 /**
+ * 读取后端错误响应中的稳定原因码 `data.reason`：
+ * - 同一状态码可能对应不同处理分支（如两步验证“票据过期回到第一步”与“动态码错误留在本步”），页面按原因码分流；
+ * - 取不到时返回 null，调用方按普通错误处理，不要反过来用提示文案做分支判断。
+ */
+export const extractRequestErrorReason = (error: unknown): string | null => {
+  const source = error instanceof AppRequestError ? error.cause : error
+  if (!axios.isAxiosError<ApiResponse<{ reason?: unknown } | null>>(source)) {
+    return null
+  }
+  const reason = source.response?.data?.data?.reason
+  return typeof reason === 'string' ? reason : null
+}
+
+/**
  * 判断请求是否由主动取消触发：
  * - Axios 在 AbortController 中止时会返回 ERR_CANCELED；
  * - 统一抽成工具函数，供“仅保留最后一次请求结果”的页面逻辑复用。

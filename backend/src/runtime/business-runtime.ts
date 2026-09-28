@@ -30,6 +30,12 @@ import { persistentRiskStateService } from '../services/persistent-risk-state.se
 import { aliyunDypnsMnsWorkerService } from '../services/aliyun-dypns-mns-worker.service.js'
 import { systemConfigService } from '../services/system-config.service.js'
 import { migrateLegacyUploadReferences } from '../utils/upload-migration.js'
+import { toSafeErrorLog } from '../utils/safe-error-log.js'
+import { describeDataEncryptionKey } from '../utils/data-encryption.js'
+import { DataEncryptionKeyMissingError, runDataEncryptionPreflight } from './data-encryption-preflight.js'
+import { overloadMonitor } from '../middleware/overload-shedding.middleware.js'
+import { getTransactionCoordinator } from '../database/transaction-coordinator.js'
+import { applyHttpServerHardening, resolveListenHost } from './http-server-hardening.js'
 import { registerRuntimeShutdownHandler } from './runtime-shutdown.js'
 import { registerDatabaseRescueQuiesce, hasPendingRecoveryIntent, markRecoveryFinalizing } from './database-rescue-control.js'
 import {
@@ -149,6 +155,7 @@ const shutdownRuntime = (reason: string, exitCode: number, exit = true): Promise
         })
       : Promise.resolve()
 
+    overloadMonitor.stop()
     // HTTP 断开不代表业务 Promise 完成；先关闭新准入，排空所有操作和 worker 才销毁连接。
     await databaseMaintenanceModeService.shutdownAndDrain()
     await mobileSessionService.stopCleanupLoop()
@@ -157,7 +164,7 @@ const shutdownRuntime = (reason: string, exitCode: number, exit = true): Promise
 
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy().catch((error) => {
-        console.error(paint('[y-link-backend] datasource shutdown failed:', 'red'), error)
+        console.error(paint('[y-link-backend] datasource shutdown failed:', 'red'), toSafeErrorLog(error))
       })
     }
     activeHttpServer = null
@@ -270,10 +277,38 @@ const runMutableStartupBootstrap = async () => {
   const configBootstrap = await systemConfigService.ensureDefaultConfigs()
   logLine('STEP', 'ensure default notification rules')
   await notificationService.ensureDefaultRules()
+  logLine('STEP', 'seal legacy sensitive configs')
+  const dataEncryption = await sealLegacySensitiveConfigs()
 
   return {
     adminBootstrap,
     configBootstrap,
+    dataEncryption,
+  }
+}
+
+/**
+ * 敏感配置落库加密的启动收口：确认数据加密密钥可用后，把验证码网关与飞书配置中的历史明文补加密。
+ * 补加密是尽力而为的存量迁移：失败只记录日志（不含任何明文或密文），保持原数据不变，不阻断启动。
+ */
+const sealLegacySensitiveConfigs = async (): Promise<{
+  keySource: 'env' | 'file' | 'unavailable'
+  keyId: string | null
+  keyGenerated: boolean
+  sealedCount: number
+  failed: boolean
+}> => {
+  const key = describeDataEncryptionKey()
+  if (!key) {
+    return { keySource: 'unavailable', keyId: null, keyGenerated: false, sealedCount: 0, failed: true }
+  }
+  try {
+    const sealedCount = await systemConfigService.sealLegacySensitiveVerificationConfigs()
+      + await notificationService.sealLegacyFeishuSecrets()
+    return { keySource: key.source, keyId: key.keyId, keyGenerated: key.generated, sealedCount, failed: false }
+  } catch (error) {
+    console.error(paint('[y-link-backend] seal legacy sensitive configs failed:', 'red'), toSafeErrorLog(error))
+    return { keySource: key.source, keyId: key.keyId, keyGenerated: key.generated, sealedCount: 0, failed: true }
   }
 }
 
@@ -282,7 +317,7 @@ type MutableStartupBootstrapResult = Awaited<ReturnType<typeof runMutableStartup
 const logMutableStartupBootstrapResult = (
   result: MutableStartupBootstrapResult,
 ): void => {
-  const { adminBootstrap, configBootstrap } = result
+  const { adminBootstrap, configBootstrap, dataEncryption } = result
   logLine(
     'ADMIN',
     `username=${adminBootstrap.username} displayName=${adminBootstrap.displayName} initialized=${adminBootstrap.initialized}`,
@@ -298,6 +333,14 @@ const logMutableStartupBootstrapResult = (
     `inserted=${configBootstrap.insertedCount}/${configBootstrap.totalCount}`,
     configBootstrap.insertedCount > 0 ? 'success' : 'info',
   )
+  logLine(
+    'DATA ENCRYPTION',
+    `key=${dataEncryption.keySource} id=${dataEncryption.keyId ?? '-'} generated=${dataEncryption.keyGenerated} sealedLegacy=${dataEncryption.sealedCount}`,
+    dataEncryption.failed ? 'error' : dataEncryption.keyGenerated ? 'warn' : 'info',
+  )
+  if (dataEncryption.keyGenerated) {
+    logLine('SECURITY', '已自动生成敏感配置加密密钥（数据目录 secrets/data-encryption.key），请与数据库一起备份。', 'warn')
+  }
   if (adminBootstrap.initialized) {
     logLine('INIT CREDENTIAL', `username=${adminBootstrap.username} password=***`, 'warn')
     logLine('SECURITY', '管理员初始化已要求使用私有密码，首次登录后仍建议立即改密。', 'warn')
@@ -314,6 +357,20 @@ export async function startBusinessRuntime(startup: { mode: 'normal' | 'cutover'
   logLine('STEP', 'initialize datasource')
   await AppDataSource.initialize()
   await initializeDatabaseInfrastructure(AppDataSource)
+  // 必须早于任何读取加密列的启动步骤：库里已有密文而密钥文件缺失时阻断启动，而不是自动生成一把新密钥。
+  logLine('STEP', 'data encryption key preflight')
+  const dataEncryptionPreflight = await runDataEncryptionPreflight(AppDataSource).catch((error: unknown) => {
+    if (error instanceof DataEncryptionKeyMissingError) logLine('DATA ENCRYPTION', error.detail, 'error')
+    throw error
+  })
+  if (dataEncryptionPreflight && dataEncryptionPreflight.mismatchedKeyIds.length > 0) {
+    logLine(
+      'DATA ENCRYPTION',
+      `库内存在无法用当前密钥（ID ${dataEncryptionPreflight.keyId}）解密的敏感配置（密钥 ID ${dataEncryptionPreflight.mismatchedKeyIds.join('、')}），`
+        + '请恢复与该数据库配套的 secrets/data-encryption.key；在此之前这些配置按“需重新录入”处理。',
+      'warn',
+    )
+  }
   const cutoverMarkerInspection = inspectDatabaseMigrationCutoverMarker()
   if (cutoverMarkerInspection.state === 'corrupted') {
     const recoveryTaskId = (
@@ -349,7 +406,8 @@ export async function startBusinessRuntime(startup: { mode: 'normal' | 'cutover'
 
   const app = createApp()
   await new Promise<void>((resolve, reject) => {
-    const server = app.listen(env.PORT)
+    const server = app.listen(env.PORT, resolveListenHost())
+    applyHttpServerHardening(server)
     activeHttpServer = server
     const onError = (error: Error) => {
       activeHttpServer = null
@@ -358,6 +416,12 @@ export async function startBusinessRuntime(startup: { mode: 'normal' | 'cutover'
     server.once('error', onError)
     server.once('listening', () => {
       server.off('error', onError)
+      // 过载监测只在正式运行时启动：SQLite 串行写入时以写队列占用率作为第二信号，MySQL 只看事件循环延迟。
+      overloadMonitor.start(() => {
+        const snapshot = getTransactionCoordinator(AppDataSource)?.snapshot()
+        if (!snapshot?.serializeWrites) return null
+        return snapshot.pendingWrites / env.SQLITE_WRITE_QUEUE_MAX_PENDING
+      })
       resolve()
     })
   })
@@ -440,7 +504,8 @@ export async function startBusinessRuntime(startup: { mode: 'normal' | 'cutover'
       logLine('DB MIGRATION', `task=${taskId} 已调度自动续跑`, 'warn')
     }
   }).catch((error) => {
-    console.error(paint('[y-link-backend] resume automatic database migration failed:', 'red'), error)
+    // 迁移错误对象可能携带目标库连接参数与 SQL，只输出名称、消息与堆栈。
+    console.error(paint('[y-link-backend] resume automatic database migration failed:', 'red'), toSafeErrorLog(error))
   }).finally(() => {
     // 通知 outbox 定时器在维护期只空转检查，不领取新任务；维护 drain 会等待已领取批次释放。
     notificationService.startOutboxWorker()

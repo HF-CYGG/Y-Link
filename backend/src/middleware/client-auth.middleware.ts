@@ -21,6 +21,7 @@ import type { MobileAuthenticatedRequest } from '../types/mobile-auth.js'
 import { mobileSessionService } from '../services/mobile-session.service.js'
 import { isMobileAccessToken } from '../utils/mobile-token.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
+import { assertSessionRateAllowed } from '../utils/session-rate-fuse.js'
 
 const parseAuthorizationBearer = (req: Request) => {
   const authorization = req.headers.authorization
@@ -70,6 +71,8 @@ export const requireClientAuth = async (req: Request, _res: Response, next: Next
     if (!credential) {
       throw new BizError('未登录或登录状态已失效', 401)
     }
+    // Web 客户端会话的令牌桶熔断（移动端访问令牌已在上方分流，不纳入）；在查库之前判定。
+    assertSessionRateAllowed('client', credential.token)
     const auth = await clientAuthService.resolveClientByToken(credential.token)
     auth.authSource = credential.source
     ;(req as ClientAuthenticatedRequest).clientAuth = auth

@@ -383,33 +383,43 @@ export interface ClearDatabaseMigrationRuntimeOverrideResult {
  * - 仅适用于本地 SQLite 运行环境，供系统管理员做数据快照兜底。
  */
 export const createSqliteBackup = () =>
-  request<{ fileName: string; filePath: string }>({
+  request<{
+    fileName: string
+    filePath: string
+    /** 备份配套的数据加密密钥来源与 ID（不含密钥本身），恢复时须一并恢复同一密钥。 */
+    dataEncryptionKey: { source: 'env' | 'file' | 'unavailable'; keyId: string | null; notice: string }
+  }>({
     method: 'POST',
     url: '/data-maintenance/backup/sqlite',
   })
 
 /**
  * 导出系统全量数据为 JSON 格式：
- * - 返回包含全部基础表数据及导出时间戳与版本号的对象，可用于跨库或环境迁移。
+ * - 返回包含全部基础表数据及导出时间戳与版本号的对象，可用于跨库或环境迁移；
+ * - 服务端默认关闭该能力（`Y_LINK_JSON_DATA_TRANSFER_ENABLED`），开启后仍须提交本人当前密码完成复核，并受账号级频控。
  */
-export const exportDataAsJson = () =>
+export const exportDataAsJson = (payload: { currentPassword: string }) =>
   request<{
     exportedAt: string
     version: string
     tables: Record<string, Array<Record<string, unknown>>>
   }>({
-    method: 'GET',
+    method: 'POST',
     url: '/data-maintenance/export/json',
+    data: payload,
   })
 
 /**
  * 通过 JSON 格式导入恢复系统全量数据：
- * - 覆盖现有数据，具有破坏性操作，通常在运维环境交接或系统重建时调用。
+ * - 覆盖现有数据，具有破坏性操作，通常在运维环境交接或系统重建时调用；
+ * - 服务端按永久删除类操作处理：默认关闭，开启后必须同时携带本人当前密码与服务端配置的永久删除口令，并受账号级频控。
  */
 export const importDataFromJson = (payload: {
   exportedAt: string
   version: string
   tables: Record<string, Array<Record<string, unknown>>>
+  permanentDeletePassword: string
+  currentPassword: string
 }) =>
   request<{
     imported: Record<string, number>

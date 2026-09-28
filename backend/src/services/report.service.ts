@@ -98,6 +98,8 @@ export interface ReportInventorySkuDetailResult {
 
 export interface ReportExportResult {
   fileName: string
+  /** 实际写出的数据行数，供路由写导出审计。 */
+  rowCount: number
 }
 
 interface ResolvedReportQuery {
@@ -160,8 +162,9 @@ export class ReportExportLeasePool {
   private readonly activeActorCounts = new Map<string, number>()
   private activeCount = 0
 
-  acquire(actorId: string) {
-    const normalizedActorId = actorId.trim()
+  /** SQLite 下 integer 主键在运行时是数字（类型声明为 string），必须先转字符串，否则导出直接 500。 */
+  acquire(actorId: string | number) {
+    const normalizedActorId = String(actorId ?? '').trim()
     if (!normalizedActorId) {
       throw new BizError('导出操作者身份缺失', 401)
     }
@@ -358,7 +361,7 @@ export class ReportService {
     input: ReportQueryInput,
     output: Writable,
     onReady?: () => void,
-    actorId?: string,
+    actorId?: string | number,
   ): Promise<ReportExportResult> {
     const lease = reportExportLeasePool.acquire(actorId ?? '')
     try {
@@ -414,6 +417,7 @@ export class ReportService {
     await workbook.commit()
       return {
         fileName: `report-${type}-${new Date().toISOString().slice(0, 19).replaceAll(/[:T]/g, '-')}.xlsx`,
+        rowCount: exportedRows,
       }
     } finally {
       // `workbook.commit()` 才代表响应流真正结束；断线和异常同样必须归还容量。

@@ -17,6 +17,8 @@ import { isUniqueConstraintError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
 import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
 import type { AuthUserContext } from '../types/auth.js'
+import type { RequestMeta } from '../utils/request-meta.js'
+import { auditService } from './audit.service.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 import { acquireSequenceMutex } from './inventory-sequence.service.js'
 import { buildSeriesCodeMutexKey } from './product-code.service.js'
@@ -179,7 +181,7 @@ export class TagService {
     return list.map((tag) => this.buildTagView(tag))
   }
 
-  async create(input: CreateTagInput, actor: AuthUserContext): Promise<TagView> {
+  async create(input: CreateTagInput, actor: AuthUserContext, requestMeta?: RequestMeta): Promise<TagView> {
     const normalizedTagName = this.normalizeTagName(input.tagName)
     const normalizedTagCode = this.normalizeTagCode(input.tagCode)
     const normalizedSeriesCode = this.normalizeSeriesCode(input.seriesCode)
@@ -196,17 +198,29 @@ export class TagService {
         tagCode: normalizedTagCode,
         seriesCode: normalizedSeriesCode,
       })
+      let saved: BaseTag
       try {
-        return this.buildTagView(await tagRepo.save(entity))
+        saved = await tagRepo.save(entity)
       } catch (error) {
         this.mapTagWriteError(error)
       }
+      await auditService.record({
+        actionType: 'tag.create',
+        actionLabel: '新增标签',
+        targetType: 'tag',
+        targetId: String(saved.id),
+        targetCode: saved.tagName,
+        actor,
+        requestMeta,
+        detail: { tagName: saved.tagName, tagCode: saved.tagCode ?? null, seriesCode: saved.seriesCode ?? null },
+      }, manager)
+      return this.buildTagView(saved)
     })
     invalidateMallCatalogReadCache()
     return result
   }
 
-  async update(id: string, input: UpdateTagInput, actor: AuthUserContext): Promise<TagView> {
+  async update(id: string, input: UpdateTagInput, actor: AuthUserContext, requestMeta?: RequestMeta): Promise<TagView> {
     const result = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
       const tagRepo = manager.getRepository(BaseTag)
@@ -246,20 +260,36 @@ export class TagService {
         seriesCode: nextSeriesCode,
         excludeTagId: id,
       })
+      const before = { tagName: tag.tagName, tagCode: tag.tagCode ?? null, seriesCode: tag.seriesCode ?? null }
       tag.tagName = nextTagName
       tag.tagCode = nextTagCode
       tag.seriesCode = nextSeriesCode
+      let saved: BaseTag
       try {
-        return this.buildTagView(await tagRepo.save(tag))
+        saved = await tagRepo.save(tag)
       } catch (error) {
         this.mapTagWriteError(error)
       }
+      const after = { tagName: saved.tagName, tagCode: saved.tagCode ?? null, seriesCode: saved.seriesCode ?? null }
+      if (JSON.stringify(before) !== JSON.stringify(after)) {
+        await auditService.record({
+          actionType: 'tag.update',
+          actionLabel: '修改标签',
+          targetType: 'tag',
+          targetId: String(saved.id),
+          targetCode: saved.tagName,
+          actor,
+          requestMeta,
+          detail: { before, after },
+        }, manager)
+      }
+      return this.buildTagView(saved)
     })
     invalidateMallCatalogReadCache()
     return result
   }
 
-  async delete(id: string, actor: AuthUserContext): Promise<void> {
+  async delete(id: string, actor: AuthUserContext, requestMeta?: RequestMeta): Promise<void> {
     await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
       const tagRepo = manager.getRepository(BaseTag)
@@ -294,6 +324,16 @@ export class TagService {
       if (relationCount > 0) throw new BizError(`标签「${tag.tagName}」已关联商品，暂不能删除`, 409)
       const result = await tagRepo.delete({ id })
       if (!result.affected) throw new BizError('标签不存在', 404)
+      await auditService.record({
+        actionType: 'tag.delete',
+        actionLabel: '删除标签',
+        targetType: 'tag',
+        targetId: String(tag.id),
+        targetCode: tag.tagName,
+        actor,
+        requestMeta,
+        detail: { tagName: tag.tagName, tagCode: tag.tagCode ?? null, seriesCode: tag.seriesCode ?? null },
+      }, manager)
     })
     invalidateMallCatalogReadCache()
   }

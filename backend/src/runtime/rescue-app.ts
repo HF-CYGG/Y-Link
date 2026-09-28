@@ -3,6 +3,7 @@ import express from 'express'
 import { databaseRescueRouter } from '../routes/database-rescue.routes.js'
 import { configureHttpSecurity } from '../utils/http-security.js'
 import { registerRuntimeShutdownHandler } from './runtime-shutdown.js'
+import { applyHttpServerHardening, resolveListenHost } from './http-server-hardening.js'
 
 export function createDatabaseRescueApp(reason: string) {
   const app = express()
@@ -24,7 +25,8 @@ export async function startDatabaseRescueServer(reason: string): Promise<void> {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('RESCUE_PORT_INVALID')
   const app = createDatabaseRescueApp(reason)
   const server = await new Promise<ReturnType<typeof app.listen>>((resolve, reject) => {
-    const instance = app.listen(port, () => resolve(instance))
+    const instance = app.listen(port, resolveListenHost(), () => resolve(instance))
+    applyHttpServerHardening(instance)
     instance.once('error', reject)
   })
   const shutdown = async (_reason: string, code: number) => {

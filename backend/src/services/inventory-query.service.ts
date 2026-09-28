@@ -186,6 +186,11 @@ export class InventoryQueryService {
   }
 
   async exportLogs(query: InventoryLogQuery): Promise<Buffer> {
+    return (await this.exportLogsWithSummary(query)).buffer
+  }
+
+  /** 导出库存流水并返回行数，供路由写导出审计。 */
+  async exportLogsWithSummary(query: InventoryLogQuery): Promise<{ buffer: Buffer; rowCount: number }> {
     const qb = this.buildLogQuery(query)
     const total = await qb.getCount()
     if (total > LOG_EXPORT_LIMIT) throw new BizError(`导出结果 ${total} 条，超过 ${LOG_EXPORT_LIMIT} 条上限，请缩小时间范围`, 400)
@@ -215,7 +220,7 @@ export class InventoryQueryService {
         ref: row.refType ? `${row.refType}#${row.refId ?? ''}` : '',
       })
     }
-    return Buffer.from(await workbook.xlsx.writeBuffer())
+    return { buffer: Buffer.from(await workbook.xlsx.writeBuffer()), rowCount: rows.length }
   }
 
   private buildLogQuery(query: InventoryLogQuery) {

@@ -17,9 +17,13 @@ ln -sf /dev/stdout /var/log/nginx/access.log
 ln -sf /dev/stderr /var/log/nginx/error.log
 
 export PORT="${PORT:-3001}"
+# 后端只监听容器回环地址：外部流量只能经 Nginx（边缘限流、请求体上限、安全头）进入，无法直连 Node 绕过。
+export Y_LINK_LISTEN_HOST="${Y_LINK_LISTEN_HOST:-127.0.0.1}"
 export Y_LINK_TRUST_PROXY="${Y_LINK_TRUST_PROXY:-127.0.0.1,::1}"
 export Y_LINK_FORCE_SECURE_COOKIES="${Y_LINK_FORCE_SECURE_COOKIES:-false}"
 export TZ="${TZ:-Asia/Shanghai}"
+# libuv 线程池由 scrypt、sharp、SQLite 驱动与文件读写共用，默认 4 线程在登录洪水时会饿死数据库查询。
+export UV_THREADPOOL_SIZE="${UV_THREADPOOL_SIZE:-8}"
 export LOG_COLOR="${LOG_COLOR:-true}"
 export FORCE_COLOR="${FORCE_COLOR:-1}"
 export DB_TYPE="${DB_TYPE:-sqlite}"

@@ -50,9 +50,12 @@ if (!process.argv.includes('--no-fonts-worker')) {
       assert.ok(foregroundPixels >= 35, `字符 ${char} 的第 ${index + 1} 位不可见：仅 ${foregroundPixels} 个前景像素`)
     }
     assert.throws(() => service.verifyCaptcha('admin', ticket.captchaId, code), /失效/)
+    // 答错一次即作废：同一票据不能再用正确答案补救，防止 OCR 多候选反复试答。
     assert.throws(() => service.verifyCaptcha('client', ticket.captchaId, 'wrong'), /错误/)
-    service.verifyCaptcha('client', ticket.captchaId, ` ${code.toLowerCase()} `)
     assert.throws(() => service.verifyCaptcha('client', ticket.captchaId, code), /失效/)
+    const retryTicket = await service.createCaptcha('client')
+    service.verifyCaptcha('client', retryTicket.captchaId, ` ${code.toLowerCase()} `)
+    assert.throws(() => service.verifyCaptcha('client', retryTicket.captchaId, code), /失效/)
     const adminTicket = await service.createCaptcha('admin')
     service.verifyCaptcha('admin', adminTicket.captchaId, code)
   }

@@ -4,7 +4,8 @@
  * 实现逻辑：
  * - 基于 Axios 创建共享请求实例，为所有 API 模块提供统一的请求入口与基础配置；
  * - 在请求阶段补齐管理端 CSRF、客户端风控头及会话相关上下文，避免各接口模块重复拼装；
- * - 在响应阶段统一解包后端返回体、处理登录失效与异常归一化，保证页面层消费口径一致。
+ * - 在响应阶段统一解包后端返回体、处理登录失效与异常归一化，保证页面层消费口径一致；
+ * - 管理端/客户端 CSRF 令牌均由会话派生，写请求因 Cookie 缺失或过期被拒时，先各自请求一次 `me` 换发再重试原请求。
  */
 
 import axios, { type AxiosRequestConfig, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios'
@@ -37,7 +38,14 @@ export type RequestConfig = Pick<AxiosRequestConfig, 'signal'>
 
 type ClientCsrfRetryConfig = InternalAxiosRequestConfig & {
   __yLinkClientCsrfRefreshAttempted?: boolean
+  __yLinkAdminCsrfRefreshAttempted?: boolean
 }
+
+/**
+ * 管理端 CSRF 令牌由会话派生（签名双提交）：Cookie 缺失或仍是升级前的随机值时，后端以这两个原因拒绝写请求，
+ * 前端先请求一次 `/auth/me` 让后端换发 Cookie，再用新值重试原请求。
+ */
+const ADMIN_CSRF_REFRESHABLE_REASONS = new Set(['ADMIN_CSRF_MISSING', 'ADMIN_CSRF_MISMATCH'])
 
 /**
  * 归一化请求地址：
@@ -63,10 +71,10 @@ const isClientRouteContext = () => {
 /**
  * 是否为登录接口请求：
  * - 登录失败属于正常业务反馈，不应被全局拦截器误判为“会话失效”；
- * - 因此需要排除 /auth/login 的 401 响应自动跳转逻辑。
+ * - 因此需要排除 /auth/login 与两步验证第二步 /auth/login/mfa 的 401 响应自动跳转逻辑。
  */
 const isLoginRequest = (url?: string) => {
-  return /\/auth\/login(?:\?|$)/.test(normalizeRequestUrl(url))
+  return /\/auth\/login(?:\/mfa)?(?:\?|$)/.test(normalizeRequestUrl(url))
 }
 
 /**
@@ -151,12 +159,13 @@ const isMaintenanceRecoveryWrite = (method?: string, url?: string) => {
  * - 仅管理端非安全方法需要附加；
  * - 前端从可读 Cookie 中取值，与浏览器自动附带的 Cookie 共同完成“双提交”校验。
  */
-const attachAdminCsrfHeader = (config: InternalAxiosRequestConfig) => {
+const attachAdminCsrfHeader = (config: ClientCsrfRetryConfig) => {
   if (!isAdminRequest(config.url) || isSafeRequestMethod(config.method)) {
     return config
   }
 
-  if (config.headers['x-csrf-token']) {
+  // 换发后的重试必须覆盖旧请求头，其余情况保留调用方显式传入的值。
+  if (config.headers['x-csrf-token'] && !config.__yLinkAdminCsrfRefreshAttempted) {
     return config
   }
 
@@ -213,6 +222,14 @@ const isClientCsrfMissingResponse = (error: unknown): error is { config: ClientC
     return false
   }
   return error.response?.status === 403 && error.response.data?.data?.reason === 'CLIENT_CSRF_MISSING'
+}
+
+const isAdminCsrfRejectedResponse = (error: unknown): error is { config: ClientCsrfRetryConfig; response: { status: number; data?: { data?: { reason?: unknown } } } } => {
+  if (!axios.isAxiosError(error)) {
+    return false
+  }
+  const reason = error.response?.data?.data?.reason
+  return error.response?.status === 403 && typeof reason === 'string' && ADMIN_CSRF_REFRESHABLE_REASONS.has(reason)
 }
 
 /**
@@ -339,6 +356,16 @@ http.interceptors.response.use(
     ) {
       retryConfig.__yLinkClientCsrfRefreshAttempted = true
       return http.get('/client-auth/me').then(() => http.request(retryConfig))
+    }
+
+    const adminRetryConfig = isAdminCsrfRejectedResponse(error) ? error.config : null
+    if (
+      adminRetryConfig
+      && !adminRetryConfig.__yLinkAdminCsrfRefreshAttempted
+      && !isSessionProbeRequest(adminRetryConfig.url)
+    ) {
+      adminRetryConfig.__yLinkAdminCsrfRefreshAttempted = true
+      return http.get('/auth/me').then(() => http.request(adminRetryConfig))
     }
 
     const normalizedError = normalizeRequestError(error)

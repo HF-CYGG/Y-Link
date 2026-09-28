@@ -13,12 +13,14 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import {
+  completeMfaLogin as completeMfaLoginApi,
   getCurrentUser,
   login as loginApi,
   logout as logoutApi,
   normalizeUserPermissions,
   normalizeUserSafeProfile,
   type LoginPayload,
+  type MfaLoginPayload,
   type PermissionCode,
   type UserSafeProfile,
 } from '@/api/modules/auth'
@@ -199,10 +201,29 @@ export const useAuthStore = defineStore('auth', () => {
    * 登录动作：
    * - 请求成功后同时更新 token/user/expiresAt；
    * - 服务端会在响应中写入 HttpOnly Cookie；
-   * - 前端仅更新 user/expiresAt 并进入主系统过渡态。
+   * - 前端仅更新 user/expiresAt 并进入主系统过渡态；
+   * - 账号已开启两步验证时服务端只返回第二步票据、不下发会话，这里原样返回且不改动登录态。
    */
   const login = async (payload: LoginPayload) => {
     const result = await loginApi(payload)
+    if (result.mfaRequired) {
+      return result
+    }
+    setAuthState({
+      user: result.user,
+      expiresAt: result.expiresAt,
+    })
+    startPostLoginTransition()
+    return result
+  }
+
+  /**
+   * 两步验证登录第二步：
+   * - 成功后与普通登录一样更新登录态并进入主系统过渡；
+   * - 失败时不改动任何登录态，由登录页按原因码决定留在本步还是回到第一步。
+   */
+  const completeMfaLogin = async (payload: MfaLoginPayload) => {
+    const result = await completeMfaLoginApi(payload)
     setAuthState({
       user: result.user,
       expiresAt: result.expiresAt,
@@ -277,6 +298,7 @@ export const useAuthStore = defineStore('auth', () => {
     clearAuthState,
     initializeAuth,
     login,
+    completeMfaLogin,
     logout,
     handleSessionExpired,
     startPostLoginTransition,

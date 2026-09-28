@@ -11,7 +11,7 @@
  * - `TEXT` 适合表单报错与 toast；
  * - `HINT` 适合展示在输入框下方的静态说明。
  */
-export const CLIENT_NEW_PASSWORD_RULE_TEXT = '密码至少 8 位，且需同时包含字母和数字'
+export const CLIENT_NEW_PASSWORD_RULE_TEXT = '密码需 8-64 位，且同时包含字母和数字'
 export const CLIENT_NEW_PASSWORD_RULE_HINT = `${CLIENT_NEW_PASSWORD_RULE_TEXT}。`
 
 /**
@@ -29,13 +29,17 @@ type ValidatorCallback = (error?: Error) => void
 
 /**
  * 判断新密码是否满足客户端口径：
- * - 至少 8 位；
+ * - 8-64 位（上限与后端 NIST 口径一致）；
  * - 至少包含 1 个字母；
- * - 至少包含 1 个数字。
+ * - 至少包含 1 个数字；
+ * - 常见弱口令与“包含账号信息”只由后端判定，前端展示后端返回的原因。
  */
 export const isClientNewPasswordValid = (password: string) => {
   const normalizedPassword = password.trim()
-  return normalizedPassword.length >= 8 && /[A-Za-z]/.test(normalizedPassword) && /\d/.test(normalizedPassword)
+  return normalizedPassword.length >= 8
+    && normalizedPassword.length <= 64
+    && /[A-Za-z]/.test(normalizedPassword)
+    && /\d/.test(normalizedPassword)
 }
 
 /**

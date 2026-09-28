@@ -257,9 +257,9 @@ for (const [source, permission, label] of [
   assert.ok(businessIndex >= 0 && guardIndex < businessIndex, `${label}必须先稳定锁定 actor 与 target 再写账号`)
 }
 for (const [routeMarker, expectedCall, label] of [
-  ['tagRouter.post(', 'tagService.create(payload, authReq.auth)', '标签创建路由'],
-  ['tagRouter.put(', 'tagService.update(req.params.id, payload, authReq.auth)', '标签修改路由'],
-  ['tagRouter.delete(', 'tagService.delete(req.params.id, authReq.auth)', '标签删除路由'],
+  ['tagRouter.post(', 'tagService.create(payload, authReq.auth, extractRequestMeta(req))', '标签创建路由'],
+  ['tagRouter.put(', 'tagService.update(req.params.id, payload, authReq.auth, extractRequestMeta(req))', '标签修改路由'],
+  ['tagRouter.delete(', 'tagService.delete(req.params.id, authReq.auth, extractRequestMeta(req))', '标签删除路由'],
 ] as const) {
   const routeIndex = tagRoutesSource.indexOf(routeMarker)
   const nextIndex = tagRoutesSource.indexOf('\n)', routeIndex)
@@ -352,11 +352,11 @@ for (const [source, firstBusinessMarker, label] of [
   assert.ok(businessIndex >= 0 && guardIndex < businessIndex, `${label}必须先锁账号再锁业务对象`)
 }
 for (const [source, expectedCall, label] of [
-  [productBatchUpdateRouteSource, 'productService.batchUpdate(payload, authReq.auth)', '商品批量更新路由'],
-  [productBatchCreateRouteSource, 'batchCreateProducts(payload.products, authReq.auth)', '商品批量创建路由'],
-  [productCreateRouteSource, 'productService.create(payload, authReq.auth)', '商品创建路由'],
-  [productUpdateRouteSource, 'productService.update(req.params.id, payload, authReq.auth)', '商品修改路由'],
-  [productDeleteRouteSource, 'productService.delete(req.params.id, authReq.auth)', '商品删除路由'],
+  [productBatchUpdateRouteSource, 'productService.batchUpdate(payload, authReq.auth, extractRequestMeta(req))', '商品批量更新路由'],
+  [productBatchCreateRouteSource, 'batchCreateProducts(payload.products, authReq.auth, extractRequestMeta(req))', '商品批量创建路由'],
+  [productCreateRouteSource, 'productService.create(payload, authReq.auth, extractRequestMeta(req))', '商品创建路由'],
+  [productUpdateRouteSource, 'productService.update(req.params.id, payload, authReq.auth, extractRequestMeta(req))', '商品修改路由'],
+  [productDeleteRouteSource, 'productService.delete(req.params.id, authReq.auth, extractRequestMeta(req))', '商品删除路由'],
   [o2oBusinessStatusRouteSource, '}, authReq.auth)', 'O2O 业务状态路由'],
   [o2oMerchantMessageRouteSource, '}, authReq.auth)', 'O2O 商家留言路由'],
 ] as const) {
@@ -638,7 +638,8 @@ try {
   assert.ok(currentPreview.blockers.some((item) => item.code === 'last_enabled_admin'), '唯一启用管理员必须阻断注销')
   await createSysUser('issue74-admin-backup', { role: 'admin' })
 
-  const stalePassword = 'Issue74-Stale-Own-Password!9'
+  // 新密码策略禁止包含用户名：测试口令与用户名 issue74-stale-own-password 保持不同。
+  const stalePassword = 'Stale74-Own-Secret!9'
   const staleOwnPasswordUser = await userService.create({
     username: 'issue74-stale-own-password',
     password: stalePassword,
@@ -664,7 +665,7 @@ try {
   await assert.rejects(
     authService.changeOwnPassword(staleOwnPasswordActor, {
       currentPassword: stalePassword,
-      newPassword: 'Issue74-Stale-Own-Password-Next!9',
+      newPassword: 'Stale74-Own-Secret-Next!9',
     }),
     /账号已停用或已注销/,
     '停用后的旧管理端请求不得修改本人密码',
@@ -685,7 +686,7 @@ try {
   })
   assert.ok(staleOwnPasswordAudit, '停用或注销账号的本人改密失败必须保留脱敏审计')
   assert.match(staleOwnPasswordAudit.detailJson ?? '', /account_inactive_or_missing/, '失效账号改密审计必须记录非敏感失败原因')
-  assert.doesNotMatch(staleOwnPasswordAudit.detailJson ?? '', /Issue74-Stale-Own-Password/, '改密失败审计不得记录密码')
+  assert.doesNotMatch(staleOwnPasswordAudit.detailJson ?? '', /Stale74-Own-Secret/, '改密失败审计不得记录密码')
 
   const staleLifecycleActorEntity = await createSysUser('issue74-stale-lifecycle-admin', { role: 'admin' })
   const staleLifecycleActor: AuthUserContext = {

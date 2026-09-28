@@ -413,6 +413,28 @@ async function main() {
     )
     pass('错误图形验证码会被拒绝')
 
+    // 图形验证码为一次性票据：答错后原票据即作废，即使补交正确答案也只能得到“已失效”。
+    await expectJsonStatus(
+      () =>
+        requestLocalHttp(`${baseUrl}/api/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: 'admin',
+            password: adminPassword,
+            captchaId: adminCaptcha.captchaId,
+            captchaCode: readCaptchaCode(adminCaptcha.captchaSvg),
+          }),
+        }),
+      '答错后复用原验证码登录',
+      400,
+    )
+    pass('答错一次后原图形验证码立即作废')
+
+    const adminCaptchaForWrongPassword = await expectJsonOk<{
+      captchaId: string
+      captchaSvg: string
+    }>(() => requestLocalHttp(`${baseUrl}/api/auth/captcha`), '重新获取管理端图形验证码（错误密码场景）')
     await expectJsonStatus(
       () =>
         requestLocalHttp(`${baseUrl}/api/auth/login`, {
@@ -421,8 +443,8 @@ async function main() {
           body: JSON.stringify({
             username: 'admin',
             password: `${adminPassword}_wrong_again`,
-            captchaId: adminCaptcha.captchaId,
-            captchaCode: readCaptchaCode(adminCaptcha.captchaSvg),
+            captchaId: adminCaptchaForWrongPassword.captchaId,
+            captchaCode: readCaptchaCode(adminCaptchaForWrongPassword.captchaSvg),
           }),
         }),
       '正确验证码但错误密码登录',

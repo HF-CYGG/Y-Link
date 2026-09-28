@@ -10,6 +10,8 @@ import { randomUUID } from 'node:crypto'
 import multer from 'multer'
 import type { Express } from 'express'
 import sharp, { type Metadata } from 'sharp'
+import { PRODUCT_IMAGE_GATE_POLICY } from '../config/load-protection-policy.js'
+import { BoundedConcurrencyGate } from './bounded-concurrency.js'
 import { BizError } from './errors.js'
 
 export type UploadCategory = 'products' | 'client-feedback'
@@ -355,6 +357,25 @@ export async function finalizeClientFeedbackImageFile(file: Express.Multer.File)
 }
 
 /**
+ * 商品图重编码闸门：管理端连续或并发上传大图时，sharp 解码/重编码会占满线程池并短时吃掉大量内存；
+ * 满载时快速返回 503（临时文件照常清理），不让请求无限堆积。
+ */
+const productImageProcessingGate = new BoundedConcurrencyGate({
+  name: 'product-image-processing',
+  ...PRODUCT_IMAGE_GATE_POLICY,
+  busyMessage: '商品图片处理繁忙，请稍后重试',
+})
+
+export async function finalizeProductImageFile(file: Express.Multer.File) {
+  try {
+    return await productImageProcessingGate.run(() => finalizeUploadedImageFile('products', file))
+  } catch (error) {
+    await cleanupUploadFileIfExists(file.path)
+    throw error
+  }
+}
+
+/**
  * 把历史单层上传路径规范化到指定分类目录：
  * - 仅处理 `/uploads/<file>` 这类旧格式；
  * - 已经是 `/uploads/<category>/<file>` 的新格式保持不变；
@@ -397,8 +418,14 @@ export const createCategorizedImageUpload = (category: UploadCategory) => {
         cb(null, `${category}-${randomUUID()}${ext}`)
       },
     }),
+    // 图片上传只携带单个 `file` 分段：显式收紧文件、字段与分段数量，
+    // 避免构造大量字段名或超大数组下标的 multipart 请求消耗解析内存（客户端反馈附件对所有客户账号开放）。
     limits: {
       fileSize: IMAGE_UPLOAD_MAX_FILE_SIZE,
+      files: 1,
+      fields: 4,
+      fieldSize: 1024,
+      parts: 5,
     },
     fileFilter: (_req, file, cb) => {
       const normalizedMime = file.mimetype.toLowerCase()
