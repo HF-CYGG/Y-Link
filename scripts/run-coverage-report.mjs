@@ -9,7 +9,8 @@
  * 维护说明：
  * - 新增会执行业务代码的后端验证脚本时追加到 BACKEND_SUITE；只做 AST 或文本检查的脚本不产生业务代码覆盖率，无需加入；
  * - 引入 Vitest 后，把它输出的 lcov 一并合并进 coverage/lcov.info；
- * - 任一套件失败即以非零码退出且不写出最终报告，避免 CI 上传不完整的覆盖率。
+ * - 任一套件失败即以非零码退出且不写出最终报告，避免 CI 上传不完整的覆盖率；
+ * - 需要 Node.js 22.6 及以上（覆盖率排除参数与 TypeScript 类型剥离从该版本起提供），低于该版本时启动即给出明确提示。
  */
 
 import fs from 'node:fs'
@@ -22,6 +23,18 @@ const backendRoot = path.join(projectRoot, 'backend')
 const coverageRoot = path.join(projectRoot, 'coverage')
 const rawReportRoot = path.join(coverageRoot, 'raw')
 const outputPath = path.join(coverageRoot, 'lcov.info')
+
+// --test-coverage-exclude 自 Node.js 22.5 起提供，TypeScript 类型剥离自 22.6 起提供。
+const MINIMUM_NODE_VERSION = '22.6.0'
+
+const isNodeVersionAtLeast = (version, minimum) => {
+  const current = version.split('.').map(Number)
+  const required = minimum.split('.').map(Number)
+  for (let index = 0; index < required.length; index += 1) {
+    if (current[index] !== required[index]) return current[index] > required[index]
+  }
+  return true
+}
 
 // 与 .github/workflows/verify-db-concurrency.yml 中会执行业务代码的检查保持一致；
 // 路由权限契约与写事务闸门只做 AST 静态检查，不产生业务代码覆盖率，因此不在此列。
@@ -61,8 +74,9 @@ const SUITES = [
     title: '共享包单测覆盖率',
     cwd: projectRoot,
     rawReportPath: path.join(rawReportRoot, 'packages.lcov'),
+    // 较新的 Node.js 默认开启类型剥离，早期 22.x 需要显式开启；按运行时特性判断，不依赖实验参数一直存在。
     buildArgs: (lcovPath) => [
-      '--experimental-strip-types',
+      ...(process.features.typescript ? [] : ['--experimental-strip-types']),
       ...buildCoverageArgs(lcovPath, 'packages/*/test/**'),
       'packages/*/test/*.test.ts',
     ],
@@ -141,6 +155,11 @@ const normalizeLcovReport = (rawText, runDirectory) => {
 }
 
 const main = async () => {
+  if (!isNodeVersionAtLeast(process.versions.node, MINIMUM_NODE_VERSION)) {
+    throw new Error(
+      `需要 Node.js ${MINIMUM_NODE_VERSION} 及以上（当前 v${process.versions.node}）：覆盖率排除参数与 TypeScript 类型剥离从该版本起提供，CI 与 Docker 镜像均使用 Node.js 22`,
+    )
+  }
   if (!fs.existsSync(path.join(backendRoot, 'node_modules', 'tsx'))) {
     throw new Error('未找到后端依赖 tsx，请先执行 npm --prefix backend ci')
   }
