@@ -457,11 +457,12 @@ export class UserService {
     if (!displayName) {
       throw new BizError('姓名不能为空', 400)
     }
+    // scrypt 是 CPU 密集操作且可能在并发闸门排队，必须在事务外完成，避免长时间占用 SQLite 唯一写槽。
+    const passwordHash = await hashPassword(password)
     try {
       return await runInTransaction(async (manager) => {
         await lockActiveSysAccountForBusiness(manager, actor.userId)
         const userRepo = manager.getRepository(SysUser)
-        const passwordHash = await hashPassword(password)
         const entity = userRepo.create({
           username,
           passwordHash,
@@ -524,6 +525,8 @@ export class UserService {
     if (normalizedPassword !== undefined && actor.userId === id) {
       throw new BizError('请使用本人修改密码入口处理自己的密码', 400)
     }
+    // 新密码哈希在事务外预先计算；事务内确认目标账号信息后才写入。
+    const newPasswordHash = normalizedPassword === undefined ? undefined : await hashPassword(normalizedPassword)
     try {
       const result = await runInTransaction(async (manager) => {
         const user = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:update')
@@ -558,8 +561,8 @@ export class UserService {
           changeSummary.roleAfter = input.role
           user.role = input.role
         }
-        if (normalizedPassword !== undefined) {
-          user.passwordHash = await hashPassword(normalizedPassword)
+        if (newPasswordHash !== undefined) {
+          user.passwordHash = newPasswordHash
           changeSummary.passwordReset = 'true'
         }
 
@@ -679,13 +682,15 @@ export class UserService {
       throw new BizError('请使用本人修改密码入口处理自己的密码', 400)
     }
 
+    // 新密码哈希在事务外预先计算，事务内只做账号信息校验与写入。
+    const newPasswordHash = await hashPassword(newPassword)
     const profile = await runInTransaction(async (manager) => {
       const user = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:reset_password')
       assertPasswordAvoidsAccountIdentifiers(newPassword, '新密码', [user.username, user.email])
       const userRepo = manager.getRepository(SysUser)
       const sessionRepo = manager.getRepository(SysUserSession)
 
-      user.passwordHash = await hashPassword(newPassword)
+      user.passwordHash = newPasswordHash
       const savedUser = await userRepo.save(user)
       const deletedSessions = await sessionRepo.delete({ userId: savedUser.id })
 

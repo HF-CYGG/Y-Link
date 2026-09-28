@@ -56,6 +56,7 @@
   - 审计：`auth.mfa.challenge/enroll_start/enable/disable/recovery_codes.regenerate`、`user.mfa.reset`（命令行来源记 `via=cli`），登录成功审计记录 `mfaMethod`；任何审计与日志不得出现秘钥或恢复码明文。
 - 密码派生并发闸门（`utils/bounded-concurrency.ts` + `utils/password.ts`）：所有 scrypt 派生（登录、改密、建号、重置、密码复核、账号不存在时的等量计算）经同一闸门执行，默认并发 `min(4, CPU-1)`、排队 64、排队超时 10 秒，超出即返回 503 + `Retry-After`，避免登录洪水占满 libuv 线程池拖垮数据库查询。可用 `YLINK_PASSWORD_HASH_CONCURRENCY/QUEUE/QUEUE_TIMEOUT_MS` 调整；闸门快照（活跃、排队、峰值、拒绝计数）见管理员接口 `GET /api/data-maintenance/database/performance` 的 `concurrencyGates`。闸门任务内部不得再次申请同一闸门。503 错误若携带 `retryAfterSeconds`，错误处理中间件按该值下发 `Retry-After`，不再统一改写为 1 秒。
 - 商品图上传（`POST /api/upload`）的 sharp 校验与重编码经 `product-image-processing` 闸门执行（默认并发 2、排队 16、超时 15 秒，`YLINK_PRODUCT_IMAGE_*` 可调），满载返回 503 且临时文件照常清理；反馈附件仍用独立闸门，两者互不挤占。
+- 新密码 scrypt 派生一律在数据库事务外预先完成（管理端建号、编辑改密、重置他人密码，本人改密，客户端注册、找回重置、改密，管理员重置客户端密码），事务内只做账号锁定、信息校验与写入，避免在 SQLite 唯一写槽内等待并发闸门。**旧密码的最终校验仍在事务内锁定账号后进行**（账号生命周期契约与 `mobile-auth:review:verify` 的 Web 改密断言），不得改为事务外快照比对。
 
 ## 代理、HTTPS 与救援传输边界
 

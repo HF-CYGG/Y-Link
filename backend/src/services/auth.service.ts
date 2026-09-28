@@ -526,6 +526,9 @@ export class AuthService {
     }
     // 旧密码复核与登录共用失败锁定：会话被劫持时不能借改密接口无限试错当前密码。
     await authSecurityService.assertAdminPasswordReauthAllowed(requestMeta, auth.username)
+    // 新密码派生不依赖数据库状态，在事务外预先完成，缩短 SQLite 写槽占用；
+    // 旧密码的最终校验仍须在事务内锁定账号后进行（账号生命周期契约），不能改用事务外快照。
+    const newPasswordHash = await hashPassword(newPassword)
 
     let result: { changed: boolean; userId: string }
     try {
@@ -568,7 +571,7 @@ export class AuthService {
           return { changed: false, userId: user.id }
         }
 
-        user.passwordHash = await hashPassword(newPassword)
+        user.passwordHash = newPasswordHash
         await userRepo.save(user)
 
         const deletedSessions = await sessionRepo.delete({ userId: user.id })

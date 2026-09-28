@@ -1193,6 +1193,8 @@ export class ClientUserManageService {
       throw new BizError('新密码不能为空', 400)
     }
 
+    // scrypt 在事务外预先计算，避免在锁定账号行期间占用 SQLite 唯一写槽或在并发闸门排队。
+    const newPasswordHash = await hashPassword(newPassword)
     const profile = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
       const userRepo = manager.getRepository(ClientUser)
@@ -1209,7 +1211,7 @@ export class ClientUserManageService {
       }
       assertPasswordAvoidsAccountIdentifiers(newPassword, '新密码', [user.realName, user.mobile, user.email, user.staffNo])
 
-      user.passwordHash = await hashPassword(newPassword)
+      user.passwordHash = newPasswordHash
       const savedUser = await userRepo.save(user)
       const deletedSessions = await sessionRepo.delete({ userId: savedUser.id })
       const revokedMobileSessions = await mobileSessionRepo.createQueryBuilder()
