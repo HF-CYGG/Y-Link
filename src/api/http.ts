@@ -71,10 +71,10 @@ const isClientRouteContext = () => {
 /**
  * 是否为登录接口请求：
  * - 登录失败属于正常业务反馈，不应被全局拦截器误判为“会话失效”；
- * - 因此需要排除 /auth/login 的 401 响应自动跳转逻辑。
+ * - 因此需要排除 /auth/login 与两步验证第二步 /auth/login/mfa 的 401 响应自动跳转逻辑。
  */
 const isLoginRequest = (url?: string) => {
-  return /\/auth\/login(?:\?|$)/.test(normalizeRequestUrl(url))
+  return /\/auth\/login(?:\/mfa)?(?:\?|$)/.test(normalizeRequestUrl(url))
 }
 
 /**

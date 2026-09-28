@@ -241,6 +241,8 @@ export interface UserSafeProfile extends AccountLifecycleFields {
   lastLoginAt: string | null
   createdAt: string
   updatedAt: string
+  /** 仅用户管理列表返回：该账号是否已开启两步验证。 */
+  mfaEnabled?: boolean
 }
 
 /**
@@ -269,10 +271,35 @@ export interface AdminCaptchaResult {
  * - user 同时承载角色与权限点，供页面鉴权直接复用。
  */
 export interface LoginResult {
+  mfaRequired?: false
   expiresAt: string
   user: UserSafeProfile
   securityReminder?: string
+  /** 本次用恢复码完成两步验证时返回剩余数量，登录页据此提醒及时重新生成。 */
+  recoveryCodesRemaining?: number
 }
+
+/**
+ * 两步验证挑战：
+ * - 账号已开启两步验证时，第一步密码正确只返回短期票据，服务端不下发会话 Cookie；
+ * - 登录页凭票据提交动态码或恢复码完成第二步。
+ */
+export interface MfaChallengeResult {
+  mfaRequired: true
+  mfaTicket: string
+  expiresInSeconds: number
+}
+
+export type LoginResponse = LoginResult | MfaChallengeResult
+
+export interface MfaLoginPayload {
+  mfaTicket: string
+  code?: string
+  recoveryCode?: string
+}
+
+/** 第二步票据过期、次数用尽或账号安全设置已变化时的原因码，前端据此回到第一步。 */
+export const ADMIN_MFA_TICKET_EXPIRED_REASON = 'ADMIN_MFA_TICKET_EXPIRED'
 
 /**
  * 本人修改密码参数：
@@ -322,10 +349,32 @@ export const normalizeUserSafeProfile = (user: UserSafeProfile): UserSafeProfile
  * - 登录页提交成功后会由 Auth Store 统一接管状态持久化；
  * - API 层先归一化 permissions，保证调用端拿到稳定结构。
  */
-export const login = async (payload: LoginPayload) => {
-  const result = await request<LoginResult>({
+export const login = async (payload: LoginPayload): Promise<LoginResponse> => {
+  const result = await request<LoginResponse>({
     method: 'POST',
     url: '/auth/login',
+    data: payload,
+  })
+
+  if (result.mfaRequired) {
+    return result
+  }
+
+  return {
+    ...result,
+    user: normalizeUserSafeProfile(result.user),
+  }
+}
+
+/**
+ * 两步验证登录第二步：
+ * - 动态码与恢复码二选一；
+ * - 成功后服务端写入会话 Cookie，返回结构与普通登录一致。
+ */
+export const completeMfaLogin = async (payload: MfaLoginPayload): Promise<LoginResult> => {
+  const result = await request<LoginResult>({
+    method: 'POST',
+    url: '/auth/login/mfa',
     data: payload,
   })
 
