@@ -44,3 +44,12 @@ export const PASSWORD_HASH_GATE_POLICY = {
   maxQueue: readBoundedInteger('YLINK_PASSWORD_HASH_QUEUE', 64, 0, 10_000),
   queueTimeoutMs: readBoundedInteger('YLINK_PASSWORD_HASH_QUEUE_TIMEOUT_MS', 10_000, 100, 120_000),
 } as const
+
+/**
+ * 商品图重编码闸门：sharp 解码与重编码同样占用线程池与大块内存，与反馈附件（独立闸门）分开限流、互不挤占。
+ */
+export const PRODUCT_IMAGE_GATE_POLICY = {
+  maxConcurrent: readBoundedInteger('YLINK_PRODUCT_IMAGE_CONCURRENCY', 2, 1, 16),
+  maxQueue: readBoundedInteger('YLINK_PRODUCT_IMAGE_QUEUE', 16, 0, 1_000),
+  queueTimeoutMs: readBoundedInteger('YLINK_PRODUCT_IMAGE_QUEUE_TIMEOUT_MS', 15_000, 100, 120_000),
+} as const
