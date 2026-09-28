@@ -14,6 +14,7 @@ import { auditService, type CreateAuditLogInput } from './audit.service.js'
 import { persistentRiskStateService, type PersistentFailureState } from './persistent-risk-state.service.js'
 import { describeClientRiskSubjectForAudit, maskLoginInputForAudit } from '../utils/audit-subject-mask.js'
 import { GLOBAL_LOGIN_FAILURE_POLICY } from '../config/load-protection-policy.js'
+import { toRiskSourceKey } from '../utils/ip-subnet.js'
 
 /** 管理端登录风控主体：`resolved` 为 false 表示账号不存在、subject 是输入原文，写审计前必须脱敏。 */
 export interface ResolvedLoginRiskSubject {
@@ -281,7 +282,8 @@ const globalLoginFailureMonitor = new GlobalLoginFailureMonitor()
 
 const LOGIN_REMAINING_WARNING_RATIO = 0.2
 const REGISTER_REMAINING_WARNING_THRESHOLD = 3
-const normalizeRiskSource = (meta?: RequestMeta) => meta?.ipAddress?.trim() || 'unknown-ip'
+// 频控与锁定按来源计数：IPv4 映射地址还原为 IPv4，IPv6 聚合到 /64，防止同网段轮换地址绕过；审计仍记完整 IP。
+const normalizeRiskSource = (meta?: RequestMeta) => toRiskSourceKey(meta?.ipAddress) ?? 'unknown-ip'
 
 export class AuthSecurityService {
   private async recordRiskEvent(input: {

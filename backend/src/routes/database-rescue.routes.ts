@@ -6,6 +6,7 @@ import {
   resumeDatabaseRecoveryOperation,
 } from '../runtime/database-rescue-control.js'
 import { isSecureOrDirectLoopback } from '../utils/http-security.js'
+import { toRiskSourceKey } from '../utils/ip-subnet.js'
 import { requestRuntimeShutdown } from '../runtime/runtime-shutdown.js'
 
 const attempts = new Map<string, { count: number; resetsAt: number }>()
@@ -15,7 +16,7 @@ export function requireDatabaseRescueCredential(req: Request, res: Response, nex
     res.status(403).json({ code: 403, message: '救援需要可信 HTTPS 或容器本地连接', data: { reason: 'RESCUE_SECURE_TRANSPORT_REQUIRED' } })
     return
   }
-  const key = req.ip || req.socket.remoteAddress || 'unknown'
+  const key = toRiskSourceKey(req.ip || req.socket.remoteAddress) ?? 'unknown'
   const time = Date.now()
   for (const [entry, state] of attempts) if (state.resetsAt <= time) attempts.delete(entry)
   if (!attempts.has(key) && attempts.size >= 1024) {
