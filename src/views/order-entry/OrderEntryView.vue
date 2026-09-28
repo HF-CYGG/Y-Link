@@ -120,6 +120,8 @@ const totalAmountText = computed(() => toMoney(totalAmount.value))
         :drawer-direction="drawerDirection"
         :drawer-size="drawerSize"
         :drawer-form="drawerForm"
+        @update:drawer-qty="drawerForm.qty = $event"
+        @update:drawer-unit-price="drawerForm.unitPrice = $event"
         :get-row-class-name="getRowClassName"
         :set-field-ref="setFieldRef"
         :handle-product-change="handleProductChange"

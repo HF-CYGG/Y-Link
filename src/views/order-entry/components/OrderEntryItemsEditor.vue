@@ -64,6 +64,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:drawerVisible': [value: boolean]
+  'update:drawerQty': [value: number | null]
+  'update:drawerUnitPrice': [value: number | null]
 }>()
 
 /**
@@ -74,6 +76,16 @@ const emit = defineEmits<{
 const drawerVisibleModel = computed({
   get: () => props.drawerVisible,
   set: (value: boolean) => emit('update:drawerVisible', value),
+})
+
+const drawerQtyModel = computed({
+  get: () => props.drawerForm.qty,
+  set: (value: number | null) => emit('update:drawerQty', value),
+})
+
+const drawerUnitPriceModel = computed({
+  get: () => props.drawerForm.unitPrice,
+  set: (value: number | null) => emit('update:drawerUnitPrice', value),
 })
 
 /**
@@ -349,10 +361,10 @@ const resolveStockHint = (productId: string, skuId: string, qty: number | null) 
             </div>
           </el-form-item>
           <el-form-item label="数量">
-            <PassiveNumberInput v-model="drawerForm.qty" data-barcode-scan-qty :min="1" :precision="0" :step="1" class="w-full" />
+            <PassiveNumberInput v-model="drawerQtyModel" data-barcode-scan-qty :min="1" :precision="0" :step="1" class="w-full" />
           </el-form-item>
           <el-form-item label="单价">
-            <PassiveNumberInput v-model="drawerForm.unitPrice" data-barcode-scan-qty :min="0" :precision="2" class="w-full" />
+            <PassiveNumberInput v-model="drawerUnitPriceModel" data-barcode-scan-qty :min="0" :precision="2" class="w-full" />
           </el-form-item>
           <el-form-item label="备注">
             <el-input v-model="drawerForm.remark" maxlength="255" placeholder="选填" />
