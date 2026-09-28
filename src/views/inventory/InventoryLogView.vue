@@ -7,6 +7,7 @@
  * - “操作前 / 操作后”优先展示 SKU 级库存，旧流水没有 SKU 快照时退回商品汇总库存；
  * - 导出按当前筛选条件由服务端生成 Excel；
  * - “变动”列展示带符号的实际库存变化 stockDelta；只影响占用量的流水（预订占用 / 释放）库存不变，改为中性色展示占用数量。
+ * - 筛选区与结果卡统一层级；桌面保留时间顺序表格，窄屏用流水卡突出变动、前后库存与来源。
  * 维护说明：
  * - 流水只读，不提供任何修改入口；
  * - changeQty 沿用各类型历史口径（销售出库等记正数表示出库量），页面不再直接用它判断增减；
@@ -15,7 +16,7 @@
 
 import { onActivated, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { PageContainer, PagePaginationBar } from '@/components/common'
+import { PageContainer, PagePaginationBar, PageToolbarCard } from '@/components/common'
 import { exportInventoryLogs, getInventoryLogs, type InventoryLogRow } from '@/api/modules/inventory'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { INVENTORY_CHANGE_TYPE_LABELS } from '@/constants/inventory'
@@ -157,10 +158,10 @@ onDeactivated(() => {
 
 <template>
   <PageContainer title="库存流水" description="每一次库存变化都会在这里留下记录：谁、何时、因为什么、从多少变成多少。">
-    <el-card shadow="never" class="mb-4">
-      <div class="flex flex-wrap gap-3">
-        <el-input v-model="filters.keyword" placeholder="商品 / SKU / 条码 / 操作人 / 备注" clearable class="w-64" @keyup.enter="search" />
-        <el-select v-model="filters.changeTypes" multiple collapse-tags collapse-tags-tooltip placeholder="全部操作类型" clearable class="w-56">
+    <PageToolbarCard class="mb-4" stack-actions-on-tablet>
+      <div class="flex min-w-0 flex-wrap gap-3">
+        <el-input v-model="filters.keyword" placeholder="商品 / SKU / 条码 / 操作人 / 备注" clearable class="!w-full sm:!w-64" @keyup.enter="search" />
+        <el-select v-model="filters.changeTypes" multiple collapse-tags collapse-tags-tooltip placeholder="全部操作类型" clearable class="!w-full sm:!w-56">
           <el-option v-for="item in changeTypeOptions" :key="item.value" :label="item.label" :value="item.value" />
         </el-select>
         <el-date-picker
@@ -169,17 +170,24 @@ onDeactivated(() => {
           value-format="YYYY-MM-DD"
           start-placeholder="开始日期"
           end-placeholder="结束日期"
-          class="!w-64"
+          class="!w-full sm:!w-64"
         />
-        <el-button type="primary" @click="search">查询</el-button>
-        <el-button :loading="exporting" @click="handleExport">导出 Excel</el-button>
       </div>
-      <div v-if="filters.skuId" class="mt-3">
-        <el-tag closable @close="clearSku">仅看：{{ filters.skuLabel || `规格 ${filters.skuId}` }}</el-tag>
+      <div v-if="filters.skuId" class="mt-3 min-w-0">
+        <el-tag closable class="!h-auto max-w-full !whitespace-normal !py-1" @close="clearSku">仅看：{{ filters.skuLabel || `规格 ${filters.skuId}` }}</el-tag>
       </div>
-    </el-card>
+      <template #actions>
+        <el-button type="primary" class="flex-1 sm:flex-none" @click="search">查询</el-button>
+        <el-button class="!ml-0 flex-1 sm:flex-none" :loading="exporting" @click="handleExport">导出 Excel</el-button>
+      </template>
+    </PageToolbarCard>
 
-    <el-card shadow="never">
+    <section class="apple-card min-w-0 p-3 sm:p-4 xl:p-5">
+      <div class="mb-4 border-b border-slate-100 pb-3 dark:border-white/10">
+        <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">变动记录</h2>
+        <p class="mt-0.5 text-xs text-slate-500">共 {{ pagination.total }} 条 · 按时间查看库存变化与关联来源</p>
+      </div>
+      <div class="hidden xl:block">
       <el-table v-loading="loading" :data="rows" row-key="id" empty-text="暂无流水">
         <el-table-column label="时间" width="170">
           <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString('zh-CN', { hour12: false }) }}</template>
@@ -211,6 +219,20 @@ onDeactivated(() => {
           <template #default="{ row }">{{ row.remark || '—' }}</template>
         </el-table-column>
       </el-table>
+      </div>
+      <div v-loading="loading" class="space-y-3 xl:hidden">
+        <div v-if="!rows.length" class="rounded-xl border border-dashed border-slate-200 px-4 py-8 text-center text-sm text-slate-500 dark:border-white/10">暂无流水</div>
+        <article v-for="row in rows" :key="row.id" class="min-w-0 rounded-xl border border-slate-200 bg-white/70 p-3 dark:border-white/10 dark:bg-white/5">
+          <div class="flex min-w-0 flex-wrap items-start justify-between gap-2">
+            <div class="min-w-0 flex-1"><p class="break-words font-semibold text-slate-900 dark:text-slate-100">{{ row.productName }}</p><p class="mt-0.5 break-all text-xs text-slate-500">{{ row.specText || '（未记录规格）' }}<span v-if="row.skuCode"> · {{ row.skuCode }}</span></p></div>
+            <span class="font-semibold tabular-nums" :class="deltaClass(row)">{{ deltaText(row) }}</span>
+          </div>
+          <div class="mt-3 flex flex-wrap items-center gap-2"><el-tag size="small" effect="plain">{{ row.changeTypeLabel }}</el-tag><span class="text-xs text-slate-500">{{ new Date(row.createdAt).toLocaleString('zh-CN', { hour12: false }) }}</span></div>
+          <div class="mt-3 rounded-lg bg-slate-50 px-3 py-2 text-sm tabular-nums dark:bg-white/5">库存 {{ row.beforeStock }} → <strong>{{ row.afterStock }}</strong></div>
+          <div class="mt-3 flex min-w-0 flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500"><span>操作人：{{ row.operatorName || '系统' }}</span><span>关联：{{ row.refType ? REF_TYPE_LABELS[row.refType] ?? row.refType : '—' }}</span></div>
+          <p v-if="row.remark" class="mt-2 break-words text-xs text-slate-600 dark:text-slate-300">备注：{{ row.remark }}</p>
+        </article>
+      </div>
       <PagePaginationBar
         v-model:current-page="pagination.page"
         v-model:page-size="pagination.pageSize"
@@ -220,6 +242,6 @@ onDeactivated(() => {
         @current-change="loadData"
         @size-change="search"
       />
-    </el-card>
+    </section>
   </PageContainer>
 </template>

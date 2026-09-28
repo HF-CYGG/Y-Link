@@ -6,6 +6,7 @@
  * - 查询条件全部交给服务端分页，顶部同时展示命中规格数与库存合计；
  * - 勾选行后打开条码打印弹窗（异步组件，避免条码库进入本页主包）；
  * - 点击“流水”跳到库存流水页并带上 skuId 过滤。
+ * - 筛选区与结果卡统一层级；桌面保留表格，窄屏用可勾选的规格卡复用表格的打印选择状态。
  * 维护说明：
  * - 库存数字只读，任何调整都要走扫码作业或盘点生成流水，不在这里提供直接修改入口；
  * - 成本价仅在有 products:manage 权限时展示，无权限时服务端返回 null，统一显示“—”；
@@ -14,7 +15,7 @@
 
 import { computed, defineAsyncComponent, onActivated, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { PageContainer, PagePaginationBar } from '@/components/common'
+import { PageContainer, PagePaginationBar, PageToolbarCard } from '@/components/common'
 import { getCategories, getLocations, getStocks, type CategoryRecord, type LocationRecord, type StockRow } from '@/api/modules/inventory'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useAuthStore } from '@/store'
@@ -36,6 +37,7 @@ const loading = ref(false)
 const categories = ref<CategoryRecord[]>([])
 const locations = ref<LocationRecord[]>([])
 const selectedRows = ref<StockRow[]>([])
+const stockTable = ref<{ toggleRowSelection: (row: StockRow) => void; clearSelection: () => void } | null>(null)
 const printVisible = ref(false)
 const listRequest = useStableRequest()
 /** onMounted 已加载时跳过紧随其后的首次 onActivated，避免缓存页首次进入重复请求。 */
@@ -66,6 +68,7 @@ const loadData = () => {
   return listRequest.runLatest({
     executor: (signal) => getStocks(query, { signal }),
     onSuccess: (result) => {
+      stockTable.value?.clearSelection()
       rows.value = result.list
       pagination.total = result.total
       totalQty.value = result.totalQty
@@ -99,6 +102,10 @@ const openPrint = () => {
   printVisible.value = true
 }
 
+const toggleMobileSelection = (row: StockRow) => {
+  stockTable.value?.toggleRowSelection(row)
+}
+
 const viewLogs = (row: StockRow) => {
   void router.push({ path: '/inventory/logs', query: { skuId: row.skuId, label: `${row.productName} · ${row.specText}` } })
 }
@@ -118,33 +125,38 @@ onActivated(() => {
 
 <template>
   <PageContainer title="当前库存" description="按规格（SKU）查看实时库存；库存变化请通过扫码作业或盘点完成。">
-    <el-card shadow="never" class="mb-4">
-      <div class="flex flex-wrap gap-3">
-        <el-input v-model="filters.keyword" placeholder="商品名称 / SKU / 条码 / 规格" clearable class="w-64" @keyup.enter="search" />
-        <el-select v-model="filters.categoryId" placeholder="全部分类" clearable class="w-40">
+    <PageToolbarCard class="mb-4" stack-actions-on-tablet>
+      <div class="flex min-w-0 flex-wrap items-center gap-3">
+        <el-input v-model="filters.keyword" placeholder="商品名称 / SKU / 条码 / 规格" clearable class="!w-full sm:!w-64" @keyup.enter="search" />
+        <el-select v-model="filters.categoryId" placeholder="全部分类" clearable class="!w-full sm:!w-40">
           <el-option v-for="item in categories" :key="item.id" :label="`${item.categoryCode} ${item.categoryName}`" :value="item.id" />
         </el-select>
-        <el-select v-model="filters.locationId" placeholder="全部库位" clearable filterable class="w-40">
+        <el-select v-model="filters.locationId" placeholder="全部库位" clearable filterable class="!w-full sm:!w-40">
           <el-option label="未设置库位" value="none" />
           <el-option v-for="item in locations" :key="item.id" :label="item.locationCode" :value="item.id" />
         </el-select>
-        <el-input v-model="filters.maxStock" placeholder="库存不高于" clearable class="w-32" @keyup.enter="search" />
+        <el-input v-model="filters.maxStock" placeholder="库存不高于" clearable class="!w-full sm:!w-32" @keyup.enter="search" />
         <el-checkbox v-model="filters.includeInactive">含停用</el-checkbox>
-        <el-button type="primary" @click="search">查询</el-button>
-        <el-button @click="resetFilters">重置</el-button>
       </div>
-    </el-card>
-
-    <el-card shadow="never">
-      <template #header>
-        <div class="flex flex-wrap items-center justify-between gap-2">
-          <span class="font-semibold">共 {{ pagination.total }} 个规格，库存合计 {{ totalQty }} 件</span>
-          <el-button v-if="canPrint" :disabled="!selectedRows.length" @click="openPrint">
-            打印条码（{{ selectedRows.length }}）
-          </el-button>
-        </div>
+      <template #actions>
+        <el-button type="primary" class="flex-1 sm:flex-none" @click="search">查询</el-button>
+        <el-button class="!ml-0 flex-1 sm:flex-none" @click="resetFilters">重置</el-button>
       </template>
+    </PageToolbarCard>
+
+    <section class="apple-card min-w-0 p-3 sm:p-4 xl:p-5">
+      <div class="mb-4 flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3 dark:border-white/10">
+        <div>
+          <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">库存规格</h2>
+          <p class="mt-0.5 text-xs text-slate-500">共 {{ pagination.total }} 个规格 · 库存合计 {{ totalQty }} 件</p>
+        </div>
+        <el-button v-if="canPrint" class="!ml-0" :disabled="!selectedRows.length" @click="openPrint">
+          打印条码（{{ selectedRows.length }}）
+        </el-button>
+      </div>
+      <div class="hidden xl:block">
       <el-table
+        ref="stockTable"
         v-loading="loading"
         :data="rows"
         row-key="skuId"
@@ -193,6 +205,33 @@ onActivated(() => {
           </template>
         </el-table-column>
       </el-table>
+      </div>
+      <div v-loading="loading" class="space-y-3 xl:hidden">
+        <div v-if="!rows.length" class="rounded-xl border border-dashed border-slate-200 px-4 py-8 text-center text-sm text-slate-500 dark:border-white/10">没有符合条件的库存</div>
+        <article v-for="row in rows" :key="row.skuId" class="min-w-0 rounded-xl border border-slate-200 bg-white/70 p-3 dark:border-white/10 dark:bg-white/5">
+          <div class="flex min-w-0 items-start justify-between gap-3">
+            <div class="min-w-0 flex-1">
+              <p class="break-words font-semibold text-slate-900 dark:text-slate-100">{{ row.productName }}</p>
+              <p class="mt-0.5 break-words text-xs text-slate-500">{{ row.specText }}</p>
+            </div>
+            <el-checkbox v-if="canPrint" :model-value="selectedRows.some((item) => item.skuId === row.skuId)" :aria-label="`选择 ${row.productName} ${row.specText} 打印条码`" @change="toggleMobileSelection(row)" />
+          </div>
+          <div class="mt-3 flex min-w-0 flex-wrap items-center gap-2 text-xs text-slate-500">
+            <span class="break-all font-medium text-slate-700 dark:text-slate-200">{{ row.skuCode }}</span>
+            <span v-if="row.barcode" class="break-all">条码 {{ row.barcode }}</span>
+            <el-tag size="small" :type="row.isActive ? 'success' : 'info'">{{ row.isActive ? '启用' : '停用' }}</el-tag>
+          </div>
+          <div class="mt-3 grid grid-cols-2 gap-2 rounded-lg bg-slate-50 p-3 text-sm dark:bg-white/5">
+            <div><p class="text-xs text-slate-500">当前库存</p><p class="mt-0.5 font-semibold tabular-nums" :class="row.currentStock <= 0 ? 'text-red-600' : 'text-slate-900 dark:text-slate-100'">{{ row.currentStock }}</p></div>
+            <div><p class="text-xs text-slate-500">已预订 / 可用</p><p class="mt-0.5 tabular-nums">{{ row.preOrderedStock }} / {{ row.availableStock }}</p></div>
+          </div>
+          <div class="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 text-xs text-slate-600 dark:text-slate-300">
+            <span>分类：{{ row.categoryName || '—' }}</span><span>库位：{{ row.locationCode || '—' }}</span>
+            <span>售价：{{ row.salePrice }}</span><span v-if="showCost">成本价：{{ formatCost(row.costPrice) }}</span>
+          </div>
+          <div class="mt-3 flex justify-end border-t border-slate-100 pt-2 dark:border-white/10"><el-button link type="primary" @click="viewLogs(row)">查看流水</el-button></div>
+        </article>
+      </div>
       <PagePaginationBar
         v-model:current-page="pagination.page"
         v-model:page-size="pagination.pageSize"
@@ -202,7 +241,7 @@ onActivated(() => {
         @current-change="loadData"
         @size-change="search"
       />
-    </el-card>
+    </section>
 
     <BarcodeLabelPrintDialog v-if="printVisible" v-model="printVisible" :sku-ids="selectedRows.map((row) => row.skuId)" />
   </PageContainer>
