@@ -3,8 +3,8 @@
  * 模块说明：src/views/inventory/InventoryMasterDataView.vue
  * 文件职责：维护商品分类（两位编码，用于 WC SKU 编码）与库位（如 A-01-01）两类库存主数据。
  * 实现逻辑：
- * - 页签用 PassiveSegmentedTabs 切换，两张表共用一个编辑弹窗，按当前页签决定表单字段；
- * - 主数据只停用不删除，列表展示引用数量，已关联商品的分类编码输入框直接禁用；
+ * - 页签、刷新和新增集中在同一列表工作区，桌面表格与手机数据卡复用同一组数据；两类主数据共用编辑弹窗；
+ * - 主数据只停用不删除，库位可直接管理当前 SKU 的默认库位关联；已关联商品的分类编码输入框直接禁用；
  * - 无 products:manage 权限时只读，不渲染新增、编辑与启停入口。
  * 维护说明：
  * - 分类编码一经被 SKU 编码使用就不能再改，服务端同样会拦截，前端禁用只是体验优化；
@@ -12,7 +12,7 @@
  */
 
 import { computed, onMounted, reactive, ref } from 'vue'
-import { BizCrudDialogShell, PageContainer, PassiveNumberInput, PassiveSegmentedTabs } from '@/components/common'
+import { BizCrudDialogShell, BizResponsiveDataCollectionShell, PageContainer, PassiveNumberInput, PassiveSegmentedTabs } from '@/components/common'
 import {
   createCategory,
   createLocation,
@@ -26,6 +26,7 @@ import {
 import { useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { showAppError, showAppSuccess } from '@/utils/app-alert'
+import LocationSkuManageDialog from './components/LocationSkuManageDialog.vue'
 
 type TabKey = 'categories' | 'locations'
 
@@ -40,6 +41,8 @@ const tabs = [
 const loading = ref(false)
 const categories = ref<CategoryRecord[]>([])
 const locations = ref<LocationRecord[]>([])
+const skuDialogVisible = ref(false)
+const managingLocation = ref<LocationRecord | null>(null)
 
 const dialogVisible = ref(false)
 const saving = ref(false)
@@ -111,6 +114,11 @@ const openEditLocation = (row: LocationRecord) => {
   dialogVisible.value = true
 }
 
+const openManageSkus = (row: LocationRecord) => {
+  managingLocation.value = row
+  skuDialogVisible.value = true
+}
+
 const handleSave = async () => {
   saving.value = true
   try {
@@ -165,65 +173,125 @@ onMounted(loadData)
 </script>
 
 <template>
-  <PageContainer title="分类与库位" description="分类编码参与 SKU 编码（WC + 分类编码 + 流水号）；库位用于找货与按库位盘点。">
-    <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
-      <PassiveSegmentedTabs v-model="activeTab" :tabs="tabs" aria-label="主数据类型" />
-      <div class="flex gap-2">
-        <el-button :loading="loading" @click="loadData">刷新</el-button>
-        <el-button v-if="canManage" type="primary" @click="openCreate">
-          {{ activeTab === 'categories' ? '新增分类' : '新增库位' }}
-        </el-button>
+  <PageContainer title="分类与库位" description="维护商品分类编码和实物存放库位。">
+    <section v-loading="loading && (activeTab === 'categories' ? categories.length > 0 : locations.length > 0)" class="apple-card min-w-0 p-3 sm:p-4">
+      <div class="mb-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-slate-100 pb-2 dark:border-white/10">
+        <PassiveSegmentedTabs v-model="activeTab" :tabs="tabs" aria-label="主数据类型" class="!w-auto max-w-full" />
+        <div class="flex flex-wrap gap-2">
+          <el-button :loading="loading" class="!ml-0" @click="loadData">刷新</el-button>
+          <el-button v-if="canManage" type="primary" class="!ml-0" @click="openCreate">
+            {{ activeTab === 'categories' ? '新增分类' : '新增库位' }}
+          </el-button>
+        </div>
       </div>
-    </div>
+      <div class="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
+        <span>{{ activeTab === 'categories' ? '分类' : '库位' }} {{ activeTab === 'categories' ? categories.length : locations.length }} 条</span>
+        <span aria-hidden="true" class="hidden text-slate-300 sm:inline dark:text-slate-600">·</span>
+        <span>{{ activeTab === 'categories' ? '分类编码用于生成新 SKU 编码' : '库位用于找货和按库位盘点' }}</span>
+      </div>
+      <BizResponsiveDataCollectionShell
+        :items="activeTab === 'categories' ? categories : locations"
+        :loading="loading"
+        :empty-description="activeTab === 'categories' ? '暂无商品分类' : '暂无库位'"
+        empty-min-height="128px"
+        :disable-card-transition="true"
+        table-wrapper-class="min-w-0"
+        card-container-class="sm:grid-cols-2 xl:grid-cols-3"
+      >
+        <template #table>
+          <el-table v-if="activeTab === 'categories'" :data="categories" row-key="id" empty-text="还没有分类">
+            <el-table-column label="分类名称" min-width="180">
+              <template #default="{ row }">
+                <div class="font-medium text-slate-800 dark:text-slate-100">{{ row.categoryName }}</div>
+                <div class="text-xs text-slate-500 dark:text-slate-400">排序 {{ row.sortOrder }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="分类编码" min-width="130">
+              <template #default="{ row }">
+                <div class="font-medium tabular-nums">{{ row.categoryCode }}</div>
+                <div class="text-xs text-slate-500 dark:text-slate-400">SKU 前缀 WC{{ row.categoryCode }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column prop="productCount" label="关联商品" width="100" />
+            <el-table-column label="状态" width="90">
+              <template #default="{ row }">
+                <el-tag :type="row.isActive ? 'success' : 'info'" size="small">{{ row.isActive ? '启用' : '停用' }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column v-if="canManage" label="操作" width="150" fixed="right">
+              <template #default="{ row }">
+                <el-button link type="primary" @click="openEditCategory(row)">编辑</el-button>
+                <el-button link :type="row.isActive ? 'warning' : 'success'" @click="toggleCategory(row)">
+                  {{ row.isActive ? '停用' : '启用' }}
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
 
-    <el-card shadow="never">
-      <el-table v-if="activeTab === 'categories'" v-loading="loading" :data="categories" row-key="id" empty-text="还没有分类">
-        <el-table-column prop="categoryCode" label="分类编码" width="110" />
-        <el-table-column prop="categoryName" label="分类名称" min-width="160" />
-        <el-table-column label="SKU 编码前缀" width="140">
-          <template #default="{ row }">WC{{ row.categoryCode }}</template>
-        </el-table-column>
-        <el-table-column prop="productCount" label="商品数" width="90" />
-        <el-table-column prop="sortOrder" label="排序" width="80" />
-        <el-table-column label="状态" width="90">
-          <template #default="{ row }">
-            <el-tag :type="row.isActive ? 'success' : 'info'" size="small">{{ row.isActive ? '启用' : '停用' }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column v-if="canManage" label="操作" width="150" fixed="right">
-          <template #default="{ row }">
-            <el-button link type="primary" @click="openEditCategory(row)">编辑</el-button>
-            <el-button link :type="row.isActive ? 'warning' : 'success'" @click="toggleCategory(row)">
-              {{ row.isActive ? '停用' : '启用' }}
-            </el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-
-      <el-table v-else v-loading="loading" :data="locations" row-key="id" empty-text="还没有库位">
-        <el-table-column prop="locationCode" label="库位编码" width="140" />
-        <el-table-column label="库位名称" min-width="140">
-          <template #default="{ row }">{{ row.locationName || '—' }}</template>
-        </el-table-column>
-        <el-table-column prop="skuCount" label="存放规格数" width="110" />
-        <el-table-column label="备注" min-width="160">
-          <template #default="{ row }">{{ row.remark || '—' }}</template>
-        </el-table-column>
-        <el-table-column label="状态" width="90">
-          <template #default="{ row }">
-            <el-tag :type="row.isActive ? 'success' : 'info'" size="small">{{ row.isActive ? '启用' : '停用' }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column v-if="canManage" label="操作" width="150" fixed="right">
-          <template #default="{ row }">
-            <el-button link type="primary" @click="openEditLocation(row)">编辑</el-button>
-            <el-button link :type="row.isActive ? 'warning' : 'success'" @click="toggleLocation(row)">
-              {{ row.isActive ? '停用' : '启用' }}
-            </el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-    </el-card>
+          <el-table v-else :data="locations" row-key="id" empty-text="还没有库位">
+            <el-table-column prop="locationCode" label="库位编码" min-width="150" />
+            <el-table-column label="库位名称" min-width="160">
+              <template #default="{ row }">{{ row.locationName || '—' }}</template>
+            </el-table-column>
+            <el-table-column prop="skuCount" label="关联规格" width="100" />
+            <el-table-column label="备注" min-width="160">
+              <template #default="{ row }"><span class="text-slate-500 dark:text-slate-400">{{ row.remark || '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="状态" width="90">
+              <template #default="{ row }">
+                <el-tag :type="row.isActive ? 'success' : 'info'" size="small">{{ row.isActive ? '启用' : '停用' }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column v-if="canManage" label="操作" width="220" fixed="right">
+              <template #default="{ row }">
+                <el-button link type="primary" @click="openManageSkus(row)">管理规格</el-button>
+                <el-button link type="primary" @click="openEditLocation(row)">编辑</el-button>
+                <el-button link :type="row.isActive ? 'warning' : 'success'" @click="toggleLocation(row)">
+                  {{ row.isActive ? '停用' : '启用' }}
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </template>
+        <template #card="{ item }">
+          <article v-if="activeTab === 'categories'" class="flex min-w-0 flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-white/10 dark:bg-slate-900/40">
+            <div class="flex min-w-0 items-start justify-between gap-2">
+              <div class="min-w-0">
+                <div class="break-words font-semibold text-slate-800 dark:text-slate-100">{{ item.categoryName }}</div>
+                <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">分类编码 {{ item.categoryCode }}</div>
+              </div>
+              <el-tag :type="item.isActive ? 'success' : 'info'" size="small">{{ item.isActive ? '启用' : '停用' }}</el-tag>
+            </div>
+            <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
+              <span class="font-medium tabular-nums text-slate-800 dark:text-slate-100">关联商品 {{ item.productCount }}</span>
+              <span class="text-xs text-slate-500 dark:text-slate-400">SKU 前缀 WC{{ item.categoryCode }} · 排序 {{ item.sortOrder }}</span>
+            </div>
+            <div v-if="canManage" class="flex gap-2 border-t border-slate-100 pt-3 dark:border-white/10">
+              <el-button class="!ml-0 flex-1" @click="openEditCategory(item)">编辑</el-button>
+              <el-button class="!ml-0 flex-1" :type="item.isActive ? 'warning' : 'success'" plain @click="toggleCategory(item)">{{ item.isActive ? '停用' : '启用' }}</el-button>
+            </div>
+          </article>
+          <article v-else class="flex min-w-0 flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-white/10 dark:bg-slate-900/40">
+            <div class="flex min-w-0 items-start justify-between gap-2">
+              <div class="min-w-0">
+                <div class="break-words font-semibold text-slate-800 dark:text-slate-100">{{ item.locationCode }}</div>
+                <div class="mt-1 break-words text-sm text-slate-500 dark:text-slate-400">{{ item.locationName || '未设置名称' }}</div>
+              </div>
+              <el-tag :type="item.isActive ? 'success' : 'info'" size="small">{{ item.isActive ? '启用' : '停用' }}</el-tag>
+            </div>
+            <div class="space-y-1 text-sm">
+              <div class="font-medium tabular-nums text-slate-800 dark:text-slate-100">关联规格 {{ item.skuCount }}</div>
+              <div v-if="item.remark" class="break-words text-xs text-slate-500 dark:text-slate-400">备注：{{ item.remark }}</div>
+            </div>
+            <div v-if="canManage" class="flex flex-wrap gap-2 border-t border-slate-100 pt-3 dark:border-white/10">
+              <el-button type="primary" plain class="!ml-0 w-full" @click="openManageSkus(item)">管理规格</el-button>
+              <el-button class="!ml-0 flex-1" @click="openEditLocation(item)">编辑</el-button>
+              <el-button class="!ml-0 flex-1" :type="item.isActive ? 'warning' : 'success'" plain @click="toggleLocation(item)">{{ item.isActive ? '停用' : '启用' }}</el-button>
+            </div>
+          </article>
+        </template>
+      </BizResponsiveDataCollectionShell>
+    </section>
 
     <BizCrudDialogShell
       v-model="dialogVisible"
@@ -262,5 +330,6 @@ onMounted(loadData)
         </el-form-item>
       </el-form>
     </BizCrudDialogShell>
+    <LocationSkuManageDialog v-model="skuDialogVisible" :location="managingLocation" @updated="loadData" />
   </PageContainer>
 </template>

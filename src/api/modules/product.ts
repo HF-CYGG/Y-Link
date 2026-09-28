@@ -311,7 +311,8 @@ const normalizeProductSkuRecord = (record: ProductSkuRecord): ProductSkuRecord =
   preOrderedStock: normalizeInteger(record.preOrderedStock),
   availableStock: normalizeInteger(record.availableStock),
   isActive: normalizeBoolean(record.isActive),
-  isCurrent: normalizeBoolean(record.isCurrent),
+  // 旧接口未返回 isCurrent 时仍按当前规格处理；新接口会显式返回 true/false。
+  isCurrent: record.isCurrent === undefined ? true : normalizeBoolean(record.isCurrent),
   o2oRecommended: normalizeBoolean(record.o2oRecommended),
   thumbnail: normalizeText(record.thumbnail) || null,
   sortOrder: normalizeInteger(record.sortOrder),
@@ -454,6 +455,46 @@ export const updateProduct = async (id: string, data: UpdateProductDto): Promise
 
   return normalizeProductDetail(result)
 }
+
+export interface ProductOnlineRecommendationDto {
+  mode: 'all' | 'selected' | 'none'
+  skuIds?: string[]
+  /** 打开编辑时全部当前规格 ID，包含停用规格，不包含退役规格。 */
+  expectedSkuIds: string[]
+}
+
+export interface UpdateProductOnlineDisplayDto {
+  o2oStatus?: 'listed' | 'unlisted'
+  detailContent?: string | null
+  limitPerUser?: number
+  recommendation?: ProductOnlineRecommendationDto
+}
+
+export const updateProductOnlineDisplay = async (id: string, data: UpdateProductOnlineDisplayDto): Promise<ProductRecord> => {
+  const result = await request<ProductRawRecord | ProductDetailRawResult>({
+    method: 'PATCH',
+    url: `/products/${id}/online-display`,
+    data,
+  })
+  return normalizeProductDetail(result)
+}
+
+export interface BatchUpdateProductOnlineDisplayDto {
+  ids: string[]
+  o2oStatus: 'listed' | 'unlisted'
+}
+
+export interface BatchUpdateProductOnlineDisplayResult {
+  ids: string[]
+  updatedCount: number
+}
+
+export const batchUpdateProductOnlineDisplay = (data: BatchUpdateProductOnlineDisplayDto): Promise<BatchUpdateProductOnlineDisplayResult> =>
+  request<BatchUpdateProductOnlineDisplayResult>({
+    method: 'PATCH',
+    url: '/products/online-display/batch',
+    data,
+  })
 
 /**
  * 批量更新产品

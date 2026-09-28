@@ -17,7 +17,7 @@
  *   均禁止打印并列出失败标签，不能静默打印空白；
  * - 调整标签版式或新增模板时，同时核对 applyPrintStyle() 的 @page 设置、BarcodeLabelCard.vue 的版式分支、
  *   以及 barcode-label-print.helpers.ts 里该模板的默认条码内容来源；
- * - thermal / a4 两个存量模板的渲染结构、类名与默认行为必须保持改动前完全一致。
+ * - A4 按用户指定的标签尺寸和行列数排版，超出可打印区域时禁止打印；热敏与野辙模板每张一页。
  */
 
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
@@ -66,6 +66,9 @@ interface LabelSettings {
 
 /** 单次打印的标签总张数上限，避免一次生成过多节点拖垮页面。 */
 const MAX_TOTAL_LABELS = 2000
+const A4_PRINTABLE_WIDTH_MM = 194
+const A4_PRINTABLE_HEIGHT_MM = 281
+const A4_LABEL_GAP_MM = 2
 
 const NUMBER_LIMITS = {
   labelWidthMm: { min: 20, max: 120 },
@@ -155,6 +158,14 @@ const encodedTextFor = (label: ProductLabelRecord) => resolveBarcodeValue(label,
 
 const totalLabelCount = computed(() => labels.value.length * settings.copies)
 const exceedsLimit = computed(() => totalLabelCount.value > MAX_TOTAL_LABELS)
+const a4LayoutError = computed(() => {
+  if (settings.template !== 'a4') return ''
+  const width = settings.columns * settings.labelWidthMm + (settings.columns - 1) * A4_LABEL_GAP_MM
+  const height = settings.rows * settings.labelHeightMm + (settings.rows - 1) * A4_LABEL_GAP_MM
+  return width <= A4_PRINTABLE_WIDTH_MM && height <= A4_PRINTABLE_HEIGHT_MM
+    ? ''
+    : `当前排版需要 ${width} × ${height} 毫米，超出 A4 可打印区域 ${A4_PRINTABLE_WIDTH_MM} × ${A4_PRINTABLE_HEIGHT_MM} 毫米，请缩小标签或减少行列`
+})
 /** 缺少条码图的标签（解析结果为空、生成失败或尚未生成）。 */
 const missingBarcodes = computed(() => {
   const codes = new Set<string>()
@@ -173,6 +184,7 @@ const printBlockedReason = computed(() => {
     return `以下条码无法生成，请修正后再打印：${codes.join('、')}`
   }
   if (exceedsLimit.value) return `单次最多打印 ${MAX_TOTAL_LABELS} 张标签，当前 ${totalLabelCount.value} 张，请减少规格或份数`
+  if (a4LayoutError.value) return a4LayoutError.value
   return ''
 })
 
@@ -185,6 +197,15 @@ const a4Pages = computed(() => {
     pages.push(expandedLabels.value.slice(index, index + perPage))
   }
   return pages
+})
+const previewA4Labels = computed(() => {
+  const perPage = settings.columns * settings.rows
+  const preview: ProductLabelRecord[] = []
+  for (const label of labels.value) {
+    for (let copy = 0; copy < settings.copies && preview.length < perPage; copy++) preview.push(label)
+    if (preview.length === perPage) break
+  }
+  return preview
 })
 
 const loadJsBarcode = () => import('jsbarcode')
@@ -314,11 +335,9 @@ onBeforeUnmount(() => {
 /** 单张一页模板（thermal / yz-full / yz-compact）共用的自定义宽高尺寸。 */
 const thermalStyle = computed(() => ({ width: `${settings.labelWidthMm}mm`, height: `${settings.labelHeightMm}mm` }))
 const a4GridStyle = computed(() => ({
-  gridTemplateColumns: `repeat(${settings.columns}, 1fr)`,
-  gridTemplateRows: `repeat(${settings.rows}, 1fr)`,
+  gridTemplateColumns: `repeat(${settings.columns}, ${settings.labelWidthMm}mm)`,
+  gridTemplateRows: `repeat(${settings.rows}, ${settings.labelHeightMm}mm)`,
 }))
-/** 预览区单张标签尺寸：a4 没有可配置的单元格尺寸，用固定值示意；其余模板与打印尺寸一致。 */
-const previewStyle = computed(() => (settings.template === 'a4' ? { width: '45mm', height: '30mm' } : thermalStyle.value))
 /** 打印日期文案：进入弹窗时取一次即可，不需要跟随时钟跳动。 */
 const printDateText = formatPrintDate(new Date())
 </script>
@@ -342,20 +361,26 @@ const printDateText = formatPrintDate(new Date())
           <el-radio-button value="yz-compact">野辙简洁标签</el-radio-button>
         </el-radio-group>
       </el-form-item>
-      <el-form-item v-if="settings.template !== 'a4'" label="标签尺寸">
-        <div class="flex items-center gap-2">
-          <PassiveNumberInput v-model="labelWidthModel" :min="NUMBER_LIMITS.labelWidthMm.min" :max="NUMBER_LIMITS.labelWidthMm.max" :precision="0" class="w-28" />
-          <span>×</span>
-          <PassiveNumberInput v-model="labelHeightModel" :min="NUMBER_LIMITS.labelHeightMm.min" :max="NUMBER_LIMITS.labelHeightMm.max" :precision="0" class="w-28" />
-          <span class="text-sm text-slate-500">毫米（宽 × 高）</span>
+      <el-form-item label="标签尺寸">
+        <div class="flex flex-wrap items-center gap-2">
+          <div class="flex shrink-0 items-center gap-2">
+            <div class="w-28"><PassiveNumberInput v-model="labelWidthModel" :min="NUMBER_LIMITS.labelWidthMm.min" :max="NUMBER_LIMITS.labelWidthMm.max" :precision="0" /></div>
+            <span class="whitespace-nowrap">×</span>
+          </div>
+          <div class="w-28 shrink-0"><PassiveNumberInput v-model="labelHeightModel" :min="NUMBER_LIMITS.labelHeightMm.min" :max="NUMBER_LIMITS.labelHeightMm.max" :precision="0" /></div>
+          <span class="shrink-0 whitespace-nowrap text-sm text-slate-500">毫米（宽 × 高）</span>
         </div>
       </el-form-item>
-      <el-form-item v-else label="排版">
-        <div class="flex items-center gap-2">
-          <PassiveNumberInput v-model="columnsModel" :min="NUMBER_LIMITS.columns.min" :max="NUMBER_LIMITS.columns.max" :precision="0" class="w-24" />
-          <span>列 ×</span>
-          <PassiveNumberInput v-model="rowsModel" :min="NUMBER_LIMITS.rows.min" :max="NUMBER_LIMITS.rows.max" :precision="0" class="w-24" />
-          <span>行 / 页</span>
+      <el-form-item v-if="settings.template === 'a4'" label="排版">
+        <div class="flex flex-wrap items-center gap-2">
+          <div class="flex shrink-0 items-center gap-2">
+            <div class="w-[108px]"><PassiveNumberInput v-model="columnsModel" :min="NUMBER_LIMITS.columns.min" :max="NUMBER_LIMITS.columns.max" :precision="0" /></div>
+            <span class="whitespace-nowrap">列 ×</span>
+          </div>
+          <div class="flex shrink-0 items-center gap-2">
+            <div class="w-[108px]"><PassiveNumberInput v-model="rowsModel" :min="NUMBER_LIMITS.rows.min" :max="NUMBER_LIMITS.rows.max" :precision="0" /></div>
+            <span class="whitespace-nowrap">行 / 页</span>
+          </div>
         </div>
       </el-form-item>
       <el-form-item label="每个份数">
@@ -387,6 +412,14 @@ const printDateText = formatPrintDate(new Date())
       class="mb-3"
     />
     <el-alert
+      v-if="a4LayoutError"
+      type="warning"
+      :closable="false"
+      show-icon
+      :title="a4LayoutError"
+      class="mb-3"
+    />
+    <el-alert
       v-if="exceedsLimit"
       type="warning"
       :closable="false"
@@ -395,22 +428,44 @@ const printDateText = formatPrintDate(new Date())
       class="mb-3"
     />
     <div class="text-sm text-slate-500">共 {{ labels.length }} 个规格，打印 {{ totalLabelCount }} 张标签。预览：</div>
-    <div v-loading="loading" class="mt-2 flex max-h-72 flex-wrap gap-2 overflow-auto rounded-lg bg-slate-100 p-3 dark:bg-white/5">
-      <BarcodeLabelCard
-        v-for="(label, index) in labels.slice(0, 12)"
-        :key="`${label.skuId}-${index}`"
-        class="barcode-label--preview"
-        :style="previewStyle"
-        :label="label"
-        :template="settings.template"
-        :barcode-svg="barcodeSvgMap[encodedTextFor(label)] ?? ''"
-        :encoded-text="encodedTextFor(label)"
-        :show-spec="settings.showSpec"
-        :show-price="settings.showPrice"
-        :show-location="settings.showLocation"
-        :show-print-date="settings.showPrintDate"
-        :print-date-text="printDateText"
-      />
+    <div v-if="settings.template === 'a4'" class="mt-1 text-xs text-slate-500">屏幕预览按比例缩小，可滚动查看整页；打印时请选择 A4 纸、100% 缩放，并关闭页眉页脚。</div>
+    <div v-else class="mt-1 text-xs text-slate-500">标签机请选与标签相同的纸型，并关闭“适应页面”。</div>
+    <div v-loading="loading" class="mt-2 max-h-72 overflow-auto rounded-lg bg-slate-100 p-3 dark:bg-white/5">
+      <div v-if="settings.template === 'a4'" class="barcode-a4-preview-frame">
+        <div class="barcode-a4-page barcode-a4-page--preview" :style="a4GridStyle">
+          <BarcodeLabelCard
+            v-for="(label, index) in previewA4Labels"
+            :key="`preview-a4-${label.skuId}-${index}`"
+            class="barcode-label--cell"
+            template="a4"
+            :label="label"
+            :barcode-svg="barcodeSvgMap[encodedTextFor(label)] ?? ''"
+            :encoded-text="encodedTextFor(label)"
+            :show-spec="settings.showSpec"
+            :show-price="settings.showPrice"
+            :show-location="settings.showLocation"
+            :show-print-date="settings.showPrintDate"
+            :print-date-text="printDateText"
+          />
+        </div>
+      </div>
+      <div v-else class="flex flex-wrap gap-2">
+        <BarcodeLabelCard
+          v-for="(label, index) in labels.slice(0, 12)"
+          :key="`${label.skuId}-${index}`"
+          class="barcode-label--preview"
+          :style="thermalStyle"
+          :label="label"
+          :template="settings.template"
+          :barcode-svg="barcodeSvgMap[encodedTextFor(label)] ?? ''"
+          :encoded-text="encodedTextFor(label)"
+          :show-spec="settings.showSpec"
+          :show-price="settings.showPrice"
+          :show-location="settings.showLocation"
+          :show-print-date="settings.showPrintDate"
+          :print-date-text="printDateText"
+        />
+      </div>
     </div>
   </BizCrudDialogShell>
 
@@ -563,8 +618,16 @@ const printDateText = formatPrintDate(new Date())
   box-sizing: border-box;
   display: grid;
   gap: 2mm;
+  align-content: start;
+  justify-content: start;
   width: 194mm;
   height: 281mm;
+}
+
+.barcode-a4-page--preview {
+  zoom: 0.8;
+  background: #ffffff;
+  box-shadow: 0 1px 8px rgba(15, 23, 42, 0.15);
 }
 
 .barcode-label--cell {
@@ -575,6 +638,7 @@ const printDateText = formatPrintDate(new Date())
   body.y-link-print-barcode {
     margin: 0 !important;
     padding: 0 !important;
+    min-width: 0 !important;
     background: #ffffff !important;
   }
 

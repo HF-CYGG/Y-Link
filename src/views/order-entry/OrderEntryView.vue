@@ -11,12 +11,14 @@
  */
 
 
-import { computed } from 'vue'
+import { computed, defineAsyncComponent } from 'vue'
 import { PageContainer } from '@/components/common'
 import OrderEntryHeaderCard from './components/OrderEntryHeaderCard.vue'
 import OrderEntryItemsEditor from './components/OrderEntryItemsEditor.vue'
 import OrderEntrySummaryCard from './components/OrderEntrySummaryCard.vue'
 import { useOrderEntryForm } from './composables/useOrderEntryForm'
+
+const OrderEntryScanPanel = defineAsyncComponent(() => import('./components/OrderEntryScanPanel.vue'))
 
 /**
  * 页面入口仅负责装配：
@@ -29,6 +31,12 @@ const {
   itemRows,
   products,
   productsLoading,
+  scanPauseReason,
+  scanUserId,
+  setScanPendingCount,
+  getScanContext,
+  commitScannedRows,
+  pendingScanCount,
   departmentOptions,
   departmentOptionsLoading,
   departmentOptionsLoadFailed,
@@ -90,6 +98,14 @@ const totalAmountText = computed(() => toMoney(totalAmount.value))
         :department-options-load-failed="departmentOptionsLoadFailed"
       />
 
+      <OrderEntryScanPanel
+        :pause-reason="scanPauseReason"
+        :user-id="scanUserId"
+        :get-context="getScanContext"
+        :commit-rows="commitScannedRows"
+        @pending-change="setScanPendingCount"
+      />
+
       <OrderEntryItemsEditor
         v-model:drawer-visible="drawerVisible"
         :products-loading="productsLoading"
@@ -104,6 +120,8 @@ const totalAmountText = computed(() => toMoney(totalAmount.value))
         :drawer-direction="drawerDirection"
         :drawer-size="drawerSize"
         :drawer-form="drawerForm"
+        @update:drawer-qty="drawerForm.qty = $event"
+        @update:drawer-unit-price="drawerForm.unitPrice = $event"
         :get-row-class-name="getRowClassName"
         :set-field-ref="setFieldRef"
         :handle-product-change="handleProductChange"
@@ -131,7 +149,7 @@ const totalAmountText = computed(() => toMoney(totalAmount.value))
         :total-amount-text="totalAmountText"
         :is-phone="isPhone"
         :is-saving="isSaving"
-        :products-loading="productsLoading"
+        :products-loading="productsLoading || pendingScanCount > 0"
         @submit="submitOrder"
       />
     </div>

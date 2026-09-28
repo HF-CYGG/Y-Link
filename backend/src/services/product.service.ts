@@ -198,6 +198,22 @@ export interface BatchUpdateProductInput {
   isActive?: boolean
 }
 
+export interface OnlineDisplayInput {
+  o2oStatus?: 'listed' | 'unlisted'
+  detailContent?: string | null
+  limitPerUser?: number
+  recommendation?: {
+    mode: 'all' | 'selected' | 'none'
+    skuIds?: string[]
+    expectedSkuIds: string[]
+  }
+}
+
+export interface BatchOnlineDisplayInput {
+  ids: string[]
+  o2oStatus: 'listed' | 'unlisted'
+}
+
 export interface ProductTagView {
   id: string
   tagName: string
@@ -939,6 +955,175 @@ export class ProductService {
     }
 
     if (logs.length > 0) await logRepo.save(logs)
+  }
+
+  /** 线上展示专用写入：锁序为账号 → 商品 → 当前 SKU，绝不进入全量规格替换。 */
+  async updateOnlineDisplay(
+    id: string,
+    input: OnlineDisplayInput,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ): Promise<ProductView> {
+    if (!input || !Object.keys(input).length) throw new BizError('至少提供一个线上展示字段')
+    if (input.o2oStatus !== undefined && input.o2oStatus !== 'listed' && input.o2oStatus !== 'unlisted') {
+      throw new BizError('线上状态无效')
+    }
+    if (input.detailContent !== undefined && input.detailContent !== null && typeof input.detailContent !== 'string') {
+      throw new BizError('商品详情格式无效')
+    }
+    const normalizedDetailContent = this.readLimitedText(
+      input.detailContent,
+      '商品详情',
+      PRODUCT_FIELD_LIMITS.detailContent,
+      { allowNull: true },
+    )
+    const normalizedLimitPerUser = this.readOptionalInteger(
+      input.limitPerUser,
+      '单人限购数量',
+      1,
+      PRODUCT_FIELD_LIMITS.maxLimitPerUser,
+    )
+    const recommendation = input.recommendation
+    if (recommendation) {
+      if (!['all', 'selected', 'none'].includes(recommendation.mode)
+        || !Array.isArray(recommendation.expectedSkuIds)
+        || recommendation.expectedSkuIds.some((skuId) => typeof skuId !== 'string' || !skuId.trim())
+        || new Set(recommendation.expectedSkuIds).size !== recommendation.expectedSkuIds.length
+        || (recommendation.mode === 'selected' && (!Array.isArray(recommendation.skuIds) || !recommendation.skuIds.length))
+        || (recommendation.mode !== 'selected' && recommendation.skuIds !== undefined)
+        || (recommendation.skuIds !== undefined && (
+          recommendation.skuIds.some((skuId) => typeof skuId !== 'string' || !skuId.trim())
+          || new Set(recommendation.skuIds).size !== recommendation.skuIds.length
+        ))) {
+        throw new BizError('推荐规格参数无效')
+      }
+    }
+
+    const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const productRepo = manager.getRepository(BaseProduct)
+      const product = await productRepo.findOne({
+        where: { id },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
+      if (!product) throw new BizError('产品不存在', 404)
+      if (input.o2oStatus === 'listed' && !isDatabaseFlagEnabled(product.isActive)) {
+        throw new BizError('已停用产品不能上架', 409)
+      }
+
+      const changedFields: string[] = []
+      const productChanges: Partial<BaseProduct> = {}
+      if (input.o2oStatus !== undefined && input.o2oStatus !== product.o2oStatus) {
+        productChanges.o2oStatus = input.o2oStatus
+        changedFields.push('o2oStatus')
+      }
+      if (normalizedDetailContent !== undefined && normalizedDetailContent !== product.detailContent) {
+        productChanges.detailContent = normalizedDetailContent
+        changedFields.push('detailContent')
+      }
+      if (normalizedLimitPerUser !== undefined && normalizedLimitPerUser !== Number(product.limitPerUser)) {
+        productChanges.limitPerUser = normalizedLimitPerUser
+        changedFields.push('limitPerUser')
+      }
+
+      let changedSkuIds: string[] = []
+      if (recommendation) {
+        const currentSkus = await this.loadCurrentSkusForUpgrade(product.id, manager, true)
+        const currentIds = currentSkus.map((sku) => String(sku.id)).sort((left, right) => left.localeCompare(right))
+        const expectedIds = [...recommendation.expectedSkuIds].sort((left, right) => left.localeCompare(right))
+        if (currentIds.length !== expectedIds.length || currentIds.some((skuId, index) => skuId !== expectedIds[index])) {
+          throw new BizError('商品规格已变化，请刷新后重试', 409)
+        }
+        const selectedIds = new Set(recommendation.mode === 'selected' ? recommendation.skuIds : [])
+        if (recommendation.mode === 'selected' && (
+          selectedIds.size !== recommendation.skuIds?.length
+          || currentSkus.some((sku) => selectedIds.has(String(sku.id)) && !isDatabaseFlagEnabled(sku.isActive))
+          || [...selectedIds].some((skuId) => !currentIds.includes(skuId))
+        )) {
+          throw new BizError('只能推荐当前启用的规格，请刷新后重试', 409)
+        }
+        const productRecommended = recommendation.mode === 'all'
+        if (isDatabaseFlagEnabled(product.o2oRecommended) !== productRecommended) {
+          productChanges.o2oRecommended = productRecommended
+          changedFields.push('o2oRecommended')
+        }
+        const skuRepo = manager.getRepository(BaseProductSku)
+        for (const sku of currentSkus) {
+          const shouldRecommend = selectedIds.has(String(sku.id))
+          if (isDatabaseFlagEnabled(sku.o2oRecommended) === shouldRecommend) continue
+          await skuRepo.update(sku.id, { o2oRecommended: shouldRecommend })
+          changedSkuIds.push(String(sku.id))
+        }
+      }
+
+      if (Object.keys(productChanges).length) {
+        await productRepo.update(product.id, productChanges)
+        Object.assign(product, productChanges)
+      }
+      if (changedFields.length || changedSkuIds.length) {
+        await auditService.record({
+          actionType: 'product.online_display.update',
+          actionLabel: '更新商品线上展示',
+          targetType: 'base_product',
+          targetId: product.id,
+          targetCode: product.productCode,
+          actor,
+          requestMeta,
+          detail: { changedFields, changedSkuIds, recommendationMode: recommendation?.mode ?? null },
+        }, manager)
+      }
+      return { view: await this.buildProductView(product, manager), changed: changedFields.length > 0 || changedSkuIds.length > 0 }
+    })
+    if (result.changed) invalidateMallCatalogReadCache()
+    return result.view
+  }
+
+  /** 批量上下架逐 ID 按稳定顺序锁定；任何无效或不可上架商品使事务整体回滚。 */
+  async batchUpdateOnlineDisplay(
+    input: BatchOnlineDisplayInput,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ): Promise<{ ids: string[]; updatedCount: number }> {
+    const productIds = [...new Set(input?.ids?.map((id) => String(id).trim()))].sort((left, right) => left.localeCompare(right))
+    if (!productIds.length || productIds.some((id) => !id)) throw new BizError('至少选择一个有效产品')
+    if (productIds.length > 100) throw new BizError('单次最多更新 100 个产品')
+    if (input.o2oStatus !== 'listed' && input.o2oStatus !== 'unlisted') throw new BizError('线上状态无效')
+
+    const updatedCount = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const repo = manager.getRepository(BaseProduct)
+      const products: BaseProduct[] = []
+      for (const id of productIds) {
+        const product = await repo.findOne({
+          where: { id },
+          lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+        })
+        if (!product) throw new BizError('存在无效产品，批量线上展示更新失败', 404)
+        if (input.o2oStatus === 'listed' && !isDatabaseFlagEnabled(product.isActive)) {
+          throw new BizError('批量上架包含已停用产品', 409)
+        }
+        products.push(product)
+      }
+      let changed = 0
+      for (const product of products) {
+        if (product.o2oStatus === input.o2oStatus) continue
+        await repo.update(product.id, { o2oStatus: input.o2oStatus })
+        await auditService.record({
+          actionType: 'product.online_display.batch_status',
+          actionLabel: '批量更新商品线上状态',
+          targetType: 'base_product',
+          targetId: product.id,
+          targetCode: product.productCode,
+          actor,
+          requestMeta,
+          detail: { previousStatus: product.o2oStatus, nextStatus: input.o2oStatus },
+        }, manager)
+        changed += 1
+      }
+      return changed
+    })
+    if (updatedCount) invalidateMallCatalogReadCache()
+    return { ids: productIds, updatedCount }
   }
 
   async batchUpdate(input: BatchUpdateProductInput, actor: AuthUserContext, requestMeta?: RequestMeta): Promise<ProductView[]> {

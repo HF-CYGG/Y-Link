@@ -126,6 +126,7 @@ export const useOrderEntryForm = () => {
    */
   const productsLoading = ref(false)
   const productCandidatesReady = ref(false)
+  const pendingScanCount = ref(0)
   /**
    * 客户部门选项：
    * - 来自系统部门配置的只读快照，加载失败时不阻断开单，控件退化为纯手动录入；
@@ -482,6 +483,33 @@ export const useOrderEntryForm = () => {
     } finally {
       productsLoading.value = false
     }
+  }
+
+  /** 扫码面板只在明细可安全修改时开放；父层在最终应用时再次守卫。 */
+  const scanPauseReason = computed<string | null>(() => {
+    if (isSaving.value) return '出库单正在提交'
+    if (drawerVisible.value) return '请先完成明细抽屉编辑'
+    if (deletingRowUids.value.length) return '明细正在删除'
+    if (!productCandidatesReady.value || productsLoading.value) return '商品候选尚未就绪'
+    return null
+  })
+
+  const scanUserId = computed(() => authStore.currentUser?.id)
+  const setScanPendingCount = (count: number): void => { pendingScanCount.value = count }
+  const getScanContext = () => ({ rows: itemRows.value, products: products.value })
+  const commitScannedRows = (
+    rows: OrderItemRow[],
+    expectedUserId: string | undefined,
+    isCurrent: () => boolean,
+  ): string | null => {
+    if (!isCurrent() || expectedUserId !== authStore.currentUser?.id) {
+      return '扫码已失效，请重新扫码'
+    }
+    if (scanPauseReason.value) {
+      return `${scanPauseReason.value}，未加入明细`
+    }
+    itemRows.value = rows
+    return null
   }
 
   /**
@@ -869,6 +897,10 @@ export const useOrderEntryForm = () => {
     if (isSaving.value) {
       return
     }
+    if (pendingScanCount.value > 0) {
+      showAppWarning('正在识别条码，请完成后再保存出库单')
+      return
+    }
 
     const invalidQtyRow = itemRows.value.find((row) => {
       if (!normalizeTextValue(row.productId)) return false
@@ -1136,6 +1168,13 @@ export const useOrderEntryForm = () => {
     itemRows,
     products,
     productsLoading,
+    productCandidatesReady,
+    scanPauseReason,
+    scanUserId,
+    setScanPendingCount,
+    getScanContext,
+    commitScannedRows,
+    pendingScanCount,
     departmentOptions,
     departmentOptionsLoading,
     departmentOptionsLoadFailed,

@@ -7,6 +7,7 @@
  * - 同一规格重复扫码时数量 +1（连扫逐次累计），每行实时展示“当前库存 → 变动 → 结果”预览，出库超出库存时标红；
  * - 确认弹窗打开或提交过程中暂停接收扫码，避免提交内容与确认文案不一致；
  * - 每张草稿持有一个幂等键：提交成功或收到 4xx 响应后换新键；网络错误、超时、5xx 保留原键，便于安全重试。
+ * - 作业设置、待提交清单与最近提交分层呈现；空清单和空结果采用紧凑提示，手机端控件与明细自动换行。
  * 维护说明：
  * - 预览里的“当前库存”是扫码时读到的值，最终以服务端记账结果为准，提交结果区展示真实前后库存；
  * - 销售出库仍在“出库开单”完成，这里不提供销售类型，避免两处出库口径分叉；
@@ -229,68 +230,81 @@ const handleSubmit = async () => {
 
 <template>
   <PageContainer title="扫码作业" description="扫码枪直接扫描即可加入清单；也可手动输入条码或用手机摄像头扫码。">
-    <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+    <div class="grid min-w-0 items-start gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
       <section class="min-w-0 space-y-4">
         <el-card shadow="never">
-          <div class="flex flex-wrap items-center gap-3">
-            <el-radio-group v-model="docType" @change="handleTypeChange">
+          <template #header>
+            <div class="space-y-0.5">
+              <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">作业设置</h2>
+              <p class="text-xs text-slate-500">选择库存变动类型，再扫码加入商品。</p>
+            </div>
+          </template>
+          <div class="min-w-0">
+            <el-radio-group v-model="docType" class="!h-auto max-w-full !justify-start !flex-wrap gap-y-2" @change="handleTypeChange">
               <el-radio-button v-for="option in STOCK_DOC_TYPE_OPTIONS" :key="option.value" :value="option.value">
                 {{ option.label }}
               </el-radio-button>
             </el-radio-group>
           </div>
-          <div class="mt-3 flex flex-wrap gap-3">
+          <div class="mt-4 flex flex-col gap-3 sm:flex-row">
             <el-select
               v-if="typeOption.reasons.length"
               v-model="reasonCode"
               :placeholder="typeOption.reasonRequired ? '选择原因（必选）' : '选择原因（可选）'"
               clearable
-              class="w-48"
+              class="!w-full sm:!w-48"
             >
               <el-option v-for="reason in typeOption.reasons" :key="reason.value" :label="reason.label" :value="reason.value" />
             </el-select>
             <el-input v-model="remark" maxlength="255" placeholder="备注（可选）" class="min-w-0 flex-1" clearable />
           </div>
-          <div class="mt-3 flex gap-2">
+          <div class="mt-4 flex min-w-0 flex-wrap gap-2 sm:flex-nowrap">
             <el-input
               v-model="manualCode"
               size="large"
               placeholder="扫码枪直接扫描，或在此输入条码 / SKU 编码后回车"
               clearable
-              class="min-w-0 flex-1"
+              class="w-full min-w-0 sm:flex-1"
               data-barcode-scan-input
             />
             <el-tooltip :content="scanButtonTitle" placement="top">
-              <el-button size="large" :loading="scanLoading" @click="openScanDialog">
+              <el-button size="large" class="!ml-0 flex-1 sm:!flex-none" :loading="scanLoading" aria-label="打开摄像头扫码" @click="openScanDialog">
                 <el-icon :size="18"><CameraFilled /></el-icon>
+                <span class="ml-1 sm:hidden">摄像头扫码</span>
               </el-button>
             </el-tooltip>
-            <el-button size="large" type="primary" :loading="lookupLoading" @click="addByCode(manualCode)">加入</el-button>
+            <el-button size="large" type="primary" class="!ml-0 flex-1 sm:!flex-none" :loading="lookupLoading" @click="addByCode(manualCode)">加入清单</el-button>
           </div>
         </el-card>
 
         <el-card shadow="never">
           <template #header>
-            <div class="flex items-center justify-between">
-              <span class="font-semibold">待提交清单（{{ lines.length }} 个规格，合计 {{ totalQty }} 件）</span>
+            <div class="flex min-w-0 flex-wrap items-center justify-between gap-2">
+              <div>
+                <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">待提交清单</h2>
+                <p class="text-xs text-slate-500">{{ lines.length }} 个规格 · 合计 {{ totalQty }} 件</p>
+              </div>
               <el-button link type="danger" :disabled="!lines.length" @click="clearDraft">清空</el-button>
             </div>
           </template>
-          <el-empty v-if="!lines.length" description="扫描商品条码后会出现在这里" :image-size="120" />
+          <div v-if="!lines.length" class="rounded-xl border border-dashed border-slate-200 bg-slate-50/70 px-4 py-5 text-center dark:border-white/10 dark:bg-white/5">
+            <p class="text-sm font-medium text-slate-700 dark:text-slate-200">清单尚无商品</p>
+            <p class="mt-1 text-xs text-slate-500">扫描商品条码后，数量与库存预览会显示在这里。</p>
+          </div>
           <div v-else class="space-y-3">
             <div
               v-for="line in lines"
               :key="line.skuId"
-              class="flex flex-wrap items-center gap-3 rounded-xl border px-3 py-2"
+              class="flex min-w-0 flex-wrap items-center gap-3 rounded-xl border px-3 py-3"
               :class="isShortage(line) ? 'border-red-300 bg-red-50 dark:border-red-500/40 dark:bg-red-500/10' : 'border-slate-200 dark:border-white/10'"
             >
-              <div class="min-w-0 flex-1">
-                <div class="truncate font-medium">{{ line.productName }}</div>
-                <div class="text-xs text-slate-500">
+              <div class="min-w-0 basis-full flex-1 sm:basis-48">
+                <div class="break-words font-medium">{{ line.productName }}</div>
+                <div class="break-all text-xs text-slate-500">
                   {{ line.specText }} · {{ line.skuCode }}<span v-if="line.locationCode"> · 库位 {{ line.locationCode }}</span>
                 </div>
               </div>
-              <div class="text-sm tabular-nums text-slate-600 dark:text-slate-300">
+              <div class="w-full text-sm tabular-nums text-slate-600 sm:w-auto dark:text-slate-300">
                 库存 {{ line.currentStock }}
                 <span :class="signedDelta(line) >= 0 ? 'text-emerald-600' : 'text-red-600'">
                   {{ signedDelta(line) >= 0 ? '+' : '' }}{{ signedDelta(line) }}
@@ -302,7 +316,7 @@ const handleSubmit = async () => {
                 :min="isAdjust ? -999999 : 1"
                 :max="999999"
                 :precision="0"
-                class="w-32"
+                class="w-28 min-w-0"
                 size="small"
                 data-barcode-scan-qty
               />
@@ -317,7 +331,7 @@ const handleSubmit = async () => {
             />
           </div>
           <div class="mt-4 flex justify-end">
-            <el-button type="primary" size="large" :loading="submitting" :disabled="!lines.length" @click="handleSubmit">
+            <el-button type="primary" size="large" class="w-full sm:w-auto" :loading="submitting" :disabled="!lines.length" @click="handleSubmit">
               提交{{ typeOption.label }}
             </el-button>
           </div>
@@ -326,11 +340,18 @@ const handleSubmit = async () => {
 
       <aside class="min-w-0">
         <el-card shadow="never">
-          <template #header><span class="font-semibold">最近提交</span></template>
-          <el-empty v-if="!lastResult" description="提交后在这里查看记账结果" :image-size="80" />
+          <template #header>
+            <div class="space-y-0.5">
+              <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">最近提交</h2>
+              <p class="text-xs text-slate-500">核对本次记账后的库存</p>
+            </div>
+          </template>
+          <div v-if="!lastResult" class="rounded-xl bg-slate-50 px-3 py-4 text-sm text-slate-500 dark:bg-white/5">
+            提交成功后，这里会显示单号与各规格的库存结果。
+          </div>
           <div v-else class="space-y-2 text-sm">
-            <div class="flex items-center justify-between">
-              <span class="font-semibold">{{ lastResult.docNo }}</span>
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <span class="break-all font-semibold">{{ lastResult.docNo }}</span>
               <el-tag size="small">{{ lastResult.docTypeLabel }}</el-tag>
             </div>
             <div class="text-xs text-slate-500">{{ lastResult.reasonLabel || '' }} {{ lastResult.remark || '' }}</div>

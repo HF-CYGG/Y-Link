@@ -37,6 +37,18 @@ const locationSchema = z.object({
   isActive: z.boolean().optional(),
 })
 
+const locationSkuQuerySchema = z.object({
+  scope: z.enum(['assigned', 'other']).default('assigned'),
+  keyword: z.string().trim().max(100).default(''),
+  page: z.coerce.number().int().min(1).max(10000).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+})
+
+const locationSkuChangeSchema = z.object({
+  action: z.enum(['assign', 'remove']),
+  expectedLocationId: z.string().trim().min(1).max(32).nullable(),
+})
+
 const stockDocSchema = z.object({
   docType: z.string().trim().min(1).max(16),
   clientRequestId: z.string().trim().max(64).nullable().optional(),
@@ -123,6 +135,21 @@ inventoryRouter.post('/locations', requirePermission('products:manage'), asyncHa
 inventoryRouter.put('/locations/:id', requirePermission('products:manage'), asyncHandler(async (req, res) => {
   const authReq = req as AuthenticatedRequest
   ok(res, await inventoryMasterDataService.updateLocation(req.params.id, locationSchema.parse(req.body), authReq.auth, extractRequestMeta(req)))
+}))
+
+inventoryRouter.get('/locations/:id/skus', requirePermission('products:manage'), asyncHandler(async (req, res) => {
+  ok(res, await inventoryMasterDataService.listLocationSkus(req.params.id, locationSkuQuerySchema.parse(req.query)))
+}))
+
+inventoryRouter.put('/locations/:id/skus/:skuId', requirePermission('products:manage'), asyncHandler(async (req, res) => {
+  const authReq = req as AuthenticatedRequest
+  ok(res, await inventoryMasterDataService.changeSkuLocation(
+    req.params.id,
+    req.params.skuId,
+    locationSkuChangeSchema.parse(req.body),
+    authReq.auth,
+    extractRequestMeta(req),
+  ))
 }))
 
 // ---- 当前库存与流水 ----

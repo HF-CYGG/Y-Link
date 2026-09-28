@@ -3,7 +3,7 @@
  * 模块说明：src/views/inventory/StocktakeListView.vue
  * 文件职责：盘点单列表与建单入口，建单时选择盘点范围（全部 / 分类 / 库位 / 指定商品）与是否盲盘。
  * 实现逻辑：
- * - 列表服务端分页，展示进度（已盘 / 总数）与差异数（盲盘单对无审核权限者不返回差异数）；
+ * - 列表服务端分页，桌面展示表格、手机展示同源数据卡，展示进度与服务端允许查看的差异数；
  * - 指定商品范围通过扫码或输入条码逐个添加，避免一次拉取全部商品；
  * - 建单成功后直接进入盘点作业页。
  * 维护说明：
@@ -14,7 +14,7 @@
 
 import { computed, onActivated, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { BizCrudDialogShell, PageContainer, PagePaginationBar } from '@/components/common'
+import { BizCrudDialogShell, BizResponsiveDataCollectionShell, PageContainer, PagePaginationBar, PageToolbarCard } from '@/components/common'
 import {
   createStocktake,
   getCategories,
@@ -149,19 +149,44 @@ onActivated(() => {
 
 <template>
   <PageContainer title="库存盘点" description="创建盘点单后扫码逐个计数，提交后核对账实差异并确认调账。">
-    <el-card shadow="never" class="mb-4">
-      <div class="flex flex-wrap gap-3">
-        <el-input v-model="filters.keyword" placeholder="盘点单号 / 范围 / 备注" clearable class="w-56" @keyup.enter="search" />
-        <el-select v-model="filters.status" placeholder="全部状态" clearable class="w-32">
-          <el-option v-for="(item, key) in STOCKTAKE_STATUS_LABELS" :key="key" :label="item.label" :value="key" />
-        </el-select>
-        <el-button type="primary" @click="search">查询</el-button>
-        <el-button v-if="canCreate" type="success" class="ml-auto" @click="openCreate">新建盘点单</el-button>
+    <PageToolbarCard class="mb-4">
+      <div class="space-y-3">
+        <div>
+          <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">筛选盘点单</h2>
+          <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">按单号、范围或状态查找盘点任务。</p>
+        </div>
+        <div class="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+          <el-input v-model="filters.keyword" placeholder="盘点单号 / 范围 / 备注" clearable class="w-full sm:!w-64" @keyup.enter="search" />
+          <el-select v-model="filters.status" placeholder="全部状态" clearable class="w-full sm:!w-36">
+            <el-option v-for="(item, key) in STOCKTAKE_STATUS_LABELS" :key="key" :label="item.label" :value="key" />
+          </el-select>
+          <el-button type="primary" class="!ml-0 w-full sm:w-auto" @click="search">查询</el-button>
+        </div>
       </div>
-    </el-card>
+      <template v-if="canCreate" #actions>
+        <el-button type="success" class="!ml-0 w-full sm:w-auto" @click="openCreate">新建盘点单</el-button>
+      </template>
+    </PageToolbarCard>
 
-    <el-card shadow="never">
-      <el-table v-loading="loading" :data="rows" row-key="id" empty-text="还没有盘点单" @row-click="(row: StocktakeRecord) => router.push(`/inventory/stocktakes/${row.id}`)">
+    <section v-loading="loading && rows.length > 0" class="apple-card min-w-0 p-3 sm:p-4">
+      <div class="mb-4 flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">盘点单列表</h2>
+          <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">共 {{ pagination.total }} 张盘点单，打开单据查看盘点进度与明细。</p>
+        </div>
+      </div>
+      <BizResponsiveDataCollectionShell
+        :items="rows"
+        :loading="loading"
+        empty-description="暂无符合条件的盘点单"
+        :empty-card="false"
+        empty-min-height="128px"
+        :disable-card-transition="true"
+        table-wrapper-class="min-w-0"
+        card-container-class="sm:grid-cols-2 xl:grid-cols-3"
+      >
+        <template #table="{ items: tableRows }">
+          <el-table :data="tableRows" row-key="id" empty-text="还没有盘点单" @row-click="(row: StocktakeRecord) => router.push(`/inventory/stocktakes/${row.id}`)">
         <el-table-column prop="stocktakeNo" label="盘点单号" width="150" />
         <el-table-column prop="scopeLabel" label="盘点范围" min-width="180" show-overflow-tooltip />
         <el-table-column label="模式" width="80">
@@ -191,7 +216,33 @@ onActivated(() => {
         <el-table-column label="" width="80" fixed="right">
           <template #default><el-button link type="primary">进入</el-button></template>
         </el-table-column>
-      </el-table>
+          </el-table>
+        </template>
+        <template #card="{ item }">
+          <article class="flex min-w-0 flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-white/10 dark:bg-slate-900/40">
+            <div class="flex min-w-0 flex-wrap items-start justify-between gap-2">
+              <div class="min-w-0">
+                <div class="font-semibold text-slate-800 dark:text-slate-100">{{ item.stocktakeNo }}</div>
+                <div class="mt-1 break-words text-sm text-slate-500 dark:text-slate-400">{{ item.scopeLabel }}</div>
+              </div>
+              <el-tag size="small" :type="STOCKTAKE_STATUS_LABELS[item.status]?.type">{{ STOCKTAKE_STATUS_LABELS[item.status]?.label ?? item.status }}</el-tag>
+            </div>
+            <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+              <el-tag size="small" effect="plain">{{ item.blindMode ? '盲盘' : '明盘' }}</el-tag>
+              <span>创建人 {{ item.createdByName || '—' }}</span>
+              <span>{{ new Date(item.createdAt).toLocaleString('zh-CN', { hour12: false }) }}</span>
+            </div>
+            <div class="rounded-lg bg-slate-50 p-3 dark:bg-white/5">
+              <div class="mb-2 flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
+                <span>盘点进度</span><span class="tabular-nums">{{ item.countedCount }} / {{ item.itemCount }}</span>
+              </div>
+              <el-progress :percentage="item.itemCount ? Math.round((item.countedCount / item.itemCount) * 100) : 0" :stroke-width="8" :show-text="false" />
+              <div v-if="item.diffCount !== null" class="mt-2 text-xs text-slate-500 dark:text-slate-400">差异 {{ item.diffCount }} 个</div>
+            </div>
+            <el-button type="primary" plain class="!ml-0 w-full" @click="router.push(`/inventory/stocktakes/${item.id}`)">进入盘点单</el-button>
+          </article>
+        </template>
+      </BizResponsiveDataCollectionShell>
       <PagePaginationBar
         v-model:current-page="pagination.page"
         v-model:page-size="pagination.pageSize"
@@ -200,7 +251,7 @@ onActivated(() => {
         class="mt-4"
         @current-change="loadData"
       />
-    </el-card>
+    </section>
 
     <BizCrudDialogShell
       v-model="createVisible"

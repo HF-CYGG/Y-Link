@@ -166,7 +166,7 @@ async function main() {
       requestLocalHttp(`${baseUrl}${url}`, { method, headers: bearer(session), body: JSON.stringify(body ?? {}) })
 
     // ---- 未登录 ----
-    for (const url of ['/api/inventory/stocks', '/api/inventory/stocktakes', '/api/products/lookup?code=x', '/api/inventory/categories']) {
+    for (const url of ['/api/inventory/stocks', '/api/inventory/stocktakes', '/api/products/lookup?code=x', '/api/inventory/categories', '/api/inventory/locations/1/skus']) {
       await expectStatus(get(null, url), `未登录访问 ${url}`, 401)
     }
     pass('未登录访问库存接口返回 401')
@@ -188,6 +188,21 @@ async function main() {
     assert.match(sku.skuCode, /^WC05\d{3}$/, '有分类的新商品应生成 WC 编码')
     assert.equal(sku.costPrice, '3.50')
     pass('管理员可建分类、库位与带条码成本价的商品')
+
+    const locationSkuUrl = `/api/inventory/locations/${location.id}/skus`
+    const assigned = await expectOk<{ total: number; list: Array<{ skuId: string; currentStock: number }> }>(get(admin, `${locationSkuUrl}?scope=assigned&page=1&pageSize=1`), '管理员读库位规格')
+    assert.equal(assigned.total, 1)
+    assert.equal(assigned.list[0]?.skuId, sku.id)
+    assert.equal(assigned.list[0]?.currentStock, 10)
+    await expectStatus(get(admin, `${locationSkuUrl}?scope=assigned&pageSize=101`), '库位规格分页超过上限', 400)
+    await expectStatus(send(admin, 'PUT', `${locationSkuUrl}/${sku.id}`, { action: 'remove' }), '缺少库位并发基线', 400)
+    await expectStatus(send(admin, 'PUT', `${locationSkuUrl}/${sku.id}`, { action: 'remove', expectedLocationId: null }), '库位并发基线过期', 409)
+    const removed = await expectOk<{ locationId: string | null }>(send(admin, 'PUT', `${locationSkuUrl}/${sku.id}`, { action: 'remove', expectedLocationId: location.id }), '管理员移出库位规格')
+    assert.equal(removed.locationId, null)
+    const reassigned = await expectOk<{ locationId: string | null }>(send(admin, 'PUT', `${locationSkuUrl}/${sku.id}`, { action: 'assign', expectedLocationId: null }), '管理员重新关联库位规格')
+    assert.equal(reassigned.locationId, location.id)
+    const afterAssociation = await expectOk<{ skus: Array<{ currentStock: number }> }>(get(admin, `/api/products/${product.id}`), '关联后读商品库存')
+    assert.equal(afterAssociation.skus[0]?.currentStock, 10)
 
     const createUser = (role: 'operator' | 'supplier', password: string) =>
       expectOk<{ username: string }>(send(admin, 'POST', '/api/users', {
@@ -219,6 +234,8 @@ async function main() {
     }
     await expectStatus(send(supplier, 'POST', '/api/inventory/docs', { docType: 'purchase_in', items: [{ skuId: sku.id, qty: 1 }] }), '供货方建库存单', 403)
     await expectStatus(send(supplier, 'POST', '/api/inventory/categories', { categoryCode: '06', categoryName: '越权' }), '供货方建分类', 403)
+    await expectStatus(get(supplier, locationSkuUrl), '供货方读库位规格', 403)
+    await expectStatus(send(supplier, 'PUT', `${locationSkuUrl}/${sku.id}`, { action: 'remove', expectedLocationId: location.id }), '供货方改库位规格', 403)
     await expectStatus(send(supplier, 'POST', '/api/inventory/stocktakes', { scopeType: 'all' }), '供货方建盘点单', 403)
     pass('供货方看不到成本价，库存、单据、盘点与导入接口全部 403')
 
