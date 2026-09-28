@@ -238,7 +238,12 @@ export async function hashPassword(plainPassword: string): Promise<string> {
 let nonexistentAccountHashPromise: Promise<string> | null = null
 
 export async function verifyPasswordForNonexistentAccount(plainPassword: string): Promise<void> {
-  nonexistentAccountHashPromise ??= hashPassword('y-link-nonexistent-account-timing-only')
+  // 计时用哈希只在首次需要时生成；派生闸门满载等失败不能被缓存，否则此后所有不存在账号的登录都会返回 503，
+  // 既误伤正常用户，又与存在账号的 401 形成可区分信号。失败时清空缓存，下次请求重新生成。
+  nonexistentAccountHashPromise ??= hashPassword('y-link-nonexistent-account-timing-only').catch((error: unknown) => {
+    nonexistentAccountHashPromise = null
+    throw error
+  })
   await verifyPassword(plainPassword, await nonexistentAccountHashPromise)
 }
 

@@ -341,7 +341,10 @@ export class AuthService {
 
     const securitySnapshot = this.buildLoginSecuritySnapshot(user)
     // 旧参数哈希透明升级：新哈希在事务外算好（CPU 密集），事务内确认安全快照未变后随会话一并写入。
-    const upgradedPasswordHash = passwordVerification.needsRehash ? await hashPassword(password) : null
+    // 升级只是顺带动作：派生闸门满载等失败时保持旧哈希、下次登录再升级，不能让已通过校验的登录失败（与客户端一致）。
+    const upgradedPasswordHash = passwordVerification.needsRehash
+      ? await hashPassword(password).catch(() => null)
+      : null
 
     // 已开启两步验证：密码正确也不签发会话，只发放第二步票据；失败计数要到第二步成功才清空。
     if (await adminMfaService.isEnabled(user.id)) {
