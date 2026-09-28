@@ -49,6 +49,7 @@ import { AuditThrottle } from './utils/audit-throttle.js'
 import { BoundedConcurrencyGate } from './utils/bounded-concurrency.js'
 import { createInFlightLimitMiddleware } from './middleware/in-flight-limit.middleware.js'
 import { ANONYMOUS_AUTH_IN_FLIGHT_POLICY } from './config/load-protection-policy.js'
+import { overloadSheddingMiddleware } from './middleware/overload-shedding.middleware.js'
 import { extractRequestMeta } from './utils/request-meta.js'
 
 const UPLOAD_CACHE_CONTROL_VALUE = 'public, max-age=31536000, immutable'
@@ -286,6 +287,9 @@ export function createApp(options: CreateAppOptions = {}) {
       maintenance: databaseMaintenanceModeService.getPublicState(),
     })
   })
+
+  // 过载分级削峰：挂在健康检查之后、所有业务入口之前；正常负载时只做一次等级判断。
+  app.use(overloadSheddingMiddleware)
 
   // 认证接口允许匿名访问，其中 logout / me 已在子路由内部再次做鉴权。
   const publicJsonParser = express.json({ limit: PUBLIC_JSON_BODY_LIMIT })

@@ -32,6 +32,8 @@ import { systemConfigService } from '../services/system-config.service.js'
 import { migrateLegacyUploadReferences } from '../utils/upload-migration.js'
 import { toSafeErrorLog } from '../utils/safe-error-log.js'
 import { describeDataEncryptionKey } from '../utils/data-encryption.js'
+import { overloadMonitor } from '../middleware/overload-shedding.middleware.js'
+import { getTransactionCoordinator } from '../database/transaction-coordinator.js'
 import { registerRuntimeShutdownHandler } from './runtime-shutdown.js'
 import { registerDatabaseRescueQuiesce, hasPendingRecoveryIntent, markRecoveryFinalizing } from './database-rescue-control.js'
 import {
@@ -151,6 +153,7 @@ const shutdownRuntime = (reason: string, exitCode: number, exit = true): Promise
         })
       : Promise.resolve()
 
+    overloadMonitor.stop()
     // HTTP 断开不代表业务 Promise 完成；先关闭新准入，排空所有操作和 worker 才销毁连接。
     await databaseMaintenanceModeService.shutdownAndDrain()
     await mobileSessionService.stopCleanupLoop()
@@ -396,6 +399,12 @@ export async function startBusinessRuntime(startup: { mode: 'normal' | 'cutover'
     server.once('error', onError)
     server.once('listening', () => {
       server.off('error', onError)
+      // 过载监测只在正式运行时启动：SQLite 串行写入时以写队列占用率作为第二信号，MySQL 只看事件循环延迟。
+      overloadMonitor.start(() => {
+        const snapshot = getTransactionCoordinator(AppDataSource)?.snapshot()
+        if (!snapshot?.serializeWrites) return null
+        return snapshot.pendingWrites / env.SQLITE_WRITE_QUEUE_MAX_PENDING
+      })
       resolve()
     })
   })

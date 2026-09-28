@@ -25,6 +25,7 @@ import { auditService } from '../services/audit.service.js'
 import { EXISTING_PASSWORD_INPUT_MAX_LENGTH } from '../constants/auth-input-limits.js'
 import { listConcurrencyGateSnapshots } from '../utils/bounded-concurrency.js'
 import { persistentRiskStateService } from '../services/persistent-risk-state.service.js'
+import { overloadMonitor } from '../middleware/overload-shedding.middleware.js'
 
 const importPayloadSchema = z
   .object({
@@ -183,6 +184,8 @@ dataMaintenanceRouter.get(
         concurrencyGates: listConcurrencyGateSnapshots(),
         // 风控负缓存规模：攻击期间应能看到拒绝结论数量上升，且不超过上限。
         riskNegativeCache: persistentRiskStateService.negativeCacheSnapshot(),
+        // 过载削峰：当前等级、最近一次采样信号与各类别削峰计数。
+        overload: overloadMonitor.snapshot(),
       },
     })
   }),

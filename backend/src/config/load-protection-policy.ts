@@ -22,6 +22,14 @@ function readBoundedInteger(name: string, fallback: number, minimum: number, max
   return value
 }
 
+function readBooleanFlag(name: string, fallback: boolean): boolean {
+  const raw = process.env[name]?.trim().toLowerCase()
+  if (!raw) return fallback
+  if (raw === 'true') return true
+  if (raw === 'false') return false
+  throw new Error(`${name} 只能为 true 或 false`)
+}
+
 /**
  * 全局撞库态势（OWASP 凭证填充防御的分级响应）：
  * 同一端 5 分钟内全站登录失败达到阈值时，对该端所有登录强制图形验证码一段时间；
@@ -68,3 +76,23 @@ export const CAPTCHA_RENDER_GATE_POLICY = {
   maxQueue: readBoundedInteger('YLINK_CAPTCHA_RENDER_QUEUE', 32, 0, 1_000),
   queueTimeoutMs: readBoundedInteger('YLINK_CAPTCHA_RENDER_QUEUE_TIMEOUT_MS', 3_000, 100, 60_000),
 } as const
+
+/**
+ * 过载自适应削峰：每秒采样事件循环延迟 p99 与 SQLite 写队列占用，连续 3 次越线升级、连续 5 次回落到一半以下降级。
+ * elevated（延迟 ≥500ms 或写队列 ≥90%）拒绝匿名认证、新 SSE 与导出；critical（延迟 ≥1 秒持续）再拒绝读请求。
+ */
+const OVERLOAD_ELEVATED_LOOP_DELAY_MS = readBoundedInteger('YLINK_OVERLOAD_ELEVATED_LOOP_DELAY_MS', 500, 50, 60_000)
+const OVERLOAD_CRITICAL_LOOP_DELAY_MS = readBoundedInteger('YLINK_OVERLOAD_CRITICAL_LOOP_DELAY_MS', 1_000, 100, 120_000)
+if (OVERLOAD_CRITICAL_LOOP_DELAY_MS <= OVERLOAD_ELEVATED_LOOP_DELAY_MS) {
+  throw new Error('YLINK_OVERLOAD_CRITICAL_LOOP_DELAY_MS 必须大于 YLINK_OVERLOAD_ELEVATED_LOOP_DELAY_MS')
+}
+
+export const OVERLOAD_SHEDDING_POLICY = {
+  enabled: readBooleanFlag('YLINK_OVERLOAD_SHEDDING_ENABLED', true),
+  sampleIntervalMs: 1_000,
+  elevatedLoopDelayMs: OVERLOAD_ELEVATED_LOOP_DELAY_MS,
+  criticalLoopDelayMs: OVERLOAD_CRITICAL_LOOP_DELAY_MS,
+  elevatedWriteQueueRatio: readBoundedInteger('YLINK_OVERLOAD_ELEVATED_WRITE_QUEUE_PERCENT', 90, 10, 100) / 100,
+  enterSamples: 3,
+  recoverSamples: 5,
+}
