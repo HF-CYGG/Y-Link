@@ -65,7 +65,8 @@ for (const file of ['docker/nginx/default.conf', 'docker/nginx/default.conf.temp
   }
   for (const declaration of ['location = /api/upload', 'location = /api/client-feedback/attachments', 'location ^~ /api/products/import', 'location ^~ /api/system-configs/client-staff-directory/import']) {
     const body = blockOf(declaration)
-    assert.match(body, /client_max_body_size 10m;/, `${file} ${declaration} 上传/导入入口应放宽到 10m`)
+    // 整个 multipart 请求体含边界与字段头，必须略高于后端 10MB 文件上限。
+    assert.match(body, /client_max_body_size 11m;/, `${file} ${declaration} 上传/导入入口应放宽到 11m`)
     assert.match(body, /limit_req zone=ylink_api_general /, `${file} ${declaration} 应计入通用限流`)
   }
   assert.match(blockOf('location ^~ /api/'), /limit_req zone=ylink_api_general burst=\d+ nodelay;/, `${file} /api/ 缺少通用每 IP 限流`)
