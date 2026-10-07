@@ -1,0 +1,129 @@
+# 模块说明：.github/workflows/sonarcloud.yml
+# 文件职责：在 CI 中运行 SonarCloud 分析并导入测试覆盖率（SonarCloud 的覆盖率导入只支持 CI 分析，自动分析不支持）。
+# 实现逻辑：
+# 1. coverage 作业执行 PR 代码与依赖包代码（npm run coverage:report），不接触任何密钥，
+#    只把 coverage/lcov.info 作为制品交给下一个作业；
+# 2. sonarcloud 作业持有 SONAR_TOKEN，运行在另一台 Runner 上，不执行 PR 代码或依赖包代码：
+#    检出完整历史供 Sonar 判定新代码与 blame，禁用安装脚本安装依赖只为提供类型声明，
+#    下载覆盖率制品后由 SonarScanner 读取 sonar-project.properties 完成分析；
+# 3. PR 的检查结果由 SonarCloud 的 GitHub App 回写。
+# 维护说明：
+# - 启用前须在 SonarCloud 关闭自动分析（否则扫描报错退出），并在仓库 Secrets 中配置 SONAR_TOKEN；
+#   未配置令牌时（包括来自 fork 的 PR）只告警并跳过扫描，不会让工作流失败；
+# - 本工作流不是 Ruleset 要求的必要检查，Sonar 服务异常或质量门未通过都不阻塞合并，必要检查仍是 verify；
+# - 不要把执行代码的步骤（测试、构建、带安装脚本的依赖安装）加进 sonarcloud 作业，也不要在其中恢复
+#   coverage 作业写入的 node_modules 缓存；令牌隔离防的是依赖包与测试代码，防不了能直接修改本文件的有写权限者；
+# - 所有 Action 按完整提交 SHA 固定，行尾注明对应版本，升级时两处同步修改；
+# - 新增需要安装脚本才能工作的依赖时，在 coverage 作业的“安装后端依赖”中追加对应的 npm rebuild，不要去掉 --ignore-scripts。
+
+name: SonarCloud 分析
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sonarcloud-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # 后续步骤会执行 PR 代码，不保留 Git 凭据。
+          persist-credentials: false
+
+      - name: 安装 Node.js
+        id: setup-node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      # 缓存键与 verify 分开：两边安装方式不同（本工作流禁用安装脚本），得到的 node_modules 不能互相复用。
+      - name: 恢复后端依赖目录缓存
+        id: backend-deps-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: backend/node_modules
+          key: backend-node-modules-ignore-scripts-${{ runner.os }}-${{ runner.arch }}-node${{ steps.setup-node.outputs.node-version }}-${{ hashFiles('backend/package-lock.json') }}
+
+      - name: 安装后端依赖
+        if: steps.backend-deps-cache.outputs.cache-hit != 'true'
+        run: |
+          npm --prefix ./backend ci --ignore-scripts --no-audit --no-fund
+          # 验证脚本使用临时 SQLite，只为 sqlite3 执行构建脚本以生成原生绑定。
+          npm --prefix ./backend rebuild sqlite3
+
+      - name: 生成覆盖率报告
+        run: npm run coverage:report
+
+      - name: 上传覆盖率报告
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-lcov
+          path: coverage/lcov.info
+          if-no-files-found: error
+          retention-days: 1
+
+  sonarcloud:
+    name: sonarcloud
+    needs: coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      # 只暴露“是否已配置”的布尔值，不暴露令牌本身。
+      HAS_SONAR_TOKEN: ${{ secrets.SONAR_TOKEN != '' }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          # 扫描只在本地读取 Git 历史，不需要保留凭据。
+          persist-credentials: false
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+
+      # 依赖只为类型感知规则提供 Vue、Express、TypeORM 等类型声明；禁用安装脚本，本作业不执行任何依赖包代码。
+      - name: 安装类型声明所需依赖
+        run: |
+          npm ci --workspaces=false --ignore-scripts --no-audit --no-fund
+          npm --prefix ./backend ci --ignore-scripts --no-audit --no-fund
+
+      - name: 下载覆盖率报告
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: coverage-lcov
+          path: coverage
+
+      - name: 提示未配置 SONAR_TOKEN
+        if: env.HAS_SONAR_TOKEN != 'true'
+        run: echo "::warning title=已跳过 SonarCloud 扫描::仓库未配置 SONAR_TOKEN，或来自 fork 的 PR 无法读取 Secrets；本次只生成覆盖率报告。"
+
+      - name: SonarCloud 扫描
+        if: env.HAS_SONAR_TOKEN == 'true'
+        uses: SonarSource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4 # v8.2.2
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
