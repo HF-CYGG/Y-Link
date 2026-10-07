@@ -37,6 +37,23 @@ export interface LocationRecord {
   skuCount: number
 }
 
+export interface LocationSkuRecord {
+  skuId: string
+  skuCode: string
+  productName: string
+  specText: string
+  locationId: string | null
+  locationCode: string | null
+  isActive: boolean
+  currentStock: number
+}
+
+export interface LocationSkuAssignmentResult {
+  skuId: string
+  locationId: string | null
+  locationCode: string | null
+}
+
 export interface CategoryPayload {
   categoryCode?: string
   categoryName?: string
@@ -406,6 +423,16 @@ export const createLocation = (data: LocationPayload) =>
   request<LocationRecord>({ method: 'POST', url: '/inventory/locations', data })
 export const updateLocation = (id: string, data: LocationPayload) =>
   request<LocationRecord>({ method: 'PUT', url: `/inventory/locations/${id}`, data })
+export const getLocationSkus = (
+  id: string,
+  params: { scope: 'assigned' | 'other'; keyword?: string; page?: number; pageSize?: number },
+  config: RequestConfig = {},
+) => request<PagedResult<LocationSkuRecord>>({ ...config, method: 'GET', url: `/inventory/locations/${id}/skus`, params: cleanParams(params) })
+export const updateLocationSku = (
+  id: string,
+  skuId: string,
+  data: { action: 'assign' | 'remove'; expectedLocationId: string | null },
+) => request<LocationSkuAssignmentResult>({ method: 'PUT', url: `/inventory/locations/${id}/skus/${skuId}`, data })
 
 // ---- 商品扫码、打印与导入导出 ----
 export const lookupProductByCode = (code: string, purpose?: 'stocktake', config: RequestConfig = {}) =>

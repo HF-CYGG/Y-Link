@@ -73,6 +73,7 @@
     "product:import-yz:verify": "tsx scripts/product-import-yz-verify.ts",
     "inventory:invariants:verify": "tsx scripts/inventory-invariants-verify.ts",
     "inventory:stock-management:verify": "tsx scripts/inventory-stock-management-verify.ts",
+    "inventory:location-sku:verify": "tsx scripts/inventory-location-sku-verify.ts",
     "inventory:http-permission:verify": "tsx scripts/inventory-http-permission-verify.ts",
     "inbound:verified-delete:verify": "tsx scripts/inbound-verified-delete-verify.ts",
     "inbound:verified-delete:mysql:verify": "tsx scripts/inbound-verified-delete-mysql-verify.ts",

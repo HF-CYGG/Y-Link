@@ -1,6 +1,6 @@
 /**
  * 模块说明：库存主数据服务（商品分类与库位）。
- * 文件职责：提供分类、库位的列表、新增、修改与启停，并在同一事务内写审计。
+ * 文件职责：提供分类、库位的列表、新增、修改、启停及 SKU 默认库位关联管理，并在同一事务内写审计。
  * 实现逻辑：
  * - 分类编码固定两位数字，作为 SKU 的 WC 编码组成部分；已关联商品的分类禁止改码；
  * - 库位编码统一转大写，仅允许字母、数字与短横线；
@@ -55,10 +55,23 @@ export interface LocationView {
   skuCount: number
 }
 
+export interface LocationSkuQuery {
+  scope: 'assigned' | 'other'
+  keyword: string
+  page: number
+  pageSize: number
+}
+
+export interface LocationSkuChange {
+  action: 'assign' | 'remove'
+  expectedLocationId: string | null
+}
+
 const CATEGORY_CODE_PATTERN = /^\d{2}$/
 const LOCATION_CODE_PATTERN = /^[A-Z0-9][A-Z0-9-]{0,31}$/
 
 const isEnabled = (value: unknown) => value !== false && value !== 0 && value !== '0'
+const escapeLikeKeyword = (value: string) => value.replace(/[!%_]/g, '!$&')
 
 const readRequiredText = (value: string | undefined, label: string, maxLength: number) => {
   const normalized = value?.trim() ?? ''
@@ -131,6 +144,125 @@ export class InventoryMasterDataService {
     ])
     const countMap = new Map(counts.map((row) => [String(row.locationId), Number(row.total)]))
     return rows.map((row) => this.buildLocationView(row, countMap.get(String(row.id)) ?? 0))
+  }
+
+  async listLocationSkus(locationId: string, query: LocationSkuQuery) {
+    const location = await AppDataSource.getRepository(BaseStorageLocation).findOneBy({ id: locationId })
+    if (!location) throw new BizError('库位不存在', 404)
+
+    const qb = AppDataSource.getRepository(BaseProductSku)
+      .createQueryBuilder('sku')
+      .innerJoin(BaseProduct, 'product', 'product.id = sku.productId')
+      .leftJoin(BaseStorageLocation, 'location', 'location.id = sku.locationId')
+      .where('sku.isCurrent = :isCurrent', { isCurrent: true })
+    if (query.scope === 'assigned') {
+      qb.andWhere('sku.locationId = :locationId', { locationId })
+    } else {
+      qb.andWhere('(sku.locationId IS NULL OR sku.locationId <> :locationId)', { locationId })
+    }
+    const keyword = query.keyword.trim()
+    if (keyword) {
+      qb.andWhere("(product.productName LIKE :keyword ESCAPE '!' OR sku.skuCode LIKE :keyword ESCAPE '!' OR sku.specText LIKE :keyword ESCAPE '!')", {
+        keyword: `%${escapeLikeKeyword(keyword)}%`,
+      })
+    }
+    const total = await qb.getCount()
+    const rows = await qb
+      .select('sku.id', 'skuId')
+      .addSelect('sku.skuCode', 'skuCode')
+      .addSelect('product.productName', 'productName')
+      .addSelect('sku.specText', 'specText')
+      .addSelect('sku.locationId', 'locationId')
+      .addSelect('location.locationCode', 'locationCode')
+      .addSelect('sku.isActive', 'isActive')
+      .addSelect('sku.currentStock', 'currentStock')
+      .orderBy('product.productName', 'ASC')
+      .addOrderBy('sku.id', 'ASC')
+      .offset((query.page - 1) * query.pageSize)
+      .limit(query.pageSize)
+      .getRawMany<{
+        skuId: string; skuCode: string; productName: string; specText: string
+        locationId: string | null; locationCode: string | null; isActive: boolean | number; currentStock: number
+      }>()
+    return {
+      page: query.page,
+      pageSize: query.pageSize,
+      total,
+      list: rows.map((row) => ({
+        skuId: String(row.skuId),
+        skuCode: row.skuCode,
+        productName: row.productName,
+        specText: row.specText,
+        locationId: row.locationId == null ? null : String(row.locationId),
+        locationCode: row.locationCode ?? null,
+        isActive: isEnabled(row.isActive),
+        currentStock: Number(row.currentStock),
+      })),
+    }
+  }
+
+  async changeSkuLocation(
+    locationId: string,
+    skuId: string,
+    input: LocationSkuChange,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ): Promise<{ skuId: string; locationId: string | null; locationCode: string | null }> {
+    // 商品编辑和库存写入均按“账号 → 商品 → SKU”加锁。预读只用于定位商品，锁内必须重新核对。
+    const candidate = await AppDataSource.getRepository(BaseProductSku).findOne({ where: { id: skuId }, select: ['id', 'productId'] })
+    if (!candidate) throw new BizError('商品规格不存在', 404)
+    return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const productQuery = manager.getRepository(BaseProduct)
+        .createQueryBuilder('product')
+        .where('product.id = :id', { id: candidate.productId })
+      if (manager.connection.options.type !== 'sqlite') productQuery.setLock('pessimistic_write')
+      const product = await productQuery.getOne()
+      if (!product) throw new BizError('商品不存在，请刷新后重试', 409)
+
+      const skuQuery = manager.getRepository(BaseProductSku)
+        .createQueryBuilder('sku')
+        .where('sku.id = :skuId', { skuId })
+      if (manager.connection.options.type !== 'sqlite') skuQuery.setLock('pessimistic_write')
+      const sku = await skuQuery.getOne()
+      if (!sku || String(sku.productId) !== String(product.id) || !isEnabled(sku.isCurrent)) {
+        throw new BizError('商品规格不存在或已退役，请刷新后重试', 409)
+      }
+      const beforeLocationId = sku.locationId == null ? null : String(sku.locationId)
+      if (beforeLocationId !== input.expectedLocationId) {
+        throw new BizError('商品规格的库位已变化，请刷新后重试', 409)
+      }
+      if (input.action === 'remove' && beforeLocationId !== locationId) {
+        throw new BizError('商品规格不属于当前库位，请刷新后重试', 409)
+      }
+
+      // 库位锁在 SKU 锁之后，防止启停与新增关联并发穿透。
+      const location = await lockById(manager, BaseStorageLocation, locationId, '库位不存在')
+      const afterLocationId = input.action === 'assign' ? String(location.id) : null
+      if (beforeLocationId === afterLocationId) {
+        return { skuId: String(sku.id), locationId: afterLocationId, locationCode: afterLocationId ? location.locationCode : null }
+      }
+      if (afterLocationId && !isEnabled(location.isActive)) throw new BizError(`库位 ${location.locationCode} 已停用`, 400)
+
+      // 只更新默认库位列，绝不保存旧 SKU 实体快照中的库存或价格字段。
+      await manager.getRepository(BaseProductSku).update({ id: sku.id }, { locationId: afterLocationId })
+      await auditService.record({
+        actionType: 'product.location.update',
+        actionLabel: input.action === 'assign' ? '关联商品规格到库位' : '移出库位中的商品规格',
+        targetType: 'base_product_sku',
+        targetId: String(sku.id),
+        targetCode: sku.skuCode,
+        actor,
+        requestMeta,
+        detail: {
+          skuId: String(sku.id),
+          productId: String(product.id),
+          beforeLocationId,
+          afterLocationId,
+        },
+      }, manager)
+      return { skuId: String(sku.id), locationId: afterLocationId, locationCode: afterLocationId ? location.locationCode : null }
+    })
   }
 
   async createCategory(input: CategoryInput, actor: AuthUserContext, requestMeta?: RequestMeta): Promise<CategoryView> {

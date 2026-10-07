@@ -22,6 +22,7 @@ import pinia from '@/store/pinia'
 import { normalizeRequestError } from '@/utils/error'
 import { useDevice } from '@/composables/useDevice'
 import { resolveProductPlaceholder } from '@/utils/product-placeholder'
+import { resolveProductPreviewImage, resolveProductPreviewSku, resolveSortedActivePreviewSkus } from '@/utils/product-preview'
 import { resolveO2oPriceView } from '@/utils/o2o-price'
 import {
   buildClientSkuSelectionModel,
@@ -250,37 +251,11 @@ const classifyProduct = (product: O2oMallProduct) => {
   return product.tags && product.tags.length > 0 ? product.tags : ['默认标签']
 }
 
-const resolveSortedActivePreviewSkus = (product: Pick<O2oMallProduct, 'skus'>) => {
-  return (product.skus ?? [])
-    .filter(isCurrentActiveSku)
-    .slice()
-    .sort((leftSku, rightSku) => {
-      const leftOrder = Number.isFinite(Number(leftSku.sortOrder)) ? Number(leftSku.sortOrder) : 0
-      const rightOrder = Number.isFinite(Number(rightSku.sortOrder)) ? Number(rightSku.sortOrder) : 0
-      return leftOrder - rightOrder
-    })
-}
-
-const hasSkuAvailableStock = (sku: Pick<O2oMallSku, 'availableStock'>) => Math.max(0, Number(sku.availableStock ?? 0)) > 0
-
-const resolveHallProductPreviewSku = (product: Pick<O2oMallProduct, 'o2oRecommended' | 'skus'>) => {
-  const sortedPreviewSkus = resolveSortedActivePreviewSkus(product)
-  if (!sortedPreviewSkus.length) {
-    return null
-  }
-
-  const recommendedPreviewSkus = product.o2oRecommended
-    ? sortedPreviewSkus
-    : sortedPreviewSkus.filter((sku) => sku.o2oRecommended === true)
-  const candidateSkus = recommendedPreviewSkus.length ? recommendedPreviewSkus : sortedPreviewSkus
-  const stockPreferredSkus = candidateSkus.filter(hasSkuAvailableStock)
-
-  return stockPreferredSkus[0] ?? candidateSkus[0] ?? sortedPreviewSkus[0]
-}
+const resolveHallProductPreviewSku = (product: Pick<O2oMallProduct, 'o2oRecommended' | 'skus'>) =>
+  resolveProductPreviewSku(product)
 
 const resolveHallProductThumbnail = (product: Pick<O2oMallProduct, 'productName' | 'productCode' | 'thumbnail' | 'o2oRecommended' | 'skus'>) => {
-  const previewSku = resolveHallProductPreviewSku(product)
-  return resolveProductPlaceholder(previewSku?.thumbnail || product.thumbnail)
+  return resolveProductPlaceholder(resolveProductPreviewImage(product))
 }
 
 const normalizeProductCardDescription = (product: Pick<O2oMallProduct, 'detailContent'>) => product.detailContent?.trim() ?? ''

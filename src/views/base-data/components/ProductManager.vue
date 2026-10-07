@@ -24,6 +24,7 @@
  * - B9 批次：「默认库位」与规格表格里的库位选择支持 allow-create 直接新建库位，交互方式对齐「关联标签」的自动
  *   创建（resolveTagIds/hasAutoCreatedTags），提交前统一由 resolveLocationIds 解析真实库位ID、按
  *   LOCATION_CODE_PATTERN 前端预校验并调用 createLocation 建库位，仅 products:manage 权限可见。
+ * - 基础资料列表按服务端状态筛选，编辑弹窗分区展示；线上展示传入的一次性 productAction 只在产品路由消费。
  * 维护说明：
  * - 后续扩展尺码、容量等规格维度时，优先扩展 SKU 表单和后端规格归一化逻辑，不要绕过商品服务直接写库存；
  * - 删除或停用已有 SKU 前需保留占用库存汇总，避免已下单未核销记录丢失库存占用；
@@ -33,8 +34,9 @@
  */
 
 
-import { computed, defineAsyncComponent, h, nextTick, onActivated, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, defineAsyncComponent, h, nextTick, onActivated, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { ArrowDown } from '@element-plus/icons-vue'
 import { type FormInstance, type FormRules, type TableInstance, type UploadRequestOptions } from 'element-plus'
 import type { RequestConfig } from '@/api/http'
 import { createTag, getTagList, type Tag } from '@/api/modules/tag'
@@ -123,10 +125,12 @@ const selectedProductIds = ref<string[]>([])
 const yzUpgradeDialogVisible = ref(false)
 const specValueRenameDialogVisible = ref(false)
 const zeroSpecEvolveDialogVisible = ref(false)
+const route = useRoute()
 const router = useRouter()
 
 const searchKeyword = ref('')
 const searchTagId = ref('')
+const searchStatus = ref<'all' | 'active' | 'inactive'>('all')
 const productCodeSortOrder = ref<'ascending' | 'descending'>('ascending')
 const productPage = ref(1)
 const productPageSize = ref(10)
@@ -507,12 +511,14 @@ const buildQueryParams = (): ProductListQuery => {
   if (searchKeyword.value) params.keyword = searchKeyword.value
   if (searchTagId.value) params.tagId = searchTagId.value
   if (searchCategoryId.value) params.categoryId = searchCategoryId.value
+  if (searchStatus.value !== 'all') params.isActive = searchStatus.value === 'active'
   return params
 }
 
-const handleSearch = () => {
+const handleSearch = async () => {
   productPage.value = 1
-  void reloadProducts()
+  await clearSelection()
+  await reloadProducts()
 }
 
 const applyTableSelection = async () => {
@@ -632,6 +638,9 @@ const isProductImplicitDefaultSku = (row: ProductRecord) => {
  */
 let productEditStockBaseline: { productId: string; currentStock: number; skus: Map<string, number> } | null = null
 
+/** 编辑弹窗打开时的 SKU 库位快照：未改动的库位不回传，由服务端保留锁内最新关联。 */
+let productEditLocationBaseline: { productId: string; skus: Map<string, string | null> } | null = null
+
 /** 单规格商品默认 SKU 扩展字段的打开时快照：未改动时不提交 defaultSku，避免无关保存触发服务端校验。 */
 let defaultSkuBaseline: string | null = null
 /** 单规格商品的默认 SKU 原始记录：规格弹窗的占位行据此展示 id、编码、条码、成本价与库位。 */
@@ -649,6 +658,12 @@ const buildEditForm = (row: ProductRecord): ProductForm => {
       .map((sku) => [String(sku.id), Number(sku.currentStock ?? 0)])),
   }
   const currentSkus = (row.skus ?? []).filter((sku) => sku.isCurrent !== false)
+  productEditLocationBaseline = {
+    productId: row.id,
+    skus: new Map(currentSkus
+      .filter((sku) => typeof sku.id === 'string' && sku.id)
+      .map((sku) => [String(sku.id), sku.locationId ?? null])),
+  }
   const skus = currentSkus.length && !isProductImplicitDefaultSku(row)
     ? currentSkus.map((sku) => ({
         id: sku.id,
@@ -724,7 +739,9 @@ const resolveDefaultSkuPayload = (
     defaultSku: {
       barcode: currentForm.defaultBarcode.trim() || null,
       costPrice: currentForm.defaultCostPrice === null ? null : normalizeSubmitNumber(currentForm.defaultCostPrice, { fallback: 0, min: 0 }),
-      locationId: resolvedDefaultLocationId || null,
+      ...(currentForm.id && defaultSkuSnapshot && (defaultSkuSnapshot.locationId ?? null) === (resolvedDefaultLocationId || null)
+        ? {}
+        : { locationId: resolvedDefaultLocationId || null }),
     },
   }
 }
@@ -771,9 +788,17 @@ const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProdu
   })
   // 编辑已有商品时，只提交用户改动过的库存，并附带打开弹窗时的基线；新增商品不受影响。
   const baseline = currentForm.id && productEditStockBaseline?.productId === currentForm.id ? productEditStockBaseline : null
+  const locationBaseline = currentForm.id && productEditLocationBaseline?.productId === currentForm.id
+    ? productEditLocationBaseline.skus
+    : null
   const resolveSkuStockField = (skuId: string | undefined, stock: number) => {
     if (!baseline || !skuId) return { currentStock: stock }
     return baseline.skus.get(String(skuId)) === stock ? {} : { currentStock: stock }
+  }
+  const resolveSkuLocationField = (sku: ProductSkuForm) => {
+    const locationId = resolveLocationIdValue(sku.locationId) || null
+    if (sku.id && locationBaseline?.has(String(sku.id)) && locationBaseline.get(String(sku.id)) === locationId) return {}
+    return { locationId }
   }
 
   return {
@@ -804,7 +829,7 @@ const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProdu
           sortOrder: index,
           barcode: typeof sku.barcode === 'string' && sku.barcode.trim() ? sku.barcode.trim() : null,
           costPrice: sku.costPrice === null || sku.costPrice === undefined ? null : normalizeSubmitNumber(sku.costPrice, { fallback: 0, min: 0 }),
-          locationId: resolveLocationIdValue(sku.locationId) || null,
+          ...resolveSkuLocationField(sku),
         }))
       : [],
     ...(baseline
@@ -1457,6 +1482,25 @@ const handleCompactBatchCommand = (command: string | number | object) => {
   }
 }
 
+const handleProductTransferCommand = (command: string | number | object) => {
+  if (command === 'export') {
+    if (!exportLoading.value) {
+      void handleExportProducts()
+    }
+    return
+  }
+
+  if (!canImportProducts.value) {
+    return
+  }
+
+  if (command === 'excel-import') {
+    importDialogVisible.value = true
+  } else if (command === 'yz-import') {
+    yzImportDialogVisible.value = true
+  }
+}
+
 const openBatchCreateDialog = () => {
   if (!ensurePermission('products:manage', '批量新增产品')) {
     return
@@ -1542,14 +1586,75 @@ const handleBatchCreate = async () => {
   }
 }
 
+let consumingProductAction = false
+
+/** 线上展示传来的动作只消费一次，保留其他查询参数，避免刷新后重新打开弹窗。 */
+const consumeProductAction = async () => {
+  if (route.name !== 'products' || consumingProductAction) return
+  const rawAction = route.query.productAction
+  const rawProductId = route.query.productId
+  if (rawAction === undefined && rawProductId === undefined) {
+    if (globalThis.sessionStorage.getItem('ylink:o2o-batch-create') === '1') {
+      globalThis.sessionStorage.removeItem('ylink:o2o-batch-create')
+      openBatchCreateDialog()
+    }
+    return
+  }
+
+  consumingProductAction = true
+  const consumedFullPath = route.fullPath
+  globalThis.sessionStorage.removeItem('ylink:o2o-batch-create')
+  const action = typeof rawAction === 'string' ? rawAction : ''
+  const productId = typeof rawProductId === 'string' ? rawProductId : ''
+  const nextQuery = { ...route.query }
+  delete nextQuery.productAction
+  delete nextQuery.productId
+  try {
+    await router.replace({ path: route.path, query: nextQuery, hash: route.hash })
+    if (action !== 'create' && action !== 'batch-create' && action !== 'sku-config') {
+      showAppWarning('产品操作入口无效，请重新选择')
+      return
+    }
+    if (!ensurePermission('products:manage', '管理产品')) return
+    if (action === 'create') {
+      await handleAdd()
+      return
+    }
+    if (action === 'batch-create') {
+      openBatchCreateDialog()
+      return
+    }
+    if (!/^\d{1,32}$/.test(productId)) {
+      showAppWarning('产品 ID 无效，无法打开规格配置')
+      return
+    }
+    await productDetailRequest.runLatest({
+      executor: (signal) => getProductDetail(productId, { signal }),
+      onSuccess: (detail) => {
+        if (route.name === 'products') handleOpenSkuConfig(detail)
+      },
+      onError: (error) => {
+        showAppError(extractErrorMessage(error, '获取产品详情失败'))
+      },
+    })
+  } catch (error) {
+    showAppError(extractErrorMessage(error, '打开产品操作失败'))
+  } finally {
+    consumingProductAction = false
+    if (route.name === 'products' && route.fullPath !== consumedFullPath
+      && (route.query.productAction !== undefined || route.query.productId !== undefined)) {
+      void consumeProductAction()
+    }
+  }
+}
+
 onMounted(() => {
   pageReady.value = true
   void refreshProductView()
-  if (globalThis.sessionStorage.getItem('ylink:o2o-batch-create') === '1') {
-    globalThis.sessionStorage.removeItem('ylink:o2o-batch-create')
-    openBatchCreateDialog()
-  }
+  void consumeProductAction()
 })
+
+watch(() => route.fullPath, () => { void consumeProductAction() })
 
 onActivated(() => {
   if (!pageReady.value) {
@@ -1601,14 +1706,27 @@ onActivated(() => {
           >
             <el-option v-for="category in allCategories" :key="category.id" :label="`${category.categoryCode} ${category.categoryName}`" :value="category.id" />
           </el-select>
+          <el-select
+            v-model="searchStatus"
+            aria-label="基础状态筛选"
+            :class="isPhone ? 'product-toolbar-search__tag' : '!w-[132px]'"
+            @change="handleSearch"
+          >
+            <el-option label="全部状态" value="all" />
+            <el-option label="启用" value="active" />
+            <el-option label="停用" value="inactive" />
+          </el-select>
           <el-button :class="isPhone ? 'product-toolbar-search__submit' : ''" type="primary" icon="Search" @click="handleSearch">搜索</el-button>
         </div>
       </template>
 
       <template #actions="{ isPhone }">
         <div v-if="isPhone" class="product-toolbar-action-row">
-          <el-tag v-if="canManageProducts" type="info">已选 {{ selectedProductCount }} 项</el-tag>
-          <el-tag v-else type="info">当前为只读模式</el-tag>
+          <div class="product-toolbar-summary">
+            <span>结果 {{ productTotal }} 件</span>
+            <span v-if="canManageProducts">已选 {{ selectedProductCount }} 件</span>
+            <span v-else>只读模式</span>
+          </div>
           <template v-if="canManageProducts">
             <el-dropdown
               trigger="click"
@@ -1627,42 +1745,69 @@ onActivated(() => {
                 </el-dropdown-menu>
               </template>
             </el-dropdown>
+          </template>
+          <el-dropdown trigger="click" @command="handleProductTransferCommand">
+            <el-button size="small">
+              {{ canImportProducts ? '导入 / 导出' : '导出' }}<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="export" :disabled="exportLoading">导出产品</el-dropdown-item>
+                <el-dropdown-item v-if="canImportProducts" command="excel-import">Excel 导入</el-dropdown-item>
+                <el-dropdown-item v-if="canImportProducts" command="yz-import">YZ 建库导入</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+          <template v-if="canManageProducts">
             <el-button size="small" type="primary" plain @click="openBatchCreateDialog">
               批量新增
             </el-button>
             <el-button size="small" type="primary" icon="Plus" @click="handleAdd">新增产品</el-button>
           </template>
         </div>
-        <div v-else class="flex w-full flex-wrap justify-end gap-2">
-          <el-tag v-if="canManageProducts" type="info">已选 {{ selectedProductCount }} 项</el-tag>
-          <el-tag v-else type="info">当前为只读模式</el-tag>
-          <el-button
-            v-if="canManageProducts"
-            :disabled="!selectedProductCount"
-            :loading="batchSubmitting"
-            @click="handleBatchUpdateStatus(true)"
-          >
-            批量启用
-          </el-button>
-          <el-button
-            v-if="canManageProducts"
-            :disabled="!selectedProductCount"
-            :loading="batchSubmitting"
-            @click="handleBatchUpdateStatus(false)"
-          >
-            批量停用
-          </el-button>
-          <el-button v-if="canManageProducts" :disabled="!selectedProductCount" @click="clearSelection">
-            清空选择
-          </el-button>
-          <el-button :disabled="!selectedProductCount" @click="openPrintDialog">打印条码</el-button>
-          <el-button :loading="exportLoading" @click="handleExportProducts">导出</el-button>
-          <el-button v-if="canImportProducts" @click="importDialogVisible = true">Excel 导入</el-button>
-          <el-button v-if="canImportProducts" @click="yzImportDialogVisible = true">YZ 建库导入</el-button>
-          <el-button v-if="canManageProducts" type="primary" plain @click="openBatchCreateDialog">
-            批量新增
-          </el-button>
-          <el-button v-if="canManageProducts" type="primary" icon="Plus" @click="handleAdd">新增产品</el-button>
+        <div v-else class="product-toolbar-desktop-actions">
+          <div class="product-toolbar-desktop-actions__group">
+            <div class="product-toolbar-summary">
+              <span>结果 {{ productTotal }} 件</span>
+              <span v-if="canManageProducts">已选 {{ selectedProductCount }} 件</span>
+              <span v-else>只读模式</span>
+            </div>
+            <el-dropdown
+              v-if="canManageProducts"
+              trigger="click"
+              :disabled="!selectedProductCount || batchSubmitting"
+              @command="handleCompactBatchCommand"
+            >
+              <el-button :disabled="!selectedProductCount" :loading="batchSubmitting">
+                批量操作<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="activate" :disabled="!selectedProductCount">批量启用</el-dropdown-item>
+                  <el-dropdown-item command="deactivate" :disabled="!selectedProductCount">批量停用</el-dropdown-item>
+                  <el-dropdown-item command="clear" :disabled="!selectedProductCount">清空选择</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+            <el-button :disabled="!selectedProductCount" @click="openPrintDialog">打印条码</el-button>
+          </div>
+          <div class="product-toolbar-desktop-actions__group">
+            <el-dropdown trigger="click" @command="handleProductTransferCommand">
+              <el-button>
+                {{ exportLoading ? '导出中…' : canImportProducts ? '导入 / 导出' : '导出' }}
+                <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="export" :disabled="exportLoading">导出产品</el-dropdown-item>
+                  <el-dropdown-item v-if="canImportProducts" command="excel-import">Excel 导入</el-dropdown-item>
+                  <el-dropdown-item v-if="canImportProducts" command="yz-import">YZ 建库导入</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+            <el-button v-if="canManageProducts" type="primary" plain @click="openBatchCreateDialog">批量新增</el-button>
+            <el-button v-if="canManageProducts" type="primary" icon="Plus" @click="handleAdd">新增产品</el-button>
+          </div>
         </div>
       </template>
     </PageToolbarCard>
@@ -1693,31 +1838,34 @@ onActivated(() => {
         >
             <el-table-column v-if="canManageProducts" type="selection" width="52" reserve-selection />
             <el-table-column
-              label="产品编码"
+              label="商品信息"
               prop="productCode"
-              min-width="150"
-              show-overflow-tooltip
+              min-width="260"
               sortable="custom"
               :sort-orders="['ascending', 'descending']"
             >
               <template #default="{ row }">
-                <span>{{ row.productCode }}</span>
-                <el-tag v-if="row.codeScheme === 'yz' && row.seriesCode" size="small" type="success" effect="plain" class="ml-1">
-                  {{ row.seriesCode }}
-                </el-tag>
+                <div class="product-info-cell">
+                  <strong class="product-info-cell__name" :title="row.productName">{{ row.productName }}</strong>
+                  <div class="product-info-cell__meta">
+                    <span :title="row.productCode">{{ row.productCode }}</span>
+                    <span v-if="row.pinyinAbbr" :title="row.pinyinAbbr">{{ row.pinyinAbbr }}</span>
+                    <el-tag v-if="row.codeScheme === 'yz' && row.seriesCode" size="small" type="success" effect="plain">
+                      {{ row.seriesCode }}
+                    </el-tag>
+                  </div>
+                </div>
               </template>
             </el-table-column>
-            <el-table-column label="产品名称" prop="productName" min-width="220" show-overflow-tooltip />
-            <el-table-column label="拼音首字母" prop="pinyinAbbr" width="120" show-overflow-tooltip />
-            <el-table-column label="分类" width="110" show-overflow-tooltip>
+            <el-table-column label="分类" width="104" show-overflow-tooltip>
               <template #default="{ row }">{{ row.categoryName || '—' }}</template>
             </el-table-column>
-            <el-table-column label="基础售价" prop="defaultPrice" width="132">
+            <el-table-column label="基础售价" prop="defaultPrice" width="112">
               <template #default="{ row }">
                 ¥{{ Number(row.defaultPrice).toFixed(2) }}
               </template>
             </el-table-column>
-            <el-table-column label="基础库存" min-width="170">
+            <el-table-column label="基础库存" width="136">
               <template #default="{ row }">
                 <div class="leading-5">
                   <div>当前库存：{{ row.currentStock }}</div>
@@ -1725,14 +1873,14 @@ onActivated(() => {
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="状态" prop="isActive" width="96">
+            <el-table-column label="状态" prop="isActive" width="80">
               <template #default="{ row }">
                 <el-tag :type="row.isActive ? 'success' : 'info'" size="small">
                   {{ row.isActive ? '启用' : '停用' }}
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="标签" min-width="240">
+            <el-table-column label="标签" min-width="160">
               <template #default="{ row }">
                 <div class="flex flex-wrap gap-1">
                   <el-tag
@@ -1748,7 +1896,7 @@ onActivated(() => {
                 </div>
               </template>
             </el-table-column>
-            <el-table-column v-if="canManageProducts" label="操作" width="176" align="right" fixed="right">
+            <el-table-column v-if="canManageProducts" label="操作" width="156" align="right" fixed="right">
               <template #default="{ row }">
                 <el-button
                   link
@@ -1795,6 +1943,9 @@ onActivated(() => {
                 <el-tag v-if="item.codeScheme === 'yz' && item.seriesCode" size="small" type="success" effect="plain" class="ml-1">
                   {{ item.seriesCode }}
                 </el-tag>
+              </p>
+              <p v-if="item.pinyinAbbr || item.categoryName" class="mt-0.5 truncate text-xs text-slate-400">
+                {{ [item.pinyinAbbr, item.categoryName].filter(Boolean).join(' · ') }}
               </p>
             </div>
             <div class="text-right">
@@ -2169,6 +2320,16 @@ onActivated(() => {
           </div>
         </div>
         <el-form v-else ref="formRef" :model="form" :rules="rules" :label-width="isPhone ? '82px' : '90px'">
+          <div v-if="form.id" class="product-editor-identity">
+            <span>当前商品</span>
+            <strong>{{ form.productName || '未命名商品' }}</strong>
+            <span class="product-editor-identity__code">{{ form.productCode }}</span>
+          </div>
+          <section class="product-editor-section" aria-label="商品身份与归类">
+            <div class="product-editor-section__heading">
+              <strong>商品身份与归类</strong>
+              <span>名称、编码及所属分类</span>
+            </div>
           <el-form-item label="产品编码" prop="productCode">
             <el-input v-model="form.productCode" :disabled="productCodeFieldDisabled" :placeholder="productCodePlaceholder" />
             <p v-if="form.legacyProductCode" class="mt-1 text-xs leading-5 text-slate-400">
@@ -2223,6 +2384,12 @@ onActivated(() => {
               />
             </el-select>
           </el-form-item>
+          </section>
+          <section class="product-editor-section" aria-label="价格与库存">
+            <div class="product-editor-section__heading">
+              <strong>价格与库存</strong>
+              <span>{{ hasMultipleEditableSkus ? '逐项数据在规格配置中维护' : '单规格商品的默认值' }}</span>
+            </div>
           <div v-if="hasMultipleEditableSkus" class="sku-owned-fields-hint">
             该商品已启用多规格，价格、库存和折扣请在规格配置中维护。
           </div>
@@ -2314,6 +2481,12 @@ onActivated(() => {
               </p>
             </el-form-item>
           </template>
+          </section>
+          <section class="product-editor-section" aria-label="关联与状态">
+            <div class="product-editor-section__heading">
+              <strong>关联与状态</strong>
+              <span>标签和基础启停</span>
+            </div>
           <el-form-item label="关联标签" prop="tagIds">
             <el-select
               v-model="form.tagIds"
@@ -2339,6 +2512,7 @@ onActivated(() => {
               基础状态控制商品是否可被线上展示引用；客户端上架、推荐和图文内容请在“线上展示”中维护。
             </p>
           </el-form-item>
+          </section>
         </el-form>
       </template>
 
@@ -2397,6 +2571,105 @@ onActivated(() => {
 .product-mobile-tag-row {
   max-height: 48px;
   overflow: hidden;
+}
+
+.product-info-cell {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  line-height: 1.35;
+}
+
+.product-info-cell__name {
+  overflow: hidden;
+  color: var(--el-text-color-primary);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.product-info-cell__meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
+.product-info-cell__meta > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.product-info-cell__meta > span:first-child {
+  flex: 0 1 auto;
+}
+
+.product-info-cell__meta > span:nth-child(2) {
+  flex: 0 1 72px;
+}
+
+.product-editor-identity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin-bottom: 16px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
+.product-editor-identity strong {
+  color: var(--el-text-color-primary);
+  font-size: 15px;
+}
+
+.product-editor-identity__code {
+  overflow-wrap: anywhere;
+}
+
+.product-editor-section {
+  min-width: 0;
+  margin-bottom: 16px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 12px;
+  padding: 14px 14px 2px;
+}
+
+.product-editor-section:last-child {
+  margin-bottom: 0;
+}
+
+.product-editor-section__heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 8px;
+  margin-bottom: 14px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
+.product-editor-section__heading strong {
+  color: var(--el-text-color-primary);
+  font-size: 13px;
+}
+
+.product-toolbar-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  color: var(--el-text-color-regular);
+  font-size: 13px;
+}
+
+.product-toolbar-summary > span + span {
+  border-left: 1px solid var(--el-border-color);
+  padding-left: 10px;
 }
 
 .product-discount-editor {
@@ -2596,6 +2869,35 @@ onActivated(() => {
   justify-self: start;
 }
 
+:deep(.product-toolbar-content) {
+  flex-direction: column;
+}
+
+:deep(.product-toolbar-actions) {
+  width: 100%;
+  justify-content: stretch;
+}
+
+.product-toolbar-desktop-actions {
+  display: flex;
+  width: 100%;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem 1.25rem;
+}
+
+.product-toolbar-desktop-actions__group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.product-toolbar-desktop-actions__group > .el-button + .el-button {
+  margin-left: 0;
+}
+
 @media (max-width: 640px) {
   .product-manager {
     gap: 0.75rem;
@@ -2610,13 +2912,12 @@ onActivated(() => {
   }
 
   .product-toolbar-search__tag {
-    flex: 1 1 0;
-    min-width: 0;
+    flex: 1 1 calc(50% - 0.5rem);
+    min-width: 125px;
   }
 
   .product-toolbar-search__submit {
-    width: 92px;
-    flex: 0 0 92px;
+    flex: 1 1 125px;
   }
 
   :deep(.product-toolbar-actions) {
@@ -2628,21 +2929,20 @@ onActivated(() => {
     display: grid;
     width: 100%;
     min-width: 0;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 0.5rem;
     align-items: center;
   }
 
-  .product-toolbar-action-row > .el-button {
-    min-width: 0;
+  .product-toolbar-action-row .product-toolbar-summary {
+    grid-column: 1 / -1;
   }
 
-  .product-toolbar-action-row > .el-button:nth-last-child(-n + 2) {
-    grid-column: span 1;
-  }
-
-  .product-toolbar-action-row > .el-button:last-child {
+  .product-toolbar-action-row > .el-button,
+  .product-toolbar-action-row :deep(.el-dropdown),
+  .product-toolbar-action-row :deep(.el-dropdown .el-button) {
     width: 100%;
+    min-width: 0;
   }
 }
 </style>

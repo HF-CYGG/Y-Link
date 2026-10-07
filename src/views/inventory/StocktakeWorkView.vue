@@ -5,7 +5,7 @@
  * 实现逻辑：
  * - 计数支持两种方式：“扫一次记一件”（每次扫码累加 1）与“扫码后输入数量”（扫码选中后输入实盘数回车保存）；
  * - 扫码结果进入串行队列逐个处理，连扫同一件商品逐次累计；数量框带扫码标记，扫码枪误入时不会写进数量；
- * - 盲盘单对无审核权限的账号不展示账面数与差异，数据本身由服务端裁剪，页面只按字段是否为空渲染；
+ * - 盲盘单对无审核权限的账号不展示账面数与差异，桌面表格和手机卡片均按 canViewBook 门禁渲染；
  * - 待确认阶段逐行选择差异原因与处理方式（调整库存 / 报损 / 重新盘点 / 暂不处理），只提交本次改动的字段，同一行请求串行执行；
  * - 有“重新盘点”行时只能退回重盘，全部处理完成后才能确认调账。
  * 维护说明：
@@ -19,7 +19,7 @@ import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessageBox, type InputInstance } from 'element-plus'
 import { CameraFilled } from '@element-plus/icons-vue'
-import { PageContainer, PagePaginationBar, PassiveNumberInput, PassiveSegmentedTabs, UnifiedScanDialog } from '@/components/common'
+import { BizResponsiveDataCollectionShell, PageContainer, PagePaginationBar, PageToolbarCard, PassiveNumberInput, PassiveSegmentedTabs, UnifiedScanDialog } from '@/components/common'
 import {
   cancelStocktake,
   completeStocktake,
@@ -492,17 +492,31 @@ onMounted(reloadAll)
       <el-button link @click="router.push('/inventory/stocktakes')">← 返回盘点单列表</el-button>
     </div>
 
-    <el-card v-if="stocktake" v-loading="loading" shadow="never" class="mb-4">
-      <div class="flex flex-wrap items-center gap-4">
-        <el-tag v-if="statusMeta" :type="statusMeta.type">{{ statusMeta.label }}</el-tag>
-        <el-tag effect="plain">{{ stocktake.blindMode ? '盲盘' : '明盘' }}</el-tag>
-        <div class="min-w-48 flex-1">
-          <el-progress :percentage="progress">
-            <span class="text-xs">已盘 {{ stocktake.countedCount }} / {{ stocktake.itemCount }}</span>
-          </el-progress>
+    <section v-if="stocktake" v-loading="loading" class="apple-card mb-4 min-w-0 p-4 sm:p-5">
+      <div class="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+        <div class="min-w-0 flex-1 space-y-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <h2 class="mr-1 text-base font-semibold text-slate-800 dark:text-slate-100">单据状态与进度</h2>
+            <el-tag v-if="statusMeta" :type="statusMeta.type">{{ statusMeta.label }}</el-tag>
+            <el-tag effect="plain">{{ stocktake.blindMode ? '盲盘' : '明盘' }}</el-tag>
+          </div>
+          <div class="grid gap-3 sm:grid-cols-3">
+            <div class="rounded-xl bg-slate-50 p-3 dark:bg-white/5">
+              <div class="text-xs text-slate-500 dark:text-slate-400">已盘规格</div>
+              <div class="mt-1 text-xl font-semibold tabular-nums">{{ stocktake.countedCount }} <span class="text-sm font-normal text-slate-500">/ {{ stocktake.itemCount }}</span></div>
+            </div>
+            <div class="rounded-xl bg-slate-50 p-3 dark:bg-white/5">
+              <div class="text-xs text-slate-500 dark:text-slate-400">盘点进度</div>
+              <div class="mt-1 text-xl font-semibold tabular-nums">{{ progress }}%</div>
+            </div>
+            <div v-if="showBook && stocktake.diffCount !== null" class="rounded-xl bg-slate-50 p-3 dark:bg-white/5">
+              <div class="text-xs text-slate-500 dark:text-slate-400">差异规格</div>
+              <div class="mt-1 text-xl font-semibold tabular-nums">{{ stocktake.diffCount }}</div>
+            </div>
+          </div>
+          <el-progress :percentage="progress" :stroke-width="8" :show-text="false" />
         </div>
-        <span v-if="stocktake.diffCount !== null" class="text-sm">差异 {{ stocktake.diffCount }} 个</span>
-        <div class="ml-auto flex flex-wrap gap-2">
+        <div class="flex flex-wrap gap-2 xl:max-w-xs xl:justify-end">
           <el-button v-if="isCounting && canCount" type="primary" :loading="acting" @click="handleSubmit">提交盘点</el-button>
           <template v-if="isReviewing && canApprove">
             <el-button :loading="acting" @click="handleReopen">退回重新盘点</el-button>
@@ -511,7 +525,7 @@ onMounted(reloadAll)
           <el-button v-if="(isCounting || isReviewing) && canApprove" type="danger" plain :loading="acting" @click="handleCancel">取消盘点单</el-button>
         </div>
       </div>
-      <div class="mt-2 text-xs text-slate-500">
+      <div class="mt-4 flex flex-wrap gap-x-3 gap-y-1 border-t border-slate-100 pt-3 text-xs text-slate-500 dark:border-white/10 dark:text-slate-400">
         创建：{{ stocktake.createdByName || '—' }} {{ formatTime(stocktake.createdAt) }}
         <span v-if="stocktake.submittedAt"> · 提交：{{ formatTime(stocktake.submittedAt) }}</span>
         <span v-if="stocktake.completedAt"> · 完成：{{ stocktake.completedByName }} {{ formatTime(stocktake.completedAt) }}</span>
@@ -525,12 +539,24 @@ onMounted(reloadAll)
         show-icon
         title="盘点结果已提交，等待有审核权限的同事核对差异并确认调账。"
       />
-    </el-card>
+      <el-alert
+        v-if="stocktake.status === 'completed' || stocktake.status === 'cancelled'"
+        class="mt-3"
+        type="info"
+        :closable="false"
+        show-icon
+        title="单据已结束，当前为只读查看。"
+      />
+    </section>
 
-    <el-card v-if="isCounting && canCount" shadow="never" class="mb-4">
-      <div class="flex flex-wrap items-center gap-3">
+    <section v-if="isCounting && canCount" class="apple-card mb-4 min-w-0 p-4 sm:p-5">
+      <div class="mb-3">
+        <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">扫码计数</h2>
+        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">扫码枪或相机识别规格，按当前计数模式录入实盘数量。</p>
+      </div>
+      <div class="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
         <el-switch v-model="quickMode" active-text="扫一次记一件" inactive-text="扫码后输入数量" />
-        <div class="flex min-w-0 flex-1 gap-2">
+        <div class="flex min-w-0 w-full flex-1 gap-2 sm:w-auto">
           <el-input
             ref="scanInputRef"
             v-model="manualCode"
@@ -547,13 +573,13 @@ onMounted(reloadAll)
           </el-tooltip>
         </div>
       </div>
-      <div v-if="currentItem" class="mt-4 flex flex-wrap items-center gap-4 rounded-xl bg-slate-50 p-3 dark:bg-white/5">
+      <div v-if="currentItem" class="mt-4 flex flex-col gap-3 rounded-xl bg-slate-50 p-3 dark:bg-white/5 sm:flex-row sm:flex-wrap sm:items-center">
         <div class="min-w-0 flex-1">
           <div class="text-lg font-semibold">{{ currentItem.productName }}</div>
           <div class="text-sm text-slate-500">
             {{ currentItem.specText }} · {{ currentItem.skuCode }}<span v-if="currentItem.locationCode"> · 库位 {{ currentItem.locationCode }}</span>
           </div>
-          <div v-if="currentItem.bookQty !== null" class="text-xs text-slate-500">账面 {{ currentItem.bookQty }}</div>
+          <div v-if="showBook && currentItem.bookQty !== null" class="text-xs text-slate-500">账面 {{ currentItem.bookQty }}</div>
         </div>
         <template v-if="quickMode">
           <div class="text-right">
@@ -576,15 +602,39 @@ onMounted(reloadAll)
           <el-button type="primary" @click="saveCurrentQty">保存</el-button>
         </template>
       </div>
-    </el-card>
+    </section>
 
-    <el-card shadow="never">
-      <div class="mb-3 flex flex-wrap items-center gap-3">
-        <PassiveSegmentedTabs v-model="filter" :tabs="filterTabs" aria-label="明细筛选" />
-        <el-input v-model="keyword" placeholder="商品 / SKU / 条码 / 规格" clearable class="w-56" @keyup.enter="searchItems" />
-        <el-button @click="searchItems">查询</el-button>
+    <PageToolbarCard class="mb-4">
+      <div class="space-y-3">
+        <div>
+          <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">盘点明细</h2>
+          <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">筛选已盘、未盘规格，{{ isReviewing && canApprove ? '逐项处理差异。' : '查看当前计数状态。' }}</p>
+        </div>
+        <div class="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+          <PassiveSegmentedTabs v-model="filter" :tabs="filterTabs" aria-label="明细筛选" />
+          <el-input v-model="keyword" placeholder="商品 / SKU / 条码 / 规格" clearable class="w-full sm:!w-56" @keyup.enter="searchItems" />
+          <el-button class="!ml-0 w-full sm:w-auto" @click="searchItems">查询</el-button>
+        </div>
       </div>
-      <el-table v-loading="itemLoading" :data="items" row-key="id" empty-text="没有符合条件的明细">
+    </PageToolbarCard>
+    <section v-loading="itemLoading && items.length > 0" class="apple-card min-w-0 p-3 sm:p-4">
+      <div class="mb-4 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">明细列表</h2>
+          <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">当前筛选共 {{ pagination.total }} 个规格。</p>
+        </div>
+      </div>
+      <BizResponsiveDataCollectionShell
+        :items="items"
+        :loading="itemLoading"
+        empty-description="没有符合条件的明细"
+        empty-min-height="128px"
+        :disable-card-transition="true"
+        table-wrapper-class="min-w-0"
+        card-container-class="sm:grid-cols-2"
+      >
+        <template #table="{ items: tableItems }">
+          <el-table :data="tableItems" row-key="id" empty-text="没有符合条件的明细">
         <el-table-column label="商品 / 规格" min-width="200">
           <template #default="{ row }">
             <div class="font-medium">
@@ -676,7 +726,60 @@ onMounted(reloadAll)
             <el-button v-if="row.countedQty !== null" link type="danger" @click="clearRow(row)">清除</el-button>
           </template>
         </el-table-column>
-      </el-table>
+          </el-table>
+        </template>
+        <template #card="{ item }">
+          <article class="flex min-w-0 flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-white/10 dark:bg-slate-900/40">
+            <div class="flex min-w-0 items-start justify-between gap-2">
+              <div class="min-w-0">
+                <div class="break-words font-semibold text-slate-800 dark:text-slate-100">{{ item.productName }}</div>
+                <div class="mt-1 break-words text-xs text-slate-500 dark:text-slate-400">{{ item.specText }} · {{ item.skuCode }}</div>
+              </div>
+              <el-tag v-if="!item.inScope" size="small" type="warning">范围外</el-tag>
+            </div>
+            <div class="flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
+              <span>库位 {{ item.locationCode || '—' }}</span>
+              <span>计数人 {{ item.countedByName || '—' }}</span>
+              <span v-if="item.countedAt">{{ formatTime(item.countedAt) }}</span>
+            </div>
+            <div class="grid grid-cols-2 gap-2 rounded-lg bg-slate-50 p-3 dark:bg-white/5">
+              <div v-if="showBook"><div class="text-xs text-slate-500">账面</div><div class="mt-1 font-semibold tabular-nums">{{ item.bookQty ?? '—' }}</div></div>
+              <div><div class="text-xs text-slate-500">实盘</div><div class="mt-1 font-semibold tabular-nums">{{ item.countedQty ?? '未盘' }}</div></div>
+              <div v-if="showBook"><div class="text-xs text-slate-500">差异</div><div class="mt-1 font-semibold tabular-nums" :class="item.diffQty > 0 ? 'text-emerald-600' : item.diffQty < 0 ? 'text-red-600' : ''">{{ item.diffQty === null ? '—' : `${item.diffQty > 0 ? '+' : ''}${item.diffQty}` }}</div></div>
+            </div>
+            <div v-if="showBook && !isCounting" class="space-y-3 border-t border-slate-100 pt-3 dark:border-white/10">
+              <div class="grid gap-2 sm:grid-cols-2">
+                <div>
+                  <div class="mb-1 text-xs text-slate-500">差异原因</div>
+                  <el-select v-if="isReviewing && canApprove && item.diffQty" :model-value="item.diffReason ?? ''" placeholder="选择原因" clearable class="w-full" @change="(value: string) => handleDiffReasonChange(item, value)">
+                    <el-option v-for="reason in STOCKTAKE_DIFF_REASON_OPTIONS" :key="reason.value" :label="reason.label" :value="reason.value" />
+                  </el-select>
+                  <span v-else class="text-sm">{{ reasonLabel(item.diffReason) }}</span>
+                </div>
+                <div>
+                  <div class="mb-1 text-xs text-slate-500">处理方式</div>
+                  <el-select v-if="isReviewing && canApprove && item.diffQty" :model-value="item.resolution ?? ''" placeholder="选择处理" clearable class="w-full" @change="(value: string) => handleResolutionChange(item, value)">
+                    <el-option v-for="option in STOCKTAKE_RESOLUTION_OPTIONS" :key="option.value" :label="option.label" :value="option.value" :disabled="option.value === 'damage' && item.diffQty > 0" />
+                  </el-select>
+                  <span v-else class="text-sm">{{ resolutionLabel(item.resolution) }}<span v-if="item.appliedQty !== null" class="text-xs text-slate-500">（已调 {{ item.appliedQty }}）</span></span>
+                </div>
+              </div>
+              <div>
+                <div class="mb-1 text-xs text-slate-500">处理备注</div>
+                <template v-if="isReviewing && canApprove && item.diffQty">
+                  <el-button link :type="isRemarkMissing(item) ? 'danger' : 'primary'" @click="editResolutionRemark(item)">{{ item.resolutionRemark || (isRemarkMissing(item) ? '请先填写备注' : '添加备注') }}</el-button>
+                  <div v-if="isRemarkMissing(item)" class="text-xs text-red-600">原因为“其他”时必须填写备注</div>
+                </template>
+                <span v-else class="break-words text-sm">{{ item.resolutionRemark || '—' }}</span>
+              </div>
+            </div>
+            <div v-if="isCounting && canCount" class="flex gap-2 border-t border-slate-100 pt-3 dark:border-white/10">
+              <el-button class="!ml-0 flex-1" type="primary" plain @click="editRowQty(item)">{{ item.countedQty === null ? '录入' : '修改' }}</el-button>
+              <el-button v-if="item.countedQty !== null" class="!ml-0 flex-1" type="danger" plain @click="clearRow(item)">清除</el-button>
+            </div>
+          </article>
+        </template>
+      </BizResponsiveDataCollectionShell>
       <PagePaginationBar
         v-model:current-page="pagination.page"
         v-model:page-size="pagination.pageSize"
@@ -685,7 +788,7 @@ onMounted(reloadAll)
         class="mt-4"
         @current-change="loadItems"
       />
-    </el-card>
+    </section>
 
     <el-dialog v-model="submitDialogVisible" title="存在未盘规格" width="min(92vw, 480px)" append-to-body align-center>
       <p class="leading-6">还有 <strong>{{ uncountedCount }}</strong> 个规格未盘点，请选择提交方式：</p>
