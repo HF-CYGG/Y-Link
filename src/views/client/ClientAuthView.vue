@@ -2926,8 +2926,14 @@ onUnmounted(() => {
     transform: translate3d(10px, -20px, 0) scale(1.05);
   }
 
+  /* 顶部多留出主题开关的高度：开关绝对定位在 18–42px，模式切换条从 64px 开始，避免两者重叠、开关截获“教师注册”的点击。 */
   .form-panel {
-    padding: 32px 20px;
+    padding: 64px 20px 32px;
+  }
+
+  .form-panel__theme {
+    top: 18px;
+    right: 20px;
   }
 
   .auth-form {
