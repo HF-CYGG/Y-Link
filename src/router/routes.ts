@@ -401,7 +401,6 @@ const layoutChildren: AppRouteRecord[] = [
   {
     path: 'inventory',
     name: 'inventory',
-    redirect: '/inventory/overview',
     meta: {
       title: '库存管理',
       icon: 'Box',
@@ -413,7 +412,7 @@ const layoutChildren: AppRouteRecord[] = [
         title: '库存管理',
         description: '扫码出入库、库存查询与盘点',
         order: 28,
-        path: '/inventory/overview',
+        path: '/inventory',
         icon: 'Box',
         colorClass: 'text-brand dark:text-teal-300',
         bgClass: 'bg-brand/10 dark:bg-brand/20',
@@ -422,12 +421,10 @@ const layoutChildren: AppRouteRecord[] = [
     children: [
       {
         path: 'overview',
-        name: 'inventory-overview',
-        component: routeViewLoaders['inventory-overview'],
+        redirect: '/inventory',
         meta: {
-          title: '库存入口',
-          menuOrder: 0,
-          activeMenu: '/inventory',
+          title: '库存管理',
+          menu: false,
           requiredAnyPermissions: ['inventory:view', 'inventory:operate', 'stocktake:view'],
         },
       },
@@ -449,9 +446,7 @@ const layoutChildren: AppRouteRecord[] = [
         component: routeViewLoaders['inventory-stocks'],
         meta: {
           title: '当前库存',
-          menu: false,
           menuOrder: 20,
-          activeMenu: '/inventory/overview',
           requiredPermissions: ['inventory:view'],
           keepAlive: true,
         },
@@ -462,9 +457,7 @@ const layoutChildren: AppRouteRecord[] = [
         component: routeViewLoaders['inventory-stocktakes'],
         meta: {
           title: '库存盘点',
-          menu: false,
           menuOrder: 30,
-          activeMenu: '/inventory/overview',
           requiredPermissions: ['stocktake:view'],
           keepAlive: true,
         },
@@ -476,7 +469,7 @@ const layoutChildren: AppRouteRecord[] = [
         meta: {
           title: '盘点作业',
           menu: false,
-          activeMenu: '/inventory/overview',
+          activeMenu: '/inventory/stocktakes',
           requiredPermissions: ['stocktake:view'],
         },
       },
@@ -1083,19 +1076,22 @@ const deriveShortcutItems = (
 export const buildAppMenuItems = (user?: Pick<UserSafeProfile, 'role' | 'permissions'> | null) => deriveMenuItems(layoutChildren, user)
 export const buildDashboardShortcutItems = (user?: Pick<UserSafeProfile, 'role' | 'permissions'> | null) =>
   deriveShortcutItems(layoutChildren, user)
-/** 库存入口卡片从实际子路由派生，隐藏菜单项仍按路由权限显示。 */
-export const buildInventoryEntryItems = (user?: Pick<UserSafeProfile, 'role' | 'permissions'> | null): AppMenuItem[] => {
-  const inventoryRoute = layoutChildren.find((record) => record.name === 'inventory')
-  if (!inventoryRoute || !canAccessRoute(inventoryRoute.meta, user)) {
-    return []
+/** 库存父路径与旧入口按菜单权限落到首个可访问业务页。 */
+export const resolveInventoryEntryRedirect = (
+  path: string,
+  user?: Pick<UserSafeProfile, 'role' | 'permissions'> | null,
+): string | null => {
+  const normalizedPath = path.endsWith('/') ? path.slice(0, -1) : path
+  if (normalizedPath !== '/inventory' && normalizedPath !== '/inventory/overview') {
+    return null
   }
 
-  const entryNames = new Set<AppRouteName>([
-    'inventory-scan', 'inventory-stocks', 'inventory-stocktakes', 'inventory-docs', 'inventory-logs',
-  ])
-  return (inventoryRoute.children ?? [])
-    .filter((record) => record.name && entryNames.has(record.name) && canAccessRoute(record.meta, user))
-    .map((record) => ({ title: record.meta.title, path: resolveRoutePath('/inventory', record.path) }))
+  const inventoryRoute = layoutChildren.find((record) => record.name === 'inventory')
+  if (!inventoryRoute || !canAccessRoute(inventoryRoute.meta, user)) {
+    return null
+  }
+
+  return deriveMenuItems(inventoryRoute.children ?? [], user, '/inventory')[0]?.path ?? null
 }
 export const buildClientNavigationItems = (context: { isAuthenticated: boolean }): ClientNavigationItem[] => {
   const clientRootRoute = routes.find((record) => record.path === '/client')
