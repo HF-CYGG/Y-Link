@@ -1103,4 +1103,18 @@ onBeforeUnmount(() => {
     max-height: calc(100dvh - 160px);
   }
 }
+
+/* 暗色：最近扫描条目与编辑行序号。 */
+.dark .recent-item {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.dark .recent-item:hover {
+  background: rgba(20, 184, 166, 0.1);
+}
+
+.dark .inbound-scan-edit-row__index {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgb(203 213 225);
+}
 </style>

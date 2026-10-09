@@ -162,7 +162,8 @@ const buildPieOption = (slices: readonly DashboardPieSlice[], valueType: PieValu
           scaleSize: themeStore.prefersReducedMotion ? 0 : 6,
         },
         itemStyle: {
-          borderColor: '#ffffff',
+          // 扇区分隔缝与卡片同色：亮色白、暗色取卡片底色，避免暗色卡片上出现一圈白缝。
+          borderColor: themeStore.isDark ? '#141415' : '#ffffff',
           borderWidth: 3,
           borderRadius: 6,
         },

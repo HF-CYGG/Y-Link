@@ -160,7 +160,7 @@ const reset = () => {
         <el-upload :show-file-list="false" accept=".xlsx" :http-request="handleSelect">
           <el-button type="primary" :loading="previewing">选择 Excel 文件</el-button>
         </el-upload>
-        <span v-if="selectedFile" class="text-sm text-slate-500">{{ selectedFile.name }}</span>
+        <span v-if="selectedFile" class="text-sm text-slate-500 dark:text-slate-400">{{ selectedFile.name }}</span>
       </div>
 
       <template v-if="preview">
@@ -179,7 +179,7 @@ const reset = () => {
           </div>
           <div class="flex flex-col gap-3">
             <div v-for="item in pendingConfirms" :key="item.uniqueKey" class="rounded border border-amber-200 bg-white p-2 dark:border-amber-500/30 dark:bg-transparent">
-              <div class="mb-1 text-xs text-slate-500">{{ item.groupLabel }}</div>
+              <div class="mb-1 text-xs text-slate-500 dark:text-slate-400">{{ item.groupLabel }}</div>
               <div class="mb-2 text-sm">{{ item.description }}</div>
               <el-radio-group v-model="resolutionChoices[item.uniqueKey]">
                 <el-radio v-for="option in item.options" :key="option.value" :value="option.value">
@@ -235,8 +235,8 @@ const reset = () => {
             </el-table-column>
             <el-table-column label="校验结果" min-width="180">
               <template #default="{ row }">
-                <span v-if="!row.errors.length" class="text-emerald-600">通过</span>
-                <span v-else class="text-red-600">{{ row.errors.join('；') }}</span>
+                <span v-if="!row.errors.length" class="text-emerald-600 dark:text-emerald-400">通过</span>
+                <span v-else class="text-red-600 dark:text-red-400">{{ row.errors.join('；') }}</span>
               </template>
             </el-table-column>
           </el-table>

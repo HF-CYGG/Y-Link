@@ -720,6 +720,20 @@ canvas {
   align-content: start;
 }
 
+/*
+ * 打印始终使用亮色：
+ * - 暗色主题下 html.dark 设置了浅色文字，打印模板中未显式指定颜色的文字会继承浅色，印到白纸上不可读；
+ * - 打印时把根节点恢复为白底深字，并声明 color-scheme: light，让原生控件也按亮色渲染。
+ */
+@media print {
+  html.dark,
+  html.dark body {
+    color: #111827;
+    background: #ffffff;
+    color-scheme: light;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   :root {
     --motion-duration-fast: 0.01ms;

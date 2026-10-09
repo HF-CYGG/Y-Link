@@ -420,9 +420,9 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: TestChannel
                   <el-text v-if="getTestFeedback(rule.id, 'email')" class="break-all">
                     <span class="mr-2 font-medium text-slate-500 dark:text-slate-300">邮箱</span>
                     <span :class="{
-                      'text-emerald-600': getTestFeedback(rule.id, 'email')?.status === 'success',
-                      'text-rose-600': getTestFeedback(rule.id, 'email')?.status === 'error',
-                      'text-slate-500': getTestFeedback(rule.id, 'email')?.status === 'testing',
+                      'text-emerald-600 dark:text-emerald-400': getTestFeedback(rule.id, 'email')?.status === 'success',
+                      'text-rose-600 dark:text-rose-400': getTestFeedback(rule.id, 'email')?.status === 'error',
+                      'text-slate-500 dark:text-slate-400': getTestFeedback(rule.id, 'email')?.status === 'testing',
                     }">
                       {{ getTestFeedback(rule.id, 'email')?.message }}
                     </span>
@@ -430,9 +430,9 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: TestChannel
                   <el-text v-if="getTestFeedback(rule.id, 'feishu')" class="break-all">
                     <span class="mr-2 font-medium text-slate-500 dark:text-slate-300">飞书</span>
                     <span :class="{
-                      'text-emerald-600': getTestFeedback(rule.id, 'feishu')?.status === 'success',
-                      'text-rose-600': getTestFeedback(rule.id, 'feishu')?.status === 'error',
-                      'text-slate-500': getTestFeedback(rule.id, 'feishu')?.status === 'testing',
+                      'text-emerald-600 dark:text-emerald-400': getTestFeedback(rule.id, 'feishu')?.status === 'success',
+                      'text-rose-600 dark:text-rose-400': getTestFeedback(rule.id, 'feishu')?.status === 'error',
+                      'text-slate-500 dark:text-slate-400': getTestFeedback(rule.id, 'feishu')?.status === 'testing',
                     }">
                       {{ getTestFeedback(rule.id, 'feishu')?.message }}
                     </span>
@@ -620,6 +620,18 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: TestChannel
 .dark .notification-rule-form :deep(.el-radio__label),
 .dark .notification-rule-form :deep(.el-checkbox__label) {
   color: #cbd5e1;
+}
+
+/* 选中态在亮色下用深青色，暗色下改用提亮的青色，且优先级需不低于亮色的 is-checked 规则。 */
+.dark .notification-rule-form :deep(.el-radio.is-checked .el-radio__label),
+.dark .notification-rule-form :deep(.el-checkbox.is-checked .el-checkbox__label) {
+  color: #5eead4;
+}
+
+.dark .notification-rule-form :deep(.el-radio__input.is-checked .el-radio__inner),
+.dark .notification-rule-form :deep(.el-checkbox__input.is-checked .el-checkbox__inner) {
+  border-color: #0d9488;
+  background: #0d9488;
 }
 
 .dark .notification-rule-form :deep(.el-input__wrapper),

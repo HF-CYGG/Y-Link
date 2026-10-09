@@ -210,7 +210,7 @@ onActivated(() => {
         <el-table-column label="创建" width="170">
           <template #default="{ row }">
             <div>{{ row.createdByName || '—' }}</div>
-            <div class="text-xs text-slate-500">{{ new Date(row.createdAt).toLocaleString('zh-CN', { hour12: false }) }}</div>
+            <div class="text-xs text-slate-500 dark:text-slate-400">{{ new Date(row.createdAt).toLocaleString('zh-CN', { hour12: false }) }}</div>
           </template>
         </el-table-column>
         <el-table-column label="" width="80" fixed="right">
@@ -297,7 +297,7 @@ onActivated(() => {
         <el-form-item label="盲盘">
           <div>
             <el-switch v-model="createForm.blindMode" />
-            <div class="text-xs text-slate-500">开启后，盘点人员只看到商品信息，看不到系统账面库存。</div>
+            <div class="text-xs text-slate-500 dark:text-slate-400">开启后，盘点人员只看到商品信息，看不到系统账面库存。</div>
           </div>
         </el-form-item>
         <el-form-item label="备注">

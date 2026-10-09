@@ -305,7 +305,7 @@ onMounted(loadData)
         <template v-if="activeTab === 'categories'">
           <el-form-item label="分类编码" required>
             <el-input v-model="form.categoryCode" maxlength="2" placeholder="两位数字，如 02" :disabled="editingInUse" />
-            <div v-if="editingInUse" class="mt-1 text-xs text-slate-500">该分类已有商品，编码不可修改</div>
+            <div v-if="editingInUse" class="mt-1 text-xs text-slate-500 dark:text-slate-400">该分类已有商品，编码不可修改</div>
           </el-form-item>
           <el-form-item label="分类名称" required>
             <el-input v-model="form.categoryName" maxlength="64" placeholder="如 贴纸、帆布包" />

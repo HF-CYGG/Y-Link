@@ -446,37 +446,37 @@ export interface FeedbackRealtimeConversationEvent {
 export const FEEDBACK_STATUS_META_MAP: Record<FeedbackIssueStatus, FeedbackIssueStatusMeta> = {
   pending: {
     label: '待受理',
-    className: 'bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-200',
+    className: 'bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-900/60',
     dotClassName: 'bg-amber-500',
   },
   processing: {
     label: '处理中',
-    className: 'bg-sky-50 text-sky-700 ring-1 ring-inset ring-sky-200',
+    className: 'bg-sky-50 text-sky-700 ring-1 ring-inset ring-sky-200 dark:bg-sky-500/10 dark:text-sky-300 dark:ring-sky-900/60',
     dotClassName: 'bg-sky-500',
   },
   resolved: {
     label: '已解决',
-    className: 'bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-200',
+    className: 'bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-900/60',
     dotClassName: 'bg-emerald-500',
   },
   closed: {
     label: '已关闭',
-    className: 'bg-slate-100 text-slate-600 ring-1 ring-inset ring-slate-200',
+    className: 'bg-slate-100 text-slate-600 ring-1 ring-inset ring-slate-200 dark:bg-white/10 dark:text-slate-300 dark:ring-white/10',
     dotClassName: 'bg-slate-400',
   },
 }
 
 const WITHDRAWN_STATUS_META: FeedbackIssueStatusMeta = {
   label: '已撤回',
-  className: 'bg-slate-100 text-slate-600 ring-1 ring-inset ring-slate-200',
+  className: 'bg-slate-100 text-slate-600 ring-1 ring-inset ring-slate-200 dark:bg-white/10 dark:text-slate-300 dark:ring-white/10',
   dotClassName: 'bg-slate-400',
 }
 
 export const FEEDBACK_PRIORITY_META_MAP: Record<FeedbackIssuePriority, FeedbackIssuePriorityMeta> = {
-  low: { label: '低优先级', className: 'bg-slate-100 text-slate-600' },
+  low: { label: '低优先级', className: 'bg-slate-100 text-slate-600 dark:bg-white/10 dark:text-slate-300' },
   medium: { label: '中优先级', className: 'bg-cyan-50 text-cyan-700' },
-  high: { label: '高优先级', className: 'bg-amber-50 text-amber-700' },
-  urgent: { label: '紧急', className: 'bg-rose-50 text-rose-700' },
+  high: { label: '高优先级', className: 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300' },
+  urgent: { label: '紧急', className: 'bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-300' },
 }
 
 export const FEEDBACK_ISSUE_TYPE_OPTIONS: Array<{ label: string; value: FeedbackIssueType; hint: string }> = [
@@ -506,17 +506,17 @@ export const FEEDBACK_SATISFACTION_META_MAP: Record<
 > = {
   satisfied: {
     label: '满意',
-    className: 'bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-200',
+    className: 'bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-900/60',
     description: '本次处理结果符合预期，问题已得到较好解决。',
   },
   neutral: {
     label: '一般',
-    className: 'bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-200',
+    className: 'bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-900/60',
     description: '问题有推进，但处理体验或效率仍有改进空间。',
   },
   unsatisfied: {
     label: '不满意',
-    className: 'bg-rose-50 text-rose-700 ring-1 ring-inset ring-rose-200',
+    className: 'bg-rose-50 text-rose-700 ring-1 ring-inset ring-rose-200 dark:bg-rose-500/10 dark:text-rose-300 dark:ring-rose-900/60',
     description: '当前结果未达到预期，仍希望继续优化处理体验。',
   },
 }

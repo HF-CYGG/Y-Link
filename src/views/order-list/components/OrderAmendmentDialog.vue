@@ -323,10 +323,10 @@ const handleCommit = async () => {
       <section
         v-for="(draft, index) in drafts"
         :key="draft.orderId"
-        class="rounded-2xl border border-slate-200 bg-slate-50 p-4"
+        class="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-white/10 dark:bg-white/5"
       >
         <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <strong class="text-sm text-slate-800">
+          <strong class="text-sm text-slate-800 dark:text-slate-100">
             第 {{ index + 1 }} 张 · 业务单号 {{ draft.businessNo }}
             <span v-if="isAdmin">· 出库系统编号（不可修改，仅用于系统追溯）{{ draft.systemNo }}</span>
           </strong>
@@ -342,7 +342,7 @@ const handleCommit = async () => {
               />
               <p
                 v-if="draft.autoBusinessNoHint && draft.businessNo === draft.autoBusinessNo"
-                class="mt-1 text-xs leading-5 text-emerald-700"
+                class="mt-1 text-xs leading-5 text-emerald-700 dark:text-emerald-300"
               >
                 {{ draft.autoBusinessNoHint }}
               </p>
@@ -374,7 +374,7 @@ const handleCommit = async () => {
                   :value="option.path"
                 />
               </el-select>
-              <p v-if="resolveDepartmentHint(draft)" class="mt-1 text-xs leading-5 text-slate-500">
+              <p v-if="resolveDepartmentHint(draft)" class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">
                 {{ resolveDepartmentHint(draft) }}
               </p>
             </div>
@@ -399,7 +399,7 @@ const handleCommit = async () => {
         <el-input v-model="reason" type="textarea" :rows="2" maxlength="500" show-word-limit placeholder="请说明分类修订或重编业务号的原因" />
       </el-form-item>
 
-      <section v-if="previewResult" class="rounded-2xl border border-slate-200 p-3">
+      <section v-if="previewResult" class="rounded-2xl border border-slate-200 p-3 dark:border-white/10">
         <el-alert
           :title="previewResult.ready ? '全部订单可提交' : '存在阻断项，不能提交'"
           :type="previewResult.ready ? 'success' : 'error'"
@@ -407,7 +407,7 @@ const handleCommit = async () => {
           show-icon
           class="mb-3"
         />
-        <div v-if="previewResult.cursorPlans.length" class="mb-3 flex flex-wrap gap-2 text-xs text-slate-600">
+        <div v-if="previewResult.cursorPlans.length" class="mb-3 flex flex-wrap gap-2 text-xs text-slate-600 dark:text-slate-300">
           <el-tag v-for="plan in previewResult.cursorPlans" :key="plan.namespace" effect="plain">
             {{ plan.namespace }} 游标 {{ plan.beforeCursor }} → {{ plan.afterCursor }}；下一号 {{ plan.nextBusinessNo || '已达位宽上限' }}
           </el-tag>
@@ -424,8 +424,8 @@ const handleCommit = async () => {
           </el-table-column>
           <el-table-column label="校验结果" min-width="260">
             <template #default="{ row }">
-              <span v-if="!row.blockingReasons.length" class="text-emerald-600">通过</span>
-              <span v-else class="text-red-600">{{ row.blockingReasons.join('；') }}</span>
+              <span v-if="!row.blockingReasons.length" class="text-emerald-600 dark:text-emerald-400">通过</span>
+              <span v-else class="text-red-600 dark:text-red-400">{{ row.blockingReasons.join('；') }}</span>
             </template>
           </el-table-column>
         </el-table>

@@ -148,7 +148,7 @@ onActivated(() => {
       <div class="mb-4 flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3 dark:border-white/10">
         <div>
           <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">库存规格</h2>
-          <p class="mt-0.5 text-xs text-slate-500">共 {{ pagination.total }} 个规格 · 库存合计 {{ totalQty }} 件</p>
+          <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">共 {{ pagination.total }} 个规格 · 库存合计 {{ totalQty }} 件</p>
         </div>
         <el-button v-if="canPrint" class="!ml-0" :disabled="!selectedRows.length" @click="openPrint">
           打印条码（{{ selectedRows.length }}）
@@ -167,13 +167,13 @@ onActivated(() => {
         <el-table-column label="商品" min-width="200">
           <template #default="{ row }">
             <div class="font-medium">{{ row.productName }}</div>
-            <div class="text-xs text-slate-500">{{ row.specText }}</div>
+            <div class="text-xs text-slate-500 dark:text-slate-400">{{ row.specText }}</div>
           </template>
         </el-table-column>
         <el-table-column label="SKU / 条码" min-width="170">
           <template #default="{ row }">
             <div>{{ row.skuCode }}</div>
-            <div v-if="row.barcode" class="text-xs text-slate-500">{{ row.barcode }}</div>
+            <div v-if="row.barcode" class="text-xs text-slate-500 dark:text-slate-400">{{ row.barcode }}</div>
           </template>
         </el-table-column>
         <el-table-column label="分类" width="110">
@@ -188,7 +188,7 @@ onActivated(() => {
         <el-table-column prop="salePrice" label="售价" width="90" align="right" />
         <el-table-column label="当前库存" width="100" align="right">
           <template #default="{ row }">
-            <span class="font-semibold tabular-nums" :class="row.currentStock <= 0 ? 'text-red-600' : ''">{{ row.currentStock }}</span>
+            <span class="font-semibold tabular-nums" :class="row.currentStock <= 0 ? 'text-red-600 dark:text-red-400' : ''">{{ row.currentStock }}</span>
           </template>
         </el-table-column>
         <el-table-column label="已预订 / 可用" width="120" align="right">
@@ -207,23 +207,23 @@ onActivated(() => {
       </el-table>
       </div>
       <div v-loading="loading" class="space-y-3 xl:hidden">
-        <div v-if="!rows.length" class="rounded-xl border border-dashed border-slate-200 px-4 py-8 text-center text-sm text-slate-500 dark:border-white/10">没有符合条件的库存</div>
+        <div v-if="!rows.length" class="rounded-xl border border-dashed border-slate-200 px-4 py-8 text-center text-sm text-slate-500 dark:border-white/10 dark:text-slate-400">没有符合条件的库存</div>
         <article v-for="row in rows" :key="row.skuId" class="min-w-0 rounded-xl border border-slate-200 bg-white/70 p-3 dark:border-white/10 dark:bg-white/5">
           <div class="flex min-w-0 items-start justify-between gap-3">
             <div class="min-w-0 flex-1">
               <p class="break-words font-semibold text-slate-900 dark:text-slate-100">{{ row.productName }}</p>
-              <p class="mt-0.5 break-words text-xs text-slate-500">{{ row.specText }}</p>
+              <p class="mt-0.5 break-words text-xs text-slate-500 dark:text-slate-400">{{ row.specText }}</p>
             </div>
             <el-checkbox v-if="canPrint" :model-value="selectedRows.some((item) => item.skuId === row.skuId)" :aria-label="`选择 ${row.productName} ${row.specText} 打印条码`" @change="toggleMobileSelection(row)" />
           </div>
-          <div class="mt-3 flex min-w-0 flex-wrap items-center gap-2 text-xs text-slate-500">
+          <div class="mt-3 flex min-w-0 flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
             <span class="break-all font-medium text-slate-700 dark:text-slate-200">{{ row.skuCode }}</span>
             <span v-if="row.barcode" class="break-all">条码 {{ row.barcode }}</span>
             <el-tag size="small" :type="row.isActive ? 'success' : 'info'">{{ row.isActive ? '启用' : '停用' }}</el-tag>
           </div>
           <div class="mt-3 grid grid-cols-2 gap-2 rounded-lg bg-slate-50 p-3 text-sm dark:bg-white/5">
-            <div><p class="text-xs text-slate-500">当前库存</p><p class="mt-0.5 font-semibold tabular-nums" :class="row.currentStock <= 0 ? 'text-red-600' : 'text-slate-900 dark:text-slate-100'">{{ row.currentStock }}</p></div>
-            <div><p class="text-xs text-slate-500">已预订 / 可用</p><p class="mt-0.5 tabular-nums">{{ row.preOrderedStock }} / {{ row.availableStock }}</p></div>
+            <div><p class="text-xs text-slate-500 dark:text-slate-400">当前库存</p><p class="mt-0.5 font-semibold tabular-nums" :class="row.currentStock <= 0 ? 'text-red-600 dark:text-red-400' : 'text-slate-900 dark:text-slate-100'">{{ row.currentStock }}</p></div>
+            <div><p class="text-xs text-slate-500 dark:text-slate-400">已预订 / 可用</p><p class="mt-0.5 tabular-nums">{{ row.preOrderedStock }} / {{ row.availableStock }}</p></div>
           </div>
           <div class="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 text-xs text-slate-600 dark:text-slate-300">
             <span>分类：{{ row.categoryName || '—' }}</span><span>库位：{{ row.locationCode || '—' }}</span>

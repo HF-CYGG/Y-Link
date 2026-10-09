@@ -344,6 +344,55 @@ const getSystemApplyStatusMeta = (order: Pick<OrderRecord, 'orderType' | 'isSyst
   border-top-color: rgba(148, 163, 184, 0.28);
 }
 
+.dark .mobile-order-card__chip.is-brand {
+  background: rgba(16, 185, 129, 0.14);
+  color: rgb(94 234 212);
+}
+
+.dark .mobile-order-card__chip.is-brand-soft {
+  background: rgba(45, 212, 191, 0.18);
+  color: rgb(153 246 228);
+}
+
+.dark .mobile-order-card__metric-qty {
+  color: #cbd5e1;
+}
+
+.dark .mobile-order-card__merge {
+  border-color: rgba(45, 212, 191, 0.2);
+  background: rgba(20, 184, 166, 0.08);
+}
+
+.dark .mobile-order-card__merge-title {
+  color: rgb(94 234 212);
+}
+
+.dark .mobile-order-card__source-notice {
+  background: rgba(255, 255, 255, 0.05);
+  color: #cbd5e1;
+}
+
+.dark .mobile-order-card--new {
+  animation-name: order-card-fade-highlight-dark;
+}
+
+@keyframes order-card-fade-highlight-dark {
+  0% {
+    transform: translateY(14px) scale(0.985);
+    background-color: rgba(245, 158, 11, 0.22);
+  }
+
+  60% {
+    transform: translateY(0) scale(1);
+    background-color: rgba(245, 158, 11, 0.1);
+  }
+
+  100% {
+    transform: translateY(0) scale(1);
+    background-color: transparent;
+  }
+}
+
 @keyframes order-card-fade-highlight {
   0% {
     transform: translateY(14px) scale(0.985);

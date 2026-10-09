@@ -122,7 +122,7 @@ const handleSubmit = async () => {
         <el-alert type="warning" :closable="false" show-icon title="旧编码会保留在历史编码字段中参与扫码匹配，已打印的旧标签仍可正常扫描识别，无需强制重新打印；原厂条码字段不受影响。" />
 
         <div>
-          <label class="mb-1 block text-xs text-slate-500">选择要升级到的文创系列</label>
+          <label class="mb-1 block text-xs text-slate-500 dark:text-slate-400">选择要升级到的文创系列</label>
           <el-select
             v-model="selectedSeriesTagId"
             filterable
@@ -157,7 +157,7 @@ const handleSubmit = async () => {
                 →
                 <span class="font-mono font-semibold text-teal-600">{{ preview.newProductCode }}</span>
               </div>
-              <div class="mt-1 text-xs text-slate-500">
+              <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">
                 系列内序号：{{ preview.seriesCode }}{{ preview.seriesSeq }}；已退役历史 SKU {{ preview.retiredSkuCount }} 个（编码保持不变，不参与本次变更）
               </div>
             </div>

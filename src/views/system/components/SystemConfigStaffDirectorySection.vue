@@ -845,11 +845,11 @@ onMounted(() => {
               @change="handleImportUploadChange"
             >
               <div class="py-3">
-                <p class="text-base font-medium text-slate-700">将 txt / xlsx 文件拖到此处，或点击选择文件</p>
-                <p class="mt-2 text-sm text-slate-500">系统会先自动识别内容并生成预览，确认无误后才会正式导入。</p>
+                <p class="text-base font-medium text-slate-700 dark:text-slate-200">将 txt / xlsx 文件拖到此处，或点击选择文件</p>
+                <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">系统会先自动识别内容并生成预览，确认无误后才会正式导入。</p>
               </div>
             </el-upload>
-            <div v-if="selectedImportFile" class="mt-3 flex flex-wrap items-center gap-3 rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600">
+            <div v-if="selectedImportFile" class="mt-3 flex flex-wrap items-center gap-3 rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600 dark:bg-white/5 dark:text-slate-300">
               <span>已选择：{{ selectedImportFile.name }}</span>
               <span>大小：{{ Math.max(1, Math.round(selectedImportFile.size / 1024)) }} KB</span>
               <el-button link type="danger" @click="clearSelectedImportFile">移除文件</el-button>
@@ -864,7 +864,7 @@ onMounted(() => {
             />
           </el-form-item>
         </div>
-        <div v-if="importPreviewResult" class="staff-directory-import-preview rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
+        <div v-if="importPreviewResult" class="staff-directory-import-preview rounded-2xl border border-slate-200 bg-slate-50/70 p-4 dark:border-white/10 dark:bg-white/5">
           <div class="flex flex-wrap items-center gap-2">
             <el-tag type="primary">共识别 {{ importPreviewResult.summary.total }} 条</el-tag>
             <el-tag type="success">待新增 {{ importPreviewResult.summary.creatable }} 条</el-tag>
@@ -903,7 +903,7 @@ onMounted(() => {
               </template>
             </el-table-column>
           </el-table>
-          <div class="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500">
+          <div class="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500 dark:text-slate-400">
             <span>{{ importPreviewRangeLabel }}，确认导入会处理全部 {{ importPreviewTotal }} 条。</span>
             <el-pagination
               v-if="importPreviewTotal > importPreviewPageSize"

@@ -541,6 +541,59 @@ const handleExportVoucherPdf = async () => {
   min-width: 194mm;
 }
 
+/*
+ * 暗色：只调整编辑区、提示条、方向工具栏与预览外框；
+ * .order-voucher-print-scope 是出库单纸面，保持白纸黑字，与实际打印一致。
+ */
+.dark .voucher-editor-banner {
+  border-color: rgba(129, 140, 248, 0.3);
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.12) 0%, rgba(59, 130, 246, 0.08) 100%);
+}
+
+.dark .voucher-editor-banner__title {
+  color: #a5b4fc;
+}
+
+.dark .voucher-editor-banner__content {
+  color: #cbd5e1;
+}
+
+.dark .voucher-editor-panel,
+.dark .voucher-preview-panel {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: #141415;
+}
+
+.dark .voucher-editor-panel__title,
+.dark .voucher-preview-panel__title {
+  color: #f1f5f9;
+}
+
+.dark .voucher-editor-panel__desc,
+.dark .voucher-preview-panel__desc {
+  color: #94a3b8;
+}
+
+.dark .voucher-editor-panel__meta,
+.dark .voucher-preview-panel__summary,
+.dark .voucher-orientation-toolbar__label {
+  color: #cbd5e1;
+}
+
+.dark .voucher-orientation-toolbar {
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.dark .voucher-preview-panel__header {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.dark .voucher-preview-panel__body {
+  background: #0f0f10;
+}
+
 
 @media (max-width: 768px) {
   .voucher-workbench {

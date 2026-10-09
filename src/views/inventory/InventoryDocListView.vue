@@ -135,7 +135,7 @@ onActivated(() => {
     <section class="apple-card min-w-0 p-3 sm:p-4 xl:p-5">
       <div class="mb-4 border-b border-slate-100 pb-3 dark:border-white/10">
         <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">单据记录</h2>
-        <p class="mt-0.5 text-xs text-slate-500">共 {{ pagination.total }} 张 · 查看明细与记账结果</p>
+        <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">共 {{ pagination.total }} 张 · 查看明细与记账结果</p>
       </div>
       <div class="hidden xl:block">
       <el-table v-loading="loading" :data="rows" row-key="id" empty-text="暂无单据">
@@ -168,16 +168,16 @@ onActivated(() => {
       </el-table>
       </div>
       <div v-loading="loading" class="space-y-3 xl:hidden">
-        <div v-if="!rows.length" class="rounded-xl border border-dashed border-slate-200 px-4 py-8 text-center text-sm text-slate-500 dark:border-white/10">暂无单据</div>
+        <div v-if="!rows.length" class="rounded-xl border border-dashed border-slate-200 px-4 py-8 text-center text-sm text-slate-500 dark:border-white/10 dark:text-slate-400">暂无单据</div>
         <article v-for="row in rows" :key="row.id" class="min-w-0 rounded-xl border border-slate-200 bg-white/70 p-3 dark:border-white/10 dark:bg-white/5">
           <div class="flex min-w-0 flex-wrap items-start justify-between gap-2">
             <div class="min-w-0 flex-1">
               <p class="break-all font-semibold text-slate-900 dark:text-slate-100">{{ row.docNo }}</p>
-              <p class="mt-1 text-xs text-slate-500">{{ new Date(row.createdAt).toLocaleString('zh-CN', { hour12: false }) }}</p>
+              <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ new Date(row.createdAt).toLocaleString('zh-CN', { hour12: false }) }}</p>
             </div>
             <el-tag size="small" :type="row.status === 'voided' ? 'info' : 'success'">{{ row.status === 'voided' ? '已作废' : '已完成' }}</el-tag>
           </div>
-          <div class="mt-3 flex flex-wrap items-center gap-2"><el-tag size="small" effect="plain">{{ row.docTypeLabel }}</el-tag><span class="text-xs text-slate-500">{{ row.operatorName || '—' }}</span></div>
+          <div class="mt-3 flex flex-wrap items-center gap-2"><el-tag size="small" effect="plain">{{ row.docTypeLabel }}</el-tag><span class="text-xs text-slate-500 dark:text-slate-400">{{ row.operatorName || '—' }}</span></div>
           <p class="mt-2 break-words text-sm text-slate-600 dark:text-slate-300">{{ [row.reasonLabel, row.remark].filter(Boolean).join('；') || '无原因或备注' }}</p>
           <div class="mt-3 flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-sm dark:bg-white/5"><span>{{ row.itemCount }} 个规格</span><span class="font-semibold tabular-nums">合计 {{ row.totalQty }} 件</span></div>
           <div class="mt-3 flex justify-end gap-2 border-t border-slate-100 pt-2 dark:border-white/10">
@@ -213,12 +213,12 @@ onActivated(() => {
           <el-table-column label="商品 / 规格" min-width="180">
             <template #default="{ row }">
               <div>{{ row.productName }}</div>
-              <div class="text-xs text-slate-500">{{ row.specText }} · {{ row.skuCode }}</div>
+              <div class="text-xs text-slate-500 dark:text-slate-400">{{ row.specText }} · {{ row.skuCode }}</div>
             </template>
           </el-table-column>
           <el-table-column label="变动" width="80" align="right">
             <template #default="{ row }">
-              <span :class="row.qty >= 0 ? 'text-emerald-600' : 'text-red-600'">{{ row.qty >= 0 ? '+' : '' }}{{ row.qty }}</span>
+              <span :class="row.qty >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'">{{ row.qty >= 0 ? '+' : '' }}{{ row.qty }}</span>
             </template>
           </el-table-column>
           <el-table-column label="前 → 后" width="110" align="center">
@@ -228,8 +228,8 @@ onActivated(() => {
         <div class="space-y-2 sm:hidden">
           <div v-for="item in detail.items ?? []" :key="item.id" class="min-w-0 rounded-xl border border-slate-200 p-3 dark:border-white/10">
             <p class="break-words font-medium">{{ item.productName }}</p>
-            <p class="mt-0.5 break-all text-xs text-slate-500">{{ item.specText }} · {{ item.skuCode }}</p>
-            <div class="mt-2 flex flex-wrap items-center justify-between gap-2 text-sm"><span :class="item.qty >= 0 ? 'text-emerald-600' : 'text-red-600'">{{ item.qty >= 0 ? '+' : '' }}{{ item.qty }}</span><span class="tabular-nums">{{ item.beforeSkuStock }} → {{ item.afterSkuStock }}</span></div>
+            <p class="mt-0.5 break-all text-xs text-slate-500 dark:text-slate-400">{{ item.specText }} · {{ item.skuCode }}</p>
+            <div class="mt-2 flex flex-wrap items-center justify-between gap-2 text-sm"><span :class="item.qty >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'">{{ item.qty >= 0 ? '+' : '' }}{{ item.qty }}</span><span class="tabular-nums">{{ item.beforeSkuStock }} → {{ item.afterSkuStock }}</span></div>
           </div>
         </div>
       </div>
