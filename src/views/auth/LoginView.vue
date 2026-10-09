@@ -7,6 +7,7 @@
  * - 账号已开启两步验证时，第一步只拿到短期票据，表单切换为动态码 / 恢复码输入，票据过期或失效时回到第一步重新输入密码；
  * - 风控触发后固定展示安全提示，并按需拉取验证码，避免用户只看到一闪而过的错误消息；
  * - 登录成功后仅投递非阻塞预热任务，先保证真正的页面跳转立即发生；
+ * - 密钥登录作为次操作沿用页面青绿色毛玻璃视觉，保留原有可用性提示、取消和重试状态。
  * - 登录页视觉层采用了融合 Apple / Microsoft Fluent 设计美学的动态几何流体背景，利用 CSS `transform` 硬件加速进行渲染，兼顾了高级视觉表现与主线程性能，避免了输入、点击延迟。
  * 维护说明：
  * - 动态几何图形的动画已使用 `will-change: transform` 并限定在 GPU 层面计算，若后续要叠加更多层，请注意内存与合成层数量，不要使用耗费 CPU 的 `background-position` 或 `box-shadow` 动画；
@@ -598,19 +599,24 @@ const handleSubmit = async () => {
               <span v-else>{{ submitButtonLabel }}</span>
             </el-button>
 
-            <div v-if="!mfaChallenge" class="mt-4 flex flex-col gap-2">
+            <div v-if="!mfaChallenge" class="passkey-login-area">
               <el-button
-                class="!m-0 !w-full"
+                class="passkey-login-button"
                 type="primary"
                 plain
                 :loading="webAuthnBusy"
                 :disabled="!webAuthnAvailability.available || submitPhase !== 'idle'"
                 @click="handleWebAuthnLogin"
-              >使用通行密钥 / 安全密钥登录</el-button>
-              <el-button v-if="webAuthnBusy && webAuthnPhase !== 'verifying'" class="!m-0 !w-full" @click="cancelWebAuthnLogin">取消密钥操作</el-button>
-              <p v-else-if="webAuthnPhase === 'verifying'" class="text-center text-xs text-slate-500" role="status">正在完成密钥登录，请稍候…</p>
-              <p class="text-center text-xs leading-5 text-slate-500 dark:text-slate-400" role="status">{{ webAuthnAvailabilityText }}</p>
-              <el-button v-if="webAuthnCapabilitiesPhase === 'error'" link @click="loadWebAuthnCapabilities">重试检查</el-button>
+              >
+                <span class="passkey-login-button__content">
+                  <el-icon v-if="!webAuthnBusy"><Key /></el-icon>
+                  <span>通行密钥 / 安全密钥登录</span>
+                </span>
+              </el-button>
+              <el-button v-if="webAuthnBusy && webAuthnPhase !== 'verifying'" class="passkey-inline-action" link @click="cancelWebAuthnLogin">取消密钥操作</el-button>
+              <p v-else-if="webAuthnPhase === 'verifying'" class="passkey-status passkey-status--progress" role="status">正在完成密钥登录，请稍候…</p>
+              <p class="passkey-status" role="status">{{ webAuthnAvailabilityText }}</p>
+              <el-button v-if="webAuthnCapabilitiesPhase === 'error'" class="passkey-inline-action" link @click="loadWebAuthnCapabilities">重试检查</el-button>
             </div>
 
 
@@ -638,6 +644,7 @@ const handleSubmit = async () => {
   --text-sub: #86868b;
   --accent: #0d9488;
   --accent-hover: #0f766e;
+  --passkey-status-text: #475569;
   --border-light: #e5e5ea;
 
   position: relative;
@@ -653,13 +660,14 @@ const handleSubmit = async () => {
   transition: background-color 0.5s ease;
 }
 
-:global(.dark) .login-page {
+:global(.dark .login-page) {
   --bg-primary: #000000;
   --bg-panel: #111112;
   --text-main: #f5f5f7;
   --text-sub: #86868b;
   --accent: #14b8a6;
   --accent-hover: #0d9488;
+  --passkey-status-text: #cbd5e1;
   --border-light: #2c2c2e;
 }
 
@@ -682,7 +690,7 @@ const handleSubmit = async () => {
   animation: blob-float 25s cubic-bezier(0.4, 0, 0.2, 1) infinite alternate;
 }
 
-:global(.dark) .geo-blob {
+:global(.dark .login-page .geo-blob) {
   opacity: 0.3;
   filter: blur(120px);
 }
@@ -744,7 +752,7 @@ const handleSubmit = async () => {
   background: rgba(255, 255, 255, 0.02);
 }
 
-:global(.dark) .glass-overlay {
+:global(.dark .login-page .glass-overlay) {
   background: rgba(0, 0, 0, 0.05);
 }
 
@@ -778,7 +786,7 @@ const handleSubmit = async () => {
   }
 }
 
-:global(.dark) .login-shell {
+:global(.dark .login-page .login-shell) {
   background: rgba(17, 17, 18, 0.75);
   box-shadow: 
     0 20px 40px rgba(0, 0, 0, 0.2),
@@ -798,7 +806,7 @@ const handleSubmit = async () => {
   overflow: hidden;
 }
 
-:global(.dark) .visual-panel {
+:global(.dark .login-page .visual-panel) {
   border-right: 1px solid rgba(255, 255, 255, 0.06);
 }
 
@@ -820,7 +828,7 @@ const handleSubmit = async () => {
   letter-spacing: 1px;
 }
 
-:global(.dark) .brand-chip {
+:global(.dark .login-page .brand-chip) {
   background: rgba(20, 184, 166, 0.15);
   color: #5eead4;
   border-color: rgba(20, 184, 166, 0.2);
@@ -871,7 +879,7 @@ const handleSubmit = async () => {
     box-shadow var(--theme-transition-duration) var(--ylink-motion-ease);
 }
 
-:global(.dark) .mockup-card {
+:global(.dark .login-page .mockup-card) {
   box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
 }
 
@@ -939,7 +947,7 @@ const handleSubmit = async () => {
   opacity: 0.15;
 }
 
-:global(.dark) .sk-line {
+:global(.dark .login-page .sk-line) {
   opacity: 0.3;
 }
 
@@ -947,7 +955,7 @@ const handleSubmit = async () => {
   opacity: 0.08;
 }
 
-:global(.dark) .sk-light {
+:global(.dark .login-page .sk-light) {
   opacity: 0.15;
 }
 
@@ -1134,7 +1142,7 @@ const handleSubmit = async () => {
   transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
-:global(.dark) .geo-input :deep(.el-input__wrapper) {
+:global(.dark .login-page .geo-input .el-input__wrapper) {
   background-color: rgba(0, 0, 0, 0.25);
   border: 1px solid rgba(255, 255, 255, 0.08);
 }
@@ -1145,7 +1153,7 @@ const handleSubmit = async () => {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04) !important;
 }
 
-:global(.dark) .geo-input :deep(.el-input__wrapper:hover) {
+:global(.dark .login-page .geo-input .el-input__wrapper:hover) {
   background-color: rgba(0, 0, 0, 0.45);
   border-color: rgba(255, 255, 255, 0.15);
 }
@@ -1156,7 +1164,7 @@ const handleSubmit = async () => {
   box-shadow: 0 0 0 1px #0d9488, 0 4px 14px rgba(13, 148, 136, 0.1) !important;
 }
 
-:global(.dark) .geo-input :deep(.el-input__wrapper.is-focus) {
+:global(.dark .login-page .geo-input .el-input__wrapper.is-focus) {
   background-color: rgba(0, 0, 0, 0.6);
   border-color: #14b8a6;
   box-shadow: 0 0 0 1px #14b8a6, 0 4px 14px rgba(20, 184, 166, 0.15) !important;
@@ -1201,7 +1209,7 @@ const handleSubmit = async () => {
   box-shadow: none;
 }
 
-:global(.dark) .captcha-image {
+:global(.dark .login-page .captcha-image) {
   background: rgba(0, 0, 0, 0.2);
   border-color: rgba(255, 255, 255, 0.05);
 }
@@ -1212,7 +1220,7 @@ const handleSubmit = async () => {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.02);
 }
 
-:global(.dark) .captcha-image:hover {
+:global(.dark .login-page .captcha-image:hover) {
   background: rgba(0, 0, 0, 0.4);
 }
 
@@ -1280,6 +1288,137 @@ const handleSubmit = async () => {
   box-shadow: 0 4px 12px rgba(13, 148, 136, 0.15) !important;
 }
 
+/* 密钥入口沿用输入框的尺寸与毛玻璃质感，保持低于主登录按钮的视觉层级。 */
+.passkey-login-area {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  width: 100%;
+  margin-top: 16px;
+}
+
+.passkey-login-button.el-button {
+  --el-button-bg-color: rgba(13, 148, 136, 0.07);
+  --el-button-border-color: rgba(13, 148, 136, 0.34);
+  --el-button-text-color: var(--accent-hover);
+  --el-button-hover-bg-color: rgba(13, 148, 136, 0.12);
+  --el-button-hover-border-color: rgba(13, 148, 136, 0.55);
+  --el-button-hover-text-color: var(--accent-hover);
+  --el-button-active-bg-color: rgba(13, 148, 136, 0.16);
+  --el-button-active-border-color: var(--accent);
+  --el-button-active-text-color: var(--accent-hover);
+  width: 100%;
+  height: 52px;
+  min-width: 0;
+  margin: 0;
+  padding: 0 12px;
+  border-radius: 14px;
+  font-size: 14px;
+  font-weight: 600;
+  background-clip: padding-box;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  transform: none;
+  transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.passkey-login-button__content {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  max-width: 100%;
+  white-space: nowrap;
+}
+
+.passkey-login-button__content .el-icon {
+  flex: 0 0 auto;
+  font-size: 17px;
+}
+
+.passkey-login-button.el-button:hover,
+.passkey-login-button.el-button:active {
+  transform: none;
+}
+
+.passkey-login-button.el-button:not(.is-disabled):not(.is-loading):hover {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8), 0 5px 14px rgba(13, 148, 136, 0.1);
+}
+
+.passkey-login-button.el-button:focus-visible,
+.passkey-inline-action.el-button:focus-visible {
+  outline: 3px solid rgba(13, 148, 136, 0.42);
+  outline-offset: 2px;
+}
+
+.passkey-login-button.el-button.is-disabled {
+  --el-button-disabled-bg-color: rgba(13, 148, 136, 0.035);
+  --el-button-disabled-border-color: rgba(13, 148, 136, 0.2);
+  --el-button-disabled-text-color: var(--text-sub);
+  box-shadow: none;
+  transform: none;
+}
+
+.passkey-login-button.el-button.is-loading:hover {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+
+.passkey-status {
+  margin: 0;
+  color: var(--passkey-status-text);
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: center;
+}
+
+.passkey-status--progress {
+  color: var(--accent-hover);
+  font-weight: 600;
+}
+
+.passkey-inline-action.el-button {
+  align-self: center;
+  min-height: 28px;
+  margin: 0;
+  padding: 2px 8px;
+  color: var(--accent-hover);
+  font-size: 12px;
+  font-weight: 600;
+  transform: none;
+}
+
+.passkey-inline-action.el-button:hover {
+  color: var(--accent);
+  transform: none;
+}
+
+:global(.dark .login-page .passkey-login-button.el-button) {
+  --el-button-bg-color: rgba(20, 184, 166, 0.1);
+  --el-button-border-color: rgba(94, 234, 212, 0.38);
+  --el-button-text-color: #5eead4;
+  --el-button-hover-bg-color: rgba(20, 184, 166, 0.16);
+  --el-button-hover-border-color: rgba(94, 234, 212, 0.6);
+  --el-button-hover-text-color: #99f6e4;
+  --el-button-active-bg-color: rgba(20, 184, 166, 0.2);
+  --el-button-active-border-color: #5eead4;
+  --el-button-active-text-color: #99f6e4;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+:global(.dark .login-page .passkey-login-button.el-button.is-disabled) {
+  --el-button-disabled-bg-color: rgba(20, 184, 166, 0.05);
+  --el-button-disabled-border-color: rgba(94, 234, 212, 0.18);
+  --el-button-disabled-text-color: var(--text-sub);
+  box-shadow: none;
+}
+
+:global(.dark .login-page .passkey-login-button.el-button:focus-visible),
+:global(.dark .login-page .passkey-inline-action.el-button:focus-visible) {
+  outline-color: rgba(94, 234, 212, 0.7);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .login-shell,
   .geo-blob,
@@ -1293,6 +1432,21 @@ const handleSubmit = async () => {
 
   .geo-submit::after {
     display: none;
+  }
+
+  .passkey-login-button.el-button,
+  .passkey-inline-action.el-button {
+    transition: none;
+  }
+}
+
+@media (max-width: 480px) {
+  .passkey-login-button.el-button {
+    font-size: 13px;
+  }
+
+  .passkey-login-button__content {
+    gap: 7px;
   }
 }
 
