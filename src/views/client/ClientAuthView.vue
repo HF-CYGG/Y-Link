@@ -81,7 +81,6 @@ import {
   getClientCaptcha,
   type ClientAuthCapabilities,
   type ClientRegisterResult,
-  type ClientValidationMode,
 } from '@/api/modules/client-auth'
 import { resolveClientPostLoginWarmupTargets, scheduleRouteComponentWarmup } from '@/router/route-performance'
 import { useClientAuthStore } from '@/store'
@@ -217,14 +216,31 @@ const registerAccountType = computed<ClientAccountType>(() => {
 const modeToggleSliderTransform = computed(() => {
   return `translateX(${AUTH_MODE_SEQUENCE.indexOf(activeMode.value) * 100}%)`
 })
-const registerValidationMode = computed<ClientValidationMode>(() => {
+const registerContactVerificationReady = computed(() => {
+  const channel = registerAccountChannel.value
+  return Boolean(
+    channel
+    && authCapabilities.value?.channels[channel]
+    && authCapabilities.value.registerValidationModes[channel] === 'verification_code',
+  )
+})
+const registerUsesVerificationCode = registerContactVerificationReady
+const registerVerificationUnavailableHint = computed(() => {
+  if (!authCapabilities.value) {
+    return capabilityErrorMessage.value
+      ? '暂无法确认验证码通道，请重新加载认证能力后再注册。'
+      : '正在确认验证码通道，请稍候。'
+  }
   const channel = registerAccountChannel.value
   if (!channel) {
-    return 'captcha'
+    return authCapabilities.value.channels.mobile || authCapabilities.value.channels.email
+      ? ''
+      : '当前未配置手机或邮箱验证码通道，个人账号注册需管理员先配置可用通道。'
   }
-  return authCapabilities.value?.registerValidationModes[channel] ?? 'captcha'
+  return registerContactVerificationReady.value
+    ? ''
+    : `当前${channel === 'email' ? '邮箱' : '手机'}验证码通道未配置或不可用，请联系管理员配置后再注册。`
 })
-const registerUsesVerificationCode = computed(() => registerValidationMode.value === 'verification_code')
 // 教师注册联系方式选填；一旦填写就与个人注册一样，必须先用图形验证码发码并提交手机/邮箱验证码。
 const teacherContactRequiresVerification = computed(() => isDepartmentRegisterMode.value && Boolean(registerAccountChannel.value))
 const shouldPrepareCaptcha = computed(() => isRegisterMode.value || loginCaptchaVisible.value)
@@ -710,7 +726,7 @@ const startRegisterVerificationCountdown = (seconds: number) => {
 
 const handleSendRegisterVerificationCode = async () => {
   if (!registerUsesVerificationCode.value) {
-    showAppWarning('当前账号类型未启用验证码注册，请根据页面提示使用图片验证码完成注册')
+    showAppWarning(registerVerificationUnavailableHint.value || '当前联系方式验证码通道不可用，请稍后重试')
     return
   }
   const channel = resolveAccountChannel(registerForm.account)
@@ -873,8 +889,8 @@ const validateDepartmentRegisterFields = () => {
 const validateRegisterChallengeFields = () => {
   if (isDepartmentRegisterMode.value) {
     if (!teacherContactRequiresVerification.value) return true
-    if (!registerUsesVerificationCode.value) {
-      showAppWarning('当前未启用该联系方式的验证码，教师注册请留空手机号或邮箱')
+    if (!registerContactVerificationReady.value) {
+      showAppWarning('当前未启用该联系方式的验证码，教师注册请留空手机号或邮箱；如需填写，请联系管理员配置通道')
       return false
     }
     if (!registerForm.verificationCode.trim()) {
@@ -883,15 +899,12 @@ const validateRegisterChallengeFields = () => {
     }
     return true
   }
-  if (registerUsesVerificationCode.value) {
-    if (!registerForm.verificationCode.trim()) {
-      showAppWarning('请输入手机/邮箱验证码')
-      return false
-    }
-    return true
+  if (!registerContactVerificationReady.value) {
+    showAppWarning(registerVerificationUnavailableHint.value || '当前联系方式验证码通道不可用')
+    return false
   }
-  if (!captcha.captchaId || !registerForm.captcha.trim()) {
-    showAppWarning('请输入图形验证码')
+  if (!registerForm.verificationCode.trim()) {
+    showAppWarning('请输入手机/邮箱验证码')
     return false
   }
   return true
@@ -948,8 +961,6 @@ const buildRegisterRequestPayload = (registeredAccount: string, registeredUserna
     verificationCode: (!isDepartmentRegisterMode.value || teacherContactRequiresVerification.value) && registerUsesVerificationCode.value
       ? normalizeInputText(registerForm.verificationCode)
       : undefined,
-    captchaId: !isDepartmentRegisterMode.value && !registerUsesVerificationCode.value ? captcha.captchaId : undefined,
-    captchaCode: !isDepartmentRegisterMode.value && !registerUsesVerificationCode.value ? normalizeInputText(registerForm.captcha) : undefined,
   }
 }
 
@@ -1058,8 +1069,8 @@ watch(
   },
 )
 
-watch(registerValidationMode, (mode) => {
-  if (mode !== 'verification_code') {
+watch(registerUsesVerificationCode, (enabled) => {
+  if (!enabled) {
     resetRegisterVerificationTimer()
     registerForm.verificationCode = ''
   }
@@ -1204,7 +1215,7 @@ onUnmounted(() => {
           />
           <el-alert v-else-if="isCapabilityFallbackVisible" class="mb-4" type="warning" :closable="false" show-icon>
             <template #title>
-              认证辅助能力加载较慢，登录与注册基础流程仍可继续；如需忘记密码、部门选项或最新校验策略，请重试。
+              认证能力暂时无法确认；登录和不填写联系方式的教师注册可继续，个人注册或填写联系方式的教师注册请先重试加载。
             </template>
             <template #default>
               <div class="capability-alert__content">
@@ -1338,6 +1349,9 @@ onUnmounted(() => {
                     个人账号默认按个人/散客流程下单，无需填写教职工号或所属部门。
                   </template>
                 </el-alert>
+                <el-alert v-if="registerVerificationUnavailableHint" class="mt-4" type="warning" :closable="false" show-icon>
+                  <template #title>{{ registerVerificationUnavailableHint }}</template>
+                </el-alert>
 
                 <el-alert
                   v-if="registerFeedbackTitle"
@@ -1405,10 +1419,10 @@ onUnmounted(() => {
                     </template>
                   </el-input>
 
-                  <div v-if="!isDepartmentRegisterMode" class="captcha-row">
+                  <div v-if="registerUsesVerificationCode" class="captcha-row">
                     <el-input
                       v-model="registerForm.captcha"
-                      :placeholder="registerUsesVerificationCode ? '先输入图形验证码，再发送手机/邮箱验证码' : '图形验证码'"
+                      placeholder="先输入图形验证码，再发送手机/邮箱验证码"
                       class="geo-input flex-1"
                       size="large"
                       clearable
@@ -1429,7 +1443,7 @@ onUnmounted(() => {
                       />
                     </button>
                   </div>
-                  <p v-if="!isDepartmentRegisterMode" class="captcha-hint-text">{{ captchaHintText }}</p>
+                  <p v-if="registerUsesVerificationCode" class="captcha-hint-text">{{ captchaHintText }}</p>
                   <Transition name="verification-code">
                     <div
                       v-if="!isDepartmentRegisterMode && registerUsesVerificationCode"
@@ -1488,24 +1502,6 @@ onUnmounted(() => {
                   </el-input>
                   <p class="password-hint-text">{{ CLIENT_NEW_PASSWORD_RULE_HINT }}</p>
 
-                  <div v-if="!registerUsesVerificationCode" class="captcha-row sr-only">
-                    <el-input v-model="registerForm.captcha" placeholder="图形验证码" class="geo-input flex-1" size="large" clearable>
-                      <template #prefix>
-                        <el-icon class="input-icon"><Key /></el-icon>
-                      </template>
-                    </el-input>
-
-                    <button type="button" class="captcha-box" :disabled="captchaLoading" @click="handleManualRefreshCaptcha">
-                      <span v-if="captchaLoading" class="captcha-loading">刷新中</span>
-                      <img
-                        v-else
-                        class="captcha-render"
-                        :src="captchaImageSrc"
-                        alt="图形验证码"
-                        draggable="false"
-                      />
-                    </button>
-                  </div>
                   <el-button class="submit-btn" native-type="submit" :loading="isLoading">立即注册个人账号</el-button>
                 </el-form>
               </div>
@@ -1589,10 +1585,19 @@ onUnmounted(() => {
                       <el-icon class="input-icon"><User /></el-icon>
                     </template>
                   </el-input>
-                  <div v-if="teacherContactRequiresVerification" class="captcha-row">
+                  <el-alert
+                    v-if="teacherContactRequiresVerification && !registerUsesVerificationCode"
+                    class="mt-4"
+                    type="warning"
+                    :closable="false"
+                    show-icon
+                  >
+                    <template #title>当前联系方式验证码通道不可用，教师注册请留空手机号或邮箱；如需填写，请联系管理员配置通道。</template>
+                  </el-alert>
+                  <div v-if="teacherContactRequiresVerification && registerUsesVerificationCode" class="captcha-row">
                     <el-input
                       v-model="registerForm.captcha"
-                      :placeholder="registerUsesVerificationCode ? '先输入图形验证码，再发送手机/邮箱验证码' : '图形验证码'"
+                      placeholder="先输入图形验证码，再发送手机/邮箱验证码"
                       class="geo-input flex-1"
                       size="large"
                       clearable
@@ -1613,7 +1618,7 @@ onUnmounted(() => {
                       />
                     </button>
                   </div>
-                  <p v-if="teacherContactRequiresVerification" class="captcha-hint-text">{{ captchaHintText }}</p>
+                  <p v-if="teacherContactRequiresVerification && registerUsesVerificationCode" class="captcha-hint-text">{{ captchaHintText }}</p>
                   <Transition name="verification-code">
                     <div
                       v-if="teacherContactRequiresVerification && registerUsesVerificationCode"
@@ -1672,24 +1677,6 @@ onUnmounted(() => {
                   </el-input>
                   <p class="password-hint-text">{{ CLIENT_NEW_PASSWORD_RULE_HINT }}</p>
 
-                  <div v-if="!registerUsesVerificationCode" class="captcha-row sr-only">
-                    <el-input v-model="registerForm.captcha" placeholder="图形验证码" class="geo-input flex-1" size="large" clearable>
-                      <template #prefix>
-                        <el-icon class="input-icon"><Key /></el-icon>
-                      </template>
-                    </el-input>
-
-                    <button type="button" class="captcha-box" :disabled="captchaLoading" @click="handleManualRefreshCaptcha">
-                      <span v-if="captchaLoading" class="captcha-loading">刷新中</span>
-                      <img
-                        v-else
-                        class="captcha-render"
-                        :src="captchaImageSrc"
-                        alt="图形验证码"
-                        draggable="false"
-                      />
-                    </button>
-                  </div>
                   <el-button class="submit-btn" native-type="submit" :loading="isLoading">立即注册教师账号</el-button>
                 </el-form>
               </div>
