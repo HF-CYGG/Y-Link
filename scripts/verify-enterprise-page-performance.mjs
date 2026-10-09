@@ -72,11 +72,18 @@ const reportPath = path.join(runtimeRoot, 'enterprise-performance-budget-report.
  * （+3.54 KB：亮 / 暗两组品牌主色色阶、全局暗色业务变量 / 浮层边框 / 打印强制亮色，以及全站页面补齐的
  * Tailwind dark: 工具类——工具类统一产出到入口 main.css）。开关组件本身在顶栏中异步拆包，不进首屏。
  * 因此首屏 JS 上限调整为 855 KB、首屏 CSS 上限调整为 325 KB。总产物 4623.59 → 4673.40 KB（+49.81 KB，
- * 主要为各路由分包内的暗色 scoped 样式）；总产物与 OrderEntryView / OrderListView 路由分包超额在基线已存在，
- * 不在本项调整，待后续统一评估。
+ * 主要为各路由分包内的暗色 scoped 样式）。
+ *
+ * 预算统一上调（经人工评估批准）：总产物与 OrderEntryView / OrderListView 路由分包在开工前基线 39c459b 已超额
+ * （总产物 4623.59 KB > 4570 KB，OrderEntryView 34.71 KB > 32 KB，OrderListView 34.31 KB > 30 KB），来源为
+ * 路由分包预算设定（#85，07cab75）之后合入的树状订单合并与来源追溯（#87）、开单库存扣减加固（#88）、业务单号 /
+ * 系统编号 / 预订单号拆分与单号复用、出库开单扫码入单、出库抽屉数值单向更新等功能；暗色适配再叠加
+ * +49.81 KB / +0.05 KB / +0.43 KB。同一环境实测：总产物 4673.40 KB、OrderEntryView 34.76 KB、OrderListView 34.74 KB。
+ * 因此总量上限调整为 4690 KB（约 0.36% 余量），OrderEntryView 与 OrderListView 路由分包上限均调整为 36 KB
+ * （约 3.5% 余量），继续约束出库两页主包增长；其余各项预算维持不变。
  */
 const performanceBudget = {
-  totalAssetsMaxKB: 4570,
+  totalAssetsMaxKB: 4690,
   criticalAssetsMaxKB: 1180,
   initialLoadJsMaxKB: 855,
   initialLoadCssMaxKB: 325,
@@ -97,11 +104,13 @@ const performanceBudget = {
    * OrderEntryView：#68-#74 引入 SKU 选择、草稿商品对账后接近 30 KB 上限；
    * #75 客户部门下拉与自由录入另增约 2.0 KB（main@6dc428b 上实测 25.13 → 27.15 KB），
    * 合并后实测 30.75 KB，按当前值重设为 32 KB，保留约 4% 余量继续约束开单页主包增长。
+   * 之后 #87/#88、单号拆分与复用、扫码入单与暗色适配叠加后，OrderEntryView 实测 34.76 KB、OrderListView 34.74 KB，
+   * 两者上限统一调整为 36 KB（详见文件头部“预算统一上调”说明）。
    */
   routeChunkMaxKB: {
     DashboardView: 20,
-    OrderEntryView: 32,
-    OrderListView: 30,
+    OrderEntryView: 36,
+    OrderListView: 36,
     ProductCenterView: 25,
     UserCenterView: 40,
     AuditLogView: 25,
