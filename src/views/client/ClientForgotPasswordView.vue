@@ -17,6 +17,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { Key, Lock, Message, User } from '@element-plus/icons-vue'
 import { getClientAuthCapabilities, getClientCaptcha, type ClientAuthCapabilities } from '@/api/modules/client-auth'
 import { useStableRequest } from '@/composables/useStableRequest'
+import ThemeToggle from '@/layout/components/ThemeToggle.vue'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
 import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
@@ -446,6 +447,9 @@ onUnmounted(() => {
 <template>
   <div class="forgot-password-page">
     <div class="forgot-password-card">
+      <div class="forgot-password-theme">
+        <ThemeToggle />
+      </div>
       <div class="forgot-password-header">
         <p class="forgot-password-title">找回密码</p>
         <p class="forgot-password-desc">系统启用手机或邮箱任一验证码通道时，即可自助找回。</p>
@@ -598,12 +602,20 @@ onUnmounted(() => {
 }
 
 .forgot-password-card {
+  position: relative;
   width: 100%;
   max-width: 460px;
   border-radius: 32px;
   background: #ffffff;
   padding: 32px 28px;
   box-shadow: 0 20px 60px rgba(15, 23, 42, 0.08);
+}
+
+/* 亮暗切换开关固定在卡片右上角，不挤占标题区宽度。 */
+.forgot-password-theme {
+  position: absolute;
+  top: 24px;
+  right: 24px;
 }
 
 .forgot-password-header {
@@ -796,5 +808,57 @@ onUnmounted(() => {
   .verification-button {
     width: 100%;
   }
+}
+
+/* 暗色：页面底色、卡片、步骤徽标、输入框、验证码框与空态卡片。 */
+.dark .forgot-password-page {
+  background: #0a0a0b;
+}
+
+.dark .forgot-password-card {
+  background: #141415;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.dark .forgot-password-title,
+.dark .empty-state-title {
+  color: #f1f5f9;
+}
+
+.dark .step-badge {
+  background: rgba(255, 255, 255, 0.08);
+  color: #cbd5e1;
+}
+
+.dark .loading-placeholder,
+.dark .empty-state-card {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.dark .geo-input :deep(.el-input__wrapper) {
+  background-color: rgba(0, 0, 0, 0.25);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.dark .geo-input :deep(.el-input__wrapper:hover) {
+  background-color: rgba(0, 0, 0, 0.4);
+}
+
+.dark .geo-input :deep(.el-input__wrapper.is-focus) {
+  background-color: rgba(0, 0, 0, 0.55);
+}
+
+.dark .geo-input :deep(.el-input__inner) {
+  color: #f1f5f9;
+}
+
+.dark .captcha-image-box {
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.dark .captcha-image-box:hover {
+  background: rgba(0, 0, 0, 0.4);
 }
 </style>

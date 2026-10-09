@@ -112,7 +112,7 @@ const handleSubmit = async () => {
         </p>
 
         <div>
-          <label class="mb-1 block text-xs text-slate-500">规格轴</label>
+          <label class="mb-1 block text-xs text-slate-500 dark:text-slate-400">规格轴</label>
           <el-radio-group v-model="axis" @change="handleAxisChange">
             <el-radio v-for="option in axisOptions" :key="option.value" :value="option.value">
               {{ option.label }}
@@ -121,7 +121,7 @@ const handleSubmit = async () => {
         </div>
 
         <div>
-          <label class="mb-1 block text-xs text-slate-500">原取值</label>
+          <label class="mb-1 block text-xs text-slate-500 dark:text-slate-400">原取值</label>
           <el-select v-model="oldValue" filterable placeholder="请选择要重命名的取值" class="w-full">
             <el-option v-for="value in currentValueOptions" :key="value" :label="value" :value="value" />
           </el-select>
@@ -131,7 +131,7 @@ const handleSubmit = async () => {
         </div>
 
         <div>
-          <label class="mb-1 block text-xs text-slate-500">新取值</label>
+          <label class="mb-1 block text-xs text-slate-500 dark:text-slate-400">新取值</label>
           <el-input v-model="newValue" maxlength="64" placeholder="请输入新的规格取值名称" />
         </div>
       </div>

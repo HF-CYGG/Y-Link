@@ -226,6 +226,28 @@ const handleExportDeliverySheetPdf = async () => {
   box-shadow: 0 18px 34px -28px rgba(15, 23, 42, 0.28);
 }
 
+/* 暗色：只调整弹窗外框、标题区与预览底板，纸面送货单本身保持白纸黑字。 */
+.dark .delivery-sheet-workbench {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: #141415;
+}
+
+.dark .delivery-sheet-preview__header {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+.dark .delivery-sheet-preview__header h3 {
+  color: #f1f5f9;
+}
+
+.dark .delivery-sheet-preview__header p {
+  color: #94a3b8;
+}
+
+.dark .delivery-sheet-preview__body {
+  background: #0f0f10;
+}
+
 .delivery-sheet-dialog-footer {
   display: flex;
   justify-content: flex-end;

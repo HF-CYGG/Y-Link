@@ -235,7 +235,7 @@ const commit = async () => {
       </el-table>
       <div class="flex flex-wrap items-center justify-between gap-3">
         <el-button plain type="primary" @click="addRow">新增明细</el-button>
-        <span class="text-sm text-slate-600">服务端重算前预览：¥{{ totalAmount }}</span>
+        <span class="text-sm text-slate-600 dark:text-slate-300">服务端重算前预览：¥{{ totalAmount }}</span>
       </div>
       <el-form-item label="修改原因" required class="!mb-0">
         <el-input v-model="reason" type="textarea" :rows="2" maxlength="500" show-word-limit placeholder="请说明本次修改原因" />

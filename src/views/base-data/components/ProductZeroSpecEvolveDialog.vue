@@ -135,7 +135,7 @@ const handleSubmit = async () => {
 
         <template v-else>
           <div>
-            <label class="mb-1 block text-xs text-slate-500">规格轴</label>
+            <label class="mb-1 block text-xs text-slate-500 dark:text-slate-400">规格轴</label>
             <el-radio-group v-model="axis">
               <el-radio v-for="option in axisOptions" :key="option.value" :value="option.value">
                 {{ option.label }}
@@ -144,7 +144,7 @@ const handleSubmit = async () => {
           </div>
 
           <div>
-            <label class="mb-1 block text-xs text-slate-500">演进方式</label>
+            <label class="mb-1 block text-xs text-slate-500 dark:text-slate-400">演进方式</label>
             <el-radio-group v-model="mode" class="flex flex-col gap-1">
               <el-radio v-for="option in modeOptions" :key="option.value" :value="option.value">
                 {{ option.label }}
@@ -156,7 +156,7 @@ const handleSubmit = async () => {
           </div>
 
           <div v-if="mode === 'inherit'">
-            <label class="mb-1 block text-xs text-slate-500">要继承的规格取值</label>
+            <label class="mb-1 block text-xs text-slate-500 dark:text-slate-400">要继承的规格取值</label>
             <el-input v-model="inheritValue" maxlength="64" placeholder="请输入具体取值，如：红色" />
           </div>
         </template>

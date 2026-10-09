@@ -117,15 +117,15 @@ const handleBack = () => {
 <template>
   <div class="h-full flex flex-col bg-[var(--ylink-color-bg)]">
     <div class="sticky top-0 z-10 flex items-center gap-3 bg-[var(--ylink-color-surface)] px-4 py-3 shadow-sm">
-      <button type="button" class="flex h-8 w-8 items-center justify-center rounded-full hover:bg-slate-100" @click="handleBack">
+      <button type="button" class="flex h-8 w-8 items-center justify-center rounded-full hover:bg-slate-100 dark:hover:bg-white/10" @click="handleBack">
         <el-icon :size="20"><ArrowLeft /></el-icon>
       </button>
-      <p class="text-lg font-semibold text-slate-900">购物车管理</p>
+      <p class="text-lg font-semibold text-slate-900 dark:text-slate-100">购物车管理</p>
     </div>
 
     <section class="flex-1 overflow-y-auto px-4 py-4 sm:px-5 pb-32">
       <div class="mb-4 rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-4 shadow-[var(--ylink-shadow-soft)]">
-        <p class="text-sm text-slate-500">支持全选、批量删除与失效商品分组</p>
+        <p class="text-sm text-slate-500 dark:text-slate-400">支持全选、批量删除与失效商品分组</p>
         <p class="mt-2 text-xs text-slate-400">
           {{ catalogSyncing ? '正在后台同步最新库存，不影响当前勾选与结算操作' : '商品库存与限购会在进入页面后自动静默同步' }}
         </p>
@@ -143,8 +143,8 @@ const handleBack = () => {
 
       <section v-else class="space-y-4">
         <div class="rounded-[1.2rem] bg-[var(--ylink-color-surface)] p-4 shadow-[var(--ylink-shadow-soft)]">
-          <div class="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-slate-100 pb-3">
-            <label class="inline-flex items-center gap-2 text-sm text-slate-600">
+          <div class="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-slate-100 pb-3 dark:border-white/5">
+            <label class="inline-flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
               <input
                 type="checkbox"
                 :checked="clientCartStore.allValidSelected"
@@ -159,7 +159,7 @@ const handleBack = () => {
             <article
               v-for="item in clientCartStore.validItems"
               :key="`valid-${resolveCartItemKey(item)}`"
-              class="rounded-xl bg-[var(--ylink-color-surface-soft)] px-3 py-3 border border-slate-100"
+              class="rounded-xl bg-[var(--ylink-color-surface-soft)] px-3 py-3 border border-slate-100 dark:border-white/5"
             >
               <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div class="flex min-w-0 items-start gap-3">
@@ -170,7 +170,7 @@ const handleBack = () => {
                     @change="clientCartStore.toggleItemSelected(resolveCartItemKey(item), ($event.target as HTMLInputElement).checked)"
                   />
                   <div class="min-w-0">
-                    <p class="truncate text-sm font-semibold text-slate-900">{{ item.productName }}</p>
+                    <p class="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">{{ item.productName }}</p>
                     <p v-if="item.specText" class="mt-0.5 text-xs text-slate-400">{{ item.specText }}</p>
                     <p class="mt-1 text-sm font-bold text-teal-600">¥{{ Number(resolveO2oPriceView(item).discountedPrice).toFixed(2) }}</p>
                     <p v-if="resolveO2oPriceView(item).isDiscounted" class="mt-0.5 text-xs text-slate-400">
@@ -197,12 +197,12 @@ const handleBack = () => {
           v-if="clientCartStore.invalidItems.length"
           class="rounded-[1.2rem] bg-[var(--ylink-color-surface)] p-4 shadow-[var(--ylink-shadow-soft)]"
         >
-          <p class="mb-3 text-sm font-semibold text-slate-700">需要处理的商品</p>
+          <p class="mb-3 text-sm font-semibold text-slate-700 dark:text-slate-200">需要处理的商品</p>
           <TransitionGroup name="cart-list-flow" tag="div" class="space-y-2">
             <article
               v-for="item in clientCartStore.invalidItems"
               :key="`invalid-${resolveCartItemKey(item)}`"
-              class="flex flex-col gap-3 rounded-xl bg-rose-50 px-3 py-3 border border-rose-100 sm:flex-row sm:items-center sm:justify-between"
+              class="flex flex-col gap-3 rounded-xl bg-rose-50 px-3 py-3 border border-rose-100 sm:flex-row sm:items-center sm:justify-between dark:bg-rose-500/10"
             >
               <div class="flex min-w-0 items-start gap-3">
                 <el-checkbox
@@ -211,9 +211,9 @@ const handleBack = () => {
                   @update:model-value="clientCartStore.toggleItemSelected(resolveCartItemKey(item), Boolean($event))"
                 />
                 <div class="min-w-0">
-                  <p class="text-sm font-semibold text-rose-700">{{ item.productName }}</p>
+                  <p class="text-sm font-semibold text-rose-700 dark:text-rose-300">{{ item.productName }}</p>
                   <p v-if="item.specText" class="mt-0.5 text-xs text-rose-500">{{ item.specText }}</p>
-                  <p class="mt-1 text-xs text-rose-600">{{ resolveClientCartConflictMessage(item) }}</p>
+                  <p class="mt-1 text-xs text-rose-600 dark:text-rose-400">{{ resolveClientCartConflictMessage(item) }}</p>
                   <p class="mt-1 text-xs text-rose-500">原选 {{ item.qty }} 件 · 当前可购 {{ resolveClientCartMaxQty(item) }} 件</p>
                 </div>
               </div>
@@ -236,13 +236,13 @@ const handleBack = () => {
       </section>
     </section>
 
-    <div v-if="clientCartStore.items.length" class="client-cart-summary absolute bottom-0 left-0 right-0 z-20 bg-white border-t border-slate-200 px-4 py-3 pb-safe shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
+    <div v-if="clientCartStore.items.length" class="client-cart-summary absolute bottom-0 left-0 right-0 z-20 bg-white border-t border-slate-200 px-4 py-3 pb-safe shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] dark:bg-[#141415] dark:border-white/10">
       <div class="flex items-center justify-between w-full max-w-[1100px] mx-auto">
         <div class="flex flex-col">
-          <p class="text-sm text-slate-500">
+          <p class="text-sm text-slate-500 dark:text-slate-400">
             已选
             <Transition name="cart-qty-pop" mode="out-in">
-              <span :key="`summary-selected-${clientCartStore.selectedQty}`" class="font-bold text-slate-900">{{ clientCartStore.selectedQty }}</span>
+              <span :key="`summary-selected-${clientCartStore.selectedQty}`" class="font-bold text-slate-900 dark:text-slate-100">{{ clientCartStore.selectedQty }}</span>
             </Transition>
             件，合计
             <Transition name="cart-qty-pop" mode="out-in">
@@ -321,5 +321,15 @@ const handleBack = () => {
 .cart-qty-pop-leave-to {
   opacity: 0;
   transform: translateY(-5px) scale(0.92);
+}
+
+/* 暗色：数量加减按钮。 */
+.dark .client-cart-qty-btn {
+  background: rgba(255, 255, 255, 0.08);
+  color: #e2e8f0;
+}
+
+.dark .client-cart-qty-btn:active {
+  background: rgba(255, 255, 255, 0.14);
 }
 </style>

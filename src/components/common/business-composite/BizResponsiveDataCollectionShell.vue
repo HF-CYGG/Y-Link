@@ -141,7 +141,7 @@ const shouldUseCardTransition = computed(() => {
       <template #template>
         <div class="flex flex-col gap-3">
           <el-skeleton-item v-for="index in props.skeletonRows" :key="`skeleton-${index}`" variant="text" />
-          <p class="pt-1 text-center text-sm text-slate-500">{{ props.loadingDescription }}</p>
+          <p class="pt-1 text-center text-sm text-slate-500 dark:text-slate-400">{{ props.loadingDescription }}</p>
         </div>
       </template>
     </el-skeleton>

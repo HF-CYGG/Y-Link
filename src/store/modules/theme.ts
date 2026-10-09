@@ -3,8 +3,11 @@
  * 文件职责：统一管理全局明暗主题模式、切换动画策略与持久化状态，供布局层和页面层共享同一套主题真源。
  * 实现逻辑：
  * - 使用 Pinia 保存当前主题模式、过渡策略和动画过程中的临时状态，避免组件各自维护一份主题副本；
- * - 结合浏览器存储在刷新后恢复用户上次选择，并在切换时同步更新全局主题类名；
+ * - 浏览器存储只记录用户的显式选择；未选择时跟随系统 prefers-color-scheme，并随系统偏好实时变化；
  * - 把点击触发点、动画时长和过渡阶段集中收口，保证主题按钮与页面过渡效果一致。
+ * 维护说明：
+ * - 首帧主题由 src/theme-init.js（构建为带内容哈希的 assets/theme-init-*.js）提前写入 html，两处的存储键与判定口径必须保持一致；
+ * - 旧键 y-link-theme-mode 是主题锁定期间为所有用户写入的默认亮色，并非真实选择，初始化时会清理。
  */
 
 import { computed, nextTick, ref, watch } from 'vue'
@@ -52,11 +55,21 @@ type DocumentWithViewTransition = Document & {
   startViewTransition?: (callback: () => Promise<void> | void) => ViewTransitionController
 }
 
-const THEME_STORAGE_KEY = 'y-link-theme-mode'
+const THEME_PREFERENCE_STORAGE_KEY = 'y-link-theme-preference'
+const LEGACY_THEME_STORAGE_KEY = 'y-link-theme-mode'
+const SYSTEM_DARK_MEDIA_QUERY = '(prefers-color-scheme: dark)'
 export const THEME_TRANSITION_DURATION_MS = 460
 const THEME_TRANSITION_EASING = 'cubic-bezier(0.22, 1, 0.36, 1)'
-const THEME_SWITCH_ENABLED = false
-const THEME_LOCKED_MODE: ThemeMode = 'light'
+
+/**
+ * 用户主题偏好序列化：
+ * - 只接受 light / dark 两个合法值，其余（含历史脏值）一律视为“未选择”；
+ * - 写入 null 时 useStorage 会移除存储键，回到跟随系统。
+ */
+const themePreferenceSerializer = {
+  read: (value: string): ThemeMode | null => (value === 'dark' || value === 'light' ? value : null),
+  write: (value: ThemeMode | null) => String(value),
+}
 
 /**
  * 判定是否处于浏览器端：
@@ -141,10 +154,23 @@ const resolveTransitionRadius = ({ x, y }: ThemeTriggerPoint) => {
  * - 将点击点、动画中状态、降级门控等细节从 UI 组件中抽离。
  */
 export const useThemeStore = defineStore('theme', () => {
-  const themeMode = useStorage<ThemeMode>(THEME_STORAGE_KEY, 'light', undefined, {
+  /**
+   * 主题真源：
+   * - themePreference 只保存用户显式选择，未选择时为 null；
+   * - systemPrefersDark 跟随系统偏好；两者合成最终主题，组件只读取 themeMode / isDark。
+   */
+  const themePreference = useStorage<ThemeMode | null>(THEME_PREFERENCE_STORAGE_KEY, null, undefined, {
     listenToStorageChanges: true,
-    writeDefaults: true,
+    writeDefaults: false,
+    serializer: themePreferenceSerializer,
   })
+  const systemPrefersDark = ref(
+    isClientEnvironment() && typeof globalThis.window.matchMedia === 'function'
+      ? globalThis.window.matchMedia(SYSTEM_DARK_MEDIA_QUERY).matches
+      : false,
+  )
+  const themeMode = computed<ThemeMode>(() => themePreference.value ?? (systemPrefersDark.value ? 'dark' : 'light'))
+  const isFollowingSystem = computed(() => themePreference.value === null)
 
   const isDark = computed(() => themeMode.value === 'dark')
   const isTransitioning = ref(false)
@@ -154,6 +180,7 @@ export const useThemeStore = defineStore('theme', () => {
   const initialized = ref(false)
 
   let reducedMotionMediaQuery: MediaQueryList | null = null
+  let systemDarkMediaQuery: MediaQueryList | null = null
   let fallbackTimer: number | null = null
   let transitionWatchdogTimer: number | null = null
   let stopThemeDomSync: (() => void) | null = null
@@ -301,16 +328,50 @@ export const useThemeStore = defineStore('theme', () => {
   }
 
   /**
-   * 提交主题模式：
-   * - 只更新响应式主题状态，真实 DOM 同步交给统一 watcher；
-   * - 这样可以把主题切换期间的 DOM 写入收敛成单写入源，避免 View Transition 与 watcher 双重落盘。
+   * 监听系统明暗偏好：
+   * - 仅更新 systemPrefersDark，是否生效由“用户是否显式选择过”决定；
+   * - 用户未选择时，系统切换明暗会立即反映到页面。
    */
-  const commitThemeMode = (mode: ThemeMode) => {
-    if (themeMode.value === mode) {
+  const syncSystemColorSchemePreference = () => {
+    if (!isClientEnvironment() || systemDarkMediaQuery || typeof globalThis.window.matchMedia !== 'function') {
       return
     }
 
-    themeMode.value = mode
+    systemDarkMediaQuery = globalThis.window.matchMedia(SYSTEM_DARK_MEDIA_QUERY)
+    systemPrefersDark.value = systemDarkMediaQuery.matches
+    systemDarkMediaQuery.addEventListener('change', (event) => {
+      systemPrefersDark.value = event.matches
+    })
+  }
+
+  /**
+   * 清理主题锁定期间遗留的旧存储键：
+   * - 锁定期间 writeDefaults 为所有用户写入了 'light'，不能当作用户选择；
+   * - 删除后老用户首次进入也能跟随系统，之后的手动选择写入新键。
+   */
+  const removeLegacyThemeStorage = () => {
+    if (!isClientEnvironment()) {
+      return
+    }
+
+    try {
+      globalThis.window.localStorage.removeItem(LEGACY_THEME_STORAGE_KEY)
+    } catch {
+      // 存储不可用时忽略，不影响主题功能。
+    }
+  }
+
+  /**
+   * 提交主题模式：
+   * - 用户显式切换即写入偏好，之后不再跟随系统；
+   * - 只更新响应式主题状态，真实 DOM 同步交给统一 watcher，避免 View Transition 与 watcher 双重落盘。
+   */
+  const commitThemeMode = (mode: ThemeMode) => {
+    if (themePreference.value === mode && themeMode.value === mode) {
+      return
+    }
+
+    themePreference.value = mode
   }
 
   /**
@@ -421,17 +482,7 @@ export const useThemeStore = defineStore('theme', () => {
    */
   const setThemeMode = async (mode: ThemeMode, event?: MouseEvent) => {
     if (!isClientEnvironment()) {
-      if (themeMode.value !== THEME_LOCKED_MODE) {
-        commitThemeMode(THEME_LOCKED_MODE)
-      }
-      return
-    }
-
-    if (!THEME_SWITCH_ENABLED) {
-      if (themeMode.value !== THEME_LOCKED_MODE) {
-        commitThemeMode(THEME_LOCKED_MODE)
-      }
-      finishTransition()
+      commitThemeMode(mode)
       return
     }
 
@@ -472,7 +523,7 @@ export const useThemeStore = defineStore('theme', () => {
    * - 组件无需关心动画能力与降级策略。
    */
   const toggleTheme = async (event?: MouseEvent) => {
-    await setThemeMode(THEME_LOCKED_MODE, event)
+    await setThemeMode(isDark.value ? 'light' : 'dark', event)
   }
 
   /**
@@ -485,10 +536,8 @@ export const useThemeStore = defineStore('theme', () => {
     // 兜底清理上次异常中断遗留的过渡门控，避免首屏出现暗层残留。
     clearTransitionGate()
     clearTransitionWatchdog()
-    // 临时下线主题切换：初始化时统一锁定为亮色，避免读取历史暗色缓存导致界面不一致。
-    if (themeMode.value !== THEME_LOCKED_MODE) {
-      commitThemeMode(THEME_LOCKED_MODE)
-    }
+    removeLegacyThemeStorage()
+    syncSystemColorSchemePreference()
 
     if (isClientEnvironment() && !lifecycleGuardBound) {
       lifecycleGuardBound = true
@@ -518,6 +567,8 @@ export const useThemeStore = defineStore('theme', () => {
 
   return {
     themeMode,
+    themePreference,
+    isFollowingSystem,
     isDark,
     isTransitioning,
     activeTransitionStrategy,

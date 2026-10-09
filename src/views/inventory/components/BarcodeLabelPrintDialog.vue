@@ -368,7 +368,7 @@ const printDateText = formatPrintDate(new Date())
             <span class="whitespace-nowrap">×</span>
           </div>
           <div class="w-28 shrink-0"><PassiveNumberInput v-model="labelHeightModel" :min="NUMBER_LIMITS.labelHeightMm.min" :max="NUMBER_LIMITS.labelHeightMm.max" :precision="0" /></div>
-          <span class="shrink-0 whitespace-nowrap text-sm text-slate-500">毫米（宽 × 高）</span>
+          <span class="shrink-0 whitespace-nowrap text-sm text-slate-500 dark:text-slate-400">毫米（宽 × 高）</span>
         </div>
       </el-form-item>
       <el-form-item v-if="settings.template === 'a4'" label="排版">
@@ -427,9 +427,9 @@ const printDateText = formatPrintDate(new Date())
       :title="`单次最多打印 ${MAX_TOTAL_LABELS} 张标签，当前 ${totalLabelCount} 张，请减少规格或份数`"
       class="mb-3"
     />
-    <div class="text-sm text-slate-500">共 {{ labels.length }} 个规格，打印 {{ totalLabelCount }} 张标签。预览：</div>
-    <div v-if="settings.template === 'a4'" class="mt-1 text-xs text-slate-500">屏幕预览按比例缩小，可滚动查看整页；打印时请选择 A4 纸、100% 缩放，并关闭页眉页脚。</div>
-    <div v-else class="mt-1 text-xs text-slate-500">标签机请选与标签相同的纸型，并关闭“适应页面”。</div>
+    <div class="text-sm text-slate-500 dark:text-slate-400">共 {{ labels.length }} 个规格，打印 {{ totalLabelCount }} 张标签。预览：</div>
+    <div v-if="settings.template === 'a4'" class="mt-1 text-xs text-slate-500 dark:text-slate-400">屏幕预览按比例缩小，可滚动查看整页；打印时请选择 A4 纸、100% 缩放，并关闭页眉页脚。</div>
+    <div v-else class="mt-1 text-xs text-slate-500 dark:text-slate-400">标签机请选与标签相同的纸型，并关闭“适应页面”。</div>
     <div v-loading="loading" class="mt-2 max-h-72 overflow-auto rounded-lg bg-slate-100 p-3 dark:bg-white/5">
       <div v-if="settings.template === 'a4'" class="barcode-a4-preview-frame">
         <div class="barcode-a4-page barcode-a4-page--preview" :style="a4GridStyle">

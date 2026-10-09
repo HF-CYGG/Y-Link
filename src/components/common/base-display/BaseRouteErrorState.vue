@@ -37,12 +37,12 @@ const emit = defineEmits<{
 
 <template>
   <section class="flex min-h-[320px] items-center justify-center">
-    <div class="w-full max-w-[620px] rounded-[28px] bg-white px-6 py-8 text-center shadow-[var(--ylink-shadow-soft)]">
-      <div class="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-amber-50 text-[28px] text-amber-500">
+    <div class="w-full max-w-[620px] rounded-[28px] bg-white px-6 py-8 text-center shadow-[var(--ylink-shadow-soft)] dark:border dark:border-white/5 dark:bg-[#141415]">
+      <div class="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-amber-50 text-[28px] text-amber-500 dark:bg-amber-500/10 dark:text-amber-400">
         !
       </div>
-      <h2 class="mt-5 text-xl font-semibold text-slate-900">{{ props.title }}</h2>
-      <p class="mt-3 text-sm leading-6 text-slate-500">{{ props.description }}</p>
+      <h2 class="mt-5 text-xl font-semibold text-slate-900 dark:text-slate-100">{{ props.title }}</h2>
+      <p class="mt-3 text-sm leading-6 text-slate-500 dark:text-slate-400">{{ props.description }}</p>
       <div class="mt-6 flex flex-wrap items-center justify-center gap-3">
         <ElButton type="primary" @click="emit('retry')">重新加载</ElButton>
         <ElButton @click="$router.push(props.homePath)">返回首页</ElButton>

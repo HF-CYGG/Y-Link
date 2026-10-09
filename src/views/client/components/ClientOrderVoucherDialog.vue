@@ -422,6 +422,46 @@ const handleExportPdf = () => {
     min-width: 100%;
   }
 }
+
+/* 暗色：只调整编辑区提示条、预览外框与工具栏；.order-voucher-print-scope 纸面与打印区保持白纸黑字。 */
+.dark .voucher-editor-banner {
+  border-color: rgba(129, 140, 248, 0.3);
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.12) 0%, rgba(59, 130, 246, 0.08) 100%);
+}
+
+.dark .voucher-editor-banner__title {
+  color: #c7d2fe;
+}
+
+.dark .voucher-editor-banner__content,
+.dark .voucher-preview-panel__summary,
+.dark .voucher-orientation-toolbar__label {
+  color: #cbd5e1;
+}
+
+.dark .voucher-preview-panel {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: #141415;
+}
+
+.dark .voucher-preview-panel__title {
+  color: #f1f5f9;
+}
+
+.dark .voucher-orientation-toolbar {
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.dark .voucher-preview-panel__header {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.dark .voucher-preview-panel__body {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: #0f0f10;
+}
 </style>
 
 <style>

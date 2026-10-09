@@ -76,17 +76,17 @@ interface OrderCardPresentation {
 const RETURN_REQUEST_STATUS_META = {
   pending: {
     label: '待门店核销',
-    className: 'bg-amber-50 text-amber-700',
+    className: 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300',
     description: '退货申请已提交，请携带商品与退货码到店处理。',
   },
   verified: {
     label: '退货已完成',
-    className: 'bg-emerald-50 text-emerald-700',
+    className: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300',
     description: '门店已完成退货核销，可在订单详情中查看本次退货记录。',
   },
   rejected: {
     label: '退货已拒绝',
-    className: 'bg-rose-50 text-rose-700',
+    className: 'bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-300',
     description: '门店已拒绝本次退货申请，请查看拒绝原因后再决定是否联系门店。',
   },
 } as const
@@ -184,7 +184,7 @@ const getOrderStatusClassName = (order: PersistedO2oPreorderSummary) => {
     return 'bg-orange-50 text-orange-700'
   }
   if (scenario === 'timeout_cancelled') {
-    return 'bg-rose-50 text-rose-700'
+    return 'bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-300'
   }
   return CLIENT_O2O_ORDER_STATUS_CLASS_MAP[order.status]
 }
@@ -373,7 +373,7 @@ const buildOrderStatusChips = (
     chips.push({
       key: 'timeoutAt',
       label: `释放 ${formatOrderDateTime(order.timeoutAt)}`,
-      className: 'bg-slate-100 text-slate-500',
+      className: 'bg-slate-100 text-slate-500 dark:bg-white/10 dark:text-slate-400',
     })
   }
 
@@ -788,11 +788,11 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="order-list-page space-y-4">
-    <div class="rounded-[1.4rem] bg-white p-3.5 shadow-[var(--ylink-shadow-soft)] sm:p-4">
+    <div class="rounded-[1.4rem] bg-white p-3.5 shadow-[var(--ylink-shadow-soft)] sm:p-4 dark:bg-[#141415]">
       <div class="order-list-page__hero">
         <div class="min-w-0 flex-1">
-          <p class="text-xl font-semibold text-slate-900">我的订单</p>
-          <p class="text-sm text-slate-500">查看待提货、已核销与已取消订单，并区分部门订与散客</p>
+          <p class="text-xl font-semibold text-slate-900 dark:text-slate-100">我的订单</p>
+          <p class="text-sm text-slate-500 dark:text-slate-400">查看待提货、已核销与已取消订单，并区分部门订与散客</p>
         </div>
         <button
           class="order-list-page__refresh-btn disabled:cursor-not-allowed disabled:opacity-60"
@@ -810,7 +810,7 @@ onBeforeUnmount(() => {
           :key="tab.key"
           type="button"
           class="rounded-full px-3 py-1.5 text-xs"
-          :class="activeStatus === tab.key ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600'"
+          :class="activeStatus === tab.key ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600 dark:bg-white/10 dark:text-slate-300'"
           @click="handleStatusChange(tab.key as 'all' | O2oPreorderSummary['status'])"
         >
           {{ tab.label }}
@@ -819,10 +819,10 @@ onBeforeUnmount(() => {
       <div class="mt-3 flex items-center gap-2">
         <input
           v-model="keywordInput"
-          class="h-10 flex-1 rounded-full border border-slate-200 bg-slate-50 px-4 text-sm outline-none focus:border-slate-300"
+          class="h-10 flex-1 rounded-full border border-slate-200 bg-slate-50 px-4 text-sm outline-none focus:border-slate-300 dark:border-white/10 dark:bg-white/5"
           placeholder="搜索订单号、核销码、部门、工号或归属"
         />
-        <button type="button" class="h-10 rounded-full border border-slate-200 px-4 text-sm text-slate-600" @click="clearKeyword">清空</button>
+        <button type="button" class="h-10 rounded-full border border-slate-200 px-4 text-sm text-slate-600 dark:border-white/10 dark:text-slate-300" @click="clearKeyword">清空</button>
       </div>
       <p v-if="keywordDebouncing || refreshing || loadingMore" class="mt-2 text-xs text-slate-400">
         {{
@@ -846,8 +846,8 @@ onBeforeUnmount(() => {
       </p>
     </div>
 
-    <div v-if="firstScreenLoading" class="grid gap-3 rounded-[1.4rem] bg-white p-3.5 shadow-[var(--ylink-shadow-soft)] sm:p-4">
-      <div v-for="index in 4" :key="index" class="h-[4rem] animate-pulse rounded-2xl bg-slate-100" />
+    <div v-if="firstScreenLoading" class="grid gap-3 rounded-[1.4rem] bg-white p-3.5 shadow-[var(--ylink-shadow-soft)] sm:p-4 dark:bg-[#141415]">
+      <div v-for="index in 4" :key="index" class="h-[4rem] animate-pulse rounded-2xl bg-slate-100 dark:bg-white/10" />
     </div>
     <BaseRequestState
       v-else-if="requestError"
@@ -872,7 +872,7 @@ onBeforeUnmount(() => {
           <article
             v-for="card in orderCardList"
             :key="card.order.id"
-            class="rounded-[1.2rem] bg-white p-3.5 shadow-[var(--ylink-shadow-soft)] sm:p-4"
+            class="rounded-[1.2rem] bg-white p-3.5 shadow-[var(--ylink-shadow-soft)] sm:p-4 dark:bg-[#141415]"
             :class="{ 'order-list-card--refreshed': isOrderRecentlyRefreshed(card.order.id) }"
             :data-order-card-id="card.order.id"
           >
@@ -880,25 +880,25 @@ onBeforeUnmount(() => {
               <div class="order-list-card__topline">
                 <div class="min-w-0 flex-1">
                   <div class="flex flex-wrap items-center gap-2">
-                    <p class="min-w-0 flex-1 truncate text-[0.98rem] font-semibold text-slate-900 sm:flex-none sm:text-base">
+                    <p class="min-w-0 flex-1 truncate text-[0.98rem] font-semibold text-slate-900 sm:flex-none sm:text-base dark:text-slate-100">
                       {{ card.order.preorderNo }}
                     </p>
-                    <span class="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-600 sm:text-xs">
+                    <span class="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-600 sm:text-xs dark:bg-white/10 dark:text-slate-300">
                       {{ getClientOrderTypeLabel(card.order) }}
                     </span>
                     <Transition name="order-refresh-badge">
                       <span
                         v-if="isOrderRecentlyRefreshed(card.order.id)"
-                        class="rounded-full bg-teal-50 px-2.5 py-1 text-[11px] font-semibold text-teal-700"
+                        class="rounded-full bg-teal-50 px-2.5 py-1 text-[11px] font-semibold text-teal-700 dark:bg-teal-500/10 dark:text-teal-300"
                       >
                         已更新
                       </span>
                     </Transition>
                   </div>
-                  <p v-if="card.order.customerOrderBusinessNo" class="mt-1 text-xs text-teal-700">
+                  <p v-if="card.order.customerOrderBusinessNo" class="mt-1 text-xs text-teal-700 dark:text-teal-300">
                     关联出库业务单号：{{ card.order.customerOrderBusinessNo }}
                   </p>
-                  <p v-if="isMergedCustomerOrder(card.order)" class="mt-1 text-xs text-teal-700">
+                  <p v-if="isMergedCustomerOrder(card.order)" class="mt-1 text-xs text-teal-700 dark:text-teal-300">
                     关联正式出库单已合并（原始出库业务单号：{{ getOriginalCustomerOrderBusinessNo(card.order) }}）
                   </p>
                 </div>
@@ -906,7 +906,7 @@ onBeforeUnmount(() => {
                   <button
                     v-if="card.order.status === 'pending'"
                     type="button"
-                    class="rounded-full border border-rose-200 px-3 py-1.5 text-xs text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
+                    class="rounded-full border border-rose-200 px-3 py-1.5 text-xs text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400 dark:border-rose-900/60 dark:text-rose-400"
                     :disabled="recallingOrderId === card.order.id"
                     @click="handleRecallOrder(card.order)"
                   >
@@ -956,7 +956,7 @@ onBeforeUnmount(() => {
         <button
           v-if="hasMoreOrders"
           type="button"
-          class="rounded-full border border-slate-200 bg-white px-5 py-2 text-sm text-slate-600 disabled:cursor-not-allowed disabled:opacity-60"
+          class="rounded-full border border-slate-200 bg-white px-5 py-2 text-sm text-slate-600 disabled:cursor-not-allowed disabled:opacity-60 dark:border-white/10 dark:bg-[#141415] dark:text-slate-300"
           :disabled="loadingMore"
           @click="loadOrders(true, { append: true })"
         >
@@ -1156,5 +1156,16 @@ onBeforeUnmount(() => {
   .order-list-card__summary {
     gap: 0.25rem 0.65rem;
   }
+}
+
+/* 暗色：刷新按钮与元信息胶囊。 */
+.dark .order-list-page__refresh-btn {
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgb(203 213 225);
+}
+
+.dark .order-list-card__meta-pill {
+  background: rgba(255, 255, 255, 0.06);
 }
 </style>

@@ -165,7 +165,7 @@ const getReturnRequestStatusMeta = (request: O2oReturnRequestDetail) => {
   if (request.status === 'verified') {
     return {
       label: '退货已完成',
-      className: 'bg-emerald-50 text-emerald-700',
+      className: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300',
       description: '门店已完成退货核销，本次退货流程已闭环。',
       qrHint: '退货二维码已完成核销，仅保留记录供你查询。',
     }
@@ -173,14 +173,14 @@ const getReturnRequestStatusMeta = (request: O2oReturnRequestDetail) => {
   if (request.status === 'rejected') {
     return {
       label: '退货已拒绝',
-      className: 'bg-rose-50 text-rose-700',
+      className: 'bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-300',
       description: '门店已拒绝本次退货申请，请查看拒绝原因后再决定是否联系门店处理。',
       qrHint: '退货申请已被拒绝，退货二维码已停用。',
     }
   }
   return {
     label: '待门店核销',
-    className: 'bg-amber-50 text-amber-700',
+    className: 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300',
     description: '请携带商品与退货码到店，由门店扫码完成退货核销。',
     qrHint: '到店后向门店出示该二维码或退货码即可办理退货。',
   }
@@ -1510,14 +1510,14 @@ onBeforeUnmount(() => {
   <section class="order-detail-page">
     <button
       type="button"
-      class="order-back-floating inline-flex h-10 w-10 items-center justify-center rounded-full bg-white text-slate-700 shadow-[var(--ylink-shadow-soft)]"
+      class="order-back-floating inline-flex h-10 w-10 items-center justify-center rounded-full bg-white text-slate-700 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415] dark:text-slate-200"
       @click="handleBack"
     >
       <el-icon :size="18"><ArrowLeft /></el-icon>
     </button>
 
-    <div v-if="loading" class="grid gap-3 rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
-      <div v-for="index in 5" :key="index" class="h-[6.2rem] animate-pulse rounded-2xl bg-slate-100" />
+    <div v-if="loading" class="grid gap-3 rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
+      <div v-for="index in 5" :key="index" class="h-[6.2rem] animate-pulse rounded-2xl bg-slate-100 dark:bg-white/10" />
     </div>
     <BaseRequestState
       v-else-if="requestError"
@@ -1529,22 +1529,22 @@ onBeforeUnmount(() => {
     />
 
     <section v-else-if="detail" class="grid gap-4 lg:grid-cols-[24rem_minmax(0,1fr)]">
-      <aside class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)]">
+      <aside class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div class="flex flex-wrap items-center gap-2">
-              <p class="text-lg font-semibold text-slate-900">{{ displayPreorderNo }}</p>
-              <span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">{{ orderTypeLabel }}</span>
+              <p class="text-lg font-semibold text-slate-900 dark:text-slate-100">{{ displayPreorderNo }}</p>
+              <span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600 dark:bg-white/10 dark:text-slate-300">{{ orderTypeLabel }}</span>
               <Transition name="detail-refresh-notice">
                 <span
                   v-if="showDetailRefreshNotice"
-                  class="rounded-full bg-teal-50 px-2.5 py-1 text-xs font-semibold text-teal-700"
+                  class="rounded-full bg-teal-50 px-2.5 py-1 text-xs font-semibold text-teal-700 dark:bg-teal-500/10 dark:text-teal-300"
                 >
                   详情已更新
                 </span>
               </Transition>
             </div>
-            <p v-if="isMergedCustomerOrder" class="mt-2 text-xs text-teal-700">关联正式出库单已合并（原始出库业务单号：{{ originalCustomerOrderBusinessNo }}）</p>
+            <p v-if="isMergedCustomerOrder" class="mt-2 text-xs text-teal-700 dark:text-teal-300">关联正式出库单已合并（原始出库业务单号：{{ originalCustomerOrderBusinessNo }}）</p>
             <p class="mt-1 text-sm text-slate-400">状态：{{ statusLabel }}</p>
             <p class="mt-1 text-xs text-slate-400">{{ detailAutoRefreshStatusText }}</p>
           </div>
@@ -1552,7 +1552,7 @@ onBeforeUnmount(() => {
             <button
               v-if="shouldShowVoucherButton"
               type="button"
-              class="rounded-full border border-teal-200 px-4 py-2 text-sm font-medium text-teal-700 transition hover:bg-teal-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
+              class="rounded-full border border-teal-200 px-4 py-2 text-sm font-medium text-teal-700 transition hover:bg-teal-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400 dark:border-teal-500/30 dark:text-teal-300"
               :disabled="voucherCapabilityLoading"
               @click="handleOpenVoucherDialog"
             >
@@ -1561,7 +1561,7 @@ onBeforeUnmount(() => {
             <button
               v-if="shouldShowModifyOrderButton"
               type="button"
-              class="rounded-full border border-teal-200 px-4 py-2 text-sm font-medium text-teal-700 transition hover:bg-teal-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
+              class="rounded-full border border-teal-200 px-4 py-2 text-sm font-medium text-teal-700 transition hover:bg-teal-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400 dark:border-teal-500/30 dark:text-teal-300"
               :disabled="editSubmitting || !canModifyOrder"
               @click="openEditDialog"
             >
@@ -1570,7 +1570,7 @@ onBeforeUnmount(() => {
             <button
               v-if="canRecallOrder"
               type="button"
-              class="rounded-full border border-rose-200 px-4 py-2 text-sm font-medium text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
+              class="rounded-full border border-rose-200 px-4 py-2 text-sm font-medium text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400 dark:border-rose-900/60 dark:text-rose-400"
               :disabled="recalling"
               @click="handleRecallOrder"
             >
@@ -1581,7 +1581,7 @@ onBeforeUnmount(() => {
         <p
           v-if="shouldShowModifyOrderButton"
           class="mt-3 text-xs"
-          :class="canModifyOrder ? 'text-slate-400' : 'text-amber-600'"
+          :class="canModifyOrder ? 'text-slate-400' : 'text-amber-600 dark:text-amber-400'"
         >
           {{ canModifyOrder ? modifyOrderQuotaText : modifyOrderDisabledHint }}
         </p>
@@ -1594,7 +1594,7 @@ onBeforeUnmount(() => {
           <p class="mt-1 text-xs">{{ businessStatusMeta.clientDescription }}</p>
         </div>
 
-        <div class="mt-5 rounded-3xl bg-slate-50 p-4 text-center">
+        <div class="mt-5 rounded-3xl bg-slate-50 p-4 text-center dark:bg-white/5">
           <img
             v-if="canUseQrCode && qrDataUrl"
             :src="qrDataUrl"
@@ -1603,18 +1603,18 @@ onBeforeUnmount(() => {
           />
           <div
             v-else
-            class="mx-auto flex h-64 w-64 flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-white px-6 text-center"
+            class="mx-auto flex h-64 w-64 flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-white px-6 text-center dark:border-white/10 dark:bg-[#141415]"
           >
-            <p class="text-sm font-semibold text-slate-700">二维码已停用</p>
+            <p class="text-sm font-semibold text-slate-700 dark:text-slate-200">二维码已停用</p>
             <p class="mt-2 text-xs leading-5 text-slate-400">{{ qrDisabledHint }}</p>
           </div>
           <p class="mt-4 text-xs text-slate-400">取货码</p>
-          <p class="mt-1 text-xl font-semibold tracking-[0.18em]" :class="canUseQrCode ? 'text-slate-900' : 'text-slate-400'">
+          <p class="mt-1 text-xl font-semibold tracking-[0.18em]" :class="canUseQrCode ? 'text-slate-900 dark:text-slate-100' : 'text-slate-400'">
             {{ displayVerifyCode }}
           </p>
         </div>
 
-        <div class="mt-4 space-y-2 rounded-2xl bg-amber-50 px-4 py-4 text-sm text-amber-700">
+        <div class="mt-4 space-y-2 rounded-2xl bg-amber-50 px-4 py-4 text-sm text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
           <p>取货地址：海右书院112房间</p>
           <p>取货时段：10:00 - 22:00</p>
           <p>联系人：门店值班人员</p>
@@ -1623,35 +1623,35 @@ onBeforeUnmount(() => {
       </aside>
 
       <div class="space-y-4">
-        <div class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)]">
-          <p class="text-lg font-semibold text-slate-900">订单信息</p>
+        <div class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
+          <p class="text-lg font-semibold text-slate-900 dark:text-slate-100">订单信息</p>
           <div class="mt-4 grid gap-3 sm:grid-cols-2">
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">创建时间</p>
-              <p class="mt-1 text-sm text-slate-700">{{ formatOrderDateTime(detail.order.createdAt) }}</p>
+              <p class="mt-1 text-sm text-slate-700 dark:text-slate-200">{{ formatOrderDateTime(detail.order.createdAt) }}</p>
             </div>
-            <div v-if="detail.order.customerOrderBusinessNo" class="rounded-2xl bg-teal-50 px-4 py-3">
+            <div v-if="detail.order.customerOrderBusinessNo" class="rounded-2xl bg-teal-50 px-4 py-3 dark:bg-teal-500/10">
               <p class="text-sm text-teal-600">关联出库业务单号</p>
-              <p class="mt-1 break-all text-sm font-semibold text-teal-800">{{ detail.order.customerOrderBusinessNo }}</p>
+              <p class="mt-1 break-all text-sm font-semibold text-teal-800 dark:text-teal-200">{{ detail.order.customerOrderBusinessNo }}</p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">下单归属</p>
-              <p class="mt-1 text-sm text-slate-700">
+              <p class="mt-1 text-sm text-slate-700 dark:text-slate-200">
                 {{ orderTypeLabel }}{{ detail.order.departmentNameSnapshot ? ` / ${detail.order.departmentNameSnapshot}` : '' }}
               </p>
-              <p v-if="detail.order.staffNoSnapshot" class="mt-1 text-xs text-slate-500">工号：{{ detail.order.staffNoSnapshot }}</p>
+              <p v-if="detail.order.staffNoSnapshot" class="mt-1 text-xs text-slate-500 dark:text-slate-400">工号：{{ detail.order.staffNoSnapshot }}</p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">总件数</p>
-              <p class="mt-1 text-sm text-slate-700">{{ detail.order.totalQty }} 件</p>
+              <p class="mt-1 text-sm text-slate-700 dark:text-slate-200">{{ detail.order.totalQty }} 件</p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">提货人</p>
-              <p class="mt-1 text-sm text-slate-700">{{ detail.order.pickupContact || '未填写' }}</p>
+              <p class="mt-1 text-sm text-slate-700 dark:text-slate-200">{{ detail.order.pickupContact || '未填写' }}</p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">到店取货时间</p>
-              <p class="mt-1 text-sm text-slate-700">
+              <p class="mt-1 text-sm text-slate-700 dark:text-slate-200">
                 {{
                   detail.order.clientOrderType === 'department'
                     ? formatOrderDateTime(detail.order.pickupAt, '未填写')
@@ -1659,47 +1659,47 @@ onBeforeUnmount(() => {
                 }}
               </p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">总金额</p>
               <p class="mt-1 text-sm font-semibold text-teal-600">¥{{ totalAmount.toFixed(2) }}</p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">超时取消时间</p>
-              <p class="mt-1 text-sm text-slate-700">{{ formatOrderDateTime(detail.order.timeoutAt, '未开启自动取消') }}</p>
+              <p class="mt-1 text-sm text-slate-700 dark:text-slate-200">{{ formatOrderDateTime(detail.order.timeoutAt, '未开启自动取消') }}</p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">核销时间</p>
-              <p class="mt-1 text-sm text-slate-700">{{ formatOrderDateTime(detail.order.verifiedAt, '尚未核销') }}</p>
+              <p class="mt-1 text-sm text-slate-700 dark:text-slate-200">{{ formatOrderDateTime(detail.order.verifiedAt, '尚未核销') }}</p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">商家状态</p>
-              <p class="mt-1 text-sm text-slate-700">{{ businessStatusMeta?.label ?? '未设置' }}</p>
+              <p class="mt-1 text-sm text-slate-700 dark:text-slate-200">{{ businessStatusMeta?.label ?? '未设置' }}</p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3 sm:col-span-2">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 sm:col-span-2 dark:bg-white/5">
               <p class="text-sm text-slate-400">订单备注</p>
-              <p class="mt-1 whitespace-pre-wrap break-words text-sm text-slate-700">{{ detail.order.remark || '未填写' }}</p>
+              <p class="mt-1 whitespace-pre-wrap break-words text-sm text-slate-700 dark:text-slate-200">{{ detail.order.remark || '未填写' }}</p>
             </div>
           </div>
         </div>
 
-        <div v-if="merchantMessageContent" class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)]">
-          <p class="text-lg font-semibold text-slate-900">商家留言</p>
-          <p class="mt-3 whitespace-pre-wrap break-words rounded-2xl bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800">
+        <div v-if="merchantMessageContent" class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
+          <p class="text-lg font-semibold text-slate-900 dark:text-slate-100">商家留言</p>
+          <p class="mt-3 whitespace-pre-wrap break-words rounded-2xl bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
             {{ merchantMessageContent }}
           </p>
         </div>
 
-        <div v-if="shouldShowReturnSection" class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)]">
+        <div v-if="shouldShowReturnSection" class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <p class="text-lg font-semibold text-slate-900">退货服务</p>
-              <p class="mt-2 text-sm leading-6 text-slate-500">
+              <p class="text-lg font-semibold text-slate-900 dark:text-slate-100">退货服务</p>
+              <p class="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">
                 支持按商品申请退货，提交后会生成门店退货核销二维码，门店扫码后完成退货处理。
               </p>
             </div>
             <button
               type="button"
-              class="rounded-full border border-teal-200 px-4 py-2 text-sm font-medium text-teal-700 transition hover:bg-teal-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
+              class="rounded-full border border-teal-200 px-4 py-2 text-sm font-medium text-teal-700 transition hover:bg-teal-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400 dark:border-teal-500/30 dark:text-teal-300"
               :disabled="!canApplyReturn"
               @click="openReturnDialog"
             >
@@ -1707,27 +1707,27 @@ onBeforeUnmount(() => {
             </button>
           </div>
           <div class="mt-4 grid gap-3 sm:grid-cols-3">
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">可退商品种类</p>
-              <p class="mt-1 text-sm font-semibold text-slate-800">{{ returnableItemCount }} 种</p>
+              <p class="mt-1 text-sm font-semibold text-slate-800 dark:text-slate-100">{{ returnableItemCount }} 种</p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">待处理退货申请</p>
-              <p class="mt-1 text-sm font-semibold text-amber-700">
+              <p class="mt-1 text-sm font-semibold text-amber-700 dark:text-amber-300">
                 {{ returnRequestStats.pendingCount }} 单 / {{ returnRequestStats.pendingQty }} 件
               </p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">历史退货申请</p>
-              <p class="mt-1 text-sm font-semibold text-slate-800">
+              <p class="mt-1 text-sm font-semibold text-slate-800 dark:text-slate-100">
                 {{ returnRequestStats.totalCount }} 单 / {{ returnRequestStats.totalQty }} 件
               </p>
             </div>
           </div>
-          <p v-if="canApplyReturn" class="mt-4 text-sm text-slate-500">
+          <p v-if="canApplyReturn" class="mt-4 text-sm text-slate-500 dark:text-slate-400">
             当前仍有可退商品，可在本页直接选择商品和数量提交退货申请。
           </p>
-          <p v-else class="mt-4 text-sm text-slate-500">
+          <p v-else class="mt-4 text-sm text-slate-500 dark:text-slate-400">
             {{
               detail.order.status === 'cancelled'
                 ? '当前订单已取消，不能新增退货申请。'
@@ -1736,11 +1736,11 @@ onBeforeUnmount(() => {
           </p>
         </div>
 
-        <div class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)]">
-          <p class="text-lg font-semibold text-slate-900">预订明细</p>
-          <div class="mt-4 overflow-hidden rounded-2xl border border-slate-100">
+        <div class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
+          <p class="text-lg font-semibold text-slate-900 dark:text-slate-100">预订明细</p>
+          <div class="mt-4 overflow-hidden rounded-2xl border border-slate-100 dark:border-white/5">
             <table class="min-w-full divide-y divide-slate-100 text-sm">
-              <thead class="bg-slate-50 text-slate-500">
+              <thead class="bg-slate-50 text-slate-500 dark:bg-white/5 dark:text-slate-400">
                 <tr>
                   <th class="px-4 py-3 text-left font-medium">商品</th>
                   <th class="px-4 py-3 text-right font-medium">单价</th>
@@ -1749,7 +1749,7 @@ onBeforeUnmount(() => {
                   <th v-if="shouldShowReturnSection" class="px-4 py-3 text-right font-medium">可退数量</th>
                 </tr>
               </thead>
-              <tbody class="divide-y divide-slate-100 bg-white text-slate-700">
+              <tbody class="divide-y divide-slate-100 bg-white text-slate-700 dark:bg-[#141415] dark:text-slate-200">
                 <tr v-for="item in detail.items" :key="item.id">
                   <td class="px-4 py-3">
                     <p class="break-words">{{ item.productName }}</p>
@@ -1762,8 +1762,8 @@ onBeforeUnmount(() => {
                     </p>
                   </td>
                   <td class="px-4 py-3 text-right font-medium">{{ item.qty }}</td>
-                  <td v-if="shouldShowReturnSection" class="px-4 py-3 text-right text-amber-700">{{ item.returnedQty }}</td>
-                  <td v-if="shouldShowReturnSection" class="px-4 py-3 text-right font-medium text-teal-700">{{ item.availableReturnQty }}</td>
+                  <td v-if="shouldShowReturnSection" class="px-4 py-3 text-right text-amber-700 dark:text-amber-300">{{ item.returnedQty }}</td>
+                  <td v-if="shouldShowReturnSection" class="px-4 py-3 text-right font-medium text-teal-700 dark:text-teal-300">{{ item.availableReturnQty }}</td>
                 </tr>
                 <tr v-if="!detail.items.length">
                   <td :colspan="shouldShowReturnSection ? 5 : 3" class="px-4 py-6 text-center text-slate-400">暂无预订商品明细，请稍后刷新重试</td>
@@ -1773,13 +1773,13 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div v-if="shouldShowReturnSection" class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)]">
+        <div v-if="shouldShowReturnSection" class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <p class="text-lg font-semibold text-slate-900">退货记录</p>
-              <p class="mt-2 text-sm text-slate-500">展示当前订单全部退货申请、核销进度与门店扫码二维码。</p>
+              <p class="text-lg font-semibold text-slate-900 dark:text-slate-100">退货记录</p>
+              <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">展示当前订单全部退货申请、核销进度与门店扫码二维码。</p>
             </div>
-            <div v-if="pendingReturnRequests.length" class="rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700">
+            <div v-if="pendingReturnRequests.length" class="rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
               待处理 {{ pendingReturnRequests.length }} 单
             </div>
           </div>
@@ -1787,11 +1787,11 @@ onBeforeUnmount(() => {
             <article
               v-for="request in detail.returnRequests"
               :key="request.id"
-              class="rounded-3xl border border-slate-100 bg-slate-50/60 p-4"
+              class="rounded-3xl border border-slate-100 bg-slate-50/60 p-4 dark:border-white/5 dark:bg-white/5"
             >
               <div class="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <p class="text-base font-semibold text-slate-900">{{ request.returnNo }}</p>
+                  <p class="text-base font-semibold text-slate-900 dark:text-slate-100">{{ request.returnNo }}</p>
                   <p class="mt-1 text-xs text-slate-400">申请时间：{{ formatOrderDateTime(request.createdAt) }}</p>
                 </div>
                 <div
@@ -1807,45 +1807,45 @@ onBeforeUnmount(() => {
               <div class="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_15rem]">
                 <div class="space-y-3">
                   <div class="grid gap-3 sm:grid-cols-2">
-                    <div class="rounded-2xl bg-white px-4 py-3">
+                    <div class="rounded-2xl bg-white px-4 py-3 dark:bg-[#141415]">
                       <p class="text-sm text-slate-400">退货件数</p>
-                      <p class="mt-1 text-sm font-semibold text-slate-800">{{ request.totalQty }} 件</p>
+                      <p class="mt-1 text-sm font-semibold text-slate-800 dark:text-slate-100">{{ request.totalQty }} 件</p>
                     </div>
-                    <div class="rounded-2xl bg-white px-4 py-3">
+                    <div class="rounded-2xl bg-white px-4 py-3 dark:bg-[#141415]">
                       <p class="text-sm text-slate-400">提交时订单状态</p>
-                      <p class="mt-1 text-sm text-slate-700">{{ getOrderStatusLabel(request.sourceOrderStatus) }}</p>
+                      <p class="mt-1 text-sm text-slate-700 dark:text-slate-200">{{ getOrderStatusLabel(request.sourceOrderStatus) }}</p>
                     </div>
-                    <div class="rounded-2xl bg-white px-4 py-3">
+                    <div class="rounded-2xl bg-white px-4 py-3 dark:bg-[#141415]">
                       <p class="text-sm text-slate-400">处理时间</p>
-                      <p class="mt-1 text-sm text-slate-700">{{ formatOrderDateTime(request.handledAt, '等待门店处理') }}</p>
+                      <p class="mt-1 text-sm text-slate-700 dark:text-slate-200">{{ formatOrderDateTime(request.handledAt, '等待门店处理') }}</p>
                     </div>
-                    <div class="rounded-2xl bg-white px-4 py-3">
+                    <div class="rounded-2xl bg-white px-4 py-3 dark:bg-[#141415]">
                       <p class="text-sm text-slate-400">处理人</p>
-                      <p class="mt-1 text-sm text-slate-700">{{ request.handledBy || '门店待处理' }}</p>
+                      <p class="mt-1 text-sm text-slate-700 dark:text-slate-200">{{ request.handledBy || '门店待处理' }}</p>
                     </div>
                   </div>
-                  <div class="rounded-2xl bg-white px-4 py-3">
+                  <div class="rounded-2xl bg-white px-4 py-3 dark:bg-[#141415]">
                     <p class="text-sm text-slate-400">退货原因</p>
-                    <p class="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-slate-700">{{ request.reason }}</p>
+                    <p class="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-slate-700 dark:text-slate-200">{{ request.reason }}</p>
                   </div>
                   <div
                     v-if="request.rejectedReason"
-                    class="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3"
+                    class="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 dark:border-rose-900/60 dark:bg-rose-500/10"
                   >
                     <p class="text-sm text-rose-500">拒绝原因</p>
-                    <p class="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-rose-700">
+                    <p class="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-rose-700 dark:text-rose-300">
                       {{ request.rejectedReason }}
                     </p>
                   </div>
-                  <div class="overflow-hidden rounded-2xl border border-white/80 bg-white">
+                  <div class="overflow-hidden rounded-2xl border border-white/80 bg-white dark:bg-[#141415]">
                     <table class="min-w-full divide-y divide-slate-100 text-sm">
-                      <thead class="bg-slate-50 text-slate-500">
+                      <thead class="bg-slate-50 text-slate-500 dark:bg-white/5 dark:text-slate-400">
                         <tr>
                           <th class="px-4 py-3 text-left font-medium">商品</th>
                           <th class="px-4 py-3 text-right font-medium">数量</th>
                         </tr>
                       </thead>
-                      <tbody class="divide-y divide-slate-100 text-slate-700">
+                      <tbody class="divide-y divide-slate-100 text-slate-700 dark:text-slate-200">
                         <tr v-for="item in request.items" :key="item.id">
                           <td class="px-4 py-3">
                             <p class="break-words">{{ item.productName }}</p>
@@ -1858,24 +1858,24 @@ onBeforeUnmount(() => {
                   </div>
                 </div>
 
-                <div class="rounded-3xl bg-white p-4 text-center">
+                <div class="rounded-3xl bg-white p-4 text-center dark:bg-[#141415]">
                   <img
                     v-if="request.status === 'pending' && returnQrMap[request.id]"
                     :src="returnQrMap[request.id]"
                     :alt="`${request.returnNo} 退货二维码`"
-                    class="mx-auto h-52 w-52 rounded-2xl bg-white p-3 shadow-sm"
+                    class="mx-auto h-52 w-52 rounded-2xl bg-white p-3 shadow-sm dark:bg-[#141415]"
                   />
                   <div
                     v-else
-                    class="mx-auto flex h-52 w-52 flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-6 text-center"
+                    class="mx-auto flex h-52 w-52 flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-6 text-center dark:border-white/10 dark:bg-white/5"
                   >
-                    <p class="text-sm font-semibold text-slate-700">二维码已停用</p>
+                    <p class="text-sm font-semibold text-slate-700 dark:text-slate-200">二维码已停用</p>
                     <p class="mt-2 text-xs leading-5 text-slate-400">{{ getReturnRequestStatusMeta(request).qrHint }}</p>
                   </div>
                   <p class="mt-4 text-xs text-slate-400">退货码</p>
                   <p
                     class="mt-1 text-lg font-semibold tracking-[0.16em]"
-                    :class="request.status === 'pending' ? 'text-slate-900' : 'text-slate-400'"
+                    :class="request.status === 'pending' ? 'text-slate-900 dark:text-slate-100' : 'text-slate-400'"
                   >
                     {{ formatDisplayCode(request.verifyCode) }}
                   </p>
@@ -1885,25 +1885,25 @@ onBeforeUnmount(() => {
           </div>
           <div
             v-else
-            class="mt-4 rounded-3xl border border-dashed border-slate-200 bg-slate-50 px-6 py-8 text-center text-sm text-slate-500"
+            class="mt-4 rounded-3xl border border-dashed border-slate-200 bg-slate-50 px-6 py-8 text-center text-sm text-slate-500 dark:border-white/10 dark:bg-white/5 dark:text-slate-400"
           >
             暂无退货申请记录；如需退货，可点击上方“申请退货”提交。
           </div>
         </div>
 
-        <div class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)]">
-          <p class="text-lg font-semibold text-slate-900">订单进度</p>
+        <div class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
+          <p class="text-lg font-semibold text-slate-900 dark:text-slate-100">订单进度</p>
           <div class="mt-4 space-y-3">
             <div
               v-for="timeline in timelineItems"
               :key="timeline.key"
               class="flex items-start gap-3 rounded-2xl px-3 py-2"
-              :class="timeline.active ? 'bg-teal-50' : 'bg-slate-50'"
+              :class="timeline.active ? 'bg-teal-50 dark:bg-teal-500/10' : 'bg-slate-50 dark:bg-white/5'"
             >
               <span class="mt-1 h-2.5 w-2.5 rounded-full" :class="timeline.active ? 'bg-teal-500' : 'bg-slate-300'" />
               <div>
-                <p class="text-sm font-semibold text-slate-900">{{ timeline.title }}</p>
-                <p class="text-xs text-slate-500">{{ timeline.time }}</p>
+                <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">{{ timeline.title }}</p>
+                <p class="text-xs text-slate-500 dark:text-slate-400">{{ timeline.time }}</p>
               </div>
             </div>
           </div>
@@ -2270,6 +2270,46 @@ onBeforeUnmount(() => {
   .voucher-preview-panel__body {
     max-height: min(42vh, 360px);
   }
+}
+
+/* 暗色：只调整编辑区提示条、预览外框与工具栏；.order-voucher-print-scope 纸面与打印区保持白纸黑字。 */
+.dark .voucher-editor-banner {
+  border-color: rgba(129, 140, 248, 0.3);
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.12) 0%, rgba(59, 130, 246, 0.08) 100%);
+}
+
+.dark .voucher-editor-banner__title {
+  color: #c7d2fe;
+}
+
+.dark .voucher-editor-banner__content,
+.dark .voucher-preview-panel__summary,
+.dark .voucher-orientation-toolbar__label {
+  color: #cbd5e1;
+}
+
+.dark .voucher-preview-panel {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: #141415;
+}
+
+.dark .voucher-preview-panel__title {
+  color: #f1f5f9;
+}
+
+.dark .voucher-orientation-toolbar {
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.dark .voucher-preview-panel__header {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.dark .voucher-preview-panel__body {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: #0f0f10;
 }
 </style>
 

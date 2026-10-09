@@ -127,4 +127,13 @@ const handleEnter = (event: KeyboardEvent) => {
 .client-qty-input--compact :deep(.el-input__inner) {
   height: 1.625rem;
 }
+
+/* 暗色：聚焦底色与数字颜色。 */
+.dark .client-qty-input :deep(.el-input__wrapper.is-focus) {
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.dark .client-qty-input :deep(.el-input__inner) {
+  color: #f1f5f9;
+}
 </style>

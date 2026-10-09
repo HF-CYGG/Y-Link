@@ -2008,7 +2008,7 @@ onActivated(() => {
       <template #default="{ isPhone }">
         <section class="flex flex-col gap-3">
           <div class="flex flex-wrap items-center justify-between gap-2">
-            <p class="text-xs text-slate-500">
+            <p class="text-xs text-slate-500 dark:text-slate-400">
               当前 {{ batchCreateRowCount }} 行 / 上限 {{ BATCH_CREATE_MAX_ROWS }} 行
             </p>
             <div class="flex flex-wrap items-center gap-2">
@@ -2016,7 +2016,7 @@ onActivated(() => {
               <el-button size="small" type="primary" plain @click="addBatchCreateRow">新增一行</el-button>
             </div>
           </div>
-          <div class="rounded-xl border border-slate-200">
+          <div class="rounded-xl border border-slate-200 dark:border-white/10">
             <el-table native-scrollbar :data="batchCreateRows" size="small" max-height="460">
               <el-table-column label="#" width="56" align="center">
                 <template #default="{ $index }">
@@ -2944,5 +2944,41 @@ onActivated(() => {
     width: 100%;
     min-width: 0;
   }
+}
+
+/* 暗色：SKU 区说明块、尺寸标签、缩略图上传与删除/替换按钮。 */
+.dark .sku-owned-fields-hint {
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgb(148 163 184);
+}
+
+.dark .sku-dims label {
+  color: rgb(203 213 225);
+}
+
+.dark .sku-thumb-button {
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgb(148 163 184);
+}
+
+.dark .sku-thumb-button:hover,
+.dark .sku-thumb-uploader.is-drag-active .sku-thumb-button {
+  border-color: rgb(45 212 191);
+  background: rgba(20, 184, 166, 0.1);
+  color: rgb(94 234 212);
+}
+
+.dark .sku-thumb-remove {
+  border-color: rgba(248, 113, 113, 0.4);
+  background: #1d1d1f;
+  color: rgb(248 113 113);
+}
+
+.dark .sku-thumb-replace-button {
+  border-color: rgba(45, 212, 191, 0.3);
+  background: rgba(20, 184, 166, 0.12);
+  color: rgb(94 234 212);
 }
 </style>

@@ -40,15 +40,15 @@ const iconMap: Record<NonNullable<Props['type']>, string> = {
   <section
     :class="[
       'ylink-request-state rounded-[1.4rem] px-5 py-10 text-center',
-      props.card ? 'bg-white shadow-[var(--ylink-shadow-soft)]' : '',
+      props.card ? 'bg-white shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]' : '',
     ]"
   >
     <p class="text-4xl">{{ iconMap[props.type] }}</p>
-    <p class="mt-3 text-base font-semibold text-slate-900">{{ props.title }}</p>
-    <p class="mt-1 text-sm text-slate-500">{{ props.description }}</p>
+    <p class="mt-3 text-base font-semibold text-slate-900 dark:text-slate-100">{{ props.title }}</p>
+    <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">{{ props.description }}</p>
     <button
       type="button"
-      class="mt-5 inline-flex h-10 items-center justify-center rounded-full border border-slate-200 bg-slate-50 px-4 text-sm text-slate-700 transition hover:border-teal-300 hover:text-teal-700"
+      class="mt-5 inline-flex h-10 items-center justify-center rounded-full border border-slate-200 bg-slate-50 px-4 text-sm text-slate-700 transition hover:border-teal-300 hover:text-teal-700 dark:border-white/10 dark:bg-white/5 dark:text-slate-200 dark:hover:border-teal-400/50 dark:hover:text-teal-300"
       @click="emit('retry')"
     >
       {{ props.actionText }}

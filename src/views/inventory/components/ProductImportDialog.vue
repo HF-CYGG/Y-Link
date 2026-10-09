@@ -126,7 +126,7 @@ const reset = () => {
         <el-upload :show-file-list="false" accept=".xlsx" :http-request="handleSelect">
           <el-button type="primary" :loading="previewing">选择 Excel 文件</el-button>
         </el-upload>
-        <span v-if="selectedFile" class="text-sm text-slate-500">{{ selectedFile.name }}</span>
+        <span v-if="selectedFile" class="text-sm text-slate-500 dark:text-slate-400">{{ selectedFile.name }}</span>
       </div>
 
       <template v-if="preview">
@@ -152,8 +152,8 @@ const reset = () => {
           <el-table-column prop="locationCode" label="库位" width="90" />
           <el-table-column label="校验结果" min-width="200">
             <template #default="{ row }">
-              <span v-if="!row.errors.length" class="text-emerald-600">通过</span>
-              <span v-else class="text-red-600">{{ row.errors.join('；') }}</span>
+              <span v-if="!row.errors.length" class="text-emerald-600 dark:text-emerald-400">通过</span>
+              <span v-else class="text-red-600 dark:text-red-400">{{ row.errors.join('；') }}</span>
             </template>
           </el-table-column>
         </el-table>

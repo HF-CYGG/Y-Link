@@ -322,7 +322,7 @@ const deviceLabel = computed(() => {
   background-color: rgba(148, 163, 184, 0.45);
 }
 
-.dark :deep(.app-sidebar__scroll-shell .el-scrollbar__thumb) {
+:global(.dark .app-sidebar__scroll-shell .el-scrollbar__thumb) {
   background-color: rgba(100, 116, 139, 0.52);
 }
 
@@ -351,8 +351,8 @@ const deviceLabel = computed(() => {
   background-color: rgba(0, 91, 82, 0.05) !important;
 }
 
-.dark :deep(.app-sidebar-menu .el-menu-item:hover),
-.dark :deep(.app-sidebar-menu .el-sub-menu__title:hover) {
+:global(.dark .app-sidebar-menu .el-menu-item:hover),
+:global(.dark .app-sidebar-menu .el-sub-menu__title:hover) {
   background-color: rgba(255, 255, 255, 0.06) !important;
 }
 
@@ -363,7 +363,7 @@ const deviceLabel = computed(() => {
   font-weight: 600;
 }
 
-.dark :deep(.app-sidebar-menu .el-menu-item.is-active) {
+:global(.dark .app-sidebar-menu .el-menu-item.is-active) {
   background-color: #2f5f5a !important;
   border-right: 3px solid #b8fff5;
   color: #ffffff !important;

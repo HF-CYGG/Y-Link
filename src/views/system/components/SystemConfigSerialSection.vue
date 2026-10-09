@@ -43,7 +43,7 @@ const SECTION_META: Array<{ kind: OrderIdentifierKind; title: string; descriptio
               {{ config?.[section.kind][orderType].prefix || '-' }}
             </code>
           </div>
-          <p class="mt-2 text-xs text-slate-500">
+          <p class="mt-2 text-xs text-slate-500 dark:text-slate-400">
             起始号 {{ config?.[section.kind][orderType].start ?? '-' }} · 位宽 {{ config?.[section.kind][orderType].width ?? '-' }}
           </p>
           <el-form-item v-if="section.editable" :prop="`${section.kind}.${orderType}.current`" class="mb-0 mt-3">

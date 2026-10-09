@@ -236,7 +236,7 @@ const handleSubmit = async () => {
           <template #header>
             <div class="space-y-0.5">
               <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">作业设置</h2>
-              <p class="text-xs text-slate-500">选择库存变动类型，再扫码加入商品。</p>
+              <p class="text-xs text-slate-500 dark:text-slate-400">选择库存变动类型，再扫码加入商品。</p>
             </div>
           </template>
           <div class="min-w-0">
@@ -282,14 +282,14 @@ const handleSubmit = async () => {
             <div class="flex min-w-0 flex-wrap items-center justify-between gap-2">
               <div>
                 <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">待提交清单</h2>
-                <p class="text-xs text-slate-500">{{ lines.length }} 个规格 · 合计 {{ totalQty }} 件</p>
+                <p class="text-xs text-slate-500 dark:text-slate-400">{{ lines.length }} 个规格 · 合计 {{ totalQty }} 件</p>
               </div>
               <el-button link type="danger" :disabled="!lines.length" @click="clearDraft">清空</el-button>
             </div>
           </template>
           <div v-if="!lines.length" class="rounded-xl border border-dashed border-slate-200 bg-slate-50/70 px-4 py-5 text-center dark:border-white/10 dark:bg-white/5">
             <p class="text-sm font-medium text-slate-700 dark:text-slate-200">清单尚无商品</p>
-            <p class="mt-1 text-xs text-slate-500">扫描商品条码后，数量与库存预览会显示在这里。</p>
+            <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">扫描商品条码后，数量与库存预览会显示在这里。</p>
           </div>
           <div v-else class="space-y-3">
             <div
@@ -300,13 +300,13 @@ const handleSubmit = async () => {
             >
               <div class="min-w-0 basis-full flex-1 sm:basis-48">
                 <div class="break-words font-medium">{{ line.productName }}</div>
-                <div class="break-all text-xs text-slate-500">
+                <div class="break-all text-xs text-slate-500 dark:text-slate-400">
                   {{ line.specText }} · {{ line.skuCode }}<span v-if="line.locationCode"> · 库位 {{ line.locationCode }}</span>
                 </div>
               </div>
               <div class="w-full text-sm tabular-nums text-slate-600 sm:w-auto dark:text-slate-300">
                 库存 {{ line.currentStock }}
-                <span :class="signedDelta(line) >= 0 ? 'text-emerald-600' : 'text-red-600'">
+                <span :class="signedDelta(line) >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'">
                   {{ signedDelta(line) >= 0 ? '+' : '' }}{{ signedDelta(line) }}
                 </span>
                 → <strong>{{ resultStock(line) }}</strong>
@@ -343,10 +343,10 @@ const handleSubmit = async () => {
           <template #header>
             <div class="space-y-0.5">
               <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">最近提交</h2>
-              <p class="text-xs text-slate-500">核对本次记账后的库存</p>
+              <p class="text-xs text-slate-500 dark:text-slate-400">核对本次记账后的库存</p>
             </div>
           </template>
-          <div v-if="!lastResult" class="rounded-xl bg-slate-50 px-3 py-4 text-sm text-slate-500 dark:bg-white/5">
+          <div v-if="!lastResult" class="rounded-xl bg-slate-50 px-3 py-4 text-sm text-slate-500 dark:bg-white/5 dark:text-slate-400">
             提交成功后，这里会显示单号与各规格的库存结果。
           </div>
           <div v-else class="space-y-2 text-sm">
@@ -354,10 +354,10 @@ const handleSubmit = async () => {
               <span class="break-all font-semibold">{{ lastResult.docNo }}</span>
               <el-tag size="small">{{ lastResult.docTypeLabel }}</el-tag>
             </div>
-            <div class="text-xs text-slate-500">{{ lastResult.reasonLabel || '' }} {{ lastResult.remark || '' }}</div>
+            <div class="text-xs text-slate-500 dark:text-slate-400">{{ lastResult.reasonLabel || '' }} {{ lastResult.remark || '' }}</div>
             <div v-for="item in lastResult.items" :key="item.id" class="rounded-lg bg-slate-50 px-2 py-1 dark:bg-white/5">
               <div class="truncate">{{ item.productName }} · {{ item.specText }}</div>
-              <div class="tabular-nums text-xs text-slate-500">
+              <div class="tabular-nums text-xs text-slate-500 dark:text-slate-400">
                 {{ item.beforeSkuStock }} → {{ item.qty >= 0 ? '+' : '' }}{{ item.qty }} → <strong>{{ item.afterSkuStock }}</strong>
               </div>
             </div>

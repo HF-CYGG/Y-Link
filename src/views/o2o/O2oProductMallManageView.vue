@@ -558,4 +558,28 @@ onDeactivated(() => {
   .mall-pagination { justify-content: center; }
   .mall-editor__row { grid-template-columns: 1fr; gap: 0; }
 }
+
+/* 暗色（只能用 .dark 类，不得改用系统媒体查询，见 scripts/verify-o2o-online-display.ts）：商城预览卡片、价格与 SKU 列表。 */
+.dark .mall-surface,
+.dark .mall-card {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: #141415;
+}
+
+.dark .mall-product__copy strong {
+  color: #f1f5f9;
+}
+
+.dark .mall-price,
+.dark .mall-card__facts b {
+  color: #5eead4;
+}
+
+.dark .mall-editor__sku-list {
+  border-top-color: rgba(255, 255, 255, 0.08);
+}
+
+.dark .mall-editor__sku-row {
+  background: rgba(255, 255, 255, 0.04);
+}
 </style>

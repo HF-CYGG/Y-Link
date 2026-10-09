@@ -116,7 +116,7 @@ const submit = () => {
         </el-descriptions-item>
       </el-descriptions>
 
-      <div v-if="preview?.blockers.length" class="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+      <div v-if="preview?.blockers.length" class="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-900/60 dark:bg-amber-500/10 dark:text-amber-300">
         <div class="mb-2 font-medium">当前阻断原因</div>
         <ul class="list-disc space-y-1 pl-5">
           <li v-for="blocker in preview.blockers" :key="blocker.code">
@@ -126,7 +126,7 @@ const submit = () => {
       </div>
       <div
         v-else-if="preview && !allowedByPreview"
-        class="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800"
+        class="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-900/60 dark:bg-amber-500/10 dark:text-amber-300"
       >
         当前状态或关键业务关联不满足该操作条件，请完成处理后重新预检。
       </div>

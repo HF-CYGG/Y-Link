@@ -193,13 +193,13 @@ const handleCommit = async () => {
               <span class="ml-2 text-xs text-slate-400">数量 {{ order.totalQty }} · ¥{{ formatAmount(order.totalAmount) }}</span>
             </el-option>
           </el-select>
-          <p v-if="isTargetForced" class="mt-1 text-xs text-slate-500">已选择的已有父单只能作为本次合并目标。</p>
+          <p v-if="isTargetForced" class="mt-1 text-xs text-slate-500 dark:text-slate-400">已选择的已有父单只能作为本次合并目标。</p>
         </el-form-item>
         <el-form-item label="来源单">
           <div class="grid w-full gap-2 sm:grid-cols-2">
-            <div v-for="order in sourceOrders" :key="order.id" class="rounded-xl border border-slate-200 px-3 py-2 text-sm">
-              <p class="font-medium text-slate-800">{{ getOrderLabel(order) }}</p>
-              <p class="mt-1 text-xs text-slate-500">数量 {{ order.totalQty }} · ¥{{ formatAmount(order.totalAmount) }}</p>
+            <div v-for="order in sourceOrders" :key="order.id" class="rounded-xl border border-slate-200 px-3 py-2 text-sm dark:border-white/10">
+              <p class="font-medium text-slate-800 dark:text-slate-100">{{ getOrderLabel(order) }}</p>
+              <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">数量 {{ order.totalQty }} · ¥{{ formatAmount(order.totalAmount) }}</p>
             </div>
           </div>
         </el-form-item>
@@ -221,8 +221,8 @@ const handleCommit = async () => {
           show-icon
         />
         <section class="grid gap-3 sm:grid-cols-2">
-          <div class="rounded-xl bg-slate-50 p-3 text-sm"><p class="text-slate-500">合并前</p><p class="mt-1 font-semibold">{{ preview.beforeTotals.itemCount }} 行 · {{ preview.beforeTotals.totalQty }} 件 · ¥{{ formatAmount(preview.beforeTotals.totalAmount) }}</p></div>
-          <div class="rounded-xl bg-teal-50 p-3 text-sm"><p class="text-teal-700">合并后</p><p class="mt-1 font-semibold text-teal-900">{{ preview.afterTotals.itemCount }} 行 · {{ preview.afterTotals.totalQty }} 件 · ¥{{ formatAmount(preview.afterTotals.totalAmount) }}</p></div>
+          <div class="rounded-xl bg-slate-50 p-3 text-sm dark:bg-white/5"><p class="text-slate-500 dark:text-slate-400">合并前</p><p class="mt-1 font-semibold">{{ preview.beforeTotals.itemCount }} 行 · {{ preview.beforeTotals.totalQty }} 件 · ¥{{ formatAmount(preview.beforeTotals.totalAmount) }}</p></div>
+          <div class="rounded-xl bg-teal-50 p-3 text-sm dark:bg-teal-500/10"><p class="text-teal-700 dark:text-teal-300">合并后</p><p class="mt-1 font-semibold text-teal-900 dark:text-teal-200">{{ preview.afterTotals.itemCount }} 行 · {{ preview.afterTotals.totalQty }} 件 · ¥{{ formatAmount(preview.afterTotals.totalAmount) }}</p></div>
         </section>
         <el-alert :title="`库存影响：${preview.inventoryImpact.message}`" type="info" :closable="false" show-icon />
         <el-table native-scrollbar :data="preview.mergedItems" size="small" max-height="220">

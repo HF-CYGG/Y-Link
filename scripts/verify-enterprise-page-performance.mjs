@@ -2,7 +2,7 @@
  * 文件说明：scripts/verify-enterprise-page-performance.mjs
  * 文件职责：执行 Y-Link 前端构建预算校验，覆盖总产物、热路径资源、低频重包与高频路由分包，并输出统一 JSON 报告。
  * 实现逻辑：
- * 1. 读取 dist 产物，并从 index.html 的 module/stylesheet 引用递归还原真实首屏静态依赖图；
+ * 1. 读取 dist 产物，并从 index.html 的 module/经典同步脚本/stylesheet 引用递归还原真实首屏静态依赖图；
  * 2. 对“总产物预算 + 首屏 JS/CSS 预算 + 低频专包预算 + 路由分包预算”逐项断言；
  * 3. 复核 keepAlive、预热与稳定请求等性能治理结构是否仍存在；
  * 4. 将预算上限、实测值、明细结果和最终状态写入 `.local-dev/enterprise-performance-budget-report.json`。
@@ -22,8 +22,10 @@ const reportPath = path.join(runtimeRoot, 'enterprise-performance-budget-report.
 /**
  * 构建预算分成两层：
  * - 总产物预算：防止整体包体持续膨胀；
- * - 首屏预算：以 index.html 实际 modulepreload、入口模块和 stylesheet 依赖图为准，
- *   避免把动态路由产物误算进热路径，也避免低频重包意外回到入口而不被发现。
+ * - 首屏预算：以 index.html 实际 modulepreload、入口模块、经典同步脚本和 stylesheet 依赖图为准，
+ *   避免把动态路由产物误算进热路径，也避免低频重包意外回到入口而不被发现；
+ * - 经典同步脚本（如首帧主题脚本 theme-init）会阻塞解析，必须计入首屏 JS，且必须是 dist/assets 下带内容哈希的产物：
+ *   放在 dist 根目录既逃过总产物统计，又会被 Nginx 的 `.js` 长缓存锁住旧版本。
  *
  * 已批准的 Issues #68-#74 在相同 Node 与依赖环境中的构建总产物为 4251.56 KB；
  * 相对 main@6dc428b 的 4199.83 KB 真实增加 51.73 KB。该增量来自四项已批准功能，
@@ -64,12 +66,29 @@ const reportPath = path.join(runtimeRoot, 'enterprise-performance-budget-report.
  * 异步加载的 AdminMfaDialog 独立块 12.41 KB、登录页第二步（动态码 / 恢复码）约 2.56 KB、用户管理页的
  * 两步验证状态列与重置入口约 1.40 KB；首屏 JS/CSS 仅 +0.42 / +0.13 KB，首屏依赖图、低频重包与路由分包
  * 预算均无新增超额，因此总量上限上调为 4570 KB（约 0.22% 余量），其余各项预算维持不变。
+ *
+ * 恢复亮暗切换（Element Plus 风格开关 + 跟随系统）：此前 THEME_SWITCH_ENABLED=false 为常量，打包器把
+ * 整段主题切换动画（View Transition 圆形揭幕与降级过渡）当作死代码删除，首屏预算是在锁定状态下定的。
+ * 同一环境下相对开工前的分支基线（39c459b）实测：首屏 JS 848.04 → 852.25 KB（+4.21 KB，其中 store 块恢复
+ * 切换动画 +2.94 KB、开关滑块的 Sunny/Moon 图标进入 ui-kit 块 +1.37 KB）；首屏 CSS 319.90 → 323.44 KB
+ * （+3.54 KB：亮 / 暗两组品牌主色色阶、全局暗色业务变量 / 浮层边框 / 打印强制亮色，以及全站页面补齐的
+ * Tailwind dark: 工具类——工具类统一产出到入口 main.css）。开关组件本身在顶栏中异步拆包，不进首屏。
+ * 因此首屏 JS 上限调整为 855 KB、首屏 CSS 上限调整为 325 KB。总产物 4623.59 → 4673.40 KB（+49.81 KB，
+ * 主要为各路由分包内的暗色 scoped 样式）。
+ *
+ * 预算统一上调（经人工评估批准）：总产物与 OrderEntryView / OrderListView 路由分包在开工前基线 39c459b 已超额
+ * （总产物 4623.59 KB > 4570 KB，OrderEntryView 34.71 KB > 32 KB，OrderListView 34.31 KB > 30 KB），来源为
+ * 路由分包预算设定（#85，07cab75）之后合入的树状订单合并与来源追溯（#87）、开单库存扣减加固（#88）、业务单号 /
+ * 系统编号 / 预订单号拆分与单号复用、出库开单扫码入单、出库抽屉数值单向更新等功能；暗色适配再叠加
+ * +49.81 KB / +0.05 KB / +0.43 KB。同一环境实测：总产物 4673.40 KB、OrderEntryView 34.76 KB、OrderListView 34.74 KB。
+ * 因此总量上限调整为 4690 KB（约 0.36% 余量），OrderEntryView 与 OrderListView 路由分包上限均调整为 36 KB
+ * （约 3.5% 余量），继续约束出库两页主包增长；其余各项预算维持不变。
  */
 const performanceBudget = {
-  totalAssetsMaxKB: 4570,
+  totalAssetsMaxKB: 4690,
   criticalAssetsMaxKB: 1180,
-  initialLoadJsMaxKB: 850,
-  initialLoadCssMaxKB: 320,
+  initialLoadJsMaxKB: 855,
+  initialLoadCssMaxKB: 325,
   entryChunkMaxKB: 80,
   loginChunkMaxKB: 25,
   frameworkChunkMaxKB: 220,
@@ -87,11 +106,13 @@ const performanceBudget = {
    * OrderEntryView：#68-#74 引入 SKU 选择、草稿商品对账后接近 30 KB 上限；
    * #75 客户部门下拉与自由录入另增约 2.0 KB（main@6dc428b 上实测 25.13 → 27.15 KB），
    * 合并后实测 30.75 KB，按当前值重设为 32 KB，保留约 4% 余量继续约束开单页主包增长。
+   * 之后 #87/#88、单号拆分与复用、扫码入单与暗色适配叠加后，OrderEntryView 实测 34.76 KB、OrderListView 34.74 KB，
+   * 两者上限统一调整为 36 KB（详见文件头部“预算统一上调”说明）。
    */
   routeChunkMaxKB: {
     DashboardView: 20,
-    OrderEntryView: 32,
-    OrderListView: 30,
+    OrderEntryView: 36,
+    OrderListView: 36,
     ProductCenterView: 25,
     UserCenterView: 40,
     AuditLogView: 25,
@@ -242,6 +263,12 @@ const modulePreloadNames = htmlTags
   .map((tag) => extractHtmlAttribute(tag, 'href'))
   .filter(Boolean)
   .map((reference) => normalizeAssetReference(reference, 'index.html modulepreload'))
+// 非 module 的同源 `<script src>` 在解析阶段同步执行，同样属于首屏；normalizeAssetReference 会拒绝 dist/assets 之外的路径。
+const classicScriptNames = htmlTags
+  .filter((tag) => /^<script\b/i.test(tag) && !/\btype\s*=\s*(["'])module\1/i.test(tag))
+  .map((tag) => extractHtmlAttribute(tag, 'src'))
+  .filter(Boolean)
+  .map((reference) => normalizeAssetReference(reference, 'index.html 经典同步脚本'))
 const stylesheetNames = htmlTags
   .filter((tag) => /^<link\b/i.test(tag) && /\brel\s*=\s*(["'])stylesheet\1/i.test(tag))
   .map((tag) => extractHtmlAttribute(tag, 'href'))
@@ -252,7 +279,7 @@ assert(entryModuleNames.length === 1, 'index.html 必须且只能有一个 type=
 assert(modulePreloadNames.length > 0, 'index.html 缺少 modulepreload；首屏依赖预加载已被关闭。')
 assert(stylesheetNames.length > 0, 'index.html 缺少首屏 stylesheet。')
 
-const initialModuleGraph = collectStaticModuleGraph([...entryModuleNames, ...modulePreloadNames])
+const initialModuleGraph = collectStaticModuleGraph([...entryModuleNames, ...modulePreloadNames, ...classicScriptNames])
 const initialAssetNames = new Set([...initialModuleGraph, ...stylesheetNames])
 const initialAssets = [...initialAssetNames].map((assetName) => requireAsset(assetName, '首屏依赖图'))
 
@@ -459,6 +486,7 @@ const report = {
   initialLoadGraph: {
     entryModules: entryModuleNames,
     modulePreloads: modulePreloadNames,
+    classicScripts: classicScriptNames,
     stylesheets: stylesheetNames,
     assets: initialAssets.map((entry) => ({ name: entry.name, sizeKB: entry.sizeKB })),
     lowFrequencyLeaks: lowFrequencyInitialLeaks.map((entry) => entry.name),
