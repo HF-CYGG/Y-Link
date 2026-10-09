@@ -137,6 +137,34 @@ body.dark {
 }
 
 /*
+ * 品牌主色色阶（亮 / 暗两组）：
+ * - 选择器使用 `html:not(.dark)` / `html.dark`（优先级高于 :root），
+ *   避免开发态按需注入的组件样式里 `:root` 默认蓝色色板覆盖品牌色；
+ * - 暗色组主色提亮为 teal-600，浅色阶按 Element Plus 暗色算法与 #141414 混合，
+ *   保证 plain 按钮、light 标签、选中/悬停浅底在暗底上不发白；
+ * - 不再用内联样式写在 html 上，否则会压过 html.dark 导致暗色色阶失效。
+ */
+html:not(.dark) {
+  --el-color-primary: #005b52;
+  --el-color-primary-light-3: #4d8c85;
+  --el-color-primary-light-5: #80ada8;
+  --el-color-primary-light-7: #b3cecb;
+  --el-color-primary-light-8: #ccdcdb;
+  --el-color-primary-light-9: #e6efee;
+  --el-color-primary-dark-2: #004942;
+}
+
+html.dark {
+  --el-color-primary: #0d9488;
+  --el-color-primary-light-3: #0f6e65;
+  --el-color-primary-light-5: #11544e;
+  --el-color-primary-light-7: #123a37;
+  --el-color-primary-light-8: #132e2b;
+  --el-color-primary-light-9: #132120;
+  --el-color-primary-dark-2: #3da9a0;
+}
+
+/*
  * 主题过渡门控：
  * - 仅在 fallback 策略触发时，为应用壳层与大面积表面容器开启颜色过渡；
  * - 明确排除按钮、菜单项、表格单元格等高频 hover 节点，避免主题切换与交互态 transition 叠加闪烁；

@@ -19,6 +19,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { Lock, User, Right, Key } from '@element-plus/icons-vue'
 import { useRoute, useRouter } from 'vue-router'
+import ThemeToggle from '@/layout/components/ThemeToggle.vue'
 import { resolveDefaultManagementRedirect, resolveSafeRedirect } from '@/router'
 import { useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
@@ -360,7 +361,9 @@ const handleSubmit = async () => {
       </aside>
 
       <section class="form-panel">
-        <div class="action-top"></div>
+        <div class="action-top">
+          <ThemeToggle />
+        </div>
 
         <div class="form-content">
           <div class="form-header">

@@ -14,6 +14,7 @@ import { computed, ref, watch } from 'vue'
 import type { RouteLocationNormalizedLoaded } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 import { APP_META } from '@/constants/app-meta'
+import ThemeToggle from '@/layout/components/ThemeToggle.vue'
 import { useClientAuthStore, useClientCartStore } from '@/store'
 import router from '@/router'
 import { buildClientNavigationItems } from '@/router/routes'
@@ -210,6 +211,7 @@ const handleLogout = async () => {
               {{ APP_META.repositoryLabel }}
             </a>
           </div>
+          <ThemeToggle />
           <button
             type="button"
             class="rounded-full border border-[var(--ylink-color-border)] bg-white/90 px-3 py-1.5 text-xs font-medium text-slate-600"

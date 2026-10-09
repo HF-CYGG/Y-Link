@@ -89,6 +89,7 @@ import pinia from '@/store/pinia'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
 import { APP_META } from '@/constants/app-meta'
+import ThemeToggle from '@/layout/components/ThemeToggle.vue'
 import {
   CLIENT_CONFIRM_INPUT_MISMATCH_MESSAGE,
   CLIENT_CONFIRM_NEW_PASSWORD_PLACEHOLDER,
@@ -1160,6 +1161,9 @@ onUnmounted(() => {
       </aside>
 
       <section class="form-panel">
+        <div class="form-panel__theme">
+          <ThemeToggle />
+        </div>
         <div class="form-container">
           <div class="mode-toggle">
             <div class="toggle-slider" :style="{ transform: modeToggleSliderTransform }"></div>
@@ -2200,6 +2204,14 @@ onUnmounted(() => {
   align-items: flex-start;
   justify-content: center;
   position: relative;
+}
+
+/* 亮暗切换开关固定在表单区右上角，与管理端登录页位置一致。 */
+.form-panel__theme {
+  position: absolute;
+  top: 20px;
+  right: 24px;
+  z-index: 2;
 }
 
 .form-container {

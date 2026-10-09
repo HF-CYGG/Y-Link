@@ -64,12 +64,19 @@ const reportPath = path.join(runtimeRoot, 'enterprise-performance-budget-report.
  * 异步加载的 AdminMfaDialog 独立块 12.41 KB、登录页第二步（动态码 / 恢复码）约 2.56 KB、用户管理页的
  * 两步验证状态列与重置入口约 1.40 KB；首屏 JS/CSS 仅 +0.42 / +0.13 KB，首屏依赖图、低频重包与路由分包
  * 预算均无新增超额，因此总量上限上调为 4570 KB（约 0.22% 余量），其余各项预算维持不变。
+ *
+ * 恢复亮暗切换（Element Plus 风格开关 + 跟随系统）：此前 THEME_SWITCH_ENABLED=false 为常量，打包器把
+ * 整段主题切换动画（View Transition 圆形揭幕与降级过渡）当作死代码删除，首屏预算是在锁定状态下定的。
+ * 同一环境下相对本分支 HEAD 实测：首屏 JS 848.04 → 852.25 KB（+4.21 KB，其中 store 块恢复切换动画
+ * +2.94 KB、开关滑块的 Sunny/Moon 图标进入 ui-kit 块 +1.37 KB），首屏 CSS 319.90 → 320.39 KB
+ * （+0.49 KB，亮 / 暗两组品牌主色色阶）。开关组件本身在顶栏中异步拆包，不进首屏。
+ * 因此首屏 JS 上限调整为 855 KB、首屏 CSS 上限调整为 321 KB；总产物超额在本分支 HEAD 已存在，不在此调整。
  */
 const performanceBudget = {
   totalAssetsMaxKB: 4570,
   criticalAssetsMaxKB: 1180,
-  initialLoadJsMaxKB: 850,
-  initialLoadCssMaxKB: 320,
+  initialLoadJsMaxKB: 855,
+  initialLoadCssMaxKB: 321,
   entryChunkMaxKB: 80,
   loginChunkMaxKB: 25,
   frameworkChunkMaxKB: 220,

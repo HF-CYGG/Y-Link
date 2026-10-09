@@ -17,6 +17,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { Key, Lock, Message, User } from '@element-plus/icons-vue'
 import { getClientAuthCapabilities, getClientCaptcha, type ClientAuthCapabilities } from '@/api/modules/client-auth'
 import { useStableRequest } from '@/composables/useStableRequest'
+import ThemeToggle from '@/layout/components/ThemeToggle.vue'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
 import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
@@ -446,6 +447,9 @@ onUnmounted(() => {
 <template>
   <div class="forgot-password-page">
     <div class="forgot-password-card">
+      <div class="forgot-password-theme">
+        <ThemeToggle />
+      </div>
       <div class="forgot-password-header">
         <p class="forgot-password-title">找回密码</p>
         <p class="forgot-password-desc">系统启用手机或邮箱任一验证码通道时，即可自助找回。</p>
@@ -598,12 +602,20 @@ onUnmounted(() => {
 }
 
 .forgot-password-card {
+  position: relative;
   width: 100%;
   max-width: 460px;
   border-radius: 32px;
   background: #ffffff;
   padding: 32px 28px;
   box-shadow: 0 20px 60px rgba(15, 23, 42, 0.08);
+}
+
+/* 亮暗切换开关固定在卡片右上角，不挤占标题区宽度。 */
+.forgot-password-theme {
+  position: absolute;
+  top: 24px;
+  right: 24px;
 }
 
 .forgot-password-header {

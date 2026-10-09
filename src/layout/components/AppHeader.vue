@@ -49,6 +49,12 @@ const passwordFormRef = ref<FormInstance>()
 
 // 两步验证设置弹窗：低频入口，首次打开时才下载组件与二维码依赖，之后保持挂载复用。
 const AdminMfaDialog = defineAsyncComponent(() => import('@/components/account/AdminMfaDialog.vue'))
+/**
+ * 亮暗切换开关异步拆包：
+ * - 顶栏属于首屏依赖图，同步引入会把 el-switch 的脚本与样式带进首屏并超出预算；
+ * - 外层占位固定尺寸，开关分包加载完成前不产生布局抖动。
+ */
+const ThemeToggle = defineAsyncComponent(() => import('@/layout/components/ThemeToggle.vue'))
 const mfaDialogMounted = ref(false)
 const mfaDialogVisible = ref(false)
 
@@ -223,6 +229,9 @@ const handleLogout = async () => {
         class="hidden rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-500 dark:bg-white/5 dark:text-slate-400 md:inline-flex"
       >
         平板布局
+      </span>
+      <span class="inline-flex h-6 w-10 items-center">
+        <ThemeToggle />
       </span>
 
       <el-dropdown trigger="click" placement="bottom-end">
