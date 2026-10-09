@@ -948,7 +948,7 @@ onBeforeUnmount(() => {
                       step.state === 'done'
                         ? 'bg-emerald-500 text-white'
                         : step.state === 'current'
-                          ? 'bg-slate-900 text-white'
+                          ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900'
                           : 'bg-white text-slate-400 ring-1 ring-inset ring-slate-200 dark:bg-[#141415] dark:ring-white/10'
                     "
                   >
@@ -957,7 +957,7 @@ onBeforeUnmount(() => {
                   <span
                     v-if="index < progressSteps.length - 1"
                     class="mt-2 h-8 w-px"
-                    :class="step.state === 'upcoming' ? 'bg-slate-200' : 'bg-slate-300'"
+                    :class="step.state === 'upcoming' ? 'bg-slate-200 dark:bg-white/10' : 'bg-slate-300 dark:bg-white/25'"
                   />
                 </div>
                 <div class="min-w-0 flex-1 pb-2">
@@ -1120,7 +1120,7 @@ onBeforeUnmount(() => {
                   <span
                     v-for="tag in conversation.fields.tags"
                     :key="tag"
-                    class="rounded-full bg-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200"
+                    class="rounded-full bg-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700 dark:bg-white/10 dark:text-slate-200"
                   >
                     {{ tag }}
                   </span>
