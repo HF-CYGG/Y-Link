@@ -650,11 +650,24 @@ const formatCompactDateTime = (value?: string | null) => {
 }
 
 /**
+ * 会话面板是否可见：三栏常驻；两栏与堆叠布局下只有停留在“会话”标签时才显示（其余时间被 v-show 隐藏）。
+ */
+const isConversationPaneVisible = computed(() => isWideWorkbench.value || activeDetailTab.value === 'conversation')
+// 面板隐藏期间请求的滚动先挂起，等面板重新可见后再补一次，隐藏态的滚动容器拿不到有效 scrollHeight。
+let hasPendingConversationScroll = false
+
+/**
  * 消息流滚到底部：
  * - 切换会话或自己发送回复后，客服应直接看到最新消息；
- * - 同会话自动刷新仍走快照恢复，不在这里强制拉到底，避免打断客服翻看历史。
+ * - 同会话自动刷新仍走快照恢复，不在这里强制拉到底，避免打断客服翻看历史；
+ * - 面板被隐藏时只记录待滚动，由 isConversationPaneVisible 的监听在切回会话标签后执行。
  */
 const scrollConversationToBottom = async () => {
+  if (!isConversationPaneVisible.value) {
+    hasPendingConversationScroll = true
+    return
+  }
+  hasPendingConversationScroll = false
   await nextTick()
   const wrap = getScrollbarWrap(conversationMessageScrollbarRef.value)
   if (wrap) {
@@ -1643,6 +1656,16 @@ watch(
   { flush: 'post' },
 )
 
+watch(
+  isConversationPaneVisible,
+  (visible) => {
+    if (visible && hasPendingConversationScroll) {
+      void scrollConversationToBottom()
+    }
+  },
+  { flush: 'post' },
+)
+
 watch(workbenchLayout, (layout) => {
   // 回到三栏时属性栏常驻右侧，标签状态复位到会话，避免窄屏切回后仍停留在属性标签。
   if (layout === 'wide') {
@@ -1905,7 +1928,7 @@ onBeforeUnmount(() => {
             @tab-change="handleDetailTabChange"
           />
 
-          <div v-show="isWideWorkbench || activeDetailTab === 'conversation'" class="cs-pane cs-thread">
+          <div v-show="isConversationPaneVisible" class="cs-pane cs-thread">
             <header class="cs-thread__head">
               <div class="min-w-0 flex-1">
                 <div class="flex items-center gap-2">
