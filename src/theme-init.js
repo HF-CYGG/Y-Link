@@ -13,17 +13,34 @@
  * - 不能移回 public/：public 下的文件名固定，会被长缓存锁住。
  */
 (function () {
+  // 存储读取单独捕获：站点存储被禁用或处于沙箱时 getItem 会抛 SecurityError，
+  // 此时视为“未显式选择”，继续按系统偏好判定，避免暗色系统下首帧闪白。
+  var preference = null
   try {
-    var preference = window.localStorage.getItem('y-link-theme-preference')
-    var isDark = preference === 'dark' || preference === 'light'
-      ? preference === 'dark'
-      : Boolean(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)
+    preference = window.localStorage.getItem('y-link-theme-preference')
+  } catch (error) {
+    preference = null
+  }
+
+  var isDark = false
+  if (preference === 'dark' || preference === 'light') {
+    isDark = preference === 'dark'
+  } else {
+    try {
+      isDark = Boolean(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)
+    } catch (error) {
+      // matchMedia 不可用时保持亮色，由应用启动后的 Theme Store 再同步。
+      isDark = false
+    }
+  }
+
+  try {
     var mode = isDark ? 'dark' : 'light'
     var root = document.documentElement
     root.classList.add(mode)
     root.dataset.themeMode = mode
     root.style.colorScheme = mode
   } catch (error) {
-    // 存储被禁用或 matchMedia 不可用时保持默认亮色，由应用启动后再同步。
+    // 根节点写入失败时不阻断页面加载，由 Theme Store 接管。
   }
 })()
