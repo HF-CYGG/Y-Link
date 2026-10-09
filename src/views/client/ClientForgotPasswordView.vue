@@ -809,4 +809,56 @@ onUnmounted(() => {
     width: 100%;
   }
 }
+
+/* 暗色：页面底色、卡片、步骤徽标、输入框、验证码框与空态卡片。 */
+.dark .forgot-password-page {
+  background: #0a0a0b;
+}
+
+.dark .forgot-password-card {
+  background: #141415;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.dark .forgot-password-title,
+.dark .empty-state-title {
+  color: #f1f5f9;
+}
+
+.dark .step-badge {
+  background: rgba(255, 255, 255, 0.08);
+  color: #cbd5e1;
+}
+
+.dark .loading-placeholder,
+.dark .empty-state-card {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.dark .geo-input :deep(.el-input__wrapper) {
+  background-color: rgba(0, 0, 0, 0.25);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.dark .geo-input :deep(.el-input__wrapper:hover) {
+  background-color: rgba(0, 0, 0, 0.4);
+}
+
+.dark .geo-input :deep(.el-input__wrapper.is-focus) {
+  background-color: rgba(0, 0, 0, 0.55);
+}
+
+.dark .geo-input :deep(.el-input__inner) {
+  color: #f1f5f9;
+}
+
+.dark .captcha-image-box {
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.dark .captcha-image-box:hover {
+  background: rgba(0, 0, 0, 0.4);
+}
 </style>

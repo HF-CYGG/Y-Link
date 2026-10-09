@@ -62,19 +62,19 @@ const resolveReturnItemKey = (productId: string, skuId?: string | null) => skuId
     @closed="emit('closed')"
   >
     <div class="client-order-detail-dialog__content space-y-4">
-      <div class="rounded-2xl bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600">
+      <div class="rounded-2xl bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600 dark:bg-white/5 dark:text-slate-300">
         请按商品填写退货数量并说明原因。提交后系统会生成门店退货二维码，门店扫码核销后完成退货处理。
       </div>
       <div class="space-y-3">
         <div
           v-for="item in detail.items"
           :key="item.id"
-          class="rounded-3xl border border-slate-100 bg-white px-4 py-4"
+          class="rounded-3xl border border-slate-100 bg-white px-4 py-4 dark:border-white/5 dark:bg-[#141415]"
         >
           <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div>
-              <p class="text-sm font-semibold text-slate-900">{{ item.productName }}</p>
-              <p v-if="item.specText" class="mt-1 text-xs leading-5 text-slate-500">{{ item.specText }}</p>
+              <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">{{ item.productName }}</p>
+              <p v-if="item.specText" class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">{{ item.specText }}</p>
               <p class="mt-1 text-xs leading-5 text-slate-400">
                 原订 {{ item.qty }} 件，当前可退 {{ item.availableReturnQty }} 件
               </p>
@@ -98,8 +98,8 @@ const resolveReturnItemKey = (productId: string, skuId?: string | null) => skuId
         </div>
       </div>
 
-      <div class="rounded-3xl border border-slate-100 bg-white px-4 py-4">
-        <p class="text-sm font-semibold text-slate-900">退货原因</p>
+      <div class="rounded-3xl border border-slate-100 bg-white px-4 py-4 dark:border-white/5 dark:bg-[#141415]">
+        <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">退货原因</p>
         <el-input
           :model-value="returnReason"
           type="textarea"
@@ -114,7 +114,7 @@ const resolveReturnItemKey = (productId: string, skuId?: string | null) => skuId
         <p class="mt-2 text-xs text-slate-400">最多输入 {{ reasonMaxLength }} 个字符。</p>
       </div>
 
-      <div class="rounded-2xl bg-amber-50 px-4 py-3 text-sm text-amber-700">
+      <div class="rounded-2xl bg-amber-50 px-4 py-3 text-sm text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
         已选择 {{ selectedReturnItemCount }} 种商品，共 {{ selectedReturnTotalQty }} 件商品申请退货。
       </div>
     </div>

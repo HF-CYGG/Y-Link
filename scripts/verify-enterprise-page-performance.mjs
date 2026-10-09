@@ -67,16 +67,19 @@ const reportPath = path.join(runtimeRoot, 'enterprise-performance-budget-report.
  *
  * 恢复亮暗切换（Element Plus 风格开关 + 跟随系统）：此前 THEME_SWITCH_ENABLED=false 为常量，打包器把
  * 整段主题切换动画（View Transition 圆形揭幕与降级过渡）当作死代码删除，首屏预算是在锁定状态下定的。
- * 同一环境下相对本分支 HEAD 实测：首屏 JS 848.04 → 852.25 KB（+4.21 KB，其中 store 块恢复切换动画
- * +2.94 KB、开关滑块的 Sunny/Moon 图标进入 ui-kit 块 +1.37 KB），首屏 CSS 319.90 → 320.39 KB
- * （+0.49 KB，亮 / 暗两组品牌主色色阶）。开关组件本身在顶栏中异步拆包，不进首屏。
- * 因此首屏 JS 上限调整为 855 KB、首屏 CSS 上限调整为 321 KB；总产物超额在本分支 HEAD 已存在，不在此调整。
+ * 同一环境下相对开工前的分支基线（39c459b）实测：首屏 JS 848.04 → 852.25 KB（+4.21 KB，其中 store 块恢复
+ * 切换动画 +2.94 KB、开关滑块的 Sunny/Moon 图标进入 ui-kit 块 +1.37 KB）；首屏 CSS 319.90 → 323.44 KB
+ * （+3.54 KB：亮 / 暗两组品牌主色色阶、全局暗色业务变量 / 浮层边框 / 打印强制亮色，以及全站页面补齐的
+ * Tailwind dark: 工具类——工具类统一产出到入口 main.css）。开关组件本身在顶栏中异步拆包，不进首屏。
+ * 因此首屏 JS 上限调整为 855 KB、首屏 CSS 上限调整为 325 KB。总产物 4623.59 → 4673.40 KB（+49.81 KB，
+ * 主要为各路由分包内的暗色 scoped 样式）；总产物与 OrderEntryView / OrderListView 路由分包超额在基线已存在，
+ * 不在本项调整，待后续统一评估。
  */
 const performanceBudget = {
   totalAssetsMaxKB: 4570,
   criticalAssetsMaxKB: 1180,
   initialLoadJsMaxKB: 855,
-  initialLoadCssMaxKB: 321,
+  initialLoadCssMaxKB: 325,
   entryChunkMaxKB: 80,
   loginChunkMaxKB: 25,
   frameworkChunkMaxKB: 220,

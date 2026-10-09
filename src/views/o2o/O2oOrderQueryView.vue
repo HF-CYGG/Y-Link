@@ -81,17 +81,17 @@ const ACCOUNT_TYPE_LABEL_MAP: Record<ClientUserAccountType, string> = {
 const RETURN_REQUEST_STATUS_META = {
   pending: {
     label: '待门店核销',
-    className: 'bg-amber-50 text-amber-700',
+    className: 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300',
     description: '用户已提交退货申请，请门店核对商品后扫码完成退货核销。',
   },
   verified: {
     label: '退货已完成',
-    className: 'bg-emerald-50 text-emerald-700',
+    className: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300',
     description: '门店已完成退货回库核销，本次退货流程已闭环。',
   },
   rejected: {
     label: '退货已拒绝',
-    className: 'bg-rose-50 text-rose-700',
+    className: 'bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-300',
     description: '门店已拒绝本次退货申请，请结合拒绝原因继续沟通处理。',
   },
 } as const
@@ -1367,10 +1367,10 @@ onBeforeUnmount(() => {
 <template>
   <PageContainer title="订单池工作台" description="左侧订单池实时分栏，右侧工作台查看状态报告、商品明细、金额汇总与进度节点">
     <div class="order-workbench-root grid gap-4 xl:grid-cols-[26rem_minmax(0,1fr)]">
-      <section class="min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm">
+      <section class="min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm dark:bg-[#141415]">
         <div class="order-pool-header">
           <div class="order-pool-header__title">
-            <p class="break-words text-lg font-semibold text-slate-900">订单池</p>
+            <p class="break-words text-lg font-semibold text-slate-900 dark:text-slate-100">订单池</p>
             <p class="mt-1 text-xs text-slate-400">{{ listAutoRefreshStatusText }}</p>
           </div>
           <div class="order-pool-header__controls">
@@ -1412,11 +1412,11 @@ onBeforeUnmount(() => {
             :key="tab.key"
             type="button"
             class="order-pool-tab flex min-w-0 items-center justify-between rounded-2xl px-3 py-2 text-left text-xs transition"
-            :class="activePool === tab.key ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'"
+            :class="activePool === tab.key ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-white/10 dark:text-slate-200'"
             @click="handlePoolChange(tab.key)"
           >
             <span class="order-pool-tab__label">{{ tab.label }}</span>
-            <span class="order-pool-tab__count rounded-full px-2 py-0.5 text-[11px]" :class="activePool === tab.key ? 'bg-white/20 text-white' : 'bg-white text-slate-500'">
+            <span class="order-pool-tab__count rounded-full px-2 py-0.5 text-[11px]" :class="activePool === tab.key ? 'bg-white/20 text-white' : 'bg-white text-slate-500 dark:bg-[#141415] dark:text-slate-400'">
               {{ poolCountMap[tab.key] }}
             </span>
           </button>
@@ -1472,7 +1472,7 @@ onBeforeUnmount(() => {
           </template>
         </div>
 
-        <div v-if="batchPurgeResults.length" class="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+        <div v-if="batchPurgeResults.length" class="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-900/60 dark:bg-amber-500/10 dark:text-amber-300">
           <p class="font-semibold">批量删除未完成项</p>
           <ul class="mt-1 space-y-1">
             <li v-for="result in batchPurgeResults" :key="`${result.id}:${result.code}`">
@@ -1482,7 +1482,7 @@ onBeforeUnmount(() => {
         </div>
 
         <Transition name="new-order-notice">
-          <div v-if="activeNewOrderNotice" class="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700">
+          <div v-if="activeNewOrderNotice" class="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700 dark:border-amber-900/60 dark:bg-amber-500/10 dark:text-amber-300">
             <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <p class="break-words">新单提醒：新增 {{ activeNewOrderNotice.count }} 笔，已高亮 6 秒</p>
               <el-button link type="warning" @click="dismissNewOrderNotice">知道了</el-button>
@@ -1497,7 +1497,7 @@ onBeforeUnmount(() => {
               :key="order.id"
               class="relative rounded-2xl border px-3 py-3 transition"
               :class="[
-                activeOrderId === order.id ? 'border-teal-200 bg-teal-50' : 'border-slate-100 bg-white hover:bg-slate-50',
+                activeOrderId === order.id ? 'border-teal-200 bg-teal-50 dark:border-teal-500/30 dark:bg-teal-500/10' : 'border-slate-100 bg-white hover:bg-slate-50 dark:border-white/5 dark:bg-[#141415]',
                 isOrderHighlighted(order.id) ? 'order-card--new' : '',
                 isOrderRefreshed(order.id) ? 'order-card--refreshed' : '',
               ]"
@@ -1514,24 +1514,24 @@ onBeforeUnmount(() => {
               <div class="flex min-w-0 items-start justify-between gap-2">
                 <div class="min-w-0">
                   <div class="flex min-w-0 flex-wrap items-center gap-2">
-                    <p class="min-w-0 break-words text-sm font-semibold text-slate-900">{{ order.preorderNo }}</p>
+                    <p class="min-w-0 break-words text-sm font-semibold text-slate-900 dark:text-slate-100">{{ order.preorderNo }}</p>
                     <el-tag v-if="order.matchedIdentifierType && order.matchedIdentifierValue && (order.matchedIdentifierType !== 'systemNo' || isAdmin)" size="small" effect="plain" type="warning">
                       命中{{ order.matchedIdentifierType === 'businessNo' ? '出库业务单号' : order.matchedIdentifierType === 'systemNo' ? '出库系统编号' : '预订单号' }}：{{ order.matchedIdentifierValue }}
                     </el-tag>
-                    <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">
+                    <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600 dark:bg-white/10 dark:text-slate-300">
                       {{ getOrderTypeLabel(order.clientOrderType) }}
                     </span>
                     <Transition name="detail-refresh-notice">
                       <span
                         v-if="isOrderRefreshed(order.id)"
-                        class="rounded-full bg-teal-50 px-2 py-0.5 text-[11px] font-medium text-teal-700"
+                        class="rounded-full bg-teal-50 px-2 py-0.5 text-[11px] font-medium text-teal-700 dark:bg-teal-500/10 dark:text-teal-300"
                       >
                         已更新
                       </span>
                     </Transition>
                     <span
                       v-if="order.returnRequestCount > 0"
-                      class="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700"
+                      class="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:bg-amber-500/10 dark:text-amber-300"
                     >
                       退货 {{ order.returnRequestCount }} 笔
                     </span>
@@ -1543,27 +1543,27 @@ onBeforeUnmount(() => {
                   </span>
                   <span
                     v-if="getOrderCountdownText(order)"
-                    class="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700"
+                    class="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:bg-amber-500/10 dark:text-amber-300"
                   >
                     {{ getOrderCountdownText(order) }}
                   </span>
                 </div>
               </div>
-              <div class="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500">
+              <div class="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500 dark:text-slate-400">
                 <p class="break-words">时间：{{ formatOrderDateTime(order.createdAt, { includeSeconds: false }) }}</p>
                 <p class="text-right">件数：{{ order.totalQty }}</p>
                 <p class="break-words">账号类型：{{ getAccountTypeLabel(getOrderAccountType(order.clientOrderType)) }}</p>
                 <p>应付总额：¥{{ formatCurrency(order.totalAmount) }}</p>
                 <p v-if="isDepartmentOrder(order.clientOrderType)" class="break-words">部门：{{ order.departmentNameSnapshot || '未填写' }}</p>
                 <p v-if="isDepartmentOrder(order.clientOrderType)" class="text-right">工号：{{ order.staffNoSnapshot || '未留工号' }}</p>
-                <p class="break-words" :class="order.returnRequestCount > 0 ? 'text-amber-700' : 'text-slate-400'">
+                <p class="break-words" :class="order.returnRequestCount > 0 ? 'text-amber-700 dark:text-amber-300' : 'text-slate-400'">
                   退货记录：{{ order.returnRequestCount > 0 ? `共 ${order.returnRequestCount} 笔${order.pendingReturnRequestCount > 0 ? `，待处理 ${order.pendingReturnRequestCount} 笔` : ''}` : '暂无' }}
                 </p>
               </div>
               </button>
             </div>
           </TransitionGroup>
-          <div v-if="!listLoading && !currentPoolOrders.length" class="rounded-2xl border border-dashed border-slate-200 px-3 py-8 text-center text-sm text-slate-400">
+          <div v-if="!listLoading && !currentPoolOrders.length" class="rounded-2xl border border-dashed border-slate-200 px-3 py-8 text-center text-sm text-slate-400 dark:border-white/10">
             当前分栏暂无订单
           </div>
         </div>
@@ -1581,24 +1581,24 @@ onBeforeUnmount(() => {
         />
       </section>
 
-      <section class="min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm">
+      <section class="min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm dark:bg-[#141415]">
         <template v-if="activeOrderDetail">
           <!-- 右侧详情栏宽度受左侧订单池挤压，宽屏再把单号区与操作区并排，保证 5 个操作按钮能在同一行完整显示。 -->
           <div class="flex flex-col gap-3 2xl:flex-row 2xl:items-start 2xl:justify-between">
             <div class="min-w-0">
               <div class="flex flex-wrap items-center gap-2">
-                <p class="break-words text-lg font-semibold text-slate-900">{{ activeOrderDetail.order.preorderNo }}</p>
+                <p class="break-words text-lg font-semibold text-slate-900 dark:text-slate-100">{{ activeOrderDetail.order.preorderNo }}</p>
                 <Transition name="detail-refresh-notice">
                   <span
                     v-if="showDetailRefreshNotice"
-                    class="rounded-full bg-teal-50 px-2.5 py-1 text-xs font-semibold text-teal-700"
+                    class="rounded-full bg-teal-50 px-2.5 py-1 text-xs font-semibold text-teal-700 dark:bg-teal-500/10 dark:text-teal-300"
                   >
                     详情已更新
                   </span>
                 </Transition>
               </div>
               <p class="mt-1 break-all text-sm text-slate-400">核销码：{{ activeOrderDetail.order.verifyCode }}</p>
-              <p v-if="activeOrderDetail.order.customerOrderBusinessNo" class="mt-1 break-all text-sm text-teal-700">
+              <p v-if="activeOrderDetail.order.customerOrderBusinessNo" class="mt-1 break-all text-sm text-teal-700 dark:text-teal-300">
                 关联出库业务单号：{{ activeOrderDetail.order.customerOrderBusinessNo }}
               </p>
             </div>
@@ -1626,25 +1626,25 @@ onBeforeUnmount(() => {
             <p class="text-sm font-semibold">状态报告：{{ reportConfig.cardTitle }}</p>
             <p class="mt-1 break-words text-xs">{{ reportConfig.cardDescription }}</p>
           </div>
-          <p v-if="activeOrderDetail.order.status === 'cancelled'" class="mt-2 text-xs text-slate-500">
+          <p v-if="activeOrderDetail.order.status === 'cancelled'" class="mt-2 text-xs text-slate-500 dark:text-slate-400">
             取消来源：{{ getCancellationSourceLabel(activeOrderDetail.order.statusReport.cancellationSource) }}；
             时间：{{ formatOrderDateTime(activeOrderDetail.order.statusReport.cancelledAt, { fallback: '历史记录未留存' }) }}
           </p>
 
-          <div class="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-1.5">
+          <div class="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-1.5 dark:border-white/10 dark:bg-white/5">
             <el-collapse v-model="detailAssistPanels" class="order-detail-assist-collapse">
               <el-collapse-item name="compliance-flags">
                 <template #title>
                   <div class="flex min-w-0 flex-col py-1">
-                    <p class="text-sm font-semibold text-slate-900">合规状态确认</p>
-                    <p class="mt-1 text-xs leading-5 text-slate-500">
+                    <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">合规状态确认</p>
+                    <p class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">
                       仅部门单可编辑“是否有出库单”和“系统申请”状态。
                     </p>
                   </div>
                 </template>
                 <div class="pb-3">
                   <div class="flex flex-wrap items-start justify-between gap-2">
-                    <div class="text-xs text-slate-500">用于门店现场确认并更新该订单合规状态。</div>
+                    <div class="text-xs text-slate-500 dark:text-slate-400">用于门店现场确认并更新该订单合规状态。</div>
                     <el-button
                       v-if="canEditComplianceFlags && activeOrderDetail.order.clientOrderType === 'department'"
                       size="small"
@@ -1656,8 +1656,8 @@ onBeforeUnmount(() => {
                     </el-button>
                   </div>
                   <div class="mt-3 grid gap-3 sm:grid-cols-2">
-                    <div class="rounded-xl border border-slate-100 bg-white px-3 py-2.5">
-                      <p class="text-xs text-slate-500">是否有出库单</p>
+                    <div class="rounded-xl border border-slate-100 bg-white px-3 py-2.5 dark:border-white/5 dark:bg-[#141415]">
+                      <p class="text-xs text-slate-500 dark:text-slate-400">是否有出库单</p>
                       <div class="mt-2">
                         <el-switch
                           v-if="canEditComplianceFlags && activeOrderDetail.order.clientOrderType === 'department'"
@@ -1666,13 +1666,13 @@ onBeforeUnmount(() => {
                           active-text="是"
                           inactive-text="否"
                         />
-                        <span v-else class="text-sm font-medium text-slate-700">
+                        <span v-else class="text-sm font-medium text-slate-700 dark:text-slate-200">
                           {{ activeOrderDetail.order.clientOrderType === 'department' ? (activeOrderDetail.order.hasCustomerOrder ? '是' : '否') : '不适用' }}
                         </span>
                       </div>
                     </div>
-                    <div class="rounded-xl border border-slate-100 bg-white px-3 py-2.5">
-                      <p class="text-xs text-slate-500">系统申请</p>
+                    <div class="rounded-xl border border-slate-100 bg-white px-3 py-2.5 dark:border-white/5 dark:bg-[#141415]">
+                      <p class="text-xs text-slate-500 dark:text-slate-400">系统申请</p>
                       <div class="mt-2">
                         <el-switch
                           v-if="canEditComplianceFlags && activeOrderDetail.order.clientOrderType === 'department'"
@@ -1681,7 +1681,7 @@ onBeforeUnmount(() => {
                           active-text="已申请"
                           inactive-text="未申请"
                         />
-                        <span v-else class="text-sm font-medium text-slate-700">
+                        <span v-else class="text-sm font-medium text-slate-700 dark:text-slate-200">
                           {{ activeOrderDetail.order.clientOrderType === 'department' ? (activeOrderDetail.order.isSystemApplied ? '已申请' : '未申请') : '不适用' }}
                         </span>
                       </div>
@@ -1693,8 +1693,8 @@ onBeforeUnmount(() => {
               <el-collapse-item name="business-status">
                 <template #title>
                   <div class="flex min-w-0 flex-col py-1">
-                    <p class="text-sm font-semibold text-slate-900">商家特殊状态</p>
-                    <p class="mt-1 text-xs leading-5 text-slate-500">
+                    <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">商家特殊状态</p>
+                    <p class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">
                       用于通知用户当前订单所处的特殊进度，不改变待核销、已核销、已取消等核心状态。
                     </p>
                   </div>
@@ -1702,7 +1702,7 @@ onBeforeUnmount(() => {
                 <div class="pb-3">
                   <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                     <div class="min-w-0">
-                      <p class="text-xs leading-5 text-slate-500">请选择需要展示给用户的特殊状态（可清空）。</p>
+                      <p class="text-xs leading-5 text-slate-500 dark:text-slate-400">请选择需要展示给用户的特殊状态（可清空）。</p>
                     </div>
                     <el-select
                       v-model="draftBusinessStatus"
@@ -1720,7 +1720,7 @@ onBeforeUnmount(() => {
                       />
                     </el-select>
                   </div>
-                  <p v-if="activeBusinessStatusMeta" class="mt-2 text-xs leading-5 text-slate-500">
+                  <p v-if="activeBusinessStatusMeta" class="mt-2 text-xs leading-5 text-slate-500 dark:text-slate-400">
                     {{ activeBusinessStatusMeta.consoleDescription }}
                   </p>
                   <div v-if="activeBusinessStatusMeta" class="mt-3 rounded-2xl px-3 py-1.5" :class="activeBusinessStatusMeta.className">
@@ -1733,8 +1733,8 @@ onBeforeUnmount(() => {
               <el-collapse-item name="merchant-message">
                 <template #title>
                   <div class="flex min-w-0 flex-col py-1">
-                    <p class="text-sm font-semibold text-slate-900">商家留言</p>
-                    <p class="mt-1 text-xs leading-5 text-slate-500">
+                    <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">商家留言</p>
+                    <p class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">
                       用于补充特殊订单说明；保存后客户端详情页可见，清空后客户端不再显示该模块。
                     </p>
                   </div>
@@ -1752,7 +1752,7 @@ onBeforeUnmount(() => {
                       :disabled="detailLoading"
                     />
                     <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                      <p class="text-xs text-slate-500">
+                      <p class="text-xs text-slate-500 dark:text-slate-400">
                         {{ merchantMessageChanged ? '留言有变更，点击保存后生效' : '留言与当前已保存内容一致' }}
                       </p>
                       <div class="flex gap-2">
@@ -1767,11 +1767,11 @@ onBeforeUnmount(() => {
                         </el-button>
                       </div>
                     </div>
-                    <div v-if="activeMerchantMessage" class="rounded-2xl border border-amber-200 bg-amber-50 px-3 py-1.5 text-sm text-amber-800">
-                      <p class="text-xs text-amber-700">当前已生效留言</p>
+                    <div v-if="activeMerchantMessage" class="rounded-2xl border border-amber-200 bg-amber-50 px-3 py-1.5 text-sm text-amber-800 dark:border-amber-900/60 dark:bg-amber-500/10 dark:text-amber-300">
+                      <p class="text-xs text-amber-700 dark:text-amber-300">当前已生效留言</p>
                       <p class="mt-1 whitespace-pre-wrap break-words">{{ activeMerchantMessage }}</p>
                     </div>
-                    <p v-else class="text-xs text-slate-500">当前未设置商家留言</p>
+                    <p v-else class="text-xs text-slate-500 dark:text-slate-400">当前未设置商家留言</p>
                   </div>
                 </div>
               </el-collapse-item>
@@ -1779,17 +1779,17 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="mt-4 grid gap-3 sm:grid-cols-4">
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">下单归属</p>
-              <p class="mt-1 text-sm font-semibold text-slate-900">{{ activeOrderOwnership }}</p>
+              <p class="mt-1 text-sm font-semibold text-slate-900 dark:text-slate-100">{{ activeOrderOwnership }}</p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">预订单登记领取人</p>
-              <p class="mt-1 break-words text-sm font-semibold text-slate-900">{{ activeOrderDetail.order.pickupContact || '未记录' }}</p>
+              <p class="mt-1 break-words text-sm font-semibold text-slate-900 dark:text-slate-100">{{ activeOrderDetail.order.pickupContact || '未记录' }}</p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">到店取货时间</p>
-              <p class="mt-1 text-sm font-semibold text-slate-900">
+              <p class="mt-1 text-sm font-semibold text-slate-900 dark:text-slate-100">
                 {{
                   activeOrderDetail.order.clientOrderType === 'department'
                     ? formatOrderDateTime(activeOrderDetail.order.pickupAt, { includeSeconds: false, fallback: '未填写' })
@@ -1797,98 +1797,98 @@ onBeforeUnmount(() => {
                 }}
               </p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">状态</p>
-              <p class="mt-1 text-sm font-semibold text-slate-900">{{ reportConfig.statusLabel }}</p>
+              <p class="mt-1 text-sm font-semibold text-slate-900 dark:text-slate-100">{{ reportConfig.statusLabel }}</p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">商家状态</p>
-              <p class="mt-1 text-sm font-semibold text-slate-900">{{ activeBusinessStatusMeta?.label ?? '未设置' }}</p>
+              <p class="mt-1 text-sm font-semibold text-slate-900 dark:text-slate-100">{{ activeBusinessStatusMeta?.label ?? '未设置' }}</p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">应付总额</p>
-              <p class="mt-1 text-sm font-semibold text-slate-900">¥{{ formatCurrency(detailAmountSummary.totalAmount) }}</p>
+              <p class="mt-1 text-sm font-semibold text-slate-900 dark:text-slate-100">¥{{ formatCurrency(detailAmountSummary.totalAmount) }}</p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">总件数</p>
-              <p class="mt-1 text-sm font-semibold text-slate-900">{{ detailAmountSummary.totalQty }} 件</p>
+              <p class="mt-1 text-sm font-semibold text-slate-900 dark:text-slate-100">{{ detailAmountSummary.totalQty }} 件</p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">商品条目</p>
-              <p class="mt-1 text-sm font-semibold text-slate-900">{{ detailAmountSummary.totalItemCount }} 项</p>
+              <p class="mt-1 text-sm font-semibold text-slate-900 dark:text-slate-100">{{ detailAmountSummary.totalItemCount }} 项</p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">退货记录</p>
-              <p class="mt-1 text-sm font-semibold text-slate-900">{{ activeReturnSummary.totalCount }} 笔</p>
+              <p class="mt-1 text-sm font-semibold text-slate-900 dark:text-slate-100">{{ activeReturnSummary.totalCount }} 笔</p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">待处理退货</p>
-              <p class="mt-1 text-sm font-semibold text-slate-900">{{ activeReturnSummary.pendingCount }} 笔</p>
+              <p class="mt-1 text-sm font-semibold text-slate-900 dark:text-slate-100">{{ activeReturnSummary.pendingCount }} 笔</p>
             </div>
           </div>
 
-          <div class="mt-4 rounded-2xl border border-slate-200 bg-white px-4 py-4">
+          <div class="mt-4 rounded-2xl border border-slate-200 bg-white px-4 py-4 dark:border-white/10 dark:bg-[#141415]">
             <div>
-              <p class="text-base font-semibold text-slate-900">下单账号信息</p>
-              <p class="mt-1 text-xs leading-5 text-slate-500">
+              <p class="text-base font-semibold text-slate-900 dark:text-slate-100">下单账号信息</p>
+              <p class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">
                 便于门店在特殊情况下通过电话、邮件等方式及时联系客户并同步订单变化。
               </p>
             </div>
             <div class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-              <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
                 <p class="text-sm text-slate-400">账号用户名</p>
-                <p class="mt-1 break-words text-sm font-semibold text-slate-900">{{ orderCustomerProfile.username }}</p>
+                <p class="mt-1 break-words text-sm font-semibold text-slate-900 dark:text-slate-100">{{ orderCustomerProfile.username }}</p>
               </div>
-              <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
                 <p class="text-sm text-slate-400">账号类型</p>
-                <p class="mt-1 break-words text-sm font-semibold text-slate-900">{{ orderCustomerProfile.accountType }}</p>
+                <p class="mt-1 break-words text-sm font-semibold text-slate-900 dark:text-slate-100">{{ orderCustomerProfile.accountType }}</p>
               </div>
-              <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
                 <p class="text-sm text-slate-400">手机号</p>
-                <p class="mt-1 break-all text-sm font-semibold text-slate-900">{{ orderCustomerProfile.mobile }}</p>
+                <p class="mt-1 break-all text-sm font-semibold text-slate-900 dark:text-slate-100">{{ orderCustomerProfile.mobile }}</p>
               </div>
-              <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
                 <p class="text-sm text-slate-400">邮箱</p>
-                <p class="mt-1 break-all text-sm font-semibold text-slate-900">{{ orderCustomerProfile.email }}</p>
+                <p class="mt-1 break-all text-sm font-semibold text-slate-900 dark:text-slate-100">{{ orderCustomerProfile.email }}</p>
               </div>
-              <div v-if="isDepartmentOrder(activeOrderDetail.order.clientOrderType)" class="rounded-2xl bg-slate-50 px-4 py-3">
+              <div v-if="isDepartmentOrder(activeOrderDetail.order.clientOrderType)" class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
                 <p class="text-sm text-slate-400">所属部门</p>
-                <p class="mt-1 break-words text-sm font-semibold text-slate-900">{{ orderCustomerProfile.departmentName }}</p>
+                <p class="mt-1 break-words text-sm font-semibold text-slate-900 dark:text-slate-100">{{ orderCustomerProfile.departmentName }}</p>
               </div>
-              <div v-if="isDepartmentOrder(activeOrderDetail.order.clientOrderType)" class="rounded-2xl bg-slate-50 px-4 py-3">
+              <div v-if="isDepartmentOrder(activeOrderDetail.order.clientOrderType)" class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
                 <p class="text-sm text-slate-400">工号</p>
-                <p class="mt-1 break-words text-sm font-semibold text-slate-900">{{ orderCustomerProfile.staffNo }}</p>
+                <p class="mt-1 break-words text-sm font-semibold text-slate-900 dark:text-slate-100">{{ orderCustomerProfile.staffNo }}</p>
               </div>
             </div>
           </div>
 
           <div class="mt-4 space-y-2">
-            <p class="text-base font-semibold text-slate-900">进度节点</p>
+            <p class="text-base font-semibold text-slate-900 dark:text-slate-100">进度节点</p>
             <div
               v-for="step in timelineItems"
               :key="step.key"
               class="flex items-start gap-3 rounded-2xl px-3 py-2"
-              :class="step.active ? 'bg-teal-50' : 'bg-slate-50'"
+              :class="step.active ? 'bg-teal-50 dark:bg-teal-500/10' : 'bg-slate-50 dark:bg-white/5'"
             >
               <span class="mt-1 h-2.5 w-2.5 rounded-full" :class="step.active ? 'bg-teal-500' : 'bg-slate-300'" />
               <div>
-                <p class="text-sm font-semibold text-slate-900">{{ step.title }}</p>
-                <p class="break-words text-xs text-slate-500">{{ step.time }}</p>
+                <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">{{ step.title }}</p>
+                <p class="break-words text-xs text-slate-500 dark:text-slate-400">{{ step.time }}</p>
               </div>
             </div>
           </div>
 
-          <div class="mt-4 rounded-2xl border border-slate-200 bg-white px-4 py-4">
+          <div class="mt-4 rounded-2xl border border-slate-200 bg-white px-4 py-4 dark:border-white/10 dark:bg-[#141415]">
             <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
               <div>
-                <p class="text-base font-semibold text-slate-900">退货记录</p>
-                <p class="mt-1 text-xs leading-5 text-slate-500">
+                <p class="text-base font-semibold text-slate-900 dark:text-slate-100">退货记录</p>
+                <p class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">
                   展示当前订单全部退货申请、处理状态、退货原因与门店扫码码，便于门店统一查看售后历史。
                 </p>
               </div>
               <span
                 class="inline-flex w-fit rounded-full px-2.5 py-1 text-xs font-medium"
-                :class="activeReturnSummary.pendingCount > 0 ? 'bg-amber-50 text-amber-700' : 'bg-slate-100 text-slate-600'"
+                :class="activeReturnSummary.pendingCount > 0 ? 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300' : 'bg-slate-100 text-slate-600 dark:bg-white/10 dark:text-slate-300'"
               >
                 {{ activeReturnSummary.pendingCount > 0 ? `待处理 ${activeReturnSummary.pendingCount} 笔` : '暂无待处理退货' }}
               </span>
@@ -1898,75 +1898,75 @@ onBeforeUnmount(() => {
               <article
                 v-for="request in activeReturnRequests"
                 :key="request.id"
-                class="rounded-2xl border border-slate-200 bg-slate-50 p-4"
+                class="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-white/10 dark:bg-white/5"
               >
                 <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                   <div class="min-w-0">
                     <div class="flex min-w-0 flex-wrap items-center gap-2">
-                      <p class="break-words text-base font-semibold text-slate-900">{{ request.returnNo }}</p>
+                      <p class="break-words text-base font-semibold text-slate-900 dark:text-slate-100">{{ request.returnNo }}</p>
                       <span class="rounded-full px-2 py-0.5 text-[11px] font-medium" :class="getReturnRequestStatusMeta(request).className">
                         {{ getReturnRequestStatusMeta(request).label }}
                       </span>
                     </div>
-                    <p class="mt-1 break-words text-xs leading-5 text-slate-500">
+                    <p class="mt-1 break-words text-xs leading-5 text-slate-500 dark:text-slate-400">
                       {{ getReturnRequestStatusMeta(request).description }}
                     </p>
                   </div>
                   <div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:w-[26rem]">
-                    <div class="rounded-2xl bg-white px-3 py-2">
+                    <div class="rounded-2xl bg-white px-3 py-2 dark:bg-[#141415]">
                       <p class="text-xs text-slate-400">申请时间</p>
-                      <p class="mt-1 text-sm font-semibold text-slate-900">{{ formatOrderDateTime(request.createdAt) }}</p>
+                      <p class="mt-1 text-sm font-semibold text-slate-900 dark:text-slate-100">{{ formatOrderDateTime(request.createdAt) }}</p>
                     </div>
-                    <div class="rounded-2xl bg-white px-3 py-2">
+                    <div class="rounded-2xl bg-white px-3 py-2 dark:bg-[#141415]">
                       <p class="text-xs text-slate-400">退货件数</p>
-                      <p class="mt-1 text-sm font-semibold text-slate-900">{{ request.totalQty }} 件</p>
+                      <p class="mt-1 text-sm font-semibold text-slate-900 dark:text-slate-100">{{ request.totalQty }} 件</p>
                     </div>
-                    <div class="rounded-2xl bg-white px-3 py-2">
+                    <div class="rounded-2xl bg-white px-3 py-2 dark:bg-[#141415]">
                       <p class="text-xs text-slate-400">原订单状态</p>
-                      <p class="mt-1 text-sm font-semibold text-slate-900">{{ VERIFY_CONSOLE_O2O_ORDER_STATUS_LABEL_MAP[request.sourceOrderStatus] }}</p>
+                      <p class="mt-1 text-sm font-semibold text-slate-900 dark:text-slate-100">{{ VERIFY_CONSOLE_O2O_ORDER_STATUS_LABEL_MAP[request.sourceOrderStatus] }}</p>
                     </div>
-                    <div class="rounded-2xl bg-white px-3 py-2">
+                    <div class="rounded-2xl bg-white px-3 py-2 dark:bg-[#141415]">
                       <p class="text-xs text-slate-400">处理时间</p>
-                      <p class="mt-1 text-sm font-semibold text-slate-900">{{ formatOrderDateTime(request.handledAt ?? request.verifiedAt, { fallback: '等待门店处理' }) }}</p>
+                      <p class="mt-1 text-sm font-semibold text-slate-900 dark:text-slate-100">{{ formatOrderDateTime(request.handledAt ?? request.verifiedAt, { fallback: '等待门店处理' }) }}</p>
                     </div>
-                    <div class="rounded-2xl bg-white px-3 py-2">
+                    <div class="rounded-2xl bg-white px-3 py-2 dark:bg-[#141415]">
                       <p class="text-xs text-slate-400">处理人</p>
-                      <p class="mt-1 text-sm font-semibold text-slate-900">{{ request.handledBy || request.verifiedBy || '门店待处理' }}</p>
+                      <p class="mt-1 text-sm font-semibold text-slate-900 dark:text-slate-100">{{ request.handledBy || request.verifiedBy || '门店待处理' }}</p>
                     </div>
-                    <div class="rounded-2xl bg-white px-3 py-2">
+                    <div class="rounded-2xl bg-white px-3 py-2 dark:bg-[#141415]">
                       <p class="text-xs text-slate-400">退货码</p>
-                      <p class="mt-1 break-all text-sm font-semibold text-slate-900">{{ request.verifyCode }}</p>
+                      <p class="mt-1 break-all text-sm font-semibold text-slate-900 dark:text-slate-100">{{ request.verifyCode }}</p>
                     </div>
                   </div>
                 </div>
 
-                <div class="mt-3 rounded-2xl border border-slate-200 bg-white px-3 py-3">
+                <div class="mt-3 rounded-2xl border border-slate-200 bg-white px-3 py-3 dark:border-white/10 dark:bg-[#141415]">
                   <p class="text-xs text-slate-400">退货原因</p>
-                  <p class="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-slate-700">{{ request.reason }}</p>
+                  <p class="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-slate-700 dark:text-slate-200">{{ request.reason }}</p>
                 </div>
 
                 <div
                   v-if="request.rejectedReason"
-                  class="mt-3 rounded-2xl border border-rose-200 bg-rose-50 px-3 py-3"
+                  class="mt-3 rounded-2xl border border-rose-200 bg-rose-50 px-3 py-3 dark:border-rose-900/60 dark:bg-rose-500/10"
                 >
                   <p class="text-xs text-rose-500">拒绝原因</p>
-                  <p class="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-rose-700">{{ request.rejectedReason }}</p>
+                  <p class="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-rose-700 dark:text-rose-300">{{ request.rejectedReason }}</p>
                 </div>
 
                 <div class="mt-3">
-                  <p class="mb-2 text-sm font-semibold text-slate-900">退货商品</p>
+                  <p class="mb-2 text-sm font-semibold text-slate-900 dark:text-slate-100">退货商品</p>
                   <div class="space-y-2">
                     <div
                       v-for="item in request.items"
                       :key="item.id"
-                      class="flex items-start justify-between gap-3 rounded-2xl border border-slate-100 bg-white px-3 py-2"
+                      class="flex items-start justify-between gap-3 rounded-2xl border border-slate-100 bg-white px-3 py-2 dark:border-white/5 dark:bg-[#141415]"
                     >
                       <div class="min-w-0">
-                        <p class="break-words text-sm font-semibold text-slate-900">{{ item.productName }}</p>
+                        <p class="break-words text-sm font-semibold text-slate-900 dark:text-slate-100">{{ item.productName }}</p>
                         <BizO2oItemSpecText :item="item" />
                         <p class="mt-1 text-xs text-slate-400">{{ item.productCode }}</p>
                       </div>
-                      <p class="shrink-0 text-sm font-semibold text-slate-700">x {{ item.qty }}</p>
+                      <p class="shrink-0 text-sm font-semibold text-slate-700 dark:text-slate-200">x {{ item.qty }}</p>
                     </div>
                   </div>
                 </div>
@@ -1975,14 +1975,14 @@ onBeforeUnmount(() => {
 
             <div
               v-else
-              class="mt-4 rounded-2xl border border-dashed border-slate-200 px-3 py-8 text-center text-sm text-slate-400"
+              class="mt-4 rounded-2xl border border-dashed border-slate-200 px-3 py-8 text-center text-sm text-slate-400 dark:border-white/10"
             >
               当前订单暂无退货申请记录
             </div>
           </div>
 
           <div class="mt-4">
-            <p class="mb-2 text-base font-semibold text-slate-900">商品明细</p>
+            <p class="mb-2 text-base font-semibold text-slate-900 dark:text-slate-100">商品明细</p>
             <div class="hidden sm:block">
               <div class="table-scroll-wrap">
                 <el-table native-scrollbar :data="activeOrderDetail.items" row-key="id" :loading="detailLoading">
@@ -2010,14 +2010,14 @@ onBeforeUnmount(() => {
               <div
                 v-for="item in activeOrderDetail.items"
                 :key="item.id"
-                class="rounded-2xl border border-slate-100 bg-slate-50 px-3 py-3"
+                class="rounded-2xl border border-slate-100 bg-slate-50 px-3 py-3 dark:border-white/5 dark:bg-white/5"
               >
-                <p class="break-words text-sm font-semibold text-slate-900">{{ item.productName }}</p>
+                <p class="break-words text-sm font-semibold text-slate-900 dark:text-slate-100">{{ item.productName }}</p>
                 <BizO2oItemSpecText :item="item" />
-                <div class="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500">
+                <div class="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500 dark:text-slate-400">
                   <p>单价：¥{{ formatCurrency(item.defaultPrice) }}</p>
                   <p class="text-right">数量：{{ item.qty }}</p>
-                  <p class="col-span-2 text-right font-semibold text-slate-700">
+                  <p class="col-span-2 text-right font-semibold text-slate-700 dark:text-slate-200">
                     小计：¥{{ formatCurrency(item.subTotal ?? Number(item.defaultPrice || 0) * Number(item.qty || 0)) }}
                   </p>
                 </div>
@@ -2026,7 +2026,7 @@ onBeforeUnmount(() => {
           </div>
         </template>
 
-        <div v-else class="flex min-h-64 items-center justify-center rounded-2xl border border-dashed border-slate-200 text-sm text-slate-400">
+        <div v-else class="flex min-h-64 items-center justify-center rounded-2xl border border-dashed border-slate-200 text-sm text-slate-400 dark:border-white/10">
           {{ detailEmptyText }}
         </div>
       </section>
@@ -2260,5 +2260,10 @@ onBeforeUnmount(() => {
   .table-scroll-wrap :deep(.el-table) {
     min-width: 520px;
   }
+}
+
+/* 暗色：详情辅助信息折叠面板分隔线。 */
+.dark .order-detail-assist-collapse :deep(.el-collapse-item__header) {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
 }
 </style>

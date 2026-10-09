@@ -275,7 +275,7 @@ onMounted(async () => {
 
 <template>
   <div class="space-y-4 pb-4">
-    <div class="rounded-[1.5rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
+    <div class="rounded-[1.5rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
       <div class="flex items-start gap-3">
         <el-button
           type="default"
@@ -289,22 +289,22 @@ onMounted(async () => {
           <span>返回</span>
         </el-button>
         <div class="min-w-0 flex-1">
-          <p class="text-xl font-semibold text-slate-900">新建反馈</p>
-          <p class="mt-1 text-sm leading-6 text-slate-500">
+          <p class="text-xl font-semibold text-slate-900 dark:text-slate-100">新建反馈</p>
+          <p class="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
             使用独立页面提交新的普通建议或专业 BUG，提交成功后会自动回到反馈会话页继续跟进。
           </p>
         </div>
       </div>
-      <div class="mt-4 rounded-[1rem] border border-slate-200 bg-slate-50 px-4 py-3">
-        <p class="text-sm font-medium text-slate-700">{{ portalNotice }}</p>
-        <p class="mt-1 text-xs leading-5 text-slate-500">若问题已存在，请优先回到原会话继续补充，避免重复建单。</p>
+      <div class="mt-4 rounded-[1rem] border border-slate-200 bg-slate-50 px-4 py-3 dark:border-white/10 dark:bg-white/5">
+        <p class="text-sm font-medium text-slate-700 dark:text-slate-200">{{ portalNotice }}</p>
+        <p class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">若问题已存在，请优先回到原会话继续补充，避免重复建单。</p>
       </div>
     </div>
 
-    <article class="rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
+    <article class="rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
       <div class="flex items-center justify-between gap-3">
         <div>
-          <p class="text-base font-semibold text-slate-900">反馈信息</p>
+          <p class="text-base font-semibold text-slate-900 dark:text-slate-100">反馈信息</p>
           <p class="mt-1 text-xs leading-5 text-slate-400">普通建议默认轻量提交，专业 BUG 再展开排查字段。</p>
         </div>
         <el-tag type="success" effect="light" round>独立提交页</el-tag>
@@ -319,11 +319,11 @@ onMounted(async () => {
             aria-label="反馈类型"
             @change="handleChangeIssueType"
           />
-          <p class="text-xs leading-5 text-slate-500">{{ currentIssueTypeHint }}</p>
+          <p class="text-xs leading-5 text-slate-500 dark:text-slate-400">{{ currentIssueTypeHint }}</p>
         </div>
 
         <div class="block">
-          <span class="mb-1 block text-xs font-medium text-slate-500">问题标题</span>
+          <span class="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">问题标题</span>
           <el-input
             v-model="createForm.title"
             maxlength="80"
@@ -336,7 +336,7 @@ onMounted(async () => {
 
         <div class="grid gap-3 sm:grid-cols-2">
           <div class="block">
-            <span class="mb-1 block text-xs font-medium text-slate-500">问题分类</span>
+            <span class="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">问题分类</span>
             <el-select v-model="createForm.category" class="w-full" placeholder="请选择问题分类" aria-label="问题分类">
               <el-option v-for="item in FEEDBACK_CATEGORY_OPTIONS" :key="item.value" :value="item.value" :label="item.label">
                 {{ item.label }}
@@ -344,7 +344,7 @@ onMounted(async () => {
             </el-select>
           </div>
           <div v-if="isBugMode" class="block">
-            <span class="mb-1 block text-xs font-medium text-slate-500">优先级</span>
+            <span class="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">优先级</span>
             <el-select v-model="createForm.priority" class="w-full" placeholder="请选择优先级" aria-label="优先级">
               <el-option v-for="item in FEEDBACK_PRIORITY_OPTIONS" :key="item.value" :value="item.value" :label="item.label">
                 {{ item.label }}
@@ -354,7 +354,7 @@ onMounted(async () => {
         </div>
 
         <div class="block">
-          <span class="mb-1 block text-xs font-medium text-slate-500">问题描述</span>
+          <span class="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">问题描述</span>
           <el-input
             v-model="createForm.summary"
             type="textarea"
@@ -367,10 +367,10 @@ onMounted(async () => {
           />
         </div>
 
-        <div v-if="isBugMode" class="rounded-[1rem] border border-slate-200 bg-slate-50/80 p-4">
+        <div v-if="isBugMode" class="rounded-[1rem] border border-slate-200 bg-slate-50/80 p-4 dark:border-white/10 dark:bg-white/5">
           <div class="flex items-center justify-between gap-3">
             <div>
-              <p class="text-sm font-semibold text-slate-900">专业 BUG 补充</p>
+              <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">专业 BUG 补充</p>
               <p class="mt-1 text-xs text-slate-400">仅在需要排查时填写，客服会按这些结构化字段定位问题。</p>
             </div>
             <el-tag round effect="plain">结构化字段</el-tag>
@@ -378,7 +378,7 @@ onMounted(async () => {
 
           <div class="mt-3 space-y-3">
             <div class="block">
-              <span class="mb-1 block text-xs font-medium text-slate-500">关联订单号</span>
+              <span class="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">关联订单号</span>
               <el-input
                 v-model="createForm.orderRef"
                 maxlength="64"
@@ -390,7 +390,7 @@ onMounted(async () => {
             </div>
 
             <div class="block">
-              <span class="mb-1 block text-xs font-medium text-slate-500">期望结果</span>
+              <span class="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">期望结果</span>
               <el-input
                 v-model="createForm.expectedResult"
                 type="textarea"
@@ -404,7 +404,7 @@ onMounted(async () => {
             </div>
 
             <div class="block">
-              <span class="mb-1 block text-xs font-medium text-slate-500">实际结果</span>
+              <span class="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">实际结果</span>
               <el-input
                 v-model="createForm.actualResult"
                 type="textarea"
@@ -418,7 +418,7 @@ onMounted(async () => {
             </div>
 
             <div class="block">
-              <span class="mb-1 block text-xs font-medium text-slate-500">复现步骤</span>
+              <span class="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">复现步骤</span>
               <el-input
                 v-model="createForm.reproductionSteps"
                 type="textarea"
@@ -433,7 +433,7 @@ onMounted(async () => {
 
             <div class="grid gap-3 sm:grid-cols-2">
               <div class="block">
-                <span class="mb-1 block text-xs font-medium text-slate-500">联系偏好</span>
+                <span class="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">联系偏好</span>
                 <el-input
                   v-model="createForm.contactPreference"
                   maxlength="64"
@@ -444,7 +444,7 @@ onMounted(async () => {
                 />
               </div>
               <div class="block">
-                <span class="mb-1 block text-xs font-medium text-slate-500">标签</span>
+                <span class="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">标签</span>
                 <el-input
                   v-model="createForm.tagText"
                   maxlength="120"
@@ -458,10 +458,10 @@ onMounted(async () => {
           </div>
         </div>
 
-        <div class="rounded-[1rem] border border-dashed border-slate-200 bg-slate-50/80 p-4">
+        <div class="rounded-[1rem] border border-dashed border-slate-200 bg-slate-50/80 p-4 dark:border-white/10 dark:bg-white/5">
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <p class="text-sm font-semibold text-slate-900">图片附件</p>
+              <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">图片附件</p>
               <p class="mt-1 text-xs leading-5 text-slate-400">
                 可上传截图、异常界面或订单凭证图片，帮助客服更快理解问题。单次最多 {{ FEEDBACK_ATTACHMENT_LIMIT }} 张，仅支持 JPG/PNG/WEBP/GIF。
               </p>
@@ -488,7 +488,7 @@ onMounted(async () => {
             <article
               v-for="(attachment, index) in createAttachments"
               :key="`${attachment.url}-${index}`"
-              class="rounded-[1rem] bg-white p-3 shadow-sm ring-1 ring-inset ring-slate-200"
+              class="rounded-[1rem] bg-white p-3 shadow-sm ring-1 ring-inset ring-slate-200 dark:bg-[#141415] dark:ring-white/10"
             >
               <div class="flex items-start gap-3">
                 <img
@@ -499,12 +499,12 @@ onMounted(async () => {
                 />
                 <div
                   v-else
-                  class="feedback-attachment-thumb feedback-attachment-thumb--placeholder flex items-center justify-center text-xs font-semibold text-slate-500"
+                  class="feedback-attachment-thumb feedback-attachment-thumb--placeholder flex items-center justify-center text-xs font-semibold text-slate-500 dark:text-slate-400"
                 >
                   附件
                 </div>
                 <div class="min-w-0 flex-1">
-                  <p class="truncate text-sm font-semibold text-slate-900">{{ attachment.name }}</p>
+                  <p class="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">{{ attachment.name }}</p>
                   <p class="mt-1 text-xs text-slate-400">{{ formatAttachmentSize(attachment.size) }}</p>
                   <div class="mt-3 flex flex-wrap gap-2">
                     <el-button size="small" @click="handlePreviewAttachment(attachment)">
@@ -635,5 +635,23 @@ onMounted(async () => {
   border-radius: 1rem;
   object-fit: contain;
   background: rgb(248 250 252);
+}
+
+/* 暗色：类型分段选择、附件缩略图与预览底色。 */
+.dark .feedback-type-segmented :deep(.el-segmented__item) {
+  color: rgb(203 213 225);
+}
+
+.dark .feedback-type-segmented :deep(.el-segmented__item-selected) {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.dark .feedback-type-segmented :deep(.el-segmented__item:not(.is-selected):hover) {
+  color: rgb(241 245 249);
+}
+
+.dark .feedback-attachment-thumb,
+.dark .feedback-preview-image {
+  background: rgba(255, 255, 255, 0.06);
 }
 </style>

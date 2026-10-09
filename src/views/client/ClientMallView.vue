@@ -1476,8 +1476,8 @@ onBeforeUnmount(() => {
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div v-if="!isPhone" class="mall-hero-card__heading">
           <p class="text-xs font-semibold tracking-[0.16em] text-slate-400">CLIENT MALL</p>
-          <p class="mall-hero-card__title mt-1 text-xl font-semibold text-slate-900">商城</p>
-          <p class="mall-hero-card__desc mt-1 text-sm text-slate-500">浏览标签、查看库存并快速加入购物车</p>
+          <p class="mall-hero-card__title mt-1 text-xl font-semibold text-slate-900 dark:text-slate-100">商城</p>
+          <p class="mall-hero-card__desc mt-1 text-sm text-slate-500 dark:text-slate-400">浏览标签、查看库存并快速加入购物车</p>
         </div>
         <button
           v-else-if="mallAnnouncementText"
@@ -1494,7 +1494,7 @@ onBeforeUnmount(() => {
         </button>
         <button
           type="button"
-          class="mall-hero-card__refresh rounded-full border border-[var(--ylink-color-border)] bg-[var(--ylink-color-surface-soft)] px-4 py-2 text-sm text-slate-600"
+          class="mall-hero-card__refresh rounded-full border border-[var(--ylink-color-border)] bg-[var(--ylink-color-surface-soft)] px-4 py-2 text-sm text-slate-600 dark:text-slate-300"
           :disabled="refreshing"
           @click="loadProducts(true)"
         >
@@ -1502,13 +1502,13 @@ onBeforeUnmount(() => {
         </button>
       </div>
       <div v-if="!isPhone" class="mall-hero-card__meta-grid mt-4 grid gap-3 sm:grid-cols-3">
-        <div class="mall-hero-card__meta-item rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700">营业时间：{{ storeBusinessHoursText }}</div>
-        <div class="mall-hero-card__meta-item rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700">提货须知：请在订单有效期内到店核销</div>
-        <div v-if="mallAnnouncementText" class="mall-hero-card__meta-item mall-hero-card__meta-item--notice rounded-2xl bg-amber-50 px-3 py-3 text-sm text-amber-700">公告：{{ mallAnnouncementText }}</div>
+        <div class="mall-hero-card__meta-item rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700 dark:text-slate-200">营业时间：{{ storeBusinessHoursText }}</div>
+        <div class="mall-hero-card__meta-item rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700 dark:text-slate-200">提货须知：请在订单有效期内到店核销</div>
+        <div v-if="mallAnnouncementText" class="mall-hero-card__meta-item mall-hero-card__meta-item--notice rounded-2xl bg-amber-50 px-3 py-3 text-sm text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">公告：{{ mallAnnouncementText }}</div>
       </div>
       <div
         v-if="passiveRefreshErrorMessage"
-        class="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-700"
+        class="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-700 dark:border-amber-900/60 dark:bg-amber-500/10 dark:text-amber-300"
       >
         当前先展示本地缓存，后台刷新失败：{{ passiveRefreshErrorMessage }}
       </div>
@@ -1527,8 +1527,8 @@ onBeforeUnmount(() => {
         <p class="mall-announcement-dialog__content">{{ mallAnnouncementText }}</p>
       </section>
     </ElDialog>
-    <div v-if="loading" class="grid gap-3 rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
-      <div v-for="index in 6" :key="index" class="h-[5.8rem] animate-pulse rounded-2xl bg-slate-100" />
+    <div v-if="loading" class="grid gap-3 rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
+      <div v-for="index in 6" :key="index" class="h-[5.8rem] animate-pulse rounded-2xl bg-slate-100 dark:bg-white/10" />
     </div>
     <BaseRequestState
       v-else-if="blockingRequestError"
@@ -1601,7 +1601,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <header class="flex items-center justify-between gap-3">
-        <p class="text-sm font-semibold text-slate-700">搜索结果 {{ searchResults.length }} 条</p>
+        <p class="text-sm font-semibold text-slate-700 dark:text-slate-200">搜索结果 {{ searchResults.length }} 条</p>
       </header>
       <div class="client-product-grid mall-product-grid">
         <article
@@ -1632,10 +1632,10 @@ onBeforeUnmount(() => {
                 <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">
                   可预订 {{ product.availableStock }}
                 </span>
-                <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">
+                <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
                   已预订 {{ product.preOrderedStock }}
                 </span>
-                <span class="rounded-full bg-slate-100 px-2 py-1 text-slate-600">
+                <span class="rounded-full bg-slate-100 px-2 py-1 text-slate-600 dark:bg-white/10 dark:text-slate-300">
                   已售 {{ resolveSoldQty(product) }}
                 </span>
               </div>
@@ -1704,7 +1704,7 @@ onBeforeUnmount(() => {
             :ref="(element) => setCategoryButtonRef(category.key, element)"
             type="button"
             class="mall-category-button mb-2 w-full rounded-xl px-2 py-2 sm:px-3 sm:py-3 text-left transition-colors duration-200"
-            :class="displayCategoryKey === category.key ? 'bg-[var(--ylink-color-primary-strong)] text-white shadow-md' : 'bg-[var(--ylink-color-surface-muted)] text-slate-500 hover:bg-slate-200'"
+            :class="displayCategoryKey === category.key ? 'bg-[var(--ylink-color-primary-strong)] text-white shadow-md' : 'bg-[var(--ylink-color-surface-muted)] text-slate-500 hover:bg-slate-200 dark:text-slate-400'"
             @click="scrollToCategory(category.key)"
           >
             <p class="truncate text-xs sm:text-sm font-medium">{{ category.label }}</p>
@@ -1742,8 +1742,8 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="client-product-card__meta">
                   <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ row.data.availableStock }}</span>
-                  <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">已预订 {{ row.data.preOrderedStock }}</span>
-                  <span class="rounded-full bg-slate-100 px-2 py-1 text-slate-600">已售 {{ resolveSoldQty(row.data) }}</span>
+                  <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">已预订 {{ row.data.preOrderedStock }}</span>
+                  <span class="rounded-full bg-slate-100 px-2 py-1 text-slate-600 dark:bg-white/10 dark:text-slate-300">已售 {{ resolveSoldQty(row.data) }}</span>
                 </div>
               </div>
             </button>
@@ -1763,7 +1763,7 @@ onBeforeUnmount(() => {
         @touchstart.passive="handleCategoryManualInterrupt"
       >
         <section v-if="useRecommendedAllProductFlow" class="mall-category-section mb-4">
-          <header class="mall-category-section__header sticky top-0 z-10 mb-2 rounded-lg bg-white/95 px-1 py-1.5 text-sm font-semibold text-slate-700 backdrop-blur-sm">
+          <header class="mall-category-section__header sticky top-0 z-10 mb-2 rounded-lg bg-white/95 px-1 py-1.5 text-sm font-semibold text-slate-700 backdrop-blur-sm dark:text-slate-200">
             推荐排序
           </header>
           <div class="client-product-grid mall-product-grid">
@@ -1793,8 +1793,8 @@ onBeforeUnmount(() => {
                   </div>
                   <div class="client-product-card__meta">
                     <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ product.availableStock }}</span>
-                    <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">已预订 {{ product.preOrderedStock }}</span>
-                    <span class="rounded-full bg-slate-100 px-2 py-1 text-slate-600">已售 {{ resolveSoldQty(product) }}</span>
+                    <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">已预订 {{ product.preOrderedStock }}</span>
+                    <span class="rounded-full bg-slate-100 px-2 py-1 text-slate-600 dark:bg-white/10 dark:text-slate-300">已售 {{ resolveSoldQty(product) }}</span>
                   </div>
                 </div>
               </button>
@@ -1809,7 +1809,7 @@ onBeforeUnmount(() => {
             :ref="(el) => setSectionRef(group.key, el)"
             class="mall-category-section mb-4"
           >
-            <header class="mall-category-section__header sticky top-0 z-10 mb-2 rounded-lg bg-white/95 px-1 py-1.5 text-sm font-semibold text-slate-700 backdrop-blur-sm">
+            <header class="mall-category-section__header sticky top-0 z-10 mb-2 rounded-lg bg-white/95 px-1 py-1.5 text-sm font-semibold text-slate-700 backdrop-blur-sm dark:text-slate-200">
               {{ group.label }}
             </header>
             <div class="client-product-grid mall-product-grid">
@@ -1839,8 +1839,8 @@ onBeforeUnmount(() => {
                     </div>
                     <div class="client-product-card__meta">
                       <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ product.availableStock }}</span>
-                      <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">已预订 {{ product.preOrderedStock }}</span>
-                      <span class="rounded-full bg-slate-100 px-2 py-1 text-slate-600">已售 {{ resolveSoldQty(product) }}</span>
+                      <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">已预订 {{ product.preOrderedStock }}</span>
+                      <span class="rounded-full bg-slate-100 px-2 py-1 text-slate-600 dark:bg-white/10 dark:text-slate-300">已售 {{ resolveSoldQty(product) }}</span>
                     </div>
                   </div>
                 </button>
@@ -1899,7 +1899,7 @@ onBeforeUnmount(() => {
                   </p>
                 </div>
                 <div class="item-stepper">
-                  <p v-if="item.specText" class="text-xs text-slate-500">{{ item.specText }}</p>
+                  <p v-if="item.specText" class="text-xs text-slate-500 dark:text-slate-400">{{ item.specText }}</p>
                   <button type="button" class="step-btn" @click="clientCartStore.incrementQty(item.skuId || item.productId, -1)">-</button>
                   <ClientQtyInput
                     size="compact"
@@ -4379,5 +4379,274 @@ onBeforeUnmount(() => {
     0 20px 48px -10px rgba(15, 23, 42, 0.12),
     0 4px 12px -2px rgba(15, 23, 42, 0.06),
     inset 0 1px 0 rgba(255, 255, 255, 0.6) !important;
+}
+
+/* =========================================================
+   暗色主题适配
+   - 商城大量使用亮色玻璃 / 白卡片与 !important 覆盖层，这里按同样优先级整体换成暗色玻璃与深色卡片；
+   - 品牌色激活态、价格色等沿用 --ylink-color-* 变量，已在全局暗色变量中提亮。
+   ========================================================= */
+.dark .mall-hero-card {
+  background: rgba(20, 20, 21, 0.62) !important;
+  border-color: rgba(255, 255, 255, 0.06) !important;
+  box-shadow: 0 16px 36px -12px rgba(0, 0, 0, 0.5) !important;
+}
+
+.dark .mall-hero-card__meta-item {
+  background: rgba(255, 255, 255, 0.04) !important;
+  border-color: rgba(255, 255, 255, 0.06) !important;
+}
+
+.dark .mall-hero-card__compact-badge,
+.dark .mall-announcement-dialog__badge {
+  background: rgba(249, 115, 22, 0.16);
+  color: #fdba74;
+}
+
+.dark .mall-hero-card__compact-text {
+  color: #fcd34d;
+}
+
+:global(.dark .mall-announcement-dialog.el-dialog) {
+  background:
+    linear-gradient(180deg, rgba(245, 158, 11, 0.1), rgba(20, 20, 21, 0.98) 46%),
+    #141415;
+}
+
+:global(.dark .mall-announcement-dialog .el-dialog__headerbtn) {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+:global(.dark .mall-announcement-dialog .el-dialog__headerbtn:hover) {
+  background: rgba(245, 158, 11, 0.16);
+}
+
+.dark .mall-announcement-dialog__title {
+  color: #f1f5f9;
+}
+
+.dark .mall-announcement-dialog__content {
+  background: rgba(245, 158, 11, 0.08);
+  color: #cbd5e1;
+}
+
+.dark .mall-browse-panel {
+  background: rgba(20, 20, 21, 0.55) !important;
+  border-color: rgba(255, 255, 255, 0.06) !important;
+  box-shadow: 0 12px 36px -12px rgba(0, 0, 0, 0.5) !important;
+}
+
+.dark .mall-category-section__header {
+  color: #e2e8f0 !important;
+}
+
+.dark .client-product-card,
+.dark .client-product-card:hover {
+  background: #1a1a1c !important;
+  border-color: rgba(255, 255, 255, 0.06) !important;
+  box-shadow: 0 12px 24px -10px rgba(0, 0, 0, 0.55) !important;
+}
+
+.dark .client-product-card:hover {
+  border-color: rgba(45, 212, 191, 0.3) !important;
+}
+
+.dark .client-product-card__name {
+  color: #f1f5f9;
+}
+
+.dark .client-product-card__cover {
+  background: linear-gradient(135deg, #222225 0%, #1d1d1f 100%) !important;
+  border-color: rgba(255, 255, 255, 0.04) !important;
+}
+
+.dark .mall-browse-categories .mall-category-button:not(.bg-\[var\(--ylink-color-primary-strong\)\]),
+.dark .mall-browse-categories .mall-category-button:not(.bg-\[var\(--ylink-color-primary-strong\)\]):hover {
+  background: #1a1a1c !important;
+  border-color: rgba(255, 255, 255, 0.06) !important;
+  box-shadow: none !important;
+  color: #cbd5e1 !important;
+}
+
+.dark .mall-browse-categories .mall-category-button:not(.bg-\[var\(--ylink-color-primary-strong\)\]):hover {
+  border-color: rgba(45, 212, 191, 0.3) !important;
+  color: #f1f5f9 !important;
+}
+
+.dark .mall-search-toolbar,
+.dark .mall-search-toolbar.is-focused,
+.dark .mall-mobile-search-inline {
+  background: #1a1a1c !important;
+  border-color: rgba(255, 255, 255, 0.1) !important;
+  box-shadow: none;
+}
+
+.dark .mall-sort-control {
+  background: rgba(255, 255, 255, 0.06) !important;
+  border-color: rgba(255, 255, 255, 0.08) !important;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.3) !important;
+}
+
+.dark .mall-sort-control__button {
+  color: #94a3b8 !important;
+}
+
+.dark .mall-sort-control__button:hover {
+  color: #f1f5f9 !important;
+}
+
+.dark .mall-sort-control__button.is-active {
+  background: #2a2a2d !important;
+  color: #f1f5f9 !important;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.4) !important;
+}
+
+.dark .mall-mobile-search-trigger {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: #1a1a1c;
+  color: #f1f5f9;
+}
+
+.dark .mall-mobile-search-sheet {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(26, 26, 28, 0.98);
+  box-shadow: 0 18px 36px rgba(0, 0, 0, 0.55);
+}
+
+.dark .mall-mobile-search-sheet__title {
+  color: #f1f5f9;
+}
+
+/* 商品详情抽屉 */
+.dark .client-detail-hero,
+.dark .client-detail-sku-section {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.dark .client-detail-hero-close,
+.dark .client-detail-close-button {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(26, 26, 28, 0.9);
+  color: #cbd5e1;
+}
+
+.dark .client-detail-title {
+  color: #f1f5f9;
+}
+
+.dark .client-detail-desc,
+.dark .client-detail-sku-group-title {
+  color: #94a3b8;
+}
+
+.dark .client-detail-tags,
+.dark .client-detail-section-title {
+  color: #cbd5e1;
+}
+
+.dark .client-detail-tags span {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.dark .client-detail-tags span:first-child {
+  background: rgba(16, 185, 129, 0.14);
+  color: #6ee7b7;
+}
+
+.dark .client-detail-tags span:nth-child(2) {
+  background: rgba(245, 158, 11, 0.14);
+  color: #fcd34d;
+}
+
+.dark .client-detail-thumb-button {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: #1a1a1c;
+  box-shadow: 0 12px 26px rgba(0, 0, 0, 0.45);
+}
+
+.dark .client-detail-sku-option.el-button {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: #1a1a1c;
+  color: #e2e8f0;
+}
+
+.dark .client-detail-sku-option.el-button.is-selected {
+  border-color: rgba(45, 212, 191, 0.6);
+  background: rgba(20, 184, 166, 0.14);
+  color: #5eead4;
+}
+
+.dark .client-detail-sku-option.el-button.is-disabled {
+  border-color: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.03);
+  color: #64748b;
+}
+
+.dark .client-detail-action-bar {
+  border-top-color: rgba(255, 255, 255, 0.08);
+  background: #141415;
+}
+
+.dark .client-detail-qty-row {
+  background: rgba(255, 255, 255, 0.06);
+  color: #cbd5e1;
+}
+
+/* 悬浮迷你购物车 */
+.dark .mini-cart-card {
+  background:
+    linear-gradient(180deg, rgba(30, 30, 33, 0.92), rgba(20, 20, 21, 0.86)) !important;
+  border-color: rgba(255, 255, 255, 0.08) !important;
+  box-shadow:
+    0 20px 48px -10px rgba(0, 0, 0, 0.6),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05) !important;
+}
+
+.dark .badge {
+  border-color: #141415;
+}
+
+.dark .main-text,
+.dark .item-name {
+  color: #f1f5f9;
+}
+
+.dark .sub-text,
+.dark .total-price,
+.dark .expand-header .title {
+  color: #94a3b8;
+}
+
+.dark .btn-checkout {
+  background: #0d9488;
+}
+
+.dark .cart-expand-trigger,
+.dark .expand-link-btn {
+  border-color: rgba(255, 255, 255, 0.1);
+  background: #1a1a1c;
+  color: #cbd5e1;
+}
+
+.dark .expand-header {
+  border-top-color: rgba(255, 255, 255, 0.08);
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+.dark .expand-footer {
+  border-top-color: rgba(255, 255, 255, 0.06);
+}
+
+.dark .expand-clear-btn {
+  color: #fb7185;
+}
+
+.dark .item-stepper {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.dark .step-btn {
+  background: #2a2a2d;
+  color: #f1f5f9;
 }
 </style>

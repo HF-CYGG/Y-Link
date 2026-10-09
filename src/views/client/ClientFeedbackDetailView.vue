@@ -258,12 +258,12 @@ const getMessageTitle = (senderRole: FeedbackMessageSenderRole, senderName: stri
  */
 const getMessageCardClass = (senderRole: FeedbackMessageSenderRole) => {
   if (senderRole === 'client') {
-    return 'ml-auto border border-brand/10 bg-brand/10 text-slate-900'
+    return 'ml-auto border border-brand/10 bg-brand/10 text-slate-900 dark:text-slate-100'
   }
   if (senderRole === 'staff') {
-    return 'border border-slate-200 bg-white text-slate-900'
+    return 'border border-slate-200 bg-white text-slate-900 dark:border-white/10 dark:bg-[#141415] dark:text-slate-100'
   }
-  return 'mx-auto border border-dashed border-slate-200 bg-slate-50/85 text-slate-600 shadow-none'
+  return 'mx-auto border border-dashed border-slate-200 bg-slate-50/85 text-slate-600 shadow-none dark:border-white/10 dark:text-slate-300'
 }
 
 const getMessageContainerClass = (senderRole: FeedbackMessageSenderRole) => {
@@ -271,13 +271,13 @@ const getMessageContainerClass = (senderRole: FeedbackMessageSenderRole) => {
 }
 
 const getMessageTitleClass = (senderRole: FeedbackMessageSenderRole) => {
-  return senderRole === 'system' ? 'text-xs font-semibold text-slate-500' : 'text-sm font-semibold text-slate-900'
+  return senderRole === 'system' ? 'text-xs font-semibold text-slate-500 dark:text-slate-400' : 'text-sm font-semibold text-slate-900 dark:text-slate-100'
 }
 
 const getMessageBodyClass = (senderRole: FeedbackMessageSenderRole) => {
   return senderRole === 'system'
-    ? 'mt-2 whitespace-pre-wrap text-xs leading-6 text-slate-500'
-    : 'mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-700'
+    ? 'mt-2 whitespace-pre-wrap text-xs leading-6 text-slate-500 dark:text-slate-400'
+    : 'mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-700 dark:text-slate-200'
 }
 
 const formatAttachmentSize = (size: number | null) => {
@@ -844,12 +844,12 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="space-y-4 pb-4">
-    <div class="rounded-[1.5rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
+    <div class="rounded-[1.5rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0 flex-1">
           <button
             type="button"
-            class="inline-flex items-center gap-1 rounded-full px-2.5 py-1.5 text-sm font-medium text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
+            class="inline-flex items-center gap-1 rounded-full px-2.5 py-1.5 text-sm font-medium text-slate-500 transition hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400"
             @click="handleNavigateBack"
           >
             <svg viewBox="0 0 20 20" fill="none" class="h-4 w-4" aria-hidden="true">
@@ -857,42 +857,42 @@ onBeforeUnmount(() => {
             </svg>
             <span>返回</span>
           </button>
-          <p class="text-xl font-semibold text-slate-900">反馈单详情</p>
-          <p class="mt-1 text-sm leading-6 text-slate-500">
+          <p class="text-xl font-semibold text-slate-900 dark:text-slate-100">反馈单详情</p>
+          <p class="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
             围绕当前反馈单查看处理进度、Issue 字段和全部消息记录，需要补充说明时可直接在本页续接。
           </p>
         </div>
         <div class="flex shrink-0 items-center gap-2">
           <span
             class="rounded-full px-3 py-1.5 text-xs font-semibold"
-            :class="realtimeState === 'online' ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'"
+            :class="realtimeState === 'online' ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300' : 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300'"
           >
             {{ realtimeState === 'online' ? '客服在线' : realtimeState === 'connecting' ? '连接中' : '客服离线' }}
           </span>
         </div>
       </div>
-      <div class="mt-4 rounded-[1rem] border border-slate-200 bg-slate-50 px-4 py-3">
-        <p class="text-sm font-medium text-slate-700">{{ availabilityText }}</p>
-        <p class="mt-1 text-xs leading-5 text-slate-500">{{ reconnectTip }}</p>
+      <div class="mt-4 rounded-[1rem] border border-slate-200 bg-slate-50 px-4 py-3 dark:border-white/10 dark:bg-white/5">
+        <p class="text-sm font-medium text-slate-700 dark:text-slate-200">{{ availabilityText }}</p>
+        <p class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">{{ reconnectTip }}</p>
       </div>
     </div>
 
-    <article v-if="loading && !conversation" class="rounded-[1.4rem] bg-white p-8 text-center shadow-[var(--ylink-shadow-soft)]">
-      <p class="text-base font-semibold text-slate-900">正在加载反馈单详情...</p>
-      <p class="mt-2 text-sm leading-6 text-slate-500">请稍候，系统正在同步当前会话记录与处理状态。</p>
+    <article v-if="loading && !conversation" class="rounded-[1.4rem] bg-white p-8 text-center shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
+      <p class="text-base font-semibold text-slate-900 dark:text-slate-100">正在加载反馈单详情...</p>
+      <p class="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">请稍候，系统正在同步当前会话记录与处理状态。</p>
     </article>
 
     <article v-else-if="conversation" class="space-y-4">
-      <article class="rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
-        <div v-if="detailLoading" class="mb-4 rounded-[1rem] bg-slate-50 px-4 py-3 text-sm text-slate-500">
+      <article class="rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
+        <div v-if="detailLoading" class="mb-4 rounded-[1rem] bg-slate-50 px-4 py-3 text-sm text-slate-500 dark:bg-white/5 dark:text-slate-400">
           正在同步当前反馈单详情...
         </div>
 
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div class="min-w-0">
             <p class="text-xs font-semibold tracking-[0.16em] text-slate-400">{{ conversation.issueNo }}</p>
-            <p class="mt-2 text-xl font-semibold text-slate-900">{{ conversation.title }}</p>
-            <p class="mt-2 text-sm leading-6 text-slate-500">{{ conversation.summary }}</p>
+            <p class="mt-2 text-xl font-semibold text-slate-900 dark:text-slate-100">{{ conversation.title }}</p>
+            <p class="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">{{ conversation.summary }}</p>
           </div>
 
           <div class="flex flex-wrap items-center gap-2">
@@ -911,7 +911,7 @@ onBeforeUnmount(() => {
             <button
               v-if="canWithdrawConversation"
               type="button"
-              class="rounded-full border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-semibold text-rose-700 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60"
+              class="rounded-full border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-semibold text-rose-700 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-900/60 dark:bg-rose-500/10 dark:text-rose-300"
               :disabled="withdrawingConversation"
               @click="handleWithdrawConversation"
             >
@@ -921,15 +921,15 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="mt-5 grid gap-3 lg:grid-cols-[1.3fr_0.9fr]">
-          <div class="rounded-[1rem] bg-slate-50 p-4">
+          <div class="rounded-[1rem] bg-slate-50 p-4 dark:bg-white/5">
             <div class="flex items-center justify-between gap-3">
               <div>
                 <p class="text-xs font-semibold tracking-[0.16em] text-slate-400">处理进度</p>
-                <p class="mt-1 text-sm text-slate-500">统一用四个阶段说明当前反馈单所处位置，减少“看见状态但不知道下一步”的落差。</p>
+                <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">统一用四个阶段说明当前反馈单所处位置，减少“看见状态但不知道下一步”的落差。</p>
               </div>
               <span
                 v-if="nextStepPrompt"
-                class="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-600 ring-1 ring-inset ring-slate-200"
+                class="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-600 ring-1 ring-inset ring-slate-200 dark:bg-[#141415] dark:text-slate-300 dark:ring-white/10"
               >
                 {{ nextStepPrompt.groupLabel }}
               </span>
@@ -949,7 +949,7 @@ onBeforeUnmount(() => {
                         ? 'bg-emerald-500 text-white'
                         : step.state === 'current'
                           ? 'bg-slate-900 text-white'
-                          : 'bg-white text-slate-400 ring-1 ring-inset ring-slate-200'
+                          : 'bg-white text-slate-400 ring-1 ring-inset ring-slate-200 dark:bg-[#141415] dark:ring-white/10'
                     "
                   >
                     {{ index + 1 }}
@@ -961,29 +961,29 @@ onBeforeUnmount(() => {
                   />
                 </div>
                 <div class="min-w-0 flex-1 pb-2">
-                  <p class="text-sm font-semibold" :class="step.state === 'upcoming' ? 'text-slate-500' : 'text-slate-900'">
+                  <p class="text-sm font-semibold" :class="step.state === 'upcoming' ? 'text-slate-500 dark:text-slate-400' : 'text-slate-900 dark:text-slate-100'">
                     {{ step.label }}
                   </p>
-                  <p class="mt-1 text-xs leading-5 text-slate-500">{{ step.description }}</p>
+                  <p class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">{{ step.description }}</p>
                 </div>
               </div>
             </div>
           </div>
 
-          <div class="rounded-[1rem] bg-slate-50 p-4">
+          <div class="rounded-[1rem] bg-slate-50 p-4 dark:bg-white/5">
             <p class="text-xs font-semibold tracking-[0.16em] text-slate-400">进度提示</p>
             <div v-if="nextStepPrompt" class="mt-3 space-y-3">
-              <div class="rounded-[0.9rem] bg-white px-3 py-3">
+              <div class="rounded-[0.9rem] bg-white px-3 py-3 dark:bg-[#141415]">
                 <p class="text-xs font-medium text-slate-400">当前阶段</p>
-                <p class="mt-1 text-sm font-semibold text-slate-900">{{ nextStepPrompt.stageLabel }}</p>
+                <p class="mt-1 text-sm font-semibold text-slate-900 dark:text-slate-100">{{ nextStepPrompt.stageLabel }}</p>
               </div>
-              <div class="rounded-[0.9rem] bg-white px-3 py-3">
+              <div class="rounded-[0.9rem] bg-white px-3 py-3 dark:bg-[#141415]">
                 <p class="text-xs font-medium text-slate-400">最近动作</p>
-                <p class="mt-1 text-sm leading-6 text-slate-600">{{ nextStepPrompt.recentAction }}</p>
+                <p class="mt-1 text-sm leading-6 text-slate-600 dark:text-slate-300">{{ nextStepPrompt.recentAction }}</p>
               </div>
-              <div class="rounded-[0.9rem] bg-white px-3 py-3">
+              <div class="rounded-[0.9rem] bg-white px-3 py-3 dark:bg-[#141415]">
                 <p class="text-xs font-medium text-slate-400">建议下一步</p>
-                <p class="mt-1 text-sm leading-6 text-slate-600">{{ nextStepPrompt.nextStep }}</p>
+                <p class="mt-1 text-sm leading-6 text-slate-600 dark:text-slate-300">{{ nextStepPrompt.nextStep }}</p>
               </div>
               <div v-if="canConfirmResolved" class="grid gap-3 sm:grid-cols-2">
                 <button
@@ -996,7 +996,7 @@ onBeforeUnmount(() => {
                 </button>
                 <button
                   type="button"
-                  class="rounded-[0.9rem] border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
+                  class="rounded-[0.9rem] border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:border-slate-300 hover:bg-slate-50 dark:border-white/10 dark:bg-[#141415] dark:text-slate-200"
                   @click="handleContinueFeedback"
                 >
                   仍未解决，继续反馈
@@ -1004,12 +1004,12 @@ onBeforeUnmount(() => {
               </div>
               <div
                 v-if="showSatisfactionEntry || hasRatedSatisfaction"
-                class="rounded-[0.95rem] border border-dashed border-slate-200 bg-white px-3 py-3"
+                class="rounded-[0.95rem] border border-dashed border-slate-200 bg-white px-3 py-3 dark:border-white/10 dark:bg-[#141415]"
               >
                 <div class="flex flex-wrap items-start justify-between gap-3">
                   <div>
                     <p class="text-xs font-medium text-slate-400">处理评价</p>
-                    <p class="mt-1 text-sm leading-6 text-slate-600">
+                    <p class="mt-1 text-sm leading-6 text-slate-600 dark:text-slate-300">
                       {{ hasRatedSatisfaction ? '你的评价已记录，客服可基于该结果持续优化处理体验。' : '当前反馈单已进入结果阶段，可补充对本次处理体验的评价。' }}
                     </p>
                   </div>
@@ -1023,14 +1023,14 @@ onBeforeUnmount(() => {
                 </div>
 
                 <div v-if="hasRatedSatisfaction && conversation.satisfaction" class="mt-3 space-y-2 text-sm">
-                  <p class="text-slate-500">评价时间：{{ formatDateTime(conversation.satisfaction.ratedAt) }}</p>
-                  <p class="leading-6 text-slate-700">
+                  <p class="text-slate-500 dark:text-slate-400">评价时间：{{ formatDateTime(conversation.satisfaction.ratedAt) }}</p>
+                  <p class="leading-6 text-slate-700 dark:text-slate-200">
                     {{ conversation.satisfaction.comment || '你未填写额外说明，系统已记录当前评价结果。' }}
                   </p>
                 </div>
 
-                <div v-else class="mt-3 rounded-[0.95rem] bg-slate-50 px-3 py-3">
-                  <p class="text-sm leading-6 text-slate-600">
+                <div v-else class="mt-3 rounded-[0.95rem] bg-slate-50 px-3 py-3 dark:bg-white/5">
+                  <p class="text-sm leading-6 text-slate-600 dark:text-slate-300">
                     你可以通过弹窗快速评价本次处理体验，并补充对回复速度、结论清晰度或改进建议的看法。
                   </p>
                   <div class="mt-3 flex justify-end">
@@ -1048,71 +1048,71 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <article v-if="showOfflineFaq" class="mt-5 rounded-[1rem] border border-amber-200 bg-amber-50/70 p-4">
+        <article v-if="showOfflineFaq" class="mt-5 rounded-[1rem] border border-amber-200 bg-amber-50/70 p-4 dark:border-amber-900/60 dark:bg-amber-500/10">
           <div class="flex items-start justify-between gap-3">
             <div>
-              <p class="text-sm font-semibold text-slate-900">离线常见问题</p>
-              <p class="mt-1 text-xs leading-5 text-slate-500">客服当前离线时，可先查看常见问题答案；如果当前反馈单还有新增现象，仍可直接在下方继续补充。</p>
+              <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">离线常见问题</p>
+              <p class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">客服当前离线时，可先查看常见问题答案；如果当前反馈单还有新增现象，仍可直接在下方继续补充。</p>
             </div>
-            <span class="rounded-full bg-white px-3 py-1 text-xs font-semibold text-amber-700">离线导流</span>
+            <span class="rounded-full bg-white px-3 py-1 text-xs font-semibold text-amber-700 dark:bg-[#141415] dark:text-amber-300">离线导流</span>
           </div>
           <div class="mt-4 grid gap-3">
             <article
               v-for="item in offlineFaqEntries"
               :key="item.question"
-              class="rounded-[0.9rem] bg-white px-4 py-3"
+              class="rounded-[0.9rem] bg-white px-4 py-3 dark:bg-[#141415]"
             >
-              <p class="text-sm font-semibold text-slate-900">{{ item.question }}</p>
-              <p class="mt-2 text-xs leading-6 text-slate-500">{{ item.answer }}</p>
+              <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">{{ item.question }}</p>
+              <p class="mt-2 text-xs leading-6 text-slate-500 dark:text-slate-400">{{ item.answer }}</p>
             </article>
           </div>
         </article>
 
         <div class="mt-5 grid gap-3 lg:grid-cols-2">
-          <div class="rounded-[1rem] bg-slate-50 p-4">
+          <div class="rounded-[1rem] bg-slate-50 p-4 dark:bg-white/5">
             <p class="text-xs font-semibold tracking-[0.16em] text-slate-400">Issue 字段</p>
             <dl class="mt-3 space-y-3 text-sm">
               <div>
                 <dt class="text-slate-400">问题类型</dt>
-                <dd class="mt-1 font-medium text-slate-900">{{ conversation.fields.issueType === 'bug' ? '专业 BUG' : '普通建议' }}</dd>
+                <dd class="mt-1 font-medium text-slate-900 dark:text-slate-100">{{ conversation.fields.issueType === 'bug' ? '专业 BUG' : '普通建议' }}</dd>
               </div>
               <div>
                 <dt class="text-slate-400">问题分类</dt>
-                <dd class="mt-1 font-medium text-slate-900">{{ getCategoryLabel(conversation.fields.category) }}</dd>
+                <dd class="mt-1 font-medium text-slate-900 dark:text-slate-100">{{ getCategoryLabel(conversation.fields.category) }}</dd>
               </div>
               <div>
                 <dt class="text-slate-400">来源入口</dt>
-                <dd class="mt-1 font-medium text-slate-900">{{ conversation.fields.sourceLabel }}</dd>
+                <dd class="mt-1 font-medium text-slate-900 dark:text-slate-100">{{ conversation.fields.sourceLabel }}</dd>
               </div>
               <div>
                 <dt class="text-slate-400">关联订单号</dt>
-                <dd class="mt-1 font-medium text-slate-900">{{ conversation.fields.orderRef || '未关联' }}</dd>
+                <dd class="mt-1 font-medium text-slate-900 dark:text-slate-100">{{ conversation.fields.orderRef || '未关联' }}</dd>
               </div>
               <div>
                 <dt class="text-slate-400">期望结果</dt>
-                <dd class="mt-1 leading-6 text-slate-900">{{ conversation.fields.expectedResult || '未填写' }}</dd>
+                <dd class="mt-1 leading-6 text-slate-900 dark:text-slate-100">{{ conversation.fields.expectedResult || '未填写' }}</dd>
               </div>
               <div>
                 <dt class="text-slate-400">实际结果</dt>
-                <dd class="mt-1 leading-6 text-slate-900">{{ conversation.fields.actualResult || '未填写' }}</dd>
+                <dd class="mt-1 leading-6 text-slate-900 dark:text-slate-100">{{ conversation.fields.actualResult || '未填写' }}</dd>
               </div>
             </dl>
           </div>
 
-          <div class="rounded-[1rem] bg-slate-50 p-4">
+          <div class="rounded-[1rem] bg-slate-50 p-4 dark:bg-white/5">
             <p class="text-xs font-semibold tracking-[0.16em] text-slate-400">补充信息</p>
             <dl class="mt-3 space-y-3 text-sm">
               <div>
                 <dt class="text-slate-400">复现步骤</dt>
-                <dd class="mt-1 leading-6 text-slate-900">{{ conversation.fields.reproductionSteps || '未填写' }}</dd>
+                <dd class="mt-1 leading-6 text-slate-900 dark:text-slate-100">{{ conversation.fields.reproductionSteps || '未填写' }}</dd>
               </div>
               <div>
                 <dt class="text-slate-400">联系偏好</dt>
-                <dd class="mt-1 leading-6 text-slate-900">{{ conversation.fields.contactPreference || '站内会话回复' }}</dd>
+                <dd class="mt-1 leading-6 text-slate-900 dark:text-slate-100">{{ conversation.fields.contactPreference || '站内会话回复' }}</dd>
               </div>
               <div>
                 <dt class="text-slate-400">客服负责人</dt>
-                <dd class="mt-1 font-medium text-slate-900">{{ conversation.assigneeName || '待分配' }}</dd>
+                <dd class="mt-1 font-medium text-slate-900 dark:text-slate-100">{{ conversation.assigneeName || '待分配' }}</dd>
               </div>
               <div>
                 <dt class="text-slate-400">标签</dt>
@@ -1120,11 +1120,11 @@ onBeforeUnmount(() => {
                   <span
                     v-for="tag in conversation.fields.tags"
                     :key="tag"
-                    class="rounded-full bg-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700"
+                    class="rounded-full bg-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-200"
                   >
                     {{ tag }}
                   </span>
-                  <span v-if="!conversation.fields.tags.length" class="text-slate-500">暂无标签</span>
+                  <span v-if="!conversation.fields.tags.length" class="text-slate-500 dark:text-slate-400">暂无标签</span>
                 </dd>
               </div>
             </dl>
@@ -1133,14 +1133,14 @@ onBeforeUnmount(() => {
 
         <article
           v-if="conversationAttachmentEntries.length"
-          class="mt-5 rounded-[1rem] border border-slate-200 bg-slate-50/80 p-4"
+          class="mt-5 rounded-[1rem] border border-slate-200 bg-slate-50/80 p-4 dark:border-white/10 dark:bg-white/5"
         >
           <div class="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <p class="text-sm font-semibold text-slate-900">附件总览</p>
+              <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">附件总览</p>
               <p class="mt-1 text-xs leading-5 text-slate-400">集中查看当前反馈单里已经上传的图片证据，不必逐条翻消息寻找。</p>
             </div>
-            <span class="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-500">
+            <span class="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-500 dark:bg-[#141415] dark:text-slate-400">
               {{ conversationAttachmentEntries.length }} 个附件
             </span>
           </div>
@@ -1149,7 +1149,7 @@ onBeforeUnmount(() => {
             <article
               v-for="item in conversationAttachmentEntries"
               :key="item.id"
-              class="rounded-[1rem] bg-white p-3 shadow-sm ring-1 ring-inset ring-slate-200"
+              class="rounded-[1rem] bg-white p-3 shadow-sm ring-1 ring-inset ring-slate-200 dark:bg-[#141415] dark:ring-white/10"
             >
               <img
                 v-if="isImageAttachment(item.attachment)"
@@ -1159,17 +1159,17 @@ onBeforeUnmount(() => {
               />
               <div
                 v-else
-                class="detail-attachment-preview detail-attachment-preview--placeholder flex items-center justify-center text-sm font-semibold text-slate-500"
+                class="detail-attachment-preview detail-attachment-preview--placeholder flex items-center justify-center text-sm font-semibold text-slate-500 dark:text-slate-400"
               >
                 附件
               </div>
-              <p class="mt-3 truncate text-sm font-semibold text-slate-900">{{ item.attachment.name }}</p>
+              <p class="mt-3 truncate text-sm font-semibold text-slate-900 dark:text-slate-100">{{ item.attachment.name }}</p>
               <p class="mt-1 text-xs text-slate-400">{{ item.senderName }} · {{ formatDateTime(item.createdAt) }}</p>
               <p class="mt-1 text-xs text-slate-400">{{ formatAttachmentSize(item.attachment.size) }}</p>
               <div class="mt-3 flex flex-wrap gap-2">
                 <button
                   type="button"
-                  class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 transition hover:bg-slate-200"
+                  class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 transition hover:bg-slate-200 dark:bg-white/10 dark:text-slate-300"
                   @click="openAttachmentPreview(item.attachment)"
                 >
                   预览
@@ -1188,10 +1188,10 @@ onBeforeUnmount(() => {
         </article>
       </article>
 
-      <article class="rounded-[1rem] border border-slate-200 bg-slate-50/80 p-4">
+      <article class="rounded-[1rem] border border-slate-200 bg-slate-50/80 p-4 dark:border-white/10 dark:bg-white/5">
         <div class="flex items-center justify-between gap-3">
           <div>
-            <p class="text-base font-semibold text-slate-900">会话记录</p>
+            <p class="text-base font-semibold text-slate-900 dark:text-slate-100">会话记录</p>
             <p class="mt-1 text-xs text-slate-400">所有消息按时间顺序展示，便于围绕同一 Issue 持续协作。</p>
           </div>
           <span class="text-xs text-slate-400">{{ conversation.messages.length }} 条消息</span>
@@ -1213,7 +1213,7 @@ onBeforeUnmount(() => {
                 {{ getMessageTitle(message.senderRole, message.senderName) }}
                 <span
                   class="ml-2 rounded-full px-2 py-0.5 text-[0.68rem] font-medium"
-                  :class="message.senderRole === 'system' ? 'bg-slate-200/80 text-slate-500' : 'bg-slate-100 text-slate-500'"
+                  :class="message.senderRole === 'system' ? 'bg-slate-200/80 text-slate-500 dark:text-slate-400' : 'bg-slate-100 text-slate-500 dark:bg-white/10 dark:text-slate-400'"
                 >
                   {{ getMessageRoleLabel(message.senderRole) }}
                 </span>
@@ -1237,12 +1237,12 @@ onBeforeUnmount(() => {
                 />
                 <div
                   v-else
-                  class="message-attachment-card__image message-attachment-card__image--placeholder flex items-center justify-center text-xs font-semibold text-slate-500"
+                  class="message-attachment-card__image message-attachment-card__image--placeholder flex items-center justify-center text-xs font-semibold text-slate-500 dark:text-slate-400"
                 >
                   附件
                 </div>
                 <div class="min-w-0 flex-1 text-left">
-                  <p class="truncate text-sm font-semibold text-slate-900">{{ attachment.name }}</p>
+                  <p class="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">{{ attachment.name }}</p>
                   <p class="mt-1 text-xs text-slate-400">{{ formatAttachmentSize(attachment.size) }}</p>
                 </div>
               </button>
@@ -1251,8 +1251,8 @@ onBeforeUnmount(() => {
         </div>
       </article>
 
-      <article v-if="shouldShowReplyComposer" class="rounded-[1rem] border border-slate-200 bg-white p-4">
-        <p class="text-base font-semibold text-slate-900">继续补充说明</p>
+      <article v-if="shouldShowReplyComposer" class="rounded-[1rem] border border-slate-200 bg-white p-4 dark:border-white/10 dark:bg-[#141415]">
+        <p class="text-base font-semibold text-slate-900 dark:text-slate-100">继续补充说明</p>
         <p class="mt-1 text-xs text-slate-400">同一问题后续有新现象时，直接追加消息即可，不需要重新新建反馈。</p>
         <textarea
           ref="replyTextareaRef"
@@ -1261,17 +1261,17 @@ onBeforeUnmount(() => {
           maxlength="400"
           placeholder="例如：今天再次尝试后，问题仍在 iPhone 浏览器出现。"
         />
-        <div class="mt-3 rounded-[1rem] border border-dashed border-slate-200 bg-slate-50 px-3 py-3">
+        <div class="mt-3 rounded-[1rem] border border-dashed border-slate-200 bg-slate-50 px-3 py-3 dark:border-white/10 dark:bg-white/5">
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <p class="text-sm font-semibold text-slate-900">补充图片附件</p>
+              <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">补充图片附件</p>
               <p class="mt-1 text-xs leading-5 text-slate-400">
                 新的异常截图、界面对比图或订单凭证可直接附在本次补充说明里，方便客服继续定位。
               </p>
             </div>
             <button
               type="button"
-              class="rounded-[0.9rem] border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:border-slate-300 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+              class="rounded-[0.9rem] border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:border-slate-300 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-white/10 dark:bg-[#141415] dark:text-slate-200"
               :disabled="uploadingReplyAttachments || replyAttachments.length >= FEEDBACK_ATTACHMENT_LIMIT"
               @click="openReplyAttachmentPicker"
             >
@@ -1291,7 +1291,7 @@ onBeforeUnmount(() => {
             <article
               v-for="(attachment, index) in replyAttachments"
               :key="`${attachment.url}-${index}`"
-              class="rounded-[0.95rem] bg-white p-3 shadow-sm ring-1 ring-inset ring-slate-200"
+              class="rounded-[0.95rem] bg-white p-3 shadow-sm ring-1 ring-inset ring-slate-200 dark:bg-[#141415] dark:ring-white/10"
             >
               <div class="flex items-start gap-3">
                 <img
@@ -1302,24 +1302,24 @@ onBeforeUnmount(() => {
                 />
                 <div
                   v-else
-                  class="reply-attachment-thumb reply-attachment-thumb--placeholder flex items-center justify-center text-xs font-semibold text-slate-500"
+                  class="reply-attachment-thumb reply-attachment-thumb--placeholder flex items-center justify-center text-xs font-semibold text-slate-500 dark:text-slate-400"
                 >
                   附件
                 </div>
                 <div class="min-w-0 flex-1">
-                  <p class="truncate text-sm font-semibold text-slate-900">{{ attachment.name }}</p>
+                  <p class="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">{{ attachment.name }}</p>
                   <p class="mt-1 text-xs text-slate-400">{{ formatAttachmentSize(attachment.size) }}</p>
                   <div class="mt-3 flex flex-wrap gap-2">
                     <button
                       type="button"
-                      class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 transition hover:bg-slate-200"
+                      class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 transition hover:bg-slate-200 dark:bg-white/10 dark:text-slate-300"
                       @click="openAttachmentPreview(attachment)"
                     >
                       预览
                     </button>
                     <button
                       type="button"
-                      class="rounded-full bg-rose-50 px-3 py-1 text-xs font-medium text-rose-600 transition hover:bg-rose-100"
+                      class="rounded-full bg-rose-50 px-3 py-1 text-xs font-medium text-rose-600 transition hover:bg-rose-100 dark:bg-rose-500/10 dark:text-rose-400"
                       @click="handleRemoveReplyAttachment(index)"
                     >
                       移除
@@ -1343,9 +1343,9 @@ onBeforeUnmount(() => {
       </article>
     </article>
 
-    <article v-else class="rounded-[1.4rem] bg-white p-8 text-center shadow-[var(--ylink-shadow-soft)]">
-      <p class="text-base font-semibold text-slate-900">未找到对应反馈单</p>
-      <p class="mt-2 text-sm leading-6 text-slate-500">
+    <article v-else class="rounded-[1.4rem] bg-white p-8 text-center shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
+      <p class="text-base font-semibold text-slate-900 dark:text-slate-100">未找到对应反馈单</p>
+      <p class="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">
         该会话可能已失效或当前账号无权访问，请返回会话列表重新选择。
       </p>
       <button
@@ -1764,5 +1764,78 @@ onBeforeUnmount(() => {
   .client-feedback-satisfaction-dialog__radio-group {
     grid-template-columns: 1fr;
   }
+}
+
+/* 暗色：回复输入框、附件、图片预览、新消息高亮与满意度弹窗。 */
+.dark .feedback-textarea {
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  color: #f1f5f9;
+}
+
+.dark .feedback-textarea:focus {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.dark .reply-attachment-thumb,
+.dark .message-attachment-card__image,
+.dark .feedback-preview-image {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.dark .message-attachment-card {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.dark .feedback-preview-panel {
+  background: rgba(20, 20, 21, 0.98);
+}
+
+.dark .feedback-preview-close {
+  background: rgba(255, 255, 255, 0.08);
+  color: #cbd5e1;
+}
+
+.dark .client-feedback-message--fresh {
+  animation-name: client-feedback-fresh-highlight-dark;
+}
+
+@keyframes client-feedback-fresh-highlight-dark {
+  0% {
+    box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.3) inset;
+    background: rgba(20, 184, 166, 0.16);
+  }
+  100% {
+    box-shadow: none;
+    background: transparent;
+  }
+}
+
+.dark .client-feedback-satisfaction-dialog__title,
+.dark .client-feedback-satisfaction-dialog__radio-card-title {
+  color: #f1f5f9;
+}
+
+.dark .client-feedback-satisfaction-dialog__desc {
+  color: #cbd5e1;
+}
+
+.dark .client-feedback-satisfaction-dialog__radio-card-desc {
+  color: #94a3b8;
+}
+
+.dark .client-feedback-satisfaction-dialog__radio-card :deep(.el-radio__label) {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: #cbd5e1;
+}
+
+.dark .client-feedback-satisfaction-dialog__radio-card.is-active :deep(.el-radio__label) {
+  background: rgba(20, 184, 166, 0.12);
+}
+
+.dark .client-feedback-satisfaction-dialog__selected-card {
+  border-color: rgba(45, 212, 191, 0.2);
 }
 </style>

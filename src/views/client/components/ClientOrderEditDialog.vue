@@ -73,15 +73,15 @@ const handleAddProductIdChange = (value: string) => {
     @closed="emit('closed')"
   >
     <div class="client-order-detail-dialog__content space-y-4">
-      <div class="rounded-2xl bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600">
+      <div class="rounded-2xl bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600 dark:bg-white/5 dark:text-slate-300">
         待取货订单支持直接修改商品、数量和备注。保存后系统会按最新内容重算预订库存，原取货码保持不变。
-        <p class="mt-2 text-xs text-slate-500">{{ modifyOrderQuotaText }}</p>
+        <p class="mt-2 text-xs text-slate-500 dark:text-slate-400">{{ modifyOrderQuotaText }}</p>
       </div>
 
-      <div class="rounded-3xl border border-slate-100 bg-white px-4 py-4">
+      <div class="rounded-3xl border border-slate-100 bg-white px-4 py-4 dark:border-white/5 dark:bg-[#141415]">
         <div class="flex flex-col gap-3 lg:flex-row lg:items-end">
           <div class="flex-1">
-            <p class="text-sm font-semibold text-slate-900">添加商品</p>
+            <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">添加商品</p>
             <el-select
               :model-value="editAddProductId"
               class="mt-3 w-full"
@@ -107,12 +107,12 @@ const handleAddProductIdChange = (value: string) => {
         <div
           v-for="item in editOrderItems"
           :key="item.itemKey"
-          class="rounded-3xl border border-slate-100 bg-white px-4 py-4"
+          class="rounded-3xl border border-slate-100 bg-white px-4 py-4 dark:border-white/5 dark:bg-[#141415]"
         >
           <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div class="min-w-0 flex-1">
-              <p class="text-sm font-semibold text-slate-900">{{ item.productName }}</p>
-              <p v-if="item.specText" class="mt-1 text-xs leading-5 text-slate-500">{{ item.specText }}</p>
+              <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">{{ item.productName }}</p>
+              <p v-if="item.specText" class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">{{ item.specText }}</p>
               <p class="mt-1 text-xs leading-5 text-slate-400">
                 原数量 {{ item.originalQty }} 件，当前最多可改为 {{ item.maxQty }} 件
               </p>
@@ -139,8 +139,8 @@ const handleAddProductIdChange = (value: string) => {
         </div>
       </div>
 
-      <div class="rounded-3xl border border-slate-100 bg-white px-4 py-4">
-        <p class="text-sm font-semibold text-slate-900">订单备注</p>
+      <div class="rounded-3xl border border-slate-100 bg-white px-4 py-4 dark:border-white/5 dark:bg-[#141415]">
+        <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">订单备注</p>
         <el-input
           :model-value="editRemark"
           type="textarea"
@@ -154,9 +154,9 @@ const handleAddProductIdChange = (value: string) => {
         />
       </div>
 
-      <div class="rounded-2xl bg-amber-50 px-4 py-3 text-sm text-amber-700">
+      <div class="rounded-2xl bg-amber-50 px-4 py-3 text-sm text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
         修改后共 {{ editableOrderTotalQty }} 件商品，合计 ¥{{ editableOrderTotalAmount.toFixed(2) }}。
-        <p class="mt-2 text-xs text-amber-700">保存成功后将占用 1 次改单机会。</p>
+        <p class="mt-2 text-xs text-amber-700 dark:text-amber-300">保存成功后将占用 1 次改单机会。</p>
       </div>
     </div>
 

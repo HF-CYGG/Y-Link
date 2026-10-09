@@ -187,14 +187,14 @@ const handleLogout = async () => {
 
 <template>
   <div
-    class="client-main-layout min-h-[100dvh] text-slate-900"
+    class="client-main-layout min-h-[100dvh] text-slate-900 dark:text-slate-100"
     :class="{ 'client-main-layout--without-tab': !shouldShowBottomNav }"
   >
     <header class="client-main-layout__header sticky top-0 z-30">
       <div class="client-main-layout__container flex items-center justify-between gap-3 px-4 py-3 sm:px-5">
         <div>
           <p class="text-xs font-semibold tracking-[0.16em] text-slate-400">Y-LINK CLIENT</p>
-          <p class="text-base font-semibold text-slate-900">{{ displayName }}</p>
+          <p class="text-base font-semibold text-slate-900 dark:text-slate-100">{{ displayName }}</p>
         </div>
         <div class="client-main-layout__header-actions">
           <div class="client-main-layout__build-meta" aria-label="版本信息">
@@ -214,7 +214,7 @@ const handleLogout = async () => {
           <ThemeToggle />
           <button
             type="button"
-            class="rounded-full border border-[var(--ylink-color-border)] bg-white/90 px-3 py-1.5 text-xs font-medium text-slate-600"
+            class="rounded-full border border-[var(--ylink-color-border)] bg-white/90 px-3 py-1.5 text-xs font-medium text-slate-600 dark:bg-white/5 dark:text-slate-300"
             @click="handleLogout"
           >
             退出
@@ -456,5 +456,15 @@ const handleLogout = async () => {
     padding-top: 0.75rem;
     padding-bottom: calc(1.25rem + var(--client-tab-bar-safe-area));
   }
+}
+
+/* 暗色：版本号文字与底部悬浮标签栏（亮色混入白色提亮，暗色改为混入黑色压暗）。 */
+.dark .client-main-layout__build-version {
+  color: #94a3b8;
+}
+
+.dark .client-main-layout__tab {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: color-mix(in srgb, var(--ylink-color-surface) 88%, #000000 12%);
 }
 </style>

@@ -1731,7 +1731,7 @@ onUnmounted(() => {
 }
 
 /* 动态几何背景层 (硬件加速流体动画 - Apple/Fluent 设计美学) */
-:global(.dark .client-auth-page) {
+.dark .client-auth-page {
   --ca-fg: #f8fafc;
   --ca-sub: #cbd5e1;
   --ca-muted: #94a3b8;
@@ -1851,7 +1851,7 @@ onUnmounted(() => {
   }
 }
 
-:global(.dark .auth-shell) {
+.dark .auth-shell {
   background: rgba(17, 17, 18, 0.75);
   box-shadow: 
     0 20px 40px rgba(0, 0, 0, 0.2),
@@ -1870,7 +1870,7 @@ onUnmounted(() => {
   border-right: 1px solid rgba(255, 255, 255, 0.6);
 }
 
-:global(.dark .brand-panel) {
+.dark .brand-panel {
   border-right-color: rgba(255, 255, 255, 0.06);
 }
 
@@ -2088,7 +2088,7 @@ onUnmounted(() => {
   text-transform: uppercase;
 }
 
-:global(.dark .geo-decor) {
+.dark .geo-decor {
   background: linear-gradient(135deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0.02) 100%);
   border-color: rgba(255, 255, 255, 0.12);
   box-shadow:
@@ -2096,7 +2096,7 @@ onUnmounted(() => {
     inset 0 1px 1.5px rgba(255, 255, 255, 0.18);
 }
 
-:global(.dark .geo-text) {
+.dark .geo-text {
   -webkit-text-stroke: 1.2px rgba(20, 184, 166, 0.6);
   text-shadow: none;
 }
@@ -2251,7 +2251,7 @@ onUnmounted(() => {
   box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.02);
 }
 
-:global(.dark .mode-toggle) {
+.dark .mode-toggle {
   background: rgba(0, 0, 0, 0.3);
   border-color: rgba(255, 255, 255, 0.05);
   box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.2);
@@ -2269,7 +2269,7 @@ onUnmounted(() => {
   transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
-:global(.dark .toggle-slider) {
+.dark .toggle-slider {
   background: rgba(255, 255, 255, 0.15);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
@@ -2362,7 +2362,7 @@ onUnmounted(() => {
   font-size: 14px;
 }
 
-:global(.dark .geo-input .el-input__inner) {
+.dark .geo-input :deep(.el-input__inner) {
   color: var(--ca-fg);
 }
 
@@ -2977,5 +2977,100 @@ onUnmounted(() => {
     transform: none !important;
   }
 
+}
+
+/*
+ * 暗色补齐（scoped 写法，作用域属性保证只作用于本页，不会串到同样使用 .geo-input 的找回密码页）：
+ * - 页面底色、几何背景层、玻璃高光与装饰圆的白色成分在暗底上会发灰，统一压暗；
+ * - 工号核验卡片、验证码框与部门树下拉同步换成暗色。
+ */
+.dark .client-auth-page {
+  background-color: #0a0a0b;
+}
+
+.dark .geo-animation-layer {
+  background-color: #0a0a0b;
+}
+
+.dark .glass-overlay {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.dark .circle-main,
+.dark .brand-panel.is-register-personal .circle-main,
+.dark .brand-panel.is-password-focus .circle-main {
+  background: linear-gradient(135deg, rgba(20, 184, 166, 0.22) 0%, rgba(255, 255, 255, 0.04) 100%);
+}
+
+.dark .circle-sub {
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.16) 0%, rgba(255, 255, 255, 0.03) 100%);
+}
+
+.dark .glass-specular {
+  background: radial-gradient(ellipse at center, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0) 70%);
+}
+
+.dark .success-pill {
+  color: #5eead4;
+}
+
+.dark .staff-lookup-card {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.dark .staff-lookup-card.is-loading::before {
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.08), transparent);
+}
+
+.dark .staff-lookup-card--success {
+  background: rgba(20, 184, 166, 0.1);
+}
+
+.dark .staff-lookup-card--warning {
+  background: rgba(245, 158, 11, 0.1);
+}
+
+.dark .staff-lookup-card--danger {
+  background: rgba(244, 63, 94, 0.1);
+}
+
+.dark .staff-lookup-card--info {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.dark .staff-lookup-card__icon {
+  background: rgba(255, 255, 255, 0.08);
+  color: #5eead4;
+}
+
+.dark .staff-lookup-card__message {
+  color: #cbd5e1;
+}
+
+.dark .staff-lookup-card__grid strong {
+  color: #f1f5f9;
+}
+
+.dark .captcha-box {
+  background: rgba(0, 0, 0, 0.25);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.dark .captcha-box:hover {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+:global(.dark .client-auth-department-popper .el-tree) {
+  --el-tree-node-hover-bg-color: rgba(255, 255, 255, 0.06);
+}
+
+:global(.dark .client-auth-department-popper .el-tree-node__content) {
+  color: #cbd5e1;
+}
+
+:global(.dark .client-auth-department-popper .el-tree-node.is-current > .el-tree-node__content) {
+  background: rgba(20, 184, 166, 0.14);
+  color: #f1f5f9;
 }
 </style>
