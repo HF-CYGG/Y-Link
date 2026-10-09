@@ -179,7 +179,7 @@ export function createApp(options: CreateAppOptions = {}) {
       },
     })
   }
-  const adminAnonymousAuthPaths = new Set(['/captcha', '/login', '/login/mfa'])
+  const adminAnonymousAuthPaths = new Set(['/captcha', '/login', '/login/mfa', '/webauthn/login/options', '/webauthn/login/verify'])
   const clientAnonymousAuthPaths = new Set([
     '/captcha',
     '/capabilities',

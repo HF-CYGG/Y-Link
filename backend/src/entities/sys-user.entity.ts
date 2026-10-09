@@ -21,6 +21,10 @@ export class SysUser {
   @Column({ name: 'password_hash', type: 'varchar', length: 255, select: false, comment: '密码哈希（salt:hash）' })
   passwordHash!: string
 
+  @Index('uk_sys_user_webauthn_user_handle', { unique: true })
+  @Column({ name: 'webauthn_user_handle', type: 'varchar', length: 64, nullable: true, select: false, comment: '不可变的 32 字节随机 WebAuthn 用户句柄（小写十六进制）' })
+  webauthnUserHandle!: string | null
+
   @Column({ name: 'display_name', type: 'varchar', length: 64, comment: '用户显示名称' })
   displayName!: string
 

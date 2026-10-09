@@ -13,7 +13,7 @@
 
 
 import dayjs from 'dayjs'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { BizCrudDialogShell, BizResponsiveDataCollectionShell, PageContainer, PagePaginationBar, PageToolbarCard } from '@/components/common'
 import AccountLifecycleDialog from '@/components/account/AccountLifecycleDialog.vue'
@@ -39,6 +39,7 @@ import {
   permanentlyDeleteUser,
   resetUserMfa,
   resetUserPassword,
+  resetUserWebAuthn,
   restoreUser,
   updateUser,
   updateUserStatus,
@@ -57,6 +58,7 @@ import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 import { showAppError, showAppSuccess } from '@/utils/app-alert'
 import { validateAdminPasswordShape } from '@/utils/admin-password-policy'
+import { getAdminMfaStatus, type AdminMfaStatus } from '@/api/modules/admin-mfa'
 import {
   accountTypeDescriptions,
   getAccountTypeDescription,
@@ -131,6 +133,17 @@ const lifecycleLoading = ref(false)
 const lifecycleAction = ref<AccountLifecycleAction>('deactivate')
 const lifecycleTarget = ref<UserSafeProfile | null>(null)
 const lifecyclePreview = ref<AccountLifecyclePreview | null>(null)
+const revokeWebAuthnVisible = ref(false)
+const revokeWebAuthnSubmitting = ref(false)
+const revokeWebAuthnConfirmationPending = ref(false)
+const revokeWebAuthnTarget = ref<UserSafeProfile | null>(null)
+const revokeWebAuthnMfaStatus = ref<AdminMfaStatus | null>(null)
+const revokeWebAuthnMfaPhase = ref<'loading' | 'ready' | 'error'>('loading')
+const revokeWebAuthnForm = reactive({ currentPassword: '', code: '', recoveryCode: '', useRecoveryCode: false, reason: '' })
+let revokeWebAuthnEpoch = 0
+let revokeWebAuthnActive = true
+let revokeWebAuthnMounted = true
+let revokeWebAuthnRefreshOnActivate = false
 
 /**
  * 用户编辑表单：
@@ -596,6 +609,126 @@ const handleResetMfa = async (row: UserSafeProfile) => {
   }
 }
 
+/** 清空撤销表单并使旧状态请求、确认框和提交结果失效。 */
+const clearRevokeWebAuthn = () => {
+  revokeWebAuthnEpoch += 1
+  revokeWebAuthnSubmitting.value = false
+  revokeWebAuthnConfirmationPending.value = false
+  revokeWebAuthnTarget.value = null
+  revokeWebAuthnMfaStatus.value = null
+  revokeWebAuthnMfaPhase.value = 'loading'
+  revokeWebAuthnForm.currentPassword = ''
+  revokeWebAuthnForm.code = ''
+  revokeWebAuthnForm.recoveryCode = ''
+  revokeWebAuthnForm.useRecoveryCode = false
+  revokeWebAuthnForm.reason = ''
+}
+watch(revokeWebAuthnVisible, (visible) => { if (!visible) clearRevokeWebAuthn() })
+const updateRevokeWebAuthnVisible = (visible: boolean) => {
+  if (!visible && revokeWebAuthnSubmitting.value) return
+  revokeWebAuthnVisible.value = visible
+}
+const deactivateRevokeWebAuthn = () => {
+  revokeWebAuthnActive = false
+  if (revokeWebAuthnSubmitting.value) {
+    // 请求参数已复制，离页时立即抹除缓存组件内的复核凭据，结果仍由在途请求反馈。
+    revokeWebAuthnForm.currentPassword = ''
+    revokeWebAuthnForm.code = ''
+    revokeWebAuthnForm.recoveryCode = ''
+    return
+  }
+  if (revokeWebAuthnConfirmationPending.value) ElMessageBox.close()
+  revokeWebAuthnVisible.value = false
+  clearRevokeWebAuthn()
+}
+onDeactivated(deactivateRevokeWebAuthn)
+onBeforeUnmount(() => {
+  revokeWebAuthnMounted = false
+  deactivateRevokeWebAuthn()
+})
+onActivated(() => {
+  revokeWebAuthnActive = true
+  if (revokeWebAuthnRefreshOnActivate) {
+    revokeWebAuthnRefreshOnActivate = false
+    void loadData()
+  }
+})
+
+const handleOpenRevokeWebAuthn = async (row: UserSafeProfile) => {
+  if (!revokeWebAuthnActive || !authStore.isAdmin || row.id === authStore.currentUser?.id || !ensurePermission('users:reset_password', '撤销用户密钥') || !row.webauthnCredentialsCount) return
+  clearRevokeWebAuthn()
+  const id = revokeWebAuthnEpoch
+  revokeWebAuthnTarget.value = row
+  revokeWebAuthnVisible.value = true
+  try {
+    const status = await getAdminMfaStatus()
+    if (id !== revokeWebAuthnEpoch || !revokeWebAuthnVisible.value) return
+    revokeWebAuthnMfaStatus.value = status
+    revokeWebAuthnMfaPhase.value = 'ready'
+  } catch {
+    if (id === revokeWebAuthnEpoch && revokeWebAuthnVisible.value) revokeWebAuthnMfaPhase.value = 'error'
+  }
+}
+
+const handleSubmitRevokeWebAuthn = async () => {
+  const target = revokeWebAuthnTarget.value
+  if (!target || revokeWebAuthnSubmitting.value || revokeWebAuthnConfirmationPending.value || !revokeWebAuthnVisible.value || !revokeWebAuthnActive) return
+  if (!authStore.isAdmin || target.id === authStore.currentUser?.id || !ensurePermission('users:reset_password', '撤销用户密钥')) return
+  if (revokeWebAuthnMfaPhase.value !== 'ready') { showAppError('尚未确认本人两步验证状态，请重试'); return }
+  const reason = revokeWebAuthnForm.reason.trim()
+  if (!reason || reason.length > 500) { showAppError('请输入 1 至 500 个字符的撤销原因'); return }
+  if (!revokeWebAuthnForm.currentPassword) { showAppError('请输入当前密码'); return }
+  const payload = { currentPassword: revokeWebAuthnForm.currentPassword, reason, code: undefined as string | undefined, recoveryCode: undefined as string | undefined }
+  if (revokeWebAuthnMfaStatus.value?.enabled) {
+    if (revokeWebAuthnForm.useRecoveryCode) {
+      if (!revokeWebAuthnForm.recoveryCode.trim()) { showAppError('请输入恢复码'); return }
+      payload.recoveryCode = revokeWebAuthnForm.recoveryCode.trim()
+    } else {
+      const code = revokeWebAuthnForm.code.replace(/\s/g, '')
+      if (!/^\d{6}$/.test(code)) { showAppError('请输入 6 位数字动态码'); return }
+      payload.code = code
+    }
+  }
+  const confirmationEpoch = revokeWebAuthnEpoch
+  revokeWebAuthnConfirmationPending.value = true
+  try {
+    await ElMessageBox.confirm(`确认撤销“${target.displayName}”的全部 ${target.webauthnCredentialsCount ?? 0} 把密钥吗？目标账号所有登录会话会立即失效。`, '撤销全部密钥', {
+      type: 'warning', confirmButtonText: '撤销全部密钥', cancelButtonText: '取消',
+    })
+  } catch {
+    if (confirmationEpoch === revokeWebAuthnEpoch) revokeWebAuthnConfirmationPending.value = false
+    return
+  }
+  if (confirmationEpoch !== revokeWebAuthnEpoch || !revokeWebAuthnActive || !revokeWebAuthnVisible.value || revokeWebAuthnTarget.value?.id !== target.id) return
+  revokeWebAuthnConfirmationPending.value = false
+  const id = revokeWebAuthnEpoch
+  revokeWebAuthnSubmitting.value = true
+  try {
+    const result = await resetUserWebAuthn(target.id, payload)
+    showAppSuccess(`已撤销“${target.displayName}”的 ${result.revokedCount} 把密钥`)
+    if (!revokeWebAuthnMounted || !revokeWebAuthnActive) {
+      revokeWebAuthnRefreshOnActivate = revokeWebAuthnMounted
+      revokeWebAuthnVisible.value = false
+      clearRevokeWebAuthn()
+      return
+    }
+    if (id !== revokeWebAuthnEpoch || !revokeWebAuthnVisible.value) return
+    revokeWebAuthnVisible.value = false
+    clearRevokeWebAuthn()
+    await loadData()
+  } catch (error) {
+    if (!revokeWebAuthnMounted || !revokeWebAuthnActive) {
+      revokeWebAuthnVisible.value = false
+      clearRevokeWebAuthn()
+      showAppError(extractErrorMessage(error, '撤销用户密钥失败'))
+      return
+    }
+    if (id === revokeWebAuthnEpoch) showAppError(extractErrorMessage(error, '撤销用户密钥失败'))
+  } finally {
+    if (id === revokeWebAuthnEpoch) revokeWebAuthnSubmitting.value = false
+  }
+}
+
 /**
  * 提交本人修改密码：
  * - 成功后服务端会使当前账号已有会话失效；
@@ -765,6 +898,7 @@ const canShowEditAction = (row: UserSafeProfile) => canEditUser.value && row.acc
 const canShowResetPasswordAction = (row: UserSafeProfile) => canResetUserPassword.value && row.accountState !== 'deactivated' && !isSelfRow(row)
 // 重置他人两步验证与重置密码同一权限；本人应在账号菜单中用动态码或恢复码自行停用。
 const canShowResetMfaAction = (row: UserSafeProfile) => canResetUserPassword.value && Boolean(row.mfaEnabled) && row.accountState !== 'deactivated' && !isSelfRow(row)
+const canShowRevokeWebAuthnAction = (row: UserSafeProfile) => authStore.isAdmin && canResetUserPassword.value && !isSelfRow(row) && (row.webauthnCredentialsCount ?? 0) > 0
 const canShowToggleStatusAction = (row: UserSafeProfile) => canToggleUser.value && row.accountState !== 'deactivated' && !(isSelfRow(row) && row.status === 'enabled')
 
 onMounted(() => {
@@ -905,6 +1039,9 @@ onMounted(() => {
                   <el-tag :type="row.mfaEnabled ? 'success' : 'info'" effect="plain" size="small">{{ row.mfaEnabled ? '已开启' : '未开启' }}</el-tag>
                 </template>
               </el-table-column>
+              <el-table-column label="密钥数量" width="110">
+                <template #default="{ row }">{{ row.webauthnCredentialsCount ?? 0 }}</template>
+              </el-table-column>
               <el-table-column label="生命周期" min-width="210" show-overflow-tooltip>
                 <template #default="{ row }">
                   <span v-if="row.accountState === 'deactivated'">
@@ -941,7 +1078,7 @@ onMounted(() => {
                 v-if="canOperateUsers"
                 label="操作"
                 fixed="right"
-                width="330"
+                width="390"
                 align="right"
                 class-name="user-manage__action-cell"
               >
@@ -950,6 +1087,7 @@ onMounted(() => {
                     <el-button v-if="canShowEditAction(row)" link type="primary" @click="handleOpenEdit(row)">编辑</el-button>
                     <el-button v-if="canShowResetPasswordAction(row)" link type="primary" @click="handleOpenResetPassword(row)">重置密码</el-button>
                     <el-button v-if="canShowResetMfaAction(row)" link type="warning" @click="handleResetMfa(row)">重置两步验证</el-button>
+                    <el-button v-if="canShowRevokeWebAuthnAction(row)" link type="danger" @click="handleOpenRevokeWebAuthn(row)">撤销密钥</el-button>
                     <el-button
                       v-if="canShowToggleStatusAction(row)"
                       link
@@ -1009,6 +1147,10 @@ onMounted(() => {
                   <el-tag size="small" :type="item.mfaEnabled ? 'success' : 'info'" effect="plain">{{ item.mfaEnabled ? '已开启' : '未开启' }}</el-tag>
                 </div>
                 <div class="flex items-center justify-between gap-3">
+                  <span class="text-slate-400">密钥数量</span>
+                  <span>{{ item.webauthnCredentialsCount ?? 0 }}</span>
+                </div>
+                <div class="flex items-center justify-between gap-3">
                   <span class="text-slate-400">最后登录</span>
                   <span>{{ item.lastLoginAt ? dayjs(item.lastLoginAt).format('YYYY-MM-DD HH:mm') : '-' }}</span>
                 </div>
@@ -1026,6 +1168,7 @@ onMounted(() => {
                 <el-button v-if="canShowEditAction(item)" link type="primary" @click="handleOpenEdit(item)">编辑</el-button>
                 <el-button v-if="canShowResetPasswordAction(item)" link type="primary" @click="handleOpenResetPassword(item)">重置密码</el-button>
                 <el-button v-if="canShowResetMfaAction(item)" link type="warning" @click="handleResetMfa(item)">重置两步验证</el-button>
+                <el-button v-if="canShowRevokeWebAuthnAction(item)" link type="danger" @click="handleOpenRevokeWebAuthn(item)">撤销密钥</el-button>
                 <el-button
                   v-if="canShowToggleStatusAction(item)"
                   link
@@ -1141,7 +1284,7 @@ onMounted(() => {
       @closed="resetAdminPasswordForm"
     >
       <div class="mb-4 rounded-2xl bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-500 dark:bg-white/5 dark:text-slate-400">
-        即将为“{{ resetPasswordForm.targetDisplayName || '-' }}（{{ resetPasswordForm.targetUsername || '-' }}）”重置密码。提交成功后，该用户已有登录会话会立即失效。
+        即将为“{{ resetPasswordForm.targetDisplayName || '-' }}（{{ resetPasswordForm.targetUsername || '-' }}）”重置密码。提交成功后，该用户已有登录会话会立即失效；已注册密钥仍保留。如怀疑凭据失陷，请另行撤销密钥。
       </div>
       <el-form ref="resetPasswordFormRef" :model="resetPasswordForm" :rules="resetPasswordRules" label-position="top">
         <el-form-item label="新密码" prop="newPassword">
@@ -1210,6 +1353,43 @@ onMounted(() => {
             @keyup.enter="handleSubmitOwnPassword"
           />
         </el-form-item>
+      </el-form>
+    </BizCrudDialogShell>
+
+    <BizCrudDialogShell
+      :model-value="revokeWebAuthnVisible"
+      @update:model-value="updateRevokeWebAuthnVisible"
+      title="撤销用户密钥"
+      height-mode="auto"
+      phone-width="94%"
+      tablet-width="500px"
+      desktop-width="480px"
+      :confirm-loading="revokeWebAuthnSubmitting"
+      confirm-text="撤销全部密钥"
+      @confirm="handleSubmitRevokeWebAuthn"
+    >
+      <el-alert v-if="revokeWebAuthnSubmitting" class="mb-3" type="info" :closable="false" title="撤销请求已提交，请等待结果后再关闭。" />
+      <el-alert
+        class="mb-3"
+        type="warning"
+        :closable="false"
+        :title="`将撤销“${revokeWebAuthnTarget?.displayName || '-'}”的全部 ${revokeWebAuthnTarget?.webauthnCredentialsCount ?? 0} 把密钥，目标账号所有会话立即失效。`"
+      />
+      <el-alert v-if="revokeWebAuthnMfaPhase === 'error'" class="mb-3" type="error" :closable="false" title="本人两步验证状态读取失败，请关闭后重试。" />
+      <el-form :model="revokeWebAuthnForm" label-position="top" @submit.prevent="handleSubmitRevokeWebAuthn">
+        <el-form-item label="撤销原因">
+          <el-input v-model="revokeWebAuthnForm.reason" type="textarea" :rows="3" maxlength="500" show-word-limit placeholder="请说明密钥丢失或凭据失陷等原因" />
+        </el-form-item>
+        <el-form-item label="当前密码">
+          <el-input v-model="revokeWebAuthnForm.currentPassword" type="password" show-password autocomplete="current-password" />
+        </el-form-item>
+        <template v-if="revokeWebAuthnMfaStatus?.enabled">
+          <el-form-item :label="revokeWebAuthnForm.useRecoveryCode ? '恢复码' : '6 位动态码'">
+            <el-input v-if="revokeWebAuthnForm.useRecoveryCode" v-model="revokeWebAuthnForm.recoveryCode" autocomplete="off" maxlength="32" />
+            <el-input v-else v-model="revokeWebAuthnForm.code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" />
+          </el-form-item>
+          <el-button link type="primary" @click="revokeWebAuthnForm.useRecoveryCode = !revokeWebAuthnForm.useRecoveryCode; revokeWebAuthnForm.code = ''; revokeWebAuthnForm.recoveryCode = ''">{{ revokeWebAuthnForm.useRecoveryCode ? '改用动态码' : '改用恢复码' }}</el-button>
+        </template>
       </el-form>
     </BizCrudDialogShell>
 

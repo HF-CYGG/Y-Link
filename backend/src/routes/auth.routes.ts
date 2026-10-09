@@ -20,6 +20,9 @@ import { authService } from '../services/auth.service.js'
 import { adminMfaService } from '../services/admin-mfa.service.js'
 import { authSecurityService } from '../services/auth-security.service.js'
 import { captchaService } from '../services/captcha.service.js'
+import { webauthnConfig } from '../config/webauthn.js'
+import { adminWebauthnService, assertWebauthnOrigin } from '../services/admin-webauthn.service.js'
+import { resolveSecureCookieFlag } from '../utils/http-security.js'
 import {
   AUTH_ACCOUNT_INPUT_MAX_LENGTH,
   existingPasswordInput,
@@ -78,6 +81,134 @@ const changePasswordSchema = z.object({
  * - 结合 Zod 进行输入参数结构化校验，配合 authSecurityService 阻挡暴力破解。
  */
 export const authRouter = Router()
+
+authRouter.get('/webauthn/capabilities', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store')
+  res.json({ code: 0, message: 'ok', data: webauthnConfig })
+})
+
+const webauthnLoginOptionsSchema = z.object({
+  captchaId: optionalCaptchaIdInput(),
+  code: optionalCaptchaCodeInput(),
+})
+const webauthnRegisterOptionsSchema = z.object({
+  name: z.string().trim().min(1, '请输入密钥名称').max(64, '密钥名称不能超过 64 位'),
+  kind: z.enum(['passkey', 'security_key']),
+  currentPassword: existingPasswordInput('当前密码'),
+  code: totpCodeInput().optional(),
+  recoveryCode: recoveryCodeInput().optional(),
+})
+const webauthnRenameSchema = z.object({ name: z.string().trim().min(1).max(64) })
+const webauthnDeleteSchema = z.object({
+  currentPassword: existingPasswordInput('当前密码'),
+  code: totpCodeInput().optional(),
+  recoveryCode: recoveryCodeInput().optional(),
+})
+const webauthnCredentialIdSchema = z.string().regex(/^\d+$/, '密钥记录 ID 不正确')
+
+authRouter.patch('/webauthn/credentials/:id', requireAuth, requireAdminCsrf, asyncHandler(async (req, res) => {
+  const authReq = req as AuthenticatedRequest
+  const id = webauthnCredentialIdSchema.parse(req.params.id)
+  const payload = webauthnRenameSchema.parse(req.body)
+  const data = await adminWebauthnService.renameCredential(authReq.auth, id, payload.name, extractRequestMeta(req))
+  res.setHeader('Cache-Control', 'no-store')
+  res.json({ code: 0, message: 'ok', data })
+}))
+
+authRouter.delete('/webauthn/credentials/:id', requireAuth, requireAdminCsrf, asyncHandler(async (req, res) => {
+  const authReq = req as AuthenticatedRequest
+  const id = webauthnCredentialIdSchema.parse(req.params.id)
+  const payload = webauthnDeleteSchema.parse(req.body)
+  const data = await adminWebauthnService.deleteCredential(authReq.auth, id, payload, extractRequestMeta(req))
+  clearAdminAuthCookies(req, res)
+  res.setHeader('Cache-Control', 'no-store')
+  res.json({ code: 0, message: 'ok', data })
+}))
+const webauthnVerifySchema = z.object({
+  challengeId: z.string().trim().min(1).max(128),
+  response: z.object({
+    id: z.string().min(1).max(2048), rawId: z.string().min(1).max(2048), type: z.literal('public-key'),
+    response: z.object({
+      clientDataJSON: z.string().min(1).max(8192),
+      attestationObject: z.string().min(1).max(65536),
+      transports: z.array(z.string().max(32)).max(16).optional(),
+    }).passthrough(),
+    clientExtensionResults: z.record(z.unknown()),
+  }).passthrough(),
+})
+const webauthnLoginVerifySchema = z.object({
+  challengeId: z.string().trim().min(1).max(128),
+  response: z.object({
+    id: z.string().min(1).max(2048), rawId: z.string().min(1).max(2048), type: z.literal('public-key'),
+    response: z.object({
+      clientDataJSON: z.string().min(1).max(8192),
+      authenticatorData: z.string().min(1).max(8192),
+      signature: z.string().min(1).max(8192),
+      userHandle: z.string().min(1).max(2048).optional(),
+    }).passthrough(),
+    clientExtensionResults: z.record(z.unknown()),
+  }).passthrough(),
+})
+
+authRouter.post('/webauthn/login/verify', asyncHandler(async (req, res) => {
+  const origin = assertWebauthnOrigin(req.headers.origin)
+  const payload = webauthnLoginVerifySchema.parse(req.body)
+  const nonce = /(?:^|;\s*)y_link_webauthn_nonce=([^;]+)/.exec(req.headers.cookie ?? '')?.[1]
+  res.clearCookie('y_link_webauthn_nonce', {
+    httpOnly: true, sameSite: 'strict', secure: resolveSecureCookieFlag(req), path: '/api/auth/webauthn/login',
+  })
+  const data = await adminWebauthnService.completeLogin(
+    payload.challengeId, payload.response as Parameters<typeof adminWebauthnService.completeLogin>[1], nonce, origin, extractRequestMeta(req),
+  )
+  setAdminAuthCookies(req, res, { sessionToken: data.token, expiresAt: data.expiresAt })
+  res.setHeader('Cache-Control', 'no-store')
+  res.json({ code: 0, message: 'ok', data: { expiresAt: data.expiresAt, user: data.user } })
+}))
+
+authRouter.get('/webauthn/credentials', requireAuth, asyncHandler(async (req, res) => {
+  const authReq = req as AuthenticatedRequest
+  const data = await adminWebauthnService.listCredentials(authReq.auth.userId)
+  res.setHeader('Cache-Control', 'no-store')
+  res.json({ code: 0, message: 'ok', data })
+}))
+
+authRouter.post('/webauthn/register/options', requireAuth, requireAdminCsrf, asyncHandler(async (req, res) => {
+  const origin = assertWebauthnOrigin(req.headers.origin)
+  const payload = webauthnRegisterOptionsSchema.parse(req.body)
+  const authReq = req as AuthenticatedRequest
+  const data = await adminWebauthnService.beginRegistration(authReq.auth, payload, origin, extractRequestMeta(req))
+  res.setHeader('Cache-Control', 'no-store')
+  res.json({ code: 0, message: 'ok', data })
+}))
+
+authRouter.post('/webauthn/register/verify', requireAuth, requireAdminCsrf, asyncHandler(async (req, res) => {
+  const origin = assertWebauthnOrigin(req.headers.origin)
+  const payload = webauthnVerifySchema.parse(req.body)
+  const authReq = req as AuthenticatedRequest
+  const data = await adminWebauthnService.completeRegistration(
+    authReq.auth, payload.challengeId, payload.response as Parameters<typeof adminWebauthnService.completeRegistration>[2], origin, extractRequestMeta(req),
+  )
+  res.setHeader('Cache-Control', 'no-store')
+  res.json({ code: 0, message: 'ok', data })
+}))
+
+authRouter.post('/webauthn/login/options', asyncHandler(async (req, res) => {
+  const origin = assertWebauthnOrigin(req.headers.origin)
+  const payload = webauthnLoginOptionsSchema.parse(req.body)
+  const requestMeta = extractRequestMeta(req)
+  const { captchaRequired } = await authSecurityService.guardAdminLoginRequest(requestMeta, 'webauthn-anonymous')
+  if (captchaRequired) {
+    if (!payload.captchaId?.trim() || !payload.code?.trim()) throw new BizError('当前登录环境需要图形验证码', 428)
+    captchaService.verifyCaptcha('admin', payload.captchaId, payload.code)
+  }
+  const { nonce, ...data } = await adminWebauthnService.beginLogin(origin)
+  res.cookie('y_link_webauthn_nonce', nonce, {
+    httpOnly: true, sameSite: 'strict', secure: resolveSecureCookieFlag(req),
+    path: '/api/auth/webauthn/login', maxAge: data.expiresInSeconds * 1000,
+  })
+  res.setHeader('Cache-Control', 'no-store')
+  res.json({ code: 0, message: 'ok', data })
+}))
 
 authRouter.get(
   '/captcha',

@@ -174,6 +174,21 @@ export const resetUserMfa = (id: string) =>
     url: `/users/${id}/mfa/reset`,
   })
 
+export interface ResetUserWebAuthnPayload {
+  currentPassword: string
+  code?: string
+  recoveryCode?: string
+  reason: string
+}
+
+/** 管理员撤销他人的全部密钥；仅目标用户的会话失效。 */
+export const resetUserWebAuthn = (id: string, payload: ResetUserWebAuthnPayload) =>
+  request<{ revokedCount: number }>({
+    method: 'POST',
+    url: `/users/${encodeURIComponent(id)}/webauthn/reset`,
+    data: payload,
+  })
+
 export const getUserDeactivationPreview = (id: string) =>
   request<AccountLifecyclePreview>({ method: 'GET', url: `/users/${id}/deactivation-preview` })
 

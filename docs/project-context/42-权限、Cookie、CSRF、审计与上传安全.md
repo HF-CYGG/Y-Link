@@ -124,6 +124,9 @@
 - 改上传安全时回归：新图片可访问、旧图片兼容访问、响应头正确。
 - 改 CSRF 时回归：管理端写接口在 Cookie 会话下的正常提交与失败提示。
 - 改两步验证、管理端登录流程或相关路由时执行 `npm --prefix backend run auth:mfa:verify`，覆盖绑定与加密落库、两段登录、防重放、恢复码一次性、票据次数与账号锁定、并发单次成功、停用与重生成、管理员与命令行重置、密钥不匹配降级、永久删除联动与审计不落明文。
+- 管理端 WebAuthn 可由所有 `SysUser` 角色自愿绑定：注册与发现式登录强制驻留凭据及用户验证，服务端验证须 `requireUserVerification=true`。开启 TOTP 的账号用密钥登录直接取得普通管理端会话；密码登录仍执行原两步验证。注册、登录挑战 5 分钟一次性，单进程有界；匿名挑战绑定独立 HttpOnly、SameSite=Strict 短期 nonce Cookie；所有敏感 WebAuthn POST 精确匹配配置的 Origin，不从 Host 推断。注册挑战还绑定当前会话摘要与密码、角色、状态、TOTP、用户句柄快照；完成时在账号锁内再次检查该会话未撤销且未过期，避免管理员撤销后在途注册复活凭据。
+- 本人添加/删除密钥须复核当前密码；开启 TOTP 时还须动态码或恢复码，与登录共用失败锁定。改名仅需本人会话及 CSRF；删除任一把密钥清除 Cookie 并吊销本人全部会话。管理员撤销他人全部密钥要求 `admin`、`users:reset_password`、操作者密码及已启用的 TOTP，禁止撤销自己，记录 1–500 字原因，并同事务吊销目标会话。管理端密钥查询、改名、撤销在开关关闭时仍可用。审计只记录记录主键和脱敏失败原因，不写原始凭据 ID、断言、挑战、Cookie 或密码；成功写操作与持久变更同事务。
+- WebAuthn 接口统一返回 `Cache-Control: no-store`；本人安全列表只含记录 ID、名称、创建/最近使用时间、设备类型、备份状态，`/auth/me` 与用户列表可返回 `webauthnCredentialsCount`。`POST /auth/webauthn/login/options` 的可选验证码字段为 `captchaId`、`code`；匿名 options 与 verify 接入来源/账号风控、在途上限、过载削峰和 Nginx 登录限流/64k 请求体边界。
 - 改接口缓存头、Fetch Metadata 拦截、管理端 CSRF、密钥类配置加密、JSON 全量导出、数据导出留痕与上限、审计脱敏、密码哈希/策略、风控来源聚合与负缓存、全局撞库态势、各类并发闸门、在途上限、过载削峰、会话保险丝、服务端超时或回环监听时执行 `npm --prefix backend run security:data-leak-ddos:verify`（分阶段隔离运行，详见文档 52）。
 - 改图形验证码时执行 `npm --prefix backend run captcha:rendering:verify`，覆盖无系统字体的真实 PNG 渲染、兼容字段、作用域隔离和一次性校验。
 - 改上述任一边界时执行 `npm --prefix backend run security:web-deep-audit:verify`（畸形 JSON、模板转义、验证码一次性、空闲超时、永久删除限流与跨入口共享口令桶、本人改密、客户端频控、onebox 上传边界、导入预检、登录锁定主体、multipart 加固、附件与资料发码频控）。

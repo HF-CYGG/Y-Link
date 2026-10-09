@@ -13,6 +13,7 @@ import { env } from '../config/env.js'
 import { resolvePermissionsByRole } from '../constants/auth-permissions.js'
 import { SysUser } from '../entities/sys-user.entity.js'
 import { SysUserSession } from '../entities/sys-user-session.entity.js'
+import { SysUserWebauthnCredential } from '../entities/sys-user-webauthn-credential.entity.js'
 import type { AuthUserContext, UserSafeProfile } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
 import type { RequestMeta } from '../utils/request-meta.js'
@@ -33,6 +34,7 @@ import { lockActiveSysAccountForBusiness } from './account-business-guard.servic
 import { authSecurityService, type ResolvedLoginRiskSubject } from './auth-security.service.js'
 import { adminMfaService, type AdminMfaFactorInput } from './admin-mfa.service.js'
 import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
+import { isAccountCurrentlyDeactivated } from './account-business-guard.service.js'
 
 export interface LoginInput {
   username: string
@@ -263,6 +265,20 @@ export class AuthService {
       expiresAt,
       user: toSafeProfile(savedUser),
     }
+  }
+
+  /** WebAuthn 校验方在同一事务内先锁账号、再锁凭据并验签后，统一由此处签发管理端会话。 */
+  async createVerifiedWebauthnSessionInTransaction(
+    manager: EntityManager,
+    lockedUser: SysUser,
+    requestMeta?: RequestMeta,
+  ): Promise<AdminLoginSession> {
+    if (!manager.queryRunner?.isTransactionActive || lockedUser.status !== 'enabled' || isAccountCurrentlyDeactivated(lockedUser)) {
+      throw new BizError('账号已停用或已注销', 403)
+    }
+    return this.createSessionInTransaction(manager, lockedUser, null, requestMeta, {
+      authMethod: 'webauthn', mfaMethod: 'webauthn',
+    })
   }
 
   async login(
@@ -508,7 +524,8 @@ export class AuthService {
     if (!user) {
       throw new BizError('当前用户不存在', 404)
     }
-    return toSafeProfile(user)
+    const webauthnCredentialsCount = await AppDataSource.getRepository(SysUserWebauthnCredential).countBy({ userId: user.id })
+    return { ...toSafeProfile(user), webauthnCredentialsCount }
   }
 
   /**

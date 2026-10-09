@@ -91,6 +91,7 @@ const MYSQL_REQUIRED_TABLES = [
   'base_product_variant_code_registry',
   'base_yz_series_seq_reservation',
   'sys_user_mfa',
+  'sys_user_webauthn_credential',
 ]
 
 /** 056 后必须物理移除的历史业务号永久占用结构。 */
@@ -139,6 +140,7 @@ const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
   base_product_variant_code_registry: '050_product_yz_sku_code.sql',
   base_yz_series_seq_reservation: '052_yz_series_seq_reservation.sql',
   sys_user_mfa: '057_admin_mfa.sql',
+  sys_user_webauthn_credential: '058_admin_webauthn.sql',
 }
 
 interface MysqlRequiredColumn {
@@ -185,6 +187,9 @@ interface MysqlRequiredCheck {
 // 只列会被当前业务代码直接读写、缺失后必然导致运行时失败的增量字段。
 // 表不存在时由 MYSQL_REQUIRED_TABLES 先给出建表脚本，避免同一张缺表重复打印多条缺列提示。
 const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
+  { tableName: 'sys_user', columnName: 'webauthn_user_handle', introducingScript: '058_admin_webauthn.sql', expectedDataType: 'varchar', minCharacterMaximumLength: 64, expectedNullable: true },
+  ...['user_id', 'rp_id', 'credential_id_sha256', 'credential_id', 'public_key', 'counter', 'transports_json', 'device_type', 'backed_up', 'name', 'created_at', 'last_used_at']
+    .map((columnName) => ({ tableName: 'sys_user_webauthn_credential', columnName, introducingScript: '058_admin_webauthn.sql' })),
   ...['deactivated_at', 'deactivation_reason', 'deactivated_by_user_id', 'deactivated_by_username', 'deactivated_by_display_name', 'restored_at', 'restored_by_user_id', 'restored_by_username', 'restored_by_display_name']
     .flatMap((columnName) => [
       { tableName: 'sys_user', columnName, introducingScript: '044_account_lifecycle_governance.sql' },
@@ -448,6 +453,9 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
 
 // 不只按索引名判断，还校验列顺序与唯一性，避免旧库中存在同名但错误的索引时误判为可启动。
 const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
+  { tableName: 'sys_user', indexName: 'uk_sys_user_webauthn_user_handle', columns: ['webauthn_user_handle'], unique: true, introducingScript: '058_admin_webauthn.sql' },
+  { tableName: 'sys_user_webauthn_credential', indexName: 'idx_sys_user_webauthn_credential_user_id', columns: ['user_id'], unique: false, introducingScript: '058_admin_webauthn.sql' },
+  { tableName: 'sys_user_webauthn_credential', indexName: 'uk_sys_user_webauthn_rp_credential_sha256', columns: ['rp_id', 'credential_id_sha256'], unique: true, introducingScript: '058_admin_webauthn.sql' },
   {
     tableName: 'account_lifecycle_event',
     indexName: 'idx_account_lifecycle_event_account',
@@ -679,6 +687,7 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
 ]
 
 const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [
+  { tableName: 'sys_user_webauthn_credential', columnName: 'user_id', referencedTableName: 'sys_user', referencedColumnName: 'id', deleteRule: 'RESTRICT', introducingScript: '058_admin_webauthn.sql' },
   ...[
     ['sys_user_session', 'user_id', 'sys_user'],
     ['client_user_session', 'user_id', 'client_user'],
@@ -823,6 +832,7 @@ const AUTO_MIGRATABLE_FILES = [
   '055_order_identifier_namespaces.sql',
   '056_disable_order_business_no_permanent_occupancy.sql',
   '057_admin_mfa.sql',
+  '058_admin_webauthn.sql',
 ]
 
 /**

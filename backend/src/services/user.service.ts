@@ -12,6 +12,7 @@ import { resolvePermissionsByRole, type PermissionCode } from '../constants/auth
 import { runInTransaction } from '../config/transaction-runner.js'
 import { SysUser } from '../entities/sys-user.entity.js'
 import { SysUserSession } from '../entities/sys-user-session.entity.js'
+import { SysUserWebauthnCredential } from '../entities/sys-user-webauthn-credential.entity.js'
 import { AccountLifecycleEvent } from '../entities/account-lifecycle-event.entity.js'
 import { BizInboundOrder } from '../entities/biz-inbound-order.entity.js'
 import { ClientFeedbackConversation } from '../entities/client-feedback-conversation.entity.js'
@@ -381,11 +382,13 @@ export class UserService {
         if (criticalCount > 0) throw new BizError('账号仍存在关键业务关联，请先完成人工交接或保留账号', 409)
 
         const sessions = await manager.getRepository(SysUserSession).delete({ userId: user.id })
+        const removedWebauthn = await manager.getRepository(SysUserWebauthnCredential).delete({ userId: user.id })
         // 两步验证记录外键为 RESTRICT，必须与账号在同一事务内删除。
         const removedMfa = await adminMfaService.deleteForUser(manager, user.id)
         await this.recordLifecycleEvent(manager, user, actor, 'permanently_deleted', reason, {
           ...references,
           removedWebSessions: sessions.affected ?? 0,
+          removedWebauthnCredentials: removedWebauthn.affected ?? 0,
           removedMfaRecords: removedMfa ? 1 : 0,
         })
         await manager.getRepository(SysUser).delete({ id: user.id })
@@ -436,12 +439,27 @@ export class UserService {
       .take(query.pageSize)
       .getManyAndCount()
 
-    const mfaEnabledIds = await adminMfaService.listEnabledUserIds(list.map((user) => user.id))
+    const userIds = list.map((user) => user.id)
+    const mfaEnabledIds = await adminMfaService.listEnabledUserIds(userIds)
+    const credentialCounts = new Map<string, number>()
+    if (userIds.length) {
+      const counts = await AppDataSource.getRepository(SysUserWebauthnCredential).createQueryBuilder('credential')
+        .select('credential.userId', 'userId')
+        .addSelect('COUNT(*)', 'credentialCount')
+        .where('credential.userId IN (:...userIds)', { userIds })
+        .groupBy('credential.userId')
+        .getRawMany<{ userId: string; credentialCount: string }>()
+      for (const count of counts) credentialCounts.set(String(count.userId), Number(count.credentialCount))
+    }
     return {
       page: query.page,
       pageSize: query.pageSize,
       total,
-      list: list.map((user) => ({ ...sanitizeUserProfile(user), mfaEnabled: mfaEnabledIds.has(String(user.id)) })),
+      list: list.map((user) => ({
+        ...sanitizeUserProfile(user),
+        mfaEnabled: mfaEnabledIds.has(String(user.id)),
+        webauthnCredentialsCount: credentialCounts.get(String(user.id)) ?? 0,
+      })),
     }
   }
 

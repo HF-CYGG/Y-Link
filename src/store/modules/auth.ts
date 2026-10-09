@@ -26,6 +26,8 @@ import {
 } from '@/api/modules/auth'
 import { resolvePostLoginWarmupTargets, scheduleRouteComponentWarmup } from '@/router/route-performance'
 import { clearPersistedAuthState, persistAuthState, readPersistedAuthState } from '@/utils/auth-storage'
+import { verifyAdminWebAuthnLogin } from '@/api/modules/admin-webauthn'
+import type { AuthenticationResponseJSON } from '@simplewebauthn/browser'
 
 /**
  * 主系统登录过渡时长：
@@ -232,6 +234,15 @@ export const useAuthStore = defineStore('auth', () => {
     return result
   }
 
+  /** WebAuthn 验证成功即建立完整会话，不再进入 TOTP 第二步。 */
+  const completeWebAuthnLogin = async (payload: { challengeId: string; response: AuthenticationResponseJSON }, signal?: AbortSignal) => {
+    const result = await verifyAdminWebAuthnLogin(payload, { signal })
+    if (signal?.aborted) return null
+    setAuthState({ user: result.user, expiresAt: result.expiresAt })
+    startPostLoginTransition()
+    return result
+  }
+
   /**
    * 退出动作：
    * - 若服务端退出失败，仍保证前端本地态可以被清空；
@@ -299,6 +310,7 @@ export const useAuthStore = defineStore('auth', () => {
     initializeAuth,
     login,
     completeMfaLogin,
+    completeWebAuthnLogin,
     logout,
     handleSessionExpired,
     startPostLoginTransition,

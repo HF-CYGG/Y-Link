@@ -57,6 +57,15 @@ const handleOpenMfaDialog = () => {
   mfaDialogVisible.value = true
 }
 
+// 密钥管理同样按需挂载，避免浏览器认证 SDK 进入管理端首屏。
+const AdminWebAuthnDialog = defineAsyncComponent(() => import('@/components/account/AdminWebAuthnDialog.vue'))
+const webAuthnDialogMounted = ref(false)
+const webAuthnDialogVisible = ref(false)
+const handleOpenWebAuthnDialog = () => {
+  webAuthnDialogMounted.value = true
+  webAuthnDialogVisible.value = true
+}
+
 /**
  * 修改密码表单：
  * - currentPassword 用于校验本人身份；
@@ -259,6 +268,10 @@ const handleLogout = async () => {
               <el-icon><Key /></el-icon>
               两步验证
             </el-dropdown-item>
+            <el-dropdown-item @click="handleOpenWebAuthnDialog">
+              <el-icon><Key /></el-icon>
+              通行密钥与安全密钥
+            </el-dropdown-item>
             <el-dropdown-item divided @click="handleLogout">
               <el-icon><SwitchButton /></el-icon>
               退出登录
@@ -321,4 +334,5 @@ const handleLogout = async () => {
   </BizCrudDialogShell>
 
   <AdminMfaDialog v-if="mfaDialogMounted" v-model="mfaDialogVisible" />
+  <AdminWebAuthnDialog v-if="webAuthnDialogMounted" v-model="webAuthnDialogVisible" />
 </template>

@@ -54,6 +54,7 @@ const REQUIRED_TABLES = [
   'base_product_variant_code_registry',
   'base_yz_series_seq_reservation',
   'sys_user_mfa',
+  'sys_user_webauthn_credential',
 ] as const
 
 const REQUIRED_COLUMNS = [
@@ -160,6 +161,9 @@ const REQUIRED_COLUMNS = [
   // 需与 mysql-migration-runner 的 MYSQL_REQUIRED_COLUMNS 保持同一口径。
   ['base_yz_series_seq_reservation', 'series_code'],
   ['base_yz_series_seq_reservation', 'code_prefix'],
+  ['sys_user', 'webauthn_user_handle'],
+  ...['user_id', 'rp_id', 'credential_id_sha256', 'credential_id', 'public_key', 'counter', 'transports_json', 'device_type', 'backed_up', 'name', 'created_at', 'last_used_at']
+    .map((columnName) => ['sys_user_webauthn_credential', columnName] as const),
 ] as const
 
 const REQUIRED_COLUMN_LENGTHS = new Map<string, number>([
@@ -167,6 +171,7 @@ const REQUIRED_COLUMN_LENGTHS = new Map<string, number>([
   ['client_feedback_conversation.department_name_snapshot', 271],
   ['biz_outbound_order.customer_department_name', 271],
   ['sms_verification_record.scheme_name', 20],
+  ['sys_user.webauthn_user_handle', 64],
 ])
 
 interface ColumnFixture {
@@ -340,6 +345,9 @@ interface CheckFixture {
 }
 
 const REQUIRED_INDEXES: readonly IndexFixture[] = [
+  { tableName: 'sys_user', indexName: 'uk_sys_user_webauthn_user_handle', columns: ['webauthn_user_handle'], unique: true },
+  { tableName: 'sys_user_webauthn_credential', indexName: 'idx_sys_user_webauthn_credential_user_id', columns: ['user_id'], unique: false },
+  { tableName: 'sys_user_webauthn_credential', indexName: 'uk_sys_user_webauthn_rp_credential_sha256', columns: ['rp_id', 'credential_id_sha256'], unique: true },
   // 050：系列码唯一、系列内序号唯一与变体码登记表的两个唯一键。
   {
     tableName: 'base_product',
@@ -614,6 +622,7 @@ const REQUIRED_FOREIGN_KEYS: readonly ForeignKeyFixture[] = [
     ['base_product_variant_code_registry', 'fk_base_product_variant_code_registry_product_id', 'product_id', 'base_product', 'CASCADE'],
     // 054：两步验证记录不随账号级联删除，永久删除账号时由服务层显式清理。
     ['sys_user_mfa', 'fk_sys_user_mfa_user_id', 'user_id', 'sys_user', 'RESTRICT'],
+    ['sys_user_webauthn_credential', 'fk_sys_user_webauthn_credential_user_id', 'user_id', 'sys_user', 'RESTRICT'],
   ].map(([tableName, constraintName, columnName, referencedTableName, deleteRule]) => ({
     tableName,
     constraintName,
@@ -1017,7 +1026,9 @@ for (const [columnKey] of REQUIRED_COLUMN_LENGTHS) {
   shortRequiredColumn.columnDefinitions.get(columnKey)!.characterMaximumLength = 1
   const introducingScript = columnKey === 'sms_verification_record.scheme_name'
     ? '039_aliyun_pnvs_sms_verification.sql'
-    : '038_department_path_capacity.sql'
+    : columnKey === 'sys_user.webauthn_user_handle'
+      ? '058_admin_webauthn.sql'
+      : '038_department_path_capacity.sql'
   await expectSchemaFailure(shortRequiredColumn, [
     `字段 ${columnKey}`,
     '字符容量不足',
@@ -1189,5 +1200,21 @@ await expectSchemaFailure(cascadingAdminMfaForeignKey, [
   '外键 sys_user_mfa.user_id 必须使用 ON DELETE RESTRICT',
   '057_admin_mfa.sql',
 ])
+
+const missingWebauthnTable = createCompleteFixture()
+missingWebauthnTable.tables.delete('sys_user_webauthn_credential')
+await expectSchemaFailure(missingWebauthnTable, ['sys_user_webauthn_credential', '058_admin_webauthn.sql'])
+
+const missingWebauthnHandle = createCompleteFixture()
+missingWebauthnHandle.columns.delete(objectKey('sys_user', 'webauthn_user_handle'))
+await expectSchemaFailure(missingWebauthnHandle, ['sys_user.webauthn_user_handle', '058_admin_webauthn.sql'])
+
+const missingWebauthnUnique = createCompleteFixture()
+missingWebauthnUnique.indexes.delete(objectKey('sys_user_webauthn_credential', 'uk_sys_user_webauthn_rp_credential_sha256'))
+await expectSchemaFailure(missingWebauthnUnique, ['索引 sys_user_webauthn_credential.uk_sys_user_webauthn_rp_credential_sha256', '058_admin_webauthn.sql'])
+
+const cascadingWebauthnForeignKey = createCompleteFixture()
+cascadingWebauthnForeignKey.foreignKeys.get(objectKey('sys_user_webauthn_credential', 'fk_sys_user_webauthn_credential_user_id'))!.deleteRule = 'CASCADE'
+await expectSchemaFailure(cascadingWebauthnForeignKey, ['外键 sys_user_webauthn_credential.user_id 必须使用 ON DELETE RESTRICT', '058_admin_webauthn.sql'])
 
 console.log('[mysql-schema-contract-verify] MySQL 启动结构契约验证通过')

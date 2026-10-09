@@ -18,16 +18,16 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { Lock, User, Right, Key } from '@element-plus/icons-vue'
-import { useRoute, useRouter } from 'vue-router'
+import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { resolveDefaultManagementRedirect, resolveSafeRedirect } from '@/router'
 import { useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { ADMIN_MFA_TICKET_EXPIRED_REASON, getAdminCaptcha, type LoginResult } from '@/api/modules/auth'
 import { APP_META } from '@/constants/app-meta'
 import { extractErrorMessage, extractRequestErrorReason, normalizeRequestError } from '@/utils/error'
-
-
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
+import { getAdminWebAuthnCapabilities, startAdminWebAuthnLogin } from '@/api/modules/admin-webauthn'
+import { assessWebAuthnAvailability, createWebAuthnFlow, isWebAuthnCancellation, type AdminWebAuthnCapabilities } from '@/utils/admin-webauthn'
 
 const form = reactive({
   username: '',
@@ -50,6 +50,41 @@ const captchaState = reactive({
   captchaSvg: '',
   expiresInSeconds: 0,
 })
+const webAuthnCapabilities = ref<AdminWebAuthnCapabilities | null>(null)
+const webAuthnCapabilitiesPhase = ref<'loading' | 'ready' | 'error'>('loading')
+const webAuthnPhase = ref<'idle' | 'options' | 'ceremony' | 'verifying'>('idle')
+const webAuthnVerifyPending = ref(false)
+let webAuthnSdk: typeof import('@simplewebauthn/browser') | null = null
+const webAuthnFlow = createWebAuthnFlow(() => webAuthnSdk?.WebAuthnAbortService.cancelCeremony())
+const webAuthnContext = () => ({
+  origin: globalThis.window?.location.origin ?? '',
+  secure: globalThis.window?.isSecureContext === true,
+  supported: typeof globalThis.PublicKeyCredential !== 'undefined' && Boolean(globalThis.navigator?.credentials?.get),
+})
+const webAuthnAvailability = computed(() => webAuthnCapabilities.value
+  ? assessWebAuthnAvailability(webAuthnCapabilities.value, webAuthnContext())
+  : { available: false, message: webAuthnCapabilitiesPhase.value === 'loading' ? '正在检查通行密钥可用性…' : '暂时无法确认通行密钥可用性，请稍后重试。' })
+const webAuthnHint = ref('')
+const webAuthnAvailabilityText = computed(() => webAuthnHint.value || webAuthnAvailability.value.message)
+const webAuthnBusy = computed(() => webAuthnPhase.value !== 'idle')
+let webAuthnCapabilitiesController: AbortController | null = null
+
+const loadWebAuthnCapabilities = async () => {
+  webAuthnCapabilitiesController?.abort()
+  const controller = new AbortController()
+  webAuthnCapabilitiesController = controller
+  webAuthnCapabilitiesPhase.value = 'loading'
+  try {
+    const result = await getAdminWebAuthnCapabilities({ signal: controller.signal })
+    if (controller.signal.aborted) return
+    webAuthnCapabilities.value = result
+    webAuthnCapabilitiesPhase.value = 'ready'
+  } catch {
+    if (controller.signal.aborted) return
+    webAuthnCapabilities.value = null
+    webAuthnCapabilitiesPhase.value = 'error'
+  }
+}
 
 const rules: FormRules = {
   username:[{ required: true, message: '请输入账号', trigger: 'blur' }],
@@ -90,26 +125,30 @@ const applySecurityHintFromMessage = (message: string) => {
   securityHint.value = /频繁|锁定|稍后|重试/.test(message) ? message : ''
 }
 
-const refreshCaptcha = async () => {
+let captchaRequestId = 0
+const refreshCaptcha = async (isCurrent: () => boolean = () => true) => {
+  const requestId = ++captchaRequestId
   captchaLoading.value = true
   try {
     const result = await getAdminCaptcha()
+    if (requestId !== captchaRequestId || !isCurrent()) return
     captchaState.captchaId = result.captchaId
     captchaState.captchaImage = result.captchaImage ?? ''
     captchaState.captchaSvg = result.captchaSvg
     captchaState.expiresInSeconds = result.expiresInSeconds
     form.captcha = ''
   } catch (error) {
-    showAppError(extractErrorMessage(error, '验证码加载失败，请稍后重试'))
+    if (requestId === captchaRequestId && isCurrent()) showAppError(extractErrorMessage(error, '验证码加载失败，请稍后重试'))
   } finally {
-    captchaLoading.value = false
+    if (requestId === captchaRequestId && isCurrent()) captchaLoading.value = false
   }
 }
 
-const ensureCaptchaVisible = async () => {
+const ensureCaptchaVisible = async (isCurrent: () => boolean = () => true) => {
+  if (!isCurrent()) return
   captchaVisible.value = true
   if (!captchaState.captchaId) {
-    await refreshCaptcha()
+    await refreshCaptcha(isCurrent)
   }
 }
 
@@ -122,10 +161,18 @@ onMounted(() => {
   root.style.removeProperty('--theme-transition-origin-y')
   root.style.removeProperty('--theme-transition-duration')
   root.style.removeProperty('--theme-transition-easing')
+  void loadWebAuthnCapabilities()
 })
 
 onBeforeUnmount(() => {
+  webAuthnCapabilitiesController?.abort()
+  webAuthnFlow.cancel()
+  captchaRequestId += 1
   document.documentElement.classList.remove('route-login')
+})
+// 最终验证已发出时，服务端仍可能设置 Cookie；等待结果后才允许切换账号或离开登录页。
+onBeforeRouteLeave(() => {
+  if (webAuthnVerifyPending.value) return false
 })
 
 const resetCaptchaState = () => {
@@ -186,6 +233,70 @@ const finishLogin = async (result: LoginResult) => {
   await router.replace(redirectPath.value)
 }
 
+const cancelWebAuthnLogin = () => {
+  // 验证请求一旦发出，服务端可能已经签发会话，不能再让取消丢弃成功结果。
+  if (webAuthnPhase.value === 'verifying') return
+  webAuthnFlow.cancel()
+  webAuthnPhase.value = 'idle'
+  webAuthnHint.value = '通行密钥操作已取消，可重新尝试。'
+}
+
+/** 独立无用户名登录；浏览器 SDK 仅在主动点击后加载。 */
+const handleWebAuthnLogin = async () => {
+  if (submitPhase.value !== 'idle' || webAuthnBusy.value || !webAuthnAvailability.value.available) return
+  if (captchaVisible.value && !form.captcha.trim()) {
+    showAppWarning('请输入图形验证码')
+    return
+  }
+  webAuthnHint.value = ''
+  form.password = ''
+  const operation = webAuthnFlow.start()
+  webAuthnPhase.value = 'options'
+  try {
+    const challenge = await startAdminWebAuthnLogin({
+      ...(captchaVisible.value ? { captchaId: captchaState.captchaId, code: form.captcha } : {}),
+    }, { signal: operation.signal })
+    if (!webAuthnFlow.isCurrent(operation.id)) return
+    const sdk = await import('@simplewebauthn/browser')
+    if (!webAuthnFlow.isCurrent(operation.id)) return
+    webAuthnSdk = sdk
+    webAuthnPhase.value = 'ceremony'
+    const response = await sdk.startAuthentication({ optionsJSON: challenge.options })
+    if (!webAuthnFlow.isCurrent(operation.id)) return
+    webAuthnPhase.value = 'verifying'
+    webAuthnVerifyPending.value = true
+    let result: LoginResult | null
+    try {
+      result = await authStore.completeWebAuthnLogin({ challengeId: challenge.challengeId, response })
+    } finally {
+      webAuthnVerifyPending.value = false
+    }
+    if (!webAuthnFlow.isCurrent(operation.id) || !result) return
+    webAuthnFlow.finish(operation.id)
+    webAuthnPhase.value = 'idle'
+    await finishLogin(result)
+  } catch (error) {
+    if (!webAuthnFlow.isCurrent(operation.id)) return
+    if (isWebAuthnCancellation(error)) {
+      webAuthnHint.value = '通行密钥操作已取消或超时，可重新尝试。'
+    } else {
+      const normalizedError = normalizeRequestError(error, '通行密钥登录失败，请稍后重试')
+      webAuthnHint.value = normalizedError.message
+      applySecurityHintFromMessage(normalizedError.message)
+      if (normalizedError.status === 428 || /验证码/.test(normalizedError.message)) {
+        await ensureCaptchaVisible(() => webAuthnFlow.isCurrent(operation.id))
+      } else if (captchaVisible.value) {
+        await refreshCaptcha(() => webAuthnFlow.isCurrent(operation.id))
+      }
+    }
+  } finally {
+    if (webAuthnFlow.isCurrent(operation.id)) {
+      webAuthnFlow.finish(operation.id)
+      webAuthnPhase.value = 'idle'
+    }
+  }
+}
+
 /**
  * 两步验证第二步：
  * - 动态码与恢复码二选一提交；
@@ -227,7 +338,7 @@ const handleMfaSubmit = async (ticket: string) => {
 const handleSubmit = async () => {
   // 第二步只有一个输入框，回车会同时触发表单隐式提交与 keyup.enter；进行中的提交必须拦截，
   // 否则同一票据被并发提交两次，后到的请求会因票据已被取走而把页面错误地退回第一步。
-  if (submitPhase.value !== 'idle') return
+  if (submitPhase.value !== 'idle' || webAuthnBusy.value) return
   if (mfaChallenge.value) {
     await handleMfaSubmit(mfaChallenge.value.ticket)
     return
@@ -459,7 +570,7 @@ const handleSubmit = async () => {
                     type="button"
                     :disabled="captchaLoading"
                     title="点击刷新验证码"
-                    @click="refreshCaptcha"
+                    @click="() => refreshCaptcha()"
                   >
                     <span v-if="captchaLoading">刷新中</span>
                     <img
@@ -486,6 +597,21 @@ const handleSubmit = async () => {
               </span>
               <span v-else>{{ submitButtonLabel }}</span>
             </el-button>
+
+            <div v-if="!mfaChallenge" class="mt-4 flex flex-col gap-2">
+              <el-button
+                class="!m-0 !w-full"
+                type="primary"
+                plain
+                :loading="webAuthnBusy"
+                :disabled="!webAuthnAvailability.available || submitPhase !== 'idle'"
+                @click="handleWebAuthnLogin"
+              >使用通行密钥 / 安全密钥登录</el-button>
+              <el-button v-if="webAuthnBusy && webAuthnPhase !== 'verifying'" class="!m-0 !w-full" @click="cancelWebAuthnLogin">取消密钥操作</el-button>
+              <p v-else-if="webAuthnPhase === 'verifying'" class="text-center text-xs text-slate-500" role="status">正在完成密钥登录，请稍候…</p>
+              <p class="text-center text-xs leading-5 text-slate-500 dark:text-slate-400" role="status">{{ webAuthnAvailabilityText }}</p>
+              <el-button v-if="webAuthnCapabilitiesPhase === 'error'" link @click="loadWebAuthnCapabilities">重试检查</el-button>
+            </div>
 
 
           </el-form>

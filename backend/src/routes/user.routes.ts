@@ -11,6 +11,8 @@ import { DatabaseRateLimitStore } from '../services/persistent-risk-state.servic
 import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { createPermanentDeletePasswordGuard } from '../utils/permanent-delete-guard.js'
+import { adminWebauthnService } from '../services/admin-webauthn.service.js'
+import { existingPasswordInput } from '../constants/auth-input-limits.js'
 
 const createUserSchema = z.object({
   username: z.string().min(1, '账号不能为空').max(64, '账号长度不能超过 64'),
@@ -38,6 +40,13 @@ const updateUserStatusSchema = z.object({
 
 const resetPasswordSchema = z.object({
   newPassword: z.string().min(8, '新密码至少 8 位').max(64, '新密码长度不能超过 64 位'),
+})
+
+const resetWebauthnSchema = z.object({
+  currentPassword: existingPasswordInput('当前密码'),
+  code: z.string().trim().max(16).optional(),
+  recoveryCode: z.string().trim().max(32).optional(),
+  reason: z.string().trim().min(1, '请输入撤销原因').max(500, '撤销原因不能超过 500 字'),
 })
 
 const accountLifecycleReasonSchema = z.object({
@@ -245,3 +254,11 @@ userRouter.post(
     })
   }),
 )
+
+userRouter.post('/:id/webauthn/reset', requirePermission('users:reset_password'), requireRole('admin'), asyncHandler(async (req, res) => {
+  const authReq = req as AuthenticatedRequest
+  const payload = resetWebauthnSchema.parse(req.body)
+  const data = await adminWebauthnService.resetUserCredentials(req.params.id, authReq.auth, payload, extractRequestMeta(req))
+  res.setHeader('Cache-Control', 'no-store')
+  res.json({ code: 0, message: 'ok', data })
+}))

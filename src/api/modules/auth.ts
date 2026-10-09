@@ -243,6 +243,8 @@ export interface UserSafeProfile extends AccountLifecycleFields {
   updatedAt: string
   /** 仅用户管理列表返回：该账号是否已开启两步验证。 */
   mfaEnabled?: boolean
+  /** 仅用户管理列表返回：当前有效通行密钥或安全密钥数量。 */
+  webauthnCredentialsCount?: number
 }
 
 /**

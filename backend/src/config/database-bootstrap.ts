@@ -35,6 +35,7 @@ const SQLITE_REQUIRED_TABLES = [
   'sys_user',
   'sys_user_session',
   'sys_user_mfa',
+  'sys_user_webauthn_credential',
   'sys_audit_log',
   'system_configs',
   'client_user',
@@ -309,6 +310,7 @@ const SQLITE_REQUIRED_CLIENT_STAFF_DIRECTORY_COLUMNS = [
 ]
 const SQLITE_REQUIRED_SYS_USER_COLUMNS = [
   'email',
+  'webauthn_user_handle',
   'deactivated_at',
   'deactivation_reason',
   'deactivated_by_user_id',
@@ -2038,6 +2040,10 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
     return true
   }
 
+  const webauthnCredentialColumns = await listSqliteTableColumns(dataSource, 'sys_user_webauthn_credential')
+  if (['user_id', 'rp_id', 'credential_id_sha256', 'credential_id', 'public_key', 'counter', 'name', 'device_type', 'backed_up']
+    .some((column) => !webauthnCredentialColumns.has(column))) return true
+
   const clientFeedbackConversationColumnSet = await listSqliteTableColumns(dataSource, 'client_feedback_conversation')
   if (SQLITE_REQUIRED_CLIENT_FEEDBACK_CONVERSATION_COLUMNS.some((column) => !clientFeedbackConversationColumnSet.has(column))) {
     return true
@@ -2109,6 +2115,7 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
   const accountForeignKeys = [
     ['sys_user_session', 'user_id', 'sys_user'],
     ['sys_user_mfa', 'user_id', 'sys_user'],
+    ['sys_user_webauthn_credential', 'user_id', 'sys_user'],
     ['client_user_session', 'user_id', 'client_user'],
     ['client_mobile_session', 'client_user_id', 'client_user'],
     ['biz_inbound_order', 'supplier_id', 'sys_user'],
