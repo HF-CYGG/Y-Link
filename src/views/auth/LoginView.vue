@@ -527,7 +527,12 @@ const handleSubmit = async () => {
   transition: background-color 0.5s ease;
 }
 
-:global(.dark) .login-page {
+/*
+ * 暗色覆盖写法约定：
+ * - scoped 样式中 `:global(.dark) .x` 会被编译成裸 `.dark` 规则，直接作用到 html 根节点并泄漏到全站；
+ * - 因此统一写成 `:global(.dark .login-page .x)`，并锚定本页根节点，避免与客户端登录页同名类互相影响。
+ */
+:global(.dark .login-page) {
   --bg-primary: #000000;
   --bg-panel: #111112;
   --text-main: #f5f5f7;
@@ -556,7 +561,7 @@ const handleSubmit = async () => {
   animation: blob-float 25s cubic-bezier(0.4, 0, 0.2, 1) infinite alternate;
 }
 
-:global(.dark) .geo-blob {
+:global(.dark .login-page .geo-blob) {
   opacity: 0.3;
   filter: blur(120px);
 }
@@ -618,7 +623,7 @@ const handleSubmit = async () => {
   background: rgba(255, 255, 255, 0.02);
 }
 
-:global(.dark) .glass-overlay {
+:global(.dark .login-page .glass-overlay) {
   background: rgba(0, 0, 0, 0.05);
 }
 
@@ -652,7 +657,7 @@ const handleSubmit = async () => {
   }
 }
 
-:global(.dark) .login-shell {
+:global(.dark .login-page .login-shell) {
   background: rgba(17, 17, 18, 0.75);
   box-shadow: 
     0 20px 40px rgba(0, 0, 0, 0.2),
@@ -672,7 +677,7 @@ const handleSubmit = async () => {
   overflow: hidden;
 }
 
-:global(.dark) .visual-panel {
+:global(.dark .login-page .visual-panel) {
   border-right: 1px solid rgba(255, 255, 255, 0.06);
 }
 
@@ -694,7 +699,7 @@ const handleSubmit = async () => {
   letter-spacing: 1px;
 }
 
-:global(.dark) .brand-chip {
+:global(.dark .login-page .brand-chip) {
   background: rgba(20, 184, 166, 0.15);
   color: #5eead4;
   border-color: rgba(20, 184, 166, 0.2);
@@ -745,7 +750,7 @@ const handleSubmit = async () => {
     box-shadow var(--theme-transition-duration) var(--ylink-motion-ease);
 }
 
-:global(.dark) .mockup-card {
+:global(.dark .login-page .mockup-card) {
   box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
 }
 
@@ -813,7 +818,7 @@ const handleSubmit = async () => {
   opacity: 0.15;
 }
 
-:global(.dark) .sk-line {
+:global(.dark .login-page .sk-line) {
   opacity: 0.3;
 }
 
@@ -821,7 +826,7 @@ const handleSubmit = async () => {
   opacity: 0.08;
 }
 
-:global(.dark) .sk-light {
+:global(.dark .login-page .sk-light) {
   opacity: 0.15;
 }
 
@@ -1008,7 +1013,7 @@ const handleSubmit = async () => {
   transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
-:global(.dark) .geo-input :deep(.el-input__wrapper) {
+:global(.dark .login-page .geo-input .el-input__wrapper) {
   background-color: rgba(0, 0, 0, 0.25);
   border: 1px solid rgba(255, 255, 255, 0.08);
 }
@@ -1019,7 +1024,7 @@ const handleSubmit = async () => {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04) !important;
 }
 
-:global(.dark) .geo-input :deep(.el-input__wrapper:hover) {
+:global(.dark .login-page .geo-input .el-input__wrapper:hover) {
   background-color: rgba(0, 0, 0, 0.45);
   border-color: rgba(255, 255, 255, 0.15);
 }
@@ -1030,7 +1035,7 @@ const handleSubmit = async () => {
   box-shadow: 0 0 0 1px #0d9488, 0 4px 14px rgba(13, 148, 136, 0.1) !important;
 }
 
-:global(.dark) .geo-input :deep(.el-input__wrapper.is-focus) {
+:global(.dark .login-page .geo-input .el-input__wrapper.is-focus) {
   background-color: rgba(0, 0, 0, 0.6);
   border-color: #14b8a6;
   box-shadow: 0 0 0 1px #14b8a6, 0 4px 14px rgba(20, 184, 166, 0.15) !important;
@@ -1075,7 +1080,7 @@ const handleSubmit = async () => {
   box-shadow: none;
 }
 
-:global(.dark) .captcha-image {
+:global(.dark .login-page .captcha-image) {
   background: rgba(0, 0, 0, 0.2);
   border-color: rgba(255, 255, 255, 0.05);
 }
@@ -1086,7 +1091,7 @@ const handleSubmit = async () => {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.02);
 }
 
-:global(.dark) .captcha-image:hover {
+:global(.dark .login-page .captcha-image:hover) {
   background: rgba(0, 0, 0, 0.4);
 }
 
