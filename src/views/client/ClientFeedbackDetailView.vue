@@ -263,7 +263,7 @@ const getMessageCardClass = (senderRole: FeedbackMessageSenderRole) => {
   if (senderRole === 'staff') {
     return 'border border-slate-200 bg-white text-slate-900 dark:border-white/10 dark:bg-[#141415] dark:text-slate-100'
   }
-  return 'mx-auto border border-dashed border-slate-200 bg-slate-50/85 text-slate-600 shadow-none dark:border-white/10 dark:text-slate-300'
+  return 'mx-auto border border-dashed border-slate-200 bg-slate-50/85 text-slate-600 shadow-none dark:border-white/10 dark:bg-white/5 dark:text-slate-300'
 }
 
 const getMessageContainerClass = (senderRole: FeedbackMessageSenderRole) => {
