@@ -126,6 +126,28 @@ const handleValueUpdate = (value: string | number | boolean) => {
   color: rgb(15 23 42);
 }
 
+/* 暗色：普通项用浅灰、选中项用提亮的青色，避免深色文字压在暗底上。 */
+.dark .passive-segmented-tabs :deep(.el-segmented) {
+  --el-segmented-item-selected-color: rgb(45 212 191);
+  --el-segmented-item-hover-color: rgb(241 245 249);
+}
+
+.dark .passive-segmented-tabs :deep(.el-segmented__item) {
+  color: rgb(203 213 225);
+}
+
+.dark .passive-segmented-tabs :deep(.el-segmented__item.is-selected) {
+  color: rgb(45 212 191);
+}
+
+.dark .passive-segmented-tabs :deep(.el-segmented__item-selected) {
+  box-shadow: inset 0 -2px 0 rgb(45 212 191);
+}
+
+.dark .passive-segmented-tabs :deep(.el-segmented__item:not(.is-disabled):hover) {
+  color: rgb(241 245 249);
+}
+
 @media (max-width: 767px) {
   .passive-segmented-tabs :deep(.el-segmented__item-label) {
     padding: 0.78rem 0.82rem;

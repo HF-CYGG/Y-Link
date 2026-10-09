@@ -631,4 +631,55 @@ const handleDialogModelValueChange = (value: boolean) => {
     max-height: min(66vh, 720px);
   }
 }
+
+/*
+ * 暗色：取景区本身已是深色，不调整；只把标题、状态胶囊、说明卡与提示胶囊换成暗底浅字，
+ * 桌面与移动两套类名同时覆盖（.dark 前缀优先级高于移动端媒体查询内的同名规则）。
+ */
+.dark .scan-shell,
+.dark .scan-shell-mobile {
+  background:
+    radial-gradient(circle at top right, rgba(45, 212, 191, 0.1), transparent 36%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0.04));
+}
+
+.dark .scan-shell__eyebrow,
+.dark .scan-shell-mobile__eyebrow {
+  color: rgb(45, 212, 191);
+}
+
+.dark .scan-shell__headline,
+.dark .scan-shell-mobile__headline {
+  color: rgb(241, 245, 249);
+}
+
+.dark .scan-shell__mode,
+.dark .scan-shell-mobile__mode {
+  background: rgba(16, 185, 129, 0.16);
+  color: rgb(110, 231, 183);
+}
+
+.dark .scan-shell__status,
+.dark .scan-shell-mobile__status,
+.dark .scan-shell__tip,
+.dark .scan-shell-mobile__tip {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgb(226, 232, 240);
+}
+
+.dark .scan-shell__info-card,
+.dark .scan-shell-mobile__info-card {
+  background: rgba(255, 255, 255, 0.04);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+.dark .scan-shell__status-text,
+.dark .scan-shell-mobile__status-text {
+  color: rgb(226, 232, 240);
+}
+
+.dark .scan-shell__hint-text,
+.dark .scan-shell-mobile__hint-text {
+  color: rgb(148, 163, 184);
+}
 </style>

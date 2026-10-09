@@ -36,6 +36,7 @@
   --motion-duration-slow: 320ms;
   --motion-easing-standard: cubic-bezier(0.2, 0, 0.2, 1);
   --motion-easing-emphasized: cubic-bezier(0.22, 1, 0.36, 1);
+  --ylink-brand-rgb: 0 91 82;
   --ylink-color-primary: #0d9488;
   --ylink-color-primary-weak: #ccfbf1;
   --ylink-color-primary-soft: #99f6e4;
@@ -152,6 +153,31 @@ html:not(.dark) {
   --el-color-primary-light-8: #ccdcdb;
   --el-color-primary-light-9: #e6efee;
   --el-color-primary-dark-2: #004942;
+}
+
+/*
+ * 暗色业务变量：
+ * - --ylink-color-* / --ylink-shadow-* 被客户端与部分管理端页面大量直接引用，在这里统一换值即可整片生效；
+ * - 浮层（下拉、弹出框、气泡）比卡片略亮一级，形成层次；卡片仍保持 #141415 与 .apple-card 一致；
+ * - --ylink-brand-rgb 驱动 Tailwind 的 brand 色，暗色下提亮为 teal-600，保证文字与白字底色都有足够对比度。
+ */
+html.dark {
+  --ylink-brand-rgb: 13 148 136;
+  --ylink-color-primary-weak: rgba(20, 184, 166, 0.16);
+  --ylink-color-primary-soft: rgba(45, 212, 191, 0.28);
+  --ylink-color-primary-strong: #0d9488;
+  --ylink-color-bg: #0a0a0b;
+  --ylink-color-surface: #141415;
+  --ylink-color-surface-muted: #1d1d1f;
+  --ylink-color-surface-soft: #18181a;
+  --ylink-color-text: #f1f5f9;
+  --ylink-color-subtext: #94a3b8;
+  --ylink-color-border: rgba(255, 255, 255, 0.08);
+  --ylink-color-overlay: rgba(10, 10, 11, 0.86);
+  --ylink-shadow-soft: 0 8px 24px rgba(0, 0, 0, 0.35);
+  --ylink-shadow-floating: 0 10px 36px rgba(0, 0, 0, 0.5);
+  --el-bg-color-overlay: #1d1d1f;
+  --el-card-bg-color: #141415;
 }
 
 html.dark {
@@ -274,6 +300,36 @@ html.dark .el-pager li {
 html.dark .el-dialog,
 html.dark .el-drawer {
   border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/*
+ * 暗色浮层边框：
+ * - 下拉、弹出框、气泡与卡片背景只差一级亮度，补细边框避免浮层与下方内容融在一起；
+ * - is-dark 气泡（Element Plus 默认深色 tooltip）在暗色下改用浮层色，避免黑底上一团更黑的块。
+ */
+html.dark .el-popper.is-light,
+html.dark .el-select-dropdown,
+html.dark .el-dropdown__popper,
+html.dark .el-picker__popper,
+html.dark .el-cascader__dropdown,
+html.dark .el-autocomplete__popper {
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+html.dark .el-popper.is-dark {
+  background: #2a2a2d;
+  border-color: rgba(255, 255, 255, 0.1);
+  color: #e5e7eb;
+}
+
+html.dark .el-popper.is-dark .el-popper__arrow::before {
+  background: #2a2a2d;
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+html.dark .el-message-box,
+html.dark .el-notification {
+  border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .el-button,
