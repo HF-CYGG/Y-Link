@@ -17,7 +17,7 @@
 - `src/components/common/*`
 - `src/store/modules/theme.ts`
 - `src/layout/components/ThemeToggle.vue`
-- `public/theme-init.js`
+- `src/theme-init.js`
 - `src/style.css`
 - `docs/前端页面与共享层接入规范.md`
 
@@ -28,7 +28,7 @@
 - 客户端购物车真源：`src/store/modules/client-cart.ts`
 - 请求稳定器：`src/composables/useStableRequest.ts`
 - 权限动作收口：`src/composables/usePermissionAction.ts`
-- 明暗主题真源：`src/store/modules/theme.ts`；首帧主题：`public/theme-init.js`；切换开关：`src/layout/components/ThemeToggle.vue`
+- 明暗主题真源：`src/store/modules/theme.ts`；首帧主题：`src/theme-init.js`；切换开关：`src/layout/components/ThemeToggle.vue`
 
 ## 前端链路
 
@@ -43,7 +43,8 @@
   - 基础展示：`BaseRequestState`、`BaseRouteErrorState`、`BaseEmptyState`
 - 明暗主题：
   - 存储键 `y-link-theme-preference` 只记录用户显式选择；未选择时跟随系统 `prefers-color-scheme` 并实时响应；旧键 `y-link-theme-mode`（主题锁定期间写入的默认亮色）在初始化时清理；
-  - `public/theme-init.js` 以同源脚本在首帧前给 html 挂 `dark`/`light` 类（页面 CSP 为 `script-src 'self'`，不能改成内联脚本），与 Store 判定口径必须一致；
+  - `src/theme-init.js` 以同源经典同步脚本在首帧前给 html 挂 `dark`/`light` 类（页面 CSP 为 `script-src 'self'`，不能改成内联脚本；`type="module"` 会延后执行），与 Store 判定口径必须一致；
+  - 构建时由 `vite.config.ts` 的 `themeInitScriptPlugin` 输出为 `assets/theme-init-<内容哈希>.js` 并改写 HTML 引用。Nginx 对 `.js` 一律一年 `immutable` 长缓存，不能移回 `public/` 用固定文件名；预算脚本把它计入首屏 JS，并拒绝 `dist/assets` 之外的经典脚本；
   - `ThemeToggle` 用 `el-switch`（滑块内嵌太阳/月亮），`before-change` 返回 false、由 Store 执行切换并保留点击点圆形揭幕；放置于管理端顶栏（异步拆包，不进首屏）、管理端登录页、客户端主壳层、客户端登录页与找回密码页；
   - 品牌主色色阶在 `style.css` 中以 `html:not(.dark)` / `html.dark` 两组声明，禁止再用内联样式写到 html 上（会压过暗色）；Tailwind `brand` 色由 `--ylink-brand-rgb` 驱动；
   - `--ylink-color-*` / `--ylink-shadow-*` 业务变量已有暗色值，新代码优先引用变量。

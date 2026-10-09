@@ -2,7 +2,7 @@
  * 文件说明：scripts/verify-enterprise-page-performance.mjs
  * 文件职责：执行 Y-Link 前端构建预算校验，覆盖总产物、热路径资源、低频重包与高频路由分包，并输出统一 JSON 报告。
  * 实现逻辑：
- * 1. 读取 dist 产物，并从 index.html 的 module/stylesheet 引用递归还原真实首屏静态依赖图；
+ * 1. 读取 dist 产物，并从 index.html 的 module/经典同步脚本/stylesheet 引用递归还原真实首屏静态依赖图；
  * 2. 对“总产物预算 + 首屏 JS/CSS 预算 + 低频专包预算 + 路由分包预算”逐项断言；
  * 3. 复核 keepAlive、预热与稳定请求等性能治理结构是否仍存在；
  * 4. 将预算上限、实测值、明细结果和最终状态写入 `.local-dev/enterprise-performance-budget-report.json`。
@@ -22,8 +22,10 @@ const reportPath = path.join(runtimeRoot, 'enterprise-performance-budget-report.
 /**
  * 构建预算分成两层：
  * - 总产物预算：防止整体包体持续膨胀；
- * - 首屏预算：以 index.html 实际 modulepreload、入口模块和 stylesheet 依赖图为准，
- *   避免把动态路由产物误算进热路径，也避免低频重包意外回到入口而不被发现。
+ * - 首屏预算：以 index.html 实际 modulepreload、入口模块、经典同步脚本和 stylesheet 依赖图为准，
+ *   避免把动态路由产物误算进热路径，也避免低频重包意外回到入口而不被发现；
+ * - 经典同步脚本（如首帧主题脚本 theme-init）会阻塞解析，必须计入首屏 JS，且必须是 dist/assets 下带内容哈希的产物：
+ *   放在 dist 根目录既逃过总产物统计，又会被 Nginx 的 `.js` 长缓存锁住旧版本。
  *
  * 已批准的 Issues #68-#74 在相同 Node 与依赖环境中的构建总产物为 4251.56 KB；
  * 相对 main@6dc428b 的 4199.83 KB 真实增加 51.73 KB。该增量来自四项已批准功能，
@@ -261,6 +263,12 @@ const modulePreloadNames = htmlTags
   .map((tag) => extractHtmlAttribute(tag, 'href'))
   .filter(Boolean)
   .map((reference) => normalizeAssetReference(reference, 'index.html modulepreload'))
+// 非 module 的同源 `<script src>` 在解析阶段同步执行，同样属于首屏；normalizeAssetReference 会拒绝 dist/assets 之外的路径。
+const classicScriptNames = htmlTags
+  .filter((tag) => /^<script\b/i.test(tag) && !/\btype\s*=\s*(["'])module\1/i.test(tag))
+  .map((tag) => extractHtmlAttribute(tag, 'src'))
+  .filter(Boolean)
+  .map((reference) => normalizeAssetReference(reference, 'index.html 经典同步脚本'))
 const stylesheetNames = htmlTags
   .filter((tag) => /^<link\b/i.test(tag) && /\brel\s*=\s*(["'])stylesheet\1/i.test(tag))
   .map((tag) => extractHtmlAttribute(tag, 'href'))
@@ -271,7 +279,7 @@ assert(entryModuleNames.length === 1, 'index.html 必须且只能有一个 type=
 assert(modulePreloadNames.length > 0, 'index.html 缺少 modulepreload；首屏依赖预加载已被关闭。')
 assert(stylesheetNames.length > 0, 'index.html 缺少首屏 stylesheet。')
 
-const initialModuleGraph = collectStaticModuleGraph([...entryModuleNames, ...modulePreloadNames])
+const initialModuleGraph = collectStaticModuleGraph([...entryModuleNames, ...modulePreloadNames, ...classicScriptNames])
 const initialAssetNames = new Set([...initialModuleGraph, ...stylesheetNames])
 const initialAssets = [...initialAssetNames].map((assetName) => requireAsset(assetName, '首屏依赖图'))
 
@@ -478,6 +486,7 @@ const report = {
   initialLoadGraph: {
     entryModules: entryModuleNames,
     modulePreloads: modulePreloadNames,
+    classicScripts: classicScriptNames,
     stylesheets: stylesheetNames,
     assets: initialAssets.map((entry) => ({ name: entry.name, sizeKB: entry.sizeKB })),
     lowFrequencyLeaks: lowFrequencyInitialLeaks.map((entry) => entry.name),
