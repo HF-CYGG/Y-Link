@@ -41,6 +41,7 @@ import { assertXlsxArchiveWithinLimits } from '../utils/xlsx-archive-guard.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 import { auditService } from './audit.service.js'
 import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
+import { acquireSequenceMutex } from './inventory-sequence.service.js'
 import {
   formatProductCode,
   formatSkuCode,
@@ -50,7 +51,7 @@ import {
   SPEC_VALUE_MAX_LENGTH,
   VARIANT_CODE_POOL,
 } from './product-code.service.js'
-import { productService, type CreateProductInput, type ProductView } from './product.service.js'
+import { PRODUCT_SCAN_CODE_MUTEX_KEY, productService, type CreateProductInput, type ProductView } from './product.service.js'
 
 const MAX_IMPORT_ROWS = 2000
 /** 解压体积预检上限：六列宽表，2000 行远小于 1MB，留足余量给少量嵌入图片。 */
@@ -220,6 +221,7 @@ export class ProductImportYzService {
   ): Promise<YzImportResult> {
     const result = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
+      await acquireSequenceMutex(manager, PRODUCT_SCAN_CODE_MUTEX_KEY)
       // 事务内重新解析 + 重新校验：不信任前端回传的预览结果，只信任 resolutions。
       const parsedRows = await this.parseWorkbook(fileBuffer)
       const { rows, groups, preview } = await this.validateAndGroup(parsedRows, manager, resolutions ?? [])

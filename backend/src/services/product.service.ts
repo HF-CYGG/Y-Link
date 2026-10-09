@@ -6,7 +6,7 @@
  * 3. 同时向管理端和 O2O 业务提供稳定的商品查询与写入能力，保证商品治理口径统一。
  */
 
-import { In, Not, type EntityManager, type Repository } from 'typeorm'
+import { In, type EntityManager, type Repository } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { BaseCategory } from '../entities/base-category.entity.js'
@@ -503,6 +503,8 @@ const PRODUCT_SERIES_SEQ_CONSTRAINT_MATCHER = {
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const PRODUCT_CREATE_MAX_RETRY = 3
 const PRODUCT_BATCH_CREATE_LIMIT = 50
+/** 商品扫码四类编码共用的事务互斥键；所有持久编码写入口须在商品/系列读取前获取。 */
+export const PRODUCT_SCAN_CODE_MUTEX_KEY = 'product.scan-code.namespace'
 const PRODUCT_FIELD_LIMITS = {
   code: 64,
   name: 128,
@@ -615,6 +617,7 @@ export class ProductService {
   async create(input: CreateProductInput, actor: AuthUserContext, requestMeta?: RequestMeta): Promise<ProductView> {
     const result = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
+      await acquireSequenceMutex(manager, PRODUCT_SCAN_CODE_MUTEX_KEY)
       const created = await this.createWithManager(input, manager, actor)
       await this.recordProductCreateAudit([created], actor, requestMeta, manager)
       return created
@@ -635,6 +638,7 @@ export class ProductService {
 
     const result = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
+      await acquireSequenceMutex(manager, PRODUCT_SCAN_CODE_MUTEX_KEY)
       const createdProducts: ProductView[] = []
 
       for (let index = 0; index < inputs.length; index += 1) {
@@ -660,6 +664,7 @@ export class ProductService {
   async update(id: string, input: UpdateProductInput, actor: AuthUserContext, requestMeta?: RequestMeta): Promise<ProductView> {
     const result = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
+      await acquireSequenceMutex(manager, PRODUCT_SCAN_CODE_MUTEX_KEY)
       const repo = manager.getRepository(BaseProduct)
       const product = await repo.findOne({
         where: { id },
@@ -1254,6 +1259,7 @@ export class ProductService {
 
     const result = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
+      await acquireSequenceMutex(manager, PRODUCT_SCAN_CODE_MUTEX_KEY)
 
       const productRepo = manager.getRepository(BaseProduct)
       const product = await productRepo.findOne({
@@ -1969,6 +1975,8 @@ export class ProductService {
         if (skuInput.barcode === undefined) {
           skuEntity.barcode = matchedSku.barcode
         }
+        // 历史编码不接受普通商品编辑入参改写，但它仍参与本批最终 SKU 的扫码命名空间校验。
+        skuEntity.legacySkuCode = matchedSku.legacySkuCode
         if (skuInput.costPrice === undefined) {
           skuEntity.costPrice = matchedSku.costPrice
         }
@@ -2024,7 +2032,7 @@ export class ProductService {
       }
       skuEntities.push(skuEntity)
     }
-    await this.assertSkuRelationsValid(product, skuEntities, manager)
+    await this.assertSkuRelationsValid(product, skuEntities, manager, { retireUnsubmittedSkus: true })
     const specTextSet = new Set<string>()
     const skuCodeSet = new Set<string>()
     skuEntities.forEach((sku) => {
@@ -2312,8 +2320,8 @@ export class ProductService {
 
   /**
    * 扫码识别：条码、SKU 编码、历史 SKU 编码（B9 批次新增，兼容升级前已打印的旧标签）三路精确匹配合并；
-   * 排序优先级为「当前版本 > 启用中 > 条码命中 > SKU 编码命中 > 历史编码命中」——历史编码只是兼容手段，
-   * 优先级最低，避免与真实条码/当前编码撞码时抢占展示。
+   * 先按「当前版本 > 启用中」取最高状态层；同层多个不同 SKU 一律报告歧义，
+   * 不能让条码字段排名掩盖旧纸签的错误归属。唯一 SKU 内再按「条码 > 当前编码 > 历史编码」选 matchedBy。
    * 返回的 SKU 视图带库存，调用方按权限决定是否裁剪。
    */
   async lookupByCode(rawCode: string): Promise<ProductLookupView> {
@@ -2325,16 +2333,30 @@ export class ProductService {
       skuRepo.find({ where: { skuCode: code } }),
       skuRepo.find({ where: { legacySkuCode: code } }),
     ])
-    const candidates = [
+    const matchedRows = [
       ...byBarcode.map((row) => ({ row, matchedBy: 'barcode' as const, rank: 2 })),
       ...bySkuCode.map((row) => ({ row, matchedBy: 'sku_code' as const, rank: 1 })),
       ...byLegacySkuCode.map((row) => ({ row, matchedBy: 'legacy_sku_code' as const, rank: 0 })),
-    ].sort((left, right) =>
+    ]
+    // 一条 SKU 同时命中多个字段仍归同一 owner；保留最高字段优先级作为 matchedBy。
+    const bestMatchBySkuId = new Map<string, (typeof matchedRows)[number]>()
+    matchedRows.forEach((candidate) => {
+      const skuId = String(candidate.row.id)
+      const previous = bestMatchBySkuId.get(skuId)
+      if (!previous || candidate.rank > previous.rank) bestMatchBySkuId.set(skuId, candidate)
+    })
+    const candidates = [...bestMatchBySkuId.values()].sort((left, right) =>
       Number(isDatabaseFlagEnabled(right.row.isCurrent)) - Number(isDatabaseFlagEnabled(left.row.isCurrent))
       || Number(isDatabaseFlagEnabled(right.row.isActive)) - Number(isDatabaseFlagEnabled(left.row.isActive))
       || right.rank - left.rank)
     const best = candidates[0]
     if (!best) throw new BizError(`未找到条码「${code}」对应的商品`, 404)
+    const sameStateOwners = candidates.filter(({ row }) =>
+      isDatabaseFlagEnabled(row.isCurrent) === isDatabaseFlagEnabled(best.row.isCurrent)
+      && isDatabaseFlagEnabled(row.isActive) === isDatabaseFlagEnabled(best.row.isActive))
+    if (sameStateOwners.length > 1) {
+      throw new BizError(`条码「${code}」对应多个商品规格，请联系管理员处理编码冲突`, 409)
+    }
     const { row: sku, matchedBy } = best
     const product = await this.productRepo.findOne({ where: { id: sku.productId } })
     if (!product) throw new BizError(`未找到条码「${code}」对应的商品`, 404)
@@ -2458,7 +2480,88 @@ export class ProductService {
    * （skuCodeChanges 是 {skuId, newSkuCode} 数组，此时对应的 SKU 行在 DB 里还是旧编码），不是本函数
    * 接受的 BaseProductSku 实体数组，签名和调用时机都不同，不能合并。
    */
-  private async assertSkuRelationsValid(product: BaseProduct, skus: BaseProductSku[], manager: EntityManager) {
+  /** 异构列排序规则会使扫码的跨列归属不对称；任何 SKU 编码写入都须先拒绝。 */
+  private async requireSharedSkuCodeCollation(manager: EntityManager): Promise<string | null> {
+    if (manager.connection.options.type === 'sqlite') return null
+    if (manager.connection.options.type !== 'mysql') {
+      throw new BizError('当前数据库不支持安全校验条码命名空间，请联系管理员', 409)
+    }
+    const columns = await manager.query(
+      "SELECT COLUMN_NAME AS name, COLLATION_NAME AS collation FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'base_product_sku' AND COLUMN_NAME IN ('sku_code', 'barcode', 'legacy_sku_code')",
+    ) as Array<{ name: string; collation: string | null }>
+    const names = new Set(columns.map((column) => column.name))
+    const collations = new Set(columns.map((column) => column.collation))
+    const [collation] = [...collations]
+    if (names.size !== 3 || !['sku_code', 'barcode', 'legacy_sku_code'].every((name) => names.has(name))
+      || collations.size !== 1 || !collation || !/^utf8mb4_[a-z0-9_]+$/i.test(collation)) {
+      throw new BizError('SKU 编码列的数据库排序规则不一致，无法安全保存编码，请联系管理员', 409)
+    }
+    return collation
+  }
+
+  /** 使用目标 SKU 三列的真实 MySQL 排序规则比较尚未落库的同批编码；SQLite 保持既有精确比较。 */
+  private async assertPendingSkuCodesUnique(skus: BaseProductSku[], manager: EntityManager): Promise<void> {
+    const collation = await this.requireSharedSkuCodeCollation(manager)
+    if (!collation || skus.length < 2) return
+    const values = skus.flatMap((sku, index) =>
+      [sku.skuCode, sku.barcode, sku.legacySkuCode]
+        .filter((code): code is string => Boolean(code))
+        .map((code) => ({ code, owner: sku.id ? String(sku.id) : `__new_${index}` })))
+    if (values.length < 2) return
+    const duplicate = await manager.query(
+      `SELECT MIN(code) AS code
+       FROM JSON_TABLE(?, '$[*]' COLUMNS (code VARCHAR(96) PATH '$.code', owner VARCHAR(64) PATH '$.owner')) AS pending
+       GROUP BY code COLLATE ${collation} HAVING COUNT(DISTINCT owner) > 1 LIMIT 1`,
+      [JSON.stringify(values)],
+    ) as Array<{ code: string }>
+    if (duplicate.length) {
+      throw new BizError(`条码或编码「${duplicate[0].code}」在本商品的多个规格中重复`, 409)
+    }
+  }
+
+  /** 持久行必须由数据库列谓词判等；错误分支再按同一列谓词定位具体输入值。 */
+  private async findPersistedSkuCodeConflict(
+    manager: EntityManager,
+    codes: string[],
+    productId: string,
+    scope: 'same' | 'other',
+    fields: Array<{ property: 'skuCode' | 'barcode' | 'legacySkuCode'; label: string }>,
+    excludedSkuIds: string[] = [],
+  ): Promise<{ row: BaseProductSku; code: string; label: string } | null> {
+    if (!codes.length) return null
+    const skuRepo = manager.getRepository(BaseProductSku)
+    for (const field of fields) {
+      const query = skuRepo.createQueryBuilder('sku')
+        .where(scope === 'same' ? 'sku.productId = :productId' : 'sku.productId <> :productId', { productId })
+        .andWhere(`sku.${field.property} IN (:...codes)`, { codes })
+        .orderBy('sku.id', 'ASC')
+      if (excludedSkuIds.length) query.andWhere('sku.id NOT IN (:...excludedSkuIds)', { excludedSkuIds })
+      // MySQL REPEATABLE READ 中此前 existsBy/配置查询可能建立旧快照；正式写事务须读锁内最新提交值。
+      if (manager.connection.options.type !== 'sqlite' && manager.queryRunner?.isTransactionActive) {
+        query.setLock('pessimistic_read')
+      }
+      const row = await query.getOne()
+      if (!row) continue
+      for (const code of codes) {
+        const matchQuery = skuRepo.createQueryBuilder('sku')
+          .where('sku.id = :skuId', { skuId: row.id })
+          .andWhere(`sku.${field.property} = :code`, { code })
+        if (manager.connection.options.type !== 'sqlite' && manager.queryRunner?.isTransactionActive) {
+          matchQuery.setLock('pessimistic_read')
+        }
+        if (await matchQuery.getExists()) return { row, code, label: field.label }
+      }
+      throw new BizError('条码冲突结果无法定位，请联系管理员后重试', 409)
+    }
+    return null
+  }
+
+  private async assertSkuRelationsValid(
+    product: BaseProduct,
+    skus: BaseProductSku[],
+    manager: EntityManager,
+    options: { retireUnsubmittedSkus?: boolean } = {},
+  ) {
     const skuRepo = manager.getRepository(BaseProductSku)
     const locationIds = [...new Set(skus.map((sku) => sku.locationId).filter(Boolean).map(String))]
     if (locationIds.length) {
@@ -2494,50 +2597,44 @@ export class ProductService {
         seen.set(code, owner)
       }
     })
+    await this.assertPendingSkuCodesUnique(skus, manager)
 
-    // P1-A 修复（PR #109 第七轮评审）：上面的 seen Map 只能查出"本批提交的数组内部"的重复——若本批
-    // 只是单条 SKU 编辑（如 applyDefaultSkuExtras 只传 [sku]），本商品其余现存 SKU 根本不在 skus
-    // 参数里，批内去重查不出来，必须显式查库比对本商品其它行的 legacySkuCode/skuCode/barcode。
-    // 豁免同样只针对"该 SKU 自己"，用 id 精确排除，不能像升级路径修复前那样直接排除整个商品。
-    const sameProductOthers = await skuRepo.find({
-      where: { productId: product.id },
-      select: ['id', 'skuCode', 'barcode', 'legacySkuCode'],
-    })
-    for (const sku of skus) {
-      const selfId = sku.id ? String(sku.id) : null
-      for (const code of [sku.skuCode, sku.barcode]) {
-        if (!code) continue
-        const hit = sameProductOthers.find((other) =>
-          String(other.id) !== selfId
-          && (other.skuCode === code || other.barcode === code || other.legacySkuCode === code),
-        )
-        if (!hit) continue
-        const conflictField = hit.skuCode === code ? '当前编码' : (hit.barcode === code ? '原厂条码' : '历史编码')
-        throw new BizError(`条码或编码「${code}」与本商品另一规格（ID ${normalizeEntityId(hit.id)}）的${conflictField}重复`, 409)
-      }
+    // 本批 SKU 以提交后的三列为准：同批两条规格互换条码时，数据库里的旧条码即将让出，
+    // 不能把它当成最终冲突；上面的 seen Map 已覆盖本批最终状态的三列重复。
+    // 对未参与本批的 SKU 仍按持久态检查：部分编辑保留其全部编码；
+    // 全量替换会释放退役 SKU 的 barcode，但 skuCode/legacySkuCode 仍受保护。
+    const submittedSkuIds = new Set(skus.filter((sku) => sku.id).map((sku) => String(sku.id)))
+    const sameProductCodes = [...new Set(skus.flatMap((sku) =>
+      [sku.skuCode, sku.barcode, sku.legacySkuCode]).filter((code): code is string => Boolean(code)))]
+    const sameProductConflict = await this.findPersistedSkuCodeConflict(
+      manager, sameProductCodes, String(product.id), 'same',
+      [
+        { property: 'skuCode', label: '当前编码' },
+        { property: 'legacySkuCode', label: '历史编码' },
+        ...(!options.retireUnsubmittedSkus ? [{ property: 'barcode' as const, label: '原厂条码' }] : []),
+      ],
+      [...submittedSkuIds],
+    )
+    if (sameProductConflict) {
+      const { row, code, label } = sameProductConflict
+      throw new BizError(`条码或编码「${code}」与本商品另一规格（ID ${normalizeEntityId(row.id)}）的${label}重复`, 409)
     }
 
     const submittedCodes = [
       ...new Set(skus.flatMap((sku) => [sku.skuCode, sku.barcode]).filter((code): code is string => Boolean(code))),
     ]
     if (submittedCodes.length) {
-      const conflicts = await skuRepo.find({
-        where: [
-          { productId: Not(product.id), skuCode: In(submittedCodes) },
-          { productId: Not(product.id), barcode: In(submittedCodes) },
-          { productId: Not(product.id), legacySkuCode: In(submittedCodes) },
+      const conflict = await this.findPersistedSkuCodeConflict(
+        manager, submittedCodes, String(product.id), 'other', [
+          { property: 'skuCode', label: '当前编码' },
+          { property: 'barcode', label: '原厂条码' },
+          { property: 'legacySkuCode', label: '历史编码' },
         ],
-        select: ['id', 'productId', 'skuCode', 'barcode', 'legacySkuCode'],
-      })
-      for (const other of conflicts) {
-        const hit = submittedCodes.find((code) => code === other.skuCode || code === other.barcode || code === other.legacySkuCode)
-        if (!hit) continue
-        const conflictField = other.skuCode === hit ? '当前编码' : (other.barcode === hit ? '原厂条码' : '历史编码')
-        const legacyHint = conflictField === '历史编码' ? '，历史编码仍被旧标签使用，不可占用' : ''
-        throw new BizError(
-          `条码或编码「${hit}」与其他商品（ID ${normalizeEntityId(other.productId)}）的${conflictField}冲突${legacyHint}`,
-          409,
-        )
+      )
+      if (conflict) {
+        const { row, code, label } = conflict
+        const legacyHint = label === '历史编码' ? '，历史编码仍被旧标签使用，不可占用' : ''
+        throw new BizError(`条码或编码「${code}」与其他商品（ID ${normalizeEntityId(row.productId)}）的${label}冲突${legacyHint}`, 409)
       }
     }
   }
@@ -3021,6 +3118,12 @@ export class ProductService {
     newProductCode: string,
     skuCodeChanges: Array<{ skuId: string; newSkuCode: string }>,
   ): Promise<string | null> {
+    try {
+      await this.requireSharedSkuCodeCollation(manager)
+    } catch (error) {
+      if (error instanceof BizError) return error.message
+      throw error
+    }
     if (newProductCode) {
       const productConflict = await manager.getRepository(BaseProduct).findOne({
         where: { productCode: newProductCode },
@@ -3044,26 +3147,29 @@ export class ProductService {
     }
     const codes = [...codeOwners.keys()]
     if (!codes.length) return null
-    const skuRepo = manager.getRepository(BaseProductSku)
-    const conflicts = await skuRepo.find({
-      where: [
-        { barcode: In(codes) },
-        { skuCode: In(codes) },
-        { legacySkuCode: In(codes) },
-      ],
-      select: ['id', 'productId', 'skuCode', 'barcode', 'legacySkuCode'],
-    })
-    if (!conflicts.length) return null
-    for (const row of conflicts) {
-      const rowId = String(row.id)
-      for (const [code, ownerId] of codeOwners) {
-        const matchesField = code === row.barcode || code === row.skuCode || code === row.legacySkuCode
-        if (!matchesField) continue
-        if (ownerId !== null && ownerId === rowId) continue // 唯一合法豁免：该 SKU 自己的新编码等于自己的历史/当前编码
-        const conflictField = row.barcode === code ? '原厂条码' : (row.skuCode === code ? 'SKU 编码' : '历史编码')
-        const scope = String(row.productId) === productId ? '本商品' : `其他商品（ID ${normalizeEntityId(row.productId)}）`
-        return `升级生成的编码「${code}」与${scope} SKU 的${conflictField}冲突，请先处理该冲突后再升级`
-      }
+    // 候选编码尚未落库；用一张参数化派生表与持久 SKU 按列真实等价关系关联，
+    // 不能先让 ci 数据库 IN 命中，再以 JS 区分大小写的 === 把冲突筛掉。
+    const candidates = [...codeOwners].map(([code, ownerId], index) => ({ code, ownerId, index }))
+    const candidateSql = candidates.map(() => 'SELECT ? AS code, ? AS owner_id, ? AS ordinal').join(' UNION ALL ')
+    const lock = manager.connection.options.type === 'mysql' && manager.queryRunner?.isTransactionActive ? ' FOR SHARE' : ''
+    const conflicts = await manager.query(
+      `WITH candidates AS (${candidateSql})
+       SELECT candidate.code AS code, sku.id AS skuId, sku.product_id AS productId,
+         CASE WHEN sku.barcode = candidate.code THEN '原厂条码'
+              WHEN sku.sku_code = candidate.code THEN 'SKU 编码'
+              ELSE '历史编码' END AS conflictField
+       FROM candidates candidate JOIN base_product_sku sku
+         ON sku.barcode = candidate.code OR sku.sku_code = candidate.code OR sku.legacy_sku_code = candidate.code
+       WHERE candidate.owner_id IS NULL OR sku.id <> candidate.owner_id
+       ORDER BY candidate.ordinal ASC, sku.id ASC LIMIT 1${lock}`,
+      candidates.flatMap(({ code, ownerId, index }) => [code, ownerId, index]),
+    ) as Array<{ code: string; skuId: string; productId: string; conflictField: string }>
+    const conflict = conflicts[0]
+    if (conflict) {
+      const scope = String(conflict.productId) === String(productId)
+        ? '本商品'
+        : `其他商品（ID ${normalizeEntityId(conflict.productId)}）`
+      return `升级生成的编码「${conflict.code}」与${scope} SKU 的${conflict.conflictField}冲突，请先处理该冲突后再升级`
     }
     return null
   }

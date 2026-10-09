@@ -521,6 +521,7 @@ const handleSearch = async () => {
   await reloadProducts()
 }
 
+let restoringTableSelection = false
 const applyTableSelection = async () => {
   await nextTick()
   const table = productTableRef.value
@@ -528,13 +529,18 @@ const applyTableSelection = async () => {
     return
   }
 
-  table.clearSelection()
   const selectedIdSet = new Set(selectedProductIds.value)
-  products.value.forEach((product) => {
-    if (selectedIdSet.has(product.id)) {
-      table.toggleRowSelection(product, true)
-    }
-  })
+  restoringTableSelection = true
+  try {
+    table.clearSelection()
+    products.value.forEach((product) => {
+      if (selectedIdSet.has(product.id)) {
+        table.toggleRowSelection(product, true)
+      }
+    })
+  } finally {
+    restoringTableSelection = false
+  }
 }
 
 const syncSelectedProductIds = async () => {
@@ -549,6 +555,7 @@ const clearSelection = async () => {
 }
 
 const handleTableSelectionChange = (selection: ProductRecord[]) => {
+  if (restoringTableSelection) return
   selectedProductIds.value = selection.map((item) => item.id)
 }
 
