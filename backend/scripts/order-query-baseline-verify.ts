@@ -4,6 +4,7 @@
  * 维护说明：若调整客户端订单查询触发策略、后端列表查询逻辑或任务验收指标，请同步更新本脚本。
  */
 
+import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -184,6 +185,14 @@ const collectClientTriggerPathBaseline = () => {
 }
 
 const seedOrdersForBaseline = async (clientAuth: ClientAuthContext) => {
+  // 本脚本需要同一客户的 60 张待核销单，先在隔离库中通过真实配置入口设置合法的限购上限；
+  // 保持限购开启，并验证第 61 次提交仍被拒绝，避免为测查询性能绕过产品规则。
+  const existingRules = await systemConfigService.getO2oRuleConfigs()
+  await systemConfigService.updateO2oRuleConfigs({
+    ...existingRules,
+    limitEnabled: true,
+    limitQty: 60,
+  }, scriptAdminActor)
   const product = await productService.create({
     productName: `订单查询性能样本商品-${Date.now()}`,
     pinyinAbbr: 'DDCX',
@@ -191,7 +200,7 @@ const seedOrdersForBaseline = async (clientAuth: ClientAuthContext) => {
     isActive: true,
     o2oStatus: 'listed',
     currentStock: 500,
-    limitPerUser: 20,
+    limitPerUser: 60,
   }, scriptAdminActor)
 
   // 生成 60 条订单样本，覆盖 pending/verified/cancelled 三种状态。
@@ -206,6 +215,16 @@ const seedOrdersForBaseline = async (clientAuth: ClientAuthContext) => {
       remark: `订单查询性能样本-${index + 1}`,
     })
   }
+  await assert.rejects(
+    () => o2oPreorderService.submit(clientAuth, {
+      clientRequestId: 'order-query-baseline-limit-61',
+      isSystemApplied: false,
+      pickupContact: '限购边界提货人',
+      items: [{ productId: product.id, qty: 1 }],
+    }),
+    /超过限购数量/,
+    '第 61 张待核销单必须继续被限购规则拒绝',
+  )
 
   const preorderRepo = AppDataSource.getRepository(O2oPreorder)
   const rows = await preorderRepo.find({

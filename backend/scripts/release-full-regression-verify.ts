@@ -5,6 +5,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -24,7 +25,7 @@ const operatorPassword = process.env.Y_LINK_VERIFY_OPERATOR_PASSWORD?.trim() || 
 const operatorResetPassword = process.env.Y_LINK_VERIFY_OPERATOR_RESET_PASSWORD?.trim() || `OpReset_${verifySeed}_Bb2!`
 const supplierPassword = process.env.Y_LINK_VERIFY_SUPPLIER_PASSWORD?.trim() || `Sp_${verifySeed}_Cc3!`
 const clientPassword = process.env.Y_LINK_VERIFY_CLIENT_PASSWORD?.trim() || `Cl_${verifySeed}_Dd4!`
-const clientResetPassword = process.env.Y_LINK_VERIFY_CLIENT_RESET_PASSWORD?.trim() || `ClReset_${verifySeed}_Ee5!`
+const clientResetPassword = process.env.Y_LINK_VERIFY_CLIENT_RESET_PASSWORD?.trim() || `ClReset_${randomBytes(16).toString('base64url')}_Ee5!`
 
 process.env.APP_PROFILE = `release-full-regression-${verifySeed}`
 process.env.DB_TYPE = 'sqlite'
@@ -165,6 +166,7 @@ async function main() {
   const { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } = await import('../src/config/database-bootstrap.js')
   const { authService } = await import('../src/services/auth.service.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
+  const { VerificationCodeService } = await import('../src/services/verification-code.service.js')
 
   prepareDatabaseRuntime()
   await AppDataSource.initialize()
@@ -734,6 +736,7 @@ async function main() {
     )).token
     pass('供货方登录链路通过')
 
+    const expectedArrivalAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
     const inboundOrder = await expectJsonOk<{
       data: {
         order: {
@@ -743,6 +746,7 @@ async function main() {
           showNo: string
           verifyCode: string
           status: string
+          expectedArrivalAt: string
         }
       }
     }>(
@@ -755,12 +759,14 @@ async function main() {
           },
           body: JSON.stringify({
             remark: '发布前入库回归',
+            expectedArrivalAt,
             items: [{ productId: createdProduct.id, qty: 3 }],
           }),
         }),
       '供货方提交送货单',
     )
     assert.equal(inboundOrder.order.status, 'pending')
+    assert.equal(inboundOrder.order.expectedArrivalAt, expectedArrivalAt, '送货单必须保留供货方填写的预计送达时间')
     pass('供货方送货单提交通过')
 
     const inboundSupplierList = await expectJsonOk<{ data: { records: Array<{ id: string }> } }>(
@@ -969,6 +975,85 @@ async function main() {
     )
     const clientAccount = `13${String(Date.now()).slice(-9)}`
     const clientUsername = `回归用户${toChineseDigits(String(Date.now()).slice(-6))}`
+    const noContactProofResponse = await fetch(`${baseUrl}/api/client-auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        accountType: 'personal',
+        username: clientUsername,
+        account: clientAccount,
+        password: clientPassword,
+        captchaId: registerCaptcha.captchaId,
+        captchaCode: readCaptchaCode(registerCaptcha.captchaSvg),
+      }),
+    })
+    assert.equal(noContactProofResponse.status, 409, '未启用联系方式验证时个人注册必须拒绝')
+
+    await expectJsonOk<{
+      data: { mobile: { enabled: boolean; ready: boolean } }
+    }>(
+      () => fetch(`${baseUrl}/api/system-configs/verification-providers`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${adminToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          mobile: {
+            enabled: true,
+            httpMethod: 'POST',
+            apiUrl: 'https://verification.example.com/mobile',
+            headersTemplate: '{}',
+            bodyTemplate: '{"target":"{{target}}","code":"{{code}}"}',
+            successMatch: 'ok',
+          },
+          email: {
+            enabled: false,
+            httpMethod: 'POST',
+            apiUrl: '',
+            headersTemplate: '{}',
+            bodyTemplate: '',
+            successMatch: '',
+          },
+        }),
+      }),
+      '隔离回归启用合成短信通道',
+    )
+    const capturedCodes: Array<{ target: string; code: string }> = []
+    const verificationCodeService = new VerificationCodeService(async (url, init) => {
+      assert.equal(new URL(String(url)).hostname, 'verification.example.com', '验证码测试传输不得连接外部主机')
+      const payload = JSON.parse(String(init?.body ?? '{}')) as { target?: string; code?: string }
+      assert.equal(typeof payload.target, 'string')
+      assert.match(payload.code ?? '', /^\d{6}$/)
+      capturedCodes.push({ target: payload.target!, code: payload.code! })
+      return { statusCode: 200, headers: {}, body: Buffer.from('ok') }
+    })
+    await verificationCodeService.sendCode({ channel: 'mobile', target: clientAccount, scene: 'register' })
+    const verificationCode = capturedCodes.find((item) => item.target === clientAccount)?.code
+    assert.ok(verificationCode, '测试传输应捕获当前手机号的一次性验证码')
+    const missingCodeResponse = await fetch(`${baseUrl}/api/client-auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        accountType: 'personal',
+        username: clientUsername,
+        account: clientAccount,
+        password: clientPassword,
+      }),
+    })
+    assert.equal(missingCodeResponse.status, 400, '已启用短信通道时无一次性验证码仍须拒绝注册')
+    const wrongCodeResponse = await fetch(`${baseUrl}/api/client-auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        accountType: 'personal',
+        username: clientUsername,
+        account: clientAccount,
+        password: clientPassword,
+        verificationCode: '000000',
+      }),
+    })
+    assert.equal(wrongCodeResponse.status, 400, '错误的一次性验证码必须拒绝注册')
     const clientRegister = await expectJsonOk<{
       data: {
         token?: string
@@ -989,71 +1074,61 @@ async function main() {
             username: clientUsername,
             account: clientAccount,
             password: clientPassword,
-            captchaId: registerCaptcha.captchaId,
-            captchaCode: readCaptchaCode(registerCaptcha.captchaSvg),
+            verificationCode,
           }),
         }),
       '客户端注册',
     )
     assert.ok(clientRegister.user.id)
     assert.equal(clientRegister.user.mobile, clientAccount)
+    const replayCodeResponse = await fetch(`${baseUrl}/api/client-auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        accountType: 'personal',
+        username: clientUsername,
+        account: clientAccount,
+        password: clientPassword,
+        verificationCode,
+      }),
+    })
+    const replayCodePayload = await readJson<{ message?: string }>(replayCodeResponse)
+    assert.equal(replayCodeResponse.status, 400, '已使用的一次性验证码必须拒绝重放')
+    assert.match(replayCodePayload.message ?? '', /验证码不存在或已过期/, '应由验证码单次消费保护拒绝重放')
     pass('客户端注册链路通过')
 
     const loginCaptcha = await expectJsonOk<{ data: { captchaSvg: string; captchaId: string } }>(
       () => fetch(`${baseUrl}/api/client-auth/captcha`),
       '客户端登录图形验证码获取',
     )
-    const clientLogin = await expectJsonOk<{
+    const clientLoginResponse = await fetch(`${baseUrl}/api/client-auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        account: clientAccount,
+        password: clientPassword,
+        captchaId: loginCaptcha.captchaId,
+        captchaCode: readCaptchaCode(loginCaptcha.captchaSvg),
+      }),
+    })
+    const clientLogin = await expectJsonOkResponse<{
       data: {
-        token: string
+        token?: string
         user: {
           mobile: string
         }
       }
-    }>(
-      () =>
-        fetch(`${baseUrl}/api/client-auth/login`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            account: clientAccount,
-            password: clientPassword,
-            captchaId: loginCaptcha.captchaId,
-            captchaCode: readCaptchaCode(loginCaptcha.captchaSvg),
-          }),
-        }),
-      '客户端登录',
-    )
+    }>(clientLoginResponse, '客户端登录')
     const clientToken = clientLogin.token
-    let clientSessionCookie: string | null = null
-    if (!clientToken) {
-      const fallbackLoginResponse = await fetch(`${baseUrl}/api/client-auth/login`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          account: clientAccount,
-          password: clientPassword,
-          captchaId: loginCaptcha.captchaId,
-          captchaCode: readCaptchaCode(loginCaptcha.captchaSvg),
-        }),
-      })
-      await expectJsonOkResponse<{
-        data: {
-          user: {
-            mobile: string
-          }
-        }
-      }>(fallbackLoginResponse, '瀹㈡埛绔櫥褰?')
-      clientSessionCookie = readCookieValueFromResponse(fallbackLoginResponse, CLIENT_SESSION_COOKIE_NAME)
-      assert.ok(clientSessionCookie, '客户端登录后未返回 Cookie 会话')
-    }
+    const clientSessionCookie = readCookieValueFromResponse(clientLoginResponse, CLIENT_SESSION_COOKIE_NAME)
+    const clientCsrfCookie = readCookieValueFromResponse(clientLoginResponse, 'y_link_client_csrf')
+    if (!clientToken) assert.ok(clientSessionCookie && clientCsrfCookie, '客户端登录后必须返回会话与 CSRF Cookie')
     const clientAuthHeaders: HeadersInit = clientToken
       ? { Authorization: `Bearer ${clientToken}` }
-      : { Cookie: `${CLIENT_SESSION_COOKIE_NAME}=${encodeURIComponent(clientSessionCookie ?? '')}` }
+      : {
+          Cookie: `${CLIENT_SESSION_COOKIE_NAME}=${encodeURIComponent(clientSessionCookie ?? '')}; y_link_client_csrf=${encodeURIComponent(clientCsrfCookie ?? '')}`,
+          'x-client-csrf-token': clientCsrfCookie ?? '',
+        }
     assert.equal(clientLogin.user.mobile, clientAccount)
     pass('客户端登录链路通过')
 
@@ -1082,6 +1157,20 @@ async function main() {
     assert.ok(mallProduct, '客户端商城未读取到刚创建的上架商品')
     assert.equal(mallProduct?.thumbnail ?? null, uploadResult.url)
     pass('客户端商城商品展示通过')
+
+    if (!clientToken) {
+      const missingCsrfResponse = await fetch(`${baseUrl}/api/o2o/mall/preorders`, {
+        method: 'POST',
+        headers: {
+          Cookie: `${CLIENT_SESSION_COOKIE_NAME}=${encodeURIComponent(clientSessionCookie ?? '')}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ clientRequestId: 'release-csrf-rejection', items: [{ productId: createdProduct.id, qty: 1 }] }),
+      })
+      const missingCsrfPayload = await readJson<{ data?: { reason?: string } }>(missingCsrfResponse)
+      assert.equal(missingCsrfResponse.status, 403, 'Cookie 会话缺失 CSRF 的写入必须拒绝')
+      assert.equal(missingCsrfPayload.data?.reason, 'CLIENT_CSRF_MISSING')
+    }
 
     const preorder = await expectJsonOk<{
       data: {

@@ -59,12 +59,14 @@ const main = async () => {
   ) => {
     sequence += 1
     const code = `${String(sequence).padStart(3, '0')}`
+    const orderType = overrides.clientOrderType ?? 'walkin'
+    const typePrefix = orderType === 'department' ? 'D' : 'W'
     return preorderRepo.save(preorderRepo.create({
-      showNo: `POOL${code}`,
+      preorderNo: `PRE-${typePrefix}-${String(sequence).padStart(6, '0')}`,
       clientUserId: client.id,
       verifyCode: `pool-verify-${runId}-${code}`,
       status,
-      clientOrderType: 'walkin',
+      clientOrderType: orderType,
       totalQty: 1,
       timeoutAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
       isDeleted: false,
@@ -85,6 +87,8 @@ const main = async () => {
   const cancelledOrders = []
   for (let index = 0; index < 3; index += 1) cancelledOrders.push(await createPreorder('cancelled'))
   const deletedOrder = await createPreorder('pending', { isDeleted: true })
+  assert.ok(verifiedOrders.every((order) => /^PRE-D-\d{6}$/.test(order.preorderNo)), '部门预订单夹具必须使用 PRE-D 编号')
+  assert.ok([...pendingOrders, ...cancelledOrders, deletedOrder].every((order) => /^PRE-W-\d{6}$/.test(order.preorderNo)), '散客预订单夹具必须使用 PRE-W 编号')
 
   for (const [index, order] of [verifiedOrders[0]!, cancelledOrders[0]!].entries()) {
     await returnRepo.save(returnRepo.create({
@@ -141,7 +145,7 @@ const main = async () => {
   const staffNoPage = await o2oPreorderService.listConsoleOrderPool({ pool: 'completed', staffNo: 'T070', pageSize: 3 })
   assert.equal(staffNoPage.total, 4)
   assert.equal(staffNoPage.list.length, 3)
-  const keywordPage = await o2oPreorderService.listConsoleOrderPool({ keyword: pendingOrders[2]!.showNo })
+  const keywordPage = await o2oPreorderService.listConsoleOrderPool({ keyword: pendingOrders[2]!.preorderNo })
   assert.equal(keywordPage.total, 1, '关键字筛选必须同时作用于总数与列表')
 
   const emptyPage = await o2oPreorderService.listConsoleOrderPool({ keyword: 'not-exists-order', page: 3 })

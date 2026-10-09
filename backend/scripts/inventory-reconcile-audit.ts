@@ -114,7 +114,7 @@ async function main() {
 
     // 1. 手工库存单：明细数量 vs 流水净额。
     const manualOrders = await manager.getRepository(BizOutboundOrder).find({
-      select: ['id', 'businessNo', 'showNo', 'isDeleted', 'createdAt'],
+      select: ['id', 'businessNo', 'systemNo', 'isDeleted', 'createdAt'],
       where: { inventoryMode: 'manual_applied' },
     })
     const orderMap = new Map(manualOrders.map((order) => [toId(order.id), order]))
@@ -177,7 +177,7 @@ async function main() {
         orderInventoryMismatch.push({
           orderId,
           businessNo: order.businessNo,
-          showNo: order.showNo,
+          showNo: order.systemNo,
           isDeleted: Boolean(order.isDeleted),
           inventoryReleased,
           skuId: skuId || null,

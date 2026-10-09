@@ -733,7 +733,7 @@ const verifyBaseDataPath = async () => {
 
 /**
  * 出库列表链路验证：
- * - 创建新单据后，立即走列表、按 showNo 筛选、详情 by id / by showNo；
+ * - 创建新单据后，立即走列表按业务单号筛选、详情 by id / by showNo 兼容别名；
  * - 用于覆盖“开单 -> 列表 -> 详情 -> 返回已访问页”的关键业务回路。
  */
 const verifyOrderListPath = async (product) => {
@@ -758,14 +758,17 @@ const verifyOrderListPath = async (product) => {
   })
   const createdOrder = submitOrderResult.data.order
   assert.ok(createdOrder.id, '提交订单后未返回 order.id')
-  assert.match(createdOrder.showNo, /^hyyz(?:jd)?\d{1,12}$/i, '提交订单后 showNo 格式不正确')
+  assert.match(createdOrder.systemNo, /^OUT-[DW]-\d{6}$/, '提交订单后 systemNo 格式不正确')
+  assert.equal(createdOrder.showNo, createdOrder.systemNo, '兼容 showNo 必须与 systemNo 相同')
+  assert.match(createdOrder.businessNo, /^hyyz(?:jd)?\d{1,12}$/i, '提交订单后 businessNo 格式不正确')
 
-  const orderListResult = await requestApi(`/orders?page=1&pageSize=20&showNo=${encodeURIComponent(createdOrder.showNo)}`, {
+  const orderListResult = await requestApi(`/orders?page=1&pageSize=20&showNo=${encodeURIComponent(createdOrder.businessNo)}`, {
     method: 'GET',
   })
-  assert.ok(orderListResult.data.list?.length ?? orderListResult.data.records?.length ?? 0, '出库列表按 showNo 筛选后未返回记录')
+  assert.ok(orderListResult.data.list?.length ?? orderListResult.data.records?.length ?? 0, '出库列表按业务单号筛选后未返回记录')
   const orderListRecords = orderListResult.data.list ?? orderListResult.data.records
   assert.ok(orderListRecords.some((item) => item.id === createdOrder.id), '出库列表未命中新建单据')
+  assert.ok(orderListRecords.some((item) => item.id === createdOrder.id && item.businessNo === createdOrder.businessNo), '出库列表必须保留业务单号')
 
   const detailByIdResult = await requestApi(`/orders/${createdOrder.id}`, {
     method: 'GET',
@@ -776,7 +779,7 @@ const verifyOrderListPath = async (product) => {
   const detailByShowNoResult = await requestApi(`/orders/show-no/${encodeURIComponent(createdOrder.showNo)}`, {
     method: 'GET',
   })
-  assert.equal(detailByShowNoResult.data.order.showNo, createdOrder.showNo, '按业务单号查询订单详情返回错误单据')
+  assert.equal(detailByShowNoResult.data.order.showNo, createdOrder.systemNo, '按旧 showNo 兼容别名查询订单详情返回错误单据')
 
   const durationMs = performance.now() - startedAt
   pushStep('出库列表核心路径', durationMs, {
@@ -874,38 +877,33 @@ const verifySystemManagementPath = async () => {
 
 /**
  * 系统配置链路验证：
- * - 拉取双流水配置；
+ * - 拉取正式单、预订单与业务单号配置；
  * - 使用原值回写，验证保存接口可正常响应（不改变业务数据）。
  */
 const verifySystemConfigPath = async () => {
   const startedAt = performance.now()
-  const fetchSerialResult = await requestApi('/system-configs/order-serial', {
+  const fetchIdentifierResult = await requestApi('/system-configs/order-identifiers', {
     method: 'GET',
   })
 
-  const configs = fetchSerialResult.data.list ?? []
-  assert.ok(configs.length >= 2, '系统配置返回的双流水配置数量异常')
-  const department = configs.find((item) => item.orderType === 'department')
-  const walkin = configs.find((item) => item.orderType === 'walkin')
-  assert.ok(department, '系统配置缺少 department 流水')
-  assert.ok(walkin, '系统配置缺少 walkin 流水')
-
-  const invalidPayload = {
-    department: {
-      start: Number(department.start),
-      current: Number(department.current),
-      width: Number(department.width),
-    },
-    walkin: {
-      start: Number(walkin.start),
-      current: Number(walkin.current),
-      width: Number(walkin.width),
-    },
+  const configs = fetchIdentifierResult.data
+  const unchangedPayload = {}
+  for (const kind of ['system', 'preorder', 'business']) {
+    unchangedPayload[kind] = {}
+    for (const orderType of ['department', 'walkin']) {
+      const value = configs[kind]?.[orderType]
+      assert.ok(value, `系统配置缺少 ${kind}.${orderType} 编号配置`)
+      unchangedPayload[kind][orderType] = {
+        start: Number(value.start),
+        current: Number(value.current),
+        width: Number(value.width),
+      }
+    }
   }
 
-  const missingCsrfResult = await requestApi('/system-configs/order-serial', {
+  const missingCsrfResult = await requestApi('/system-configs/order-identifiers', {
     method: 'PUT',
-    body: invalidPayload,
+    body: unchangedPayload,
     expectedStatus: 403,
     expectJsonEnvelope: true,
     includeCsrfHeader: false,
@@ -916,9 +914,9 @@ const verifySystemConfigPath = async () => {
     '系统配置接口缺少 CSRF 请求头时未返回预期安全提示',
   )
 
-  const invalidCsrfResult = await requestApi('/system-configs/order-serial', {
+  const invalidCsrfResult = await requestApi('/system-configs/order-identifiers', {
     method: 'PUT',
-    body: invalidPayload,
+    body: unchangedPayload,
     expectedStatus: 403,
     expectJsonEnvelope: true,
     csrfHeaderValue: 'invalid-csrf-token',
@@ -929,16 +927,26 @@ const verifySystemConfigPath = async () => {
     '系统配置接口错误 CSRF 请求头未被预期拦截',
   )
 
-  const updateResult = await requestApi('/system-configs/order-serial', {
+  const updateResult = await requestApi('/system-configs/order-identifiers', {
     method: 'PUT',
-    body: invalidPayload,
+    body: unchangedPayload,
   })
-  assert.ok(Array.isArray(updateResult.data.list), '系统配置更新后返回数据结构异常')
+  for (const kind of ['system', 'preorder', 'business']) {
+    for (const orderType of ['department', 'walkin']) {
+      const value = updateResult.data.configs?.[kind]?.[orderType]
+      assert.ok(value, `系统配置更新后缺少 ${kind}.${orderType}`)
+      assert.deepEqual(
+        { start: value.start, current: value.current, width: value.width },
+        unchangedPayload[kind][orderType],
+        `原值回写后 ${kind}.${orderType} 编号配置必须保持一致`,
+      )
+    }
+  }
 
   const durationMs = performance.now() - startedAt
   pushStep('系统配置关键参数读取与保存', durationMs, {
     timings: {
-      fetchSerialMs: Number(fetchSerialResult.durationMs.toFixed(2)),
+      fetchIdentifiersMs: Number(fetchIdentifierResult.durationMs.toFixed(2)),
       missingCsrfBlockMs: Number(missingCsrfResult.durationMs.toFixed(2)),
       invalidCsrfBlockMs: Number(invalidCsrfResult.durationMs.toFixed(2)),
       updateSerialMs: Number(updateResult.durationMs.toFixed(2)),
