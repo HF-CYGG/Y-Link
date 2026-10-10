@@ -114,7 +114,7 @@ const departmentHint = computed(() => {
               </el-tooltip>
             </div>
           </template>
-          <div class="w-full rounded-xl border border-dashed border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-500">
+          <div class="w-full rounded-xl border border-dashed border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-500 dark:border-white/10 dark:bg-white/5 dark:text-slate-400">
             当前为散客单，无需维护正式出库单相关状态。
           </div>
         </el-form-item>

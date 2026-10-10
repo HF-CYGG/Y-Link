@@ -453,7 +453,7 @@ onActivated(() => {
                   <el-button :class="isPhone ? 'flex-1' : ''" :icon="List">字段选择</el-button>
                 </template>
                 <div class="max-h-[360px] overflow-auto pr-1">
-                  <p class="mb-3 text-sm font-semibold text-slate-700">选择预览与导出字段</p>
+                  <p class="mb-3 text-sm font-semibold text-slate-700 dark:text-slate-200">选择预览与导出字段</p>
                   <el-checkbox-group v-model="selectedFieldKeys" class="report-field-checkbox-group">
                     <el-checkbox v-for="field in currentAvailableFields" :key="field.key" :value="field.key">
                       {{ field.label }}
@@ -1008,6 +1008,11 @@ onActivated(() => {
     flex: 1;
     min-width: 0;
   }
+}
+
+.dark .report-mobile-card__chip {
+  background: rgba(16, 185, 129, 0.14);
+  color: rgb(94 234 212);
 }
 
 .dark .report-mobile-card__title,

@@ -8,8 +8,8 @@ export default {
   theme: {
     extend: {
       colors: {
-        // 业务主色：非遗青
-        brand: '#005b52',
+        // 业务主色：非遗青。由 CSS 变量驱动（见 src/style.css 的 --ylink-brand-rgb），暗色下自动提亮以保证对比度。
+        brand: 'rgb(var(--ylink-brand-rgb) / <alpha-value>)',
         // 业务辅助色：雅致灰蓝
         secondary: '#6b7a8f',
       },

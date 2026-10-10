@@ -63,11 +63,11 @@ const offlineFaqEntries = computed(() => availability.value?.offlineFaqs ?? [])
 const showOfflineFaq = computed(() => Boolean(availability.value && !availability.value.isOnline && offlineFaqEntries.value.length))
 const summaryCards = computed(() => {
   return [
-    { key: 'all', label: '全部会话', value: summary.value.all, valueClassName: 'text-slate-900' },
-    { key: 'pending', label: '待受理', value: summary.value.pending, valueClassName: 'text-amber-600' },
-    { key: 'processing', label: '处理中', value: summary.value.processing, valueClassName: 'text-sky-600' },
-    { key: 'resolved', label: '已解决', value: summary.value.resolved, valueClassName: 'text-emerald-600' },
-    { key: 'closed', label: '已关闭', value: summary.value.closed, valueClassName: 'text-slate-600' },
+    { key: 'all', label: '全部会话', value: summary.value.all, valueClassName: 'text-slate-900 dark:text-slate-100' },
+    { key: 'pending', label: '待受理', value: summary.value.pending, valueClassName: 'text-amber-600 dark:text-amber-400' },
+    { key: 'processing', label: '处理中', value: summary.value.processing, valueClassName: 'text-sky-600 dark:text-sky-400' },
+    { key: 'resolved', label: '已解决', value: summary.value.resolved, valueClassName: 'text-emerald-600 dark:text-emerald-400' },
+    { key: 'closed', label: '已关闭', value: summary.value.closed, valueClassName: 'text-slate-600 dark:text-slate-300' },
   ]
 })
 
@@ -332,12 +332,12 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="space-y-4 pb-4">
-    <div class="rounded-[1.5rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
+    <div class="rounded-[1.5rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div class="min-w-0 flex-1">
           <button
             type="button"
-            class="inline-flex items-center gap-1 rounded-full px-2.5 py-1.5 text-sm font-medium text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
+            class="inline-flex items-center gap-1 rounded-full px-2.5 py-1.5 text-sm font-medium text-slate-500 transition hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400"
             @click="handleNavigateBack"
           >
             <svg viewBox="0 0 20 20" fill="none" class="h-4 w-4" aria-hidden="true">
@@ -345,24 +345,24 @@ onBeforeUnmount(() => {
             </svg>
             <span>返回</span>
           </button>
-          <p class="text-xl font-semibold text-slate-900">反馈会话</p>
-          <p class="mt-1 text-sm leading-6 text-slate-500">
+          <p class="text-xl font-semibold text-slate-900 dark:text-slate-100">反馈会话</p>
+          <p class="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
             查看历史反馈并继续补充说明；如需新增问题，可进入独立的新建反馈页提交。
           </p>
         </div>
         <div class="flex shrink-0 items-center gap-2">
           <span
             class="rounded-full px-3 py-1.5 text-xs font-semibold"
-            :class="realtimeState === 'online' ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'"
+            :class="realtimeState === 'online' ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300' : 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300'"
           >
             {{ realtimeState === 'online' ? '客服在线' : realtimeState === 'connecting' ? '连接中' : '客服离线' }}
           </span>
         </div>
       </div>
-      <div class="mt-4 rounded-[1rem] border border-slate-200 bg-slate-50 px-4 py-3">
-        <p class="text-sm font-medium text-slate-700">{{ availabilityText }}</p>
-        <p class="mt-2 text-xs leading-5 text-slate-500">在线时间：{{ workHoursText }}</p>
-        <p class="mt-1 text-xs leading-5 text-slate-500">{{ reconnectTip }}</p>
+      <div class="mt-4 rounded-[1rem] border border-slate-200 bg-slate-50 px-4 py-3 dark:border-white/10 dark:bg-white/5">
+        <p class="text-sm font-medium text-slate-700 dark:text-slate-200">{{ availabilityText }}</p>
+        <p class="mt-2 text-xs leading-5 text-slate-500 dark:text-slate-400">在线时间：{{ workHoursText }}</p>
+        <p class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">{{ reconnectTip }}</p>
       </div>
     </div>
 
@@ -370,7 +370,7 @@ onBeforeUnmount(() => {
       <article
         v-for="item in summaryCards"
         :key="item.key"
-        class="feedback-summary-card rounded-[1.2rem] bg-white px-4 py-3 shadow-[var(--ylink-shadow-soft)]"
+        class="feedback-summary-card rounded-[1.2rem] bg-white px-4 py-3 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]"
       >
         <p class="truncate text-xs font-medium tracking-[0.12em] text-slate-400">{{ item.label }}</p>
         <p class="text-xl font-semibold" :class="item.valueClassName">{{ item.value }}</p>
@@ -378,10 +378,10 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="space-y-4">
-      <article class="rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
+      <article class="rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
         <div class="flex items-center justify-between gap-3">
           <div>
-            <p class="text-base font-semibold text-slate-900">新建反馈</p>
+            <p class="text-base font-semibold text-slate-900 dark:text-slate-100">新建反馈</p>
             <p class="mt-1 text-xs leading-5 text-slate-400">新问题将跳转到独立提交页，已创建的反馈请进入对应详情页继续补充。</p>
           </div>
           <span class="rounded-full bg-brand/10 px-3 py-1 text-xs font-semibold text-brand">独立提交页</span>
@@ -392,47 +392,47 @@ onBeforeUnmount(() => {
           @click="handleNavigateToCreate"
         >
           <div>
-            <p class="text-sm font-semibold text-slate-900">进入新建反馈页</p>
-            <p class="mt-1 text-xs leading-5 text-slate-500">{{ portalNotice }}</p>
+            <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">进入新建反馈页</p>
+            <p class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">{{ portalNotice }}</p>
           </div>
           <span class="rounded-full bg-brand px-3 py-1 text-xs font-semibold text-white">新建</span>
         </button>
       </article>
 
-      <article v-if="showOfflineFaq" class="rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
+      <article v-if="showOfflineFaq" class="rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
         <div class="flex items-start justify-between gap-3">
           <div>
-            <p class="text-base font-semibold text-slate-900">离线常见问题</p>
+            <p class="text-base font-semibold text-slate-900 dark:text-slate-100">离线常见问题</p>
             <p class="mt-1 text-xs leading-5 text-slate-400">客服当前离线，你可以先查看常见答案，再决定是新建反馈还是继续补充原会话。</p>
           </div>
-          <span class="rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700">离线导流</span>
+          <span class="rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">离线导流</span>
         </div>
         <div class="mt-4 grid gap-3">
           <article
             v-for="item in offlineFaqEntries"
             :key="item.question"
-            class="rounded-[1rem] border border-slate-200 bg-slate-50 px-4 py-3"
+            class="rounded-[1rem] border border-slate-200 bg-slate-50 px-4 py-3 dark:border-white/10 dark:bg-white/5"
           >
-            <p class="text-sm font-semibold text-slate-900">{{ item.question }}</p>
-            <p class="mt-2 text-xs leading-6 text-slate-500">{{ item.answer }}</p>
+            <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">{{ item.question }}</p>
+            <p class="mt-2 text-xs leading-6 text-slate-500 dark:text-slate-400">{{ item.answer }}</p>
           </article>
         </div>
       </article>
 
-      <article class="rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
+      <article class="rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
         <div class="flex items-center justify-between gap-3">
           <div>
-            <p class="text-base font-semibold text-slate-900">我的会话</p>
+            <p class="text-base font-semibold text-slate-900 dark:text-slate-100">我的会话</p>
             <p class="mt-1 text-xs leading-5 text-slate-400">按“当前更需要谁动作”的口径分组展示，进入详情页后可查看完整处理进度。</p>
           </div>
           <span class="text-xs font-medium text-slate-400">{{ conversations.length }} 条</span>
         </div>
 
-        <div v-if="loading" class="mt-4 rounded-[1rem] bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
+        <div v-if="loading" class="mt-4 rounded-[1rem] bg-slate-50 px-4 py-8 text-center text-sm text-slate-500 dark:bg-white/5 dark:text-slate-400">
           正在加载会话...
         </div>
 
-        <div v-else-if="!conversations.length" class="mt-4 rounded-[1rem] bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
+        <div v-else-if="!conversations.length" class="mt-4 rounded-[1rem] bg-slate-50 px-4 py-8 text-center text-sm text-slate-500 dark:bg-white/5 dark:text-slate-400">
           还没有反馈记录，可先提交一条新的问题说明。
         </div>
 
@@ -440,32 +440,32 @@ onBeforeUnmount(() => {
           <section
             v-for="group in groupedConversations"
             :key="group.key"
-            class="rounded-[1rem] border border-slate-200 bg-slate-50/80 p-4"
+            class="rounded-[1rem] border border-slate-200 bg-slate-50/80 p-4 dark:border-white/10 dark:bg-white/5"
           >
             <div class="flex flex-wrap items-start justify-between gap-3">
               <div>
-                <p class="text-sm font-semibold text-slate-900">{{ group.label }}</p>
+                <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">{{ group.label }}</p>
                 <p class="mt-1 text-xs leading-5 text-slate-400">{{ group.description }}</p>
               </div>
-              <span class="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-500">{{ group.count }} 条</span>
+              <span class="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-500 dark:bg-[#141415] dark:text-slate-400">{{ group.count }} 条</span>
             </div>
 
             <div v-if="group.conversations.length" class="mt-4 space-y-3">
               <article
                 v-for="item in group.conversations"
                 :key="item.id"
-                class="rounded-[1rem] border border-slate-200 bg-white p-4 transition hover:border-slate-300 hover:bg-slate-50"
+                class="rounded-[1rem] border border-slate-200 bg-white p-4 transition hover:border-slate-300 hover:bg-slate-50 dark:border-white/10 dark:bg-[#141415]"
                 :class="{ 'feedback-conversation-card--closed': item.status === 'closed' }"
               >
                 <div class="flex flex-wrap items-start justify-between gap-3">
                   <div class="min-w-0 flex-1">
                     <div class="flex flex-wrap items-center gap-2">
-                      <p class="truncate text-sm font-semibold text-slate-900">{{ item.title }}</p>
-                      <span class="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-600">
+                      <p class="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">{{ item.title }}</p>
+                      <span class="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-600 dark:bg-white/10 dark:text-slate-300">
                         {{ getConversationPrompt(item).stageLabel }}
                       </span>
                     </div>
-                    <p class="mt-1 text-xs text-slate-500">{{ item.issueNo }}</p>
+                    <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ item.issueNo }}</p>
                   </div>
 
                   <div class="flex shrink-0 items-center gap-2">
@@ -485,13 +485,13 @@ onBeforeUnmount(() => {
                   </div>
                 </div>
 
-                <p class="line-clamp-2 text-sm leading-6 text-slate-600" :class="item.status === 'closed' ? 'mt-2' : 'mt-3'">
+                <p class="line-clamp-2 text-sm leading-6 text-slate-600 dark:text-slate-300" :class="item.status === 'closed' ? 'mt-2' : 'mt-3'">
                   {{ item.lastMessagePreview || item.summary }}
                 </p>
 
-                <div v-if="shouldShowConversationNextStep(item)" class="mt-3 rounded-[0.9rem] bg-slate-50 px-3 py-2">
+                <div v-if="shouldShowConversationNextStep(item)" class="mt-3 rounded-[0.9rem] bg-slate-50 px-3 py-2 dark:bg-white/5">
                   <p class="text-[11px] font-semibold tracking-[0.12em] text-slate-400">下一步</p>
-                  <p class="mt-1 text-xs leading-5 text-slate-500">{{ getConversationPrompt(item).nextStep }}</p>
+                  <p class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">{{ getConversationPrompt(item).nextStep }}</p>
                 </div>
 
                 <div class="flex flex-wrap items-center gap-2 text-xs text-slate-400" :class="shouldShowConversationNextStep(item) ? 'mt-3' : 'mt-2'">
@@ -502,7 +502,7 @@ onBeforeUnmount(() => {
                   <span>更新于 {{ formatDateTime(item.lastMessageAt) }}</span>
                   <span
                     v-if="item.unreadForClient > 0"
-                    class="rounded-full bg-rose-50 px-2 py-1 font-medium text-rose-600"
+                    class="rounded-full bg-rose-50 px-2 py-1 font-medium text-rose-600 dark:bg-rose-500/10 dark:text-rose-400"
                   >
                     {{ item.unreadForClient }} 条未读
                   </span>
@@ -510,7 +510,7 @@ onBeforeUnmount(() => {
               </article>
             </div>
 
-            <div v-else class="mt-4 rounded-[1rem] border border-dashed border-slate-200 bg-white px-4 py-6 text-center text-sm text-slate-500">
+            <div v-else class="mt-4 rounded-[1rem] border border-dashed border-slate-200 bg-white px-4 py-6 text-center text-sm text-slate-500 dark:border-white/10 dark:bg-[#141415] dark:text-slate-400">
               {{ group.emptyText }}
             </div>
           </section>

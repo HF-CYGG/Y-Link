@@ -133,11 +133,11 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
 </script>
 
 <template>
-  <div class="mb-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+  <div class="mb-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 dark:border-white/10 dark:bg-white/5">
     <div class="flex flex-wrap items-start justify-between gap-2">
       <div>
-        <p class="text-sm font-semibold text-slate-900">合规状态确认</p>
-        <p class="mt-1 text-xs text-slate-500">仅部门单可编辑“是否有出库单”和“系统申请”。</p>
+        <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">合规状态确认</p>
+        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">仅部门单可编辑“是否有出库单”和“系统申请”。</p>
       </div>
       <el-button
         v-if="canEditStandaloneComplianceFlags"
@@ -150,8 +150,8 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
       </el-button>
     </div>
     <div class="mt-3 grid gap-3 sm:grid-cols-2">
-      <div class="rounded-xl bg-white px-3 py-3">
-        <p class="text-xs text-slate-500">是否有出库单</p>
+      <div class="rounded-xl bg-white px-3 py-3 dark:bg-[#141415]">
+        <p class="text-xs text-slate-500 dark:text-slate-400">是否有出库单</p>
         <div class="mt-2">
           <el-switch
             v-if="canEditStandaloneComplianceFlags"
@@ -161,13 +161,13 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
             inactive-text="否"
             @update:model-value="emit('update:hasCustomerOrder', $event)"
           />
-          <span v-else class="text-sm font-medium text-slate-700">
+          <span v-else class="text-sm font-medium text-slate-700 dark:text-slate-200">
             {{ order.orderType === 'department' ? (order.hasCustomerOrder ? '是' : '否') : '不适用' }}
           </span>
         </div>
       </div>
-      <div class="rounded-xl bg-white px-3 py-3">
-        <p class="text-xs text-slate-500">系统申请</p>
+      <div class="rounded-xl bg-white px-3 py-3 dark:bg-[#141415]">
+        <p class="text-xs text-slate-500 dark:text-slate-400">系统申请</p>
         <div class="mt-2">
           <el-switch
             v-if="canEditStandaloneComplianceFlags"
@@ -177,7 +177,7 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
             inactive-text="未申请"
             @update:model-value="emit('update:isSystemApplied', $event)"
           />
-          <span v-else class="text-sm font-medium text-slate-700">
+          <span v-else class="text-sm font-medium text-slate-700 dark:text-slate-200">
             {{ order.orderType === 'department' ? (order.isSystemApplied ? '已申请' : '未申请') : '不适用' }}
           </span>
         </div>
@@ -227,9 +227,9 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
     </el-descriptions>
   </section>
 
-  <section v-if="order.merge.role !== 'standalone'" class="mb-5 rounded-2xl border border-teal-100 bg-teal-50/60 p-3 sm:p-4">
-    <h3 class="text-base font-semibold text-teal-900">合并关系</h3>
-    <p v-if="order.merge.role === 'source'" class="mt-2 text-sm text-teal-800">
+  <section v-if="order.merge.role !== 'standalone'" class="mb-5 rounded-2xl border border-teal-100 bg-teal-50/60 p-3 sm:p-4 dark:border-teal-500/20 dark:bg-teal-500/10">
+    <h3 class="text-base font-semibold text-teal-900 dark:text-teal-200">合并关系</h3>
+    <p v-if="order.merge.role === 'source'" class="mt-2 text-sm text-teal-800 dark:text-teal-200">
       当前为来源单，已合并至
       <el-button v-if="order.merge.parent" link type="primary" @click="emit('navigate', order.merge.parent.id)">
         {{ order.merge.parent.businessNo }}
@@ -237,15 +237,15 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
       <span v-else>父单</span>，仅支持查看。
     </p>
     <div v-else class="mt-2">
-      <p class="text-sm text-teal-800">当前为父单，包含 {{ order.merge.children.length }} 张来源单。</p>
+      <p class="text-sm text-teal-800 dark:text-teal-200">当前为父单，包含 {{ order.merge.children.length }} 张来源单。</p>
       <div class="mt-2 flex flex-wrap gap-2">
         <el-button v-for="child in order.merge.children" :key="child.id" link type="primary" @click="emit('navigate', child.id)">
           {{ child.businessNo }}<span v-if="formatSourceDoc(child)">（{{ formatSourceDoc(child) }}）</span>
         </el-button>
       </div>
       <div v-if="mergedPickupRecords.length" class="mt-3 space-y-2">
-        <div class="text-sm font-medium text-teal-900">各来源领取记录</div>
-        <div v-for="(pickup, index) in mergedPickupRecords" :key="pickup.sourceOrderId" class="rounded-lg border border-teal-100 bg-white/80 px-3 py-2 text-sm text-teal-950">
+        <div class="text-sm font-medium text-teal-900 dark:text-teal-200">各来源领取记录</div>
+        <div v-for="(pickup, index) in mergedPickupRecords" :key="pickup.sourceOrderId" class="rounded-lg border border-teal-100 bg-white/80 px-3 py-2 text-sm text-teal-950 dark:border-teal-500/20 dark:bg-white/5 dark:text-teal-200">
           <div class="font-medium">{{ index === 0 ? '父单' : '来源单' }} {{ pickup.businessNo }}</div>
           <div>线上预订单：{{ pickup.sourcePreorderNo || '未记录' }}</div>
           <div>领取人：{{ pickup.pickupContact || '未记录' }}</div>
@@ -293,7 +293,7 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
       <el-table-column prop="remark" label="备注" min-width="180" show-overflow-tooltip />
       <el-table-column v-if="hasItemProvenance()" label="来源单" min-width="150">
         <template #default="{ row }">
-          <span v-if="row.sourceOrderId" class="text-xs text-slate-500">合并来源明细</span>
+          <span v-if="row.sourceOrderId" class="text-xs text-slate-500 dark:text-slate-400">合并来源明细</span>
           <span v-else>-</span>
         </template>
       </el-table-column>
@@ -321,7 +321,7 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
         <div v-if="item.remark" class="mt-2 rounded bg-slate-100 p-1.5 text-xs text-slate-500 dark:bg-white/5 dark:text-slate-400">
           备注：{{ item.remark }}
         </div>
-        <div v-if="item.sourceOrderId" class="mt-2 text-xs text-slate-500">来源：已合并来源单明细</div>
+        <div v-if="item.sourceOrderId" class="mt-2 text-xs text-slate-500 dark:text-slate-400">来源：已合并来源单明细</div>
       </div>
     </div>
   </section>
@@ -357,7 +357,7 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
         >
           <span class="absolute -left-[1.3rem] top-3 h-2 w-2 rounded-full bg-brand" />
           <div class="font-medium text-slate-800 dark:text-slate-100">版本 {{ revision.revisionNo }} · {{ revision.reason || '未填写原因' }}</div>
-          <div class="mt-1 text-xs text-slate-500">
+          <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">
             {{ dayjs(revision.createdAt).format('YYYY-MM-DD HH:mm:ss') }} · {{ revision.actorDisplayName || revision.actorUsername }}
           </div>
         </article>

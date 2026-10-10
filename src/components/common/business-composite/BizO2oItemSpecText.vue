@@ -29,7 +29,7 @@ const specView = computed(() => resolveO2oItemSpecView(props.item))
   <p
     v-if="specView.visible"
     class="mt-1 break-words text-xs leading-5"
-    :class="specView.kind === 'missing' ? 'italic text-slate-400' : 'text-slate-500'"
+    :class="specView.kind === 'missing' ? 'italic text-slate-400' : 'text-slate-500 dark:text-slate-400'"
   >
     {{ specView.text }}
   </p>

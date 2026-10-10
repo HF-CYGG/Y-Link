@@ -6,12 +6,69 @@
  * 3. 在生产构建阶段执行手工拆包，优化首屏缓存与路由切换体验。
  */
 /// <reference path="./src/types/unplugin-vue-components-vite.d.ts" />
-import { defineConfig, loadEnv } from 'vite'
+import { defineConfig, loadEnv, type Plugin } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import basicSsl from '@vitejs/plugin-basic-ssl'
 import Components from 'unplugin-vue-components/vite'
 import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
+import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath, URL } from 'node:url'
+
+/**
+ * 首帧主题脚本构建插件：
+ * - `src/theme-init.js` 必须以同步经典脚本在首帧前执行（CSP 禁止内联，`type="module"` 又会延后执行），
+ *   Vite 不会打包非 module 脚本，因此由本插件单独产出；
+ * - Nginx 对所有 `.js` 设置一年 `immutable` 长缓存，固定文件名会让脚本更新后浏览器仍执行旧版本，
+ *   所以构建时按内容哈希输出到 `assets/theme-init-<hash>.js`，并把 HTML 中的引用改写为该文件；
+ * - `pre` 阶段先把标签替换为占位注释，避免 Vite 对“非 module 脚本无法打包”告警；`post` 阶段再写回哈希地址；
+ * - 开发态不做处理，由 Vite 直接按 `/src/theme-init.js` 提供源码。
+ */
+const THEME_INIT_SOURCE_URL = '/src/theme-init.js'
+const THEME_INIT_PLACEHOLDER = '<!-- ylink-theme-init-script -->'
+const THEME_INIT_TAG_PATTERN = /<script\s+src=["']\/src\/theme-init\.js["']\s*><\/script>/
+
+const themeInitScriptPlugin = (): Plugin[] => {
+  let publicBase = '/'
+  let assetsDir = 'assets'
+  let emittedFileName = ''
+  let emittedSource = ''
+
+  return [
+    {
+      name: 'ylink-theme-init-script',
+      apply: 'build',
+      configResolved(config) {
+        publicBase = config.base
+        assetsDir = config.build.assetsDir
+      },
+      buildStart() {
+        const sourcePath = fileURLToPath(new URL(`.${THEME_INIT_SOURCE_URL}`, import.meta.url))
+        this.addWatchFile(sourcePath)
+        // 头部维护注释只服务于源码阅读，产物中去掉以减小首屏同步脚本体积。
+        emittedSource = readFileSync(sourcePath, 'utf8').replace(/^\/\*[\s\S]*?\*\/\s*/, '')
+        const contentHash = createHash('sha256').update(emittedSource).digest('hex').slice(0, 10)
+        emittedFileName = `${assetsDir}/theme-init-${contentHash}.js`
+      },
+      generateBundle() {
+        this.emitFile({ type: 'asset', fileName: emittedFileName, source: emittedSource })
+      },
+      transformIndexHtml: {
+        order: 'pre',
+        handler: (html) => html.replace(THEME_INIT_TAG_PATTERN, THEME_INIT_PLACEHOLDER),
+      },
+    },
+    {
+      name: 'ylink-theme-init-script:html-post',
+      apply: 'build',
+      transformIndexHtml: {
+        order: 'post',
+        handler: (html) =>
+          html.replace(THEME_INIT_PLACEHOLDER, `<script src="${publicBase}${emittedFileName}"></script>`),
+      },
+    },
+  ]
+}
 
 type VendorChunkRule = {
   chunkName: string
@@ -135,6 +192,7 @@ export default defineConfig(({ command, mode }) => {
   return {
     plugins: [
       vue(),
+      ...themeInitScriptPlugin(),
       /**
        * Element Plus 编译期按需引入：
        * - 仅为模板中真实使用到的组件生成 import；

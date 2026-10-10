@@ -140,6 +140,10 @@ const showNextImage = () => {
   background: rgb(241 245 249);
 }
 
+.dark .passive-preview-image {
+  background: rgba(255, 255, 255, 0.06);
+}
+
 .passive-preview-image.is-previewable {
   cursor: zoom-in;
 }

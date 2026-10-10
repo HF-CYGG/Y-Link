@@ -620,9 +620,9 @@ onBeforeUnmount(() => {
 <template>
   <PageContainer title="入库管理工作台" description="支持扫码录入、本次入库清单确认与库存流水联动追踪">
     <div class="inbound-workbench-root grid gap-4 xl:grid-cols-[24rem_minmax(0,1fr)_minmax(0,1fr)]">
-      <section ref="scanPanelRef" class="inbound-scan-panel min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm">
+      <section ref="scanPanelRef" class="inbound-scan-panel min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm dark:bg-[#141415]">
         <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <p class="break-words text-lg font-semibold text-slate-900">扫码录入区</p>
+          <p class="break-words text-lg font-semibold text-slate-900 dark:text-slate-100">扫码录入区</p>
           <el-segmented
             v-model="scanMode"
             class="scan-mode-segmented"
@@ -632,7 +632,7 @@ onBeforeUnmount(() => {
             ]"
           />
         </div>
-        <p class="mt-2 break-words text-sm text-slate-500">扫码枪输入后按回车可直接识别商品编码，未识别将阻止写入清单。</p>
+        <p class="mt-2 break-words text-sm text-slate-500 dark:text-slate-400">扫码枪输入后按回车可直接识别商品编码，未识别将阻止写入清单。</p>
 
         <div class="mt-4">
           <el-input
@@ -661,12 +661,12 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="mt-3 rounded-2xl border border-emerald-100 bg-emerald-50/70 p-3 text-xs leading-6 text-slate-600">
+        <div class="mt-3 rounded-2xl border border-emerald-100 bg-emerald-50/70 p-3 text-xs leading-6 text-slate-600 dark:border-emerald-900/50 dark:bg-emerald-500/10 dark:text-slate-300">
           <p>{{ scanCapabilityHint }}</p>
         </div>
 
-        <div class="mt-3 rounded-2xl border border-slate-100 bg-slate-50 p-3">
-          <p class="text-xs text-slate-500">快捷数量</p>
+        <div class="mt-3 rounded-2xl border border-slate-100 bg-slate-50 p-3 dark:border-white/5 dark:bg-white/5">
+          <p class="text-xs text-slate-500 dark:text-slate-400">快捷数量</p>
           <div class="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
             <el-button @click="increaseQuickQty(1)">+1</el-button>
             <el-button @click="increaseQuickQty(5)">+5</el-button>
@@ -674,14 +674,14 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="mt-3 rounded-2xl border border-slate-100 bg-slate-50 p-3 text-sm">
-          <p class="text-xs text-slate-500">当前识别商品</p>
+        <div class="mt-3 rounded-2xl border border-slate-100 bg-slate-50 p-3 text-sm dark:border-white/5 dark:bg-white/5">
+          <p class="text-xs text-slate-500 dark:text-slate-400">当前识别商品</p>
           <template v-if="recognizedProduct">
-            <p class="mt-2 font-semibold text-slate-800">
+            <p class="mt-2 font-semibold text-slate-800 dark:text-slate-100">
               {{ recognizedProduct.productName }}
-              <span class="text-xs font-normal text-slate-500">（{{ recognizedProduct.productCode }}）</span>
+              <span class="text-xs font-normal text-slate-500 dark:text-slate-400">（{{ recognizedProduct.productCode }}）</span>
             </p>
-            <p class="mt-1 text-xs text-slate-500">
+            <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
               当前库存 {{ recognizedProduct.currentStock }}，预订 {{ recognizedProduct.preOrderedStock }}，可用
               {{ recognizedProduct.availableStock }}
             </p>
@@ -701,11 +701,11 @@ onBeforeUnmount(() => {
               <el-button class="mt-2 w-full" type="primary" @click="addRecognizedProductWithQty">加入清单</el-button>
             </div>
           </template>
-          <p v-else class="mt-2 text-slate-500">暂未识别商品，请扫码或使用下方手动入口。</p>
+          <p v-else class="mt-2 text-slate-500 dark:text-slate-400">暂未识别商品，请扫码或使用下方手动入口。</p>
         </div>
 
-        <div class="mt-4 rounded-2xl border border-dashed border-slate-200 p-3">
-          <p class="text-sm font-semibold text-slate-800">手动入库兼容入口</p>
+        <div class="mt-4 rounded-2xl border border-dashed border-slate-200 p-3 dark:border-white/10">
+          <p class="text-sm font-semibold text-slate-800 dark:text-slate-100">手动入库兼容入口</p>
           <el-form class="mt-3 inbound-mobile-form" label-width="70px" label-position="top">
             <el-form-item label="商品">
               <el-select
@@ -750,18 +750,18 @@ onBeforeUnmount(() => {
             <el-button @click="addManualToInboundList">加入本次清单</el-button>
             <el-button type="success" :loading="submittingSingle" @click="handleSingleInbound">单笔立即入库</el-button>
           </div>
-          <div v-if="manualSelectedProduct" class="mt-3 text-xs text-slate-500">
+          <div v-if="manualSelectedProduct" class="mt-3 text-xs text-slate-500 dark:text-slate-400">
             选中商品：{{ manualSelectedProduct.productName }}（库存 {{ manualSelectedProduct.currentStock }}，可用
             {{ manualSelectedProduct.availableStock }}）
           </div>
         </div>
       </section>
 
-      <section class="inventory-log-panel min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm" :style="inventoryLogPanelStyle">
+      <section class="inventory-log-panel min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm dark:bg-[#141415]" :style="inventoryLogPanelStyle">
         <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <p class="break-words text-lg font-semibold text-slate-900">本次入库清单</p>
-            <p class="break-words text-sm text-slate-500">支持多商品连续录入、数量编辑、删除、清空和批量确认入库</p>
+            <p class="break-words text-lg font-semibold text-slate-900 dark:text-slate-100">本次入库清单</p>
+            <p class="break-words text-sm text-slate-500 dark:text-slate-400">支持多商品连续录入、数量编辑、删除、清空和批量确认入库</p>
           </div>
           <div class="flex flex-wrap items-center gap-2">
             <el-tag type="info">商品种类 {{ totalSkuCount }}</el-tag>
@@ -824,8 +824,8 @@ onBeforeUnmount(() => {
           </el-button>
         </div>
 
-        <div v-if="batchInboundResult" class="mt-4 rounded-2xl border border-slate-100 bg-slate-50 p-3 text-sm">
-          <p class="font-semibold text-slate-800">本次结果：成功 {{ batchInboundResult.successCount }} 条，失败 {{ batchInboundResult.failedCount }} 条</p>
+        <div v-if="batchInboundResult" class="mt-4 rounded-2xl border border-slate-100 bg-slate-50 p-3 text-sm dark:border-white/5 dark:bg-white/5">
+          <p class="font-semibold text-slate-800 dark:text-slate-100">本次结果：成功 {{ batchInboundResult.successCount }} 条，失败 {{ batchInboundResult.failedCount }} 条</p>
           <ul v-if="batchInboundResult.failedCount" class="mt-2 space-y-1 text-xs text-rose-500">
             <li
               v-for="item in batchInboundResult.details.filter((detail) => !detail.success)"
@@ -837,10 +837,10 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <section class="min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm">
+      <section class="min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm dark:bg-[#141415]">
         <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <p class="break-words text-lg font-semibold text-slate-900">库存流水区</p>
+            <p class="break-words text-lg font-semibold text-slate-900 dark:text-slate-100">库存流水区</p>
           </div>
           <el-button @click="loadLogs">刷新流水</el-button>
         </div>
@@ -853,7 +853,7 @@ onBeforeUnmount(() => {
             <el-table-column prop="changeQty" label="数量" width="90" align="right" />
             <el-table-column label="库存变化" min-width="220">
               <template #default="{ row }">
-                <div class="text-sm leading-6 text-slate-600">
+                <div class="text-sm leading-6 text-slate-600 dark:text-slate-300">
                   <div>物理库存：{{ row.beforeCurrentStock }} -> {{ row.afterCurrentStock }}</div>
                   <div>预订库存：{{ row.beforePreorderedStock }} -> {{ row.afterPreorderedStock }}</div>
                 </div>

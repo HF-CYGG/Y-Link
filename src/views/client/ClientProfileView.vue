@@ -409,15 +409,15 @@ const confirmSavedContactCode = async (channel: ContactChannel) => {
 
 <template>
   <section class="space-y-4 pb-20">
-    <div class="rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
-      <p class="text-xl font-semibold text-slate-900">我的</p>
-      <p class="mt-1 text-sm text-slate-500">查看账号信息与取货相关资料</p>
+    <div class="rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
+      <p class="text-xl font-semibold text-slate-900 dark:text-slate-100">我的</p>
+      <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">查看账号信息与取货相关资料</p>
     </div>
 
-    <div class="rounded-[1.2rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
+    <div class="rounded-[1.2rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
       <div class="mb-4 flex items-center justify-between">
         <div>
-          <p class="text-base font-semibold text-slate-900">资料信息</p>
+          <p class="text-base font-semibold text-slate-900 dark:text-slate-100">资料信息</p>
           <p class="mt-1 text-xs text-slate-400">
             {{ isDepartmentAccount ? '部门账户资料由管理员维护' : '修改联系方式需要当前密码；未验证联系方式不能用于找回密码' }}
           </p>
@@ -433,24 +433,24 @@ const confirmSavedContactCode = async (channel: ContactChannel) => {
       </div>
 
       <p class="text-xs text-slate-400">账户类型</p>
-      <p class="mt-1 text-base font-semibold text-slate-900">{{ accountTypeLabel }}</p>
+      <p class="mt-1 text-base font-semibold text-slate-900 dark:text-slate-100">{{ accountTypeLabel }}</p>
 
       <p class="mt-4 text-xs text-slate-400">姓名</p>
-      <p class="mt-1 text-base font-semibold text-slate-900">
+      <p class="mt-1 text-base font-semibold text-slate-900 dark:text-slate-100">
         {{ displayName }}
       </p>
 
       <template v-if="isDirectoryManagedAccount">
         <p class="mt-4 text-xs text-slate-400">{{ staffNoLabel }}</p>
-        <p class="mt-1 text-base font-semibold text-slate-900">{{ displayStaffNo }}</p>
+        <p class="mt-1 text-base font-semibold text-slate-900 dark:text-slate-100">{{ displayStaffNo }}</p>
 
         <p class="mt-4 text-xs text-slate-400">部门</p>
-        <p class="mt-1 text-base font-semibold text-slate-900">{{ displayDepartmentName }}</p>
+        <p class="mt-1 text-base font-semibold text-slate-900 dark:text-slate-100">{{ displayDepartmentName }}</p>
       </template>
 
       <template v-if="!isDepartmentAccount">
         <p class="mt-4 text-xs text-slate-400">手机号</p>
-        <p class="mt-1 flex items-center gap-2 text-base font-semibold text-slate-900">
+        <p class="mt-1 flex items-center gap-2 text-base font-semibold text-slate-900 dark:text-slate-100">
           {{ clientAuthStore.currentUser?.mobile || '-' }}
           <el-tag size="small" :type="clientAuthStore.currentUser?.mobileVerifiedAt ? 'success' : 'info'">
             {{ clientAuthStore.currentUser?.mobileVerifiedAt ? '已验证' : '未验证' }}
@@ -458,7 +458,7 @@ const confirmSavedContactCode = async (channel: ContactChannel) => {
         </p>
 
         <p class="mt-4 text-xs text-slate-400">邮箱</p>
-        <p class="mt-1 flex items-center gap-2 text-base font-semibold text-slate-900">
+        <p class="mt-1 flex items-center gap-2 text-base font-semibold text-slate-900 dark:text-slate-100">
           {{ clientAuthStore.currentUser?.email || '-' }}
           <el-tag size="small" :type="clientAuthStore.currentUser?.emailVerifiedAt ? 'success' : 'info'">
             {{ clientAuthStore.currentUser?.emailVerifiedAt ? '已验证' : '未验证' }}
@@ -467,10 +467,10 @@ const confirmSavedContactCode = async (channel: ContactChannel) => {
       </template>
     </div>
 
-    <div class="rounded-[1.2rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
+    <div class="rounded-[1.2rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
       <div class="flex items-center justify-between">
         <div>
-          <p class="text-base font-semibold text-slate-900">修改密码</p>
+          <p class="text-base font-semibold text-slate-900 dark:text-slate-100">修改密码</p>
           <p class="mt-1 text-xs text-slate-400">定期修改密码以保护账号安全</p>
         </div>
         <button
@@ -483,10 +483,10 @@ const confirmSavedContactCode = async (channel: ContactChannel) => {
       </div>
     </div>
 
-    <div class="rounded-[1.2rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
+    <div class="rounded-[1.2rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
       <div class="flex items-center justify-between gap-3">
         <div>
-          <p class="text-base font-semibold text-slate-900">反馈与客服</p>
+          <p class="text-base font-semibold text-slate-900 dark:text-slate-100">反馈与客服</p>
           <p class="mt-1 text-xs text-slate-400">统一进入反馈会话页，提交 Issue 字段并查看客服处理进度。</p>
         </div>
         <button
@@ -529,7 +529,7 @@ const confirmSavedContactCode = async (channel: ContactChannel) => {
             :placeholder="CLIENT_CONFIRM_NEW_PASSWORD_PLACEHOLDER"
           />
         </el-form-item>
-        <p class="mt-1 text-xs leading-6 text-slate-500">{{ CLIENT_NEW_PASSWORD_RULE_HINT }}</p>
+        <p class="mt-1 text-xs leading-6 text-slate-500 dark:text-slate-400">{{ CLIENT_NEW_PASSWORD_RULE_HINT }}</p>
       </el-form>
     </BizCrudDialogShell>
 
@@ -558,7 +558,7 @@ const confirmSavedContactCode = async (channel: ContactChannel) => {
           <el-input v-model="profileForm.mobile" placeholder="请输入手机号" />
           <!-- 已保存且未认证的手机号：独立补认证，不依赖保存资料 -->
           <div v-if="mobileVerificationMode === 'verify_saved'" class="mt-2 w-full">
-            <p class="mb-1 text-xs text-slate-500">当前手机号未验证，验证后可用于找回密码</p>
+            <p class="mb-1 text-xs text-slate-500 dark:text-slate-400">当前手机号未验证，验证后可用于找回密码</p>
             <div class="flex w-full gap-2">
               <el-input v-model="savedContactCodes.mobile" maxlength="8" placeholder="手机号验证码" />
               <el-button
@@ -585,7 +585,7 @@ const confirmSavedContactCode = async (channel: ContactChannel) => {
           <el-input v-model="profileForm.email" placeholder="请输入邮箱" />
           <!-- 已保存且未认证的邮箱：独立补认证，不依赖保存资料 -->
           <div v-if="emailVerificationMode === 'verify_saved'" class="mt-2 w-full">
-            <p class="mb-1 text-xs text-slate-500">当前邮箱未验证，验证后可用于找回密码</p>
+            <p class="mb-1 text-xs text-slate-500 dark:text-slate-400">当前邮箱未验证，验证后可用于找回密码</p>
             <div class="flex w-full gap-2">
               <el-input v-model="savedContactCodes.email" maxlength="8" placeholder="邮箱验证码" />
               <el-button
@@ -668,5 +668,16 @@ const confirmSavedContactCode = async (channel: ContactChannel) => {
 .profile-action-button:hover {
   background: rgb(248 250 252);
   color: rgb(15 23 42);
+}
+
+/* 暗色：个人中心操作按钮。 */
+.dark .profile-action-button {
+  border-color: rgba(255, 255, 255, 0.1);
+  color: rgb(203 213 225);
+}
+
+.dark .profile-action-button:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: rgb(241 245 249);
 }
 </style>

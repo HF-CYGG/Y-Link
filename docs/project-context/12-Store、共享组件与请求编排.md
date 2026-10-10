@@ -15,6 +15,10 @@
 - `src/composables/useStableRequest.ts`
 - `src/composables/usePermissionAction.ts`
 - `src/components/common/*`
+- `src/store/modules/theme.ts`
+- `src/layout/components/ThemeToggle.vue`
+- `src/theme-init.js`
+- `src/style.css`
 - `docs/前端页面与共享层接入规范.md`
 
 ## 真实入口
@@ -24,6 +28,7 @@
 - 客户端购物车真源：`src/store/modules/client-cart.ts`
 - 请求稳定器：`src/composables/useStableRequest.ts`
 - 权限动作收口：`src/composables/usePermissionAction.ts`
+- 明暗主题真源：`src/store/modules/theme.ts`；首帧主题：`src/theme-init.js`；切换开关：`src/layout/components/ThemeToggle.vue`
 
 ## 前端链路
 
@@ -36,6 +41,13 @@
   - 页面容器：`PageContainer`、`PageToolbarCard`、`PagePaginationBar`
   - 业务壳层：`BizResponsiveDataCollectionShell`、`BizResponsiveDrawerShell`、`BizCrudDialogShell`
   - 基础展示：`BaseRequestState`、`BaseRouteErrorState`、`BaseEmptyState`
+- 明暗主题：
+  - 存储键 `y-link-theme-preference` 只记录用户显式选择；未选择时跟随系统 `prefers-color-scheme` 并实时响应；旧键 `y-link-theme-mode`（主题锁定期间写入的默认亮色）在初始化时清理；
+  - `src/theme-init.js` 以同源经典同步脚本在首帧前给 html 挂 `dark`/`light` 类（页面 CSP 为 `script-src 'self'`，不能改成内联脚本；`type="module"` 会延后执行），与 Store 判定口径必须一致；
+  - 构建时由 `vite.config.ts` 的 `themeInitScriptPlugin` 输出为 `assets/theme-init-<内容哈希>.js` 并改写 HTML 引用。Nginx 对 `.js` 一律一年 `immutable` 长缓存，不能移回 `public/` 用固定文件名；预算脚本把它计入首屏 JS，并拒绝 `dist/assets` 之外的经典脚本；
+  - `ThemeToggle` 用 `el-switch`（滑块内嵌太阳/月亮），`before-change` 返回 false、由 Store 执行切换并保留点击点圆形揭幕；放置于管理端顶栏（异步拆包，不进首屏）、管理端登录页、客户端主壳层、客户端登录页与找回密码页；
+  - 品牌主色色阶在 `style.css` 中以 `html:not(.dark)` / `html.dark` 两组声明，禁止再用内联样式写到 html 上（会压过暗色）；Tailwind `brand` 色由 `--ylink-brand-rgb` 驱动；
+  - `--ylink-color-*` / `--ylink-shadow-*` 业务变量已有暗色值，新代码优先引用变量。
 
 ## 后端链路
 
@@ -48,6 +60,7 @@
 - 客户端 `client-auth` 快照包含：当前用户、过期时间、初始化态。
 - 购物车快照除了数量，还会持久化价格、库存、限购和选择态，保证刷新后仍能恢复局部视图。
 - 稳定请求内部通过 `AbortController + latestRequestId` 只允许最后一次结果回写。
+- 主题状态：`themePreference`（用户选择或 null）+ `systemPrefersDark` 合成 `themeMode` / `isDark`；DOM 只由 Store 的同步 watcher 写入 html/body 的 `dark`/`light` 类与 `color-scheme`。
 
 ## 权限与安全边界
 
@@ -62,9 +75,17 @@
 3. 弹层双滚动或高度异常：查页面是否绕过共享壳层自己再包一层主滚动容器。
 4. 按钮显示/禁用异常：查 `usePermissionAction.ts`、Store 权限集和页面 computed。
 5. 刷新后局部状态丢失：查对应 Store 是否做了持久化快照。
+6. 暗色下某处仍是白块或深色字：
+   - Tailwind 浅色类要配 `dark:` 变体（白底 `dark:bg-[#141415]`、浅灰底 `dark:bg-white/5`、边框 `dark:border-white/10`、正文 `dark:text-slate-100/300`）；
+   - scoped 样式写 `.dark .本组件类 { }`（编译为 `.dark .x[data-v]`）；需要命中子组件内部时写 `.dark .本组件类 :deep(.el-xxx)`；
+   - **禁止** `:global(.dark) .x`（会被编译成裸 `.dark` 规则作用到 html 并泄漏全站）和 `.dark :deep(.x)`（作用域属性落在 html 上永不生效）；传送到 body 的浮层用 `:global(.dark .浮层专属类 ...)`；
+   - scoped 中 `background: linear-gradient(浅色)` 是背景图，`dark:bg-*` 只改背景色盖不住，必须在暗色选择器里整体重写 `background`；
+   - 亮色规则若带 `is-checked`、`:hover` 等更高优先级选择器，暗色规则也要写到同等优先级。
+7. 打印出来文字发灰：打印模板、凭证纸面、二维码区域必须保持白底黑字，`style.css` 已在 `@media print` 下把 html.dark 强制恢复亮色；不要给纸面或二维码容器加 `dark:` 背景。
 
 ## 验证与回归关注点
 
 - 改 Store 时至少回归：刷新恢复、账号切换、退出登录、并发请求、弱网下请求中止。
 - 改共享组件时回归：桌面和移动端布局、弹窗滚动、抽屉滚动、列表分页、空态和错误态。
 - 改权限动作时回归：按钮显隐、点击拦截、越权提示文本和后端实际权限结果。
+- 改样式或新增页面时回归：亮色与暗色各截一次；构建后 `dist/assets/*.css` 中不得出现裸 `}.dark{` 规则；首次访问（清空存储）在系统亮/暗下分别跟随系统，手动切换后刷新仍保持选择且无闪白。

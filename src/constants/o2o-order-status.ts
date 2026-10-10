@@ -59,7 +59,7 @@ export const O2O_ORDER_BUSINESS_STATUS_META: Record<
     label: '备货中（已接单）',
     clientDescription: '门店已接单，正在备货，请耐心等待。',
     consoleDescription: '订单已接单，门店正在处理货品与备货。',
-    className: 'bg-sky-50 text-sky-700',
+    className: 'bg-sky-50 text-sky-700 dark:bg-sky-500/10 dark:text-sky-300',
   },
   ready: {
     label: '请取货（等待取货）',
@@ -71,7 +71,7 @@ export const O2O_ORDER_BUSINESS_STATUS_META: Record<
     label: '待发货（等待接单）',
     clientDescription: '订单已提交，等待门店接单处理。',
     consoleDescription: '订单已提交，等待门店确认接单。',
-    className: 'bg-blue-50 text-blue-700',
+    className: 'bg-blue-50 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300',
   },
   shipped: {
     label: '已发货',
@@ -89,37 +89,37 @@ export const O2O_ORDER_BUSINESS_STATUS_META: Record<
     label: '已关闭',
     clientDescription: '商家已关闭该订单，请联系门店了解详情。',
     consoleDescription: '订单已被商家关闭。',
-    className: 'bg-slate-100 text-slate-600',
+    className: 'bg-slate-100 text-slate-600 dark:bg-white/10 dark:text-slate-300',
   },
   completed: {
     label: '已完结（交易结束）',
     clientDescription: '订单交易已收尾完成，如有疑问可联系门店进一步确认。',
     consoleDescription: '订单交易已结束，用于补充表达门店侧收尾完成，但不替代主状态。',
-    className: 'bg-emerald-50 text-emerald-700',
+    className: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300',
   },
   after_sale: {
     label: '其他（售后）',
     clientDescription: '订单已进入售后处理，请等待门店进一步处理。',
     consoleDescription: '订单当前处于售后处理场景。',
-    className: 'bg-amber-50 text-amber-700',
+    className: 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300',
   },
   after_sale_done: {
     label: '售后完成',
     clientDescription: '售后处理已完成，可查看最新结果。',
     consoleDescription: '订单售后处理已完成。',
-    className: 'bg-emerald-50 text-emerald-700',
+    className: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300',
   },
   verifying: {
     label: '核销中',
     clientDescription: '门店正在处理核销，请稍候确认结果。',
     consoleDescription: '订单正在核销流程中。',
-    className: 'bg-teal-50 text-teal-700',
+    className: 'bg-teal-50 text-teal-700 dark:bg-teal-500/10 dark:text-teal-300',
   },
   verify_failed: {
     label: '核销失败',
     clientDescription: '本次核销失败，请联系门店重新处理。',
     consoleDescription: '订单核销失败，需人工介入处理。',
-    className: 'bg-rose-50 text-rose-700',
+    className: 'bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-300',
   },
 }
 
@@ -144,9 +144,9 @@ export const VERIFY_CONSOLE_O2O_ORDER_STATUS_LABEL_MAP: Record<O2oOrderStatus, s
 }
 
 export const CLIENT_O2O_ORDER_STATUS_CLASS_MAP: Record<O2oOrderStatus, string> = {
-  pending: 'bg-amber-50 text-amber-600',
-  verified: 'bg-emerald-50 text-emerald-600',
-  cancelled: 'bg-slate-100 text-slate-500',
+  pending: 'bg-amber-50 text-amber-600 dark:bg-amber-500/10 dark:text-amber-400',
+  verified: 'bg-emerald-50 text-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-400',
+  cancelled: 'bg-slate-100 text-slate-500 dark:bg-white/10 dark:text-slate-400',
 }
 
 export const VERIFY_CONSOLE_O2O_ORDER_STATUS_CLASS_MAP: Record<O2oOrderStatus, string> = {
@@ -237,7 +237,7 @@ export const CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG: Record<
 > = {
   pending: {
     statusLabel: '待取货',
-    cardClassName: 'bg-amber-50 text-amber-700',
+    cardClassName: 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300',
     cardTitle: '待到店核销',
     cardDescription: '请在有效时段内到店出示核销码完成领取。',
     timelineCurrentTitle: '待核销',
@@ -253,7 +253,7 @@ export const CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG: Record<
   },
   cancelled: {
     statusLabel: '已取消',
-    cardClassName: 'bg-slate-100 text-slate-600',
+    cardClassName: 'bg-slate-100 text-slate-600 dark:bg-white/10 dark:text-slate-300',
     cardTitle: '订单已取消',
     cardDescription: '订单已取消，如需领取请重新下单。',
     timelineCurrentTitle: '订单已取消',
@@ -261,7 +261,7 @@ export const CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG: Record<
   },
   timeout_cancelled: {
     statusLabel: '超时取消',
-    cardClassName: 'bg-rose-50 text-rose-700',
+    cardClassName: 'bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-300',
     cardTitle: '订单已超时取消',
     cardDescription: '订单因超时未核销自动取消，库存已释放。',
     timelineCurrentTitle: '超时自动取消',
@@ -269,7 +269,7 @@ export const CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG: Record<
   },
   verified: {
     statusLabel: '已核销',
-    cardClassName: 'bg-emerald-50 text-emerald-700',
+    cardClassName: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300',
     cardTitle: '订单已核销完成',
     cardDescription: '核销已完成，可在订单记录中查看本次领取详情。',
     timelineCurrentTitle: '已核销',

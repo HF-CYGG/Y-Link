@@ -146,8 +146,8 @@ onBeforeUnmount(() => { pageActive.value = false; pageEpoch += 1; tickets.clear(
 <template>
   <section class="apple-card p-3 sm:p-4" aria-label="条码快速入单">
     <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
-      <strong class="text-sm text-slate-800">扫码添加商品</strong>
-      <span v-if="pending" class="text-xs text-slate-500">正在识别 {{ pending }} 个条码</span>
+      <strong class="text-sm text-slate-800 dark:text-slate-100">扫码添加商品</strong>
+      <span v-if="pending" class="text-xs text-slate-500 dark:text-slate-400">正在识别 {{ pending }} 个条码</span>
     </div>
     <el-input
       ref="scanInputRef"
@@ -158,7 +158,7 @@ onBeforeUnmount(() => { pageActive.value = false; pageEpoch += 1; tickets.clear(
       aria-label="手动输入商品条码"
       :disabled="Boolean(pauseReason)"
     />
-    <p class="mt-2 text-xs text-slate-500" aria-live="polite">
+    <p class="mt-2 text-xs text-slate-500 dark:text-slate-400" aria-live="polite">
       {{ scanStatus || '支持原厂条码、SKU 编码和历史旧码；识别结果加入下方明细。' }}
     </p>
   </section>

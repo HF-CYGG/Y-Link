@@ -21,6 +21,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { Lock, User, Right, Key } from '@element-plus/icons-vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
+import ThemeToggle from '@/layout/components/ThemeToggle.vue'
 import { resolveDefaultManagementRedirect, resolveSafeRedirect } from '@/router'
 import { useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
@@ -722,7 +723,9 @@ const handleSubmit = async () => {
       </aside>
 
       <section class="form-panel">
-        <div class="action-top"></div>
+        <div class="action-top">
+          <ThemeToggle />
+        </div>
 
         <div class="form-content">
           <div class="form-header">
@@ -914,6 +917,11 @@ const handleSubmit = async () => {
   transition: background-color 0.5s ease;
 }
 
+/*
+ * 暗色覆盖写法约定：
+ * - scoped 样式中 `:global(.dark) .x` 会被编译成裸 `.dark` 规则，直接作用到 html 根节点并泄漏到全站；
+ * - 因此统一写成 `:global(.dark .login-page .x)`，并锚定本页根节点，避免与客户端登录页同名类互相影响。
+ */
 :global(.dark .login-page) {
   --bg-primary: #000000;
   --bg-panel: #111112;

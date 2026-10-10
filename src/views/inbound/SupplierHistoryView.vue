@@ -1820,4 +1820,17 @@ onBeforeUnmount(() => {
     transform: none;
   }
 }
+
+/* 暗色：表格头部与详情头部渐变、详情序号底色。 */
+.dark .history-table-shell__header {
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.5), rgba(20, 20, 21, 0.9));
+}
+
+.dark .history-detail-hero {
+  background: linear-gradient(180deg, rgba(20, 20, 21, 0.98), rgba(30, 41, 59, 0.5));
+}
+
+.dark .history-detail-item__index {
+  background: rgba(255, 255, 255, 0.08);
+}
 </style>

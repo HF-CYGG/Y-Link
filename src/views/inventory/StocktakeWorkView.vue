@@ -503,7 +503,7 @@ onMounted(reloadAll)
           <div class="grid gap-3 sm:grid-cols-3">
             <div class="rounded-xl bg-slate-50 p-3 dark:bg-white/5">
               <div class="text-xs text-slate-500 dark:text-slate-400">已盘规格</div>
-              <div class="mt-1 text-xl font-semibold tabular-nums">{{ stocktake.countedCount }} <span class="text-sm font-normal text-slate-500">/ {{ stocktake.itemCount }}</span></div>
+              <div class="mt-1 text-xl font-semibold tabular-nums">{{ stocktake.countedCount }} <span class="text-sm font-normal text-slate-500 dark:text-slate-400">/ {{ stocktake.itemCount }}</span></div>
             </div>
             <div class="rounded-xl bg-slate-50 p-3 dark:bg-white/5">
               <div class="text-xs text-slate-500 dark:text-slate-400">盘点进度</div>
@@ -576,14 +576,14 @@ onMounted(reloadAll)
       <div v-if="currentItem" class="mt-4 flex flex-col gap-3 rounded-xl bg-slate-50 p-3 dark:bg-white/5 sm:flex-row sm:flex-wrap sm:items-center">
         <div class="min-w-0 flex-1">
           <div class="text-lg font-semibold">{{ currentItem.productName }}</div>
-          <div class="text-sm text-slate-500">
+          <div class="text-sm text-slate-500 dark:text-slate-400">
             {{ currentItem.specText }} · {{ currentItem.skuCode }}<span v-if="currentItem.locationCode"> · 库位 {{ currentItem.locationCode }}</span>
           </div>
-          <div v-if="showBook && currentItem.bookQty !== null" class="text-xs text-slate-500">账面 {{ currentItem.bookQty }}</div>
+          <div v-if="showBook && currentItem.bookQty !== null" class="text-xs text-slate-500 dark:text-slate-400">账面 {{ currentItem.bookQty }}</div>
         </div>
         <template v-if="quickMode">
           <div class="text-right">
-            <div class="text-xs text-slate-500">已计数</div>
+            <div class="text-xs text-slate-500 dark:text-slate-400">已计数</div>
             <div class="text-3xl font-bold tabular-nums">{{ currentItem.countedQty ?? 0 }}</div>
           </div>
         </template>
@@ -641,7 +641,7 @@ onMounted(reloadAll)
               {{ row.productName }}
               <el-tag v-if="!row.inScope" size="small" type="warning" class="ml-1">范围外</el-tag>
             </div>
-            <div class="text-xs text-slate-500">{{ row.specText }} · {{ row.skuCode }}</div>
+            <div class="text-xs text-slate-500 dark:text-slate-400">{{ row.specText }} · {{ row.skuCode }}</div>
           </template>
         </el-table-column>
         <el-table-column label="库位" width="100">
@@ -659,7 +659,7 @@ onMounted(reloadAll)
         <el-table-column v-if="showBook" label="差异" width="80" align="right">
           <template #default="{ row }">
             <span v-if="row.diffQty === null">—</span>
-            <span v-else class="font-semibold tabular-nums" :class="row.diffQty > 0 ? 'text-emerald-600' : row.diffQty < 0 ? 'text-red-600' : ''">
+            <span v-else class="font-semibold tabular-nums" :class="row.diffQty > 0 ? 'text-emerald-600 dark:text-emerald-400' : row.diffQty < 0 ? 'text-red-600 dark:text-red-400' : ''">
               {{ row.diffQty > 0 ? '+' : '' }}{{ row.diffQty }}
             </span>
           </template>
@@ -699,7 +699,7 @@ onMounted(reloadAll)
             </el-select>
             <span v-else>
               {{ resolutionLabel(row.resolution) }}
-              <span v-if="row.appliedQty !== null" class="text-xs text-slate-500">（已调 {{ row.appliedQty }}）</span>
+              <span v-if="row.appliedQty !== null" class="text-xs text-slate-500 dark:text-slate-400">（已调 {{ row.appliedQty }}）</span>
             </span>
           </template>
         </el-table-column>
@@ -709,7 +709,7 @@ onMounted(reloadAll)
               <el-button link :type="isRemarkMissing(row) ? 'danger' : 'primary'" @click="editResolutionRemark(row)">
                 {{ row.resolutionRemark || (isRemarkMissing(row) ? '请先填写备注' : '添加备注') }}
               </el-button>
-              <div v-if="isRemarkMissing(row)" class="text-xs text-red-600">原因为“其他”时必须填写备注</div>
+              <div v-if="isRemarkMissing(row)" class="text-xs text-red-600 dark:text-red-400">原因为“其他”时必须填写备注</div>
             </template>
             <span v-else>{{ row.resolutionRemark || '—' }}</span>
           </template>
@@ -717,7 +717,7 @@ onMounted(reloadAll)
         <el-table-column label="计数人" width="150">
           <template #default="{ row }">
             <div>{{ row.countedByName || '—' }}</div>
-            <div v-if="row.countedAt" class="text-xs text-slate-500">{{ formatTime(row.countedAt) }}</div>
+            <div v-if="row.countedAt" class="text-xs text-slate-500 dark:text-slate-400">{{ formatTime(row.countedAt) }}</div>
           </template>
         </el-table-column>
         <el-table-column v-if="isCounting && canCount" label="操作" width="120" fixed="right">
@@ -743,32 +743,32 @@ onMounted(reloadAll)
               <span v-if="item.countedAt">{{ formatTime(item.countedAt) }}</span>
             </div>
             <div class="grid grid-cols-2 gap-2 rounded-lg bg-slate-50 p-3 dark:bg-white/5">
-              <div v-if="showBook"><div class="text-xs text-slate-500">账面</div><div class="mt-1 font-semibold tabular-nums">{{ item.bookQty ?? '—' }}</div></div>
-              <div><div class="text-xs text-slate-500">实盘</div><div class="mt-1 font-semibold tabular-nums">{{ item.countedQty ?? '未盘' }}</div></div>
-              <div v-if="showBook"><div class="text-xs text-slate-500">差异</div><div class="mt-1 font-semibold tabular-nums" :class="item.diffQty > 0 ? 'text-emerald-600' : item.diffQty < 0 ? 'text-red-600' : ''">{{ item.diffQty === null ? '—' : `${item.diffQty > 0 ? '+' : ''}${item.diffQty}` }}</div></div>
+              <div v-if="showBook"><div class="text-xs text-slate-500 dark:text-slate-400">账面</div><div class="mt-1 font-semibold tabular-nums">{{ item.bookQty ?? '—' }}</div></div>
+              <div><div class="text-xs text-slate-500 dark:text-slate-400">实盘</div><div class="mt-1 font-semibold tabular-nums">{{ item.countedQty ?? '未盘' }}</div></div>
+              <div v-if="showBook"><div class="text-xs text-slate-500 dark:text-slate-400">差异</div><div class="mt-1 font-semibold tabular-nums" :class="item.diffQty > 0 ? 'text-emerald-600 dark:text-emerald-400' : item.diffQty < 0 ? 'text-red-600 dark:text-red-400' : ''">{{ item.diffQty === null ? '—' : `${item.diffQty > 0 ? '+' : ''}${item.diffQty}` }}</div></div>
             </div>
             <div v-if="showBook && !isCounting" class="space-y-3 border-t border-slate-100 pt-3 dark:border-white/10">
               <div class="grid gap-2 sm:grid-cols-2">
                 <div>
-                  <div class="mb-1 text-xs text-slate-500">差异原因</div>
+                  <div class="mb-1 text-xs text-slate-500 dark:text-slate-400">差异原因</div>
                   <el-select v-if="isReviewing && canApprove && item.diffQty" :model-value="item.diffReason ?? ''" placeholder="选择原因" clearable class="w-full" @change="(value: string) => handleDiffReasonChange(item, value)">
                     <el-option v-for="reason in STOCKTAKE_DIFF_REASON_OPTIONS" :key="reason.value" :label="reason.label" :value="reason.value" />
                   </el-select>
                   <span v-else class="text-sm">{{ reasonLabel(item.diffReason) }}</span>
                 </div>
                 <div>
-                  <div class="mb-1 text-xs text-slate-500">处理方式</div>
+                  <div class="mb-1 text-xs text-slate-500 dark:text-slate-400">处理方式</div>
                   <el-select v-if="isReviewing && canApprove && item.diffQty" :model-value="item.resolution ?? ''" placeholder="选择处理" clearable class="w-full" @change="(value: string) => handleResolutionChange(item, value)">
                     <el-option v-for="option in STOCKTAKE_RESOLUTION_OPTIONS" :key="option.value" :label="option.label" :value="option.value" :disabled="option.value === 'damage' && item.diffQty > 0" />
                   </el-select>
-                  <span v-else class="text-sm">{{ resolutionLabel(item.resolution) }}<span v-if="item.appliedQty !== null" class="text-xs text-slate-500">（已调 {{ item.appliedQty }}）</span></span>
+                  <span v-else class="text-sm">{{ resolutionLabel(item.resolution) }}<span v-if="item.appliedQty !== null" class="text-xs text-slate-500 dark:text-slate-400">（已调 {{ item.appliedQty }}）</span></span>
                 </div>
               </div>
               <div>
-                <div class="mb-1 text-xs text-slate-500">处理备注</div>
+                <div class="mb-1 text-xs text-slate-500 dark:text-slate-400">处理备注</div>
                 <template v-if="isReviewing && canApprove && item.diffQty">
                   <el-button link :type="isRemarkMissing(item) ? 'danger' : 'primary'" @click="editResolutionRemark(item)">{{ item.resolutionRemark || (isRemarkMissing(item) ? '请先填写备注' : '添加备注') }}</el-button>
-                  <div v-if="isRemarkMissing(item)" class="text-xs text-red-600">原因为“其他”时必须填写备注</div>
+                  <div v-if="isRemarkMissing(item)" class="text-xs text-red-600 dark:text-red-400">原因为“其他”时必须填写备注</div>
                 </template>
                 <span v-else class="break-words text-sm">{{ item.resolutionRemark || '—' }}</span>
               </div>

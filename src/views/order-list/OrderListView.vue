@@ -145,7 +145,7 @@ const OrderListMobileCardLoading = defineComponent({
   name: 'OrderListMobileCardLoading',
   setup: () => () => h(
     'div',
-    { class: 'rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500', 'aria-hidden': 'true' },
+    { class: 'rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500 dark:border-white/10 dark:bg-[#141415] dark:text-slate-400', 'aria-hidden': 'true' },
     '正在加载订单卡片…',
   ),
 })
@@ -153,7 +153,7 @@ const OrderListMobileCardLoadError = defineComponent({
   name: 'OrderListMobileCardLoadError',
   setup: () => () => h(
     'div',
-    { class: 'rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800', 'aria-hidden': 'true' },
+    { class: 'rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-900/60 dark:bg-amber-500/10 dark:text-amber-300', 'aria-hidden': 'true' },
     '订单卡片暂时无法加载，请刷新后重试。',
   ),
 })
@@ -539,7 +539,7 @@ const handleSaveComplianceFlags = async () => {
       <Transition name="order-refresh-badge">
         <div
           v-if="silentRefreshing"
-          class="rounded-2xl border border-teal-100 bg-teal-50 px-4 py-3 text-sm text-teal-700"
+          class="rounded-2xl border border-teal-100 bg-teal-50 px-4 py-3 text-sm text-teal-700 dark:border-teal-500/20 dark:bg-teal-500/10 dark:text-teal-300"
         >
           正在静默同步最新单据，当前筛选、分页、滚动与详情查看保持不变
         </div>
@@ -548,7 +548,7 @@ const handleSaveComplianceFlags = async () => {
       <Transition name="new-order-notice">
         <div
           v-if="newOrderNotice"
-          class="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700"
+          class="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700 dark:border-amber-900/60 dark:bg-amber-500/10 dark:text-amber-300"
         >
           <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div class="min-w-0">
@@ -889,6 +889,25 @@ const handleSaveComplianceFlags = async () => {
 
   65% {
     background-color: rgba(254, 252, 232, 0.72);
+  }
+
+  100% {
+    background-color: transparent;
+  }
+}
+
+/* 暗色：新单高亮改用低饱和琥珀色，避免暗色表格里闪出一行亮黄。 */
+:global(.dark .el-table__body tr.order-list-table-row--new > td) {
+  animation-name: order-table-row-fade-highlight-dark;
+}
+
+@keyframes order-table-row-fade-highlight-dark {
+  0% {
+    background-color: rgba(245, 158, 11, 0.22);
+  }
+
+  65% {
+    background-color: rgba(245, 158, 11, 0.1);
   }
 
   100% {

@@ -121,6 +121,11 @@ const resolvedComponentCacheKey = computed(() => {
     linear-gradient(180deg, rgba(248, 250, 252, 0.88), rgba(255, 255, 255, 0.96));
 }
 
+/* 暗色：渐变是背景图，外层 dark:bg 盖不住，必须在暗色选择器里整体重写背景。 */
+.dark .supplier-workbench-shell__hero {
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.55), rgba(20, 20, 21, 0.9));
+}
+
 .supplier-workbench-shell__tab-wrap {
   width: 100%;
   min-width: 0;
@@ -152,6 +157,10 @@ const resolvedComponentCacheKey = computed(() => {
 @media (max-width: 767px) {
   .supplier-workbench-shell__hero {
     background: linear-gradient(180deg, rgba(248, 250, 252, 0.92), rgba(255, 255, 255, 0.98));
+  }
+
+  .dark .supplier-workbench-shell__hero {
+    background: linear-gradient(180deg, rgba(30, 41, 59, 0.6), rgba(20, 20, 21, 0.95));
   }
 
   .supplier-workbench-shell--compact-mobile .supplier-workbench-shell__hero {

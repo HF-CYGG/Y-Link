@@ -278,7 +278,7 @@ onMounted(() => {
                   :key="item.uid"
                   class="delivery-item-row flex flex-col gap-4 rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-slate-700/70 dark:bg-slate-900/50 lg:flex-row lg:items-start"
                 >
-                  <div class="delivery-item-row__index flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-slate-200/80 bg-white text-sm font-medium text-slate-500 dark:border-slate-600 dark:bg-slate-800">
+                  <div class="delivery-item-row__index flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-slate-200/80 bg-white text-sm font-medium text-slate-500 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-400">
                     {{ index + 1 }}
                   </div>
                   <div class="flex-1">
@@ -661,5 +661,24 @@ onMounted(() => {
   .delivery-side-metric__progress {
     transition: none;
   }
+}
+
+/* 暗色：渐变头部与成功页内容区是背景图，外层 dark:bg 盖不住，需要整体重写背景。 */
+.dark .delivery-main-card__header {
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.5), rgba(20, 20, 21, 0.9));
+}
+
+.dark .delivery-inline-metric {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.dark .delivery-side-card__signal {
+  background: rgba(20, 184, 166, 0.14);
+}
+
+.dark .delivery-success-shell__content {
+  background: linear-gradient(180deg, rgba(20, 20, 21, 0.98), rgba(30, 41, 59, 0.5));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 </style>

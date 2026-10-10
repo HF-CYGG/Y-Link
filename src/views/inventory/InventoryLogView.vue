@@ -185,7 +185,7 @@ onDeactivated(() => {
     <section class="apple-card min-w-0 p-3 sm:p-4 xl:p-5">
       <div class="mb-4 border-b border-slate-100 pb-3 dark:border-white/10">
         <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">变动记录</h2>
-        <p class="mt-0.5 text-xs text-slate-500">共 {{ pagination.total }} 条 · 按时间查看库存变化与关联来源</p>
+        <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">共 {{ pagination.total }} 条 · 按时间查看库存变化与关联来源</p>
       </div>
       <div class="hidden xl:block">
       <el-table v-loading="loading" :data="rows" row-key="id" empty-text="暂无流水">
@@ -195,7 +195,7 @@ onDeactivated(() => {
         <el-table-column label="商品 / 规格" min-width="200">
           <template #default="{ row }">
             <div class="font-medium">{{ row.productName }}</div>
-            <div class="text-xs text-slate-500">{{ row.specText || '（未记录规格）' }} <span v-if="row.skuCode">· {{ row.skuCode }}</span></div>
+            <div class="text-xs text-slate-500 dark:text-slate-400">{{ row.specText || '（未记录规格）' }} <span v-if="row.skuCode">· {{ row.skuCode }}</span></div>
           </template>
         </el-table-column>
         <el-table-column label="操作类型" width="140">
@@ -221,15 +221,15 @@ onDeactivated(() => {
       </el-table>
       </div>
       <div v-loading="loading" class="space-y-3 xl:hidden">
-        <div v-if="!rows.length" class="rounded-xl border border-dashed border-slate-200 px-4 py-8 text-center text-sm text-slate-500 dark:border-white/10">暂无流水</div>
+        <div v-if="!rows.length" class="rounded-xl border border-dashed border-slate-200 px-4 py-8 text-center text-sm text-slate-500 dark:border-white/10 dark:text-slate-400">暂无流水</div>
         <article v-for="row in rows" :key="row.id" class="min-w-0 rounded-xl border border-slate-200 bg-white/70 p-3 dark:border-white/10 dark:bg-white/5">
           <div class="flex min-w-0 flex-wrap items-start justify-between gap-2">
-            <div class="min-w-0 flex-1"><p class="break-words font-semibold text-slate-900 dark:text-slate-100">{{ row.productName }}</p><p class="mt-0.5 break-all text-xs text-slate-500">{{ row.specText || '（未记录规格）' }}<span v-if="row.skuCode"> · {{ row.skuCode }}</span></p></div>
+            <div class="min-w-0 flex-1"><p class="break-words font-semibold text-slate-900 dark:text-slate-100">{{ row.productName }}</p><p class="mt-0.5 break-all text-xs text-slate-500 dark:text-slate-400">{{ row.specText || '（未记录规格）' }}<span v-if="row.skuCode"> · {{ row.skuCode }}</span></p></div>
             <span class="font-semibold tabular-nums" :class="deltaClass(row)">{{ deltaText(row) }}</span>
           </div>
-          <div class="mt-3 flex flex-wrap items-center gap-2"><el-tag size="small" effect="plain">{{ row.changeTypeLabel }}</el-tag><span class="text-xs text-slate-500">{{ new Date(row.createdAt).toLocaleString('zh-CN', { hour12: false }) }}</span></div>
+          <div class="mt-3 flex flex-wrap items-center gap-2"><el-tag size="small" effect="plain">{{ row.changeTypeLabel }}</el-tag><span class="text-xs text-slate-500 dark:text-slate-400">{{ new Date(row.createdAt).toLocaleString('zh-CN', { hour12: false }) }}</span></div>
           <div class="mt-3 rounded-lg bg-slate-50 px-3 py-2 text-sm tabular-nums dark:bg-white/5">库存 {{ row.beforeStock }} → <strong>{{ row.afterStock }}</strong></div>
-          <div class="mt-3 flex min-w-0 flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500"><span>操作人：{{ row.operatorName || '系统' }}</span><span>关联：{{ row.refType ? REF_TYPE_LABELS[row.refType] ?? row.refType : '—' }}</span></div>
+          <div class="mt-3 flex min-w-0 flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500 dark:text-slate-400"><span>操作人：{{ row.operatorName || '系统' }}</span><span>关联：{{ row.refType ? REF_TYPE_LABELS[row.refType] ?? row.refType : '—' }}</span></div>
           <p v-if="row.remark" class="mt-2 break-words text-xs text-slate-600 dark:text-slate-300">备注：{{ row.remark }}</p>
         </article>
       </div>

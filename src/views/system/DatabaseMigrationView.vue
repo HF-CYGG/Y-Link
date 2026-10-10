@@ -1258,7 +1258,7 @@ onBeforeUnmount(stopAutomaticTaskPolling)
               <p class="mt-1 font-medium text-slate-700 dark:text-slate-200">
                 {{ effectiveDatabaseSummary?.displayName || '正在读取...' }}
               </p>
-              <p class="mt-1 text-xs text-slate-500">{{ activeRuntimeModeLabel }}</p>
+              <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ activeRuntimeModeLabel }}</p>
             </div>
             <div>
               <p class="text-slate-400">最近自动任务</p>
@@ -1266,7 +1266,7 @@ onBeforeUnmount(stopAutomaticTaskPolling)
                 <el-tag class="mt-1" :type="getTaskStatusTagType(latestAutomaticTask.status)" effect="light">
                   {{ getTaskStatusLabel(latestAutomaticTask.status) }}
                 </el-tag>
-                <p class="mt-1 text-xs text-slate-500">{{ latestAutomaticTask.progress.currentStage }}</p>
+                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ latestAutomaticTask.progress.currentStage }}</p>
               </template>
               <p v-else class="mt-1 font-medium text-slate-700 dark:text-slate-200">尚未创建</p>
             </div>

@@ -148,7 +148,7 @@ const changeAssignment = async (row: LocationSkuRecord) => {
           <el-table-column label="商品与规格" min-width="220">
             <template #default="{ row }">
               <div class="font-medium">{{ row.productName }}</div>
-              <div class="text-xs text-slate-500">{{ row.specText }}</div>
+              <div class="text-xs text-slate-500 dark:text-slate-400">{{ row.specText }}</div>
             </template>
           </el-table-column>
           <el-table-column prop="skuCode" label="SKU 编码" min-width="140" />
@@ -173,7 +173,7 @@ const changeAssignment = async (row: LocationSkuRecord) => {
               <div class="min-w-0 break-words font-medium">{{ row.productName }} · {{ row.specText }}</div>
               <el-tag :type="row.isActive ? 'success' : 'info'" size="small">{{ row.isActive ? '启用' : '停用' }}</el-tag>
             </div>
-            <div class="mt-2 break-all text-xs text-slate-500">SKU {{ row.skuCode }} · 当前库位 {{ row.locationCode || '未设置' }} · 库存 {{ row.currentStock }} 件</div>
+            <div class="mt-2 break-all text-xs text-slate-500 dark:text-slate-400">SKU {{ row.skuCode }} · 当前库位 {{ row.locationCode || '未设置' }} · 库存 {{ row.currentStock }} 件</div>
             <div class="mt-2 text-right">
               <el-button size="small" :loading="pendingSkuId === row.skuId" :disabled="pendingSkuId !== null || loading" @click="changeAssignment(row)">
                 {{ scope === 'assigned' ? '移出此库位' : '移入此库位' }}

@@ -824,14 +824,14 @@ watch(
 <template>
   <PageContainer title="O2O 核销台" description="支持工作人员录入或扫码取货码、退货码，按单据类型完成核销、拒绝退货与现场改单">
     <div class="verify-console-layout">
-      <section class="verify-console-entry rounded-3xl bg-white p-5 shadow-sm">
+      <section class="verify-console-entry rounded-3xl bg-white p-5 shadow-sm dark:bg-[#141415]">
         <div class="flex items-center justify-between gap-3">
-          <p class="text-lg font-semibold text-slate-900">扫码 / 输入核销码</p>
-          <span class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500">
+          <p class="text-lg font-semibold text-slate-900 dark:text-slate-100">扫码 / 输入核销码</p>
+          <span class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500 dark:bg-white/10 dark:text-slate-400">
             {{ scanModeLabel }}
           </span>
         </div>
-        <p class="mt-2 text-sm text-slate-500">支持手机扫码后自动填入；核销码和预订单号查询入口语义独立。</p>
+        <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">支持手机扫码后自动填入；核销码和预订单号查询入口语义独立。</p>
 
         <div class="mt-4">
           <el-input
@@ -876,18 +876,18 @@ watch(
           </div>
         </div>
 
-        <div class="mt-3 rounded-2xl border border-slate-100 bg-slate-50 px-3 py-2 text-xs text-slate-500">
+        <div class="mt-3 rounded-2xl border border-slate-100 bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:border-white/5 dark:bg-white/5 dark:text-slate-400">
           {{ scanActionHint }}
         </div>
       </section>
 
-      <section class="rounded-3xl bg-white p-5 shadow-sm">
+      <section class="rounded-3xl bg-white p-5 shadow-sm dark:bg-[#141415]">
         <template v-if="verifyResult">
           <div class="flex flex-wrap items-start justify-between gap-4">
             <div>
               <div class="flex flex-wrap items-center gap-2">
-                <p class="text-lg font-semibold text-slate-900">{{ currentDocumentTitle }}</p>
-                <span class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500">
+                <p class="text-lg font-semibold text-slate-900 dark:text-slate-100">{{ currentDocumentTitle }}</p>
+                <span class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500 dark:bg-white/10 dark:text-slate-400">
                   {{ currentDocumentTypeLabel }}
                 </span>
               </div>
@@ -927,23 +927,23 @@ watch(
             </div>
           </div>
 
-          <div v-if="preorderDetail" class="mt-4 rounded-2xl border border-teal-100 bg-teal-50 px-4 py-3 text-sm text-teal-700">
+          <div v-if="preorderDetail" class="mt-4 rounded-2xl border border-teal-100 bg-teal-50 px-4 py-3 text-sm text-teal-700 dark:border-teal-500/20 dark:bg-teal-500/10 dark:text-teal-300">
             <p class="font-semibold">核销依据说明</p>
             <p class="mt-1 leading-6">当前页面支持待核销预订单现场改单。保存后，商品明细、总金额、总件数和后续核销出库都会以最新结果为准。</p>
           </div>
 
           <div v-if="preorderDetail" class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">下单归属</p>
-              <p class="mt-1 text-base font-semibold text-slate-900">{{ preorderOwnershipLabel }}</p>
+              <p class="mt-1 text-base font-semibold text-slate-900 dark:text-slate-100">{{ preorderOwnershipLabel }}</p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">预订单登记领取人</p>
-              <p class="mt-1 break-words text-base font-semibold text-slate-900">{{ preorderDetail.order.pickupContact || '未记录' }}</p>
+              <p class="mt-1 break-words text-base font-semibold text-slate-900 dark:text-slate-100">{{ preorderDetail.order.pickupContact || '未记录' }}</p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">到店取货时间</p>
-              <p class="mt-1 text-base font-semibold text-slate-900">
+              <p class="mt-1 text-base font-semibold text-slate-900 dark:text-slate-100">
                 {{
                   preorderDetail.order.clientOrderType === 'department'
                     ? formatPickupAt(preorderDetail.order.pickupAt)
@@ -951,37 +951,37 @@ watch(
                 }}
               </p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">总金额</p>
-              <p class="mt-1 text-base font-semibold text-slate-900">¥{{ preorderTotalAmountText }}</p>
+              <p class="mt-1 text-base font-semibold text-slate-900 dark:text-slate-100">¥{{ preorderTotalAmountText }}</p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">总件数</p>
-              <p class="mt-1 text-base font-semibold text-slate-900">{{ preorderDetail.order.totalQty }} 件</p>
+              <p class="mt-1 text-base font-semibold text-slate-900 dark:text-slate-100">{{ preorderDetail.order.totalQty }} 件</p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">创建时间</p>
-              <p class="mt-1 text-sm text-slate-700">{{ preorderDetail.order.createdAt }}</p>
+              <p class="mt-1 text-sm text-slate-700 dark:text-slate-200">{{ preorderDetail.order.createdAt }}</p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">核销码</p>
-              <p class="mt-1 break-all text-sm text-slate-700">{{ preorderDetail.order.verifyCode }}</p>
+              <p class="mt-1 break-all text-sm text-slate-700 dark:text-slate-200">{{ preorderDetail.order.verifyCode }}</p>
             </div>
-            <div v-if="preorderDetail.order.customerOrderBusinessNo" class="rounded-2xl bg-teal-50 px-4 py-3">
+            <div v-if="preorderDetail.order.customerOrderBusinessNo" class="rounded-2xl bg-teal-50 px-4 py-3 dark:bg-teal-500/10">
               <p class="text-sm text-teal-600">关联出库业务单号</p>
-              <p class="mt-1 break-all text-sm font-semibold text-teal-800">{{ preorderDetail.order.customerOrderBusinessNo }}</p>
+              <p class="mt-1 break-all text-sm font-semibold text-teal-800 dark:text-teal-200">{{ preorderDetail.order.customerOrderBusinessNo }}</p>
             </div>
-            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">订单备注</p>
-              <p class="mt-1 whitespace-pre-wrap break-words text-sm text-slate-700">{{ preorderDetail.order.remark || '未填写' }}</p>
+              <p class="mt-1 whitespace-pre-wrap break-words text-sm text-slate-700 dark:text-slate-200">{{ preorderDetail.order.remark || '未填写' }}</p>
             </div>
           </div>
 
-          <div v-if="preorderDetail" class="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
+          <div v-if="preorderDetail" class="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4 dark:border-white/10 dark:bg-white/5">
             <div class="flex flex-wrap items-start justify-between gap-3">
               <div>
-                <p class="text-sm font-semibold text-slate-900">合规状态确认</p>
-                <p class="mt-1 text-xs text-slate-500">仅部门单可编辑“是否有出库单”和“系统申请”状态。</p>
+                <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">合规状态确认</p>
+                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">仅部门单可编辑“是否有出库单”和“系统申请”状态。</p>
               </div>
               <el-button
                 v-if="canEditComplianceFlags && isDepartmentPreorder"
@@ -994,8 +994,8 @@ watch(
               </el-button>
             </div>
             <div class="mt-3 grid gap-3 sm:grid-cols-2">
-              <div class="rounded-xl bg-white px-3 py-3">
-                <p class="text-xs text-slate-500">是否有出库单</p>
+              <div class="rounded-xl bg-white px-3 py-3 dark:bg-[#141415]">
+                <p class="text-xs text-slate-500 dark:text-slate-400">是否有出库单</p>
                 <div class="mt-2">
                   <el-switch
                     v-if="canEditComplianceFlags && isDepartmentPreorder"
@@ -1004,13 +1004,13 @@ watch(
                     active-text="是"
                     inactive-text="否"
                   />
-                  <span v-else class="text-sm font-medium text-slate-700">
+                  <span v-else class="text-sm font-medium text-slate-700 dark:text-slate-200">
                     {{ isDepartmentPreorder ? (preorderDetail.order.hasCustomerOrder ? '是' : '否') : '不适用' }}
                   </span>
                 </div>
               </div>
-              <div class="rounded-xl bg-white px-3 py-3">
-                <p class="text-xs text-slate-500">系统申请</p>
+              <div class="rounded-xl bg-white px-3 py-3 dark:bg-[#141415]">
+                <p class="text-xs text-slate-500 dark:text-slate-400">系统申请</p>
                 <div class="mt-2">
                   <el-switch
                     v-if="canEditComplianceFlags && isDepartmentPreorder"
@@ -1019,7 +1019,7 @@ watch(
                     active-text="已申请"
                     inactive-text="未申请"
                   />
-                  <span v-else class="text-sm font-medium text-slate-700">
+                  <span v-else class="text-sm font-medium text-slate-700 dark:text-slate-200">
                     {{ isDepartmentPreorder ? (preorderDetail.order.isSystemApplied ? '已申请' : '未申请') : '不适用' }}
                   </span>
                 </div>
@@ -1046,50 +1046,50 @@ watch(
           </template>
 
           <template v-else-if="returnRequestDetail">
-            <div class="mt-4 rounded-2xl border px-4 py-3 text-sm" :class="returnRequestDetail.status === 'rejected' ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-slate-200 bg-slate-50 text-slate-600'">
+            <div class="mt-4 rounded-2xl border px-4 py-3 text-sm" :class="returnRequestDetail.status === 'rejected' ? 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900/60 dark:bg-rose-500/10 dark:text-rose-300' : 'border-slate-200 bg-slate-50 text-slate-600 dark:border-white/10 dark:bg-white/5 dark:text-slate-300'">
               {{ returnRequestResultHint }}
             </div>
 
             <div class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
                 <p class="text-sm text-slate-400">退货总件数</p>
-                <p class="mt-1 text-base font-semibold text-slate-900">{{ returnRequestDetail.totalQty }} 件</p>
+                <p class="mt-1 text-base font-semibold text-slate-900 dark:text-slate-100">{{ returnRequestDetail.totalQty }} 件</p>
               </div>
-              <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
                 <p class="text-sm text-slate-400">申请时间</p>
-                <p class="mt-1 text-sm text-slate-700">{{ returnRequestDetail.createdAt }}</p>
+                <p class="mt-1 text-sm text-slate-700 dark:text-slate-200">{{ returnRequestDetail.createdAt }}</p>
               </div>
-              <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
                 <p class="text-sm text-slate-400">退货码</p>
-                <p class="mt-1 break-all text-sm text-slate-700">{{ returnRequestDetail.verifyCode }}</p>
+                <p class="mt-1 break-all text-sm text-slate-700 dark:text-slate-200">{{ returnRequestDetail.verifyCode }}</p>
               </div>
-              <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
                 <p class="text-sm text-slate-400">原订单状态</p>
-                <p class="mt-1 text-sm font-medium text-slate-700">
+                <p class="mt-1 text-sm font-medium text-slate-700 dark:text-slate-200">
                   {{ VERIFY_CONSOLE_O2O_ORDER_STATUS_LABEL_MAP[returnRequestDetail.sourceOrderStatus] }}
                 </p>
               </div>
-              <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
                 <p class="text-sm text-slate-400">处理时间</p>
-                <p class="mt-1 text-sm text-slate-700">{{ returnRequestDetail.handledAt || '尚未处理' }}</p>
+                <p class="mt-1 text-sm text-slate-700 dark:text-slate-200">{{ returnRequestDetail.handledAt || '尚未处理' }}</p>
               </div>
-              <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
                 <p class="text-sm text-slate-400">处理人</p>
-                <p class="mt-1 text-sm text-slate-700">{{ returnRequestDetail.handledBy || '门店待处理' }}</p>
+                <p class="mt-1 text-sm text-slate-700 dark:text-slate-200">{{ returnRequestDetail.handledBy || '门店待处理' }}</p>
               </div>
             </div>
 
-            <div class="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+            <div class="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 dark:border-white/10 dark:bg-white/5">
               <p class="text-sm text-slate-400">退货原因</p>
-              <p class="mt-1 text-sm leading-6 text-slate-700">{{ returnRequestDetail.reason }}</p>
+              <p class="mt-1 text-sm leading-6 text-slate-700 dark:text-slate-200">{{ returnRequestDetail.reason }}</p>
             </div>
 
             <div
               v-if="returnRequestDetail.rejectedReason"
-              class="mt-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3"
+              class="mt-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 dark:border-rose-900/60 dark:bg-rose-500/10"
             >
               <p class="text-sm text-rose-500">拒绝原因</p>
-              <p class="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-rose-700">
+              <p class="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-rose-700 dark:text-rose-300">
                 {{ returnRequestDetail.rejectedReason }}
               </p>
             </div>
@@ -1107,7 +1107,7 @@ watch(
           </template>
         </template>
 
-        <div v-else class="flex min-h-64 items-center justify-center rounded-2xl border border-dashed border-slate-200 px-6 text-center text-sm leading-6 text-slate-400">
+        <div v-else class="flex min-h-64 items-center justify-center rounded-2xl border border-dashed border-slate-200 px-6 text-center text-sm leading-6 text-slate-400 dark:border-white/10">
           {{ emptyStateText }}
         </div>
       </section>
@@ -1166,11 +1166,11 @@ watch(
       @closed="handleRejectDialogClosed"
     >
       <div class="space-y-4">
-        <div class="rounded-2xl bg-rose-50 px-4 py-3 text-sm leading-6 text-rose-700">
+        <div class="rounded-2xl bg-rose-50 px-4 py-3 text-sm leading-6 text-rose-700 dark:bg-rose-500/10 dark:text-rose-300">
           请填写明确的拒绝原因，保存后核销台与后续查询都会按“已拒绝”结果展示。
         </div>
-        <div class="rounded-3xl border border-slate-100 bg-white px-4 py-4">
-          <p class="text-sm font-semibold text-slate-900">拒绝原因</p>
+        <div class="rounded-3xl border border-slate-100 bg-white px-4 py-4 dark:border-white/5 dark:bg-[#141415]">
+          <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">拒绝原因</p>
           <el-input
             v-model="rejectReason"
             type="textarea"
@@ -1211,14 +1211,14 @@ watch(
       @closed="handleOnsiteAdjustDialogClosed"
     >
       <div class="space-y-4">
-        <div class="rounded-2xl bg-teal-50 px-4 py-3 text-sm leading-6 text-teal-700">
+        <div class="rounded-2xl bg-teal-50 px-4 py-3 text-sm leading-6 text-teal-700 dark:bg-teal-500/10 dark:text-teal-300">
           待核销订单支持门店按现场实际领取情况调整商品、数量和备注。保存后系统会按最新内容重算预订库存，原核销码保持不变。
         </div>
 
-        <div class="rounded-3xl border border-slate-100 bg-white px-4 py-4">
+        <div class="rounded-3xl border border-slate-100 bg-white px-4 py-4 dark:border-white/5 dark:bg-[#141415]">
           <div class="flex flex-col gap-3 lg:flex-row lg:items-end">
             <div class="flex-1">
-              <p class="text-sm font-semibold text-slate-900">添加商品</p>
+              <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">添加商品</p>
               <el-select
                 v-model="onsiteAddProductId"
                 class="mt-3 w-full"
@@ -1243,12 +1243,12 @@ watch(
           <div
             v-for="item in onsiteOrderItems"
             :key="item.itemKey"
-            class="rounded-3xl border border-slate-100 bg-white px-4 py-4"
+            class="rounded-3xl border border-slate-100 bg-white px-4 py-4 dark:border-white/5 dark:bg-[#141415]"
           >
             <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <div class="min-w-0 flex-1">
-                <p class="text-sm font-semibold text-slate-900">{{ item.productName }}</p>
-                <p v-if="item.specText" class="mt-1 text-xs leading-5 text-slate-500">{{ item.specText }}</p>
+                <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">{{ item.productName }}</p>
+                <p v-if="item.specText" class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">{{ item.specText }}</p>
                 <p class="mt-1 text-xs leading-5 text-slate-400">
                   原数量 {{ item.originalQty }} 件，当前最多可改为 {{ item.maxQty }} 件
                 </p>
@@ -1275,8 +1275,8 @@ watch(
           </div>
         </div>
 
-        <div class="rounded-3xl border border-slate-100 bg-white px-4 py-4">
-          <p class="text-sm font-semibold text-slate-900">订单备注</p>
+        <div class="rounded-3xl border border-slate-100 bg-white px-4 py-4 dark:border-white/5 dark:bg-[#141415]">
+          <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">订单备注</p>
           <el-input
             v-model="onsiteRemark"
             type="textarea"
@@ -1289,9 +1289,9 @@ watch(
           />
         </div>
 
-        <div class="rounded-2xl bg-amber-50 px-4 py-3 text-sm text-amber-700">
+        <div class="rounded-2xl bg-amber-50 px-4 py-3 text-sm text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
           修改后共 {{ onsiteTotalQty }} 件商品，合计 ¥{{ onsiteTotalAmount.toFixed(2) }}。
-          <p class="mt-2 text-xs text-amber-700">保存成功后，本单后续核销出库会以此结果为准。</p>
+          <p class="mt-2 text-xs text-amber-700 dark:text-amber-300">保存成功后，本单后续核销出库会以此结果为准。</p>
         </div>
       </div>
 
@@ -1439,5 +1439,27 @@ watch(
     flex: 1 1 auto;
     padding-inline: 1rem;
   }
+}
+
+/* 暗色：核销状态胶囊与移动端底部操作条。 */
+.dark .status-chip--pending {
+  background: rgba(6, 182, 212, 0.14);
+  color: #67e8f9;
+}
+
+.dark .status-chip--verified {
+  background: rgba(34, 197, 94, 0.14);
+  color: #86efac;
+}
+
+.dark .status-chip--cancelled,
+.dark .status-chip--rejected {
+  background: rgba(239, 68, 68, 0.14);
+  color: #fca5a5;
+}
+
+.dark .verify-mobile-bar {
+  background: rgba(20, 20, 21, 0.94);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
 }
 </style>
