@@ -25,6 +25,7 @@ process.env.Y_LINK_SKIP_DATABASE_RUNTIME_OVERRIDE = 'true'
 
 const { DataSource } = await import('typeorm')
 const { prepareSqliteAdminMfaCompatibility } = await import('../src/config/database-bootstrap.js')
+const { getTransactionCoordinator } = await import('../src/database/transaction-coordinator.js')
 const { runDataEncryptionPreflight, DataEncryptionKeyMissingError } = await import('../src/runtime/data-encryption-preflight.js')
 const db = new DataSource({ type: 'sqlite', database: process.env.SQLITE_DB_PATH, entities: [], synchronize: false })
 const rollbackDb = new DataSource({ type: 'sqlite', database: path.join(runRoot, 'rollback.sqlite'), entities: [], synchronize: false })
@@ -61,6 +62,7 @@ try {
 
   const snapshot = await db.query('SELECT id, user_id, totp_secret_sealed, recovery_codes_json, enabled_at, last_used_step, created_at, updated_at FROM sys_user_mfa')
   await prepareSqliteAdminMfaCompatibility(db)
+  assert.equal(getTransactionCoordinator(db)?.snapshot().serializeWrites, true, '旧 MFA 表重建事务必须已由当前 SQLite 数据源的写入协调器接管')
   assert.deepEqual(await db.query('SELECT id, user_id, totp_secret_sealed, recovery_codes_json, enabled_at, last_used_step, created_at, updated_at FROM sys_user_mfa'), snapshot)
   const mfaColumns = await db.query('PRAGMA table_info("sys_user_mfa")') as Array<{ name: string; notnull: number }>
   assert.equal(mfaColumns.find((column) => column.name === 'totp_secret_sealed')?.notnull, 0)

@@ -283,6 +283,17 @@ const ALLOWED_DIRECT_TRANSACTION_CALLS: Array<{
     relativePath: 'src/config/database-bootstrap.ts',
     receiver: 'dataSource',
     method: 'transaction',
+    enclosingFunction: 'prepareSqliteAdminMfaCompatibility',
+    expectedCount: 1,
+    reason:
+      'prepareSqliteAdminMfaCompatibility 接受任意 DataSource 以升级独立的旧 SQLite 库，'
+      + '不能使用只绑定全局 AppDataSource 的 runInTransaction；函数在开启重建事务前'
+      + '先对同一个 dataSource 调用 initializeDatabaseInfrastructure，确保事务已由 SQLite 写入协调器接管',
+  },
+  {
+    relativePath: 'src/config/database-bootstrap.ts',
+    receiver: 'dataSource',
+    method: 'transaction',
     enclosingFunction: 'backfillSqliteOrderAmendmentData',
     expectedCount: 1,
     reason:
