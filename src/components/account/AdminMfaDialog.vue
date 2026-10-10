@@ -1,34 +1,45 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/components/account/AdminMfaDialog.vue
- * 文件职责：管理端本人两步验证（TOTP）设置弹窗，承接状态查看、绑定身份验证器、保存恢复码、重生成恢复码与停用。
+ * 文件职责：管理端本人两步验证设置弹窗，承接 TOTP、密码后密钥与恢复码的状态和管理操作。
  * 实现逻辑：
- * - 弹窗按“状态 → 复核密码 → 扫码确认 → 保存恢复码 / 停用 / 重生成”分阶段展示，同一时刻只渲染当前阶段的表单与按钮；
+ * - 弹窗按状态、绑定 TOTP、使用已有强密钥启用 MFA、保存恢复码、单关 TOTP、完全停用及重生成恢复码分阶段展示；
  * - 由顶栏首次点击时异步挂载，二维码库在进入扫码阶段才动态加载，两者都不进入首屏包；
- * - 秘钥、恢复码与输入的密码只保存在组件内存，弹窗关闭即清空，不写入本地存储或日志；
- * - 发起绑定、停用、重生成都先复核当前密码，失败次数与登录共用锁定，错误提示直接展示服务端返回的原因。
+ * - 敏感操作复核当前密码和已启用的 TOTP 或强密钥；恢复码不能换新恢复码；
+ * - 完全停用后服务端吊销会话，前端清登录态并引导重新登录；单关 TOTP 仍刷新状态；
+ * - 秘钥、恢复码与输入的密码只保存在组件内存，关闭时清空，不写入本地存储或日志。
  * 维护说明：
  * - 恢复码只在生成当次展示，关闭前必须明确提示用户保存；不要增加“再次查看恢复码”之类的能力；
  * - 二维码生成失败时必须保留手动输入秘钥的方式，不能让用户只看到空白占位。
  */
 
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { onBeforeRouteLeave } from 'vue-router'
 import dayjs from 'dayjs'
+import { ElMessageBox } from 'element-plus'
 import { BizCrudDialogShell } from '@/components/common'
 import {
   confirmAdminMfaEnrollment,
   disableAdminMfa,
+  disableAdminTotp,
+  enableAdminWebAuthnMfa,
   getAdminMfaStatus,
   regenerateAdminMfaRecoveryCodes,
   startAdminMfaEnrollment,
   type AdminMfaStatus,
 } from '@/api/modules/admin-mfa'
+import { getAdminWebAuthnCredentials, startAdminWebAuthnStepUp, verifyAdminWebAuthnStepUp, type AdminWebAuthnStepUpAction } from '@/api/modules/admin-webauthn'
+import { useAuthStore } from '@/store'
+import pinia from '@/store/pinia'
+import { redirectToAdminLogin } from '@/utils/auth-navigation'
+import { createWebAuthnFlow, isWebAuthnCancellation } from '@/utils/admin-webauthn'
+import { guardRecoveryCodePaste } from '@/utils/admin-mfa-recovery-code'
 import { extractErrorMessage, normalizeRequestError } from '@/utils/error'
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 type QrCodeModule = typeof import('qrcode')
 type QrCodeRenderer = Pick<QrCodeModule, 'toDataURL'>
-type MfaDialogStage = 'status' | 'enroll-password' | 'enroll-scan' | 'recovery-codes' | 'disable' | 'regenerate'
+type MfaDialogStage = 'status' | 'enroll-password' | 'enroll-scan' | 'recovery-codes' | 'disable' | 'disable-totp' | 'regenerate' | 'enable-key'
 
 const props = defineProps<{
   modelValue: boolean
@@ -43,7 +54,11 @@ const RECOVERY_CODES_LOW_THRESHOLD = 3
 const stage = ref<MfaDialogStage>('status')
 const loading = ref(false)
 const submitting = ref(false)
+const disableAllPending = ref(false)
+const recoveryFinalPending = ref(false)
+const authStore = useAuthStore(pinia)
 const status = ref<AdminMfaStatus | null>(null)
+const strongCredentialCount = ref(0)
 const recoveryCodes = ref<string[]>([])
 const enrollment = reactive({
   secret: '',
@@ -57,7 +72,10 @@ const form = reactive({
   code: '',
   recoveryCode: '',
   useRecoveryCode: false,
+  useWebAuthn: false,
 })
+let webAuthnSdk: typeof import('@simplewebauthn/browser') | null = null
+const stepUpFlow = createWebAuthnFlow(() => webAuthnSdk?.WebAuthnAbortService.cancelCeremony())
 
 let qrCodeModulePromise: Promise<QrCodeModule> | null = null
 
@@ -70,7 +88,11 @@ const dialogTitle = computed(() => {
     case 'recovery-codes':
       return '保存恢复码'
     case 'disable':
-      return '停用两步验证'
+      return '完全停用两步验证'
+    case 'disable-totp':
+      return '关闭动态码验证'
+    case 'enable-key':
+      return '使用已有密钥开启两步验证'
     case 'regenerate':
       return '重新生成恢复码'
     default:
@@ -83,13 +105,14 @@ const groupedSecret = computed(() => enrollment.secret.match(/.{1,4}/g)?.join(' 
 
 const enabledAtText = computed(() => (status.value?.enabledAt ? dayjs(status.value.enabledAt).format('YYYY-MM-DD HH:mm') : '-'))
 
-const recoveryCodesLow = computed(() => Boolean(status.value?.enabled) && (status.value?.recoveryCodesRemaining ?? 0) <= RECOVERY_CODES_LOW_THRESHOLD)
+const recoveryCodesLow = computed(() => Boolean(status.value?.mfaRequired) && (status.value?.recoveryCodesRemaining ?? 0) <= RECOVERY_CODES_LOW_THRESHOLD)
 
 const resetForm = () => {
   form.currentPassword = ''
   form.code = ''
   form.recoveryCode = ''
   form.useRecoveryCode = false
+  form.useWebAuthn = false
 }
 
 const clearEnrollment = () => {
@@ -100,8 +123,11 @@ const clearEnrollment = () => {
   enrollment.qrFailed = false
 }
 
-const goToStage = (nextStage: MfaDialogStage) => {
+const goToStage = (nextStage: MfaDialogStage, fromCompletedAction = false) => {
+  if (!fromCompletedAction && (submitting.value || recoveryFinalPending.value || recoveryCodes.value.length > 0)) return
+  stepUpFlow.cancel()
   resetForm()
+  if (status.value?.mfaRequired && !status.value.availableMethods.includes('totp') && status.value.availableMethods.includes('webauthn')) form.useWebAuthn = true
   stage.value = nextStage
 }
 
@@ -109,6 +135,7 @@ const loadStatus = async () => {
   loading.value = true
   try {
     status.value = await getAdminMfaStatus()
+    strongCredentialCount.value = (await getAdminWebAuthnCredentials().catch(() => [])).filter((credential) => credential.usage === 'passwordless').length
     stage.value = 'status'
   } catch (error) {
     showAppError(extractErrorMessage(error, '读取两步验证状态失败'))
@@ -120,24 +147,58 @@ const loadStatus = async () => {
 watch(
   () => props.modelValue,
   (visible) => {
-    if (visible) {
-      void loadStatus()
-    }
+    if (visible && !submitting.value && !recoveryFinalPending.value && recoveryCodes.value.length === 0) void loadStatus()
+    else if (submitting.value || recoveryFinalPending.value || recoveryCodes.value.length > 0) emit('update:modelValue', true)
   },
   { immediate: true },
 )
 
 const closeDialog = () => {
+  if (submitting.value || recoveryFinalPending.value || recoveryCodes.value.length > 0) return
   emit('update:modelValue', false)
 }
+onBeforeRouteLeave(() => { if (submitting.value || disableAllPending.value || recoveryFinalPending.value || recoveryCodes.value.length > 0) return false })
 
 // 关闭动画结束后清空全部敏感状态，下次打开重新读取服务端状态。
 const handleClosed = () => {
+  if (recoveryFinalPending.value || recoveryCodes.value.length > 0) return
+  stepUpFlow.cancel()
   resetForm()
   clearEnrollment()
   recoveryCodes.value = []
   status.value = null
+  strongCredentialCount.value = 0
   stage.value = 'status'
+}
+onBeforeUnmount(() => { stepUpFlow.cancel(); resetForm(); recoveryCodes.value = [] })
+
+const obtainWebAuthnProof = async (action: AdminWebAuthnStepUpAction, currentPassword: string) => {
+  const operation = stepUpFlow.start()
+  try {
+    const challenge = await startAdminWebAuthnStepUp({ currentPassword, action }, { signal: operation.signal })
+    if (!stepUpFlow.isCurrent(operation.id)) throw new DOMException('已取消', 'AbortError')
+    const sdk = await import('@simplewebauthn/browser')
+    if (!stepUpFlow.isCurrent(operation.id)) throw new DOMException('已取消', 'AbortError')
+    webAuthnSdk = sdk
+    const response = await sdk.startAuthentication({ optionsJSON: challenge.options })
+    if (!stepUpFlow.isCurrent(operation.id)) throw new DOMException('已取消', 'AbortError')
+    const result = await verifyAdminWebAuthnStepUp({ challengeId: challenge.challengeId, response }, { signal: operation.signal })
+    if (!stepUpFlow.isCurrent(operation.id)) throw new DOMException('已取消', 'AbortError')
+    return result.stepUpProof
+  } finally { stepUpFlow.finish(operation.id) }
+}
+
+const checkedFactor = async (action: AdminWebAuthnStepUpAction, allowRecovery = true): Promise<{ code?: string; recoveryCode?: string; stepUpProof?: string } | null> => {
+  if (!status.value?.mfaRequired) return {}
+  if (form.useWebAuthn) return { stepUpProof: await obtainWebAuthnProof(action, form.currentPassword) }
+  if (form.useRecoveryCode) {
+    if (!allowRecovery) { showAppWarning('恢复码不能用于生成新的恢复码'); return null }
+    if (!status.value.availableMethods.includes('recovery_code') || !form.recoveryCode.trim()) { showAppWarning('请输入可用恢复码'); return null }
+    return { recoveryCode: form.recoveryCode.trim() }
+  }
+  const code = normalizeCodeInput(form.code)
+  if (!status.value.availableMethods.includes('totp') || !/^\d{6}$/.test(code)) { showAppWarning('请输入 6 位数字动态码，或切换其他可用方式'); return null }
+  return { code }
 }
 
 const resolveQrCodeRenderer = async (): Promise<QrCodeRenderer> => {
@@ -191,20 +252,24 @@ const handleStartEnrollment = async () => {
   }
   submitting.value = true
   try {
-    const result = await startAdminMfaEnrollment(form.currentPassword)
-    goToStage('enroll-scan')
+    const proof = await checkedFactor('mfa.totp.enroll')
+    if (!proof) return
+    const result = await startAdminMfaEnrollment(form.currentPassword, proof)
+    goToStage('enroll-scan', true)
     enrollment.secret = result.secret
     enrollment.otpauthUri = result.otpauthUri
     void renderEnrollmentQrCode(result.otpauthUri)
   } catch (error) {
     form.currentPassword = ''
-    showAppError(extractErrorMessage(error, '发起绑定失败，请稍后重试'))
+    if (isWebAuthnCancellation(error)) showAppWarning('安全密钥复核已取消')
+    else showAppError(extractErrorMessage(error, '发起绑定失败，请稍后重试'))
   } finally {
     submitting.value = false
   }
 }
 
 const handleConfirmEnrollment = async () => {
+  if (submitting.value || stage.value !== 'enroll-scan' || recoveryCodes.value.length > 0) return
   const code = normalizeCodeInput(form.code)
   if (!/^\d{6}$/.test(code)) {
     showAppWarning('请输入身份验证器中显示的 6 位动态码')
@@ -212,11 +277,18 @@ const handleConfirmEnrollment = async () => {
   }
   submitting.value = true
   try {
+    recoveryFinalPending.value = true
     const result = await confirmAdminMfaEnrollment(code)
+    recoveryFinalPending.value = false
     clearEnrollment()
-    recoveryCodes.value = result.recoveryCodes
-    goToStage('recovery-codes')
-    showAppSuccess('两步验证已开启')
+    if (result.recoveryCodes.length) {
+      goToStage('recovery-codes', true)
+      recoveryCodes.value = result.recoveryCodes
+      showAppSuccess('两步验证已开启，请保存新恢复码')
+    } else {
+      await loadStatus()
+      showAppSuccess('动态码已绑定，原恢复码仍有效')
+    }
   } catch (error) {
     form.code = ''
     const normalizedError = normalizeRequestError(error, '动态码校验失败，请稍后重试')
@@ -227,72 +299,108 @@ const handleConfirmEnrollment = async () => {
       await loadStatus()
     }
   } finally {
+    recoveryFinalPending.value = false
     submitting.value = false
   }
 }
 
 const handleFinishRecoveryCodes = async () => {
+  if (submitting.value || stage.value !== 'recovery-codes') return
   recoveryCodes.value = []
   await loadStatus()
 }
 
 const handleDisable = async () => {
+  if (submitting.value) return
   if (!form.currentPassword) {
     showAppWarning('请输入当前登录密码')
     return
   }
-  const code = normalizeCodeInput(form.code)
-  const recoveryCode = form.recoveryCode.trim()
-  if (form.useRecoveryCode ? !recoveryCode : !/^\d{6}$/.test(code)) {
-    showAppWarning(form.useRecoveryCode ? '请输入一个未使用过的恢复码' : '请输入身份验证器中显示的 6 位动态码')
-    return
-  }
+  const disableTotpOnly = stage.value === 'disable-totp'
   submitting.value = true
   try {
-    await disableAdminMfa({
-      currentPassword: form.currentPassword,
-      ...(form.useRecoveryCode ? { recoveryCode } : { code }),
-    })
-    showAppSuccess('两步验证已停用')
-    await loadStatus()
+    if (!disableTotpOnly) {
+      await ElMessageBox.confirm('完全停用后，动态码、密码后密钥和恢复码都不再作为登录第二步；下次仅凭密码即可登录。确认继续吗？', '完全停用两步验证', {
+        type: 'warning', confirmButtonText: '确认完全停用', cancelButtonText: '取消',
+      })
+    }
+    const proof = await checkedFactor(disableTotpOnly ? 'mfa.totp.disable' : 'mfa.disable_all')
+    if (!proof) return
+    if (disableTotpOnly) {
+      await disableAdminTotp({ currentPassword: form.currentPassword, ...proof })
+      showAppSuccess('动态码验证已关闭')
+      await loadStatus()
+    } else {
+      // 完全停用已由服务端吊销所有会话；不能再以旧会话读取状态。
+      disableAllPending.value = true
+      await disableAdminMfa({ currentPassword: form.currentPassword, ...proof })
+      authStore.clearAuthState({ resetInitialized: true })
+      emit('update:modelValue', false)
+      showAppSuccess('两步验证已完全停用，请重新登录')
+      disableAllPending.value = false
+      redirectToAdminLogin()
+    }
   } catch (error) {
     form.code = ''
     form.recoveryCode = ''
-    showAppError(extractErrorMessage(error, '停用两步验证失败，请稍后重试'))
+    if (error === 'cancel' || error === 'close') return
+    if (isWebAuthnCancellation(error)) showAppWarning('安全密钥复核已取消')
+    else showAppError(extractErrorMessage(error, '停用两步验证失败，请稍后重试'))
   } finally {
+    disableAllPending.value = false
     submitting.value = false
+    form.currentPassword = ''
   }
 }
 
 const handleRegenerate = async () => {
+  if (submitting.value || stage.value !== 'regenerate' || recoveryCodes.value.length > 0) return
   if (!form.currentPassword) {
     showAppWarning('请输入当前登录密码')
     return
   }
-  const code = normalizeCodeInput(form.code)
-  if (!/^\d{6}$/.test(code)) {
-    showAppWarning('请输入身份验证器中显示的 6 位动态码')
-    return
-  }
   submitting.value = true
   try {
-    const result = await regenerateAdminMfaRecoveryCodes({ currentPassword: form.currentPassword, code })
+    const proof = await checkedFactor('mfa.recovery_codes', false)
+    if (!proof) return
+    recoveryFinalPending.value = true
+    const result = await regenerateAdminMfaRecoveryCodes({ currentPassword: form.currentPassword, ...proof })
+    recoveryFinalPending.value = false
+    goToStage('recovery-codes', true)
     recoveryCodes.value = result.recoveryCodes
-    goToStage('recovery-codes')
     showAppSuccess('已生成新的恢复码，旧恢复码全部失效')
   } catch (error) {
     form.code = ''
-    showAppError(extractErrorMessage(error, '重新生成恢复码失败，请稍后重试'))
+    if (isWebAuthnCancellation(error)) showAppWarning('安全密钥复核已取消')
+    else showAppError(extractErrorMessage(error, '重新生成恢复码失败，请稍后重试'))
   } finally {
+    recoveryFinalPending.value = false
     submitting.value = false
   }
 }
 
-const toggleDisableFactor = () => {
-  form.useRecoveryCode = !form.useRecoveryCode
-  form.code = ''
-  form.recoveryCode = ''
+const handleEnableKey = async () => {
+  if (submitting.value || stage.value !== 'enable-key' || recoveryCodes.value.length > 0) return
+  if (!form.currentPassword) { showAppWarning('请输入当前登录密码'); return }
+  submitting.value = true
+  try {
+    const stepUpProof = await obtainWebAuthnProof('mfa.webauthn.enable', form.currentPassword)
+    recoveryFinalPending.value = true
+    const result = await enableAdminWebAuthnMfa({ currentPassword: form.currentPassword, stepUpProof })
+    recoveryFinalPending.value = false
+    goToStage('recovery-codes', true)
+    recoveryCodes.value = result.recoveryCodes
+    showAppSuccess('已使用现有密钥开启两步验证')
+  } catch (error) {
+    if (isWebAuthnCancellation(error)) showAppWarning('安全密钥复核已取消')
+    else showAppError(extractErrorMessage(error, '开启密钥两步验证失败'))
+  } finally {
+    recoveryFinalPending.value = false
+    form.currentPassword = ''
+    submitting.value = false
+  }
 }
+
 </script>
 
 <template>
@@ -303,7 +411,7 @@ const toggleDisableFactor = () => {
     phone-width="94%"
     tablet-width="480px"
     desktop-width="460px"
-    @update:model-value="emit('update:modelValue', $event)"
+    @update:model-value="!$event && closeDialog()"
     @closed="handleClosed"
   >
     <el-skeleton v-if="loading" :rows="3" animated />
@@ -311,12 +419,16 @@ const toggleDisableFactor = () => {
     <template v-else-if="stage === 'status' && status">
       <div class="flex items-center justify-between gap-3 rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
         <div class="text-sm font-semibold text-slate-700 dark:text-slate-200">当前状态</div>
-        <el-tag :type="status.enabled ? 'success' : 'info'" effect="light">{{ status.enabled ? '已开启' : '未开启' }}</el-tag>
+        <el-tag :type="status.mfaRequired ? 'success' : 'info'" effect="light">{{ status.mfaRequired ? '已开启' : '未开启' }}</el-tag>
       </div>
-      <div v-if="status.enabled" class="mt-3 grid gap-2 text-sm text-slate-600 dark:text-slate-300">
+      <div v-if="status.mfaRequired" class="mt-3 grid gap-2 text-sm text-slate-600 dark:text-slate-300">
         <div class="flex items-center justify-between gap-3">
-          <span class="text-slate-400">开启时间</span>
-          <span>{{ enabledAtText }}</span>
+          <span class="text-slate-400">动态码</span>
+          <span>{{ status.totpEnabled ? `已启用（${enabledAtText}）` : '未启用' }}</span>
+        </div>
+        <div class="flex items-center justify-between gap-3">
+          <span class="text-slate-400">密码后密钥</span>
+          <span>{{ status.availableMethods.includes('webauthn') ? '可用' : '未启用' }}</span>
         </div>
         <div class="flex items-center justify-between gap-3">
           <span class="text-slate-400">剩余恢复码</span>
@@ -330,18 +442,20 @@ const toggleDisableFactor = () => {
           show-icon
           title="恢复码即将用完，建议重新生成并妥善保存。"
         />
+        <el-alert v-if="!status.totpEnabled && !status.availableMethods.includes('webauthn')" type="warning" :closable="false" title="目前仅剩恢复码可用，请尽快重新绑定动态码，或联系管理员重置。" />
       </div>
       <p v-else class="mt-3 text-sm leading-6 text-slate-500 dark:text-slate-400">
-        开启后，登录时除了密码，还需要输入手机上身份验证器应用（如 Microsoft Authenticator、Google Authenticator、腾讯身份验证器）生成的 6 位动态码。
-        即使密码泄露，他人也无法直接登录后台。手机丢失时可用恢复码登录，或联系其他管理员重置。
+        可绑定身份验证器应用，或显式使用已有的直接登录强凭据（通行密钥或安全密钥）开启密码后验证。创建直接登录凭据不会自动开启两步验证。
       </p>
     </template>
 
-    <template v-else-if="stage === 'enroll-password' || stage === 'disable' || stage === 'regenerate'">
+    <template v-else-if="stage === 'enroll-password' || stage === 'disable' || stage === 'disable-totp' || stage === 'regenerate' || stage === 'enable-key'">
       <div class="mb-4 rounded-2xl bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-500 dark:bg-white/5 dark:text-slate-400">
-        <template v-if="stage === 'enroll-password'">为确认是本人操作，请先输入当前登录密码。</template>
-        <template v-else-if="stage === 'disable'">停用后登录只需要密码。请输入当前密码，并提供动态码或恢复码完成确认。</template>
-        <template v-else>重新生成后，旧恢复码全部失效。请输入当前密码和身份验证器中的动态码。</template>
+        <template v-if="stage === 'enroll-password'">为确认是本人操作，请输入当前密码；已开启两步验证时还需选择一种可用复核方式。</template>
+        <template v-else-if="stage === 'disable'">这会完全停用所有密码后验证方式。请输入当前密码和一种可用复核方式。</template>
+        <template v-else-if="stage === 'disable-totp'">仅关闭动态码，已绑定的密码后密钥仍作为登录第二步。请输入当前密码和复核方式。</template>
+        <template v-else-if="stage === 'enable-key'">使用已存在的直接登录强凭据（通行密钥或安全密钥）开启密码后验证；此操作不会注册新密钥。</template>
+        <template v-else>重新生成后旧恢复码全部失效，恢复码本身不能用来换新码。</template>
       </div>
       <el-form label-position="top" @submit.prevent>
         <el-form-item label="当前密码">
@@ -354,7 +468,7 @@ const toggleDisableFactor = () => {
             maxlength="256"
           />
         </el-form-item>
-        <el-form-item v-if="stage !== 'enroll-password' && !form.useRecoveryCode" label="动态码">
+        <el-form-item v-if="stage !== 'enable-key' && status?.mfaRequired && !form.useWebAuthn && !form.useRecoveryCode" label="动态码">
           <el-input
             v-model.trim="form.code"
             placeholder="身份验证器中的 6 位动态码"
@@ -363,18 +477,22 @@ const toggleDisableFactor = () => {
             maxlength="7"
           />
         </el-form-item>
-        <el-form-item v-if="stage === 'disable' && form.useRecoveryCode" label="恢复码">
+        <el-form-item v-if="stage !== 'enable-key' && stage !== 'regenerate' && status?.mfaRequired && form.useRecoveryCode && !form.useWebAuthn" label="恢复码">
           <el-input
             v-model.trim="form.recoveryCode"
-            placeholder="例如 ABCD-EFGH-JKLM"
+            placeholder="单个恢复码，例如ABCD-EFGH-JKLM"
             autocomplete="off"
-            maxlength="20"
+            maxlength="32"
+            @paste="guardRecoveryCodePaste($event, showAppWarning)"
           />
         </el-form-item>
       </el-form>
-      <el-button v-if="stage === 'disable'" link type="primary" @click="toggleDisableFactor">
-        {{ form.useRecoveryCode ? '改用动态码' : '手机不在身边？改用恢复码' }}
-      </el-button>
+      <div v-if="stage !== 'enable-key' && status?.mfaRequired" class="flex flex-wrap gap-1">
+        <el-button v-if="status.availableMethods.includes('totp')" link type="primary" @click="form.useWebAuthn = false; form.useRecoveryCode = false">动态码</el-button>
+        <el-button v-if="stage !== 'regenerate' && status.availableMethods.includes('recovery_code')" link type="primary" @click="form.useWebAuthn = false; form.useRecoveryCode = true">恢复码</el-button>
+        <el-button v-if="status.availableMethods.includes('webauthn')" link type="primary" @click="form.useWebAuthn = true; form.useRecoveryCode = false">已绑定密钥</el-button>
+      </div>
+      <el-alert v-if="form.useWebAuthn || stage === 'enable-key'" class="mt-2" type="info" :closable="false" title="继续后浏览器会请求已绑定的强凭据完成安全复核。" />
     </template>
 
     <template v-else-if="stage === 'enroll-scan'">
@@ -416,16 +534,17 @@ const toggleDisableFactor = () => {
         :closable="false"
         show-icon
         title="请立即抄写或保存到安全位置"
-        description="每个恢复码只能使用一次，可在手机丢失时代替动态码登录。关闭本窗口后将无法再次查看。"
+        description="每个恢复码只能使用一次，验证时每次仅输入其中一条。复制全部仅供保存，不能直接粘贴到验证框；确认保存后将无法再次查看。"
       />
-      <div class="mt-4 grid grid-cols-2 gap-2">
-        <code
+      <div class="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <div
           v-for="code in recoveryCodes"
           :key="code"
-          class="rounded-xl bg-slate-50 px-3 py-2 text-center font-mono text-sm tracking-wider text-slate-700 dark:bg-white/5 dark:text-slate-200"
+          class="flex min-w-0 flex-wrap items-center justify-between gap-1 rounded-xl bg-slate-50 px-3 py-2 dark:bg-white/5"
         >
-          {{ code }}
-        </code>
+          <code class="break-all font-mono text-sm tracking-wider text-slate-700 dark:text-slate-200">{{ code }}</code>
+          <el-button link type="primary" size="small" @click="copyText(code, '单条恢复码已复制')">复制此条</el-button>
+        </div>
       </div>
     </template>
 
@@ -433,11 +552,16 @@ const toggleDisableFactor = () => {
       <span class="flex flex-wrap justify-end gap-2">
         <template v-if="stage === 'status'">
           <el-button @click="closeDialog">关闭</el-button>
-          <template v-if="status?.enabled">
-            <el-button :disabled="loading" @click="goToStage('regenerate')">重新生成恢复码</el-button>
-            <el-button type="danger" plain :disabled="loading" @click="goToStage('disable')">停用</el-button>
+          <template v-if="status?.mfaRequired">
+            <el-button v-if="status.availableMethods.includes('totp') || status.availableMethods.includes('webauthn')" :disabled="loading" @click="goToStage('regenerate')">重新生成恢复码</el-button>
+            <el-button v-if="!status.totpEnabled" :disabled="loading" @click="goToStage('enroll-password')">绑定动态码</el-button>
+            <el-button v-if="status.totpEnabled && status.availableMethods.includes('webauthn')" :disabled="loading" @click="goToStage('disable-totp')">关闭动态码</el-button>
+            <el-button type="danger" plain :disabled="loading" @click="goToStage('disable')">完全停用两步验证</el-button>
           </template>
-          <el-button v-else type="primary" :disabled="loading || !status" @click="goToStage('enroll-password')">开启两步验证</el-button>
+          <template v-else>
+            <el-button type="primary" :disabled="loading || !status" @click="goToStage('enroll-password')">绑定动态码</el-button>
+            <el-button v-if="strongCredentialCount > 0" :disabled="loading" @click="goToStage('enable-key')">使用已有强凭据开启</el-button>
+          </template>
         </template>
         <template v-else-if="stage === 'enroll-password'">
           <el-button @click="goToStage('status')">返回</el-button>
@@ -448,16 +572,24 @@ const toggleDisableFactor = () => {
           <el-button type="primary" :loading="submitting" @click="handleConfirmEnrollment">验证并开启</el-button>
         </template>
         <template v-else-if="stage === 'recovery-codes'">
-          <el-button @click="copyText(recoveryCodes.join('\n'), '恢复码已复制')">复制全部</el-button>
+          <el-button @click="copyText(recoveryCodes.join('\n'), '全部恢复码已复制，请妥善保存')">复制全部用于保存</el-button>
           <el-button type="primary" @click="handleFinishRecoveryCodes">我已妥善保存</el-button>
         </template>
         <template v-else-if="stage === 'disable'">
           <el-button @click="goToStage('status')">返回</el-button>
-          <el-button type="danger" :loading="submitting" @click="handleDisable">确认停用</el-button>
+          <el-button type="danger" :loading="submitting" @click="handleDisable">完全停用</el-button>
+        </template>
+        <template v-else-if="stage === 'disable-totp'">
+          <el-button @click="goToStage('status')">返回</el-button>
+          <el-button type="warning" :loading="submitting" @click="handleDisable">关闭动态码</el-button>
         </template>
         <template v-else-if="stage === 'regenerate'">
           <el-button @click="goToStage('status')">返回</el-button>
           <el-button type="primary" :loading="submitting" @click="handleRegenerate">重新生成</el-button>
+        </template>
+        <template v-else-if="stage === 'enable-key'">
+          <el-button @click="goToStage('status')">返回</el-button>
+          <el-button type="primary" :loading="submitting" @click="handleEnableKey">验证并开启</el-button>
         </template>
       </span>
     </template>

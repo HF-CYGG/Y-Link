@@ -1,4 +1,4 @@
-/** 管理端通行密钥凭据：原始 ID 与公钥只用于校验，接口只公开记录主键和安全元数据。 */
+/** 管理端通行密钥凭据：usage 区分免密登录与密码登录第二因素；原始 ID 与公钥只用于校验。 */
 import { Column, CreateDateColumn, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, type Relation } from 'typeorm'
 import { entityColumnOptions } from './entity-column-options.js'
 import { SysUser } from './sys-user.entity.js'
@@ -39,6 +39,9 @@ export class SysUserWebauthnCredential {
 
   @Column({ name: 'name', type: 'varchar', length: 64 })
   name!: string
+
+  @Column({ name: 'usage', type: 'varchar', length: 16, default: 'passwordless', comment: '凭据用途：免密登录或密码登录第二因素' })
+  usage!: 'passwordless' | 'second_factor'
 
   @CreateDateColumn({ name: 'created_at', ...entityColumnOptions.timestamp })
   createdAt!: Date

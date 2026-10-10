@@ -88,6 +88,7 @@ export interface UserSafeProfile {
   updatedAt: Date
   /** 仅用户管理列表返回：该账号是否已开启两步验证。 */
   mfaEnabled?: boolean
+  mfaRequired?: boolean
   /** 管理端已绑定的 WebAuthn 凭据数量；不暴露凭据 ID 或公钥。 */
   webauthnCredentialsCount?: number
 }

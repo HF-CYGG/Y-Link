@@ -14,6 +14,7 @@ import { resolvePermissionsByRole } from '../constants/auth-permissions.js'
 import { SysUser } from '../entities/sys-user.entity.js'
 import { SysUserSession } from '../entities/sys-user-session.entity.js'
 import { SysUserWebauthnCredential } from '../entities/sys-user-webauthn-credential.entity.js'
+import { SysUserMfa } from '../entities/sys-user-mfa.entity.js'
 import type { AuthUserContext, UserSafeProfile } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
 import type { RequestMeta } from '../utils/request-meta.js'
@@ -56,6 +57,10 @@ interface AdminLoginSecuritySnapshot {
   username: string
   role: SysUser['role']
   status: SysUser['status']
+  deactivatedAt: number
+  restoredAt: number
+  mfaId: string | null
+  mfaRevision: number | null
 }
 
 export interface AdminLoginSession {
@@ -72,6 +77,7 @@ export interface AdminLoginMfaChallenge {
   mfaRequired: true
   mfaTicket: string
   expiresInSeconds: number
+  availableMethods: Array<'totp' | 'recovery_code' | 'webauthn'>
 }
 
 export type AdminLoginResult = AdminLoginSession | AdminLoginMfaChallenge
@@ -180,6 +186,10 @@ export class AuthService {
       username: user.username,
       role: user.role,
       status: user.status,
+      deactivatedAt: user.deactivatedAt?.getTime() ?? 0,
+      restoredAt: user.restoredAt?.getTime() ?? 0,
+      mfaId: null,
+      mfaRevision: null,
     }
   }
 
@@ -200,6 +210,14 @@ export class AuthService {
       && user.role === snapshot.role
       && user.status === snapshot.status
       && user.status === 'enabled'
+      && !isAccountCurrentlyDeactivated(user)
+      && (user.deactivatedAt?.getTime() ?? 0) === snapshot.deactivatedAt
+      && (user.restoredAt?.getTime() ?? 0) === snapshot.restoredAt
+  }
+
+  private async isMfaSnapshotCurrent(manager: EntityManager, userId: string, snapshot: AdminLoginSecuritySnapshot): Promise<boolean> {
+    const mfa = await manager.getRepository(SysUserMfa).findOneBy({ userId })
+    return (mfa?.id ?? null) === snapshot.mfaId && (mfa?.factorRevision ?? null) === snapshot.mfaRevision
   }
 
   /**
@@ -362,13 +380,32 @@ export class AuthService {
       ? await hashPassword(password).catch(() => null)
       : null
 
-    // 已开启两步验证：密码正确也不签发会话，只发放第二步票据；失败计数要到第二步成功才清空。
-    if (await adminMfaService.isEnabled(user.id)) {
+    // 密码结论在账号锁内再核对：策略启停与签发会话必须有确定先后顺序。
+    const data = await runInTransaction(async (manager) => {
+      const lockedUser = await this.lockUserForSession(manager, user.id)
+      if (!lockedUser || !this.isLoginSecuritySnapshotCurrent(lockedUser, securitySnapshot)) {
+        throw new BizError('账号或密码错误', 401)
+      }
+      const mfa = await manager.getRepository(SysUserMfa).createQueryBuilder('mfa')
+        .addSelect('mfa.totpSecretSealed').where('mfa.user_id = :userId', { userId: lockedUser.id }).getOne()
+      if (!mfa) {
+        return this.createSessionInTransaction(manager, lockedUser, upgradedPasswordHash, requestMeta, { authMethod: 'password', mfaMethod: null })
+      }
+      const availableMethods: AdminLoginMfaChallenge['availableMethods'] = []
+      if (mfa.totpSecretSealed) availableMethods.push('totp')
+      if (await adminMfaService.hasRecoveryCodes(manager, lockedUser.id)) availableMethods.push('recovery_code')
+      if (await adminMfaService.countUsableWebauthnCredentials(manager, lockedUser.id) > 0) {
+        availableMethods.push('webauthn')
+      }
+      return { mfaRequired: true as const, availableMethods,
+        snapshot: { ...securitySnapshot, mfaId: mfa.id, mfaRevision: mfa.factorRevision } }
+    })
+    if (data.mfaRequired) {
       const mfaTicket = generateSessionToken()
       mfaLoginTicketStore.set(mfaTicket, {
         userId: String(user.id),
         username: user.username,
-        securitySnapshot,
+        securitySnapshot: data.snapshot,
         upgradedPasswordHash,
         expiresAt: Date.now() + MFA_LOGIN_TICKET_TTL_MS,
         attemptsLeft: MFA_LOGIN_MAX_ATTEMPTS,
@@ -391,22 +428,9 @@ export class AuthService {
         mfaRequired: true,
         mfaTicket,
         expiresInSeconds: MFA_LOGIN_TICKET_TTL_MS / 1000,
+        availableMethods: data.availableMethods,
       }
     }
-
-    const data = await runInTransaction(async (manager) => {
-      // 密码散列校验保持在事务外；签发前在同一事务内锁定账号并复核安全快照。
-      // 这样改密、停用或角色变更与会话插入必然形成明确先后，晚到的旧校验结果不能重新创建会话。
-      const lockedUser = await this.lockUserForSession(manager, user.id)
-      if (!lockedUser || !this.isLoginSecuritySnapshotCurrent(lockedUser, securitySnapshot)) {
-        throw new BizError('账号或密码错误', 401)
-      }
-      // 事务外判定“未开启”后若恰好刚开启两步验证，不能沿用旧判断直接签发会话。
-      if (await adminMfaService.isEnabled(lockedUser.id, manager)) {
-        throw new BizError('账号安全设置已变化，请重新登录', 401)
-      }
-      return this.createSessionInTransaction(manager, lockedUser, upgradedPasswordHash, requestMeta, { mfaMethod: null })
-    })
 
     // 登录成功后清空该来源与该账号的失败计数，避免历史失败导致后续误锁；按规范用户名清理，与失败记录同一个桶。
     await authSecurityService.clearAdminLoginFailures(requestMeta, user.username)
@@ -429,7 +453,8 @@ export class AuthService {
 
     const outcome = await runInTransaction(async (manager) => {
       const lockedUser = await this.lockUserForSession(manager, ticket.userId)
-      if (!lockedUser || !this.isLoginSecuritySnapshotCurrent(lockedUser, ticket.securitySnapshot)) {
+      if (!lockedUser || !this.isLoginSecuritySnapshotCurrent(lockedUser, ticket.securitySnapshot)
+        || !await this.isMfaSnapshotCurrent(manager, ticket.userId, ticket.securitySnapshot)) {
         return { kind: 'stale' as const }
       }
       const factor = await adminMfaService.verifyFactor(manager, lockedUser.id, {
@@ -440,6 +465,7 @@ export class AuthService {
         return { kind: 'rejected' as const, factor }
       }
       const session = await this.createSessionInTransaction(manager, lockedUser, ticket.upgradedPasswordHash, requestMeta, {
+        authMethod: 'password',
         mfaMethod: factor.method,
         ...(factor.method === 'recovery_code' ? { recoveryCodesRemaining: factor.recoveryCodesRemaining } : {}),
       })
@@ -485,6 +511,53 @@ export class AuthService {
       throw new BizError('动态码或恢复码不正确', 401, { reason: 'ADMIN_MFA_CODE_INVALID', attemptsLeft })
     }
     throw new BizError('验证失败次数过多，请重新输入账号和密码', 401, { reason: MFA_TICKET_EXPIRED_REASON })
+  }
+
+  /** WebAuthn 挑战可读取密码票据主体，但只有最终验签可消费票据。 */
+  inspectMfaLoginTicket(ticketId: string): { userId: string; username: string; expiresAt: number } {
+    const ticket = mfaLoginTicketStore.get(ticketId)
+    if (!ticket) throw new BizError('登录验证已过期，请重新输入账号和密码', 401, { reason: MFA_TICKET_EXPIRED_REASON })
+    return { userId: ticket.userId, username: ticket.username, expiresAt: ticket.expiresAt }
+  }
+
+  /** 与动态码竞争同一密码票据；验签、计数器和会话签发处于同一账号锁事务。 */
+  async completeMfaLoginWithWebauthn(
+    ticketId: string,
+    verify: (manager: EntityManager, user: SysUser) => Promise<boolean>,
+    requestMeta?: RequestMeta,
+  ): Promise<AdminLoginSession> {
+    const ticket = mfaLoginTicketStore.take(ticketId)
+    if (!ticket) throw new BizError('登录验证已过期，请重新输入账号和密码', 401, { reason: MFA_TICKET_EXPIRED_REASON })
+    await authSecurityService.guardAdminMfaLoginRequest(requestMeta, ticket.username)
+    const outcome = await runInTransaction(async (manager) => {
+      const user = await this.lockUserForSession(manager, ticket.userId)
+      if (!user || !this.isLoginSecuritySnapshotCurrent(user, ticket.securitySnapshot)
+        || !await this.isMfaSnapshotCurrent(manager, user.id, ticket.securitySnapshot)) return { kind: 'stale' as const }
+      try {
+        if (!await verify(manager, user)) return { kind: 'rejected' as const }
+      } catch (error) {
+        if (error instanceof BizError && error.statusCode < 500) return { kind: 'rejected' as const }
+        throw error
+      }
+      const session = await this.createSessionInTransaction(manager, user, ticket.upgradedPasswordHash, requestMeta,
+        { authMethod: 'password', mfaMethod: 'webauthn' })
+      return { kind: 'issued' as const, session }
+    })
+    if (outcome.kind === 'issued') {
+      await authSecurityService.clearAdminLoginFailures(requestMeta, ticket.username)
+      return outcome.session
+    }
+    if (outcome.kind === 'stale') {
+      throw new BizError('账号安全设置已变化，请重新登录', 401, { reason: MFA_TICKET_EXPIRED_REASON })
+    }
+    const attemptsLeft = ticket.attemptsLeft - 1
+    if (attemptsLeft > 0) mfaLoginTicketStore.set(ticketId, { ...ticket, attemptsLeft })
+    await authSecurityService.recordAdminLoginFailure(requestMeta, ticket.username)
+    await auditService.safeRecord({ actionType: 'auth.login', actionLabel: '密码后密钥验证失败',
+      targetType: 'user', targetId: ticket.userId, targetCode: ticket.username, requestMeta,
+      resultStatus: 'failed', detail: { reason: 'webauthn_rejected', attemptsLeft } })
+    throw new BizError(attemptsLeft > 0 ? '安全密钥验证失败' : '验证失败次数过多，请重新输入账号和密码',
+      401, { reason: attemptsLeft > 0 ? 'WEBAUTHN_CREDENTIAL_INVALID' : MFA_TICKET_EXPIRED_REASON, attemptsLeft })
   }
 
   async logout(auth: AuthUserContext, requestMeta?: RequestMeta): Promise<void> {

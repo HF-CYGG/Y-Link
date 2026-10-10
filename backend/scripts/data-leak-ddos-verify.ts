@@ -714,6 +714,11 @@ function verifyOverloadPrimitives() {
   const classify = m.classifyOverloadShed
   assert.equal(classify('POST', '/api/auth/login', 'normal'), null)
   assert.equal(classify('POST', '/api/auth/login', 'elevated'), 'anonymousAuth')
+  for (const endpoint of ['/api/auth/login/mfa/webauthn/options', '/api/auth/login/mfa/webauthn/verify']) {
+    assert.equal(classify('POST', endpoint, 'normal'), null)
+    assert.equal(classify('POST', endpoint, 'elevated'), 'anonymousAuth')
+    assert.equal(classify('POST', endpoint, 'critical'), 'anonymousAuth')
+  }
   assert.equal(classify('GET', '/api/customer-service/stream', 'elevated'), 'realtime')
   assert.equal(classify('GET', '/api/reports/sales/export', 'elevated'), 'export')
   assert.equal(classify('POST', '/api/data-maintenance/export/json', 'elevated'), 'export')
@@ -1523,6 +1528,11 @@ async function verifyOverloadShedding() {
     assert.equal(anonymousLogin.status, 503)
     assert.equal(anonymousLogin.headers.get('retry-after'), '5')
     assert.equal(anonymousLogin.body?.data?.reason, 'SERVER_OVERLOADED')
+    for (const endpoint of ['/api/auth/login/mfa/webauthn/options', '/api/auth/login/mfa/webauthn/verify']) {
+      const shed = await call('POST', endpoint, { body: {} })
+      assert.equal(shed.status, 503, `${endpoint} elevated 须在身份验证前削峰`)
+      assert.equal(shed.body?.data?.reason, 'SERVER_OVERLOADED')
+    }
     assert.equal((await call('GET', '/api/client-auth/captcha')).status, 503)
     assert.equal((await call('GET', '/api/audit-logs/export', { session })).status, 503)
     assert.equal((await call('GET', '/api/customer-service/stream', { session })).status, 503)
@@ -1532,6 +1542,10 @@ async function verifyOverloadShedding() {
 
     feed(1500, 3)
     assert.equal(monitor.getLevel(), 'critical')
+    for (const endpoint of ['/api/auth/login/mfa/webauthn/options', '/api/auth/login/mfa/webauthn/verify']) {
+      assert.equal((await call('POST', endpoint, { body: {} })).status, 503,
+        `${endpoint} critical 须在身份验证前削峰`)
+    }
     assert.equal((await call('GET', '/api/users?page=1&pageSize=10', { session })).status, 503, 'critical 拒绝已登录读请求')
     assert.equal((await call('GET', '/api/auth/me', { session })).status, 200, 'critical 保留 /auth/me')
     assert.equal((await call('POST', '/api/auth/presence/heartbeat', { session })).status, 200, '写请求永不削峰')
@@ -1541,6 +1555,11 @@ async function verifyOverloadShedding() {
     feed(100, 5)
   }
   assert.equal(monitor.getLevel(), 'normal')
+  for (const endpoint of ['/api/auth/login/mfa/webauthn/options', '/api/auth/login/mfa/webauthn/verify']) {
+    const ordinary = await call('POST', endpoint, { body: {} })
+    assert.equal(ordinary.status, 403, `${endpoint} normal 时须进入常规 Origin 校验`)
+    assert.notEqual(ordinary.body?.data?.reason, 'SERVER_OVERLOADED')
+  }
   assert.equal((await call('GET', '/api/users?page=1&pageSize=10', { session })).status, 200)
   const after = monitor.snapshot()
   assert.ok(after.shedCounts.anonymousAuth - before.anonymousAuth >= 2, JSON.stringify(after.shedCounts))

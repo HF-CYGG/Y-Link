@@ -46,8 +46,10 @@ const resetWebauthnSchema = z.object({
   currentPassword: existingPasswordInput('当前密码'),
   code: z.string().trim().max(16).optional(),
   recoveryCode: z.string().trim().max(32).optional(),
+  stepUpProof: z.string().trim().min(1).max(128).optional(),
   reason: z.string().trim().min(1, '请输入撤销原因').max(500, '撤销原因不能超过 500 字'),
 })
+const resetMfaSchema = resetWebauthnSchema.omit({ reason: true })
 
 const accountLifecycleReasonSchema = z.object({
   reason: z.string().trim().min(2, '原因至少 2 个字符').max(500, '原因不能超过 500 个字符'),
@@ -246,7 +248,8 @@ userRouter.post(
   requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
-    const data = await userService.resetMfa(req.params.id, authReq.auth, extractRequestMeta(req))
+    const payload = resetMfaSchema.parse(req.body)
+    const data = await userService.resetMfa(req.params.id, authReq.auth, payload, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',

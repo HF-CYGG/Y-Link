@@ -21,6 +21,12 @@ export interface AdminWebAuthnCredential {
   lastUsedAt: string | null
   deviceType: string
   backedUp: boolean
+  usage: 'passwordless' | 'second_factor'
+}
+
+export interface AdminWebAuthnRegistrationResult extends AdminWebAuthnCredential {
+  /** 仅首次独立启用第二因素时返回，不能缓存或写入日志。 */
+  recoveryCodes?: string[]
 }
 
 export interface AdminWebAuthnChallenge<T> {
@@ -33,12 +39,19 @@ export interface AdminWebAuthnStepUp {
   currentPassword: string
   code?: string
   recoveryCode?: string
+  stepUpProof?: string
 }
 
 export interface AdminWebAuthnRegisterPayload extends AdminWebAuthnStepUp {
   name: string
   kind: 'passkey' | 'security_key'
+  usage?: 'passwordless' | 'second_factor'
 }
+
+export type AdminWebAuthnStepUpAction =
+  | 'webauthn.register' | 'webauthn.delete' | 'mfa.totp.enroll' | 'mfa.totp.disable'
+  | 'mfa.disable_all' | 'mfa.recovery_codes' | 'mfa.webauthn.enable'
+  | 'user.mfa.reset' | 'user.webauthn.reset'
 
 export const getAdminWebAuthnCapabilities = (config: RequestConfig = {}) =>
   request<AdminWebAuthnCapabilities>({ ...config, method: 'GET', url: '/auth/webauthn/capabilities' })
@@ -46,6 +59,21 @@ export const getAdminWebAuthnCapabilities = (config: RequestConfig = {}) =>
 export const startAdminWebAuthnLogin = (payload: { captchaId?: string; code?: string }, config: RequestConfig = {}) =>
   request<AdminWebAuthnChallenge<PublicKeyCredentialRequestOptionsJSON>>({
     ...config, method: 'POST', url: '/auth/webauthn/login/options', data: payload,
+  })
+
+export const startAdminMfaWebAuthnLogin = (mfaTicket: string, config: RequestConfig = {}) =>
+  request<AdminWebAuthnChallenge<PublicKeyCredentialRequestOptionsJSON>>({
+    ...config, method: 'POST', url: '/auth/login/mfa/webauthn/options', data: { mfaTicket },
+  })
+
+export const startAdminWebAuthnStepUp = (payload: { currentPassword: string; action: AdminWebAuthnStepUpAction; targetId?: string }, config: RequestConfig = {}) =>
+  request<AdminWebAuthnChallenge<PublicKeyCredentialRequestOptionsJSON>>({
+    ...config, method: 'POST', url: '/auth/webauthn/step-up/options', data: payload,
+  })
+
+export const verifyAdminWebAuthnStepUp = (payload: { challengeId: string; response: AuthenticationResponseJSON }, config: RequestConfig = {}) =>
+  request<{ stepUpProof: string; expiresInSeconds: number }>({
+    ...config, method: 'POST', url: '/auth/webauthn/step-up/verify', data: payload,
   })
 
 export const verifyAdminWebAuthnLogin = async (
@@ -65,7 +93,7 @@ export const startAdminWebAuthnRegistration = (payload: AdminWebAuthnRegisterPay
 
 export const verifyAdminWebAuthnRegistration = (
   payload: { challengeId: string; response: RegistrationResponseJSON }, config: RequestConfig = {},
-) => request<AdminWebAuthnCredential>({ ...config, method: 'POST', url: '/auth/webauthn/register/verify', data: payload })
+) => request<AdminWebAuthnRegistrationResult>({ ...config, method: 'POST', url: '/auth/webauthn/register/verify', data: payload })
 
 export const renameAdminWebAuthnCredential = (id: string, name: string, config: RequestConfig = {}) =>
   request<AdminWebAuthnCredential>({ ...config, method: 'PATCH', url: `/auth/webauthn/credentials/${encodeURIComponent(id)}`, data: { name } })

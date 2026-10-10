@@ -57,3 +57,40 @@ export const createWebAuthnFlow = (cancelCeremony: () => void) => {
     cancel,
   }
 }
+
+/** 统一登录尝试的可取消阶段与最终请求冻结状态。最终请求完成前不得丢弃可能写入 Cookie 的回应。 */
+export const createLoginAttemptGate = () => {
+  let sequence = 0
+  let controller: AbortController | null = null
+  let committed = false
+  return {
+    begin: () => {
+      if (committed) return null
+      controller?.abort()
+      controller = new AbortController()
+      sequence += 1
+      return { id: sequence, signal: controller.signal }
+    },
+    isCurrent: (id: number) => id === sequence && controller !== null && !controller.signal.aborted,
+    isCommitted: () => committed,
+    commit: (id: number) => {
+      if (id !== sequence || controller === null || controller.signal.aborted) return false
+      committed = true
+      return true
+    },
+    settle: (id: number) => {
+      if (id !== sequence || !committed) return false
+      committed = false
+      controller = null
+      sequence += 1
+      return true
+    },
+    cancel: () => {
+      if (committed) return false
+      controller?.abort()
+      controller = null
+      sequence += 1
+      return true
+    },
+  }
+}

@@ -31,10 +31,10 @@ export class TestWebauthnAuthenticator {
     return Buffer.from(JSON.stringify({ type, challenge, origin, crossOrigin: false }))
   }
 
-  private authenticatorData(rpId: string, counter: number, register = false, uv = true) {
+  private authenticatorData(rpId: string, counter: number, register = false, uv = true, up = true) {
     const counterBytes = Buffer.alloc(4)
     counterBytes.writeUInt32BE(counter)
-    const base = [createHash('sha256').update(rpId).digest(), Buffer.from([register ? (uv ? 0x45 : 0x41) : (uv ? 0x05 : 0x01)]), counterBytes]
+    const base = [createHash('sha256').update(rpId).digest(), Buffer.from([register ? (uv ? 0x45 : 0x41) : ((up ? 0x01 : 0) | (uv ? 0x04 : 0))]), counterBytes]
     if (!register) return Buffer.concat(base)
     const jwk = this.publicKey.export({ format: 'jwk' })
     const cose = cbor(new Map<number, CborValue>([
@@ -45,10 +45,20 @@ export class TestWebauthnAuthenticator {
     return Buffer.concat([...base, Buffer.alloc(16), idLength, this.credentialId, cose])
   }
 
-  registration(challenge: string, origin: string, rpId: string, uv = true) {
+  registration(challenge: string, origin: string, rpId: string, uv = true,
+    attestationFormat: 'none' | 'packed' | 'packed_bad_signature' | 'unknown' = 'none') {
     const clientDataJSON = this.clientData('webauthn.create', challenge, origin)
+    const authData = this.authenticatorData(rpId, 0, true, uv)
+    const attStmt = new Map<string, CborValue>()
+    if (attestationFormat !== 'none') {
+      const signature = sign('sha256', Buffer.concat([authData, createHash('sha256').update(clientDataJSON).digest()]), this.privateKey)
+      if (attestationFormat === 'packed_bad_signature') signature[signature.length - 1] ^= 1
+      attStmt.set('alg', -7)
+      attStmt.set('sig', signature)
+    }
     const attestationObject = cbor(new Map<string, CborValue>([
-      ['fmt', 'none'], ['attStmt', new Map()], ['authData', this.authenticatorData(rpId, 0, true, uv)],
+      ['fmt', attestationFormat === 'unknown' ? 'unknown-format' : attestationFormat === 'none' ? 'none' : 'packed'],
+      ['attStmt', attStmt], ['authData', authData],
     ]))
     const id = this.credentialId.toString('base64url')
     return {
@@ -57,9 +67,9 @@ export class TestWebauthnAuthenticator {
     }
   }
 
-  authentication(challenge: string, origin: string, rpId: string, userHandle: string, counter: number, uv = true) {
+  authentication(challenge: string, origin: string, rpId: string, userHandle: string | null, counter: number, uv = true, up = true) {
     const clientDataJSON = this.clientData('webauthn.get', challenge, origin)
-    const authenticatorData = this.authenticatorData(rpId, counter, false, uv)
+    const authenticatorData = this.authenticatorData(rpId, counter, false, uv, up)
     const signature = sign('sha256', Buffer.concat([authenticatorData, createHash('sha256').update(clientDataJSON).digest()]), this.privateKey)
     const id = this.credentialId.toString('base64url')
     return {

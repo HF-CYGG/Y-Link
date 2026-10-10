@@ -16,7 +16,7 @@ const backendRoot = path.resolve(process.cwd())
 assert.equal(fs.existsSync(path.join(backendRoot, '.env')), false, '隔离验证拒绝读取 backend/.env')
 const profile = 'admin-webauthn-legacy-upgrade-verify'
 assert.equal(fs.existsSync(path.join(backendRoot, `.env.${profile}`)), false, '隔离验证拒绝读取 profile env')
-const testDataRoot = path.resolve(backendRoot, '../tmp/admin-webauthn-20261009-backend/test-data')
+const testDataRoot = path.resolve(backendRoot, '../tmp/webauthn-compat-auth/test-data')
 assert.equal(path.basename(testDataRoot), 'test-data')
 fs.mkdirSync(testDataRoot, { recursive: true })
 const tempRoot = fs.mkdtempSync(path.join(testDataRoot, `run-legacy-${process.pid}-`))
@@ -62,7 +62,7 @@ try {
   assert.ok('token' in originalLogin, '历史会话必须由原密码登录创建')
   const originalToken = originalLogin.token
   const auth = await authService.resolveAuthUserByToken(originalToken)
-  const enrollment = await adminMfaService.beginEnrollment(auth)
+  const enrollment = await adminMfaService.beginEnrollment(auth, { currentPassword: process.env.INIT_ADMIN_PASSWORD! })
   const enrollmentCode = computeHotp(decodeBase32(enrollment.secret), currentTotpStep())
   await adminMfaService.confirmEnrollment(auth, enrollmentCode)
   await AppDataSource.getRepository(SysUserMfa).update({ userId: user.id }, { lastUsedStep: currentTotpStep() - 2 })

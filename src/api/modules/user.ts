@@ -168,16 +168,21 @@ export const resetUserPassword = async (id: string, payload: ResetUserPasswordPa
  * - 用于对方丢失手机且恢复码用尽的场景，不能重置自己；
  * - 不作废对方已有会话，重置后对方下次登录只需账号密码，应提醒其尽快重新绑定。
  */
-export const resetUserMfa = (id: string) =>
-  request<{ reset: true }>({
-    method: 'POST',
-    url: `/users/${id}/mfa/reset`,
-  })
-
-export interface ResetUserWebAuthnPayload {
+export interface AdminUserSensitiveActionProof {
   currentPassword: string
   code?: string
   recoveryCode?: string
+  stepUpProof?: string
+}
+
+export const resetUserMfa = (id: string, payload: AdminUserSensitiveActionProof) =>
+  request<{ reset: true }>({
+    method: 'POST',
+    url: `/users/${encodeURIComponent(id)}/mfa/reset`,
+    data: payload,
+  })
+
+export interface ResetUserWebAuthnPayload extends AdminUserSensitiveActionProof {
   reason: string
 }
 

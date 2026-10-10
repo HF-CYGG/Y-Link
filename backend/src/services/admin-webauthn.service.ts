@@ -35,6 +35,47 @@ interface LoginTicket {
 }
 const loginTickets = new EphemeralTicketStore<LoginTicket>({ maxSize: 5000, resolveExpiresAt: (ticket) => ticket.expiresAt })
 
+export const ADMIN_STEP_UP_ACTIONS = [
+  'webauthn.register', 'webauthn.delete', 'mfa.totp.enroll', 'mfa.totp.disable',
+  'mfa.disable_all', 'mfa.recovery_codes', 'mfa.webauthn.enable',
+  'user.mfa.reset', 'user.webauthn.reset',
+] as const
+export type AdminStepUpAction = typeof ADMIN_STEP_UP_ACTIONS[number]
+interface AccountSecuritySnapshot {
+  passwordHash: string
+  role: SysUser['role']
+  status: SysUser['status']
+  deactivatedAt: number
+  restoredAt: number
+  mfaId: string | null
+  mfaRevision: number | null
+}
+interface BoundChallenge extends AccountSecuritySnapshot {
+  userId: string
+  sessionDigest: string
+  action: AdminStepUpAction
+  targetId: string | null
+  challenge: string
+  expectedOrigin: string
+  expectedRpId: string
+  allowedIds: string[]
+  verifiedUsage?: 'passwordless' | 'second_factor'
+  expiresAt: number
+}
+interface MfaChallenge {
+  userId: string
+  mfaTicketDigest: string
+  nonceDigest: string
+  challenge: string
+  expectedOrigin: string
+  expectedRpId: string
+  allowedIds: string[]
+  expiresAt: number
+}
+const mfaChallenges = new EphemeralTicketStore<MfaChallenge>({ maxSize: 5000, resolveExpiresAt: (ticket) => ticket.expiresAt })
+const stepUpChallenges = new EphemeralTicketStore<BoundChallenge>({ maxSize: 5000, resolveExpiresAt: (ticket) => ticket.expiresAt })
+const stepUpProofs = new EphemeralTicketStore<BoundChallenge>({ maxSize: 5000, resolveExpiresAt: (ticket) => ticket.expiresAt })
+
 interface RegisterTicket {
   purpose: 'register'
   userId: string
@@ -50,9 +91,11 @@ interface RegisterTicket {
     restoredAt: number
     mfaId: string | null
     mfaEnabledAt: number | null
+    mfaRevision: number | null
     userHandle: string
   }
   name: string
+  usage: 'passwordless' | 'second_factor'
   expiresAt: number
 }
 const registerTickets = new EphemeralTicketStore<RegisterTicket>({ maxSize: 5000, resolveExpiresAt: (ticket) => ticket.expiresAt })
@@ -105,6 +148,69 @@ export class AdminWebauthnService {
     }
   }
 
+  private snapshot(user: SysUser, mfa: SysUserMfa | null): AccountSecuritySnapshot {
+    return { passwordHash: user.passwordHash, role: user.role, status: user.status,
+      deactivatedAt: user.deactivatedAt?.getTime() ?? 0, restoredAt: user.restoredAt?.getTime() ?? 0,
+      mfaId: mfa?.id ?? null, mfaRevision: mfa?.factorRevision ?? null }
+  }
+
+  private async assertSnapshot(manager: EntityManager, user: SysUser, snapshot: AccountSecuritySnapshot): Promise<void> {
+    const mfa = await manager.getRepository(SysUserMfa).findOneBy({ userId: user.id })
+    const current = this.snapshot(user, mfa)
+    if (Object.keys(current).some((key) => current[key as keyof AccountSecuritySnapshot] !== snapshot[key as keyof AccountSecuritySnapshot])) {
+      throw new BizError('账号安全设置已变化，请重新验证', 409, { reason: 'WEBAUTHN_CHALLENGE_EXPIRED' })
+    }
+  }
+
+  private parseCredentialId(response: AuthenticationResponseJSON): { bytes: Buffer; digest: string } {
+    const rawId = response.rawId
+    const bytes = typeof rawId === 'string' ? Buffer.from(rawId, 'base64url') : Buffer.alloc(0)
+    if (!bytes.length || bytes.length > 1024 || bytes.toString('base64url') !== rawId || response.id !== rawId) {
+      throw new BizError('通行密钥凭据无效', 401, { reason: 'WEBAUTHN_CREDENTIAL_INVALID' })
+    }
+    return { bytes, digest: createHash('sha256').update(bytes).digest('hex') }
+  }
+
+  private async verifyCredentialForUser(manager: EntityManager, user: SysUser, response: AuthenticationResponseJSON,
+    challenge: { challenge: string; expectedOrigin: string; expectedRpId: string; allowedIds: string[] }): Promise<false | 'passwordless' | 'second_factor'> {
+    const { bytes, digest } = this.parseCredentialId(response)
+    if (!challenge.allowedIds.includes(digest)) return false
+    const query = manager.getRepository(SysUserWebauthnCredential).createQueryBuilder('credential')
+      .addSelect(['credential.credentialId', 'credential.publicKey'])
+      .where('credential.user_id = :userId AND credential.rp_id = :rpId AND credential.credential_id_sha256 = :digest',
+        { userId: user.id, rpId: challenge.expectedRpId, digest })
+    if (manager.connection.options.type === 'mysql') query.setLock('pessimistic_write')
+    const credential = await query.getOne()
+    if (!credential || !Buffer.from(credential.credentialId).equals(bytes)) return false
+    const handle = response.response.userHandle
+    if (handle) {
+      if (!user.webauthnUserHandle) return false
+      const bytesHandle = Buffer.from(handle, 'base64url')
+      const expectedHandle = Buffer.from(user.webauthnUserHandle, 'hex')
+      if (bytesHandle.toString('base64url') !== handle || bytesHandle.length !== expectedHandle.length
+        || !timingSafeEqual(bytesHandle, expectedHandle)) return false
+    }
+    const requireUV = credential.usage === 'passwordless'
+    let verification: Awaited<ReturnType<typeof verifyAuthenticationResponse>>
+    try {
+      verification = await verifyAuthenticationResponse({ response,
+        expectedChallenge: challenge.challenge, expectedOrigin: challenge.expectedOrigin,
+        expectedRPID: challenge.expectedRpId, requireUserVerification: requireUV,
+        credential: { id: bytes.toString('base64url'), publicKey: new Uint8Array(credential.publicKey),
+          counter: Number(credential.counter),
+          transports: credential.transportsJson ? JSON.parse(credential.transportsJson) as string[] : undefined } })
+    } catch { return false }
+    // SDK 默认 WebAuthn 路径已强制 UP；第二因素仅放宽 UV。
+    if (!verification.verified || (requireUV && !verification.authenticationInfo.userVerified)
+      || verification.authenticationInfo.credentialID !== bytes.toString('base64url')) return false
+    credential.counter = String(verification.authenticationInfo.newCounter)
+    credential.deviceType = verification.authenticationInfo.credentialDeviceType
+    credential.backedUp = verification.authenticationInfo.credentialBackedUp
+    credential.lastUsedAt = new Date()
+    await manager.getRepository(SysUserWebauthnCredential).save(credential)
+    return credential.usage
+  }
+
   async listCredentials(userId: string) {
     const credentials = await this.credentialRepo.find({
       where: { userId }, order: { createdAt: 'DESC', id: 'DESC' },
@@ -114,8 +220,9 @@ export class AdminWebauthnService {
 
   private toSafeCredential(credential: SysUserWebauthnCredential) {
     return {
-      id: credential.id, name: credential.name, createdAt: credential.createdAt,
+      id: String(credential.id), name: credential.name, createdAt: credential.createdAt,
       lastUsedAt: credential.lastUsedAt, deviceType: credential.deviceType, backedUp: credential.backedUp,
+      usage: credential.usage,
     }
   }
 
@@ -144,16 +251,17 @@ export class AdminWebauthnService {
     currentPassword: string
     code?: string
     recoveryCode?: string
+    stepUpProof?: string
   }, requestMeta?: RequestMeta) {
     await authService.verifyStepUpPassword(auth, input.currentPassword, requestMeta, 'auth.webauthn.delete')
     const outcome = await runInTransaction(async (manager) => {
       const user = await this.lockUser(manager, auth.userId)
       await this.assertSessionLiveUnderAccountLock(manager, auth)
       if (!await verifyPassword(input.currentPassword.trim(), user.passwordHash)) return { kind: 'password_invalid' as const }
-      const mfa = await manager.getRepository(SysUserMfa).findOneBy({ userId: user.id })
+      const mfa = await manager.getRepository(SysUserMfa).createQueryBuilder('mfa')
+        .addSelect('mfa.totpSecretSealed').where('mfa.user_id = :userId', { userId: user.id }).getOne()
       if (mfa) {
-        if (Boolean(input.code) === Boolean(input.recoveryCode)) return { kind: 'factor_missing' as const }
-        const factor = await adminMfaService.verifyFactor(manager, user.id, input)
+        const factor = await adminMfaService.verifyFactorOrProof(manager, auth, input, 'webauthn.delete', id)
         if (!factor.ok) return { kind: 'factor_invalid' as const, reason: factor.reason }
       }
       const repo = manager.getRepository(SysUserWebauthnCredential)
@@ -161,7 +269,13 @@ export class AdminWebauthnService {
       if (manager.connection.options.type === 'mysql') query.setLock('pessimistic_write')
       const credential = await query.getOne()
       if (!credential) throw new BizError('密钥不存在', 404)
+      if (mfa && !mfa.totpSecretSealed && credential.rpId === webauthnConfig.rpId
+        && (credential.usage === 'passwordless' || credential.usage === 'second_factor')
+        && await adminMfaService.countUsableWebauthnCredentials(manager, user.id) <= 1) {
+        throw new BizError('不能删除最后一个常规验证方式，请使用明确停用全部两步验证', 409)
+      }
       await repo.delete({ id: credential.id, userId: user.id })
+      if (mfa) await adminMfaService.bumpFactorRevision(manager, user.id)
       const revokedSessions = await manager.getRepository(SysUserSession).delete({ userId: user.id })
       await auditService.record({
         actionType: 'auth.webauthn.delete', actionLabel: '删除通行密钥', targetType: 'user', targetId: user.id,
@@ -179,7 +293,7 @@ export class AdminWebauthnService {
         targetId: auth.userId, actor: auth, requestMeta, resultStatus: 'failed',
         detail: { reason: outcome.kind === 'factor_invalid' ? outcome.reason : outcome.kind },
       })
-      throw new BizError(outcome.kind === 'factor_missing' ? '请输入 6 位动态码或恢复码' : '身份复核未通过', 400, { reason: 'WEBAUTHN_STEP_UP_INVALID' })
+      throw new BizError('身份复核未通过', 400, { reason: 'WEBAUTHN_STEP_UP_INVALID' })
     }
     customerServiceRealtimeService.disconnectByOwner('service', auth.userId)
     return true
@@ -189,6 +303,7 @@ export class AdminWebauthnService {
     currentPassword: string
     code?: string
     recoveryCode?: string
+    stepUpProof?: string
     reason: string
   }, requestMeta?: RequestMeta): Promise<{ revokedCount: number }> {
     const reason = input.reason.trim()
@@ -210,11 +325,11 @@ export class AdminWebauthnService {
       if (!await verifyPassword(input.currentPassword.trim(), actorSecret.passwordHash)) return { kind: 'password_invalid' as const }
       const mfa = await manager.getRepository(SysUserMfa).findOneBy({ userId: actorUser.id })
       if (mfa) {
-        if (Boolean(input.code) === Boolean(input.recoveryCode)) return { kind: 'factor_missing' as const }
-        const factor = await adminMfaService.verifyFactor(manager, actorUser.id, input)
+        const factor = await adminMfaService.verifyFactorOrProof(manager, actor, input, 'user.webauthn.reset', targetId)
         if (!factor.ok) return { kind: 'factor_invalid' as const, reason: factor.reason }
       }
       const credentials = await manager.getRepository(SysUserWebauthnCredential).delete({ userId: target.id })
+      if ((credentials.affected ?? 0) > 0) await adminMfaService.bumpFactorRevision(manager, target.id)
       const sessions = await manager.getRepository(SysUserSession).delete({ userId: target.id })
       await auditService.record({
         actionType: 'user.webauthn.reset', actionLabel: '管理员撤销通行密钥', targetType: 'user', targetId: target.id,
@@ -232,7 +347,7 @@ export class AdminWebauthnService {
         targetId, actor, requestMeta, resultStatus: 'failed',
         detail: { reason: outcome.kind === 'factor_invalid' ? outcome.reason : outcome.kind },
       })
-      throw new BizError(outcome.kind === 'factor_missing' ? '请输入 6 位动态码或恢复码' : '身份复核未通过', 400, { reason: 'WEBAUTHN_STEP_UP_INVALID' })
+      throw new BizError('身份复核未通过', 400, { reason: 'WEBAUTHN_STEP_UP_INVALID' })
     }
     customerServiceRealtimeService.disconnectByOwner('service', targetId)
     return { revokedCount: outcome.revokedCount }
@@ -241,13 +356,18 @@ export class AdminWebauthnService {
   async beginRegistration(auth: AuthUserContext, input: {
     name: string
     kind: 'passkey' | 'security_key'
+    usage?: 'passwordless' | 'second_factor'
     currentPassword: string
     code?: string
     recoveryCode?: string
+    stepUpProof?: string
   }, origin: string, requestMeta?: RequestMeta) {
     const { rpId, rpName } = requireWebauthnEnabled()
     const name = input.name.trim()
     if (!name || name.length > 64) throw new BizError('密钥名称长度需为 1 至 64 位', 400)
+    if (input.usage === 'second_factor' && input.kind !== 'security_key') {
+      throw new BizError('第二因素须选择安全密钥注册方式', 400)
+    }
     await authService.verifyStepUpPassword(auth, input.currentPassword, requestMeta, 'auth.webauthn.register')
     const outcome = await runInTransaction(async (manager) => {
       const user = await this.lockUser(manager, auth.userId)
@@ -255,8 +375,7 @@ export class AdminWebauthnService {
       if (!await verifyPassword(input.currentPassword.trim(), user.passwordHash)) return { kind: 'password_invalid' as const }
       const mfa = await manager.getRepository(SysUserMfa).findOneBy({ userId: user.id })
       if (mfa) {
-        if (Boolean(input.code) === Boolean(input.recoveryCode)) return { kind: 'factor_missing' as const }
-        const factor = await adminMfaService.verifyFactor(manager, user.id, input)
+        const factor = await adminMfaService.verifyFactorOrProof(manager, auth, input, 'webauthn.register')
         if (!factor.ok) return { kind: 'factor_invalid' as const, reason: factor.reason }
       }
       const credentials = await manager.getRepository(SysUserWebauthnCredential)
@@ -284,6 +403,7 @@ export class AdminWebauthnService {
           deactivatedAt: user.deactivatedAt?.getTime() ?? 0,
           restoredAt: user.restoredAt?.getTime() ?? 0,
           mfaId: mfa?.id ?? null, mfaEnabledAt: mfa?.enabledAt.getTime() ?? null,
+          mfaRevision: mfa?.factorRevision ?? null,
           userHandle: user.webauthnUserHandle,
         },
       }
@@ -297,20 +417,24 @@ export class AdminWebauthnService {
         targetId: auth.userId, targetCode: auth.username, actor: auth, requestMeta, resultStatus: 'failed',
         detail: { reason: outcome.kind === 'factor_invalid' ? outcome.reason : outcome.kind },
       })
-      throw new BizError(outcome.kind === 'factor_missing' ? '请输入 6 位动态码或恢复码' : '身份复核未通过', 400, { reason: 'WEBAUTHN_STEP_UP_INVALID' })
+      throw new BizError('身份复核未通过', 400, { reason: 'WEBAUTHN_STEP_UP_INVALID' })
     }
     const options = await generateRegistrationOptions({
       rpName, rpID: rpId, userName: outcome.username, userDisplayName: outcome.displayName,
       userID: Buffer.from(outcome.handle, 'hex'), attestationType: 'none', timeout: CHALLENGE_TTL_MS,
-      authenticatorSelection: { residentKey: 'required', requireResidentKey: true, userVerification: 'required' },
-      preferredAuthenticatorType: input.kind === 'security_key' ? 'securityKey' : 'localDevice',
+      authenticatorSelection: input.usage === 'second_factor'
+        ? { residentKey: 'discouraged', requireResidentKey: false, userVerification: 'discouraged' }
+        : { residentKey: 'required', requireResidentKey: true, userVerification: 'required' },
+      ...(input.kind === 'security_key' ? { preferredAuthenticatorType: 'securityKey' as const } : {}),
       excludeCredentials: outcome.excludeCredentials,
     })
     const challengeId = randomBytes(32).toString('base64url')
     registerTickets.set(challengeId, {
       purpose: 'register', userId: outcome.userId, sessionDigest: hashSessionToken(auth.sessionToken),
       challenge: options.challenge, expectedOrigin: origin, expectedRpId: rpId,
-      securitySnapshot: outcome.securitySnapshot, name, expiresAt: Date.now() + CHALLENGE_TTL_MS,
+      securitySnapshot: outcome.securitySnapshot, name,
+      usage: input.usage ?? 'passwordless',
+      expiresAt: Date.now() + CHALLENGE_TTL_MS,
     })
     return { challengeId, options, expiresInSeconds: CHALLENGE_TTL_MS / 1000 }
   }
@@ -327,9 +451,10 @@ export class AdminWebauthnService {
     try {
       verified = await verifyRegistrationResponse({
         response, expectedChallenge: ticket.challenge, expectedOrigin: ticket.expectedOrigin,
-        expectedRPID: ticket.expectedRpId, requireUserVerification: true,
+        expectedRPID: ticket.expectedRpId, requireUserVerification: ticket.usage === 'passwordless',
       })
-      if (!verified.verified || !verified.registrationInfo?.userVerified || verified.registrationInfo.fmt !== 'none') {
+      if (!verified.verified || !verified.registrationInfo
+        || (ticket.usage === 'passwordless' && (!verified.registrationInfo.userVerified || !verified.registrationInfo.credentialDeviceType))) {
         throw new Error('registration_unverified')
       }
     } catch {
@@ -357,7 +482,8 @@ export class AdminWebauthnService {
         || (user.restoredAt?.getTime() ?? 0) !== snapshot.restoredAt
         || user.webauthnUserHandle !== snapshot.userHandle
         || (mfa?.id ?? null) !== snapshot.mfaId
-        || (mfa?.enabledAt.getTime() ?? null) !== snapshot.mfaEnabledAt) {
+        || (mfa?.enabledAt.getTime() ?? null) !== snapshot.mfaEnabledAt
+        || (mfa?.factorRevision ?? null) !== snapshot.mfaRevision) {
         throw new BizError('账号安全设置已变化，请重新绑定', 409, { reason: 'WEBAUTHN_CHALLENGE_EXPIRED' })
       }
       const repo = manager.getRepository(SysUserWebauthnCredential)
@@ -383,16 +509,155 @@ export class AdminWebauthnService {
         counter: String(credential.counter), transportsJson: transports.length ? JSON.stringify(transports) : null,
         deviceType: verified.registrationInfo.credentialDeviceType,
         backedUp: verified.registrationInfo.credentialBackedUp,
-        name: ticket.name, lastUsedAt: null,
+        name: ticket.name, usage: ticket.usage, lastUsedAt: null,
       }))
+      const recoveryCodes = !mfa && ticket.usage === 'second_factor'
+        ? await adminMfaService.enableWithWebauthnInTransaction(manager, user.id)
+        : []
+      if (mfa) await adminMfaService.bumpFactorRevision(manager, user.id)
       await auditService.record({
         actionType: 'auth.webauthn.register', actionLabel: '绑定通行密钥', targetType: 'user', targetId: user.id,
         targetCode: user.username, actor: auth, requestMeta,
-        detail: { credentialRecordId: created.id, deviceType: created.deviceType },
+        detail: { credentialRecordId: created.id, deviceType: created.deviceType, usage: created.usage },
       }, manager)
-      return created
+      return { credential: created, recoveryCodes }
     })
-    return this.toSafeCredential(saved)
+    return { ...this.toSafeCredential(saved.credential),
+      ...(saved.recoveryCodes.length ? { recoveryCodes: saved.recoveryCodes } : {}) }
+  }
+
+  async beginMfaLogin(mfaTicket: string, origin: string, requestMeta?: RequestMeta) {
+    const { rpId } = requireWebauthnEnabled()
+    const ticket = authService.inspectMfaLoginTicket(mfaTicket)
+    await authSecurityService.guardAdminMfaLoginRequest(requestMeta, ticket.username)
+    const credentials = await this.credentialRepo.createQueryBuilder('credential')
+        .addSelect('credential.credentialId').where('credential.user_id = :userId AND credential.rp_id = :rpId',
+          { userId: ticket.userId, rpId })
+        .andWhere('credential.usage IN (:...usages)', { usages: ['passwordless', 'second_factor'] }).getMany()
+    if (!credentials.length) throw new BizError('当前账号没有可用的通行密钥', 409)
+    const allowCredentials = credentials.map((item) => ({ id: Buffer.from(item.credentialId).toString('base64url'),
+      transports: item.transportsJson ? JSON.parse(item.transportsJson) as string[] : undefined }))
+    const options = await generateAuthenticationOptions({ rpID: rpId,
+      userVerification: credentials.every((item) => item.usage === 'passwordless') ? 'required' : 'preferred',
+      allowCredentials, timeout: CHALLENGE_TTL_MS })
+    const challengeId = randomBytes(32).toString('base64url')
+    const nonce = randomBytes(32).toString('base64url')
+    const expiresAt = Math.min(Date.now() + CHALLENGE_TTL_MS, ticket.expiresAt)
+    mfaChallenges.set(challengeId, { userId: ticket.userId, mfaTicketDigest: hashSessionToken(mfaTicket),
+      nonceDigest: nonceDigest(nonce),
+      challenge: options.challenge, expectedOrigin: origin, expectedRpId: rpId,
+      allowedIds: credentials.map((item) => item.credentialIdSha256), expiresAt })
+    return { challengeId, options, expiresInSeconds: Math.max(1, Math.ceil((expiresAt - Date.now()) / 1000)), nonce }
+  }
+
+  async completeMfaLogin(mfaTicket: string, challengeId: string, response: AuthenticationResponseJSON,
+    nonce: string | undefined, origin: string, requestMeta?: RequestMeta) {
+    requireWebauthnEnabled()
+    const challenge = mfaChallenges.take(challengeId)
+    if (!challenge || !nonce || !sameHex(challenge.nonceDigest, nonceDigest(nonce))
+      || challenge.mfaTicketDigest !== hashSessionToken(mfaTicket)
+      || challenge.expectedOrigin !== origin || challenge.expectedRpId !== webauthnConfig.rpId) {
+      throw new BizError('安全密钥挑战已过期，请重试', 401, { reason: 'WEBAUTHN_CHALLENGE_EXPIRED' })
+    }
+    return authService.completeMfaLoginWithWebauthn(mfaTicket, async (manager, user) => {
+      if (String(user.id) !== challenge.userId) return false
+      return Boolean(await this.verifyCredentialForUser(manager, user, response, challenge))
+    }, requestMeta)
+  }
+
+  async beginStepUp(auth: AuthUserContext, input: {
+    currentPassword: string; action: AdminStepUpAction; targetId?: string
+  }, origin: string, requestMeta?: RequestMeta) {
+    const { rpId } = requireWebauthnEnabled()
+    const targetId = input.targetId ?? null
+    if ((input.action.startsWith('user.') || input.action === 'webauthn.delete') !== Boolean(targetId)) {
+      throw new BizError('身份复核目标不正确', 400)
+    }
+    await authService.verifyStepUpPassword(auth, input.currentPassword, requestMeta, `auth.webauthn.step_up.${input.action}`)
+    const prepared = await runInTransaction(async (manager) => {
+      const user = await this.lockUser(manager, auth.userId)
+      await this.assertSessionLiveUnderAccountLock(manager, auth)
+      if (!await verifyPassword(input.currentPassword.trim(), user.passwordHash)) throw new BizError('当前密码错误', 400)
+      const mfa = await manager.getRepository(SysUserMfa).findOneBy({ userId: user.id })
+      const credentials = await manager.getRepository(SysUserWebauthnCredential).createQueryBuilder('credential')
+        .addSelect('credential.credentialId').where('credential.user_id = :userId AND credential.rp_id = :rpId',
+          { userId: user.id, rpId })
+        .andWhere('credential.usage IN (:...usages)', { usages: ['passwordless', 'second_factor'] }).getMany()
+      if (!credentials.length) throw new BizError('当前账号没有可用的通行密钥', 409)
+      return { snapshot: this.snapshot(user, mfa), credentials }
+    })
+    const allowCredentials = prepared.credentials.map((item) => ({ id: Buffer.from(item.credentialId).toString('base64url'),
+      transports: item.transportsJson ? JSON.parse(item.transportsJson) as string[] : undefined }))
+    const options = await generateAuthenticationOptions({ rpID: rpId,
+      userVerification: prepared.credentials.every((item) => item.usage === 'passwordless') ? 'required' : 'preferred',
+      allowCredentials, timeout: CHALLENGE_TTL_MS })
+    const challengeId = randomBytes(32).toString('base64url')
+    stepUpChallenges.set(challengeId, { ...prepared.snapshot, userId: String(auth.userId),
+      sessionDigest: hashSessionToken(auth.sessionToken), action: input.action, targetId,
+      challenge: options.challenge, expectedOrigin: origin, expectedRpId: rpId,
+      allowedIds: prepared.credentials.map((item) => item.credentialIdSha256), expiresAt: Date.now() + CHALLENGE_TTL_MS })
+    return { challengeId, options, expiresInSeconds: CHALLENGE_TTL_MS / 1000 }
+  }
+
+  async completeStepUp(auth: AuthUserContext, challengeId: string, response: AuthenticationResponseJSON, origin: string) {
+    requireWebauthnEnabled()
+    const challenge = stepUpChallenges.take(challengeId)
+    if (!challenge || challenge.userId !== String(auth.userId)
+      || challenge.sessionDigest !== hashSessionToken(auth.sessionToken)
+      || challenge.expectedOrigin !== origin || challenge.expectedRpId !== webauthnConfig.rpId) {
+      throw new BizError('身份复核挑战已过期，请重试', 401, { reason: 'WEBAUTHN_CHALLENGE_EXPIRED' })
+    }
+    const verifiedUsage = await runInTransaction(async (manager) => {
+      const user = await this.lockUser(manager, auth.userId)
+      await this.assertSessionLiveUnderAccountLock(manager, auth)
+      await this.assertSnapshot(manager, user, challenge)
+      const usage = await this.verifyCredentialForUser(manager, user, response, challenge)
+      if (!usage) {
+        throw new BizError('安全密钥验证失败', 401, { reason: 'WEBAUTHN_CREDENTIAL_INVALID' })
+      }
+      await auditService.record({ actionType: 'auth.webauthn.step_up', actionLabel: '安全密钥身份复核',
+        targetType: 'user', targetId: user.id, targetCode: user.username, actor: auth,
+        detail: { action: challenge.action, targetId: challenge.targetId, usage } }, manager)
+      return usage
+    })
+    const stepUpProof = randomBytes(32).toString('base64url')
+    stepUpProofs.set(stepUpProof, { ...challenge, verifiedUsage, expiresAt: Date.now() + CHALLENGE_TTL_MS })
+    return { stepUpProof, expiresInSeconds: CHALLENGE_TTL_MS / 1000 }
+  }
+
+  async consumeStepUpProofInTransaction(manager: EntityManager, auth: AuthUserContext,
+    stepUpProof: string, action: AdminStepUpAction, targetId?: string): Promise<void> {
+    const proof = stepUpProofs.take(stepUpProof)
+    if (!proof || proof.action !== action || proof.targetId !== (targetId ?? null)
+      || proof.userId !== String(auth.userId) || proof.sessionDigest !== hashSessionToken(auth.sessionToken)) {
+      throw new BizError('身份复核证明已过期，请重新验证', 409, { reason: 'WEBAUTHN_STEP_UP_EXPIRED' })
+    }
+    if (action === 'mfa.webauthn.enable' && proof.verifiedUsage !== 'passwordless') {
+      throw new BizError('须使用已绑定的强凭据开启密码两步验证', 403)
+    }
+    const user = await this.lockUser(manager, auth.userId)
+    await this.assertSessionLiveUnderAccountLock(manager, auth)
+    await this.assertSnapshot(manager, user, proof)
+  }
+
+  async enablePasswordMfa(auth: AuthUserContext, input: { currentPassword: string; stepUpProof: string }, requestMeta?: RequestMeta) {
+    requireWebauthnEnabled()
+    await authService.verifyStepUpPassword(auth, input.currentPassword, requestMeta, 'auth.mfa.webauthn.enable')
+    return runInTransaction(async (manager) => {
+      const user = await this.lockUser(manager, auth.userId)
+      await this.assertSessionLiveUnderAccountLock(manager, auth)
+      if (!await verifyPassword(input.currentPassword.trim(), user.passwordHash)) throw new BizError('当前密码错误', 400)
+      await this.consumeStepUpProofInTransaction(manager, auth, input.stepUpProof, 'mfa.webauthn.enable')
+      if (await manager.getRepository(SysUserMfa).countBy({ userId: user.id })) throw new BizError('密码两步验证已开启', 409)
+      if (!await adminMfaService.countUsableWebauthnCredentials(manager, user.id, 'passwordless')) {
+        throw new BizError('当前账号没有已绑定的强凭据', 409)
+      }
+      const recoveryCodes = await adminMfaService.enableWithWebauthnInTransaction(manager, user.id)
+      await auditService.record({ actionType: 'auth.mfa.enable', actionLabel: '使用已有强凭据开启密码两步验证',
+        targetType: 'user', targetId: user.id, targetCode: user.username, actor: auth, requestMeta,
+        detail: { method: 'webauthn', recoveryCodeCount: recoveryCodes.length } }, manager)
+      return { recoveryCodes }
+    })
   }
 
   async beginLogin(origin: string) {
@@ -431,7 +696,7 @@ export class AdminWebauthnService {
           .where('credential.id = :id AND credential.user_id = :userId', { id: candidate.id, userId: lockedUser.id })
         if (manager.connection.options.type === 'mysql') query.setLock('pessimistic_write')
         const credential = await query.getOne()
-        if (!credential || credential.rpId !== ticket.expectedRpId || credential.credentialIdSha256 !== digest
+        if (!credential || credential.usage !== 'passwordless' || credential.rpId !== ticket.expectedRpId || credential.credentialIdSha256 !== digest
           || !Buffer.from(credential.credentialId).equals(credentialIdBytes)
           || !lockedUser.webauthnUserHandle) {
           throw new BizError('通行密钥凭据无效', 401, { reason: 'WEBAUTHN_CREDENTIAL_INVALID' })

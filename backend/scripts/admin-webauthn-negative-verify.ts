@@ -17,7 +17,7 @@ const backendRoot = path.resolve(process.cwd())
 const profile = 'admin-webauthn-negative-verify'
 assert.equal(fs.existsSync(path.join(backendRoot, '.env')), false, '隔离验证拒绝读取 backend/.env')
 assert.equal(fs.existsSync(path.join(backendRoot, `.env.${profile}`)), false, '隔离验证拒绝读取 profile env')
-const testDataRoot = path.resolve(backendRoot, '../tmp/admin-webauthn-20261009-backend/test-data')
+const testDataRoot = path.resolve(backendRoot, '../tmp/webauthn-compat-auth/test-data')
 assert.equal(path.basename(testDataRoot), 'test-data')
 fs.mkdirSync(testDataRoot, { recursive: true })
 const tempRoot = fs.mkdtempSync(path.join(testDataRoot, `run-negative-${process.pid}-`))
@@ -103,7 +103,7 @@ async function keyTicket() {
 }
 async function keyVerify(ticket: Awaited<ReturnType<typeof keyTicket>>, response: ReturnType<TestWebauthnAuthenticator['authentication']>) {
   return call('POST', '/api/auth/webauthn/login/verify', { challengeId: ticket.challengeId, response }, {
-    Origin: ORIGIN, Cookie: `y_link_webauthn_nonce=${ticket.nonce}`,
+    Origin: ORIGIN, Cookie: `y_link_webauthn_nonce_${ticket.challengeId}=${ticket.nonce}`,
   })
 }
 async function credentialState(id: string) {
@@ -126,6 +126,8 @@ async function expectRejectedKey(authenticator: TestWebauthnAuthenticator, handl
   }
   const response = await keyVerify(ticket, signed)
   assert.equal(response.status, 401, `${kind} 真实认证断言必须拒绝`)
+  const body = await response.clone().json() as { data?: { reason?: string } }
+  assert.notEqual(body.data?.reason, 'WEBAUTHN_CHALLENGE_EXPIRED', `${kind} 不得因 nonce 错误而假通过`)
   noAdminCookie(response)
 }
 
@@ -219,7 +221,7 @@ try {
   const purposeAuthentication = adminAuthenticator.authentication(registerForPurpose.options.challenge, ORIGIN, 'localhost', adminKey.handle, 1)
   const wrongPurpose = await call('POST', '/api/auth/webauthn/login/verify', {
     challengeId: registerForPurpose.challengeId, response: purposeAuthentication,
-  }, { Origin: ORIGIN, Cookie: `y_link_webauthn_nonce=${loginForPurpose.nonce}` })
+  }, { Origin: ORIGIN, Cookie: `y_link_webauthn_nonce_${registerForPurpose.challengeId}=${loginForPurpose.nonce}` })
   assert.equal(wrongPurpose.status, 401, '注册票据不得作为登录票据')
   noAdminCookie(wrongPurpose)
   const expiredRegistration = await registerOptions(adminSession, ADMIN_PASSWORD, '过期注册挑战')

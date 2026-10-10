@@ -1,22 +1,23 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/auth/LoginView.vue
- * 文件职责：负责管理端登录、验证码补录、两步验证第二步与登录后安全提示展示，并保证登录成功后的跳转优先级高于装饰动画与预热任务。
+ * 文件职责：负责管理端密码、通行密钥直接登录与密码后第二因素验证，并展示验证码及登录后安全提示。
  * 实现逻辑：
- * - 先执行表单校验，再按需携带图形验证码发起登录；
- * - 账号已开启两步验证时，第一步只拿到短期票据，表单切换为动态码 / 恢复码输入，票据过期或失效时回到第一步重新输入密码；
+ * - 标准用户名和密码自动填充及表单原生提交共用一个入口，密码第一步被接受后才暂存浏览器 PasswordCredential，完整登录后尝试保存；
+ * - 账号已开启两步验证时，第一步取得短期票据，第二步只展示可用的动态码、恢复码或已绑定密钥；
+ * - 可见页按浏览器能力启动一次条件式通行密钥请求，主动密钥登录仍由用户点击触发；切换流程时取消未提交的仪式并丢弃迟到结果；
+ * - 可能签发会话的最终请求从发出到结束冻结页面输入与路由离开，结束后由本次流程自行完成跳转；
  * - 风控触发后固定展示安全提示，并按需拉取验证码，避免用户只看到一闪而过的错误消息；
  * - 登录成功后仅投递非阻塞预热任务，先保证真正的页面跳转立即发生；
- * - 密钥登录作为次操作沿用页面青绿色毛玻璃视觉，保留原有可用性提示、取消和重试状态。
  * - 登录页视觉层采用了融合 Apple / Microsoft Fluent 设计美学的动态几何流体背景，利用 CSS `transform` 硬件加速进行渲染，兼顾了高级视觉表现与主线程性能，避免了输入、点击延迟。
  * 维护说明：
  * - 动态几何图形的动画已使用 `will-change: transform` 并限定在 GPU 层面计算，若后续要叠加更多层，请注意内存与合成层数量，不要使用耗费 CPU 的 `background-position` 或 `box-shadow` 动画；
  * - 验证码展示必须继续使用图片 data URL，避免改回 `v-html` 注入 SVG；
- * - 第二步是否回到第一步只看服务端原因码 `ADMIN_MFA_TICKET_EXPIRED`，不要按提示文案判断。
+ * - 第二步是否回到第一步依据服务端 `ADMIN_MFA_TICKET_EXPIRED` 原因码或限流状态，不按提示文案判断；终止流程必须丢弃待保存密码凭据。
  */
 
 
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { Lock, User, Right, Key } from '@element-plus/icons-vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
@@ -27,8 +28,10 @@ import { ADMIN_MFA_TICKET_EXPIRED_REASON, getAdminCaptcha, type LoginResult } fr
 import { APP_META } from '@/constants/app-meta'
 import { extractErrorMessage, extractRequestErrorReason, normalizeRequestError } from '@/utils/error'
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
-import { getAdminWebAuthnCapabilities, startAdminWebAuthnLogin } from '@/api/modules/admin-webauthn'
-import { assessWebAuthnAvailability, createWebAuthnFlow, isWebAuthnCancellation, type AdminWebAuthnCapabilities } from '@/utils/admin-webauthn'
+import { getAdminWebAuthnCapabilities, startAdminMfaWebAuthnLogin, startAdminWebAuthnLogin } from '@/api/modules/admin-webauthn'
+import { assessWebAuthnAvailability, createLoginAttemptGate, createWebAuthnFlow, isWebAuthnCancellation, type AdminWebAuthnCapabilities } from '@/utils/admin-webauthn'
+import { createPasswordCredentialHandoff, type PasswordCredentialBridge } from '@/utils/admin-password-credential'
+import { guardRecoveryCodePaste } from '@/utils/admin-mfa-recovery-code'
 
 const form = reactive({
   username: '',
@@ -55,8 +58,21 @@ const webAuthnCapabilities = ref<AdminWebAuthnCapabilities | null>(null)
 const webAuthnCapabilitiesPhase = ref<'loading' | 'ready' | 'error'>('loading')
 const webAuthnPhase = ref<'idle' | 'options' | 'ceremony' | 'verifying'>('idle')
 const webAuthnVerifyPending = ref(false)
+const finalRequestPending = ref(false)
+const loginGate = createLoginAttemptGate()
+const passwordCredentialBridge: PasswordCredentialBridge = {
+  PasswordCredential: (globalThis as typeof globalThis & { PasswordCredential?: PasswordCredentialBridge['PasswordCredential'] }).PasswordCredential,
+  store: globalThis.navigator?.credentials?.store ? (credential) => globalThis.navigator.credentials.store(credential) : undefined,
+}
+const passwordHandoff = createPasswordCredentialHandoff(passwordCredentialBridge)
+let passwordSaveSerial = 0
 let webAuthnSdk: typeof import('@simplewebauthn/browser') | null = null
 const webAuthnFlow = createWebAuthnFlow(() => webAuthnSdk?.WebAuthnAbortService.cancelCeremony())
+const conditionalPhase = ref<'unavailable' | 'ready' | 'active' | 'expired' | 'stopped'>('unavailable')
+let conditionalId: number | null = null
+let conditionalProbeSerial = 0
+let conditionalExpiryTimer: ReturnType<typeof setTimeout> | null = null
+const usernameFocused = ref(false)
 const webAuthnContext = () => ({
   origin: globalThis.window?.location.origin ?? '',
   secure: globalThis.window?.isSecureContext === true,
@@ -70,6 +86,101 @@ const webAuthnAvailabilityText = computed(() => webAuthnHint.value || webAuthnAv
 const webAuthnBusy = computed(() => webAuthnPhase.value !== 'idle')
 let webAuthnCapabilitiesController: AbortController | null = null
 
+const clearConditionalExpiry = () => {
+  if (conditionalExpiryTimer) clearTimeout(conditionalExpiryTimer)
+  conditionalExpiryTimer = null
+}
+const stopConditional = () => {
+  conditionalProbeSerial += 1
+  clearConditionalExpiry()
+  if (conditionalId !== null) webAuthnFlow.cancel()
+  conditionalId = null
+  if (conditionalPhase.value === 'active') conditionalPhase.value = 'stopped'
+}
+
+const canUseConditionalMediation = async () => {
+  if (!webAuthnAvailability.value.available || !globalThis.PublicKeyCredential?.isConditionalMediationAvailable) return false
+  try { return await globalThis.PublicKeyCredential.isConditionalMediationAvailable() } catch { return false }
+}
+
+/** 条件式候选只在可见登录页启动；挑战到期后等账号框再次聚焦，不持续轮询。 */
+const startConditionalLogin = async () => {
+  if (conditionalId !== null || document.visibilityState !== 'visible' || mfaChallenge.value || finalRequestPending.value || webAuthnBusy.value) return
+  const probeSerial = ++conditionalProbeSerial
+  if (!await canUseConditionalMediation()) { if (probeSerial === conditionalProbeSerial) conditionalPhase.value = 'unavailable'; return }
+  if (probeSerial !== conditionalProbeSerial || document.visibilityState !== 'visible' || mfaChallenge.value || finalRequestPending.value || webAuthnBusy.value) return
+  const operation = webAuthnFlow.start()
+  conditionalId = operation.id
+  conditionalPhase.value = 'active'
+  let verificationSubmitted = false
+  try {
+    const challenge = await startAdminWebAuthnLogin({}, { signal: operation.signal })
+    if (conditionalId !== operation.id || !webAuthnFlow.isCurrent(operation.id)) return
+    clearConditionalExpiry()
+    conditionalExpiryTimer = setTimeout(() => {
+      if (conditionalId !== operation.id) return
+      stopConditional()
+      conditionalPhase.value = 'expired'
+    }, Math.max(0, challenge.expiresInSeconds) * 1000)
+    const sdk = await import('@simplewebauthn/browser')
+    if (conditionalId !== operation.id || !webAuthnFlow.isCurrent(operation.id)) return
+    webAuthnSdk = sdk
+    const response = await sdk.startAuthentication({ optionsJSON: challenge.options, useBrowserAutofill: true })
+    if (conditionalId !== operation.id || !webAuthnFlow.isCurrent(operation.id)) return
+    clearConditionalExpiry()
+    conditionalId = null
+    const attempt = loginGate.begin()
+    if (!attempt || !loginGate.commit(attempt.id)) return
+    verificationSubmitted = true
+    finalRequestPending.value = true
+    webAuthnVerifyPending.value = true
+    try {
+      const result = await authStore.completeWebAuthnLogin({ challengeId: challenge.challengeId, response })
+      if (result) { loginGate.settle(attempt.id); finalRequestPending.value = false; webAuthnVerifyPending.value = false; await finishLogin(result) }
+    } finally {
+      loginGate.settle(attempt.id)
+      finalRequestPending.value = false
+      webAuthnVerifyPending.value = false
+    }
+  } catch (error) {
+    if (!verificationSubmitted && (conditionalId !== operation.id || !webAuthnFlow.isCurrent(operation.id))) return
+    const normalized = normalizeRequestError(error, '通行密钥候选暂不可用')
+    if (verificationSubmitted) {
+      conditionalPhase.value = 'stopped'
+      showAppError(normalized.message)
+      applySecurityHintFromMessage(normalized.message)
+    } else if (normalized.status === 428 || normalized.status === 429) conditionalPhase.value = 'stopped'
+    else conditionalPhase.value = 'ready'
+  } finally {
+    if (verificationSubmitted) {
+      webAuthnFlow.finish(operation.id)
+      clearConditionalExpiry()
+      conditionalPhase.value = 'stopped'
+    }
+    if (conditionalId === operation.id) {
+      conditionalId = null
+      clearConditionalExpiry()
+      webAuthnFlow.finish(operation.id)
+    }
+  }
+}
+
+const handleVisibility = () => {
+  if (document.visibilityState === 'hidden') {
+    passwordSaveSerial += 1
+    stopConditional()
+    if (!finalRequestPending.value) { webAuthnFlow.cancel(); loginGate.cancel(); webAuthnPhase.value = 'idle'; submitPhase.value = 'idle' }
+    passwordHandoff.discard()
+    return
+  }
+  if (conditionalPhase.value === 'expired' && usernameFocused.value) void startConditionalLogin()
+}
+
+const handleUsernameFocus = () => {
+  usernameFocused.value = true
+  if (conditionalPhase.value === 'expired' && document.visibilityState === 'visible') void startConditionalLogin()
+}
+
 const loadWebAuthnCapabilities = async () => {
   webAuthnCapabilitiesController?.abort()
   const controller = new AbortController()
@@ -80,6 +191,7 @@ const loadWebAuthnCapabilities = async () => {
     if (controller.signal.aborted) return
     webAuthnCapabilities.value = result
     webAuthnCapabilitiesPhase.value = 'ready'
+    if (assessWebAuthnAvailability(result, webAuthnContext()).available) void startConditionalLogin()
   } catch {
     if (controller.signal.aborted) return
     webAuthnCapabilities.value = null
@@ -93,8 +205,9 @@ const rules: FormRules = {
 }
 
 // 两步验证第二步：票据只保存在内存，刷新页面即回到第一步。
-const mfaChallenge = ref<{ ticket: string } | null>(null)
-const mfaMode = ref<'totp' | 'recovery'>('totp')
+const mfaChallenge = ref<{ ticket: string; username: string; availableMethods: Array<'totp' | 'recovery_code' | 'webauthn'>; expiresAt: number } | null>(null)
+const mfaMode = ref<'totp' | 'recovery_code' | 'webauthn'>('totp')
+let mfaExpiryTimer: ReturnType<typeof setTimeout> | null = null
 const mfaForm = reactive({
   code: '',
   recoveryCode: '',
@@ -109,7 +222,8 @@ const submitButtonLabel = computed(() => {
 const formTitle = computed(() => (mfaChallenge.value ? '两步验证' : '登录'))
 const formSubtitle = computed(() => {
   if (!mfaChallenge.value) return '请输入您的访问凭证'
-  return mfaMode.value === 'totp' ? '请输入身份验证器应用中的 6 位动态码' : '请输入一个未使用过的恢复码'
+  if (mfaMode.value === 'totp') return '请输入身份验证器应用中的 6 位动态码'
+  return mfaMode.value === 'recovery_code' ? '请输入一个未使用过的恢复码' : '使用已绑定的通行密钥或安全密钥完成验证'
 })
 
 // 安全说明：验证码后端返回的是 SVG 字符串，
@@ -163,17 +277,28 @@ onMounted(() => {
   root.style.removeProperty('--theme-transition-duration')
   root.style.removeProperty('--theme-transition-easing')
   void loadWebAuthnCapabilities()
+  document.addEventListener('visibilitychange', handleVisibility)
 })
 
 onBeforeUnmount(() => {
+  passwordSaveSerial += 1
   webAuthnCapabilitiesController?.abort()
-  webAuthnFlow.cancel()
+  stopConditional()
+  if (!finalRequestPending.value) webAuthnFlow.cancel()
+  loginGate.cancel()
+  passwordHandoff.discard()
+  document.removeEventListener('visibilitychange', handleVisibility)
   captchaRequestId += 1
   document.documentElement.classList.remove('route-login')
 })
 // 最终验证已发出时，服务端仍可能设置 Cookie；等待结果后才允许切换账号或离开登录页。
 onBeforeRouteLeave(() => {
-  if (webAuthnVerifyPending.value) return false
+  if (webAuthnVerifyPending.value || finalRequestPending.value || loginGate.isCommitted()) return false
+  passwordSaveSerial += 1
+  stopConditional()
+  webAuthnFlow.cancel()
+  loginGate.cancel()
+  passwordHandoff.discard()
 })
 
 const resetCaptchaState = () => {
@@ -185,14 +310,33 @@ const resetCaptchaState = () => {
 }
 
 const resetMfaChallenge = () => {
+  if (finalRequestPending.value) return
+  passwordHandoff.discard()
+  if (mfaExpiryTimer) clearTimeout(mfaExpiryTimer)
+  mfaExpiryTimer = null
   mfaChallenge.value = null
   mfaMode.value = 'totp'
   mfaForm.code = ''
   mfaForm.recoveryCode = ''
 }
 
-const toggleMfaMode = () => {
-  mfaMode.value = mfaMode.value === 'totp' ? 'recovery' : 'totp'
+watch(() => form.username, () => {
+  if (mfaChallenge.value || finalRequestPending.value) return
+  passwordHandoff.discard()
+  if (webAuthnPhase.value !== 'idle') {
+    webAuthnFlow.cancel()
+    loginGate.cancel()
+    webAuthnPhase.value = 'idle'
+  }
+})
+
+const toggleMfaMode = (mode: 'totp' | 'recovery_code' | 'webauthn') => {
+  if (!mfaChallenge.value?.availableMethods.includes(mode)) return
+  if (finalRequestPending.value) return
+  webAuthnFlow.cancel()
+  loginGate.cancel()
+  webAuthnPhase.value = 'idle'
+  mfaMode.value = mode
   mfaForm.code = ''
   mfaForm.recoveryCode = ''
 }
@@ -202,6 +346,7 @@ const toggleMfaMode = () => {
  * 先投递跳转，再处理安全提醒；恢复码登录后提醒剩余数量，引导及时重新生成。
  */
 const finishLogin = async (result: LoginResult) => {
+  void passwordHandoff.storeOnce()
   submitPhase.value = 'success'
   securityHint.value = ''
   resetCaptchaState()
@@ -238,6 +383,7 @@ const cancelWebAuthnLogin = () => {
   // 验证请求一旦发出，服务端可能已经签发会话，不能再让取消丢弃成功结果。
   if (webAuthnPhase.value === 'verifying') return
   webAuthnFlow.cancel()
+  loginGate.cancel()
   webAuthnPhase.value = 'idle'
   webAuthnHint.value = '通行密钥操作已取消，可重新尝试。'
 }
@@ -250,7 +396,11 @@ const handleWebAuthnLogin = async () => {
     return
   }
   webAuthnHint.value = ''
+  stopConditional()
+  passwordHandoff.discard()
   form.password = ''
+  const attempt = loginGate.begin()
+  if (!attempt) return
   const operation = webAuthnFlow.start()
   webAuthnPhase.value = 'options'
   try {
@@ -266,11 +416,15 @@ const handleWebAuthnLogin = async () => {
     if (!webAuthnFlow.isCurrent(operation.id)) return
     webAuthnPhase.value = 'verifying'
     webAuthnVerifyPending.value = true
+    finalRequestPending.value = true
+    loginGate.commit(attempt.id)
     let result: LoginResult | null
     try {
       result = await authStore.completeWebAuthnLogin({ challengeId: challenge.challengeId, response })
     } finally {
       webAuthnVerifyPending.value = false
+      finalRequestPending.value = false
+      loginGate.settle(attempt.id)
     }
     if (!webAuthnFlow.isCurrent(operation.id) || !result) return
     webAuthnFlow.finish(operation.id)
@@ -291,6 +445,7 @@ const handleWebAuthnLogin = async () => {
       }
     }
   } finally {
+    loginGate.cancel()
     if (webAuthnFlow.isCurrent(operation.id)) {
       webAuthnFlow.finish(operation.id)
       webAuthnPhase.value = 'idle'
@@ -304,25 +459,34 @@ const handleWebAuthnLogin = async () => {
  * - 票据过期、次数用尽、账号安全设置变化或账号被锁定时回到第一步，其余错误留在本步清空输入重试。
  */
 const handleMfaSubmit = async (ticket: string) => {
+  if (!mfaChallenge.value || Date.now() >= mfaChallenge.value.expiresAt) { resetMfaChallenge(); showAppWarning('两步验证已过期，请重新登录'); return }
   const code = mfaForm.code.replace(/\s/g, '')
   const recoveryCode = mfaForm.recoveryCode.trim()
   if (mfaMode.value === 'totp' && !/^\d{6}$/.test(code)) {
     showAppWarning('请输入 6 位数字动态码')
     return
   }
-  if (mfaMode.value === 'recovery' && !recoveryCode) {
+  if (mfaMode.value === 'recovery_code' && !recoveryCode) {
     showAppWarning('请输入恢复码')
     return
   }
 
+  const attempt = loginGate.begin()
+  if (!attempt || !loginGate.commit(attempt.id)) return
   submitPhase.value = 'submitting'
+  finalRequestPending.value = true
   try {
     const result = await authStore.completeMfaLogin({
       mfaTicket: ticket,
       ...(mfaMode.value === 'totp' ? { code } : { recoveryCode }),
     })
+    loginGate.settle(attempt.id)
+    finalRequestPending.value = false
     await finishLogin(result)
   } catch (error) {
+    passwordHandoff.discard()
+    loginGate.settle(attempt.id)
+    finalRequestPending.value = false
     submitPhase.value = 'idle'
     const normalizedError = normalizeRequestError(error, '验证失败，请稍后重试')
     applySecurityHintFromMessage(normalizedError.message)
@@ -334,48 +498,131 @@ const handleMfaSubmit = async (ticket: string) => {
     }
     showAppError(normalizedError.message)
   }
+  finally {
+    loginGate.settle(attempt.id)
+    finalRequestPending.value = false
+  }
+}
+
+const handleMfaWebAuthn = async () => {
+  const challengeState = mfaChallenge.value
+  if (!challengeState?.availableMethods.includes('webauthn') || submitPhase.value !== 'idle' || finalRequestPending.value) return
+  if (Date.now() >= challengeState.expiresAt) { resetMfaChallenge(); showAppWarning('两步验证已过期，请重新登录'); return }
+  if (!webAuthnAvailability.value.available) { showAppWarning(webAuthnAvailability.value.message); return }
+  const attempt = loginGate.begin()
+  if (!attempt) return
+  const operation = webAuthnFlow.start()
+  webAuthnPhase.value = 'options'
+  try {
+    const challenge = await startAdminMfaWebAuthnLogin(challengeState.ticket, { signal: operation.signal })
+    if (!webAuthnFlow.isCurrent(operation.id) || !loginGate.isCurrent(attempt.id)) return
+    const sdk = await import('@simplewebauthn/browser')
+    if (!webAuthnFlow.isCurrent(operation.id) || !loginGate.isCurrent(attempt.id)) return
+    webAuthnSdk = sdk
+    webAuthnPhase.value = 'ceremony'
+    const response = await sdk.startAuthentication({ optionsJSON: challenge.options })
+    if (!webAuthnFlow.isCurrent(operation.id) || !loginGate.isCurrent(attempt.id)) return
+    if (!loginGate.commit(attempt.id)) return
+    webAuthnPhase.value = 'verifying'
+    finalRequestPending.value = true
+    webAuthnVerifyPending.value = true
+    submitPhase.value = 'submitting'
+    const result = await authStore.completeMfaWebAuthnLogin({ mfaTicket: challengeState.ticket, challengeId: challenge.challengeId, response })
+    loginGate.settle(attempt.id)
+    finalRequestPending.value = false
+    webAuthnVerifyPending.value = false
+    await finishLogin(result)
+  } catch (error) {
+    passwordHandoff.discard()
+    loginGate.settle(attempt.id)
+    finalRequestPending.value = false
+    webAuthnVerifyPending.value = false
+    if (webAuthnFlow.isCurrent(operation.id)) {
+      if (!isWebAuthnCancellation(error)) {
+        const normalized = normalizeRequestError(error, '安全密钥验证失败，请稍后重试')
+        if (extractRequestErrorReason(error) === ADMIN_MFA_TICKET_EXPIRED_REASON || normalized.status === 429) resetMfaChallenge()
+        showAppError(normalized.message)
+      }
+    }
+  } finally {
+    loginGate.settle(attempt.id)
+    loginGate.cancel()
+    finalRequestPending.value = false
+    webAuthnVerifyPending.value = false
+    webAuthnFlow.finish(operation.id)
+    webAuthnPhase.value = 'idle'
+    if (!authStore.isAuthenticated) submitPhase.value = 'idle'
+  }
 }
 
 const handleSubmit = async () => {
   // 第二步只有一个输入框，回车会同时触发表单隐式提交与 keyup.enter；进行中的提交必须拦截，
   // 否则同一票据被并发提交两次，后到的请求会因票据已被取走而把页面错误地退回第一步。
-  if (submitPhase.value !== 'idle' || webAuthnBusy.value) return
+  if (submitPhase.value !== 'idle' || finalRequestPending.value) return
   if (mfaChallenge.value) {
-    await handleMfaSubmit(mfaChallenge.value.ticket)
+    if (mfaMode.value === 'webauthn') await handleMfaWebAuthn()
+    else await handleMfaSubmit(mfaChallenge.value.ticket)
     return
   }
+  stopConditional()
+  webAuthnFlow.cancel()
+  webAuthnPhase.value = 'idle'
+  const attempt = loginGate.begin()
+  if (!attempt) return
+  submitPhase.value = 'submitting'
   const valid = await formRef.value?.validate().catch(() => false)
-  if (!valid) return
+  if (!loginGate.isCurrent(attempt.id)) return
+  if (!valid) { loginGate.cancel(); submitPhase.value = 'idle'; return }
   if (captchaVisible.value && !form.captcha.trim()) {
     showAppWarning('请输入图形验证码')
+    loginGate.cancel()
+    submitPhase.value = 'idle'
     return
   }
 
-  submitPhase.value = 'submitting'
+  if (!loginGate.commit(attempt.id)) return
+  finalRequestPending.value = true
+  const submittedPasswordSaveSerial = passwordSaveSerial
+  const submittedCredentials = { username: form.username, password: form.password }
 
   try {
     const result = await authStore.login({
-      username: form.username,
-      password: form.password,
+      username: submittedCredentials.username,
+      password: submittedCredentials.password,
       captchaId: captchaVisible.value ? captchaState.captchaId : undefined,
       captchaCode: captchaVisible.value ? form.captcha : undefined,
     })
 
     // 已开启两步验证：密码正确，进入第二步；密码不再需要，尽早从表单内存中清除。
     if (result.mfaRequired) {
+      if (submittedPasswordSaveSerial === passwordSaveSerial && document.visibilityState === 'visible') {
+        passwordHandoff.capture(submittedCredentials.username, submittedCredentials.password, result.expiresInSeconds)
+      }
+      loginGate.settle(attempt.id)
+      finalRequestPending.value = false
       submitPhase.value = 'idle'
       securityHint.value = ''
       resetCaptchaState()
+      form.username = submittedCredentials.username
       form.password = ''
-      mfaMode.value = 'totp'
+      mfaMode.value = result.availableMethods[0] ?? 'totp'
       mfaForm.code = ''
       mfaForm.recoveryCode = ''
-      mfaChallenge.value = { ticket: result.mfaTicket }
+      mfaChallenge.value = { ticket: result.mfaTicket, username: submittedCredentials.username, availableMethods: result.availableMethods, expiresAt: Date.now() + result.expiresInSeconds * 1000 }
+      if (mfaExpiryTimer) clearTimeout(mfaExpiryTimer)
+      mfaExpiryTimer = setTimeout(() => { if (!finalRequestPending.value) resetMfaChallenge() }, result.expiresInSeconds * 1000)
       return
     }
 
+    if (submittedPasswordSaveSerial === passwordSaveSerial && document.visibilityState === 'visible') {
+      passwordHandoff.capture(submittedCredentials.username, submittedCredentials.password, 300)
+    }
+    form.password = ''
+    loginGate.settle(attempt.id)
+    finalRequestPending.value = false
     await finishLogin(result)
   } catch (error) {
+    passwordHandoff.discard()
     submitPhase.value = 'idle'
     const normalizedError = normalizeRequestError(error, '登录失败，请稍后重试')
     const message = normalizedError.message
@@ -391,6 +638,9 @@ const handleSubmit = async () => {
       await refreshCaptcha()
     }
     showAppError(message)
+  } finally {
+    loginGate.settle(attempt.id)
+    finalRequestPending.value = false
   }
 }
 </script>
@@ -493,8 +743,8 @@ const handleSubmit = async () => {
             ref="formRef"
             :model="form"
             :rules="rules"
+            :disabled="finalRequestPending"
             class="modern-form"
-            autocomplete="off"
             @submit.prevent="handleSubmit"
           >
             <template v-if="mfaChallenge">
@@ -508,23 +758,24 @@ const handleSubmit = async () => {
                   inputmode="numeric"
                   autocomplete="one-time-code"
                   maxlength="7"
-                  @keyup.enter="handleSubmit"
                 />
                 <el-input
-                  v-else
+                  v-else-if="mfaMode === 'recovery_code'"
                   v-model.trim="mfaForm.recoveryCode"
                   class="geo-input"
-                  placeholder="恢复码，例如 ABCD-EFGH-JKLM"
+                  placeholder="单个恢复码，例如ABCD-EFGH-JKLM"
                   :prefix-icon="Key"
                   autocomplete="off"
-                  maxlength="20"
-                  @keyup.enter="handleSubmit"
+                  maxlength="32"
+                  @paste="guardRecoveryCodePaste($event, showAppWarning)"
                 />
+                <el-alert v-else type="info" :closable="false" title="请选择已绑定的通行密钥或安全密钥；实体密钥也可通过 USB 或 NFC 使用。" />
               </el-form-item>
               <div class="mfa-switch-row">
-                <el-button link type="primary" @click="toggleMfaMode">
-                  {{ mfaMode === 'totp' ? '手机不在身边？使用恢复码' : '改用动态码' }}
+                <el-button v-for="method in mfaChallenge.availableMethods.filter((item) => item !== mfaMode)" :key="method" link type="primary" @click="toggleMfaMode(method)">
+                  {{ method === 'totp' ? '改用动态码' : method === 'recovery_code' ? '改用恢复码' : '改用通行密钥或安全密钥' }}
                 </el-button>
+                <el-button v-if="webAuthnBusy && webAuthnPhase !== 'verifying'" link @click="cancelWebAuthnLogin">取消密钥操作</el-button>
                 <el-button link @click="resetMfaChallenge">返回重新登录</el-button>
               </div>
             </template>
@@ -536,9 +787,12 @@ const handleSubmit = async () => {
                   class="geo-input"
                   placeholder="账号"
                   :prefix-icon="User"
-                  autocomplete="username"
+                  id="admin-username"
+                  name="username"
+                  autocomplete="username webauthn"
                   clearable
-                  @keyup.enter="handleSubmit"
+                  @focus="handleUsernameFocus"
+                  @blur="usernameFocused = false"
                 />
               </el-form-item>
 
@@ -550,8 +804,9 @@ const handleSubmit = async () => {
                   placeholder="密码"
                   show-password
                   :prefix-icon="Lock"
+                  id="admin-password"
+                  name="password"
                   autocomplete="current-password"
-                  @keyup.enter="handleSubmit"
                 />
               </el-form-item>
 
@@ -564,7 +819,6 @@ const handleSubmit = async () => {
                     :prefix-icon="Key"
                     autocomplete="off"
                     maxlength="8"
-                    @keyup.enter="handleSubmit"
                   />
                   <button
                     class="captcha-image"
@@ -588,9 +842,9 @@ const handleSubmit = async () => {
 
             <el-button
               class="geo-submit group"
+              native-type="submit"
               :class="{ 'is-loading': submitPhase !== 'idle' }"
               :loading="submitPhase === 'submitting' || submitPhase === 'success'"
-              @click="handleSubmit"
             >
               <span v-if="submitPhase === 'idle'" class="flex items-center">
                 {{ submitButtonLabel }}

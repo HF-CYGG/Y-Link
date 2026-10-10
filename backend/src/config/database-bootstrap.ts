@@ -24,6 +24,7 @@ import {
 } from './mysql-migration-runner.js'
 import { BizError } from '../utils/errors.js'
 import { backupOrderBusinessNoRetirementTables } from './order-business-no-retirement-backup.js'
+import { parseDatabaseInteger } from '../utils/migration-autoincrement.js'
 
 const SQLITE_REQUIRED_TABLES = [
   'base_product',
@@ -415,6 +416,76 @@ async function hasSqliteNotNullColumn(
   )
   const column = columns.find((item) => item.name === columnName)
   return Boolean(column && Number(column.notnull) === 1)
+}
+
+/**
+ * 旧 MFA 表的 TOTP 密文为 NOT NULL；通行密钥第二因素允许没有 TOTP，因此在同步器之前定向升级。
+ * SQLite 的表/索引/触发器替换均在同一事务内完成，失败会保留原表；已有额外列也按原 DDL 和原列复制。
+ */
+export async function prepareSqliteAdminMfaCompatibility(dataSource: DataSource): Promise<void> {
+  const mfaTable = 'sys_user_mfa'
+  const mfaColumns = await listSqliteTableColumns(dataSource, mfaTable)
+  if (mfaColumns.size > 0 && await hasSqliteNotNullColumn(dataSource, mfaTable, 'totp_secret_sealed')) {
+    await initializeDatabaseInfrastructure(dataSource)
+    await dataSource.transaction(async (manager) => {
+      const [table] = await manager.query(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", [mfaTable],
+      ) as Array<{ sql: string }>
+      const originalSql = table?.sql
+      const replacementTable = 'sys_user_mfa__compat_rebuild'
+      const replacementExists = await manager.query(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", [replacementTable],
+      ) as Array<{ name: string }>
+      if (!originalSql || replacementExists.length > 0) {
+        throw new Error('SQLITE_MFA_COMPAT_SCHEMA_UNEXPECTED')
+      }
+      const withNewName = originalSql.replace(
+        /^CREATE TABLE\s+(?:"sys_user_mfa"|`sys_user_mfa`|sys_user_mfa)\s*\(/i,
+        `CREATE TABLE "${replacementTable}" (`,
+      )
+      const newSql = withNewName.replace(
+        /("totp_secret_sealed"\s+varchar\(255\)\s+)NOT NULL/i,
+        '$1',
+      )
+      if (withNewName === originalSql || newSql === withNewName) {
+        throw new Error('SQLITE_MFA_COMPAT_SCHEMA_UNEXPECTED')
+      }
+      const objects = await manager.query(
+        "SELECT sql FROM sqlite_master WHERE tbl_name = ? AND type IN ('index', 'trigger') AND sql IS NOT NULL ORDER BY type, name",
+        [mfaTable],
+      ) as Array<{ sql: string }>
+      const [oldSequence] = await manager.query(
+        'SELECT CAST(seq AS TEXT) AS seq FROM sqlite_sequence WHERE name = ?', [mfaTable],
+      ) as Array<{ seq: unknown }>
+      const quotedColumns = [...mfaColumns].map((column) => `"${column.replaceAll('"', '""')}"`).join(', ')
+      await manager.query(newSql)
+      await manager.query(`INSERT INTO "${replacementTable}" (${quotedColumns}) SELECT ${quotedColumns} FROM "${mfaTable}"`)
+      await manager.query(`DROP TABLE "${mfaTable}"`)
+      await manager.query(`ALTER TABLE "${replacementTable}" RENAME TO "${mfaTable}"`)
+      for (const object of objects) await manager.query(object.sql)
+      if (oldSequence) {
+        const sequence = parseDatabaseInteger(oldSequence.seq).toString()
+        await manager.query(
+          'UPDATE sqlite_sequence SET seq = MAX(seq, CAST(? AS INTEGER)) WHERE name = ?',
+          [sequence, mfaTable],
+        )
+        await manager.query(
+          'INSERT INTO sqlite_sequence (name, seq) SELECT ?, CAST(? AS INTEGER) WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = ?)',
+          [mfaTable, sequence, mfaTable],
+        )
+      }
+      const violations = await manager.query('PRAGMA foreign_key_check("sys_user_mfa")') as unknown[]
+      if (violations.length > 0) throw new Error('SQLITE_MFA_COMPAT_FOREIGN_KEY_INVALID')
+    })
+  }
+  const updatedMfaColumns = await listSqliteTableColumns(dataSource, mfaTable)
+  if (updatedMfaColumns.size > 0 && !updatedMfaColumns.has('factor_revision')) {
+    await dataSource.query('ALTER TABLE "sys_user_mfa" ADD COLUMN "factor_revision" integer NOT NULL DEFAULT (1)')
+  }
+  const credentialColumns = await listSqliteTableColumns(dataSource, 'sys_user_webauthn_credential')
+  if (credentialColumns.size > 0 && !credentialColumns.has('usage')) {
+    await dataSource.query('ALTER TABLE "sys_user_webauthn_credential" ADD COLUMN "usage" varchar(16) NOT NULL DEFAULT (\'passwordless\')')
+  }
 }
 
 async function listSqliteUniqueIndexes(dataSource: DataSource, tableName: string): Promise<Set<string>> {
@@ -2041,8 +2112,11 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
   }
 
   const webauthnCredentialColumns = await listSqliteTableColumns(dataSource, 'sys_user_webauthn_credential')
-  if (['user_id', 'rp_id', 'credential_id_sha256', 'credential_id', 'public_key', 'counter', 'name', 'device_type', 'backed_up']
+  if (['user_id', 'rp_id', 'credential_id_sha256', 'credential_id', 'public_key', 'counter', 'name', 'device_type', 'backed_up', 'usage']
     .some((column) => !webauthnCredentialColumns.has(column))) return true
+
+  const mfaColumns = await listSqliteTableColumns(dataSource, 'sys_user_mfa')
+  if (!mfaColumns.has('factor_revision') || await hasSqliteNotNullColumn(dataSource, 'sys_user_mfa', 'totp_secret_sealed')) return true
 
   const clientFeedbackConversationColumnSet = await listSqliteTableColumns(dataSource, 'client_feedback_conversation')
   if (SQLITE_REQUIRED_CLIENT_FEEDBACK_CONVERSATION_COLUMNS.some((column) => !clientFeedbackConversationColumnSet.has(column))) {
@@ -2144,6 +2218,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   if (env.DB_TYPE === 'sqlite') {
     await dropSqliteOrderBusinessNoPermanentOccupancy(dataSource)
     await ensureSqliteMobileSessionSchema(dataSource)
+    await prepareSqliteAdminMfaCompatibility(dataSource)
     await prepareSqliteOrderAmendmentColumns(dataSource)
     await prepareSqliteOrderContentInventoryColumns(dataSource)
     await prepareSqliteOrderSourceDocColumns(dataSource)

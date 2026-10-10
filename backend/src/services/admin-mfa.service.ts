@@ -18,12 +18,18 @@ import { createHmac, timingSafeEqual } from 'node:crypto'
 import { In, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
+import { webauthnConfig } from '../config/webauthn.js'
 import { SysUser } from '../entities/sys-user.entity.js'
 import { SysUserMfa } from '../entities/sys-user-mfa.entity.js'
+import { SysUserWebauthnCredential } from '../entities/sys-user-webauthn-credential.entity.js'
+import { SysUserSession } from '../entities/sys-user-session.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { deriveDataSubkey, describeDataEncryptionKey, openSensitiveValue, sealSensitiveValue } from '../utils/data-encryption.js'
 import { EphemeralTicketStore } from '../utils/ephemeral-ticket-store.js'
 import { BizError } from '../utils/errors.js'
+import { isAdminSessionIdleExpired } from '../utils/admin-session-idle.js'
+import { hashSessionToken } from '../utils/session-token.js'
+import { verifyPassword } from '../utils/password.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import {
   buildTotpUri,
@@ -36,6 +42,7 @@ import {
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 import { auditService } from './audit.service.js'
 import { authSecurityService } from './auth-security.service.js'
+import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
 
 const ENROLLMENT_TTL_MS = 10 * 60 * 1000
 const ENROLLMENT_MAX_ATTEMPTS = 5
@@ -46,6 +53,14 @@ const KEY_UNAVAILABLE_MESSAGE = '数据加密密钥不可用，暂时无法开�
 interface PendingEnrollment {
   userId: string
   secret: string
+  sessionDigest: string
+  passwordHash: string
+  role: SysUser['role']
+  status: SysUser['status']
+  deactivatedAt: number
+  restoredAt: number
+  mfaId: string | null
+  mfaRevision: number | null
   expiresAt: number
   attemptsLeft: number
 }
@@ -58,9 +73,10 @@ const pendingEnrollmentStore = new EphemeralTicketStore<PendingEnrollment>({
 export interface AdminMfaFactorInput {
   code?: string | null
   recoveryCode?: string | null
+  stepUpProof?: string | null
 }
 
-export type AdminMfaFactorMethod = 'totp' | 'recovery_code'
+export type AdminMfaFactorMethod = 'totp' | 'recovery_code' | 'webauthn'
 
 export type AdminMfaFactorResult =
   | { ok: true; method: AdminMfaFactorMethod; recoveryCodesRemaining: number }
@@ -68,6 +84,9 @@ export type AdminMfaFactorResult =
 
 export interface AdminMfaStatus {
   enabled: boolean
+  mfaRequired: boolean
+  totpEnabled: boolean
+  availableMethods: Array<'totp' | 'recovery_code' | 'webauthn'>
   enabledAt: Date | null
   recoveryCodesRemaining: number
 }
@@ -126,19 +145,84 @@ export class AdminMfaService {
     return { codes, digests }
   }
 
+  /** 首次绑定第二因素或明确开启密码后 MFA 时创建策略；恢复码仅在创建响应中返回。 */
+  async enableWithWebauthnInTransaction(manager: EntityManager, userId: string): Promise<string[]> {
+    const repo = manager.getRepository(SysUserMfa)
+    if (await repo.countBy({ userId })) return []
+    const { codes, digests } = this.generateRecoveryCodes(userId)
+    await repo.insert({ userId, totpSecretSealed: null,
+      recoveryCodesJson: serializeRecoveryDigests(digests, currentDataKeyId()), enabledAt: new Date(),
+      lastUsedStep: null, factorRevision: 1 })
+    return codes
+  }
+
+  async bumpFactorRevision(manager: EntityManager, userId: string): Promise<void> {
+    await manager.getRepository(SysUserMfa).createQueryBuilder().update(SysUserMfa)
+      .set({ factorRevision: () => 'factor_revision + 1' }).where('user_id = :userId', { userId }).execute()
+  }
+
   async getStatus(userId: string): Promise<AdminMfaStatus> {
     const record = await this.repo
       .createQueryBuilder('mfa')
-      .addSelect('mfa.recoveryCodesJson')
+      .addSelect(['mfa.recoveryCodesJson', 'mfa.totpSecretSealed'])
       .where('mfa.user_id = :userId', { userId })
       .getOne()
     if (!record) {
-      return { enabled: false, enabledAt: null, recoveryCodesRemaining: 0 }
+      return { enabled: false, mfaRequired: false, totpEnabled: false, availableMethods: [], enabledAt: null, recoveryCodesRemaining: 0 }
+    }
+    const remaining = parseRecoveryDigests(record.recoveryCodesJson).digests.length
+    const availableMethods: AdminMfaStatus['availableMethods'] = []
+    if (record.totpSecretSealed) availableMethods.push('totp')
+    if (remaining > 0) availableMethods.push('recovery_code')
+    if (await this.countUsableWebauthnCredentials(AppDataSource.manager, userId) > 0) {
+      availableMethods.push('webauthn')
     }
     return {
-      enabled: true,
+      enabled: Boolean(record.totpSecretSealed),
+      mfaRequired: true,
+      totpEnabled: Boolean(record.totpSecretSealed),
+      availableMethods,
       enabledAt: record.enabledAt,
-      recoveryCodesRemaining: parseRecoveryDigests(record.recoveryCodesJson).digests.length,
+      recoveryCodesRemaining: remaining,
+    }
+  }
+
+  async hasRecoveryCodes(manager: EntityManager, userId: string): Promise<boolean> {
+    const record = await manager.getRepository(SysUserMfa).createQueryBuilder('mfa')
+      .addSelect('mfa.recoveryCodesJson').where('mfa.user_id = :userId', { userId }).getOne()
+    return Boolean(record && parseRecoveryDigests(record.recoveryCodesJson).digests.length)
+  }
+
+  /** 当前 RP 可验签的合法用途密钥；旧 RP 密钥仍可列表管理，但不构成当前密码 MFA 因素。 */
+  async countUsableWebauthnCredentials(manager: EntityManager, userId: string,
+    usage?: 'passwordless' | 'second_factor'): Promise<number> {
+    if (!webauthnConfig.enabled || !webauthnConfig.rpId) return 0
+    return manager.getRepository(SysUserWebauthnCredential).countBy({
+      userId, rpId: webauthnConfig.rpId, usage: usage ?? In(['passwordless', 'second_factor']),
+    })
+  }
+
+  async verifyFactorOrProof(manager: EntityManager, auth: AuthUserContext, factor: AdminMfaFactorInput,
+    action: import('./admin-webauthn.service.js').AdminStepUpAction, targetId?: string): Promise<AdminMfaFactorResult> {
+    await this.assertSessionLiveUnderAccountLock(manager, auth)
+    if (factor.stepUpProof) {
+      if (factor.code || factor.recoveryCode) return { ok: false, reason: 'factor_missing' }
+      const { adminWebauthnService } = await import('./admin-webauthn.service.js')
+      await adminWebauthnService.consumeStepUpProofInTransaction(manager, auth, factor.stepUpProof, action, targetId)
+      return { ok: true, method: 'webauthn', recoveryCodesRemaining: 0 }
+    }
+    if (Boolean(factor.code) === Boolean(factor.recoveryCode)) return { ok: false, reason: 'factor_missing' }
+    return this.verifyFactor(manager, auth.userId, factor)
+  }
+
+  /** 敏感事务取得账号锁后仍须核实会话；HTTP 层鉴权不覆盖排队期间的撤销和空闲超时。 */
+  async assertSessionLiveUnderAccountLock(manager: EntityManager, auth: AuthUserContext): Promise<void> {
+    const session = await manager.getRepository(SysUserSession).findOneBy({
+      userId: auth.userId, sessionToken: hashSessionToken(auth.sessionToken),
+    })
+    const now = new Date()
+    if (!session || session.expiresAt <= now || isAdminSessionIdleExpired(session, now)) {
+      throw new BizError('登录状态已失效，请重新登录', 401)
     }
   }
 
@@ -154,11 +238,33 @@ export class AdminMfaService {
     return new Set(rows.map((row) => String(row.userId)))
   }
 
+  async listTotpEnabledUserIds(userIds: Array<string | number>): Promise<Set<string>> {
+    if (!userIds.length) return new Set()
+    const rows = await this.repo.createQueryBuilder('mfa').addSelect('mfa.totpSecretSealed')
+      .where('mfa.user_id IN (:...userIds)', { userIds: userIds.map(String) }).getMany()
+    return new Set(rows.filter((row) => Boolean(row.totpSecretSealed)).map((row) => String(row.userId)))
+  }
+
   /** 发起绑定：调用方必须已完成当前密码复核；同一账号重复发起时覆盖旧的待确认秘钥。 */
-  async beginEnrollment(auth: AuthUserContext, requestMeta?: RequestMeta) {
-    if (await this.isEnabled(auth.userId)) {
-      throw new BizError('两步验证已开启；如需更换手机，请先停用再重新绑定', 409)
-    }
+  async beginEnrollment(auth: AuthUserContext, input: AdminMfaFactorInput & { currentPassword: string }, requestMeta?: RequestMeta) {
+    const snapshot = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, auth.userId)
+      const user = await manager.getRepository(SysUser).createQueryBuilder('user')
+        .addSelect('user.passwordHash').where('user.id = :id', { id: auth.userId }).getOneOrFail()
+      if (!await verifyPassword(input.currentPassword.trim(), user.passwordHash)) throw new BizError('当前密码错误', 400)
+      const mfa = await manager.getRepository(SysUserMfa).createQueryBuilder('mfa')
+        .addSelect('mfa.totpSecretSealed').where('mfa.user_id = :userId', { userId: auth.userId }).getOne()
+      if (mfa?.totpSecretSealed) throw new BizError('动态码已开启；请先单独停用再重新绑定', 409)
+      if (mfa) {
+        const factor = await this.verifyFactorOrProof(manager, auth, input, 'mfa.totp.enroll')
+        if (!factor.ok) throw new BizError('身份复核未通过', 400)
+      }
+      await this.assertSessionLiveUnderAccountLock(manager, auth)
+      return { sessionDigest: hashSessionToken(auth.sessionToken), passwordHash: user.passwordHash,
+        role: user.role, status: user.status,
+        deactivatedAt: user.deactivatedAt?.getTime() ?? 0, restoredAt: user.restoredAt?.getTime() ?? 0,
+        mfaId: mfa?.id ?? null, mfaRevision: mfa?.factorRevision ?? null }
+    })
     if (!deriveDataSubkey(RECOVERY_DIGEST_LABEL)) {
       throw new BizError(KEY_UNAVAILABLE_MESSAGE, 503)
     }
@@ -166,6 +272,7 @@ export class AdminMfaService {
     pendingEnrollmentStore.set(String(auth.userId), {
       userId: String(auth.userId),
       secret,
+      ...snapshot,
       expiresAt: Date.now() + ENROLLMENT_TTL_MS,
       attemptsLeft: ENROLLMENT_MAX_ATTEMPTS,
     })
@@ -222,16 +329,31 @@ export class AdminMfaService {
     await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, auth.userId)
       const repo = manager.getRepository(SysUserMfa)
-      if (await repo.count({ where: { userId: auth.userId } }) > 0) {
-        throw new BizError('两步验证已开启，请刷新后查看', 409)
+      const user = await manager.getRepository(SysUser).createQueryBuilder('user')
+        .addSelect('user.passwordHash').where('user.id = :id', { id: auth.userId }).getOneOrFail()
+      const existing = await repo.createQueryBuilder('mfa').addSelect('mfa.totpSecretSealed')
+        .where('mfa.user_id = :userId', { userId: auth.userId }).getOne()
+      const session = await manager.getRepository(SysUserSession).findOneBy({ userId: auth.userId, sessionToken: pending.sessionDigest })
+      const now = new Date()
+      if (!session || session.expiresAt <= now || isAdminSessionIdleExpired(session, now)
+        || pending.sessionDigest !== hashSessionToken(auth.sessionToken)
+        || user.passwordHash !== pending.passwordHash || user.role !== pending.role || user.status !== pending.status
+        || (user.deactivatedAt?.getTime() ?? 0) !== pending.deactivatedAt
+        || (user.restoredAt?.getTime() ?? 0) !== pending.restoredAt
+        || (existing?.id ?? null) !== pending.mfaId || (existing?.factorRevision ?? null) !== pending.mfaRevision
+        || existing?.totpSecretSealed) {
+        throw new BizError('账号安全设置已变化，请重新绑定', 409)
       }
-      await repo.insert({
-        userId: auth.userId,
-        totpSecretSealed: sealedSecret,
-        recoveryCodesJson: serializeRecoveryDigests(digests, currentDataKeyId()),
-        enabledAt: new Date(),
-        lastUsedStep: matchedStep,
-      })
+      if (existing) {
+        existing.totpSecretSealed = sealedSecret
+        existing.lastUsedStep = matchedStep
+        existing.factorRevision += 1
+        await repo.save(existing)
+      } else {
+        await repo.insert({ userId: auth.userId, totpSecretSealed: sealedSecret,
+          recoveryCodesJson: serializeRecoveryDigests(digests, currentDataKeyId()),
+          enabledAt: new Date(), lastUsedStep: matchedStep, factorRevision: 1 })
+      }
       await auditService.record(
         {
           actionType: 'auth.mfa.enable',
@@ -241,13 +363,13 @@ export class AdminMfaService {
           targetCode: auth.username,
           actor: actorOf(auth),
           requestMeta,
-          detail: { recoveryCodeCount: codes.length },
+          detail: { recoveryCodeCount: existing ? 0 : codes.length },
         },
         manager,
       )
     })
     pendingEnrollmentStore.delete(ticketKey)
-    return { recoveryCodes: codes }
+    return { recoveryCodes: pending.mfaId ? [] : codes }
   }
 
   /**
@@ -274,6 +396,7 @@ export class AdminMfaService {
 
     const code = factor.code?.replace(/\s/g, '') ?? ''
     if (code) {
+      if (!record.totpSecretSealed) return { ok: false, reason: 'factor_missing' }
       const opened = openSensitiveValue(secretContext(userId), record.totpSecretSealed)
       // 秘钥只接受本服务加密写入的密文；明文或无法解密都视为数据异常，不能退化为“无需第二因素”。
       if (opened.state !== 'sealed') {
@@ -362,12 +485,18 @@ export class AdminMfaService {
   }
 
   /** 停用：调用方已复核当前密码，这里再校验动态码或恢复码。 */
-  async disable(auth: AuthUserContext, factor: AdminMfaFactorInput, requestMeta?: RequestMeta): Promise<void> {
+  async disable(auth: AuthUserContext, factor: AdminMfaFactorInput & { currentPassword: string }, requestMeta?: RequestMeta): Promise<void> {
     const outcome = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, auth.userId)
-      const result = await this.verifyFactor(manager, auth.userId, factor)
+      const user = await manager.getRepository(SysUser).createQueryBuilder('user').addSelect('user.passwordHash')
+        .where('user.id = :id', { id: auth.userId }).getOneOrFail()
+      if (!await verifyPassword(factor.currentPassword.trim(), user.passwordHash)) throw new BizError('当前密码错误', 400)
+      if (!await manager.getRepository(SysUserMfa).countBy({ userId: auth.userId })) throw new BizError('当前账号未开启两步验证', 409)
+      const result = await this.verifyFactorOrProof(manager, auth, factor, 'mfa.disable_all')
       if (!result.ok) return result
       await manager.getRepository(SysUserMfa).delete({ userId: auth.userId })
+      await manager.getRepository(SysUserWebauthnCredential).delete({ userId: auth.userId, usage: 'second_factor' })
+      await manager.getRepository(SysUserSession).delete({ userId: auth.userId })
       await auditService.record(
         {
           actionType: 'auth.mfa.disable',
@@ -386,16 +515,50 @@ export class AdminMfaService {
     if (!outcome.ok) {
       await this.rejectSelfServiceFactor(auth, outcome, requestMeta, { actionType: 'auth.mfa.disable', actionLabel: '停用两步验证' })
     }
+    customerServiceRealtimeService.disconnectByOwner('service', auth.userId)
+  }
+
+  async disableTotp(auth: AuthUserContext, factor: AdminMfaFactorInput & { currentPassword: string }, requestMeta?: RequestMeta): Promise<void> {
+    const outcome = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, auth.userId)
+      const user = await manager.getRepository(SysUser).createQueryBuilder('user').addSelect('user.passwordHash')
+        .where('user.id = :id', { id: auth.userId }).getOneOrFail()
+      if (!await verifyPassword(factor.currentPassword.trim(), user.passwordHash)) throw new BizError('当前密码错误', 400)
+      const mfa = await manager.getRepository(SysUserMfa).createQueryBuilder('mfa')
+        .addSelect('mfa.totpSecretSealed').where('mfa.user_id = :userId', { userId: auth.userId }).getOne()
+      if (!mfa?.totpSecretSealed) throw new BizError('当前未开启动态码', 409)
+      const result = await this.verifyFactorOrProof(manager, auth, factor, 'mfa.totp.disable')
+      if (!result.ok) return result
+      const remainingKeys = await this.countUsableWebauthnCredentials(manager, auth.userId)
+      if (!remainingKeys) throw new BizError('不能移除最后一个常规验证方式，请使用明确停用全部两步验证', 409)
+      mfa.totpSecretSealed = null
+      mfa.lastUsedStep = null
+      mfa.factorRevision += 1
+      await manager.getRepository(SysUserMfa).save(mfa)
+      await auditService.record({ actionType: 'auth.mfa.totp.disable', actionLabel: '单独停用动态码',
+        targetType: 'user', targetId: auth.userId, targetCode: auth.username, actor: actorOf(auth), requestMeta,
+        detail: { method: result.method } }, manager)
+      return result
+    })
+    if (!outcome.ok) await this.rejectSelfServiceFactor(auth, outcome, requestMeta,
+      { actionType: 'auth.mfa.totp.disable', actionLabel: '单独停用动态码' })
   }
 
   /** 重新生成恢复码：调用方已复核当前密码，这里只接受动态码（恢复码不能用来换新恢复码）。 */
-  async regenerateRecoveryCodes(auth: AuthUserContext, code: string, requestMeta?: RequestMeta): Promise<{ recoveryCodes: string[] }> {
+  async regenerateRecoveryCodes(auth: AuthUserContext, input: AdminMfaFactorInput & { currentPassword: string }, requestMeta?: RequestMeta): Promise<{ recoveryCodes: string[] }> {
     const { codes, digests } = this.generateRecoveryCodes(auth.userId)
     const outcome = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, auth.userId)
-      const result = await this.verifyFactor(manager, auth.userId, { code })
+      const user = await manager.getRepository(SysUser).createQueryBuilder('user').addSelect('user.passwordHash')
+        .where('user.id = :id', { id: auth.userId }).getOneOrFail()
+      if (!await verifyPassword(input.currentPassword.trim(), user.passwordHash)) throw new BizError('当前密码错误', 400)
+      if (!await manager.getRepository(SysUserMfa).countBy({ userId: auth.userId })) throw new BizError('当前账号未开启两步验证', 409)
+      if (input.recoveryCode) throw new BizError('恢复码不能用于重新生成恢复码', 400)
+      const result = await this.verifyFactorOrProof(manager, auth, input, 'mfa.recovery_codes')
       if (!result.ok) return result
-      await manager.getRepository(SysUserMfa).update({ userId: auth.userId }, { recoveryCodesJson: serializeRecoveryDigests(digests, currentDataKeyId()) })
+      await manager.getRepository(SysUserMfa).createQueryBuilder().update(SysUserMfa)
+        .set({ recoveryCodesJson: serializeRecoveryDigests(digests, currentDataKeyId()), factorRevision: () => 'factor_revision + 1' })
+        .where('user_id = :userId', { userId: auth.userId }).execute()
       await auditService.record(
         {
           actionType: 'auth.mfa.recovery_codes.regenerate',
@@ -432,12 +595,16 @@ export class AdminMfaService {
    */
   async resetByUsernameFromCli(username: string): Promise<{ reset: boolean; username: string }> {
     return runInTransaction(async (manager) => {
-      const user = await manager.getRepository(SysUser).findOne({ where: { username } })
+      const query = manager.getRepository(SysUser).createQueryBuilder('user').where('user.username = :username', { username })
+      if (manager.connection.options.type === 'mysql') query.setLock('pessimistic_write')
+      const user = await query.getOne()
       if (!user) {
         throw new BizError('账号不存在', 404)
       }
       const reset = await this.deleteForUser(manager, user.id)
       if (reset) {
+        await manager.getRepository(SysUserWebauthnCredential).delete({ userId: user.id, usage: 'second_factor' })
+        await manager.getRepository(SysUserSession).delete({ userId: user.id })
         await auditService.record(
           {
             actionType: 'user.mfa.reset',

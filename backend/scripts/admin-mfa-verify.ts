@@ -50,8 +50,11 @@ const { resetDataEncryptionKeyCacheForTesting } = await import('../src/utils/dat
 const { resolvePermissionsByRole } = await import('../src/constants/auth-permissions.js')
 const { SysUser } = await import('../src/entities/sys-user.entity.js')
 const { SysUserMfa } = await import('../src/entities/sys-user-mfa.entity.js')
+const { SysUserSession } = await import('../src/entities/sys-user-session.entity.js')
+const { hashSessionToken } = await import('../src/utils/session-token.js')
 const { SysAuditLog } = await import('../src/entities/sys-audit-log.entity.js')
 const { AuthRiskState } = await import('../src/entities/auth-risk-state.entity.js')
+const { auditService } = await import('../src/services/audit.service.js')
 const { persistentRiskStateService } = await import('../src/services/persistent-risk-state.service.js')
 
 interface ApiResponse {
@@ -147,8 +150,11 @@ async function contextOf(username: string): Promise<AuthUserContext> {
 
 /** 通过服务层为指定账号开启两步验证，返回秘钥与恢复码。 */
 async function enableMfaViaService(username: string) {
-  const auth = await contextOf(username)
-  const enrollment = await adminMfaService.beginEnrollment(auth)
+  const password = username === 'admin' ? ADMIN_PASSWORD : OPERATOR_PASSWORD
+  const login = await authService.login({ username, password })
+  assert.ok('token' in login, '绑定前应取得真实登录会话')
+  const auth = await authService.resolveAuthUserByToken(login.token)
+  const enrollment = await adminMfaService.beginEnrollment(auth, { currentPassword: password })
   plaintextSecrets.push(enrollment.secret)
   const confirmed = await adminMfaService.confirmEnrollment(auth, codeAt(enrollment.secret, currentTotpStep()))
   plaintextSecrets.push(...confirmed.recoveryCodes)
@@ -304,14 +310,20 @@ async function verifySelfServiceManagement(adminSession: HttpSession, secret: st
   const wrongPasswordDisable = await call('POST', '/api/auth/mfa/disable', { currentPassword: 'Wrong-Password-9', recoveryCode: newCodes[0] }, adminSession)
   assert.equal(wrongPasswordDisable.status, 400, '停用必须复核当前密码')
   await resetRiskState()
+  const cannotRemoveLastTotp = await call('POST', '/api/auth/mfa/totp/disable',
+    { currentPassword: ADMIN_PASSWORD, recoveryCode: newCodes[0] }, adminSession)
+  assert.equal(cannotRemoveLastTotp.status, 409, '单独停用动态码不能移除最后常规因素')
+  assert.equal((await call('GET', '/api/auth/mfa/status', undefined, adminSession)).body.data?.recoveryCodesRemaining, 10,
+    '最后因素失败时恢复码消费须随事务回滚')
   const disabled = await call('POST', '/api/auth/mfa/disable', { currentPassword: ADMIN_PASSWORD, recoveryCode: newCodes[0] }, adminSession)
   assert.equal(disabled.status, 200, JSON.stringify(disabled.body))
-  assert.equal((await call('GET', '/api/auth/mfa/status', undefined, adminSession)).body.data?.enabled, false)
+  assert.equal((await call('GET', '/api/auth/mfa/status', undefined, adminSession)).status, 401, '完整停用同时撤销旧会话')
   assert.ok(await AppDataSource.getRepository(SysAuditLog).count({ where: { actionType: 'auth.mfa.disable', resultStatus: 'success' } }) >= 1)
 
   await resetRiskState()
   const plainLogin = await loginStepOne('admin', ADMIN_PASSWORD)
   assert.equal(plainLogin.body.data?.mfaRequired, undefined, '停用后恢复单因素登录')
+  assert.equal((await call('GET', '/api/auth/mfa/status', undefined, sessionFrom(plainLogin))).body.data?.enabled, false)
   return sessionFrom(plainLogin)
 }
 
@@ -319,6 +331,14 @@ async function verifyAdminResetAndUserList(adminSession: HttpSession) {
   const adminActor = await contextOf('admin')
   await userService.create({ username: 'mfa-operator', password: OPERATOR_PASSWORD, displayName: '两步验证操作员', role: 'operator', status: 'enabled' }, adminActor)
   const operator = await enableMfaViaService('mfa-operator')
+  await AppDataSource.getRepository(SysUserSession).delete({ userId: operator.auth.userId,
+    sessionToken: hashSessionToken(operator.auth.sessionToken) })
+  await assert.rejects(() => adminMfaService.disable(operator.auth,
+    { currentPassword: OPERATOR_PASSWORD, recoveryCode: operator.recoveryCodes[0] }),
+  (error: unknown) => (error as { statusCode?: number }).statusCode === 401,
+  '账号锁内必须复核已被撤销的旧会话，恢复码不得继续完成敏感操作')
+  assert.equal(await AppDataSource.getRepository(SysUserMfa).countBy({ userId: operator.auth.userId }), 1,
+    '撤销会话后的敏感操作不能关闭 MFA')
 
   const list = await call('GET', '/api/users?page=1&pageSize=50', undefined, adminSession)
   assert.equal(list.status, 200)
@@ -332,9 +352,9 @@ async function verifyAdminResetAndUserList(adminSession: HttpSession) {
   assert.equal(operatorStepOne.body.data?.mfaRequired, true)
   const selfReset = await call('POST', `/api/users/${adminActor.userId}/mfa/reset`, {}, adminSession)
   assert.equal(selfReset.status, 400, '不能在用户管理里重置自己的两步验证')
-  const reset = await call('POST', `/api/users/${operator.auth.userId}/mfa/reset`, {}, adminSession)
+  const reset = await call('POST', `/api/users/${operator.auth.userId}/mfa/reset`, { currentPassword: ADMIN_PASSWORD }, adminSession)
   assert.equal(reset.status, 200, JSON.stringify(reset.body))
-  const resetAgain = await call('POST', `/api/users/${operator.auth.userId}/mfa/reset`, {}, adminSession)
+  const resetAgain = await call('POST', `/api/users/${operator.auth.userId}/mfa/reset`, { currentPassword: ADMIN_PASSWORD }, adminSession)
   assert.equal(resetAgain.status, 409, '未开启时重置返回 409')
   const staleTicket = await call('POST', '/api/auth/login/mfa', { mfaTicket: operatorStepOne.body.data?.mfaTicket, code: codeAt(operator.secret, currentTotpStep() + 1) })
   assert.equal(staleTicket.body.data?.reason, 'ADMIN_MFA_TICKET_EXPIRED', '两步验证被重置后旧票据必须作废')
@@ -372,6 +392,81 @@ async function verifyKeyMismatchFallback() {
   const restored = await loginStepOne('admin', ADMIN_PASSWORD)
   const ok = await call('POST', '/api/auth/login/mfa', { mfaTicket: restored.body.data?.mfaTicket, code: codeAt(admin.secret, currentTotpStep()) })
   assert.equal(ok.status, 200, '恢复原密钥后可正常完成两步验证')
+  return { secret: admin.secret, session: sessionFrom(ok), userId: admin.auth.userId }
+}
+
+async function verifyAdminResetFactorFailureAccounting(admin: Awaited<ReturnType<typeof verifyKeyMismatchFallback>>) {
+  const actor = await contextOf('admin')
+  await userService.create({ username: 'mfa-factor-reset-target', password: OPERATOR_PASSWORD,
+    displayName: '复核失败重置目标', role: 'operator', status: 'enabled' }, actor)
+  const target = await enableMfaViaService('mfa-factor-reset-target')
+  const targetId = String(target.auth.userId)
+  const resetPath = `/api/users/${targetId}/mfa/reset`
+  const targetSessions = await AppDataSource.getRepository(SysUserSession).countBy({ userId: targetId })
+  const riskFailures = async () => (await AppDataSource.getRepository(AuthRiskState)
+    .findBy({ stateType: 'login_failure' })).reduce((sum, state) => sum + state.failureCount, 0)
+  await resetRiskState()
+
+  const wrong = await call('POST', resetPath,
+    { currentPassword: ADMIN_PASSWORD, code: wrongCodeFor(admin.secret) }, admin.session)
+  assert.equal(wrong.status, 400, '正确密码加错误动态码必须拒绝重置')
+  assert.equal(await riskFailures(), 2, '错误动态码必须计入管理端来源和账号风险桶')
+  const wrongAudit = await AppDataSource.getRepository(SysAuditLog).findOne({
+    where: { actionType: 'user.mfa.reset', targetId, resultStatus: 'failed' }, order: { id: 'DESC' },
+  })
+  assert.match(wrongAudit?.detailJson ?? '', /"reason":"code_mismatch"/, '错误动态码必须留下脱敏失败审计')
+  assert.equal(await AppDataSource.getRepository(SysUserMfa).countBy({ userId: targetId }), 1)
+  assert.equal(await AppDataSource.getRepository(SysUserSession).countBy({ userId: targetId }), targetSessions,
+    '复核失败不得撤销目标登录会话')
+
+  process.env.Y_LINK_DATA_ENCRYPTION_KEY = 'ab'.repeat(32)
+  resetDataEncryptionKeyCacheForTesting()
+  try {
+    const unreadable = await call('POST', resetPath,
+      { currentPassword: ADMIN_PASSWORD, code: codeAt(admin.secret, currentTotpStep() + 1) }, admin.session)
+    assert.equal(unreadable.status, 400, '密钥不可读时必须拒绝重置')
+    assert.equal(await riskFailures(), 2, '密钥不可读不是猜错，不得增加风控失败次数')
+    const audit = await AppDataSource.getRepository(SysAuditLog).findOne({
+      where: { actionType: 'user.mfa.reset', targetId, resultStatus: 'failed' }, order: { id: 'DESC' },
+    })
+    assert.match(audit?.detailJson ?? '', /"reason":"secret_unreadable"/)
+  } finally {
+    delete process.env.Y_LINK_DATA_ENCRYPTION_KEY
+    resetDataEncryptionKeyCacheForTesting()
+  }
+  const expiredProof = await call('POST', resetPath,
+    { currentPassword: ADMIN_PASSWORD, stepUpProof: 'expired-proof' }, admin.session)
+  assert.ok(expiredProof.status >= 400, '过期或无效证明不得重置目标')
+  assert.equal(await riskFailures(), 2, '证明失效不是猜错，不得增加风控失败次数')
+  assert.equal(await AppDataSource.getRepository(SysUserMfa).countBy({ userId: targetId }), 1)
+
+  await resetRiskState()
+  await rewindLastUsedStep(admin.userId)
+  const validCode = codeAt(admin.secret, currentTotpStep())
+  const originalRecord = auditService.record.bind(auditService)
+  auditService.record = async (entry, manager) => {
+    if (entry.actionType === 'user.mfa.reset') throw new Error('测试注入重置审计失败')
+    return originalRecord(entry, manager)
+  }
+  try {
+    const rollback = await call('POST', resetPath,
+      { currentPassword: ADMIN_PASSWORD, code: validCode }, admin.session)
+    assert.equal(rollback.status, 500, '审计写入失败必须回滚重置事务')
+  } finally {
+    auditService.record = originalRecord
+  }
+  assert.equal(await AppDataSource.getRepository(SysUserMfa).countBy({ userId: targetId }), 1,
+    '审计失败必须保留目标两步验证')
+  assert.equal(await AppDataSource.getRepository(SysUserSession).countBy({ userId: targetId }), targetSessions,
+    '审计失败必须保留目标会话')
+  const success = await call('POST', resetPath,
+    { currentPassword: ADMIN_PASSWORD, code: validCode }, admin.session)
+  assert.equal(success.status, 200, '事务回滚后的同一动态码须可完成重置')
+  assert.equal(await AppDataSource.getRepository(SysUserMfa).countBy({ userId: targetId }), 0)
+  assert.equal(await AppDataSource.getRepository(SysUserSession).countBy({ userId: targetId }), 0)
+  assert.ok(await AppDataSource.getRepository(SysAuditLog).countBy({
+    actionType: 'user.mfa.reset', targetId, resultStatus: 'success',
+  }) >= 1, '成功重置必须保留审计')
 }
 
 async function verifyPermanentDeleteAndCli() {
@@ -423,7 +518,8 @@ try {
   await verifyRecoveryCodeAndTicketLimits(secret, recoveryCodes)
   const plainAdminSession = await verifySelfServiceManagement(adminSession, secret, recoveryCodes)
   await verifyAdminResetAndUserList(plainAdminSession)
-  await verifyKeyMismatchFallback()
+  const adminWithMfa = await verifyKeyMismatchFallback()
+  await verifyAdminResetFactorFailureAccounting(adminWithMfa)
   await verifyPermanentDeleteAndCli()
   await verifyAuditNeverStoresSecrets()
   console.log('[admin-mfa-verify] 管理端两步验证回归通过：绑定与落库加密、两段登录、防重放、恢复码一次性、票据次数与账号锁定、并发单次成功、停用与重生成、管理员重置与旧票据作废、用户列表状态、密钥不匹配降级、永久删除联动、命令行重置、审计不落明文')

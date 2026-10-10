@@ -18,6 +18,8 @@ const ANONYMOUS_AUTH_PATHS = new Set([
   '/api/auth/captcha',
   '/api/auth/login',
   '/api/auth/login/mfa',
+  '/api/auth/login/mfa/webauthn/options',
+  '/api/auth/login/mfa/webauthn/verify',
   '/api/auth/webauthn/login/options',
   '/api/auth/webauthn/login/verify',
   '/api/client-auth/captcha',

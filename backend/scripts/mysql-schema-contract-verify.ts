@@ -162,6 +162,9 @@ const REQUIRED_COLUMNS = [
   ['base_yz_series_seq_reservation', 'series_code'],
   ['base_yz_series_seq_reservation', 'code_prefix'],
   ['sys_user', 'webauthn_user_handle'],
+  ['sys_user_mfa', 'totp_secret_sealed'],
+  ['sys_user_mfa', 'factor_revision'],
+  ['sys_user_webauthn_credential', 'usage'],
   ...['user_id', 'rp_id', 'credential_id_sha256', 'credential_id', 'public_key', 'counter', 'transports_json', 'device_type', 'backed_up', 'name', 'created_at', 'last_used_at']
     .map((columnName) => ['sys_user_webauthn_credential', columnName] as const),
 ] as const
@@ -172,6 +175,8 @@ const REQUIRED_COLUMN_LENGTHS = new Map<string, number>([
   ['biz_outbound_order.customer_department_name', 271],
   ['sms_verification_record.scheme_name', 20],
   ['sys_user.webauthn_user_handle', 64],
+  ['sys_user_mfa.totp_secret_sealed', 255],
+  ['sys_user_webauthn_credential.usage', 16],
 ])
 
 interface ColumnFixture {
@@ -179,9 +184,16 @@ interface ColumnFixture {
   columnType: string
   isNullable: 'YES' | 'NO'
   characterMaximumLength: number | null
+  columnDefault?: string | null
 }
 
 const REQUIRED_MANUAL_OUTBOUND_COLUMN_DEFINITIONS = new Map<string, ColumnFixture>([
+  ['sys_user_mfa.factor_revision', {
+    dataType: 'int', columnType: 'int', isNullable: 'NO', characterMaximumLength: null, columnDefault: '1',
+  }],
+  ['sys_user_webauthn_credential.usage', {
+    dataType: 'varchar', columnType: 'varchar(16)', isNullable: 'NO', characterMaximumLength: 16, columnDefault: 'passwordless',
+  }],
   ['base_product.code_scheme', {
     dataType: 'varchar',
     columnType: 'varchar(8)',
@@ -701,6 +713,7 @@ function createDataSource(fixture: SchemaFixture): DataSource {
               COLUMN_NAME: key.slice(separatorIndex + 1),
               DATA_TYPE: definition?.dataType ?? 'varchar',
               COLUMN_TYPE: definition?.columnType ?? 'varchar(255)',
+              COLUMN_DEFAULT: definition?.columnDefault ?? null,
               IS_NULLABLE: definition?.isNullable ?? 'YES',
               CHARACTER_MAXIMUM_LENGTH: definition?.characterMaximumLength ?? null,
             }
@@ -1028,6 +1041,8 @@ for (const [columnKey] of REQUIRED_COLUMN_LENGTHS) {
     ? '039_aliyun_pnvs_sms_verification.sql'
     : columnKey === 'sys_user.webauthn_user_handle'
       ? '058_admin_webauthn.sql'
+      : columnKey === 'sys_user_mfa.totp_secret_sealed' || columnKey === 'sys_user_webauthn_credential.usage'
+        ? '059_admin_webauthn_second_factor.sql'
       : '038_department_path_capacity.sql'
   await expectSchemaFailure(shortRequiredColumn, [
     `字段 ${columnKey}`,
@@ -1193,6 +1208,26 @@ await expectSchemaFailure(missingAdminMfaUniqueIndex, [
   '索引 sys_user_mfa.uk_sys_user_mfa_user_id',
   '057_admin_mfa.sql',
 ])
+
+const oldAdminMfaNotNull = createCompleteFixture()
+oldAdminMfaNotNull.columnDefinitions.get(objectKey('sys_user_mfa', 'totp_secret_sealed'))!.isNullable = 'NO'
+await expectSchemaFailure(oldAdminMfaNotNull, ['字段 sys_user_mfa.totp_secret_sealed 必须允许 NULL', '059_admin_webauthn_second_factor.sql'])
+
+const missingFactorRevision = createCompleteFixture()
+missingFactorRevision.columns.delete(objectKey('sys_user_mfa', 'factor_revision'))
+await expectSchemaFailure(missingFactorRevision, ['字段 sys_user_mfa.factor_revision', '059_admin_webauthn_second_factor.sql'])
+
+const nullableFactorRevision = createCompleteFixture()
+nullableFactorRevision.columnDefinitions.get(objectKey('sys_user_mfa', 'factor_revision'))!.isNullable = 'YES'
+await expectSchemaFailure(nullableFactorRevision, ['字段 sys_user_mfa.factor_revision 必须为 NOT NULL', '059_admin_webauthn_second_factor.sql'])
+
+const missingCredentialUsage = createCompleteFixture()
+missingCredentialUsage.columns.delete(objectKey('sys_user_webauthn_credential', 'usage'))
+await expectSchemaFailure(missingCredentialUsage, ['字段 sys_user_webauthn_credential.usage', '059_admin_webauthn_second_factor.sql'])
+
+const missingUsageDefault = createCompleteFixture()
+missingUsageDefault.columnDefinitions.get(objectKey('sys_user_webauthn_credential', 'usage'))!.columnDefault = null
+await expectSchemaFailure(missingUsageDefault, ['字段 sys_user_webauthn_credential.usage 默认值应为 passwordless', '059_admin_webauthn_second_factor.sql'])
 
 const cascadingAdminMfaForeignKey = createCompleteFixture()
 cascadingAdminMfaForeignKey.foreignKeys.get(objectKey('sys_user_mfa', 'fk_sys_user_mfa_user_id'))!.deleteRule = 'CASCADE'
