@@ -105,6 +105,7 @@ const handleValueUpdate = (value: string | number | boolean) => {
   line-height: 1.2;
   transition:
     color 0.16s ease,
+    box-shadow 0.16s ease,
     opacity 0.16s ease;
 }
 
@@ -112,14 +113,21 @@ const handleValueUpdate = (value: string | number | boolean) => {
   padding: 0.85rem 1.15rem;
 }
 
+/*
+ * 选中下划线直接画在选中项上，不使用 Element Plus 的绝对定位指示块：
+ * - 指示块按 offsetLeft / offsetWidth 定位，二者都会取整；在 125% / 150% 缩放等小数像素布局下，
+ *   末项指示块会比分段容器宽出不足 1px，触发外层 `overflow-x: auto` 出现多余横向滚动条；
+ * - 页面在隐藏状态挂载（KeepAlive、预热）时指示块宽度会被算成 0，下划线可能整段丢失；
+ * - 画在选中项本身则随项宽度精确渲染，外层仍保留横向滚动，供标签真正超宽时在窄屏滑动；
+ * - Element Plus 初始化后会给指示块写入内联 `display: block`，因此这里必须用 `!important` 才能隐藏。
+ */
 .passive-segmented-tabs :deep(.el-segmented__item-selected) {
-  border-radius: 0;
-  background: transparent;
-  box-shadow: inset 0 -2px 0 rgb(13 148 136);
+  display: none !important;
 }
 
 .passive-segmented-tabs :deep(.el-segmented__item.is-selected) {
   color: rgb(13 148 136);
+  box-shadow: inset 0 -2px 0 rgb(13 148 136);
 }
 
 .passive-segmented-tabs :deep(.el-segmented__item:not(.is-disabled):hover) {
@@ -138,9 +146,6 @@ const handleValueUpdate = (value: string | number | boolean) => {
 
 .dark .passive-segmented-tabs :deep(.el-segmented__item.is-selected) {
   color: rgb(45 212 191);
-}
-
-.dark .passive-segmented-tabs :deep(.el-segmented__item-selected) {
   box-shadow: inset 0 -2px 0 rgb(45 212 191);
 }
 
