@@ -1,8 +1,8 @@
 /**
  * 文件说明：敏感配置加密密钥的启动预检，确保“数据库里的密文”与“当前主密钥”配套。
  * 实现逻辑：
- * - 在数据源初始化后、任何业务读写之前，扫描已加密的列（验证码网关配置、飞书 Webhook/签名密钥、两步验证秘钥），
- *   从密文前缀取出生成它们的密钥 ID；只读取加密列本身，不解密、不输出任何明文或密文；
+ * - 在数据源初始化后、任何业务读写之前，扫描已加密的列与仍有效的恢复码摘要元数据，
+ *   取得所依赖的密钥 ID；不解密、不输出任何明文、密文或恢复码摘要；
  * - 未设置环境变量且数据目录缺少密钥文件、而库里已有密文时（典型场景：只拿 SQLite 备份在全新数据目录恢复），
  *   直接阻断启动，而不是自动生成新密钥——否则这些配置永久无法解密，开启两步验证的管理员也无法登录；
  * - 密钥文件存在但与库内密文的密钥 ID 不一致时只告警：读取侧已按“需重新录入”降级，保存侧会保留原密文。
@@ -62,6 +62,25 @@ async function collectDatabaseKeyIds(dataSource: DataSource): Promise<string[]> 
       for (const row of rows) {
         const keyId = readSealedValueKeyId(row.sealed)
         if (keyId) keyIds.add(keyId)
+      }
+    }
+    // 仅通行密钥用户可以没有 TOTP 密文，但未使用的恢复码仍依赖同一主密钥的 HMAC 子密钥。
+    if (await queryRunner.hasTable('sys_user_mfa') && await queryRunner.hasColumn('sys_user_mfa', 'recovery_codes_json')) {
+      const rows = await queryRunner.query(
+        'SELECT recovery_codes_json AS metadata FROM sys_user_mfa WHERE recovery_codes_json IS NOT NULL',
+      ) as Array<{ metadata: string }>
+      for (const row of rows) {
+        try {
+          const parsed = JSON.parse(row.metadata) as { kid?: unknown; codes?: unknown }
+          if (!parsed || !Array.isArray(parsed.codes)) continue
+          const hasActiveCode = parsed.codes.some((code) => typeof code === 'string' && /^[0-9a-f]{64}$/.test(code))
+          if (hasActiveCode) {
+            // 非法 kid 不会被当作当前密钥；缺文件时同样阻断，交给原有拒绝校验路径处理。
+            keyIds.add(typeof parsed.kid === 'string' && /^[0-9a-f]{8}$/.test(parsed.kid) ? parsed.kid : 'unidentified')
+          }
+        } catch {
+          // 损坏的 JSON 在验证恢复码时会被既有解析逻辑拒绝；不猜测或修补密钥 ID。
+        }
       }
     }
   } finally {

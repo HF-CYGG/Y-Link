@@ -12,6 +12,7 @@ import { resolvePermissionsByRole, type PermissionCode } from '../constants/auth
 import { runInTransaction } from '../config/transaction-runner.js'
 import { SysUser } from '../entities/sys-user.entity.js'
 import { SysUserSession } from '../entities/sys-user-session.entity.js'
+import { SysUserWebauthnCredential } from '../entities/sys-user-webauthn-credential.entity.js'
 import { AccountLifecycleEvent } from '../entities/account-lifecycle-event.entity.js'
 import { BizInboundOrder } from '../entities/biz-inbound-order.entity.js'
 import { ClientFeedbackConversation } from '../entities/client-feedback-conversation.entity.js'
@@ -21,11 +22,13 @@ import { NotificationRule } from '../entities/notification-rule.entity.js'
 import type { AuthUserContext, UserRole, UserSafeProfile, UserStatus } from '../types/auth.js'
 import { isUniqueConstraintError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
-import { assertAdminPasswordPolicy, assertPasswordAvoidsAccountIdentifiers, hashPassword } from '../utils/password.js'
+import { assertAdminPasswordPolicy, assertPasswordAvoidsAccountIdentifiers, hashPassword, verifyPassword } from '../utils/password.js'
+import { hashSessionToken } from '../utils/session-token.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { assertPermanentDeletePassword } from '../utils/permanent-delete-password.js'
 import { auditService } from './audit.service.js'
-import { sanitizeUserProfile } from './auth.service.js'
+import { authService, sanitizeUserProfile } from './auth.service.js'
+import { authSecurityService } from './auth-security.service.js'
 import { adminMfaService } from './admin-mfa.service.js'
 import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
 import {
@@ -381,11 +384,13 @@ export class UserService {
         if (criticalCount > 0) throw new BizError('账号仍存在关键业务关联，请先完成人工交接或保留账号', 409)
 
         const sessions = await manager.getRepository(SysUserSession).delete({ userId: user.id })
+        const removedWebauthn = await manager.getRepository(SysUserWebauthnCredential).delete({ userId: user.id })
         // 两步验证记录外键为 RESTRICT，必须与账号在同一事务内删除。
         const removedMfa = await adminMfaService.deleteForUser(manager, user.id)
         await this.recordLifecycleEvent(manager, user, actor, 'permanently_deleted', reason, {
           ...references,
           removedWebSessions: sessions.affected ?? 0,
+          removedWebauthnCredentials: removedWebauthn.affected ?? 0,
           removedMfaRecords: removedMfa ? 1 : 0,
         })
         await manager.getRepository(SysUser).delete({ id: user.id })
@@ -436,12 +441,29 @@ export class UserService {
       .take(query.pageSize)
       .getManyAndCount()
 
-    const mfaEnabledIds = await adminMfaService.listEnabledUserIds(list.map((user) => user.id))
+    const userIds = list.map((user) => user.id)
+    const mfaEnabledIds = await adminMfaService.listEnabledUserIds(userIds)
+    const totpEnabledIds = await adminMfaService.listTotpEnabledUserIds(userIds)
+    const credentialCounts = new Map<string, number>()
+    if (userIds.length) {
+      const counts = await AppDataSource.getRepository(SysUserWebauthnCredential).createQueryBuilder('credential')
+        .select('credential.userId', 'userId')
+        .addSelect('COUNT(*)', 'credentialCount')
+        .where('credential.userId IN (:...userIds)', { userIds })
+        .groupBy('credential.userId')
+        .getRawMany<{ userId: string; credentialCount: string }>()
+      for (const count of counts) credentialCounts.set(String(count.userId), Number(count.credentialCount))
+    }
     return {
       page: query.page,
       pageSize: query.pageSize,
       total,
-      list: list.map((user) => ({ ...sanitizeUserProfile(user), mfaEnabled: mfaEnabledIds.has(String(user.id)) })),
+      list: list.map((user) => ({
+        ...sanitizeUserProfile(user),
+        mfaEnabled: totpEnabledIds.has(String(user.id)),
+        mfaRequired: mfaEnabledIds.has(String(user.id)),
+        webauthnCredentialsCount: credentialCounts.get(String(user.id)) ?? 0,
+      })),
     }
   }
 
@@ -721,18 +743,32 @@ export class UserService {
    * 管理员重置他人两步验证（对方丢失手机且恢复码用尽时使用）：
    * - 与重置密码同一权限与锁序，先锁操作人再锁目标账号；
    * - 不能在这里重置自己，本人应通过账号菜单用动态码或恢复码停用；
-   * - 不作废对方会话，重置后对方下次登录只需账号密码，可立即重新绑定。
+   * - 重置时同步撤销目标账号会话与 second_factor 密钥，保留独立的 passwordless 凭据；
+   * - 操作者须复核当前密码，已开启 MFA 时还须提交已绑定因素或绑定动作的单次证明。
    */
-  async resetMfa(id: string, actor: AuthUserContext, requestMeta?: RequestMeta): Promise<{ reset: true }> {
+  async resetMfa(id: string, actor: AuthUserContext, input: {
+    currentPassword: string; code?: string; recoveryCode?: string; stepUpProof?: string
+  }, requestMeta?: RequestMeta): Promise<{ reset: true }> {
     if (String(actor.userId) === String(id)) {
       throw new BizError('不能在这里重置自己的两步验证，请在账号菜单中停用', 400)
     }
-    return runInTransaction(async (manager) => {
+    await authService.verifyStepUpPassword(actor, input.currentPassword, requestMeta, 'user.mfa.reset')
+    const outcome = await runInTransaction(async (manager) => {
       const user = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:reset_password')
+      const actorSecret = await manager.getRepository(SysUser).createQueryBuilder('account')
+        .addSelect('account.passwordHash').where('account.id = :id', { id: actor.userId }).getOneOrFail()
+      if (!await verifyPassword(input.currentPassword.trim(), actorSecret.passwordHash)) throw new BizError('当前密码错误', 400)
+      await adminMfaService.assertSessionLiveUnderAccountLock(manager, actor)
+      if (await adminMfaService.isEnabled(actor.userId, manager)) {
+        const factor = await adminMfaService.verifyFactorOrProof(manager, actor, input, 'user.mfa.reset', id)
+        if (!factor.ok) return { reset: false as const, reason: factor.reason }
+      }
       const removed = await adminMfaService.deleteForUser(manager, user.id)
       if (!removed) {
         throw new BizError('该账号未开启两步验证', 409)
       }
+      const removedKeys = await manager.getRepository(SysUserWebauthnCredential).delete({ userId: user.id, usage: 'second_factor' })
+      const removedSessions = await manager.getRepository(SysUserSession).delete({ userId: user.id })
       await auditService.record(
         {
           actionType: 'user.mfa.reset',
@@ -742,12 +778,25 @@ export class UserService {
           targetCode: user.username,
           actor,
           requestMeta,
-          detail: { via: 'admin', displayName: user.displayName },
+          detail: { via: 'admin', displayName: user.displayName,
+            revokedSecondFactorKeys: removedKeys.affected ?? 0, revokedSessions: removedSessions.affected ?? 0 },
         },
         manager,
       )
       return { reset: true as const }
     })
+    if (!outcome.reset) {
+      if (outcome.reason === 'code_mismatch') {
+        await authSecurityService.recordAdminLoginFailure(requestMeta, actor.username)
+      }
+      await auditService.safeRecord({
+        actionType: 'user.mfa.reset', actionLabel: '重置两步验证', targetType: 'user',
+        targetId: id, actor, requestMeta, resultStatus: 'failed', detail: { reason: outcome.reason },
+      })
+      throw new BizError('身份复核未通过', 400)
+    }
+    customerServiceRealtimeService.disconnectByOwner('service', id)
+    return outcome
   }
 }
 

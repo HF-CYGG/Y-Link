@@ -7,7 +7,7 @@
 import { createRouter, createWebHistory, type RouteLocationNormalized } from 'vue-router'
 import { scheduleRouteComponentWarmup, type AppRouteName } from '@/router/route-performance'
 import { useAuthStore, useClientAuthStore } from '@/store'
-import { canAccessRoute, resolveFirstAccessibleManagementPath, routes } from '@/router/routes'
+import { canAccessRoute, resolveFirstAccessibleManagementPath, resolveInventoryEntryRedirect, routes } from '@/router/routes'
 import type { UserSafeProfile } from '@/api/modules/auth'
 import { showPermissionDenied } from '@/utils/permission'
 import { hasRecoverableAdminSessionHint } from '@/utils/auth-storage'
@@ -248,6 +248,13 @@ router.beforeEach(async (to) => {
   const clientRedirect = resolveClientRouteRedirect(to, flags, clientAuthStore)
   if (clientRedirect) {
     return clientRedirect
+  }
+
+  const inventoryRedirect = flags.requiresAuth && authStore.isAuthenticated
+    ? resolveInventoryEntryRedirect(to.path, authStore.currentUser)
+    : null
+  if (inventoryRedirect) {
+    return inventoryRedirect
   }
 
   const permissionRedirect = resolveManagementPermissionRedirect(to, flags, authStore)

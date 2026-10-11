@@ -14,6 +14,7 @@ import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath, URL } from 'node:url'
+import { shortenHtml2pdfModuleIds } from './scripts/html2pdf-module-id-shortener.mjs'
 
 /**
  * 首帧主题脚本构建插件：
@@ -27,6 +28,36 @@ import { fileURLToPath, URL } from 'node:url'
 const THEME_INIT_SOURCE_URL = '/src/theme-init.js'
 const THEME_INIT_PLACEHOLDER = '<!-- ylink-theme-init-script -->'
 const THEME_INIT_TAG_PATTERN = /<script\s+src=["']\/src\/theme-init\.js["']\s*><\/script>/
+
+/** 仅在生产构建时压缩已核验供应商包的内部模块 ID；不改变 PDF 实现和外部 html2canvas 导入。 */
+const html2pdfModuleIdPlugin = (): Plugin => {
+  let transformedCount = 0
+  let verifiedOnce = false
+  return {
+    name: 'ylink-html2pdf-module-id-shortener',
+    enforce: 'pre',
+    apply: 'build',
+    // watch 重建可复用已转换模块的缓存：每轮重置重复计数，但保留首次成功验证标记。
+    buildStart() {
+      transformedCount = 0
+    },
+    transform(code, id) {
+      const normalizedId = id.replaceAll('\\', '/').split('?')[0]
+      if (!normalizedId.includes('/node_modules/html2pdf.js/')) return null
+      if (!normalizedId.endsWith('/node_modules/html2pdf.js/dist/html2pdf.js')) {
+        throw new Error(`html2pdf.js 构建入口已变化，拒绝未经复核的模块 ID 转换：${normalizedId}`)
+      }
+      transformedCount += 1
+      if (transformedCount !== 1) throw new Error('html2pdf.js 构建入口重复处理，拒绝转换')
+      const result = shortenHtml2pdfModuleIds(code)
+      verifiedOnce = true
+      return { code: result.code, map: null }
+    },
+    buildEnd(error) {
+      if (!error && !verifiedOnce) throw new Error('构建未发现预期 html2pdf.js 入口，拒绝静默跳过模块 ID 转换')
+    },
+  }
+}
 
 const themeInitScriptPlugin = (): Plugin[] => {
   let publicBase = '/'
@@ -193,6 +224,7 @@ export default defineConfig(({ command, mode }) => {
     plugins: [
       vue(),
       ...themeInitScriptPlugin(),
+      html2pdfModuleIdPlugin(),
       /**
        * Element Plus 编译期按需引入：
        * - 仅为模板中真实使用到的组件生成 import；

@@ -53,7 +53,7 @@ async function main(): Promise<void> {
     const operationRepo = AppDataSource.getRepository(OrderMergeOperation)
     const parent = await orderRepo.save(orderRepo.create({
       orderUuid: randomUUID(),
-      showNo: 'hyyzjd900001',
+      systemNo: 'OUT-D-900001',
       businessNo: 'hyyzjd900001',
       editVersion: 1,
       status: 'active',

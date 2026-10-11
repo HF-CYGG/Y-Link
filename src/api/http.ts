@@ -71,10 +71,11 @@ const isClientRouteContext = () => {
 /**
  * 是否为登录接口请求：
  * - 登录失败属于正常业务反馈，不应被全局拦截器误判为“会话失效”；
- * - 因此需要排除 /auth/login 与两步验证第二步 /auth/login/mfa 的 401 响应自动跳转逻辑。
+ * - 因此需要排除密码登录、两步验证第二步及 WebAuthn 匿名登录两接口的 401 自动跳转；
+ * - WebAuthn 凭据管理与注册仍受会话保护，不能把整个前缀加入白名单。
  */
 const isLoginRequest = (url?: string) => {
-  return /\/auth\/login(?:\/mfa)?(?:\?|$)/.test(normalizeRequestUrl(url))
+  return /\/(?:auth\/login(?:\/mfa)?|auth\/webauthn\/login\/(?:options|verify))(?:\?|$)/.test(normalizeRequestUrl(url))
 }
 
 /**

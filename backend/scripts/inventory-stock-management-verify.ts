@@ -142,11 +142,11 @@ async function main() {
     await assert.rejects(() => productService.create({
       productName: '撞码商品',
       skus: [{ specValues: {}, barcode: '6901234567892' }],
-    }, admin), /已被其他商品的规格使用/)
+    }, admin), /条码或编码「6901234567892」与其他商品（ID \d+）的原厂条码冲突/)
     await assert.rejects(() => productService.create({
       productName: '撞编码商品',
       skus: [{ specValues: {}, barcode: 'WC02001' }],
-    }, admin), /已被其他商品的规格使用/)
+    }, admin), /条码或编码「WC02001」与其他商品（ID \d+）的当前编码冲突/)
     await assert.rejects(() => inventoryMasterDataService.updateCategory(stickers.id, { categoryCode: '09' }, admin), /不能修改分类编码/)
 
     // 单规格商品：通过 defaultSku 维护默认规格的条码、成本价与库位；多规格商品不允许走该入口。
@@ -383,11 +383,23 @@ async function main() {
       skus: [{ specValues: { 色: '红' }, barcode: 'SWAP-A' }, { specValues: { 色: '蓝' }, barcode: 'SWAP-B' }],
     }, admin)
     const [red, blue] = swap.skus
+    await assert.rejects(
+      () => productService.update(swap.id, {
+        specGroups: colorGroups(['红', '蓝']),
+        skus: [{ id: red.id, specValues: { 色: '红' }, barcode: 'SWAP-A' }, { id: blue.id, specValues: { 色: '蓝' }, barcode: 'SWAP-A' }],
+      }, admin),
+      (error: unknown) => error instanceof Error && /多个规格中重复/.test(error.message)
+        && (error as { statusCode?: number }).statusCode === 409,
+      '最终两条 SKU 占用同一条码必须继续拒绝',
+    )
+    assert.equal((await AppDataSource.getRepository(BaseProductSku).findOneByOrFail({ id: blue.id })).barcode, 'SWAP-B', '被拒绝的最终重复不得改写现存条码')
     const swapped = await productService.update(swap.id, {
       specGroups: colorGroups(['红', '蓝']),
       skus: [{ id: red.id, specValues: { 色: '红' }, barcode: 'SWAP-B' }, { id: blue.id, specValues: { 色: '蓝' }, barcode: 'SWAP-A' }],
     }, admin)
     assert.deepEqual(swapped.skus.map((sku) => [sku.id, sku.barcode]), [[red.id, 'SWAP-B'], [blue.id, 'SWAP-A']])
+    assert.equal((await productService.lookupByCode('SWAP-A')).sku.id, blue.id)
+    assert.equal((await productService.lookupByCode('SWAP-B')).sku.id, red.id)
     await productService.update(swap.id, { specGroups: colorGroups(['红']), skus: [{ id: red.id, specValues: { 色: '红' } }] }, admin)
     const retiredBlue = await AppDataSource.getRepository(BaseProductSku).findOneByOrFail({ id: blue.id })
     assert.equal(retiredBlue.barcode, null, '退役规格应释放条码')

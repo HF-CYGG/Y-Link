@@ -656,7 +656,7 @@ async function main() {
     }))
     const legacyOrder = await orderRepo.save(orderRepo.create({
       orderUuid: randomUUID(),
-      showNo: `hyyz${verifySeed.replace(/\D/g, '').slice(-6).padStart(6, '0')}`,
+      systemNo: `OUT-W-${verifySeed.replace(/\D/g, '').slice(-6).padStart(6, '0')}`,
       businessNo: `hyyz8${verifySeed.replace(/\D/g, '').slice(-5).padStart(5, '0')}`,
       editVersion: 1,
       inventoryMode: 'legacy_none',

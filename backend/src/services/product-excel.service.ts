@@ -23,7 +23,8 @@ import { assertXlsxArchiveWithinLimits } from '../utils/xlsx-archive-guard.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 import { auditService } from './audit.service.js'
 import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
-import { productService, type CreateProductInput } from './product.service.js'
+import { acquireSequenceMutex } from './inventory-sequence.service.js'
+import { PRODUCT_SCAN_CODE_MUTEX_KEY, productService, type CreateProductInput } from './product.service.js'
 
 const TEMPLATE_COLUMNS = [
   { key: 'productName', header: '商品名称*', width: 24 },
@@ -318,6 +319,7 @@ export class ProductExcelService {
     const parsedRows = await this.parseWorkbook(buffer)
     const result = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
+      await acquireSequenceMutex(manager, PRODUCT_SCAN_CODE_MUTEX_KEY)
       const { rows, groups, categoryIdByCode, locationIdByCode } = await this.validate(parsedRows, manager)
       const preview = this.toPreview(rows, groups.size)
       if (preview.errorCount > 0) {

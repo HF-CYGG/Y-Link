@@ -1114,15 +1114,14 @@ async function main() {
     assert.equal(legacyLookup.sku.id, legacyCodeGreenSku!.id, '应命中对应的 SKU')
     pass('旧码可扫：用升级前的旧 skuCode 调 lookupByCode 能命中该 SKU，matchedBy 为 legacy_sku_code')
 
-    // 用例 35：优先级正确——构造「A 商品的 skuCode」恰好等于「B 商品的 legacySkuCode」的场景，
-    // 断言 lookupByCode 优先返回 A（SKU 编码命中优先于历史编码命中）。这里复用用例 33 里蓝色 SKU
+    // 用例 35：历史双归属失败关闭——构造「A 商品的 skuCode」恰好等于「B 商品的 legacySkuCode」，
+    // 两条 SKU 均当前启用时扫码须提示歧义，不能因命中字段排名不同而静默选错旧纸签。这里复用蓝色 SKU
     // 升级前的旧编码：升级后它只活在 legacyCodeUpgraded 蓝色 SKU 的 legacySkuCode 里（不受唯一约束）。
     // 第六轮评审 P1-A 修复后，assertSkuRelationsValid 会拒绝任何普通写入把 skuCode/barcode 显式设成
     // 其他商品的 legacySkuCode——这正是本轮要堵住的口子，因此不能再像之前那样直接经 productService.create
     // 传入冲突的 skuCode 来构造场景（会被正确拒绝，语义变化是预期内的）。这里改为绕过服务层直接改写
     // 底层行，模拟"服务层校验之外已经存在的歧义数据"（例如本修复上线前的历史数据、或未来某条尚未纳入
-    // 校验的写入路径遗留下来的数据）：lookupByCode 的优先级兜底就是为这类场景准备的最后一道防线，
-    // 依然需要覆盖，用例本身要验证的不变量没有变化，只是构造手段必须换成服务层校验拦不住的路径。
+    // 校验的写入路径遗留下来的数据）：lookupByCode 的最高当前/启用状态层必须拒绝多 SKU 归属。
     const oldBlueSkuCode = oldLegacyCodeSkuCodeById.get(
       legacyCodeUpgraded.skus.find((sku) => sku.specValues['颜色'] === '蓝色')!.id,
     )
@@ -1139,11 +1138,18 @@ async function main() {
       limitPerUser: 5,
     } as Parameters<typeof productService.create>[0], actor)
     await skuRepo.update({ id: priorityProduct.skus[0].id }, { skuCode: oldBlueSkuCode! })
+    await assert.rejects(
+      () => productService.lookupByCode(oldBlueSkuCode!),
+      (error) => assertBizErrorWithStatus(error, 409) && (error as InstanceType<typeof BizError>).message.includes('多个商品规格'),
+      '同状态层的当前编码与另一 SKU 历史编码冲突时必须明确拒绝扫码',
+    )
+    const legacyBlueSkuId = legacyCodeUpgraded.skus.find((sku) => sku.specValues['颜色'] === '蓝色')!.id
+    await skuRepo.update({ id: legacyBlueSkuId }, { isCurrent: false })
     const priorityLookup = await productService.lookupByCode(oldBlueSkuCode!)
-    assert.equal(priorityLookup.matchedBy, 'sku_code', 'SKU 编码命中应优先于历史编码命中')
-    assert.equal(priorityLookup.product.id, priorityProduct.id, '应返回当前 SKU 编码命中的商品 A，而不是历史编码命中的商品 B')
-    assert.equal(priorityLookup.sku.id, priorityProduct.skus[0].id, '应返回 A 商品的 SKU，而不是 B 商品退役的历史编码')
-    pass('优先级正确：A 商品当前 skuCode 恰好等于 B 商品的 legacySkuCode 时，lookupByCode 优先返回 A（SKU 编码命中优先于历史编码命中）')
+    assert.equal(priorityLookup.sku.id, priorityProduct.skus[0].id, '低 current 历史候选不得抢占当前 SKU')
+    assert.equal(priorityLookup.matchedBy, 'sku_code', '低状态层存在历史候选时仍应保留当前编码匹配类型')
+    await skuRepo.update({ id: legacyBlueSkuId }, { isCurrent: true })
+    pass('历史双归属保护：同状态层多 SKU 冲突返回 409；较低 current 历史候选不影响当前 SKU 扫码')
 
     // ============ 第 6 批：PR #109 评审修复（P1-1 / P1-2 / P1-3）============
 
@@ -1942,9 +1948,21 @@ async function main() {
       (error: unknown) => assertBizErrorWithStatus(error, 409) && (error as InstanceType<typeof BizError>).message.includes(p12SiblingLegacyCode),
       'P1-A：本商品内某条 SKU 的 skuCode 等于另一条 SKU 的历史编码（legacySkuCode）时，普通保存路径应抛 409',
     )
+    await assert.rejects(
+      () => productService.update(p12OrdinaryProduct.id, {
+        specGroups: [{ name: '颜色', values: ['紫色', '橙色'] }],
+        skus: [
+          { id: p12SkuPurple!.id, specValues: { 颜色: '紫色' }, defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 0, barcode: p12SiblingLegacyCode },
+          { id: p12SkuOrange!.id, specValues: { 颜色: '橙色' }, defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 1 },
+        ],
+      } as Parameters<typeof productService.update>[1], actor),
+      (error: unknown) => assertBizErrorWithStatus(error, 409) && (error as InstanceType<typeof BizError>).message.includes(p12SiblingLegacyCode),
+      'P1-A：本批一条 SKU 的条码等于另一条 SKU 保留的历史编码时应抛 409',
+    )
 
     const p12PurpleUnchanged = await skuRepo.findOneBy({ id: p12SkuPurple!.id })
     assert.equal(p12PurpleUnchanged!.skuCode, p12SkuPurple!.skuCode, '被拒绝的写入不应残留，紫色 SKU 的 skuCode 应保持原样')
+    assert.equal(p12PurpleUnchanged!.barcode, null, '被拒绝的条码写入不应残留')
     pass('P1-A：assertSkuRelationsValid 已纳入本商品内其它 SKU 的 legacySkuCode 冲突检查——普通保存路径同样抛 409，且不残留写入')
 
     // ============ P2-A（PR #109 第八轮评审）：升级前必须检测"产品编码"冲突，且不能陷入重试死循环 ============

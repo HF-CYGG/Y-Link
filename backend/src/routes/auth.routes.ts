@@ -20,6 +20,9 @@ import { authService } from '../services/auth.service.js'
 import { adminMfaService } from '../services/admin-mfa.service.js'
 import { authSecurityService } from '../services/auth-security.service.js'
 import { captchaService } from '../services/captcha.service.js'
+import { webauthnConfig } from '../config/webauthn.js'
+import { adminWebauthnService, assertWebauthnOrigin, ADMIN_STEP_UP_ACTIONS } from '../services/admin-webauthn.service.js'
+import { resolveSecureCookieFlag } from '../utils/http-security.js'
 import {
   AUTH_ACCOUNT_INPUT_MAX_LENGTH,
   existingPasswordInput,
@@ -48,6 +51,9 @@ const mfaLoginSchema = z
 
 const mfaStepUpSchema = z.object({
   currentPassword: existingPasswordInput('当前密码'),
+  code: totpCodeInput().optional(),
+  recoveryCode: recoveryCodeInput().optional(),
+  stepUpProof: z.string().trim().min(1).max(128).optional(),
 })
 
 const mfaConfirmSchema = z.object({
@@ -59,13 +65,16 @@ const mfaDisableSchema = z
     currentPassword: existingPasswordInput('当前密码'),
     code: totpCodeInput().optional(),
     recoveryCode: recoveryCodeInput().optional(),
+    stepUpProof: z.string().trim().min(1).max(128).optional(),
   })
-  .refine((value) => Boolean(value.code) !== Boolean(value.recoveryCode), { message: '请输入 6 位动态码或恢复码' })
+  .refine((value) => [value.code, value.recoveryCode, value.stepUpProof].filter(Boolean).length === 1,
+    { message: '请选择一种两步验证方式' })
 
 const mfaRegenerateSchema = z.object({
   currentPassword: existingPasswordInput('当前密码'),
-  code: totpCodeInput().min(1, '请输入 6 位动态码'),
-})
+  code: totpCodeInput().optional(),
+  stepUpProof: z.string().trim().min(1).max(128).optional(),
+}).refine((value) => Boolean(value.code) !== Boolean(value.stepUpProof), { message: '请选择动态码或安全密钥验证' })
 
 const changePasswordSchema = z.object({
   currentPassword: existingPasswordInput('当前密码'),
@@ -78,6 +87,201 @@ const changePasswordSchema = z.object({
  * - 结合 Zod 进行输入参数结构化校验，配合 authSecurityService 阻挡暴力破解。
  */
 export const authRouter = Router()
+
+authRouter.get('/webauthn/capabilities', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store')
+  res.json({ code: 0, message: 'ok', data: webauthnConfig })
+})
+
+const webauthnLoginOptionsSchema = z.object({
+  captchaId: optionalCaptchaIdInput(),
+  code: optionalCaptchaCodeInput(),
+})
+const webauthnRegisterOptionsSchema = z.object({
+  name: z.string().trim().min(1, '请输入密钥名称').max(64, '密钥名称不能超过 64 位'),
+  kind: z.enum(['passkey', 'security_key']),
+  usage: z.enum(['passwordless', 'second_factor']).optional(),
+  currentPassword: existingPasswordInput('当前密码'),
+  code: totpCodeInput().optional(),
+  recoveryCode: recoveryCodeInput().optional(),
+  stepUpProof: z.string().trim().min(1).max(128).optional(),
+})
+const webauthnRenameSchema = z.object({ name: z.string().trim().min(1).max(64) })
+const webauthnDeleteSchema = z.object({
+  currentPassword: existingPasswordInput('当前密码'),
+  code: totpCodeInput().optional(),
+  recoveryCode: recoveryCodeInput().optional(),
+  stepUpProof: z.string().trim().min(1).max(128).optional(),
+})
+const webauthnCredentialIdSchema = z.string().regex(/^\d+$/, '密钥记录 ID 不正确')
+
+authRouter.patch('/webauthn/credentials/:id', requireAuth, requireAdminCsrf, asyncHandler(async (req, res) => {
+  const authReq = req as AuthenticatedRequest
+  const id = webauthnCredentialIdSchema.parse(req.params.id)
+  const payload = webauthnRenameSchema.parse(req.body)
+  const data = await adminWebauthnService.renameCredential(authReq.auth, id, payload.name, extractRequestMeta(req))
+  res.setHeader('Cache-Control', 'no-store')
+  res.json({ code: 0, message: 'ok', data })
+}))
+
+authRouter.delete('/webauthn/credentials/:id', requireAuth, requireAdminCsrf, asyncHandler(async (req, res) => {
+  const authReq = req as AuthenticatedRequest
+  const id = webauthnCredentialIdSchema.parse(req.params.id)
+  const payload = webauthnDeleteSchema.parse(req.body)
+  const data = await adminWebauthnService.deleteCredential(authReq.auth, id, payload, extractRequestMeta(req))
+  clearAdminAuthCookies(req, res)
+  res.setHeader('Cache-Control', 'no-store')
+  res.json({ code: 0, message: 'ok', data })
+}))
+const webauthnVerifySchema = z.object({
+  challengeId: z.string().regex(/^[A-Za-z0-9_-]{43}$/, '挑战编号格式不正确'),
+  response: z.object({
+    id: z.string().min(1).max(2048), rawId: z.string().min(1).max(2048), type: z.literal('public-key'),
+    response: z.object({
+      clientDataJSON: z.string().min(1).max(8192),
+      attestationObject: z.string().min(1).max(65536),
+      transports: z.array(z.string().max(32)).max(16).optional(),
+    }).passthrough(),
+    clientExtensionResults: z.record(z.unknown()),
+  }).passthrough(),
+})
+const webauthnLoginVerifySchema = z.object({
+  challengeId: z.string().regex(/^[A-Za-z0-9_-]{43}$/, '挑战编号格式不正确'),
+  response: z.object({
+    id: z.string().min(1).max(2048), rawId: z.string().min(1).max(2048), type: z.literal('public-key'),
+    response: z.object({
+      clientDataJSON: z.string().min(1).max(8192),
+      authenticatorData: z.string().min(1).max(8192),
+      signature: z.string().min(1).max(8192),
+      userHandle: z.string().min(1).max(2048).nullable().optional(),
+    }).passthrough(),
+    clientExtensionResults: z.record(z.unknown()),
+  }).passthrough(),
+})
+
+const webauthnMfaOptionsSchema = z.object({ mfaTicket: z.string().trim().min(1).max(128) })
+const webauthnMfaVerifySchema = webauthnLoginVerifySchema.extend({ mfaTicket: z.string().trim().min(1).max(128) })
+const stepUpOptionsSchema = z.object({
+  currentPassword: existingPasswordInput('当前密码'),
+  action: z.enum(ADMIN_STEP_UP_ACTIONS),
+  targetId: z.string().regex(/^\d+$/).optional(),
+})
+const nonceCookieName = (challengeId: string) => `y_link_webauthn_nonce_${challengeId}`
+const mfaNonceCookieName = (challengeId: string) => `y_link_webauthn_mfa_nonce_${challengeId}`
+const nonceCookieCount = (raw: string | undefined) => (raw ?? '').split(';').filter((part) =>
+  /^\s*y_link_webauthn_nonce_[A-Za-z0-9_-]{43}=/.test(part)).length
+const cookieValueByName = (raw: string | undefined, name: string) => {
+  return (raw ?? '').split(';').map((part) => part.trim()).find((part) => part.startsWith(`${name}=`))?.slice(name.length + 1)
+}
+const nonceForChallenge = (raw: string | undefined, challengeId: string) => cookieValueByName(raw, nonceCookieName(challengeId))
+
+authRouter.post('/login/mfa/webauthn/options', asyncHandler(async (req, res) => {
+  const origin = assertWebauthnOrigin(req.headers.origin)
+  const { mfaTicket } = webauthnMfaOptionsSchema.parse(req.body)
+  if ((req.headers.cookie ?? '').split(';').filter((part) =>
+    /^\s*y_link_webauthn_mfa_nonce_[A-Za-z0-9_-]{43}=/.test(part)).length >= 8) {
+    throw new BizError('同时进行的密钥验证过多，请完成或关闭旧页面后重试', 429)
+  }
+  const { nonce, ...data } = await adminWebauthnService.beginMfaLogin(mfaTicket, origin, extractRequestMeta(req))
+  res.cookie(mfaNonceCookieName(data.challengeId), nonce, { httpOnly: true, sameSite: 'strict',
+    secure: resolveSecureCookieFlag(req), path: '/api/auth/login/mfa/webauthn', maxAge: data.expiresInSeconds * 1000 })
+  res.setHeader('Cache-Control', 'no-store')
+  res.json({ code: 0, message: 'ok', data })
+}))
+
+authRouter.post('/login/mfa/webauthn/verify', asyncHandler(async (req, res) => {
+  const origin = assertWebauthnOrigin(req.headers.origin)
+  const payload = webauthnMfaVerifySchema.parse(req.body)
+  const name = mfaNonceCookieName(payload.challengeId)
+  const nonce = cookieValueByName(req.headers.cookie, name)
+  res.clearCookie(name, { httpOnly: true, sameSite: 'strict', secure: resolveSecureCookieFlag(req),
+    path: '/api/auth/login/mfa/webauthn' })
+  const data = await adminWebauthnService.completeMfaLogin(payload.mfaTicket, payload.challengeId,
+    payload.response as Parameters<typeof adminWebauthnService.completeMfaLogin>[2], nonce, origin, extractRequestMeta(req))
+  setAdminAuthCookies(req, res, { sessionToken: data.token, expiresAt: data.expiresAt })
+  res.setHeader('Cache-Control', 'no-store')
+  res.json({ code: 0, message: 'ok', data: { expiresAt: data.expiresAt, user: data.user } })
+}))
+
+authRouter.post('/webauthn/step-up/options', requireAuth, requireAdminCsrf, asyncHandler(async (req, res) => {
+  const origin = assertWebauthnOrigin(req.headers.origin)
+  const payload = stepUpOptionsSchema.parse(req.body)
+  const authReq = req as AuthenticatedRequest
+  const data = await adminWebauthnService.beginStepUp(authReq.auth, payload, origin, extractRequestMeta(req))
+  res.setHeader('Cache-Control', 'no-store')
+  res.json({ code: 0, message: 'ok', data })
+}))
+
+authRouter.post('/webauthn/step-up/verify', requireAuth, requireAdminCsrf, asyncHandler(async (req, res) => {
+  const origin = assertWebauthnOrigin(req.headers.origin)
+  const payload = webauthnLoginVerifySchema.parse(req.body)
+  const authReq = req as AuthenticatedRequest
+  const data = await adminWebauthnService.completeStepUp(authReq.auth, payload.challengeId,
+    payload.response as Parameters<typeof adminWebauthnService.completeStepUp>[2], origin)
+  res.setHeader('Cache-Control', 'no-store')
+  res.json({ code: 0, message: 'ok', data })
+}))
+
+authRouter.post('/webauthn/login/verify', asyncHandler(async (req, res) => {
+  const origin = assertWebauthnOrigin(req.headers.origin)
+  const payload = webauthnLoginVerifySchema.parse(req.body)
+  const nonce = nonceForChallenge(req.headers.cookie, payload.challengeId)
+  res.clearCookie(nonceCookieName(payload.challengeId), {
+    httpOnly: true, sameSite: 'strict', secure: resolveSecureCookieFlag(req), path: '/api/auth/webauthn/login',
+  })
+  const data = await adminWebauthnService.completeLogin(
+    payload.challengeId, payload.response as Parameters<typeof adminWebauthnService.completeLogin>[1], nonce, origin, extractRequestMeta(req),
+  )
+  setAdminAuthCookies(req, res, { sessionToken: data.token, expiresAt: data.expiresAt })
+  res.setHeader('Cache-Control', 'no-store')
+  res.json({ code: 0, message: 'ok', data: { expiresAt: data.expiresAt, user: data.user } })
+}))
+
+authRouter.get('/webauthn/credentials', requireAuth, asyncHandler(async (req, res) => {
+  const authReq = req as AuthenticatedRequest
+  const data = await adminWebauthnService.listCredentials(authReq.auth.userId)
+  res.setHeader('Cache-Control', 'no-store')
+  res.json({ code: 0, message: 'ok', data })
+}))
+
+authRouter.post('/webauthn/register/options', requireAuth, requireAdminCsrf, asyncHandler(async (req, res) => {
+  const origin = assertWebauthnOrigin(req.headers.origin)
+  const payload = webauthnRegisterOptionsSchema.parse(req.body)
+  const authReq = req as AuthenticatedRequest
+  const data = await adminWebauthnService.beginRegistration(authReq.auth, payload, origin, extractRequestMeta(req))
+  res.setHeader('Cache-Control', 'no-store')
+  res.json({ code: 0, message: 'ok', data })
+}))
+
+authRouter.post('/webauthn/register/verify', requireAuth, requireAdminCsrf, asyncHandler(async (req, res) => {
+  const origin = assertWebauthnOrigin(req.headers.origin)
+  const payload = webauthnVerifySchema.parse(req.body)
+  const authReq = req as AuthenticatedRequest
+  const data = await adminWebauthnService.completeRegistration(
+    authReq.auth, payload.challengeId, payload.response as Parameters<typeof adminWebauthnService.completeRegistration>[2], origin, extractRequestMeta(req),
+  )
+  res.setHeader('Cache-Control', 'no-store')
+  res.json({ code: 0, message: 'ok', data })
+}))
+
+authRouter.post('/webauthn/login/options', asyncHandler(async (req, res) => {
+  const origin = assertWebauthnOrigin(req.headers.origin)
+  const payload = webauthnLoginOptionsSchema.parse(req.body)
+  if (nonceCookieCount(req.headers.cookie) >= 8) throw new BizError('同时进行的密钥登录过多，请完成或关闭旧页面后重试', 429)
+  const requestMeta = extractRequestMeta(req)
+  const { captchaRequired } = await authSecurityService.guardAdminLoginRequest(requestMeta, 'webauthn-anonymous')
+  if (captchaRequired) {
+    if (!payload.captchaId?.trim() || !payload.code?.trim()) throw new BizError('当前登录环境需要图形验证码', 428)
+    captchaService.verifyCaptcha('admin', payload.captchaId, payload.code)
+  }
+  const { nonce, ...data } = await adminWebauthnService.beginLogin(origin)
+  res.cookie(nonceCookieName(data.challengeId), nonce, {
+    httpOnly: true, sameSite: 'strict', secure: resolveSecureCookieFlag(req),
+    path: '/api/auth/webauthn/login', maxAge: data.expiresInSeconds * 1000,
+  })
+  res.setHeader('Cache-Control', 'no-store')
+  res.json({ code: 0, message: 'ok', data })
+}))
 
 authRouter.get(
   '/captcha',
@@ -121,6 +325,7 @@ authRouter.post(
           mfaRequired: true,
           mfaTicket: data.mfaTicket,
           expiresInSeconds: data.expiresInSeconds,
+          availableMethods: data.availableMethods,
         },
       })
       return
@@ -235,9 +440,9 @@ authRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const requestMeta = extractRequestMeta(req)
-    const { currentPassword } = mfaStepUpSchema.parse(req.body)
-    await authService.verifyStepUpPassword(authReq.auth, currentPassword, requestMeta, 'auth.mfa.enroll')
-    const data = await adminMfaService.beginEnrollment(authReq.auth, requestMeta)
+    const payload = mfaStepUpSchema.parse(req.body)
+    await authService.verifyStepUpPassword(authReq.auth, payload.currentPassword, requestMeta, 'auth.mfa.enroll')
+    const data = await adminMfaService.beginEnrollment(authReq.auth, payload, requestMeta)
     res.setHeader('Cache-Control', 'no-store')
     res.json({ code: 0, message: 'ok', data })
   }),
@@ -265,10 +470,39 @@ authRouter.post(
     const requestMeta = extractRequestMeta(req)
     const payload = mfaDisableSchema.parse(req.body)
     await authService.verifyStepUpPassword(authReq.auth, payload.currentPassword, requestMeta, 'auth.mfa.disable')
-    await adminMfaService.disable(authReq.auth, { code: payload.code, recoveryCode: payload.recoveryCode }, requestMeta)
+    await adminMfaService.disable(authReq.auth, payload, requestMeta)
+    clearAdminAuthCookies(req, res)
     res.json({ code: 0, message: 'ok', data: true })
   }),
 )
+
+authRouter.post('/mfa/disable-all', requireAuth, requireAdminCsrf, asyncHandler(async (req, res) => {
+  const authReq = req as AuthenticatedRequest
+  const requestMeta = extractRequestMeta(req)
+  const payload = mfaDisableSchema.parse(req.body)
+  await authService.verifyStepUpPassword(authReq.auth, payload.currentPassword, requestMeta, 'auth.mfa.disable_all')
+  await adminMfaService.disable(authReq.auth, payload, requestMeta)
+  clearAdminAuthCookies(req, res)
+  res.json({ code: 0, message: 'ok', data: true })
+}))
+
+authRouter.post('/mfa/totp/disable', requireAuth, requireAdminCsrf, asyncHandler(async (req, res) => {
+  const authReq = req as AuthenticatedRequest
+  const requestMeta = extractRequestMeta(req)
+  const payload = mfaDisableSchema.parse(req.body)
+  await authService.verifyStepUpPassword(authReq.auth, payload.currentPassword, requestMeta, 'auth.mfa.totp.disable')
+  await adminMfaService.disableTotp(authReq.auth, payload, requestMeta)
+  res.json({ code: 0, message: 'ok', data: true })
+}))
+
+authRouter.post('/mfa/webauthn/enable', requireAuth, requireAdminCsrf, asyncHandler(async (req, res) => {
+  const authReq = req as AuthenticatedRequest
+  const payload = z.object({ currentPassword: existingPasswordInput('当前密码'),
+    stepUpProof: z.string().trim().min(1).max(128) }).parse(req.body)
+  const data = await adminWebauthnService.enablePasswordMfa(authReq.auth, payload, extractRequestMeta(req))
+  res.setHeader('Cache-Control', 'no-store')
+  res.json({ code: 0, message: 'ok', data })
+}))
 
 authRouter.post(
   '/mfa/recovery-codes',
@@ -279,7 +513,7 @@ authRouter.post(
     const requestMeta = extractRequestMeta(req)
     const payload = mfaRegenerateSchema.parse(req.body)
     await authService.verifyStepUpPassword(authReq.auth, payload.currentPassword, requestMeta, 'auth.mfa.recovery_codes')
-    const data = await adminMfaService.regenerateRecoveryCodes(authReq.auth, payload.code, requestMeta)
+    const data = await adminMfaService.regenerateRecoveryCodes(authReq.auth, payload, requestMeta)
     res.setHeader('Cache-Control', 'no-store')
     res.json({ code: 0, message: 'ok', data })
   }),

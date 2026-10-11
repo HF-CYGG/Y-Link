@@ -580,12 +580,28 @@ async function main() {
 
     const { aggregateOrderVoucherItems } = await import('../../src/views/order-list/order-voucher-aggregation.js')
     const voucherRows = aggregateOrderVoucherItems([
-      { id: '1', productId: multiProduct.id, skuId: redSku.id, productName: multiProduct.productName, specText: redSku.specText, qty: '2.00', unitPrice: '18.80', subTotal: '37.60' },
-      { id: '2', productId: multiProduct.id, skuId: blueSku.id, productName: multiProduct.productName, specText: blueSku.specText, qty: '3.00', unitPrice: '20.60', subTotal: '61.80' },
+      { id: '1', productId: multiProduct.id, sourceOrderId: 'source-red', skuId: redSku.id, productName: multiProduct.productName, specText: redSku.specText, qty: '2.00', unitPrice: '18.80', subTotal: '37.60' },
+      { id: '2', productId: multiProduct.id, sourceOrderId: 'source-blue', skuId: blueSku.id, productName: multiProduct.productName, specText: blueSku.specText, qty: '3.00', unitPrice: '20.60', subTotal: '61.80' },
     ])
-    assert.equal(voucherRows.length, 2, '打印/PDF 展示不得合并同商品的不同 SKU')
-    assert.ok(voucherRows.some((row) => row.productName.includes(redSku.specText)))
-    assert.ok(voucherRows.some((row) => row.productName.includes(blueSku.specText)))
+    assert.equal(voucherRows.length, 1, '同一商品的不同 SKU 应归为一条商品展示行')
+    assert.equal(voucherRows[0]?.productName, multiProduct.productName)
+    assert.equal(voucherRows[0]?.qty, '5')
+    assert.equal(voucherRows[0]?.subTotal, '99.40')
+    assert.equal(voucherRows[0]?.details.length, 2, '商品归组后必须保留两种 SKU 的独立展示明细')
+    assert.deepEqual(
+      voucherRows[0]?.details.map((detail) => ({
+        sourceOrderId: detail.sourceOrderId,
+        specText: detail.specText,
+        qty: detail.qty,
+        unitPrice: detail.unitPrice,
+        subTotal: detail.subTotal,
+      })),
+      [
+        { sourceOrderId: 'source-red', specText: redSku.specText, qty: '2', unitPrice: '18.80', subTotal: '37.60' },
+        { sourceOrderId: 'source-blue', specText: blueSku.specText, qty: '3', unitPrice: '20.60', subTotal: '61.80' },
+      ],
+      '打印/PDF 明细必须保留规格、数量、单价、金额与来源，不得因商品归组丢失 SKU 差异',
+    )
 
     const routeSource = readSource('backend/src/routes/order.routes.ts')
     const orderEntryTypeSource = readSource('src/views/order-entry/types.ts')

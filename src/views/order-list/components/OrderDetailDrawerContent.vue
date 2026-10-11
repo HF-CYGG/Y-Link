@@ -1,12 +1,13 @@
 <script setup lang="ts">
 /**
  * 模块说明：`src/views/order-list/components/OrderDetailDrawerContent.vue`
- * 文件职责：负责渲染出库单详情抽屉中的主单信息、明细列表与永久修订时间线。
+ * 文件职责：负责渲染出库单详情抽屉中的合规状态、主单信息、明细列表与永久修订时间线。
  * 实现逻辑：
  * 1. 主单信息按订单类型做条件化展示，部门单保留部门流程字段，散客单直接显示“不适用”或隐藏冗余项；
  * 2. 明细仍由父层提供，组件按订单 ID/版本只读加载永久 revision 时间线；
- * 3. 金额、库存模式与订单类型在组件内统一格式化，确保表格端与移动端展示口径一致。
- * 维护说明：revision 请求使用订单 ID 与版本号抑制过期响应，不得用当前商品数据覆盖历史快照。
+ * 3. 合规状态只使用父层权限、草稿和保存状态，编辑经事件回传，不在展示组件内请求或持久化；
+ * 4. 金额、库存模式与订单类型在组件内统一格式化，确保表格端与移动端展示口径一致。
+ * 维护说明：revision 请求使用订单 ID 与版本号抑制过期响应，不得用当前商品数据覆盖历史快照；合规草稿由父层拥有。
  */
 
 
@@ -28,8 +29,16 @@ const props = defineProps<{
   isPhone: boolean
   isDesktop: boolean
   detailGridClass: string
+  canEditStandaloneComplianceFlags: boolean
+  complianceForm: { hasCustomerOrder: boolean; isSystemApplied: boolean }
+  complianceSaving: boolean
 }>()
-const emit = defineEmits<{ navigate: [orderId: string] }>()
+const emit = defineEmits<{
+  navigate: [orderId: string]
+  'update:hasCustomerOrder': [value: boolean]
+  'update:isSystemApplied': [value: boolean]
+  'save-compliance': []
+}>()
 const authStore = useAuthStore(pinia)
 const canViewSystemNo = () => authStore.currentUser?.role === 'admin'
 
@@ -124,6 +133,58 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
 </script>
 
 <template>
+  <div class="mb-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 dark:border-white/10 dark:bg-white/5">
+    <div class="flex flex-wrap items-start justify-between gap-2">
+      <div>
+        <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">合规状态确认</p>
+        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">仅部门单可编辑“是否有出库单”和“系统申请”。</p>
+      </div>
+      <el-button
+        v-if="canEditStandaloneComplianceFlags"
+        size="small"
+        type="primary"
+        :loading="complianceSaving"
+        @click="emit('save-compliance')"
+      >
+        保存状态
+      </el-button>
+    </div>
+    <div class="mt-3 grid gap-3 sm:grid-cols-2">
+      <div class="rounded-xl bg-white px-3 py-3 dark:bg-[#141415]">
+        <p class="text-xs text-slate-500 dark:text-slate-400">是否有出库单</p>
+        <div class="mt-2">
+          <el-switch
+            v-if="canEditStandaloneComplianceFlags"
+            :model-value="complianceForm.hasCustomerOrder"
+            inline-prompt
+            active-text="是"
+            inactive-text="否"
+            @update:model-value="emit('update:hasCustomerOrder', $event)"
+          />
+          <span v-else class="text-sm font-medium text-slate-700 dark:text-slate-200">
+            {{ order.orderType === 'department' ? (order.hasCustomerOrder ? '是' : '否') : '不适用' }}
+          </span>
+        </div>
+      </div>
+      <div class="rounded-xl bg-white px-3 py-3 dark:bg-[#141415]">
+        <p class="text-xs text-slate-500 dark:text-slate-400">系统申请</p>
+        <div class="mt-2">
+          <el-switch
+            v-if="canEditStandaloneComplianceFlags"
+            :model-value="complianceForm.isSystemApplied"
+            inline-prompt
+            active-text="已申请"
+            inactive-text="未申请"
+            @update:model-value="emit('update:isSystemApplied', $event)"
+          />
+          <span v-else class="text-sm font-medium text-slate-700 dark:text-slate-200">
+            {{ order.orderType === 'department' ? (order.isSystemApplied ? '已申请' : '未申请') : '不适用' }}
+          </span>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <section class="mb-5 rounded-2xl border border-slate-100 bg-slate-50/70 p-3 sm:p-4 dark:border-white/10 dark:bg-white/5">
     <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
       <h3 class="flex items-center gap-2 text-base font-semibold text-slate-800 dark:text-slate-100">

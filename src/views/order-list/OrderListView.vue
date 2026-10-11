@@ -22,7 +22,6 @@ import dayjs from 'dayjs'
 
 import { computed, defineAsyncComponent, defineComponent, h, ref, watch, type ComponentPublicInstance } from 'vue'
 import { updateOrderComplianceFlags, type OrderDetailResult, type OrderRecord } from '@/api/modules/order'
-import type { OrderMergeOrderReference } from '../../../packages/shared-types/src/orders'
 import { createTimedAsyncLoader } from './order-list-mobile-card-loader'
 import {
   BizResponsiveDataCollectionShell,
@@ -36,7 +35,6 @@ import { useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { useOrderListView } from './composables/useOrderListView'
-import OrderDeleteConfirmDialog from './components/OrderDeleteConfirmDialog.vue'
 
 import { showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
@@ -102,11 +100,47 @@ const {
 const { hasPermission, ensurePermission } = usePermissionAction()
 const authStore = useAuthStore(pinia)
 const isAdmin = computed(() => authStore.currentUser?.role === 'admin')
-const OrderDetailDrawerContent = defineAsyncComponent(() => import('./components/OrderDetailDrawerContent.vue'))
+const ignoreAsyncLoadState = () => undefined
+const OrderDetailDrawerLoadError = () => h('p', { role: 'alert', class: 'rounded-xl bg-amber-50 p-3 text-sm text-amber-800' }, '详情加载失败，请刷新后重试。')
+const OrderDetailDrawerContent = defineAsyncComponent({
+  loader: createTimedAsyncLoader({
+    load: () => import('./components/OrderDetailDrawerContent.vue'),
+    timeoutMs: 15_000,
+    timeoutMessage: '单据详情加载超时',
+    onLoading: ignoreAsyncLoadState,
+    onSuccess: ignoreAsyncLoadState,
+    onError: ignoreAsyncLoadState,
+  }),
+  errorComponent: OrderDetailDrawerLoadError,
+})
 const OrderVoucherWorkbenchDialog = defineAsyncComponent(() => import('./components/OrderVoucherWorkbenchDialog.vue'))
 const OrderAmendmentDialog = defineAsyncComponent(() => import('./components/OrderAmendmentDialog.vue'))
 const OrderContentEditDialog = defineAsyncComponent(() => import('./components/OrderContentEditDialog.vue'))
 const OrderMergeDialog = defineAsyncComponent(() => import('./components/OrderMergeDialog.vue'))
+let deleteDialogLoadFailed = false
+const deleteDialogLoadErrorMessage = '删除确认加载失败，请刷新后重试'
+const handleDeleteDialogLoadError = () => {
+  deleteDialogLoadFailed = true
+  deleteDialogVisible.value = false
+  showAppWarning(deleteDialogLoadErrorMessage)
+}
+const handleOpenDeleteDialog = (row: OrderRecord) => {
+  if (deleteDialogLoadFailed) {
+    showAppWarning(deleteDialogLoadErrorMessage)
+    return
+  }
+  void handleDeleteOrderWithConfirm(row).catch(() => undefined)
+}
+const OrderDeleteConfirmDialog = defineAsyncComponent({
+  loader: createTimedAsyncLoader({
+    load: () => import('./components/OrderDeleteConfirmDialog.vue'),
+    timeoutMs: 15_000,
+    timeoutMessage: '删除确认弹窗加载超时',
+    onLoading: ignoreAsyncLoadState,
+    onSuccess: ignoreAsyncLoadState,
+    onError: handleDeleteDialogLoadError,
+  }),
+})
 const OrderListMobileCardLoading = defineComponent({
   name: 'OrderListMobileCardLoading',
   setup: () => () => h(
@@ -156,10 +190,9 @@ const OrderListMobileCard = defineAsyncComponent({
 const voucherDialogVisible = ref(false)
 const enableHtml2pdfExport = import.meta.env.VITE_ORDER_VOUCHER_HTML2PDF_ENABLED !== 'false'
 const canUseOrderVoucher = computed(() => currentOrder.value?.orderType === 'department' && currentOrder.value.merge.role !== 'source')
-const canEditComplianceFlags = computed(() => hasPermission('orders:update'))
 const canEditStandaloneComplianceFlags = computed(() => Boolean(
   currentOrder.value
-  && canEditComplianceFlags.value
+  && hasPermission('orders:update')
   && currentOrder.value.orderType === 'department'
   && currentOrder.value.merge.role === 'standalone',
 ))
@@ -184,11 +217,10 @@ const complianceForm = ref({
   hasCustomerOrder: false,
   isSystemApplied: false,
 })
-const hasActiveFilter = computed(() => {
-  return Boolean(searchForm.value.keyword || searchForm.value.orderType !== 'all' || searchForm.value.dateRange)
-})
 const emptyDescription = computed(() => {
-  return hasActiveFilter.value ? '未匹配到符合条件的订单，请调整筛选条件后重试' : '暂无订单数据，稍后可通过开单后回来查看'
+  return searchForm.value.keyword || searchForm.value.orderType !== 'all' || searchForm.value.dateRange
+    ? '未匹配到符合条件的订单，请调整筛选条件后重试'
+    : '暂无订单数据，稍后可通过开单后回来查看'
 })
 const bindListBodyRef = (element: Element | ComponentPublicInstance | null) => {
   listBodyRef.value = element instanceof HTMLElement ? element : null
@@ -214,7 +246,6 @@ const getMergeLabel = (order: Pick<OrderRecord, 'merge'>) => {
   return isSourceOrder(order) ? '已合并至父单' : ''
 }
 type OrderTreeRecord = OrderRecord & { children?: OrderTreeRecord[] }
-const toMergeReference = (order: OrderRecord): OrderMergeOrderReference => order
 const orderTreeRows = computed<OrderTreeRecord[]>(() => listState.records.map((order) => ({
   ...order,
   children: order.merge.children.map((child) => ({
@@ -222,7 +253,7 @@ const orderTreeRows = computed<OrderTreeRecord[]>(() => listState.records.map((o
     ...child,
     contentEditable: false,
     contentEditBlockers: ['已合并至父单，内容不可编辑'],
-    merge: { role: 'source', parent: toMergeReference(order), children: [] },
+    merge: { role: 'source', parent: order, children: [] },
     children: [],
   })),
 })))
@@ -630,7 +661,7 @@ const handleSaveComplianceFlags = async () => {
                     v-if="canDeleteOrder && !row.isDeleted && !isSourceOrder(row)"
                     link
                     type="danger"
-                    @click="handleDeleteOrderWithConfirm(row).catch(() => undefined)"
+                    @click="handleOpenDeleteDialog(row)"
                   >
                     删除
                   </el-button>
@@ -671,7 +702,7 @@ const handleSaveComplianceFlags = async () => {
               @view-id="handleViewDetail({ id: $event })"
               @select="handleMobileSelectionChange(item, $event)"
               @amend="openOrderAmendment([$event])"
-              @delete="handleDeleteOrderWithConfirm($event).catch(() => undefined)"
+              @delete="handleOpenDeleteDialog"
               @restore="handleRestoreOrderWithConfirm($event).catch(() => undefined)"
               @purge="handlePurgeOrderWithConfirm($event).catch(() => undefined)"
               @toggle-parent="toggleParentExpanded"
@@ -719,64 +750,18 @@ const handleSaveComplianceFlags = async () => {
         </div>
       </template>
       <template #default="{ isPhone, isDesktop }">
-        <div
-          v-if="currentOrder"
-          class="mb-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 dark:border-white/10 dark:bg-white/5"
-        >
-          <div class="flex flex-wrap items-start justify-between gap-2">
-            <div>
-              <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">合规状态确认</p>
-              <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">仅部门单可编辑“是否有出库单”和“系统申请”。</p>
-            </div>
-            <el-button
-              v-if="canEditStandaloneComplianceFlags"
-              size="small"
-              type="primary"
-              :loading="complianceSaving"
-              @click="handleSaveComplianceFlags"
-            >
-              保存状态
-            </el-button>
-          </div>
-          <div class="mt-3 grid gap-3 sm:grid-cols-2">
-            <div class="rounded-xl bg-white px-3 py-3 dark:bg-[#141415]">
-              <p class="text-xs text-slate-500 dark:text-slate-400">是否有出库单</p>
-              <div class="mt-2">
-                <el-switch
-                  v-if="canEditStandaloneComplianceFlags"
-                  v-model="complianceForm.hasCustomerOrder"
-                  inline-prompt
-                  active-text="是"
-                  inactive-text="否"
-                />
-                <span v-else class="text-sm font-medium text-slate-700 dark:text-slate-200">
-                  {{ currentOrder.orderType === 'department' ? (currentOrder.hasCustomerOrder ? '是' : '否') : '不适用' }}
-                </span>
-              </div>
-            </div>
-            <div class="rounded-xl bg-white px-3 py-3 dark:bg-[#141415]">
-              <p class="text-xs text-slate-500 dark:text-slate-400">系统申请</p>
-              <div class="mt-2">
-                <el-switch
-                  v-if="canEditStandaloneComplianceFlags"
-                  v-model="complianceForm.isSystemApplied"
-                  inline-prompt
-                  active-text="已申请"
-                  inactive-text="未申请"
-                />
-                <span v-else class="text-sm font-medium text-slate-700 dark:text-slate-200">
-                  {{ currentOrder.orderType === 'department' ? (currentOrder.isSystemApplied ? '已申请' : '未申请') : '不适用' }}
-                </span>
-              </div>
-            </div>
-          </div>
-        </div>
         <OrderDetailDrawerContent
           v-if="currentOrder"
           :order="currentOrder"
           :is-phone="isPhone"
           :is-desktop="isDesktop"
           :detail-grid-class="detailGridClass"
+          :can-edit-standalone-compliance-flags="canEditStandaloneComplianceFlags"
+          :compliance-form="complianceForm"
+          :compliance-saving="complianceSaving"
+          @update:has-customer-order="complianceForm.hasCustomerOrder = $event"
+          @update:is-system-applied="complianceForm.isSystemApplied = $event"
+          @save-compliance="handleSaveComplianceFlags"
           @navigate="handleViewDetail({ id: $event })"
         />
       </template>
@@ -804,6 +789,7 @@ const handleSaveComplianceFlags = async () => {
     />
 
     <OrderDeleteConfirmDialog
+      v-if="deleteDialogVisible"
       v-model="deleteDialogVisible"
       :order="deleteDialogOrder"
       :submitting="deleteDialogSubmitting"

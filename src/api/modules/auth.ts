@@ -243,6 +243,10 @@ export interface UserSafeProfile extends AccountLifecycleFields {
   updatedAt: string
   /** 仅用户管理列表返回：该账号是否已开启两步验证。 */
   mfaEnabled?: boolean
+  /** 是否需要密码后的第二因素；与旧字段 mfaEnabled 的 TOTP 口径分开。 */
+  mfaRequired?: boolean
+  /** 仅用户管理列表返回：当前有效通行密钥或安全密钥数量。 */
+  webauthnCredentialsCount?: number
 }
 
 /**
@@ -288,6 +292,7 @@ export interface MfaChallengeResult {
   mfaRequired: true
   mfaTicket: string
   expiresInSeconds: number
+  availableMethods: Array<'totp' | 'recovery_code' | 'webauthn'>
 }
 
 export type LoginResponse = LoginResult | MfaChallengeResult
@@ -296,6 +301,17 @@ export interface MfaLoginPayload {
   mfaTicket: string
   code?: string
   recoveryCode?: string
+}
+
+export interface MfaWebAuthnLoginPayload {
+  mfaTicket: string
+  challengeId: string
+  response: import('@simplewebauthn/browser').AuthenticationResponseJSON
+}
+
+export const completeMfaWebAuthnLogin = async (payload: MfaWebAuthnLoginPayload): Promise<LoginResult> => {
+  const result = await request<LoginResult>({ method: 'POST', url: '/auth/login/mfa/webauthn/verify', data: payload })
+  return { ...result, user: normalizeUserSafeProfile(result.user) }
 }
 
 /** 第二步票据过期、次数用尽或账号安全设置已变化时的原因码，前端据此回到第一步。 */

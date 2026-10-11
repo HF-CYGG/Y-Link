@@ -12,6 +12,9 @@ import { request } from '@/api/http'
 
 export interface AdminMfaStatus {
   enabled: boolean
+  mfaRequired: boolean
+  totpEnabled: boolean
+  availableMethods: Array<'totp' | 'recovery_code' | 'webauthn'>
   enabledAt: string | null
   recoveryCodesRemaining: number
 }
@@ -30,11 +33,13 @@ export interface DisableAdminMfaPayload {
   currentPassword: string
   code?: string
   recoveryCode?: string
+  stepUpProof?: string
 }
 
 export interface RegenerateAdminMfaRecoveryCodesPayload {
   currentPassword: string
-  code: string
+  code?: string
+  stepUpProof?: string
 }
 
 export const getAdminMfaStatus = () =>
@@ -43,11 +48,11 @@ export const getAdminMfaStatus = () =>
     url: '/auth/mfa/status',
   })
 
-export const startAdminMfaEnrollment = (currentPassword: string) =>
+export const startAdminMfaEnrollment = (currentPassword: string, proof: { code?: string; recoveryCode?: string; stepUpProof?: string } = {}) =>
   request<AdminMfaEnrollment>({
     method: 'POST',
     url: '/auth/mfa/enroll',
-    data: { currentPassword },
+    data: { currentPassword, ...proof },
   })
 
 export const confirmAdminMfaEnrollment = (code: string) =>
@@ -63,6 +68,12 @@ export const disableAdminMfa = (payload: DisableAdminMfaPayload) =>
     url: '/auth/mfa/disable',
     data: payload,
   })
+
+export const disableAdminTotp = (payload: DisableAdminMfaPayload) =>
+  request<boolean>({ method: 'POST', url: '/auth/mfa/totp/disable', data: payload })
+
+export const enableAdminWebAuthnMfa = (payload: { currentPassword: string; stepUpProof: string }) =>
+  request<AdminMfaRecoveryCodes>({ method: 'POST', url: '/auth/mfa/webauthn/enable', data: payload })
 
 export const regenerateAdminMfaRecoveryCodes = (payload: RegenerateAdminMfaRecoveryCodesPayload) =>
   request<AdminMfaRecoveryCodes>({

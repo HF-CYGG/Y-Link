@@ -10,6 +10,7 @@ import fs from 'node:fs'
 import { request as httpRequest, type Server } from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
+import ts from 'typescript'
 import type { AuthUserContext } from '../src/types/auth.js'
 
 const backendRoot = path.resolve(process.cwd())
@@ -214,6 +215,71 @@ assert.ok(
   '通知规则更新必须先锁账号，再在同事务初始化默认规则',
 )
 
+const dataMaintenanceImportSource = sliceMethod(dataMaintenanceServiceSource, '  async importJson(', '\n}\n\nexport const dataMaintenanceService')
+const importExecutableSource = dataMaintenanceImportSource
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .split('\n')
+  .filter((line) => !line.trimStart().startsWith('//'))
+  .join('\n')
+const usesIrreversibleClear = (source: string) => /\.clear\(\)|\bTRUNCATE\b/i.test(source)
+assert.equal(usesIrreversibleClear('// TRUNCATE 仅作为风险说明'), true, '反例必须能触发原危险字面量')
+assert.equal(usesIrreversibleClear('// TRUNCATE 仅作为风险说明'.split('\n').filter((line) => !line.trimStart().startsWith('//')).join('\n')), false, '注释不应触发不可回滚清表告警')
+assert.equal(usesIrreversibleClear('await manager.getRepository(InventoryLog).clear()'), true, '真实 clear 调用必须触发保护')
+assert.doesNotMatch(importExecutableSource, /\.clear\(\)|\bTRUNCATE\b/i, '导入 JSON 不得使用 MySQL 事务不可回滚的清表方式')
+// 只统计 importJson 直接返回的 runInTransaction 回调 AST 中实际执行的 DELETE，
+// 不把方法外层、回调外层或注释中的同名文本误判为可回滚操作。
+const transactionalDeleteTables = (methodSource: string): Set<string> => {
+  const sourceFile = ts.createSourceFile(
+    'import-json-contract.ts',
+    `class ImportProbe {\n${methodSource}\n}`,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  )
+  const classNode = sourceFile.statements.find(ts.isClassDeclaration)
+  const method = classNode?.members.find((member): member is ts.MethodDeclaration =>
+    ts.isMethodDeclaration(member) && member.name.getText(sourceFile) === 'importJson')
+  const transactionReturn = method?.body?.statements.find((statement) =>
+    ts.isReturnStatement(statement)
+    && statement.expression
+    && ts.isCallExpression(statement.expression)
+    && ts.isIdentifier(statement.expression.expression)
+    && statement.expression.expression.text === 'runInTransaction')
+  const transactionCall = transactionReturn && ts.isReturnStatement(transactionReturn)
+    ? transactionReturn.expression
+    : undefined
+  const callback = transactionCall && ts.isCallExpression(transactionCall)
+    ? transactionCall.arguments[0]
+    : undefined
+  const tables = new Set<string>()
+  if (!callback || !ts.isArrowFunction(callback) || !ts.isBlock(callback.body)) return tables
+  const visit = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && ts.isAwaitExpression(node.parent)) {
+      const normalized = node.getText(sourceFile).replace(/\s+/g, '')
+      const match = /^manager\.createQueryBuilder\(\)\.delete\(\)\.from\((\w+)\)\.execute\(\)$/.exec(normalized)
+      if (match) tables.add(match[1])
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(callback.body)
+  return tables
+}
+const sampleDelete = 'await manager.createQueryBuilder().delete().from(InventoryLog).execute()'
+assert.equal(transactionalDeleteTables(`async importJson() { ${sampleDelete} }`).size, 0, '缺少事务入口不得通过删除探针')
+assert.equal(transactionalDeleteTables(`async importJson() { ${sampleDelete}; return runInTransaction(async (manager) => {}) }`).size, 0, '先删除后开启事务不得通过探针')
+assert.deepEqual(
+  [...transactionalDeleteTables(`async importJson() { return runInTransaction(async (manager) => { ${sampleDelete} }); await manager.createQueryBuilder().delete().from(SystemConfig).execute() }`)],
+  ['InventoryLog'],
+  '回调外的第二张表不得计入事务内删除',
+)
+const deletedInsideTransaction = transactionalDeleteTables(dataMaintenanceImportSource)
+for (const table of ['InventoryLog', 'O2oPreorderItem', 'O2oPreorder', 'ClientUser', 'BaseProduct', 'SystemConfig']) {
+  assert.ok(
+    deletedInsideTransaction.has(table),
+    `导入 JSON 必须在事务中对 ${table} 执行可回滚 DELETE`,
+  )
+}
+
 const managementWriteContracts = [
   [sliceMethod(userServiceSource, '  async create(', '  async update('), 'manager.getRepository(SysUser)', '创建管理端账号'],
   [sliceMethod(clientUserManageServiceSource, '  async createDepartmentAccountsBatch(', '  async createProfile('), 'manager.getRepository(ClientUser)', '部门客户端批量开户'],
@@ -232,7 +298,7 @@ const managementWriteContracts = [
   [sliceMethod(systemConfigServiceSource, '  async updateClientDepartmentConfigs(', '  async ensureClientDepartmentOptions('), 'manager.query(', '更新客户端部门配置'],
   [sliceMethod(systemConfigServiceSource, '  async updateVerificationProviderConfigs(', '\n}\n\nexport const systemConfigService'), 'manager.query(', '更新验证码服务配置'],
   [sliceMethod(clientStaffInviteCodeServiceSource, '  private async updateConfig(', '\n}\n\nexport const clientStaffInviteCodeService'), 'manager.getRepository(SystemConfig)', '更新教职工邀请码'],
-  [sliceMethod(dataMaintenanceServiceSource, '  async importJson(', '\n}\n\nexport const dataMaintenanceService'), 'manager.getRepository(InventoryLog).clear()', '导入 JSON 数据'],
+  [dataMaintenanceImportSource, 'manager.createQueryBuilder().delete().from(InventoryLog).execute()', '导入 JSON 数据'],
   [dataExportSource, 'this.loadExportRows(tableKey, manager)', '导出 JSON 数据与审计'],
   [sliceMethod(tagServiceSource, '  async create(', '  async update('), 'manager.getRepository(BaseTag)', '创建标签'],
   [sliceMethod(tagServiceSource, '  async update(', '  async delete('), 'manager.getRepository(BaseTag)', '修改标签'],

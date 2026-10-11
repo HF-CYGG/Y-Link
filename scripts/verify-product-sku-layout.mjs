@@ -18,6 +18,8 @@ const sliceBetween = (startNeedle, endNeedle) => {
 
 const operationColumn = sliceBetween('label="操作"', '</el-table-column>')
 const mainDialog = sliceBetween('v-model="dialogVisible"', '</BizCrudDialogShell>')
+const mainDialogFooter = mainDialog.match(/<template #footer="\{ close \}">([\s\S]*?)<\/template>/)?.[1] ?? ''
+const skuSubmitHandler = sliceBetween('const handleSubmitSkuConfig = async () => {', 'const handleDeleteProduct = async')
 const skuDialog = sliceBetween('v-if="isSkuDialog"', '<el-form v-else')
 const mobileActions = sliceBetween('class="product-mobile-actions', '</div>')
 const skuThumbButton = sliceBetween('class="sku-thumb-button"', '</button>')
@@ -34,7 +36,9 @@ assertSourceIncludes(`:tablet-width="isSkuDialog ? '92%' : '720px'"`, 'SKU mode 
 assertSourceIncludes(`:desktop-width="isSkuDialog ? '920px' : '500px'"`, 'SKU mode should use a wider desktop dialog to avoid content overflow')
 assert.ok(skuDialog.includes('sku-card'), 'SKU config should be rendered in its own standalone card')
 assert.ok(skuDialog.includes('min-inline-size: 0'), 'SKU fieldset should reset default min-inline-size to avoid overflow')
-assertSourceIncludes('@confirm="isSkuDialog ? handleSubmitSkuConfig() : handleSubmit()"', 'SKU mode should save through dedicated submit handler')
+assert.ok(mainDialogFooter.includes('@click="isSkuDialog ? handleSubmitSkuConfig() : handleSubmit()"'), 'SKU mode should save through the dedicated custom footer action')
+assert.ok(skuSubmitHandler.includes('await buildSubmitPayload(submitForm)'), 'SKU dedicated submit handler should build the SKU payload')
+assert.ok(skuSubmitHandler.includes('await updateProduct(form.value.id, payload)'), 'SKU dedicated submit handler should save through updateProduct')
 assert.ok(skuDialog.includes('sku-dims'), 'SKU dialog should keep color and style inputs together')
 assert.ok((skuDialog.match(/<el-input-tag/g) ?? []).length >= 2, 'SKU color and style dimensions should use InputTag components')
 assert.ok(skuDialog.includes('v-model="skuColorInput"'), 'SKU color InputTag should bind to array input state')

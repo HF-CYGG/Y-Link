@@ -14,6 +14,7 @@ const requiredFiles = [
   'src/views/order-list/components/OrderMergeDialog.vue',
   'src/views/order-list/components/OrderListMobileCard.vue',
   'src/views/order-list/order-list-mobile-card-loader.ts',
+  'src/utils/timed-async-loader.ts',
   'src/views/order-list/order-merge-state.ts',
   'src/views/order-list/components/OrderDetailDrawerContent.vue',
   'src/views/client/ClientOrdersView.vue',
@@ -55,8 +56,9 @@ expectText('src/views/order-list/OrderListView.vue', 'mobileCardLoadAnnouncement
 expectText('src/views/order-list/OrderListView.vue', "aria-live=\"polite\"", '唯一页面级加载播报区域')
 expectText('src/views/order-list/OrderListView.vue', 'createTimedAsyncLoader', '移动端卡片自清理超时加载器')
 expectText('src/views/order-list/OrderListView.vue', 'timeoutMs: 15_000', '移动端卡片十五秒超时')
-expectText('src/views/order-list/order-list-mobile-card-loader.ts', 'Promise.race', '移动端卡片超时竞速')
-expectText('src/views/order-list/order-list-mobile-card-loader.ts', 'clearTimeout', '移动端卡片超时定时器清理')
+expectText('src/views/order-list/order-list-mobile-card-loader.ts', "from '../../utils/timed-async-loader'", '移动端卡片兼容导出')
+expectText('src/utils/timed-async-loader.ts', 'Promise.race', '共享异步加载超时竞速')
+expectText('src/utils/timed-async-loader.ts', 'clearTimeout', '共享异步加载定时器清理')
 const orderListViewSource = source.get('src/views/order-list/OrderListView.vue') || ''
 const loadingFallbackSource = orderListViewSource.slice(
   orderListViewSource.indexOf('const OrderListMobileCardLoading'),

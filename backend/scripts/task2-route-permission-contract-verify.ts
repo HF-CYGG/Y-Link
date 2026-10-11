@@ -33,6 +33,8 @@ const ANONYMOUS_ROUTE_ALLOWLIST = new Set<string>([
   'GET /health',
   'GET /database-rescue',
   'GET /api/auth/captcha', 'POST /api/auth/login', 'POST /api/auth/login/mfa', 'POST /api/auth/logout',
+  'POST /api/auth/login/mfa/webauthn/options', 'POST /api/auth/login/mfa/webauthn/verify',
+  'GET /api/auth/webauthn/capabilities', 'POST /api/auth/webauthn/login/options', 'POST /api/auth/webauthn/login/verify',
   'GET /api/client-auth/captcha', 'POST /api/client-auth/register', 'POST /api/client-auth/login',
   'GET /api/client-auth/capabilities', 'POST /api/client-auth/verification-code/send',
   'POST /api/client-auth/forgot-password/verify', 'POST /api/client-auth/forgot-password/reset',
@@ -51,7 +53,12 @@ const AUTHENTICATED_SELF_SERVICE_ALLOWLIST = new Set<string>([
   'POST /api/auth/presence/heartbeat',
   'POST /api/auth/change-password',
   'GET /api/auth/mfa/status', 'POST /api/auth/mfa/enroll', 'POST /api/auth/mfa/enroll/confirm',
-  'POST /api/auth/mfa/disable', 'POST /api/auth/mfa/recovery-codes',
+  'POST /api/auth/mfa/disable', 'POST /api/auth/mfa/disable-all', 'POST /api/auth/mfa/totp/disable',
+  'POST /api/auth/mfa/recovery-codes', 'POST /api/auth/mfa/webauthn/enable',
+  'GET /api/auth/webauthn/credentials', 'POST /api/auth/webauthn/register/options',
+  'POST /api/auth/webauthn/register/verify', 'PATCH /api/auth/webauthn/credentials/:id',
+  'DELETE /api/auth/webauthn/credentials/:id',
+  'POST /api/auth/webauthn/step-up/options', 'POST /api/auth/webauthn/step-up/verify',
 ])
 
 const log = (message: string) => console.log(`[task2-route-contract] ${message}`)

@@ -168,10 +168,30 @@ export const resetUserPassword = async (id: string, payload: ResetUserPasswordPa
  * - 用于对方丢失手机且恢复码用尽的场景，不能重置自己；
  * - 不作废对方已有会话，重置后对方下次登录只需账号密码，应提醒其尽快重新绑定。
  */
-export const resetUserMfa = (id: string) =>
+export interface AdminUserSensitiveActionProof {
+  currentPassword: string
+  code?: string
+  recoveryCode?: string
+  stepUpProof?: string
+}
+
+export const resetUserMfa = (id: string, payload: AdminUserSensitiveActionProof) =>
   request<{ reset: true }>({
     method: 'POST',
-    url: `/users/${id}/mfa/reset`,
+    url: `/users/${encodeURIComponent(id)}/mfa/reset`,
+    data: payload,
+  })
+
+export interface ResetUserWebAuthnPayload extends AdminUserSensitiveActionProof {
+  reason: string
+}
+
+/** 管理员撤销他人的全部密钥；仅目标用户的会话失效。 */
+export const resetUserWebAuthn = (id: string, payload: ResetUserWebAuthnPayload) =>
+  request<{ revokedCount: number }>({
+    method: 'POST',
+    url: `/users/${encodeURIComponent(id)}/webauthn/reset`,
+    data: payload,
   })
 
 export const getUserDeactivationPreview = (id: string) =>

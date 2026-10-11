@@ -14,6 +14,7 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import {
   completeMfaLogin as completeMfaLoginApi,
+  completeMfaWebAuthnLogin as completeMfaWebAuthnLoginApi,
   getCurrentUser,
   login as loginApi,
   logout as logoutApi,
@@ -21,11 +22,13 @@ import {
   normalizeUserSafeProfile,
   type LoginPayload,
   type MfaLoginPayload,
+  type MfaWebAuthnLoginPayload,
   type PermissionCode,
   type UserSafeProfile,
 } from '@/api/modules/auth'
 import { resolvePostLoginWarmupTargets, scheduleRouteComponentWarmup } from '@/router/route-performance'
 import { clearPersistedAuthState, persistAuthState, readPersistedAuthState } from '@/utils/auth-storage'
+import type { AuthenticationResponseJSON } from '@simplewebauthn/browser'
 
 /**
  * 主系统登录过渡时长：
@@ -232,6 +235,24 @@ export const useAuthStore = defineStore('auth', () => {
     return result
   }
 
+  /** 密码第一步后的实体安全密钥验证与动态码沿用同一完整会话入口。 */
+  const completeMfaWebAuthnLogin = async (payload: MfaWebAuthnLoginPayload) => {
+    const result = await completeMfaWebAuthnLoginApi(payload)
+    setAuthState({ user: result.user, expiresAt: result.expiresAt })
+    startPostLoginTransition()
+    return result
+  }
+
+  /** WebAuthn 验证成功即建立完整会话，不再进入 TOTP 第二步。 */
+  const completeWebAuthnLogin = async (payload: { challengeId: string; response: AuthenticationResponseJSON }, signal?: AbortSignal) => {
+    const { verifyAdminWebAuthnLogin } = await import('@/api/modules/admin-webauthn')
+    const result = await verifyAdminWebAuthnLogin(payload, { signal })
+    if (signal?.aborted) return null
+    setAuthState({ user: result.user, expiresAt: result.expiresAt })
+    startPostLoginTransition()
+    return result
+  }
+
   /**
    * 退出动作：
    * - 若服务端退出失败，仍保证前端本地态可以被清空；
@@ -299,6 +320,8 @@ export const useAuthStore = defineStore('auth', () => {
     initializeAuth,
     login,
     completeMfaLogin,
+    completeMfaWebAuthnLogin,
+    completeWebAuthnLogin,
     logout,
     handleSessionExpired,
     startPostLoginTransition,

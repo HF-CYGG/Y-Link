@@ -3,7 +3,7 @@
  * 文件职责：集中管理出库开单页的主单、明细、草稿恢复与提交逻辑。
  * 实现逻辑：
  * 1. 使用一个组合式函数统一管理页面全部响应式状态，避免多个组件重复维护业务字段；
- * 2. 提交前在这里完成校验、数据清洗与接口参数组装；
+ * 2. 用户点击提交后按需加载校验与载荷构建模块，本文件继续管理幂等、草稿及网络提交；
  * 3. 针对“正式出库单只给部门单”规则，在此做最终提交兜底，确保散客单不会误传相关状态。
  */
 
@@ -17,6 +17,7 @@ import { useAppStore, useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { extractErrorMessage } from '@/utils/error'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
+import { createTimedAsyncLoader } from '@/utils/timed-async-loader'
 import {
   clearLegacyScopedStorageKey,
   getBrowserStorage,
@@ -54,13 +55,14 @@ function toMoney(value: number): string {
   return value.toFixed(2)
 }
 
-function normalizeTextValue(value: string | number | null | undefined): string {
-  if (value === null || value === undefined) {
-    return ''
-  }
-
-  return String(value).trim()
-}
+const loadOrderEntrySubmission = createTimedAsyncLoader({
+  load: () => import('./prepare-order-submission'),
+  timeoutMs: 15_000,
+  timeoutMessage: '开单校验加载超时',
+  onLoading: () => undefined,
+  onSuccess: () => undefined,
+  onError: () => undefined,
+})
 
 /**
  * 订单录入页业务编排 composable：
@@ -236,23 +238,6 @@ export const useOrderEntryForm = () => {
   })
   const totalAmount = computed(() => {
     return itemRows.value.reduce((sum, row) => sum + calcLineAmount(row), 0)
-  })
-
-  /**
-   * 提交前有效明细：
-   * - 仅保留已选择产品且数量大于 0 的行；
-   * - 单价为空时按 0 补齐，保证提交参数结构稳定。
-   */
-  const validSubmitItems = computed<SubmitOrderPayload['items']>(() => {
-    return itemRows.value
-      .filter((row) => normalizeTextValue(row.productId) && normalizeNumber(row.qty) > 0)
-      .map((row) => ({
-        productId: normalizeTextValue(row.productId),
-        skuId: normalizeTextValue(row.skuId) || undefined,
-        qty: normalizeNumber(row.qty),
-        unitPrice: normalizeNumber(row.unitPrice),
-        remark: row.remark.trim() || undefined,
-      }))
   })
 
   /**
@@ -593,48 +578,6 @@ export const useOrderEntryForm = () => {
   }
 
   /**
-   * 构建最终提交明细：
-   * - 顺序解析所有有效行，并再次确认商品仍在当前可选集合；
-   * - 开单链路不创建商品，避免商品创建成功而库存型出库失败后留下半成功数据；
-   * - 输出结果直接可用于整单提交接口。
-   */
-  const buildSubmitItems = (): SubmitOrderPayload['items'] => {
-    const rows = itemRows.value.filter((row) => normalizeTextValue(row.productId) && normalizeNumber(row.qty) > 0)
-    const submitItems: SubmitOrderPayload['items'] = []
-
-    for (const [rowIndex, row] of rows.entries()) {
-      if (!Number.isSafeInteger(normalizeNumber(row.qty))) {
-        throw new Error(`第 ${rowIndex + 1} 行数量必须为正整数`)
-      }
-      const resolvedProductId = normalizeTextValue(row.productId)
-      if (!productMap.value.has(resolvedProductId)) {
-        throw new Error(`第 ${rowIndex + 1} 行商品未建档、已停用或暂无可用规格，请重新选择`)
-      }
-      const candidates = getSelectableSkus(resolvedProductId)
-      let selectedSku = candidates.find((sku) => sku.id === row.skuId)
-      if (!selectedSku && candidates.length === 1) {
-        selectedSku = candidates[0]
-        row.skuId = selectedSku?.id ?? ''
-      }
-      if (!selectedSku) {
-        if (candidates.length > 1) {
-          throw new Error(`商品“${getProductLabelById(resolvedProductId)}”为多规格商品，请选择规格`)
-        }
-        throw new Error(`商品“${getProductLabelById(resolvedProductId)}”暂无当前启用规格`)
-      }
-      submitItems.push({
-        productId: resolvedProductId,
-        skuId: selectedSku.id,
-        qty: normalizeNumber(row.qty),
-        unitPrice: normalizeNumber(row.unitPrice),
-        remark: row.remark.trim() || undefined,
-      })
-    }
-
-    return submitItems
-  }
-
-  /**
    * 删除明细行：
    * - 先记录删除标记触发 CSS 过渡；
    * - 动效完成后再从数据源中真正移除。
@@ -865,29 +808,6 @@ export const useOrderEntryForm = () => {
   }
 
   /**
-   * 提交前库存预检：
-   * - 按规格汇总本单所需数量，与商品列表返回的可用库存比较；
-   * - 仅用于提前提示，服务端事务内校验仍是最终依据（期间库存可能被其他单据改动）。
-   */
-  const findStockShortage = (): string | null => {
-    const requiredBySku = new Map<string, { productId: string; qty: number }>()
-    for (const row of itemRows.value) {
-      const qty = normalizeNumber(row.qty)
-      if (!row.productId || !row.skuId || qty <= 0) continue
-      const current = requiredBySku.get(row.skuId)
-      requiredBySku.set(row.skuId, { productId: row.productId, qty: (current?.qty ?? 0) + qty })
-    }
-    for (const [skuId, required] of requiredBySku) {
-      const sku = getSelectableSkus(required.productId).find((item) => item.id === skuId)
-      const available = getSkuAvailableStock(sku)
-      if (available !== null && required.qty > available) {
-        return `商品“${getProductLabelById(required.productId)}”规格“${sku?.specText || '默认规格'}”可用库存 ${available}，本单需要 ${required.qty}，请调整数量`
-      }
-    }
-    return null
-  }
-
-  /**
    * 提交整单：
    * - 先校验至少存在一条有效明细，并按可用库存预检；
    * - 结果未知的失败（超时、断网）重试时复用同一幂等键，避免重复开单与重复扣库存；
@@ -901,90 +821,21 @@ export const useOrderEntryForm = () => {
       showAppWarning('正在识别条码，请完成后再保存出库单')
       return
     }
-
-    const invalidQtyRow = itemRows.value.find((row) => {
-      if (!normalizeTextValue(row.productId)) return false
-      const qty = normalizeNumber(row.qty)
-      return !Number.isSafeInteger(qty) || qty <= 0
-    })
-    if (invalidQtyRow) {
-      showAppWarning('数量必须为正整数')
-      return
-    }
-
-    if (!validSubmitItems.value.length) {
-      showAppWarning('请至少录入一条有效明细（已选择产品且数量大于 0）')
-      return
-    }
-
-    const invalidProductRow = itemRows.value.find((row) => {
-      const productId = normalizeTextValue(row.productId)
-      return Boolean(productId) && normalizeNumber(row.qty) > 0 && !productMap.value.has(productId)
-    })
-    if (invalidProductRow) {
-      showAppWarning('存在未建档、已停用或暂无可用规格的商品，请重新选择')
-      return
-    }
-
-    const invalidSkuRow = itemRows.value.find((row) => {
-      if (!productMap.value.has(row.productId) || normalizeNumber(row.qty) <= 0) {
-        return false
-      }
-      return !getSelectableSkus(row.productId).some((sku) => sku.id === row.skuId)
-    })
-    if (invalidSkuRow) {
-      const candidates = getSelectableSkus(invalidSkuRow.productId)
-      showAppWarning(candidates.length > 1 ? '存在多规格商品尚未选择规格' : '存在商品暂无当前启用规格')
-      return
-    }
-    const hasInvalidPriceRow = itemRows.value.some((row) => {
-      const hasProduct = Boolean(normalizeTextValue(row.productId))
-      const hasQty = normalizeNumber(row.qty) > 0
-      return hasProduct && hasQty && normalizeNumber(row.unitPrice) <= 0
-    })
-    if (hasInvalidPriceRow) {
-      showAppWarning('存在单价小于等于 0 的明细，请先修正后再保存')
-      return
-    }
-    if (!headerForm.issuerName.trim()) {
-      showAppWarning('请填写出单人')
-      return
-    }
-    if (headerForm.orderType === 'department' && !headerForm.customerDepartmentName.trim()) {
-      showAppWarning('部门单必须填写客户部门')
-      return
-    }
-    if (headerForm.customerDepartmentName.trim().length > 271) {
-      showAppWarning('客户部门名称不能超过 271 个字符')
-      return
-    }
-
-    const stockShortage = findStockShortage()
-    if (stockShortage) {
-      showAppWarning(stockShortage)
-      return
-    }
-
-    // 记录本次是否携带系统部门节点，失败后据此刷新部门选项。
-    const submittedDepartmentNodeId = headerForm.orderType === 'department' ? headerForm.customerDepartmentNodeId : ''
+    // 模块下载期间先锁定按钮；下载结束再同步读取当前表单，避免双击或编辑期间混用旧载荷。
     isSaving.value = true
+    let preparationLoaded = false
+    let submittedDepartmentNodeId = ''
     try {
-      const submitItems = buildSubmitItems()
-      const isDepartmentOrder = headerForm.orderType === 'department'
-      const payloadWithoutKey: Omit<SubmitOrderPayload, 'idempotencyKey'> = {
-        orderType: headerForm.orderType,
-        // 详细注释：正式出库单、系统申请等概念只属于部门单。
-        // 即便未来界面状态被草稿恢复或异常交互影响，这里仍统一按订单类型做一次最终兜底。
-        hasCustomerOrder: isDepartmentOrder ? headerForm.hasCustomerOrder : false,
-        isSystemApplied: isDepartmentOrder ? headerForm.isSystemApplied : false,
-        issuerName: headerForm.issuerName.trim(),
-        customerDepartmentName: isDepartmentOrder ? headerForm.customerDepartmentName.trim() || undefined : undefined,
-        // 仅选自系统部门配置时携带节点 ID；手动录入不携带，服务端原样保存且不回写配置。
-        customerDepartmentNodeId: isDepartmentOrder ? headerForm.customerDepartmentNodeId || undefined : undefined,
-        customerName: headerForm.customerName.trim() || undefined,
-        remark: headerForm.remark.trim() || undefined,
-        items: submitItems,
+      const { prepareOrderSubmission } = await loadOrderEntrySubmission()
+      preparationLoaded = true
+      const prepared = prepareOrderSubmission(headerForm, itemRows.value, products.value)
+      if (!prepared.payload) {
+        showAppWarning(prepared.error)
+        return
       }
+      const payloadWithoutKey = prepared.payload
+      // 失败后部门选项刷新必须与本次载荷一致，不读取下载期间可能变化的表单字段。
+      submittedDepartmentNodeId = payloadWithoutKey.customerDepartmentNodeId ?? ''
       // 载荷未变时复用上次未确认成功的幂等键：若上次其实已落库，服务端直接返回既有订单而不会再次扣库存。
       const fingerprint = JSON.stringify(payloadWithoutKey)
       const idempotencyKey = pendingSubmission.value?.fingerprint === fingerprint
@@ -1013,6 +864,10 @@ export const useOrderEntryForm = () => {
         },
       })
     } catch (error) {
+      if (!preparationLoaded) {
+        showAppError('校验加载失败，录入已保留；请刷新后重试')
+        return
+      }
       // 携带部门节点提交失败时刷新选项：节点若已被删除，本地旧选项随之移除，
       // 重新推导后同一路径按手动录入提交，避免不刷新页面就无法恢复。
       if (submittedDepartmentNodeId) {
