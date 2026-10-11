@@ -69,6 +69,10 @@ jobs:
           # 验证脚本使用临时 SQLite，只为 sqlite3 执行构建脚本以生成原生绑定。
           npm --prefix ./backend rebuild sqlite3
 
+      # 前端 SFC 行为验证只使用现有锁文件依赖；此作业不持有 SONAR_TOKEN。
+      - name: 安装前端验证依赖
+        run: npm ci --workspaces=false --ignore-scripts --no-audit --no-fund
+
       - name: 生成覆盖率报告
         run: npm run coverage:report
 

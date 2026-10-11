@@ -60,19 +60,19 @@ const bundle = await rolldown({
     transform(code, id) { if (id.endsWith('.ts')) return code.replaceAll('import.meta.env', '({ VITE_API_BASE_URL: "/api", DEV: false })') },
   }],
 })
-await bundle.write({ file: outputPath, format: 'esm' })
+await bundle.write({ file: outputPath, format: 'esm', sourcemap: true })
 await bundle.close()
 const helperPath = path.resolve('tmp/webauthn-compat-ui/webauthn-helper-test.mjs')
 const helperBundle = await rolldown({ input: 'src/utils/admin-webauthn.ts' })
-await helperBundle.write({ file: helperPath, format: 'esm' })
+await helperBundle.write({ file: helperPath, format: 'esm', sourcemap: true })
 await helperBundle.close()
 const recoveryPastePath = path.resolve('tmp/webauthn-compat-ui/recovery-paste-test.mjs')
 const recoveryPasteBundle = await rolldown({ input: 'src/utils/admin-mfa-recovery-code.ts' })
-await recoveryPasteBundle.write({ file: recoveryPastePath, format: 'esm' })
+await recoveryPasteBundle.write({ file: recoveryPastePath, format: 'esm', sourcemap: true })
 await recoveryPasteBundle.close()
 const passwordHelperPath = path.resolve('tmp/webauthn-compat-ui/password-credential-test.mjs')
 const passwordHelperBundle = await rolldown({ input: 'src/utils/admin-password-credential.ts' })
-await passwordHelperBundle.write({ file: passwordHelperPath, format: 'esm' })
+await passwordHelperBundle.write({ file: passwordHelperPath, format: 'esm', sourcemap: true })
 await passwordHelperBundle.close()
 const apiEntryPath = path.resolve('tmp/webauthn-compat-ui/api-entry.ts')
 const apiPath = path.resolve('tmp/webauthn-compat-ui/api-test.mjs')
@@ -102,7 +102,7 @@ const apiBundle = await rolldown({
     transform(code, id) { if (id.endsWith('.ts')) return code.replaceAll('import.meta.env', '({ VITE_API_BASE_URL: "/api", DEV: false })') },
   }],
 })
-await apiBundle.write({ file: apiPath, format: 'esm', codeSplitting: false })
+await apiBundle.write({ file: apiPath, format: 'esm', codeSplitting: false, sourcemap: true })
 await apiBundle.close()
 try {
   const { assessWebAuthnAvailability, createWebAuthnFlow, createLoginAttemptGate, isWebAuthnCancellation } = await import(pathToFileURL(helperPath).href)
