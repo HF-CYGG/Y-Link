@@ -19,10 +19,11 @@ dist-ssr
 .env.docker.mysql
 backend/.env
 backend/data/
+# 后端 SQLite 数据库默认位于 backend/data/（SQLITE_DB_PATH），根部 .sqlite 只可能是误生成的本地文件。
+backend/*.sqlite
 backend/uploads/*
 !backend/uploads/.gitkeep
 .local-dev/
-.AGENTS.md
 
 # 本地测试产物；正式回归脚本继续纳入版本管理。
 /coverage/
@@ -36,13 +37,14 @@ backend/uploads/*
 !.vscode/extensions.json
 .trae/
 .idea
+.vs/
+.codex-remote-attachments/
 .DS_Store
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
-.agents
 
 # Mobile / Expo
 apps/mobile/.expo/

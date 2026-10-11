@@ -20,3 +20,8 @@ logs
 .vscode
 .idea
 .git
+
+# 验证脚本、本地上传目录与误生成的 SQLite 文件均不进入后端镜像（Dockerfile 只复制 src/sql/tsconfig/package*）。
+scripts
+uploads
+*.sqlite

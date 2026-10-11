@@ -22,7 +22,9 @@ RUN npm ci --workspaces=false
 COPY index.html ./
 COPY rescue.html ./
 COPY public ./public
-COPY scripts ./scripts
+# 只复制构建链路实际依赖的脚本（构建入口、进程工具、vite.config.ts 导入的 html2pdf 模块 ID 压缩器及其类型声明），
+# 避免任一验证脚本改动都击穿 `npm run build` 层缓存；构建入口新增脚本依赖时必须同步补充。
+COPY scripts/run-frontend-build.mjs scripts/process-runner-utils.mjs scripts/html2pdf-module-id-shortener.mjs scripts/html2pdf-module-id-shortener.d.mts ./scripts/
 COPY src ./src
 COPY packages/shared-types ./packages/shared-types
 COPY packages/validation ./packages/validation

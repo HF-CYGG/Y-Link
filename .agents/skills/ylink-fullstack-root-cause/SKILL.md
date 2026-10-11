@@ -77,7 +77,7 @@ description: "Diagnoses Y-Link issues by repo structure. Invoke when bugs span a
 ### 5. 数据与迁移
 - 初始化 SQL：`backend/sql/**`
 - 运行期补列：`backend/src/config/database-bootstrap.ts`
-- 本地数据库：`backend/database.sqlite`
+- 本地数据库：`backend/data/y-link.sqlite`（由 `SQLITE_DB_PATH` 决定，默认值见 `backend/.env.example`）
 
 ### 6. 脚本与部署
 - 本地联调：

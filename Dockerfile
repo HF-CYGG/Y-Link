@@ -1,8 +1,7 @@
+# syntax=docker/dockerfile:1
 # 模块说明：前端独立部署 Docker 构建文件
 # 文件职责：定义前端静态资源的打包过程与 Nginx 运行环境
 # 维护说明：若前端构建流程增加必须的环境变量或改变产物目录，需同步修改此处
-
-# syntax=docker/dockerfile:1
 
 # ------------------------------
 # 文件说明：Y-Link 前端镜像构建文件。
@@ -28,7 +27,9 @@ RUN npm ci --workspaces=false
 COPY index.html ./
 COPY rescue.html ./
 COPY public ./public
-COPY scripts ./scripts
+# 只复制构建链路实际依赖的脚本（构建入口、进程工具、vite.config.ts 导入的 html2pdf 模块 ID 压缩器及其类型声明），
+# 避免任一验证脚本改动都击穿 `npm run build` 层缓存；构建入口新增脚本依赖时必须同步补充。
+COPY scripts/run-frontend-build.mjs scripts/process-runner-utils.mjs scripts/html2pdf-module-id-shortener.mjs scripts/html2pdf-module-id-shortener.d.mts ./scripts/
 COPY src ./src
 COPY packages/shared-types ./packages/shared-types
 COPY packages/validation ./packages/validation

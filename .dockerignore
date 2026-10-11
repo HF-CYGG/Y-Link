@@ -27,3 +27,17 @@ backend/.env.*
 .idea
 .git
 .trae
+
+# 以下目录不参与任何镜像构建（所有 Dockerfile 均为显式 COPY），排除后可缩小构建上下文；
+# 其中 backend/uploads 与 .local-dev 可能含用户上传文件或本地验证报告，更不应进入构建上下文。
+docs
+spec
+apps
+.agents
+.vs
+.codex-remote-attachments
+.local-dev
+*.ps1
+backend/scripts
+backend/uploads
+backend/*.sqlite
