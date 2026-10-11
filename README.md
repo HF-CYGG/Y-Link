@@ -208,6 +208,10 @@ INVITE_CODE_PEPPER=请生成至少32个随机字节的教师邀请码密钥
 | `SQLITE_DB_PATH` | `/app/data/y-link.sqlite` | SQLite 文件位置 |
 | `PORT` | `3001` | 容器内后端端口，通常不用改 |
 | `VERIFICATION_CODE_REQUEST_TIMEOUT_MS` | `8000` | 短信/邮件验证码平台请求超时（毫秒） |
+| `AUTH_WEBAUTHN_ENABLED` | `false` | 设为 `true` 才启用管理端通行密钥与安全密钥 |
+| `AUTH_WEBAUTHN_RP_ID` | 空 | 浏览器访问域名（不含协议、端口、路径），或本地测试用 `localhost` |
+| `AUTH_WEBAUTHN_RP_NAME` | 空 | 浏览器显示的非空站点名称，例如 `Y-Link` |
+| `AUTH_WEBAUTHN_ORIGINS` | 空 | 浏览器外部访问地址组成的非空 JSON 字符串数组 |
 
 首次启动后，系统会自动创建管理员账号。已有管理员时不会覆盖原账号密码。
 
@@ -279,6 +283,42 @@ node -e "console.log(require('node:crypto').randomBytes(48).toString('base64url'
 | `403` 或无权调用 API | 检查运行中的 AccessKey 是否属于已授权 RAM 用户；确认已授予 PNVS 所需权限 |
 | 发送成功但手机未收到 | 检查签名与模板是否来自同一 PNVS 控制台配置、测试手机号是否已绑定，以及账户余额和发送记录 |
 | MNS 回执显示配置异常 | 初次使用请保持 `ALIYUN_DYPNS_MNS_ENABLED=false`；只有需要送达/失败回执时才启用，并另行配置 MNS 权限与网络连通性 |
+
+### 4.2 管理端通行密钥与安全密钥
+
+启用前，先确认管理端由哪个固定域名和 HTTPS 地址供浏览器访问。`AUTH_WEBAUTHN_RP_ID` 填小写域名（例如 `erp.example.com`），不带协议、端口或路径，不能填 IP；`AUTH_WEBAUTHN_RP_NAME` 填非空的展示名称，也可使用中文。`AUTH_WEBAUTHN_ORIGINS` 填非空 JSON 字符串数组，其中每个 Origin 的主机必须与 RP ID 完全相同，且是完整、精确的浏览器外部访问地址；不能填容器服务名、容器端口、路径或末尾斜杠。公网使用 HTTPS，只有 `localhost` 可使用 HTTP。
+
+在 1Panel 的应用容器“环境变量”表单中，分别新增以下名称和值（右侧是直接填写的实际值）：
+
+| 变量名 | 值 |
+| --- | --- |
+| `AUTH_WEBAUTHN_ENABLED` | `true` |
+| `AUTH_WEBAUTHN_RP_ID` | `erp.example.com` |
+| `AUTH_WEBAUTHN_RP_NAME` | `Y-Link` |
+| `AUTH_WEBAUTHN_ORIGINS` | `["https://erp.example.com"]` |
+
+**1Panel 表单的 `AUTH_WEBAUTHN_ORIGINS` 值不能包含外层单引号，也不能给 JSON 双引号添加转义反斜杠。**只有写入 Compose 使用的私有 `.env` 文件时，才可以按 `.env` 语法加外层单引号，例如：
+
+```env
+AUTH_WEBAUTHN_ENABLED=true
+AUTH_WEBAUTHN_RP_ID=erp.example.com
+AUTH_WEBAUTHN_RP_NAME=Y-Link
+AUTH_WEBAUTHN_ORIGINS='["https://erp.example.com"]'
+```
+
+Compose 读取 `.env` 后会去掉这一层单引号，传给后端的仍是 JSON 数组文本 `["https://erp.example.com"]`。如果把 `.env` 写法原样贴进 1Panel 表单，外层单引号会成为变量值的一部分，后端解析 JSON 时会报 `AUTH_WEBAUTHN_ORIGINS 必须是 JSON 字符串数组`，应用可能进入返回 503 的救援状态。
+
+仅在本机测试时，可将 `RP_ID` 改为 `localhost`，将 `ORIGINS` 改为 `["http://localhost:8090"]`；若使用 `compose.onebox.yml`，还需在 `.env` 中设置 `Y_LINK_PORT=8090`。实际映射端口不同，就同步修改 Origin 中的端口。公网示例中的 `erp.example.com` 也必须替换成实际供浏览器访问的同一域名。
+
+保存变量后需要**重新创建应用容器**才能更新容器环境；普通 `docker restart` 或 `docker compose restart` 不会更新环境变量。仓库的 `compose.onebox.yml` 已向 `ylink` 服务映射这四项，`compose.cloud.yml` 已向 `backend` 服务映射；自定义编排也须将四项传给应用后端。仅修改环境变量无需重新构建镜像。默认 `.env` + 单文件 Onebox 的示例命令是：
+
+```bash
+docker compose --env-file .env -f compose.onebox.yml up -d --no-deps --force-recreate ylink
+```
+
+执行时必须沿用原部署的项目名（如原来使用 `-p`）、`--env-file`、所有 `-f` 叠加文件、端口、挂载和数据卷，只重建应用服务；不要使用 `down -v` 或删除数据。1Panel 中也应在保留这些设置后重新创建应用容器。需要回退配置时，恢复原变量值，再用原参数重新创建应用容器。
+
+重建后，通过浏览器外部访问地址检查 `/health` 返回 `status: "UP"`，并检查 `/api/auth/webauthn/capabilities` 的 `data.enabled` 为 `true`、`data.rpId` 与 `data.allowedOrigins` 与填写值一致。配置生效后还需用密码登录管理端，进入顶部账号菜单“通行密钥与安全密钥” → “添加密钥”，选择用途“直接登录”和类型“通行密钥”并完成绑定。选择“密码后验证”则是登录密码后的第二因素，不等于直接登录。若启动日志出现 `DATABASE_STARTUP_FAILED`，先核对以上变量值和容器是否已重建；启动入口也会将多数配置或运行时异常归到该通用错误码，不能据此认定数据库损坏。
 
 ### 5. 重启规则和资源
 
