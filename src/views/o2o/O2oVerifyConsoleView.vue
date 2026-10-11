@@ -1358,6 +1358,11 @@ watch(
   gap: 0.75rem;
 }
 
+/* 相邻按钮间距交给容器 gap，清零 Element Plus 默认 margin-left，避免扫码按钮组间距不均 */
+.verify-console-icon-group > :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
 .verify-console-search-btn {
   border-radius: 14px;
   min-width: 8.5rem;

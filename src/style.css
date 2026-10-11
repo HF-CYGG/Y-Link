@@ -597,6 +597,21 @@ canvas {
 }
 
 /*
+ * 按钮组间距统一交给容器 gap：
+ * - Element Plus 默认给相邻按钮加 `.el-button + .el-button { margin-left: 12px }`，它与容器 `gap` 叠加后：
+ *   横排间距被放大、换行后新行首个按钮缩进、纵排（flex-col）按钮右缩、grid 单元格内按钮变窄偏移，形成卡片按钮错位；
+ * - 已声明 gap 的 Tailwind flex / grid 容器统一清零该外边距；横向 flex 只在存在列间距时清零
+ *   （排除仅有 `gap-y-*` 的横排，避免按钮贴在一起），纵排与 grid 一律清零；
+ * - 容器的布局类放在 `:where()` 中不计优先级，但 gap 属性选择器必须计入（`:is()`），
+ *   否则与 Element Plus 同优先级、会被其后加载的组件样式覆盖；页面若确需额外间距仍可用局部样式覆盖；
+ * - 使用自定义类 + CSS gap 的容器无法在全局识别，需在组件内用 `.容器 > :deep(.el-button + .el-button)` 自行清零。
+ */
+:where(.grid, .inline-grid, .flex-col)[class*='gap-'] > .el-button + .el-button,
+:where(.flex, .inline-flex):is([class*='gap-']:not([class*='gap-y-']), [class*='gap-x-']) > .el-button + .el-button {
+  margin-left: 0;
+}
+
+/*
  * 全局弹窗高度安全网：
  * - 统一让普通 el-dialog 在视口内按纵向结构工作，避免长内容把底部操作区挤出可视区；
  * - 默认仍按“滚动型正文”兜底，兼容尚未迁移到通用壳的原生弹窗；
