@@ -19,6 +19,7 @@
 ## 真实入口
 
 - 管理端页面入口：`/base-data/products`、`/base-data/tags`、`/o2o-console/products`
+- “标签管理”是共享工作台（`TagCenterView.vue`，`viewKey: 'tag-center'`）：`/base-data/tags` 为“商品标签”，`/base-data/master-data` 为“分类与库位”（原库存管理菜单入口，组件仍为 `views/inventory/InventoryMasterDataView.vue`）；“商品标签”随壳层同步加载，“分类与库位”异步拆包、由壳层挂载后空闲预取（不放进路由预热表，避免增加首屏路由包体积）。侧栏“标签管理”入口通过路由 `meta.menuFallbackSibling` 兜底：账号无 `tags:view` 但有 `products:view` 时，入口仍显示并指向 `/base-data/master-data`，`/base-data/tags` 本身的权限不放宽。
 - 后端服务真源：`product.service.ts`、`tag.service.ts`
 
 ## 前端链路

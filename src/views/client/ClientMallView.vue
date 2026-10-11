@@ -2231,12 +2231,12 @@ onBeforeUnmount(() => {
 
 :global(.mall-announcement-dialog .el-dialog__body) {
   display: flex;
-  flex: 0 0 auto !important;
+  flex: 0 1 auto !important;
   justify-content: center;
   height: auto !important;
-  min-height: unset !important;
+  min-height: 0 !important;
   max-height: inherit;
-  overflow: visible !important;
+  overflow-y: auto !important;
   padding: 0;
 }
 

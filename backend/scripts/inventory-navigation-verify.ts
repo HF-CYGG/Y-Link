@@ -78,7 +78,7 @@ const cases: Array<{ name: string; user: TestUser; visibleChildren: string[]; fi
     user: { role: 'admin', permissions: ['inventory:view', 'inventory:operate', 'stocktake:view', 'products:view'] },
     visibleChildren: [
       '/inventory/scan', '/inventory/stocks', '/inventory/stocktakes',
-      '/inventory/docs', '/inventory/logs', '/inventory/master-data',
+      '/inventory/docs', '/inventory/logs',
     ],
     first: '/inventory/scan',
   },
@@ -113,6 +113,50 @@ assert.equal((childRoute('stocks').meta as AppRouteMeta).menu, undefined)
 assert.equal((childRoute('stocktakes').meta as AppRouteMeta).menu, undefined)
 assert.equal((childRoute('stocktakes/:id').meta as AppRouteMeta).menu, false)
 assert.equal((childRoute('stocktakes/:id').meta as AppRouteMeta).activeMenu, '/inventory/stocktakes')
+
+// 分类与库位已迁入“基础资料 → 标签管理”工作台：库存菜单不再展示，旧地址仅做兼容重定向。
+assert.equal(childRoute('master-data').component, undefined)
+assert.equal(childRoute('master-data').redirect, '/base-data/master-data')
+assert.equal((childRoute('master-data').meta as AppRouteMeta).menu, false)
+assert.equal(Object.hasOwn(routeViewLoaders, 'inventory-master-data'), false)
+assert.equal(testRouter.resolve('/inventory/master-data').matched.at(-1)?.path, '/inventory/master-data')
+const baseDataRoute = root.children.find((route) => route.path === 'base-data')
+const tagRoute = baseDataRoute?.children?.find((route) => route.path === 'tags')
+const masterDataRoute = baseDataRoute?.children?.find((route) => route.path === 'master-data')
+assert.ok(tagRoute && masterDataRoute, '基础资料下缺少标签管理工作台路由')
+const tagMeta = tagRoute.meta as AppRouteMeta
+const masterDataMeta = masterDataRoute.meta as AppRouteMeta
+assert.equal(masterDataRoute.name, 'base-data-master-data')
+assert.equal(masterDataMeta.menu, false)
+assert.equal(masterDataMeta.activeMenu, '/base-data/tags')
+assert.deepEqual(masterDataMeta.requiredPermissions, ['products:view'])
+assert.equal(tagMeta.viewKey, 'tag-center')
+assert.equal(masterDataMeta.viewKey, 'tag-center')
+const adminUser: TestUser = { role: 'admin', permissions: ['tags:view', 'products:view'] }
+const baseDataMenu = buildAppMenuItems(adminUser).find((item) => item.title === '基础资料')
+assert.ok(baseDataMenu, '管理员应看到基础资料菜单')
+assert.deepEqual(visiblePaths(baseDataMenu.children ?? []), ['/base-data/products', '/base-data/tags'])
+assert.equal(canAccessRoute(masterDataMeta, adminUser), true)
+assert.equal(canAccessRoute(masterDataMeta, { role: 'operator', permissions: ['tags:view'] }), false)
+// 只有 products:view、没有 tags:view 的账号：“标签管理”入口仍可见并指向“分类与库位”，而“商品标签”路由本身仍不可访问。
+const productsOnlyUser: TestUser = { role: 'operator', permissions: ['inventory:view', 'products:view'] }
+const productsOnlyBaseData = buildAppMenuItems(productsOnlyUser).find((item) => item.title === '基础资料')
+assert.ok(productsOnlyBaseData, '仅有 products:view 的账号应看到基础资料菜单')
+const productsOnlyTagEntry = productsOnlyBaseData.children?.find((item) => item.title === '标签管理')
+assert.equal(productsOnlyTagEntry?.path, '/base-data/master-data', '仅有 products:view 时标签管理入口应指向分类与库位')
+assert.deepEqual(visiblePaths(productsOnlyBaseData.children ?? []), ['/base-data/products', '/base-data/master-data'])
+assert.equal(canAccessRoute(tagMeta, productsOnlyUser), false)
+assert.equal(canAccessRoute(masterDataMeta, productsOnlyUser), true)
+// 只有 tags:view 的账号：入口照常指向“商品标签”，不出现“分类与库位”。
+const tagsOnlyBaseData = buildAppMenuItems({ role: 'operator', permissions: ['tags:view'] }).find((item) => item.title === '基础资料')
+assert.deepEqual(visiblePaths(tagsOnlyBaseData?.children ?? []), ['/base-data/tags'])
+// 两种查看权限都没有时不出现标签管理入口。
+assert.equal(
+  buildAppMenuItems({ role: 'operator', permissions: ['inventory:view'] }).some((item) => item.title === '基础资料'),
+  false,
+)
+// eslint-disable-next-line no-console
+console.log('✅ 分类与库位迁入标签管理工作台，旧入口重定向，仅有其中一种查看权限的账号也能从侧栏进入')
 
 for (const user of [
   { role: 'operator', permissions: [] },

@@ -2303,6 +2303,11 @@ onUnmounted(() => {
   gap: 10px;
 }
 
+/* 相邻按钮间距交给容器 gap，清零 Element Plus 默认 margin-left，避免换行后首个按钮缩进 */
+.register-feedback-alert__actions > :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
 .block-title {
   font-size: 26px;
   font-weight: 700;

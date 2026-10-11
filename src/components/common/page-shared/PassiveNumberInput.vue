@@ -6,6 +6,7 @@
  * - 通过 `ElInput` 承载输入框外观，避免 `ElInputNumber` 挂载时固定注册 `passive: false` 的 `wheel` 监听；
  * - 在组件内部补齐最小值、最大值、步进、精度、严格步进和按钮增减逻辑，保持常见数值录入体验；
  * - 对外继续暴露 `v-model`、`change`、`focus`、`blur` 能力，减少业务页面替换成本。
+ * - 可选 displaySyncToken 让少数受外部布局约束的表单在提交草稿后强制显示最终 modelValue；未传时行为不变。
  * 维护说明：
  * - 若后续需要补齐更多 `ElInputNumber` 能力，应优先在此组件扩展，而不是在页面里各自拼装数值输入逻辑；
  * - 当前组件刻意不绑定 `wheel` 阻止逻辑，避免再次触发浏览器关于 scroll-blocking listener 的性能告警。
@@ -32,6 +33,7 @@ const props = withDefaults(defineProps<{
   readonly?: boolean
   placeholder?: string
   size?: PassiveNumberInputSize
+  displaySyncToken?: number
 }>(), {
   modelValue: null,
   min: Number.MIN_SAFE_INTEGER,
@@ -44,6 +46,7 @@ const props = withDefaults(defineProps<{
   readonly: false,
   placeholder: '',
   size: 'default',
+  displaySyncToken: 0,
 })
 
 const emit = defineEmits<{
@@ -113,6 +116,10 @@ watch(
   },
   { immediate: true },
 )
+
+watch(() => props.displaySyncToken, () => {
+  inputText.value = formatDisplayValue(props.modelValue)
+})
 
 const containerClass = computed(() => [
   'passive-number-input',

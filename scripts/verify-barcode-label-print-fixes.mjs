@@ -69,10 +69,10 @@ await check('合法原型键真实生成 SVG 并在标签卡片呈现', async ()
     const failedBarcodes = Vue.ref([])
     const loadError = Vue.ref('')
     const renderBarcodes = new Function(
-      'loadJsBarcode', 'barcodeSvgMap', 'barcodeModuleMap', 'failedBarcodes', 'labels', 'resolveBarcodeValue', 'settings', 'document', 'showAppWarning', 'showAppError', 'loadError',
-      `${js}; return renderBarcodes`,
+      'loadJsBarcode', 'barcodeSvgMap', 'barcodeModuleMap', 'failedBarcodes', 'labels', 'resolveBarcodeValue', 'settings', 'document', 'showAppWarning', 'showAppError', 'loadError', 'CODE128_QUIET_ZONE_MODULES_PER_SIDE',
+      `let renderVersion = 0; ${js}; return renderBarcodes`,
     )(async () => ({ default: JsBarcode }), barcodeSvgMap, barcodeModuleMap, failedBarcodes, labels, helpers.resolveBarcodeValue,
-      { barcodeSource: 'factory_barcode' }, document, () => {}, () => {}, loadError)
+      { barcodeSource: 'factory_barcode' }, document, () => {}, () => {}, loadError, helpers.CODE128_QUIET_ZONE_MODULES_PER_SIDE)
     await renderBarcodes()
     assert.equal(Object.hasOwn(barcodeSvgMap.value, value), true, `${value} 必须是自有键`)
     const svg = barcodeSvgMap.value[value]
@@ -81,30 +81,30 @@ await check('合法原型键真实生成 SVG 并在标签卡片呈现', async ()
     assert.ok(barcodeModuleMap.value[value] > 0, `${value} 必须记录真实 Code128 模块数`)
     renderedCases.set(value, { labels, barcodeSvgMap, barcodeModuleMap, failedBarcodes })
     const card = Vue.createSSRApp({
-      props: ['label', 'template', 'barcodeSvg', 'encodedText', 'showSpec', 'showPrice', 'showLocation', 'showPrintDate', 'printDateText'],
+      props: ['label', 'template', 'barcodeSvg', 'encodedText', 'showSpec', 'showCode', 'showPrice', 'showLocation', 'showPrintDate', 'printDateText', 'fitStyle'],
       ssrRender: cardRender,
     }, {
       label: { productName: '合成商品', specText: '', price: 1, locationCode: '' }, template: 'thermal', barcodeSvg: svg,
-      encodedText: value, showSpec: false, showPrice: false, showLocation: false, showPrintDate: false, printDateText: '',
+      encodedText: value, showSpec: false, showCode: true, showPrice: false, showLocation: false, showPrintDate: false, printDateText: '', fitStyle: {},
     })
     assert.match(await VueServerRenderer.renderToString(card), /<svg\b/, `${value} 标签卡片应含SVG`)
   }
 })
 
-await check('生成图、缺码、净高与密度都接入最终打印阻断', () => {
-  const js = transpile(['getGeneratedBarcodeSvg', 'barcodeSvgFor', 'labelLayoutError', 'barcodeDensityError', 'missingBarcodes', 'printBlockedReason'])
+await check('生成图与缺码接入最终打印阻断，密度风险独立提示', () => {
+  const js = transpile(['getGeneratedBarcodeSvg', 'barcodeSvgFor', 'missingBarcodes', 'printBlockedReason'])
   const checkGuard = (value, width, height, mapOverride, template = 'thermal') => {
     const rendered = renderedCases.get(value)
     assert.ok(rendered)
     const settings = { template, barcodeSource: 'factory_barcode', labelWidthMm: width, labelHeightMm: height,
-      showSpec: true, showPrice: true, showLocation: false, showPrintDate: true }
+      showSpec: true, showCode: true, showPrice: true, showLocation: false, showPrintDate: true }
     const result = new Function(
       'computed', 'barcodeSvgMap', 'barcodeModuleMap', 'labels', 'failedBarcodes', 'settings', 'resolveBarcodeValue',
-      'getLabelLayoutError', 'getCode128DensityError', 'loading', 'loadError', 'exceedsLimit', 'totalLabelCount', 'a4LayoutError', 'MAX_TOTAL_LABELS',
+      'labelLayoutError', 'barcodeTextError', 'loading', 'loadError', 'exceedsLimit', 'totalLabelCount', 'a4LayoutError', 'MAX_TOTAL_LABELS',
       `${js}; return { getGeneratedBarcodeSvg, barcodeSvgFor, missingBarcodes, printBlockedReason }`,
     )((getter) => ({ get value() { return getter() } }), mapOverride ?? rendered.barcodeSvgMap, rendered.barcodeModuleMap,
-      rendered.labels, rendered.failedBarcodes, settings, helpers.resolveBarcodeValue, helpers.getLabelLayoutError,
-      helpers.getCode128DensityError, { value: false }, { value: '' }, { value: false }, { value: 1 }, { value: '' }, 2000)
+      rendered.labels, rendered.failedBarcodes, settings, helpers.resolveBarcodeValue, { value: helpers.getLabelLayoutError(settings) },
+      { value: '' }, { value: false }, { value: '' }, { value: false }, { value: 1 }, { value: '' }, 2000)
     return { labelCount: rendered.labels.value.length, source: helpers.resolveBarcodeValue(rendered.labels.value[0], settings.barcodeSource),
       svg: result.barcodeSvgFor(rendered.labels.value[0]), direct: result.getGeneratedBarcodeSvg(value),
       missing: result.missingBarcodes.value, blocked: result.printBlockedReason.value }
@@ -115,28 +115,31 @@ await check('生成图、缺码、净高与密度都接入最终打印阻断', (
   assert.equal(prototype.blocked, '', '宽标签的合法原型键应可打印')
   const missing = checkGuard('constructor', 60, 30, { value: {} })
   assert.match(missing.blocked, /无法生成/, `无自有SVG应阻断：${JSON.stringify(missing)}`)
-  assert.match(checkGuard('WC02001', 40, 10).blocked, /条码区/, '10mm净高应阻断')
-  assert.match(checkGuard('A'.repeat(64), 40, 30).blocked, /每模块/, '长码密度应阻断')
-  assert.match(checkGuard('YZ0100001', 32, 30, undefined, 'a4').blocked, /每模块/, 'A4 32mm 单元格边框不能被净宽估算漏掉')
-  assert.equal(checkGuard('YZ0100001', 32, 30).blocked, '', '无边框热敏 32mm 恰好达到 0.25mm 基线')
+  assert.equal(checkGuard('WC02001', 40, 10).blocked, '', '10mm适配后仍有基本图形区')
+  assert.equal(checkGuard('A'.repeat(64), 40, 30).blocked, '', '密度风险不作为硬阻断')
+  assert.equal(checkGuard('YZ0100001', 32, 30, undefined, 'a4').blocked, '')
+  assert.equal(checkGuard('YZ0100001', 37, 30).blocked, '', '含两侧10X静区后热敏 37mm 达到 0.25mm 基线')
   assert.equal(checkGuard('WC02001', 40, 30).blocked, '')
   assert.equal(checkGuard('YZ0100001', 40, 30).blocked, '')
   assert.equal(checkGuard('WC02001', 40, 30, undefined, 'a4').blocked, '')
   assert.equal(checkGuard('YZ0100001', 40, 30, undefined, 'a4').blocked, '')
 })
 
-await check('10mm 无条码净高，30mm 默认尺寸正常', () => {
-  assert.equal(typeof helpers.getLabelLayoutError, 'function', '需要净高校验函数')
-  const base = { template: 'thermal', labelWidthMm: 40, showSpec: true, showPrice: true, showLocation: false, showPrintDate: true }
-  assert.match(helpers.getLabelLayoutError({ ...base, labelHeightMm: 10 }), /增高|隐藏|尺寸/)
-  assert.equal(helpers.getLabelLayoutError({ ...base, labelHeightMm: 30 }), '')
-  for (const template of ['a4', 'yz-full', 'yz-compact']) {
-    assert.ok(helpers.getLabelLayoutError({ ...base, template, labelHeightMm: 10 }), `${template} 10mm 应阻断`)
-    assert.equal(helpers.getLabelLayoutError({ ...base, template, labelHeightMm: 30 }), '', `${template} 30mm 应通过`)
+await check('固定纸张适配后 20mm 有保守图形高度，10mm 有基本可见区与风险提示', () => {
+  const base = { labelWidthMm: 30, showSpec: true, showCode: true, showPrice: true, showLocation: true, showPrintDate: true }
+  for (const template of ['thermal', 'a4', 'yz-full', 'yz-compact']) {
+    const normal = { ...base, template, labelHeightMm: 20 }
+    const tiny = { ...normal, labelHeightMm: 10 }
+    assert.equal(helpers.getLabelLayoutError(normal), '', template)
+    assert.ok(helpers.getLabelContentFit(normal).graphicHeightMm >= 2, template)
+    assert.ok(helpers.getLabelContentFit(tiny).graphicHeightMm >= 2, template)
+    assert.match(helpers.getLabelLayoutWarning(tiny), /保守建议/, template)
+    assert.equal(helpers.getLabelLayoutError(tiny), '', template)
+    assert.match(helpers.getLabelLayoutError({ ...tiny, labelHeightMm: 5 }), /基本可见下限/, template)
   }
 })
 
-await check('真实 Code128 模块数限制高密度并保留默认短码', () => {
+await check('真实 Code128 模块数仅提示高密度并保留默认短码', () => {
   assert.equal(typeof helpers.getCode128DensityError, 'function', '需要模块宽度校验函数')
   const cases = [
     ['WC02001', false], ['YZ0100001', false], ['6901234567892', false], ['A'.repeat(64), true],
@@ -145,8 +148,82 @@ await check('真实 Code128 模块数限制高密度并保留默认短码', () =
     const target = {}
     JsBarcode(target, value, { format: 'CODE128', displayValue: false, margin: 0, height: 60, width: 2 })
     const moduleCount = target.encodings.reduce((count, encoding) => count + encoding.data.length, 0)
-    const message = helpers.getCode128DensityError(40, moduleCount, 'thermal')
+    const message = helpers.getCode128DensityError({ template: 'thermal', labelWidthMm: 40, labelHeightMm: 30,
+      showSpec: true, showCode: true, showPrice: true, showLocation: false, showPrintDate: false }, moduleCount)
     assert.equal(Boolean(message), shouldBlock, `${value} 模块数 ${moduleCount}`)
+  }
+})
+
+await check('截图长 SKU 在 30mm 手动纸宽下保留高密度风险', () => {
+  for (const value of ['P-260420-0008-SKU-1', 'P-260420-0008-SKU-12']) {
+    const target = {}
+    JsBarcode(target, value, { format: 'CODE128', displayValue: false, margin: 0, height: 60, width: 2 })
+    const modules = target.encodings.reduce((count, encoding) => count + encoding.data.length, 0)
+    const settings = { template: 'thermal', labelWidthMm: 30, labelHeightMm: 20,
+      showSpec: true, showCode: true, showPrice: true, showLocation: false, showPrintDate: false }
+    assert.match(helpers.getCode128DensityError(settings, modules), /每模块/)
+    assert.deepEqual([settings.labelWidthMm, settings.labelHeightMm], [30, 20])
+  }
+})
+
+await check('实际 SVG 两侧各预留至少十个模块的静区，宽度计算只加入一次', async () => {
+  const rendered = renderedCases.get('YZ0100001')
+  assert.ok(rendered)
+  const svg = rendered.barcodeSvgMap.value.YZ0100001
+  const totalModules = Number(svg.match(/viewBox="0 0 (\d+) /)?.[1]) / 2
+  const symbolModules = rendered.barcodeModuleMap.value.YZ0100001
+  assert.equal(totalModules - symbolModules, 20)
+  const target = {}
+  JsBarcode(target, 'YZ0100001', { format: 'CODE128', displayValue: false, margin: 0, width: 2 })
+  assert.equal(symbolModules, target.encodings[0].data.length)
+  assert.equal(totalModules, symbolModules + helpers.CODE128_QUIET_ZONE_MODULES_PER_SIDE * 2)
+})
+
+await check('四模板全部字段只调整内部比例，不改变尺寸或隐藏字段', () => {
+  const base = { labelWidthMm: 30, labelHeightMm: 20, showSpec: true, showCode: true,
+    showPrice: true, showLocation: true, showPrintDate: true }
+  for (const template of ['thermal', 'a4', 'yz-full', 'yz-compact']) {
+    const settings = { ...base, template }
+    const fit = helpers.getLabelContentFit(settings)
+    assert.ok(fit.scale >= 0.45 && fit.scale <= 1, `${template}: ${fit.scale}`)
+    assert.ok(fit.graphicHeightMm >= 2, `${template}: ${fit.graphicHeightMm}`)
+    assert.deepEqual([settings.labelWidthMm, settings.labelHeightMm], [30, 20])
+  }
+})
+
+await check('数值长码按可用宽度缩人眼文字，不省略编码', () => {
+  const value = '123456789012345678901234567890'
+  const target = {}
+  JsBarcode(target, value, { format: 'CODE128', displayValue: false, margin: 0, height: 60, width: 2 })
+  const modules = target.encodings.reduce((count, encoding) => count + encoding.data.length, 0)
+  assert.ok(modules > 0)
+  const settings = { template: 'thermal', labelWidthMm: 40, labelHeightMm: 20,
+    showSpec: true, showCode: true, showPrice: true, showLocation: false, showPrintDate: false }
+  assert.ok(helpers.getHumanCodeFontSizePt(settings, value) < 8)
+  assert.equal(helpers.getHumanCodeFitWarning(settings, value), '')
+  assert.match(helpers.getHumanCodeFitWarning({ ...settings, labelWidthMm: 20 }, 'A'.repeat(80)), /基本可读建议/)
+  assert.match(dialogSource, /\.barcode-label__text\s*\{[^}]*white-space:\s*nowrap/s)
+  assert.doesNotMatch(dialogSource, /\.barcode-label__text\s*\{[^}]*text-overflow:\s*ellipsis/s)
+})
+
+await check('隐藏可读编码释放图形净高，但不改变实际条码值', () => {
+  const base = { template: 'thermal', labelWidthMm: 30, labelHeightMm: 23,
+    showSpec: true, showPrice: true, showLocation: false, showPrintDate: false }
+  const shown = helpers.getLabelContentFit({ ...base, showCode: true }).graphicHeightMm
+  const hidden = helpers.getLabelContentFit({ ...base, showCode: false }).graphicHeightMm
+  assert.ok(hidden >= shown)
+  assert.equal(helpers.getLabelLayoutError({ ...base, labelHeightMm: 20, showCode: false }), '')
+})
+
+await check('四种标签隐藏可读编码时仍保留 SVG 且不输出编码文本', async () => {
+  for (const template of ['thermal', 'a4', 'yz-full', 'yz-compact']) {
+    const props = { label: { productName: '测试', specText: '', price: 1, locationCode: '' }, template,
+      barcodeSvg: '<svg data-code="完整编码" />', encodedText: '完整编码', showSpec: false,
+      showCode: false, showPrice: false, showLocation: false, showPrintDate: false, printDateText: '', fitStyle: {} }
+    const card = Vue.createSSRApp({ props: Object.keys(props), ssrRender: cardRender }, props)
+    const html = await VueServerRenderer.renderToString(card)
+    assert.match(html, /<svg\b/, `${template} 仍需保留可扫描条码`)
+    assert.equal((html.match(/完整编码/g) ?? []).length, 1, `${template} 不得渲染可读编码文字`)
   }
 })
 
@@ -157,12 +234,14 @@ await check('A4 单元格 border-box 边框同时计入横向和纵向净尺寸'
   JsBarcode(target, 'YZ0100001', { format: 'CODE128', displayValue: false, margin: 0, height: 60, width: 2 })
   const modules = target.encodings.reduce((count, encoding) => count + encoding.data.length, 0)
   assert.equal(modules, 112)
-  assert.equal(helpers.getCode128DensityError(32, modules, 'thermal'), '')
-  assert.match(helpers.getCode128DensityError(32, modules, 'a4'), /每模块/)
-  const base = { labelWidthMm: 40, labelHeightMm: 25.4, showSpec: true, showPrice: true,
+  const base = { labelWidthMm: 37, labelHeightMm: 25.4, showSpec: true, showCode: true, showPrice: true,
     showLocation: false, showPrintDate: false }
-  assert.equal(helpers.getLabelLayoutError({ ...base, template: 'thermal' }), '')
-  assert.match(helpers.getLabelLayoutError({ ...base, template: 'a4' }), /条码区/)
+  assert.ok(helpers.getLabelContentFit({ ...base, template: 'a4' }).contentWidthMm <
+    helpers.getLabelContentFit({ ...base, template: 'thermal' }).contentWidthMm)
+  assert.equal(helpers.getCode128DensityError({ ...base, template: 'thermal' }, modules), '')
+  assert.match(helpers.getCode128DensityError({ ...base, template: 'a4' }, modules), /每模块/)
+  assert.ok(helpers.getLabelContentFit({ ...base, template: 'a4' }).graphicHeightMm <
+    helpers.getLabelContentFit({ ...base, template: 'thermal' }).graphicHeightMm)
 })
 
 if (failures.length) {

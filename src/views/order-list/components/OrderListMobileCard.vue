@@ -318,6 +318,11 @@ const getSystemApplyStatusMeta = (order: Pick<OrderRecord, 'orderType' | 'isSyst
   gap: 14px;
 }
 
+/* 相邻按钮间距交给容器 gap，清零 Element Plus 默认 margin-left，避免卡片操作按钮间距不均 */
+.mobile-order-card__actions > :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
 .dark .mobile-order-card__business-no {
   color: #e2e8f0;
 }
