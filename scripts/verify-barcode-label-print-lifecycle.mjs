@@ -12,7 +12,8 @@ const first = ast.statements.findIndex((statement) => declarationName(statement)
 const last = ast.statements.findIndex((statement) => declarationName(statement) === 'handlePrint')
 assert.ok(first >= 0 && last > first)
 const lifecycleExpressions = ast.statements.filter((statement) => ts.isExpressionStatement(statement) &&
-  (/^watch\(\(\) => (?:\[)?props\.modelValue/.test(statement.getText(ast)) || /^onBeforeUnmount\(/.test(statement.getText(ast))))
+  ((/^watch\(/.test(statement.getText(ast)) && statement.getText(ast).includes('props.modelValue'))
+    || /^onBeforeUnmount\(/.test(statement.getText(ast))))
 assert.equal(lifecycleExpressions.length >= 2, true, '必须找到关闭监听与卸载清理')
 const code = ts.transpileModule([...ast.statements.slice(first, last + 1), ...lifecycleExpressions].map((statement) => statement.getText(ast)).join('\n'), {
   compilerOptions: { module: ts.ModuleKind.None },
@@ -50,12 +51,12 @@ function harness(printAction = () => {}, nextTickAction = async () => {}) {
   const handlePrint = new Function(
     'document', 'globalThis', 'settings', 'sanitizeSettings', 'SETTINGS_KEY', 'PRINT_STYLE_ID', 'PRINT_BODY_CLASS',
     'printing', 'printBlockedReason', 'showAppWarning', 'showAppError', 'nextTick', 'ref',
-    'watch', 'onBeforeUnmount', 'props', 'loadLabels',
+    'watch', 'onBeforeUnmount', 'props', 'loadLabels', 'ensureA4Grid', 'invalidateBatch',
     `${code}; return handlePrint`,
   )(document, browser, { template: 'thermal', labelWidthMm: 40, labelHeightMm: 30 }, (value) => value,
     'synthetic-settings', 'synthetic-print-style', 'synthetic-print-body', printing, { value: '' }, () => {},
     (error) => errors.push(String(error)), nextTickAction, (value) => ({ value }),
-    (source, callback) => watchers.push({ source, callback }), (callback) => { unmount = callback }, props, async () => {})
+    (source, callback) => watchers.push({ source, callback }), (callback) => { unmount = callback }, props, async () => {}, () => {}, () => {})
   const emit = (name) => { for (const callback of [...(listeners.get(name) ?? [])]) callback() }
   const callbacks = () => [...timers.values()]
   const state = () => ({ printing: printing.value, style: Boolean(style), bodyClass: classes.has('synthetic-print-body'),
@@ -63,7 +64,7 @@ function harness(printAction = () => {}, nextTickAction = async () => {}) {
     timers: timers.size, errors: errors.length, printCalls })
   const close = () => {
     props.modelValue = false
-    for (const item of watchers) item.callback(item.source())
+    for (const item of watchers) item.callback(Array.isArray(item.source) ? item.source.map((getter) => getter()) : item.source())
   }
   return { handlePrint, emit, callbacks, state, close, unmount: () => unmount(), setFocused(value) { focused = value } }
 }
