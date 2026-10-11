@@ -15,6 +15,13 @@ on:
   push:
     branches:
       - main
+    # 只改文档的提交不会进入任何镜像（各 Dockerfile 只 COPY 源码、配置与 lockfile），跳过整条发布流水线。
+    # GitHub 不对标签推送评估路径过滤，发布标签始终构建；手动触发同样不受影响。
+    # 维护说明：若 Dockerfile 新增 COPY 这些目录或根目录 Markdown，必须同步从此处移除对应规则。
+    paths-ignore:
+      - 'docs/**'
+      - 'spec/**'
+      - '*.md'
     tags:
       - 'v*'
       - 'release-v*'
