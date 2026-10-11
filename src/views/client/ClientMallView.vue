@@ -9,7 +9,7 @@
  */
 
 
-import { refDebounced, useVirtualList } from '@vueuse/core'
+import { useVirtualList } from '@vueuse/core'
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
@@ -184,7 +184,24 @@ const normalizedKeyword = computed(() => keyword.value.trim().toLowerCase())
 const hasKeyword = computed(() => normalizedKeyword.value.length > 0)
 // 搜索结果按防抖后的关键词计算：连续输入时不再每个字符都全量匹配、排序并重渲染整段结果列表。
 // 从“无关键词”进入搜索（首个字符、页面恢复上次搜索）时立即生效，避免先闪一下空结果。
-const debouncedKeyword = refDebounced(normalizedKeyword, 150)
+// 不使用 @vueuse 的 refDebounced：vueuse 被归入首屏 ui-kit 拆包，额外引入会直接抬高首屏 JS 预算。
+const SEARCH_KEYWORD_DEBOUNCE_MS = 150
+const debouncedKeyword = ref(normalizedKeyword.value)
+let searchKeywordDebounceTimer: ReturnType<typeof globalThis.setTimeout> | null = null
+const clearSearchKeywordDebounce = () => {
+  if (searchKeywordDebounceTimer !== null) {
+    globalThis.clearTimeout(searchKeywordDebounceTimer)
+    searchKeywordDebounceTimer = null
+  }
+}
+watch(normalizedKeyword, (value) => {
+  clearSearchKeywordDebounce()
+  searchKeywordDebounceTimer = globalThis.setTimeout(() => {
+    searchKeywordDebounceTimer = null
+    debouncedKeyword.value = value
+  }, SEARCH_KEYWORD_DEBOUNCE_MS)
+})
+onBeforeUnmount(clearSearchKeywordDebounce)
 const searchKeyword = computed(() => (debouncedKeyword.value ? debouncedKeyword.value : normalizedKeyword.value))
 const hasRenderableProducts = computed(() => products.value.length > 0)
 const blockingRequestError = computed(() => {
