@@ -9,8 +9,8 @@
  * 维护说明：
  * - 新增标签版式或条码内容来源时，先在这里补枚举值和默认口径，再让弹窗与卡片组件消费，不要绕过这里直接在组件里写字符串字面量；
  * - resolveBarcodeValue 返回 null 表示该口径下无可用条码值（如未录入原厂条码），调用方需按“无法生成”处理，不能把 null 当空字符串直接送入条码库。
- * - getLabelLayoutError 按四模板实际字段行高及 A4 单元格边框估算至少 8mm 条码净高，BarcodeLabelPrintDialog 的 CSS 字号、padding、边框或字段条件改变时必须同步调整；
- * - getCode128DensityError 按模板实际内容净宽估算最窄模块，0.25mm 是按 203 DPI 约两点/模块设置的保守门槛，不代表所有打印机或扫描枪的保证。
+ * - getLabelContentFit 按手动纸宽纸高及四模板字段计算内部字号、内边距和图形净高；纸张尺寸不可由内容反写；
+ * - Code128 图形与两侧各 10X 静区保持原值，0.25mm / 8mm 为扫码风险提示，不代替实机验证。
  */
 import type { ProductLabelRecord } from '@/api/modules/inventory'
 
@@ -65,8 +65,17 @@ export const formatPrintDate = (date: Date): string => {
 
 /** 203 DPI 标签机约每模块两点的保守阈值；实际可扫性仍取决于打印机与纸张。 */
 export const MIN_CODE128_MODULE_WIDTH_MM = 0.25
-/** 保留可见的条码图形高度，避免弹性布局把 SVG 压到零。 */
+
+/** Code128 图形两侧各预留十个最窄模块的空白；SVG 的 viewBox 含静区，模块表只记录图形模块。 */
+export const CODE128_QUIET_ZONE_MODULES_PER_SIDE = 10
+/** 保守的图形高度提示阈值；较小的标签仍允许打印并提示实机扫码风险。 */
 export const MIN_BARCODE_GRAPHIC_HEIGHT_MM = 8
+
+/** 低于 2mm 的图形无法作为基本可见条码，阻止几何上无意义的布局。 */
+export const ABSOLUTE_MIN_BARCODE_GRAPHIC_HEIGHT_MM = 2
+
+/** 低于 2.5pt 的完整人眼编码不再具备基本可读性，不能用裁切伪装适配。 */
+export const MIN_HUMAN_CODE_FONT_PT = 2.5
 /** A4 单元格使用 border-box，四边 0.2mm 边框需从内容净尺寸扣除。 */
 const A4_CELL_BORDER_MM = 0.2
 
@@ -74,41 +83,84 @@ export interface LabelLayoutSettings {
   template: LabelTemplate
   labelWidthMm: number
   labelHeightMm: number
+  fontSizePt?: number
   showSpec: boolean
+  showCode: boolean
   showPrice: boolean
   showLocation: boolean
   showPrintDate: boolean
 }
 
-const lineHeightMm = (fontPt: number, multiplier = 1.2): number => fontPt * 25.4 / 72 * multiplier
+const ptToMm = (pt: number): number => pt * 25.4 / 72
 
-/** 按当前标签 CSS 的文字行、上下内边距与条码区间距估算剩余净高。 */
-export const getLabelLayoutError = (settings: LabelLayoutSettings): string => {
-  const { template, showSpec, showPrice, showLocation, showPrintDate } = settings
-  const headerHeight = template === 'yz-compact' ? 0 : lineHeightMm(9)
-  const specHeight = showSpec && (template === 'thermal' || template === 'a4') ? lineHeightMm(7) : 0
-  const footerHeight = template === 'yz-full'
-    ? Math.max(
-      showPrice ? lineHeightMm(7) : 0,
-      (showLocation ? lineHeightMm(7, 1.3) : 0)
-        + (showPrintDate ? lineHeightMm(7, 1.3) + (showLocation ? 0.5 : 0) : 0),
-    )
-    : (showPrice || showLocation ? lineHeightMm(7) : 0)
-  // .barcode-label 上下 padding 3mm，.barcode-label__code 上下 margin 1mm；A4 另有上下边框。
-  const verticalBorder = template === 'a4' ? A4_CELL_BORDER_MM * 2 : 0
-  const remaining = settings.labelHeightMm - 3 - 1 - verticalBorder - headerHeight - specHeight - lineHeightMm(8) - footerHeight
-  if (remaining >= MIN_BARCODE_GRAPHIC_HEIGHT_MM) return ''
-  const visibleHeight = Math.max(0, Math.round(remaining * 10) / 10)
-  return `当前 ${settings.labelHeightMm} 毫米高的标签预计仅余 ${visibleHeight} 毫米条码区，至少需要 ${MIN_BARCODE_GRAPHIC_HEIGHT_MM} 毫米；请增高标签或隐藏规格、售价、库位、日期等显示项`
+export interface LabelContentFit {
+  scale: number
+  horizontalPaddingMm: number
+  verticalPaddingMm: number
+  codeGapMm: number
+  graphicHeightMm: number
+  contentWidthMm: number
 }
 
-/** SVG 按标签净宽缩放时估算 Code128 最窄模块宽度，扣除两侧 padding，A4 再扣单元格边框。 */
-export const getCode128DensityError = (labelWidthMm: number, moduleCount: number, template: LabelTemplate): string => {
+/** 先按首选字号为已选字段分配单行，空间不足时最低缩至原版字号的 35%，剩余高度留给 SVG。 */
+export const getLabelContentFit = (settings: LabelLayoutSettings): LabelContentFit => {
+  const { template, labelWidthMm, labelHeightMm, showSpec, showCode, showPrice, showLocation, showPrintDate } = settings
+  const border = template === 'a4' ? A4_CELL_BORDER_MM * 2 : 0
+  const horizontalPaddingMm = Math.min(2, Math.max(0.5, labelWidthMm * 0.05))
+  const verticalPaddingMm = Math.min(1.5, Math.max(0.4, labelHeightMm * 0.05))
+  const codeGapMm = Math.min(0.5, Math.max(0.15, labelHeightMm * 0.01))
+  const line = (pt: number) => ptToMm(pt) * 1.1
+  const header = template === 'yz-compact' ? 0 : line(9)
+  const spec = showSpec && (template === 'thermal' || template === 'a4') ? line(7) : 0
+  const footer = template === 'yz-full'
+    ? Math.max(showPrice ? line(7) : 0,
+      (showLocation ? line(7) : 0) + (showPrintDate ? line(7) : 0))
+    : (showPrice || showLocation ? line(7) : 0)
+  const textHeightAtFullScale = header + spec + (showCode ? line(8) : 0) + footer
+  const fixedHeight = verticalPaddingMm * 2 + codeGapMm * 2 + border
+  const preferredScale = (settings.fontSizePt ?? 9) / 9
+  const minimumScale = Math.min(preferredScale, 0.35)
+  const scale = textHeightAtFullScale > 0
+    ? Math.max(minimumScale, Math.min(preferredScale, (labelHeightMm - fixedHeight - MIN_BARCODE_GRAPHIC_HEIGHT_MM) / textHeightAtFullScale))
+    : preferredScale
+  const yzFooterGap = template === 'yz-full' && showLocation && showPrintDate ? 0.25 * scale : 0
+  const graphicHeightMm = labelHeightMm - fixedHeight - textHeightAtFullScale * scale - yzFooterGap
+  return { scale, horizontalPaddingMm, verticalPaddingMm, codeGapMm, graphicHeightMm,
+    contentWidthMm: labelWidthMm - horizontalPaddingMm * 2 - border }
+}
+
+/** 固定纸张下仅在基本条形区域无法容纳时阻断；8mm 是另行提示的保守值。 */
+export const getLabelLayoutError = (settings: LabelLayoutSettings): string => {
+  const height = getLabelContentFit(settings).graphicHeightMm
+  return height >= ABSOLUTE_MIN_BARCODE_GRAPHIC_HEIGHT_MM ? ''
+    : `当前 ${settings.labelWidthMm} × ${settings.labelHeightMm} 毫米标签在保留已选字段后，条码图形仅余 ${Math.max(0, height).toFixed(1)} 毫米，低于 ${ABSOLUTE_MIN_BARCODE_GRAPHIC_HEIGHT_MM} 毫米基本可见下限；请调整尺寸或显示项`
+}
+
+export const getLabelLayoutWarning = (settings: LabelLayoutSettings): string => {
+  const height = getLabelContentFit(settings).graphicHeightMm
+  return height >= MIN_BARCODE_GRAPHIC_HEIGHT_MM ? ''
+    : `当前条码图形约 ${Math.max(0, height).toFixed(1)} 毫米高，低于 ${MIN_BARCODE_GRAPHIC_HEIGHT_MM} 毫米保守建议；请在实际打印机上验证扫码效果`
+}
+
+/** 按等宽字体每字不超过约 0.7em 分配完整编码文字；不省略、不换成其他编码。 */
+export const getHumanCodeFontSizePt = (settings: LabelLayoutSettings, value: string): number => {
+  const fit = getLabelContentFit(settings)
+  const maximumByWidth = value.length ? fit.contentWidthMm / ptToMm(value.length * 0.7) : 8
+  return Math.min(8 * fit.scale, maximumByWidth)
+}
+
+export const getHumanCodeFitWarning = (settings: LabelLayoutSettings, value: string): string => {
+  if (!settings.showCode || !value) return ''
+  const font = getHumanCodeFontSizePt(settings, value)
+  return font >= MIN_HUMAN_CODE_FONT_PT ? ''
+    : `完整编码文字已缩至约 ${font.toFixed(1)}pt，低于 ${MIN_HUMAN_CODE_FONT_PT}pt 基本可读建议；条形编码仍保留原值，请核对打印效果`
+}
+
+/** SVG viewBox 含图形与静区；用 Card 的真实内容净宽估算最窄模块宽度。 */
+export const getCode128DensityError = (settings: LabelLayoutSettings, moduleCount: number): string => {
   if (!Number.isFinite(moduleCount) || moduleCount <= 0) return '无法计算条码模块宽度，请重新加载标签数据'
-  const horizontalBorder = template === 'a4' ? A4_CELL_BORDER_MM * 2 : 0
-  const moduleWidthMm = (labelWidthMm - 4 - horizontalBorder) / moduleCount
+  const moduleWidthMm = getLabelContentFit(settings).contentWidthMm
+    / (moduleCount + CODE128_QUIET_ZONE_MODULES_PER_SIDE * 2)
   if (moduleWidthMm >= MIN_CODE128_MODULE_WIDTH_MM) return ''
-  const minimumWidth = Math.ceil(4 + horizontalBorder + moduleCount * MIN_CODE128_MODULE_WIDTH_MM)
-  const widthAction = minimumWidth <= 120 ? `将标签加宽到至少 ${minimumWidth} 毫米、` : ''
-  return `当前条码每模块约 ${moduleWidthMm.toFixed(2)} 毫米，低于 ${MIN_CODE128_MODULE_WIDTH_MM} 毫米的保守阈值；请${widthAction}改用较短的内部 SKU 编码或缩短原厂条码`
+  return `当前条码每模块约 ${moduleWidthMm.toFixed(2)} 毫米，低于 ${MIN_CODE128_MODULE_WIDTH_MM} 毫米的保守阈值；已保持手动纸张尺寸，请先实机验证扫码效果`
 }
