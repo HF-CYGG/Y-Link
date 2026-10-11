@@ -45,6 +45,13 @@ export interface AppRouteMeta extends RouteMeta {
   menuOrder?: number
   menuGroup?: string
   menuStandalone?: boolean
+  /**
+   * 共享工作台菜单兜底（同级路由的相对 path）：
+   * - 当前路由无权访问但该同级路由可访问时，仍以当前路由标题生成菜单项并指向该同级路由；
+   * - 用于“一个菜单入口承载多个按不同权限访问的标签”，避免只拥有其中某个标签权限的账号找不到入口；
+   * - 不放宽路由本身的权限，同级路由仍按自身 meta 校验；仅支持无子路由的叶子菜单。
+   */
+  menuFallbackSibling?: string
   menuHighlight?: 'spotlight'
   clientNav?: boolean
   clientNavOrder?: number
@@ -312,6 +319,8 @@ const layoutChildren: AppRouteRecord[] = [
           menuOrder: 20,
           activeMenu: '/base-data',
           requiredPermissions: ['tags:view'],
+          // 仅有 products:view 的账号看不到“商品标签”，菜单入口改指向“分类与库位”标签，保证工作台仍可从侧栏进入。
+          menuFallbackSibling: 'master-data',
           keepAlive: true,
           viewKey: 'tag-center',
           suppressGlobalLoadingBar: true,
@@ -325,7 +334,6 @@ const layoutChildren: AppRouteRecord[] = [
         meta: {
           title: '分类与库位',
           menu: false,
-          menuOrder: 30,
           activeMenu: '/base-data/tags',
           requiredPermissions: ['products:view'],
           keepAlive: true,
@@ -918,11 +926,19 @@ const deriveMenuItems = (records: AppRouteRecord[], user?: Pick<UserSafeProfile,
   const collectedItems: AppMenuItem[] = []
 
   sortByMenuOrder(records).forEach((record) => {
-    if (record.meta.menu === false || !canAccessRoute(record.meta, user)) {
+    if (record.meta.menu === false) {
       return
     }
 
-    const fullPath = resolveRoutePath(parentPath, record.path)
+    let fullPath = resolveRoutePath(parentPath, record.path)
+    if (!canAccessRoute(record.meta, user)) {
+      // 共享工作台兜底：本路由无权访问时改指向可访问的同级路由，没有则照常隐藏。
+      const fallbackRecord = records.find((item) => item.path === record.meta.menuFallbackSibling)
+      if (!fallbackRecord || !canAccessRoute(fallbackRecord.meta, user)) {
+        return
+      }
+      fullPath = resolveRoutePath(parentPath, fallbackRecord.path)
+    }
     const hasConfiguredChildren = Boolean(record.children?.length)
     const children = record.children ? deriveMenuItems(record.children, user, fullPath) : []
     const nestedChildren = children.filter((item) => !item.standalone)

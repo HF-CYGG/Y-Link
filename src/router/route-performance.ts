@@ -378,7 +378,7 @@ const warmupTargetMatchers: Array<{
   { target: 'order-entry', prefixes: ['/order-entry'] },
   { target: 'order-list', prefixes: ['/order-list'] },
   { target: 'reports', prefixes: ['/reports'] },
-  { target: 'tags', prefixes: ['/base-data/tags', '/base-data/master-data', '/inventory/master-data'] },
+  { target: 'tags', prefixes: ['/base-data/tags', '/base-data/master-data'] },
   { target: 'products', prefixes: ['/base-data/products', '/base-data'] },
   { target: 'supplier-delivery', prefixes: ['/supplier-delivery'] },
   { target: 'supplier-history', prefixes: ['/supplier-history'] },
