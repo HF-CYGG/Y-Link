@@ -259,11 +259,12 @@ html[data-theme-transition='fallback'] body::after {
   isolation: isolate;
 }
 
+/* 冻结现有动画的进度，避免门控撤销后一次性入场动画从头播放。 */
 html[data-theme-transition='view-transition'] *,
 html[data-theme-transition='view-transition'] *::before,
 html[data-theme-transition='view-transition'] *::after {
   transition-property: none !important;
-  animation: none !important;
+  animation-play-state: paused !important;
 }
 
 ::view-transition-old(root) {
