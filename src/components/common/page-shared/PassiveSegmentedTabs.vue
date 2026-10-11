@@ -134,6 +134,17 @@ const handleValueUpdate = (value: string | number | boolean) => {
   color: rgb(15 23 42);
 }
 
+/*
+ * 键盘焦点：Element Plus 原本把焦点轮廓画在已隐藏的指示块上，真正获得焦点的 radio 又是透明零尺寸，
+ * 这里在 `input:focus-visible` 相邻的标签文字上补独立轮廓；仅键盘聚焦时出现，鼠标点击不显示。
+ * 轮廓向内收（负 offset），避免被外层 `overflow-x: auto` 的标签栏裁掉。
+ */
+.passive-segmented-tabs :deep(.el-segmented__item-input:focus-visible + .el-segmented__item-label) {
+  border-radius: 6px;
+  outline: 2px solid rgb(13 148 136);
+  outline-offset: -2px;
+}
+
 /* 暗色：普通项用浅灰、选中项用提亮的青色，避免深色文字压在暗底上。 */
 .dark .passive-segmented-tabs :deep(.el-segmented) {
   --el-segmented-item-selected-color: rgb(45 212 191);
@@ -151,6 +162,10 @@ const handleValueUpdate = (value: string | number | boolean) => {
 
 .dark .passive-segmented-tabs :deep(.el-segmented__item:not(.is-disabled):hover) {
   color: rgb(241 245 249);
+}
+
+.dark .passive-segmented-tabs :deep(.el-segmented__item-input:focus-visible + .el-segmented__item-label) {
+  outline-color: rgb(45 212 191);
 }
 
 @media (max-width: 767px) {
