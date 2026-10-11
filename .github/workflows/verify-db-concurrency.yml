@@ -1,9 +1,10 @@
 # 模块说明：GitHub Pull Request 必要检查
 # 文件职责：只运行 Web/后端构建和秒级关键契约，尽快确认提交具备合入基础。
 # 维护说明：Ruleset 要求的状态名是 `verify`，不得改名；Docker、数据库迁移、并发与依赖审计改在本地按改动范围执行。
-# 提速说明：后端依赖中的 sqlite3 安装时会触发 prebuild-install / node-gyp 编译，冷安装约 85 秒，
-#           因此按「系统 + 架构 + 实际 Node 版本 + 后端 lockfile」缓存 backend/node_modules，命中时跳过安装；
-#           根 Web 依赖冷安装仅约 9 秒且体积大，继续走 npm 下载缓存，避免解包耗时反超安装。
+# 提速说明：后端 lockfile 锁定 prebuild-install@7.1.3（依赖 napi-build-utils@2）。旧版 napi-build-utils@1 按字符串比较 N-API 版本，
+#           Node 22.14+ 的 N-API 升到 10 后 sqlite3 拿不到预编译包，会回退 node-gyp 源码编译，冷安装约 85 秒；修正后约 6 秒。
+#           不要把 prebuild-install 降回 7.1.2 及以下。backend/node_modules 仍按「系统 + 架构 + 实际 Node 版本 + 后端 lockfile」缓存，
+#           命中时跳过安装；根 Web 依赖冷安装仅约 9 秒且体积大，继续走 npm 下载缓存，避免解包耗时反超安装。
 
 name: PR 必要检查
 
