@@ -46,6 +46,7 @@ async function main() {
   const { BaseProductSku } = await import('../src/entities/base-product-sku.entity.js')
   const { BaseProductVariantCodeRegistry } = await import('../src/entities/base-product-variant-code-registry.entity.js')
   const { BaseYzSeriesSeqReservation } = await import('../src/entities/base-yz-series-seq-reservation.entity.js')
+  const { SysAuditLog } = await import('../src/entities/sys-audit-log.entity.js')
   const {
     allocateSeriesSeq,
     reserveSeriesSeq,
@@ -2044,6 +2045,59 @@ async function main() {
       '重试升级仍应稳定抛出同样的 409 序号耗尽错误，证明不会陷入死循环',
     )
     pass('P2-A：该系列 01-99 号产品编码全部被占用时，预检给出序号耗尽阻断，正式升级抛 409 且重试结论稳定，不会陷入死循环')
+
+    // ============ 批量升级到 YZ 编码 ============
+    const batchTag = await createSeriesTag('BU')
+    // 02 号被手工编码占用：批量预测与执行都应跳过它，且批次内序号连续递增。
+    await createManualCodeProduct(formatProductCode(defaultPrefix, 'BU', 2))
+    const batchA = await createSingleSkuLegacyProduct('BA', 'batch-a')
+    const batchB = await createSingleSkuLegacyProduct('BB', 'batch-b')
+    const batchC = await createSingleSkuLegacyProduct('BC', 'batch-c')
+    const batchOrder = [batchB.id, overCapacityProduct.id, batchA.id, legacyToUpgrade.id, batchC.id]
+    const registryCountBeforeBatchPreview = await registryRepo.count()
+    const batchPreview = await productService.previewBatchProductYzUpgrade({ ids: batchOrder, primarySeriesTagId: batchTag.id })
+    assert.equal(await registryRepo.count(), registryCountBeforeBatchPreview, '批量预检不应写入登记表')
+    assert.deepEqual(batchPreview.items.map((item) => item.productId), batchOrder.map(String), '预检应按提交顺序返回')
+    assert.deepEqual(batchPreview.items.map((item) => item.eligible), [true, false, true, false, true])
+    assert.ok(batchPreview.items[1]?.blockingReason?.includes('上限'), '容量超限商品应给出阻断原因且不占用序号')
+    assert.ok(batchPreview.items[3]?.blockingReason?.includes('YZ'), '已是 YZ 的商品应被标记跳过')
+    assert.deepEqual(
+      batchPreview.items.filter((item) => item.eligible).map((item) => item.newProductCode),
+      [1, 3, 4].map((seq) => formatProductCode(defaultPrefix, 'BU', seq)),
+      '批次内序号应连续预测并跳过被占用的 02 号',
+    )
+    pass('批量预检：按提交顺序连续预测序号、跳过被占用号，不可升级商品给出原因且不占号，且不写登记表')
+
+    // 含已是 YZ 的商品时整批拒绝；含容量超限商品时整批回滚，前面商品不得被部分升级。
+    await assert.rejects(
+      productService.batchUpgradeProductsToYzCode({ ids: [batchA.id, legacyToUpgrade.id], primarySeriesTagId: batchTag.id }, actor),
+      (error: unknown) => assertBizErrorWithStatus(error, 400),
+    )
+    await assert.rejects(
+      productService.batchUpgradeProductsToYzCode({ ids: [batchB.id, overCapacityProduct.id], primarySeriesTagId: batchTag.id }, actor),
+      (error: unknown) => assertBizErrorWithStatus(error, 409) && (error as InstanceType<typeof BizError>).message.includes(overCapacityProduct.productName),
+    )
+    assert.equal((await productRepo.findOneByOrFail({ id: batchB.id })).codeScheme, 'legacy', '整批失败时不得部分升级')
+    pass('批量升级原子性：含已升级商品整批 400；含容量超限商品整批 409 回滚且错误带商品名，前序商品未被部分升级')
+
+    const eligibleIds = batchPreview.items.filter((item) => item.eligible).map((item) => item.productId)
+    const batchResult = await productService.batchUpgradeProductsToYzCode({ ids: eligibleIds, primarySeriesTagId: batchTag.id }, actor)
+    assert.deepEqual(
+      batchResult.items.map((item) => item.newProductCode),
+      batchPreview.items.filter((item) => item.eligible).map((item) => item.newProductCode),
+      '批量执行结果应与预检预测一致',
+    )
+    for (const item of batchResult.items) {
+      const row = await productRepo.findOneByOrFail({ id: item.productId })
+      assert.equal(row.codeScheme, 'yz')
+      assert.equal(row.productCode, item.newProductCode)
+      assert.equal(row.legacyProductCode, item.oldProductCode)
+      const skus = await skuRepo.find({ where: { productId: item.productId, isCurrent: true } })
+      skus.forEach((sku) => assert.ok(yzSkuPattern.test(sku.skuCode), `批量升级后 SKU 码 ${sku.skuCode} 应匹配 YZ 规则`))
+    }
+    const batchAuditCount = await AppDataSource.getRepository(SysAuditLog).count({ where: { actionType: 'product.yz_code_upgrade', actionLabel: '批量升级存量商品为 YZ 编码' } })
+    assert.equal(batchAuditCount, 3, '每个批量升级商品各写一条审计')
+    pass('批量升级执行：3 个商品按预检顺序升级到 BU01/BU03/BU04，旧编码写入历史字段，逐商品写审计')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()
