@@ -37,6 +37,7 @@ export type AppRouteName =
   | 'base-data'
   | 'products'
   | 'tags'
+  | 'base-data-master-data'
   | 'supplier-delivery'
   | 'supplier-history'
   | 'inbound-scan'
@@ -52,7 +53,6 @@ export type AppRouteName =
   | 'inventory-docs'
   | 'inventory-stocktakes'
   | 'inventory-stocktake-work'
-  | 'inventory-master-data'
   | 'system'
   | 'system-configs'
   | 'system-db-migration'
@@ -80,6 +80,8 @@ type WarmupNavigator = Navigator & {
  * - 所有业务页面都从这里统一声明，避免“路由里写一份、预热逻辑再写一份”；
  * - 让按需加载、预热与构建验证围绕同一套入口展开。
  */
+const loadTagCenterView = () => import('@/views/base-data/TagCenterView.vue')
+
 export const routeViewLoaders = {
   login: () => import('@/views/auth/LoginView.vue'),
   'client-login': () => import('@/views/client/ClientAuthView.vue'),
@@ -100,7 +102,11 @@ export const routeViewLoaders = {
   'order-list': () => import('@/views/order-list/OrderListView.vue'),
   reports: () => import('@/views/reports/ReportCenterView.vue'),
   products: () => import('@/views/product-center/ProductCenterView.vue'),
-  tags: () => import('@/views/base-data/TagManageView.vue'),
+  // 标签管理共享工作台：“商品标签”与“分类与库位”两个入口必须加载同一壳层模块，
+  // 否则外层 KeepAlive 复用相同 viewKey 时会出现“同 key 不同组件类型”的切换异常；
+  // 共用同一个加载函数，避免首屏路由包里重复生成一份依赖映射。
+  tags: loadTagCenterView,
+  'base-data-master-data': loadTagCenterView,
 
   // 送货单与扫码入库模块：
   // - 供货方“录入”和“历史”两个旧入口都必须回到同一个共享工作台壳层；
@@ -120,7 +126,6 @@ export const routeViewLoaders = {
   'inventory-docs': () => import('@/views/inventory/InventoryDocListView.vue'),
   'inventory-stocktakes': () => import('@/views/inventory/StocktakeListView.vue'),
   'inventory-stocktake-work': () => import('@/views/inventory/StocktakeWorkView.vue'),
-  'inventory-master-data': () => import('@/views/inventory/InventoryMasterDataView.vue'),
   'system-configs': () => import('@/views/system/SystemConfigViewLoader'),
   'system-db-migration': () => import('@/views/system/DatabaseMigrationView.vue'),
   'system-users': () => import('@/views/system/UserCenterView.vue'),
@@ -158,6 +163,7 @@ const warmableRouteLoaders: Partial<Record<RouteWarmupTarget, RouteViewLoader>> 
       routeViewLoaders.products(),
       preloadProductCenterTabs(resolveProductCenterWarmupTargets('products')),
     ]),
+  // 标签管理两个入口共用同一壳层，预热壳层即可；“分类与库位”子包由壳层挂载后空闲预取，不占首屏路由包体积。
   tags: routeViewLoaders.tags,
   'supplier-delivery': routeViewLoaders['supplier-delivery'],
   'supplier-history': routeViewLoaders['supplier-history'],
@@ -372,7 +378,7 @@ const warmupTargetMatchers: Array<{
   { target: 'order-entry', prefixes: ['/order-entry'] },
   { target: 'order-list', prefixes: ['/order-list'] },
   { target: 'reports', prefixes: ['/reports'] },
-  { target: 'tags', prefixes: ['/base-data/tags'] },
+  { target: 'tags', prefixes: ['/base-data/tags', '/base-data/master-data', '/inventory/master-data'] },
   { target: 'products', prefixes: ['/base-data/products', '/base-data'] },
   { target: 'supplier-delivery', prefixes: ['/supplier-delivery'] },
   { target: 'supplier-history', prefixes: ['/supplier-history'] },

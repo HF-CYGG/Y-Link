@@ -313,6 +313,24 @@ const layoutChildren: AppRouteRecord[] = [
           activeMenu: '/base-data',
           requiredPermissions: ['tags:view'],
           keepAlive: true,
+          viewKey: 'tag-center',
+          suppressGlobalLoadingBar: true,
+        },
+      },
+      {
+        // 分类与库位：作为“标签管理”工作台的第二个标签，与 tags 共享 viewKey 复用同一壳层实例。
+        path: 'master-data',
+        name: 'base-data-master-data',
+        component: routeViewLoaders['base-data-master-data'],
+        meta: {
+          title: '分类与库位',
+          menu: false,
+          menuOrder: 30,
+          activeMenu: '/base-data/tags',
+          requiredPermissions: ['products:view'],
+          keepAlive: true,
+          viewKey: 'tag-center',
+          suppressGlobalLoadingBar: true,
         },
       },
     ],
@@ -498,15 +516,13 @@ const layoutChildren: AppRouteRecord[] = [
         },
       },
       {
+        // 兼容旧入口：分类与库位已迁入“基础资料 → 标签管理”工作台，旧书签与外部链接统一重定向。
         path: 'master-data',
-        name: 'inventory-master-data',
-        component: routeViewLoaders['inventory-master-data'],
+        redirect: '/base-data/master-data',
         meta: {
           title: '分类与库位',
-          menuOrder: 60,
-          activeMenu: '/inventory',
+          menu: false,
           requiredPermissions: ['products:view'],
-          keepAlive: true,
         },
       },
     ],
