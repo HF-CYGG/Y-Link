@@ -7,7 +7,8 @@
  * - 扫码结果进入串行队列逐个处理，连扫同一件商品逐次累计；数量框带扫码标记，扫码枪误入时不会写进数量；
  * - 盲盘单对无审核权限的账号不展示账面数与差异，桌面表格和手机卡片均按 canViewBook 门禁渲染；
  * - 待确认阶段逐行选择差异原因与处理方式（调整库存 / 报损 / 重新盘点 / 暂不处理），只提交本次改动的字段，同一行请求串行执行；
- * - 有“重新盘点”行时只能退回重盘，全部处理完成后才能确认调账。
+ * - 有“重新盘点”行时只能退回重盘，全部处理完成后才能确认调账；
+ * - 当前计数项、桌面表格与手机卡片都展示规格示例图（SKU 图优先、商品图兜底、无图用统一占位图），便于盘点时对照实物确认，点击可放大预览。
  * 维护说明：
  * - 扫码计数失败（未识别、已退役、在其他盘点单中）必须弹出原因，避免漏盘；
  * - 差异原因为“其他”且处理方式不是“重新盘点”时必须有备注，与服务端规则一致；
@@ -19,7 +20,7 @@ import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessageBox, type InputInstance } from 'element-plus'
 import { CameraFilled } from '@element-plus/icons-vue'
-import { BizResponsiveDataCollectionShell, PageContainer, PagePaginationBar, PageToolbarCard, PassiveNumberInput, PassiveSegmentedTabs, UnifiedScanDialog } from '@/components/common'
+import { BizResponsiveDataCollectionShell, PageContainer, PagePaginationBar, PageToolbarCard, PassiveNumberInput, PassivePreviewImage, PassiveSegmentedTabs, UnifiedScanDialog } from '@/components/common'
 import {
   cancelStocktake,
   completeStocktake,
@@ -38,6 +39,7 @@ import { useCameraQrScanner } from '@/composables/useCameraQrScanner'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { STOCKTAKE_DIFF_REASON_OPTIONS, STOCKTAKE_RESOLUTION_OPTIONS, STOCKTAKE_STATUS_LABELS } from '@/constants/inventory'
 import { useAuthStore } from '@/store'
+import { resolveProductPlaceholder } from '@/utils/product-placeholder'
 import pinia from '@/store/pinia'
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
@@ -59,6 +61,16 @@ const acting = ref(false)
 const filter = ref<ItemFilter>('all')
 const keyword = ref('')
 const pagination = reactive({ page: 1, pageSize: 50, total: 0 })
+
+/**
+ * 规格示例图：服务端已按“SKU 图优先、商品图兜底”填充 thumbnail；
+ * 无图时展示统一占位图且不开启预览，避免点开空白大图。
+ */
+const resolveItemImage = (row: Pick<StocktakeItemRecord, 'thumbnail'>) => resolveProductPlaceholder(row.thumbnail)
+const resolveItemPreviewImages = (row: Pick<StocktakeItemRecord, 'thumbnail'>) => {
+  const thumbnail = row.thumbnail?.trim()
+  return thumbnail ? [thumbnail] : []
+}
 const detailRequest = useStableRequest()
 const itemsRequest = useStableRequest()
 
@@ -574,12 +586,22 @@ onMounted(reloadAll)
         </div>
       </div>
       <div v-if="currentItem" class="mt-4 flex flex-col gap-3 rounded-xl bg-slate-50 p-3 dark:bg-white/5 sm:flex-row sm:flex-wrap sm:items-center">
-        <div class="min-w-0 flex-1">
+        <div class="flex min-w-0 flex-1 items-center gap-3">
+          <PassivePreviewImage
+            :src="resolveItemImage(currentItem)"
+            :preview-images="resolveItemPreviewImages(currentItem)"
+            fit="cover"
+            class="h-16 w-16 shrink-0 rounded-xl"
+            :alt="`${currentItem.productName} ${currentItem.specText} 示例图`"
+            dialog-title="规格示例图"
+          />
+          <div class="min-w-0 flex-1">
           <div class="text-lg font-semibold">{{ currentItem.productName }}</div>
           <div class="text-sm text-slate-500 dark:text-slate-400">
             {{ currentItem.specText }} · {{ currentItem.skuCode }}<span v-if="currentItem.locationCode"> · 库位 {{ currentItem.locationCode }}</span>
           </div>
           <div v-if="showBook && currentItem.bookQty !== null" class="text-xs text-slate-500 dark:text-slate-400">账面 {{ currentItem.bookQty }}</div>
+          </div>
         </div>
         <template v-if="quickMode">
           <div class="text-right">
@@ -635,13 +657,25 @@ onMounted(reloadAll)
       >
         <template #table="{ items: tableItems }">
           <el-table :data="tableItems" row-key="id" empty-text="没有符合条件的明细">
-        <el-table-column label="商品 / 规格" min-width="200">
+        <el-table-column label="商品 / 规格" min-width="240">
           <template #default="{ row }">
-            <div class="font-medium">
-              {{ row.productName }}
-              <el-tag v-if="!row.inScope" size="small" type="warning" class="ml-1">范围外</el-tag>
+            <div class="flex min-w-0 items-center gap-3">
+              <PassivePreviewImage
+                :src="resolveItemImage(row)"
+                :preview-images="resolveItemPreviewImages(row)"
+                fit="cover"
+                class="h-12 w-12 shrink-0 rounded-lg"
+                :alt="`${row.productName} ${row.specText} 示例图`"
+                dialog-title="规格示例图"
+              />
+              <div class="min-w-0">
+                <div class="font-medium">
+                  {{ row.productName }}
+                  <el-tag v-if="!row.inScope" size="small" type="warning" class="ml-1">范围外</el-tag>
+                </div>
+                <div class="text-xs text-slate-500 dark:text-slate-400">{{ row.specText }} · {{ row.skuCode }}</div>
+              </div>
             </div>
-            <div class="text-xs text-slate-500 dark:text-slate-400">{{ row.specText }} · {{ row.skuCode }}</div>
           </template>
         </el-table-column>
         <el-table-column label="库位" width="100">
@@ -731,7 +765,15 @@ onMounted(reloadAll)
         <template #card="{ item }">
           <article class="flex min-w-0 flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-white/10 dark:bg-slate-900/40">
             <div class="flex min-w-0 items-start justify-between gap-2">
-              <div class="min-w-0">
+              <PassivePreviewImage
+                :src="resolveItemImage(item)"
+                :preview-images="resolveItemPreviewImages(item)"
+                fit="cover"
+                class="h-14 w-14 shrink-0 rounded-xl"
+                :alt="`${item.productName} ${item.specText} 示例图`"
+                dialog-title="规格示例图"
+              />
+              <div class="min-w-0 flex-1">
                 <div class="break-words font-semibold text-slate-800 dark:text-slate-100">{{ item.productName }}</div>
                 <div class="mt-1 break-words text-xs text-slate-500 dark:text-slate-400">{{ item.specText }} · {{ item.skuCode }}</div>
               </div>

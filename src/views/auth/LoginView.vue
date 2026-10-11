@@ -894,6 +894,11 @@ const handleSubmit = async () => {
   margin: -6px 0 18px;
 }
 
+/* 相邻按钮间距交给容器 gap，清零 Element Plus 默认 margin-left，避免间距与 gap 叠加 */
+.mfa-switch-row > :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
 .login-page {
   --bg-primary: #f5f5f7;
   --bg-panel: #ffffff;
