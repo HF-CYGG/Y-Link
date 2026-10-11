@@ -982,6 +982,11 @@ onBeforeUnmount(() => {
   gap: 0.75rem;
 }
 
+/* 相邻按钮间距交给容器 gap，清零 Element Plus 默认 margin-left，避免扫码按钮组间距不均 */
+.scan-icon-group > :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
 /* 扫码输入框增强：聚焦时边框强调，便于扫码枪连续作业时快速确认焦点位置。 */
 .scan-input :deep(.el-input__wrapper) {
   border-radius: 12px;

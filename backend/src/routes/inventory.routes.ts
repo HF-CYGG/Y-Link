@@ -40,6 +40,12 @@ const locationSchema = z.object({
 const locationSkuQuerySchema = z.object({
   scope: z.enum(['assigned', 'other']).default('assigned'),
   keyword: z.string().trim().max(100).default(''),
+  // 分类筛选：传分类 ID 精确匹配，传 none 只看未分类商品，不传不过滤。
+  categoryId: z.string().trim().max(32).optional(),
+  // 标签筛选：商品关联了该标签（含系列标签）即命中。
+  tagId: z.string().trim().max(32).optional(),
+  // 规格启停筛选：不传表示全部。
+  status: z.enum(['active', 'inactive']).optional(),
   page: z.coerce.number().int().min(1).max(10000).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
 })
@@ -47,6 +53,14 @@ const locationSkuQuerySchema = z.object({
 const locationSkuChangeSchema = z.object({
   action: z.enum(['assign', 'remove']),
   expectedLocationId: z.string().trim().min(1).max(32).nullable(),
+})
+
+const locationSkuBatchChangeSchema = z.object({
+  action: z.enum(['assign', 'remove']),
+  items: z.array(z.object({
+    skuId: z.string().trim().min(1).max(32),
+    expectedLocationId: z.string().trim().min(1).max(32).nullable(),
+  })).min(1, '请至少选择一个规格').max(100, '单次最多批量处理 100 个规格'),
 })
 
 const stockDocSchema = z.object({
@@ -139,6 +153,16 @@ inventoryRouter.put('/locations/:id', requirePermission('products:manage'), asyn
 
 inventoryRouter.get('/locations/:id/skus', requirePermission('products:manage'), asyncHandler(async (req, res) => {
   ok(res, await inventoryMasterDataService.listLocationSkus(req.params.id, locationSkuQuerySchema.parse(req.query)))
+}))
+
+inventoryRouter.put('/locations/:id/skus', requirePermission('products:manage'), asyncHandler(async (req, res) => {
+  const authReq = req as AuthenticatedRequest
+  ok(res, await inventoryMasterDataService.changeSkuLocations(
+    req.params.id,
+    locationSkuBatchChangeSchema.parse(req.body),
+    authReq.auth,
+    extractRequestMeta(req),
+  ))
 }))
 
 inventoryRouter.put('/locations/:id/skus/:skuId', requirePermission('products:manage'), asyncHandler(async (req, res) => {

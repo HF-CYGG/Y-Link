@@ -255,6 +255,11 @@ const handleExportDeliverySheetPdf = async () => {
   gap: 8px;
 }
 
+/* 相邻按钮间距交给容器 gap，清零 Element Plus 默认 margin-left，避免换行后首个按钮缩进 */
+.delivery-sheet-dialog-footer > :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
 @media (max-width: 900px) {
   .delivery-sheet-workbench {
     min-height: 0;

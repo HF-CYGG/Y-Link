@@ -99,7 +99,7 @@ const modalClassName = computed(() => {
 /**
  * 统一正文包裹类名：
  * - `scroll` 模式下补齐 `min-height: 0`，让长表单可以在弹窗正文安全滚动；
- * - `auto` 模式保持内容自然撑高，不再人为拉伸内部容器。
+ * - `auto` 模式保持内容自然撑高，不再人为拉伸内部容器；内容超过弹窗最大高度时由 `.el-dialog__body` 纵向滚动兜底（见 style.css）。
  */
 const bodyWrapperClassName = computed(() => {
   return ['min-w-0', props.heightMode === 'scroll' ? 'min-h-0' : ''].filter(Boolean).join(' ')

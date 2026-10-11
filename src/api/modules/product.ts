@@ -150,6 +150,10 @@ export interface ProductStockBaseline {
 export interface BatchUpdateProductDto {
   ids: Array<string | number>
   isActive?: boolean
+  /** 批量改分类：null 清空。 */
+  categoryId?: string | null
+  /** 批量改所选商品全部当前 SKU 的默认库位：null 清空。 */
+  locationId?: string | null
 }
 
 export interface BatchCreateProductDto {
@@ -579,6 +583,49 @@ export const upgradeProductToYzCode = async (productId: string, primarySeriesTag
 
   return normalizeProductDetail(result)
 }
+
+/** 批量升级预检：单个商品结果。eligible=false 时不得提交该商品。 */
+export interface ProductYzBatchUpgradePreviewItem {
+  productId: string
+  productName: string
+  oldProductCode: string
+  newProductCode: string | null
+  seriesSeq: number | null
+  currentSkuCount: number
+  retiredSkuCount: number
+  skuChanges: ProductYzUpgradeSkuChange[]
+  eligible: boolean
+  blockingReason: string | null
+}
+
+export interface ProductYzBatchUpgradePreview {
+  seriesCode: string
+  items: ProductYzBatchUpgradePreviewItem[]
+}
+
+export interface ProductYzBatchUpgradeResult {
+  items: Array<{ productId: string; productName: string; oldProductCode: string; newProductCode: string; skuCount: number }>
+}
+
+/**
+ * 批量升级预检：只读，按提交顺序预测连续的系列内序号，不可升级的商品返回 blockingReason。
+ */
+export const previewBatchProductYzUpgrade = (ids: string[], primarySeriesTagId: string): Promise<ProductYzBatchUpgradePreview> =>
+  request<ProductYzBatchUpgradePreview>({
+    method: 'POST',
+    url: '/products/yz-code-upgrade/batch/preview',
+    data: { ids, primarySeriesTagId },
+  })
+
+/**
+ * 批量升级到 YZ 编码：整批同事务执行，任一商品失败整批回滚。
+ */
+export const batchUpgradeProductsToYzCode = (ids: string[], primarySeriesTagId: string): Promise<ProductYzBatchUpgradeResult> =>
+  request<ProductYzBatchUpgradeResult>({
+    method: 'POST',
+    url: '/products/yz-code-upgrade/batch',
+    data: { ids, primarySeriesTagId },
+  })
 
 /** 规格轴：variant=一级变体轴（颜色/款式），size=尺码轴。 */
 export type ProductSpecAxis = 'variant' | 'size'

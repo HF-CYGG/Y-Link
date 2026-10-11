@@ -10,17 +10,19 @@
  *   解析逻辑统一走 barcode-label-print.helpers.ts 的 resolveBarcodeValue，避免条码生成、条码下方文本、失败判定三处口径不一致；
  * - 单张标签的版式渲染下沉到 BarcodeLabelCard.vue，预览区与 Teleport 打印根节点共用同一份标签内容，模板切换时预览同步跟随；
  * - 打印时才通过 Teleport 渲染独立打印根节点（打印结束即移除，避免常驻大量 DOM），并按模板写入 @page 尺寸，除 A4 外均每张一页；
- * - 模板参数（尺寸、行列、份数、显示字段、条码内容来源）校验后保存在本机，下次打开沿用；输入框清空时回退默认值；
+ * - 模板参数（尺寸、首选字号、行列、份数、显示字段、条码内容来源）校验后保存在本机，下次打开沿用；输入框清空失焦时回退默认值；
+ * - 手动宽高始终是纸张真源；按显示字段缩放内部字号、边距和条码空间，A4 仅自动减少越界行列；
+ * - 可读编码文字单独设显示开关，旧设置默认显示；隐藏文字不会改变 SVG 编码来源，净高估算随开关更新；
  * - 单次打印总张数上限 MAX_TOTAL_LABELS，超出时提示并禁止打印。
  * 维护说明：
  * - 条码内容只允许可打印 ASCII（服务端已校验），条码库加载失败、个别条码生成失败、或 factory_barcode 来源下原厂条码未录入时
  *   均禁止打印并列出失败标签，不能静默打印空白；
- * - 四种模板的显示字段、字号、行高、padding、A4 单元格边框或条码区域样式变更时，同步核对 helpers 中至少 8mm 净高的估算模型；
- *   SVG 模块宽度低于 0.25mm 时提示加宽标签或换较短编码，该保守阈值不能代替实机扫码验证；
+ * - 四模板字号、行高、padding、A4 单元格边框或条码样式变化时，同步核对 helpers 的可用净高；
+ *   低于 8mm 图形或 0.25mm 模块仅警告，基本条形空间不足或编码缺失才阻断；10X 静区不能代替实机扫码验证；
  * - 打印会话统一清理 afterprint/焦点监听、兜底定时器、临时样式与打印根节点；关闭或卸载期间不得让旧回调清理新会话；
  * - 调整标签版式或新增模板时，同时核对 applyPrintStyle() 的 @page 设置、BarcodeLabelCard.vue 的版式分支、
  *   以及 barcode-label-print.helpers.ts 里该模板的默认条码内容来源；
- * - A4 按用户指定的标签尺寸和行列数排版，超出可打印区域时禁止打印；热敏与野辙模板每张一页。
+ * - A4 自动减少越界行列并在打印前复核，热敏与野辙模板每张一页；批次/来源异步更新不可回填已失效的标签。
  */
 
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
@@ -29,12 +31,15 @@ import { getProductLabels, type ProductLabelRecord } from '@/api/modules/invento
 import { showAppError, showAppWarning } from '@/utils/app-alert'
 import BarcodeLabelCard from './BarcodeLabelCard.vue'
 import {
+  CODE128_QUIET_ZONE_MODULES_PER_SIDE,
   type BarcodeSource,
   type LabelTemplate,
   defaultBarcodeSourceForTemplate,
   formatPrintDate,
   getCode128DensityError,
+  getHumanCodeFitWarning,
   getLabelLayoutError,
+  getLabelLayoutWarning,
   resolveBarcodeValue,
   sanitizeBarcodeSource,
   sanitizeLabelTemplate,
@@ -60,8 +65,10 @@ interface LabelSettings {
   columns: number
   rows: number
   copies: number
+  fontSizePt: number
   showPrice: boolean
   showSpec: boolean
+  showCode: boolean
   showLocation: boolean
   /** 条码内容来源，见 barcode-label-print.helpers.ts。 */
   barcodeSource: BarcodeSource
@@ -81,6 +88,7 @@ const NUMBER_LIMITS = {
   columns: { min: 1, max: 6 },
   rows: { min: 1, max: 16 },
   copies: { min: 1, max: 200 },
+  fontSizePt: { min: 4, max: 24 },
 } as const
 
 type NumberSettingKey = keyof typeof NUMBER_LIMITS
@@ -92,8 +100,10 @@ const defaultSettings: LabelSettings = {
   columns: 3,
   rows: 8,
   copies: 1,
+  fontSizePt: 9,
   showPrice: true,
   showSpec: true,
+  showCode: true,
   showLocation: false,
   barcodeSource: 'factory_barcode_first',
   showPrintDate: true,
@@ -107,7 +117,7 @@ const sanitizeNumber = (key: NumberSettingKey, value: unknown) => {
 
 const sanitizeSettings = (raw: unknown): LabelSettings => {
   const source = (raw && typeof raw === 'object' ? raw : {}) as Partial<Record<keyof LabelSettings, unknown>>
-  const pickBoolean = (key: 'showPrice' | 'showSpec' | 'showLocation' | 'showPrintDate') => {
+  const pickBoolean = (key: 'showPrice' | 'showSpec' | 'showCode' | 'showLocation' | 'showPrintDate') => {
     const value = source[key]
     return typeof value === 'boolean' ? value : defaultSettings[key]
   }
@@ -119,8 +129,10 @@ const sanitizeSettings = (raw: unknown): LabelSettings => {
     columns: sanitizeNumber('columns', source.columns),
     rows: sanitizeNumber('rows', source.rows),
     copies: sanitizeNumber('copies', source.copies),
+    fontSizePt: sanitizeNumber('fontSizePt', source.fontSizePt),
     showPrice: pickBoolean('showPrice'),
     showSpec: pickBoolean('showSpec'),
+    showCode: pickBoolean('showCode'),
     showLocation: pickBoolean('showLocation'),
     // 旧 localStorage 没有该字段时回退到当前模板对应的默认口径，保证 thermal/a4 行为不变。
     barcodeSource: sanitizeBarcodeSource(source.barcodeSource, template),
@@ -145,19 +157,39 @@ const labels = ref<ProductLabelRecord[]>([])
 const barcodeSvgMap = ref<Record<string, string>>(Object.create(null))
 const barcodeModuleMap = ref<Record<string, number>>(Object.create(null))
 const failedBarcodes = ref<string[]>([])
+const autoLayoutNotice = ref('')
+const pendingEmptyNumberFields = new Set<NumberSettingKey>()
+const inputRevision = reactive<Record<NumberSettingKey, number>>({
+  labelWidthMm: 0, labelHeightMm: 0, columns: 0, rows: 0, copies: 0, fontSizePt: 0,
+})
 
-/** 数字输入框的双向绑定：清空或非法时回退默认值，保证 @page 尺寸与排版始终有效。 */
+/** 聚焦清空只是编辑暂态，不把默认纸宽反写到预览，更不能因此提前减少 A4 行列。 */
 const numberModel = (key: NumberSettingKey) => computed<number | null>({
   get: () => settings[key],
   set: (value) => {
-    settings[key] = value === null ? defaultSettings[key] : sanitizeNumber(key, value)
+    if (value === null) {
+      pendingEmptyNumberFields.add(key)
+      return
+    }
+    pendingEmptyNumberFields.delete(key)
+    settings[key] = sanitizeNumber(key, value)
   },
 })
+const commitNumberDraft = (key: NumberSettingKey, _event?: FocusEvent) => {
+  if (pendingEmptyNumberFields.delete(key)) settings[key] = defaultSettings[key]
+  // 共享输入框显式按最终 modelValue 同步草稿；同值默认回退与 A4 约束都无需重挂载。
+  inputRevision[key] += 1
+}
+const syncAfterNumberControlClick = (key: NumberSettingKey, event: MouseEvent) => {
+  if (!(event.target as HTMLElement | null)?.closest?.('.passive-number-input__control')) return
+  inputRevision[key] += 1
+}
 const labelWidthModel = numberModel('labelWidthMm')
 const labelHeightModel = numberModel('labelHeightMm')
 const columnsModel = numberModel('columns')
 const rowsModel = numberModel('rows')
 const copiesModel = numberModel('copies')
+const fontSizeModel = numberModel('fontSizePt')
 
 /** 按当前条码内容来源解析出的实际编码值；factory_barcode 来源下原厂条码未录入时为空串。 */
 const encodedTextFor = (label: ProductLabelRecord) => resolveBarcodeValue(label, settings.barcodeSource) ?? ''
@@ -177,15 +209,61 @@ const a4LayoutError = computed(() => {
     : `当前排版需要 ${width} × ${height} 毫米，超出 A4 可打印区域 ${A4_PRINTABLE_WIDTH_MM} × ${A4_PRINTABLE_HEIGHT_MM} 毫米，请缩小标签或减少行列`
 })
 const labelLayoutError = computed(() => getLabelLayoutError(settings))
-const barcodeDensityError = computed(() => {
+const labelLayoutWarning = computed(() => getLabelLayoutWarning(settings))
+const barcodeDensityWarning = computed(() => {
   for (const label of labels.value) {
     const value = resolveBarcodeValue(label, settings.barcodeSource)
     if (!value || !Object.prototype.hasOwnProperty.call(barcodeModuleMap.value, value)) continue
-    const error = getCode128DensityError(settings.labelWidthMm, barcodeModuleMap.value[value], settings.template)
+    const error = getCode128DensityError(settings, barcodeModuleMap.value[value])
     if (error) return `${label.skuCode}：${error}`
   }
   return ''
 })
+const barcodeTextWarning = computed(() => {
+  if (!settings.showCode) return ''
+  for (const label of labels.value) {
+    const value = resolveBarcodeValue(label, settings.barcodeSource)
+    if (!value || !Object.prototype.hasOwnProperty.call(barcodeModuleMap.value, value)) continue
+    const error = getHumanCodeFitWarning(settings, value)
+    if (error) return `${label.skuCode}：${error}`
+  }
+  return ''
+})
+// 切换模板时只跟随默认编码来源；手动纸张尺寸保持不变，迟到条码图由批次/来源代次保护。
+watch(() => settings.template, (nextTemplate, prevTemplate) => {
+  if (!prevTemplate) return
+  if (settings.barcodeSource === defaultBarcodeSourceForTemplate(prevTemplate)) {
+    settings.barcodeSource = defaultBarcodeSourceForTemplate(nextTemplate)
+  }
+}, { flush: 'sync' })
+/** 固定手动纸张尺寸，只把 A4 越界的行列减少到可打印区域。 */
+let adjustingLayout = false
+const ensureA4Grid = () => {
+  if (adjustingLayout) return
+  adjustingLayout = true
+  try {
+    const notices: string[] = []
+    if (settings.template === 'a4') {
+      const maxColumns = Math.max(1, Math.floor((A4_PRINTABLE_WIDTH_MM + A4_LABEL_GAP_MM) / (settings.labelWidthMm + A4_LABEL_GAP_MM)))
+      const maxRows = Math.max(1, Math.floor((A4_PRINTABLE_HEIGHT_MM + A4_LABEL_GAP_MM) / (settings.labelHeightMm + A4_LABEL_GAP_MM)))
+      if (settings.columns > maxColumns) {
+        settings.columns = maxColumns
+        notices.push(`A4 改为 ${maxColumns} 列`)
+      }
+      if (settings.rows > maxRows) {
+        settings.rows = maxRows
+        notices.push(`A4 改为 ${maxRows} 行`)
+      }
+    }
+    autoLayoutNotice.value = notices.length
+      ? `纸张尺寸保持 ${settings.labelWidthMm} × ${settings.labelHeightMm} 毫米；${notices.join('，')}，当前 A4 ${settings.columns} 列 × ${settings.rows} 行`
+      : ''
+  } finally {
+    adjustingLayout = false
+  }
+}
+watch([() => settings.labelWidthMm, () => settings.labelHeightMm, () => settings.columns,
+  () => settings.rows, () => settings.template], ensureA4Grid, { flush: 'sync', immediate: true })
 /** 缺少条码图的标签（解析结果为空、生成失败或尚未生成）。 */
 const missingBarcodes = computed(() => {
   const codes = new Set<string>()
@@ -206,7 +284,6 @@ const printBlockedReason = computed(() => {
   if (exceedsLimit.value) return `单次最多打印 ${MAX_TOTAL_LABELS} 张标签，当前 ${totalLabelCount.value} 张，请减少规格或份数`
   if (a4LayoutError.value) return a4LayoutError.value
   if (labelLayoutError.value) return labelLayoutError.value
-  if (barcodeDensityError.value) return barcodeDensityError.value
   return ''
 })
 
@@ -232,11 +309,34 @@ const previewA4Labels = computed(() => {
 
 const loadJsBarcode = () => import('jsbarcode')
 
+let loadVersion = 0
+let renderVersion = 0
+/** 新批次或关闭时立即撤下旧图，网络和动态导入的迟到结果不得回填。 */
+const invalidateBatch = () => {
+  loadVersion += 1
+  renderVersion += 1
+  labels.value = []
+  barcodeSvgMap.value = Object.create(null)
+  barcodeModuleMap.value = Object.create(null)
+  failedBarcodes.value = []
+  loading.value = false
+  loadError.value = ''
+  autoLayoutNotice.value = ''
+}
+
 const renderBarcodes = async () => {
+  const generation = ++renderVersion
+  const source = settings.barcodeSource
+  const currentLabels = labels.value
+  barcodeSvgMap.value = Object.create(null)
+  barcodeModuleMap.value = Object.create(null)
+  failedBarcodes.value = []
+  const isCurrent = () => generation === renderVersion && labels.value === currentLabels && settings.barcodeSource === source
   let JsBarcode: Awaited<ReturnType<typeof loadJsBarcode>>['default']
   try {
     JsBarcode = (await loadJsBarcode()).default
   } catch {
+    if (!isCurrent()) return
     barcodeSvgMap.value = Object.create(null)
     barcodeModuleMap.value = Object.create(null)
     failedBarcodes.value = []
@@ -244,11 +344,12 @@ const renderBarcodes = async () => {
     showAppError(loadError.value)
     return
   }
+  if (!isCurrent()) return
   const next: Record<string, string> = Object.create(null)
   const nextModules: Record<string, number> = Object.create(null)
   const failed: string[] = []
-  for (const label of labels.value) {
-    const value = resolveBarcodeValue(label, settings.barcodeSource)
+  for (const label of currentLabels) {
+    const value = resolveBarcodeValue(label, source)
     if (!value) {
       // factory_barcode 来源下原厂条码未录入：该标签视为无法生成，不能静默跳过。
       failed.push(`${label.skuCode}（无原厂条码）`)
@@ -257,10 +358,12 @@ const renderBarcodes = async () => {
     if (Object.prototype.hasOwnProperty.call(next, value)) continue
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
     try {
-      JsBarcode(svg, value, { format: 'CODE128', displayValue: false, margin: 0, height: 60, width: 2 })
+      JsBarcode(svg, value, { format: 'CODE128', displayValue: false, margin: 0,
+        marginLeft: CODE128_QUIET_ZONE_MODULES_PER_SIDE * 2,
+        marginRight: CODE128_QUIET_ZONE_MODULES_PER_SIDE * 2, height: 60, width: 2 })
       svg.setAttribute('preserveAspectRatio', 'none')
       const viewBoxWidth = Number(svg.getAttribute('viewBox')?.trim().split(/\s+/)[2])
-      const moduleCount = viewBoxWidth / 2
+      const moduleCount = viewBoxWidth / 2 - CODE128_QUIET_ZONE_MODULES_PER_SIDE * 2
       if (!Number.isFinite(moduleCount) || moduleCount <= 0 || !svg.outerHTML.startsWith('<svg')) {
         throw new Error('条码 SVG 缺少有效模块尺寸')
       }
@@ -270,6 +373,7 @@ const renderBarcodes = async () => {
       failed.push(value)
     }
   }
+  if (!isCurrent()) return
   barcodeSvgMap.value = next
   barcodeModuleMap.value = nextModules
   failedBarcodes.value = failed
@@ -277,18 +381,23 @@ const renderBarcodes = async () => {
 }
 
 const loadLabels = async () => {
+  invalidateBatch()
   if (!props.skuIds.length) return
+  const requestVersion = loadVersion
+  const requestedSkuIds = [...props.skuIds]
   loading.value = true
-  loadError.value = ''
   try {
-    labels.value = await getProductLabels(props.skuIds)
+    const result = await getProductLabels(requestedSkuIds)
+    if (requestVersion !== loadVersion) return
+    labels.value = result
     await renderBarcodes()
   } catch (error) {
+    if (requestVersion !== loadVersion) return
     labels.value = []
     loadError.value = '条码数据加载失败，请重新打开弹窗'
     showAppError(error, '条码数据加载失败')
   } finally {
-    loading.value = false
+    if (requestVersion === loadVersion) loading.value = false
   }
 }
 
@@ -356,6 +465,7 @@ const schedulePrintFallback = (session: PrintSession, delayMs: number) => {
 
 const handlePrint = async () => {
   if (printing.value) return
+  ensureA4Grid()
   if (printBlockedReason.value) {
     showAppWarning(printBlockedReason.value)
     return
@@ -377,13 +487,14 @@ const handlePrint = async () => {
   }
   activePrintSession = session
   printing.value = true
+  const requestedSkuIds = JSON.stringify(props.skuIds)
   try {
     applyPrintStyle()
     globalThis.addEventListener('afterprint', session.onAfterPrint)
     globalThis.addEventListener('blur', session.onBlur)
     globalThis.addEventListener('focus', session.onFocus)
     await nextTick()
-    if (activePrintSession !== session || !props.modelValue) {
+    if (activePrintSession !== session || !props.modelValue || JSON.stringify(props.skuIds) !== requestedSkuIds) {
       finishPrintSession(session)
       return
     }
@@ -398,30 +509,20 @@ const handlePrint = async () => {
   }
 }
 
-watch(() => [props.modelValue, props.skuIds.join(',')], ([visible]) => {
-  if (!visible) {
-    finishPrintSession()
-  } else if (!printing.value) {
-    void loadLabels()
-  }
-}, { immediate: true })
+watch([() => props.modelValue, () => JSON.stringify(props.skuIds)], ([visible]) => {
+  finishPrintSession()
+  if (visible) void loadLabels()
+  else invalidateBatch()
+}, { immediate: true, flush: 'sync' })
 
 // 条码内容来源变化时，已加载的标签需要按新口径重新生成条码图与失败列表。
 watch(() => settings.barcodeSource, () => {
   if (labels.value.length) void renderBarcodes()
-})
-
-// 切换模板时，若当前条码内容来源仍是上一个模板的默认值（用户未手动改过），跟随新模板切到其默认口径；
-// 用户已手动选择过非默认口径时保留其选择，不强行覆盖。
-watch(() => settings.template, (nextTemplate, prevTemplate) => {
-  if (!prevTemplate) return
-  if (settings.barcodeSource === defaultBarcodeSourceForTemplate(prevTemplate)) {
-    settings.barcodeSource = defaultBarcodeSourceForTemplate(nextTemplate)
-  }
-})
+}, { flush: 'sync' })
 
 onBeforeUnmount(() => {
   finishPrintSession()
+  invalidateBatch()
 })
 
 /** 单张一页模板（thermal / yz-full / yz-compact）共用的自定义宽高尺寸。 */
@@ -456,27 +557,35 @@ const printDateText = formatPrintDate(new Date())
       <el-form-item label="标签尺寸">
         <div class="flex flex-wrap items-center gap-2">
           <div class="flex shrink-0 items-center gap-2">
-            <div class="w-28"><PassiveNumberInput v-model="labelWidthModel" :min="NUMBER_LIMITS.labelWidthMm.min" :max="NUMBER_LIMITS.labelWidthMm.max" :precision="0" :disabled="printing" /></div>
+            <div class="w-28" @click="syncAfterNumberControlClick('labelWidthMm', $event)"><PassiveNumberInput v-model="labelWidthModel" :display-sync-token="inputRevision.labelWidthMm" :min="NUMBER_LIMITS.labelWidthMm.min" :max="NUMBER_LIMITS.labelWidthMm.max" :precision="0" :disabled="printing" @blur="commitNumberDraft('labelWidthMm', $event)" /></div>
             <span class="whitespace-nowrap">×</span>
           </div>
-          <div class="w-28 shrink-0"><PassiveNumberInput v-model="labelHeightModel" :min="NUMBER_LIMITS.labelHeightMm.min" :max="NUMBER_LIMITS.labelHeightMm.max" :precision="0" :disabled="printing" /></div>
+          <div class="w-28 shrink-0" @click="syncAfterNumberControlClick('labelHeightMm', $event)"><PassiveNumberInput v-model="labelHeightModel" :display-sync-token="inputRevision.labelHeightMm" :min="NUMBER_LIMITS.labelHeightMm.min" :max="NUMBER_LIMITS.labelHeightMm.max" :precision="0" :disabled="printing" @blur="commitNumberDraft('labelHeightMm', $event)" /></div>
           <span class="shrink-0 whitespace-nowrap text-sm text-slate-500 dark:text-slate-400">毫米（宽 × 高）</span>
         </div>
       </el-form-item>
+      <div class="mb-2 text-xs text-slate-500 dark:text-slate-400">
+        当前打印尺寸：{{ settings.labelWidthMm }} × {{ settings.labelHeightMm }} 毫米{{ settings.template === 'a4' ? `；A4 每页 ${settings.columns} 列 × ${settings.rows} 行` : '，请在打印机中选相同纸型' }}。
+      </div>
       <el-form-item v-if="settings.template === 'a4'" label="排版">
         <div class="flex flex-wrap items-center gap-2">
           <div class="flex shrink-0 items-center gap-2">
-            <div class="w-[108px]"><PassiveNumberInput v-model="columnsModel" :min="NUMBER_LIMITS.columns.min" :max="NUMBER_LIMITS.columns.max" :precision="0" :disabled="printing" /></div>
+            <div class="w-[108px]" @click="syncAfterNumberControlClick('columns', $event)"><PassiveNumberInput v-model="columnsModel" :display-sync-token="inputRevision.columns" :min="NUMBER_LIMITS.columns.min" :max="NUMBER_LIMITS.columns.max" :precision="0" :disabled="printing" @blur="commitNumberDraft('columns', $event)" /></div>
             <span class="whitespace-nowrap">列 ×</span>
           </div>
           <div class="flex shrink-0 items-center gap-2">
-            <div class="w-[108px]"><PassiveNumberInput v-model="rowsModel" :min="NUMBER_LIMITS.rows.min" :max="NUMBER_LIMITS.rows.max" :precision="0" :disabled="printing" /></div>
+            <div class="w-[108px]" @click="syncAfterNumberControlClick('rows', $event)"><PassiveNumberInput v-model="rowsModel" :display-sync-token="inputRevision.rows" :min="NUMBER_LIMITS.rows.min" :max="NUMBER_LIMITS.rows.max" :precision="0" :disabled="printing" @blur="commitNumberDraft('rows', $event)" /></div>
             <span class="whitespace-nowrap">行 / 页</span>
           </div>
         </div>
       </el-form-item>
       <el-form-item label="每个份数">
-        <PassiveNumberInput v-model="copiesModel" :min="NUMBER_LIMITS.copies.min" :max="NUMBER_LIMITS.copies.max" :precision="0" :disabled="printing" class="w-28" />
+        <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <div class="w-28 shrink-0" @click="syncAfterNumberControlClick('copies', $event)"><PassiveNumberInput v-model="copiesModel" :display-sync-token="inputRevision.copies" :min="NUMBER_LIMITS.copies.min" :max="NUMBER_LIMITS.copies.max" :precision="0" :disabled="printing" @blur="commitNumberDraft('copies', $event)" /></div>
+          <span class="whitespace-nowrap text-sm">字体大小</span>
+          <div class="w-28 shrink-0" @click="syncAfterNumberControlClick('fontSizePt', $event)"><PassiveNumberInput v-model="fontSizeModel" :display-sync-token="inputRevision.fontSizePt" :min="NUMBER_LIMITS.fontSizePt.min" :max="NUMBER_LIMITS.fontSizePt.max" :precision="0" :disabled="printing" aria-label="字体大小" @blur="commitNumberDraft('fontSizePt', $event)" /></div>
+          <span class="whitespace-nowrap text-sm">pt（空间不足时自动缩小）</span>
+        </div>
       </el-form-item>
       <el-form-item label="条码内容">
         <el-radio-group v-model="settings.barcodeSource" :disabled="printing">
@@ -486,6 +595,7 @@ const printDateText = formatPrintDate(new Date())
         </el-radio-group>
       </el-form-item>
       <el-form-item label="显示">
+        <el-checkbox v-model="settings.showCode" :disabled="printing">条码下方编码文字</el-checkbox>
         <el-checkbox v-model="settings.showSpec" :disabled="printing">规格</el-checkbox>
         <el-checkbox v-model="settings.showPrice" :disabled="printing">售价</el-checkbox>
         <el-checkbox v-model="settings.showLocation" :disabled="printing">库位</el-checkbox>
@@ -493,6 +603,7 @@ const printDateText = formatPrintDate(new Date())
       </el-form-item>
     </el-form>
 
+    <el-alert v-if="autoLayoutNotice" type="info" :closable="false" show-icon :title="autoLayoutNotice" class="mb-3" />
     <el-alert v-if="loadError" type="error" :closable="false" show-icon :title="loadError" class="mb-3" />
     <el-alert
       v-else-if="failedBarcodes.length"
@@ -512,7 +623,9 @@ const printDateText = formatPrintDate(new Date())
       class="mb-3"
     />
     <el-alert v-if="labelLayoutError" type="warning" :closable="false" show-icon :title="labelLayoutError" class="mb-3" />
-    <el-alert v-if="barcodeDensityError" type="warning" :closable="false" show-icon :title="barcodeDensityError" class="mb-3" />
+    <el-alert v-if="labelLayoutWarning" type="warning" :closable="false" show-icon :title="labelLayoutWarning" class="mb-3" />
+    <el-alert v-if="barcodeDensityWarning" type="warning" :closable="false" show-icon :title="barcodeDensityWarning" class="mb-3" />
+    <el-alert v-if="barcodeTextWarning" type="warning" :closable="false" show-icon :title="barcodeTextWarning" class="mb-3" />
     <el-alert
       v-if="exceedsLimit"
       type="warning"
@@ -532,10 +645,14 @@ const printDateText = formatPrintDate(new Date())
             :key="`preview-a4-${label.skuId}-${index}`"
             class="barcode-label--cell"
             template="a4"
+            :label-width-mm="settings.labelWidthMm"
+            :label-height-mm="settings.labelHeightMm"
+            :font-size-pt="settings.fontSizePt"
             :label="label"
             :barcode-svg="barcodeSvgFor(label)"
             :encoded-text="encodedTextFor(label)"
             :show-spec="settings.showSpec"
+            :show-code="settings.showCode"
             :show-price="settings.showPrice"
             :show-location="settings.showLocation"
             :show-print-date="settings.showPrintDate"
@@ -551,9 +668,13 @@ const printDateText = formatPrintDate(new Date())
           :style="thermalStyle"
           :label="label"
           :template="settings.template"
+          :label-width-mm="settings.labelWidthMm"
+          :label-height-mm="settings.labelHeightMm"
+          :font-size-pt="settings.fontSizePt"
           :barcode-svg="barcodeSvgFor(label)"
           :encoded-text="encodedTextFor(label)"
           :show-spec="settings.showSpec"
+          :show-code="settings.showCode"
           :show-price="settings.showPrice"
           :show-location="settings.showLocation"
           :show-print-date="settings.showPrintDate"
@@ -573,9 +694,13 @@ const printDateText = formatPrintDate(new Date())
           :style="thermalStyle"
           :label="label"
           :template="settings.template"
+          :label-width-mm="settings.labelWidthMm"
+          :label-height-mm="settings.labelHeightMm"
+          :font-size-pt="settings.fontSizePt"
           :barcode-svg="barcodeSvgFor(label)"
           :encoded-text="encodedTextFor(label)"
           :show-spec="settings.showSpec"
+          :show-code="settings.showCode"
           :show-price="settings.showPrice"
           :show-location="settings.showLocation"
           :show-print-date="settings.showPrintDate"
@@ -589,10 +714,14 @@ const printDateText = formatPrintDate(new Date())
             :key="`a4-${label.skuId}-${index}`"
             class="barcode-label--cell"
             template="a4"
+            :label-width-mm="settings.labelWidthMm"
+            :label-height-mm="settings.labelHeightMm"
+            :font-size-pt="settings.fontSizePt"
             :label="label"
             :barcode-svg="barcodeSvgFor(label)"
             :encoded-text="encodedTextFor(label)"
             :show-spec="settings.showSpec"
+            :show-code="settings.showCode"
             :show-price="settings.showPrice"
             :show-location="settings.showLocation"
             :show-print-date="settings.showPrintDate"
@@ -609,23 +738,22 @@ const printDateText = formatPrintDate(new Date())
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
   overflow: hidden;
-  padding: 1.5mm 2mm;
+  padding: var(--barcode-pad-y, 1mm) var(--barcode-pad-x, 1.5mm);
   background: #ffffff;
   color: #000000;
   font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
-  line-height: 1.2;
+  line-height: 1.1;
 }
 
 .barcode-label--preview {
-  border: 1px dashed #94a3b8;
+  outline: 1px dashed #94a3b8;
   border-radius: 4px;
 }
 
 .barcode-label__name {
   overflow: hidden;
-  font-size: 9pt;
+  font-size: calc(9pt * var(--barcode-font-scale, 1));
   font-weight: 600;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -635,16 +763,16 @@ const printDateText = formatPrintDate(new Date())
 .barcode-label__footer {
   display: flex;
   justify-content: space-between;
-  gap: 2mm;
+  gap: var(--barcode-gap, 0.2mm);
   overflow: hidden;
-  font-size: 7pt;
+  font-size: calc(7pt * var(--barcode-font-scale, 1));
   white-space: nowrap;
 }
 
 .barcode-label__code {
-  flex: 1;
+  flex: 1 1 0;
   min-height: 0;
-  margin: 0.5mm 0;
+  margin: var(--barcode-gap, 0.2mm) 0;
 }
 
 .barcode-label__code svg {
@@ -654,10 +782,11 @@ const printDateText = formatPrintDate(new Date())
 }
 
 .barcode-label__text {
+  flex-shrink: 0;
   font-family: Consolas, 'Courier New', monospace;
-  font-size: 8pt;
+  font-size: var(--barcode-human-font, 8pt);
   text-align: center;
-  letter-spacing: 0.5px;
+  white-space: nowrap;
 }
 
 /* 野辙完整标签：商品名称与规格文本同行显示，名称过长省略。 */
@@ -665,7 +794,7 @@ const printDateText = formatPrintDate(new Date())
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 2mm;
+  gap: var(--barcode-gap, 0.2mm);
   overflow: hidden;
 }
 
@@ -677,7 +806,7 @@ const printDateText = formatPrintDate(new Date())
 .barcode-label__spec {
   flex-shrink: 0;
   overflow: hidden;
-  font-size: 7pt;
+  font-size: calc(7pt * var(--barcode-font-scale, 1));
   white-space: nowrap;
 }
 
@@ -691,8 +820,8 @@ const printDateText = formatPrintDate(new Date())
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 0.5mm;
-  line-height: 1.3;
+  gap: calc(0.25mm * var(--barcode-font-scale, 1));
+  line-height: 1.1;
 }
 
 .barcode-label__date {

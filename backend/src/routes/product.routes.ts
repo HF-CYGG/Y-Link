@@ -192,12 +192,16 @@ const updateProductSchema = z.object({
   }).optional(),
 })
 
+// 批量更新只开放启停、分类与库位三类字段；categoryId/locationId 传 null 表示清空，未传表示不改。
+const batchUpdateReferenceIdSchema = z.union([z.string().trim().min(1).max(32), z.number().int().positive()]).nullable().optional()
 const batchUpdateProductSchema = z
   .object({
-    ids: z.array(productTagIdSchema).min(1, '至少选择一个产品'),
+    ids: z.array(productTagIdSchema).min(1, '至少选择一个产品').max(200, '单次最多批量处理 200 个产品'),
     isActive: optionalBooleanSchema,
+    categoryId: batchUpdateReferenceIdSchema,
+    locationId: batchUpdateReferenceIdSchema,
   })
-  .refine((payload) => typeof payload.isActive === 'boolean', {
+  .refine((payload) => typeof payload.isActive === 'boolean' || payload.categoryId !== undefined || payload.locationId !== undefined, {
     message: '至少提供一个可更新字段',
   })
 
@@ -298,7 +302,7 @@ productRouter.get(
 
 productRouter.post(
   '/batch',
-  // 批量更新商品状态属于管理操作，需要 products:manage。
+  // 批量更新商品启停、分类与规格库位属于管理操作，需要 products:manage。
   requirePermission('products:manage'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
@@ -551,6 +555,43 @@ productRouter.delete(
 const yzCodeUpgradeSchema = z.object({
   primarySeriesTagId: z.string().min(1, '请选择要升级到的文创系列'),
 })
+
+const yzCodeBatchUpgradeSchema = z.object({
+  ids: z.array(productTagIdSchema).min(1, '请至少选择一个要升级的商品').max(50, '单次最多批量升级 50 个商品'),
+  primarySeriesTagId: z.string().min(1, '请选择要升级到的文创系列'),
+})
+
+// 批量升级使用静态路径，集中注册在单品 /:id/yz-code-upgrade 路由之前，便于对照两条入口的校验口径。
+productRouter.post(
+  '/yz-code-upgrade/batch/preview',
+  // 只读预检，权限口径与商品维护一致，需要 products:manage。
+  requirePermission('products:manage'),
+  asyncHandler(async (req, res) => {
+    const payload = yzCodeBatchUpgradeSchema.parse(req.body)
+    const data = await productService.previewBatchProductYzUpgrade(payload)
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+productRouter.post(
+  '/yz-code-upgrade/batch',
+  // 批量升级不可逆，整批同事务执行，需要 products:manage。
+  requirePermission('products:manage'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = yzCodeBatchUpgradeSchema.parse(req.body)
+    const data = await productService.batchUpgradeProductsToYzCode(payload, authReq.auth, extractRequestMeta(req))
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
 
 productRouter.post(
   '/:id/yz-code-upgrade/preview',

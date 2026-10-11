@@ -18,6 +18,8 @@
  *   与「0 号规格演进」（ProductZeroSpecEvolveDialog.vue，把原本"无该轴规格"的 SKU 继承为具体取值，或退役保留）
  *   两个入口，均为异步组件、只读商品当前是否存在待演进的 0 号 SKU 决定是否展示；
  * - Excel 导入、条码打印弹窗、YZ 编码升级弹窗、规格取值重命名弹窗与 0 号规格演进弹窗均为异步组件，只在点击时加载；
+ * - 批量操作除启停外还提供“批量修改分类 / 批量修改库位”（ProductBatchFieldDialog.vue，异步加载），库位会覆盖所选商品全部当前 SKU；
+ * - “批量升级到 YZ 编码”（ProductYzBatchUpgradeDialog.vue，异步加载）按列表顺序提交所选商品，预检排除不可升级项后整批同事务执行；
  * - B9 批次：升级前的历史编码不再回填进 barcode，改为独立字段展示——商品级 legacyProductCode 显示在「产品编码」
  *   输入框下方、SKU 级 legacySkuCode 显示在规格表格编码位旁（单规格商品显示在「原厂条码」输入框下方），均为
  *   只读追溯提示，不可编辑；
@@ -99,6 +101,8 @@ const BarcodeLabelPrintDialog = defineAsyncComponent(() => import('@/views/inven
 const ProductYzUpgradeDialog = defineAsyncComponent(() => import('@/views/base-data/components/ProductYzUpgradeDialog.vue'))
 const ProductSpecValueRenameDialog = defineAsyncComponent(() => import('@/views/base-data/components/ProductSpecValueRenameDialog.vue'))
 const ProductZeroSpecEvolveDialog = defineAsyncComponent(() => import('@/views/base-data/components/ProductZeroSpecEvolveDialog.vue'))
+const ProductBatchFieldDialog = defineAsyncComponent(() => import('@/views/base-data/components/ProductBatchFieldDialog.vue'))
+const ProductYzBatchUpgradeDialog = defineAsyncComponent(() => import('@/views/base-data/components/ProductYzBatchUpgradeDialog.vue'))
 
 const allTags = ref<Tag[]>([])
 const allCategories = ref<CategoryRecord[]>([])
@@ -119,6 +123,10 @@ const editingProductId = ref('')
 const editLoading = ref(false)
 const productDetailRequest = useStableRequest()
 const batchSubmitting = ref(false)
+const batchFieldDialogVisible = ref(false)
+const batchFieldTarget = ref<'category' | 'location'>('category')
+const yzBatchUpgradeDialogVisible = ref(false)
+const yzBatchUpgradeProductIds = ref<string[]>([])
 const batchCreateDialogVisible = ref(false)
 const batchCreateSubmitting = ref(false)
 const selectedProductIds = ref<string[]>([])
@@ -1468,7 +1476,55 @@ const handleBatchUpdateStatus = async (isActive: boolean) => {
   }
 }
 
+const openBatchFieldDialog = (field: 'category' | 'location') => {
+  if (!ensurePermission('products:manage', field === 'category' ? '批量修改产品分类' : '批量修改产品库位')) {
+    return
+  }
+  if (!selectedProductIds.value.length) {
+    showAppWarning('请先选择要批量处理的产品')
+    return
+  }
+  batchFieldTarget.value = field
+  batchFieldDialogVisible.value = true
+}
+
+const handleBatchFieldUpdated = async () => {
+  await clearSelection()
+  await reloadProducts()
+}
+
+const openYzBatchUpgradeDialog = () => {
+  if (!ensurePermission('products:manage', '批量升级到 YZ 编码')) {
+    return
+  }
+  const selectedIdSet = new Set(selectedProductIds.value)
+  // 按列表展示顺序提交，系列内序号随之依次分配，管理员看到的顺序即编码顺序。
+  const orderedIds = products.value.filter((product) => selectedIdSet.has(product.id)).map((product) => product.id)
+  if (!orderedIds.length) {
+    showAppWarning('请先选择要批量升级的产品')
+    return
+  }
+  yzBatchUpgradeProductIds.value = orderedIds
+  yzBatchUpgradeDialogVisible.value = true
+}
+
+const handleYzBatchUpgraded = async () => {
+  yzBatchUpgradeDialogVisible.value = false
+  await clearSelection()
+  await reloadProducts()
+}
+
 const handleCompactBatchCommand = (command: string | number | object) => {
+  if (command === 'yz-upgrade') {
+    openYzBatchUpgradeDialog()
+    return
+  }
+
+  if (command === 'category' || command === 'location') {
+    openBatchFieldDialog(command)
+    return
+  }
+
   if (command === 'activate') {
     void handleBatchUpdateStatus(true)
     return
@@ -1747,6 +1803,9 @@ onActivated(() => {
                 <el-dropdown-menu>
                   <el-dropdown-item command="activate" :disabled="!selectedProductCount">批量启用</el-dropdown-item>
                   <el-dropdown-item command="deactivate" :disabled="!selectedProductCount">批量停用</el-dropdown-item>
+                  <el-dropdown-item command="category" :disabled="!selectedProductCount">批量修改分类</el-dropdown-item>
+                  <el-dropdown-item command="location" :disabled="!selectedProductCount">批量修改库位</el-dropdown-item>
+                  <el-dropdown-item command="yz-upgrade" :disabled="!selectedProductCount">批量升级到 YZ 编码</el-dropdown-item>
                   <el-dropdown-item command="clear" :disabled="!selectedProductCount">清空选择</el-dropdown-item>
                   <el-dropdown-item command="print" :disabled="!selectedProductCount">打印条码</el-dropdown-item>
                 </el-dropdown-menu>
@@ -1792,6 +1851,9 @@ onActivated(() => {
                 <el-dropdown-menu>
                   <el-dropdown-item command="activate" :disabled="!selectedProductCount">批量启用</el-dropdown-item>
                   <el-dropdown-item command="deactivate" :disabled="!selectedProductCount">批量停用</el-dropdown-item>
+                  <el-dropdown-item command="category" :disabled="!selectedProductCount">批量修改分类</el-dropdown-item>
+                  <el-dropdown-item command="location" :disabled="!selectedProductCount">批量修改库位</el-dropdown-item>
+                  <el-dropdown-item command="yz-upgrade" :disabled="!selectedProductCount">批量升级到 YZ 编码</el-dropdown-item>
                   <el-dropdown-item command="clear" :disabled="!selectedProductCount">清空选择</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
@@ -2112,7 +2174,7 @@ onActivated(() => {
       v-if="canManageProducts"
       v-model="dialogVisible"
       :title="isSkuDialog ? '规格配置' : dialogTitle"
-      height-mode="auto"
+      height-mode="scroll"
       phone-width="94%"
       :tablet-width="isSkuDialog ? '92%' : '720px'"
       :desktop-width="isSkuDialog ? '920px' : '500px'"
@@ -2541,6 +2603,22 @@ onActivated(() => {
     <ProductImportDialog v-if="importDialogVisible" v-model="importDialogVisible" @imported="reloadProducts" />
     <ProductYzImportDialog v-if="yzImportDialogVisible" v-model="yzImportDialogVisible" @imported="reloadProducts" />
     <BarcodeLabelPrintDialog v-if="printDialogVisible" v-model="printDialogVisible" :sku-ids="printSkuIds" />
+    <ProductYzBatchUpgradeDialog
+      v-if="canManageProducts && yzBatchUpgradeDialogVisible"
+      v-model="yzBatchUpgradeDialogVisible"
+      :product-ids="yzBatchUpgradeProductIds"
+      :series-tag-options="seriesTagOptions"
+      @upgraded="handleYzBatchUpgraded"
+    />
+    <ProductBatchFieldDialog
+      v-if="batchFieldDialogVisible"
+      v-model="batchFieldDialogVisible"
+      :field="batchFieldTarget"
+      :product-ids="selectedProductIds"
+      :categories="allCategories"
+      :locations="allLocations"
+      @updated="handleBatchFieldUpdated"
+    />
     <ProductYzUpgradeDialog
       v-if="canManageProducts && yzUpgradeDialogVisible"
       v-model="yzUpgradeDialogVisible"

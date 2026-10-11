@@ -838,6 +838,11 @@ const handleSaveComplianceFlags = async () => {
   flex-shrink: 0;
 }
 
+/* 相邻按钮间距交给容器 gap，清零 Element Plus 默认 margin-left，避免间距与 gap 叠加 */
+.order-detail-drawer-header > :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
 @media (max-width: 768px) {
   .order-detail-drawer-header {
     padding-right: 0;
