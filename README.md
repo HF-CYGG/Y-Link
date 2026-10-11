@@ -571,6 +571,7 @@ docker compose --env-file .env.docker.mysql -f compose.mysql.yml up -d --force-r
 
 - Node.js 20+
 - 覆盖率命令 `npm run coverage:report` 需要 Node.js 22.6 及以上（与 CI、Docker 镜像一致使用 Node.js 22 即可）
+- 登录页主题切换浏览器回归脚本需要 Node.js 22 及以上和全局 WebSocket；不改变应用的 Node.js 20+ 要求
 - npm
 - Docker 可选，用于容器验证和 MySQL 并发验收
 
@@ -611,6 +612,12 @@ npm run local:dev
 | `npm run verify:db:migration` | SQLite -> MySQL 隔离环境端到端验收 |
 | `npm run verify:performance` | 性能预算验证 |
 | `npm run verify:all` | 全量质量验证 |
+
+登录页主题切换浏览器回归需先运行 `npm run build` 生成 `dist`，并在本机准备已安装的 Chrome 或 Chromium。脚本使用本机只读 API fixture，不连接实际后端，也不会安装或下载浏览器。浏览器可执行文件不在脚本默认路径时，先将 `CHROME_PATH` 设为该文件路径，再运行：
+
+```bash
+node scripts/verify-login-theme-transition.mjs
+```
 
 `verify:db:concurrency` 默认会通过 Docker 拉起 MySQL 8.4 临时环境。没有 Docker 时，可提供 `VERIFY_DB_CONCURRENCY_MYSQL_*` 连接到自备 MySQL。
 

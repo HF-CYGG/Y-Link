@@ -10,6 +10,14 @@ import { tmpdir } from 'node:os'
 import { extname, join, resolve, sep } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 
+const nodeMajorVersion = Number(process.versions.node.split('.')[0])
+if (nodeMajorVersion < 22) {
+  throw new Error(`登录页主题切换回归需要 Node.js 22 及以上（当前 ${process.version}）`)
+}
+if (typeof globalThis.WebSocket !== 'function') {
+  throw new Error('登录页主题切换回归需要 Node.js 全局 WebSocket，请使用支持该能力的 Node.js 22 及以上版本')
+}
+
 const CHROME_PATH = process.env.CHROME_PATH || 'C:/Program Files/Google/Chrome/Application/chrome.exe'
 const profilePrefix = resolve(tmpdir(), 'ylink-login-theme-')
 const profileDir = await mkdtemp(profilePrefix)
