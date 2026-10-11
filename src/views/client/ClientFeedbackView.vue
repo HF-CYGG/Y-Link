@@ -226,6 +226,10 @@ const connectRealtime = () => {
       }
       realtimeState.value = 'offline'
       reconnectTip.value = '实时连接已中断，系统正在尝试自动续接...'
+      // EventSource 断线后可能连续触发 onerror，先清理尚未执行的重连，避免叠加多个定时器反复重建连接。
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer)
+      }
       reconnectTimer = setTimeout(() => {
         if (isRealtimeEligible()) {
           connectRealtime()

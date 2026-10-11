@@ -37,6 +37,9 @@ import { adminMfaService, type AdminMfaFactorInput } from './admin-mfa.service.j
 import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
 import { isAccountCurrentlyDeactivated } from './account-business-guard.service.js'
 
+// 管理端会话活跃时间最小写入间隔：鉴权中间件内存短路与 SQL 条件更新共用同一阈值。
+const ADMIN_SESSION_ACTIVITY_TOUCH_INTERVAL_MS = 60_000
+
 export interface LoginInput {
   username: string
   password: string
@@ -774,6 +777,16 @@ export class AuthService {
   }
 
   async resolveAuthUserByToken(sessionToken: string): Promise<AuthUserContext> {
+    const { auth } = await this.resolveAuthSessionByToken(sessionToken)
+    return auth
+  }
+
+  /**
+   * 解析会话并带出上次活跃时间：
+   * - 鉴权中间件据此在内存中判断是否需要写回 last_access_at，避免每个管理端请求都发起一次 UPDATE；
+   * - lastAccessAt 只用于节流判断，不放进 AuthUserContext，避免扩散到业务与审计链路。
+   */
+  async resolveAuthSessionByToken(sessionToken: string): Promise<{ auth: AuthUserContext; lastAccessAt: Date | null }> {
     const now = new Date()
     const sessionTokenHash = hashSessionToken(sessionToken)
     // 每个管理端请求都要鉴权：会话与账号一次联表取回，不再先查会话、再按 userId 查账号（密码哈希列默认不选取）。
@@ -807,16 +820,35 @@ export class AuthService {
     }
 
     return {
-      userId: user.id,
-      username: user.username,
-      displayName: user.displayName,
-      role: user.role,
-      permissions: resolvePermissionsByRole(user.role),
-      status: user.status,
-      sessionToken,
-      // 认证来源由中间件根据“本次请求从 Cookie 还是 Bearer 进入”最终覆写。
-      authSource: 'bearer',
+      auth: {
+        userId: user.id,
+        username: user.username,
+        displayName: user.displayName,
+        role: user.role,
+        permissions: resolvePermissionsByRole(user.role),
+        status: user.status,
+        sessionToken,
+        // 认证来源由中间件根据“本次请求从 Cookie 还是 Bearer 进入”最终覆写。
+        authSource: 'bearer',
+      },
+      lastAccessAt: session.lastAccessAt ?? null,
     }
+  }
+
+  /**
+   * 判断会话活跃时间是否需要写库：
+   * - 与 touchSessionActivity 的 SQL 节流条件一致，先在内存中短路，最近已写过就不再占用 SQLite 写槽；
+   * - lastAccessAt 为空（历史会话）时必须写入，保证空闲超时判定有基准。
+   */
+  shouldTouchSessionActivity(lastAccessAt: Date | null, now = new Date(), minIntervalMs = ADMIN_SESSION_ACTIVITY_TOUCH_INTERVAL_MS): boolean {
+    if (!lastAccessAt) {
+      return true
+    }
+    const lastAccessMs = lastAccessAt instanceof Date ? lastAccessAt.getTime() : new Date(lastAccessAt).getTime()
+    if (!Number.isFinite(lastAccessMs)) {
+      return true
+    }
+    return now.getTime() - lastAccessMs >= Math.max(1_000, minIntervalMs)
   }
 
   /**
@@ -824,7 +856,7 @@ export class AuthService {
    * - 管理端每个请求都可能走鉴权链路，若每次都更新 last_access_at，会在 SQLite 下产生额外写压；
    * - 仅当上次活跃时间超过最小间隔时才写库，兼顾在线状态准确性和并发稳定性。
    */
-  async touchSessionActivity(sessionToken: string, minIntervalMs = 60_000): Promise<void> {
+  async touchSessionActivity(sessionToken: string, minIntervalMs = ADMIN_SESSION_ACTIVITY_TOUCH_INTERVAL_MS): Promise<void> {
     const now = new Date()
     const threshold = new Date(now.getTime() - Math.max(1_000, minIntervalMs))
     const sessionTokenHash = hashSessionToken(sessionToken)

@@ -607,7 +607,13 @@ export class ProductService {
     }
   }
 
-  async list(query: ProductQuery): Promise<ProductView[]> {
+  /**
+   * 商品候选列表：
+   * - omitDetailContent 用于开单、入库、核销等“下拉候选/全量候选”场景：这些调用方从不读取商品详情正文，
+   *   而单条 detailContent 最长 2 万字，全量返回会让响应体随商品数线性膨胀；
+   * - 编辑与商城详情仍通过 GET /products/:id 读取完整正文，不受影响。
+   */
+  async list(query: ProductQuery, options: { omitDetailContent?: boolean } = {}): Promise<ProductView[]> {
     const qb = this.productRepo.createQueryBuilder('p')
     this.applyListFilters(qb, query)
     qb.orderBy('p.id', 'DESC')
@@ -619,7 +625,8 @@ export class ProductService {
     }
 
     const products = await qb.getMany()
-    return this.buildProductViews(products)
+    const views = await this.buildProductViews(products)
+    return options.omitDetailContent ? views.map((view) => ({ ...view, detailContent: null })) : views
   }
 
   async listPaged(query: ProductQuery): Promise<PaginationResult<ProductView>> {

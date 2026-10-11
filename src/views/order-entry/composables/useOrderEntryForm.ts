@@ -7,7 +7,7 @@
  * 3. 针对“正式出库单只给部门单”规则，在此做最终提交兜底，确保散客单不会误传相关状态。
  */
 
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
 
 import { useRouter } from 'vue-router'
 import { orderApi, productApi } from '@/api'
@@ -332,6 +332,8 @@ export const useOrderEntryForm = () => {
    * - 仅在浏览器环境且持久化开关就绪后执行，避免初始化阶段把空白态覆盖到草稿。
    */
   const persistDraft = () => {
+    // 立即写入会覆盖尚未触发的防抖写入，避免旧定时器随后再写一次。
+    cancelScheduledDraftPersist()
     if (!draftPersistenceReady.value || !productCandidatesReady.value) {
       return
     }
@@ -341,8 +343,49 @@ export const useOrderEntryForm = () => {
       return
     }
 
-    storage.setItem(storageKey, JSON.stringify(buildDraftSnapshot()))
+    try {
+      storage.setItem(storageKey, JSON.stringify(buildDraftSnapshot()))
+    } catch {
+      // 配额已满或隐私模式禁止写入时只放弃草稿保存，不能打断开单与提交流程。
+    }
   }
+
+  /**
+   * 草稿防抖写入：
+   * - 录入时每次按键都会触发深度监听，逐次 JSON 序列化 + 同步写 sessionStorage 会拖慢长明细单的输入；
+   * - 仅监听链路走防抖，提交前登记幂等键等关键节点仍直接调用 persistDraft 同步落盘；
+   * - 离开页面（失活、卸载、pagehide）时立即补写，避免最后一次输入丢失。
+   */
+  const DRAFT_PERSIST_DEBOUNCE_MS = 300
+  let draftPersistTimer: ReturnType<typeof globalThis.setTimeout> | null = null
+
+  function cancelScheduledDraftPersist() {
+    if (draftPersistTimer !== null) {
+      globalThis.clearTimeout(draftPersistTimer)
+      draftPersistTimer = null
+    }
+  }
+
+  const scheduleDraftPersist = () => {
+    cancelScheduledDraftPersist()
+    draftPersistTimer = globalThis.setTimeout(() => {
+      draftPersistTimer = null
+      persistDraft()
+    }, DRAFT_PERSIST_DEBOUNCE_MS)
+  }
+
+  const flushScheduledDraftPersist = () => {
+    if (draftPersistTimer !== null) {
+      persistDraft()
+    }
+  }
+
+  onDeactivated(flushScheduledDraftPersist)
+  onBeforeUnmount(() => {
+    flushScheduledDraftPersist()
+    globalThis.removeEventListener?.('pagehide', flushScheduledDraftPersist)
+  })
+  globalThis.addEventListener?.('pagehide', flushScheduledDraftPersist)
 
   /**
    * 读取并恢复录入草稿：
@@ -957,7 +1000,7 @@ export const useOrderEntryForm = () => {
   )
 
   /**
-   * 监听录入态变化并实时保存草稿：
+   * 监听录入态变化并（防抖）保存草稿：
    * - 覆盖主单、明细、抽屉草稿三部分；
    * - 让用户临时切页后返回时恢复到离开前的输入状态。
    */
@@ -980,7 +1023,7 @@ export const useOrderEntryForm = () => {
       () => drawerForm.remark,
     ],
     () => {
-      persistDraft()
+      scheduleDraftPersist()
     },
     { deep: true },
   )

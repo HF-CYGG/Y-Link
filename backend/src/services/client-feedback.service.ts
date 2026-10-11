@@ -2041,13 +2041,16 @@ class ClientFeedbackService {
   }
 
   async getServiceConversationDetail(id: string, actor: AuthUserContext): Promise<ClientFeedbackConversationDetail> {
-    if (databaseMaintenanceModeService.isReadOnly()) {
-      const conversation = await this.requireConversationById(id, AppDataSource.manager)
-      const messages = await this.loadConversationMessages(AppDataSource.manager, conversation.id)
+    // 只读快路径：维护只读期间，或会话当前没有客服未读消息时，无需开启写事务与账号行锁。
+    // 客服工作台会高频轮询/重复打开详情，若每次都进事务，SQLite 下会无谓占用唯一写槽。
+    const readOnlyMode = databaseMaintenanceModeService.isReadOnly()
+    const snapshot = await this.requireConversationById(id, AppDataSource.manager)
+    if (readOnlyMode || snapshot.unreadForServiceCount <= 0) {
+      const messages = await this.loadConversationMessages(AppDataSource.manager, snapshot.id)
       return {
-        conversation: this.buildConversationSummary(conversation, actor.userId),
+        conversation: this.buildConversationSummary(snapshot, actor.userId),
         messages: messages.map((message) => this.buildMessageView(message, { scope: 'service', userId: actor.userId })),
-        internalRemark: this.buildInternalRemarkView(conversation),
+        internalRemark: this.buildInternalRemarkView(snapshot),
       }
     }
 

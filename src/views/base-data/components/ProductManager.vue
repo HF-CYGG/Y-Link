@@ -999,8 +999,18 @@ const discountRateOptions = computed(() => {
   })
 })
 
+// SKU 表格每行、每次渲染都会取折扣选项；按售价缓存 91 项选项数组，避免编辑任一字段时整表重复构造。
+// 售价种类有限，超过上限直接整体清空即可，无需 LRU。
+const DISCOUNT_RATE_OPTION_CACHE_LIMIT = 200
+const discountRateOptionCache = new Map<string, Array<{ label: string; value: number }>>()
+
 const buildDiscountRateOptions = (defaultPrice: unknown) => {
-  return Array.from({ length: 91 }, (_item, index) => {
+  const cacheKey = String(defaultPrice ?? '')
+  const cached = discountRateOptionCache.get(cacheKey)
+  if (cached) {
+    return cached
+  }
+  const options = Array.from({ length: 91 }, (_item, index) => {
     const value = Math.round((10 - index * 0.1) * 10) / 10
     const discountedPrice = calculateDiscountedPriceText(defaultPrice as string | number, value)
     return {
@@ -1008,6 +1018,11 @@ const buildDiscountRateOptions = (defaultPrice: unknown) => {
       value,
     }
   })
+  if (discountRateOptionCache.size >= DISCOUNT_RATE_OPTION_CACHE_LIMIT) {
+    discountRateOptionCache.clear()
+  }
+  discountRateOptionCache.set(cacheKey, options)
+  return options
 }
 
 const resolveSkuThumbnail = (row: ProductSkuForm) => {

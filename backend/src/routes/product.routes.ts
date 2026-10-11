@@ -257,6 +257,9 @@ productRouter.get(
         req.query.o2oStatus === 'listed' || req.query.o2oStatus === 'unlisted'
           ? req.query.o2oStatus
           : undefined,
+    }, {
+      // 非分页列表只服务于各业务页的商品候选，详情正文改由 GET /products/:id 按需读取。
+      omitDetailContent: true,
     })
 
     res.json({

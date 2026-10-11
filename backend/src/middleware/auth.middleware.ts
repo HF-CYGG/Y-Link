@@ -112,10 +112,13 @@ export async function requireAuth(req: Request, _res: Response, next: NextFuncti
     // 按会话令牌桶熔断：在查库之前判定，单个会话的失控高频请求不再产生会话查询。
     assertSessionRateAllowed('admin', credential.token)
 
-    const auth = await authService.resolveAuthUserByToken(credential.token)
+    const { auth, lastAccessAt } = await authService.resolveAuthSessionByToken(credential.token)
     auth.authSource = credential.source
     ;(req as AuthenticatedRequest).auth = auth
-    const releaseActivityLease = databaseMaintenanceModeService.registerInFlightWrite()
+    // 最近 60 秒内已写过活跃时间的会话直接跳过，避免每个请求都占用一次数据库写槽（SQLite 下 0 行 UPDATE 也要排队）。
+    const releaseActivityLease = authService.shouldTouchSessionActivity(lastAccessAt)
+      ? databaseMaintenanceModeService.registerInFlightWrite()
+      : null
     if (releaseActivityLease) {
       try {
         await authService.touchSessionActivity(auth.sessionToken).catch(() => undefined)

@@ -37,6 +37,7 @@
   - SKU 归一化与保存
   - 默认 SKU 与产品主记录同步
   - 产品视图构建与库存聚合
+- 非分页商品列表 `GET /api/products` 仅服务于开单、入库、核销、出库编辑等商品候选，响应中 `detailContent` 固定为 `null`（单条最长 2 万字，全量返回会线性放大响应体）；需要详情正文时必须调用 `GET /api/products/:id`。商品中心列表走 `GET /api/products/paged`，不受影响。
 - 线上展示专用写入使用 `PATCH /api/products/:id/online-display`：仅接受 `o2oStatus`、`detailContent`、`limitPerUser` 和 `recommendation`，返回最新商品视图；不调用商品全量编辑或 SKU 替换。`recommendation.mode` 为 `all`、`selected`、`none`，必须提交打开编辑时所有当前 SKU（含停用、不含退役）的 `expectedSkuIds`；`selected.skuIds` 只允许当前启用 SKU。集合变化或推荐失效返回 409，停用商品上架也返回 409。
 - 批量上下架使用 `PATCH /api/products/online-display/batch`，提交商品 ID 与 `o2oStatus`；去重后最多 100 个商品，全部锁定和校验后在同一事务内写入，返回排序后的 `ids` 和实际变更数 `updatedCount`。任一商品无效或停用商品拟上架时整批失败。
 - 基础资料批量更新使用 `POST /api/products/batch`：`ids` 最多 200 个，可同时或单独提交 `isActive`、`categoryId`、`locationId`（后两者传 `null` 表示清空）。分类写商品主表，停用分类只允许保留、不允许新挂入；库位覆盖所选商品全部当前 SKU（含停用、不含退役）的默认库位，只更新 `location_id` 列，停用库位不可新挂入。锁序为账号 → 商品 → 当前 SKU → 库位，每类实际变化各写一条 `product.batch_update` 汇总审计。

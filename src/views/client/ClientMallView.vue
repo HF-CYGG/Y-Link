@@ -9,7 +9,7 @@
  */
 
 
-import { useVirtualList } from '@vueuse/core'
+import { refDebounced, useVirtualList } from '@vueuse/core'
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
@@ -182,6 +182,10 @@ const storeBusinessHoursText = computed(() => clientCatalogStore.storefront.busi
 const mallAnnouncementText = computed(() => clientCatalogStore.storefront.mallAnnouncementText?.trim() ?? '')
 const normalizedKeyword = computed(() => keyword.value.trim().toLowerCase())
 const hasKeyword = computed(() => normalizedKeyword.value.length > 0)
+// 搜索结果按防抖后的关键词计算：连续输入时不再每个字符都全量匹配、排序并重渲染整段结果列表。
+// 从“无关键词”进入搜索（首个字符、页面恢复上次搜索）时立即生效，避免先闪一下空结果。
+const debouncedKeyword = refDebounced(normalizedKeyword, 150)
+const searchKeyword = computed(() => (debouncedKeyword.value ? debouncedKeyword.value : normalizedKeyword.value))
 const hasRenderableProducts = computed(() => products.value.length > 0)
 const blockingRequestError = computed(() => {
   return hasRenderableProducts.value ? null : requestError.value
@@ -428,13 +432,15 @@ const useRecommendedAllProductFlow = computed(() => isRecommendedSortMode.value 
 const recommendedAllProducts = computed(() => sortProductsForDisplay(products.value))
 
 const searchResults = computed(() => {
-  if (!normalizedKeyword.value) {
+  // 关键词已清空时立即退出搜索态，不等待防抖。
+  if (!normalizedKeyword.value || !searchKeyword.value) {
     return []
   }
 
+  const currentKeyword = searchKeyword.value
   const matchedProducts: O2oMallProduct[] = []
   mallBrowseIndex.value.searchEntries.forEach((entry) => {
-    if (entry.searchText.includes(normalizedKeyword.value)) {
+    if (entry.searchText.includes(currentKeyword)) {
       matchedProducts.push(entry.product)
     }
   })
