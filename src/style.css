@@ -635,9 +635,17 @@ canvas {
   overflow: auto;
 }
 
+/*
+ * auto 模式 = “短内容按自然高度收紧，长内容在正文内滚动”：
+ * - 弹窗根节点受 `max-height` 约束，正文若写成 `flex: 0 0 auto + overflow: visible`，
+ *   一旦内容超过视口（长表单、窄屏、矮屏），分组卡片与底部按钮会溢出白色卡片之外，形成错位；
+ * - 因此正文保留 `flex-basis: auto` 以按内容取高，同时允许收缩（`flex-shrink: 1` + `min-height: 0`），
+ *   并由正文承担纵向滚动，白色卡片与内容始终对齐。
+ */
 .ylink-crud-dialog-shell__body--auto {
-  flex: 0 0 auto !important;
-  overflow: visible !important;
+  flex: 0 1 auto !important;
+  min-height: 0;
+  overflow-y: auto !important;
 }
 
 .el-dialog:not(.ylink-dialog-height-mode--auto) .el-dialog__body,
@@ -647,7 +655,7 @@ canvas {
 }
 
 .ylink-dialog-height-mode--auto .el-dialog__body {
-  overflow: visible;
+  overflow-y: auto;
 }
 
 /*
