@@ -187,6 +187,8 @@ interface ProductAuditSnapshot {
 
 const PRODUCT_AUDIT_FIELDS = ['productCode', 'productName', 'defaultPrice', 'discountRate', 'isActive', 'o2oStatus', 'limitPerUser'] as const
 const PRODUCT_AUDIT_MAX_LISTED_ITEMS = 50
+/** 批量升级 YZ 编码单次上限：系列内序号仅 1-99，单批过大既难以人工核对也会拉长事务。 */
+const YZ_BATCH_UPGRADE_MAX_ITEMS = 50
 
 const normalizeAuditDecimal = (value: unknown, scale: number): string => {
   const numeric = Number(value)
@@ -196,6 +198,10 @@ const normalizeAuditDecimal = (value: unknown, scale: number): string => {
 export interface BatchUpdateProductInput {
   ids: Array<string | number>
   isActive?: boolean
+  /** 批量改分类：null 清空，undefined 不改。 */
+  categoryId?: string | number | null
+  /** 批量改默认库位：作用于所选商品全部当前 SKU（含停用、不含退役）；null 清空，undefined 不改。 */
+  locationId?: string | number | null
 }
 
 export interface OnlineDisplayInput {
@@ -381,6 +387,35 @@ export interface ProductYzUpgradePreview {
   /** 保持不动的已退役 SKU 数量。 */
   retiredSkuCount: number
   blockingReason: string | null
+}
+
+/** 批量升级预检：单个商品的结果。eligible=false 时 blockingReason 必有值，前端不得提交该商品。 */
+export interface ProductYzBatchUpgradePreviewItem {
+  productId: string
+  productName: string
+  oldProductCode: string
+  /** 可升级时为按批次顺序预测的新产品编码；不可升级时为 null。 */
+  newProductCode: string | null
+  seriesSeq: number | null
+  currentSkuCount: number
+  retiredSkuCount: number
+  skuChanges: ProductYzUpgradeSkuChange[]
+  eligible: boolean
+  blockingReason: string | null
+}
+
+export interface ProductYzBatchUpgradePreview {
+  seriesCode: string
+  items: ProductYzBatchUpgradePreviewItem[]
+}
+
+export interface ProductYzBatchUpgradeInput {
+  ids: Array<string | number>
+  primarySeriesTagId: string
+}
+
+export interface ProductYzBatchUpgradeResult {
+  items: Array<{ productId: string; productName: string; oldProductCode: string; newProductCode: string; skuCount: number }>
 }
 
 /** 规格取值重命名：入参。只改显示名称，编码位（skuCode/variantCode/sizeCode）不受影响。 */
@@ -1137,47 +1172,142 @@ export class ProductService {
     if (!productIds.length) {
       throw new BizError('至少选择一个产品')
     }
-    if (typeof input.isActive !== 'boolean') {
+    const updateActive = typeof input.isActive === 'boolean'
+    const updateCategory = input.categoryId !== undefined
+    const updateLocation = input.locationId !== undefined
+    if (!updateActive && !updateCategory && !updateLocation) {
       throw new BizError('至少提供一个可更新字段')
     }
+    const targetCategoryId = input.categoryId === undefined || input.categoryId === null ? null : normalizeEntityId(input.categoryId) || null
+    const targetLocationId = input.locationId === undefined || input.locationId === null ? null : normalizeEntityId(input.locationId) || null
 
     const result = await runInTransaction(async (manager) => {
+      // 锁序与商品编辑、库位关联保持一致：账号 → 商品 → 当前 SKU → 库位。
       await lockActiveSysAccountForBusiness(manager, actor.userId)
       const repo = manager.getRepository(BaseProduct)
+      const lockRows = manager.connection.options.type !== 'sqlite'
       const productQuery = repo
         .createQueryBuilder('product')
         .where('product.id IN (:...productIds)', { productIds })
         .orderBy('product.id', 'ASC')
-      if (manager.connection.options.type !== 'sqlite') productQuery.setLock('pessimistic_write')
+      if (lockRows) productQuery.setLock('pessimistic_write')
       const products = await productQuery.getMany()
 
       if (products.length !== productIds.length) {
         throw new BizError('存在无效产品，批量更新失败')
       }
 
-      const changedProducts = products
-        .filter((product) => isDatabaseFlagEnabled(product.isActive) !== input.isActive)
-        .map((product) => ({ productId: String(product.id), productCode: product.productCode, productName: product.productName }))
-      products.forEach((product) => {
-        product.isActive = input.isActive as boolean
-        product.o2oStatus = resolveEffectiveO2oStatus(product.isActive, undefined, product.o2oStatus)
-      })
-
-      const saved = await repo.save(products)
-      if (changedProducts.length) {
-        await auditService.record({
-          actionType: 'product.batch_update',
-          actionLabel: input.isActive ? '批量启用商品' : '批量停用商品',
-          targetType: 'product',
-          actor,
-          requestMeta,
-          detail: {
-            isActive: input.isActive,
-            count: changedProducts.length,
-            products: changedProducts.slice(0, PRODUCT_AUDIT_MAX_LISTED_ITEMS),
-          },
-        }, manager)
+      if (updateActive) {
+        const changedProducts = products
+          .filter((product) => isDatabaseFlagEnabled(product.isActive) !== input.isActive)
+          .map((product) => ({ productId: String(product.id), productCode: product.productCode, productName: product.productName }))
+        products.forEach((product) => {
+          product.isActive = input.isActive as boolean
+          product.o2oStatus = resolveEffectiveO2oStatus(product.isActive, undefined, product.o2oStatus)
+        })
+        if (changedProducts.length) {
+          await auditService.record({
+            actionType: 'product.batch_update',
+            actionLabel: input.isActive ? '批量启用商品' : '批量停用商品',
+            targetType: 'product',
+            actor,
+            requestMeta,
+            detail: {
+              isActive: input.isActive,
+              count: changedProducts.length,
+              products: changedProducts.slice(0, PRODUCT_AUDIT_MAX_LISTED_ITEMS),
+            },
+          }, manager)
+        }
       }
+
+      if (updateCategory) {
+        const category = targetCategoryId
+          ? await manager.getRepository(BaseCategory).findOne({ where: { id: targetCategoryId } })
+          : null
+        if (targetCategoryId && !category) throw new BizError('商品分类不存在，请刷新后重试', 400)
+        const changedProducts = products.filter((product) => String(product.categoryId ?? '') !== String(category?.id ?? ''))
+        // 与单品编辑一致：停用分类只允许保留，不允许新挂入。
+        if (category && changedProducts.length && !isDatabaseFlagEnabled(category.isActive)) {
+          throw new BizError(`商品分类「${category.categoryName}」已停用`, 400)
+        }
+        if (changedProducts.length) {
+          await auditService.record({
+            actionType: 'product.batch_update',
+            actionLabel: category ? '批量修改商品分类' : '批量清空商品分类',
+            targetType: 'product',
+            actor,
+            requestMeta,
+            detail: {
+              categoryId: category ? String(category.id) : null,
+              categoryName: category ? `${category.categoryCode} ${category.categoryName}` : null,
+              count: changedProducts.length,
+              products: changedProducts.slice(0, PRODUCT_AUDIT_MAX_LISTED_ITEMS).map((product) => ({
+                productId: String(product.id),
+                productCode: product.productCode,
+                productName: product.productName,
+                beforeCategoryId: product.categoryId ? String(product.categoryId) : null,
+              })),
+            },
+          }, manager)
+        }
+        products.forEach((product) => {
+          product.categoryId = category ? String(category.id) : null
+        })
+      }
+
+      const saved = updateActive || updateCategory ? await repo.save(products) : products
+
+      if (updateLocation) {
+        const skuRepo = manager.getRepository(BaseProductSku)
+        const skuQuery = skuRepo
+          .createQueryBuilder('sku')
+          .where('sku.productId IN (:...productIds)', { productIds })
+          .andWhere('sku.isCurrent = :isCurrent', { isCurrent: true })
+          .orderBy('sku.id', 'ASC')
+        if (lockRows) skuQuery.setLock('pessimistic_write')
+        const skus = await skuQuery.getMany()
+
+        // 库位锁在 SKU 锁之后，防止库位启停与新增关联并发穿透。
+        let location: BaseStorageLocation | null = null
+        if (targetLocationId) {
+          const locationQuery = manager.getRepository(BaseStorageLocation)
+            .createQueryBuilder('location')
+            .where('location.id = :id', { id: targetLocationId })
+          if (lockRows) locationQuery.setLock('pessimistic_write')
+          location = await locationQuery.getOne()
+          if (!location) throw new BizError('库位不存在，请刷新后重试', 400)
+        }
+        const changedSkus = skus.filter((sku) => String(sku.locationId ?? '') !== String(location?.id ?? ''))
+        if (location && changedSkus.length && !isDatabaseFlagEnabled(location.isActive)) {
+          throw new BizError(`库位 ${location.locationCode} 已停用`, 400)
+        }
+
+        if (changedSkus.length) {
+          // 只更新默认库位列，绝不保存 SKU 实体快照，避免把锁前读取的库存或价格字段写回。
+          await skuRepo.update({ id: In(changedSkus.map((sku) => sku.id)) }, { locationId: location ? String(location.id) : null })
+          await auditService.record({
+            actionType: 'product.batch_update',
+            actionLabel: location ? '批量修改规格默认库位' : '批量清空规格默认库位',
+            targetType: 'product',
+            actor,
+            requestMeta,
+            detail: {
+              locationId: location ? String(location.id) : null,
+              locationCode: location?.locationCode ?? null,
+              productCount: new Set(changedSkus.map((sku) => String(sku.productId))).size,
+              skuCount: changedSkus.length,
+              skus: changedSkus.slice(0, PRODUCT_AUDIT_MAX_LISTED_ITEMS).map((sku) => ({
+                skuId: String(sku.id),
+                skuCode: sku.skuCode,
+                productId: String(sku.productId),
+                beforeLocationId: sku.locationId ? String(sku.locationId) : null,
+              })),
+            },
+          }, manager)
+        }
+      }
+
       return this.buildProductViews(saved, manager)
     })
     invalidateMallCatalogReadCache()
@@ -1241,7 +1371,7 @@ export class ProductService {
 
   /**
    * 存量商品手动升级到 YZ 编码（第 3.5 批；B9 批次改造历史编码落位）：
-   * - 业务决策是“冻结在 legacy，逐个手动升级”，因此本方法只处理单个商品，不做批量/自动重编码；
+   * - 业务决策是“冻结在 legacy，由管理员手动升级”，不做自动重编码；单品与批量入口共用 upgradeLegacyProductWithManager；
    * - 前置校验全部通过后才在同一事务内重生 productCode 与当前有效 SKU 的 skuCode，已退役 SKU 原样保留；
    * - 旧 productCode 写入 product.legacyProductCode，每条被重算编码的 SKU 旧 skuCode 写入 sku.legacySkuCode，
    *   用于 lookupByCode 的历史编码兼容路径扫描；barcode（原厂条码）字段从此只保留真实原厂条码，不再回填。
@@ -1261,8 +1391,7 @@ export class ProductService {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
       await acquireSequenceMutex(manager, PRODUCT_SCAN_CODE_MUTEX_KEY)
 
-      const productRepo = manager.getRepository(BaseProduct)
-      const product = await productRepo.findOne({
+      const product = await manager.getRepository(BaseProduct).findOne({
         where: { id: productId },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
@@ -1274,93 +1403,193 @@ export class ProductService {
       }
 
       const seriesTag = await this.loadAndLockSeriesTagForYzScheme(seriesTagId, manager)
-
-      // 只处理当前有效 SKU；已退役 SKU 一律不读不写，保留旧编码。按 Excel 出现顺序（sortOrder，其次 id）
-      // 稳定排序，保证变体码/尺码码的分配顺序与预检模拟、前端展示口径一致。
-      const currentSkus = await this.loadCurrentSkusForUpgrade(product.id, manager, true)
-      this.assertUpgradeCapacity(currentSkus)
-
-      const prefix = await getProductCodePrefix(manager)
-      const seriesSeq = await allocateSeriesSeq(manager, seriesTag.id, seriesTag.seriesCode as string, prefix)
-      const oldProductCode = product.productCode
-      const newProductCode = formatProductCode(prefix, seriesTag.seriesCode as string, seriesSeq)
-
-      // P2-A 修复（PR #109 第八轮评审）：allocateSeriesSeq 分配阶段已经会跳过被其他商品占用的
-      // productCode，但分配与下面 productRepo.save 之间仍有极小的并发窗口（另一事务恰好在此时写入了
-      // 相同编码）。这里保存前先做一次兜底校验，命中即抛出友好的 409，避免退化成
-      // base_product.product_code 唯一约束的原始 DB 报错——那种报错会让整个事务回滚、序列游标也跟着
-      // 回退，重试仍会分配到同一个号，商品就永远无法升级了。
-      await this.assertNoUpgradeCodeConflict(manager, product.id, newProductCode, [])
-
-      product.primarySeriesTagId = seriesTag.id
-      product.seriesSeq = seriesSeq
-      product.codeScheme = 'yz'
-      product.productCode = newProductCode
-      product.legacyProductCode = oldProductCode
-      const savedProduct = await productRepo.save(product)
-
-      // 主系列标签必须出现在标签关联里，口径与 YZ 建档（createWithManager）一致；已存在则不重复插入。
-      const relationRepo = manager.getRepository(RelProductTag)
-      const hasSeriesRelation = await relationRepo.exists({ where: { productId: savedProduct.id, tagId: seriesTag.id } })
-      if (!hasSeriesRelation) {
-        await relationRepo.save(relationRepo.create({ productId: savedProduct.id, tagId: seriesTag.id }))
-      }
-
-      const skuRepo = manager.getRepository(BaseProductSku)
-      const auditSkuChanges: Array<{ skuId: string; oldSkuCode: string; newSkuCode: string }> = []
-      const updatedSkus: BaseProductSku[] = []
-
-      for (const sku of currentSkus) {
-        const specValues = normalizeSpecValuesKeys(parseSpecValuesJson(sku.specValuesJson))
-        const variantCode = await resolveVariantCode(manager, savedProduct.id, specValues[VARIANT_AXIS_SPEC_KEY])
-        const sizeCode = await resolveSizeCode(manager, savedProduct.id, specValues[SIZE_AXIS_SPEC_KEY])
-        const oldSkuCode = sku.skuCode
-        const newSkuCode = formatSkuCode(newProductCode, variantCode, sizeCode)
-
-        // 旧标签救济：旧 skuCode 无条件写入 legacySkuCode（历史编码理论上可能重复，不受唯一约束限制），
-        // 供 lookupByCode 第三路匹配，让已打印的旧标签仍可扫描；barcode（原厂条码）不再被本流程改动。
-        sku.legacySkuCode = oldSkuCode
-        sku.variantCode = variantCode
-        sku.sizeCode = sizeCode
-        sku.skuCode = newSkuCode
-        updatedSkus.push(sku)
-        auditSkuChanges.push({ skuId: String(sku.id), oldSkuCode, newSkuCode })
-      }
-
-      // 保存前做跨列冲突校验：新编码不能撞上其他商品 SKU 的原厂条码或编码，否则扫码会指向错商品。
-      // 抛错会回滚本事务内已执行的 product / registry 写入，不会落下半成品数据。
-      await this.assertNoUpgradeCodeConflict(
-        manager,
-        savedProduct.id,
-        newProductCode,
-        updatedSkus.map((sku) => ({ skuId: String(sku.id), newSkuCode: sku.skuCode })),
-      )
-
-      if (updatedSkus.length) {
-        await skuRepo.save(updatedSkus)
-      }
-
-      // 审计：只记编码映射，不落任何敏感值（价格、库存、条码等均不写入）。
-      await auditService.record({
-        actionType: 'product.yz_code_upgrade',
-        actionLabel: '存量商品升级为 YZ 编码',
-        targetType: 'base_product',
-        targetId: savedProduct.id,
-        targetCode: newProductCode,
-        actor,
-        requestMeta,
-        detail: {
-          productId: savedProduct.id,
-          oldProductCode,
-          newProductCode,
-          skuCodeChanges: auditSkuChanges,
-        },
-      }, manager)
-
+      const { savedProduct } = await this.upgradeLegacyProductWithManager(product, seriesTag, manager, actor, requestMeta)
       return this.buildProductView(savedProduct, manager)
     })
     invalidateMallCatalogReadCache()
     return result
+  }
+
+  /**
+   * 批量升级到 YZ 编码：所选商品统一升级到同一文创系列，按提交顺序依次分配系列内序号。
+   * - 整批在同一事务内执行，任一商品校验失败（已是 YZ、容量超限、编码冲突、序号耗尽）整批回滚，不会出现部分升级；
+   * - 锁序：账号 → 扫码编码互斥 → 商品（按 ID 升序）→ 系列互斥，然后再按提交顺序逐个重算编码；
+   * - 每个商品各写一条 product.yz_code_upgrade 审计，与单品升级口径一致，便于按商品追溯旧编码。
+   */
+  async batchUpgradeProductsToYzCode(
+    input: ProductYzBatchUpgradeInput,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ): Promise<ProductYzBatchUpgradeResult> {
+    const seriesTagId = this.normalizeSeriesTagIdInput(input?.primarySeriesTagId)
+    if (!seriesTagId) {
+      throw new BizError('请选择要升级到的文创系列', 400)
+    }
+    const orderedIds = this.normalizeBatchUpgradeIds(input?.ids)
+
+    const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      await acquireSequenceMutex(manager, PRODUCT_SCAN_CODE_MUTEX_KEY)
+
+      const sortedIds = [...orderedIds].sort((left, right) => left.localeCompare(right))
+      const productQuery = manager.getRepository(BaseProduct)
+        .createQueryBuilder('product')
+        .where('product.id IN (:...ids)', { ids: sortedIds })
+        .orderBy('product.id', 'ASC')
+      if (manager.connection.options.type !== 'sqlite') productQuery.setLock('pessimistic_write')
+      const products = await productQuery.getMany()
+      if (products.length !== sortedIds.length) {
+        throw new BizError('存在无效产品，请刷新后重试', 404)
+      }
+      const productMap = new Map(products.map((product) => [normalizeEntityId(product.id), product]))
+      const alreadyYz = products.filter((product) => product.codeScheme === 'yz')
+      if (alreadyYz.length) {
+        throw new BizError(`商品「${alreadyYz.map((product) => product.productName).slice(0, 5).join('、')}」已经使用 YZ 编码，请取消选择后重试`, 400)
+      }
+
+      const seriesTag = await this.loadAndLockSeriesTagForYzScheme(seriesTagId, manager)
+      const items: ProductYzBatchUpgradeResult['items'] = []
+      for (const id of orderedIds) {
+        const product = productMap.get(id) as BaseProduct
+        try {
+          const upgraded = await this.upgradeLegacyProductWithManager(product, seriesTag, manager, actor, requestMeta, true)
+          items.push({
+            productId: normalizeEntityId(upgraded.savedProduct.id),
+            productName: upgraded.savedProduct.productName,
+            oldProductCode: upgraded.oldProductCode,
+            newProductCode: upgraded.newProductCode,
+            skuCount: upgraded.skuCount,
+          })
+        } catch (error) {
+          // 把出错商品名带上，方便管理员定位后取消勾选重试；事务仍会整体回滚。
+          if (error instanceof BizError) {
+            throw new BizError(`商品「${product.productName}」升级失败：${error.message}`, error.statusCode)
+          }
+          throw error
+        }
+      }
+      return { items }
+    })
+    invalidateMallCatalogReadCache()
+    return result
+  }
+
+  private normalizeBatchUpgradeIds(ids: Array<string | number> | undefined): string[] {
+    const orderedIds: string[] = []
+    const seen = new Set<string>()
+    for (const raw of ids ?? []) {
+      const id = normalizeEntityId(raw)
+      if (!id || seen.has(id)) continue
+      seen.add(id)
+      orderedIds.push(id)
+    }
+    if (!orderedIds.length) {
+      throw new BizError('请至少选择一个要升级的商品', 400)
+    }
+    if (orderedIds.length > YZ_BATCH_UPGRADE_MAX_ITEMS) {
+      throw new BizError(`单次最多批量升级 ${YZ_BATCH_UPGRADE_MAX_ITEMS} 个商品`, 400)
+    }
+    return orderedIds
+  }
+
+  /**
+   * 单个 legacy 商品升级的事务体：调用方负责账号锁、扫码编码互斥、商品行锁与系列标签互斥。
+   * batch=true 时审计标签区分为“批量升级”，其余写入与单品完全一致。
+   */
+  private async upgradeLegacyProductWithManager(
+    product: BaseProduct,
+    seriesTag: BaseTag,
+    manager: EntityManager,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+    batch = false,
+  ): Promise<{ savedProduct: BaseProduct; oldProductCode: string; newProductCode: string; skuCount: number }> {
+    const productRepo = manager.getRepository(BaseProduct)
+
+    // 只处理当前有效 SKU；已退役 SKU 一律不读不写，保留旧编码。按 Excel 出现顺序（sortOrder，其次 id）
+    // 稳定排序，保证变体码/尺码码的分配顺序与预检模拟、前端展示口径一致。
+    const currentSkus = await this.loadCurrentSkusForUpgrade(product.id, manager, true)
+    this.assertUpgradeCapacity(currentSkus)
+
+    const prefix = await getProductCodePrefix(manager)
+    const seriesSeq = await allocateSeriesSeq(manager, seriesTag.id, seriesTag.seriesCode as string, prefix)
+    const oldProductCode = product.productCode
+    const newProductCode = formatProductCode(prefix, seriesTag.seriesCode as string, seriesSeq)
+
+    // P2-A 修复（PR #109 第八轮评审）：allocateSeriesSeq 分配阶段已经会跳过被其他商品占用的
+    // productCode，但分配与下面 productRepo.save 之间仍有极小的并发窗口（另一事务恰好在此时写入了
+    // 相同编码）。这里保存前先做一次兜底校验，命中即抛出友好的 409，避免退化成
+    // base_product.product_code 唯一约束的原始 DB 报错——那种报错会让整个事务回滚、序列游标也跟着
+    // 回退，重试仍会分配到同一个号，商品就永远无法升级了。
+    await this.assertNoUpgradeCodeConflict(manager, product.id, newProductCode, [])
+
+    product.primarySeriesTagId = seriesTag.id
+    product.seriesSeq = seriesSeq
+    product.codeScheme = 'yz'
+    product.productCode = newProductCode
+    product.legacyProductCode = oldProductCode
+    const savedProduct = await productRepo.save(product)
+
+    // 主系列标签必须出现在标签关联里，口径与 YZ 建档（createWithManager）一致；已存在则不重复插入。
+    const relationRepo = manager.getRepository(RelProductTag)
+    const hasSeriesRelation = await relationRepo.exists({ where: { productId: savedProduct.id, tagId: seriesTag.id } })
+    if (!hasSeriesRelation) {
+      await relationRepo.save(relationRepo.create({ productId: savedProduct.id, tagId: seriesTag.id }))
+    }
+
+    const skuRepo = manager.getRepository(BaseProductSku)
+    const auditSkuChanges: Array<{ skuId: string; oldSkuCode: string; newSkuCode: string }> = []
+    const updatedSkus: BaseProductSku[] = []
+
+    for (const sku of currentSkus) {
+      const specValues = normalizeSpecValuesKeys(parseSpecValuesJson(sku.specValuesJson))
+      const variantCode = await resolveVariantCode(manager, savedProduct.id, specValues[VARIANT_AXIS_SPEC_KEY])
+      const sizeCode = await resolveSizeCode(manager, savedProduct.id, specValues[SIZE_AXIS_SPEC_KEY])
+      const oldSkuCode = sku.skuCode
+      const newSkuCode = formatSkuCode(newProductCode, variantCode, sizeCode)
+
+      // 旧标签救济：旧 skuCode 无条件写入 legacySkuCode（历史编码理论上可能重复，不受唯一约束限制），
+      // 供 lookupByCode 第三路匹配，让已打印的旧标签仍可扫描；barcode（原厂条码）不再被本流程改动。
+      sku.legacySkuCode = oldSkuCode
+      sku.variantCode = variantCode
+      sku.sizeCode = sizeCode
+      sku.skuCode = newSkuCode
+      updatedSkus.push(sku)
+      auditSkuChanges.push({ skuId: String(sku.id), oldSkuCode, newSkuCode })
+    }
+
+    // 保存前做跨列冲突校验：新编码不能撞上其他商品 SKU 的原厂条码或编码，否则扫码会指向错商品。
+    // 抛错会回滚本事务内已执行的 product / registry 写入，不会落下半成品数据。
+    await this.assertNoUpgradeCodeConflict(
+      manager,
+      savedProduct.id,
+      newProductCode,
+      updatedSkus.map((sku) => ({ skuId: String(sku.id), newSkuCode: sku.skuCode })),
+    )
+
+    if (updatedSkus.length) {
+      await skuRepo.save(updatedSkus)
+    }
+
+    // 审计：只记编码映射，不落任何敏感值（价格、库存、条码等均不写入）。
+    await auditService.record({
+      actionType: 'product.yz_code_upgrade',
+      actionLabel: batch ? '批量升级存量商品为 YZ 编码' : '存量商品升级为 YZ 编码',
+      targetType: 'base_product',
+      targetId: savedProduct.id,
+      targetCode: newProductCode,
+      actor,
+      requestMeta,
+      detail: {
+        productId: savedProduct.id,
+        oldProductCode,
+        newProductCode,
+        skuCodeChanges: auditSkuChanges,
+        ...(batch ? { batch: true } : {}),
+      },
+    }, manager)
+
+    return { savedProduct, oldProductCode, newProductCode, skuCount: updatedSkus.length }
   }
 
   /**
@@ -1707,6 +1936,92 @@ export class ProductService {
       retiredSkuCount,
       blockingReason: blockedBeforeConflictCheck ?? codeConflictReason,
     }
+  }
+
+  /**
+   * 批量升级预检（只读）：按提交顺序为每个可升级商品预测连续的系列内序号，口径与 batchUpgradeProductsToYzCode
+   * 依次调用 allocateSeriesSeq 一致；不可升级的商品不占用预测序号，前端据此排除后再提交。
+   * 与单品预检一样不得调用任何会落库或消耗序号的方法。
+   */
+  async previewBatchProductYzUpgrade(input: ProductYzBatchUpgradeInput): Promise<ProductYzBatchUpgradePreview> {
+    const seriesTagId = this.normalizeSeriesTagIdInput(input?.primarySeriesTagId)
+    if (!seriesTagId) {
+      throw new BizError('请选择要升级到的文创系列', 400)
+    }
+    const orderedIds = this.normalizeBatchUpgradeIds(input?.ids)
+    const manager = AppDataSource.manager
+    const seriesTag = await this.loadSeriesTagForYzScheme(seriesTagId, manager)
+    const seriesCode = seriesTag.seriesCode as string
+    const prefix = await getProductCodePrefix(manager)
+    const products = await manager.getRepository(BaseProduct).find({ where: { id: In(orderedIds) } })
+    const productMap = new Map(products.map((product) => [normalizeEntityId(product.id), product]))
+
+    const items: ProductYzBatchUpgradePreviewItem[] = []
+    let lastPredictedSeq = 0
+    for (const id of orderedIds) {
+      const product = productMap.get(id)
+      if (!product) {
+        items.push({
+          productId: id, productName: '', oldProductCode: '', newProductCode: null, seriesSeq: null,
+          currentSkuCount: 0, retiredSkuCount: 0, skuChanges: [], eligible: false, blockingReason: '商品不存在，请刷新后重试',
+        })
+        continue
+      }
+      const base = {
+        productId: normalizeEntityId(product.id),
+        productName: product.productName,
+        oldProductCode: product.productCode,
+      }
+      if (product.codeScheme === 'yz') {
+        items.push({
+          ...base, newProductCode: null, seriesSeq: null, currentSkuCount: 0, retiredSkuCount: 0, skuChanges: [],
+          eligible: false, blockingReason: '已经使用 YZ 编码，无需升级',
+        })
+        continue
+      }
+      const [currentSkus, retiredSkuCount] = await Promise.all([
+        this.loadCurrentSkusForUpgrade(product.id, manager, false),
+        manager.getRepository(BaseProductSku).count({ where: { productId: product.id, isCurrent: false } }),
+      ])
+      const capacityBlockingReason = this.detectUpgradeCapacityBlockingReason(currentSkus)
+      if (capacityBlockingReason) {
+        items.push({
+          ...base, newProductCode: null, seriesSeq: null, currentSkuCount: currentSkus.length, retiredSkuCount, skuChanges: [],
+          eligible: false, blockingReason: capacityBlockingReason,
+        })
+        continue
+      }
+      const predictedSeq = await this.predictNextSeriesSeq(manager, seriesTag.id, seriesCode, prefix, lastPredictedSeq)
+      if (predictedSeq > 99) {
+        items.push({
+          ...base, newProductCode: null, seriesSeq: null, currentSkuCount: currentSkus.length, retiredSkuCount, skuChanges: [],
+          eligible: false, blockingReason: '该系列可用序号已耗尽（1-99 均已被占用），无法继续升级',
+        })
+        continue
+      }
+      const newProductCode = formatProductCode(prefix, seriesCode, predictedSeq)
+      const skuChanges = await this.simulateUpgradeSkuChanges(product.id, currentSkus, newProductCode, manager)
+      const conflictReason = await this.detectUpgradeCodeConflict(
+        manager,
+        product.id,
+        newProductCode,
+        skuChanges.map((change) => ({ skuId: change.skuId, newSkuCode: change.newSkuCode })),
+      )
+      if (conflictReason) {
+        // 冲突商品被排除后不会消耗这个序号，后续商品继续从同一位置预测。
+        items.push({
+          ...base, newProductCode: null, seriesSeq: null, currentSkuCount: currentSkus.length, retiredSkuCount, skuChanges: [],
+          eligible: false, blockingReason: conflictReason,
+        })
+        continue
+      }
+      lastPredictedSeq = predictedSeq
+      items.push({
+        ...base, newProductCode, seriesSeq: predictedSeq, currentSkuCount: currentSkus.length, retiredSkuCount, skuChanges,
+        eligible: true, blockingReason: null,
+      })
+    }
+    return { seriesCode, items }
   }
 
   private async replaceProductTags(
@@ -3202,7 +3517,8 @@ export class ProductService {
    * previewProductYzUpgrade 据此判断序号是否已耗尽），不在本方法内抛错——预检失败应体现为
    * blockingReason 文案，而不是中断整个预检请求。
    */
-  private async predictNextSeriesSeq(manager: EntityManager, seriesTagId: string, seriesCode: string, prefix: string): Promise<number> {
+  /** afterSeq：批量预检时传入上一个已预测序号，保证批次内预测连续且与依次 allocateSeriesSeq 的结果一致。 */
+  private async predictNextSeriesSeq(manager: EntityManager, seriesTagId: string, seriesCode: string, prefix: string, afterSeq = 0): Promise<number> {
     const sequenceKey = `product_series_seq.${seriesTagId}`
     const sequence = await manager.getRepository(BusinessSequence).findOneBy({ sequenceKey })
     let candidate: number
@@ -3216,6 +3532,7 @@ export class ProductService {
         .getRawOne<{ maxSeq: string | number | null }>()
       candidate = Number(row?.maxSeq ?? 0) + 1
     }
+    candidate = Math.max(candidate, afterSeq + 1)
     const reservationRepo = manager.getRepository(BaseYzSeriesSeqReservation)
     const productRepo = manager.getRepository(BaseProduct)
     while (candidate <= 99) {
