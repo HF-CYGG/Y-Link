@@ -11,6 +11,7 @@ import { renderToString } from '@vue/server-renderer'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const sourcePath = path.join(root, 'src/views/inventory/components/BarcodeLabelPrintDialog.vue')
+const helperPath = path.join(root, 'src/views/inventory/components/barcode-label-print.helpers.ts')
 const outputRoot = path.join(root, 'tmp/coverage-vue-barcode')
 fs.mkdirSync(outputRoot, { recursive: true })
 
@@ -49,6 +50,11 @@ const output = path.join(outputRoot, 'BarcodeLabelPrintDialog-setup.mjs')
 await bundle.write({ file: output, format: 'esm', sourcemap: true })
 await bundle.close()
 const component = (await import(pathToFileURL(output).href)).default
+const helperBundle = await rolldown({ input: helperPath })
+const helperOutput = path.join(outputRoot, 'barcode-label-print-helpers.mjs')
+await helperBundle.write({ file: helperOutput, format: 'esm' })
+await helperBundle.close()
+const { getLabelContentFit } = await import(pathToFileURL(helperOutput).href)
 
 const renderer = createRenderer({
   createElement: (tag) => ({ tag, children: [], parent: null }),
@@ -214,6 +220,81 @@ test('没有生成条码图及原厂值时阻断打印并指出对应标签', as
   assert.equal(calls.loading, 0, '本地校验不得请求标签数据')
 })
 
+test('手动 30×20 是唯一纸张尺寸，长旧编码生成及打印不得反写尺寸', async () => {
+  await withBrowser(async (browser) => {
+    const { state, unmount } = await mountSetup([], true)
+    try {
+      state.labelWidthModel.value = 30
+      state.labelHeightModel.value = 20
+      state.settings.barcodeSource = 'sku_code'
+      const values = ['P-260420-0008-SKU-1', 'P-260420-0007-SKU-1-2', 'P-260420-0003-DEFAULT']
+      state.labels.value = values.map((value) => testLabel(value))
+      await state.renderBarcodes()
+      await nextTick()
+      assert.deepEqual([state.labelWidthModel.value, state.labelHeightModel.value], [30, 20])
+      assert.deepEqual(state.thermalStyle.value, { width: '30mm', height: '20mm' })
+      assert.equal(state.printBlockedReason.value, '')
+      await state.handlePrint()
+      assert.equal(browser.printed.length, 1)
+      assert.match([...browser.styles.values()][0].textContent, /@page \{ size: 30mm 20mm; margin: 0; \}/)
+      assert.deepEqual([state.settings.labelWidthMm, state.settings.labelHeightMm], [30, 20])
+    } finally { unmount() }
+  })
+})
+
+test('首选字号旧存储默认 9pt，4–24pt 只影响内部字号且打印持久化', async () => {
+  await withBrowser(async (browser) => {
+    browser.saved.set('y-link:barcode-label-settings', JSON.stringify({
+      template: 'thermal', labelWidthMm: 30, labelHeightMm: 20, fontSizePt: 99,
+    }))
+    const { state, unmount } = await mountSetup([], true)
+    try {
+      assert.equal(state.settings.fontSizePt, 9)
+      state.settings.barcodeSource = 'sku_code'
+      const label = testLabel('P-260420-0008-SKU-1')
+      state.labels.value = [label]
+      await state.renderBarcodes()
+      const baseline = getLabelContentFit(state.settings).scale
+      state.fontSizeModel.value = 4
+      assert.equal(state.settings.fontSizePt, 4)
+      assert.ok(getLabelContentFit(state.settings).scale <= 4 / 9)
+      assert.ok(getLabelContentFit(state.settings).scale <= baseline)
+      state.fontSizeModel.value = 24
+      assert.equal(state.settings.fontSizePt, 24)
+      assert.ok(getLabelContentFit(state.settings).scale <= 24 / 9)
+      assert.deepEqual([state.settings.labelWidthMm, state.settings.labelHeightMm], [30, 20])
+      await state.handlePrint()
+      assert.equal(browser.printed.length, 1)
+      assert.match([...browser.styles.values()][0].textContent, /size: 30mm 20mm/)
+      assert.equal(JSON.parse(browser.saved.get('y-link:barcode-label-settings')).fontSizePt, 24)
+    } finally { unmount() }
+  })
+})
+
+test('数字清空编辑暂态不改纸张与 A4 排版，失焦同步显示真实约束值', async () => {
+  await withBrowser(async () => {
+    const { state, unmount } = await mountSetup()
+    try {
+      state.labelWidthModel.value = null
+      assert.equal(state.settings.labelWidthMm, 40)
+      state.commitNumberDraft('labelWidthMm')
+      assert.equal(state.settings.labelWidthMm, 40)
+      assert.equal(state.inputRevision.labelWidthMm, 1)
+      state.settings.template = 'a4'
+      state.labelWidthModel.value = 50
+      assert.equal(state.settings.columns, 3)
+      state.rowsModel.value = 9
+      assert.equal(state.settings.rows, 8)
+      state.commitNumberDraft('rows')
+      assert.equal(state.inputRevision.rows, 1)
+      state.fontSizeModel.value = null
+      state.commitNumberDraft('fontSizePt')
+      assert.equal(state.settings.fontSizePt, 9)
+      assert.equal(state.inputRevision.fontSizePt, 1)
+    } finally { unmount() }
+  })
+})
+
 test('打印数量与 A4 版式越界分别阻断，预览和分页只复制已生成的标签', async () => {
   const state = await setup()
   const label = { skuCode: 'WC02001', barcode: 'WC02001', factoryBarcode: '' }
@@ -345,6 +426,7 @@ test('失焦后的打印回退仅在重新可见且聚焦时清理，关闭和�
       browser.document.visibilityState = 'visible'
       props.modelValue = true
       await nextTick()
+      readyToPrint(state)
       await state.handlePrint()
       assert.equal(browser.printed.length, 2)
       oldAfterPrint()
@@ -439,7 +521,7 @@ test('真实 SVG 生成复用重复条码，并将空原厂码和生成异常列
   })
 })
 
-test('真实长条码被密度门槛阻断，YZ 详情标签可通过隐藏附加字段恢复净高', async () => {
+test('长条码密度只警告，四模板字段增多时保持手动高度', async () => {
   await withBrowser(async () => {
     const { state, unmount } = await mountSetup()
     try {
@@ -450,8 +532,9 @@ test('真实长条码被密度门槛阻断，YZ 详情标签可通过隐藏附�
       await state.renderBarcodes()
       assert.match(state.barcodeSvgMap.value[longValue], /^<svg/)
       assert.ok(state.barcodeModuleMap.value[longValue] > 100)
-      assert.match(state.barcodeDensityError.value, /条码每模块/)
-      assert.match(state.printBlockedReason.value, /低于.*保守阈值/)
+      assert.match(state.barcodeDensityWarning.value, /条码每模块/)
+      state.settings.showCode = false
+      assert.equal(state.printBlockedReason.value, '')
 
       state.labels.value = [testLabel('WC02005', 'FACTORY-5')]
       await state.renderBarcodes()
@@ -461,12 +544,7 @@ test('真实长条码被密度门槛阻断，YZ 详情标签可通过隐藏附�
       state.settings.showLocation = true
       state.settings.showPrintDate = true
       await nextTick()
-      assert.match(state.labelLayoutError.value, /条码区/)
-      assert.match(state.printBlockedReason.value, /至少需要 8 毫米/)
-      state.settings.showPrice = false
-      state.settings.showLocation = false
-      assert.match(state.labelLayoutError.value, /条码区/, '仅保留日期时净高仍不足')
-      state.settings.showPrintDate = false
+      assert.equal(state.settings.labelHeightMm, 20)
       assert.equal(state.labelLayoutError.value, '')
       assert.equal(state.printBlockedReason.value, '')
 
@@ -474,13 +552,398 @@ test('真实长条码被密度门槛阻断，YZ 详情标签可通过隐藏附�
       state.settings.labelHeightMm = 23
       state.settings.showLocation = true
       await nextTick()
-      assert.match(state.labelLayoutError.value, /条码区/, '旧模板显示库位时需预留页脚高度')
-      state.settings.showLocation = false
+      assert.equal(state.settings.labelHeightMm, 23)
       assert.equal(state.labelLayoutError.value, '')
-      state.settings.showPrice = true
-      assert.match(state.labelLayoutError.value, /条码区/, '旧模板显示售价时同样占用页脚高度')
+      assert.equal(state.settings.showLocation, true)
     } finally {
       unmount()
     }
+  })
+})
+
+test('批次最长 SKU 完成生成后保持手动尺寸，并同步预览与打印纸张', async () => {
+  await withBrowser(async (browser) => {
+    const { state, unmount } = await mountSetup([], true)
+    try {
+      state.settings.barcodeSource = 'sku_code'
+      state.labels.value = [testLabel('P-260420-0008-SKU-1'), testLabel('P-260420-0008-SKU-12')]
+      await state.renderBarcodes()
+      await nextTick()
+      assert.equal(state.settings.labelWidthMm, 40)
+      assert.deepEqual(state.thermalStyle.value, { width: '40mm', height: '30mm' })
+      assert.match(state.barcodeDensityWarning.value, /低于.*保守阈值/)
+      assert.equal(state.printBlockedReason.value, '')
+      await state.handlePrint()
+      assert.equal(browser.printed.length, 1)
+      assert.match([...browser.styles.values()][0].textContent, /@page \{ size: 40mm 30mm; margin: 0; \}/)
+    } finally {
+      unmount()
+    }
+  })
+})
+
+test('A4 长码不改变手动宽高，仅在版式越界时减少列数', async () => {
+  await withBrowser(async () => {
+    const { state, unmount } = await mountSetup()
+    try {
+      state.settings.template = 'a4'
+      state.settings.barcodeSource = 'sku_code'
+      state.labels.value = [testLabel('P-260420-0008-SKU-12')]
+      await state.renderBarcodes()
+      await nextTick()
+      assert.equal(state.settings.labelWidthMm, 40)
+      assert.equal(state.settings.columns, 3)
+      assert.equal(state.a4LayoutError.value, '')
+      assert.deepEqual(state.a4GridStyle.value, {
+        gridTemplateColumns: 'repeat(3, 40mm)', gridTemplateRows: 'repeat(8, 30mm)',
+      })
+      state.labelWidthModel.value = 70
+      assert.equal(state.settings.columns, 2)
+      assert.match(state.autoLayoutNotice.value, /2 列/)
+    } finally {
+      unmount()
+    }
+  })
+})
+
+test('过长可读文字与密度只提示，隐藏文字仍保留原条码', async () => {
+  await withBrowser(async () => {
+    const { state, unmount } = await mountSetup()
+    try {
+      state.settings.barcodeSource = 'sku_code'
+      state.labels.value = [testLabel('A'.repeat(64))]
+      await state.renderBarcodes()
+      await nextTick()
+      assert.equal(state.settings.labelWidthMm, 40)
+      assert.equal(state.printBlockedReason.value, '')
+      assert.match(state.barcodeTextWarning.value, /完整编码文字.*基本可读建议/)
+      state.settings.showCode = false
+      assert.equal(state.printBlockedReason.value, '')
+      assert.match(state.barcodeDensityWarning.value, /保守阈值/)
+    } finally {
+      unmount()
+    }
+  })
+})
+
+test('旧本机设置默认显示可读编码，隐藏仅改变版式不改变实际编码', async () => {
+  await withBrowser(async (browser) => {
+    browser.saved.set('y-link:barcode-label-settings', JSON.stringify({ template: 'thermal', labelHeightMm: 23 }))
+    const { state, unmount } = await mountSetup()
+    try {
+      assert.equal(state.settings.showCode, true)
+      const label = testLabel('WC02001')
+      state.settings.barcodeSource = 'sku_code'
+      state.labels.value = [label]
+      state.barcodeSvgMap.value = { WC02001: '<svg />' }
+      state.barcodeModuleMap.value = { WC02001: 101 }
+      assert.equal(state.settings.labelHeightMm, 23)
+      assert.equal(state.labelLayoutError.value, '')
+      state.settings.showCode = false
+      assert.equal(state.encodedTextFor(label), 'WC02001')
+      assert.equal(state.barcodeSvgFor(label), '<svg />')
+      assert.equal(state.labelLayoutError.value, '')
+    } finally {
+      unmount()
+    }
+  })
+})
+
+test('小热敏标签保持全字段及纸高，显示开关只改变内部条码净高', async () => {
+  const state = await setup()
+  state.settings.template = 'thermal'
+  state.settings.labelWidthMm = 30
+  state.settings.labelHeightMm = 20
+  state.settings.barcodeSource = 'sku_code'
+  state.settings.showSpec = true
+  state.settings.showPrice = true
+  state.settings.showCode = true
+  assert.equal(state.labelLayoutError.value, '')
+  const fullHeight = getLabelContentFit(state.settings).graphicHeightMm
+  state.settings.showCode = false
+  assert.equal(state.labelLayoutError.value, '')
+  assert.ok(getLabelContentFit(state.settings).graphicHeightMm >= fullHeight)
+  state.settings.showSpec = false
+  assert.equal(state.labelLayoutError.value, '')
+  assert.deepEqual([state.settings.labelWidthMm, state.settings.labelHeightMm], [30, 20])
+})
+
+test('手工缩小和放大宽度均保持原值，条码密度风险不能反写输入', async () => {
+  await withBrowser(async () => {
+    const { state, unmount } = await mountSetup()
+    try {
+      state.settings.barcodeSource = 'sku_code'
+      state.labels.value = [testLabel('P-260420-0008-SKU-1')]
+      await state.renderBarcodes()
+      assert.equal(state.settings.labelWidthMm, 40)
+      state.labelWidthModel.value = 40
+      assert.equal(state.settings.labelWidthMm, 40)
+      state.labelWidthModel.value = 70
+      assert.equal(state.settings.labelWidthMm, 70)
+      state.labelWidthModel.value = 30
+      assert.equal(state.settings.labelWidthMm, 30)
+      assert.match(state.barcodeDensityWarning.value, /保守阈值/)
+    } finally {
+      unmount()
+    }
+  })
+})
+
+test('隐藏可读编码时长数字码保持尺寸和原条形编码', async () => {
+  await withBrowser(async () => {
+    const { state, unmount } = await mountSetup()
+    try {
+      state.settings.barcodeSource = 'sku_code'
+      state.settings.showCode = false
+      state.labels.value = [testLabel('123456789012345678901234567890')]
+      await state.renderBarcodes()
+      assert.equal(state.settings.labelWidthMm, 40)
+      assert.equal(state.printBlockedReason.value, '')
+      assert.match(state.barcodeSvgMap.value['123456789012345678901234567890'], /^<svg/)
+    } finally {
+      unmount()
+    }
+  })
+})
+
+test('显示完整长数字码时收缩人眼字体而非纸宽', async () => {
+  await withBrowser(async () => {
+    const { state, unmount } = await mountSetup()
+    try {
+      state.settings.barcodeSource = 'sku_code'
+      state.labels.value = [testLabel('123456789012345678901234567890')]
+      await state.renderBarcodes()
+      assert.equal(state.settings.labelWidthMm, 40)
+      assert.equal(state.settings.labelHeightMm, 30)
+      assert.equal(state.printBlockedReason.value, '')
+    } finally {
+      unmount()
+    }
+  })
+})
+
+test('切换到 YZ 模板先更新默认来源，不按迟到的旧原厂模块扩宽', async () => {
+  await withBrowser(async () => {
+    const { state, unmount } = await mountSetup()
+    try {
+      const label = { ...testLabel('WC02001', 'FACTORY-' + 'A'.repeat(28)), barcode: 'FACTORY-' + 'A'.repeat(28) }
+      state.labels.value = [label]
+      state.settings.template = 'yz-full'
+      assert.equal(state.settings.barcodeSource, 'sku_code', '模板切换需先确定新编码来源')
+      state.barcodeModuleMap.value = { [label.factoryBarcode]: 420 }
+      assert.equal(state.settings.labelWidthMm, 40, '迟到的旧原厂模块不得再扩大新模板')
+      await state.renderBarcodes()
+      assert.equal(state.settings.labelWidthMm, 40)
+    } finally {
+      unmount()
+    }
+  })
+})
+
+test('手动选择原厂条码后切换 YZ 模板仍保留原厂值和手动尺寸', async () => {
+  await withBrowser(async () => {
+    const { state, unmount } = await mountSetup()
+    try {
+      state.settings.barcodeSource = 'factory_barcode'
+      state.settings.template = 'yz-compact'
+      assert.equal(state.settings.barcodeSource, 'factory_barcode')
+      state.labels.value = [testLabel('WC02001', 'FACTORY-' + 'A'.repeat(28))]
+      await state.renderBarcodes()
+      assert.equal(state.settings.labelWidthMm, 40)
+      assert.equal(state.encodedTextFor(state.labels.value[0]), 'FACTORY-' + 'A'.repeat(28))
+      assert.equal(state.printBlockedReason.value, '')
+    } finally {
+      unmount()
+    }
+  })
+})
+
+test('30×20 热敏全字段在固定纸张内适配，打印纸型仍为 30×20', async () => {
+  await withBrowser(async (browser) => {
+    const { state, unmount } = await mountSetup([], true)
+    try {
+      state.settings.barcodeSource = 'sku_code'
+      state.settings.labelWidthMm = 30
+      state.settings.labelHeightMm = 20
+      state.settings.showSpec = true
+      state.settings.showCode = true
+      state.settings.showPrice = true
+      state.labels.value = [testLabel('WC02001')]
+      await state.renderBarcodes()
+      await nextTick()
+      assert.deepEqual([state.settings.labelWidthMm, state.settings.labelHeightMm], [30, 20])
+      assert.deepEqual([state.settings.showSpec, state.settings.showCode, state.settings.showPrice], [true, true, true])
+      assert.equal(state.labelLayoutError.value, '')
+      assert.equal(state.printBlockedReason.value, '')
+      assert.ok(getLabelContentFit(state.settings).graphicHeightMm >= 8)
+      await state.handlePrint()
+      assert.equal(browser.printed.length, 1)
+      assert.match([...browser.styles.values()][0].textContent,
+        new RegExp(`size: ${state.settings.labelWidthMm}mm ${state.settings.labelHeightMm}mm`))
+    } finally { unmount() }
+  })
+})
+
+test('四模板保留全部字段，以内部缩放适配 30×20 纸张', async () => {
+  await withBrowser(async () => {
+    const { state, unmount } = await mountSetup()
+    try {
+      state.labels.value = [testLabel('WC02001')]
+      state.settings.barcodeSource = 'sku_code'
+      for (const template of ['thermal', 'a4', 'yz-full', 'yz-compact']) {
+        state.settings.template = template
+        state.settings.showSpec = true
+        state.settings.showCode = true
+        state.settings.showPrice = true
+        state.settings.showLocation = true
+        state.settings.showPrintDate = true
+        state.settings.labelWidthMm = 30
+        state.settings.labelHeightMm = 20
+        await state.renderBarcodes()
+        assert.equal(state.labelLayoutError.value, '', template)
+        assert.deepEqual([state.settings.labelWidthMm, state.settings.labelHeightMm], [30, 20], template)
+        assert.ok(getLabelContentFit(state.settings).graphicHeightMm >= 2, template)
+        assert.deepEqual([state.settings.showSpec, state.settings.showCode, state.settings.showPrice,
+          state.settings.showLocation, state.settings.showPrintDate], [true, true, true, true, true])
+      }
+    } finally { unmount() }
+  })
+})
+
+test('A4 手工和旧存储越界均自动减少行列，宽度未改变也修正', async () => {
+  await withBrowser(async (browser) => {
+    browser.saved.set('y-link:barcode-label-settings', JSON.stringify({
+      template: 'a4', labelWidthMm: 50, labelHeightMm: 30, columns: 6, rows: 16,
+    }))
+    const { state, unmount } = await mountSetup()
+    try {
+      assert.equal(state.settings.columns, 3)
+      assert.equal(state.settings.rows, 8)
+      assert.equal(state.a4LayoutError.value, '')
+      state.settings.columns = 6
+      state.settings.rows = 16
+      assert.equal(state.settings.columns, 3)
+      assert.equal(state.settings.rows, 8)
+      assert.match(state.autoLayoutNotice.value, /3 列 × 8 行/)
+    } finally { unmount() }
+  })
+})
+
+test('清空和更换 skuIds 时立即丢弃旧批次，迟到请求不可恢复旧标签', async () => {
+  await withBrowser(async () => {
+    let resolveFirst
+    let resolveSecond
+    loadResult = () => new Promise((resolve) => {
+      if (!resolveFirst) resolveFirst = resolve
+      else resolveSecond = resolve
+    })
+    const { state, props, unmount } = await mountSetup(['old'], true)
+    try {
+      props.skuIds = ['new']
+      await nextTick()
+      assert.deepEqual(state.labels.value, [])
+      resolveSecond([testLabel('NEW')])
+      await nextTick()
+      resolveFirst([testLabel('OLD')])
+      await nextTick()
+      await nextTick()
+      assert.deepEqual(state.labels.value.map((label) => label.skuCode), ['NEW'])
+      props.skuIds = []
+      await nextTick()
+      assert.deepEqual(state.labels.value, [])
+      assert.match(state.printBlockedReason.value, /没有可打印的标签/)
+    } finally { loadResult = async () => []; unmount() }
+  })
+})
+
+test('条码来源切换后迟到 SVG 生成不得混入新来源', async () => {
+  await withBrowser(async () => {
+    const { state, unmount } = await mountSetup()
+    try {
+      state.labels.value = [testLabel('NEW', 'OLD')]
+      state.settings.barcodeSource = 'factory_barcode'
+      const oldRender = state.renderBarcodes()
+      state.settings.barcodeSource = 'sku_code'
+      const newRender = state.renderBarcodes()
+      await Promise.all([oldRender, newRender])
+      assert.equal(state.barcodeSvgMap.value.OLD, undefined)
+      assert.match(state.barcodeSvgMap.value.NEW, /^<svg/)
+    } finally { unmount() }
+  })
+})
+
+test('准备打印到 nextTick 期间切换批次，旧打印会话不得调用 print', async () => {
+  await withBrowser(async (browser) => {
+    loadResult = async () => []
+    const { state, props, unmount } = await mountSetup(['old'], true)
+    try {
+      await state.loadLabels()
+      readyToPrint(state)
+      const pending = state.handlePrint()
+      props.skuIds = ['new']
+      await pending
+      assert.equal(browser.printed.length, 0)
+      assert.equal(state.printing.value, false)
+      assert.deepEqual(state.labels.value, [])
+      assert.equal(browser.styles.size, 0)
+    } finally { unmount() }
+  })
+})
+
+test('截图多类长旧编码混短 SKU，所有条码保留原值且不改尺寸份数', async () => {
+  await withBrowser(async () => {
+    const { state, unmount } = await mountSetup()
+    try {
+      state.settings.barcodeSource = 'sku_code'
+      state.settings.copies = 2
+      const values = ['WC02001', 'P-260420-0008-SKU-1', 'P-260420-0007-SKU-1-2', 'P-260420-0003-DEFAULT']
+      state.labels.value = values.map((value) => testLabel(value))
+      await state.renderBarcodes()
+      assert.equal(state.settings.labelWidthMm, 40)
+      assert.equal(state.totalLabelCount.value, 8)
+      assert.equal(state.settings.copies, 2)
+      assert.equal(state.printBlockedReason.value, '')
+      for (const value of values) assert.match(state.barcodeSvgMap.value[value], /^<svg/)
+    } finally { unmount() }
+  })
+})
+
+test('父组件直接卸载时，迟到成功或失败请求均不回填、不弹旧错误', async () => {
+  await withBrowser(async () => {
+    for (const outcome of ['success', 'failure']) {
+      let settle
+      loadResult = () => new Promise((resolve, reject) => { settle = outcome === 'success' ? resolve : reject })
+      const { state, unmount } = await mountSetup(['old'], true)
+      const errorsBefore = calls.errors.length
+      unmount()
+      if (outcome === 'success') settle([testLabel('OLD')])
+      else settle(new Error('过期请求失败'))
+      await nextTick()
+      assert.deepEqual(state.labels.value, [])
+      assert.equal(state.loading.value, false)
+      assert.equal(calls.errors.length, errorsBefore)
+    }
+    loadResult = async () => []
+  })
+})
+
+test('父组件传入内容相同的新 skuIds 数组不重载，也不取消正在打印的会话', async () => {
+  await withBrowser(async (browser) => {
+    loadResult = async () => [testLabel('WC02001')]
+    const { state, props, unmount } = await mountSetup(['same'], true)
+    try {
+      await state.loadLabels()
+      assert.equal(state.printBlockedReason.value, '')
+      await state.handlePrint()
+      assert.equal(browser.printed.length, 1)
+      const loadsBefore = calls.loading
+      const labelsBefore = state.labels.value
+      props.skuIds = ['same']
+      await nextTick()
+      assert.equal(calls.loading, loadsBefore)
+      assert.equal(state.printing.value, true)
+      assert.equal(state.labels.value, labelsBefore)
+      assert.equal(browser.styles.size, 1)
+    } finally { loadResult = async () => []; unmount() }
   })
 })
