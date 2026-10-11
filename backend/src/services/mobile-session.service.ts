@@ -35,6 +35,7 @@ import { persistentRiskStateService } from './persistent-risk-state.service.js'
 import { notificationService } from './notification.service.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
+import { toSafeErrorLog } from '../utils/safe-error-log.js'
 
 const ACCESS_ACTIVITY_WRITE_INTERVAL_MS = 60 * 1000
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000
@@ -1030,8 +1031,11 @@ export class MobileSessionService {
   private startCleanupTimer() {
     if (databaseOperationGate.isFrozen() || this.cleanupLoopTimer) return
     this.cleanupLoopTimer = globalThis.setInterval(() => {
-      void this.runCleanupCycle().catch(() => undefined)
+      void this.runCleanupCycle().catch((error) => {
+        console.error('[mobile-session] 后台过期会话清理周期失败', toSafeErrorLog(error))
+      })
     }, CLEANUP_INTERVAL_MS)
+    this.cleanupLoopTimer.unref?.()
   }
 
   async stopCleanupLoop(): Promise<void> {

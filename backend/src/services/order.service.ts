@@ -292,6 +292,31 @@ const normalizeDecimalText = (value: string | number | null | undefined, fallbac
   return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : fallback
 }
 
+/**
+ * 解析列表筛选的本地日期（YYYY-MM-DD）：
+ * - 数据库按 UTC 存储 created_at，若直接用 "YYYY-MM-DD 23:59:59" 字符串比较，会按 UTC 日切分，在 TZ=Asia/Shanghai 下整体偏移 8 小时；
+ * - 统一转为服务器本地零点的 Date 交给驱动转换，口径与库存流水、报表、工作台保持一致；
+ * - 日越界（如 02-31）会被 Date 静默进位，这里回写比对后拒绝，避免悄悄查错区间。
+ */
+const parseOrderListDateStart = (value: string, label: string): Date => {
+  const normalized = value.trim()
+  const parsed = /^\d{4}-\d{2}-\d{2}$/.test(normalized) ? new Date(`${normalized}T00:00:00`) : new Date(Number.NaN)
+  const roundTrip = Number.isNaN(parsed.getTime())
+    ? ''
+    : `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, '0')}-${String(parsed.getDate()).padStart(2, '0')}`
+  if (roundTrip !== normalized) {
+    throw new BizError(`${label}格式不正确，应为有效的 YYYY-MM-DD 日期`, 400)
+  }
+  return parsed
+}
+
+const resolveNextLocalDayStart = (date: Date): Date => {
+  const nextDay = new Date(date.getTime())
+  // 用 setDate 而不是 +86400000，夏令时切换日也能落在次日本地零点。
+  nextDay.setDate(nextDay.getDate() + 1)
+  return nextDay
+}
+
 const normalizeDateTime = (value: Date | string): string => {
   return value instanceof Date ? value.toISOString() : String(value)
 }
@@ -482,22 +507,26 @@ export class OrderService {
       qb.andWhere('order.orderType = :orderType', { orderType: query.orderType })
     }
     if (query.startDate || query.endDate) {
-      const endDate = query.endDate ? query.endDate + ' 23:59:59' : null
+      // 起点为开始日本地零点（含），终点为结束日次日本地零点（不含），避免漏掉 23:59:59 之后的毫秒。
+      const startDate = query.startDate ? parseOrderListDateStart(query.startDate, '开始日期') : null
+      const endDateExclusive = query.endDate
+        ? resolveNextLocalDayStart(parseOrderListDateStart(query.endDate, '结束日期'))
+        : null
       const rootDateConditions = [
-        query.startDate ? 'order.createdAt >= :startDate' : null,
-        endDate ? 'order.createdAt <= :endDate' : null,
+        startDate ? 'order.createdAt >= :startDate' : null,
+        endDateExclusive ? 'order.createdAt < :endDateExclusive' : null,
       ].filter((condition): condition is string => Boolean(condition))
       const childDateConditions = [
-        query.startDate ? 'child.created_at >= :startDate' : null,
-        endDate ? 'child.created_at <= :endDate' : null,
+        startDate ? 'child.created_at >= :startDate' : null,
+        endDateExclusive ? 'child.created_at < :endDateExclusive' : null,
       ].filter((condition): condition is string => Boolean(condition))
       qb.andWhere(new Brackets((dateQb) => {
         dateQb.where(`(${rootDateConditions.join(' AND ')})`, {
-          startDate: query.startDate,
-          endDate,
+          startDate,
+          endDateExclusive,
         }).orWhere(
           `EXISTS (SELECT 1 FROM order_merge_relation relation INNER JOIN biz_outbound_order child ON child.id = relation.source_order_id WHERE relation.parent_order_id = order.id AND ${childDateConditions.join(' AND ')})`,
-          { startDate: query.startDate, endDate },
+          { startDate, endDateExclusive },
         )
       }))
     }

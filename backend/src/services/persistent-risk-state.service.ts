@@ -25,6 +25,7 @@ import { databaseOperationGate } from '../database/operation-gate.js'
 import { AuthRiskState } from '../entities/auth-risk-state.entity.js'
 import { isRetryableTransactionLockError } from '../utils/database-errors.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
+import { toSafeErrorLog } from '../utils/safe-error-log.js'
 
 export interface PersistentFailureState {
   count: number
@@ -482,8 +483,11 @@ class PersistentRiskStateService {
       if (databaseMaintenanceModeService.isReadOnly()) {
         return
       }
-      void this.cleanupExpired().catch(() => undefined)
+      void this.cleanupExpired().catch((error) => {
+        console.error('[persistent-risk-state] 后台过期清理周期失败', toSafeErrorLog(error))
+      })
     }, CLEANUP_INTERVAL_MS)
+    this.cleanupLoopTimer.unref?.()
   }
 
   stopCleanupLoop(): void {

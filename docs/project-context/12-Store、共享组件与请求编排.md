@@ -36,6 +36,7 @@
 - 客户端 `client-auth.ts` 负责登录、注册、找回密码、会话恢复，并在退出或账号切换时清理购物车、目录和订单缓存。
 - `client-cart.ts` 以“现有库存 + 单人限购”为统一约束，并在目录刷新后尽量重映射商品和 SKU，而不是直接清空。
 - `useStableRequest.ts` 通过“只保留最后一次请求结果 + 自动中止旧请求”解决高频筛选和详情切换的竞态问题。
+  - 被新请求抢占的旧请求不会回调 `onFinally`（由新请求接管加载态）；页面失活、卸载或显式 `cancel()` 时会同步补调一次 `onFinally({ status: 'canceled' })`，keep-alive 页面无需再在 `onDeactivated` 里手工复位 loading。
 - `usePermissionAction.ts` 统一处理显隐、点击前权限拦截和越权提示。
 - 共享页面结构组件主要分三类：
   - 页面容器：`PageContainer`、`PageToolbarCard`、`PagePaginationBar`

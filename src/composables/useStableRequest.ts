@@ -4,7 +4,7 @@
  * 实现逻辑：
  * - 每次发起新请求前自动取消上一轮同类请求，避免慢请求晚返回时覆盖最新界面状态；
  * - 对成功、失败、取消和收尾阶段分别提供回调，让页面层按需编排加载态与提示逻辑；
- * - 在组件卸载或缓存页停用时主动中止未完成请求，减少无效网络占用与异步状态污染。
+ * - 在组件卸载或缓存页停用时主动中止未完成请求，并补调收尾回调复位加载态，减少无效网络占用与异步状态污染。
  */
 
 import { onBeforeUnmount, onDeactivated } from 'vue'
@@ -28,30 +28,47 @@ export const useStableRequest = () => {
   let activeController: AbortController | null = null
   // 自增请求编号用于解决“旧请求比新请求更晚返回”的乱序问题。
   let latestRequestId = 0
+  // 当前进行中请求的取消收尾：显式 cancel() 时必须补调一次 onFinally，否则页面 loading 会永久停留。
+  let pendingCancelFinalize: (() => void | Promise<void>) | null = null
 
   /**
    * 主动取消当前请求：
-   * - 路由切走、页面失活或发起更新请求前统一复用；
-   * - 只终止当前实例下的“同一类最新请求”，不影响其它独立请求通道。
+   * - 路由切走、页面失活或业务层显式中止时复用；
+   * - 只终止当前实例下的“同一类最新请求”，不影响其它独立请求通道；
+   * - 被取消的请求自身不会再走 finally 收尾，因此这里同步补调 onFinally({ status: 'canceled' })，
+   *   让 keep-alive 页面离开时复位加载态；必须同步执行，避免晚于紧随其后的新请求把 loading 改回 false。
    */
   const cancel = () => {
+    const finalize = pendingCancelFinalize
+    pendingCancelFinalize = null
     activeController?.abort()
     activeController = null
+    if (!finalize) {
+      return
+    }
+    try {
+      void Promise.resolve(finalize()).catch(() => undefined)
+    } catch {
+      // 收尾回调只负责复位页面状态，异常不能打断路由失活或组件卸载流程。
+    }
   }
 
   /**
    * 执行“仅保留最后一次结果”的异步任务：
    * - 成功、失败、取消的收尾时机由通用层统一处理；
-   * - 被新请求抢占或被手动取消的任务不会再触发页面提示与 loading 收尾，避免闪烁。
+   * - 被新请求抢占的任务不会再触发页面提示与 loading 收尾，避免闪烁；
+ * - 被显式 cancel()（含页面失活/卸载）的任务由 cancel 同步补调一次 onFinally({ status: 'canceled' })。
    */
   const runLatest = async <T>(options: RunLatestOptions<T>) => {
     latestRequestId += 1
     const requestId = latestRequestId
 
     // 发起新请求前先主动终止旧请求，避免相同页面上的多次筛选/切换并发回写。
+    // 被新请求抢占时不补调旧请求的 onFinally：新请求会接管加载态，提前复位反而会造成闪烁。
     activeController?.abort()
     const controller = new AbortController()
     activeController = controller
+    pendingCancelFinalize = options.onFinally ? () => options.onFinally?.({ status: 'canceled' }) : null
 
     let status: 'success' | 'error' | 'canceled' = 'canceled'
 
@@ -79,6 +96,7 @@ export const useStableRequest = () => {
       }
 
       activeController = null
+      pendingCancelFinalize = null
       await options.onFinally?.({ status })
     }
   }

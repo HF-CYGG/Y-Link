@@ -260,6 +260,12 @@ export const preloadRouteComponents = async (routeNames: RouteWarmupTarget[]) =>
 
       const warmupPromise = loader()
       warmedRoutePromises.set(routeName, warmupPromise)
+      // 预热失败（如发版后旧 chunk 404、弱网中断）不能永久占位，否则本会话内该路由再也不会被预热。
+      warmupPromise.catch(() => {
+        if (warmedRoutePromises.get(routeName) === warmupPromise) {
+          warmedRoutePromises.delete(routeName)
+        }
+      })
       return warmupPromise
     }),
   )

@@ -610,6 +610,27 @@ async function main() {
     }, '春秋 DST 切换日必须完整覆盖本地 00:00-次日 00:00，且排除次日单据')
     assert.equal(springDstReport.list[0]?.businessNo, springDstInside.order.businessNo)
     assert.equal(autumnDstReport.list[0]?.businessNo, autumnDstInside.order.businessNo)
+    // 出库单列表日期筛选必须与报表同口径：按服务器本地自然日 [00:00, 次日 00:00) 过滤，而不是按 UTC 字符串切日。
+    const [springDstOrderList, autumnDstOrderList] = await Promise.all([
+      orderService.list({ page: 1, pageSize: 20, startDate: '2024-03-10', endDate: '2024-03-10' }),
+      orderService.list({ page: 1, pageSize: 20, startDate: '2024-11-03', endDate: '2024-11-03' }),
+    ])
+    assert.deepEqual(
+      {
+        spring: springDstOrderList.list.map((item) => item.businessNo),
+        autumn: autumnDstOrderList.list.map((item) => item.businessNo),
+      },
+      {
+        spring: [springDstInside.order.businessNo],
+        autumn: [autumnDstInside.order.businessNo],
+      },
+      '出库单列表日期筛选必须覆盖本地 23:30 单据并排除次日 00:30 单据',
+    )
+    await assert.rejects(
+      () => orderService.list({ page: 1, pageSize: 20, startDate: '2024-02-31' }),
+      (error: unknown) => error instanceof BizError && error.statusCode === 400,
+      '出库单列表必须拒绝日越界的日期，不能静默进位查错区间',
+    )
 
     const dstMergeTarget = await createOrder('dst-merge-target', 5)
     const dstMergeSource = await createOrder('dst-merge-source', 6)

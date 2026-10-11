@@ -14,7 +14,7 @@
  */
 
 
-import { computed, onActivated, onBeforeUnmount, onDeactivated, ref, watch } from 'vue'
+import { computed, onActivated, ref, watch } from 'vue'
 import type { EChartsOption } from 'echarts'
 
 import { Document, Money } from '@element-plus/icons-vue'
@@ -209,20 +209,6 @@ const loadPieData = async () => {
     },
   })
 }
-
-/**
- * 失活与卸载时复位加载态：
- * - useStableRequest 的 cancel() 会把 activeController 置空，runLatest 随后判定当前请求已过期
- *   而直接返回，onFinally 不会被调用；
- * - 不复位的话，keep-alive 页面在请求未完成时离开，pieLoading 会永久为 true，三张饼图卡片
- *   会一直停在骨架屏，直到用户再次改动筛选条件。
- */
-const resetLoadingOnLeave = () => {
-  pieLoading.value = false
-}
-
-onDeactivated(resetLoadingOnLeave)
-onBeforeUnmount(resetLoadingOnLeave)
 
 /**
  * 重新进入 keep-alive 页面时兜底：

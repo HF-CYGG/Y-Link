@@ -74,6 +74,7 @@ import {
   normalizeDiscountRate,
   parseMoneyToCents,
 } from '../utils/discount-price.js'
+import { toSafeErrorLog } from '../utils/safe-error-log.js'
 
 /** 部门单到店取货时间允许的过去容差：覆盖客户端时钟偏差与提交网络耗时。 */
 const O2O_PICKUP_AT_PAST_TOLERANCE_MS = 5 * 60 * 1000
@@ -5001,8 +5002,12 @@ class O2oPreorderService {
       if (databaseMaintenanceModeService.isReadOnly()) {
         return
       }
-      void this.cancelTimeoutOrders({ skipRecentMs: O2O_TIMEOUT_RECYCLE_RECENT_WINDOW_MS }).catch(() => undefined)
+      void this.cancelTimeoutOrders({ skipRecentMs: O2O_TIMEOUT_RECYCLE_RECENT_WINDOW_MS }).catch((error) => {
+        // 回收失败意味着超时预订单占用的库存未释放，必须留下脱敏日志便于排查，而不是静默吞掉。
+        console.error('[o2o-timeout-recycle] 后台超时回收周期失败', toSafeErrorLog(error))
+      })
     }, O2O_TIMEOUT_BACKGROUND_RECYCLE_INTERVAL_MS)
+    this.timeoutRecycleLoopTimer.unref?.()
   }
 
   async stopTimeoutRecycleLoop(): Promise<void> {
