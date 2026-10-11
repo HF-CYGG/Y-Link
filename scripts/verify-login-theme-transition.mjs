@@ -118,8 +118,11 @@ async function startChrome() {
     '--no-proxy-server', '--remote-debugging-port=0', `--user-data-dir=${profileDir}`,
     'about:blank',
   ], { windowsHide: true, stdio: 'ignore' })
+  let chromeStartError
+  chrome.once('error', (error) => { chromeStartError = error })
   const portFile = join(profileDir, 'DevToolsActivePort')
   const port = await waitFor(async () => {
+    if (chromeStartError) throw chromeStartError
     if (chrome.exitCode !== null) throw new Error(`Chrome 提前退出：${chrome.exitCode}`)
     try { return Number((await readFile(portFile, 'utf8')).split('\n')[0]) } catch { return 0 }
   }, 'Chrome 调试端口')
@@ -458,7 +461,7 @@ try {
     page.close()
   }
 } finally {
-  if (chrome && chrome.exitCode === null) {
+  if (chrome?.pid && chrome.exitCode === null) {
     chrome.kill()
     await Promise.race([
       new Promise((resolvePromise) => chrome.once('close', resolvePromise)),
