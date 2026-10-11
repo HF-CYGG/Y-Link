@@ -8,13 +8,14 @@
  * 维护重点：列表附带引用计数，前端据此提示“已被使用”；新增字段需同步前端表单与导入模板。
  */
 
-import { Not, type EntityManager } from 'typeorm'
+import { In, Not, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { BaseCategory } from '../entities/base-category.entity.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { BaseProductSku } from '../entities/base-product-sku.entity.js'
 import { BaseStorageLocation } from '../entities/base-storage-location.entity.js'
+import { RelProductTag } from '../entities/rel-product-tag.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { isUniqueConstraintError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
@@ -58,6 +59,12 @@ export interface LocationView {
 export interface LocationSkuQuery {
   scope: 'assigned' | 'other'
   keyword: string
+  /** 分类 ID；'none' 表示只看未分类商品。 */
+  categoryId?: string
+  /** 商品标签 ID：商品关联了该标签即命中。 */
+  tagId?: string
+  /** 规格启停状态。 */
+  status?: 'active' | 'inactive'
   page: number
   pageSize: number
 }
@@ -66,6 +73,13 @@ export interface LocationSkuChange {
   action: 'assign' | 'remove'
   expectedLocationId: string | null
 }
+
+export interface LocationSkuBatchChange {
+  action: 'assign' | 'remove'
+  items: Array<{ skuId: string; expectedLocationId: string | null }>
+}
+
+const UNCATEGORIZED_FILTER = 'none'
 
 const CATEGORY_CODE_PATTERN = /^\d{2}$/
 const LOCATION_CODE_PATTERN = /^[A-Z0-9][A-Z0-9-]{0,31}$/
@@ -154,11 +168,34 @@ export class InventoryMasterDataService {
       .createQueryBuilder('sku')
       .innerJoin(BaseProduct, 'product', 'product.id = sku.productId')
       .leftJoin(BaseStorageLocation, 'location', 'location.id = sku.locationId')
+      .leftJoin(BaseCategory, 'category', 'category.id = product.categoryId')
       .where('sku.isCurrent = :isCurrent', { isCurrent: true })
     if (query.scope === 'assigned') {
       qb.andWhere('sku.locationId = :locationId', { locationId })
     } else {
       qb.andWhere('(sku.locationId IS NULL OR sku.locationId <> :locationId)', { locationId })
+    }
+    const categoryId = String(query.categoryId ?? '').trim()
+    if (categoryId === UNCATEGORIZED_FILTER) {
+      qb.andWhere('product.categoryId IS NULL')
+    } else if (categoryId) {
+      qb.andWhere('product.categoryId = :categoryId', { categoryId })
+    }
+    const tagId = String(query.tagId ?? '').trim()
+    if (tagId) {
+      // 用 EXISTS 子查询而不是 JOIN，避免一个商品挂多个标签时规格行重复、总数失真。
+      qb.andWhere((builder) => {
+        const subQuery = builder.subQuery()
+          .select('1')
+          .from(RelProductTag, 'rel')
+          .where('rel.productId = product.id')
+          .andWhere('rel.tagId = :tagId')
+          .getQuery()
+        return `EXISTS ${subQuery}`
+      }, { tagId })
+    }
+    if (query.status) {
+      qb.andWhere('sku.isActive = :skuActive', { skuActive: query.status === 'active' })
     }
     const keyword = query.keyword.trim()
     if (keyword) {
@@ -174,6 +211,7 @@ export class InventoryMasterDataService {
       .addSelect('sku.specText', 'specText')
       .addSelect('sku.locationId', 'locationId')
       .addSelect('location.locationCode', 'locationCode')
+      .addSelect('category.categoryName', 'categoryName')
       .addSelect('sku.isActive', 'isActive')
       .addSelect('sku.currentStock', 'currentStock')
       .orderBy('product.productName', 'ASC')
@@ -182,7 +220,8 @@ export class InventoryMasterDataService {
       .limit(query.pageSize)
       .getRawMany<{
         skuId: string; skuCode: string; productName: string; specText: string
-        locationId: string | null; locationCode: string | null; isActive: boolean | number; currentStock: number
+        locationId: string | null; locationCode: string | null; categoryName: string | null
+        isActive: boolean | number; currentStock: number
       }>()
     return {
       page: query.page,
@@ -195,6 +234,7 @@ export class InventoryMasterDataService {
         specText: row.specText,
         locationId: row.locationId == null ? null : String(row.locationId),
         locationCode: row.locationCode ?? null,
+        categoryName: row.categoryName ?? null,
         isActive: isEnabled(row.isActive),
         currentStock: Number(row.currentStock),
       })),
@@ -262,6 +302,99 @@ export class InventoryMasterDataService {
         },
       }, manager)
       return { skuId: String(sku.id), locationId: afterLocationId, locationCode: afterLocationId ? location.locationCode : null }
+    })
+  }
+
+  /**
+   * 批量移入/移出库位：整批在同一事务内校验并写入，任一规格的库位与读取时不一致即整批 409，避免部分成功。
+   * 锁序与单条关联一致：账号 → 商品（按 ID 升序）→ SKU（按 ID 升序）→ 库位。
+   */
+  async changeSkuLocations(
+    locationId: string,
+    input: LocationSkuBatchChange,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ): Promise<{ action: 'assign' | 'remove'; skuIds: string[]; updatedCount: number }> {
+    const expectedBySkuId = new Map<string, string | null>()
+    for (const item of input.items) {
+      const skuId = item.skuId.trim()
+      if (expectedBySkuId.has(skuId) && expectedBySkuId.get(skuId) !== item.expectedLocationId) {
+        throw new BizError('批量规格中存在重复且库位不一致的条目，请刷新后重试', 400)
+      }
+      expectedBySkuId.set(skuId, item.expectedLocationId)
+    }
+    const skuIds = [...expectedBySkuId.keys()].sort((left, right) => left.localeCompare(right))
+    if (!skuIds.length) throw new BizError('请至少选择一个规格', 400)
+
+    // 预读只用于定位商品，锁内必须重新核对归属。
+    const candidates = await AppDataSource.getRepository(BaseProductSku).find({ where: { id: In(skuIds) }, select: ['id', 'productId'] })
+    if (candidates.length !== skuIds.length) throw new BizError('部分商品规格不存在，请刷新后重试', 409)
+    const productIds = [...new Set(candidates.map((sku) => String(sku.productId)))].sort((left, right) => left.localeCompare(right))
+
+    return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const lockRows = manager.connection.options.type !== 'sqlite'
+      const productQuery = manager.getRepository(BaseProduct)
+        .createQueryBuilder('product')
+        .where('product.id IN (:...productIds)', { productIds })
+        .orderBy('product.id', 'ASC')
+      if (lockRows) productQuery.setLock('pessimistic_write')
+      const products = await productQuery.getMany()
+      if (products.length !== productIds.length) throw new BizError('部分商品不存在，请刷新后重试', 409)
+      const lockedProductIds = new Set(products.map((product) => String(product.id)))
+
+      const skuQuery = manager.getRepository(BaseProductSku)
+        .createQueryBuilder('sku')
+        .where('sku.id IN (:...skuIds)', { skuIds })
+        .orderBy('sku.id', 'ASC')
+      if (lockRows) skuQuery.setLock('pessimistic_write')
+      const skus = await skuQuery.getMany()
+      if (skus.length !== skuIds.length) throw new BizError('部分商品规格不存在，请刷新后重试', 409)
+      for (const sku of skus) {
+        if (!lockedProductIds.has(String(sku.productId)) || !isEnabled(sku.isCurrent)) {
+          throw new BizError(`商品规格 ${sku.skuCode} 不存在或已退役，请刷新后重试`, 409)
+        }
+        const beforeLocationId = sku.locationId == null ? null : String(sku.locationId)
+        if (beforeLocationId !== expectedBySkuId.get(String(sku.id))) {
+          throw new BizError(`商品规格 ${sku.skuCode} 的库位已变化，请刷新后重试`, 409)
+        }
+        if (input.action === 'remove' && beforeLocationId !== locationId) {
+          throw new BizError(`商品规格 ${sku.skuCode} 不属于当前库位，请刷新后重试`, 409)
+        }
+      }
+
+      // 库位锁在 SKU 锁之后，防止启停与新增关联并发穿透。
+      const location = await lockById(manager, BaseStorageLocation, locationId, '库位不存在')
+      const afterLocationId = input.action === 'assign' ? String(location.id) : null
+      const changedSkus = skus.filter((sku) => (sku.locationId == null ? null : String(sku.locationId)) !== afterLocationId)
+      if (afterLocationId && changedSkus.length && !isEnabled(location.isActive)) {
+        throw new BizError(`库位 ${location.locationCode} 已停用`, 400)
+      }
+
+      if (changedSkus.length) {
+        // 只更新默认库位列，绝不保存旧 SKU 实体快照中的库存或价格字段。
+        await manager.getRepository(BaseProductSku).update({ id: In(changedSkus.map((sku) => sku.id)) }, { locationId: afterLocationId })
+        // 逐条写审计，保持与单条关联相同的 actionType，按 SKU 追溯时不会漏掉批量操作。
+        for (const sku of changedSkus) {
+          await auditService.record({
+            actionType: 'product.location.update',
+            actionLabel: input.action === 'assign' ? '批量关联商品规格到库位' : '批量移出库位中的商品规格',
+            targetType: 'base_product_sku',
+            targetId: String(sku.id),
+            targetCode: sku.skuCode,
+            actor,
+            requestMeta,
+            detail: {
+              skuId: String(sku.id),
+              productId: String(sku.productId),
+              beforeLocationId: sku.locationId == null ? null : String(sku.locationId),
+              afterLocationId,
+              batch: true,
+            },
+          }, manager)
+        }
+      }
+      return { action: input.action, skuIds, updatedCount: changedSkus.length }
     })
   }
 
