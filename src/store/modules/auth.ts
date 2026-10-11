@@ -28,7 +28,6 @@ import {
 } from '@/api/modules/auth'
 import { resolvePostLoginWarmupTargets, scheduleRouteComponentWarmup } from '@/router/route-performance'
 import { clearPersistedAuthState, persistAuthState, readPersistedAuthState } from '@/utils/auth-storage'
-import { verifyAdminWebAuthnLogin } from '@/api/modules/admin-webauthn'
 import type { AuthenticationResponseJSON } from '@simplewebauthn/browser'
 
 /**
@@ -246,6 +245,7 @@ export const useAuthStore = defineStore('auth', () => {
 
   /** WebAuthn 验证成功即建立完整会话，不再进入 TOTP 第二步。 */
   const completeWebAuthnLogin = async (payload: { challengeId: string; response: AuthenticationResponseJSON }, signal?: AbortSignal) => {
+    const { verifyAdminWebAuthnLogin } = await import('@/api/modules/admin-webauthn')
     const result = await verifyAdminWebAuthnLogin(payload, { signal })
     if (signal?.aborted) return null
     setAuthState({ user: result.user, expiresAt: result.expiresAt })

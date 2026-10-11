@@ -8,6 +8,17 @@ import fs from 'node:fs'
 import ts from 'typescript'
 import { createMemoryHistory, createRouter, isNavigationFailure } from 'vue-router'
 
+const authStoreSource = fs.readFileSync('src/store/modules/auth.ts', 'utf8')
+const authStoreAst = ts.createSourceFile('auth.ts', authStoreSource, ts.ScriptTarget.Latest, true)
+assert.equal(
+  authStoreAst.statements.some((statement) =>
+    ts.isImportDeclaration(statement)
+    && !statement.importClause?.isTypeOnly
+    && statement.moduleSpecifier.text === '@/api/modules/admin-webauthn'),
+  false,
+  '共享认证 Store 不得静态加载仅在密钥登录时使用的 WebAuthn API',
+)
+
 const values = new Map()
 const storage = {
   getItem: (key) => values.get(key) ?? null,
@@ -255,6 +266,44 @@ try {
   assert.equal(authStore.isAuthenticated, true, '密码后实体密钥验证成功须进入统一登录态')
   authStore.clearAuthState({ resetInitialized: true })
   assert.equal(values.has('y-link.auth.user'), false)
+
+  const findStoreWebAuthnCompletion = (node) => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(authStoreAst) === 'completeWebAuthnLogin') return node
+    return ts.forEachChild(node, findStoreWebAuthnCompletion)
+  }
+  const storeWebAuthnCompletion = findStoreWebAuthnCompletion(authStoreAst)
+  assert.ok(storeWebAuthnCompletion?.initializer, '须测试真实 Store 的密钥登录动作')
+  const completionJavascript = ts.transpileModule(
+    `const completeWebAuthnLogin = ${storeWebAuthnCompletion.initializer.getText(authStoreAst).replace("import('@/api/modules/admin-webauthn')", 'loadTestWebAuthnApi()')};`,
+    { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } },
+  ).outputText
+  const makeWebAuthnCompletion = new Function('binding', `with (binding) { ${completionJavascript}; return completeWebAuthnLogin }`)
+  let moduleLoads = 0
+  let verifiedRequests = 0
+  const appliedSessions = []
+  let transitions = 0
+  const completion = makeWebAuthnCompletion({
+    loadTestWebAuthnApi: async () => {
+      moduleLoads += 1
+      if (moduleLoads === 1) throw new Error('密钥验证模块加载失败')
+      return { verifyAdminWebAuthnLogin: async () => { verifiedRequests += 1; return login } }
+    },
+    setAuthState: (session) => appliedSessions.push(session),
+    startPostLoginTransition: () => { transitions += 1 },
+  })
+  const completionPayload = { challengeId: 'retry-1', response: { id: 'key', rawId: 'key', type: 'public-key', response: {}, clientExtensionResults: {} } }
+  await assert.rejects(completion(completionPayload), /密钥验证模块加载失败/)
+  assert.equal(appliedSessions.length, 0, '动态模块加载失败不得建立登录态')
+  assert.equal(transitions, 0, '动态模块加载失败不得进入系统过渡态')
+  assert.equal((await completion(completionPayload))?.user.id, '1', '第二次尝试须重新加载模块并完成登录')
+  assert.equal(moduleLoads, 2, '不得缓存首次失败的模块加载 Promise')
+  assert.equal(verifiedRequests, 1)
+  assert.equal(appliedSessions.length, 1)
+  assert.equal(transitions, 1)
+  const abortedCompletion = new AbortController()
+  abortedCompletion.abort()
+  assert.equal(await completion(completionPayload, abortedCompletion.signal), null)
+  assert.equal(appliedSessions.length, 1, '最终请求被中止后不得写入登录态')
 
   const mfaSource = fs.readFileSync('src/components/account/AdminMfaDialog.vue', 'utf8')
   const mfaRecoveryInput = mfaSource.match(/<el-input\b(?=[^>]*v-model\.trim="form\.recoveryCode")[^>]*\/>/)?.[0]
@@ -916,6 +965,16 @@ try {
   const loginScript = loginSource.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)?.[1]
   assert.ok(loginScript)
   const loginAst = ts.createSourceFile('LoginView.ts', loginScript, ts.ScriptTarget.Latest, true)
+  const finalWebAuthnCalls = []
+  const collectFinalWebAuthnCalls = (node) => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+      && node.expression.expression.getText(loginAst) === 'authStore'
+      && node.expression.name.text === 'completeWebAuthnLogin') finalWebAuthnCalls.push(node)
+    ts.forEachChild(node, collectFinalWebAuthnCalls)
+  }
+  collectFinalWebAuthnCalls(loginAst)
+  assert.equal(finalWebAuthnCalls.length, 2, '条件式与主动密钥登录均须进入统一最终验证入口')
+  assert.ok(finalWebAuthnCalls.every((call) => call.arguments.length === 1), '最终验证不得复用会被离页/隐藏事件中止的选项请求 signal')
   const loginDeclaration = (name) => {
     for (const statement of loginAst.statements) {
       if (!ts.isVariableStatement(statement)) continue
@@ -1010,7 +1069,7 @@ try {
   const failingLogin = makeLoginHarness()
   const failing = failingLogin.actions.handleWebAuthnLogin()
   for (let i = 0; i < 6; i += 1) await Promise.resolve()
-  failingLogin.rejectVerify(new Error('验证失败'))
+  failingLogin.rejectVerify(new Error('密钥验证模块加载失败'))
   await failing
   assert.equal(failingLogin.binding.webAuthnVerifyPending.value, false, '验证失败后须释放路由守卫')
   await router.push('/client/login')
