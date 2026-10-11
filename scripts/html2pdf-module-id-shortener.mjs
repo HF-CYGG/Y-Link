@@ -14,6 +14,8 @@ const LITERAL_COUNT = 1457
 const ALPHABET = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
 
 const sha256 = (value) => createHash('sha256').update(value).digest('hex')
+// 与 Array.prototype.sort 的默认字符串次序一致，按 UTF-16 码元比较且不依赖系统区域设置。
+const compareUtf16Strings = (left, right) => (left < right ? -1 : left > right ? 1 : 0)
 
 const walk = (node, visit, parent = null, key = null) => {
   if (!node || typeof node !== 'object') return
@@ -55,7 +57,7 @@ const structuralHash = (node, reverse = new Map()) => {
     }
     if (value && typeof value === 'object') {
       digest.update('{')
-      for (const childKey of Object.keys(value).filter((item) => !['start', 'end', 'raw'].includes(item)).sort()) {
+      for (const childKey of Object.keys(value).filter((item) => !['start', 'end', 'raw'].includes(item)).sort(compareUtf16Strings)) {
         digest.update(`${childKey}:`)
         feed(value[childKey], value.type, childKey)
       }
@@ -95,7 +97,7 @@ export const validateHtml2pdfModuleIdClosure = (source) => {
   const registry = registries[0]
   assert.equal(registry.type, 'ObjectExpression', 'Webpack 模块表不再是静态对象')
   assert.equal(registryUses.length, 3, 'Webpack 模块表发生未知外泄或动态访问')
-  assert.deepEqual(registryUses.map((usage) => `${usage.parent?.type}.${usage.key}`).sort(),
+  assert.deepEqual(registryUses.map((usage) => `${usage.parent?.type}.${usage.key}`).sort(compareUtf16Strings),
     ['MemberExpression.object', 'MemberExpression.object', 'VariableDeclarator.id'])
 
   const moduleKeys = registry.properties.map((property) => {
@@ -108,7 +110,7 @@ export const validateHtml2pdfModuleIdClosure = (source) => {
   })
   assert.equal(moduleKeys.length, 307)
   assert.equal(new Set(moduleKeys).size, moduleKeys.length, '模块表存在重复键')
-  const targets = moduleKeys.filter((value) => value.startsWith('./node_modules/')).sort()
+  const targets = moduleKeys.filter((value) => value.startsWith('./node_modules/')).sort(compareUtf16Strings)
   assert.equal(targets.length, MODULE_COUNT)
   const originalValues = new Set(allLiterals.map(({ node }) => node.value))
   const idMap = new Map(targets.map((value, index) => [value, shortName(index)]))

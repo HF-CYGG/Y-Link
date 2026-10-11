@@ -26,6 +26,7 @@ test('缩名只改变封闭的 300 个内部模块 ID，保留外部 html2canvas
   assert.equal(report.directCalls, 1155)
   assert.equal(report.boundCalls, 2)
   assert.equal(report.savedBytes, 70032)
+  assert.equal(report.transformedSha256, '58d3bc47db10afc2a06e4eae3f236de532e3e14dc86c83c95355ee6463742b76')
   assert.ok(report.savedBytes > 60000)
   assert.ok(code.includes('require("html2canvas")'))
   assert.ok(code.includes(externalBind))

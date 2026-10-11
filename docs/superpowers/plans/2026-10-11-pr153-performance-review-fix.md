@@ -47,3 +47,10 @@
 - [x] 新增模块首次加载失败重试、失败/中止不写登录态、最终请求不使用选项 signal 和离页解冻回归；`npm run verify:admin-webauthn` exit 0。
 - [x] 初始 `npm run build` exit 0、`npm run verify:text-encoding` exit 0；修复前 `npm run verify:performance` exit 1 的旧快照证据保留，最终结果见任务 2.5。
 - [x] 最终冻结源文件后复查 `npm run build`、`npm run verify:text-encoding`、`git diff --check` 与 blob/manifest；性能阶段结果及 PDF 对照见忽略目录 `tmp/pr153-performance-20261011/performance-final-result.json`，提交主线和独立 reviewer；在放行前不 commit/push。
+
+### 任务 4：处理 PR 新扫描的确定性排序反馈
+
+- [x] 新提交 `0188b6a` 的 SonarCloud 扫描报告 `scripts/html2pdf-module-id-shortener.mjs` 两处 S2871。模块表与 AST 键的排序保持原生 `sort()` 的 UTF-16 码元次序，改用显式比较器；同文件第三处模块目标排序也统一处理，不引入未指定区域设置的 `localeCompare`。
+- [x] 正例测试固定转换后完整 SHA-256 `58d3bc47db10afc2a06e4eae3f236de532e3e14dc86c83c95355ee6463742b76`；新源码下 AST 拒绝与闭合测试 6/6、Vite 插件生命周期测试 2/2 均退出 0，转换产物与原快照逐字节一致。
+- [x] 本机 Chrome headless 在隔离夹具中重新运行原版与缩名版 PDF：两者均为 2 页、39565 字节、1 条链接、2 个图片对象、相同画布哈希及相同无效输入错误；测试服务和浏览器进程已停止。结果见忽略目录 `tmp/pr153-performance-20261011/pdf-sort-fix-result.json`。
+- [x] 新源码下 `npm run verify:performance`、`npm run verify:text-encoding`、`git diff --check` 均退出 0；总产物 4678.85/4690 KB、首屏 JS 854.72/855 KB，完整门禁结果见忽略目录 `tmp/pr153-performance-20261011/performance-sort-fix-exit.json`。Sonar 可靠性与覆盖率仍须以后续新 HEAD 扫描为准。
