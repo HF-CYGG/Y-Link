@@ -8,7 +8,7 @@
 import { computed, nextTick, onActivated, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import type { TableInstance } from 'element-plus'
-import { PageContainer, PageToolbarCard, PassivePreviewImage } from '@/components/common'
+import { PageContainer, PageToolbarCard, PassiveNumberInput, PassivePreviewImage } from '@/components/common'
 import { getTagList, type Tag } from '@/api/modules/tag'
 import {
   batchUpdateProductOnlineDisplay,
@@ -480,7 +480,7 @@ onDeactivated(() => {
                 :disabled="!canManageProducts || (!editingProduct.isActive && form.o2oStatus !== 'listed')" />
             </el-form-item>
             <el-form-item label="单人限购">
-              <el-input-number v-model="form.limitPerUser" :min="1" :max="Math.max(999999, editingProduct.limitPerUser)" :step="1" :disabled="!canManageProducts" controls-position="right" />
+              <PassiveNumberInput v-model="form.limitPerUser" :min="1" :max="Math.max(999999, editingProduct.limitPerUser)" :step="1" :precision="0" :disabled="!canManageProducts" />
             </el-form-item>
           </div>
           <el-form-item label="客户端推荐">
