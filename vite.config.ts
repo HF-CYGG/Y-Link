@@ -155,7 +155,71 @@ const VENDOR_CHUNK_RULES: VendorChunkRule[] = [
   },
 ]
 
+/**
+ * Element Plus 首屏核心组件目录（`element-plus/es/components/<目录名>/`）：
+ * - 只收录入口同步链路真实用到的组件及其内部依赖：App.vue 的 el-config-provider、全局维护横幅的 el-alert、
+ *   main.ts 的 v-loading 指令、全局提示与错误弹窗使用的 ElMessage / ElMessageBox（后者内部依赖 button、input、
+ *   overlay、focus-trap 等）；
+ * - 其余组件的 JS 归入按需加载的 `ui-extended` 块，不再随入口 HTML 预加载；
+ * - 新增“入口同步渲染”的 Element Plus 组件时必须补进本清单，否则 `ui-extended` 会被拉进首屏依赖图，
+ *   构建预算脚本会以“低频重包进入首屏”判定失败。
+ */
+const ELEMENT_PLUS_CORE_COMPONENTS = new Set([
+  'config-provider',
+  'alert',
+  'message',
+  'message-box',
+  'loading',
+  'icon',
+  'badge',
+  'button',
+  'input',
+  'overlay',
+  'focus-trap',
+  'form',
+])
+
+const ELEMENT_PLUS_COMPONENT_PATTERN = /\/node_modules\/element-plus\/es\/components\/([^/]+)\/(.*)$/
+
+/**
+ * Element Plus 分层拆包：
+ * - 组件样式（`components/<name>/style/*` 与 `theme-chalk/*.css`）一律留在 `ui-kit`：
+ *   ui-kit.css 随入口加载并排在 main.css 之前，全局样式对 Element Plus 的覆盖依赖这一层叠顺序；
+ *   若样式跟随路由懒加载，会以同等优先级反向覆盖全局定制，造成全站样式回归；
+ * - 首屏核心组件 JS 留在 `ui-kit`，其余组件 JS（表格、树、日期、上传等）归入 `ui-extended`，
+ *   由首个用到它们的路由按需加载，避免客户端商城等首屏为管理端组件付出下载与解析成本；
+ * - utils / hooks / locale 等公共层不在 components 目录下，继续按包规则留在 `ui-kit`。
+ */
+const resolveElementPlusChunk = (normalizedId: string) => {
+  const componentMatch = normalizedId.match(ELEMENT_PLUS_COMPONENT_PATTERN)
+  if (!componentMatch) {
+    return undefined
+  }
+
+  const [, componentName, restPath] = componentMatch
+  if (restPath.startsWith('style/') || ELEMENT_PLUS_CORE_COMPONENTS.has(componentName)) {
+    return 'ui-kit'
+  }
+
+  return 'ui-extended'
+}
+
+/** 只对 node_modules 内的依赖做手工归组；业务源码交给 Rolldown 按路由懒加载关系自动拆分。 */
+const resolveNodeModuleChunk = (id: string) => {
+  const normalizedId = id.replaceAll('\\', '/')
+  if (!normalizedId.includes('/node_modules/')) {
+    return undefined
+  }
+
+  return resolveVendorChunk(normalizedId)
+}
+
 const resolveVendorChunk = (normalizedId: string) => {
+  const elementPlusChunk = resolveElementPlusChunk(normalizedId)
+  if (elementPlusChunk) {
+    return elementPlusChunk
+  }
+
   for (const rule of VENDOR_CHUNK_RULES) {
     if (rule.packageNames.some((packageName) => normalizedId.includes(`/node_modules/${packageName}/`))) {
       return rule.chunkName
@@ -307,14 +371,34 @@ export default defineConfig(({ command, mode }) => {
           rescue: fileURLToPath(new URL('./rescue.html', import.meta.url)),
         },
         output: {
-          manualChunks(id) {
-            const normalizedId = id.replaceAll('\\', '/')
-
-            if (!normalizedId.includes('/node_modules/')) {
-              return
-            }
-
-            return resolveVendorChunk(normalizedId)
+          /**
+           * 依赖分组按优先级认领模块：
+           * - Rolldown 的分组默认会把“被认领模块的依赖”一并递归收入同组；若只用单个 manualChunks 函数，
+           *   各返回名按首次出现顺序认领，`ui-extended` 先出现时会把 Element Plus 公共 utils/hooks、图标与 dayjs
+           *   一起吸走，入口反而被迫预加载整个 `ui-extended`；
+           * - 因此显式设定优先级：framework 最先认领 Vue 运行时，ui-kit 其次认领 Element Plus 公共层、
+           *   首屏核心组件与全部组件样式，其余依赖规则（含 ui-extended 与各低频重包）最后按原逻辑认领。
+           */
+          codeSplitting: {
+            groups: [
+              {
+                name: 'framework',
+                priority: 30,
+                test: (id: string) => resolveNodeModuleChunk(id) === 'framework',
+              },
+              {
+                name: 'ui-kit',
+                priority: 20,
+                test: (id: string) => resolveNodeModuleChunk(id) === 'ui-kit',
+              },
+              {
+                name: (id: string) => {
+                  const chunkName = resolveNodeModuleChunk(id)
+                  return chunkName && chunkName !== 'framework' && chunkName !== 'ui-kit' ? chunkName : null
+                },
+                priority: 10,
+              },
+            ],
           },
         },
       },

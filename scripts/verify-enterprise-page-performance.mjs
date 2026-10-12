@@ -83,19 +83,36 @@ const reportPath = path.join(runtimeRoot, 'enterprise-performance-budget-report.
  * +49.81 KB / +0.05 KB / +0.43 KB。同一环境实测：总产物 4673.40 KB、OrderEntryView 34.76 KB、OrderListView 34.74 KB。
  * 因此总量上限调整为 4690 KB（约 0.36% 余量），OrderEntryView 与 OrderListView 路由分包上限均调整为 36 KB
  * （约 3.5% 余量），继续约束出库两页主包增长；其余各项预算维持不变。
+ *
+ * Element Plus 分层拆包与预算重新标定（经人工评估批准）：main@7f02712 实测总产物 4706.56 KB、首屏 JS 855.12 KB，
+ * 已分别超出 4690 / 855 KB，来源为上次标定（fb66179）之后合入的 #152～#158（客服工作台布局、标签打印密度、
+ * 卡片对齐、商品中心批量改分类/库位与批量升级 YZ 编码等）。本轮处理：
+ * 1. vite.config.ts 把 Element Plus 拆成两层：组件样式、公共 utils/hooks 与首屏核心组件（config-provider、alert、
+ *    message、message-box、loading 及其内部依赖）留在 ui-kit；表格、树、日期、上传等其余组件 JS 归入按需加载的
+ *    ui-extended，不再写入 index.html 的 modulepreload。组件样式仍全部随 ui-kit.css 首屏加载，CSS 产物与加载顺序
+ *    逐字节不变，避免懒加载样式反向覆盖全局定制。实测首屏 JS 855.16 → 482.39 KB（-43.6%）、关键资源
+ *    1179.33 → 806.56 KB、ui-kit JS 591.16 → 218.19 KB；首屏 CSS 维持 324.17 KB。
+ * 2. 拆包本身带来跨块导入导出开销：两层之间约 +3.7 KB，各路由分包多一条 ui-extended 导入语句约 +2.9 KB；
+ *    开单 / 入库 / 出库编辑的商品下拉按需渲染另增约 +1.65 KB；此前本分支的稳定请求与防抖优化约 +0.83 KB。
+ *    同一环境最终实测总产物 4715.54 KB。
+ * 因此：总量上限调整为 4733 KB（约 0.37% 余量）；首屏 JS 上限下调为 487 KB、关键资源上限下调为 815 KB、
+ * ui-kit 上限下调为 230 KB，锁住本次收益；ui-extended 以低频块登记 395 KB 上限，并复用“低频块不得进入首屏依赖图”
+ * 检查防止回退；其余各项预算维持不变。
  */
 const performanceBudget = {
-  totalAssetsMaxKB: 4690,
-  criticalAssetsMaxKB: 1180,
-  initialLoadJsMaxKB: 855,
+  totalAssetsMaxKB: 4733,
+  criticalAssetsMaxKB: 815,
+  initialLoadJsMaxKB: 487,
   initialLoadCssMaxKB: 325,
   entryChunkMaxKB: 80,
   loginChunkMaxKB: 25,
   frameworkChunkMaxKB: 220,
-  uiKitChunkMaxKB: 1000,
+  uiKitChunkMaxKB: 230,
   vendorChunkMaxKB: 1900,
   lowFrequencyChunkMaxKB: {
     'pdf-export': 1000,
+    // Element Plus 非首屏组件 JS：只允许由路由按需加载，进入首屏依赖图即判定失败。
+    'ui-extended': 395,
     'qr-scanner': 450,
     charting: 650,
     'image-tools': 80,
