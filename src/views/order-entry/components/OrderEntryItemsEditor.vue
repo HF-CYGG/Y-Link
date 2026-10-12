@@ -12,9 +12,10 @@
  */
 
 
-import { computed } from 'vue'
+import { computed, toRef } from 'vue'
 import type { ProductRecord, ProductSkuRecord } from '@/api/modules/product'
 import { BizResponsiveDrawerShell, PassiveNumberInput } from '@/components/common'
+import { useActiveSelectOptions } from '@/composables/useActiveSelectOptions'
 import type { FocusField, OrderEntryDrawerForm, OrderItemRow } from '../types'
 import { getProductOptionLabel, getProductSkuOptionLabel } from '../types'
 
@@ -73,6 +74,18 @@ const emit = defineEmits<{
  * - 子组件通过 setter 将关闭动作通知给父层；
  * - 保持抽屉显隐状态仍由页面 composable 统一持有。
  */
+/**
+ * 桌面表格商品下拉按需渲染：
+ * - 明细多、商品多时，每行都挂载全部 el-option 会让组件数随“行数 × 商品数”增长；
+ * - 只有当前聚焦或展开的那一行渲染完整候选，其余行只保留已选商品以显示标签；
+ * - 移动端抽屉只有单个下拉，不需要按需渲染。
+ */
+const {
+  activateOptions: activateProductOptions,
+  handleOptionsVisibleChange: handleProductOptionsVisibleChange,
+  resolveRowOptions: resolveRowProductOptions,
+} = useActiveSelectOptions(toRef(props, 'products'), (product) => String(product.id))
+
 const drawerVisibleModel = computed({
   get: () => props.drawerVisible,
   set: (value: boolean) => emit('update:drawerVisible', value),
@@ -167,11 +180,13 @@ const resolveStockHint = (productId: string, skuId: string, qty: number | null) 
                 clearable
                 placeholder="输入产品名/拼音首字母检索"
                 class="w-full"
+                @focus="activateProductOptions(row.uid)"
+                @visible-change="handleProductOptionsVisibleChange(row.uid, $event)"
                 @change="handleProductChange(row)"
                 @keydown="handleGridKeydown($event, $index, 'product')"
               >
                 <el-option
-                  v-for="product in products"
+                  v-for="product in resolveRowProductOptions(row.uid, row.productId)"
                   :key="product.id"
                   :label="getProductOptionLabel(product)"
                   :value="product.id"

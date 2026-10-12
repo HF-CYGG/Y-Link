@@ -17,6 +17,7 @@ import { ElMessageBox } from 'element-plus'
 import QRCode from 'qrcode'
 import { useRouter } from 'vue-router'
 import { PageContainer, PassiveNumberInput } from '@/components/common'
+import { useActiveSelectOptions } from '@/composables/useActiveSelectOptions'
 import { getProductList, type ProductRecord } from '@/api/modules/product'
 import { submitSupplierDelivery } from '@/api/modules/inbound'
 import { extractErrorMessage } from '@/utils/error'
@@ -47,6 +48,12 @@ const createDeliveryItemRow = (): DeliveryItemRow => ({
 })
 
 const getProductOptionValue = (product: ProductRecord) => String(product.id)
+// 明细较多时每行都挂载全部商品选项代价很高：只有聚焦或展开的那一行渲染完整候选，其余行只保留已选商品。
+const {
+  activateOptions: activateProductOptions,
+  handleOptionsVisibleChange: handleProductOptionsVisibleChange,
+  resolveRowOptions: resolveRowProductOptions,
+} = useActiveSelectOptions(products, getProductOptionValue)
 const getActiveProductSkus = (productId: string) => {
   return (products.value.find((product) => String(product.id) === String(productId))?.skus ?? [])
     .filter((sku) => sku.id && sku.isActive !== false && sku.isCurrent !== false)
@@ -289,10 +296,12 @@ onMounted(() => {
                       :disabled="hasNoProducts"
                       empty-text="暂无可送货商品"
                       class="w-full"
+                      @focus="activateProductOptions(item.uid)"
+                      @visible-change="handleProductOptionsVisibleChange(item.uid, $event)"
                       @change="handleProductChange(item)"
                     >
                       <el-option
-                        v-for="product in products"
+                        v-for="product in resolveRowProductOptions(item.uid, item.productId)"
                         :key="getProductOptionValue(product)"
                         :label="product.productName"
                         :value="getProductOptionValue(product)"

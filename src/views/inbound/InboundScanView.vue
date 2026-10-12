@@ -16,6 +16,7 @@
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { PageContainer, PassiveNumberInput, PassiveSegmentedTabs, UnifiedScanDialog } from '@/components/common'
+import { useActiveSelectOptions } from '@/composables/useActiveSelectOptions'
 import {
   getInboundDetail,
   getInboundDetailByShowNo,
@@ -72,6 +73,12 @@ const createEditRow = (): EditItemRow => ({
 })
 
 const getProductOptionValue = (product: ProductRecord) => String(product.id)
+// 明细较多时每行都挂载全部商品选项代价很高：只有聚焦或展开的那一行渲染完整候选，其余行只保留已选商品。
+const {
+  activateOptions: activateProductOptions,
+  handleOptionsVisibleChange: handleProductOptionsVisibleChange,
+  resolveRowOptions: resolveRowProductOptions,
+} = useActiveSelectOptions(products, getProductOptionValue)
 const getActiveProductSkus = (productId: string) => {
   return (products.value.find((product) => String(product.id) === String(productId))?.skus ?? [])
     .filter((sku) => sku.id && sku.isActive !== false && sku.isCurrent !== false)
@@ -831,10 +838,12 @@ onBeforeUnmount(() => {
                 class="w-full"
                 placeholder="请选择商品"
                 :loading="editProductsLoading"
+                @focus="activateProductOptions(item.uid)"
+                @visible-change="handleProductOptionsVisibleChange(item.uid, $event)"
                 @change="handleEditProductChange(item)"
               >
                 <el-option
-                  v-for="product in products"
+                  v-for="product in resolveRowProductOptions(item.uid, item.productId)"
                   :key="getProductOptionValue(product)"
                   :label="product.productName"
                   :value="getProductOptionValue(product)"

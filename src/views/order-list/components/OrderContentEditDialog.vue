@@ -17,6 +17,7 @@ import {
   type UpdateOrderContentPayload,
 } from '@/api/modules/order'
 import { BizCrudDialogShell, PassiveNumberInput } from '@/components/common'
+import { useActiveSelectOptions } from '@/composables/useActiveSelectOptions'
 import { showAppSuccess, showAppWarning } from '@/utils/app-alert'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 
@@ -39,6 +40,12 @@ const emit = defineEmits<{
 }>()
 
 const products = ref<ProductRecord[]>([])
+// 明细表每行的商品下拉按需渲染：只有聚焦或展开的那一行挂载全部候选，其余行只保留已选商品。
+const {
+  activateOptions: activateProductOptions,
+  handleOptionsVisibleChange: handleProductOptionsVisibleChange,
+  resolveRowOptions: resolveRowProductOptions,
+} = useActiveSelectOptions(products, (product) => String(product.id))
 const rows = ref<DraftRow[]>([])
 const reason = ref('')
 const businessNo = ref('')
@@ -194,8 +201,15 @@ const commit = async () => {
         <el-table-column label="商品" min-width="190">
           <template #default="{ row }">
             <span v-if="row.original">{{ row.productName }}</span>
-            <el-select v-else v-model="row.productId" filterable @change="handleProductChange(row)">
-              <el-option v-for="product in products" :key="product.id" :label="`${product.productCode} · ${product.productName}`" :value="product.id" />
+            <el-select
+              v-else
+              v-model="row.productId"
+              filterable
+              @focus="activateProductOptions(row.uid)"
+              @visible-change="handleProductOptionsVisibleChange(row.uid, $event)"
+              @change="handleProductChange(row)"
+            >
+              <el-option v-for="product in resolveRowProductOptions(row.uid, row.productId)" :key="product.id" :label="`${product.productCode} · ${product.productName}`" :value="product.id" />
             </el-select>
           </template>
         </el-table-column>
