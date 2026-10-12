@@ -25,6 +25,7 @@ import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
 
 import { showAppError, showAppWarning } from '@/utils/app-alert'
+import { formatQty } from '../dashboard-format'
 
 const props = defineProps<{
   topProducts: DashboardTopProduct[]
@@ -55,11 +56,6 @@ const rankSubtitle = computed(() => {
 const emptyDescription = computed(() => {
   return props.options.productId ? '所选商品在该区间暂无出库' : '所选区间暂无榜单数据'
 })
-
-const formatQty = (value: string | number | null | undefined): string => {
-  const normalizedNumber = Number(value ?? 0)
-  return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : '0.00'
-}
 
 /**
  * 商品远程检索：

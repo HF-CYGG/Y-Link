@@ -28,6 +28,7 @@ import { useDashboardAnalytics } from './composables/useDashboardAnalytics'
 
 
 import { showAppError } from '@/utils/app-alert'
+import { formatAmount, formatQty } from './dashboard-format'
 
 const router = useRouter()
 const appStore = useAppStore(pinia)
@@ -77,26 +78,6 @@ const compactShortcutItems = computed(() => {
   const visibleSize = appStore.isPhone ? 2 : 4
   return shortcutItems.value.slice(0, visibleSize)
 })
-
-/**
- * 金额格式化：
- * - 看板金额统一以两位小数展示，避免模板里重复 Number().toFixed()；
- * - 兜底 0.00，防止接口波动导致空值显示。
- */
-const formatAmount = (value: string | number | null | undefined): string => {
-  const normalizedNumber = Number(value ?? 0)
-  return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : '0.00'
-}
-
-/**
- * 数量格式化：
- * - 业务数量允许出现小数，统一保留两位；
- * - 排行榜与趋势辅助信息使用同一格式策略。
- */
-const formatQty = (value: string | number | null | undefined): string => {
-  const normalizedNumber = Number(value ?? 0)
-  return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : '0.00'
-}
 
 /**
  * 卡片网格策略：

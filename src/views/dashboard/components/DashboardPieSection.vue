@@ -28,6 +28,7 @@ import { escapeTooltipHtml } from '@/utils/html-escape'
 import type { DashboardAppliedFilter } from '../composables/useDashboardAnalytics'
 
 import { showAppError } from '@/utils/app-alert'
+import { formatAmount } from '../dashboard-format'
 
 const props = defineProps<{
   filter: DashboardAppliedFilter
@@ -88,11 +89,6 @@ const pieCards = computed(() => {
     },
   ] as const
 })
-
-const formatAmount = (value: NumericLike): string => {
-  const normalizedNumber = Number(value ?? 0)
-  return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : '0.00'
-}
 
 const formatCount = (value: NumericLike): string => {
   const normalizedNumber = Number(value ?? 0)

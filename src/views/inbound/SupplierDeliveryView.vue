@@ -19,6 +19,7 @@ import { useRouter } from 'vue-router'
 import { PageContainer, PassiveNumberInput } from '@/components/common'
 import { useActiveSelectOptions } from '@/composables/useActiveSelectOptions'
 import { getProductList, type ProductRecord } from '@/api/modules/product'
+import { useInboundActiveSkus } from './useInboundActiveSkus'
 import { submitSupplierDelivery } from '@/api/modules/inbound'
 import { extractErrorMessage } from '@/utils/error'
 
@@ -54,10 +55,8 @@ const {
   handleOptionsVisibleChange: handleProductOptionsVisibleChange,
   resolveRowOptions: resolveRowProductOptions,
 } = useActiveSelectOptions(products, getProductOptionValue)
-const getActiveProductSkus = (productId: string) => {
-  return (products.value.find((product) => String(product.id) === String(productId))?.skus ?? [])
-    .filter((sku) => sku.id && sku.isActive !== false && sku.isCurrent !== false)
-}
+// 可入库规格按商品预建映射，模板逐行取值为 O(1)，规则见 useInboundActiveSkus。
+const { getActiveProductSkus } = useInboundActiveSkus(products)
 const handleProductChange = (item: DeliveryItemRow) => {
   const candidates = getActiveProductSkus(item.productId)
   item.skuId = candidates.length === 1 ? String(candidates[0]?.id ?? '') : ''

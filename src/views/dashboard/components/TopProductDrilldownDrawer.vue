@@ -22,6 +22,7 @@ import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
 
 import { showAppError, showAppWarning } from '@/utils/app-alert'
+import { formatAmount, formatQty, formatOrderType } from '../dashboard-format'
 
 const props = defineProps<{
   modelValue: boolean
@@ -39,20 +40,6 @@ const emit = defineEmits<{
 const request = useStableRequest()
 const loading = ref(false)
 const data = ref<ProductDrilldownResult | null>(null)
-
-const formatAmount = (value: string | number | null | undefined): string => {
-  const normalizedNumber = Number(value ?? 0)
-  return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : '0.00'
-}
-
-const formatQty = (value: string | number | null | undefined): string => {
-  const normalizedNumber = Number(value ?? 0)
-  return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : '0.00'
-}
-
-const formatOrderType = (value: 'department' | 'walkin'): string => {
-  return value === 'department' ? '部门单' : '散客单'
-}
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const loadData = async () => {

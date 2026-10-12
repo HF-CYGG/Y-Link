@@ -19,6 +19,7 @@ import TopCustomerDrilldownDrawer from './TopCustomerDrilldownDrawer.vue'
 import type { DashboardAppliedFilter, DashboardRankOptions } from '../composables/useDashboardAnalytics'
 
 import { showAppWarning } from '@/utils/app-alert'
+import { formatAmount } from '../dashboard-format'
 
 const props = defineProps<{
   topCustomers: DashboardTopCustomer[]
@@ -32,11 +33,6 @@ const rankSubtitle = computed(() => `按出库金额 Top ${props.options.topN}`)
 
 const drawerVisible = ref(false)
 const activeCustomerName = ref('')
-
-const formatAmount = (value: string | number | null | undefined): string => {
-  const normalizedNumber = Number(value ?? 0)
-  return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : '0.00'
-}
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const openDrilldown = (customerName: string) => {

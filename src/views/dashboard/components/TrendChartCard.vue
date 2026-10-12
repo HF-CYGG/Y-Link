@@ -19,6 +19,7 @@ import type { DashboardTrendPoint } from '@/api/modules/dashboard'
 import { useThemeStore } from '@/store'
 import pinia from '@/store/pinia'
 import { escapeTooltipHtml } from '@/utils/html-escape'
+import { formatAmount, formatQty } from '../dashboard-format'
 
 const props = defineProps<{
   trend: DashboardTrendPoint[]
@@ -31,16 +32,6 @@ const props = defineProps<{
 
 const trendTitle = computed(() => `出库趋势（${props.granularityLabel}）`)
 const themeStore = useThemeStore(pinia)
-
-const formatAmount = (value: string | number | null | undefined): string => {
-  const normalizedNumber = Number(value ?? 0)
-  return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : '0.00'
-}
-
-const formatQty = (value: string | number | null | undefined): string => {
-  const normalizedNumber = Number(value ?? 0)
-  return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : '0.00'
-}
 
 const peakAmount = computed(() => {
   const maxValue = Math.max(...props.trend.map((point) => Number(point.amount ?? 0)), 0)
