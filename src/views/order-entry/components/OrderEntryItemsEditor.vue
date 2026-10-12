@@ -50,6 +50,8 @@ const props = defineProps<{
   /** 返回所选规格的可用库存；未选规格时返回 null。 */
   getSkuAvailableStockById: (productId: string, skuId: string) => number | null
   handleGridKeydown: (event: KeyboardEvent, rowIndex: number, field: FocusField) => void
+  /** 商品、规格下拉的回车跳格：el-select 会拦截回车冒泡，需在捕获阶段登记。 */
+  handleGridSelectKeydownCapture: (event: KeyboardEvent, rowIndex: number, field: FocusField) => void
   appendRow: (focusProduct?: boolean) => Promise<void>
   openDrawerForCreate: () => Promise<void>
   openDrawerByRow: (row: OrderItemRow) => void
@@ -183,6 +185,7 @@ const resolveStockHint = (productId: string, skuId: string, qty: number | null) 
                 @focus="activateProductOptions(row.uid)"
                 @visible-change="handleProductOptionsVisibleChange(row.uid, $event)"
                 @change="handleProductChange(row)"
+                @keydown.capture="handleGridSelectKeydownCapture($event, $index, 'product')"
                 @keydown="handleGridKeydown($event, $index, 'product')"
               >
                 <el-option
@@ -204,6 +207,7 @@ const resolveStockHint = (productId: string, skuId: string, qty: number | null) 
                 :placeholder="getSelectableSkus(row.productId).length > 1 ? '请选择规格' : '请先选择商品'"
                 class="w-full"
                 @change="handleSkuChange(row)"
+                @keydown.capture="handleGridSelectKeydownCapture($event, $index, 'sku')"
                 @keydown="handleGridKeydown($event, $index, 'sku')"
               >
                 <el-option

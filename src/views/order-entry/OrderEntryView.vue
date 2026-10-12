@@ -72,6 +72,7 @@ const {
   handleDrawerSkuChange,
   setFieldRef,
   handleGridKeydown,
+  handleGridSelectKeydownCapture,
   submitOrder,
 } = useOrderEntryForm()
 
@@ -130,6 +131,7 @@ const totalAmountText = computed(() => toMoney(totalAmount.value))
         :get-sku-label-by-id="getSkuLabelById"
         :get-sku-available-stock-by-id="getSkuAvailableStockById"
         :handle-grid-keydown="handleGridKeydown"
+        :handle-grid-select-keydown-capture="handleGridSelectKeydownCapture"
         :append-row="appendRow"
         :open-drawer-for-create="openDrawerForCreate"
         :open-drawer-by-row="openDrawerByRow"

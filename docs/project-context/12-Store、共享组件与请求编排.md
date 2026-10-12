@@ -38,7 +38,7 @@
 - `useStableRequest.ts` 通过“只保留最后一次请求结果 + 自动中止旧请求”解决高频筛选和详情切换的竞态问题。
   - 被新请求抢占的旧请求不会回调 `onFinally`（由新请求接管加载态）；页面失活、卸载或显式 `cancel()` 时会同步补调一次 `onFinally({ status: 'canceled' })`，keep-alive 页面无需再在 `onDeactivated` 里手工复位 loading。
 - `usePermissionAction.ts` 统一处理显隐、点击前权限拦截和越权提示。
-- `useActiveSelectOptions.ts` 用于“多行明细 × 全量商品候选”的 `el-select`：只有最后聚焦或展开的那一行渲染完整候选，其余行只保留已选项以显示标签；已接入开单表格、出库内容编辑、供应方送货、送货历史编辑与入库扫码编辑。不要改用 `el-select-v2` 承接开单表格，它会拦截 Enter / 上下键冒泡。
+- `useActiveSelectOptions.ts` 用于“多行明细 × 全量商品候选”的 `el-select`：只有最后聚焦或展开的那一行渲染完整候选，其余行只保留已选项以显示标签；已接入开单表格、出库内容编辑、供应方送货、送货历史编辑与入库扫码编辑。Element Plus 的 `el-select` 与 `el-select-v2` 都会拦截输入框上 Enter / 上下键 / Esc 的冒泡，需要“回车跳格”的页面必须在捕获阶段登记（开单页见 `handleGridSelectKeydownCapture`）。
 - 共享页面结构组件主要分三类：
   - 页面容器：`PageContainer`、`PageToolbarCard`、`PagePaginationBar`
   - 业务壳层：`BizResponsiveDataCollectionShell`、`BizResponsiveDrawerShell`、`BizCrudDialogShell`

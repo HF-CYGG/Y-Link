@@ -825,6 +825,30 @@ export const useOrderEntryForm = () => {
   }
 
   /**
+   * 下拉单元格的回车跳格（捕获阶段）：
+   * - Element Plus el-select 在输入框上处理 Enter / 上下键 / Esc 后会 stopPropagation，
+   *   挂在 el-select 上的冒泡 @keydown 永远收不到回车，商品、规格列因此无法“回车选中并跳格”；
+   * - 这里在捕获阶段只记录“下拉已展开时按下回车”，不阻止默认行为，让 el-select 先完成选中；
+   *   再用宏任务等选中、change 回调与规格下拉的禁用态重渲染完成后，按统一顺序移动焦点；
+   * - 下拉未展开时回车由 el-select 打开下拉，不跳格；输入法组字中的回车不处理；
+   * - Tab 不会被 el-select 拦截，仍由 handleGridKeydown 在冒泡阶段处理，避免重复跳格。
+   */
+  const handleGridSelectKeydownCapture = (event: KeyboardEvent, rowIndex: number, field: FocusField) => {
+    if (!isDesktop.value || event.key !== 'Enter' || event.isComposing) {
+      return
+    }
+
+    const target = event.target instanceof HTMLElement ? event.target : null
+    if (target?.getAttribute('aria-expanded') !== 'true') {
+      return
+    }
+
+    globalThis.setTimeout(() => {
+      void moveFocus(rowIndex, field, false)
+    }, 0)
+  }
+
+  /**
    * 重置页面：
    * - 清空主单信息；
    * - 重新初始化为一条空白明细；
@@ -1109,6 +1133,7 @@ export const useOrderEntryForm = () => {
     handleDrawerSkuChange,
     setFieldRef,
     handleGridKeydown,
+    handleGridSelectKeydownCapture,
     submitOrder,
   }
 }

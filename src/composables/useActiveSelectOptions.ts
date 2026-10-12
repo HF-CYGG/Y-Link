@@ -8,7 +8,8 @@
  * - 不在 blur 时收起：鼠标点选选项的过程中输入框可能短暂失焦，提前收起会让点击落空；下一个下拉激活时自然替换。
  * 维护说明：
  * - Element Plus el-select 会在选项挂载后重新计算 default-first-option 的高亮项，因此过滤、回车选中与现有键盘跳格行为不变；
- * - 不要改用 el-select-v2 承接开单表格：它的输入框会拦截 Enter / 上下键冒泡，破坏开单页“回车选中并跳到下一格”的键盘流；
+ * - el-select 与 el-select-v2 都会在输入框上拦截 Enter / 上下键 / Esc 的冒泡；需要“回车跳格”的页面应在捕获阶段登记
+ *   （参考开单页 handleGridSelectKeydownCapture），不能依赖挂在下拉上的冒泡 @keydown；
  * - rowKey 必须是行级稳定标识（如明细 uid），不能用数组下标，否则增删行后激活状态会错位。
  */
 
