@@ -8,6 +8,9 @@ import { Column, CreateDateColumn, Entity, Index, JoinColumn, ManyToOne, Primary
 import { entityColumnOptions } from './entity-column-options.js'
 import { SysUser } from './sys-user.entity.js'
 
+// 送货单池轮询（按状态计数、已入库分栏按核销时间倒序）与供货方历史轮询（按创建时间倒序）的复合索引；MySQL 见 sql/060。
+@Index('idx_biz_inbound_pool_status_verified', ['isDeleted', 'status', 'verifiedAt', 'id'])
+@Index('idx_biz_inbound_supplier_deleted_created', ['supplierId', 'isDeleted', 'createdAt'])
 @Entity({ name: 'biz_inbound_order' })
 export class BizInboundOrder {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })

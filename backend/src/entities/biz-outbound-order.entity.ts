@@ -30,6 +30,8 @@ export type OrderSourceDocType = (typeof ORDER_SOURCE_DOC_TYPES)[number]
 @Index('idx_biz_outbound_source_doc', ['sourceDocType', 'sourceDocId'])
 @Index('uk_biz_outbound_business_no', ['businessNo'], { unique: true })
 @Index('idx_biz_outbound_order_type_created_at', ['orderType', 'createdAt'])
+// 出库列表每 15 秒轮询的“未删除 + 有效根单 + id 倒序”分页与计数走该覆盖索引；MySQL 见 sql/060。
+@Index('idx_biz_outbound_deleted_status_id', ['isDeleted', 'status', 'id'])
 @Entity({ name: 'biz_outbound_order' })
 @Check('ck_biz_outbound_order_amounts', "`total_qty` >= 0 AND `total_amount` >= 0 AND LENGTH(TRIM(COALESCE(`idempotency_key`, ''))) > 0")
 @Check('ck_biz_outbound_inventory_mode', "`inventory_mode` IN ('legacy_none', 'manual_applied', 'o2o_preapplied')")

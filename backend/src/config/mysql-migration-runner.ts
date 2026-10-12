@@ -838,6 +838,9 @@ const AUTO_MIGRATABLE_FILES = [
   '057_admin_mfa.sql',
   '058_admin_webauthn.sql',
   '059_admin_webauthn_second_factor.sql',
+  // 060 只新增性能索引（information_schema 判断 + PREPARE），可安全重放；不列入启动必需索引，
+  // 未执行时只影响查询性能，不阻断存量部署启动。
+  '060_hot_query_indexes.sql',
 ]
 
 /**

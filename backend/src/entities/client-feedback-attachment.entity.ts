@@ -18,6 +18,8 @@ export class ClientFeedbackAttachment {
   @Column({ name: 'message_id', type: 'varchar', length: 36, nullable: true })
   messageId!: string | null
 
+  // 附件清理任务按存储名逐个核对“是否仍被多条记录引用”，没有索引时每个文件都是一次整表扫描；MySQL 见 sql/060。
+  @Index('idx_client_feedback_attachment_storage_name')
   @Column({ name: 'storage_name', type: 'varchar', length: 255 })
   storageName!: string
 

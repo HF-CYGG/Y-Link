@@ -1398,6 +1398,37 @@ async function ensureSqliteMallCatalogIndexes(dataSource: DataSource): Promise<v
     'idx_client_user_session_expires_id',
     `CREATE INDEX IF NOT EXISTS "idx_client_user_session_expires_id" ON "client_user_session" ("expires_at", "id")`,
   )
+  // 060 热点查询索引：实体已声明，这里为“结构已就绪、不会触发 synchronize”的存量 SQLite 库补齐。
+  await ensureSqliteIndex(
+    dataSource,
+    'inventory_log',
+    'idx_inventory_log_created_id',
+    `CREATE INDEX IF NOT EXISTS "idx_inventory_log_created_id" ON "inventory_log" ("created_at", "id")`,
+  )
+  await ensureSqliteIndex(
+    dataSource,
+    'biz_outbound_order',
+    'idx_biz_outbound_deleted_status_id',
+    `CREATE INDEX IF NOT EXISTS "idx_biz_outbound_deleted_status_id" ON "biz_outbound_order" ("is_deleted", "status", "id")`,
+  )
+  await ensureSqliteIndex(
+    dataSource,
+    'biz_inbound_order',
+    'idx_biz_inbound_pool_status_verified',
+    `CREATE INDEX IF NOT EXISTS "idx_biz_inbound_pool_status_verified" ON "biz_inbound_order" ("is_deleted", "status", "verified_at", "id")`,
+  )
+  await ensureSqliteIndex(
+    dataSource,
+    'biz_inbound_order',
+    'idx_biz_inbound_supplier_deleted_created',
+    `CREATE INDEX IF NOT EXISTS "idx_biz_inbound_supplier_deleted_created" ON "biz_inbound_order" ("supplier_id", "is_deleted", "created_at")`,
+  )
+  await ensureSqliteIndex(
+    dataSource,
+    'client_feedback_attachment',
+    'idx_client_feedback_attachment_storage_name',
+    `CREATE INDEX IF NOT EXISTS "idx_client_feedback_attachment_storage_name" ON "client_feedback_attachment" ("storage_name")`,
+  )
 }
 
 function serializeSqliteNumericLiteral(value: number, fractionDigits = 2): string {

@@ -12,6 +12,8 @@ import { entityColumnOptions } from './entity-column-options.js'
 @Entity({ name: 'inventory_log' })
 @Index('idx_inventory_log_ref_lookup', ['refType', 'refId', 'changeType', 'id'])
 @Index('idx_inventory_log_product_created', ['productId', 'createdAt', 'id'])
+// 库存流水页与导出按时间范围筛选（未指定商品）时使用，避免计数与导出整表扫描；MySQL 见 sql/060。
+@Index('idx_inventory_log_created_id', ['createdAt', 'id'])
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export class InventoryLog {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })
