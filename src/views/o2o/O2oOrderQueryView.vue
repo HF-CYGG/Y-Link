@@ -6,6 +6,8 @@
  * - 左侧订单池采用服务端分页：每次只加载当前分栏的当前页订单，分栏数量取服务端按同一筛选口径统计的总数；
  * - 切换分栏、搜索、筛选与改每页条数时回到第一页；自动轮询沿用当前分栏、页码与已提交筛选静默刷新；
  * - 新单提醒依赖服务端 newOrderCount 与 latestOrderId 基准，不再对比前后两次列表 id 集合，避免翻页后误报。
+ * - 每秒推进的 nowMs 只在卡片状态子组件（O2oOrderPoolCardStatus）与事件回调里读取，页面模板不直接订阅时钟，
+ *   高亮与提示条的过期统一由每秒裁剪完成，避免每秒整页重渲染订单池与详情面板。
  * 维护说明：
  * - 分栏口径由后端 `/o2o/orders/pool` 统一计算，修改分栏规则时要同步校验计数、高亮、新订单提醒与详情联动；
  * - 详情区的状态文案必须复用共享状态配置，避免“主动撤回”被错误展示成普通取消。
@@ -15,6 +17,7 @@ import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMoun
 import { ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { BizO2oItemSpecText, PageContainer, PagePaginationBar } from '@/components/common'
+import O2oOrderPoolCardStatus from './components/O2oOrderPoolCardStatus.vue'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import {
@@ -25,7 +28,6 @@ import {
   O2O_ORDER_BUSINESS_STATUS_META,
   VERIFY_CONSOLE_O2O_ORDER_STATUS_LABEL_MAP,
   type O2oOrderBusinessStatus,
-  type O2oOrderStatus,
 } from '@/constants/o2o-order-status'
 import {
   batchPurgeCancelledO2oOrders,
@@ -213,13 +215,11 @@ const parseTimeMs = (value: string | null | undefined) => {
   return Number.isFinite(timestamp) ? timestamp : 0
 }
 
-const getOrderReportConfig = (order: { statusReport?: O2oOrderStatusReport; status: O2oOrderStatus; timeoutAt: string | null }) => {
-  return getClientOrderStatusReportConfig({
-    statusReport: order.statusReport,
-    status: order.status,
-    timeoutAt: order.timeoutAt,
-  }, nowMs.value)
-}
+/**
+ * 页面时钟读取函数：只传给卡片状态子组件，由子组件在自己的渲染里读取时钟。
+ * 父组件模板只引用函数本身，不会订阅 nowMs，因此每秒的时钟推进不会触发整页重渲染。
+ */
+const resolveNowMs = () => nowMs.value
 
 /**
  * 订单 ID 大小比较：
@@ -249,16 +249,10 @@ const detailEmptyText = computed(() => {
   }
   return '请选择左侧订单查看状态报告与进度节点'
 })
-const activeNewOrderNotice = computed(() => {
-  if (!latestNewOrderNotice.value) {
-    return null
-  }
-  if (latestNewOrderNotice.value.expiresAt <= nowMs.value) {
-    return null
-  }
-  return latestNewOrderNotice.value
-})
-const showDetailRefreshNotice = computed(() => detailRefreshNoticeExpiresAt.value > nowMs.value)
+// 新单提醒、详情“已更新”提示与卡片高亮的过期由每秒 pruneTransientMarks 统一裁剪，
+// 模板只读取裁剪后的状态，不直接比较 nowMs，避免整页渲染订阅每秒推进的时钟。
+const activeNewOrderNotice = computed(() => latestNewOrderNotice.value)
+const showDetailRefreshNotice = computed(() => detailRefreshNoticeExpiresAt.value > 0)
 const listAutoRefreshStatusText = computed(() => {
   if (!lastSilentListRefreshAt.value) {
     return '订单池自动轮询中'
@@ -283,11 +277,16 @@ const reportConfig = computed(() => {
     })
   }
 
+  // 场景由 activeScenario 统一解析（字符串，值不变时不会触发重渲染）；这里不再直接读时钟，
+  // 否则手动取消场景每秒都会生成新的配置对象，带动整页重渲染。
   return getClientOrderStatusReportConfig({
-    statusReport: activeOrderDetail.value.order.statusReport,
+    statusReport: {
+      ...activeOrderDetail.value.order.statusReport,
+      scenario: activeScenario.value,
+    },
     status: activeOrderDetail.value.order.status,
     timeoutAt: activeOrderDetail.value.order.timeoutAt,
-  }, nowMs.value)
+  })
 })
 
 const detailAmountSummary = computed(() => {
@@ -498,34 +497,6 @@ const timelineItems = computed(() => {
   ]
 })
 
-const resolveRemainSeconds = (order: { status: O2oOrderStatus; expireInSeconds?: number; timeoutAt: string | null }) => {
-  if (order.status !== 'pending') {
-    return null
-  }
-  if (order.timeoutAt) {
-    const remain = Math.floor((new Date(order.timeoutAt).getTime() - nowMs.value) / 1000)
-    return Math.max(0, remain)
-  }
-  if (typeof order.expireInSeconds === 'number') {
-    return Math.max(0, Math.floor(order.expireInSeconds))
-  }
-  return null
-}
-
-const formatCountdown = (order: { status: O2oOrderStatus; expireInSeconds?: number; timeoutAt: string | null }) => {
-  const remainSeconds = resolveRemainSeconds(order)
-  if (remainSeconds === null) {
-    return '--'
-  }
-  if (remainSeconds <= 0) {
-    return '已超时'
-  }
-  const hour = Math.floor(remainSeconds / 3600)
-  const minute = Math.floor((remainSeconds % 3600) / 60)
-  const second = remainSeconds % 60
-  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:${String(second).padStart(2, '0')}`
-}
-
 // 详细注释：订单池静默刷新只高亮新增或摘要变更的订单，
 // 这样操作员可以快速感知关键变化，但不会因为整个列表轮询而失去视觉焦点。
 const hasOrderSummaryChanged = (previous: O2oConsolePreorderSummary | undefined, next: O2oConsolePreorderSummary) => {
@@ -577,25 +548,11 @@ const markRefreshedOrders = (orderIds: string[]) => {
 }
 
 const isOrderRefreshed = (orderId: string) => {
-  return (orderRefreshMarkExpiresAtMap.value[orderId] ?? 0) > nowMs.value
-}
-
-/**
- * 订单池卡片倒计时文案：
- * - 仅待核销订单且存在有效剩余时间时展示；
- * - 将倒计时提升到卡片头部状态区，避免与金额/件数信息混排后视觉重心下坠；
- * - 已超时、已取消、已核销统一不再在列表卡片重复展示倒计时，状态标签本身已足够表达结果。
- */
-const getOrderCountdownText = (order: { status: O2oOrderStatus; expireInSeconds?: number; timeoutAt: string | null }) => {
-  const remainSeconds = resolveRemainSeconds(order)
-  if (remainSeconds === null || remainSeconds <= 0) {
-    return ''
-  }
-  return `剩余 ${formatCountdown(order)}`
+  return orderRefreshMarkExpiresAtMap.value[orderId] !== undefined
 }
 
 const isOrderHighlighted = (orderId: string) => {
-  return (orderHighlightExpiresAtMap.value[orderId] ?? 0) > nowMs.value
+  return orderHighlightExpiresAtMap.value[orderId] !== undefined
 }
 
 const pruneTransientMarks = () => {
@@ -1538,15 +1495,7 @@ onBeforeUnmount(() => {
                   </div>
                 </div>
                 <div class="flex shrink-0 flex-col items-end gap-1 text-right">
-                  <span class="rounded-full px-2 py-0.5 text-[11px] font-medium" :class="getOrderReportConfig(order).cardClassName">
-                    {{ getOrderReportConfig(order).statusLabel }}
-                  </span>
-                  <span
-                    v-if="getOrderCountdownText(order)"
-                    class="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:bg-amber-500/10 dark:text-amber-300"
-                  >
-                    {{ getOrderCountdownText(order) }}
-                  </span>
+                  <O2oOrderPoolCardStatus :order="order" :resolve-now-ms="resolveNowMs" />
                 </div>
               </div>
               <div class="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500 dark:text-slate-400">
