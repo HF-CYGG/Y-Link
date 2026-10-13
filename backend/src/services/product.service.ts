@@ -1427,22 +1427,31 @@ export class ProductService {
    * 线上出现过已升级商品的默认规格仍是启动补建的 `SKU-<商品ID>` 等非 YZ 编码，导致条码标签打出旧码；
    * 这里逐个商品按升级同一口径（resolveUpgradeSpecAxes + 编码登记表）重算这些规格的编码：
    * - 只处理 code_scheme='yz' 商品的当前规格，已符合新编码的规格与退役规格一律不动，可安全重放；
+   * - 候选商品用一次联表查询筛出（YZ 商品的全部当前规格编码），避免启动时按商品逐个往返数据库；
    * - 旧编码写入 legacySkuCode，已打印的旧标签仍可扫码；规格 key 同步改写为新版两轴；
+   * - legacySkuCode 只有一列：已存有不同的历史编码时不覆盖（覆盖会让更早打印的标签扫不出来），
+   *   整个商品跳过并在日志中告警，交由人工处理；
    * - 每个商品独立事务，命中编码冲突或登记表拒绝时整个商品回滚并跳过，只记日志，不阻断启动；
    * - 每个被修复的商品写一条 product.yz_sku_code_repair 审计，只记编码映射。
    */
   async repairStaleYzSkuCodes(): Promise<{ repairedSkuCount: number; skippedProducts: Array<{ productCode: string; reason: string }> }> {
     const isYzSkuCodeOf = (productCode: string, skuCode: string) =>
       skuCode.startsWith(productCode) && /^[0-9][A-E]?$/.test(skuCode.slice(productCode.length))
-    const yzProducts = await this.productRepo.find({ where: { codeScheme: 'yz' }, select: ['id', 'productCode'] })
-    const candidateIds: string[] = []
-    for (const product of yzProducts) {
-      const skus = await AppDataSource.getRepository(BaseProductSku).find({
-        where: { productId: product.id, isCurrent: true },
-        select: ['id', 'skuCode'],
-      })
-      if (skus.some((sku) => !isYzSkuCodeOf(product.productCode, sku.skuCode))) candidateIds.push(String(product.id))
-    }
+    const currentYzSkuRows: Array<{ productId: string | number; productCode: string; skuCode: string }> = await AppDataSource
+      .getRepository(BaseProductSku)
+      .createQueryBuilder('sku')
+      .innerJoin(BaseProduct, 'product', 'product.id = sku.productId')
+      .select('sku.productId', 'productId')
+      .addSelect('product.productCode', 'productCode')
+      .addSelect('sku.skuCode', 'skuCode')
+      .where('product.codeScheme = :codeScheme', { codeScheme: 'yz' })
+      .andWhere('sku.isCurrent = :isCurrent', { isCurrent: true })
+      .getRawMany()
+    const productCodeById = new Map<string, string>()
+    currentYzSkuRows
+      .filter((row) => !isYzSkuCodeOf(row.productCode, row.skuCode))
+      .forEach((row) => productCodeById.set(String(row.productId), row.productCode))
+    const candidateIds = [...productCodeById.keys()]
 
     let repairedSkuCount = 0
     const skippedProducts: Array<{ productCode: string; reason: string }> = []
@@ -1468,6 +1477,12 @@ export class ProductService {
             if (changes.some((change) => change.newSkuCode === newSkuCode)) {
               throw new BizError(`多个规格会生成同一编码「${newSkuCode}」，需人工处理`, 409)
             }
+            if (sku.legacySkuCode && sku.legacySkuCode !== sku.skuCode) {
+              throw new BizError(
+                `规格「${sku.skuCode}」已有历史编码「${sku.legacySkuCode}」，修复会覆盖其扫码映射，需人工处理`,
+                409,
+              )
+            }
             changes.push({ skuId: String(sku.id), oldSkuCode: sku.skuCode, newSkuCode })
             if (axes.changed) sku.specValuesJson = JSON.stringify(axes.specValues)
             sku.legacySkuCode = sku.skuCode
@@ -1489,9 +1504,8 @@ export class ProductService {
           return changes.length
         })
       } catch (error) {
-        const product = yzProducts.find((item) => String(item.id) === productId)
         skippedProducts.push({
-          productCode: product?.productCode ?? productId,
+          productCode: productCodeById.get(productId) ?? productId,
           reason: error instanceof BizError ? error.message : '修复失败',
         })
       }

@@ -2183,6 +2183,35 @@ async function main() {
     assert.ok(!repairAgain.skippedProducts.some((item) => item.productCode === staleUpgraded.productCode), '重放不应把已修复商品列为跳过')
     assert.equal((await skuRepo.findOneByOrFail({ id: staleSkuId })).skuCode, `${staleUpgraded.productCode}0`, '重放不再改动已修复规格')
     pass('启动自愈：YZ 商品默认规格的遗留 SKU-<ID> 编码重编为产品编码 + 0，旧码进历史编码仍可扫，写审计且可安全重放')
+
+    // 用例 最终-2：历史编码不被覆盖——规格已存有升级前的印刷编码，当前编码又被改回其他旧格式时，
+    // 只有一列 legacySkuCode 无法同时保留两个旧码，必须整个商品跳过并告警，数据原样不动。
+    const keepLegacyTag = await createSeriesTag('KL')
+    const keepLegacyBase = await productService.create({
+      productCode: nextProductCode(),
+      productName: `keep-legacy-${verifySeed}`,
+      pinyinAbbr: 'KL',
+      defaultPrice: 75,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+    } as Parameters<typeof productService.create>[0], actor)
+    const keepLegacyUpgraded = await productService.upgradeProductToYzCode(keepLegacyBase.id, { primarySeriesTagId: keepLegacyTag.id }, actor)
+    const keepLegacySku = keepLegacyUpgraded.skus[0]
+    const printedLegacyCode = keepLegacySku.legacySkuCode
+    assert.ok(printedLegacyCode, '升级后应已有历史编码')
+    const revertedCode = `SKU-${keepLegacyBase.id}`
+    await skuRepo.update({ id: keepLegacySku.id }, { skuCode: revertedCode })
+    const keepLegacyResult = await productService.repairStaleYzSkuCodes()
+    const skipped = keepLegacyResult.skippedProducts.find((item) => item.productCode === keepLegacyUpgraded.productCode)
+    assert.ok(skipped && skipped.reason.includes('已有历史编码'), '已有不同历史编码时应跳过并给出原因')
+    const keepLegacyRow = await skuRepo.findOneByOrFail({ id: keepLegacySku.id })
+    assert.equal(keepLegacyRow.skuCode, revertedCode, '跳过时当前编码保持不动')
+    assert.equal(keepLegacyRow.legacySkuCode, printedLegacyCode, '已有历史编码不得被覆盖')
+    assert.equal((await productService.lookupByCode(printedLegacyCode!)).sku.id, keepLegacySku.id, '更早打印的旧标签仍能扫到')
+    pass('启动自愈保护历史编码：规格已有不同历史编码时整个商品跳过并给出原因，当前编码与历史编码均不被改动')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()
