@@ -2330,6 +2330,74 @@ async function main() {
     assert.equal(lookalikeScan.sku.id, String(lookalikeRetired.id), 'legacy 商品的 -R<ID> 结尾退役行不得被当作自愈归档行继任')
     assert.equal(lookalikeScan.sku.isCurrent, false)
     pass('归档继任限定自愈产物：legacy 商品退役行编码碰巧以 -R<自身ID> 结尾时，扫码仍命中该退役行，不转到同规格当前行')
+
+    // 归档行不得被规格复活：线上根因里被误退役的 YZ 行通常 ID 更大（较新），自愈后它成为同规格中 ID 最大的
+    // 退役归档行。商品切到多规格再切回单规格时，复活必须选持有合法 YZ 编码的行，不能把 -R<ID> 归档码带回当前。
+    const reviveTag = await createSeriesTag('RV')
+    const reviveBase = await productService.create({
+      productCode: nextProductCode(),
+      productName: `archive-revive-${verifySeed}`,
+      pinyinAbbr: 'AR',
+      defaultPrice: 30,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+    } as Parameters<typeof productService.create>[0], actor)
+    const reviveOldId = reviveBase.skus[0].id
+    const reviveOldCode = `SKU-${reviveBase.id}`
+    const revivePreUpgradeCode = reviveBase.skus[0].skuCode
+    await skuRepo.update({ id: reviveOldId }, { skuCode: reviveOldCode, isCurrent: false, isActive: false })
+    const reviveNewer = await skuRepo.save(skuRepo.create({
+      productId: reviveBase.id,
+      skuCode: revivePreUpgradeCode,
+      specValuesJson: JSON.stringify({ 规格: '默认规格' }),
+      specText: '默认规格',
+      defaultPrice: '30.00',
+      discountRate: '10.0',
+      currentStock: 0,
+      preOrderedStock: 0,
+      isActive: true,
+      isCurrent: true,
+      o2oRecommended: false,
+      thumbnail: null,
+      sortOrder: 0,
+    }))
+    const reviveNewerId = String(reviveNewer.id)
+    assert.ok(Number(reviveNewerId) > Number(reviveOldId), '构造场景：被误退役的 YZ 行 ID 更大')
+    const reviveUpgraded = await productService.upgradeProductToYzCode(reviveBase.id, { primarySeriesTagId: reviveTag.id }, actor)
+    const reviveYzCode = `${reviveUpgraded.productCode}0`
+    assert.equal((await skuRepo.findOneByOrFail({ id: reviveNewerId })).skuCode, reviveYzCode)
+    await skuRepo.update({ id: reviveNewerId }, { isCurrent: false, isActive: false })
+    await skuRepo.update({ id: reviveOldId }, { isCurrent: true, isActive: true })
+    await productService.repairStaleYzSkuCodes()
+    assert.equal((await skuRepo.findOneByOrFail({ id: reviveOldId })).skuCode, reviveYzCode, '自愈后当前行持有合法 YZ 编码')
+    assert.equal((await skuRepo.findOneByOrFail({ id: reviveNewerId })).skuCode, `${reviveYzCode}-R${reviveNewerId}`, '较新的 YZ 行已归档')
+    const reviveUpdateBase = {
+      productCode: reviveUpgraded.productCode,
+      productName: reviveUpgraded.productName,
+      pinyinAbbr: 'AR',
+      defaultPrice: 30,
+      discountRate: 10,
+      currentStock: 0,
+      isActive: true,
+      tagIds: reviveUpgraded.tagIds,
+    }
+    const reviveMulti = await productService.update(reviveBase.id, {
+      ...reviveUpdateBase,
+      skus: [
+        { specValues: { '颜色/款式': '红色' }, defaultPrice: 30, currentStock: 0, isActive: true, sortOrder: 0 },
+        { specValues: { '颜色/款式': '蓝色' }, defaultPrice: 30, currentStock: 0, isActive: true, sortOrder: 1 },
+      ],
+    } as Parameters<typeof productService.update>[1], actor)
+    assert.equal(reviveMulti.skus.filter((sku) => sku.isCurrent).length, 2, '已切到多规格')
+    await productService.update(reviveBase.id, { ...reviveUpdateBase, skus: [] } as Parameters<typeof productService.update>[1], actor)
+    const revivedCurrent = await skuRepo.find({ where: { productId: reviveBase.id, isCurrent: true } })
+    assert.deepEqual(revivedCurrent.map((sku) => String(sku.id)), [String(reviveOldId)], '切回单规格应复活持有合法 YZ 编码的行，而不是 ID 更大的归档行')
+    assert.equal(revivedCurrent[0].skuCode, reviveYzCode, '切回单规格后条码仍为产品编码 + 0')
+    assert.equal(isDatabaseFlagEnabled((await skuRepo.findOneByOrFail({ id: reviveNewerId })).isCurrent), false, '归档行保持退役')
+    pass('归档行不参与规格复活：自愈后切到多规格再切回单规格，复活持有合法 YZ 编码的行，归档码不会重新成为当前编码')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()

@@ -515,6 +515,22 @@ const buildSpecText = (specValues: Record<string, string>, specGroups: ProductSp
 const isYzSkuCodeOf = (productCode: string, skuCode: string): boolean =>
   skuCode.startsWith(productCode) && /^[0-9][A-E]?$/.test(skuCode.slice(productCode.length))
 
+/**
+ * 是否为启动自愈（repairStaleYzSkuCodes）让码时归档的退役行：YZ 商品、有变体码、编码为“本商品 YZ 规格编码 + -R<自身ID>”。
+ * YZ 规格编码由系统生成且禁止手工改写，只有自愈归档会产出这种形态。归档行不得再被规格复活，扫码命中时转到同规格当前行。
+ */
+const isArchivedYzSku = (
+  product: Pick<BaseProduct, 'productCode' | 'codeScheme'>,
+  sku: Pick<BaseProductSku, 'id' | 'skuCode' | 'variantCode' | 'isCurrent'>,
+): boolean => {
+  const archiveSuffix = `-R${sku.id}`
+  return product.codeScheme === 'yz'
+    && !isDatabaseFlagEnabled(sku.isCurrent)
+    && Boolean(sku.variantCode)
+    && sku.skuCode.endsWith(archiveSuffix)
+    && isYzSkuCodeOf(product.productCode, sku.skuCode.slice(0, -archiveSuffix.length))
+}
+
 /** 存量单规格商品的默认规格占位取值，不参与归轴，也不参与规格匹配。 */
 const LEGACY_DEFAULT_SPEC_KEY = '规格'
 const LEGACY_DEFAULT_SPEC_VALUE = '默认规格'
@@ -2356,13 +2372,18 @@ export class ProductService {
     // 被下面的 allocateSkuCode 追加 -2 后缀，产出 YZPX012A-2 这种不符合 YZ 定长规则的编码。
     const retiredSkuBySpecKey = new Map<string, BaseProductSku>()
     if (product.codeScheme === 'yz') {
+      // 启动自愈归档行（`<YZ 编码>-R<ID>`）只为让码而存在，绝不复活，否则归档码会重新成为当前编码。
+      const hasLegalYzCode = (sku: BaseProductSku) => isYzSkuCodeOf(product.productCode, sku.skuCode)
       existingSkus
-        .filter((sku) => !isDatabaseFlagEnabled(sku.isCurrent))
+        .filter((sku) => !isDatabaseFlagEnabled(sku.isCurrent) && !isArchivedYzSku(product, sku))
         .forEach((sku) => {
           const retiredSpecKey = buildSkuEntitySpecValuesKey(sku)
           const previousRetired = retiredSkuBySpecKey.get(retiredSpecKey)
-          // 同一规格组合可能留有多条历史行，取 id 最大的那条（最近一次退役的）复活。
-          if (!previousRetired || Number(sku.id) > Number(previousRetired.id)) {
+          // 同一规格组合可能留有多条历史行：优先复活持有合法 YZ 编码的行，同等条件下取 id 最大的（最近一次退役的）。
+          const shouldReplace = !previousRetired
+            || (hasLegalYzCode(sku) && !hasLegalYzCode(previousRetired))
+            || (hasLegalYzCode(sku) === hasLegalYzCode(previousRetired) && Number(sku.id) > Number(previousRetired.id))
+          if (shouldReplace) {
             retiredSkuBySpecKey.set(retiredSpecKey, sku)
           }
         })
@@ -2884,11 +2905,9 @@ export class ProductService {
    * `-R<ID>` 结尾的退役行一律不做继任，保持调用方对退役规格的拒绝。
    */
   private async resolveArchivedSkuSuccessor(sku: BaseProductSku): Promise<BaseProductSku> {
-    const archiveSuffix = `-R${sku.id}`
-    if (isDatabaseFlagEnabled(sku.isCurrent) || !sku.variantCode || !sku.skuCode.endsWith(archiveSuffix)) return sku
+    if (isDatabaseFlagEnabled(sku.isCurrent) || !sku.variantCode || !sku.skuCode.endsWith(`-R${sku.id}`)) return sku
     const product = await this.productRepo.findOne({ where: { id: sku.productId }, select: ['id', 'productCode', 'codeScheme'] })
-    if (!product || product.codeScheme !== 'yz') return sku
-    if (!isYzSkuCodeOf(product.productCode, sku.skuCode.slice(0, -archiveSuffix.length))) return sku
+    if (!product || !isArchivedYzSku(product, sku)) return sku
     const specKey = buildSkuEntitySpecValuesKey(sku)
     const successors = (await AppDataSource.getRepository(BaseProductSku).find({ where: { productId: sku.productId } }))
       .filter((row) => isDatabaseFlagEnabled(row.isCurrent) && buildSkuEntitySpecValuesKey(row) === specKey)
