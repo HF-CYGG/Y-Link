@@ -2291,9 +2291,22 @@ async function main() {
     assert.equal(preUpgradeScan.sku.id, revertedScenario.retiredOldId, '扫描升级前打印的旧码应转到同规格当前行，而不是退役归档行')
     assert.equal(preUpgradeScan.sku.isCurrent, true)
     assert.equal(preUpgradeScan.matchedBy, 'legacy_sku_code')
+    // 继任按编码而不是规格 key 关联：继任行经 0 号规格演进（inherit）改变规格 key 但保持 SKU 与编码不变后，
+    // 扫描归档行里的升级前旧码仍应命中该当前行。
+    const evolvedHealed = await productService.evolveProductZeroSpec(
+      revertedScenario.upgradedProduct.id,
+      { axis: 'variant', mode: 'inherit', inheritValue: '红色' },
+      actor,
+    )
+    const evolvedSku = evolvedHealed.skus.find((sku) => sku.id === revertedScenario.retiredOldId)
+    assert.equal(evolvedSku?.skuCode, `${revertedScenario.upgradedProduct.productCode}0`, '演进后继任行编码不变')
+    assert.equal(variantValueOf(evolvedSku!), '红色', '演进后继任行规格 key 已改变')
+    const evolvedScan = await productService.lookupByCode(revertedScenario.preUpgradeCode)
+    assert.equal(evolvedScan.sku.id, revertedScenario.retiredOldId, '继任行规格演进后，升级前旧码仍应命中当前继任行')
+    assert.equal(evolvedScan.sku.isCurrent, true)
     const [healedLabel] = await productService.listLabels([revertedScenario.retiredOldId])
     assert.equal(healedLabel.skuCode, `${revertedScenario.upgradedProduct.productCode}0`, '条码标签打印新编码')
-    pass('启动自愈修复已回退数据：让出同规格退役行占用的新编码，当前默认规格回到产品编码 + 0，新码、复活旧码与升级前旧码均扫到当前行，标签打印新编码')
+    pass('启动自愈修复已回退数据：让出同规格退役行占用的新编码，当前默认规格回到产品编码 + 0，新码、复活旧码与升级前旧码均扫到当前行（继任行 0 号规格演进后亦然），标签打印新编码')
 
     // 反例：legacy 商品的退役行自定义编码恰好以 -R<自身ID> 结尾，且同规格有当前行——不是自愈归档行，
     // 扫码必须仍命中该退役行（由调用方拒绝退役规格），不能被继任映射静默转到当前行。

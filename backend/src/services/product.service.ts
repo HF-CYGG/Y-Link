@@ -2896,22 +2896,21 @@ export class ProductService {
   }
 
   /**
-   * 启动自愈归档行的扫码继任：repairStaleYzSkuCodes 让出新编码时，会把同一规格退役行的编码改为
-   * `<原编码>-R<ID>`，但该行的 legacySkuCode 仍是升级前已打印的旧码（当前行的历史编码槽已用于保存
-   * 另一批旧码，一列放不下两个）。扫码命中这种归档退役行时，转到同商品同规格的唯一当前行，
-   * 让两批旧标签都能继续开单、入库；不是归档行、或找不到唯一继任行时原样返回，不改变其他退役行的语义。
-   * 归档行判定必须同时满足：商品为 YZ 编码、该行有变体码、去掉 `-R<ID>` 后恰是本商品的 YZ 规格编码——
-   * YZ 规格编码由系统生成且不允许手工改写，只有自愈归档会产出这种形态；legacy 商品或自定义编码碰巧以
-   * `-R<ID>` 结尾的退役行一律不做继任，保持调用方对退役规格的拒绝。
+   * 启动自愈归档行的扫码继任：repairStaleYzSkuCodes 让码时把退役行编码改为 `<让出的 YZ 编码>-R<ID>`，
+   * 并把被让出的 YZ 编码交给继任的当前行；但归档行的 legacySkuCode 仍是升级前已打印的旧码（当前行的历史编码槽
+   * 已用于保存另一批旧码，一列放不下两个）。扫码命中这种归档退役行时，转到同商品中持有被让出 YZ 编码的当前行。
+   * 继任关系按编码而不是规格 key 建立：0 号规格演进（inherit）会合法改变继任行的规格 key，但保持 SKU 与编码不变。
+   * 不是归档行（判定见 isArchivedYzSku）、或该编码已无当前持有者时原样返回，不改变其他退役行的语义。
    */
   private async resolveArchivedSkuSuccessor(sku: BaseProductSku): Promise<BaseProductSku> {
-    if (isDatabaseFlagEnabled(sku.isCurrent) || !sku.variantCode || !sku.skuCode.endsWith(`-R${sku.id}`)) return sku
+    const archiveSuffix = `-R${sku.id}`
+    if (isDatabaseFlagEnabled(sku.isCurrent) || !sku.variantCode || !sku.skuCode.endsWith(archiveSuffix)) return sku
     const product = await this.productRepo.findOne({ where: { id: sku.productId }, select: ['id', 'productCode', 'codeScheme'] })
     if (!product || !isArchivedYzSku(product, sku)) return sku
-    const specKey = buildSkuEntitySpecValuesKey(sku)
-    const successors = (await AppDataSource.getRepository(BaseProductSku).find({ where: { productId: sku.productId } }))
-      .filter((row) => isDatabaseFlagEnabled(row.isCurrent) && buildSkuEntitySpecValuesKey(row) === specKey)
-    return successors.length === 1 ? successors[0] : sku
+    const successor = await AppDataSource.getRepository(BaseProductSku).findOne({
+      where: { productId: sku.productId, skuCode: sku.skuCode.slice(0, -archiveSuffix.length) },
+    })
+    return successor && isDatabaseFlagEnabled(successor.isCurrent) ? successor : sku
   }
 
   /** 条码打印数据：按传入顺序返回，条码图由前端生成。 */
