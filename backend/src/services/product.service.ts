@@ -523,6 +523,59 @@ const buildSkuEntitySpecValuesKey = (sku: Pick<BaseProductSku, 'specValuesJson'>
   return buildSpecValuesKey(parseSpecValuesJson(sku.specValuesJson))
 }
 
+/** 存量单规格商品的默认规格占位取值，不参与归轴。 */
+const LEGACY_DEFAULT_SPEC_KEY = '规格'
+const LEGACY_DEFAULT_SPEC_VALUE = '默认规格'
+
+/**
+ * 存量商品升级到 YZ 编码专用的规格归轴，升级执行、预检模拟、容量校验三处必须共用这一个口径：
+ * - 旧版规格只有「颜色」「款式」两个维度，「款式」多为图案/款式而非尺码：
+ *   单独出现时归一级变体轴（编码位 1-9），只有同时存在颜色维度时才作为第二轴落到尺码位（A-E）；
+ * - 已是新 key（「颜色/款式」「尺码」）的按原轴取值，新 key 与旧 key 同时存在时新 key 优先；
+ * - 自定义「规格」维度（非“默认规格”）在没有一级变体取值时归一级变体轴，与前端规格矩阵的兜底口径一致；
+ * - specValues 是按新版两轴 key 重写后的结果，changed=true 时由升级流程写回 specValuesJson，
+ *   让升级后的编辑匹配、规格维度展示与已分配的编码位保持一致。这是升级这一显式迁移动作的一部分，
+ *   不同于 normalizeSpecValuesKeys 的“只读兼容、不改写落库字节”。
+ */
+const resolveUpgradeSpecAxes = (specValuesJson: string | null | undefined): {
+  variantValue: string
+  sizeValue: string
+  specValues: Record<string, string>
+  changed: boolean
+} => {
+  const raw = parseSpecValuesJson(specValuesJson)
+  const rest: Record<string, string> = { ...raw }
+  const take = (key: string): string => {
+    const value = normalizeSpecTextValue(rest[key])
+    delete rest[key]
+    return value
+  }
+  const newVariantValue = take(VARIANT_AXIS_SPEC_KEY)
+  const legacyColorValue = take(LEGACY_VARIANT_AXIS_SPEC_KEY)
+  let variantValue = newVariantValue || legacyColorValue
+  if (newVariantValue && legacyColorValue) rest[LEGACY_VARIANT_AXIS_SPEC_KEY] = legacyColorValue
+  let sizeValue = take(SIZE_AXIS_SPEC_KEY)
+  const legacyStyleValue = take(LEGACY_SIZE_AXIS_SPEC_KEY)
+  if (legacyStyleValue) {
+    if (!variantValue) variantValue = legacyStyleValue
+    else if (!sizeValue) sizeValue = legacyStyleValue
+    // 两轴都已有新 key 取值时保留旧「款式」原值，不丢数据；匹配时新 key 优先，不受其影响。
+    else rest[LEGACY_SIZE_AXIS_SPEC_KEY] = legacyStyleValue
+  }
+  const customSpecValue = normalizeSpecTextValue(rest[LEGACY_DEFAULT_SPEC_KEY])
+  if (!variantValue && customSpecValue && customSpecValue !== LEGACY_DEFAULT_SPEC_VALUE) {
+    variantValue = take(LEGACY_DEFAULT_SPEC_KEY)
+  }
+  if (!variantValue && !sizeValue) {
+    return { variantValue, sizeValue, specValues: raw, changed: false }
+  }
+  const specValues: Record<string, string> = { ...rest }
+  if (variantValue) specValues[VARIANT_AXIS_SPEC_KEY] = variantValue
+  if (sizeValue) specValues[SIZE_AXIS_SPEC_KEY] = sizeValue
+  const toSortedEntries = (record: Record<string, string>) => JSON.stringify(Object.entries(record).sort(([left], [right]) => left.localeCompare(right)))
+  return { variantValue, sizeValue, specValues, changed: toSortedEntries(specValues) !== toSortedEntries(raw) }
+}
+
 const PRODUCT_CODE_CONSTRAINT_MATCHER = {
   mysqlConstraint: 'uk_base_product_code',
   sqliteColumns: ['base_product.product_code'],
@@ -1374,7 +1427,8 @@ export class ProductService {
    * - 业务决策是“冻结在 legacy，由管理员手动升级”，不做自动重编码；单品与批量入口共用 upgradeLegacyProductWithManager；
    * - 前置校验全部通过后才在同一事务内重生 productCode 与当前有效 SKU 的 skuCode，已退役 SKU 原样保留；
    * - 旧 productCode 写入 product.legacyProductCode，每条被重算编码的 SKU 旧 skuCode 写入 sku.legacySkuCode，
-   *   用于 lookupByCode 的历史编码兼容路径扫描；barcode（原厂条码）字段从此只保留真实原厂条码，不再回填。
+   *   用于 lookupByCode 的历史编码兼容路径扫描；barcode（原厂条码）字段从此只保留真实原厂条码，不再回填；
+   * - 规格归轴统一走 resolveUpgradeSpecAxes：旧「款式」单独出现时归一级变体轴（1-9），并把规格 key 改写为新版两轴。
    */
   async upgradeProductToYzCode(
     productId: string,
@@ -1542,10 +1596,12 @@ export class ProductService {
     const updatedSkus: BaseProductSku[] = []
 
     for (const sku of currentSkus) {
-      const specValues = normalizeSpecValuesKeys(parseSpecValuesJson(sku.specValuesJson))
-      const variantCode = await resolveVariantCode(manager, savedProduct.id, specValues[VARIANT_AXIS_SPEC_KEY])
-      const sizeCode = await resolveSizeCode(manager, savedProduct.id, specValues[SIZE_AXIS_SPEC_KEY])
+      const axes = resolveUpgradeSpecAxes(sku.specValuesJson)
+      const variantCode = await resolveVariantCode(manager, savedProduct.id, axes.variantValue)
+      const sizeCode = await resolveSizeCode(manager, savedProduct.id, axes.sizeValue)
       const oldSkuCode = sku.skuCode
+      // 规格 key 随升级改写为新版两轴，与刚分配的编码位一致；specText 展示文案保持不变。
+      if (axes.changed) sku.specValuesJson = JSON.stringify(axes.specValues)
       const newSkuCode = formatSkuCode(newProductCode, variantCode, sizeCode)
 
       // 旧标签救济：旧 skuCode 无条件写入 legacySkuCode（历史编码理论上可能重复，不受唯一约束限制），
@@ -3383,9 +3439,7 @@ export class ProductService {
     const variantValues = new Set<string>()
     const sizeValues = new Set<string>()
     currentSkus.forEach((sku) => {
-      const specValues = normalizeSpecValuesKeys(parseSpecValuesJson(sku.specValuesJson))
-      const variantValue = normalizeSpecTextValue(specValues[VARIANT_AXIS_SPEC_KEY])
-      const sizeValue = normalizeSpecTextValue(specValues[SIZE_AXIS_SPEC_KEY])
+      const { variantValue, sizeValue } = resolveUpgradeSpecAxes(sku.specValuesJson)
       if (variantValue) variantValues.add(variantValue)
       if (sizeValue) sizeValues.add(sizeValue)
     })
@@ -3604,9 +3658,9 @@ export class ProductService {
 
     // B9 批次：旧编码统一落 legacySkuCode，不再受 barcode 占用与否影响，预检不用再模拟条码占用情况。
     return currentSkus.map((sku) => {
-      const specValues = normalizeSpecValuesKeys(parseSpecValuesJson(sku.specValuesJson))
-      const variantCode = simulateVariantCode(specValues[VARIANT_AXIS_SPEC_KEY])
-      const sizeCode = simulateSizeCode(specValues[SIZE_AXIS_SPEC_KEY])
+      const axes = resolveUpgradeSpecAxes(sku.specValuesJson)
+      const variantCode = simulateVariantCode(axes.variantValue)
+      const sizeCode = simulateSizeCode(axes.sizeValue)
       const oldSkuCode = sku.skuCode
       const newSkuCode = formatSkuCode(newProductCode, variantCode, sizeCode)
       return {

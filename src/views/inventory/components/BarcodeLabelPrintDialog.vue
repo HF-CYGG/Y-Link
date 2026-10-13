@@ -6,7 +6,7 @@
  * 实现逻辑：
  * - 打开时按勾选的规格向服务端取打印数据，条码图在前端用 JsBarcode（Code128）生成 SVG；
  * - JsBarcode 只在本组件内动态加载，不进入库存页或商品页主包；
- * - 条码内容来源（barcodeSource）决定实际编码值：内部 SKU 编码 / 原厂条码 / 原厂条码优先（历史合并值），
+ * - 条码内容来源（barcodeSource）决定实际编码值：商品编码（规格级编码，YZ 升级后即新编码，如 YZDW030A）/ 原厂条码 / 原厂条码优先（历史合并值），
  *   解析逻辑统一走 barcode-label-print.helpers.ts 的 resolveBarcodeValue，避免条码生成、条码下方文本、失败判定三处口径不一致；
  * - 单张标签的版式渲染下沉到 BarcodeLabelCard.vue，预览区与 Teleport 打印根节点共用同一份标签内容，模板切换时预览同步跟随；
  * - 打印时才通过 Teleport 渲染独立打印根节点（打印结束即移除，避免常驻大量 DOM），并按模板写入 @page 尺寸，除 A4 外均每张一页；
@@ -589,7 +589,7 @@ const printDateText = formatPrintDate(new Date())
       </el-form-item>
       <el-form-item label="条码内容">
         <el-radio-group v-model="settings.barcodeSource" :disabled="printing">
-          <el-radio-button value="sku_code">内部 SKU 编码</el-radio-button>
+          <el-radio-button value="sku_code">商品编码</el-radio-button>
           <el-radio-button value="factory_barcode">原厂条码</el-radio-button>
           <el-radio-button value="factory_barcode_first">原厂条码优先</el-radio-button>
         </el-radio-group>
