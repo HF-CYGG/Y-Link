@@ -2141,6 +2141,77 @@ async function main() {
     const batchAuditCount = await AppDataSource.getRepository(SysAuditLog).count({ where: { actionType: 'product.yz_code_upgrade', actionLabel: '批量升级存量商品为 YZ 编码' } })
     assert.equal(batchAuditCount, 3, '每个批量升级商品各写一条审计')
     pass('批量升级执行：3 个商品按预检顺序升级到 BU01/BU03/BU04，旧编码写入历史字段，逐商品写审计')
+
+    // 用例 最终：启动自愈——已升级的 YZ 单规格商品，默认规格被留成启动补建的 `SKU-<商品ID>`（线上实际现象），
+    // repairStaleYzSkuCodes 应按升级口径重编为「产品编码 + 0」，旧码进历史编码仍可扫；重复执行不再改动。
+    // 放在全部用例之后执行，避免批量修复影响前面用例刻意构造的编码数据。
+    const staleTag = await createSeriesTag('RP')
+    const staleLegacy = await productService.create({
+      productCode: nextProductCode(),
+      productName: `stale-default-${verifySeed}`,
+      pinyinAbbr: 'SD',
+      defaultPrice: 40,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+    } as Parameters<typeof productService.create>[0], actor)
+    const staleUpgraded = await productService.upgradeProductToYzCode(staleLegacy.id, { primarySeriesTagId: staleTag.id }, actor)
+    const staleSkuId = staleUpgraded.skus[0].id
+    assert.equal(staleUpgraded.skus.length, 1)
+    assert.equal(staleUpgraded.skus[0].skuCode, `${staleUpgraded.productCode}0`, '单规格商品升级时默认规格应直接重编为产品编码 + 0')
+    assert.equal(staleUpgraded.skus[0].legacySkuCode, staleLegacy.skus[0].skuCode, '默认规格升级前的 -DEFAULT 编码写入历史编码')
+    const staleCode = `SKU-${staleLegacy.id}`
+    await skuRepo.update({ id: staleSkuId }, { skuCode: staleCode, legacySkuCode: null, variantCode: null, sizeCode: null })
+    const [staleLabel] = await productService.listLabels([staleSkuId])
+    assert.equal(staleLabel.skuCode, staleCode, '构造场景：修复前打印数据仍是旧码')
+    const repairResult = await productService.repairStaleYzSkuCodes()
+    assert.ok(repairResult.repairedSkuCount >= 1, '应至少修复构造的这一条规格')
+    const repairedSku = await skuRepo.findOneByOrFail({ id: staleSkuId })
+    assert.equal(repairedSku.skuCode, `${staleUpgraded.productCode}0`, '默认规格应重编为产品编码 + 0')
+    assert.equal(repairedSku.variantCode, '0')
+    assert.equal(repairedSku.legacySkuCode, staleCode, '旧码写入历史编码')
+    const [repairedLabel] = await productService.listLabels([staleSkuId])
+    assert.equal(repairedLabel.skuCode, `${staleUpgraded.productCode}0`, '修复后条码标签打印新编码')
+    const staleScan = await productService.lookupByCode(staleCode)
+    assert.equal(staleScan.sku.id, staleSkuId, '已打印的旧码标签仍能扫到该规格')
+    assert.equal(staleScan.matchedBy, 'legacy_sku_code')
+    const repairAudit = await AppDataSource.getRepository(SysAuditLog).count({ where: { actionType: 'product.yz_sku_code_repair', targetId: staleUpgraded.id } })
+    assert.equal(repairAudit, 1, '修复写一条审计')
+    const repairAgain = await productService.repairStaleYzSkuCodes()
+    assert.ok(!repairAgain.skippedProducts.some((item) => item.productCode === staleUpgraded.productCode), '重放不应把已修复商品列为跳过')
+    assert.equal((await skuRepo.findOneByOrFail({ id: staleSkuId })).skuCode, `${staleUpgraded.productCode}0`, '重放不再改动已修复规格')
+    pass('启动自愈：YZ 商品默认规格的遗留 SKU-<ID> 编码重编为产品编码 + 0，旧码进历史编码仍可扫，写审计且可安全重放')
+
+    // 用例 最终-2：历史编码不被覆盖——规格已存有升级前的印刷编码，当前编码又被改回其他旧格式时，
+    // 只有一列 legacySkuCode 无法同时保留两个旧码，必须整个商品跳过并告警，数据原样不动。
+    const keepLegacyTag = await createSeriesTag('KL')
+    const keepLegacyBase = await productService.create({
+      productCode: nextProductCode(),
+      productName: `keep-legacy-${verifySeed}`,
+      pinyinAbbr: 'KL',
+      defaultPrice: 75,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+    } as Parameters<typeof productService.create>[0], actor)
+    const keepLegacyUpgraded = await productService.upgradeProductToYzCode(keepLegacyBase.id, { primarySeriesTagId: keepLegacyTag.id }, actor)
+    const keepLegacySku = keepLegacyUpgraded.skus[0]
+    const printedLegacyCode = keepLegacySku.legacySkuCode
+    assert.ok(printedLegacyCode, '升级后应已有历史编码')
+    const revertedCode = `SKU-${keepLegacyBase.id}`
+    await skuRepo.update({ id: keepLegacySku.id }, { skuCode: revertedCode })
+    const keepLegacyResult = await productService.repairStaleYzSkuCodes()
+    const skipped = keepLegacyResult.skippedProducts.find((item) => item.productCode === keepLegacyUpgraded.productCode)
+    assert.ok(skipped && skipped.reason.includes('已有历史编码'), '已有不同历史编码时应跳过并给出原因')
+    const keepLegacyRow = await skuRepo.findOneByOrFail({ id: keepLegacySku.id })
+    assert.equal(keepLegacyRow.skuCode, revertedCode, '跳过时当前编码保持不动')
+    assert.equal(keepLegacyRow.legacySkuCode, printedLegacyCode, '已有历史编码不得被覆盖')
+    assert.equal((await productService.lookupByCode(printedLegacyCode!)).sku.id, keepLegacySku.id, '更早打印的旧标签仍能扫到')
+    pass('启动自愈保护历史编码：规格已有不同历史编码时整个商品跳过并给出原因，当前编码与历史编码均不被改动')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()

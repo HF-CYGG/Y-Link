@@ -1423,6 +1423,98 @@ export class ProductService {
   }
 
   /**
+   * 启动期自愈：YZ 编码商品名下的当前规格必须都是「产品编码 + 变体位 + 可选尺码位」的新编码。
+   * 线上出现过已升级商品的默认规格仍是启动补建的 `SKU-<商品ID>` 等非 YZ 编码，导致条码标签打出旧码；
+   * 这里逐个商品按升级同一口径（resolveUpgradeSpecAxes + 编码登记表）重算这些规格的编码：
+   * - 只处理 code_scheme='yz' 商品的当前规格，已符合新编码的规格与退役规格一律不动，可安全重放；
+   * - 候选商品用一次联表查询筛出（YZ 商品的全部当前规格编码），避免启动时按商品逐个往返数据库；
+   * - 旧编码写入 legacySkuCode，已打印的旧标签仍可扫码；规格 key 同步改写为新版两轴；
+   * - legacySkuCode 只有一列：已存有不同的历史编码时不覆盖（覆盖会让更早打印的标签扫不出来），
+   *   整个商品跳过并在日志中告警，交由人工处理；
+   * - 每个商品独立事务，命中编码冲突或登记表拒绝时整个商品回滚并跳过，只记日志，不阻断启动；
+   * - 每个被修复的商品写一条 product.yz_sku_code_repair 审计，只记编码映射。
+   */
+  async repairStaleYzSkuCodes(): Promise<{ repairedSkuCount: number; skippedProducts: Array<{ productCode: string; reason: string }> }> {
+    const isYzSkuCodeOf = (productCode: string, skuCode: string) =>
+      skuCode.startsWith(productCode) && /^[0-9][A-E]?$/.test(skuCode.slice(productCode.length))
+    const currentYzSkuRows: Array<{ productId: string | number; productCode: string; skuCode: string }> = await AppDataSource
+      .getRepository(BaseProductSku)
+      .createQueryBuilder('sku')
+      .innerJoin(BaseProduct, 'product', 'product.id = sku.productId')
+      .select('sku.productId', 'productId')
+      .addSelect('product.productCode', 'productCode')
+      .addSelect('sku.skuCode', 'skuCode')
+      .where('product.codeScheme = :codeScheme', { codeScheme: 'yz' })
+      .andWhere('sku.isCurrent = :isCurrent', { isCurrent: true })
+      .getRawMany()
+    const productCodeById = new Map<string, string>()
+    currentYzSkuRows
+      .filter((row) => !isYzSkuCodeOf(row.productCode, row.skuCode))
+      .forEach((row) => productCodeById.set(String(row.productId), row.productCode))
+    const candidateIds = [...productCodeById.keys()]
+
+    let repairedSkuCount = 0
+    const skippedProducts: Array<{ productCode: string; reason: string }> = []
+    for (const productId of candidateIds) {
+      try {
+        repairedSkuCount += await runInTransaction(async (manager) => {
+          await acquireSequenceMutex(manager, PRODUCT_SCAN_CODE_MUTEX_KEY)
+          const product = await manager.getRepository(BaseProduct).findOne({
+            where: { id: productId },
+            lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+          })
+          if (!product || product.codeScheme !== 'yz') return 0
+          const staleSkus = (await this.loadCurrentSkusForUpgrade(product.id, manager, true))
+            .filter((sku) => !isYzSkuCodeOf(product.productCode, sku.skuCode))
+          if (!staleSkus.length) return 0
+
+          const changes: Array<{ skuId: string; oldSkuCode: string; newSkuCode: string }> = []
+          for (const sku of staleSkus) {
+            const axes = resolveUpgradeSpecAxes(sku.specValuesJson)
+            const variantCode = await resolveVariantCode(manager, product.id, axes.variantValue)
+            const sizeCode = await resolveSizeCode(manager, product.id, axes.sizeValue)
+            const newSkuCode = formatSkuCode(product.productCode, variantCode, sizeCode)
+            if (changes.some((change) => change.newSkuCode === newSkuCode)) {
+              throw new BizError(`多个规格会生成同一编码「${newSkuCode}」，需人工处理`, 409)
+            }
+            if (sku.legacySkuCode && sku.legacySkuCode !== sku.skuCode) {
+              throw new BizError(
+                `规格「${sku.skuCode}」已有历史编码「${sku.legacySkuCode}」，修复会覆盖其扫码映射，需人工处理`,
+                409,
+              )
+            }
+            changes.push({ skuId: String(sku.id), oldSkuCode: sku.skuCode, newSkuCode })
+            if (axes.changed) sku.specValuesJson = JSON.stringify(axes.specValues)
+            sku.legacySkuCode = sku.skuCode
+            sku.variantCode = variantCode
+            sku.sizeCode = sizeCode
+            sku.skuCode = newSkuCode
+          }
+          const conflict = await this.detectUpgradeCodeConflict(manager, product.id, '', changes)
+          if (conflict) throw new BizError(conflict, 409)
+          await manager.getRepository(BaseProductSku).save(staleSkus)
+          await auditService.record({
+            actionType: 'product.yz_sku_code_repair',
+            actionLabel: '启动修复 YZ 商品遗留的非 YZ 规格编码',
+            targetType: 'base_product',
+            targetId: product.id,
+            targetCode: product.productCode,
+            detail: { productId: product.id, skuCodeChanges: changes },
+          }, manager)
+          return changes.length
+        })
+      } catch (error) {
+        skippedProducts.push({
+          productCode: productCodeById.get(productId) ?? productId,
+          reason: error instanceof BizError ? error.message : '修复失败',
+        })
+      }
+    }
+    if (repairedSkuCount) invalidateMallCatalogReadCache()
+    return { repairedSkuCount, skippedProducts }
+  }
+
+  /**
    * 存量商品手动升级到 YZ 编码（第 3.5 批；B9 批次改造历史编码落位）：
    * - 业务决策是“冻结在 legacy，由管理员手动升级”，不做自动重编码；单品与批量入口共用 upgradeLegacyProductWithManager；
    * - 前置校验全部通过后才在同一事务内重生 productCode 与当前有效 SKU 的 skuCode，已退役 SKU 原样保留；
