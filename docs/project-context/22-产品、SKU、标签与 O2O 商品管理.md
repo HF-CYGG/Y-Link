@@ -41,6 +41,7 @@
 - 批量上下架使用 `PATCH /api/products/online-display/batch`，提交商品 ID 与 `o2oStatus`；去重后最多 100 个商品，全部锁定和校验后在同一事务内写入，返回排序后的 `ids` 和实际变更数 `updatedCount`。任一商品无效或停用商品拟上架时整批失败。
 - 基础资料批量更新使用 `POST /api/products/batch`：`ids` 最多 200 个，可同时或单独提交 `isActive`、`categoryId`、`locationId`（后两者传 `null` 表示清空）。分类写商品主表，停用分类只允许保留、不允许新挂入；库位覆盖所选商品全部当前 SKU（含停用、不含退役）的默认库位，只更新 `location_id` 列，停用库位不可新挂入。锁序为账号 → 商品 → 当前 SKU → 库位，每类实际变化各写一条 `product.batch_update` 汇总审计。
 - 批量升级 YZ 编码：`POST /api/products/yz-code-upgrade/batch/preview` 只读预检，按提交顺序为可升级商品预测连续系列内序号，已是 YZ、容量超限、编码冲突、序号耗尽的商品返回 `eligible=false` 与原因且不占号；`POST /api/products/yz-code-upgrade/batch` 提交最多 50 个商品与统一 `primarySeriesTagId`，整批同事务执行，任一失败整批回滚并在错误中带商品名。单品与批量共用 `upgradeLegacyProductWithManager`，每个商品各写一条 `product.yz_code_upgrade` 审计。
+- 更换 YZ 商品文创系列（仅管理员）：`POST /api/products/:id/series-switch/preview` 只读预检，`POST /api/products/:id/series-switch` 执行，两条路由都要求 `products:manage` 且 `requireRole('admin')`，服务层再校验一次角色。执行时在新系列分配序号重生 `productCode`，本商品所有以旧产品编码开头的 SKU（含已退役行，保证复活规格时编码一致）只替换产品编码前缀，变体码/尺码码不变；旧序号已在永久占用登记里，不会回收复用；`legacyProductCode`/`legacySkuCode` 保持不变（只保留升级前的历史编码），因此换系列前打印的 YZ 标签会失效；同时移除旧系列标签关联、补上新系列关联，写一条 `product.series_switch` 审计。普通编辑接口仍拒绝改 YZ 商品的系列。前端在编辑弹窗改选系列时打开 `ProductSeriesSwitchDialog.vue`，需勾选“已了解影响”并在二次确认框确认后才提交。
 - 两个专用接口均要求 `products:manage`，Cookie 请求继承全局 CSRF 校验；按“操作账号 → 商品 → 当前 SKU”锁序写入，审计与业务写入同事务提交，提交后使商城目录缓存失效。价格、库存、条码、库位、图片、SKU 启停及退役状态均不在专用接口写入范围内。
 - SKU 处理重点：
   - 若未显式传 `skus`，会回退到默认规格逻辑

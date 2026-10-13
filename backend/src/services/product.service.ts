@@ -418,6 +418,33 @@ export interface ProductYzBatchUpgradeResult {
   items: Array<{ productId: string; productName: string; oldProductCode: string; newProductCode: string; skuCount: number }>
 }
 
+/** YZ 编码商品更换文创系列：请求入参，只需要目标系列标签。 */
+export interface ProductSeriesSwitchInput {
+  primarySeriesTagId: string
+}
+
+/** 更换文创系列时单条 SKU 的编码变化；isCurrent=false 表示已退役行（同样换前缀，保证日后复活规格时编码与新系列一致）。 */
+export interface ProductSeriesSwitchSkuChange extends ProductYzUpgradeSkuChange {
+  isCurrent: boolean
+}
+
+/** 更换文创系列预检结果：blockingReason 非空时前端应禁止提交。 */
+export interface ProductSeriesSwitchPreview {
+  productId: string
+  oldSeriesName: string | null
+  oldSeriesCode: string | null
+  newSeriesName: string
+  newSeriesCode: string
+  oldProductCode: string
+  newProductCode: string
+  /** 新系列内序号：预检阶段为预测值（未真正分配）。 */
+  seriesSeq: number
+  skuChanges: ProductSeriesSwitchSkuChange[]
+  /** 升级前的历史产品编码，更换系列时保持不变；直接以 YZ 编码建档的商品为 null。 */
+  legacyProductCode: string | null
+  blockingReason: string | null
+}
+
 /** 规格取值重命名：入参。只改显示名称，编码位（skuCode/variantCode/sizeCode）不受影响。 */
 export interface ProductSpecValueRenameInput {
   axis: 'variant' | 'size'
@@ -1590,6 +1617,231 @@ export class ProductService {
     }, manager)
 
     return { savedProduct, oldProductCode, newProductCode, skuCount: updatedSkus.length }
+  }
+
+  /**
+   * 更换文创系列预检（只读，仅管理员）：返回换系列后产品编码与 SKU 编码会变成什么，供前端二次确认弹窗展示。
+   * 与升级预检一样不得调用 allocateSeriesSeq（会真的消耗序号），新系列序号用 predictNextSeriesSeq 预测。
+   */
+  async previewProductSeriesSwitch(
+    productId: string,
+    primarySeriesTagId: string,
+    actor: AuthUserContext,
+  ): Promise<ProductSeriesSwitchPreview> {
+    this.assertSeriesSwitchActor(actor)
+    const seriesTagId = this.normalizeSeriesTagIdInput(primarySeriesTagId)
+    if (!seriesTagId) {
+      throw new BizError('请选择要更换到的文创系列', 400)
+    }
+    const manager = AppDataSource.manager
+
+    const product = await manager.getRepository(BaseProduct).findOneBy({ id: productId })
+    if (!product) {
+      throw new BizError('产品不存在', 404)
+    }
+    this.assertSeriesSwitchable(product, seriesTagId)
+    const seriesTag = await this.loadSeriesTagForYzScheme(seriesTagId, manager)
+    const oldSeriesTag = await this.loadOldSeriesTag(product, manager)
+
+    const [skus, prefix] = await Promise.all([
+      this.loadSkusForSeriesSwitch(product.id, product.productCode, manager, false),
+      getProductCodePrefix(manager),
+    ])
+    const predictedSeriesSeq = await this.predictNextSeriesSeq(manager, seriesTag.id, seriesTag.seriesCode as string, prefix)
+    const seriesSeqExhaustedReason = predictedSeriesSeq > 99
+      ? '目标系列可用序号已耗尽（1-99 均已被占用），无法更换到该系列'
+      : null
+    const newProductCode = formatProductCode(prefix, seriesTag.seriesCode as string, predictedSeriesSeq)
+    const skuChanges = seriesSeqExhaustedReason ? [] : this.buildSeriesSwitchSkuChanges(skus, product.productCode, newProductCode)
+    const codeConflictReason = seriesSeqExhaustedReason
+      ? null
+      : await this.detectUpgradeCodeConflict(
+        manager,
+        product.id,
+        newProductCode,
+        skuChanges.map((change) => ({ skuId: change.skuId, newSkuCode: change.newSkuCode })),
+      )
+
+    return {
+      productId: normalizeEntityId(product.id),
+      oldSeriesName: oldSeriesTag?.tagName ?? null,
+      oldSeriesCode: oldSeriesTag?.seriesCode ?? null,
+      newSeriesName: seriesTag.tagName,
+      newSeriesCode: seriesTag.seriesCode as string,
+      oldProductCode: product.productCode,
+      newProductCode,
+      seriesSeq: predictedSeriesSeq,
+      skuChanges,
+      legacyProductCode: product.legacyProductCode ?? null,
+      blockingReason: seriesSeqExhaustedReason ?? codeConflictReason,
+    }
+  }
+
+  /**
+   * YZ 编码商品更换文创系列（仅管理员）：
+   * - 产品编码内含系列码，换系列必须在新系列重新分配序号并重算编码；旧序号已写入永久占用登记，不会被回收复用；
+   * - 本商品所有以旧产品编码开头的 SKU（含已退役行，保证日后复活规格时编码与新系列一致）只替换产品编码前缀，
+   *   变体码/尺码码原样保留，不触碰变体码登记表；
+   * - legacyProductCode / legacySkuCode 按业务决策保持不变（只保留升级前的历史编码），因此换系列前打印的
+   *   YZ 标签换系列后无法再扫码识别，前端确认弹窗必须提示重新贴标；
+   * - 标签关联同步：移除旧主系列标签关联、补上新主系列标签关联，避免商品同时出现在两个系列下；
+   * - 锁序与升级一致：账号 → 扫码编码互斥 → 商品 → 目标系列互斥，审计与业务写入同事务提交。
+   */
+  async switchProductSeries(
+    productId: string,
+    input: ProductSeriesSwitchInput,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ): Promise<ProductView> {
+    this.assertSeriesSwitchActor(actor)
+    const seriesTagId = this.normalizeSeriesTagIdInput(input?.primarySeriesTagId)
+    if (!seriesTagId) {
+      throw new BizError('请选择要更换到的文创系列', 400)
+    }
+
+    const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      await acquireSequenceMutex(manager, PRODUCT_SCAN_CODE_MUTEX_KEY)
+
+      const productRepo = manager.getRepository(BaseProduct)
+      const product = await productRepo.findOne({
+        where: { id: productId },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
+      if (!product) {
+        throw new BizError('产品不存在', 404)
+      }
+      this.assertSeriesSwitchable(product, seriesTagId)
+      const seriesTag = await this.loadAndLockSeriesTagForYzScheme(seriesTagId, manager)
+      const oldSeriesTag = await this.loadOldSeriesTag(product, manager)
+      const skus = await this.loadSkusForSeriesSwitch(product.id, product.productCode, manager, true)
+
+      const prefix = await getProductCodePrefix(manager)
+      const seriesSeq = await allocateSeriesSeq(manager, seriesTag.id, seriesTag.seriesCode as string, prefix)
+      const oldProductCode = product.productCode
+      const oldSeriesSeq = product.seriesSeq
+      const newProductCode = formatProductCode(prefix, seriesTag.seriesCode as string, seriesSeq)
+      const skuChanges = this.buildSeriesSwitchSkuChanges(skus, oldProductCode, newProductCode)
+
+      // 保存前做跨列冲突校验（产品编码、SKU 编码、原厂条码、历史编码），命中直接 409 并整体回滚。
+      await this.assertNoUpgradeCodeConflict(
+        manager,
+        product.id,
+        newProductCode,
+        skuChanges.map((change) => ({ skuId: change.skuId, newSkuCode: change.newSkuCode })),
+      )
+
+      product.primarySeriesTagId = seriesTag.id
+      product.seriesSeq = seriesSeq
+      product.productCode = newProductCode
+      const savedProduct = await productRepo.save(product)
+
+      const relationRepo = manager.getRepository(RelProductTag)
+      if (oldSeriesTag) {
+        await relationRepo.delete({ productId: savedProduct.id, tagId: oldSeriesTag.id })
+      }
+      const hasSeriesRelation = await relationRepo.exists({ where: { productId: savedProduct.id, tagId: seriesTag.id } })
+      if (!hasSeriesRelation) {
+        await relationRepo.save(relationRepo.create({ productId: savedProduct.id, tagId: seriesTag.id }))
+      }
+
+      const newSkuCodeById = new Map(skuChanges.map((change) => [change.skuId, change.newSkuCode]))
+      const updatedSkus = skus.filter((sku) => newSkuCodeById.has(String(sku.id)))
+      updatedSkus.forEach((sku) => {
+        sku.skuCode = newSkuCodeById.get(String(sku.id)) as string
+      })
+      if (updatedSkus.length) {
+        await manager.getRepository(BaseProductSku).save(updatedSkus)
+      }
+
+      // 审计：只记系列与编码映射，不落价格、库存、条码等业务值。
+      await auditService.record({
+        actionType: 'product.series_switch',
+        actionLabel: '更换 YZ 商品文创系列',
+        targetType: 'base_product',
+        targetId: savedProduct.id,
+        targetCode: newProductCode,
+        actor,
+        requestMeta,
+        detail: {
+          productId: savedProduct.id,
+          productName: savedProduct.productName,
+          oldSeries: oldSeriesTag
+            ? { tagId: normalizeEntityId(oldSeriesTag.id), tagName: oldSeriesTag.tagName, seriesCode: oldSeriesTag.seriesCode }
+            : null,
+          newSeries: { tagId: normalizeEntityId(seriesTag.id), tagName: seriesTag.tagName, seriesCode: seriesTag.seriesCode },
+          oldProductCode,
+          newProductCode,
+          oldSeriesSeq,
+          newSeriesSeq: seriesSeq,
+          skuCodeChanges: skuChanges.map(({ skuId, oldSkuCode, newSkuCode, isCurrent }) => ({ skuId, oldSkuCode, newSkuCode, isCurrent })),
+        },
+      }, manager)
+
+      return this.buildProductView(savedProduct, manager)
+    })
+    invalidateMallCatalogReadCache()
+    return result
+  }
+
+  /** 更换文创系列属于管理员专属操作：路由层已有角色门禁，服务层再兜底一次，防止绕过路由直接调用。 */
+  private assertSeriesSwitchActor(actor: AuthUserContext): void {
+    if (actor?.role !== 'admin') {
+      throw new BizError('仅管理员可以更换 YZ 编码商品的文创系列', 403)
+    }
+  }
+
+  private assertSeriesSwitchable(product: BaseProduct, targetSeriesTagId: string): void {
+    if (product.codeScheme !== 'yz') {
+      throw new BizError('只有 YZ 编码商品支持更换文创系列，历史编码商品请使用「升级到 YZ 编码」入口', 400)
+    }
+    if (this.normalizeSeriesTagIdInput(product.primarySeriesTagId) === targetSeriesTagId) {
+      throw new BizError('所选文创系列与当前系列相同，无需更换', 400)
+    }
+  }
+
+  private async loadOldSeriesTag(product: BaseProduct, manager: EntityManager): Promise<BaseTag | null> {
+    return product.primarySeriesTagId
+      ? manager.getRepository(BaseTag).findOneBy({ id: product.primarySeriesTagId })
+      : null
+  }
+
+  /**
+   * 读取本商品全部 SKU（含退役行），当前行在前、再按 sortOrder/id 稳定排序，保证预检与执行展示口径一致。
+   * 只有以旧产品编码开头的行才需要换前缀（升级前遗留的历史编码退役行不受影响），由 buildSeriesSwitchSkuChanges 过滤。
+   */
+  private async loadSkusForSeriesSwitch(
+    productId: string,
+    productCode: string,
+    manager: EntityManager,
+    lock: boolean,
+  ): Promise<BaseProductSku[]> {
+    const query = manager.getRepository(BaseProductSku)
+      .createQueryBuilder('sku')
+      .where('sku.productId = :productId', { productId })
+      .orderBy('sku.isCurrent', 'DESC')
+      .addOrderBy('sku.sortOrder', 'ASC')
+      .addOrderBy('sku.id', 'ASC')
+    if (lock && manager.connection.options.type !== 'sqlite') {
+      query.setLock('pessimistic_write')
+    }
+    const skus = await query.getMany()
+    return skus.filter((sku) => typeof sku.skuCode === 'string' && sku.skuCode.startsWith(productCode))
+  }
+
+  /** 只替换产品编码前缀，保留变体码/尺码码等后缀原样不变（产品编码定长，新旧前缀长度通常一致，但不依赖这一点）。 */
+  private buildSeriesSwitchSkuChanges(
+    skus: BaseProductSku[],
+    oldProductCode: string,
+    newProductCode: string,
+  ): ProductSeriesSwitchSkuChange[] {
+    return skus.map((sku) => ({
+      skuId: String(sku.id),
+      specText: sku.specText,
+      oldSkuCode: sku.skuCode,
+      newSkuCode: `${newProductCode}${sku.skuCode.slice(oldProductCode.length)}`,
+      isCurrent: isDatabaseFlagEnabled(sku.isCurrent),
+    }))
   }
 
   /**
@@ -3220,7 +3472,8 @@ export class ProductService {
       }
     }
     if (product.codeScheme === 'yz') {
-      // YZ 编码商品：产品编码由系统生成、不可手工改写；文创系列本批不支持切换（会导致 productCode 需要重算）。
+      // YZ 编码商品：产品编码由系统生成、不可手工改写；文创系列不能在普通编辑中切换（会导致 productCode 需要重算），
+      // 必须由管理员走「更换文创系列」专用入口（switchProductSeries），那里会预检、重算编码并写审计。
       if (typeof input.productCode === 'string' && input.productCode.trim() !== product.productCode) {
         throw new BizError('YZ 编码商品的产品编码不可修改', 400)
       }
@@ -3230,7 +3483,7 @@ export class ProductService {
         // 直接比较会让「原样回传当前系列」也被判成修改，导致编辑其它字段时被误拦。
         const currentSeriesTagId = this.normalizeSeriesTagIdInput(product.primarySeriesTagId)
         if (normalizedSeriesTagId !== currentSeriesTagId) {
-          throw new BizError('YZ 编码商品的文创系列不可修改', 400)
+          throw new BizError('YZ 编码商品的文创系列不能在普通编辑中修改，请由管理员使用「更换文创系列」入口', 400)
         }
       }
     }

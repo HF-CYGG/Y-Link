@@ -584,6 +584,51 @@ export const upgradeProductToYzCode = async (productId: string, primarySeriesTag
   return normalizeProductDetail(result)
 }
 
+/** 更换文创系列时单条 SKU 编码变化；isCurrent=false 表示已退役规格。 */
+export interface ProductSeriesSwitchSkuChange extends ProductYzUpgradeSkuChange {
+  isCurrent: boolean
+}
+
+/** 更换文创系列预检结果：blockingReason 非空时前端应禁止提交。 */
+export interface ProductSeriesSwitchPreview {
+  productId: string
+  oldSeriesName: string | null
+  oldSeriesCode: string | null
+  newSeriesName: string
+  newSeriesCode: string
+  oldProductCode: string
+  newProductCode: string
+  seriesSeq: number
+  skuChanges: ProductSeriesSwitchSkuChange[]
+  legacyProductCode: string | null
+  blockingReason: string | null
+}
+
+/**
+ * 预检 YZ 编码商品更换文创系列（仅管理员）：
+ * - 只读接口，不会真正分配序号，供二次确认弹窗展示换系列后的编码变化。
+ */
+export const previewProductSeriesSwitch = (productId: string, primarySeriesTagId: string): Promise<ProductSeriesSwitchPreview> =>
+  request<ProductSeriesSwitchPreview>({
+    method: 'POST',
+    url: `/products/${productId}/series-switch/preview`,
+    data: { primarySeriesTagId },
+  })
+
+/**
+ * 执行 YZ 编码商品更换文创系列（仅管理员）：
+ * - 返回更换后的完整产品详情，供页面直接回填编辑态与刷新列表。
+ */
+export const switchProductSeries = async (productId: string, primarySeriesTagId: string): Promise<ProductRecord> => {
+  const result = await request<ProductRawRecord | ProductDetailRawResult>({
+    method: 'POST',
+    url: `/products/${productId}/series-switch`,
+    data: { primarySeriesTagId },
+  })
+
+  return normalizeProductDetail(result)
+}
+
 /** 批量升级预检：单个商品结果。eligible=false 时不得提交该商品。 */
 export interface ProductYzBatchUpgradePreviewItem {
   productId: string

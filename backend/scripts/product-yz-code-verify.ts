@@ -2098,6 +2098,141 @@ async function main() {
     const batchAuditCount = await AppDataSource.getRepository(SysAuditLog).count({ where: { actionType: 'product.yz_code_upgrade', actionLabel: '批量升级存量商品为 YZ 编码' } })
     assert.equal(batchAuditCount, 3, '每个批量升级商品各写一条审计')
     pass('批量升级执行：3 个商品按预检顺序升级到 BU01/BU03/BU04，旧编码写入历史字段，逐商品写审计')
+
+    // 更换文创系列：准备一个 YZ 商品，红色在用、蓝色已退役（退役行同样带旧系列编码）。
+    const switchFromTag = await createSeriesTag('SF')
+    const switchToTag = await createSeriesTag('ST')
+    const switchProduct = await productService.create({
+      productName: `series-switch-${verifySeed}`,
+      pinyinAbbr: 'SS',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+      primarySeriesTagId: switchFromTag.id,
+    } as Parameters<typeof productService.create>[0], actor)
+    const switchRedSku = (await productService.evolveProductZeroSpec(
+      switchProduct.id,
+      { axis: 'variant', mode: 'inherit', inheritValue: '红色' },
+      actor,
+    )).skus[0]
+    const switchWithBlue = await productService.update(switchProduct.id, {
+      specGroups: [{ name: '颜色/款式', values: ['红色', '蓝色'] }],
+      skus: [
+        { id: switchRedSku.id, specValues: { '颜色/款式': '红色' }, defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 0 },
+        { specValues: { '颜色/款式': '蓝色' }, defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 1 },
+      ],
+    } as Parameters<typeof productService.update>[1], actor)
+    const switchBlueSku = switchWithBlue.skus.find((sku) => sku.specValues['颜色/款式'] === '蓝色')!
+    await productService.update(switchProduct.id, {
+      specGroups: [{ name: '颜色/款式', values: ['红色'] }],
+      skus: [{ id: switchRedSku.id, specValues: { '颜色/款式': '红色' }, defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 0 }],
+    } as Parameters<typeof productService.update>[1], actor)
+    const switchOldProductCode = switchProduct.productCode
+    assert.equal(switchOldProductCode, formatProductCode(defaultPrefix, 'SF', 1))
+
+    // 权限与前置校验：非管理员 403；与当前系列相同 400；legacy 商品 400；普通编辑仍不能顺带换系列。
+    const operatorActor: AuthUserContext = { ...actor, role: 'operator' }
+    await assert.rejects(
+      productService.previewProductSeriesSwitch(switchProduct.id, switchToTag.id, operatorActor),
+      (error: unknown) => assertBizErrorWithStatus(error, 403),
+    )
+    await assert.rejects(
+      productService.switchProductSeries(switchProduct.id, { primarySeriesTagId: switchToTag.id }, operatorActor),
+      (error: unknown) => assertBizErrorWithStatus(error, 403),
+    )
+    await assert.rejects(
+      productService.switchProductSeries(switchProduct.id, { primarySeriesTagId: switchFromTag.id }, actor),
+      (error: unknown) => assertBizErrorWithStatus(error, 400),
+    )
+    await assert.rejects(
+      productService.switchProductSeries(legacyProduct.id, { primarySeriesTagId: switchToTag.id }, actor),
+      (error: unknown) => assertBizErrorWithStatus(error, 400),
+    )
+    await assert.rejects(
+      productService.update(switchProduct.id, { primarySeriesTagId: switchToTag.id } as Parameters<typeof productService.update>[1], actor),
+      (error: unknown) => assertBizErrorWithStatus(error, 400),
+    )
+    pass('更换系列门禁：非管理员 403，同系列与 legacy 商品 400，普通编辑仍不能顺带切换系列')
+
+    // 预检只读：两次结果一致，不写序号占用登记，在用与退役 SKU 都只换产品编码前缀。
+    const reservationCountBeforeSwitchPreview = await reservationRepo.count()
+    const switchPreview = await productService.previewProductSeriesSwitch(switchProduct.id, switchToTag.id, actor)
+    const switchPreviewAgain = await productService.previewProductSeriesSwitch(switchProduct.id, switchToTag.id, actor)
+    assert.equal(await reservationRepo.count(), reservationCountBeforeSwitchPreview, '换系列预检不应写序号占用登记')
+    assert.equal(switchPreview.newProductCode, switchPreviewAgain.newProductCode)
+    const switchNewProductCode = formatProductCode(defaultPrefix, 'ST', 1)
+    assert.equal(switchPreview.newProductCode, switchNewProductCode)
+    assert.equal(switchPreview.oldSeriesCode, 'SF')
+    assert.equal(switchPreview.newSeriesCode, 'ST')
+    assert.equal(switchPreview.blockingReason, null)
+    assert.deepEqual(
+      switchPreview.skuChanges.map((change) => [change.oldSkuCode, change.newSkuCode, change.isCurrent]),
+      [
+        [switchRedSku.skuCode, `${switchNewProductCode}${switchRedSku.skuCode.slice(switchOldProductCode.length)}`, true],
+        [switchBlueSku.skuCode, `${switchNewProductCode}${switchBlueSku.skuCode.slice(switchOldProductCode.length)}`, false],
+      ],
+    )
+    pass('更换系列预检：只读且结果稳定，在用与退役 SKU 均只替换产品编码前缀')
+
+    // 正式执行：编码、系列、标签关联、审计全部到位，历史编码字段保持不变。
+    const switched = await productService.switchProductSeries(switchProduct.id, { primarySeriesTagId: switchToTag.id }, actor)
+    assert.equal(switched.productCode, switchNewProductCode)
+    assert.equal(String(switched.primarySeriesTagId), String(switchToTag.id))
+    assert.equal(switched.seriesCode, 'ST')
+    assert.equal(switched.legacyProductCode, null, '直接以 YZ 建档的商品换系列后历史编码仍为空')
+    assert.deepEqual(switched.skus.map((sku) => sku.skuCode), [switchPreview.skuChanges[0]!.newSkuCode])
+    const switchedRetiredRow = await skuRepo.findOneByOrFail({ id: switchBlueSku.id })
+    assert.equal(switchedRetiredRow.skuCode, switchPreview.skuChanges[1]!.newSkuCode, '退役行也应换成新系列前缀')
+    assert.equal(switchedRetiredRow.legacySkuCode ?? null, null, '退役行历史编码保持不变')
+    const switchRelRepo = AppDataSource.getRepository((await import('../src/entities/rel-product-tag.entity.js')).RelProductTag)
+    const switchRels = await switchRelRepo.find({ where: { productId: switchProduct.id } })
+    assert.ok(switchRels.some((rel) => String(rel.tagId) === String(switchToTag.id)), '应补上新系列标签关联')
+    assert.ok(!switchRels.some((rel) => String(rel.tagId) === String(switchFromTag.id)), '应移除旧系列标签关联')
+    const switchAudit = await AppDataSource.getRepository(SysAuditLog).findOneBy({ actionType: 'product.series_switch', targetId: String(switchProduct.id) })
+    assert.ok(switchAudit, '更换系列应写审计')
+    pass('更换系列执行：产品编码与全部相关 SKU 编码换到新系列，标签关联同步，历史编码不变并写审计')
+
+    // 旧序号永久占用不回收：旧系列下一个新商品拿到 02 号；复活退役规格时沿用换系列后的编码。
+    const afterSwitchSameOldSeries = await productService.create({
+      productName: `series-switch-next-${verifySeed}`,
+      pinyinAbbr: 'SN',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+      primarySeriesTagId: switchFromTag.id,
+    } as Parameters<typeof productService.create>[0], actor)
+    assert.equal(afterSwitchSameOldSeries.productCode, formatProductCode(defaultPrefix, 'SF', 2), '旧系列的 01 号不应被回收复用')
+    const revived = await productService.update(switchProduct.id, {
+      specGroups: [{ name: '颜色/款式', values: ['红色', '蓝色'] }],
+      skus: [
+        { id: switchRedSku.id, specValues: { '颜色/款式': '红色' }, defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 0 },
+        { specValues: { '颜色/款式': '蓝色' }, defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 1 },
+      ],
+    } as Parameters<typeof productService.update>[1], actor)
+    const revivedBlue = revived.skus.find((sku) => sku.specValues['颜色/款式'] === '蓝色')
+    assert.equal(revivedBlue?.id, switchBlueSku.id, '复活应沿用原退役行')
+    assert.equal(revivedBlue?.skuCode, switchPreview.skuChanges[1]!.newSkuCode, '复活后的编码应是新系列编码')
+    pass('更换系列后：旧系列序号不回收，复活退役规格沿用新系列编码')
+
+    // 升级过的商品再换系列：升级前的历史产品编码与历史 SKU 编码保持不变。
+    const upgradedForSwitch = batchResult.items[0]!
+    const legacySkuCodesBeforeSwitch = (await skuRepo.find({ where: { productId: upgradedForSwitch.productId }, order: { id: 'ASC' } }))
+      .map((sku) => sku.legacySkuCode)
+    const upgradedSwitched = await productService.switchProductSeries(upgradedForSwitch.productId, { primarySeriesTagId: switchToTag.id }, actor)
+    assert.equal(upgradedSwitched.productCode, formatProductCode(defaultPrefix, 'ST', 2))
+    assert.equal(upgradedSwitched.legacyProductCode, upgradedForSwitch.oldProductCode, '升级前历史产品编码应保持不变')
+    assert.deepEqual(
+      (await skuRepo.find({ where: { productId: upgradedForSwitch.productId }, order: { id: 'ASC' } })).map((sku) => sku.legacySkuCode),
+      legacySkuCodesBeforeSwitch,
+      '升级前历史 SKU 编码应保持不变',
+    )
+    pass('升级过的商品更换系列：只换当前 YZ 编码，升级前的历史编码保持不变')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()
