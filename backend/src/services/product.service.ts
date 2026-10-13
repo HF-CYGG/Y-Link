@@ -511,10 +511,40 @@ const buildSpecText = (specValues: Record<string, string>, specGroups: ProductSp
 
 // 规格组合匹配 key：编辑商品时靠它判断提交的规格是否对应已有 SKU，必须先做新旧 key 归一化，
 // 否则历史 SKU（旧 key）与提交的新规格（新 key）会算出不同的 key，被误判为“规格已移除”而退役。
+/** YZ 规格编码：产品编码 + 一位变体码 + 可选一位尺码码。 */
+const isYzSkuCodeOf = (productCode: string, skuCode: string): boolean =>
+  skuCode.startsWith(productCode) && /^[0-9][A-E]?$/.test(skuCode.slice(productCode.length))
+
+/**
+ * 是否为启动自愈（repairStaleYzSkuCodes）让码时归档的退役行：YZ 商品、有变体码、编码为“本商品 YZ 规格编码 + -R<自身ID>”。
+ * YZ 规格编码由系统生成且禁止手工改写，只有自愈归档会产出这种形态。归档行不得再被规格复活，扫码命中时转到同规格当前行。
+ */
+const isArchivedYzSku = (
+  product: Pick<BaseProduct, 'productCode' | 'codeScheme'>,
+  sku: Pick<BaseProductSku, 'id' | 'skuCode' | 'variantCode' | 'isCurrent'>,
+): boolean => {
+  const archiveSuffix = `-R${sku.id}`
+  return product.codeScheme === 'yz'
+    && !isDatabaseFlagEnabled(sku.isCurrent)
+    && Boolean(sku.variantCode)
+    && sku.skuCode.endsWith(archiveSuffix)
+    && isYzSkuCodeOf(product.productCode, sku.skuCode.slice(0, -archiveSuffix.length))
+}
+
+/** 存量单规格商品的默认规格占位取值，不参与归轴，也不参与规格匹配。 */
+const LEGACY_DEFAULT_SPEC_KEY = '规格'
+const LEGACY_DEFAULT_SPEC_VALUE = '默认规格'
+
+/**
+ * 规格匹配 key：同一规格无论新旧 key 写法都必须得到同一个 key。
+ * 「规格=默认规格」只是默认规格的占位写法，与空规格 {} 等价，这里剔除后再比较——否则单规格商品
+ * 编辑保存（默认规格按 {} 提交）会匹配不上存成「规格=默认规格」的当前行，把它退役并复活历史上
+ * 退役的旧默认规格，导致已升级的 YZ 编码被换回 SKU-<ID> / P-…-DEFAULT 等旧码。
+ */
 const buildSpecValuesKey = (specValues: Record<string, string>): string => {
   const entries = Object.entries(normalizeSpecValuesKeys(specValues))
     .map(([name, value]) => [normalizeSpecTextValue(name), normalizeSpecTextValue(value)] as const)
-    .filter(([name, value]) => name && value)
+    .filter(([name, value]) => name && value && !(name === LEGACY_DEFAULT_SPEC_KEY && value === LEGACY_DEFAULT_SPEC_VALUE))
     .sort(([leftName], [rightName]) => leftName.localeCompare(rightName))
   return JSON.stringify(entries)
 }
@@ -522,10 +552,6 @@ const buildSpecValuesKey = (specValues: Record<string, string>): string => {
 const buildSkuEntitySpecValuesKey = (sku: Pick<BaseProductSku, 'specValuesJson'>): string => {
   return buildSpecValuesKey(parseSpecValuesJson(sku.specValuesJson))
 }
-
-/** 存量单规格商品的默认规格占位取值，不参与归轴。 */
-const LEGACY_DEFAULT_SPEC_KEY = '规格'
-const LEGACY_DEFAULT_SPEC_VALUE = '默认规格'
 
 /**
  * 存量商品升级到 YZ 编码专用的规格归轴，升级执行、预检模拟、容量校验三处必须共用这一个口径：
@@ -1432,11 +1458,12 @@ export class ProductService {
    * - legacySkuCode 只有一列：已存有不同的历史编码时不覆盖（覆盖会让更早打印的标签扫不出来），
    *   整个商品跳过并在日志中告警，交由人工处理；
    * - 每个商品独立事务，命中编码冲突或登记表拒绝时整个商品回滚并跳过，只记日志，不阻断启动；
-   * - 每个被修复的商品写一条 product.yz_sku_code_repair 审计，只记编码映射。
+   * - 新编码被同一规格的退役行占着时（单规格商品升级后编辑保存被旧口径误退役的 YZ 行），先把退役行编码
+   *   改为 `<原编码>-R<ID>` 归档值让出新编码，再回写当前行；归档行 legacySkuCode 中的升级前旧码由
+   *   lookupByCode 的归档继任（resolveArchivedSkuSuccessor）转到当前行；不同规格的退役行占用仍按冲突跳过；
+   * - 每个被修复的商品写一条 product.yz_sku_code_repair 审计，只记编码映射（含让出的退役行编码）。
    */
   async repairStaleYzSkuCodes(): Promise<{ repairedSkuCount: number; skippedProducts: Array<{ productCode: string; reason: string }> }> {
-    const isYzSkuCodeOf = (productCode: string, skuCode: string) =>
-      skuCode.startsWith(productCode) && /^[0-9][A-E]?$/.test(skuCode.slice(productCode.length))
     const currentYzSkuRows: Array<{ productId: string | number; productCode: string; skuCode: string }> = await AppDataSource
       .getRepository(BaseProductSku)
       .createQueryBuilder('sku')
@@ -1469,6 +1496,7 @@ export class ProductService {
           if (!staleSkus.length) return 0
 
           const changes: Array<{ skuId: string; oldSkuCode: string; newSkuCode: string }> = []
+          const staleSpecKeyById = new Map(staleSkus.map((sku) => [String(sku.id), buildSkuEntitySpecValuesKey(sku)]))
           for (const sku of staleSkus) {
             const axes = resolveUpgradeSpecAxes(sku.specValuesJson)
             const variantCode = await resolveVariantCode(manager, product.id, axes.variantValue)
@@ -1490,16 +1518,35 @@ export class ProductService {
             sku.sizeCode = sizeCode
             sku.skuCode = newSkuCode
           }
+          // 让出被“同一规格的退役行”占着的新编码：典型场景是单规格商品升级后编辑保存，旧口径把存成
+          // 「规格=默认规格」的 YZ 行误判为规格变化而退役、复活了历史 {} 旧行。退役行编码改为带 -R<ID>
+          // 后缀的归档值（不再参与当前扫码），新编码回到当前行；不同规格的退役行占用仍按冲突跳过。
+          const skuRepo = manager.getRepository(BaseProductSku)
+          const releasedRetiredSkuCodes: Array<{ skuId: string; oldSkuCode: string; archivedSkuCode: string }> = []
+          const retiredSkus = (await skuRepo.find({ where: { productId: product.id } }))
+            .filter((row) => !isDatabaseFlagEnabled(row.isCurrent))
+          for (const change of changes) {
+            const holder = retiredSkus.find((row) => row.skuCode === change.newSkuCode)
+            if (!holder || buildSkuEntitySpecValuesKey(holder) !== staleSpecKeyById.get(change.skuId)) continue
+            const archivedSkuCode = `${holder.skuCode}-R${holder.id}`.slice(0, 96)
+            releasedRetiredSkuCodes.push({ skuId: String(holder.id), oldSkuCode: holder.skuCode, archivedSkuCode })
+            holder.skuCode = archivedSkuCode
+            await skuRepo.save(holder)
+          }
           const conflict = await this.detectUpgradeCodeConflict(manager, product.id, '', changes)
           if (conflict) throw new BizError(conflict, 409)
-          await manager.getRepository(BaseProductSku).save(staleSkus)
+          await skuRepo.save(staleSkus)
           await auditService.record({
             actionType: 'product.yz_sku_code_repair',
             actionLabel: '启动修复 YZ 商品遗留的非 YZ 规格编码',
             targetType: 'base_product',
             targetId: product.id,
             targetCode: product.productCode,
-            detail: { productId: product.id, skuCodeChanges: changes },
+            detail: {
+              productId: product.id,
+              skuCodeChanges: changes,
+              ...(releasedRetiredSkuCodes.length ? { releasedRetiredSkuCodes } : {}),
+            },
           }, manager)
           return changes.length
         })
@@ -2325,13 +2372,18 @@ export class ProductService {
     // 被下面的 allocateSkuCode 追加 -2 后缀，产出 YZPX012A-2 这种不符合 YZ 定长规则的编码。
     const retiredSkuBySpecKey = new Map<string, BaseProductSku>()
     if (product.codeScheme === 'yz') {
+      // 启动自愈归档行（`<YZ 编码>-R<ID>`）只为让码而存在，绝不复活，否则归档码会重新成为当前编码。
+      const hasLegalYzCode = (sku: BaseProductSku) => isYzSkuCodeOf(product.productCode, sku.skuCode)
       existingSkus
-        .filter((sku) => !isDatabaseFlagEnabled(sku.isCurrent))
+        .filter((sku) => !isDatabaseFlagEnabled(sku.isCurrent) && !isArchivedYzSku(product, sku))
         .forEach((sku) => {
           const retiredSpecKey = buildSkuEntitySpecValuesKey(sku)
           const previousRetired = retiredSkuBySpecKey.get(retiredSpecKey)
-          // 同一规格组合可能留有多条历史行，取 id 最大的那条（最近一次退役的）复活。
-          if (!previousRetired || Number(sku.id) > Number(previousRetired.id)) {
+          // 同一规格组合可能留有多条历史行：优先复活持有合法 YZ 编码的行，同等条件下取 id 最大的（最近一次退役的）。
+          const shouldReplace = !previousRetired
+            || (hasLegalYzCode(sku) && !hasLegalYzCode(previousRetired))
+            || (hasLegalYzCode(sku) === hasLegalYzCode(previousRetired) && Number(sku.id) > Number(previousRetired.id))
+          if (shouldReplace) {
             retiredSkuBySpecKey.set(retiredSpecKey, sku)
           }
         })
@@ -2820,7 +2872,8 @@ export class ProductService {
     if (sameStateOwners.length > 1) {
       throw new BizError(`条码「${code}」对应多个商品规格，请联系管理员处理编码冲突`, 409)
     }
-    const { row: sku, matchedBy } = best
+    const { matchedBy } = best
+    const sku = await this.resolveArchivedSkuSuccessor(best.row)
     const product = await this.productRepo.findOne({ where: { id: sku.productId } })
     if (!product) throw new BizError(`未找到条码「${code}」对应的商品`, 404)
     const [category, location] = await Promise.all([
@@ -2840,6 +2893,24 @@ export class ProductService {
       },
       sku: this.buildProductSkuView(sku, location ? new Map([[String(location.id), location.locationCode]]) : undefined),
     }
+  }
+
+  /**
+   * 启动自愈归档行的扫码继任：repairStaleYzSkuCodes 让码时把退役行编码改为 `<让出的 YZ 编码>-R<ID>`，
+   * 并把被让出的 YZ 编码交给继任的当前行；但归档行的 legacySkuCode 仍是升级前已打印的旧码（当前行的历史编码槽
+   * 已用于保存另一批旧码，一列放不下两个）。扫码命中这种归档退役行时，转到同商品中持有被让出 YZ 编码的当前行。
+   * 继任关系按编码而不是规格 key 建立：0 号规格演进（inherit）会合法改变继任行的规格 key，但保持 SKU 与编码不变。
+   * 不是归档行（判定见 isArchivedYzSku）、或该编码已无当前持有者时原样返回，不改变其他退役行的语义。
+   */
+  private async resolveArchivedSkuSuccessor(sku: BaseProductSku): Promise<BaseProductSku> {
+    const archiveSuffix = `-R${sku.id}`
+    if (isDatabaseFlagEnabled(sku.isCurrent) || !sku.variantCode || !sku.skuCode.endsWith(archiveSuffix)) return sku
+    const product = await this.productRepo.findOne({ where: { id: sku.productId }, select: ['id', 'productCode', 'codeScheme'] })
+    if (!product || !isArchivedYzSku(product, sku)) return sku
+    const successor = await AppDataSource.getRepository(BaseProductSku).findOne({
+      where: { productId: sku.productId, skuCode: sku.skuCode.slice(0, -archiveSuffix.length) },
+    })
+    return successor && isDatabaseFlagEnabled(successor.isCurrent) ? successor : sku
   }
 
   /** 条码打印数据：按传入顺序返回，条码图由前端生成。 */
