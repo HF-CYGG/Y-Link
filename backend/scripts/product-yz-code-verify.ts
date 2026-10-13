@@ -2294,6 +2294,42 @@ async function main() {
     const [healedLabel] = await productService.listLabels([revertedScenario.retiredOldId])
     assert.equal(healedLabel.skuCode, `${revertedScenario.upgradedProduct.productCode}0`, '条码标签打印新编码')
     pass('启动自愈修复已回退数据：让出同规格退役行占用的新编码，当前默认规格回到产品编码 + 0，新码、复活旧码与升级前旧码均扫到当前行，标签打印新编码')
+
+    // 反例：legacy 商品的退役行自定义编码恰好以 -R<自身ID> 结尾，且同规格有当前行——不是自愈归档行，
+    // 扫码必须仍命中该退役行（由调用方拒绝退役规格），不能被继任映射静默转到当前行。
+    const lookalikeBase = await productService.create({
+      productCode: nextProductCode(),
+      productName: `archive-lookalike-${verifySeed}`,
+      pinyinAbbr: 'AL',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+    } as Parameters<typeof productService.create>[0], actor)
+    const lookalikeRetired = await skuRepo.save(skuRepo.create({
+      productId: lookalikeBase.id,
+      skuCode: `LOOKALIKE-${verifySeed}`,
+      specValuesJson: '{}',
+      specText: '默认规格',
+      defaultPrice: '10.00',
+      discountRate: '10.0',
+      currentStock: 0,
+      preOrderedStock: 0,
+      isActive: false,
+      isCurrent: false,
+      o2oRecommended: false,
+      thumbnail: null,
+      sortOrder: 0,
+      variantCode: '0',
+    }))
+    const lookalikeCode = `ABC${verifySeed}-R${lookalikeRetired.id}`
+    await skuRepo.update({ id: lookalikeRetired.id }, { skuCode: lookalikeCode })
+    const lookalikeScan = await productService.lookupByCode(lookalikeCode)
+    assert.equal(lookalikeScan.sku.id, String(lookalikeRetired.id), 'legacy 商品的 -R<ID> 结尾退役行不得被当作自愈归档行继任')
+    assert.equal(lookalikeScan.sku.isCurrent, false)
+    pass('归档继任限定自愈产物：legacy 商品退役行编码碰巧以 -R<自身ID> 结尾时，扫码仍命中该退役行，不转到同规格当前行')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()

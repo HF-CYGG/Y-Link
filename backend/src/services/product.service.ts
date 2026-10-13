@@ -511,6 +511,10 @@ const buildSpecText = (specValues: Record<string, string>, specGroups: ProductSp
 
 // 规格组合匹配 key：编辑商品时靠它判断提交的规格是否对应已有 SKU，必须先做新旧 key 归一化，
 // 否则历史 SKU（旧 key）与提交的新规格（新 key）会算出不同的 key，被误判为“规格已移除”而退役。
+/** YZ 规格编码：产品编码 + 一位变体码 + 可选一位尺码码。 */
+const isYzSkuCodeOf = (productCode: string, skuCode: string): boolean =>
+  skuCode.startsWith(productCode) && /^[0-9][A-E]?$/.test(skuCode.slice(productCode.length))
+
 /** 存量单规格商品的默认规格占位取值，不参与归轴，也不参与规格匹配。 */
 const LEGACY_DEFAULT_SPEC_KEY = '规格'
 const LEGACY_DEFAULT_SPEC_VALUE = '默认规格'
@@ -1444,8 +1448,6 @@ export class ProductService {
    * - 每个被修复的商品写一条 product.yz_sku_code_repair 审计，只记编码映射（含让出的退役行编码）。
    */
   async repairStaleYzSkuCodes(): Promise<{ repairedSkuCount: number; skippedProducts: Array<{ productCode: string; reason: string }> }> {
-    const isYzSkuCodeOf = (productCode: string, skuCode: string) =>
-      skuCode.startsWith(productCode) && /^[0-9][A-E]?$/.test(skuCode.slice(productCode.length))
     const currentYzSkuRows: Array<{ productId: string | number; productCode: string; skuCode: string }> = await AppDataSource
       .getRepository(BaseProductSku)
       .createQueryBuilder('sku')
@@ -2877,9 +2879,16 @@ export class ProductService {
    * `<原编码>-R<ID>`，但该行的 legacySkuCode 仍是升级前已打印的旧码（当前行的历史编码槽已用于保存
    * 另一批旧码，一列放不下两个）。扫码命中这种归档退役行时，转到同商品同规格的唯一当前行，
    * 让两批旧标签都能继续开单、入库；不是归档行、或找不到唯一继任行时原样返回，不改变其他退役行的语义。
+   * 归档行判定必须同时满足：商品为 YZ 编码、该行有变体码、去掉 `-R<ID>` 后恰是本商品的 YZ 规格编码——
+   * YZ 规格编码由系统生成且不允许手工改写，只有自愈归档会产出这种形态；legacy 商品或自定义编码碰巧以
+   * `-R<ID>` 结尾的退役行一律不做继任，保持调用方对退役规格的拒绝。
    */
   private async resolveArchivedSkuSuccessor(sku: BaseProductSku): Promise<BaseProductSku> {
-    if (isDatabaseFlagEnabled(sku.isCurrent) || !sku.skuCode.endsWith(`-R${sku.id}`)) return sku
+    const archiveSuffix = `-R${sku.id}`
+    if (isDatabaseFlagEnabled(sku.isCurrent) || !sku.variantCode || !sku.skuCode.endsWith(archiveSuffix)) return sku
+    const product = await this.productRepo.findOne({ where: { id: sku.productId }, select: ['id', 'productCode', 'codeScheme'] })
+    if (!product || product.codeScheme !== 'yz') return sku
+    if (!isYzSkuCodeOf(product.productCode, sku.skuCode.slice(0, -archiveSuffix.length))) return sku
     const specKey = buildSkuEntitySpecValuesKey(sku)
     const successors = (await AppDataSource.getRepository(BaseProductSku).find({ where: { productId: sku.productId } }))
       .filter((row) => isDatabaseFlagEnabled(row.isCurrent) && buildSkuEntitySpecValuesKey(row) === specKey)
