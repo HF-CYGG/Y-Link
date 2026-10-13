@@ -1439,7 +1439,8 @@ export class ProductService {
    *   整个商品跳过并在日志中告警，交由人工处理；
    * - 每个商品独立事务，命中编码冲突或登记表拒绝时整个商品回滚并跳过，只记日志，不阻断启动；
    * - 新编码被同一规格的退役行占着时（单规格商品升级后编辑保存被旧口径误退役的 YZ 行），先把退役行编码
-   *   改为 `<原编码>-R<ID>` 归档值让出新编码，再回写当前行；不同规格的退役行占用仍按冲突跳过；
+   *   改为 `<原编码>-R<ID>` 归档值让出新编码，再回写当前行；归档行 legacySkuCode 中的升级前旧码由
+   *   lookupByCode 的归档继任（resolveArchivedSkuSuccessor）转到当前行；不同规格的退役行占用仍按冲突跳过；
    * - 每个被修复的商品写一条 product.yz_sku_code_repair 审计，只记编码映射（含让出的退役行编码）。
    */
   async repairStaleYzSkuCodes(): Promise<{ repairedSkuCount: number; skippedProducts: Array<{ productCode: string; reason: string }> }> {
@@ -2848,7 +2849,8 @@ export class ProductService {
     if (sameStateOwners.length > 1) {
       throw new BizError(`条码「${code}」对应多个商品规格，请联系管理员处理编码冲突`, 409)
     }
-    const { row: sku, matchedBy } = best
+    const { matchedBy } = best
+    const sku = await this.resolveArchivedSkuSuccessor(best.row)
     const product = await this.productRepo.findOne({ where: { id: sku.productId } })
     if (!product) throw new BizError(`未找到条码「${code}」对应的商品`, 404)
     const [category, location] = await Promise.all([
@@ -2868,6 +2870,20 @@ export class ProductService {
       },
       sku: this.buildProductSkuView(sku, location ? new Map([[String(location.id), location.locationCode]]) : undefined),
     }
+  }
+
+  /**
+   * 启动自愈归档行的扫码继任：repairStaleYzSkuCodes 让出新编码时，会把同一规格退役行的编码改为
+   * `<原编码>-R<ID>`，但该行的 legacySkuCode 仍是升级前已打印的旧码（当前行的历史编码槽已用于保存
+   * 另一批旧码，一列放不下两个）。扫码命中这种归档退役行时，转到同商品同规格的唯一当前行，
+   * 让两批旧标签都能继续开单、入库；不是归档行、或找不到唯一继任行时原样返回，不改变其他退役行的语义。
+   */
+  private async resolveArchivedSkuSuccessor(sku: BaseProductSku): Promise<BaseProductSku> {
+    if (isDatabaseFlagEnabled(sku.isCurrent) || !sku.skuCode.endsWith(`-R${sku.id}`)) return sku
+    const specKey = buildSkuEntitySpecValuesKey(sku)
+    const successors = (await AppDataSource.getRepository(BaseProductSku).find({ where: { productId: sku.productId } }))
+      .filter((row) => isDatabaseFlagEnabled(row.isCurrent) && buildSkuEntitySpecValuesKey(row) === specKey)
+    return successors.length === 1 ? successors[0] : sku
   }
 
   /** 条码打印数据：按传入顺序返回，条码图由前端生成。 */
