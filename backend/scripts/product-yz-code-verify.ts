@@ -2212,6 +2212,77 @@ async function main() {
     assert.equal(keepLegacyRow.legacySkuCode, printedLegacyCode, '已有历史编码不得被覆盖')
     assert.equal((await productService.lookupByCode(printedLegacyCode!)).sku.id, keepLegacySku.id, '更早打印的旧标签仍能扫到')
     pass('启动自愈保护历史编码：规格已有不同历史编码时整个商品跳过并给出原因，当前编码与历史编码均不被改动')
+
+    // 用例 最终-3：线上实际根因——单规格商品默认规格存成「规格=默认规格」，且留有一条退役的 {} 旧默认规格
+    // （如启动补建的 SKU-<ID>）。升级后按前端单规格方式编辑保存（skus: []，默认规格按 {} 提交），
+    // 旧口径会误判规格变化：退役 YZ 行、复活旧行，条码打回旧码。修复后必须匹配当前行，编码保持不变。
+    const buildDefaultSpecScenario = async (seriesCode: string, name: string) => {
+      const tag = await createSeriesTag(seriesCode)
+      const base = await productService.create({
+        productCode: nextProductCode(),
+        productName: `${name}-${verifySeed}`,
+        pinyinAbbr: 'DS',
+        defaultPrice: 40,
+        discountRate: 10,
+        isActive: true,
+        o2oStatus: 'unlisted',
+        currentStock: 0,
+        limitPerUser: 5,
+      } as Parameters<typeof productService.create>[0], actor)
+      await skuRepo.update({ id: base.skus[0].id }, { specValuesJson: JSON.stringify({ 规格: '默认规格' }) })
+      const retiredOld = await skuRepo.save(skuRepo.create({
+        productId: base.id,
+        skuCode: `SKU-${base.id}`,
+        specValuesJson: '{}',
+        specText: '默认规格',
+        defaultPrice: '40.00',
+        discountRate: '10.0',
+        currentStock: 0,
+        preOrderedStock: 0,
+        isActive: false,
+        isCurrent: false,
+        o2oRecommended: false,
+        thumbnail: null,
+        sortOrder: 0,
+      }))
+      const upgradedProduct = await productService.upgradeProductToYzCode(base.id, { primarySeriesTagId: tag.id }, actor)
+      return { upgradedProduct, yzSkuId: upgradedProduct.skus[0].id, retiredOldId: String(retiredOld.id), oldCode: `SKU-${base.id}` }
+    }
+    const editScenario = await buildDefaultSpecScenario('DE', 'default-spec-edit')
+    await productService.update(editScenario.upgradedProduct.id, {
+      productCode: editScenario.upgradedProduct.productCode,
+      productName: editScenario.upgradedProduct.productName,
+      pinyinAbbr: 'DS',
+      defaultPrice: 40,
+      discountRate: 10,
+      currentStock: 0,
+      isActive: true,
+      tagIds: editScenario.upgradedProduct.tagIds,
+      skus: [],
+    } as Parameters<typeof productService.update>[1], actor)
+    const editedCurrent = await skuRepo.find({ where: { productId: editScenario.upgradedProduct.id, isCurrent: true } })
+    assert.deepEqual(editedCurrent.map((sku) => String(sku.id)), [editScenario.yzSkuId], '编辑保存后当前默认规格仍应是升级后的那一行')
+    assert.equal(editedCurrent[0].skuCode, `${editScenario.upgradedProduct.productCode}0`, '编辑保存不得把编码换回旧码')
+    assert.equal(isDatabaseFlagEnabled((await skuRepo.findOneByOrFail({ id: editScenario.retiredOldId })).isCurrent), false, '历史旧默认规格不得被复活')
+    pass('单规格编辑保存：默认规格「规格=默认规格」与 {} 视为同一规格，升级后的 YZ 编码保持当前，不复活历史旧默认规格')
+
+    // 已被旧口径换回旧码的线上数据：当前行是复活的 {} 旧行，YZ 行已退役并占着新编码。启动自愈应让出退役行编码，
+    // 把「产品编码 + 0」还给当前行，旧码写入历史编码仍可扫，退役行改为 -R<ID> 归档编码。
+    const revertedScenario = await buildDefaultSpecScenario('DF', 'default-spec-reverted')
+    await skuRepo.update({ id: revertedScenario.yzSkuId }, { isCurrent: false, isActive: false })
+    await skuRepo.update({ id: revertedScenario.retiredOldId }, { isCurrent: true, isActive: true })
+    const revertedRepair = await productService.repairStaleYzSkuCodes()
+    assert.ok(!revertedRepair.skippedProducts.some((item) => item.productCode === revertedScenario.upgradedProduct.productCode), '同一规格的退役行占用不应导致跳过')
+    const healedCurrent = await skuRepo.findOneByOrFail({ id: revertedScenario.retiredOldId })
+    assert.equal(healedCurrent.skuCode, `${revertedScenario.upgradedProduct.productCode}0`, '当前行应回到产品编码 + 0')
+    assert.equal(healedCurrent.legacySkuCode, revertedScenario.oldCode, '复活旧行的旧码写入历史编码')
+    const archivedYz = await skuRepo.findOneByOrFail({ id: revertedScenario.yzSkuId })
+    assert.equal(archivedYz.skuCode, `${revertedScenario.upgradedProduct.productCode}0-R${revertedScenario.yzSkuId}`, '退役行编码改为归档值')
+    assert.equal((await productService.lookupByCode(`${revertedScenario.upgradedProduct.productCode}0`)).sku.id, revertedScenario.retiredOldId, '扫描新编码命中当前行')
+    assert.equal((await productService.lookupByCode(revertedScenario.oldCode)).sku.id, revertedScenario.retiredOldId, '扫描旧码仍命中当前行')
+    const [healedLabel] = await productService.listLabels([revertedScenario.retiredOldId])
+    assert.equal(healedLabel.skuCode, `${revertedScenario.upgradedProduct.productCode}0`, '条码标签打印新编码')
+    pass('启动自愈修复已回退数据：让出同规格退役行占用的新编码，当前默认规格回到产品编码 + 0，新旧码均可扫，标签打印新编码')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()
