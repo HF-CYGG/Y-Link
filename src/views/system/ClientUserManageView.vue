@@ -138,12 +138,16 @@ const createUsernameLabel = computed(() => (isCreateDepartmentProfile.value ? '�
 const createDepartmentRequired = computed(() => isCreateDepartmentProfile.value)
 const createContactRequired = computed(() => isCreatePersonalProfile.value)
 
+// 校验器与提交都走统一的文本归一化：Element Plus 可清空选择器在清空时会把模型写成 undefined，
+// 直接调用 value.trim() 会在 change 校验时抛出 TypeError。
+const normalizeOptionalText = (value: unknown) => (typeof value === 'string' ? value.trim() : '')
+
 const createRules: FormRules = {
   profileKind: [{ required: true, message: '请选择创建类型', trigger: 'change' }],
   username: [
     {
-      validator: (_rule, value: string, callback) => {
-        if (!isCreateTeacherProfile.value && !value.trim()) {
+      validator: (_rule, value: unknown, callback) => {
+        if (!isCreateTeacherProfile.value && !normalizeOptionalText(value)) {
           callback(new Error(isCreateDepartmentProfile.value ? '请输入账号名称' : '请输入用户名'))
           return
         }
@@ -154,12 +158,12 @@ const createRules: FormRules = {
   ],
   staffNo: [
     {
-      validator: (_rule, value: string, callback) => {
+      validator: (_rule, value: unknown, callback) => {
         if (!isCreateTeacherProfile.value) {
           callback()
           return
         }
-        const normalized = value.trim()
+        const normalized = normalizeOptionalText(value)
         if (!normalized) {
           callback(new Error('请输入教职工号'))
           return
@@ -175,12 +179,12 @@ const createRules: FormRules = {
   ],
   mobile: [
     {
-      validator: (_rule, value: string, callback) => {
-        if (value && !/^1\d{10}$/.test(value.trim())) {
+      validator: (_rule, value: unknown, callback) => {
+        if (value && !/^1\d{10}$/.test(normalizeOptionalText(value))) {
           callback(new Error('手机号格式不正确'))
           return
         }
-        if (createContactRequired.value && !value.trim() && !createForm.email.trim()) {
+        if (createContactRequired.value && !normalizeOptionalText(value) && !normalizeOptionalText(createForm.email)) {
           callback(new Error('手机号和邮箱至少保留一项'))
           return
         }
@@ -191,12 +195,12 @@ const createRules: FormRules = {
   ],
   email: [
     {
-      validator: (_rule, value: string, callback) => {
-        if (value && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim())) {
+      validator: (_rule, value: unknown, callback) => {
+        if (value && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizeOptionalText(value))) {
           callback(new Error('邮箱格式不正确'))
           return
         }
-        if (createContactRequired.value && !value.trim() && !createForm.mobile.trim()) {
+        if (createContactRequired.value && !normalizeOptionalText(value) && !normalizeOptionalText(createForm.mobile)) {
           callback(new Error('手机号和邮箱至少保留一项'))
           return
         }
@@ -207,8 +211,8 @@ const createRules: FormRules = {
   ],
   departmentNodeId: [
     {
-      validator: (_rule, value: string, callback) => {
-        if (createDepartmentRequired.value && !value.trim()) {
+      validator: (_rule, value: unknown, callback) => {
+        if (createDepartmentRequired.value && !normalizeOptionalText(value)) {
           callback(new Error('请选择部门共享账号所属部门'))
           return
         }
@@ -224,7 +228,7 @@ const createRules: FormRules = {
   ],
   confirmPassword: [
     {
-      validator: (_rule, value: string, callback) => {
+      validator: (_rule, value: unknown, callback) => {
         if (!value) {
           callback(new Error('请再次输入登录密码'))
           return
@@ -259,12 +263,12 @@ const editRules: FormRules = {
   username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
   mobile: [
     {
-      validator: (_rule, value: string, callback) => {
-        if (value && !/^1\d{10}$/.test(value.trim())) {
+      validator: (_rule, value: unknown, callback) => {
+        if (value && !/^1\d{10}$/.test(normalizeOptionalText(value))) {
           callback(new Error('手机号格式不正确'))
           return
         }
-        if (editForm.profileKind === 'personal' && !value.trim() && !editForm.email.trim()) {
+        if (editForm.profileKind === 'personal' && !normalizeOptionalText(value) && !normalizeOptionalText(editForm.email)) {
           callback(new Error('手机号和邮箱至少保留一项'))
           return
         }
@@ -275,12 +279,12 @@ const editRules: FormRules = {
   ],
   email: [
     {
-      validator: (_rule, value: string, callback) => {
-        if (value && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim())) {
+      validator: (_rule, value: unknown, callback) => {
+        if (value && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizeOptionalText(value))) {
           callback(new Error('邮箱格式不正确'))
           return
         }
-        if (editForm.profileKind === 'personal' && !value.trim() && !editForm.mobile.trim()) {
+        if (editForm.profileKind === 'personal' && !normalizeOptionalText(value) && !normalizeOptionalText(editForm.mobile)) {
           callback(new Error('手机号和邮箱至少保留一项'))
           return
         }
@@ -377,8 +381,6 @@ const resetEditForm = () => {
   editForm.status = 'enabled'
   editFormRef.value?.clearValidate()
 }
-
-const normalizeOptionalText = (value: unknown) => (typeof value === 'string' ? value.trim() : '')
 
 const buildDepartmentPathLookup = (tree: ClientDepartmentTreeNode[]) => {
   const pathMap: Record<string, string> = {}
