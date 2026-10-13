@@ -22,6 +22,10 @@ function pass(message: string) {
   console.log(`OK ${message}`)
 }
 
+/** 升级会把规格 key 改写为新版两轴，按新 key 优先、旧 key 兜底取值，升级前后都能定位同一 SKU。 */
+const variantValueOf = (sku: { specValues: Record<string, string> }) => sku.specValues['颜色/款式'] ?? sku.specValues['颜色']
+const sizeValueOf = (sku: { specValues: Record<string, string> }) => sku.specValues['尺码'] ?? sku.specValues['款式']
+
 function cleanupSqliteFile() {
   if (!fs.existsSync(sqlitePath)) {
     return
@@ -306,7 +310,7 @@ async function main() {
         { specValues: { 颜色: '米色' }, defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 0 },
       ],
     } as Parameters<typeof productService.update>[1], actor)
-    const legacyNewSku = legacyProductWithNewSpec.skus.find((sku) => sku.specValues['颜色'] === '米色')
+    const legacyNewSku = legacyProductWithNewSpec.skus.find((sku) => variantValueOf(sku) === '米色')
     assert.ok(legacyNewSku, 'legacy 商品应生成新规格 SKU')
     assert.ok(
       /^WC\d{2}\d{3,}$/.test(legacyNewSku!.skuCode)
@@ -392,7 +396,7 @@ async function main() {
         { specValues: { 颜色: '灰色', 款式: 'M' }, defaultPrice: 20, currentStock: 0, isActive: true, sortOrder: 7 },
       ],
     } as Parameters<typeof productService.update>[1], actor)
-    const graySkus = withFourthColor.skus.filter((sku) => sku.specValues['颜色'] === '灰色')
+    const graySkus = withFourthColor.skus.filter((sku) => variantValueOf(sku) === '灰色')
     assert.equal(graySkus.length, 2)
     assert.deepEqual([...graySkus.map((sku) => sku.skuCode)].sort(), ['YZPX014A', 'YZPX014B'])
     graySkus.forEach((sku) => assert.equal(sku.variantCode, '4'))
@@ -405,10 +409,10 @@ async function main() {
         { name: '款式', values: ['S', 'M'] },
       ],
       skus: withFourthColor.skus
-        .filter((sku) => sku.specValues['颜色'] !== '蓝色')
+        .filter((sku) => variantValueOf(sku) !== '蓝色')
         .map(toUpdateSkuInput),
     } as Parameters<typeof productService.update>[1], actor)
-    assert.ok(!withoutBlue.skus.some((sku) => sku.specValues['颜色'] === '蓝色'), '蓝色规格应已从当前矩阵移除')
+    assert.ok(!withoutBlue.skus.some((sku) => variantValueOf(sku) === '蓝色'), '蓝色规格应已从当前矩阵移除')
     const blueRegistryRow = await registryRepo.findOneBy({ productId: yzProduct.id, axis: 'variant', specValue: '蓝色' })
     assert.equal(blueRegistryRow?.code, '2', '蓝色退役后登记表中的变体码仍应保留为 2，不能被清理')
 
@@ -424,7 +428,7 @@ async function main() {
       ],
     } as Parameters<typeof productService.update>[1], actor)
     const yzSkuPattern = buildSkuCodePattern('YZ')
-    const blueBackSkus = blueBack.skus.filter((sku) => sku.specValues['颜色'] === '蓝色')
+    const blueBackSkus = blueBack.skus.filter((sku) => variantValueOf(sku) === '蓝色')
     assert.equal(blueBackSkus.length, 2)
     blueBackSkus.forEach((sku) => assert.equal(sku.variantCode, '2'))
     // skuCode 必须原样复用退役前的 YZPX012A/012B，不允许出现 "-2" 之类的去重后缀：
@@ -501,7 +505,7 @@ async function main() {
     assert.equal(legacyToUpgrade.skus.length, 5)
 
     // 升级前先退役红色-S：只重新提交 4 个规格，触发既有的退役逻辑（用例 12 已验证过该链路）。
-    const redSSku = legacyToUpgrade.skus.find((sku) => sku.specValues['颜色'] === '红色')
+    const redSSku = legacyToUpgrade.skus.find((sku) => variantValueOf(sku) === '红色')
     assert.ok(redSSku, '应存在待退役的红色-S SKU')
     const beforeUpgrade = await productService.update(legacyToUpgrade.id, {
       specGroups: [
@@ -509,7 +513,7 @@ async function main() {
         { name: '款式', values: ['S', 'M'] },
       ],
       skus: legacyToUpgrade.skus
-        .filter((sku) => sku.specValues['颜色'] !== '红色')
+        .filter((sku) => variantValueOf(sku) !== '红色')
         .map((sku) => ({
           id: sku.id,
           specValues: sku.specValues,
@@ -565,7 +569,7 @@ async function main() {
       const oldCode = preUpgradeSkuCodeById.get(sku.id)
       assert.ok(oldCode, `应找到 SKU ${sku.id} 升级前的编码`)
       assert.equal(sku.legacySkuCode, oldCode, '每条当前 SKU 的 legacySkuCode 应等于其升级前的 skuCode')
-      if (sku.specValues['颜色'] === '白色' && sku.specValues['款式'] === 'S') {
+      if (variantValueOf(sku) === '白色' && sizeValueOf(sku) === 'S') {
         assert.equal(sku.barcode, `ORIG-${verifySeed}`, '原本有原厂条码的 SKU 条码应保持不变')
       } else {
         assert.equal(sku.barcode, null, '原本条码为空的 SKU 升级后 barcode 仍应为 null，不再回填旧编码')
@@ -1097,7 +1101,7 @@ async function main() {
       const oldCode = oldLegacyCodeSkuCodeById.get(sku.id)
       assert.ok(oldCode, `应找到 SKU ${sku.id} 升级前的编码`)
       assert.equal(sku.legacySkuCode, oldCode, '每条当前 SKU 的 legacySkuCode 应等于其升级前的 skuCode')
-      if (sku.specValues['颜色'] === '蓝色') {
+      if (variantValueOf(sku) === '蓝色') {
         assert.equal(sku.barcode, `FACT-${verifySeed}`, '原本有真实原厂条码的 SKU 升级后 barcode 应保持原值不变')
       } else {
         assert.equal(sku.barcode, null, '原本条码为空的 SKU 升级后 barcode 仍应为 null')
@@ -1106,7 +1110,7 @@ async function main() {
     pass('升级写历史编码：legacyProductCode 等于升级前 productCode，各当前 SKU 的 legacySkuCode 等于其升级前 skuCode，barcode 不受污染')
 
     // 用例 34：旧码可扫——用升级前的旧 skuCode 调 lookupByCode，应命中该 SKU 且 matchedBy 为 legacy_sku_code。
-    const legacyCodeGreenSku = legacyCodeUpgraded.skus.find((sku) => sku.specValues['颜色'] === '绿色')
+    const legacyCodeGreenSku = legacyCodeUpgraded.skus.find((sku) => variantValueOf(sku) === '绿色')
     assert.ok(legacyCodeGreenSku, '应存在绿色 SKU')
     const oldGreenSkuCode = oldLegacyCodeSkuCodeById.get(legacyCodeGreenSku!.id)
     assert.ok(oldGreenSkuCode, '应找到绿色 SKU 升级前的编码')
@@ -1124,7 +1128,7 @@ async function main() {
     // 底层行，模拟"服务层校验之外已经存在的歧义数据"（例如本修复上线前的历史数据、或未来某条尚未纳入
     // 校验的写入路径遗留下来的数据）：lookupByCode 的最高当前/启用状态层必须拒绝多 SKU 归属。
     const oldBlueSkuCode = oldLegacyCodeSkuCodeById.get(
-      legacyCodeUpgraded.skus.find((sku) => sku.specValues['颜色'] === '蓝色')!.id,
+      legacyCodeUpgraded.skus.find((sku) => variantValueOf(sku) === '蓝色')!.id,
     )
     assert.ok(oldBlueSkuCode, '应找到蓝色 SKU 升级前的编码')
     const priorityProduct = await productService.create({
@@ -1144,13 +1148,52 @@ async function main() {
       (error) => assertBizErrorWithStatus(error, 409) && (error as InstanceType<typeof BizError>).message.includes('多个商品规格'),
       '同状态层的当前编码与另一 SKU 历史编码冲突时必须明确拒绝扫码',
     )
-    const legacyBlueSkuId = legacyCodeUpgraded.skus.find((sku) => sku.specValues['颜色'] === '蓝色')!.id
+    const legacyBlueSkuId = legacyCodeUpgraded.skus.find((sku) => variantValueOf(sku) === '蓝色')!.id
     await skuRepo.update({ id: legacyBlueSkuId }, { isCurrent: false })
     const priorityLookup = await productService.lookupByCode(oldBlueSkuCode!)
     assert.equal(priorityLookup.sku.id, priorityProduct.skus[0].id, '低 current 历史候选不得抢占当前 SKU')
     assert.equal(priorityLookup.matchedBy, 'sku_code', '低状态层存在历史候选时仍应保留当前编码匹配类型')
     await skuRepo.update({ id: legacyBlueSkuId }, { isCurrent: true })
     pass('历史双归属保护：同状态层多 SKU 冲突返回 409；较低 current 历史候选不影响当前 SKU 扫码')
+
+    // 用例 35b：旧「款式」单独出现时归一级变体轴——存量商品只有款式维度（如不同图案），升级应编为 1/2/3，
+    // 而不是 0A/0B/0C；规格 key 随升级改写为「颜色/款式」，规格文案不变，预检与正式升级结论一致。
+    const styleOnlyTag = await createSeriesTag('WS')
+    const styleOnlyProduct = await productService.create({
+      productCode: nextProductCode(),
+      productName: `style-only-${verifySeed}`,
+      pinyinAbbr: 'SO',
+      defaultPrice: 23,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+      skus: ['明心书院', '校门', '岳动馆'].map((value, index) => (
+        { specValues: { 款式: value }, defaultPrice: 23, currentStock: 0, isActive: true, sortOrder: index }
+      )),
+    } as Parameters<typeof productService.create>[0], actor)
+    const styleOnlySpecTextById = new Map(styleOnlyProduct.skus.map((sku) => [sku.id, sku.specText]))
+    const styleOnlyPreview = await productService.previewProductYzUpgrade(styleOnlyProduct.id, styleOnlyTag.id)
+    assert.deepEqual(
+      styleOnlyPreview.skuChanges.map((change) => change.newSkuCode),
+      ['YZWS011', 'YZWS012', 'YZWS013'],
+      '预检应把单独的旧款式归入一级变体轴',
+    )
+    const styleOnlyUpgraded = await productService.upgradeProductToYzCode(styleOnlyProduct.id, { primarySeriesTagId: styleOnlyTag.id }, actor)
+    const styleOnlyByValue = new Map(styleOnlyUpgraded.skus.map((sku) => [variantValueOf(sku), sku]))
+    assert.deepEqual(
+      ['明心书院', '校门', '岳动馆'].map((value) => styleOnlyByValue.get(value)?.skuCode),
+      ['YZWS011', 'YZWS012', 'YZWS013'],
+      '正式升级应与预检一致，旧款式按出现顺序编为 1/2/3',
+    )
+    styleOnlyUpgraded.skus.forEach((sku) => {
+      assert.equal(sku.sizeCode, null, '旧款式归变体轴后不应再占用尺码位')
+      assert.deepEqual(sku.specValues, { '颜色/款式': variantValueOf(sku) }, '规格 key 应改写为新版「颜色/款式」')
+      assert.equal(sku.specText, styleOnlySpecTextById.get(sku.id), '规格文案保持不变')
+    })
+    assert.deepEqual(styleOnlyUpgraded.specGroups.map((group) => group.name), ['颜色/款式'], '升级后规格维度只剩颜色/款式一组')
+    pass('旧款式归轴：只有款式维度的存量商品升级为 YZWS011/012/013，规格 key 改写为「颜色/款式」，预检与正式升级一致')
 
     // ============ 第 6 批：PR #109 评审修复（P1-1 / P1-2 / P1-3）============
 
@@ -1839,8 +1882,8 @@ async function main() {
       ],
     } as Parameters<typeof productService.create>[0], actor)
     assert.equal(p12IntraProduct.skus.length, 2)
-    const p12SkuRed = p12IntraProduct.skus.find((sku) => sku.specValues['颜色'] === '红色')
-    const p12SkuBlue = p12IntraProduct.skus.find((sku) => sku.specValues['颜色'] === '蓝色')
+    const p12SkuRed = p12IntraProduct.skus.find((sku) => variantValueOf(sku) === '红色')
+    const p12SkuBlue = p12IntraProduct.skus.find((sku) => variantValueOf(sku) === '蓝色')
     assert.ok(p12SkuRed && p12SkuBlue, '应存在红色/蓝色两条 SKU')
 
     const p12PreviewBefore = await productService.previewProductYzUpgrade(p12IntraProduct.id, p12IntraTag.id)
@@ -1930,8 +1973,8 @@ async function main() {
         { specValues: { 颜色: '橙色' }, defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 1 },
       ],
     } as Parameters<typeof productService.create>[0], actor)
-    const p12SkuPurple = p12OrdinaryProduct.skus.find((sku) => sku.specValues['颜色'] === '紫色')
-    const p12SkuOrange = p12OrdinaryProduct.skus.find((sku) => sku.specValues['颜色'] === '橙色')
+    const p12SkuPurple = p12OrdinaryProduct.skus.find((sku) => variantValueOf(sku) === '紫色')
+    const p12SkuOrange = p12OrdinaryProduct.skus.find((sku) => variantValueOf(sku) === '橙色')
     assert.ok(p12SkuPurple && p12SkuOrange, '应存在紫色/橙色两条 SKU')
 
     // legacySkuCode 不经普通建档/编辑接口写入，这里沿用文件里已有的直接写库惯例，模拟"橙色 SKU 曾经历
