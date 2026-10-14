@@ -93,6 +93,7 @@ import {
   buildSkuMatrixRows,
   evaluateSkuDimensionCapacity,
   extractSkuDimensionValues,
+  resolveSkuSpecAxes,
   SIZE_AXIS_SPEC_KEY,
   VARIANT_AXIS_SPEC_KEY,
   type ProductSkuMatrixRow,
@@ -634,18 +635,6 @@ const handleCardSelectionChange = async (productId: string, checked: boolean | s
  * - 标签集合转换为 id 数组，便于多选组件直接回填；
  * - 默认售价显式转 number，保持输入组件的数据类型稳定。
  */
-// B8 批次改名：新 key 优先，缺失时回退旧 key（颜色→颜色/款式，款式→尺码），兼容尚未重新保存过的历史数据。
-const resolveSkuFormColor = (specValues: Record<string, string> | undefined, specText: string | undefined) => {
-  const color = String(specValues?.[VARIANT_AXIS_SPEC_KEY] ?? specValues?.颜色 ?? '').trim()
-  if (color) {
-    return color
-  }
-  return String(specValues?.规格 || specText || '').trim()
-}
-
-const resolveSkuFormStyle = (specValues: Record<string, string> | undefined) =>
-  String(specValues?.[SIZE_AXIS_SPEC_KEY] ?? specValues?.款式 ?? '').trim()
-
 const buildSkuSpecValues = (sku: ProductSkuForm, index: number): Record<string, string> => {
   if (sku.specValues && Object.keys(sku.specValues).length) {
     return sku.specValues
@@ -722,8 +711,8 @@ const buildEditForm = (row: ProductRecord): ProductForm => {
         id: sku.id,
         specValues: sku.specValues ?? {},
         specText: sku.specText,
-        color: resolveSkuFormColor(sku.specValues, sku.specText),
-        style: resolveSkuFormStyle(sku.specValues),
+        // 归轴统一走 resolveSkuSpecAxes：旧「款式」无尺码编码位时归颜色/款式，规格文案只在两轴都为空时兜底。
+        ...resolveSkuSpecAxes(sku.specValues, sku.specText, sku.sizeCode),
         defaultPrice: Number(sku.defaultPrice ?? sku.originalPrice ?? row.defaultPrice),
         discountRate: Number(sku.discountRate ?? row.discountRate),
         currentStock: Number(sku.currentStock ?? 0),

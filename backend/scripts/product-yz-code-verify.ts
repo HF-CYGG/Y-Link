@@ -22,6 +22,10 @@ function pass(message: string) {
   console.log(`OK ${message}`)
 }
 
+/** 升级会把规格 key 改写为新版两轴，按新 key 优先、旧 key 兜底取值，升级前后都能定位同一 SKU。 */
+const variantValueOf = (sku: { specValues: Record<string, string> }) => sku.specValues['颜色/款式'] ?? sku.specValues['颜色']
+const sizeValueOf = (sku: { specValues: Record<string, string> }) => sku.specValues['尺码'] ?? sku.specValues['款式']
+
 function cleanupSqliteFile() {
   if (!fs.existsSync(sqlitePath)) {
     return
@@ -306,7 +310,7 @@ async function main() {
         { specValues: { 颜色: '米色' }, defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 0 },
       ],
     } as Parameters<typeof productService.update>[1], actor)
-    const legacyNewSku = legacyProductWithNewSpec.skus.find((sku) => sku.specValues['颜色'] === '米色')
+    const legacyNewSku = legacyProductWithNewSpec.skus.find((sku) => variantValueOf(sku) === '米色')
     assert.ok(legacyNewSku, 'legacy 商品应生成新规格 SKU')
     assert.ok(
       /^WC\d{2}\d{3,}$/.test(legacyNewSku!.skuCode)
@@ -392,7 +396,7 @@ async function main() {
         { specValues: { 颜色: '灰色', 款式: 'M' }, defaultPrice: 20, currentStock: 0, isActive: true, sortOrder: 7 },
       ],
     } as Parameters<typeof productService.update>[1], actor)
-    const graySkus = withFourthColor.skus.filter((sku) => sku.specValues['颜色'] === '灰色')
+    const graySkus = withFourthColor.skus.filter((sku) => variantValueOf(sku) === '灰色')
     assert.equal(graySkus.length, 2)
     assert.deepEqual([...graySkus.map((sku) => sku.skuCode)].sort(), ['YZPX014A', 'YZPX014B'])
     graySkus.forEach((sku) => assert.equal(sku.variantCode, '4'))
@@ -405,10 +409,10 @@ async function main() {
         { name: '款式', values: ['S', 'M'] },
       ],
       skus: withFourthColor.skus
-        .filter((sku) => sku.specValues['颜色'] !== '蓝色')
+        .filter((sku) => variantValueOf(sku) !== '蓝色')
         .map(toUpdateSkuInput),
     } as Parameters<typeof productService.update>[1], actor)
-    assert.ok(!withoutBlue.skus.some((sku) => sku.specValues['颜色'] === '蓝色'), '蓝色规格应已从当前矩阵移除')
+    assert.ok(!withoutBlue.skus.some((sku) => variantValueOf(sku) === '蓝色'), '蓝色规格应已从当前矩阵移除')
     const blueRegistryRow = await registryRepo.findOneBy({ productId: yzProduct.id, axis: 'variant', specValue: '蓝色' })
     assert.equal(blueRegistryRow?.code, '2', '蓝色退役后登记表中的变体码仍应保留为 2，不能被清理')
 
@@ -424,7 +428,7 @@ async function main() {
       ],
     } as Parameters<typeof productService.update>[1], actor)
     const yzSkuPattern = buildSkuCodePattern('YZ')
-    const blueBackSkus = blueBack.skus.filter((sku) => sku.specValues['颜色'] === '蓝色')
+    const blueBackSkus = blueBack.skus.filter((sku) => variantValueOf(sku) === '蓝色')
     assert.equal(blueBackSkus.length, 2)
     blueBackSkus.forEach((sku) => assert.equal(sku.variantCode, '2'))
     // skuCode 必须原样复用退役前的 YZPX012A/012B，不允许出现 "-2" 之类的去重后缀：
@@ -501,7 +505,7 @@ async function main() {
     assert.equal(legacyToUpgrade.skus.length, 5)
 
     // 升级前先退役红色-S：只重新提交 4 个规格，触发既有的退役逻辑（用例 12 已验证过该链路）。
-    const redSSku = legacyToUpgrade.skus.find((sku) => sku.specValues['颜色'] === '红色')
+    const redSSku = legacyToUpgrade.skus.find((sku) => variantValueOf(sku) === '红色')
     assert.ok(redSSku, '应存在待退役的红色-S SKU')
     const beforeUpgrade = await productService.update(legacyToUpgrade.id, {
       specGroups: [
@@ -509,7 +513,7 @@ async function main() {
         { name: '款式', values: ['S', 'M'] },
       ],
       skus: legacyToUpgrade.skus
-        .filter((sku) => sku.specValues['颜色'] !== '红色')
+        .filter((sku) => variantValueOf(sku) !== '红色')
         .map((sku) => ({
           id: sku.id,
           specValues: sku.specValues,
@@ -565,7 +569,7 @@ async function main() {
       const oldCode = preUpgradeSkuCodeById.get(sku.id)
       assert.ok(oldCode, `应找到 SKU ${sku.id} 升级前的编码`)
       assert.equal(sku.legacySkuCode, oldCode, '每条当前 SKU 的 legacySkuCode 应等于其升级前的 skuCode')
-      if (sku.specValues['颜色'] === '白色' && sku.specValues['款式'] === 'S') {
+      if (variantValueOf(sku) === '白色' && sizeValueOf(sku) === 'S') {
         assert.equal(sku.barcode, `ORIG-${verifySeed}`, '原本有原厂条码的 SKU 条码应保持不变')
       } else {
         assert.equal(sku.barcode, null, '原本条码为空的 SKU 升级后 barcode 仍应为 null，不再回填旧编码')
@@ -1097,7 +1101,7 @@ async function main() {
       const oldCode = oldLegacyCodeSkuCodeById.get(sku.id)
       assert.ok(oldCode, `应找到 SKU ${sku.id} 升级前的编码`)
       assert.equal(sku.legacySkuCode, oldCode, '每条当前 SKU 的 legacySkuCode 应等于其升级前的 skuCode')
-      if (sku.specValues['颜色'] === '蓝色') {
+      if (variantValueOf(sku) === '蓝色') {
         assert.equal(sku.barcode, `FACT-${verifySeed}`, '原本有真实原厂条码的 SKU 升级后 barcode 应保持原值不变')
       } else {
         assert.equal(sku.barcode, null, '原本条码为空的 SKU 升级后 barcode 仍应为 null')
@@ -1106,7 +1110,7 @@ async function main() {
     pass('升级写历史编码：legacyProductCode 等于升级前 productCode，各当前 SKU 的 legacySkuCode 等于其升级前 skuCode，barcode 不受污染')
 
     // 用例 34：旧码可扫——用升级前的旧 skuCode 调 lookupByCode，应命中该 SKU 且 matchedBy 为 legacy_sku_code。
-    const legacyCodeGreenSku = legacyCodeUpgraded.skus.find((sku) => sku.specValues['颜色'] === '绿色')
+    const legacyCodeGreenSku = legacyCodeUpgraded.skus.find((sku) => variantValueOf(sku) === '绿色')
     assert.ok(legacyCodeGreenSku, '应存在绿色 SKU')
     const oldGreenSkuCode = oldLegacyCodeSkuCodeById.get(legacyCodeGreenSku!.id)
     assert.ok(oldGreenSkuCode, '应找到绿色 SKU 升级前的编码')
@@ -1124,7 +1128,7 @@ async function main() {
     // 底层行，模拟"服务层校验之外已经存在的歧义数据"（例如本修复上线前的历史数据、或未来某条尚未纳入
     // 校验的写入路径遗留下来的数据）：lookupByCode 的最高当前/启用状态层必须拒绝多 SKU 归属。
     const oldBlueSkuCode = oldLegacyCodeSkuCodeById.get(
-      legacyCodeUpgraded.skus.find((sku) => sku.specValues['颜色'] === '蓝色')!.id,
+      legacyCodeUpgraded.skus.find((sku) => variantValueOf(sku) === '蓝色')!.id,
     )
     assert.ok(oldBlueSkuCode, '应找到蓝色 SKU 升级前的编码')
     const priorityProduct = await productService.create({
@@ -1144,13 +1148,52 @@ async function main() {
       (error) => assertBizErrorWithStatus(error, 409) && (error as InstanceType<typeof BizError>).message.includes('多个商品规格'),
       '同状态层的当前编码与另一 SKU 历史编码冲突时必须明确拒绝扫码',
     )
-    const legacyBlueSkuId = legacyCodeUpgraded.skus.find((sku) => sku.specValues['颜色'] === '蓝色')!.id
+    const legacyBlueSkuId = legacyCodeUpgraded.skus.find((sku) => variantValueOf(sku) === '蓝色')!.id
     await skuRepo.update({ id: legacyBlueSkuId }, { isCurrent: false })
     const priorityLookup = await productService.lookupByCode(oldBlueSkuCode!)
     assert.equal(priorityLookup.sku.id, priorityProduct.skus[0].id, '低 current 历史候选不得抢占当前 SKU')
     assert.equal(priorityLookup.matchedBy, 'sku_code', '低状态层存在历史候选时仍应保留当前编码匹配类型')
     await skuRepo.update({ id: legacyBlueSkuId }, { isCurrent: true })
     pass('历史双归属保护：同状态层多 SKU 冲突返回 409；较低 current 历史候选不影响当前 SKU 扫码')
+
+    // 用例 35b：旧「款式」单独出现时归一级变体轴——存量商品只有款式维度（如不同图案），升级应编为 1/2/3，
+    // 而不是 0A/0B/0C；规格 key 随升级改写为「颜色/款式」，规格文案不变，预检与正式升级结论一致。
+    const styleOnlyTag = await createSeriesTag('WS')
+    const styleOnlyProduct = await productService.create({
+      productCode: nextProductCode(),
+      productName: `style-only-${verifySeed}`,
+      pinyinAbbr: 'SO',
+      defaultPrice: 23,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+      skus: ['明心书院', '校门', '岳动馆'].map((value, index) => (
+        { specValues: { 款式: value }, defaultPrice: 23, currentStock: 0, isActive: true, sortOrder: index }
+      )),
+    } as Parameters<typeof productService.create>[0], actor)
+    const styleOnlySpecTextById = new Map(styleOnlyProduct.skus.map((sku) => [sku.id, sku.specText]))
+    const styleOnlyPreview = await productService.previewProductYzUpgrade(styleOnlyProduct.id, styleOnlyTag.id)
+    assert.deepEqual(
+      styleOnlyPreview.skuChanges.map((change) => change.newSkuCode),
+      ['YZWS011', 'YZWS012', 'YZWS013'],
+      '预检应把单独的旧款式归入一级变体轴',
+    )
+    const styleOnlyUpgraded = await productService.upgradeProductToYzCode(styleOnlyProduct.id, { primarySeriesTagId: styleOnlyTag.id }, actor)
+    const styleOnlyByValue = new Map(styleOnlyUpgraded.skus.map((sku) => [variantValueOf(sku), sku]))
+    assert.deepEqual(
+      ['明心书院', '校门', '岳动馆'].map((value) => styleOnlyByValue.get(value)?.skuCode),
+      ['YZWS011', 'YZWS012', 'YZWS013'],
+      '正式升级应与预检一致，旧款式按出现顺序编为 1/2/3',
+    )
+    styleOnlyUpgraded.skus.forEach((sku) => {
+      assert.equal(sku.sizeCode, null, '旧款式归变体轴后不应再占用尺码位')
+      assert.deepEqual(sku.specValues, { '颜色/款式': variantValueOf(sku) }, '规格 key 应改写为新版「颜色/款式」')
+      assert.equal(sku.specText, styleOnlySpecTextById.get(sku.id), '规格文案保持不变')
+    })
+    assert.deepEqual(styleOnlyUpgraded.specGroups.map((group) => group.name), ['颜色/款式'], '升级后规格维度只剩颜色/款式一组')
+    pass('旧款式归轴：只有款式维度的存量商品升级为 YZWS011/012/013，规格 key 改写为「颜色/款式」，预检与正式升级一致')
 
     // ============ 第 6 批：PR #109 评审修复（P1-1 / P1-2 / P1-3）============
 
@@ -1839,8 +1882,8 @@ async function main() {
       ],
     } as Parameters<typeof productService.create>[0], actor)
     assert.equal(p12IntraProduct.skus.length, 2)
-    const p12SkuRed = p12IntraProduct.skus.find((sku) => sku.specValues['颜色'] === '红色')
-    const p12SkuBlue = p12IntraProduct.skus.find((sku) => sku.specValues['颜色'] === '蓝色')
+    const p12SkuRed = p12IntraProduct.skus.find((sku) => variantValueOf(sku) === '红色')
+    const p12SkuBlue = p12IntraProduct.skus.find((sku) => variantValueOf(sku) === '蓝色')
     assert.ok(p12SkuRed && p12SkuBlue, '应存在红色/蓝色两条 SKU')
 
     const p12PreviewBefore = await productService.previewProductYzUpgrade(p12IntraProduct.id, p12IntraTag.id)
@@ -1930,8 +1973,8 @@ async function main() {
         { specValues: { 颜色: '橙色' }, defaultPrice: 10, currentStock: 0, isActive: true, sortOrder: 1 },
       ],
     } as Parameters<typeof productService.create>[0], actor)
-    const p12SkuPurple = p12OrdinaryProduct.skus.find((sku) => sku.specValues['颜色'] === '紫色')
-    const p12SkuOrange = p12OrdinaryProduct.skus.find((sku) => sku.specValues['颜色'] === '橙色')
+    const p12SkuPurple = p12OrdinaryProduct.skus.find((sku) => variantValueOf(sku) === '紫色')
+    const p12SkuOrange = p12OrdinaryProduct.skus.find((sku) => variantValueOf(sku) === '橙色')
     assert.ok(p12SkuPurple && p12SkuOrange, '应存在紫色/橙色两条 SKU')
 
     // legacySkuCode 不经普通建档/编辑接口写入，这里沿用文件里已有的直接写库惯例，模拟"橙色 SKU 曾经历
@@ -2233,6 +2276,276 @@ async function main() {
       '升级前历史 SKU 编码应保持不变',
     )
     pass('升级过的商品更换系列：只换当前 YZ 编码，升级前的历史编码保持不变')
+
+    // 用例 最终：启动自愈——已升级的 YZ 单规格商品，默认规格被留成启动补建的 `SKU-<商品ID>`（线上实际现象），
+    // repairStaleYzSkuCodes 应按升级口径重编为「产品编码 + 0」，旧码进历史编码仍可扫；重复执行不再改动。
+    // 放在全部用例之后执行，避免批量修复影响前面用例刻意构造的编码数据。
+    const staleTag = await createSeriesTag('RP')
+    const staleLegacy = await productService.create({
+      productCode: nextProductCode(),
+      productName: `stale-default-${verifySeed}`,
+      pinyinAbbr: 'SD',
+      defaultPrice: 40,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+    } as Parameters<typeof productService.create>[0], actor)
+    const staleUpgraded = await productService.upgradeProductToYzCode(staleLegacy.id, { primarySeriesTagId: staleTag.id }, actor)
+    const staleSkuId = staleUpgraded.skus[0].id
+    assert.equal(staleUpgraded.skus.length, 1)
+    assert.equal(staleUpgraded.skus[0].skuCode, `${staleUpgraded.productCode}0`, '单规格商品升级时默认规格应直接重编为产品编码 + 0')
+    assert.equal(staleUpgraded.skus[0].legacySkuCode, staleLegacy.skus[0].skuCode, '默认规格升级前的 -DEFAULT 编码写入历史编码')
+    const staleCode = `SKU-${staleLegacy.id}`
+    await skuRepo.update({ id: staleSkuId }, { skuCode: staleCode, legacySkuCode: null, variantCode: null, sizeCode: null })
+    const [staleLabel] = await productService.listLabels([staleSkuId])
+    assert.equal(staleLabel.skuCode, staleCode, '构造场景：修复前打印数据仍是旧码')
+    const repairResult = await productService.repairStaleYzSkuCodes()
+    assert.ok(repairResult.repairedSkuCount >= 1, '应至少修复构造的这一条规格')
+    const repairedSku = await skuRepo.findOneByOrFail({ id: staleSkuId })
+    assert.equal(repairedSku.skuCode, `${staleUpgraded.productCode}0`, '默认规格应重编为产品编码 + 0')
+    assert.equal(repairedSku.variantCode, '0')
+    assert.equal(repairedSku.legacySkuCode, staleCode, '旧码写入历史编码')
+    const [repairedLabel] = await productService.listLabels([staleSkuId])
+    assert.equal(repairedLabel.skuCode, `${staleUpgraded.productCode}0`, '修复后条码标签打印新编码')
+    const staleScan = await productService.lookupByCode(staleCode)
+    assert.equal(staleScan.sku.id, staleSkuId, '已打印的旧码标签仍能扫到该规格')
+    assert.equal(staleScan.matchedBy, 'legacy_sku_code')
+    const repairAudit = await AppDataSource.getRepository(SysAuditLog).count({ where: { actionType: 'product.yz_sku_code_repair', targetId: staleUpgraded.id } })
+    assert.equal(repairAudit, 1, '修复写一条审计')
+    const repairAgain = await productService.repairStaleYzSkuCodes()
+    assert.ok(!repairAgain.skippedProducts.some((item) => item.productCode === staleUpgraded.productCode), '重放不应把已修复商品列为跳过')
+    assert.equal((await skuRepo.findOneByOrFail({ id: staleSkuId })).skuCode, `${staleUpgraded.productCode}0`, '重放不再改动已修复规格')
+    pass('启动自愈：YZ 商品默认规格的遗留 SKU-<ID> 编码重编为产品编码 + 0，旧码进历史编码仍可扫，写审计且可安全重放')
+
+    // 用例 最终-2：历史编码不被覆盖——规格已存有升级前的印刷编码，当前编码又被改回其他旧格式时，
+    // 只有一列 legacySkuCode 无法同时保留两个旧码，必须整个商品跳过并告警，数据原样不动。
+    const keepLegacyTag = await createSeriesTag('KL')
+    const keepLegacyBase = await productService.create({
+      productCode: nextProductCode(),
+      productName: `keep-legacy-${verifySeed}`,
+      pinyinAbbr: 'KL',
+      defaultPrice: 75,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+    } as Parameters<typeof productService.create>[0], actor)
+    const keepLegacyUpgraded = await productService.upgradeProductToYzCode(keepLegacyBase.id, { primarySeriesTagId: keepLegacyTag.id }, actor)
+    const keepLegacySku = keepLegacyUpgraded.skus[0]
+    const printedLegacyCode = keepLegacySku.legacySkuCode
+    assert.ok(printedLegacyCode, '升级后应已有历史编码')
+    const revertedCode = `SKU-${keepLegacyBase.id}`
+    await skuRepo.update({ id: keepLegacySku.id }, { skuCode: revertedCode })
+    const keepLegacyResult = await productService.repairStaleYzSkuCodes()
+    const skipped = keepLegacyResult.skippedProducts.find((item) => item.productCode === keepLegacyUpgraded.productCode)
+    assert.ok(skipped && skipped.reason.includes('已有历史编码'), '已有不同历史编码时应跳过并给出原因')
+    const keepLegacyRow = await skuRepo.findOneByOrFail({ id: keepLegacySku.id })
+    assert.equal(keepLegacyRow.skuCode, revertedCode, '跳过时当前编码保持不动')
+    assert.equal(keepLegacyRow.legacySkuCode, printedLegacyCode, '已有历史编码不得被覆盖')
+    assert.equal((await productService.lookupByCode(printedLegacyCode!)).sku.id, keepLegacySku.id, '更早打印的旧标签仍能扫到')
+    pass('启动自愈保护历史编码：规格已有不同历史编码时整个商品跳过并给出原因，当前编码与历史编码均不被改动')
+
+    // 用例 最终-3：线上实际根因——单规格商品默认规格存成「规格=默认规格」，且留有一条退役的 {} 旧默认规格
+    // （如启动补建的 SKU-<ID>）。升级后按前端单规格方式编辑保存（skus: []，默认规格按 {} 提交），
+    // 旧口径会误判规格变化：退役 YZ 行、复活旧行，条码打回旧码。修复后必须匹配当前行，编码保持不变。
+    const buildDefaultSpecScenario = async (seriesCode: string, name: string) => {
+      const tag = await createSeriesTag(seriesCode)
+      const base = await productService.create({
+        productCode: nextProductCode(),
+        productName: `${name}-${verifySeed}`,
+        pinyinAbbr: 'DS',
+        defaultPrice: 40,
+        discountRate: 10,
+        isActive: true,
+        o2oStatus: 'unlisted',
+        currentStock: 0,
+        limitPerUser: 5,
+      } as Parameters<typeof productService.create>[0], actor)
+      await skuRepo.update({ id: base.skus[0].id }, { specValuesJson: JSON.stringify({ 规格: '默认规格' }) })
+      const retiredOld = await skuRepo.save(skuRepo.create({
+        productId: base.id,
+        skuCode: `SKU-${base.id}`,
+        specValuesJson: '{}',
+        specText: '默认规格',
+        defaultPrice: '40.00',
+        discountRate: '10.0',
+        currentStock: 0,
+        preOrderedStock: 0,
+        isActive: false,
+        isCurrent: false,
+        o2oRecommended: false,
+        thumbnail: null,
+        sortOrder: 0,
+      }))
+      const upgradedProduct = await productService.upgradeProductToYzCode(base.id, { primarySeriesTagId: tag.id }, actor)
+      return {
+        upgradedProduct,
+        yzSkuId: upgradedProduct.skus[0].id,
+        retiredOldId: String(retiredOld.id),
+        oldCode: `SKU-${base.id}`,
+        preUpgradeCode: base.skus[0].skuCode,
+      }
+    }
+    const editScenario = await buildDefaultSpecScenario('DE', 'default-spec-edit')
+    await productService.update(editScenario.upgradedProduct.id, {
+      productCode: editScenario.upgradedProduct.productCode,
+      productName: editScenario.upgradedProduct.productName,
+      pinyinAbbr: 'DS',
+      defaultPrice: 40,
+      discountRate: 10,
+      currentStock: 0,
+      isActive: true,
+      tagIds: editScenario.upgradedProduct.tagIds,
+      skus: [],
+    } as Parameters<typeof productService.update>[1], actor)
+    const editedCurrent = await skuRepo.find({ where: { productId: editScenario.upgradedProduct.id, isCurrent: true } })
+    assert.deepEqual(editedCurrent.map((sku) => String(sku.id)), [editScenario.yzSkuId], '编辑保存后当前默认规格仍应是升级后的那一行')
+    assert.equal(editedCurrent[0].skuCode, `${editScenario.upgradedProduct.productCode}0`, '编辑保存不得把编码换回旧码')
+    assert.equal(isDatabaseFlagEnabled((await skuRepo.findOneByOrFail({ id: editScenario.retiredOldId })).isCurrent), false, '历史旧默认规格不得被复活')
+    pass('单规格编辑保存：默认规格「规格=默认规格」与 {} 视为同一规格，升级后的 YZ 编码保持当前，不复活历史旧默认规格')
+
+    // 已被旧口径换回旧码的线上数据：当前行是复活的 {} 旧行，YZ 行已退役并占着新编码。启动自愈应让出退役行编码，
+    // 把「产品编码 + 0」还给当前行，旧码写入历史编码仍可扫，退役行改为 -R<ID> 归档编码。
+    const revertedScenario = await buildDefaultSpecScenario('DF', 'default-spec-reverted')
+    await skuRepo.update({ id: revertedScenario.yzSkuId }, { isCurrent: false, isActive: false })
+    await skuRepo.update({ id: revertedScenario.retiredOldId }, { isCurrent: true, isActive: true })
+    const revertedRepair = await productService.repairStaleYzSkuCodes()
+    assert.ok(!revertedRepair.skippedProducts.some((item) => item.productCode === revertedScenario.upgradedProduct.productCode), '同一规格的退役行占用不应导致跳过')
+    const healedCurrent = await skuRepo.findOneByOrFail({ id: revertedScenario.retiredOldId })
+    assert.equal(healedCurrent.skuCode, `${revertedScenario.upgradedProduct.productCode}0`, '当前行应回到产品编码 + 0')
+    assert.equal(healedCurrent.legacySkuCode, revertedScenario.oldCode, '复活旧行的旧码写入历史编码')
+    const archivedYz = await skuRepo.findOneByOrFail({ id: revertedScenario.yzSkuId })
+    assert.equal(archivedYz.skuCode, `${revertedScenario.upgradedProduct.productCode}0-R${revertedScenario.yzSkuId}`, '退役行编码改为归档值')
+    assert.equal((await productService.lookupByCode(`${revertedScenario.upgradedProduct.productCode}0`)).sku.id, revertedScenario.retiredOldId, '扫描新编码命中当前行')
+    assert.equal((await productService.lookupByCode(revertedScenario.oldCode)).sku.id, revertedScenario.retiredOldId, '扫描旧码仍命中当前行')
+    assert.equal(archivedYz.legacySkuCode, revertedScenario.preUpgradeCode, '归档行保留升级前旧码')
+    const preUpgradeScan = await productService.lookupByCode(revertedScenario.preUpgradeCode)
+    assert.equal(preUpgradeScan.sku.id, revertedScenario.retiredOldId, '扫描升级前打印的旧码应转到同规格当前行，而不是退役归档行')
+    assert.equal(preUpgradeScan.sku.isCurrent, true)
+    assert.equal(preUpgradeScan.matchedBy, 'legacy_sku_code')
+    // 继任按编码而不是规格 key 关联：继任行经 0 号规格演进（inherit）改变规格 key 但保持 SKU 与编码不变后，
+    // 扫描归档行里的升级前旧码仍应命中该当前行。
+    const evolvedHealed = await productService.evolveProductZeroSpec(
+      revertedScenario.upgradedProduct.id,
+      { axis: 'variant', mode: 'inherit', inheritValue: '红色' },
+      actor,
+    )
+    const evolvedSku = evolvedHealed.skus.find((sku) => sku.id === revertedScenario.retiredOldId)
+    assert.equal(evolvedSku?.skuCode, `${revertedScenario.upgradedProduct.productCode}0`, '演进后继任行编码不变')
+    assert.equal(variantValueOf(evolvedSku!), '红色', '演进后继任行规格 key 已改变')
+    const evolvedScan = await productService.lookupByCode(revertedScenario.preUpgradeCode)
+    assert.equal(evolvedScan.sku.id, revertedScenario.retiredOldId, '继任行规格演进后，升级前旧码仍应命中当前继任行')
+    assert.equal(evolvedScan.sku.isCurrent, true)
+    const [healedLabel] = await productService.listLabels([revertedScenario.retiredOldId])
+    assert.equal(healedLabel.skuCode, `${revertedScenario.upgradedProduct.productCode}0`, '条码标签打印新编码')
+    pass('启动自愈修复已回退数据：让出同规格退役行占用的新编码，当前默认规格回到产品编码 + 0，新码、复活旧码与升级前旧码均扫到当前行（继任行 0 号规格演进后亦然），标签打印新编码')
+
+    // 反例：legacy 商品的退役行自定义编码恰好以 -R<自身ID> 结尾，且同规格有当前行——不是自愈归档行，
+    // 扫码必须仍命中该退役行（由调用方拒绝退役规格），不能被继任映射静默转到当前行。
+    const lookalikeBase = await productService.create({
+      productCode: nextProductCode(),
+      productName: `archive-lookalike-${verifySeed}`,
+      pinyinAbbr: 'AL',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+    } as Parameters<typeof productService.create>[0], actor)
+    const lookalikeRetired = await skuRepo.save(skuRepo.create({
+      productId: lookalikeBase.id,
+      skuCode: `LOOKALIKE-${verifySeed}`,
+      specValuesJson: '{}',
+      specText: '默认规格',
+      defaultPrice: '10.00',
+      discountRate: '10.0',
+      currentStock: 0,
+      preOrderedStock: 0,
+      isActive: false,
+      isCurrent: false,
+      o2oRecommended: false,
+      thumbnail: null,
+      sortOrder: 0,
+      variantCode: '0',
+    }))
+    const lookalikeCode = `ABC${verifySeed}-R${lookalikeRetired.id}`
+    await skuRepo.update({ id: lookalikeRetired.id }, { skuCode: lookalikeCode })
+    const lookalikeScan = await productService.lookupByCode(lookalikeCode)
+    assert.equal(lookalikeScan.sku.id, String(lookalikeRetired.id), 'legacy 商品的 -R<ID> 结尾退役行不得被当作自愈归档行继任')
+    assert.equal(lookalikeScan.sku.isCurrent, false)
+    pass('归档继任限定自愈产物：legacy 商品退役行编码碰巧以 -R<自身ID> 结尾时，扫码仍命中该退役行，不转到同规格当前行')
+
+    // 归档行不得被规格复活：线上根因里被误退役的 YZ 行通常 ID 更大（较新），自愈后它成为同规格中 ID 最大的
+    // 退役归档行。商品切到多规格再切回单规格时，复活必须选持有合法 YZ 编码的行，不能把 -R<ID> 归档码带回当前。
+    const reviveTag = await createSeriesTag('RV')
+    const reviveBase = await productService.create({
+      productCode: nextProductCode(),
+      productName: `archive-revive-${verifySeed}`,
+      pinyinAbbr: 'AR',
+      defaultPrice: 30,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+    } as Parameters<typeof productService.create>[0], actor)
+    const reviveOldId = reviveBase.skus[0].id
+    const reviveOldCode = `SKU-${reviveBase.id}`
+    const revivePreUpgradeCode = reviveBase.skus[0].skuCode
+    await skuRepo.update({ id: reviveOldId }, { skuCode: reviveOldCode, isCurrent: false, isActive: false })
+    const reviveNewer = await skuRepo.save(skuRepo.create({
+      productId: reviveBase.id,
+      skuCode: revivePreUpgradeCode,
+      specValuesJson: JSON.stringify({ 规格: '默认规格' }),
+      specText: '默认规格',
+      defaultPrice: '30.00',
+      discountRate: '10.0',
+      currentStock: 0,
+      preOrderedStock: 0,
+      isActive: true,
+      isCurrent: true,
+      o2oRecommended: false,
+      thumbnail: null,
+      sortOrder: 0,
+    }))
+    const reviveNewerId = String(reviveNewer.id)
+    assert.ok(Number(reviveNewerId) > Number(reviveOldId), '构造场景：被误退役的 YZ 行 ID 更大')
+    const reviveUpgraded = await productService.upgradeProductToYzCode(reviveBase.id, { primarySeriesTagId: reviveTag.id }, actor)
+    const reviveYzCode = `${reviveUpgraded.productCode}0`
+    assert.equal((await skuRepo.findOneByOrFail({ id: reviveNewerId })).skuCode, reviveYzCode)
+    await skuRepo.update({ id: reviveNewerId }, { isCurrent: false, isActive: false })
+    await skuRepo.update({ id: reviveOldId }, { isCurrent: true, isActive: true })
+    await productService.repairStaleYzSkuCodes()
+    assert.equal((await skuRepo.findOneByOrFail({ id: reviveOldId })).skuCode, reviveYzCode, '自愈后当前行持有合法 YZ 编码')
+    assert.equal((await skuRepo.findOneByOrFail({ id: reviveNewerId })).skuCode, `${reviveYzCode}-R${reviveNewerId}`, '较新的 YZ 行已归档')
+    const reviveUpdateBase = {
+      productCode: reviveUpgraded.productCode,
+      productName: reviveUpgraded.productName,
+      pinyinAbbr: 'AR',
+      defaultPrice: 30,
+      discountRate: 10,
+      currentStock: 0,
+      isActive: true,
+      tagIds: reviveUpgraded.tagIds,
+    }
+    const reviveMulti = await productService.update(reviveBase.id, {
+      ...reviveUpdateBase,
+      skus: [
+        { specValues: { '颜色/款式': '红色' }, defaultPrice: 30, currentStock: 0, isActive: true, sortOrder: 0 },
+        { specValues: { '颜色/款式': '蓝色' }, defaultPrice: 30, currentStock: 0, isActive: true, sortOrder: 1 },
+      ],
+    } as Parameters<typeof productService.update>[1], actor)
+    assert.equal(reviveMulti.skus.filter((sku) => sku.isCurrent).length, 2, '已切到多规格')
+    await productService.update(reviveBase.id, { ...reviveUpdateBase, skus: [] } as Parameters<typeof productService.update>[1], actor)
+    const revivedCurrent = await skuRepo.find({ where: { productId: reviveBase.id, isCurrent: true } })
+    assert.deepEqual(revivedCurrent.map((sku) => String(sku.id)), [String(reviveOldId)], '切回单规格应复活持有合法 YZ 编码的行，而不是 ID 更大的归档行')
+    assert.equal(revivedCurrent[0].skuCode, reviveYzCode, '切回单规格后条码仍为产品编码 + 0')
+    assert.equal(isDatabaseFlagEnabled((await skuRepo.findOneByOrFail({ id: reviveNewerId })).isCurrent), false, '归档行保持退役')
+    pass('归档行不参与规格复活：自愈后切到多规格再切回单规格，复活持有合法 YZ 编码的行，归档码不会重新成为当前编码')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()
