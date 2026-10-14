@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import {
   buildSkuMatrixRows,
   extractSkuDimensionValues,
+  resolveSkuSpecAxes,
   type ProductSkuMatrixRow,
 } from '../src/views/base-data/components/product-sku-matrix.helpers'
 
@@ -121,5 +122,34 @@ const extractedDimensions = extractSkuDimensionValues([
 
 assert.deepEqual(extractedDimensions.colors, ['Red', 'Blue'], 'dimension extraction should dedupe current colors')
 assert.deepEqual(extractedDimensions.styles, ['Standard', 'Gift'], 'dimension extraction should dedupe current styles')
+
+// 规格归轴：旧「款式」单独出现且没有尺码编码位时归颜色/款式，与后端存量升级口径一致；
+// 已分配尺码编码位（如已升级为 0A 的商品）仍按尺码展示；规格文案只在两轴都为空时兜底，不能同时出现在两行。
+assert.deepEqual(resolveSkuSpecAxes({ 款式: '明心书院' }, '明心书院', null), { color: '明心书院', style: '' }, '存量商品的单独款式应归颜色/款式轴')
+assert.deepEqual(resolveSkuSpecAxes({ 款式: '明心书院' }, '明心书院', 'A'), { color: '', style: '明心书院' }, '已分配尺码位的款式应保持尺码轴且不再兜底为颜色')
+assert.deepEqual(resolveSkuSpecAxes({ 尺码: 'S' }, 'S', null), { color: '', style: 'S' }, '只有尺码时不能把规格文案兜底成颜色')
+assert.deepEqual(resolveSkuSpecAxes({ 颜色: '红', 款式: 'S' }, '红 / S', null), { color: '红', style: 'S' }, '颜色与款式同时存在时款式仍是第二轴')
+assert.deepEqual(resolveSkuSpecAxes({ 规格: '礼盒装' }, '礼盒装', null), { color: '礼盒装', style: '' }, '两轴都为空时才兜底为规格文案')
+assert.deepEqual(resolveSkuSpecAxes({ 规格: '默认规格' }, '默认规格', null), { color: '', style: '' }, '默认规格不产生维度取值')
+
+const legacyStyleRows: ProductSkuMatrixRow[] = ['明心书院', '校门'].map((value, index) => ({
+  id: `legacy-style-${index}`,
+  specValues: { 款式: value },
+  specText: value,
+  ...resolveSkuSpecAxes({ 款式: value }, value, null),
+  isCurrent: true,
+}))
+const legacyStyleDimensions = extractSkuDimensionValues(legacyStyleRows)
+assert.deepEqual(legacyStyleDimensions, { colors: ['明心书院', '校门'], styles: [] }, '单维度存量款式不能同时出现在颜色和尺码两行')
+const legacyStyleMatrix = buildSkuMatrixRows({
+  colors: [...legacyStyleDimensions.colors, '岳动馆'],
+  styles: legacyStyleDimensions.styles,
+  existingRows: legacyStyleRows,
+  defaults: { defaultPrice: 23, discountRate: 10, currentStock: 0 },
+})
+assert.equal(legacyStyleMatrix.length, 3, '重新生成矩阵不应产生笛卡尔积重复规格')
+assert.deepEqual(legacyStyleMatrix[0].specValues, { 款式: '明心书院' }, '已有规格重新生成矩阵时保留原 specValues，后端才能按 key 匹配原 SKU')
+assert.equal(legacyStyleMatrix[0].id, 'legacy-style-0')
+assert.deepEqual(legacyStyleMatrix[2].specValues, { '颜色/款式': '岳动馆' }, '新增规格使用新版 key')
 
 console.log('[verify:product-sku-matrix] SKU matrix verification passed')

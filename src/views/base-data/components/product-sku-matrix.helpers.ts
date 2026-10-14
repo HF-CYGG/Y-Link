@@ -4,7 +4,10 @@
  * 实现逻辑：
  * - 将颜色、款式输入归一化为去重后的规格维度；
  * - 根据规格维度生成稳定排序的 SKU 笛卡尔积；
- * - 通过规格组合键匹配已有 SKU，保留历史 id、价格、库存、启停状态、编码、条码、成本价、库位以及 YZ 编码位（variantCode/sizeCode）；
+ * - 通过规格组合键匹配已有 SKU，保留历史 id、原 specValues、价格、库存、启停状态、编码、条码、成本价、库位以及 YZ 编码位（variantCode/sizeCode）；
+ *   已有行保留原 specValues 而不按新 key 重建，否则后端按 key 匹配不上会把同一规格当成新规格，退役旧 SKU 再新建；
+ * - resolveSkuSpecAxes 是规格归轴的唯一入口：旧「款式」在没有尺码编码位（sizeCode）时归颜色/款式轴，
+ *   与后端存量商品升级的归轴口径一致；规格文案只在两轴都没有取值时才兜底为颜色/款式，避免同一取值同时出现在两行；
  * - `spec_values_json` 的 key（B8 批次改名）新写入统一使用「颜色/款式」「尺码」，对应 YZ 编码体系的
  *   一级变体轴（编码位 1-9）与尺码轴（编码位 A-E），详见 evaluateSkuDimensionCapacity；读取历史数据时
  *   兼容旧 key「颜色」「款式」（新 key 缺失才回退旧 key），不做批量迁移，靠重新保存自然懒迁移为新 key。
@@ -78,22 +81,40 @@ export const dedupeSkuDimensionValues = (values: string[]): string[] => {
   return result
 }
 
-export const resolveSkuMatrixColor = (row: ProductSkuMatrixRow): string => {
-  // 新 key 优先，缺失时回退旧 key，兼容尚未重新保存过的历史规格数据。
-  const color = normalizeSkuMatrixText(
-    row.color || row.specValues?.[VARIANT_AXIS_SPEC_KEY] || row.specValues?.[LEGACY_VARIANT_AXIS_SPEC_KEY],
-  )
-  if (color) {
-    return color
+/**
+ * 从 SKU 的规格数据解析颜色/款式轴与尺码轴取值：
+ * - 新 key 优先，缺失时回退旧 key，兼容尚未重新保存过的历史规格数据；
+ * - 旧「款式」单独出现且该 SKU 没有尺码编码位时归颜色/款式轴（存量商品升级同样按此分配 1-9 编码位），
+ *   已分配尺码编码位的（如早期 YZ 商品或已升级为 0A/0B 的商品）仍按尺码轴展示，保证与已有编码一致；
+ * - 两轴都没有取值时，才把非默认的「规格」取值或规格文案兜底为颜色/款式，避免同一取值同时出现在两行。
+ */
+export const resolveSkuSpecAxes = (
+  specValues: Record<string, string> | undefined,
+  specText: string | undefined,
+  sizeCode: string | null | undefined,
+): { color: string; style: string } => {
+  const color = normalizeSkuMatrixText(specValues?.[VARIANT_AXIS_SPEC_KEY] || specValues?.[LEGACY_VARIANT_AXIS_SPEC_KEY])
+  const explicitStyle = normalizeSkuMatrixText(specValues?.[SIZE_AXIS_SPEC_KEY])
+  const legacyStyle = normalizeSkuMatrixText(specValues?.[LEGACY_SIZE_AXIS_SPEC_KEY])
+  if (!color && !explicitStyle && legacyStyle && !sizeCode) {
+    return { color: legacyStyle, style: '' }
   }
-  const fallbackSpecText = normalizeSkuMatrixText(row.specValues?.规格 || row.specText)
-  return isImplicitDefaultSpecText(fallbackSpecText) ? '' : fallbackSpecText
+  const style = explicitStyle || legacyStyle
+  if (color || style) {
+    return { color, style }
+  }
+  const fallbackSpecText = normalizeSkuMatrixText(specValues?.规格 || specText)
+  return { color: isImplicitDefaultSpecText(fallbackSpecText) ? '' : fallbackSpecText, style: '' }
+}
+
+export const resolveSkuMatrixColor = (row: ProductSkuMatrixRow): string => {
+  if (row.color !== undefined || row.style !== undefined) return normalizeSkuMatrixText(row.color)
+  return resolveSkuSpecAxes(row.specValues, row.specText, row.sizeCode).color
 }
 
 export const resolveSkuMatrixStyle = (row: ProductSkuMatrixRow): string => {
-  return normalizeSkuMatrixText(
-    row.style || row.specValues?.[SIZE_AXIS_SPEC_KEY] || row.specValues?.[LEGACY_SIZE_AXIS_SPEC_KEY],
-  )
+  if (row.color !== undefined || row.style !== undefined) return normalizeSkuMatrixText(row.style)
+  return resolveSkuSpecAxes(row.specValues, row.specText, row.sizeCode).style
 }
 
 const buildSkuMatrixKey = (color: string, style: string) => `${color}\u001f${style}`
@@ -147,9 +168,10 @@ export const buildSkuMatrixRows = ({
     const matchedRow = existingRowMap.get(buildSkuMatrixKey(color, style))
     const specText = buildSkuSpecText(color, style)
 
+    const matchedSpecValues = matchedRow?.specValues && Object.keys(matchedRow.specValues).length ? matchedRow.specValues : null
     return {
       id: matchedRow?.id,
-      specValues: buildSkuSpecValues(color, style),
+      specValues: matchedSpecValues ?? buildSkuSpecValues(color, style),
       specText,
       color,
       style,
