@@ -4,13 +4,16 @@
  * 文件职责：管理员为 YZ 编码商品更换文创系列的二次确认弹窗，承载换系列预检展示、影响说明与最终提交。
  * 实现逻辑：
  * - 使用方（ProductManager.vue）在管理员改选「文创系列」下拉时打开本弹窗，并传入商品与目标系列；
- * - 打开即调用 previewProductSeriesSwitch 只读预检，展示旧/新产品编码、在用与已退役 SKU 的编码变化；
+ * - 打开即调用 previewProductSeriesSwitch 只读预检，展示旧/新产品编码、在用与已退役 SKU 的编码变化；预检走 useStableRequest，
+ *   旧请求被取消、晚到的旧响应不会覆盖当前目标系列的结果；
  * - blockingReason 非空时用错误提示替代变更列表并禁用提交；
  * - 提交需两道确认：先勾选“已了解上述影响”，再在 ElMessageBox 中再次确认，最后调用 switchProductSeries，
+ *   提交时带上管理员确认的预检编码，后端发现不一致（预检后被并发占号或规格变化）返回 409，本弹窗自动重新预检并要求重新确认；
  *   成功后通过 switched 事件回传最新商品数据，由使用方刷新列表与编辑态。
  * 维护说明：
  * - 更换系列会重算编码、让已打印的 YZ 标签失效且不可撤销，禁止新增跳过预检或跳过二次确认的“快速更换”入口；
- * - 影响说明必须与后端 switchProductSeries 的真实行为保持一致（历史编码不变、旧序号永久作废、标签关联同步）。
+ * - 影响说明必须与后端 switchProductSeries 的真实行为保持一致（历史编码不变、旧序号永久作废、标签关联同步）；
+ *   历史单据只快照 SKU 编码，单据详情里的「产品编码」读取商品当前值，文案不能承诺产品编码也保持原样。
  */
 
 import { computed, ref, watch } from 'vue'
@@ -22,8 +25,9 @@ import {
   type ProductSeriesSwitchPreview,
 } from '@/api/modules/product'
 import { BizCrudDialogShell } from '@/components/common'
+import { useStableRequest } from '@/composables/useStableRequest'
 import { showAppError, showAppSuccess } from '@/utils/app-alert'
-import { extractErrorMessage } from '@/utils/error'
+import { extractErrorMessage, normalizeRequestError } from '@/utils/error'
 
 interface Props {
   modelValue: boolean
@@ -40,6 +44,9 @@ const emit = defineEmits<{
 
 const previewLoading = ref(false)
 const preview = ref<ProductSeriesSwitchPreview | null>(null)
+/** 当前 preview 对应的目标系列，提交时以它为准，保证提交的正是管理员看到并确认的那次预检。 */
+const previewTargetSeriesTagId = ref('')
+const previewRequest = useStableRequest()
 const acknowledged = ref(false)
 const submitting = ref(false)
 
@@ -55,16 +62,29 @@ const canSubmit = computed(() => !!preview.value && !preview.value.blockingReaso
 
 const loadPreview = async () => {
   preview.value = null
+  previewTargetSeriesTagId.value = ''
   acknowledged.value = false
-  if (!props.targetSeriesTagId) return
-  previewLoading.value = true
-  try {
-    preview.value = await previewProductSeriesSwitch(props.productId, props.targetSeriesTagId)
-  } catch (error) {
-    showAppError(extractErrorMessage(error, '更换系列预检失败'))
-  } finally {
-    previewLoading.value = false
+  const targetSeriesTagId = props.targetSeriesTagId
+  if (!targetSeriesTagId) {
+    previewRequest.cancel()
+    return
   }
+  previewLoading.value = true
+  await previewRequest.runLatest({
+    executor: (signal) => previewProductSeriesSwitch(props.productId, targetSeriesTagId, { signal }),
+    onSuccess: (result) => {
+      // 双保险：只接受与当前目标系列一致的结果，旧目标的晚到响应直接丢弃。
+      if (targetSeriesTagId !== props.targetSeriesTagId) return
+      preview.value = result
+      previewTargetSeriesTagId.value = targetSeriesTagId
+    },
+    onError: (error) => {
+      showAppError(extractErrorMessage(error, '更换系列预检失败'))
+    },
+    onFinally: ({ status }) => {
+      if (status !== 'canceled') previewLoading.value = false
+    },
+  })
 }
 
 watch(
@@ -83,10 +103,13 @@ const handleClose = () => {
 }
 
 const handleSubmit = async () => {
-  if (!canSubmit.value || !preview.value) return
+  if (!canSubmit.value || !preview.value || !previewTargetSeriesTagId.value) return
+  // 固定住本次确认的预检快照：二次确认框打开期间即使预检被刷新，提交的也只能是框里展示的这一份。
+  const confirmedPreview = preview.value
+  const confirmedTargetSeriesTagId = previewTargetSeriesTagId.value
   try {
     await ElMessageBox.confirm(
-      `确定将「${props.productName}」从「${oldSeriesLabel.value}」更换到「${newSeriesLabel.value}」吗？产品编码将由 ${preview.value.oldProductCode} 变为 ${preview.value.newProductCode}，此操作不可撤销。`,
+      `确定将「${props.productName}」从「${oldSeriesLabel.value}」更换到「${newSeriesLabel.value}」吗？产品编码将由 ${confirmedPreview.oldProductCode} 变为 ${confirmedPreview.newProductCode}，此操作不可撤销。`,
       '再次确认更换文创系列',
       { type: 'warning', confirmButtonText: '确认更换', cancelButtonText: '再想想' },
     )
@@ -95,11 +118,16 @@ const handleSubmit = async () => {
   }
   submitting.value = true
   try {
-    const updated = await switchProductSeries(props.productId, props.targetSeriesTagId)
+    const updated = await switchProductSeries(props.productId, confirmedTargetSeriesTagId, confirmedPreview)
     showAppSuccess(`已更换文创系列，新产品编码为 ${updated.productCode}`)
     emit('switched', updated)
   } catch (error) {
-    showAppError(extractErrorMessage(error, '更换文创系列失败'))
+    const normalizedError = normalizeRequestError(error, '更换文创系列失败')
+    showAppError(normalizedError.message)
+    // 确认后编码已变化：重新预检，让管理员基于最新编码重新勾选确认。
+    if (normalizedError.status === 409) {
+      void loadPreview()
+    }
   } finally {
     submitting.value = false
   }
@@ -171,7 +199,7 @@ const handleSubmit = async () => {
                 <li v-if="preview.legacyProductCode">升级前的历史编码 {{ preview.legacyProductCode }} 不受影响，对应旧标签仍可扫码。</li>
                 <li>原编码 {{ preview.oldProductCode }} 将永久作废、不会再分配给其他商品；此操作不可撤销，再次更换会继续占用新序号。</li>
                 <li>商品会从「{{ oldSeriesLabel }}」标签下移除并归入「{{ newSeriesLabel }}」，商城按系列展示与筛选随之变化。</li>
-                <li>已有出库单、入库单、预订单等历史单据保留当时的编码快照，不会被改写。</li>
+                <li>已有出库单、入库单、预订单等历史单据中的 SKU 编码保留当时的快照，不会被改写；但单据详情里的「产品编码」读取商品当前编码，会显示为新编码。</li>
                 <li>确认后编辑弹窗会以最新数据刷新，尚未保存的其他修改将丢失，请先保存再更换。</li>
               </ul>
             </el-alert>

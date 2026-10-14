@@ -608,8 +608,13 @@ export interface ProductSeriesSwitchPreview {
  * 预检 YZ 编码商品更换文创系列（仅管理员）：
  * - 只读接口，不会真正分配序号，供二次确认弹窗展示换系列后的编码变化。
  */
-export const previewProductSeriesSwitch = (productId: string, primarySeriesTagId: string): Promise<ProductSeriesSwitchPreview> =>
+export const previewProductSeriesSwitch = (
+  productId: string,
+  primarySeriesTagId: string,
+  requestConfig: RequestConfig = {},
+): Promise<ProductSeriesSwitchPreview> =>
   request<ProductSeriesSwitchPreview>({
+    ...requestConfig,
     method: 'POST',
     url: `/products/${productId}/series-switch/preview`,
     data: { primarySeriesTagId },
@@ -617,13 +622,22 @@ export const previewProductSeriesSwitch = (productId: string, primarySeriesTagId
 
 /**
  * 执行 YZ 编码商品更换文创系列（仅管理员）：
+ * - 必须带上管理员确认过的预检产品编码与 SKU 编码，后端不一致时返回 409，需重新预检确认；
  * - 返回更换后的完整产品详情，供页面直接回填编辑态与刷新列表。
  */
-export const switchProductSeries = async (productId: string, primarySeriesTagId: string): Promise<ProductRecord> => {
+export const switchProductSeries = async (
+  productId: string,
+  primarySeriesTagId: string,
+  confirmed: Pick<ProductSeriesSwitchPreview, 'newProductCode' | 'skuChanges'>,
+): Promise<ProductRecord> => {
   const result = await request<ProductRawRecord | ProductDetailRawResult>({
     method: 'POST',
     url: `/products/${productId}/series-switch`,
-    data: { primarySeriesTagId },
+    data: {
+      primarySeriesTagId,
+      expectedProductCode: confirmed.newProductCode,
+      expectedSkuCodes: confirmed.skuChanges.map((change) => change.newSkuCode),
+    },
   })
 
   return normalizeProductDetail(result)

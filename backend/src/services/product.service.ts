@@ -418,9 +418,15 @@ export interface ProductYzBatchUpgradeResult {
   items: Array<{ productId: string; productName: string; oldProductCode: string; newProductCode: string; skuCount: number }>
 }
 
-/** YZ 编码商品更换文创系列：请求入参，只需要目标系列标签。 */
+/**
+ * YZ 编码商品更换文创系列：请求入参。
+ * expectedProductCode / expectedSkuCodes 为管理员在确认弹窗里看到的预检结果，执行时必须与实际分配一致，
+ * 否则说明预检后目标系列序号或商品规格已被并发改动，拒绝提交并要求重新确认。
+ */
 export interface ProductSeriesSwitchInput {
   primarySeriesTagId: string
+  expectedProductCode: string
+  expectedSkuCodes: string[]
 }
 
 /** 更换文创系列时单条 SKU 的编码变化；isCurrent=false 表示已退役行（同样换前缀，保证日后复活规格时编码与新系列一致）。 */
@@ -1839,7 +1845,7 @@ export class ProductService {
     const oldSeriesTag = await this.loadOldSeriesTag(product, manager)
 
     const [skus, prefix] = await Promise.all([
-      this.loadSkusForSeriesSwitch(product.id, product.productCode, manager, false),
+      this.loadSkusForSeriesSwitch(product, manager, false),
       getProductCodePrefix(manager),
     ])
     const predictedSeriesSeq = await this.predictNextSeriesSeq(manager, seriesTag.id, seriesTag.seriesCode as string, prefix)
@@ -1909,7 +1915,7 @@ export class ProductService {
       this.assertSeriesSwitchable(product, seriesTagId)
       const seriesTag = await this.loadAndLockSeriesTagForYzScheme(seriesTagId, manager)
       const oldSeriesTag = await this.loadOldSeriesTag(product, manager)
-      const skus = await this.loadSkusForSeriesSwitch(product.id, product.productCode, manager, true)
+      const skus = await this.loadSkusForSeriesSwitch(product, manager, true)
 
       const prefix = await getProductCodePrefix(manager)
       const seriesSeq = await allocateSeriesSeq(manager, seriesTag.id, seriesTag.seriesCode as string, prefix)
@@ -1917,6 +1923,8 @@ export class ProductService {
       const oldSeriesSeq = product.seriesSeq
       const newProductCode = formatProductCode(prefix, seriesTag.seriesCode as string, seriesSeq)
       const skuChanges = this.buildSeriesSwitchSkuChanges(skus, oldProductCode, newProductCode)
+      // 不可撤销操作只能落成管理员确认过的编码：与预检结果不一致即 409，事务回滚，已分配的序号随之撤销。
+      this.assertSeriesSwitchMatchesConfirmed(input, newProductCode, skuChanges)
 
       // 保存前做跨列冲突校验（产品编码、SKU 编码、原厂条码、历史编码），命中直接 409 并整体回滚。
       await this.assertNoUpgradeCodeConflict(
@@ -1979,6 +1987,27 @@ export class ProductService {
     return result
   }
 
+  private assertSeriesSwitchMatchesConfirmed(
+    input: ProductSeriesSwitchInput,
+    newProductCode: string,
+    skuChanges: ProductSeriesSwitchSkuChange[],
+  ): void {
+    const expectedProductCode = typeof input?.expectedProductCode === 'string' ? input.expectedProductCode.trim() : ''
+    const expectedSkuCodes = Array.isArray(input?.expectedSkuCodes)
+      ? input.expectedSkuCodes.map((code) => String(code).trim()).sort()
+      : null
+    const actualSkuCodes = skuChanges.map((change) => change.newSkuCode).sort()
+    if (expectedProductCode !== newProductCode) {
+      throw new BizError(
+        `目标系列可分配的产品编码已变化（确认时为 ${expectedProductCode || '空'}，当前为 ${newProductCode}），请重新确认后再提交`,
+        409,
+      )
+    }
+    if (!expectedSkuCodes || expectedSkuCodes.join(',') !== actualSkuCodes.join(',')) {
+      throw new BizError('商品规格在确认后发生了变化，换系列后的 SKU 编码与确认时不一致，请重新确认后再提交', 409)
+    }
+  }
+
   /** 更换文创系列属于管理员专属操作：路由层已有角色门禁，服务层再兜底一次，防止绕过路由直接调用。 */
   private assertSeriesSwitchActor(actor: AuthUserContext): void {
     if (actor?.role !== 'admin') {
@@ -2002,18 +2031,19 @@ export class ProductService {
   }
 
   /**
-   * 读取本商品全部 SKU（含退役行），当前行在前、再按 sortOrder/id 稳定排序，保证预检与执行展示口径一致。
-   * 只有以旧产品编码开头的行才需要换前缀（升级前遗留的历史编码退役行不受影响），由 buildSeriesSwitchSkuChanges 过滤。
+   * 读取本商品需要换前缀的 SKU（含退役行），当前行在前、再按 sortOrder/id 稳定排序，保证预检与执行展示口径一致。
+   * 只认真正属于当前 YZ 编码的行：合法 YZ 规格编码（产品编码 + 变体位 + 可选尺码位），或启动自愈产生的归档行
+   * （YZ 规格编码 + -R<自身ID>）。升级前遗留的历史编码退役行即使恰好以当前产品编码开头（如 YZSF01123）也不改写，
+   * 否则这类没有 legacySkuCode 备份的旧标签会无法再被扫码识别。
    */
   private async loadSkusForSeriesSwitch(
-    productId: string,
-    productCode: string,
+    product: BaseProduct,
     manager: EntityManager,
     lock: boolean,
   ): Promise<BaseProductSku[]> {
     const query = manager.getRepository(BaseProductSku)
       .createQueryBuilder('sku')
-      .where('sku.productId = :productId', { productId })
+      .where('sku.productId = :productId', { productId: product.id })
       .orderBy('sku.isCurrent', 'DESC')
       .addOrderBy('sku.sortOrder', 'ASC')
       .addOrderBy('sku.id', 'ASC')
@@ -2021,7 +2051,8 @@ export class ProductService {
       query.setLock('pessimistic_write')
     }
     const skus = await query.getMany()
-    return skus.filter((sku) => typeof sku.skuCode === 'string' && sku.skuCode.startsWith(productCode))
+    return skus.filter((sku) => typeof sku.skuCode === 'string'
+      && (isYzSkuCodeOf(product.productCode, sku.skuCode) || isArchivedYzSku(product, sku)))
   }
 
   /** 只替换产品编码前缀，保留变体码/尺码码等后缀原样不变（产品编码定长，新旧前缀长度通常一致，但不依赖这一点）。 */

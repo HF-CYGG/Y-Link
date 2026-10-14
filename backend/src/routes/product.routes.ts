@@ -624,8 +624,14 @@ productRouter.post(
   }),
 )
 
-const seriesSwitchSchema = z.object({
+const seriesSwitchPreviewSchema = z.object({
   primarySeriesTagId: z.string().min(1, '请选择要更换到的文创系列'),
+})
+
+// 执行时必须带上管理员确认过的预检编码，服务层逐一比对，防止落成未经确认的编码。
+const seriesSwitchSchema = seriesSwitchPreviewSchema.extend({
+  expectedProductCode: z.string().min(1, '缺少确认的产品编码，请重新确认'),
+  expectedSkuCodes: z.array(z.string().max(100)).max(500),
 })
 
 productRouter.post(
@@ -635,7 +641,7 @@ productRouter.post(
   requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
-    const payload = seriesSwitchSchema.parse(req.body)
+    const payload = seriesSwitchPreviewSchema.parse(req.body)
     const data = await productService.previewProductSeriesSwitch(req.params.id, payload.primarySeriesTagId, authReq.auth)
     res.json({
       code: 0,

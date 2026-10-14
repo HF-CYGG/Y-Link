@@ -2175,6 +2175,28 @@ async function main() {
     } as Parameters<typeof productService.update>[1], actor)
     const switchOldProductCode = switchProduct.productCode
     assert.equal(switchOldProductCode, formatProductCode(defaultPrefix, 'SF', 1))
+    // 升级前遗留的历史编码退役行：编码恰好以当前产品编码开头但不是合法 YZ 规格编码，换系列时不得改写。
+    const switchHistoricRow = await skuRepo.save(skuRepo.create({
+      productId: switchProduct.id,
+      skuCode: `${switchOldProductCode}123`,
+      specValuesJson: JSON.stringify({ '颜色/款式': '旧款' }),
+      specText: '旧款',
+      defaultPrice: '10.00',
+      discountRate: '10.0',
+      currentStock: 0,
+      preOrderedStock: 0,
+      isActive: false,
+      isCurrent: false,
+      o2oRecommended: false,
+      thumbnail: null,
+      sortOrder: 9,
+    }))
+    const confirmedSwitchInput = (primarySeriesTagId: string, preview: { newProductCode: string; skuChanges: Array<{ newSkuCode: string }> }) => ({
+      primarySeriesTagId,
+      expectedProductCode: preview.newProductCode,
+      expectedSkuCodes: preview.skuChanges.map((change) => change.newSkuCode),
+    })
+    const unconfirmedSwitchInput = (primarySeriesTagId: string) => ({ primarySeriesTagId, expectedProductCode: 'UNCONFIRMED', expectedSkuCodes: [] })
 
     // 权限与前置校验：非管理员 403；与当前系列相同 400；legacy 商品 400；普通编辑仍不能顺带换系列。
     const operatorActor: AuthUserContext = { ...actor, role: 'operator' }
@@ -2183,15 +2205,15 @@ async function main() {
       (error: unknown) => assertBizErrorWithStatus(error, 403),
     )
     await assert.rejects(
-      productService.switchProductSeries(switchProduct.id, { primarySeriesTagId: switchToTag.id }, operatorActor),
+      productService.switchProductSeries(switchProduct.id, unconfirmedSwitchInput(switchToTag.id), operatorActor),
       (error: unknown) => assertBizErrorWithStatus(error, 403),
     )
     await assert.rejects(
-      productService.switchProductSeries(switchProduct.id, { primarySeriesTagId: switchFromTag.id }, actor),
+      productService.switchProductSeries(switchProduct.id, unconfirmedSwitchInput(switchFromTag.id), actor),
       (error: unknown) => assertBizErrorWithStatus(error, 400),
     )
     await assert.rejects(
-      productService.switchProductSeries(legacyProduct.id, { primarySeriesTagId: switchToTag.id }, actor),
+      productService.switchProductSeries(legacyProduct.id, unconfirmedSwitchInput(switchToTag.id), actor),
       (error: unknown) => assertBizErrorWithStatus(error, 400),
     )
     await assert.rejects(
@@ -2218,10 +2240,25 @@ async function main() {
         [switchBlueSku.skuCode, `${switchNewProductCode}${switchBlueSku.skuCode.slice(switchOldProductCode.length)}`, false],
       ],
     )
-    pass('更换系列预检：只读且结果稳定，在用与退役 SKU 均只替换产品编码前缀')
+    assert.ok(!switchPreview.skuChanges.some((change) => change.skuId === String(switchHistoricRow.id)), '历史编码退役行不应出现在换前缀列表里')
+    pass('更换系列预检：只读且结果稳定，在用与退役 SKU 均只替换产品编码前缀，升级前历史编码行不受影响')
+
+    // 执行时编码与确认的预检不一致（预检后被并发占号或规格变化）：409 且整体回滚，不消耗新系列序号。
+    const reservationCountBeforeStaleSwitch = await reservationRepo.count()
+    await assert.rejects(
+      productService.switchProductSeries(switchProduct.id, { ...confirmedSwitchInput(switchToTag.id, switchPreview), expectedProductCode: formatProductCode(defaultPrefix, 'ST', 9) }, actor),
+      (error: unknown) => assertBizErrorWithStatus(error, 409),
+    )
+    await assert.rejects(
+      productService.switchProductSeries(switchProduct.id, { ...confirmedSwitchInput(switchToTag.id, switchPreview), expectedSkuCodes: [switchPreview.skuChanges[0]!.newSkuCode] }, actor),
+      (error: unknown) => assertBizErrorWithStatus(error, 409),
+    )
+    assert.equal((await productRepo.findOneByOrFail({ id: switchProduct.id })).productCode, switchOldProductCode, '确认不一致时不得改动商品')
+    assert.equal(await reservationRepo.count(), reservationCountBeforeStaleSwitch, '确认不一致时序号分配应随事务回滚')
+    pass('更换系列确认校验：执行编码与确认的预检不一致时 409 回滚，不改商品、不消耗序号')
 
     // 正式执行：编码、系列、标签关联、审计全部到位，历史编码字段保持不变。
-    const switched = await productService.switchProductSeries(switchProduct.id, { primarySeriesTagId: switchToTag.id }, actor)
+    const switched = await productService.switchProductSeries(switchProduct.id, confirmedSwitchInput(switchToTag.id, switchPreview), actor)
     assert.equal(switched.productCode, switchNewProductCode)
     assert.equal(String(switched.primarySeriesTagId), String(switchToTag.id))
     assert.equal(switched.seriesCode, 'ST')
@@ -2230,6 +2267,7 @@ async function main() {
     const switchedRetiredRow = await skuRepo.findOneByOrFail({ id: switchBlueSku.id })
     assert.equal(switchedRetiredRow.skuCode, switchPreview.skuChanges[1]!.newSkuCode, '退役行也应换成新系列前缀')
     assert.equal(switchedRetiredRow.legacySkuCode ?? null, null, '退役行历史编码保持不变')
+    assert.equal((await skuRepo.findOneByOrFail({ id: switchHistoricRow.id })).skuCode, switchHistoricRow.skuCode, '升级前历史编码退役行不应被改写')
     const switchRelRepo = AppDataSource.getRepository((await import('../src/entities/rel-product-tag.entity.js')).RelProductTag)
     const switchRels = await switchRelRepo.find({ where: { productId: switchProduct.id } })
     assert.ok(switchRels.some((rel) => String(rel.tagId) === String(switchToTag.id)), '应补上新系列标签关联')
@@ -2267,7 +2305,8 @@ async function main() {
     const upgradedForSwitch = batchResult.items[0]!
     const legacySkuCodesBeforeSwitch = (await skuRepo.find({ where: { productId: upgradedForSwitch.productId }, order: { id: 'ASC' } }))
       .map((sku) => sku.legacySkuCode)
-    const upgradedSwitched = await productService.switchProductSeries(upgradedForSwitch.productId, { primarySeriesTagId: switchToTag.id }, actor)
+    const upgradedSwitchPreview = await productService.previewProductSeriesSwitch(upgradedForSwitch.productId, switchToTag.id, actor)
+    const upgradedSwitched = await productService.switchProductSeries(upgradedForSwitch.productId, confirmedSwitchInput(switchToTag.id, upgradedSwitchPreview), actor)
     assert.equal(upgradedSwitched.productCode, formatProductCode(defaultPrefix, 'ST', 2))
     assert.equal(upgradedSwitched.legacyProductCode, upgradedForSwitch.oldProductCode, '升级前历史产品编码应保持不变')
     assert.deepEqual(
