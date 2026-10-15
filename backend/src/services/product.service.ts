@@ -2062,8 +2062,8 @@ export class ProductService {
 
   /**
    * 读取本商品需要换前缀的 SKU（含退役行），当前行在前、再按 sortOrder/id 稳定排序，保证预检与执行展示口径一致。
-   * 只认真正属于当前 YZ 编码的行：合法 YZ 规格编码（产品编码 + 变体位 + 可选尺码位），或启动自愈产生的归档行
-   * （YZ 规格编码 + -R<自身ID>）。升级前遗留的历史编码退役行即使恰好以当前产品编码开头（如 YZSF01123）也不改写，
+   * 只认真正属于当前 YZ 编码的行：编码严格等于“产品编码 + 本行 variantCode + 本行 sizeCode”，或启动自愈产生的归档行
+   * （上述 YZ 规格编码 + -R<自身ID>）。升级前遗留的历史编码退役行即使恰好以当前产品编码开头（如 YZSF01123）也不改写，
    * 否则这类没有 legacySkuCode 备份的旧标签会无法再被扫码识别。
    * 在用行若不符合 YZ 编码格式则单独返回（unswitchableCurrentSkus），由调用方阻断，不能静默跳过。
    */
@@ -2082,8 +2082,16 @@ export class ProductService {
       query.setLock('pessimistic_write')
     }
     const rows = await query.getMany()
-    const isSwitchable = (sku: BaseProductSku) => typeof sku.skuCode === 'string'
-      && (isYzSkuCodeOf(product.productCode, sku.skuCode) || isArchivedYzSku(product, sku))
+    // 只看字符串形状不够：升级前遗留的退役行可能恰好长得像合法 YZ 规格编码（如 YZSF011），但它没有变体码登记。
+    // 必须以本行持久化的 variantCode/sizeCode 重新拼出编码并完全相等，才算系统为本商品生成的 YZ 编码。
+    const ownsYzSkuCode = (sku: BaseProductSku, code: string) => Boolean(sku.variantCode)
+      && code === formatSkuCode(product.productCode, sku.variantCode as string, sku.sizeCode ?? null)
+    const isSwitchable = (sku: BaseProductSku) => {
+      if (typeof sku.skuCode !== 'string') return false
+      if (ownsYzSkuCode(sku, sku.skuCode)) return true
+      const archiveSuffix = `-R${sku.id}`
+      return isArchivedYzSku(product, sku) && ownsYzSkuCode(sku, sku.skuCode.slice(0, -archiveSuffix.length))
+    }
     return {
       skus: rows.filter(isSwitchable),
       unswitchableCurrentSkus: rows.filter((sku) => isDatabaseFlagEnabled(sku.isCurrent) && !isSwitchable(sku)),

@@ -2191,6 +2191,23 @@ async function main() {
       thumbnail: null,
       sortOrder: 9,
     }))
+    // 升级前遗留、形状恰好合法的退役行（如 YZSF019）：没有变体码登记，同样不得被视为本商品的 YZ 编码而改写。
+    const switchLookalikeHistoricRow = await skuRepo.save(skuRepo.create({
+      productId: switchProduct.id,
+      skuCode: `${switchOldProductCode}9`,
+      specValuesJson: JSON.stringify({ '颜色/款式': '旧款二' }),
+      specText: '旧款二',
+      defaultPrice: '10.00',
+      discountRate: '10.0',
+      currentStock: 0,
+      preOrderedStock: 0,
+      isActive: false,
+      isCurrent: false,
+      o2oRecommended: false,
+      thumbnail: null,
+      sortOrder: 10,
+      variantCode: null,
+    }))
     const confirmedSwitchInput = (
       primarySeriesTagId: string,
       preview: { oldProductCode: string; newProductCode: string; skuChanges: Array<{ newSkuCode: string }> },
@@ -2247,6 +2264,7 @@ async function main() {
       ],
     )
     assert.ok(!switchPreview.skuChanges.some((change) => change.skuId === String(switchHistoricRow.id)), '历史编码退役行不应出现在换前缀列表里')
+    assert.ok(!switchPreview.skuChanges.some((change) => change.skuId === String(switchLookalikeHistoricRow.id)), '形状合法但无变体码登记的历史退役行不应出现在换前缀列表里')
     pass('更换系列预检：只读且结果稳定，在用与退役 SKU 均只替换产品编码前缀，升级前历史编码行不受影响')
 
     // 执行时编码与确认的预检不一致（预检后被并发占号或规格变化）：409 且整体回滚，不消耗新系列序号。
@@ -2279,6 +2297,7 @@ async function main() {
     assert.equal(switchedRetiredRow.skuCode, switchPreview.skuChanges[1]!.newSkuCode, '退役行也应换成新系列前缀')
     assert.equal(switchedRetiredRow.legacySkuCode ?? null, null, '退役行历史编码保持不变')
     assert.equal((await skuRepo.findOneByOrFail({ id: switchHistoricRow.id })).skuCode, switchHistoricRow.skuCode, '升级前历史编码退役行不应被改写')
+    assert.equal((await skuRepo.findOneByOrFail({ id: switchLookalikeHistoricRow.id })).skuCode, switchLookalikeHistoricRow.skuCode, '形状合法的历史退役行不应被改写')
     const switchRelRepo = AppDataSource.getRepository((await import('../src/entities/rel-product-tag.entity.js')).RelProductTag)
     const switchRels = await switchRelRepo.find({ where: { productId: switchProduct.id } })
     assert.ok(switchRels.some((rel) => String(rel.tagId) === String(switchToTag.id)), '应补上新系列标签关联')
