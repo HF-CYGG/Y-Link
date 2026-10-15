@@ -628,8 +628,9 @@ const seriesSwitchPreviewSchema = z.object({
   primarySeriesTagId: z.string().min(1, '请选择要更换到的文创系列'),
 })
 
-// 执行时必须带上管理员确认过的预检编码，服务层逐一比对，防止落成未经确认的编码。
+// 执行时必须带上管理员确认过的预检结果（原产品编码与新编码），服务层在商品锁内逐一比对，防止落成未经确认的变更。
 const seriesSwitchSchema = seriesSwitchPreviewSchema.extend({
+  expectedOldProductCode: z.string().min(1, '缺少确认时的原产品编码，请重新确认'),
   expectedProductCode: z.string().min(1, '缺少确认的产品编码，请重新确认'),
   expectedSkuCodes: z.array(z.string().max(100)).max(500),
 })

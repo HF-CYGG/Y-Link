@@ -420,11 +420,12 @@ export interface ProductYzBatchUpgradeResult {
 
 /**
  * YZ 编码商品更换文创系列：请求入参。
- * expectedProductCode / expectedSkuCodes 为管理员在确认弹窗里看到的预检结果，执行时必须与实际分配一致，
- * 否则说明预检后目标系列序号或商品规格已被并发改动，拒绝提交并要求重新确认。
+ * expectedOldProductCode / expectedProductCode / expectedSkuCodes 为管理员在确认弹窗里看到的预检结果，执行时必须与
+ * 商品当前编码和实际分配一致，否则说明预检后商品已被其他人换过系列、目标系列序号或商品规格已被并发改动，拒绝提交并要求重新确认。
  */
 export interface ProductSeriesSwitchInput {
   primarySeriesTagId: string
+  expectedOldProductCode: string
   expectedProductCode: string
   expectedSkuCodes: string[]
 }
@@ -1844,17 +1845,19 @@ export class ProductService {
     const seriesTag = await this.loadSeriesTagForYzScheme(seriesTagId, manager)
     const oldSeriesTag = await this.loadOldSeriesTag(product, manager)
 
-    const [skus, prefix] = await Promise.all([
+    const [{ skus, unswitchableCurrentSkus }, prefix] = await Promise.all([
       this.loadSkusForSeriesSwitch(product, manager, false),
       getProductCodePrefix(manager),
     ])
+    const unswitchableReason = this.describeUnswitchableCurrentSkus(unswitchableCurrentSkus)
     const predictedSeriesSeq = await this.predictNextSeriesSeq(manager, seriesTag.id, seriesTag.seriesCode as string, prefix)
     const seriesSeqExhaustedReason = predictedSeriesSeq > 99
       ? '目标系列可用序号已耗尽（1-99 均已被占用），无法更换到该系列'
       : null
     const newProductCode = formatProductCode(prefix, seriesTag.seriesCode as string, predictedSeriesSeq)
-    const skuChanges = seriesSeqExhaustedReason ? [] : this.buildSeriesSwitchSkuChanges(skus, product.productCode, newProductCode)
-    const codeConflictReason = seriesSeqExhaustedReason
+    const blockedBeforeConflictCheck = unswitchableReason ?? seriesSeqExhaustedReason
+    const skuChanges = blockedBeforeConflictCheck ? [] : this.buildSeriesSwitchSkuChanges(skus, product.productCode, newProductCode)
+    const codeConflictReason = blockedBeforeConflictCheck
       ? null
       : await this.detectUpgradeCodeConflict(
         manager,
@@ -1874,7 +1877,7 @@ export class ProductService {
       seriesSeq: predictedSeriesSeq,
       skuChanges,
       legacyProductCode: product.legacyProductCode ?? null,
-      blockingReason: seriesSeqExhaustedReason ?? codeConflictReason,
+      blockingReason: blockedBeforeConflictCheck ?? codeConflictReason,
     }
   }
 
@@ -1913,9 +1916,16 @@ export class ProductService {
         throw new BizError('产品不存在', 404)
       }
       this.assertSeriesSwitchable(product, seriesTagId)
+      // 在商品行锁内核对源状态：换系列必然改写产品编码且旧号永不回收，编码一致即说明预检后没有被他人换过系列。
+      // 只校验目标编码不够——A→B 先提交后，A→C 的目标编码与旧预检完全相同，会在未经确认的情况下把 B 再换成 C。
+      this.assertSeriesSwitchSourceUnchanged(input, product)
       const seriesTag = await this.loadAndLockSeriesTagForYzScheme(seriesTagId, manager)
       const oldSeriesTag = await this.loadOldSeriesTag(product, manager)
-      const skus = await this.loadSkusForSeriesSwitch(product, manager, true)
+      const { skus, unswitchableCurrentSkus } = await this.loadSkusForSeriesSwitch(product, manager, true)
+      const unswitchableReason = this.describeUnswitchableCurrentSkus(unswitchableCurrentSkus)
+      if (unswitchableReason) {
+        throw new BizError(unswitchableReason, 409)
+      }
 
       const prefix = await getProductCodePrefix(manager)
       const seriesSeq = await allocateSeriesSeq(manager, seriesTag.id, seriesTag.seriesCode as string, prefix)
@@ -1987,6 +1997,26 @@ export class ProductService {
     return result
   }
 
+  private assertSeriesSwitchSourceUnchanged(input: ProductSeriesSwitchInput, product: BaseProduct): void {
+    const expectedOldProductCode = typeof input?.expectedOldProductCode === 'string' ? input.expectedOldProductCode.trim() : ''
+    if (expectedOldProductCode !== product.productCode) {
+      throw new BizError(
+        `商品编码在确认后已变化（确认时为 ${expectedOldProductCode || '空'}，当前为 ${product.productCode}），可能已被其他管理员更换系列，请刷新后重新确认`,
+        409,
+      )
+    }
+  }
+
+  /**
+   * 当前（在用）SKU 的编码若不是本商品合法 YZ 规格编码（例如启动自愈因历史编码冲突而跳过的行），换系列无法同步改写它，
+   * 执行后会留下旧系列编码且自愈也不会再处理，因此直接阻断，要求先治理这些规格编码。
+   */
+  private describeUnswitchableCurrentSkus(unswitchableCurrentSkus: BaseProductSku[]): string | null {
+    if (!unswitchableCurrentSkus.length) return null
+    const samples = unswitchableCurrentSkus.slice(0, 3).map((sku) => `${sku.specText || '默认规格'}（${sku.skuCode}）`).join('、')
+    return `商品有 ${unswitchableCurrentSkus.length} 个在用规格的编码不符合当前 YZ 编码格式，无法随系列一起更换：${samples}${unswitchableCurrentSkus.length > 3 ? ' 等' : ''}。请先治理这些规格编码后再更换系列`
+  }
+
   private assertSeriesSwitchMatchesConfirmed(
     input: ProductSeriesSwitchInput,
     newProductCode: string,
@@ -2035,12 +2065,13 @@ export class ProductService {
    * 只认真正属于当前 YZ 编码的行：合法 YZ 规格编码（产品编码 + 变体位 + 可选尺码位），或启动自愈产生的归档行
    * （YZ 规格编码 + -R<自身ID>）。升级前遗留的历史编码退役行即使恰好以当前产品编码开头（如 YZSF01123）也不改写，
    * 否则这类没有 legacySkuCode 备份的旧标签会无法再被扫码识别。
+   * 在用行若不符合 YZ 编码格式则单独返回（unswitchableCurrentSkus），由调用方阻断，不能静默跳过。
    */
   private async loadSkusForSeriesSwitch(
     product: BaseProduct,
     manager: EntityManager,
     lock: boolean,
-  ): Promise<BaseProductSku[]> {
+  ): Promise<{ skus: BaseProductSku[]; unswitchableCurrentSkus: BaseProductSku[] }> {
     const query = manager.getRepository(BaseProductSku)
       .createQueryBuilder('sku')
       .where('sku.productId = :productId', { productId: product.id })
@@ -2050,9 +2081,13 @@ export class ProductService {
     if (lock && manager.connection.options.type !== 'sqlite') {
       query.setLock('pessimistic_write')
     }
-    const skus = await query.getMany()
-    return skus.filter((sku) => typeof sku.skuCode === 'string'
-      && (isYzSkuCodeOf(product.productCode, sku.skuCode) || isArchivedYzSku(product, sku)))
+    const rows = await query.getMany()
+    const isSwitchable = (sku: BaseProductSku) => typeof sku.skuCode === 'string'
+      && (isYzSkuCodeOf(product.productCode, sku.skuCode) || isArchivedYzSku(product, sku))
+    return {
+      skus: rows.filter(isSwitchable),
+      unswitchableCurrentSkus: rows.filter((sku) => isDatabaseFlagEnabled(sku.isCurrent) && !isSwitchable(sku)),
+    }
   }
 
   /** 只替换产品编码前缀，保留变体码/尺码码等后缀原样不变（产品编码定长，新旧前缀长度通常一致，但不依赖这一点）。 */

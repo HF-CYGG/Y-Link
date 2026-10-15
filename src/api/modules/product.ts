@@ -622,19 +622,20 @@ export const previewProductSeriesSwitch = (
 
 /**
  * 执行 YZ 编码商品更换文创系列（仅管理员）：
- * - 必须带上管理员确认过的预检产品编码与 SKU 编码，后端不一致时返回 409，需重新预检确认；
+ * - 必须带上管理员确认过的预检结果（原产品编码、新产品编码与 SKU 编码），后端不一致时返回 409，需重新预检确认；
  * - 返回更换后的完整产品详情，供页面直接回填编辑态与刷新列表。
  */
 export const switchProductSeries = async (
   productId: string,
   primarySeriesTagId: string,
-  confirmed: Pick<ProductSeriesSwitchPreview, 'newProductCode' | 'skuChanges'>,
+  confirmed: Pick<ProductSeriesSwitchPreview, 'oldProductCode' | 'newProductCode' | 'skuChanges'>,
 ): Promise<ProductRecord> => {
   const result = await request<ProductRawRecord | ProductDetailRawResult>({
     method: 'POST',
     url: `/products/${productId}/series-switch`,
     data: {
       primarySeriesTagId,
+      expectedOldProductCode: confirmed.oldProductCode,
       expectedProductCode: confirmed.newProductCode,
       expectedSkuCodes: confirmed.skuChanges.map((change) => change.newSkuCode),
     },

@@ -2191,12 +2191,18 @@ async function main() {
       thumbnail: null,
       sortOrder: 9,
     }))
-    const confirmedSwitchInput = (primarySeriesTagId: string, preview: { newProductCode: string; skuChanges: Array<{ newSkuCode: string }> }) => ({
+    const confirmedSwitchInput = (
+      primarySeriesTagId: string,
+      preview: { oldProductCode: string; newProductCode: string; skuChanges: Array<{ newSkuCode: string }> },
+    ) => ({
       primarySeriesTagId,
+      expectedOldProductCode: preview.oldProductCode,
       expectedProductCode: preview.newProductCode,
       expectedSkuCodes: preview.skuChanges.map((change) => change.newSkuCode),
     })
-    const unconfirmedSwitchInput = (primarySeriesTagId: string) => ({ primarySeriesTagId, expectedProductCode: 'UNCONFIRMED', expectedSkuCodes: [] })
+    const unconfirmedSwitchInput = (primarySeriesTagId: string) => ({
+      primarySeriesTagId, expectedOldProductCode: 'UNCONFIRMED', expectedProductCode: 'UNCONFIRMED', expectedSkuCodes: [],
+    })
 
     // 权限与前置校验：非管理员 403；与当前系列相同 400；legacy 商品 400；普通编辑仍不能顺带换系列。
     const operatorActor: AuthUserContext = { ...actor, role: 'operator' }
@@ -2257,6 +2263,11 @@ async function main() {
     assert.equal(await reservationRepo.count(), reservationCountBeforeStaleSwitch, '确认不一致时序号分配应随事务回滚')
     pass('更换系列确认校验：执行编码与确认的预检不一致时 409 回滚，不改商品、不消耗序号')
 
+    // 并发换系列：两位管理员都基于 SF 预检，一位换到 ST、另一位换到 SC。SC 的目标编码不受 ST 影响，
+    // 必须靠源编码校验拦住后提交的那一方，否则会在未经确认的情况下把 ST 再换成 SC。
+    const switchThirdTag = await createSeriesTag('SC')
+    const staleSourcePreview = await productService.previewProductSeriesSwitch(switchProduct.id, switchThirdTag.id, actor)
+
     // 正式执行：编码、系列、标签关联、审计全部到位，历史编码字段保持不变。
     const switched = await productService.switchProductSeries(switchProduct.id, confirmedSwitchInput(switchToTag.id, switchPreview), actor)
     assert.equal(switched.productCode, switchNewProductCode)
@@ -2275,6 +2286,39 @@ async function main() {
     const switchAudit = await AppDataSource.getRepository(SysAuditLog).findOneBy({ actionType: 'product.series_switch', targetId: String(switchProduct.id) })
     assert.ok(switchAudit, '更换系列应写审计')
     pass('更换系列执行：产品编码与全部相关 SKU 编码换到新系列，标签关联同步，历史编码不变并写审计')
+
+    const reservationCountBeforeStaleSource = await reservationRepo.count()
+    await assert.rejects(
+      productService.switchProductSeries(switchProduct.id, confirmedSwitchInput(switchThirdTag.id, staleSourcePreview), actor),
+      (error: unknown) => assertBizErrorWithStatus(error, 409),
+    )
+    assert.equal((await productRepo.findOneByOrFail({ id: switchProduct.id })).productCode, switchNewProductCode, '源状态已变化时不得再次换系列')
+    assert.equal(await reservationRepo.count(), reservationCountBeforeStaleSource, '源状态校验失败时不应消耗目标系列序号')
+    pass('并发换系列：基于旧源编码的确认在他人先换系列后提交返回 409，商品保持先提交的结果且不消耗序号')
+
+    // 在用规格编码不符合 YZ 格式（如自愈因历史编码冲突跳过的行）：预检阻断，执行 409，不得静默只换一部分。
+    const unswitchableTag = await createSeriesTag('UB')
+    const unswitchableProduct = await productService.create({
+      productName: `series-switch-unswitchable-${verifySeed}`,
+      pinyinAbbr: 'UB',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 0,
+      limitPerUser: 5,
+      primarySeriesTagId: unswitchableTag.id,
+    } as Parameters<typeof productService.create>[0], actor)
+    await skuRepo.update({ id: unswitchableProduct.skus[0].id }, { skuCode: `SKU-STALE-${verifySeed}` })
+    const unswitchablePreview = await productService.previewProductSeriesSwitch(unswitchableProduct.id, switchToTag.id, actor)
+    assert.ok(unswitchablePreview.blockingReason?.includes('不符合当前 YZ 编码格式'), '在用规格编码不合规时预检应给出阻断原因')
+    assert.equal(unswitchablePreview.skuChanges.length, 0)
+    await assert.rejects(
+      productService.switchProductSeries(unswitchableProduct.id, confirmedSwitchInput(switchToTag.id, unswitchablePreview), actor),
+      (error: unknown) => assertBizErrorWithStatus(error, 409),
+    )
+    assert.equal((await productRepo.findOneByOrFail({ id: unswitchableProduct.id })).productCode, unswitchableProduct.productCode, '阻断时商品编码不变')
+    pass('在用规格编码不符合 YZ 格式时：预检阻断并说明原因，执行 409，商品不被部分换系列')
 
     // 旧序号永久占用不回收：旧系列下一个新商品拿到 02 号；复活退役规格时沿用换系列后的编码。
     const afterSwitchSameOldSeries = await productService.create({
