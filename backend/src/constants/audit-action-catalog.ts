@@ -174,6 +174,7 @@ export const AUDIT_ACTION_CATALOG: Readonly<Record<string, AuditActionDefinition
   'product.import': { label: 'Excel 批量导入商品', category: 'product_inventory' },
   'product.import_yz': { label: 'YZ 建库 Excel 批量导入商品', category: 'product_inventory' },
   'product.yz_code_upgrade': { label: '存量商品升级为 YZ 编码', category: 'product_inventory' },
+  'product.series_switch': { label: '更换 YZ 商品文创系列', category: 'product_inventory' },
   'product.spec_value_rename': { label: '重命名商品规格取值', category: 'product_inventory' },
   'product.zero_spec_evolve': { label: '商品 0 号规格演进', category: 'product_inventory' },
   'product.online_display.update': { label: '更新商品线上展示', category: 'product_inventory' },
