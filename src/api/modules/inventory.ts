@@ -94,6 +94,8 @@ export interface ProductLookupResult {
 
 export interface ProductLabelRecord {
   skuId: string
+  /** 所属商品 ID，打印弹窗按它分组（商品名称不唯一）。 */
+  productId: string
   skuCode: string
   /** 原厂条码优先，否则退回 SKU 编码（历史合并值，语义不变）。 */
   barcode: string
