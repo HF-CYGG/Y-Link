@@ -8,7 +8,8 @@
  * - 盲盘单对无审核权限的账号不展示账面数与差异，桌面表格和手机卡片均按 canViewBook 门禁渲染；
  * - 待确认阶段逐行选择差异原因与处理方式（调整库存 / 报损 / 重新盘点 / 暂不处理），只提交本次改动的字段，同一行请求串行执行；
  * - 有“重新盘点”行时只能退回重盘，全部处理完成后才能确认调账；
- * - 当前计数项、桌面表格与手机卡片都展示规格示例图（SKU 图优先、商品图兜底、无图用统一占位图），便于盘点时对照实物确认，点击可放大预览。
+ * - 当前计数项、桌面表格与手机卡片都展示规格示例图（SKU 图优先、商品图兜底、无图用统一占位图），便于盘点时对照实物确认，点击可放大预览；
+ * - 按库位盘点时明细按“规格 × 库位”展开：扫码计数落在“当前盘点库位”，表格内修改或清除按该行自己的库位提交。
  * 维护说明：
  * - 扫码计数失败（未识别、已退役、在其他盘点单中）必须弹出原因，避免漏盘；
  * - 差异原因为“其他”且处理方式不是“重新盘点”时必须有备注，与服务端规则一致；
@@ -81,6 +82,10 @@ const currentQty = ref<number | null>(null)
 const qtyInputRef = ref<{ focus?: () => void; blur?: () => void } | null>(null)
 const scanInputRef = ref<InputInstance | null>(null)
 const submitDialogVisible = ref(false)
+/** 按库位盘点时的当前盘点库位，扫码计数都记到这个库位上。 */
+const countLocationId = ref<string | null>(null)
+const isLocationScope = computed(() => stocktake.value?.scopeType === 'location')
+const scopeLocations = computed(() => stocktake.value?.scopeLocations ?? [])
 
 const isCounting = computed(() => stocktake.value?.status === 'counting')
 const isReviewing = computed(() => stocktake.value?.status === 'reviewing')
@@ -116,6 +121,8 @@ const loadDetail = (silent = false) => {
     executor: (signal) => getStocktakeDetail(id, { signal }),
     onSuccess: (record) => {
       stocktake.value = record
+      const locationIds = (record.scopeLocations ?? []).map((item) => item.id)
+      if (!countLocationId.value || !locationIds.includes(countLocationId.value)) countLocationId.value = locationIds[0] ?? null
       if (!silent && record.status === 'reviewing' && record.canViewBook && filter.value === 'all') filter.value = 'diff'
     },
     onError: (error) => {
@@ -161,15 +168,25 @@ const searchItems = () => {
   void loadItems()
 }
 
+/** 同一规格按库位盘点时会有多行，按“规格 × 库位”匹配，不能只按规格。 */
+const isSameItem = (row: Pick<StocktakeItemRecord, 'skuId' | 'locationScopeId'>, skuId: string, locationScopeId: string | null) =>
+  row.skuId === skuId && (row.locationScopeId ?? null) === (locationScopeId ?? null)
+
 const replaceItemRow = (item: StocktakeItemRecord) => {
-  const index = items.value.findIndex((row) => row.id === item.id || row.skuId === item.skuId)
+  const index = items.value.findIndex((row) => row.id === item.id || isSameItem(row, item.skuId, item.locationScopeId))
   if (index >= 0) items.value.splice(index, 1, item)
 }
 
-const saveCount = async (skuId: string, qty: number | null, mode: 'set' | 'add' | 'clear') => {
+/** locationId 不传时取当前盘点库位（仅按库位盘点有效）；表格行操作传该行自己的库位。 */
+const saveCount = async (skuId: string, qty: number | null, mode: 'set' | 'add' | 'clear', locationId?: string | null) => {
   if (!stocktake.value) return { ok: false as const, item: null }
+  const targetLocationId = isLocationScope.value ? (locationId === undefined ? countLocationId.value : locationId) : null
+  if (isLocationScope.value && !targetLocationId) {
+    showAppWarning('请先选择当前盘点库位')
+    return { ok: false as const, item: null }
+  }
   try {
-    const item = await countStocktakeItem(stocktake.value.id, { skuId, qty, mode })
+    const item = await countStocktakeItem(stocktake.value.id, { skuId, qty, mode, ...(targetLocationId ? { locationId: targetLocationId } : {}) })
     if (item && mode !== 'clear') {
       currentItem.value = item
       replaceItemRow(item)
@@ -201,7 +218,8 @@ const processScan = async (code: string) => {
     if (previous && previous.skuId !== result.sku.id && currentQty.value !== null && currentQty.value !== previous.countedQty) {
       showAppWarning(`「${previous.productName}」输入的实盘数量尚未保存，已切换到新扫描的商品`)
     }
-    const existing = items.value.find((row) => row.skuId === result.sku.id)
+    const scanLocationId = isLocationScope.value ? countLocationId.value : null
+    const existing = items.value.find((row) => isSameItem(row, result.sku.id, scanLocationId))
     currentItem.value = existing ?? {
       id: '',
       skuId: result.sku.id,
@@ -211,7 +229,10 @@ const processScan = async (code: string) => {
       productId: result.product.id,
       productName: result.product.productName,
       thumbnail: result.sku.thumbnail ?? result.product.thumbnail,
-      locationCode: result.sku.locationCode ?? null,
+      locationCode: isLocationScope.value
+        ? scopeLocations.value.find((item) => item.id === scanLocationId)?.locationCode ?? null
+        : result.sku.locationCode ?? null,
+      locationScopeId: scanLocationId,
       inScope: false,
       countedQty: null,
       countedByName: null,
@@ -248,7 +269,7 @@ const saveCurrentQty = async () => {
     showAppWarning('请输入实盘数量')
     return
   }
-  const { item } = await saveCount(target.skuId, currentQty.value, 'set')
+  const { item } = await saveCount(target.skuId, currentQty.value, 'set', isLocationScope.value ? target.locationScopeId : undefined)
   if (!item) return
   currentQty.value = item.countedQty
   showAppSuccess(`已记录「${item.productName}」实盘 ${item.countedQty}`)
@@ -263,7 +284,7 @@ const editRowQty = async (row: StocktakeItemRecord) => {
       inputPattern: /^\d{1,6}$/,
       inputErrorMessage: '请输入 0 到 999999 的整数',
     })
-    await saveCount(row.skuId, Number(value), 'set')
+    await saveCount(row.skuId, Number(value), 'set', row.locationScopeId)
   } catch {
     // 用户取消
   }
@@ -276,9 +297,9 @@ const clearRow = async (row: StocktakeItemRecord) => {
   } catch {
     return
   }
-  const { ok, item } = await saveCount(row.skuId, null, 'clear')
+  const { ok, item } = await saveCount(row.skuId, null, 'clear', row.locationScopeId)
   if (!ok) return
-  if (currentItem.value?.skuId === row.skuId) {
+  if (currentItem.value && isSameItem(currentItem.value, row.skuId, row.locationScopeId)) {
     currentItem.value = row.inScope && item ? item : null
     currentQty.value = currentItem.value?.countedQty ?? null
   }
@@ -568,6 +589,16 @@ onMounted(reloadAll)
       </div>
       <div class="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
         <el-switch v-model="quickMode" active-text="扫一次记一件" inactive-text="扫码后输入数量" />
+        <el-select
+          v-if="isLocationScope"
+          v-model="countLocationId"
+          class="w-full sm:w-48"
+          size="large"
+          placeholder="当前盘点库位"
+          @change="focusScanInput"
+        >
+          <el-option v-for="location in scopeLocations" :key="location.id" :label="`当前库位：${location.locationCode}`" :value="location.id" />
+        </el-select>
         <div class="flex min-w-0 w-full flex-1 gap-2 sm:w-auto">
           <el-input
             ref="scanInputRef"

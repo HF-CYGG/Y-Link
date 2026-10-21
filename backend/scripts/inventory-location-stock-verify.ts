@@ -188,6 +188,12 @@ async function main() {
     const stocktake = await stocktakeService.create({ scopeType: 'location', locationIds: [shelfA.id, shelfC.id], blindMode: false }, actor)
     assert.equal(stocktake.itemCount, 2)
     assert.deepEqual(stocktake.scopeLocations.map((item) => item.locationCode).sort(), ['A-01', 'C-01'])
+    // 计数前的按库位明细：账面展示该库位当前件数，而不是规格总库存。
+    const uncountedItems = await stocktakeService.listItems(stocktake.id, { pageSize: 50 }, actor)
+    assert.deepEqual(
+      uncountedItems.list.map((item) => [item.locationCode, item.bookQty]).sort(),
+      [['A-01', 2], ['C-01', 6]],
+    )
     await assert.rejects(() => stocktakeService.count(stocktake.id, { skuId, qty: 1, mode: 'set' }, actor), /请先选择当前盘点库位/)
     const countedA = await stocktakeService.count(stocktake.id, { skuId, qty: 1, mode: 'set', locationId: shelfA.id }, actor)
     assert.equal(countedA.bookQty, 2)

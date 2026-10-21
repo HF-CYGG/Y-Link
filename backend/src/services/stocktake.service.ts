@@ -30,7 +30,7 @@ import { lockActiveSysAccountForBusiness } from './account-business-guard.servic
 import { auditService } from './audit.service.js'
 import { applyInventoryDeltas, loadLockedSkuTargets } from './inventory-ledger.service.js'
 import { acquireSequenceMutex, allocateStocktakeNo } from './inventory-sequence.service.js'
-import { readSkuLocationQty } from './sku-location-stock.service.js'
+import { loadSkuLocationDistributions, readSkuLocationQty } from './sku-location-stock.service.js'
 import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
 
 export const STOCKTAKE_REF_TYPE = 'inv_stocktake'
@@ -256,11 +256,12 @@ export class StocktakeService {
     qb.orderBy('item.countedAt', 'DESC').addOrderBy('item.id', 'ASC').skip((page - 1) * pageSize).take(pageSize)
     const [rows, total] = await qb.getManyAndCount()
     const locationCodes = await this.loadLocationCodes(this.itemLocationIds(rows))
+    const bookFallback = await this.loadLocationBookFallback(rows)
     return {
       page,
       pageSize,
       total,
-      list: rows.map((row) => this.buildItemView(row, showBook, locationCodes)),
+      list: rows.map((row) => this.buildItemView(row, showBook, locationCodes, bookFallback)),
     }
   }
 
@@ -839,9 +840,29 @@ export class StocktakeService {
   }
 
   /** showBook 为 false 时（盲盘且无审核权限）账面数、差异与处理信息一律不下发。 */
-  private buildItemView(row: InvStocktakeItem, showBook: boolean, locationCodes: Map<string, string>): StocktakeItemView {
+  /**
+   * 未计数的按库位明细还没有账面快照，展示时按该库位当前件数，而不是规格总库存。
+   * 只读折算，不加锁；计数时仍以锁内读取的件数为准写入快照。
+   */
+  private async loadLocationBookFallback(rows: InvStocktakeItem[]): Promise<Map<string, number>> {
+    const pending = rows.filter((row) => row.sku && !isWholeSkuScope(row.locationScopeId) && (row.bookQtySnapshot === null || row.bookQtySnapshot === undefined))
+    const result = new Map<string, number>()
+    if (!pending.length) return result
+    const distributions = await loadSkuLocationDistributions(AppDataSource.manager, [...new Map(pending.map((row) => [String(row.skuId), row.sku as BaseProductSku])).values()])
+    for (const row of pending) {
+      const distribution = distributions.get(String(row.skuId))
+      if (!distribution) continue
+      const locationId = normalizeId(row.locationScopeId)
+      result.set(String(row.id), locationId === distribution.mainLocationId
+        ? distribution.mainQty
+        : distribution.others.find((item) => item.locationId === locationId)?.qty ?? 0)
+    }
+    return result
+  }
+
+  private buildItemView(row: InvStocktakeItem, showBook: boolean, locationCodes: Map<string, string>, bookFallback?: Map<string, number>): StocktakeItemView {
     const diff = this.diffOf(row)
-    const book = row.bookQtySnapshot ?? (row.sku ? Number(row.sku.currentStock ?? 0) : null)
+    const book = row.bookQtySnapshot ?? bookFallback?.get(String(row.id)) ?? (row.sku ? Number(row.sku.currentStock ?? 0) : null)
     return {
       id: String(row.id),
       skuId: String(row.skuId),
