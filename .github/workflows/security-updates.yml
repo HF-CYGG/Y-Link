@@ -1,0 +1,50 @@
+# 模块说明：.github/workflows/security-updates.yml
+# 文件职责：在合入 main 前与每日定时检查 Node 运行时、根 Web 与后端生产依赖是否落后于已发布的安全补丁。
+# 实现逻辑：
+# 1. 只读取仓库文件与 lockfile，不安装依赖、不执行 PR 代码以外的脚本，通常十几秒完成；
+# 2. 具体规则在 scripts/verify-security-updates.mjs：Node 版本固定点低于最新安全版本、主版本 EOL、
+#    或生产依赖存在可在现有版本范围内修复的 high/critical 漏洞时失败；需大版本升级或无修复的只告警；
+# 3. 定时任务用于发现「代码没变但上游新发布了安全补丁」的情况，失败时 GitHub 会通知仓库维护者。
+# 维护说明：
+# - 状态名为 `security-updates`，若要阻断合入需在 main 的 Ruleset 中把它加为必要检查，改名时同步修改 Ruleset；
+# - 检查依赖 nodejs.org 与 npm 官方审计接口，偶发网络失败可直接重跑，不要改成忽略失败。
+
+name: 漏洞补丁更新检查
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  schedule:
+    # 每天北京时间 09:00 运行一次。
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-updates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security-updates:
+    name: security-updates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: 检查 Node 运行时与生产依赖安全补丁
+        run: npm run verify:security-updates

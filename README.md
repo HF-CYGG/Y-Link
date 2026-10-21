@@ -16,7 +16,7 @@ Y-Link 是一套面向文创、非遗、门店和活动场景的库存管理系�
 
 ## Mobile 工程基础状态
 
-仓库包含 `apps/mobile` Expo 工程和 `packages/*` 跨端基础。Mobile 固定使用 Node.js `22.13.1`；根 npm workspace 让 Mobile 通过正式 package dependency 消费共享 Contract，同时不改变现有 Vue Web、Express 后端、数据库或部署方式。
+仓库包含 `apps/mobile` Expo 工程和 `packages/*` 跨端基础。Mobile 固定使用 Node.js `22.23.4`；根 npm workspace 让 Mobile 通过正式 package dependency 消费共享 Contract，同时不改变现有 Vue Web、Express 后端、数据库或部署方式。
 
 当前 Mobile 尚未接入真实 API，也没有实现正式登录会话、服务端购物车、订单、库存、退货、相机、相册、通知或 Deep Link。未运行模拟器或真机验证时，只能依据 SQLite migration 专项测试、typecheck 与 Android JS bundle export 判断工程基础，不代表设备交互、签名 APK 或发布链路可用。
 

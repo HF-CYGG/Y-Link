@@ -4,7 +4,7 @@ Y-Link 的 Expo 移动端工程。当前已建立可运行路由、Provider、Fe
 
 ## 环境与安装
 
-- Node.js：`22.13.1`
+- Node.js：`22.23.4`
 - 包管理器：npm workspace；本目录保留独立 `package.json`，唯一依赖真源为仓库根 `package-lock.json`
 - 依赖源：仓库根 `.npmrc` 固定官方 npm registry；根 lockfile 保留 tarball `resolved` 与 `integrity` 供本地、CI 与 EAS 共用
 - Expo SDK：`~57.0.0`
@@ -63,7 +63,7 @@ cd apps/mobile
 eas build --platform android --profile preview
 ```
 
-EAS 上传仓库后按根 workspace 与根 `package-lock.json` 安装，`eas.json` 将 Node 固定为 `22.13.1`。当前没有 EAS project ID、Android applicationId、签名或凭据，因此上述命令只是正式构建入口说明，本阶段不执行发布或远端构建。
+EAS 上传仓库后按根 workspace 与根 `package-lock.json` 安装，`eas.json` 将 Node 固定为 `22.23.4`。当前没有 EAS project ID、Android applicationId、签名或凭据，因此上述命令只是正式构建入口说明，本阶段不执行发布或远端构建。
 
 ## 平台能力状态
 
