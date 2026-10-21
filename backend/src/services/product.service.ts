@@ -35,6 +35,7 @@ import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 import { acquireSequenceMutex, allocateWcSkuCode } from './inventory-sequence.service.js'
 import { auditService } from './audit.service.js'
+import { formatLocationDeductions, reconcileSkuLocationStocks } from './sku-location-stock.service.js'
 import {
   allocateSeriesSeq,
   reserveSeriesSeq,
@@ -1031,6 +1032,9 @@ export class ProductService {
     const finalProductStock = Number(product.currentStock ?? 0)
     const preOrderedStock = Number(product.preOrderedStock ?? 0)
     let runningProductStock = snapshot.productCurrentStock
+    // 编辑可能调低库存或改动主库位：先按“先扣主库位、不够再扣其他库位”规整分库位件数，
+    // 并把重合到新主库位的行并回主库位；扣到的其他库位追加到该规格的库存调整流水备注。
+    const locationDeductions = await reconcileSkuLocationStocks(manager, skus)
     const baseLog = {
       productId: String(product.id),
       changeType: mode === 'create' ? 'stock_initial' : 'manual_stock_adjust',
@@ -1068,7 +1072,10 @@ export class ProductService {
           afterSkuCurrentStock: afterSkuStock,
           beforeSkuPreorderedStock: before?.preOrderedStock ?? skuPreOrderedStock,
           afterSkuPreorderedStock: before?.preOrderedStock ?? skuPreOrderedStock,
-          remark: `${mode === 'create' ? '新建商品初始库存' : '商品编辑调整'} SKU ${sku.skuCode} 库存 ${beforeSkuStock} → ${afterSkuStock}${beforeContributes ? '' : '（该规格不计入商品汇总）'}`,
+          remark: [
+            `${mode === 'create' ? '新建商品初始库存' : '商品编辑调整'} SKU ${sku.skuCode} 库存 ${beforeSkuStock} → ${afterSkuStock}${beforeContributes ? '' : '（该规格不计入商品汇总）'}`,
+            formatLocationDeductions(locationDeductions.get(String(sku.id))),
+          ].filter(Boolean).join('；').slice(0, 255),
         }))
       }
 
@@ -1401,6 +1408,12 @@ export class ProductService {
         if (changedSkus.length) {
           // 只更新默认库位列，绝不保存 SKU 实体快照，避免把锁前读取的库存或价格字段写回。
           await skuRepo.update({ id: In(changedSkus.map((sku) => sku.id)) }, { locationId: location ? String(location.id) : null })
+          // 主库位改成某个已拆分的其他库位时，把该行并回主库位；不改 SKU 实体，审计仍记录改动前的主库位。
+          await reconcileSkuLocationStocks(manager, changedSkus.map((sku) => ({
+            id: sku.id,
+            currentStock: sku.currentStock,
+            locationId: location ? String(location.id) : null,
+          })))
           await auditService.record({
             actionType: 'product.batch_update',
             actionLabel: location ? '批量修改规格默认库位' : '批量清空规格默认库位',

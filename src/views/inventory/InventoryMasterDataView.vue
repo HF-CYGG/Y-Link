@@ -330,6 +330,6 @@ onMounted(loadData)
         </el-form-item>
       </el-form>
     </BizCrudDialogShell>
-    <LocationSkuManageDialog v-model="skuDialogVisible" :location="managingLocation" :categories="categories" @updated="loadData" />
+    <LocationSkuManageDialog v-model="skuDialogVisible" :location="managingLocation" :categories="categories" :locations="locations" @updated="loadData" />
   </PageContainer>
 </template>

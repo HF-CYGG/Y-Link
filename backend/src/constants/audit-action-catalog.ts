@@ -163,6 +163,7 @@ export const AUDIT_ACTION_CATALOG: Readonly<Record<string, AuditActionDefinition
   'product.category.update': { label: '修改商品分类', category: 'product_inventory' },
   'product.location.create': { label: '新增库位', category: 'product_inventory' },
   'product.location.update': { label: '修改库位', category: 'product_inventory' },
+  'product.location.transfer': { label: '库位拨转', category: 'product_inventory' },
   'product.create': { label: '新增商品', category: 'product_inventory' },
   'product.batch_create': { label: '批量新增商品', category: 'product_inventory' },
   'product.update': { label: '编辑商品', category: 'product_inventory' },

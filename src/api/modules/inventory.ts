@@ -37,16 +37,53 @@ export interface LocationRecord {
   skuCount: number
 }
 
+/** 规格在某个库位的件数（主库位以外的拆分库位）。 */
+export interface SkuLocationQty {
+  locationId: string
+  locationCode: string
+  qty: number
+}
+
 export interface LocationSkuRecord {
   skuId: string
   skuCode: string
   productName: string
   specText: string
+  /** 主库位。 */
   locationId: string | null
   locationCode: string | null
   categoryName: string | null
   isActive: boolean
   currentStock: number
+  /** 本库位是否为该规格的主库位。 */
+  isMainHere: boolean
+  /** 该规格在本库位的件数。 */
+  locationQty: number
+  /** 主库位件数（总库存减去其他库位件数）。 */
+  mainQty: number
+  /** 主库位以外的拆分库位。 */
+  otherLocations: SkuLocationQty[]
+}
+
+/** 单个规格的库位分布。 */
+export interface SkuLocationDistribution {
+  skuId: string
+  skuCode: string
+  currentStock: number
+  mainLocationId: string | null
+  mainLocationCode: string | null
+  mainQty: number
+  others: SkuLocationQty[]
+}
+
+export interface LocationSkuTransferPayload {
+  /** 来源库位；传主库位 ID（主库位为空时传 null）表示从主库位拨出。 */
+  fromLocationId: string | null
+  qty: number
+  /** 打开弹窗时看到的来源库位件数，服务端据此拦截并发变化。 */
+  expectedFromQty: number
+  expectedMainLocationId: string | null
+  setAsMain?: boolean
 }
 
 export interface LocationSkuAssignmentResult {
@@ -205,8 +242,13 @@ export interface StockRow {
   thumbnail: string | null
   categoryId: string | null
   categoryName: string | null
+  /** 主库位。 */
   locationId: string | null
   locationCode: string | null
+  /** 主库位件数。 */
+  mainLocationQty: number
+  /** 主库位以外的拆分库位与件数。 */
+  otherLocations: SkuLocationQty[]
   costPrice: string | null
   salePrice: string
   currentStock: number
@@ -330,6 +372,8 @@ export interface StocktakeRecord {
   countedCount: number
   diffCount: number | null
   canViewBook: boolean
+  /** 按库位盘点的库位清单，计数时选择当前盘点库位用；其他范围为空数组。 */
+  scopeLocations: Array<{ id: string; locationCode: string }>
 }
 
 export interface StocktakeItemRecord {
@@ -341,7 +385,10 @@ export interface StocktakeItemRecord {
   productId: string
   productName: string
   thumbnail: string | null
+  /** 按库位盘点时为该行盘的库位，按总量盘点时为主库位。 */
   locationCode: string | null
+  /** 按库位盘点时为该行盘的库位 ID，按总量盘点时为 null。 */
+  locationScopeId: string | null
   inScope: boolean
   countedQty: number | null
   countedByName: string | null
@@ -451,6 +498,13 @@ export const updateLocationSku = (
   data: { action: 'assign' | 'remove'; expectedLocationId: string | null },
 ) => request<LocationSkuAssignmentResult>({ method: 'PUT', url: `/inventory/locations/${id}/skus/${skuId}`, data })
 
+/** 按数量拨转：id 为目标库位。 */
+export const transferLocationSku = (id: string, skuId: string, data: LocationSkuTransferPayload) =>
+  request<{ skuId: string; distribution: SkuLocationDistribution }>({ method: 'POST', url: `/inventory/locations/${id}/skus/${skuId}/transfer`, data })
+
+export const getSkuLocationDistribution = (skuId: string, config: RequestConfig = {}) =>
+  request<SkuLocationDistribution>({ ...config, method: 'GET', url: `/inventory/skus/${skuId}/locations` })
+
 export const updateLocationSkus = (
   id: string,
   data: { action: 'assign' | 'remove'; items: Array<{ skuId: string; expectedLocationId: string | null }> },
@@ -516,7 +570,7 @@ export const getStocktakeItems = (
   params: { page?: number; pageSize?: number; keyword?: string; filter?: 'all' | 'counted' | 'uncounted' | 'diff' },
   config: RequestConfig = {},
 ) => request<PagedResult<StocktakeItemRecord>>({ ...config, method: 'GET', url: `/inventory/stocktakes/${id}/items`, params: cleanParams(params) })
-export const countStocktakeItem = (id: string, data: { skuId: string; qty?: number | null; mode: 'set' | 'add' | 'clear' }) =>
+export const countStocktakeItem = (id: string, data: { skuId: string; qty?: number | null; mode: 'set' | 'add' | 'clear'; locationId?: string | null }) =>
   request<StocktakeItemRecord>({ method: 'POST', url: `/inventory/stocktakes/${id}/count`, data })
 export const submitStocktake = (id: string, treatUncountedAsZero = false) =>
   request<StocktakeRecord>({ method: 'POST', url: `/inventory/stocktakes/${id}/submit`, data: { treatUncountedAsZero } })

@@ -57,6 +57,7 @@ import { InvStockDoc } from '../entities/inv-stock-doc.entity.js'
 import { InvStockDocItem } from '../entities/inv-stock-doc-item.entity.js'
 import { InvStocktake } from '../entities/inv-stocktake.entity.js'
 import { InvStocktakeItem } from '../entities/inv-stocktake-item.entity.js'
+import { InvSkuLocationStock } from '../entities/inv-sku-location-stock.entity.js'
 
 export const appEntities = [
   BaseProduct,
@@ -104,6 +105,7 @@ export const appEntities = [
   InvStockDocItem,
   InvStocktake,
   InvStocktakeItem,
+  InvSkuLocationStock,
 ]
 
 /**
