@@ -763,7 +763,7 @@ onMounted(reloadAll)
           </el-table>
         </template>
         <template #card="{ item }">
-          <article class="flex min-w-0 flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-white/10 dark:bg-slate-900/40">
+          <article class="flex min-w-0 flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-white/10 dark:bg-black/40">
             <div class="flex min-w-0 items-start justify-between gap-2">
               <PassivePreviewImage
                 :src="resolveItemImage(item)"

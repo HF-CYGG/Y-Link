@@ -242,7 +242,7 @@ onDeactivated(() => {
           <span v-pre class="font-mono">{{ip}}</span>。
         </p>
       </div>
-      <span class="rounded-lg bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+      <span class="rounded-lg bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500 dark:bg-white/10 dark:text-slate-400">
         保存后立即生效
       </span>
     </div>
@@ -256,7 +256,7 @@ onDeactivated(() => {
     />
 
     <div class="grid gap-6 xl:grid-cols-2">
-      <div class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-5 dark:border-white/10 dark:bg-slate-900/30">
+      <div class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-5 dark:border-white/10 dark:bg-black/30">
         <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div>
             <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100">短信验证码平台</h3>
@@ -324,7 +324,7 @@ onDeactivated(() => {
               show-icon
             />
 
-            <div class="grid gap-2 rounded-xl border border-slate-200/80 bg-white/70 p-3 text-xs dark:border-white/10 dark:bg-slate-950/30 sm:grid-cols-3">
+            <div class="grid gap-2 rounded-xl border border-slate-200/80 bg-white/70 p-3 text-xs dark:border-white/10 dark:bg-black/30 sm:grid-cols-3">
               <div class="flex items-center justify-between gap-2 sm:block">
                 <span class="text-slate-500 dark:text-slate-400">访问凭据</span>
                 <el-tag class="sm:mt-1" :type="mobileProviderStatus?.credentialsConfigured ? 'success' : 'danger'" size="small">
@@ -382,7 +382,7 @@ onDeactivated(() => {
         </div>
       </div>
 
-      <div class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-5 dark:border-white/10 dark:bg-slate-900/30">
+      <div class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-5 dark:border-white/10 dark:bg-black/30">
         <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div>
             <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100">邮箱验证码平台</h3>
@@ -455,7 +455,7 @@ onDeactivated(() => {
       </div>
     </div>
 
-    <section class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-5 dark:border-white/10 dark:bg-slate-900/30">
+    <section class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-5 dark:border-white/10 dark:bg-black/30">
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100">最近短信回执</h3>
