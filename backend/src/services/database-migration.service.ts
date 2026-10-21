@@ -363,6 +363,7 @@ const CRITICAL_VALIDATION_TABLES = new Set([
   'inv_stock_doc_item',
   'inv_stocktake',
   'inv_stocktake_item',
+  'inv_sku_location_stock',
 ])
 
 function createTaskId(): string {

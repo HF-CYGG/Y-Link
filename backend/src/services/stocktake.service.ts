@@ -5,11 +5,14 @@
  * - 建单即按范围（全部 / 分类 / 库位 / 指定 SKU）生成明细，状态为“盘点中”；同一 SKU 不允许同时出现在两张未完成的盘点单里，避免重复调账；
  * - 某 SKU 首次计数时由服务端记录当时的账面库存快照，差异 = 实盘 − 快照；确认时按差异增量调账，盘点期间正常出入库不会被覆盖；
  * - 盲盘单的账面数与差异只对拥有 stocktake:approve 的账号下发，计数接口永远不返回账面数；
- * - 确认完成时，调整行生成盘盈 / 盘亏流水，报损行生成盘点报损流水，全部经共享记账函数落账。
+ * - 确认完成时，调整行生成盘盈 / 盘亏流水，报损行生成盘点报损流水，全部经共享记账函数落账；
+ * - 按库位盘点时明细按“规格 × 库位”展开：账面快照取该库位件数（主库位件数 = 总库存 − 其他库位之和），
+ *   调账只增减该库位件数；其他范围按规格总量盘点，location_scope_id 为 0；
+ * - 同一规格可以同时在多张未完成盘点单里，但只能是不同库位的按库位盘点；任一方按总量盘点即视为冲突。
  * 维护重点：状态流转集中在 assertStatus；新增处理方式时同步 STOCKTAKE_RESOLUTIONS 与前端字典。
  */
 
-import { In, type EntityManager } from 'typeorm'
+import { Brackets, In, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { STOCKTAKE_DIFF_REASONS, STOCKTAKE_RESOLUTIONS } from '../constants/inventory-change-types.js'
@@ -17,6 +20,7 @@ import { BaseCategory } from '../entities/base-category.entity.js'
 import { BaseProductSku } from '../entities/base-product-sku.entity.js'
 import { BaseStorageLocation } from '../entities/base-storage-location.entity.js'
 import { InvStocktake } from '../entities/inv-stocktake.entity.js'
+import { InvSkuLocationStock } from '../entities/inv-sku-location-stock.entity.js'
 import { InvStocktakeItem } from '../entities/inv-stocktake-item.entity.js'
 import type { PaginationResult } from '../types/api.js'
 import type { AuthUserContext } from '../types/auth.js'
@@ -26,6 +30,7 @@ import { lockActiveSysAccountForBusiness } from './account-business-guard.servic
 import { auditService } from './audit.service.js'
 import { applyInventoryDeltas, loadLockedSkuTargets } from './inventory-ledger.service.js'
 import { acquireSequenceMutex, allocateStocktakeNo } from './inventory-sequence.service.js'
+import { readSkuLocationQty } from './sku-location-stock.service.js'
 import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
 
 export const STOCKTAKE_REF_TYPE = 'inv_stocktake'
@@ -49,6 +54,8 @@ export interface CreateStocktakeInput {
 
 export interface CountStocktakeInput {
   skuId: string | number
+  /** 按库位盘点时的当前盘点库位；只有一个候选库位时可以不传。 */
+  locationId?: string | number | null
   qty?: number | null
   mode: 'set' | 'add' | 'clear'
 }
@@ -77,6 +84,8 @@ export interface StocktakeView {
   countedCount: number
   diffCount: number | null
   canViewBook: boolean
+  /** 按库位盘点的库位清单（计数时选择当前库位用），其他范围为空数组。 */
+  scopeLocations: Array<{ id: string; locationCode: string }>
 }
 
 export interface StocktakeItemView {
@@ -88,7 +97,10 @@ export interface StocktakeItemView {
   productId: string
   productName: string
   thumbnail: string | null
+  /** 按库位盘点时为该行盘的库位；按总量盘点时为规格主库位。 */
   locationCode: string | null
+  /** 按库位盘点时为该行盘的库位 ID；按总量盘点时为 null。 */
+  locationScopeId: string | null
   inScope: boolean
   countedQty: number | null
   countedByName: string | null
@@ -113,6 +125,14 @@ const normalizeId = (value: unknown) => String(value ?? '').trim()
 const toIso = (value: Date | string | null | undefined) => (value ? new Date(value).toISOString() : null)
 const isEnabled = (value: unknown) => value !== false && value !== 0 && value !== '0'
 const uniqueIds = (values: Array<string | number> | undefined) => [...new Set((values ?? []).map(normalizeId).filter(Boolean))]
+/** 按总量盘点的明细库位标记。 */
+const WHOLE_SKU_SCOPE = '0'
+const isWholeSkuScope = (value: unknown) => normalizeId(value) === WHOLE_SKU_SCOPE || normalizeId(value) === ''
+
+interface StocktakeScopeEntry {
+  sku: BaseProductSku
+  locationScopeId: string
+}
 
 const STATUS_LABELS: Record<StocktakeStatus, string> = {
   counting: '盘点中',
@@ -138,10 +158,10 @@ export class StocktakeService {
     const result = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
       await acquireSequenceMutex(manager, STOCKTAKE_SCOPE_MUTEX_KEY)
-      const { skus, scopeJson, scopeLabel } = await this.resolveScope(input, manager)
-      if (!skus.length) throw new BizError('所选范围内没有可盘点的商品规格', 400)
-      if (skus.length > MAX_STOCKTAKE_ITEMS) throw new BizError(`单张盘点单最多 ${MAX_STOCKTAKE_ITEMS} 个规格，请缩小范围`, 400)
-      await this.assertNoOpenConflict(manager, skus.map((sku) => String(sku.id)))
+      const { entries, scopeJson, scopeLabel } = await this.resolveScope(input, manager)
+      if (!entries.length) throw new BizError('所选范围内没有可盘点的商品规格', 400)
+      if (entries.length > MAX_STOCKTAKE_ITEMS) throw new BizError(`单张盘点单最多 ${MAX_STOCKTAKE_ITEMS} 个规格，请缩小范围`, 400)
+      await this.assertNoOpenConflict(manager, entries.map((entry) => ({ skuId: String(entry.sku.id), locationScopeId: entry.locationScopeId })))
 
       const stocktakeRepo = manager.getRepository(InvStocktake)
       const stocktake = await stocktakeRepo.save(stocktakeRepo.create({
@@ -156,10 +176,11 @@ export class StocktakeService {
         createdByName: actor.displayName || actor.username,
       }))
       const itemRepo = manager.getRepository(InvStocktakeItem)
-      const itemEntities = skus.map((sku) => itemRepo.create({
+      const itemEntities = entries.map(({ sku, locationScopeId }) => itemRepo.create({
         stocktakeId: stocktake.id,
         productId: String(sku.productId),
         skuId: String(sku.id),
+        locationScopeId,
         inScope: true,
         bookQtySnapshot: null,
         countedQty: null,
@@ -193,11 +214,12 @@ export class StocktakeService {
     qb.orderBy('st.id', 'DESC').skip((page - 1) * pageSize).take(pageSize)
     const [rows, total] = await qb.getManyAndCount()
     const stats = await this.loadStats(rows.map((row) => String(row.id)))
+    const scopeCodes = await this.loadLocationCodes(rows.flatMap((row) => this.readScopeLocationIdsOf(row)))
     return {
       page,
       pageSize,
       total,
-      list: rows.map((row) => this.buildView(row, actor, stats.get(String(row.id)))),
+      list: rows.map((row) => this.buildView(row, actor, stats.get(String(row.id)), scopeCodes)),
     }
   }
 
@@ -205,7 +227,8 @@ export class StocktakeService {
     const stocktake = await AppDataSource.getRepository(InvStocktake).findOne({ where: { id } })
     if (!stocktake) throw new BizError('盘点单不存在', 404)
     const stats = await this.loadStats([String(stocktake.id)])
-    return this.buildView(stocktake, actor, stats.get(String(stocktake.id)))
+    const scopeCodes = await this.loadLocationCodes(this.readScopeLocationIdsOf(stocktake))
+    return this.buildView(stocktake, actor, stats.get(String(stocktake.id)), scopeCodes)
   }
 
   async listItems(id: string, query: StocktakeItemQuery, actor: AuthUserContext): Promise<PaginationResult<StocktakeItemView>> {
@@ -232,7 +255,7 @@ export class StocktakeService {
     }
     qb.orderBy('item.countedAt', 'DESC').addOrderBy('item.id', 'ASC').skip((page - 1) * pageSize).take(pageSize)
     const [rows, total] = await qb.getManyAndCount()
-    const locationCodes = await this.loadLocationCodes(rows.map((row) => row.sku?.locationId ?? null))
+    const locationCodes = await this.loadLocationCodes(this.itemLocationIds(rows))
     return {
       page,
       pageSize,
@@ -255,19 +278,28 @@ export class StocktakeService {
       this.assertStatus(stocktake, ['counting'], '只有盘点中的单据可以计数')
       const itemRepo = manager.getRepository(InvStocktakeItem)
       // 同一盘点单的明细读写都在盘点单行锁内，普通读即可拿到最新值。
-      let item = await itemRepo.findOne({ where: { stocktakeId: stocktake.id, skuId } })
+      const locationScopeId = await this.resolveCountLocation(manager, stocktake, skuId, input.locationId)
+      let item = await itemRepo.findOne({ where: { stocktakeId: stocktake.id, skuId, locationScopeId } })
       if (!item) {
         if (input.mode === 'clear') throw new BizError('该规格尚未计数', 400)
         // 冲突检查放在锁 SKU 之前：确认盘点先锁盘点单再锁 SKU，这里若先持有 SKU 再等待其明细会互相等待。
         await acquireSequenceMutex(manager, STOCKTAKE_SCOPE_MUTEX_KEY)
-        await this.assertNoOpenConflict(manager, [skuId], String(stocktake.id))
+        await this.assertNoOpenConflict(manager, [{ skuId, locationScopeId }], String(stocktake.id))
       }
       const targets = await loadLockedSkuTargets(manager, [skuId])
       const target = targets.get(skuId)
       if (!target) throw new BizError('规格不存在，请重新扫码', 404)
       if (!item) {
         if (!isEnabled(target.sku.isCurrent)) throw new BizError(`规格 ${target.sku.skuCode} 已退役，不能加入盘点`, 409)
-        item = itemRepo.create({ stocktakeId: stocktake.id, productId: String(target.product.id), skuId, inScope: false, bookQtySnapshot: null, countedQty: null })
+        item = itemRepo.create({
+          stocktakeId: stocktake.id,
+          productId: String(target.product.id),
+          skuId,
+          locationScopeId,
+          inScope: false,
+          bookQtySnapshot: null,
+          countedQty: null,
+        })
       }
       if (input.mode === 'clear' && !isEnabled(item.inScope)) {
         // 误扫的范围外规格清除后直接移除，不再占用该 SKU，也不会被“未盘按 0 计”算成盘亏。
@@ -286,7 +318,7 @@ export class StocktakeService {
         const qty = Number(input.qty)
         // set 表示“此刻实盘就是这么多”，账面快照同步刷新为当前库存；add 是连续扫码累加，沿用首次计数时的快照。
         if (input.mode === 'set' || item.bookQtySnapshot === null || item.bookQtySnapshot === undefined) {
-          item.bookQtySnapshot = Number(target.sku.currentStock ?? 0)
+          item.bookQtySnapshot = await this.readBookQty(manager, target.sku, item.locationScopeId)
         }
         const nextQty = input.mode === 'add' ? Number(item.countedQty ?? 0) + qty : qty
         if (nextQty > MAX_COUNT_QTY) throw new BizError(`累计数量不能超过 ${MAX_COUNT_QTY}`, 400)
@@ -302,8 +334,58 @@ export class StocktakeService {
       saved.product = target.product
       return { item: saved, showBook: canViewBook(actor, stocktake) }
     })
-    const locationCodes = await this.loadLocationCodes([item.sku?.locationId ?? null])
+    const locationCodes = await this.loadLocationCodes(this.itemLocationIds([item]))
     return this.buildItemView(item, showBook, locationCodes)
+  }
+
+  /**
+   * 确定本次计数落在哪一行：按库位盘点时取请求指定的库位（必须在本单范围内）；未指定时，
+   * 本单里该规格只有一个库位行、或本单只盘一个库位，即可唯一确定，否则要求先选择当前盘点库位。
+   */
+  private async resolveCountLocation(
+    manager: EntityManager,
+    stocktake: InvStocktake,
+    skuId: string,
+    requestedLocationId: string | number | null | undefined,
+  ): Promise<string> {
+    if (stocktake.scopeType !== 'location') return WHOLE_SKU_SCOPE
+    const scopeLocationIds = this.readScopeLocationIds(stocktake)
+    const requested = normalizeId(requestedLocationId)
+    if (requested) {
+      if (!scopeLocationIds.includes(requested)) throw new BizError('所选库位不在本盘点单的盘点范围内', 400)
+      return requested
+    }
+    const existing = await manager.getRepository(InvStocktakeItem).find({
+      where: { stocktakeId: stocktake.id, skuId },
+      select: ['id', 'locationScopeId'],
+    })
+    if (existing.length === 1) return normalizeId(existing[0].locationScopeId)
+    if (existing.length === 0 && scopeLocationIds.length === 1) return scopeLocationIds[0]
+    throw new BizError('该规格在本盘点单的多个库位中，请先选择当前盘点库位', 400)
+  }
+
+  /** 账面快照：按总量盘点取规格总库存，按库位盘点取该库位件数。调用方需已锁定 SKU。 */
+  private async readBookQty(manager: EntityManager, sku: BaseProductSku, locationScopeId: string | null | undefined) {
+    if (isWholeSkuScope(locationScopeId)) return Number(sku.currentStock ?? 0)
+    return readSkuLocationQty(manager, sku, normalizeId(locationScopeId))
+  }
+
+  private readScopeLocationIdsOf(stocktake: InvStocktake): string[] {
+    return stocktake.scopeType === 'location' ? this.readScopeLocationIds(stocktake) : []
+  }
+
+  private readScopeLocationIds(stocktake: InvStocktake): string[] {
+    try {
+      const parsed = JSON.parse(stocktake.scopeJson || '{}') as { locationIds?: Array<string | number> }
+      return uniqueIds(parsed.locationIds)
+    } catch {
+      return []
+    }
+  }
+
+  /** 明细展示需要的库位：按库位盘点取该行库位，按总量盘点取规格主库位。 */
+  private itemLocationIds(rows: InvStocktakeItem[]): Array<string | null> {
+    return rows.map((row) => (isWholeSkuScope(row.locationScopeId) ? row.sku?.locationId ?? null : normalizeId(row.locationScopeId)))
   }
 
   async submit(id: string, options: { treatUncountedAsZero?: boolean }, actor: AuthUserContext, requestMeta?: RequestMeta): Promise<StocktakeView> {
@@ -325,7 +407,8 @@ export class StocktakeService {
         const targets = await loadLockedSkuTargets(manager, uncounted.map((item) => String(item.skuId)))
         const now = new Date()
         for (const item of uncounted) {
-          item.bookQtySnapshot = Number(targets.get(String(item.skuId))?.sku.currentStock ?? 0)
+          const sku = targets.get(String(item.skuId))?.sku
+          item.bookQtySnapshot = sku ? await this.readBookQty(manager, sku, item.locationScopeId) : 0
           item.countedQty = 0
           item.countedByName = `${actor.displayName || actor.username}（未盘按 0 计）`
           item.countedAt = now
@@ -434,7 +517,7 @@ export class StocktakeService {
       }, manager)
       return saved
     })
-    const locationCodes = await this.loadLocationCodes([item.sku?.locationId ?? null])
+    const locationCodes = await this.loadLocationCodes(this.itemLocationIds([item]))
     return this.buildItemView(item, true, locationCodes)
   }
 
@@ -464,7 +547,9 @@ export class StocktakeService {
           if (!isEnabled(target.sku.isCurrent)) {
             throw new BizError(`规格 ${target.sku.skuCode} 在盘点期间已退役，不能调账，请将该行改为“暂不处理”`, 409)
           }
-          return { ...target, stockDelta: this.diffOf(item) as number, key: String(item.id), item }
+          // 按库位盘点的行只调该库位件数；按总量盘点的行走默认规则（盘盈落主库位，盘亏先扣主库位）。
+          const locationId = isWholeSkuScope(item.locationScopeId) ? undefined : normalizeId(item.locationScopeId)
+          return { ...target, stockDelta: this.diffOf(item) as number, key: String(item.id), item, locationId }
         })
       const remarkOf = (item: InvStocktakeItem, label: string) => [
         `${label} ${stocktake.stocktakeNo}`,
@@ -572,9 +657,10 @@ export class StocktakeService {
       .orderBy('sku.productId', 'ASC')
       .addOrderBy('sku.sortOrder', 'ASC')
       .addOrderBy('sku.id', 'ASC')
+    const wholeSku = (skus: BaseProductSku[]): StocktakeScopeEntry[] => skus.map((sku) => ({ sku, locationScopeId: WHOLE_SKU_SCOPE }))
     if (input.scopeType === 'all') {
       qb.andWhere('sku.isActive = :isActive', { isActive: true }).andWhere('p.is_active = :productActive', { productActive: 1 })
-      return { skus: await qb.getMany(), scopeJson: {}, scopeLabel: '全部商品' }
+      return { entries: wholeSku(await qb.getMany()), scopeJson: {}, scopeLabel: '全部商品' }
     }
     if (input.scopeType === 'category') {
       const categoryIds = uniqueIds(input.categoryIds)
@@ -585,7 +671,7 @@ export class StocktakeService {
         .andWhere('p.is_active = :productActive', { productActive: 1 })
         .andWhere('p.category_id IN (:...categoryIds)', { categoryIds })
       return {
-        skus: await qb.getMany(),
+        entries: wholeSku(await qb.getMany()),
         scopeJson: { categoryIds },
         scopeLabel: `分类：${categories.map((item) => item.categoryName).join('、')}`.slice(0, 255),
       }
@@ -595,11 +681,36 @@ export class StocktakeService {
       if (!locationIds.length) throw new BizError('请选择要盘点的库位', 400)
       const locations = await manager.getRepository(BaseStorageLocation).find({ where: { id: In(locationIds) } })
       if (locations.length !== locationIds.length) throw new BizError('存在无效的库位', 400)
+      // 库位内的规格 = 主库位在该库位的规格 + 在该库位拆有件数的规格，每个“规格 × 库位”一行。
+      const stockedSubQuery = qb.subQuery()
+        .select('1')
+        .from(InvSkuLocationStock, 'stock')
+        .where('stock.skuId = sku.id')
+        .andWhere('stock.locationId IN (:...locationIds)')
+        .getQuery()
       qb.andWhere('sku.isActive = :isActive', { isActive: true })
         .andWhere('p.is_active = :productActive', { productActive: 1 })
-        .andWhere('sku.locationId IN (:...locationIds)', { locationIds })
+        .andWhere(new Brackets((where) => {
+          where.where('sku.locationId IN (:...locationIds)', { locationIds })
+            .orWhere(`EXISTS ${stockedSubQuery}`)
+        }))
+      const skus = await qb.getMany()
+      const stockRows = skus.length
+        ? await manager.getRepository(InvSkuLocationStock).find({
+            where: { skuId: In(skus.map((sku) => String(sku.id))), locationId: In(locationIds) },
+            select: ['skuId', 'locationId'],
+          })
+        : []
+      const rowKeys = new Set(stockRows.map((row) => `${normalizeId(row.skuId)}::${normalizeId(row.locationId)}`))
+      const entries: StocktakeScopeEntry[] = []
+      for (const sku of skus) {
+        for (const locationId of locationIds) {
+          const isMain = normalizeId(sku.locationId) === locationId
+          if (isMain || rowKeys.has(`${normalizeId(sku.id)}::${locationId}`)) entries.push({ sku, locationScopeId: locationId })
+        }
+      }
       return {
-        skus: await qb.getMany(),
+        entries,
         scopeJson: { locationIds },
         scopeLabel: `库位：${locations.map((item) => item.locationCode).join('、')}`.slice(0, 255),
       }
@@ -610,28 +721,46 @@ export class StocktakeService {
       qb.andWhere('sku.id IN (:...skuIds)', { skuIds })
       const skus = await qb.getMany()
       if (skus.length !== skuIds.length) throw new BizError('存在无效或已退役的规格', 400)
-      return { skus, scopeJson: { skuIds }, scopeLabel: `指定 ${skus.length} 个规格` }
+      return { entries: wholeSku(skus), scopeJson: { skuIds }, scopeLabel: `指定 ${skus.length} 个规格` }
     }
     throw new BizError('不支持的盘点范围', 400)
   }
 
   /**
-   * 同一 SKU 不能同时出现在两张未完成盘点单中。调用方必须先持有 STOCKTAKE_SCOPE_MUTEX_KEY。
+   * 同一规格不能在两张未完成盘点单里重复调账。调用方必须先持有 STOCKTAKE_SCOPE_MUTEX_KEY。
+   * - 冲突口径：任一方按总量盘点（location_scope_id = 0），或双方盘的是同一库位；
+   *   不同库位的按库位盘点互不影响（各自只调本库位件数），允许并行；
    * - MySQL 可重复读下普通读可能看不到并发事务刚提交的明细，所以明细用加锁读（读取最新提交版本）；
    * - 只锁明细不连表：避免锁到 SKU 与盘点单行，和确认盘点、他单计数互相等待；
    * - 盘点单状态用普通读：终态不会回到未完成，快照里查不到的盘点单一定是刚创建的，按未完成处理。
    */
-  private async assertNoOpenConflict(manager: EntityManager, skuIds: string[], excludeStocktakeId?: string) {
+  private async assertNoOpenConflict(
+    manager: EntityManager,
+    targets: Array<{ skuId: string; locationScopeId: string }>,
+    excludeStocktakeId?: string,
+  ) {
     const lockable = manager.connection.options.type !== 'sqlite'
+    const targetMap = new Map<string, Set<string>>()
+    for (const target of targets) {
+      const set = targetMap.get(target.skuId) ?? new Set<string>()
+      set.add(normalizeId(target.locationScopeId) || WHOLE_SKU_SCOPE)
+      targetMap.set(target.skuId, set)
+    }
+    const skuIds = [...targetMap.keys()]
     for (let offset = 0; offset < skuIds.length; offset += 500) {
       const chunk = skuIds.slice(offset, offset + 500)
       const itemQuery = manager.getRepository(InvStocktakeItem)
         .createQueryBuilder('item')
-        .select(['item.id', 'item.stocktakeId', 'item.skuId'])
+        .select(['item.id', 'item.stocktakeId', 'item.skuId', 'item.locationScopeId'])
         .where('item.skuId IN (:...chunk)', { chunk })
       if (excludeStocktakeId) itemQuery.andWhere('item.stocktakeId <> :excludeStocktakeId', { excludeStocktakeId })
       if (lockable) itemQuery.setLock('pessimistic_read')
-      const items = await itemQuery.getMany()
+      const items = (await itemQuery.getMany()).filter((item) => {
+        const wanted = targetMap.get(normalizeId(item.skuId))
+        if (!wanted) return false
+        const existing = normalizeId(item.locationScopeId) || WHOLE_SKU_SCOPE
+        return existing === WHOLE_SKU_SCOPE || wanted.has(WHOLE_SKU_SCOPE) || wanted.has(existing)
+      })
       if (!items.length) continue
       const stocktakeIds = [...new Set(items.map((item) => String(item.stocktakeId)))]
       const stocktakes = await manager.getRepository(InvStocktake).find({
@@ -684,6 +813,7 @@ export class StocktakeService {
     row: InvStocktake,
     actor: AuthUserContext,
     stats?: { itemCount: number; countedCount: number; diffCount: number },
+    scopeCodes: Map<string, string> = new Map(),
   ): StocktakeView {
     const showBook = canViewBook(actor, row)
     return {
@@ -704,6 +834,7 @@ export class StocktakeService {
       countedCount: stats?.countedCount ?? 0,
       diffCount: showBook ? stats?.diffCount ?? 0 : null,
       canViewBook: showBook,
+      scopeLocations: this.readScopeLocationIdsOf(row).map((locationId) => ({ id: locationId, locationCode: scopeCodes.get(locationId) ?? locationId })),
     }
   }
 
@@ -720,7 +851,11 @@ export class StocktakeService {
       productId: String(row.productId),
       productName: row.product?.productName ?? '',
       thumbnail: row.sku?.thumbnail || row.product?.thumbnail || null,
-      locationCode: row.sku?.locationId ? locationCodes.get(String(row.sku.locationId)) ?? null : null,
+      locationCode: (() => {
+        const locationId = isWholeSkuScope(row.locationScopeId) ? row.sku?.locationId : row.locationScopeId
+        return locationId ? locationCodes.get(String(locationId)) ?? null : null
+      })(),
+      locationScopeId: isWholeSkuScope(row.locationScopeId) ? null : normalizeId(row.locationScopeId),
       inScope: isEnabled(row.inScope),
       countedQty: row.countedQty ?? null,
       countedByName: row.countedByName ?? null,
