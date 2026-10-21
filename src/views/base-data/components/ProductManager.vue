@@ -2210,7 +2210,7 @@ onActivated(() => {
     >
       <template #default="{ isPhone }">
         <div v-if="isSkuDialog" class="product-sku-config-card flex flex-col gap-5">
-          <div class="sku-card sku-form rounded-xl border border-slate-200 bg-slate-50/50 p-4 dark:border-white/10 dark:bg-slate-900/20" style="min-inline-size: 0; max-width: 100%">
+          <div class="sku-card sku-form rounded-xl border border-slate-200 bg-slate-50/50 p-4 dark:border-white/10 dark:bg-black/20" style="min-inline-size: 0; max-width: 100%">
             <h3 class="mb-4 text-sm font-semibold text-slate-800 dark:text-slate-200">规格维度配置</h3>
             <p v-if="form.codeScheme === 'yz'" class="mb-2 text-xs leading-5 text-slate-400">
               YZ 编码规则：颜色/款式最多 9 个（编码位 1-9），尺码最多 5 个（编码位 A-E）

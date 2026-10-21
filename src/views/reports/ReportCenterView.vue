@@ -491,13 +491,13 @@ onActivated(() => {
       </div>
 
       <div v-if="showSalesSummary" class="report-sales-summary grid gap-3 sm:grid-cols-2" aria-live="polite">
-        <div class="report-sales-summary__item rounded-xl bg-slate-50 px-4 py-3 dark:bg-slate-900/40">
+        <div class="report-sales-summary__item rounded-xl bg-slate-50 px-4 py-3 dark:bg-black/40">
           <div class="text-xs text-slate-500 dark:text-slate-400">总数量（全部命中明细）</div>
           <div class="mt-1 text-lg font-semibold text-slate-800 dark:text-slate-100">
             {{ salesSummary ? salesSummary.totalQty : '-' }}
           </div>
         </div>
-        <div class="report-sales-summary__item rounded-xl bg-slate-50 px-4 py-3 dark:bg-slate-900/40">
+        <div class="report-sales-summary__item rounded-xl bg-slate-50 px-4 py-3 dark:bg-black/40">
           <div class="text-xs text-slate-500 dark:text-slate-400">总金额（全部命中明细）</div>
           <div class="mt-1 text-lg font-semibold text-brand">
             {{ salesSummary ? `¥${salesSummary.totalAmount}` : '-' }}
@@ -609,7 +609,7 @@ onActivated(() => {
       destroy-on-close
     >
       <div class="space-y-4">
-        <div class="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-300">
+        <div class="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600 dark:border-white/10 dark:bg-black/60 dark:text-slate-300">
           <div class="flex items-center gap-2 font-semibold text-slate-800 dark:text-slate-100">
             <el-icon><View /></el-icon>
             <span>{{ currentReportOption.label }}</span>
@@ -1031,8 +1031,8 @@ onActivated(() => {
 
 .dark .report-mobile-card__metric,
 .dark .report-preview-card {
-  border-color: rgba(148, 163, 184, 0.22);
-  background: rgba(15, 23, 42, 0.58);
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(10, 10, 11, 0.58);
 }
 
 .dark .report-mobile-card__metric strong {
@@ -1045,6 +1045,6 @@ onActivated(() => {
 }
 
 .dark .report-preview-card__head {
-  border-bottom-color: rgba(148, 163, 184, 0.22);
+  border-bottom-color: rgba(255, 255, 255, 0.1);
 }
 </style>

@@ -598,13 +598,13 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: TestChannel
 }
 
 .dark .notification-rule-card {
-  border-color: rgba(148, 163, 184, 0.18);
-  background: rgba(15, 23, 42, 0.58);
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(10, 10, 11, 0.58);
 }
 
 .dark .notification-rule-card :deep(.el-card__header),
 .dark .notification-rule-card :deep(.el-card__body) {
-  background: rgba(15, 23, 42, 0.58);
+  background: rgba(10, 10, 11, 0.58);
 }
 
 .dark .notification-rule-card__title {

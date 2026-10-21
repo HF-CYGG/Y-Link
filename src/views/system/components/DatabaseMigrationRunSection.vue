@@ -110,7 +110,7 @@ const emit = defineEmits<{
         </el-table>
       </div>
 
-      <div class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-4 dark:border-white/10 dark:bg-slate-900/20">
+      <div class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-4 dark:border-white/10 dark:bg-black/20">
         <template v-if="selectedTask">
           <div class="border-b border-slate-200/80 pb-4 dark:border-white/10">
             <div class="flex flex-wrap items-start justify-between gap-3">

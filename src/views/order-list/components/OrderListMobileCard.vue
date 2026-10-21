@@ -336,7 +336,7 @@ const getSystemApplyStatusMeta = (order: Pick<OrderRecord, 'orderType' | 'isSyst
 
 .dark .mobile-order-card__primary,
 .dark .mobile-order-card__merge-child {
-  background: rgba(30, 41, 59, 0.65);
+  background: rgba(255, 255, 255, 0.05);
 }
 
 .dark .mobile-order-card__primary-value,
@@ -346,7 +346,7 @@ const getSystemApplyStatusMeta = (order: Pick<OrderRecord, 'orderType' | 'isSyst
 }
 
 .dark .mobile-order-card__actions {
-  border-top-color: rgba(148, 163, 184, 0.28);
+  border-top-color: rgba(255, 255, 255, 0.14);
 }
 
 .dark .mobile-order-card__chip.is-brand {
