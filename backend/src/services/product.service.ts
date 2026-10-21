@@ -339,6 +339,8 @@ export interface ProductLookupView {
 
 export interface ProductLabelView {
   skuId: string
+  /** 所属商品 ID，前端按它分组，商品名称不唯一不能代替。 */
+  productId: string
   skuCode: string
   barcode: string
   /** SKU 原厂条码原值，未录入时为 null（与 barcode 的“原厂优先，否则退回 SKU 编码”合并语义不同）。 */
@@ -2939,6 +2941,7 @@ export class ProductService {
       const product = productMap.get(String(sku.productId))
       return {
         skuId: id,
+        productId: String(sku.productId),
         skuCode: sku.skuCode,
         barcode: sku.barcode || sku.skuCode,
         factoryBarcode: sku.barcode || null,

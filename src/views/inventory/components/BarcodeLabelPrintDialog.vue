@@ -211,15 +211,15 @@ interface LabelGroup {
   productName: string
   items: ProductLabelRecord[]
 }
-/** 服务端按请求顺序返回（同商品规格相邻），按相邻的商品名称分组展示。 */
+/** 按商品 ID 分组（商品名称不唯一，规格也不保证相邻），组顺序取各商品首个规格出现的位置。 */
 const labelGroups = computed(() => {
-  const groups: LabelGroup[] = []
+  const groupMap = new Map<string, LabelGroup>()
   for (const label of labels.value) {
-    const last = groups[groups.length - 1]
-    if (last && last.productName === label.productName) last.items.push(label)
-    else groups.push({ key: `${groups.length}-${label.skuId}`, productName: label.productName, items: [label] })
+    const group = groupMap.get(label.productId)
+    if (group) group.items.push(label)
+    else groupMap.set(label.productId, { key: label.productId, productName: label.productName, items: [label] })
   }
-  return groups
+  return [...groupMap.values()]
 })
 const allSelected = computed(() => labels.value.length > 0 && selectedLabels.value.length === labels.value.length)
 const partiallySelected = computed(() => selectedLabels.value.length > 0 && !allSelected.value)
