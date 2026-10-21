@@ -221,7 +221,8 @@ const runNpmAudit = (title, cwd, extraArgs) => {
 /**
  * 按 lockfile 计算某个包的生产依赖闭包（安装路径集合）。
  * 根 lockfile 含 Mobile workspace，其依赖会被提升到根 node_modules，`npm audit --workspaces=false` 仍会把它们算进来；
- * 这里沿 Node 模块解析规则从根包的 dependencies / optionalDependencies 出发，只保留 Web 真正会安装进生产的包。
+ * 这里沿 Node 模块解析规则从根包的 dependencies / optionalDependencies 出发（并计入非可选 peer），
+ * 只保留 Web 真正会安装进生产的包。
  */
 const collectProductionClosure = (lockfilePath) => {
   const packages = JSON.parse(fs.readFileSync(lockfilePath, 'utf8')).packages ?? {}
@@ -246,7 +247,15 @@ const collectProductionClosure = (lockfilePath) => {
       queue.push(entry.resolved)
       continue
     }
-    for (const name of Object.keys({ ...entry.dependencies, ...entry.optionalDependencies })) {
+    // npm 的 `--omit=dev` 仍会审计必需 peer（如 @vitejs/plugin-basic-ssl 要求的 vite），闭包必须同样计入，
+    // 只排除 peerDependenciesMeta 标记为 optional 的 peer。
+    const requiredPeers = Object.keys(entry.peerDependencies ?? {}).filter(
+      (name) => !entry.peerDependenciesMeta?.[name]?.optional,
+    )
+    for (const name of new Set([
+      ...Object.keys({ ...entry.dependencies, ...entry.optionalDependencies }),
+      ...requiredPeers,
+    ])) {
       const installPath = resolveInstallPath(current, name)
       if (installPath) queue.push(installPath)
     }
