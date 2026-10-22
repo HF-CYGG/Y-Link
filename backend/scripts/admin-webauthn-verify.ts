@@ -132,6 +132,21 @@ try {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
     })
     assert.equal(missingOrigin.status, 403, '匿名挑战缺少 Origin 必须拒绝')
+    // 旧版 WebKit 同源 POST 可能缺失 Origin 或带 null，允许以同源 Referer 兜底，但跨站信号一律拒绝
+    const refererCases: Array<[Record<string, string>, number, string]> = [
+      [{ Referer: 'http://localhost:3000/login?redirect=/dashboard' }, 200, '缺失 Origin 时同源 Referer 应放行'],
+      [{ Origin: 'null', Referer: 'http://localhost:3000/login', 'Sec-Fetch-Site': 'same-origin' }, 200, 'Origin 为 null 且同源 Referer 应放行'],
+      [{ Referer: 'https://evil.example/login' }, 403, '缺失 Origin 时跨站 Referer 必须拒绝'],
+      [{ Origin: 'null', Referer: 'http://localhost:3000/login', 'Sec-Fetch-Site': 'cross-site' }, 403, '跨站 Sec-Fetch-Site 不得借空 Origin 绕过'],
+      [{ Origin: 'https://evil.example', Referer: 'http://localhost:3000/login' }, 403, '显式 Origin 不匹配时不得回退 Referer'],
+      [{ Referer: 'not a url' }, 403, '非法 Referer 必须拒绝'],
+    ]
+    for (const [headers, status, message] of refererCases) {
+      const response = await fetch(`http://localhost:${port}/api/auth/webauthn/login/options`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '198.51.100.109', ...headers }, body: '{}',
+      })
+      assert.equal(response.status, status, message)
+    }
     const optionsResponse = await fetch(`http://localhost:${port}/api/auth/webauthn/login/options`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'http://localhost:3000' }, body: '{}',
     })
