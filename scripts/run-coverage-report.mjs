@@ -154,6 +154,9 @@ const SUITES = [
     buildArgs: (lcovPath) => [
       '--enable-source-maps',
       ...buildCoverageArgs(lcovPath, 'scripts/**'),
+      // 测试为调用 getLabelContentFit 单独打包的 helper 临时副本（无源码图），只是被测入口的依赖，不是源码；
+      // helper.ts 的真实覆盖率由“订单与条码工具”套件经 tsx 直接执行与弹窗包的源码图提供，这里排除临时副本。
+      '--test-coverage-exclude=tmp/coverage-vue-barcode/barcode-label-print-helpers.mjs',
       'scripts/coverage-vue-barcode.test.mjs',
       'scripts/html2pdf-module-id-shortener.test.mjs',
       'scripts/html2pdf-vite-plugin.test.mjs',

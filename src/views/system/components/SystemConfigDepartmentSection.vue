@@ -65,7 +65,7 @@ const treeProps = {
     />
 
     <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
-      <div class="department-tree-shell rounded-2xl border border-slate-200/80 bg-slate-50/60 p-4 dark:border-white/10 dark:bg-slate-900/20">
+      <div class="department-tree-shell rounded-2xl border border-slate-200/80 bg-slate-50/60 p-4 dark:border-white/10 dark:bg-black/20">
         <el-empty
           v-if="serialForm.clientDepartmentTree.length === 0"
           description="暂无部门节点"
@@ -131,7 +131,7 @@ const treeProps = {
         </el-tree>
       </div>
 
-      <aside class="department-selection-panel rounded-2xl border border-slate-200/80 bg-slate-50/70 p-4 text-sm dark:border-white/10 dark:bg-slate-900/30">
+      <aside class="department-selection-panel rounded-2xl border border-slate-200/80 bg-slate-50/70 p-4 text-sm dark:border-white/10 dark:bg-black/30">
         <div class="mb-3">
           <div class="font-medium text-slate-700 dark:text-slate-200">当前选择</div>
           <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
@@ -302,7 +302,7 @@ const treeProps = {
 }
 
 .dark .department-tree {
-  --el-tree-node-hover-bg-color: rgba(15, 23, 42, 0.78);
+  --el-tree-node-hover-bg-color: rgba(255, 255, 255, 0.06);
 }
 
 .dark .department-tree-node__label {
@@ -318,7 +318,7 @@ const treeProps = {
 }
 
 .dark .department-selected-card {
-  background: rgba(15, 23, 42, 0.68);
+  background: rgba(10, 10, 11, 0.68);
   box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.18);
 }
 
@@ -327,8 +327,8 @@ const treeProps = {
 }
 
 .dark .department-selected-empty {
-  border-color: rgba(148, 163, 184, 0.3);
-  background: rgba(15, 23, 42, 0.48);
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(10, 10, 11, 0.48);
 }
 
 @media (max-width: 640px) {

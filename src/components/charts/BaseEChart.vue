@@ -39,7 +39,7 @@ const chartStyle = computed(() => ({
     <VChart :option="props.option" :autoresize="props.autoresize" class="h-full w-full" />
     <div
       v-if="props.loading"
-      class="absolute inset-0 flex items-center justify-center rounded-xl bg-white/70 backdrop-blur-sm dark:bg-slate-950/40"
+      class="absolute inset-0 flex items-center justify-center rounded-xl bg-white/70 backdrop-blur-sm dark:bg-black/40"
     >
       <el-skeleton animated :rows="4" class="w-full px-6" />
     </div>

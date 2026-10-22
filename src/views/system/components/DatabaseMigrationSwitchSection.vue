@@ -55,7 +55,7 @@ const emit = defineEmits<{
 
     <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(320px,0.95fr)]">
       <div class="space-y-4">
-        <div class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-4 dark:border-white/10 dark:bg-slate-900/20">
+        <div class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-4 dark:border-white/10 dark:bg-black/20">
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div>
               <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100">当前运行状态</h3>
@@ -132,13 +132,13 @@ const emit = defineEmits<{
       </div>
 
       <div class="space-y-4">
-        <div class="rounded-2xl border border-slate-200/80 bg-white p-4 dark:border-white/10 dark:bg-slate-950/30">
+        <div class="rounded-2xl border border-slate-200/80 bg-white p-4 dark:border-white/10 dark:bg-black/30">
           <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100">最终操作面板</h3>
           <p class="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">
             优先确认已选任务是否成功、迁后校验是否正常，再执行切换。只有迁移只读验收窗口内可以安全恢复 SQLite；MySQL 开放业务写入后必须从 MySQL 备份恢复或执行受控反向迁移。
           </p>
 
-          <div class="mt-4 rounded-2xl bg-slate-50 px-4 py-3 dark:bg-slate-900/40">
+          <div class="mt-4 rounded-2xl bg-slate-50 px-4 py-3 dark:bg-black/40">
             <p class="text-xs text-slate-400">当前用于切换的任务</p>
             <p class="mt-1 break-all text-sm font-medium text-slate-700 dark:text-slate-200">
               {{ selectedSucceededTask?.id || '请先在第 3 步选中一条成功任务' }}

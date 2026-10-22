@@ -107,15 +107,15 @@ watch(
       <div v-loading="loading" class="space-y-4">
         <template v-if="data">
           <div class="grid gap-3 sm:grid-cols-3">
-            <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-slate-900/40">
+            <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-black/40">
               <div class="text-xs text-slate-500 dark:text-slate-400">当前库存合计</div>
               <div class="mt-1 text-sm font-semibold text-slate-700 dark:text-slate-200">{{ data.summary.currentStock }}</div>
             </div>
-            <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-slate-900/40">
+            <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-black/40">
               <div class="text-xs text-slate-500 dark:text-slate-400">预订库存合计</div>
               <div class="mt-1 text-sm font-semibold text-slate-700 dark:text-slate-200">{{ data.summary.preOrderedStock }}</div>
             </div>
-            <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-slate-900/40">
+            <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-black/40">
               <div class="text-xs text-slate-500 dark:text-slate-400">可用库存合计</div>
               <div class="mt-1 text-sm font-semibold text-brand">{{ data.summary.availableStock }}</div>
             </div>
@@ -136,7 +136,7 @@ watch(
               <div
                 v-for="sku in data.skus"
                 :key="sku.skuId"
-                class="inventory-sku-card rounded-xl border border-slate-100 bg-white p-3 dark:border-slate-700 dark:bg-slate-800"
+                class="inventory-sku-card rounded-xl border border-slate-100 bg-white p-3 dark:border-white/10 dark:bg-[#141415]"
                 :class="sku.countedInSummary ? '' : 'is-excluded'"
               >
                 <div class="flex items-start justify-between gap-2">
@@ -149,15 +149,15 @@ watch(
                   </el-tag>
                 </div>
                 <div class="mt-3 grid grid-cols-3 gap-2 text-center">
-                  <div class="rounded-lg bg-slate-50 px-1 py-1.5 dark:bg-slate-900/40">
+                  <div class="rounded-lg bg-slate-50 px-1 py-1.5 dark:bg-black/40">
                     <div class="text-[11px] text-slate-500 dark:text-slate-400">当前</div>
                     <div class="text-sm font-semibold text-slate-700 dark:text-slate-200">{{ sku.currentStock }}</div>
                   </div>
-                  <div class="rounded-lg bg-slate-50 px-1 py-1.5 dark:bg-slate-900/40">
+                  <div class="rounded-lg bg-slate-50 px-1 py-1.5 dark:bg-black/40">
                     <div class="text-[11px] text-slate-500 dark:text-slate-400">预订</div>
                     <div class="text-sm font-semibold text-slate-700 dark:text-slate-200">{{ sku.preOrderedStock }}</div>
                   </div>
-                  <div class="rounded-lg bg-slate-50 px-1 py-1.5 dark:bg-slate-900/40">
+                  <div class="rounded-lg bg-slate-50 px-1 py-1.5 dark:bg-black/40">
                     <div class="text-[11px] text-slate-500 dark:text-slate-400">可用</div>
                     <div class="text-sm font-semibold text-slate-700 dark:text-slate-200">{{ sku.availableStock }}</div>
                   </div>
@@ -178,7 +178,7 @@ watch(
               </el-table-column>
             </el-table>
           </template>
-          <div v-else class="flex min-h-[160px] items-center justify-center rounded-xl bg-slate-50 dark:bg-slate-900/40">
+          <div v-else class="flex min-h-[160px] items-center justify-center rounded-xl bg-slate-50 dark:bg-black/40">
             <el-empty :image-size="72" description="该商品暂无规格记录" />
           </div>
         </template>

@@ -7,7 +7,8 @@
 # - 运行阶段仅保留生产依赖、编译产物与 SQL 模板，兼顾体积与 sqlite3 兼容性。
 # ------------------------------
 # SQLite 镜像固定 Node 22 LTS，避免未验收的新 ABI 让 optional sqlite3 在安装期被静默跳过。
-ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:22-bookworm-slim
+# 固定到 Node 22 最新安全补丁版本；Node 发布新安全版本后 `npm run verify:security-updates` 会报红，需同步升级全部 Node 版本固定点。
+ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:22.23.4-bookworm-slim
 
 # ------------------------------
 # 编译阶段：只产出 dist，不产出 node_modules。

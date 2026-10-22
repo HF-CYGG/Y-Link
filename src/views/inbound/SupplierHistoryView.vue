@@ -163,7 +163,7 @@ const summaryCards = computed(() => {
       label: '已取消',
       value: summary.value.cancelled,
       hint: '不再处理',
-      accentClass: 'bg-slate-100 text-slate-600 dark:bg-slate-700/60 dark:text-slate-300',
+      accentClass: 'bg-slate-100 text-slate-600 dark:bg-white/10 dark:text-slate-300',
     },
   ]
 })
@@ -1054,7 +1054,7 @@ onBeforeUnmount(() => {
         <div
           v-for="(card, index) in summaryCards"
           :key="card.label"
-          class="history-summary-card rounded-[26px] border border-slate-200/70 bg-white/95 p-5 shadow-[0_14px_34px_-34px_rgba(15,23,42,0.18)] dark:border-slate-700/80 dark:bg-slate-800/95"
+          class="history-summary-card rounded-[26px] border border-slate-200/70 bg-white/95 p-5 shadow-[0_14px_34px_-34px_rgba(15,23,42,0.18)] dark:border-white/10 dark:bg-[#141415]/95"
           :style="{ '--history-card-delay': `${index * 48}ms` }"
         >
           <div :class="['history-summary-card__badge', card.accentClass]">
@@ -1066,7 +1066,7 @@ onBeforeUnmount(() => {
         </div>
       </transition-group>
 
-      <div class="history-filter-card mb-4 rounded-[28px] border border-slate-200/70 bg-white/95 p-4 shadow-[0_14px_34px_-34px_rgba(15,23,42,0.16)] dark:border-slate-700/80 dark:bg-slate-800/95 sm:p-5">
+      <div class="history-filter-card mb-4 rounded-[28px] border border-slate-200/70 bg-white/95 p-4 shadow-[0_14px_34px_-34px_rgba(15,23,42,0.16)] dark:border-white/10 dark:bg-[#141415]/95 sm:p-5">
         <div class="history-filter-card__toolbar flex flex-1 flex-col gap-3 xl:flex-row xl:items-center">
           <el-input
             v-model="keyword"
@@ -1099,8 +1099,8 @@ onBeforeUnmount(() => {
         </p>
       </div>
 
-      <div class="history-table-shell overflow-hidden rounded-[28px] border border-slate-200/70 bg-white/95 shadow-[0_18px_42px_-40px_rgba(15,23,42,0.18)] dark:border-slate-700/80 dark:bg-slate-800/95">
-        <div class="history-table-shell__header flex flex-col gap-2 border-b border-slate-200/70 px-5 py-4 dark:border-slate-700/80 sm:px-6">
+      <div class="history-table-shell overflow-hidden rounded-[28px] border border-slate-200/70 bg-white/95 shadow-[0_18px_42px_-40px_rgba(15,23,42,0.18)] dark:border-white/10 dark:bg-[#141415]/95">
+        <div class="history-table-shell__header flex flex-col gap-2 border-b border-slate-200/70 px-5 py-4 dark:border-white/10 sm:px-6">
           <h3 class="text-base font-semibold text-slate-900 dark:text-slate-100">记录列表</h3>
           <p class="text-sm leading-6 text-slate-500 dark:text-slate-400">{{ tableSummaryText }}</p>
         </div>
@@ -1241,7 +1241,7 @@ onBeforeUnmount(() => {
         <div class="supplier-history-detail-panel min-h-[200px]">
           <transition name="history-detail-fade" appear>
             <div v-if="currentDetail" class="space-y-4">
-              <div class="history-detail-hero rounded-[26px] border border-slate-200/70 bg-white/95 p-5 shadow-[0_14px_32px_-32px_rgba(15,23,42,0.16)] dark:border-slate-700/80 dark:bg-slate-800/95">
+              <div class="history-detail-hero rounded-[26px] border border-slate-200/70 bg-white/95 p-5 shadow-[0_14px_32px_-32px_rgba(15,23,42,0.16)] dark:border-white/10 dark:bg-[#141415]/95">
                 <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                   <div>
                     <p class="text-xs uppercase tracking-[0.2em] text-slate-400 dark:text-slate-500">送货单详情</p>
@@ -1308,27 +1308,27 @@ onBeforeUnmount(() => {
                 </div>
 
                 <div class="mt-4 grid gap-3 sm:grid-cols-4">
-                  <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-slate-700/70 dark:bg-slate-900/40">
+                  <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-white/10 dark:bg-black/40">
                     <p class="text-xs text-slate-500 dark:text-slate-400">总件数</p>
                     <p class="mt-2 text-lg font-semibold text-brand dark:text-teal-400">{{ Number(currentDetail.order.totalQty) }} 件</p>
                   </div>
-                  <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-slate-700/70 dark:bg-slate-900/40">
+                  <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-white/10 dark:bg-black/40">
                     <p class="text-xs text-slate-500 dark:text-slate-400">预计送达时间</p>
                     <p class="mt-2 text-lg font-semibold text-slate-800 dark:text-slate-100">
                       {{ currentDetail.order.expectedArrivalAt ? dayjs(currentDetail.order.expectedArrivalAt).format('MM-DD HH:mm') : '未填写' }}
                     </p>
                   </div>
-                  <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-slate-700/70 dark:bg-slate-900/40">
+                  <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-white/10 dark:bg-black/40">
                     <p class="text-xs text-slate-500 dark:text-slate-400">入库时间</p>
                     <p class="mt-2 text-lg font-semibold text-slate-800 dark:text-slate-100">
                       {{ currentDetail.order.verifiedAt ? dayjs(currentDetail.order.verifiedAt).format('MM-DD HH:mm') : '-' }}
                     </p>
                   </div>
-                  <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-slate-700/70 dark:bg-slate-900/40">
+                  <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-white/10 dark:bg-black/40">
                     <p class="text-xs text-slate-500 dark:text-slate-400">供货方</p>
                     <p class="mt-2 text-lg font-semibold text-slate-800 dark:text-slate-100">{{ currentDetail.order.supplierName || '-' }}</p>
                   </div>
-                  <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-slate-700/70 dark:bg-slate-900/40">
+                  <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-white/10 dark:bg-black/40">
                     <p class="text-xs text-slate-500 dark:text-slate-400">最近更新</p>
                     <p class="mt-2 text-lg font-semibold text-slate-800 dark:text-slate-100">
                       {{ dayjs(currentDetail.order.updatedAt).format('MM-DD HH:mm') }}
@@ -1338,10 +1338,10 @@ onBeforeUnmount(() => {
               </div>
 
               <div
-                class="rounded-[26px] border border-slate-200/70 bg-white/95 p-5 shadow-[0_14px_32px_-32px_rgba(15,23,42,0.14)] dark:border-slate-700/80 dark:bg-slate-800/95"
+                class="rounded-[26px] border border-slate-200/70 bg-white/95 p-5 shadow-[0_14px_32px_-32px_rgba(15,23,42,0.14)] dark:border-white/10 dark:bg-[#141415]/95"
               >
                 <div class="grid gap-3 sm:grid-cols-2">
-                  <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-slate-700/70 dark:bg-slate-900/40">
+                  <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-white/10 dark:bg-black/40">
                     <p class="text-xs text-slate-500 dark:text-slate-400">备注</p>
                     <p class="mt-2 text-sm leading-6 text-slate-700 dark:text-slate-300">
                       {{ currentDetail.order.remark || '未填写备注' }}
@@ -1365,13 +1365,13 @@ onBeforeUnmount(() => {
                 </div>
               </div>
 
-              <div class="rounded-[26px] border border-slate-200/70 bg-white/95 p-5 shadow-[0_14px_32px_-32px_rgba(15,23,42,0.14)] dark:border-slate-700/80 dark:bg-slate-800/95">
+              <div class="rounded-[26px] border border-slate-200/70 bg-white/95 p-5 shadow-[0_14px_32px_-32px_rgba(15,23,42,0.14)] dark:border-white/10 dark:bg-[#141415]/95">
                 <h4 class="text-sm font-semibold text-slate-900 dark:text-slate-100">商品明细</h4>
                 <div class="mt-4 space-y-3">
                   <div
                     v-for="(item, index) in currentDetail.items"
                     :key="item.id"
-                    class="history-detail-item flex items-center justify-between gap-3 rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-slate-700/70 dark:bg-slate-900/40"
+                    class="history-detail-item flex items-center justify-between gap-3 rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-white/10 dark:bg-black/40"
                   >
                     <div class="flex min-w-0 items-center gap-3">
                       <span class="history-detail-item__index">{{ index + 1 }}</span>
@@ -1386,7 +1386,7 @@ onBeforeUnmount(() => {
               <transition name="history-detail-fade">
                 <div v-if="shouldShowPendingQrCode && qrCodeDataUrl" class="rounded-[26px] border border-amber-200/70 bg-amber-50/65 p-5 text-center shadow-[0_12px_28px_-28px_rgba(245,158,11,0.18)] dark:border-amber-900/60 dark:bg-amber-950/20">
                   <p class="text-sm font-medium text-amber-700 dark:text-amber-300">向库管员出示此二维码完成入库</p>
-                  <img :src="qrCodeDataUrl" alt="核销二维码" class="mx-auto mt-4 h-40 w-40 rounded-2xl border border-white/80 bg-white p-2 shadow-sm dark:border-slate-700/70 dark:bg-slate-900/70" />
+                  <img :src="qrCodeDataUrl" alt="核销二维码" class="mx-auto mt-4 h-40 w-40 rounded-2xl border border-white/80 bg-white p-2 shadow-sm dark:border-white/10 dark:bg-black/70" />
                 </div>
               </transition>
 
@@ -1424,7 +1424,7 @@ onBeforeUnmount(() => {
           <p class="text-sm leading-6 text-slate-500 dark:text-slate-400">
             撤销后该送货单会保留在历史单据中，但不再允许库管继续扫码入库。
           </p>
-          <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 px-4 py-3 text-sm text-slate-600 dark:border-slate-700/70 dark:bg-slate-900/40 dark:text-slate-300">
+          <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 px-4 py-3 text-sm text-slate-600 dark:border-white/10 dark:bg-black/40 dark:text-slate-300">
             当前单据：{{ targetCancelOrder?.showNo || '-' }}
           </div>
           <el-input
@@ -1454,11 +1454,11 @@ onBeforeUnmount(() => {
         @closed="resetEditForm"
       >
         <div class="space-y-4">
-          <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 px-4 py-3 text-sm leading-6 text-slate-600 dark:border-slate-700/70 dark:bg-slate-900/40 dark:text-slate-300">
+          <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 px-4 py-3 text-sm leading-6 text-slate-600 dark:border-white/10 dark:bg-black/40 dark:text-slate-300">
             仅待入库送货单支持改单。保存后会直接覆盖当前商品明细、总件数、预计送达时间和备注，核销二维码保持不变。
           </div>
 
-          <div class="rounded-2xl border border-slate-200/70 bg-slate-50/75 p-4 dark:border-slate-700/70 dark:bg-slate-900/40">
+          <div class="rounded-2xl border border-slate-200/70 bg-slate-50/75 p-4 dark:border-white/10 dark:bg-black/40">
             <p class="mb-2 text-sm font-medium text-slate-600 dark:text-slate-400">预计送达时间</p>
             <el-date-picker
               v-model="editForm.expectedArrivalAt"
@@ -1475,7 +1475,7 @@ onBeforeUnmount(() => {
               <div
                 v-for="(item, index) in editForm.items"
                 :key="item.uid"
-                class="history-edit-item-row flex flex-col gap-3 rounded-2xl border border-slate-200/70 bg-slate-50/75 p-4 dark:border-slate-700/70 dark:bg-slate-900/40 lg:flex-row lg:items-start"
+                class="history-edit-item-row flex flex-col gap-3 rounded-2xl border border-slate-200/70 bg-slate-50/75 p-4 dark:border-white/10 dark:bg-black/40 lg:flex-row lg:items-start"
               >
                 <div class="history-detail-item__index flex-shrink-0">{{ index + 1 }}</div>
                 <div class="flex-1">
@@ -1539,7 +1539,7 @@ onBeforeUnmount(() => {
             <el-button plain @click="handleAddEditItem">添加商品</el-button>
           </div>
 
-          <div class="rounded-2xl border border-slate-200/70 bg-slate-50/70 p-4 dark:border-slate-700/70 dark:bg-slate-900/40">
+          <div class="rounded-2xl border border-slate-200/70 bg-slate-50/70 p-4 dark:border-white/10 dark:bg-black/40">
             <p class="mb-2 text-sm font-medium text-slate-600 dark:text-slate-400">备注信息</p>
             <el-input
               v-model="editForm.remark"
@@ -1823,11 +1823,11 @@ onBeforeUnmount(() => {
 
 /* 暗色：表格头部与详情头部渐变、详情序号底色。 */
 .dark .history-table-shell__header {
-  background: linear-gradient(180deg, rgba(30, 41, 59, 0.5), rgba(20, 20, 21, 0.9));
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(20, 20, 21, 0.9));
 }
 
 .dark .history-detail-hero {
-  background: linear-gradient(180deg, rgba(20, 20, 21, 0.98), rgba(30, 41, 59, 0.5));
+  background: linear-gradient(180deg, rgba(20, 20, 21, 0.98), rgba(255, 255, 255, 0.03));
 }
 
 .dark .history-detail-item__index {

@@ -7,7 +7,8 @@
  * - 编辑弹窗在主商品字段之外维护 SKU 行，提交时把颜色、款式、售价、库存和启停状态转换为后端规格数据；
  * - 未配置规格时继续使用默认规格，由后端同步主商品价格与库存，兼容历史单规格商品；
  * - 表格、移动卡片和筛选条件仍复用既有数据集合，避免规格能力影响原有基础资料工作台；
- * - 商品可归属一个分类；单规格商品在编辑弹窗直接维护条码、成本价与库位（通过 defaultSku 提交），多规格商品在规格配置里逐行维护；
+ * - 商品可归属一个分类；单规格商品在编辑弹窗直接维护条码、成本价与主库位（通过 defaultSku 提交），多规格商品在规格配置里逐行维护；
+ *   同一规格可分放多个库位，这里只维护主库位，其他库位的件数由库存查询 / 库位管理的拨转维护；
  * - 新增商品必须选择文创系列（seriesCode 非空的标签），选中后走 YZ 编码，productCode 由后端生成、前端禁用并清空该输入；
  *   编辑已有 YZ 编码商品时产品编码只读，文创系列仅管理员可改选——改选不直接写入表单，而是打开「更换文创系列」二次确认弹窗
  *   （ProductSeriesSwitchDialog.vue）预检并重算编码；编辑历史（legacy）商品保持原有自由编辑行为，并提供「升级到 YZ 编码」入口（ProductYzUpgradeDialog.vue）；
@@ -2210,7 +2211,7 @@ onActivated(() => {
     >
       <template #default="{ isPhone }">
         <div v-if="isSkuDialog" class="product-sku-config-card flex flex-col gap-5">
-          <div class="sku-card sku-form rounded-xl border border-slate-200 bg-slate-50/50 p-4 dark:border-white/10 dark:bg-slate-900/20" style="min-inline-size: 0; max-width: 100%">
+          <div class="sku-card sku-form rounded-xl border border-slate-200 bg-slate-50/50 p-4 dark:border-white/10 dark:bg-black/20" style="min-inline-size: 0; max-width: 100%">
             <h3 class="mb-4 text-sm font-semibold text-slate-800 dark:text-slate-200">规格维度配置</h3>
             <p v-if="form.codeScheme === 'yz'" class="mb-2 text-xs leading-5 text-slate-400">
               YZ 编码规则：颜色/款式最多 9 个（编码位 1-9），尺码最多 5 个（编码位 A-E）
@@ -2382,7 +2383,7 @@ onActivated(() => {
                     <PassiveNumberInput v-model="row.costPrice" class="w-full" :controls="false" :min="0" :precision="2" placeholder="成本" />
                   </template>
                 </el-table-column>
-                <el-table-column label="库位" width="130">
+                <el-table-column label="主库位" width="130">
                   <template #default="{ row }">
                     <el-select
                       v-model="row.locationId"
@@ -2558,7 +2559,7 @@ onActivated(() => {
             <el-form-item label="成本价">
               <PassiveNumberInput v-model="form.defaultCostPrice" :min="0" :precision="2" class="w-full" placeholder="可选" />
             </el-form-item>
-            <el-form-item label="默认库位">
+            <el-form-item label="主库位">
               <el-select
                 v-model="form.defaultLocationId"
                 clearable
@@ -2576,7 +2577,7 @@ onActivated(() => {
                 <el-option v-for="location in activeLocationOptions" :key="location.id" :label="location.locationCode" :value="location.id" />
               </el-select>
               <p v-if="canManageProducts" class="mt-1 text-xs leading-5 text-slate-400">
-                可直接输入新库位编码（如 A-01-01）自动创建，无需前往库存主数据页
+                可直接输入新库位编码（如 A-01-01）自动创建。同一规格可分放多个库位，入库默认落在主库位；其他库位的件数请在「库存查询」或「库位管理」中按数量拨转
               </p>
             </el-form-item>
           </template>

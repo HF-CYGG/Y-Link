@@ -36,10 +36,10 @@ const SECTION_META: Array<{ kind: OrderIdentifierKind; title: string; descriptio
       </div>
 
       <div class="mt-4 space-y-4">
-        <div v-for="orderType in ['department', 'walkin'] as const" :key="orderType" class="rounded-xl bg-slate-50 p-3 dark:bg-slate-800/60">
+        <div v-for="orderType in ['department', 'walkin'] as const" :key="orderType" class="rounded-xl bg-slate-50 p-3 dark:bg-white/5">
           <div class="flex items-center justify-between gap-2">
             <span class="text-sm font-medium text-slate-700 dark:text-slate-200">{{ ORDER_TYPE_LABELS[orderType] }}</span>
-            <code class="rounded bg-white px-2 py-1 text-xs text-slate-600 dark:bg-slate-900 dark:text-slate-300">
+            <code class="rounded bg-white px-2 py-1 text-xs text-slate-600 dark:bg-black/30 dark:text-slate-300">
               {{ config?.[section.kind][orderType].prefix || '-' }}
             </code>
           </div>

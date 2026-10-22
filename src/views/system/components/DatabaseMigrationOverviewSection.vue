@@ -40,7 +40,7 @@ const emit = defineEmits<{
     </div>
 
     <div class="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(320px,0.9fr)]">
-      <div class="rounded-3xl border border-slate-200/80 bg-slate-50/80 p-5 dark:border-white/10 dark:bg-slate-900/20">
+      <div class="rounded-3xl border border-slate-200/80 bg-slate-50/80 p-5 dark:border-white/10 dark:bg-black/20">
         <p class="text-sm text-slate-500 dark:text-slate-400">当前实际生效数据库</p>
         <div class="mt-3 flex flex-wrap items-center gap-2">
           <p class="text-2xl font-semibold text-slate-900 dark:text-slate-100">
@@ -54,13 +54,13 @@ const emit = defineEmits<{
           {{ effectiveDatabaseSummary?.description || '正在读取当前数据库状态...' }}
         </p>
         <div class="mt-4 grid gap-3 sm:grid-cols-2">
-          <div class="rounded-2xl bg-white px-4 py-3 dark:bg-slate-950/40">
+          <div class="rounded-2xl bg-white px-4 py-3 dark:bg-black/40">
             <p class="text-xs text-slate-400">当前连接摘要</p>
             <p class="mt-1 break-all text-sm font-medium text-slate-700 dark:text-slate-200">
               {{ effectiveDatabaseSummary?.summary || '-' }}
             </p>
           </div>
-          <div class="rounded-2xl bg-white px-4 py-3 dark:bg-slate-950/40">
+          <div class="rounded-2xl bg-white px-4 py-3 dark:bg-black/40">
             <p class="text-xs text-slate-400">配置来源</p>
             <p class="mt-1 text-sm font-medium text-slate-700 dark:text-slate-200">
               {{ effectiveDatabaseSummary?.sourceLabel || '-' }}
@@ -69,18 +69,18 @@ const emit = defineEmits<{
         </div>
       </div>
 
-      <div class="rounded-3xl border border-slate-200/80 bg-white p-5 dark:border-white/10 dark:bg-slate-950/30">
+      <div class="rounded-3xl border border-slate-200/80 bg-white p-5 dark:border-white/10 dark:bg-black/30">
         <p class="text-sm font-semibold text-slate-700 dark:text-slate-200">系统推荐动作</p>
         <div class="mt-3 space-y-3 text-sm leading-6 text-slate-600 dark:text-slate-300">
-          <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-slate-900/40">
+          <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-black/40">
             <p class="text-xs text-slate-400">当前情况</p>
             <p class="mt-1 font-medium text-slate-700 dark:text-slate-200">{{ beginnerGuide?.headline || '-' }}</p>
           </div>
-          <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-slate-900/40">
+          <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-black/40">
             <p class="text-xs text-slate-400">建议动作</p>
             <p class="mt-1">{{ beginnerGuide?.recommendedAction || '-' }}</p>
           </div>
-          <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-slate-900/40">
+          <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-black/40">
             <p class="text-xs text-slate-400">下一步提醒</p>
             <p class="mt-1">{{ beginnerGuide?.nextStep || '准备好目标 MySQL 信息后，再进入数据库迁移助手开始预检。' }}</p>
           </div>
@@ -92,7 +92,7 @@ const emit = defineEmits<{
       </div>
     </div>
 
-    <div class="rounded-3xl border border-dashed border-slate-300/80 bg-slate-50/70 p-5 dark:border-white/10 dark:bg-slate-900/20">
+    <div class="rounded-3xl border border-dashed border-slate-300/80 bg-slate-50/70 p-5 dark:border-white/10 dark:bg-black/20">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p class="text-sm font-semibold text-slate-800 dark:text-slate-100">第一步入口</p>
