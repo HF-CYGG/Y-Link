@@ -136,6 +136,8 @@ try {
     const refererCases: Array<[Record<string, string>, number, string]> = [
       [{ Referer: 'http://localhost:3000/login?redirect=/dashboard' }, 200, '缺失 Origin 时同源 Referer 应放行'],
       [{ Origin: 'null', Referer: 'http://localhost:3000/login', 'Sec-Fetch-Site': 'same-origin' }, 200, 'Origin 为 null 且同源 Referer 应放行'],
+      [{ Origin: 'null', Referer: 'http://localhost:3000/login' }, 200, '无 Sec-Fetch-Site 的 Origin:null 同源请求应通过全局门禁并放行'],
+      [{ Origin: 'null', Referer: 'https://evil.example/login' }, 403, '无 Sec-Fetch-Site 的 Origin:null 跨站 Referer 必须拒绝'],
       [{ Referer: 'https://evil.example/login' }, 403, '缺失 Origin 时跨站 Referer 必须拒绝'],
       [{ Origin: 'null', Referer: 'http://localhost:3000/login', 'Sec-Fetch-Site': 'cross-site' }, 403, '跨站 Sec-Fetch-Site 不得借空 Origin 绕过'],
       [{ Origin: 'https://evil.example', Referer: 'http://localhost:3000/login' }, 403, '显式 Origin 不匹配时不得回退 Referer'],
