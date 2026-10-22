@@ -169,6 +169,15 @@ async function main() {
       /不属于当前库位/,
     )
 
+    // 主库位为空时移出拆分库位：件数归入“未设置库位”，不能因来源与目标相同而被拒绝。
+    await transfer(shelfA.id, shelfC.id, 2)
+    await inventoryMasterDataService.changeSkuLocation(shelfC.id, skuId, { action: 'remove', expectedLocationId: shelfC.id }, actor)
+    assert.deepEqual(await distribution(), { main: null, mainQty: 6, others: { 'A-01': 2 }, total: 8 })
+    await inventoryMasterDataService.changeSkuLocation(shelfA.id, skuId, { action: 'remove', expectedLocationId: null }, actor)
+    assert.deepEqual(await distribution(), { main: null, mainQty: 8, others: {}, total: 8 })
+    await inventoryMasterDataService.changeSkuLocation(shelfC.id, skuId, { action: 'assign', expectedLocationId: null }, actor)
+    assert.deepEqual(await distribution(), { main: 'C-01', mainQty: 8, others: {}, total: 8 })
+
     // 4. 列表与查询。
     await transfer(shelfA.id, shelfC.id, 2)
     const assignedA = await inventoryMasterDataService.listLocationSkus(shelfA.id, { scope: 'assigned', keyword: '', page: 1, pageSize: 20 })

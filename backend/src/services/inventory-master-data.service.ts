@@ -332,7 +332,7 @@ export class InventoryMasterDataService {
    * 整体移入 / 移出（单条与批量共用，调用方已锁定 SKU 与库位）：
    * - assign（整体移入）：主库位全部件数搬到本库位并把本库位设为主库位；其他库位的件数保持不动；
    * - remove（移出）：本库位是主库位时清空主库位，件数变为“未设置库位”；
-   *   本库位只是拆分库位时，把这里的件数并回主库位。
+   *   本库位只是拆分库位时，把这里的件数并回主库位；主库位为空时件数归入“未设置库位”。
    * 返回是否发生变化以及前后分布，供审计记录。
    */
   private async applyWholeLocationChange(
@@ -357,8 +357,11 @@ export class InventoryMasterDataService {
       await setSkuMainLocation(manager, sku, locationId)
     } else if (mainLocationId === locationId) {
       await setSkuMainLocation(manager, sku, null)
+    } else if (hereQty > 0 && mainLocationId) {
+      await transferSkuLocationStock(manager, sku, { fromLocationId: locationId, toLocationId: mainLocationId, qty: hereQty })
     } else if (hereQty > 0) {
-      await transferSkuLocationStock(manager, sku, { fromLocationId: locationId, toLocationId: mainLocationId ?? locationId, qty: hereQty })
+      // 主库位为空时没有可拨入的库位：删除本库位行，件数由“总库存 − 其他库位之和”自动归入“未设置库位”。
+      await manager.getRepository(InvSkuLocationStock).delete({ skuId, locationId })
     } else {
       throw new BizError('商品规格不属于当前库位，请刷新后重试', 409)
     }

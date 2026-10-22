@@ -244,7 +244,9 @@ const removeFromLocation = async (row: LocationSkuRecord) => {
   try {
     const effect = row.isMainHere
       ? `本库位是该规格的主库位，移出后主库位改为“未设置”，这里的 ${row.locationQty} 件变为未设置库位`
-      : `这里的 ${row.locationQty} 件将并回主库位「${row.locationCode || '未设置'}」`
+      : row.locationId
+        ? `这里的 ${row.locationQty} 件将并回主库位「${row.locationCode}」`
+        : `该规格当前没有主库位，这里的 ${row.locationQty} 件将变为未设置库位`
     await ElMessageBox.confirm(
       `将「${row.productName} · ${row.specText}」移出「${location.locationCode}」？${effect}。此操作不会增减总库存。`,
       '确认移出规格',
