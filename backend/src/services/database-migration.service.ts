@@ -48,6 +48,8 @@ import { o2oPreorderService } from './o2o-preorder.service.js'
 import { requestRuntimeShutdown } from '../runtime/runtime-shutdown.js'
 import { appendControlAudit, writeControlFile } from '../runtime/durable-control-file.js'
 import { bindDatabaseRescueSnapshot, issueDatabaseRescueCredential, inspectRecoveryIntent, databaseRescueStatus, prepareAutomaticDatabaseRescueRollback } from '../runtime/database-rescue-control.js'
+import { normalizeStaticCheckClause } from '../utils/mysql-check-clause.js'
+import { dropMysqlRequiredTriggers, ensureMysqlRequiredTriggers } from '../config/mysql-migration-runner.js'
 
 type MigrationIssueLevel = 'info' | 'warning' | 'error'
 type MigrationTaskStatus =
@@ -76,6 +78,8 @@ export interface SQLiteToMySqlPrecheckInput {
   initializeSchema?: boolean
   clearTargetBeforeImport?: boolean
   switchAfterSuccess?: boolean
+  /** 仅一键自动迁移使用：本系统失败自动迁移遗留的目标表不阻断预检，开始执行时自动清理重建。 */
+  reclaimFailedAutomaticTarget?: boolean
 }
 
 export interface CreateSQLiteToMySqlTaskInput extends SQLiteToMySqlPrecheckInput {
@@ -418,6 +422,22 @@ function quoteSqliteStringLiteral(value: string): string {
   return `'${value.replaceAll("'", "''")}'`
 }
 
+/**
+ * 把建触发器探测失败翻译成可操作提示；只按 MySQL 错误码分类，不透出驱动原文（可能含账号、主机或 SQL）。
+ */
+function describeMysqlTriggerProbeFailure(error: unknown): string {
+  const candidate = error as { errno?: unknown; driverError?: { errno?: unknown } } | null
+  const errno = Number(candidate?.driverError?.errno ?? candidate?.errno)
+  if (errno === 1419) {
+    return '目标 MySQL 开启了二进制日志，且不允许普通账号创建触发器：请在 MySQL 启动参数加 --log-bin-trust-function-creators=1'
+      + '（Y-Link 自带的 compose.onebox.mysql.yml 已内置），或由 DBA 执行 SET PERSIST log_bin_trust_function_creators = 1 后重试'
+  }
+  if (errno === 1142 || errno === 1044) {
+    return '目标 MySQL 账号缺少 TRIGGER 权限，无法补建账号生命周期保护触发器，请授予目标库 TRIGGER 权限后重试'
+  }
+  return '目标 MySQL 无法创建触发器，自动迁移需要补建账号生命周期保护触发器，请检查账号权限与 MySQL 配置后重试'
+}
+
 function normalizeCanonicalNumber(value: string): string {
   const normalized = value.trim()
   if (!/^-?\d+(?:\.\d+)?$/.test(normalized)) {
@@ -430,150 +450,6 @@ function normalizeCanonicalNumber(value: string): string {
   const fraction = fractionPart.replace(/0+$/, '')
   const numeric = fraction ? `${integer}.${fraction}` : integer
   return negative && numeric !== '0' ? `-${numeric}` : numeric
-}
-
-/**
- * 将当前静态实体 CHECK 与 MySQL information_schema 返回值收敛到可严格比较的形式。
- * MySQL 可能补充冗余分组括号、调整关键字大小写，或给字符串增加字符集 introducer；
- * 这些格式差异会被消除。遇到需要依赖分组语义的 OR/NOT/算术表达式时返回 null，
- * 由调用方按约束不一致阻断迁移，避免误判。
- */
-function normalizeStaticCheckClause(value: unknown): string | null {
-  if (typeof value !== 'string' || !value.trim()) {
-    return null
-  }
-  const clause = value.trim().replace(/\\'/gu, "'")
-
-  const tokens: string[] = []
-  const parentheses: boolean[] = []
-  let cursor = 0
-
-  const appendToken = (token: string): void => {
-    tokens.push(token)
-  }
-
-  while (cursor < clause.length) {
-    const character = clause[cursor]
-    if (/\s/u.test(character)) {
-      cursor += 1
-      continue
-    }
-
-    if (character === '`') {
-      let identifier = ''
-      let closed = false
-      cursor += 1
-      while (cursor < clause.length) {
-        if (clause[cursor] === '`' && clause[cursor + 1] === '`') {
-          identifier += '`'
-          cursor += 2
-          continue
-        }
-        if (clause[cursor] === '`') {
-          cursor += 1
-          closed = true
-          break
-        }
-        identifier += clause[cursor]
-        cursor += 1
-      }
-      if (!closed) {
-        return null
-      }
-      appendToken(`identifier:${identifier.toLowerCase()}`)
-      continue
-    }
-
-    if (character === "'") {
-      let literal = ''
-      let closed = false
-      cursor += 1
-      while (cursor < clause.length) {
-        if (clause[cursor] === "'" && clause[cursor + 1] === "'") {
-          literal += "'"
-          cursor += 2
-          continue
-        }
-        if (clause[cursor] === "'") {
-          cursor += 1
-          closed = true
-          break
-        }
-        literal += clause[cursor]
-        cursor += 1
-      }
-      if (!closed) {
-        return null
-      }
-      appendToken(`string:${JSON.stringify(literal)}`)
-      continue
-    }
-
-    const remaining = clause.slice(cursor)
-    const numberMatch = /^(?:\d+(?:\.\d*)?|\.\d+)/u.exec(remaining)
-    if (numberMatch) {
-      appendToken(`number:${normalizeCanonicalNumber(numberMatch[0])}`)
-      cursor += numberMatch[0].length
-      continue
-    }
-
-    const wordMatch = /^[A-Za-z_][A-Za-z0-9_$]*/u.exec(remaining)
-    if (wordMatch) {
-      const word = wordMatch[0].toLowerCase()
-      cursor += wordMatch[0].length
-      let nextCursor = cursor
-      while (nextCursor < clause.length && /\s/u.test(clause[nextCursor])) {
-        nextCursor += 1
-      }
-      if (word.startsWith('_') && clause[nextCursor] === "'") {
-        continue
-      }
-      if (['or', 'not', 'between', 'is', 'in', 'like', 'xor'].includes(word)) {
-        return null
-      }
-      appendToken(word === 'and' ? 'keyword:and' : `word:${word}`)
-      continue
-    }
-
-    const operator = ['>=', '<=', '<>', '!='].find((candidate) => remaining.startsWith(candidate))
-    if (operator) {
-      appendToken(`operator:${operator === '!=' ? '<>' : operator}`)
-      cursor += operator.length
-      continue
-    }
-    if (['=', '>', '<', ','].includes(character)) {
-      appendToken(character === ',' ? 'comma' : `operator:${character}`)
-      cursor += 1
-      continue
-    }
-    if (['+', '-', '*', '/', '%', '|', '&', '^'].includes(character)) {
-      return null
-    }
-    if (character === '(') {
-      const previousToken = tokens[tokens.length - 1]
-      const isFunctionCall = typeof previousToken === 'string' && previousToken.startsWith('word:')
-      parentheses.push(isFunctionCall)
-      if (isFunctionCall) {
-        appendToken('left-parenthesis')
-      }
-      cursor += 1
-      continue
-    }
-    if (character === ')') {
-      const isFunctionCall = parentheses.pop()
-      if (isFunctionCall === undefined) {
-        return null
-      }
-      if (isFunctionCall) {
-        appendToken('right-parenthesis')
-      }
-      cursor += 1
-      continue
-    }
-    return null
-  }
-
-  return parentheses.length === 0 && tokens.length > 0 ? tokens.join('\u001f') : null
 }
 
 function normalizeCanonicalDate(value: string): string {
@@ -2209,6 +2085,7 @@ export class DatabaseMigrationService {
       'INDEX',
       'REFERENCES',
       'CREATE TEMPORARY TABLES',
+      'TRIGGER',
     ]
     const missingPrivileges = requiredPrivileges.filter((privilege) => !grantedPrivileges.has(privilege))
     if (missingPrivileges.length > 0) {
@@ -2230,6 +2107,15 @@ export class DatabaseMigrationService {
         `UPDATE ${quoteIdentifier(probeTableName)} SET value_text = 'verified' WHERE id = 1`,
       )
       await targetDataSource.query(`DELETE FROM ${quoteIdentifier(probeTableName)} WHERE id = 1`)
+      // 迁移导入后要补建追加型保护触发器；冻结写入前先实测，避免切换后才因缺触发器进入救援。
+      try {
+        await targetDataSource.query(
+          `CREATE TRIGGER ${quoteIdentifier(`${probeTableName}_t`)} BEFORE DELETE ON ${quoteIdentifier(probeTableName)}`
+          + " FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Y_LINK_TRIGGER_PROBE'",
+        )
+      } catch (error) {
+        throw new BizError(describeMysqlTriggerProbeFailure(error), 409)
+      }
     } finally {
       await targetDataSource.query(`DROP TABLE IF EXISTS ${quoteIdentifier(probeTableName)}`).catch(() => undefined)
     }
@@ -2258,9 +2144,19 @@ export class DatabaseMigrationService {
       const existingTables = await this.listExistingTableNames(targetDataSource)
       if (existingTables.length > 0) {
         if (!resume) {
-          throw new BizError(`一键自动迁移只允许独立空库，当前已存在表：${existingTables.join('、')}`, 409)
+          // 本系统失败自动迁移遗留的表可自动认领，正式开始时由 prepareOwnedAutomaticTarget 清理后重建。
+          const reclaimableTaskId = await this.resolveReclaimableFailedAutomaticTarget(
+            targetDataSource,
+            target,
+            existingTables,
+            this.resolveOrderedEntityMetadatas(AppDataSource).map((metadata) => metadata.tableName),
+          )
+          if (!reclaimableTaskId) {
+            throw new BizError(`一键自动迁移只允许独立空库，当前已存在表：${existingTables.join('、')}`, 409)
+          }
+        } else {
+          await this.assertOwnedAutomaticTargetTables(targetDataSource, resume.taskId, existingTables, resume.expectedTableNames)
         }
-        await this.assertOwnedAutomaticTargetTables(targetDataSource, resume.taskId, existingTables, resume.expectedTableNames)
       }
       await this.verifyMySqlAutomaticPermissions(targetDataSource)
     } finally {
@@ -2285,37 +2181,58 @@ export class DatabaseMigrationService {
     }
   }
 
+  private async dropOwnedTargetTables(targetDataSource: DataSource, tableNames: string[]): Promise<void> {
+    const queryRunner = targetDataSource.createQueryRunner()
+    await queryRunner.connect()
+    try {
+      await queryRunner.query('SET FOREIGN_KEY_CHECKS = 0')
+      for (const tableName of tableNames) {
+        await queryRunner.query(`DROP TABLE ${quoteIdentifier(tableName)}`)
+      }
+    } finally {
+      try {
+        await queryRunner.query('SET FOREIGN_KEY_CHECKS = 1')
+      } finally {
+        await queryRunner.release()
+      }
+    }
+  }
+
+  /**
+   * 准备本任务独占的目标库：续跑时清掉本任务已建的表；首次执行时目标库必须为空，
+   * 或只含本系统失败自动迁移任务遗留的表（自动认领清理）。返回被认领的遗留任务 ID。
+   */
   private async prepareOwnedAutomaticTarget(
     targetDataSource: DataSource,
+    target: MySqlMigrationTargetInput,
     taskId: string,
     retrying: boolean,
     expectedTableNames: string[],
-  ): Promise<void> {
+  ): Promise<string | null> {
     const ownerTableName = '_y_link_migration_owner'
     const existingTables = await this.listExistingTableNames(targetDataSource)
     if (retrying) {
       await this.assertOwnedAutomaticTargetTables(targetDataSource, taskId, existingTables, expectedTableNames)
-      const queryRunner = targetDataSource.createQueryRunner()
-      await queryRunner.connect()
-      try {
-        await queryRunner.query('SET FOREIGN_KEY_CHECKS = 0')
-        for (const tableName of existingTables) {
-          if (tableName !== ownerTableName) {
-            await queryRunner.query(`DROP TABLE ${quoteIdentifier(tableName)}`)
-          }
-        }
-      } finally {
-        try {
-          await queryRunner.query('SET FOREIGN_KEY_CHECKS = 1')
-        } finally {
-          await queryRunner.release()
-        }
-      }
-      return
+      await this.dropOwnedTargetTables(
+        targetDataSource,
+        existingTables.filter((tableName) => tableName !== ownerTableName),
+      )
+      return null
     }
 
+    let reclaimedTaskId: string | null = null
     if (existingTables.length > 0) {
-      throw new BizError(`目标库不再为空，已禁止开始自动迁移：${existingTables.join('、')}`, 409)
+      reclaimedTaskId = await this.resolveReclaimableFailedAutomaticTarget(
+        targetDataSource,
+        target,
+        existingTables,
+        expectedTableNames,
+      )
+      if (!reclaimedTaskId) {
+        throw new BizError(`目标库不再为空，已禁止开始自动迁移：${existingTables.join('、')}`, 409)
+      }
+      // 遗留表连同旧所有权标记一并删除，随后由本任务重新写入标记并重建全部结构。
+      await this.dropOwnedTargetTables(targetDataSource, existingTables)
     }
     await targetDataSource.query(`
       CREATE TABLE ${quoteIdentifier(ownerTableName)} (
@@ -2327,6 +2244,7 @@ export class DatabaseMigrationService {
       `INSERT INTO ${quoteIdentifier(ownerTableName)} (task_id, created_at) VALUES (?, ?)`,
       [taskId, new Date()],
     )
+    return reclaimedTaskId
   }
 
   private async clearAutomaticTargetOwnerMarker(
@@ -2344,6 +2262,52 @@ export class DatabaseMigrationService {
     }
     await this.assertAutomaticTargetOwnerMarker(targetDataSource, taskId)
     await targetDataSource.query(`DROP TABLE ${quoteIdentifier(ownerTableName)}`)
+  }
+
+  /**
+   * 判断目标库中的现有表是否全部是本系统某个已失败的一键自动迁移任务遗留的，可由新任务自动清理后重建：
+   * - 必须存在且仅有一行所有权标记，标记的任务 ID 能读到本机健康任务记录；
+   * - 该任务为自动模式、已终止于 failed / rolled_back，且目标主机、端口、库名与本次一致；
+   * - 除所有权标记外只允许出现当前实体表，任何外部表都按“非本系统结构”拒绝，不做清理。
+   * 满足时返回遗留任务 ID，否则返回 null，由调用方维持“只允许独立空库”的原有门禁。
+   */
+  private async resolveReclaimableFailedAutomaticTarget(
+    targetDataSource: DataSource,
+    target: MySqlMigrationTargetInput,
+    existingTables: string[],
+    expectedTableNames: string[],
+  ): Promise<string | null> {
+    const ownerTableName = '_y_link_migration_owner'
+    if (!existingTables.includes(ownerTableName)) {
+      return null
+    }
+    if (existingTables.some((tableName) => tableName !== ownerTableName && !expectedTableNames.includes(tableName))) {
+      return null
+    }
+    const ownerRows = this.toQueryRows(
+      await targetDataSource.query(`SELECT task_id AS taskId FROM ${quoteIdentifier(ownerTableName)} LIMIT 2`),
+    )
+    const previousTaskId = ownerRows.length === 1 ? this.readStringField(ownerRows[0] ?? {}, 'taskId') : undefined
+    if (!previousTaskId) {
+      return null
+    }
+    let previousTask: InternalMigrationTaskRecord
+    try {
+      const result = await this.readTaskRecordResult(previousTaskId)
+      if (result.readState !== 'healthy') {
+        return null
+      }
+      previousTask = result.task
+    } catch {
+      return null
+    }
+    const sameTarget = previousTask.target.host.trim().toLowerCase() === target.host.trim().toLowerCase()
+      && Number(previousTask.target.port) === Number(target.port)
+      && previousTask.target.database === target.database
+    if (previousTask.mode !== 'automatic' || !['failed', 'rolled_back'].includes(previousTask.status) || !sameTarget) {
+      return null
+    }
+    return previousTaskId
   }
 
   private async assertAutomaticTargetOwnerMarker(
@@ -2589,6 +2553,8 @@ export class DatabaseMigrationService {
     await queryRunner.connect()
     try {
       if (targetDataSource.options.type === 'mysql') {
+        // 追加型保护触发器会拒绝 DELETE，清表前移除，导入完成后再补建。
+        await dropMysqlRequiredTriggers(queryRunner)
         await queryRunner.query('SET FOREIGN_KEY_CHECKS = 0')
       }
       for (const metadata of reversedMetadatas) {
@@ -2714,6 +2680,7 @@ export class DatabaseMigrationService {
     expectedTableNames: string[],
     targetSchemaInfo: { databaseExists: boolean; defaultCharset: string | null },
     targetExistingAppTables: DatabaseMigrationTableStat[],
+    reclaimableTaskId: string | null = null,
   ): {
     issues: DatabaseMigrationIssue[]
     targetDatabaseExists: boolean
@@ -2765,7 +2732,13 @@ export class DatabaseMigrationService {
       })
     }
 
-    if (targetExistingAppTables.length > 0 && !input.allowTargetWithData) {
+    if (targetExistingAppTables.length > 0 && !input.allowTargetWithData && reclaimableTaskId) {
+      issues.push({
+        level: 'warning',
+        code: 'target_reclaim_failed_automatic_task',
+        message: `目标 MySQL 中的表由本系统失败的自动迁移任务 ${reclaimableTaskId} 遗留，开始自动迁移时会先清理这些表再重新建表导入。`,
+      })
+    } else if (targetExistingAppTables.length > 0 && !input.allowTargetWithData) {
       issues.push({
         level: 'error',
         code: 'target_not_empty',
@@ -2816,11 +2789,20 @@ export class DatabaseMigrationService {
       const targetVersion = this.readStringField(this.toQueryRows(versionRows)[0] ?? {}, 'version') ?? null
       const targetSchemaInfo = await this.inspectMySqlSchemaCharset(targetDataSource)
       const targetExistingAppTables = await this.collectMySqlExistingAppTableStats(targetDataSource)
+      const reclaimableTaskId = input.reclaimFailedAutomaticTarget && targetSchemaInfo.databaseExists
+        ? await this.resolveReclaimableFailedAutomaticTarget(
+          targetDataSource,
+          input.target,
+          await this.listExistingTableNames(targetDataSource),
+          expectedTableNames,
+        )
+        : null
       const targetState = this.collectTargetPrecheckIssues(
         input,
         expectedTableNames,
         targetSchemaInfo,
         targetExistingAppTables,
+        reclaimableTaskId,
       )
       const checkConstraintSupportIssue = buildCheckConstraintSupportIssue(targetVersion)
       if (checkConstraintSupportIssue) {
@@ -3173,6 +3155,7 @@ export class DatabaseMigrationService {
           initializeSchema: true,
           clearTargetBeforeImport: false,
           switchAfterSuccess: true,
+          reclaimFailedAutomaticTarget: true,
         })
         if (!latestPrecheck.canProceed) {
           throw new BizError(
@@ -3258,12 +3241,20 @@ export class DatabaseMigrationService {
             attempt === 0 ? '正在以独立 MySQL 子进程初始化目标表结构' : `正在执行第 ${attempt} 次安全续跑`,
           )
           const existingTargetTables = await this.listExistingTableNames(targetDataSource)
-          await this.prepareOwnedAutomaticTarget(
+          const reclaimedTaskId = await this.prepareOwnedAutomaticTarget(
             targetDataSource,
+            task.target,
             task.id,
             attempt > 0 && existingTargetTables.length > 0,
             orderedMetadatas.map((metadata) => metadata.tableName),
           )
+          if (reclaimedTaskId) {
+            await this.updateAutomaticTaskStage(
+              task,
+              'initializing_mysql',
+              `已清理失败任务 ${reclaimedTaskId} 遗留的目标表，正在重新初始化目标表结构`,
+            )
+          }
           await this.runMysqlSchemaWorker(task.target)
           await this.maybeInterruptAutomaticMigrationE2E(attempt)
 
@@ -3286,6 +3277,8 @@ export class DatabaseMigrationService {
           }
 
           await this.maybeTamperAutomaticMigrationE2E(targetDataSource, orderedMetadatas)
+          // synchronize 不建触发器；导入完成后补建启动自检要求的追加型保护触发器，再交给结构子进程核验。
+          await ensureMysqlRequiredTriggers(targetDataSource)
           await this.runMysqlSchemaWorker(task.target, 'verify')
           await this.updateAutomaticTaskStage(task, 'validating', '正在执行全表结构、内容哈希与自增序列强校验')
           validationResult = await this.validateAutomaticMigration(
@@ -3640,6 +3633,7 @@ export class DatabaseMigrationService {
         runningTask.updatedAt = new Date().toISOString()
         await this.writeTaskRecord(runningTask)
       }
+      await ensureMysqlRequiredTriggers(targetDataSource)
 
       await this.updateTaskStage(runningTask, '正在执行迁后关键数据校验')
       const targetTableStats = await this.collectTableStatsByMetadatas(targetDataSource, orderedMetadatas)
