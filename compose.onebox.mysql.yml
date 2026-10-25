@@ -14,6 +14,9 @@ services:
       - --collation-server=utf8mb4_0900_ai_ci
       # 应用日志仍可使用 Asia/Shanghai；数据库 CURRENT_TIMESTAMP 与 mysql2 统一按 UTC。
       - --default-time-zone=+00:00
+      # MySQL 8.4 默认开启二进制日志，普通账号创建触发器会报 1419；迁移与 044 脚本需要补建
+      # 账号生命周期追加型保护触发器（只 SIGNAL 拒绝，不读写数据，对复制安全）。
+      - --log-bin-trust-function-creators=1
     volumes:
       - y_link_onebox_mysql:/var/lib/mysql
     healthcheck:

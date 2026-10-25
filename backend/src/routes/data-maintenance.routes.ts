@@ -130,6 +130,12 @@ const sqliteToMysqlPrecheckSchema = z.object({
   allowTargetWithData: z.boolean().optional(),
 })
 
+// 预检专用：一键自动迁移入口声明 purpose=automatic，允许把本系统失败自动迁移遗留的目标表降为提示；
+// 手动迁移任务创建不接收该字段。
+const sqliteToMysqlPrecheckRequestSchema = sqliteToMysqlPrecheckSchema.extend({
+  purpose: z.enum(['automatic']).optional(),
+})
+
 const createSqliteToMysqlTaskSchema = sqliteToMysqlPrecheckSchema.extend({
   initializeSchema: z.boolean().optional(),
   clearTargetBeforeImport: z.boolean().optional(),
@@ -291,7 +297,7 @@ dataMaintenanceRouter.post(
   requirePermission('db_migration:view'),
   requireRole('admin'),
   asyncHandler(async (req, res) => {
-    const payload = sqliteToMysqlPrecheckSchema.parse(req.body)
+    const { purpose, ...payload } = sqliteToMysqlPrecheckRequestSchema.parse(req.body)
     // 预检会用管理员提供的凭据连接任意主机，需留审计以便追溯内网探测；不记录密码。
     const recordPrecheck = (resultStatus: 'success' | 'failed', detail: Record<string, unknown> = {}) => auditService.safeRecord({
       actionType: 'database_migration.precheck',
@@ -305,7 +311,9 @@ dataMaintenanceRouter.post(
     })
     let data: Awaited<ReturnType<typeof databaseMigrationService.precheckSQLiteToMySql>>
     try {
-      data = await databaseMigrationService.precheckSQLiteToMySql(payload)
+      data = await databaseMigrationService.precheckSQLiteToMySql(purpose === 'automatic'
+        ? { ...payload, allowTargetWithData: false, reclaimFailedAutomaticTarget: true }
+        : payload)
     } catch (error) {
       await recordPrecheck('failed', { statusCode: error instanceof BizError ? error.statusCode : 500 })
       throw error

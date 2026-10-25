@@ -7,7 +7,8 @@
  * - 插入完成后再次统计全部实体表，任一表仍为空即以失败退出，避免“空表也校验通过”的伪覆盖。
  * 维护说明：
  * - 新增实体无需手工维护表清单，命令直接读取 AppDataSource.entityMetadatas；
- * - 新增数据库 CHECK 约束时，应同步扩展特殊字段取值，确保夹具仍满足真实结构约束。
+ * - `列 IN (...)` 形式的 CHECK 约束会自动取第一个允许值；其它形式的新 CHECK 约束仍需同步扩展特殊字段取值，
+ *   确保夹具满足真实结构约束。
  */
 
 import crypto from 'node:crypto'
@@ -20,6 +21,12 @@ import { env } from '../config/env.js'
 type QueryRow = Record<string, unknown>
 
 const quoteIdentifier = (identifier: string) => `\`${identifier.replaceAll('`', '``')}\``
+
+/**
+ * 夹具时间取“当前时间 + 1 天”（保留毫秒）：验证码、会话、风控等后台清理任务会删除过期或超过保留期的记录，
+ * 写死历史日期会让夹具在回退复核前被清理而误报“未覆盖表”；同一次运行内取值固定，仍满足快照比对。
+ */
+const FIXTURE_TIMESTAMP = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().replace('T', ' ').slice(0, 23)
 
 function toRows(value: unknown): QueryRow[] {
   return Array.isArray(value)
@@ -74,6 +81,28 @@ function truncateText(value: string, column: ColumnMetadata): string {
   return value.slice(0, configuredLength)
 }
 
+/**
+ * 从实体 CHECK 约束中找出 `列 IN ('a', 'b', ...)` 的允许取值，夹具取第一个，
+ * 避免通用字符串违反状态、类型等枚举约束导致 SQLite 拒绝写入。
+ */
+function resolveCheckInListValue(metadata: EntityMetadata, columnName: string): string | undefined {
+  for (const check of metadata.checks) {
+    if (typeof check.expression !== 'string') {
+      continue
+    }
+    for (const match of check.expression.matchAll(/`?([A-Za-z_][A-Za-z0-9_]*)`?\s+IN\s*\(([^)]*)\)/giu)) {
+      if (match[1].toLowerCase() !== columnName) {
+        continue
+      }
+      const firstValue = /'((?:[^']|'')*)'/u.exec(match[2])
+      if (firstValue) {
+        return firstValue[1].replaceAll("''", "'")
+      }
+    }
+  }
+  return undefined
+}
+
 function buildFixtureValue(metadata: EntityMetadata, column: ColumnMetadata): unknown {
   const columnName = column.databaseName.toLowerCase()
   const columnType = resolveColumnType(column)
@@ -100,6 +129,10 @@ function buildFixtureValue(metadata: EntityMetadata, column: ColumnMetadata): un
   }
   if (column.enum?.length) {
     return column.enum[0]
+  }
+  const checkInListValue = resolveCheckInListValue(metadata, columnName)
+  if (checkInListValue !== undefined) {
+    return checkInListValue
   }
   if (columnName === 'order_uuid' || columnName.endsWith('_uuid')) {
     return crypto.randomUUID()
@@ -151,7 +184,7 @@ function buildFixtureValue(metadata: EntityMetadata, column: ColumnMetadata): un
     || columnType.includes('time')
     || columnName.endsWith('_at')
   ) {
-    return '2026-07-25 12:34:56.789'
+    return FIXTURE_TIMESTAMP
   }
   if (
     columnType.includes('int')
@@ -185,20 +218,19 @@ async function readFirstRow(queryRunner: QueryRunner, metadata: EntityMetadata):
   return rows[0]
 }
 
-async function createDistinctOutboundOrderFixture(
+/** 复制首行并覆盖唯一列，插入同表第二条夹具记录后读回（按主键倒序取最新一行）。 */
+async function insertClonedFixtureRow(
   queryRunner: QueryRunner,
   metadata: EntityMetadata,
   firstRow: QueryRow,
+  overrides: QueryRow,
 ): Promise<QueryRow> {
   const row: QueryRow = {}
   for (const column of metadata.columns) {
     if (column.isGenerated) continue
     row[column.databaseName] = firstRow[column.databaseName]
   }
-  row.order_uuid = crypto.randomUUID()
-  row.show_no = 'hyyzjd900002'
-  row.business_no = 'hyyzjd900002'
-  row.idempotency_key = 'migration-e2e-order-merge-source'
+  Object.assign(row, overrides)
 
   const columnNames = Object.keys(row)
   await queryRunner.query(
@@ -208,13 +240,42 @@ async function createDistinctOutboundOrderFixture(
     columnNames.map((columnName) => row[columnName]),
   )
   const primaryColumn = metadata.primaryColumns[0]
-  if (!primaryColumn) throw new Error('biz_outbound_order 缺少主键，无法生成第二张合并关系夹具订单')
+  if (!primaryColumn) throw new Error(`${metadata.tableName} 缺少主键，无法生成第二条夹具记录`)
   const rows = toRows(await queryRunner.query(
     `SELECT * FROM ${quoteIdentifier(metadata.tableName)}
      ORDER BY ${quoteIdentifier(primaryColumn.databaseName)} DESC LIMIT 1`,
   ))
-  if (!rows[0]) throw new Error('未能读取第二张合并关系夹具订单')
+  if (!rows[0]) throw new Error(`未能读取 ${metadata.tableName} 的第二条夹具记录`)
   return rows[0]
+}
+
+async function createDistinctOutboundOrderFixture(
+  queryRunner: QueryRunner,
+  metadata: EntityMetadata,
+  firstRow: QueryRow,
+): Promise<QueryRow> {
+  return insertClonedFixtureRow(queryRunner, metadata, firstRow, {
+    order_uuid: crypto.randomUUID(),
+    show_no: 'hyyzjd900002',
+    business_no: 'hyyzjd900002',
+    idempotency_key: 'migration-e2e-order-merge-source',
+  })
+}
+
+/**
+ * 两步验证策略只要存在一行就会让该账号密码登录进入第二步；夹具不能挂到验收管理员身上，
+ * 否则迁移后的管理员登录只拿到 MFA 票据。这里复制一个独立的夹具用户承载 MFA 记录。
+ */
+async function createDistinctMfaUserFixture(
+  queryRunner: QueryRunner,
+  metadata: EntityMetadata,
+  firstRow: QueryRow,
+): Promise<QueryRow> {
+  return insertClonedFixtureRow(queryRunner, metadata, firstRow, {
+    username: 'migration_e2e_mfa_user',
+    email: null,
+    webauthn_user_handle: null,
+  })
 }
 
 export async function seedEmptyTable(
@@ -250,9 +311,12 @@ export async function seedEmptyTable(
     const usesDistinctSourceOrder = foreignKey.columnNames.some(
       (columnName) => columnName === 'source_order_id' || columnName === 'sourceOrderId',
     )
-    const referencedRow = distinctOutboundOrderRow && usesDistinctSourceOrder
-      ? distinctOutboundOrderRow
-      : firstReferencedRow
+    const usesDistinctMfaUser = metadata.tableName === 'sys_user_mfa' && referencedTableName === 'sys_user'
+    const referencedRow = usesDistinctMfaUser && firstReferencedRow
+      ? await createDistinctMfaUserFixture(queryRunner, foreignKey.referencedEntityMetadata, firstReferencedRow)
+      : distinctOutboundOrderRow && usesDistinctSourceOrder
+        ? distinctOutboundOrderRow
+        : firstReferencedRow
     if (!referencedRow) {
       throw new Error(
         `实体表 ${metadata.tableName} 缺少外键夹具依赖 ${referencedTableName}`,
@@ -293,7 +357,7 @@ export async function seedEmptyTable(
       }
     }
     if (column.isCreateDate || column.isUpdateDate) {
-      row[column.databaseName] = '2026-07-25 12:34:56.789'
+      row[column.databaseName] = FIXTURE_TIMESTAMP
       continue
     }
     if (column.isNullable) {
