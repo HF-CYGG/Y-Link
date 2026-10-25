@@ -61,7 +61,8 @@
 /**
  * 模块说明：src/views/client/ClientAuthView.vue
  * 文件职责：客户端登录/注册总入口，负责账号登录、注册、验证码刷新与登录后回跳。
- * 实现逻辑：复用认证 Store 与稳定请求处理登录注册；验证码行统一居中对齐，联系方式验证行通过网格展开和淡入平滑切换。
+ * 实现逻辑：复用认证 Store 与稳定请求处理登录注册；验证码行统一居中对齐，联系方式验证行通过网格展开和淡入平滑切换；
+ *   图形验证码按服务端有效期在到期前自动换新并清空登录、注册表单里已输入的旧码，提交或发码进行中则稍后重试。
  * 维护说明：当前页面已切换为 Split-Card 一体化布局，视觉可继续调整，但登录/注册/验证码链路需保持可用。
  */
 
@@ -87,6 +88,7 @@ import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
+import { useCaptchaAutoRefresh } from '@/composables/useCaptchaAutoRefresh'
 import { APP_META } from '@/constants/app-meta'
 import ThemeToggle from '@/layout/components/ThemeToggle.vue'
 import {
@@ -115,7 +117,6 @@ interface ClientCaptchaState {
   captchaId: string
   captchaImage: string
   captchaSvg: string
-  expiresInSeconds: number
 }
 
 const router = useRouter()
@@ -151,7 +152,6 @@ const capabilityLoading = ref(false)
 const capabilityErrorMessage = ref('')
 const registerVerificationCountdown = ref(0)
 let registerVerificationTimer: ReturnType<typeof globalThis.setInterval> | null = null
-let captchaExpireTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let capabilityDeferredTimer: ReturnType<typeof globalThis.setTimeout> | null = null
 let formTransitionFrame: number | null = null
 let formTransitionRunId = 0
@@ -166,7 +166,6 @@ const captcha = reactive<ClientCaptchaState>({
   captchaId: '',
   captchaImage: '',
   captchaSvg: '',
-  expiresInSeconds: 0,
 })
 const loginForm = reactive({
   account: '',
@@ -256,10 +255,10 @@ const captchaImageSrc = computed(() => {
 })
 
 const captchaHintText = computed(() => {
-  if (captcha.expiresInSeconds <= 0) {
+  if (captchaAutoRefresh.remainingSeconds.value <= 0) {
     return '点击右侧验证码图片可立即刷新。'
   }
-  return `图形验证码约 ${captcha.expiresInSeconds}s 后失效，点击图片可立即刷新。`
+  return `图形验证码约 ${captchaAutoRefresh.remainingSeconds.value}s 后自动更换，点击图片可立即刷新。`
 })
 
 const extractRegisterRemainingMessage = (response: AxiosResponse | undefined) => {
@@ -445,21 +444,7 @@ const refreshCaptcha = async (silent = false) => {
       captcha.captchaId = result.captchaId
       captcha.captchaImage = result.captchaImage ?? ''
       captcha.captchaSvg = result.captchaSvg
-      captcha.expiresInSeconds = result.expiresInSeconds
-      if (captchaExpireTimer) {
-        globalThis.clearInterval(captchaExpireTimer)
-      }
-      captchaExpireTimer = globalThis.setInterval(() => {
-        if (captcha.expiresInSeconds <= 1) {
-          captcha.expiresInSeconds = 0
-          if (captchaExpireTimer) {
-            globalThis.clearInterval(captchaExpireTimer)
-            captchaExpireTimer = null
-          }
-          return
-        }
-        captcha.expiresInSeconds -= 1
-      }, 1000)
+      captchaAutoRefresh.schedule(result.expiresInSeconds)
       if (!silent) {
         showAppSuccess('已刷新验证码')
       }
@@ -480,12 +465,27 @@ const clearCaptcha = () => {
   captcha.captchaId = ''
   captcha.captchaImage = ''
   captcha.captchaSvg = ''
-  captcha.expiresInSeconds = 0
-  if (captchaExpireTimer) {
-    globalThis.clearInterval(captchaExpireTimer)
-    captchaExpireTimer = null
-  }
+  captchaAutoRefresh.cancel()
 }
+
+// 验证码到期前自动换新：旧码已失效，一并清空登录与注册表单里已输入的验证码。
+// 当前不展示验证码时直接丢弃旧票据，下次展示由 ensureCaptchaReady 重新拉取；提交或发码进行中则 2 秒后再试。
+const captchaAutoRefresh = useCaptchaAutoRefresh({
+  countdown: true,
+  onExpire: () => {
+    if (!shouldPrepareCaptcha.value) {
+      clearCaptcha()
+      return
+    }
+    if (isLoading.value || verificationSending.value) {
+      captchaAutoRefresh.retryAfter(2000)
+      return
+    }
+    loginForm.captcha = ''
+    registerForm.captcha = ''
+    void refreshCaptcha(true)
+  },
+})
 
 const ensureCaptchaReady = async () => {
   if (captcha.captchaId && (captcha.captchaImage || captcha.captchaSvg)) {

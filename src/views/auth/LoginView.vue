@@ -8,6 +8,7 @@
  * - 可见页按浏览器能力启动一次条件式通行密钥请求，主动密钥登录仍由用户点击触发；切换流程时取消未提交的仪式并丢弃迟到结果；
  * - 可能签发会话的最终请求从发出到结束冻结页面输入与路由离开，结束后由本次流程自行完成跳转；
  * - 风控触发后固定展示安全提示，并按需拉取验证码，避免用户只看到一闪而过的错误消息；
+ * - 验证码按服务端有效期在到期前自动换新并清空旧输入；提交或密钥仪式进行中则稍后重试，不打断正在发出的请求；
  * - 登录成功后仅投递非阻塞预热任务，先保证真正的页面跳转立即发生；
  * - 登录页视觉层采用了融合 Apple / Microsoft Fluent 设计美学的动态几何流体背景，利用 CSS `transform` 硬件加速进行渲染，兼顾了高级视觉表现与主线程性能，避免了输入、点击延迟。
  * 维护说明：
@@ -33,6 +34,7 @@ import { getAdminWebAuthnCapabilities, startAdminMfaWebAuthnLogin, startAdminWeb
 import { assessWebAuthnAvailability, createLoginAttemptGate, createWebAuthnFlow, isWebAuthnCancellation, type AdminWebAuthnCapabilities } from '@/utils/admin-webauthn'
 import { createPasswordCredentialHandoff, type PasswordCredentialBridge } from '@/utils/admin-password-credential'
 import { guardRecoveryCodePaste } from '@/utils/admin-mfa-recovery-code'
+import { useCaptchaAutoRefresh } from '@/composables/useCaptchaAutoRefresh'
 
 const form = reactive({
   username: '',
@@ -253,12 +255,26 @@ const refreshCaptcha = async (isCurrent: () => boolean = () => true) => {
     captchaState.captchaSvg = result.captchaSvg
     captchaState.expiresInSeconds = result.expiresInSeconds
     form.captcha = ''
+    captchaAutoRefresh.schedule(result.expiresInSeconds)
   } catch (error) {
     if (requestId === captchaRequestId && isCurrent()) showAppError(extractErrorMessage(error, '验证码加载失败，请稍后重试'))
   } finally {
     if (requestId === captchaRequestId && isCurrent()) captchaLoading.value = false
   }
 }
+
+// 验证码到期前自动换新；提交或密钥仪式进行中旧验证码可能已随请求发出，先等 2 秒再试，
+// 该流程结果若已自行换新验证码，会重新安排计时并覆盖这次重试。
+const captchaAutoRefresh = useCaptchaAutoRefresh({
+  onExpire: () => {
+    if (!captchaVisible.value) return
+    if (submitPhase.value !== 'idle' || finalRequestPending.value || webAuthnPhase.value !== 'idle') {
+      captchaAutoRefresh.retryAfter(2000)
+      return
+    }
+    void refreshCaptcha()
+  },
+})
 
 const ensureCaptchaVisible = async (isCurrent: () => boolean = () => true) => {
   if (!isCurrent()) return
@@ -303,6 +319,7 @@ onBeforeRouteLeave(() => {
 })
 
 const resetCaptchaState = () => {
+  captchaAutoRefresh.cancel()
   captchaVisible.value = false
   captchaState.captchaId = ''
   captchaState.captchaImage = ''

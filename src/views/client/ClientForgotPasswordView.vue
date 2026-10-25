@@ -5,7 +5,8 @@
  * 实现逻辑：
  * - 首屏先渲染标题与主流程骨架，再延后补齐“是否支持自助找回”的能力配置；
  * - 验证码、身份校验、重置密码均接入“重复提交门禁 + 可取消旧请求”双保险；
- * - 错误提示、加载态与弱网回退统一走同一套提示口径，避免用户误判当前状态。
+ * - 错误提示、加载态与弱网回退统一走同一套提示口径，避免用户误判当前状态；
+ * - 图形验证码与登录页共用自动刷新逻辑，到期前换新并清空已输入的旧码，发码或提交进行中则稍后重试。
  * 维护说明：
  * - 若后续扩展找回方式，请同步检查 `forgotPasswordAvailable`、验证码表单与接口入参；
  * - 若修改页面文案，请保持与登录/注册页的安全提示口径一致。
@@ -19,6 +20,7 @@ import { getClientAuthCapabilities, getClientCaptcha, type ClientAuthCapabilitie
 import { useStableRequest } from '@/composables/useStableRequest'
 import ThemeToggle from '@/layout/components/ThemeToggle.vue'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
+import { useCaptchaAutoRefresh } from '@/composables/useCaptchaAutoRefresh'
 import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import {
@@ -57,10 +59,8 @@ const captcha = reactive({
   captchaId: '',
   captchaImage: '',
   captchaSvg: '',
-  expiresInSeconds: 0,
 })
 let verificationTimer: ReturnType<typeof globalThis.setInterval> | null = null
-let captchaExpireTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let capabilityDeferredTimer: ReturnType<typeof globalThis.setTimeout> | null = null
 
 const verifyForm = reactive({
@@ -89,10 +89,10 @@ const captchaImageSrc = computed(() => {
 })
 
 const captchaHintText = computed(() => {
-  if (captcha.expiresInSeconds <= 0) {
+  if (captchaAutoRefresh.remainingSeconds.value <= 0) {
     return '发送验证码前请先输入图形验证码，点击右侧图片可立即刷新。'
   }
-  return `发送验证码前请先输入图形验证码，约 ${captcha.expiresInSeconds}s 后失效。`
+  return `发送验证码前请先输入图形验证码，约 ${captchaAutoRefresh.remainingSeconds.value}s 后自动更换。`
 })
 
 const loadAuthCapabilities = async (options: { silent?: boolean } = {}) => {
@@ -147,21 +147,7 @@ const refreshCaptcha = async (silent = false) => {
       captcha.captchaId = result.captchaId
       captcha.captchaImage = result.captchaImage ?? ''
       captcha.captchaSvg = result.captchaSvg
-      captcha.expiresInSeconds = result.expiresInSeconds
-      if (captchaExpireTimer) {
-        globalThis.clearInterval(captchaExpireTimer)
-      }
-      captchaExpireTimer = globalThis.setInterval(() => {
-        if (captcha.expiresInSeconds <= 1) {
-          captcha.expiresInSeconds = 0
-          if (captchaExpireTimer) {
-            globalThis.clearInterval(captchaExpireTimer)
-            captchaExpireTimer = null
-          }
-          return
-        }
-        captcha.expiresInSeconds -= 1
-      }, 1000)
+      captchaAutoRefresh.schedule(result.expiresInSeconds)
       if (!silent) {
         showAppSuccess('已刷新验证码')
       }
@@ -182,12 +168,26 @@ const clearCaptcha = () => {
   captcha.captchaId = ''
   captcha.captchaImage = ''
   captcha.captchaSvg = ''
-  captcha.expiresInSeconds = 0
-  if (captchaExpireTimer) {
-    globalThis.clearInterval(captchaExpireTimer)
-    captchaExpireTimer = null
-  }
+  captchaAutoRefresh.cancel()
 }
+
+// 验证码到期前自动换新并清空已输入的旧码；第二步不展示验证码时直接丢弃旧票据，
+// 回到第一步时由 ensureCaptchaReady 重新拉取；发码或提交进行中则 2 秒后再试。
+const captchaAutoRefresh = useCaptchaAutoRefresh({
+  countdown: true,
+  onExpire: () => {
+    if (!shouldPrepareCaptcha.value) {
+      clearCaptcha()
+      return
+    }
+    if (verificationSending.value || submitting.value) {
+      captchaAutoRefresh.retryAfter(2000)
+      return
+    }
+    verifyForm.captcha = ''
+    void refreshCaptcha(true)
+  },
+})
 
 const ensureCaptchaReady = async () => {
   if (captcha.captchaId && (captcha.captchaImage || captcha.captchaSvg)) {
