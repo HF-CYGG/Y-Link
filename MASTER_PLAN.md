@@ -45,7 +45,7 @@ Y-Link 保留现有 Vue Web 管理端、Web 客户端和 Express/TypeORM 后端�
 - TanStack Query、Zustand；
 - `expo-secure-store`、`expo-sqlite`；
 - `react-native-safe-area-context`、`react-native-screens`；
-- Node.js `22.13.1` 与根 npm workspace 统一安装。
+- Node.js `22.23.4` 与根 npm workspace 统一安装。
 
 ### 3.2 后续候选能力
 

@@ -6,7 +6,9 @@
  * - `stockDelta` 为库存净变化：正数增加物理库存，负数扣减物理库存；
  * - 商品汇总库存只由“当前版本且启用”的 SKU 构成：停用或退役的 SKU 只改动自身库存，不改商品汇总；
  * - 净扣减方向逐一校验 SKU 与商品可用量（`currentStock - preOrderedStock`），净增加方向校验整数上限；
- * - `preOrderedStock` 永不改动，预订占用由 O2O 链路自行维护。
+ * - `preOrderedStock` 永不改动，预订占用由 O2O 链路自行维护；
+ * - 分库位件数：增量带 locationId 时只增减该库位（按库位盘点调账）；不带时增加落主库位，
+ *   扣减先扣主库位、不够再按库位编码扣其他库位，并把实际扣减的其他库位追加到流水备注。
  * 维护重点：新增库存变动场景只调用本模块，不要在服务里再手写增减与流水，避免口径漂移。
  */
 
@@ -16,6 +18,7 @@ import { BaseProduct } from '../entities/base-product.entity.js'
 import { BaseProductSku } from '../entities/base-product-sku.entity.js'
 import { InventoryLog } from '../entities/inventory-log.entity.js'
 import { BizError } from '../utils/errors.js'
+import { applySkuLocationDelta, formatLocationDeductions, reconcileSkuLocationStocks } from './sku-location-stock.service.js'
 
 export interface InventoryStockDelta {
   product: BaseProduct
@@ -24,6 +27,11 @@ export interface InventoryStockDelta {
   stockDelta: number
   /** 调用方自定义的回溯键，原样带回到返回行，便于把记账结果对应回业务明细。 */
   key?: string
+  /**
+   * 指定库位：传入时只增减该库位件数（null 表示主库位为空时的“未设置库位”）；
+   * 不传时按默认规则——增加落主库位，扣减先扣主库位、不够再按库位编码扣其他库位。
+   */
+  locationId?: string | null
 }
 
 export interface InventoryLedgerOperator {
@@ -119,8 +127,13 @@ export async function applyInventoryDeltas(
   const inventoryLogRepo = manager.getRepository(InventoryLog)
   const logs: InventoryLog[] = []
   const lines: InventoryLedgerLineView[] = []
+  const lastLogBySku = new Map<string, InventoryLog>()
+  const reconcileSkuIds = new Set<string>()
   for (const delta of changed) {
     const { product, sku } = delta
+    // 指定库位的增减必须在改动总库存之前处理：此时“主库位件数 = 总库存 − 其他库位之和”仍对应改动前的状态。
+    if (delta.locationId !== undefined) await applySkuLocationDelta(manager, sku, delta.locationId, delta.stockDelta)
+    else if (delta.stockDelta < 0) reconcileSkuIds.add(normalizeId(sku.id))
     const affectsProductAggregate = skuContributesToProductAggregate(sku)
     const beforeCurrentStock = Number(product.currentStock)
     const beforePreorderedStock = Number(product.preOrderedStock)
@@ -141,7 +154,7 @@ export async function applyInventoryDeltas(
       afterSkuCurrentStock: sku.currentStock,
     })
     const remark = `${input.buildRemark(delta)}${affectsProductAggregate ? '' : '（规格已停用或退役，不计入商品汇总）'}`
-    logs.push(inventoryLogRepo.create({
+    const log = inventoryLogRepo.create({
       productId: normalizeId(product.id),
       skuId: normalizeId(sku.id),
       changeType: input.changeType,
@@ -160,7 +173,20 @@ export async function applyInventoryDeltas(
       refType: input.refType,
       refId: input.refId,
       remark: remark.slice(0, 255),
-    }))
+    })
+    logs.push(log)
+    lastLogBySku.set(normalizeId(sku.id), log)
+  }
+
+  // 默认规则的扣减：总库存已在内存中扣好，规整分库位行并把扣到的其他库位写进该 SKU 最后一条流水的备注。
+  if (reconcileSkuIds.size) {
+    const deductions = await reconcileSkuLocationStocks(manager, [...skuNetMap.values()]
+      .map(({ sku }) => sku)
+      .filter((sku) => reconcileSkuIds.has(normalizeId(sku.id))))
+    for (const [skuId, items] of deductions) {
+      const log = lastLogBySku.get(skuId)
+      if (log) log.remark = `${log.remark}；${formatLocationDeductions(items)}`.slice(0, 255)
+    }
   }
 
   // 写后兜底：只校验净扣减的实体，避免历史异常数据阻断回补、入库这类增加操作。

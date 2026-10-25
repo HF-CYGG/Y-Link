@@ -1525,6 +1525,35 @@ const runContentTamperScenario = async (context) => {
     '内容篡改任务不得留下通过的强校验结果',
   )
   log('同等行数内容篡改断言通过：目标行数不变但 SHA-256 不一致，任务禁止切换')
+
+  // 失败任务在目标库遗留所有权标记与已导入表；一键入口预检应降为“将自动清理”提示，手动预检仍阻断。
+  const target = { ...mysqlTarget, password: mysqlPassword }
+  const readPrecheckIssues = async (body) => {
+    const { payload } = await context.client.request('/api/data-maintenance/db-migration/precheck', {
+      method: 'POST',
+      expectedStatuses: [200],
+      body,
+      timeoutMs: 60_000,
+    })
+    return { canProceed: payload?.data?.canProceed, codes: (payload?.data?.issues ?? []).map((issue) => `${issue.level}:${issue.code}`) }
+  }
+  const automaticPrecheck = await readPrecheckIssues({ target, allowTargetWithData: false, purpose: 'automatic' })
+  assert.ok(
+    automaticPrecheck.codes.includes('warning:target_reclaim_failed_automatic_task'),
+    `一键入口预检未识别失败任务遗留表：${automaticPrecheck.codes.join(', ')}`,
+  )
+  assert.ok(!automaticPrecheck.codes.includes('error:target_not_empty'), '可认领的遗留表不得再阻断一键入口预检')
+  assert.equal(automaticPrecheck.canProceed, true, '可认领的遗留表应允许一键迁移继续')
+  const manualPrecheck = await readPrecheckIssues({ target, allowTargetWithData: false })
+  assert.ok(manualPrecheck.codes.includes('error:target_not_empty'), '未声明自动用途的预检必须保持非空目标库阻断')
+
+  // 篡改开关仍开启，第二个任务会再次在强校验失败；只要失败原因是内容校验而非“空库”门禁，即证明遗留表已被清理重建。
+  const reclaimTask = await createAutomaticTask(context.client, target)
+  const reclaimTerminal = await waitForTaskTerminal(context.client, reclaimTask.id)
+  assert.equal(reclaimTerminal.status, 'failed', `认领重建任务应在篡改校验处失败，实际 ${reclaimTerminal.status}`)
+  assert.match(reclaimTerminal.errorMessage ?? '', /哈希|校验|内容/, `认领重建任务未走到内容校验：${reclaimTerminal.errorMessage ?? ''}`)
+  assert.doesNotMatch(reclaimTerminal.errorMessage ?? '', /空库|不再为空|非本任务结构/, '认领重建任务不应被空库门禁拒绝')
+  log('失败任务遗留表自动认领断言通过：一键预检降级提示、手动预检仍阻断、新任务清理后重新建表导入')
 }
 
 const runExecutionInterruptionScenario = async ({

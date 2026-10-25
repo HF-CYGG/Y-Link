@@ -552,7 +552,7 @@ onActivated(() => {
                 :key="activity.id"
                 type="button"
                 :class="[
-                  'w-full rounded-lg border border-slate-100 bg-slate-50/80 px-3 py-2.5 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/35 dark:border-white/10 dark:bg-slate-900/40 sm:px-3.5 sm:py-3',
+                  'w-full rounded-lg border border-slate-100 bg-slate-50/80 px-3 py-2.5 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/35 dark:border-white/10 dark:bg-black/40 sm:px-3.5 sm:py-3',
                   isActivityNavigable(activity)
                     ? 'cursor-pointer hover:border-brand/35 hover:bg-slate-50 hover:shadow-sm dark:hover:border-brand/40 dark:hover:bg-slate-900/60'
                     : 'cursor-not-allowed opacity-80',
@@ -637,13 +637,13 @@ onActivated(() => {
 }
 
 .dark .dashboard-mobile-metric-panel {
-  border-color: rgba(148, 163, 184, 0.18);
-  background: rgba(15, 23, 42, 0.72);
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(10, 10, 11, 0.72);
   box-shadow: 0 14px 32px rgba(2, 6, 23, 0.24);
 }
 
 .dark .dashboard-mobile-metric-cell {
-  border-color: rgba(148, 163, 184, 0.18);
+  border-color: rgba(255, 255, 255, 0.1);
 }
 
 @keyframes dashboard-mobile-metric-pulse {

@@ -81,6 +81,7 @@
    - **禁止** `:global(.dark) .x`（会被编译成裸 `.dark` 规则作用到 html 并泄漏全站）和 `.dark :deep(.x)`（作用域属性落在 html 上永不生效）；传送到 body 的浮层用 `:global(.dark .浮层专属类 ...)`；
    - scoped 中 `background: linear-gradient(浅色)` 是背景图，`dark:bg-*` 只改背景色盖不住，必须在暗色选择器里整体重写 `background`；
    - 亮色规则若带 `is-checked`、`:hover` 等更高优先级选择器，暗色规则也要写到同等优先级。
+   - 暗色底色与边框禁止使用 slate 系（`dark:bg-slate-700~950`、`dark:border-slate-600/700`，以及 scoped 里的 `rgba(15, 23, 42 / 30, 41, 59 / 148, 163, 184, …)`）：slate 带蓝色调，叠在 `#141415` 卡片之间会显成蓝色卡片边框。卡片底用 `dark:bg-[#141415]`（半透明保留 `/95`），浅灰块用 `dark:bg-white/5~10`，加深块用 `dark:bg-black/N`，边框用 `dark:border-white/10`；亮色只写 `bg-slate-900` 一类深色选中态时也要补暗色变体（选中态用 `dark:bg-brand`）。
 7. 打印出来文字发灰：打印模板、凭证纸面、二维码区域必须保持白底黑字，`style.css` 已在 `@media print` 下把 html.dark 强制恢复亮色；不要给纸面或二维码容器加 `dark:` 背景。
 
 ## 验证与回归关注点

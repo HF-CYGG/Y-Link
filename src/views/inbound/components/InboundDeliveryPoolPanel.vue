@@ -185,7 +185,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="inbound-pool grid gap-4 xl:grid-cols-[26rem_minmax(0,1fr)]">
-    <section class="min-w-0 rounded-2xl border border-slate-100 bg-white p-4 shadow-sm dark:border-slate-700 dark:bg-slate-800">
+    <section class="min-w-0 rounded-2xl border border-slate-100 bg-white p-4 shadow-sm dark:border-white/10 dark:bg-[#141415]">
       <PassiveSegmentedTabs v-model="activePool" :tabs="poolTabs" aria-label="送货单池分栏" @tab-change="handlePoolChange" />
 
       <div class="mt-3 flex items-center gap-2">
@@ -216,7 +216,7 @@ onBeforeUnmount(() => {
             预计送达：{{ formatDateTime(order.expectedArrivalAt) }} · 共 {{ Number(order.totalQty) }} 件
           </p>
         </el-button>
-        <div v-if="!listLoading && !records.length" class="rounded-xl border border-dashed border-slate-200 py-10 text-center text-sm text-slate-400 dark:border-slate-700">
+        <div v-if="!listLoading && !records.length" class="rounded-xl border border-dashed border-slate-200 py-10 text-center text-sm text-slate-400 dark:border-white/10">
           当前分栏暂无送货单
         </div>
       </div>
@@ -233,7 +233,7 @@ onBeforeUnmount(() => {
       />
     </section>
 
-    <section v-if="!isPhone" class="min-w-0 rounded-2xl border border-slate-100 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-800">
+    <section v-if="!isPhone" class="min-w-0 rounded-2xl border border-slate-100 bg-white p-5 shadow-sm dark:border-white/10 dark:bg-[#141415]">
       <div v-loading="detailLoading" class="min-h-[240px]">
         <template v-if="activeDetail">
           <div class="flex flex-wrap items-start justify-between gap-3">
@@ -258,25 +258,25 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-slate-900/40">
+            <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-black/40">
               <p class="text-xs text-slate-500 dark:text-slate-400">预计送达时间</p>
               <p class="mt-1 text-sm font-semibold text-slate-800 dark:text-slate-100">{{ formatDateTime(activeDetail.order.expectedArrivalAt) }}</p>
             </div>
-            <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-slate-900/40">
+            <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-black/40">
               <p class="text-xs text-slate-500 dark:text-slate-400">总件数</p>
               <p class="mt-1 text-sm font-semibold text-slate-800 dark:text-slate-100">{{ Number(activeDetail.order.totalQty) }} 件</p>
             </div>
-            <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-slate-900/40">
+            <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-black/40">
               <p class="text-xs text-slate-500 dark:text-slate-400">供货方</p>
               <p class="mt-1 truncate text-sm font-semibold text-slate-800 dark:text-slate-100">{{ activeDetail.order.supplierName || '-' }}</p>
             </div>
-            <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-slate-900/40">
+            <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-black/40">
               <p class="text-xs text-slate-500 dark:text-slate-400">入库时间</p>
               <p class="mt-1 text-sm font-semibold text-slate-800 dark:text-slate-100">{{ formatDateTime(activeDetail.order.verifiedAt, '尚未入库') }}</p>
             </div>
           </div>
 
-          <div class="mt-4 rounded-xl bg-slate-50 px-3 py-2 dark:bg-slate-900/40">
+          <div class="mt-4 rounded-xl bg-slate-50 px-3 py-2 dark:bg-black/40">
             <p class="text-xs text-slate-500 dark:text-slate-400">备注</p>
             <p class="mt-1 whitespace-pre-wrap break-words text-sm text-slate-700 dark:text-slate-200">{{ activeDetail.order.remark || '未填写备注' }}</p>
           </div>
@@ -313,28 +313,28 @@ onBeforeUnmount(() => {
           </el-tag>
         </div>
         <div class="grid grid-cols-2 gap-2">
-          <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-slate-900/40">
+          <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-black/40">
             <p class="text-xs text-slate-500 dark:text-slate-400">预计送达</p>
             <p class="mt-1 text-sm font-semibold text-slate-800 dark:text-slate-100">{{ formatDateTime(activeDetail.order.expectedArrivalAt) }}</p>
           </div>
-          <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-slate-900/40">
+          <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-black/40">
             <p class="text-xs text-slate-500 dark:text-slate-400">总件数</p>
             <p class="mt-1 text-sm font-semibold text-slate-800 dark:text-slate-100">{{ Number(activeDetail.order.totalQty) }} 件</p>
           </div>
-          <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-slate-900/40">
+          <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-black/40">
             <p class="text-xs text-slate-500 dark:text-slate-400">供货方</p>
             <p class="mt-1 truncate text-sm font-semibold text-slate-800 dark:text-slate-100">{{ activeDetail.order.supplierName || '-' }}</p>
           </div>
-          <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-slate-900/40">
+          <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-black/40">
             <p class="text-xs text-slate-500 dark:text-slate-400">入库时间</p>
             <p class="mt-1 text-sm font-semibold text-slate-800 dark:text-slate-100">{{ formatDateTime(activeDetail.order.verifiedAt, '尚未入库') }}</p>
           </div>
         </div>
-        <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-slate-900/40">
+        <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-black/40">
           <p class="text-xs text-slate-500 dark:text-slate-400">备注</p>
           <p class="mt-1 whitespace-pre-wrap break-words text-sm text-slate-700 dark:text-slate-200">{{ activeDetail.order.remark || '未填写备注' }}</p>
         </div>
-        <div v-for="item in activeDetail.items" :key="item.id" class="rounded-xl border border-slate-100 px-3 py-2 dark:border-slate-700">
+        <div v-for="item in activeDetail.items" :key="item.id" class="rounded-xl border border-slate-100 px-3 py-2 dark:border-white/10">
           <p class="text-sm font-medium text-slate-800 dark:text-slate-100">{{ item.productNameSnapshot }}</p>
           <p class="mt-0.5 text-xs text-slate-500 dark:text-slate-400">{{ item.sku?.specText || '默认规格' }} · {{ Number(item.qty) }} 件</p>
         </div>

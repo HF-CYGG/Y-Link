@@ -1,7 +1,10 @@
 /**
  * 文件说明：盘点明细实体，逐 SKU 记录账面快照、实盘数量、差异、差异原因与处理方式。
  * 实现逻辑：账面快照在该 SKU 首次计数时由服务端记录，差异 = 实盘 − 快照；确认时按差异增量调账，避免盘点期间正常出入库被覆盖。
- * 维护重点：`(stocktake_id, sku_id)` 唯一；范围外追加的 SKU 以 in_scope=0 标记。
+ * - 按库位盘点时每行对应“规格 × 库位”，location_scope_id 记录该行盘的库位，账面快照取该库位件数；
+ *   其他范围（全部 / 分类 / 指定规格）按规格总量盘点，location_scope_id 固定为 0。
+ * 维护重点：`(stocktake_id, sku_id, location_scope_id)` 唯一；范围外追加的 SKU 以 in_scope=0 标记。
+ *   location_scope_id 用 0 而不是 NULL 表示“不分库位”，因为唯一索引不约束 NULL，会放过同一规格的重复行。
  */
 
 import { Column, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, type Relation, UpdateDateColumn } from 'typeorm'
@@ -11,7 +14,7 @@ import { entityColumnOptions } from './entity-column-options.js'
 import { InvStocktake } from './inv-stocktake.entity.js'
 
 @Entity({ name: 'inv_stocktake_item' })
-@Index('uk_inv_stocktake_item_sku', ['stocktakeId', 'skuId'], { unique: true })
+@Index('uk_inv_stocktake_item_sku_location', ['stocktakeId', 'skuId', 'locationScopeId'], { unique: true })
 export class InvStocktakeItem {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })
   id!: string
@@ -27,6 +30,9 @@ export class InvStocktakeItem {
   @Index('idx_inv_stocktake_item_sku_id')
   @Column({ name: 'sku_id', ...entityColumnOptions.foreignId, comment: 'SKU ID' })
   skuId!: string
+
+  @Column({ name: 'location_scope_id', ...entityColumnOptions.foreignId, default: 0, comment: '盘点库位ID（0 表示按规格总量盘点）' })
+  locationScopeId!: string
 
   @Column({ name: 'in_scope', ...entityColumnOptions.booleanFlag, comment: '是否属于建单范围' })
   inScope!: boolean

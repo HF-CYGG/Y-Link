@@ -92,6 +92,7 @@ const MYSQL_REQUIRED_TABLES = [
   'base_yz_series_seq_reservation',
   'sys_user_mfa',
   'sys_user_webauthn_credential',
+  'inv_sku_location_stock',
 ]
 
 /** 056 后必须物理移除的历史业务号永久占用结构。 */
@@ -141,6 +142,7 @@ const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
   base_yz_series_seq_reservation: '052_yz_series_seq_reservation.sql',
   sys_user_mfa: '057_admin_mfa.sql',
   sys_user_webauthn_credential: '058_admin_webauthn.sql',
+  inv_sku_location_stock: '060_sku_location_stock.sql',
 }
 
 interface MysqlRequiredColumn {
@@ -174,8 +176,11 @@ interface MysqlRequiredForeignKey {
 
 interface MysqlRequiredTrigger {
   triggerName: string
+  tableName: string
   eventManipulation: 'UPDATE' | 'DELETE'
   actionTiming: 'BEFORE'
+  /** 触发器正文，须与 introducingScript 中的定义保持一致；SQLite→MySQL 自动迁移按此补建。 */
+  actionStatement: string
   introducingScript: string
 }
 
@@ -188,6 +193,8 @@ interface MysqlRequiredCheck {
 // 只列会被当前业务代码直接读写、缺失后必然导致运行时失败的增量字段。
 // 表不存在时由 MYSQL_REQUIRED_TABLES 先给出建表脚本，避免同一张缺表重复打印多条缺列提示。
 const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
+  // 060：按库位盘点的明细库位列，0 表示按规格总量盘点；缺失时盘点建单与计数都会写库失败。
+  { tableName: 'inv_stocktake_item', columnName: 'location_scope_id', introducingScript: '060_sku_location_stock.sql', expectedDataType: 'bigint', expectedNullable: false, expectedDefault: '0' },
   { tableName: 'sys_user_mfa', columnName: 'factor_revision', introducingScript: '059_admin_webauthn_second_factor.sql', expectedDataType: 'int', expectedNullable: false, expectedDefault: '1' },
   { tableName: 'sys_user_mfa', columnName: 'totp_secret_sealed', introducingScript: '059_admin_webauthn_second_factor.sql', expectedDataType: 'varchar', minCharacterMaximumLength: 255, expectedNullable: true },
   { tableName: 'sys_user_webauthn_credential', columnName: 'usage', introducingScript: '059_admin_webauthn_second_factor.sql', expectedDataType: 'varchar', minCharacterMaximumLength: 16, expectedNullable: false, expectedDefault: 'passwordless' },
@@ -457,6 +464,10 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
 
 // 不只按索引名判断，还校验列顺序与唯一性，避免旧库中存在同名但错误的索引时误判为可启动。
 const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
+  // 060：分库位库存同一规格同一库位至多一行；盘点明细唯一键扩展到“规格 × 库位”（旧的 uk_inv_stocktake_item_sku 由 060 删除）。
+  { tableName: 'inv_sku_location_stock', indexName: 'uk_inv_sku_location_stock_sku_location', columns: ['sku_id', 'location_id'], unique: true, introducingScript: '060_sku_location_stock.sql' },
+  { tableName: 'inv_sku_location_stock', indexName: 'idx_inv_sku_location_stock_location_id', columns: ['location_id'], unique: false, introducingScript: '060_sku_location_stock.sql' },
+  { tableName: 'inv_stocktake_item', indexName: 'uk_inv_stocktake_item_sku_location', columns: ['stocktake_id', 'sku_id', 'location_scope_id'], unique: true, introducingScript: '060_sku_location_stock.sql' },
   { tableName: 'sys_user', indexName: 'uk_sys_user_webauthn_user_handle', columns: ['webauthn_user_handle'], unique: true, introducingScript: '058_admin_webauthn.sql' },
   { tableName: 'sys_user_webauthn_credential', indexName: 'idx_sys_user_webauthn_credential_user_id', columns: ['user_id'], unique: false, introducingScript: '058_admin_webauthn.sql' },
   { tableName: 'sys_user_webauthn_credential', indexName: 'uk_sys_user_webauthn_rp_credential_sha256', columns: ['rp_id', 'credential_id_sha256'], unique: true, introducingScript: '058_admin_webauthn.sql' },
@@ -634,7 +645,6 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
     ['inv_stock_doc', 'uk_inv_stock_doc_no', ['doc_no']],
     ['inv_stock_doc', 'uk_inv_stock_doc_request', ['client_request_id']],
     ['inv_stocktake', 'uk_inv_stocktake_no', ['stocktake_no']],
-    ['inv_stocktake_item', 'uk_inv_stocktake_item_sku', ['stocktake_id', 'sku_id']],
   ] as const).map(([tableName, indexName, columns]) => ({
     tableName,
     indexName,
@@ -691,6 +701,9 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
 ]
 
 const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [
+  // 060：分库位库存随 SKU 级联清理；库位只停用不删除，被引用时必须拒绝删除。
+  { tableName: 'inv_sku_location_stock', columnName: 'sku_id', referencedTableName: 'base_product_sku', referencedColumnName: 'id', deleteRule: 'CASCADE', introducingScript: '060_sku_location_stock.sql' },
+  { tableName: 'inv_sku_location_stock', columnName: 'location_id', referencedTableName: 'base_storage_location', referencedColumnName: 'id', deleteRule: 'RESTRICT', introducingScript: '060_sku_location_stock.sql' },
   { tableName: 'sys_user_webauthn_credential', columnName: 'user_id', referencedTableName: 'sys_user', referencedColumnName: 'id', deleteRule: 'RESTRICT', introducingScript: '058_admin_webauthn.sql' },
   ...[
     ['sys_user_session', 'user_id', 'sys_user'],
@@ -782,14 +795,18 @@ const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [
 const MYSQL_REQUIRED_TRIGGERS: readonly MysqlRequiredTrigger[] = [
   {
     triggerName: 'trg_account_lifecycle_event_no_update',
+    tableName: 'account_lifecycle_event',
     eventManipulation: 'UPDATE',
     actionTiming: 'BEFORE',
+    actionStatement: "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'ACCOUNT_LIFECYCLE_EVENT_APPEND_ONLY'",
     introducingScript: '044_account_lifecycle_governance.sql',
   },
   {
     triggerName: 'trg_account_lifecycle_event_no_delete',
+    tableName: 'account_lifecycle_event',
     eventManipulation: 'DELETE',
     actionTiming: 'BEFORE',
+    actionStatement: "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'ACCOUNT_LIFECYCLE_EVENT_APPEND_ONLY'",
     introducingScript: '044_account_lifecycle_governance.sql',
   },
 ]
@@ -838,6 +855,7 @@ const AUTO_MIGRATABLE_FILES = [
   '057_admin_mfa.sql',
   '058_admin_webauthn.sql',
   '059_admin_webauthn_second_factor.sql',
+  '060_sku_location_stock.sql',
 ]
 
 /**
@@ -1536,6 +1554,55 @@ function collectMysqlTriggerIssues(
   })
 }
 
+/** DataSource 与 QueryRunner 都满足的最小查询接口，供迁移服务与建表子进程共用。 */
+interface MysqlQueryExecutor {
+  query(sql: string, parameters?: unknown[]): Promise<unknown>
+}
+
+const quoteMysqlIdentifier = (value: string): string => `\`${value.replaceAll('`', '``')}\``
+
+async function readMysqlRequiredTriggerIssues(
+  executor: MysqlQueryExecutor,
+): Promise<Array<MysqlSchemaShapeIssue<MysqlRequiredTrigger>>> {
+  const rows = await executor.query(
+    `SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING
+     FROM information_schema.TRIGGERS
+     WHERE TRIGGER_SCHEMA = DATABASE()
+       AND TRIGGER_NAME IN (${MYSQL_REQUIRED_TRIGGERS.map(() => '?').join(', ')})`,
+    MYSQL_REQUIRED_TRIGGERS.map((item) => item.triggerName),
+  ) as MysqlTriggerRow[]
+  return collectMysqlTriggerIssues(rows, MYSQL_REQUIRED_TRIGGERS)
+}
+
+/** 返回缺失或定义不匹配的必需触发器名称；为空表示全部就绪。 */
+export async function findInvalidMysqlRequiredTriggers(executor: MysqlQueryExecutor): Promise<string[]> {
+  return (await readMysqlRequiredTriggerIssues(executor)).map((issue) => issue.requirement.triggerName)
+}
+
+/**
+ * SQLite→MySQL 迁移在数据导入完成后补建必需触发器：TypeORM synchronize 不会创建触发器，
+ * 而启动期结构自检要求它们存在。只处理缺失或定义不匹配的触发器，先删后建保证定义与迁移脚本一致。
+ * 必须在导入之后执行，否则追加型保护触发器会阻断导入前的清表。
+ */
+export async function ensureMysqlRequiredTriggers(executor: MysqlQueryExecutor): Promise<string[]> {
+  const issues = await readMysqlRequiredTriggerIssues(executor)
+  for (const { requirement } of issues) {
+    await executor.query(`DROP TRIGGER IF EXISTS ${quoteMysqlIdentifier(requirement.triggerName)}`)
+    await executor.query(
+      `CREATE TRIGGER ${quoteMysqlIdentifier(requirement.triggerName)} ${requirement.actionTiming} ${requirement.eventManipulation}`
+      + ` ON ${quoteMysqlIdentifier(requirement.tableName)} FOR EACH ROW ${requirement.actionStatement}`,
+    )
+  }
+  return issues.map((issue) => issue.requirement.triggerName)
+}
+
+/** 迁移导入前清空目标表时先移除追加型保护触发器，导入完成后由 ensureMysqlRequiredTriggers 补回。 */
+export async function dropMysqlRequiredTriggers(executor: MysqlQueryExecutor): Promise<void> {
+  for (const requirement of MYSQL_REQUIRED_TRIGGERS) {
+    await executor.query(`DROP TRIGGER IF EXISTS ${quoteMysqlIdentifier(requirement.triggerName)}`)
+  }
+}
+
 /** 启动期只读自检：确认当前代码会直接依赖的 MySQL 表、字段与索引结构均已落地。 */
 export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): Promise<void> {
   if (env.DB_TYPE !== 'mysql') {
@@ -1641,14 +1708,7 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
       )
     : []
   const invalidForeignKeys = collectMysqlForeignKeyIssues(foreignKeyRows, requiredForeignKeysOnExistingTables)
-  const triggerRows: MysqlTriggerRow[] = await dataSource.query(
-    `SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING
-     FROM information_schema.TRIGGERS
-     WHERE TRIGGER_SCHEMA = DATABASE()
-       AND TRIGGER_NAME IN (${MYSQL_REQUIRED_TRIGGERS.map(() => '?').join(', ')})`,
-    MYSQL_REQUIRED_TRIGGERS.map((item) => item.triggerName),
-  )
-  const invalidTriggers = collectMysqlTriggerIssues(triggerRows, MYSQL_REQUIRED_TRIGGERS)
+  const invalidTriggers = await readMysqlRequiredTriggerIssues(dataSource)
   const requiredChecksOnExistingTables = MYSQL_REQUIRED_CHECKS.filter((requirement) => (
     existingTableSet.has(requirement.tableName)
   ))

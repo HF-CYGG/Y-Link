@@ -32,7 +32,7 @@ defineProps<{
   <div class="config-stage__panel space-y-4">
     <div class="mb-5 flex items-center justify-between gap-2 border-b border-slate-100 pb-4 dark:border-white/5">
       <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">线上预订规则</h2>
-      <span class="rounded-lg bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+      <span class="rounded-lg bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500 dark:bg-white/10 dark:text-slate-400">
         默认值：24小时 / 5件 / 3次
       </span>
     </div>

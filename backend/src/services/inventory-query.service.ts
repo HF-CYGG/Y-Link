@@ -2,6 +2,8 @@
  * 模块说明：库存查询服务（当前库存与通用库存流水）。
  * 文件职责：按 SKU 维度查询当前库存，按多条件分页查询与导出 inventory_log。
  * 实现逻辑：库存与流水都以 SKU 为主，联查商品、分类、库位名称；流水类型中文名取自统一字典。
+ * - 同一规格可分放多个库位：locationId / locationCode 为主库位，otherLocations 为主库位以外的拆分库位与件数；
+ *   按库位筛选时命中“主库位在此或在此拆有件数”的规格。
  * 维护重点：只读服务，不参与任何写库存流程。
  */
 
@@ -9,10 +11,12 @@ import ExcelJS from 'exceljs'
 import { AppDataSource } from '../config/data-source.js'
 import { INVENTORY_CHANGE_TYPE_LABELS } from '../constants/inventory-change-types.js'
 import { BaseProductSku } from '../entities/base-product-sku.entity.js'
+import { InvSkuLocationStock } from '../entities/inv-sku-location-stock.entity.js'
 import { InventoryLog } from '../entities/inventory-log.entity.js'
 import type { PaginationResult } from '../types/api.js'
 import { calculateDiscountedPrice } from '../utils/discount-price.js'
 import { BizError } from '../utils/errors.js'
+import { loadSkuLocationDistributions, type SkuLocationQty } from './sku-location-stock.service.js'
 
 export interface StockQuery {
   page?: number
@@ -36,8 +40,13 @@ export interface StockRowView {
   thumbnail: string | null
   categoryId: string | null
   categoryName: string | null
+  /** 主库位。 */
   locationId: string | null
   locationCode: string | null
+  /** 主库位件数（总库存减去其他库位件数）。 */
+  mainLocationQty: number
+  /** 主库位以外的拆分库位与件数。 */
+  otherLocations: SkuLocationQty[]
   costPrice: string | null
   salePrice: string
   currentStock: number
@@ -106,7 +115,15 @@ export class InventoryQueryService {
     }
     if (query.categoryId) qb.andWhere('p.category_id = :categoryId', { categoryId: query.categoryId })
     if (query.locationId === 'none') qb.andWhere('sku.locationId IS NULL')
-    else if (query.locationId) qb.andWhere('sku.locationId = :locationId', { locationId: query.locationId })
+    else if (query.locationId) {
+      const stockedHere = qb.subQuery()
+        .select('1')
+        .from(InvSkuLocationStock, 'stock')
+        .where('stock.skuId = sku.id')
+        .andWhere('stock.locationId = :locationId')
+        .getQuery()
+      qb.andWhere(`(sku.locationId = :locationId OR EXISTS ${stockedHere})`, { locationId: query.locationId })
+    }
     if (typeof query.maxStock === 'number' && Number.isFinite(query.maxStock)) {
       qb.andWhere('sku.currentStock <= :maxStock', { maxStock: Math.floor(query.maxStock) })
     }
@@ -142,6 +159,11 @@ export class InventoryQueryService {
       .offset((page - 1) * pageSize)
       .limit(pageSize)
       .getRawMany<Record<string, string | number | null>>()
+    const distributions = await loadSkuLocationDistributions(AppDataSource.manager, rows.map((row) => ({
+      id: String(row.skuId),
+      locationId: row.locationId ? String(row.locationId) : null,
+      currentStock: Number(row.currentStock ?? 0),
+    })))
 
     return {
       page,
@@ -165,6 +187,8 @@ export class InventoryQueryService {
           categoryName: row.categoryName ? String(row.categoryName) : null,
           locationId: row.locationId ? String(row.locationId) : null,
           locationCode: row.locationCode ? String(row.locationCode) : null,
+          mainLocationQty: distributions.get(String(row.skuId))?.mainQty ?? currentStock,
+          otherLocations: distributions.get(String(row.skuId))?.others ?? [],
           costPrice: row.costPrice === null || row.costPrice === undefined ? null : Number(row.costPrice).toFixed(2),
           salePrice: calculateDiscountedPrice(String(row.defaultPrice ?? 0), String(row.discountRate ?? 10)),
           currentStock,

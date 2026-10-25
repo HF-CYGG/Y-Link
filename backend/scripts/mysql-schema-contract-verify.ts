@@ -55,6 +55,7 @@ const REQUIRED_TABLES = [
   'base_yz_series_seq_reservation',
   'sys_user_mfa',
   'sys_user_webauthn_credential',
+  'inv_sku_location_stock',
 ] as const
 
 const REQUIRED_COLUMNS = [
@@ -167,6 +168,8 @@ const REQUIRED_COLUMNS = [
   ['sys_user_webauthn_credential', 'usage'],
   ...['user_id', 'rp_id', 'credential_id_sha256', 'credential_id', 'public_key', 'counter', 'transports_json', 'device_type', 'backed_up', 'name', 'created_at', 'last_used_at']
     .map((columnName) => ['sys_user_webauthn_credential', columnName] as const),
+  // 060：按库位盘点的明细库位列。
+  ['inv_stocktake_item', 'location_scope_id'],
 ] as const
 
 const REQUIRED_COLUMN_LENGTHS = new Map<string, number>([
@@ -190,6 +193,9 @@ interface ColumnFixture {
 const REQUIRED_MANUAL_OUTBOUND_COLUMN_DEFINITIONS = new Map<string, ColumnFixture>([
   ['sys_user_mfa.factor_revision', {
     dataType: 'int', columnType: 'int', isNullable: 'NO', characterMaximumLength: null, columnDefault: '1',
+  }],
+  ['inv_stocktake_item.location_scope_id', {
+    dataType: 'bigint', columnType: 'bigint unsigned', isNullable: 'NO', characterMaximumLength: null, columnDefault: '0',
   }],
   ['sys_user_webauthn_credential.usage', {
     dataType: 'varchar', columnType: 'varchar(16)', isNullable: 'NO', characterMaximumLength: 16, columnDefault: 'passwordless',
@@ -563,7 +569,10 @@ const REQUIRED_INDEXES: readonly IndexFixture[] = [
   { tableName: 'inv_stock_doc', indexName: 'uk_inv_stock_doc_no', columns: ['doc_no'], unique: true },
   { tableName: 'inv_stock_doc', indexName: 'uk_inv_stock_doc_request', columns: ['client_request_id'], unique: true },
   { tableName: 'inv_stocktake', indexName: 'uk_inv_stocktake_no', columns: ['stocktake_no'], unique: true },
-  { tableName: 'inv_stocktake_item', indexName: 'uk_inv_stocktake_item_sku', columns: ['stocktake_id', 'sku_id'], unique: true },
+  // 060：盘点明细唯一键扩展到“规格 × 库位”；分库位库存同一规格同一库位至多一行。
+  { tableName: 'inv_stocktake_item', indexName: 'uk_inv_stocktake_item_sku_location', columns: ['stocktake_id', 'sku_id', 'location_scope_id'], unique: true },
+  { tableName: 'inv_sku_location_stock', indexName: 'uk_inv_sku_location_stock_sku_location', columns: ['sku_id', 'location_id'], unique: true },
+  { tableName: 'inv_sku_location_stock', indexName: 'idx_inv_sku_location_stock_location_id', columns: ['location_id'], unique: false },
 ]
 
 const REQUIRED_FOREIGN_KEYS: readonly ForeignKeyFixture[] = [
@@ -635,6 +644,9 @@ const REQUIRED_FOREIGN_KEYS: readonly ForeignKeyFixture[] = [
     // 054：两步验证记录不随账号级联删除，永久删除账号时由服务层显式清理。
     ['sys_user_mfa', 'fk_sys_user_mfa_user_id', 'user_id', 'sys_user', 'RESTRICT'],
     ['sys_user_webauthn_credential', 'fk_sys_user_webauthn_credential_user_id', 'user_id', 'sys_user', 'RESTRICT'],
+    // 060：分库位库存随 SKU 级联清理，库位被引用时拒绝删除。
+    ['inv_sku_location_stock', 'fk_inv_sku_location_stock_sku_id', 'sku_id', 'base_product_sku', 'CASCADE'],
+    ['inv_sku_location_stock', 'fk_inv_sku_location_stock_location_id', 'location_id', 'base_storage_location', 'RESTRICT'],
   ].map(([tableName, constraintName, columnName, referencedTableName, deleteRule]) => ({
     tableName,
     constraintName,
@@ -1251,5 +1263,22 @@ await expectSchemaFailure(missingWebauthnUnique, ['索引 sys_user_webauthn_cred
 const cascadingWebauthnForeignKey = createCompleteFixture()
 cascadingWebauthnForeignKey.foreignKeys.get(objectKey('sys_user_webauthn_credential', 'fk_sys_user_webauthn_credential_user_id'))!.deleteRule = 'CASCADE'
 await expectSchemaFailure(cascadingWebauthnForeignKey, ['外键 sys_user_webauthn_credential.user_id 必须使用 ON DELETE RESTRICT', '058_admin_webauthn.sql'])
+
+// 060：分库位库存表、盘点明细库位列与“规格 × 库位”唯一键缺失，或外键删除规则被改动，都必须在启动期阻断并指向 060。
+const missingLocationStockTable = createCompleteFixture()
+missingLocationStockTable.tables.delete('inv_sku_location_stock')
+await expectSchemaFailure(missingLocationStockTable, ['inv_sku_location_stock', '060_sku_location_stock.sql'])
+
+const missingStocktakeLocationScope = createCompleteFixture()
+missingStocktakeLocationScope.columns.delete(objectKey('inv_stocktake_item', 'location_scope_id'))
+await expectSchemaFailure(missingStocktakeLocationScope, ['字段 inv_stocktake_item.location_scope_id', '060_sku_location_stock.sql'])
+
+const missingStocktakeLocationUnique = createCompleteFixture()
+missingStocktakeLocationUnique.indexes.delete(objectKey('inv_stocktake_item', 'uk_inv_stocktake_item_sku_location'))
+await expectSchemaFailure(missingStocktakeLocationUnique, ['索引 inv_stocktake_item.uk_inv_stocktake_item_sku_location', '060_sku_location_stock.sql'])
+
+const restrictLocationStockSku = createCompleteFixture()
+restrictLocationStockSku.foreignKeys.get(objectKey('inv_sku_location_stock', 'fk_inv_sku_location_stock_sku_id'))!.deleteRule = 'RESTRICT'
+await expectSchemaFailure(restrictLocationStockSku, ['外键 inv_sku_location_stock.sku_id 必须使用 ON DELETE CASCADE', '060_sku_location_stock.sql'])
 
 console.log('[mysql-schema-contract-verify] MySQL 启动结构契约验证通过')

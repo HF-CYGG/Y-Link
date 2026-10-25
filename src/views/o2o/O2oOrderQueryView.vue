@@ -1412,7 +1412,7 @@ onBeforeUnmount(() => {
             :key="tab.key"
             type="button"
             class="order-pool-tab flex min-w-0 items-center justify-between rounded-2xl px-3 py-2 text-left text-xs transition"
-            :class="activePool === tab.key ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-white/10 dark:text-slate-200'"
+            :class="activePool === tab.key ? 'bg-slate-900 text-white dark:bg-brand' : 'bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-white/10 dark:text-slate-200'"
             @click="handlePoolChange(tab.key)"
           >
             <span class="order-pool-tab__label">{{ tab.label }}</span>

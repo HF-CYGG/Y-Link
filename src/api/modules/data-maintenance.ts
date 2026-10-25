@@ -50,6 +50,8 @@ export interface CreateAutomaticSQLiteToMySqlTaskPayload {
 export interface SQLiteToMySqlPrecheckPayload {
   target: MySqlMigrationTarget
   allowTargetWithData?: boolean
+  /** 一键自动迁移入口传 automatic：本系统失败自动迁移遗留的目标表降为提示，执行时自动清理重建。 */
+  purpose?: 'automatic'
 }
 
 /**

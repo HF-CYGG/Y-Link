@@ -65,7 +65,7 @@ const canOpenRescue = computed(() => {
 </script>
 
 <template>
-  <section v-if="task" class="mt-5 rounded-2xl border border-slate-200/80 bg-slate-50/70 p-4 dark:border-white/10 dark:bg-slate-900/20">
+  <section v-if="task" class="mt-5 rounded-2xl border border-slate-200/80 bg-slate-50/70 p-4 dark:border-white/10 dark:bg-black/20">
     <div class="flex flex-wrap items-start justify-between gap-3">
       <div>
         <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100">自动迁移进度</h3>
@@ -96,7 +96,7 @@ const canOpenRescue = computed(() => {
           ? 'border-emerald-200 bg-emerald-50/80 dark:border-emerald-900/70 dark:bg-emerald-950/20'
           : phaseState(index) === 'active'
             ? 'border-amber-300 bg-amber-50/80 dark:border-amber-900/70 dark:bg-amber-950/20'
-            : 'border-slate-200 bg-white/70 dark:border-white/10 dark:bg-slate-950/20'"
+            : 'border-slate-200 bg-white/70 dark:border-white/10 dark:bg-black/20'"
       >
         <div class="flex items-center justify-between gap-2 text-sm font-medium text-slate-800 dark:text-slate-100">
           <span>{{ index + 1 }}. {{ phase.title }}</span>

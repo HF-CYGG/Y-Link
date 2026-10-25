@@ -854,6 +854,8 @@ async function verifyFetchMetadataIsolation() {
   await blocked('POST', '/api/auth/logout', { 'Sec-Fetch-Site': 'same-site' }, '兄弟子域写请求')
   await blocked('POST', '/api/client-auth/login', { Origin: 'http://evil.example' }, '无 Fetch Metadata 时 Origin 主机不一致', { account: 'x', password: 'y' })
   await blocked('POST', '/api/client-auth/register', { Origin: 'null' }, 'null 来源', {})
+  await blocked('POST', '/api/client-auth/register', { Origin: 'null', Referer: 'http://evil.example/login' }, 'null 来源且跨站 Referer', {})
+  await passed('POST', '/api/auth/login', { Origin: 'null', Referer: `${baseUrl}/login?redirect=/dashboard` }, 'null 来源但同源 Referer（旧版 WebKit）', {})
   await passed('GET', '/api/o2o/mall/products', { 'Sec-Fetch-Site': 'same-site' }, '兄弟子域读请求')
   await passed('POST', '/api/auth/login', { 'Sec-Fetch-Site': 'same-origin' }, '同源写请求', {})
   await passed('POST', '/api/auth/login', { 'Sec-Fetch-Site': 'none' }, '用户直接发起的请求', {})

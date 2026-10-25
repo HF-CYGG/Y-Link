@@ -93,6 +93,7 @@ includes(mysqlCompose, 'mysql:', 'MySQL 必须位于 Onebox 可选叠加文件')
 includes(mysqlCompose, 'MYSQL_PASSWORD: ${MYSQL_PASSWORD:?', '可选 MySQL 必须在启动前拒绝空业务密码')
 includes(mysqlCompose, 'MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?', '可选 MySQL 必须在启动前拒绝空 root 密码')
 includes(mysqlCompose, '--default-time-zone=+00:00', '内置 MySQL 必须以 UTC 生成数据库时间戳')
+includes(mysqlCompose, '--log-bin-trust-function-creators=1', '内置 MySQL 必须允许迁移账号补建账号生命周期保护触发器')
 includes(compose, 'DB_TYPE: sqlite', 'Onebox 首次启动必须默认使用 SQLite')
 includes(
   compose,

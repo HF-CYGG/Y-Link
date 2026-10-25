@@ -1630,7 +1630,7 @@ onActivated(() => {
 }
 
 .dark .system-config-section-menu {
-  border-bottom-color: rgba(148, 163, 184, 0.22);
+  border-bottom-color: rgba(255, 255, 255, 0.1);
   background: transparent;
 }
 
@@ -1641,7 +1641,7 @@ onActivated(() => {
 .dark .system-config-section-menu :deep(.el-menu-item:hover),
 .dark .system-config-section-menu :deep(.el-menu-item:focus),
 .dark .system-config-section-menu :deep(.el-menu-item.is-active) {
-  background-color: rgba(15, 23, 42, 0.5);
+  background-color: rgba(10, 10, 11, 0.5);
   border-bottom-color: #5eead4;
   color: #5eead4;
 }

@@ -56,8 +56,8 @@ const emit = defineEmits<{
           step.unlocked
             ? activeStepKey === step.key
               ? 'border-blue-300 bg-blue-50/80 shadow-sm dark:border-blue-400/40 dark:bg-blue-500/10'
-              : 'border-slate-200/80 bg-slate-50/80 hover:border-blue-200 hover:bg-blue-50/50 dark:border-white/10 dark:bg-slate-900/20'
-            : 'cursor-not-allowed border-slate-200/60 bg-slate-100/70 opacity-65 dark:border-white/10 dark:bg-slate-900/10',
+              : 'border-slate-200/80 bg-slate-50/80 hover:border-blue-200 hover:bg-blue-50/50 dark:border-white/10 dark:bg-black/20'
+            : 'cursor-not-allowed border-slate-200/60 bg-slate-100/70 opacity-65 dark:border-white/10 dark:bg-black/10',
         ]"
         :disabled="!step.unlocked"
         @click="emit('open-step', { stepKey: step.key, unlocked: step.unlocked })"

@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import test from 'node:test'
 import { parse, compileScript } from '@vue/compiler-sfc'
 import { rolldown } from 'rolldown'
-import { createRenderer, createSSRApp, h, nextTick, reactive } from 'vue'
+import { createRenderer, createSSRApp, h, nextTick, reactive, watch } from 'vue'
 import { renderToString } from '@vue/server-renderer'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -68,12 +68,20 @@ const renderer = createRenderer({
   parentNode: (node) => node.parent,
   nextSibling: () => null,
 })
+/**
+ * 测试直接给 labels 赋值、不经 loadLabels()；组件在 loadLabels() 里会把新一批标签默认全选，
+ * 这里用同步监听镜像同一行为，否则打印只打勾选规格后所有用例都会被“请至少勾选”拦住。
+ */
+const selectAllOnReplace = (state) => {
+  watch(state.labels, (value) => { state.selectedSkuIds.value = new Set(value.map((label) => label.skuId)) }, { flush: 'sync' })
+}
 const mountSetup = async (skuIds = [], modelValue = false) => {
   let state
   const props = reactive({ modelValue, skuIds })
   const app = renderer.createApp({
     setup() {
       state = component.setup(props, { emit: () => {}, expose: () => {} })
+      selectAllOnReplace(state)
       return () => h('div')
     },
   })
@@ -89,6 +97,8 @@ const setup = async (skuIds = []) => {
       return () => h('div')
     },
   }))
+  // SSR 渲染期间 Vue 不执行 watch，必须在 renderToString 结束后、组件上下文之外注册。
+  selectAllOnReplace(state)
   return state
 }
 
@@ -181,7 +191,7 @@ const withBrowser = async (run) => {
 }
 
 const testLabel = (skuCode = 'WC02001', factoryBarcode = 'FACTORY-1') => ({
-  skuCode, barcode: skuCode, factoryBarcode,
+  skuId: skuCode, skuCode, barcode: skuCode, factoryBarcode,
 })
 const readyToPrint = (state, label = testLabel()) => {
   state.labels.value = [label]
@@ -218,6 +228,23 @@ test('没有生成条码图及原厂值时阻断打印并指出对应标签', as
   assert.deepEqual(state.missingBarcodes.value, ['WC02001（无原厂条码）'])
   assert.match(state.printBlockedReason.value, /无原厂条码/)
   assert.equal(calls.loading, 0, '本地校验不得请求标签数据')
+})
+
+test('只打印勾选的规格：取消勾选后不参与缺码检查与计数，全不选时阻断打印', async () => {
+  const state = await setup()
+  const ok = testLabel('WC02001')
+  const broken = testLabel('WC02002', '')
+  state.labels.value = [ok, broken]
+  state.barcodeSvgMap.value = { [state.encodedTextFor(ok)]: '<svg />' }
+  assert.deepEqual(state.missingBarcodes.value, ['WC02002'], '默认全选时缺码规格应阻断')
+  state.toggleSkuSelected(broken.skuId, false)
+  assert.deepEqual(state.missingBarcodes.value, [], '未勾选的规格不参与缺码检查')
+  assert.equal(state.totalLabelCount.value, state.settings.copies)
+  assert.equal(state.printBlockedReason.value, '')
+  state.toggleAllSelected(false)
+  assert.equal(state.printBlockedReason.value, '请至少勾选一个要打印的规格')
+  state.toggleAllSelected(true)
+  assert.equal(state.selectedLabels.value.length, 2)
 })
 
 test('手动 30×20 是唯一纸张尺寸，长旧编码生成及打印不得反写尺寸', async () => {

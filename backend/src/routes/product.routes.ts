@@ -8,7 +8,7 @@ import path from 'node:path'
 import { Router } from 'express'
 import multer from 'multer'
 import { z } from 'zod'
-import { requireAnyPermission, requirePermission } from '../middleware/auth.middleware.js'
+import { requireAnyPermission, requirePermission, requireRole } from '../middleware/auth.middleware.js'
 import { productExcelService } from '../services/product-excel.service.js'
 import { productImportYzService, type YzImportResolution } from '../services/product-import-yz.service.js'
 import { batchCreateProducts, productService, type ProductView } from '../services/product.service.js'
@@ -616,6 +616,51 @@ productRouter.post(
     const authReq = req as AuthenticatedRequest
     const payload = yzCodeUpgradeSchema.parse(req.body)
     const data = await productService.upgradeProductToYzCode(req.params.id, payload, authReq.auth, extractRequestMeta(req))
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+const seriesSwitchPreviewSchema = z.object({
+  primarySeriesTagId: z.string().min(1, '请选择要更换到的文创系列'),
+})
+
+// 执行时必须带上管理员确认过的预检结果（原产品编码与新编码），服务层在商品锁内逐一比对，防止落成未经确认的变更。
+const seriesSwitchSchema = seriesSwitchPreviewSchema.extend({
+  expectedOldProductCode: z.string().min(1, '缺少确认时的原产品编码，请重新确认'),
+  expectedProductCode: z.string().min(1, '缺少确认的产品编码，请重新确认'),
+  expectedSkuCodes: z.array(z.string().max(100)).max(500),
+})
+
+productRouter.post(
+  '/:id/series-switch/preview',
+  // 只读预检；更换文创系列会重算编码、让已打印的 YZ 标签失效，仅管理员可用。
+  requirePermission('products:manage'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = seriesSwitchPreviewSchema.parse(req.body)
+    const data = await productService.previewProductSeriesSwitch(req.params.id, payload.primarySeriesTagId, authReq.auth)
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+productRouter.post(
+  '/:id/series-switch',
+  // YZ 编码商品更换文创系列：重算产品编码与 SKU 编码，不可撤销，仅管理员可用。
+  requirePermission('products:manage'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = seriesSwitchSchema.parse(req.body)
+    const data = await productService.switchProductSeries(req.params.id, payload, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',

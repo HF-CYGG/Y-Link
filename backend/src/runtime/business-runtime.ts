@@ -27,6 +27,7 @@ import { notificationService } from '../services/notification.service.js'
 import { mobileSessionService } from '../services/mobile-session.service.js'
 import { o2oPreorderService } from '../services/o2o-preorder.service.js'
 import { persistentRiskStateService } from '../services/persistent-risk-state.service.js'
+import { productService } from '../services/product.service.js'
 import { aliyunDypnsMnsWorkerService } from '../services/aliyun-dypns-mns-worker.service.js'
 import { systemConfigService } from '../services/system-config.service.js'
 import { migrateLegacyUploadReferences } from '../utils/upload-migration.js'
@@ -279,11 +280,32 @@ const runMutableStartupBootstrap = async () => {
   await notificationService.ensureDefaultRules()
   logLine('STEP', 'seal legacy sensitive configs')
   const dataEncryption = await sealLegacySensitiveConfigs()
+  logLine('STEP', 'repair stale yz sku codes')
+  await repairStaleYzSkuCodes()
 
   return {
     adminBootstrap,
     configBootstrap,
     dataEncryption,
+  }
+}
+
+/**
+ * YZ 商品遗留非 YZ 规格编码的启动自愈（如启动补建的 SKU-<商品ID>）：尽力而为，
+ * 单个商品失败只跳过并记日志（只含产品编码与原因），不阻断启动；修复详情见审计 product.yz_sku_code_repair。
+ */
+const repairStaleYzSkuCodes = async (): Promise<void> => {
+  try {
+    const result = await productService.repairStaleYzSkuCodes()
+    if (result.repairedSkuCount || result.skippedProducts.length) {
+      logLine(
+        'YZ SKU REPAIR',
+        `repaired=${result.repairedSkuCount} skipped=${result.skippedProducts.map((item) => `${item.productCode}(${item.reason})`).join(', ') || 0}`,
+        result.skippedProducts.length ? 'warn' : 'success',
+      )
+    }
+  } catch (error) {
+    console.error(paint('[y-link-backend] repair stale yz sku codes failed:', 'red'), toSafeErrorLog(error))
   }
 }
 

@@ -176,7 +176,7 @@ const cookieValueByName = (raw: string | undefined, name: string) => {
 const nonceForChallenge = (raw: string | undefined, challengeId: string) => cookieValueByName(raw, nonceCookieName(challengeId))
 
 authRouter.post('/login/mfa/webauthn/options', asyncHandler(async (req, res) => {
-  const origin = assertWebauthnOrigin(req.headers.origin)
+  const origin = assertWebauthnOrigin(req.headers)
   const { mfaTicket } = webauthnMfaOptionsSchema.parse(req.body)
   if ((req.headers.cookie ?? '').split(';').filter((part) =>
     /^\s*y_link_webauthn_mfa_nonce_[A-Za-z0-9_-]{43}=/.test(part)).length >= 8) {
@@ -190,7 +190,7 @@ authRouter.post('/login/mfa/webauthn/options', asyncHandler(async (req, res) => 
 }))
 
 authRouter.post('/login/mfa/webauthn/verify', asyncHandler(async (req, res) => {
-  const origin = assertWebauthnOrigin(req.headers.origin)
+  const origin = assertWebauthnOrigin(req.headers)
   const payload = webauthnMfaVerifySchema.parse(req.body)
   const name = mfaNonceCookieName(payload.challengeId)
   const nonce = cookieValueByName(req.headers.cookie, name)
@@ -204,7 +204,7 @@ authRouter.post('/login/mfa/webauthn/verify', asyncHandler(async (req, res) => {
 }))
 
 authRouter.post('/webauthn/step-up/options', requireAuth, requireAdminCsrf, asyncHandler(async (req, res) => {
-  const origin = assertWebauthnOrigin(req.headers.origin)
+  const origin = assertWebauthnOrigin(req.headers)
   const payload = stepUpOptionsSchema.parse(req.body)
   const authReq = req as AuthenticatedRequest
   const data = await adminWebauthnService.beginStepUp(authReq.auth, payload, origin, extractRequestMeta(req))
@@ -213,7 +213,7 @@ authRouter.post('/webauthn/step-up/options', requireAuth, requireAdminCsrf, asyn
 }))
 
 authRouter.post('/webauthn/step-up/verify', requireAuth, requireAdminCsrf, asyncHandler(async (req, res) => {
-  const origin = assertWebauthnOrigin(req.headers.origin)
+  const origin = assertWebauthnOrigin(req.headers)
   const payload = webauthnLoginVerifySchema.parse(req.body)
   const authReq = req as AuthenticatedRequest
   const data = await adminWebauthnService.completeStepUp(authReq.auth, payload.challengeId,
@@ -223,7 +223,7 @@ authRouter.post('/webauthn/step-up/verify', requireAuth, requireAdminCsrf, async
 }))
 
 authRouter.post('/webauthn/login/verify', asyncHandler(async (req, res) => {
-  const origin = assertWebauthnOrigin(req.headers.origin)
+  const origin = assertWebauthnOrigin(req.headers)
   const payload = webauthnLoginVerifySchema.parse(req.body)
   const nonce = nonceForChallenge(req.headers.cookie, payload.challengeId)
   res.clearCookie(nonceCookieName(payload.challengeId), {
@@ -245,7 +245,7 @@ authRouter.get('/webauthn/credentials', requireAuth, asyncHandler(async (req, re
 }))
 
 authRouter.post('/webauthn/register/options', requireAuth, requireAdminCsrf, asyncHandler(async (req, res) => {
-  const origin = assertWebauthnOrigin(req.headers.origin)
+  const origin = assertWebauthnOrigin(req.headers)
   const payload = webauthnRegisterOptionsSchema.parse(req.body)
   const authReq = req as AuthenticatedRequest
   const data = await adminWebauthnService.beginRegistration(authReq.auth, payload, origin, extractRequestMeta(req))
@@ -254,7 +254,7 @@ authRouter.post('/webauthn/register/options', requireAuth, requireAdminCsrf, asy
 }))
 
 authRouter.post('/webauthn/register/verify', requireAuth, requireAdminCsrf, asyncHandler(async (req, res) => {
-  const origin = assertWebauthnOrigin(req.headers.origin)
+  const origin = assertWebauthnOrigin(req.headers)
   const payload = webauthnVerifySchema.parse(req.body)
   const authReq = req as AuthenticatedRequest
   const data = await adminWebauthnService.completeRegistration(
@@ -265,7 +265,7 @@ authRouter.post('/webauthn/register/verify', requireAuth, requireAdminCsrf, asyn
 }))
 
 authRouter.post('/webauthn/login/options', asyncHandler(async (req, res) => {
-  const origin = assertWebauthnOrigin(req.headers.origin)
+  const origin = assertWebauthnOrigin(req.headers)
   const payload = webauthnLoginOptionsSchema.parse(req.body)
   if (nonceCookieCount(req.headers.cookie) >= 8) throw new BizError('同时进行的密钥登录过多，请完成或关闭旧页面后重试', 429)
   const requestMeta = extractRequestMeta(req)

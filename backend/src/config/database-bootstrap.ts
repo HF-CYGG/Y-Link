@@ -72,6 +72,7 @@ const SQLITE_REQUIRED_TABLES = [
   'inv_stocktake_item',
   'base_product_variant_code_registry',
   'base_yz_series_seq_reservation',
+  'inv_sku_location_stock',
 ]
 
 /**
@@ -595,6 +596,26 @@ async function prepareSqliteOrderAmendmentColumns(dataSource: DataSource): Promi
  * #73 历史库存模式推断：旧手工单不追溯库存，O2O 核销正式单沿用预扣库存语义。
  * 新建手工单由服务层显式写 manual_applied，本函数不会覆盖任何合法的新模式。
  */
+/**
+ * 060：按库位盘点的明细库位列与唯一键替换（对应 MySQL 060_sku_location_stock.sql）。
+ * - 补 location_scope_id（0 表示按规格总量盘点），存量明细全部视为按总量盘点；
+ * - 先建 (stocktake_id, sku_id, location_scope_id) 新唯一索引，再删旧的 (stocktake_id, sku_id) 唯一索引，
+ *   否则按库位盘点时同一规格的多库位行会被旧索引拦住；
+ * - 不依赖 synchronize：shouldSynchronizeSqliteSchema 只按列判断，列补齐后可能不再触发同步，索引必须在这里换好。
+ * 全程幂等，表不存在（全新库）时跳过，由实体同步按最新结构建表。
+ */
+async function prepareSqliteStocktakeLocationScope(dataSource: DataSource): Promise<void> {
+  const columns = await listSqliteTableColumns(dataSource, 'inv_stocktake_item')
+  if (columns.size === 0) return
+  if (!columns.has('location_scope_id')) {
+    await dataSource.query('ALTER TABLE "inv_stocktake_item" ADD COLUMN "location_scope_id" integer NOT NULL DEFAULT (0)')
+  }
+  await dataSource.query(
+    'CREATE UNIQUE INDEX IF NOT EXISTS "uk_inv_stocktake_item_sku_location" ON "inv_stocktake_item" ("stocktake_id", "sku_id", "location_scope_id")',
+  )
+  await dataSource.query('DROP INDEX IF EXISTS "uk_inv_stocktake_item_sku"')
+}
+
 async function prepareSqliteOrderContentInventoryColumns(dataSource: DataSource): Promise<void> {
   const orderColumns = await listSqliteTableColumns(dataSource, 'biz_outbound_order')
   if (orderColumns.size === 0) return
@@ -2222,6 +2243,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
     await prepareSqliteOrderAmendmentColumns(dataSource)
     await prepareSqliteOrderContentInventoryColumns(dataSource)
     await prepareSqliteOrderSourceDocColumns(dataSource)
+    await prepareSqliteStocktakeLocationScope(dataSource)
     await backfillSqliteLegacySkuCodeFromBarcode(dataSource)
     await prepareSqliteYzReservationSeriesCodeColumns(dataSource)
     await prepareSqliteOrderMergeOperationResultSnapshot(dataSource)

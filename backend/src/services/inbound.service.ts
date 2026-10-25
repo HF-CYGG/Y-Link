@@ -22,6 +22,7 @@ import { MAX_DATABASE_INT, MAX_INBOUND_ORDER_ITEM_COUNT } from '../constants/web
 import { assertPermanentDeletePassword } from '../utils/permanent-delete-password.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 import { buildSkuLogFields, snapshotSkuStock } from './inventory-ledger.service.js'
+import { formatLocationDeductions, reconcileSkuLocationStocks } from './sku-location-stock.service.js'
 
 export interface SubmitInboundItemInput {
   productId: string
@@ -937,6 +938,8 @@ class InboundService {
           product.currentStock = afterCurrentStock
           await skuRepository.save(sku)
           await productRepository.save(product)
+          // 冲销按“先扣主库位、不够再扣其他库位”规整分库位件数，扣到的其他库位写进流水备注。
+          const locationNote = formatLocationDeductions((await reconcileSkuLocationStocks(manager, [sku])).get(String(sku.id)))
           await inventoryLogRepository.save(inventoryLogRepository.create({
             productId: String(product.id),
             ...buildSkuLogFields(sku, skuBefore),
@@ -951,7 +954,7 @@ class InboundService {
             operatorName: actor.displayName || actor.username,
             refType: 'biz_inbound_order',
             refId: order.id,
-            remark: `冲销已入库送货单 ${order.showNo}；SKU ${item.skuId}；数量 ${item.qty}`,
+            remark: [`冲销已入库送货单 ${order.showNo}；SKU ${item.skuId}；数量 ${item.qty}`, locationNote].filter(Boolean).join('；').slice(0, 255),
           }))
           reversalItems.push(item)
         }

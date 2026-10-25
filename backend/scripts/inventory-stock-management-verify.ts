@@ -173,6 +173,8 @@ async function main() {
     const labels = await productService.listLabels([blackBag.id, starSku.id])
     assert.deepEqual(labels.map((label) => label.barcode), ['WC03002', 'WC02001'])
     assert.equal(labels[1].locationCode, 'A-01-01')
+    // 打印弹窗按商品 ID 分组，不能退回按商品名称分组。
+    assert.deepEqual(labels.map((label) => label.productId), [String(bag.id), String(starSticker.id)])
     const filtered = await productService.list({ keyword: '6901234567892' })
     assert.deepEqual(filtered.map((item) => item.id), [bag.id])
     const byCategory = await productService.list({ categoryId: stickers.id })

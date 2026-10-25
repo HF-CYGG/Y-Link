@@ -51,6 +51,7 @@ export const useDatabaseMigrationConnectionTest = (
       executor: (signal) => precheckSQLiteToMySqlMigration({
         target: getTarget(),
         allowTargetWithData: false,
+        purpose: 'automatic',
       }, { signal }),
       onSuccess: (response) => {
         result.value = response

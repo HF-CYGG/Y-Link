@@ -254,7 +254,7 @@ onMounted(loadData)
           </el-table>
         </template>
         <template #card="{ item }">
-          <article v-if="activeTab === 'categories'" class="flex min-w-0 flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-white/10 dark:bg-slate-900/40">
+          <article v-if="activeTab === 'categories'" class="flex min-w-0 flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-white/10 dark:bg-black/40">
             <div class="flex min-w-0 items-start justify-between gap-2">
               <div class="min-w-0">
                 <div class="break-words font-semibold text-slate-800 dark:text-slate-100">{{ item.categoryName }}</div>
@@ -271,7 +271,7 @@ onMounted(loadData)
               <el-button class="!ml-0 flex-1" :type="item.isActive ? 'warning' : 'success'" plain @click="toggleCategory(item)">{{ item.isActive ? '停用' : '启用' }}</el-button>
             </div>
           </article>
-          <article v-else class="flex min-w-0 flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-white/10 dark:bg-slate-900/40">
+          <article v-else class="flex min-w-0 flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 dark:border-white/10 dark:bg-black/40">
             <div class="flex min-w-0 items-start justify-between gap-2">
               <div class="min-w-0">
                 <div class="break-words font-semibold text-slate-800 dark:text-slate-100">{{ item.locationCode }}</div>
@@ -330,6 +330,6 @@ onMounted(loadData)
         </el-form-item>
       </el-form>
     </BizCrudDialogShell>
-    <LocationSkuManageDialog v-model="skuDialogVisible" :location="managingLocation" :categories="categories" @updated="loadData" />
+    <LocationSkuManageDialog v-model="skuDialogVisible" :location="managingLocation" :categories="categories" :locations="locations" @updated="loadData" />
   </PageContainer>
 </template>

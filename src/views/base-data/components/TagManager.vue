@@ -393,17 +393,17 @@ onActivated(() => {
         <el-skeleton animated :rows="4" />
       </div>
       <div v-else-if="aggregateResult" class="mt-3 space-y-2 sm:mt-4 sm:space-y-3">
-        <div class="tag-aggregate-current truncate rounded-xl bg-slate-50 px-2.5 py-1.5 text-xs text-slate-500 dark:bg-slate-900/40 dark:text-slate-300 sm:px-3 sm:py-2">
+        <div class="tag-aggregate-current truncate rounded-xl bg-slate-50 px-2.5 py-1.5 text-xs text-slate-500 dark:bg-black/40 dark:text-slate-300 sm:px-3 sm:py-2">
           {{ aggregateResult.tagName }} ｜ {{ aggregateDateRange[0] }} 至 {{ aggregateDateRange[1] }} ｜ {{ aggregateOrderType ? (aggregateOrderType === 'department' ? '部门单' : '散客单') : '全部订单类型' }}
         </div>
         <div class="grid grid-cols-2 gap-2 sm:grid-cols-2 sm:gap-3 xl:grid-cols-4">
-          <div v-for="item in aggregateSummary" :key="item.key" class="rounded-xl bg-slate-50 px-2.5 py-2 dark:bg-slate-900/40 sm:px-3 sm:py-2.5">
+          <div v-for="item in aggregateSummary" :key="item.key" class="rounded-xl bg-slate-50 px-2.5 py-2 dark:bg-black/40 sm:px-3 sm:py-2.5">
             <div class="text-xs text-slate-500 dark:text-slate-400">{{ item.label }}</div>
             <div class="mt-1 text-sm font-semibold text-slate-800 dark:text-slate-100">{{ item.value }}</div>
           </div>
         </div>
       </div>
-      <div v-else class="mt-3 flex min-h-[88px] items-center justify-center rounded-xl bg-slate-50 text-slate-400 dark:bg-slate-900/40 sm:mt-4 sm:min-h-[110px]">
+      <div v-else class="mt-3 flex min-h-[88px] items-center justify-center rounded-xl bg-slate-50 text-slate-400 dark:bg-black/40 sm:mt-4 sm:min-h-[110px]">
         <el-empty :image-size="56" description="请选择标签并查询统计" />
       </div>
     </div>

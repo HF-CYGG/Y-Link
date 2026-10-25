@@ -7,8 +7,8 @@ const dockerfiles = [
   'backend/Dockerfile',
   'backend/Dockerfile.mysql',
 ]
-const publicEcrNodeImage = 'public.ecr.aws/docker/library/node:22-bookworm-slim'
-const dockerHubNodeImage = 'docker.io/library/node:22-bookworm-slim'
+const publicEcrNodeImage = 'public.ecr.aws/docker/library/node:22.23.4-bookworm-slim'
+const dockerHubNodeImage = 'docker.io/library/node:22.23.4-bookworm-slim'
 
 for (const filePath of dockerfiles) {
   const source = readFileSync(filePath, 'utf8')

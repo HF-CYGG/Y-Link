@@ -1252,7 +1252,7 @@ onBeforeUnmount(stopAutomaticTaskPolling)
             <el-tag type="success">推荐入口</el-tag>
           </div>
 
-          <div class="mt-4 grid gap-3 rounded-2xl bg-slate-50 p-4 text-sm dark:bg-slate-900/30 sm:grid-cols-2">
+          <div class="mt-4 grid gap-3 rounded-2xl bg-slate-50 p-4 text-sm dark:bg-black/30 sm:grid-cols-2">
             <div>
               <p class="text-slate-400">当前数据库</p>
               <p class="mt-1 font-medium text-slate-700 dark:text-slate-200">
@@ -1426,7 +1426,7 @@ onBeforeUnmount(stopAutomaticTaskPolling)
                   </el-tag>
                 </div>
 
-                <div class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-4 text-sm text-slate-600 dark:border-white/10 dark:bg-slate-900/20 dark:text-slate-300">
+                <div class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-4 text-sm text-slate-600 dark:border-white/10 dark:bg-black/20 dark:text-slate-300">
                   <p class="break-all">
                     目标：{{ normalizedTargetPreview.host || '-' }}:{{ normalizedTargetPreview.port }}/{{ normalizedTargetPreview.database || '-' }}
                   </p>
