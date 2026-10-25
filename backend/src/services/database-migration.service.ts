@@ -2220,9 +2220,8 @@ export class DatabaseMigrationService {
       return null
     }
 
-    let reclaimedTaskId: string | null = null
     if (existingTables.length > 0) {
-      reclaimedTaskId = await this.resolveReclaimableFailedAutomaticTarget(
+      const reclaimedTaskId = await this.resolveReclaimableFailedAutomaticTarget(
         targetDataSource,
         target,
         existingTables,
@@ -2231,8 +2230,18 @@ export class DatabaseMigrationService {
       if (!reclaimedTaskId) {
         throw new BizError(`目标库不再为空，已禁止开始自动迁移：${existingTables.join('、')}`, 409)
       }
-      // 遗留表连同旧所有权标记一并删除，随后由本任务重新写入标记并重建全部结构。
-      await this.dropOwnedTargetTables(targetDataSource, existingTables)
+      // 先用单条 UPDATE 把所有权标记转交给本任务并回读确认，再清理业务表且保留标记：
+      // 清理途中断连或重启时，本任务续跑仍能通过所有权校验并继续清理，不会留下无主遗留表。
+      await targetDataSource.query(
+        `UPDATE ${quoteIdentifier(ownerTableName)} SET task_id = ?, created_at = ? WHERE task_id = ?`,
+        [taskId, new Date(), reclaimedTaskId],
+      )
+      await this.assertAutomaticTargetOwnerMarker(targetDataSource, taskId)
+      await this.dropOwnedTargetTables(
+        targetDataSource,
+        existingTables.filter((tableName) => tableName !== ownerTableName),
+      )
+      return reclaimedTaskId
     }
     await targetDataSource.query(`
       CREATE TABLE ${quoteIdentifier(ownerTableName)} (
@@ -2244,7 +2253,7 @@ export class DatabaseMigrationService {
       `INSERT INTO ${quoteIdentifier(ownerTableName)} (task_id, created_at) VALUES (?, ?)`,
       [taskId, new Date()],
     )
-    return reclaimedTaskId
+    return null
   }
 
   private async clearAutomaticTargetOwnerMarker(

@@ -62,4 +62,56 @@ await service.assertAutomaticTargetReady({}, resume)
 assert.equal(permissionChecks, 2)
 assert.equal(destroyed, 9, '每个失败路径均须释放连接')
 assert.ok(queries.every(sql => /^SELECT /i.test(sql)), '所有权复检不能执行数据清理')
-console.log('[migration-resume] 冻结后复检、归属隔离、未知表拒绝及失败释放通过')
+
+// 认领失败任务遗留表时，清理途中断连不得留下无主表：标记须先转交给本任务，清理期间始终保留。
+const reclaimService = service as unknown as {
+  listExistingTableNames: () => Promise<string[]>
+  resolveReclaimableFailedAutomaticTarget: () => Promise<string | null>
+  prepareOwnedAutomaticTarget: (
+    dataSource: unknown,
+    target: unknown,
+    taskId: string,
+    retrying: boolean,
+    expectedTableNames: string[],
+  ) => Promise<string | null>
+}
+const ownerTable = '_y_link_migration_owner'
+let reclaimTables = [ownerTable, 'biz_a', 'biz_b']
+let reclaimOwners = [{ taskId: 'task-old' }]
+let failDropOf: string | null = 'biz_b'
+const reclaimQuery = async (sql: string, params: unknown[] = []) => {
+  if (sql.startsWith('UPDATE')) {
+    reclaimOwners = reclaimOwners.map((row) => (row.taskId === params[2] ? { taskId: String(params[0]) } : row))
+    return { affectedRows: 1 }
+  }
+  if (sql.includes('task_id')) return reclaimOwners
+  const dropMatch = /^DROP TABLE `([^`]+)`$/.exec(sql)
+  if (dropMatch) {
+    if (dropMatch[1] === failDropOf) throw new Error('模拟清理途中断连')
+    reclaimTables = reclaimTables.filter((name) => name !== dropMatch[1])
+    return []
+  }
+  if (sql.startsWith('SET FOREIGN_KEY_CHECKS')) return []
+  throw new Error(`非预期查询：${sql}`)
+}
+const reclaimDataSource = {
+  query: reclaimQuery,
+  createQueryRunner: () => ({ connect: async () => undefined, query: reclaimQuery, release: async () => undefined }),
+}
+reclaimService.listExistingTableNames = async () => [...reclaimTables]
+reclaimService.resolveReclaimableFailedAutomaticTarget = async () => (
+  reclaimOwners.length === 1 && reclaimOwners[0]?.taskId === 'task-old' ? 'task-old' : null
+)
+await assert.rejects(
+  reclaimService.prepareOwnedAutomaticTarget(reclaimDataSource, {}, 'task-new', false, ['biz_a', 'biz_b']),
+  /模拟清理途中断连/,
+)
+assert.ok(reclaimTables.includes(ownerTable), '认领清理中断后必须保留所有权标记')
+assert.deepEqual(reclaimOwners, [{ taskId: 'task-new' }], '清理业务表前所有权标记必须已转交给当前任务')
+failDropOf = null
+assert.equal(
+  await reclaimService.prepareOwnedAutomaticTarget(reclaimDataSource, {}, 'task-new', true, ['biz_a', 'biz_b']),
+  null,
+)
+assert.deepEqual(reclaimTables, [ownerTable], '当前任务续跑应清完剩余遗留表并保留自身标记')
+console.log('[migration-resume] 冻结后复检、归属隔离、未知表拒绝、失败释放及遗留表认领中断续跑通过')
