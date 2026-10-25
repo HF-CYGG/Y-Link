@@ -15,6 +15,7 @@
     "transaction-coordinator:verify": "node --import tsx scripts/transaction-coordinator-verify.ts",
     "verify:mysql:schema-contract": "node --import tsx scripts/mysql-schema-contract-verify.ts",
     "verify:db:migration:foundation": "tsx scripts/database-migration-foundation-verify.ts",
+    "verify:db:migration:check-clause": "tsx scripts/mysql-check-clause-verify.ts",
     "verify:db:write-freeze": "node --import tsx scripts/database-write-freeze-verify.ts",
     "verify:db:rescue:control": "node --import tsx scripts/database-rescue-control-verify.ts",
     "verify:db:rescue:protocol": "node --import tsx scripts/database-rescue-protocol-verify.ts",
