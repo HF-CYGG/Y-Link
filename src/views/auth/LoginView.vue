@@ -263,15 +263,12 @@ const refreshCaptcha = async (isCurrent: () => boolean = () => true) => {
   }
 }
 
-// 验证码到期前自动换新；提交或密钥仪式进行中旧验证码可能已随请求发出，先等 2 秒再试，
+// 验证码到期前自动换新；提交或密钥仪式进行中旧验证码可能已随请求发出，由组合函数稍后重试，
 // 该流程结果若已自行换新验证码，会重新安排计时并覆盖这次重试。
 const captchaAutoRefresh = useCaptchaAutoRefresh({
+  isVisible: () => captchaVisible.value,
+  isBusy: () => submitPhase.value !== 'idle' || finalRequestPending.value || webAuthnPhase.value !== 'idle',
   onExpire: () => {
-    if (!captchaVisible.value) return
-    if (submitPhase.value !== 'idle' || finalRequestPending.value || webAuthnPhase.value !== 'idle') {
-      captchaAutoRefresh.retryAfter(2000)
-      return
-    }
     void refreshCaptcha()
   },
 })

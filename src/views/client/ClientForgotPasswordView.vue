@@ -16,11 +16,11 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { Key, Lock, Message, User } from '@element-plus/icons-vue'
-import { getClientAuthCapabilities, getClientCaptcha, type ClientAuthCapabilities } from '@/api/modules/client-auth'
+import { getClientAuthCapabilities, type ClientAuthCapabilities } from '@/api/modules/client-auth'
 import { useStableRequest } from '@/composables/useStableRequest'
 import ThemeToggle from '@/layout/components/ThemeToggle.vue'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
-import { useCaptchaAutoRefresh } from '@/composables/useCaptchaAutoRefresh'
+import { useClientCaptcha } from '@/composables/useClientCaptcha'
 import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import {
@@ -38,7 +38,6 @@ import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/uti
 const route = useRoute()
 const router = useRouter()
 const clientAuthStore = useClientAuthStore(pinia)
-const { runLatest: runLatestCaptchaRequest, cancel: cancelCaptchaRequest } = useStableRequest()
 const { runLatest: runLatestCapabilityRequest, cancel: cancelCapabilityRequest } = useStableRequest()
 const { runLatest: runLatestVerificationCodeRequest, cancel: cancelVerificationCodeRequest } = useStableRequest()
 const { runLatest: runLatestVerifyRequest, cancel: cancelVerifyRequest } = useStableRequest()
@@ -54,12 +53,6 @@ const verificationCountdown = ref(0)
 const capabilityLoading = ref(false)
 const capabilityErrorMessage = ref('')
 const authCapabilities = ref<ClientAuthCapabilities | null>(null)
-const captchaLoading = ref(false)
-const captcha = reactive({
-  captchaId: '',
-  captchaImage: '',
-  captchaSvg: '',
-})
 let verificationTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let capabilityDeferredTimer: ReturnType<typeof globalThis.setTimeout> | null = null
 
@@ -67,6 +60,26 @@ const verifyForm = reactive({
   account: '',
   captcha: '',
   verificationCode: '',
+})
+
+// 图形验证码与登录页共用：到期前自动换新并清空已输入的旧码；第二步不展示验证码时丢弃旧票据，
+// 回到第一步时由 ensureCaptchaReady 重新拉取；发码或提交进行中则稍后重试。
+const {
+  captcha,
+  captchaLoading,
+  captchaImageSrc,
+  captchaRemainingSeconds,
+  refreshCaptcha,
+  clearCaptcha,
+  ensureCaptchaReady,
+  handleManualRefreshCaptcha,
+  cancelCaptchaRequest,
+} = useClientCaptcha({
+  isVisible: () => shouldPrepareCaptcha.value,
+  isBusy: () => verificationSending.value || submitting.value,
+  onAutoRefresh: () => {
+    verifyForm.captcha = ''
+  },
 })
 
 const resetForm = reactive({
@@ -80,19 +93,12 @@ const isCapabilityFallbackVisible = computed(() => !capabilityLoading.value && !
 const shouldPrepareCaptcha = computed(() => step.value === 1 && forgotPasswordAvailable.value)
 const passwordStrengthHint = CLIENT_NEW_PASSWORD_RULE_HINT
 
-// 安全说明：验证码接口返回的是 SVG 文本，
-// 这里统一编码成 data URL 图片，避免使用 v-html 直接注入 SVG 片段。
-const captchaImageSrc = computed(() => {
-  return captcha.captchaImage || (captcha.captchaSvg
-    ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(captcha.captchaSvg)}`
-    : '')
-})
 
 const captchaHintText = computed(() => {
-  if (captchaAutoRefresh.remainingSeconds.value <= 0) {
+  if (captchaRemainingSeconds.value <= 0) {
     return '发送验证码前请先输入图形验证码，点击右侧图片可立即刷新。'
   }
-  return `发送验证码前请先输入图形验证码，约 ${captchaAutoRefresh.remainingSeconds.value}s 后自动更换。`
+  return `发送验证码前请先输入图形验证码，约 ${captchaRemainingSeconds.value}s 后自动更换。`
 })
 
 const loadAuthCapabilities = async (options: { silent?: boolean } = {}) => {
@@ -137,67 +143,6 @@ const handleRetryLoadAuthCapabilities = async () => {
 
 const applySecurityHintFromMessage = (message: string) => {
   securityHint.value = /频繁|锁定|稍后|重试/.test(message) ? message : ''
-}
-
-const refreshCaptcha = async (silent = false) => {
-  captchaLoading.value = true
-  await runLatestCaptchaRequest({
-    executor: (signal) => getClientCaptcha({ signal }),
-    onSuccess: (result) => {
-      captcha.captchaId = result.captchaId
-      captcha.captchaImage = result.captchaImage ?? ''
-      captcha.captchaSvg = result.captchaSvg
-      captchaAutoRefresh.schedule(result.expiresInSeconds)
-      if (!silent) {
-        showAppSuccess('已刷新验证码')
-      }
-    },
-    onError: (error) => {
-      const normalizedError = normalizeRequestError(error, '验证码刷新失败，请稍后重试')
-      if (!silent) {
-        showAppError(normalizedError.message)
-      }
-    },
-    onFinally: () => {
-      captchaLoading.value = false
-    },
-  })
-}
-
-const clearCaptcha = () => {
-  captcha.captchaId = ''
-  captcha.captchaImage = ''
-  captcha.captchaSvg = ''
-  captchaAutoRefresh.cancel()
-}
-
-// 验证码到期前自动换新并清空已输入的旧码；第二步不展示验证码时直接丢弃旧票据，
-// 回到第一步时由 ensureCaptchaReady 重新拉取；发码或提交进行中则 2 秒后再试。
-const captchaAutoRefresh = useCaptchaAutoRefresh({
-  countdown: true,
-  onExpire: () => {
-    if (!shouldPrepareCaptcha.value) {
-      clearCaptcha()
-      return
-    }
-    if (verificationSending.value || submitting.value) {
-      captchaAutoRefresh.retryAfter(2000)
-      return
-    }
-    verifyForm.captcha = ''
-    void refreshCaptcha(true)
-  },
-})
-
-const ensureCaptchaReady = async () => {
-  if (captcha.captchaId && (captcha.captchaImage || captcha.captchaSvg)) {
-    return
-  }
-  await refreshCaptcha(true)
-}
-
-const handleManualRefreshCaptcha = async () => {
-  await refreshCaptcha()
 }
 
 const validateAccount = (account: string) => {

@@ -79,7 +79,6 @@ import { Key, Lock, Message, User } from '@element-plus/icons-vue'
 import {
   type ClientAccountType,
   getClientAuthCapabilities,
-  getClientCaptcha,
   type ClientAuthCapabilities,
   type ClientRegisterResult,
 } from '@/api/modules/client-auth'
@@ -88,7 +87,7 @@ import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
-import { useCaptchaAutoRefresh } from '@/composables/useCaptchaAutoRefresh'
+import { useClientCaptcha } from '@/composables/useClientCaptcha'
 import { APP_META } from '@/constants/app-meta'
 import ThemeToggle from '@/layout/components/ThemeToggle.vue'
 import {
@@ -113,16 +112,9 @@ const AUTH_MODE_QUERY_TAB_MAP: Record<AuthMode, 'login' | 'register-personal' | 
 }
 const AUTH_MODE_SEQUENCE: AuthMode[] = ['login', 'register-personal', 'register-department']
 
-interface ClientCaptchaState {
-  captchaId: string
-  captchaImage: string
-  captchaSvg: string
-}
-
 const router = useRouter()
 const route = useRoute()
 const clientAuthStore = useClientAuthStore(pinia)
-const { runLatest: runLatestCaptchaRequest, cancel: cancelCaptchaRequest } = useStableRequest()
 const { runLatest: runLatestCapabilityRequest, cancel: cancelCapabilityRequest } = useStableRequest()
 const { runLatest: runLatestLoginRequest, cancel: cancelLoginRequest } = useStableRequest()
 const { runLatest: runLatestRegisterRequest, cancel: cancelRegisterRequest } = useStableRequest()
@@ -134,7 +126,6 @@ const { runWithGate } = useIdempotentAction()
 // - 状态上仍兼容 query 透传，便于注册后回到登录页。
 const activeMode = ref<AuthMode>('login')
 const isLoading = ref(false)
-const captchaLoading = ref(false)
 const loginCaptchaVisible = ref(false)
 const successTip = ref('')
 const securityHint = ref('')
@@ -162,10 +153,26 @@ const formAnimating = ref(false)
 const usernameFocused = ref(false)
 const passwordFocused = ref(false)
 const authCapabilities = ref<ClientAuthCapabilities | null>(null)
-const captcha = reactive<ClientCaptchaState>({
-  captchaId: '',
-  captchaImage: '',
-  captchaSvg: '',
+// 图形验证码登录与注册共用，按需拉取：登录页仅在首轮失败后展示，注册页在当前通道走图片验证码时展示；
+// 到期前自动换新，并清空登录、注册表单里已输入的旧码；
+// 当前不展示验证码时丢弃旧票据，下次展示由 ensureCaptchaReady 重新拉取；提交或发码进行中则稍后重试。
+const {
+  captcha,
+  captchaLoading,
+  captchaImageSrc,
+  captchaRemainingSeconds,
+  refreshCaptcha,
+  clearCaptcha,
+  ensureCaptchaReady,
+  handleManualRefreshCaptcha,
+  cancelCaptchaRequest,
+} = useClientCaptcha({
+  isVisible: () => shouldPrepareCaptcha.value,
+  isBusy: () => isLoading.value || verificationSending.value,
+  onAutoRefresh: () => {
+    loginForm.captcha = ''
+    registerForm.captcha = ''
+  },
 })
 const loginForm = reactive({
   account: '',
@@ -247,18 +254,11 @@ const shouldPrepareCaptcha = computed(() => isRegisterMode.value || loginCaptcha
 const isCapabilityHintVisible = computed(() => capabilityLoading.value && !authCapabilities.value)
 const isCapabilityFallbackVisible = computed(() => !capabilityLoading.value && !!capabilityErrorMessage.value && !authCapabilities.value)
 const forgotPasswordAvailable = computed(() => authCapabilities.value?.forgotPasswordEnabled ?? false)
-// 优先使用后端 PNG data URL；旧服务返回 SVG 时仍以图片地址方式渲染，避免 v-html 注入。
-const captchaImageSrc = computed(() => {
-  return captcha.captchaImage || (captcha.captchaSvg
-    ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(captcha.captchaSvg)}`
-    : '')
-})
-
 const captchaHintText = computed(() => {
-  if (captchaAutoRefresh.remainingSeconds.value <= 0) {
+  if (captchaRemainingSeconds.value <= 0) {
     return '点击右侧验证码图片可立即刷新。'
   }
-  return `图形验证码约 ${captchaAutoRefresh.remainingSeconds.value}s 后自动更换，点击图片可立即刷新。`
+  return `图形验证码约 ${captchaRemainingSeconds.value}s 后自动更换，点击图片可立即刷新。`
 })
 
 const extractRegisterRemainingMessage = (response: AxiosResponse | undefined) => {
@@ -431,71 +431,6 @@ const applyRouteState = () => {
   if (registeredAccount) {
     loginForm.account = registeredAccount
   }
-}
-
-// 图形验证码按需拉取：
-// - 登录页仅在首轮失败后展示；
-// - 注册页在当前通道走图片验证码时展示。
-const refreshCaptcha = async (silent = false) => {
-  captchaLoading.value = true
-  await runLatestCaptchaRequest({
-    executor: (signal) => getClientCaptcha({ signal }),
-    onSuccess: (result) => {
-      captcha.captchaId = result.captchaId
-      captcha.captchaImage = result.captchaImage ?? ''
-      captcha.captchaSvg = result.captchaSvg
-      captchaAutoRefresh.schedule(result.expiresInSeconds)
-      if (!silent) {
-        showAppSuccess('已刷新验证码')
-      }
-    },
-    onError: (error) => {
-      const normalizedError = normalizeRequestError(error, '验证码刷新失败，请稍后重试')
-      if (!silent) {
-        showAppError(normalizedError.message)
-      }
-    },
-    onFinally: () => {
-      captchaLoading.value = false
-    },
-  })
-}
-
-const clearCaptcha = () => {
-  captcha.captchaId = ''
-  captcha.captchaImage = ''
-  captcha.captchaSvg = ''
-  captchaAutoRefresh.cancel()
-}
-
-// 验证码到期前自动换新：旧码已失效，一并清空登录与注册表单里已输入的验证码。
-// 当前不展示验证码时直接丢弃旧票据，下次展示由 ensureCaptchaReady 重新拉取；提交或发码进行中则 2 秒后再试。
-const captchaAutoRefresh = useCaptchaAutoRefresh({
-  countdown: true,
-  onExpire: () => {
-    if (!shouldPrepareCaptcha.value) {
-      clearCaptcha()
-      return
-    }
-    if (isLoading.value || verificationSending.value) {
-      captchaAutoRefresh.retryAfter(2000)
-      return
-    }
-    loginForm.captcha = ''
-    registerForm.captcha = ''
-    void refreshCaptcha(true)
-  },
-})
-
-const ensureCaptchaReady = async () => {
-  if (captcha.captchaId && (captcha.captchaImage || captcha.captchaSvg)) {
-    return
-  }
-  await refreshCaptcha(true)
-}
-
-const handleManualRefreshCaptcha = async () => {
-  await refreshCaptcha()
 }
 
 const loadAuthCapabilities = async (options: { silent?: boolean } = {}) => {
