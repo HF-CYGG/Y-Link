@@ -341,6 +341,12 @@ const jsonSnapshotDir = appDataPaths.migrationJsonDir
 const migrationSecretDir = appDataPaths.migrationSecretDir
 const migrationLockFile = appDataPaths.migrationLockFile
 const MIGRATION_BATCH_SIZE = 300
+/**
+ * 允许迁移时自动截断的诊断类文本列：
+ * - 早期版本写审计日志时未截断 UA，SQLite 不校验 VARCHAR 长度，历史超长值会让 MySQL 严格模式整批拒绝；
+ * - 仅收录排障辅助字段，截断尾部不影响任何业务口径；业务字段超长仍必须人工清理后再迁移。
+ */
+const MIGRATION_TRUNCATABLE_TEXT_COLUMNS = new Set(['sys_audit_log.user_agent', 'order_revision.user_agent'])
 const CRITICAL_VALIDATION_TABLES = new Set([
   'sys_user',
   'system_configs',
@@ -1045,6 +1051,95 @@ export class DatabaseMigrationService {
       }
     }
     return issues
+  }
+
+  /**
+   * 统计源 SQLite 中超出实体声明 VARCHAR 长度的文本：
+   * - SQLite 不校验 VARCHAR 长度，MySQL utf8mb4 按字符计长且严格模式下会直接报 Data too long；
+   * - 每张表只扫描一次，用 SUM(CASE ...) 汇总全部定长文本列，避免逐列全表扫描；
+   * - SQLite 对 TEXT 的 LENGTH 按字符计数，与 MySQL VARCHAR 的字符口径一致。
+   */
+  private async collectOverlongTextColumns(
+    dataSource: DataSource,
+    metadatas: EntityMetadata[],
+  ): Promise<Array<{ tableName: string; columnName: string; maxLength: number; overlongCount: number }>> {
+    const results: Array<{ tableName: string; columnName: string; maxLength: number; overlongCount: number }> = []
+    for (const metadata of metadatas) {
+      const boundedColumns = metadata.columns
+        .filter((column) => column.type === 'varchar' || column.type === String)
+        .map((column) => ({
+          columnName: column.databaseName,
+          maxLength: Number.parseInt(String(column.length ?? ''), 10),
+        }))
+        .filter((column) => Number.isInteger(column.maxLength) && column.maxLength > 0)
+      if (boundedColumns.length === 0) {
+        continue
+      }
+      const selectList = boundedColumns
+        .map((column, index) =>
+          `SUM(CASE WHEN LENGTH(${quoteIdentifier(column.columnName)}) > ${column.maxLength} THEN 1 ELSE 0 END) AS c${index}`,
+        )
+        .join(', ')
+      const [row] = this.toQueryRows(await dataSource.query(`SELECT ${selectList} FROM ${quoteIdentifier(metadata.tableName)}`))
+      boundedColumns.forEach((column, index) => {
+        const overlongCount = toNumber(row?.[`c${index}`] ?? 0)
+        if (overlongCount > 0) {
+          results.push({ tableName: metadata.tableName, ...column, overlongCount })
+        }
+      })
+    }
+    return results
+  }
+
+  private async collectSourceOverlongTextIssues(existingSourceTableNames: string[]): Promise<DatabaseMigrationIssue[]> {
+    const existingTableSet = new Set(existingSourceTableNames)
+    const metadatas = this.resolveOrderedEntityMetadatas(AppDataSource)
+      .filter((metadata) => existingTableSet.has(metadata.tableName))
+    const overlongColumns = await this.collectOverlongTextColumns(AppDataSource, metadatas)
+    return overlongColumns.map((item) => {
+      const columnLabel = `${item.tableName}.${item.columnName}`
+      return MIGRATION_TRUNCATABLE_TEXT_COLUMNS.has(columnLabel)
+        ? {
+            level: 'warning' as const,
+            code: 'source_diagnostic_text_overlong',
+            message: `源 SQLite 中 ${columnLabel} 有 ${item.overlongCount} 条超过 ${item.maxLength} 字符，迁移时将自动截断（仅影响排障辅助信息）。`,
+          }
+        : {
+            level: 'error' as const,
+            code: 'source_text_overlong',
+            message: `源 SQLite 中 ${columnLabel} 有 ${item.overlongCount} 条超过 MySQL 列长 ${item.maxLength} 字符，请先清理后再迁移到 MySQL。`,
+          }
+    })
+  }
+
+  /**
+   * 迁移前修正源库超长文本：
+   * - 诊断类白名单列按字符截断到列长，返回修正行数供任务阶段提示；
+   * - 其余超长列直接阻断，避免导入中途才被 MySQL 以 Data too long 打断且看不出具体字段。
+   */
+  private async repairAndAssertSourceTextLengths(dataSource: DataSource): Promise<number> {
+    const overlongColumns = await this.collectOverlongTextColumns(dataSource, this.resolveOrderedEntityMetadatas(dataSource))
+    const blockingColumns = overlongColumns.filter(
+      (item) => !MIGRATION_TRUNCATABLE_TEXT_COLUMNS.has(`${item.tableName}.${item.columnName}`),
+    )
+    if (blockingColumns.length > 0) {
+      throw new BizError(
+        `SQLite 源库存在超出 MySQL 列长的文本：${blockingColumns
+          .map((item) => `${item.tableName}.${item.columnName}（${item.overlongCount} 条超过 ${item.maxLength} 字符）`)
+          .join('；')}`,
+        409,
+      )
+    }
+
+    let repairedRows = 0
+    for (const item of overlongColumns) {
+      const column = quoteIdentifier(item.columnName)
+      await dataSource.query(
+        `UPDATE ${quoteIdentifier(item.tableName)} SET ${column} = SUBSTR(${column}, 1, ${item.maxLength}) WHERE LENGTH(${column}) > ${item.maxLength}`,
+      )
+      repairedRows += item.overlongCount
+    }
+    return repairedRows
   }
 
   private resolveOrderedEntityMetadatas(dataSource: DataSource): EntityMetadata[] {
@@ -2681,6 +2776,7 @@ export class DatabaseMigrationService {
 
     const sourceTableStats = await this.collectSourceTableStats(AppDataSource)
     issues.push(...(await this.collectSourceBusinessConstraintIssues(existingSourceTableNames)))
+    issues.push(...(await this.collectSourceOverlongTextIssues(existingSourceTableNames)))
     const sourceTotalRows = sourceTableStats.reduce((sum, item) => sum + item.rowCount, 0)
     if (sourceTotalRows === 0) {
       issues.push({
@@ -3205,6 +3301,12 @@ export class DatabaseMigrationService {
         expectedTableNames: this.resolveOrderedEntityMetadatas(AppDataSource).map((metadata) => metadata.tableName),
       } : undefined)
 
+      // 写入已冻结，在生成不可变快照前修正历史超长诊断文本，保证快照、目标库与强校验哈希口径一致。
+      const repairedOverlongRows = await this.repairAndAssertSourceTextLengths(AppDataSource)
+      if (repairedOverlongRows > 0) {
+        await this.updateTaskStage(task, `已截断 ${repairedOverlongRows} 条超长诊断文本（UA）以适配 MySQL 列长`)
+      }
+
       await this.updateAutomaticTaskStage(task, 'snapshotting', '正在生成不可变 SQLite 一致性快照')
       let immutableSnapshotFile = task.immutableSnapshotFile
       if (immutableSnapshotFile) {
@@ -3607,7 +3709,14 @@ export class DatabaseMigrationService {
     const sourceOrderedMetadatas = this.resolveOrderedEntityMetadatas(AppDataSource)
     const backupFile = await this.createSqliteBackupSnapshot()
     runningTask.backupFile = backupFile
-    await this.updateTaskStage(runningTask, '已完成 SQLite 物理备份，正在生成 JSON 快照')
+    // 物理备份保留原始数据后再修正超长诊断文本，JSON 快照与导入数据保持同一口径。
+    const repairedOverlongRows = await this.repairAndAssertSourceTextLengths(AppDataSource)
+    await this.updateTaskStage(
+      runningTask,
+      repairedOverlongRows > 0
+        ? `已完成 SQLite 物理备份并截断 ${repairedOverlongRows} 条超长诊断文本，正在生成 JSON 快照`
+        : '已完成 SQLite 物理备份，正在生成 JSON 快照',
+    )
 
     const jsonSnapshotFile = await this.createJsonSnapshotBackup(sourceOrderedMetadatas, latestPrecheck.source.tables)
     runningTask.jsonSnapshotFile = jsonSnapshotFile
