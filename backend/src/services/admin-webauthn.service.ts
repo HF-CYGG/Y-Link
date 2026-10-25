@@ -107,12 +107,38 @@ export function requireWebauthnEnabled(): { rpId: string; rpName: string; allowe
   return { rpId: webauthnConfig.rpId, rpName: webauthnConfig.rpName, allowedOrigins: webauthnConfig.allowedOrigins }
 }
 
-export function assertWebauthnOrigin(origin: string | undefined): string {
-  const config = requireWebauthnEnabled()
-  if (!origin || !config.allowedOrigins.includes(origin)) {
-    throw new BizError('WebAuthn 请求来源不受信任', 403, { reason: 'WEBAUTHN_ORIGIN_DENIED' })
+type WebauthnOriginHeaders = Record<string, string | string[] | undefined>
+const singleHeader = (value: string | string[] | undefined) => (Array.isArray(value) ? undefined : value?.trim() || undefined)
+const refererOrigin = (referer: string | undefined) => {
+  if (!referer) return undefined
+  try {
+    return new URL(referer).origin
+  } catch {
+    return undefined
   }
-  return origin
+}
+
+/**
+ * 解析并校验 WebAuthn 请求来源：
+ * - Origin 存在且不为 `null` 时必须精确命中白名单，不匹配直接拒绝，不回退；
+ * - 部分 WebKit（如 iOS 17.5 Safari）在特定导航后发出的同源 POST 会缺失 Origin 或带 `null`，
+ *   此时回退到 Referer 的 origin 精确匹配；第三方页面无法伪造指向本站的 Referer；
+ * - 回退时若带 Sec-Fetch-Site，必须为 same-origin，避免跨站请求借空 Origin 绕过；
+ * - 断言端仍由 SimpleWebAuthn 校验 clientDataJSON.origin，此处只是请求级前置门禁。
+ */
+export function assertWebauthnOrigin(headers: WebauthnOriginHeaders): string {
+  const config = requireWebauthnEnabled()
+  const deny = () => new BizError('WebAuthn 请求来源不受信任', 403, { reason: 'WEBAUTHN_ORIGIN_DENIED' })
+  const origin = singleHeader(headers.origin)
+  if (origin && origin !== 'null') {
+    if (!config.allowedOrigins.includes(origin)) throw deny()
+    return origin
+  }
+  const fetchSite = singleHeader(headers['sec-fetch-site'])
+  if (fetchSite && fetchSite !== 'same-origin') throw deny()
+  const fallback = refererOrigin(singleHeader(headers.referer))
+  if (!fallback || !config.allowedOrigins.includes(fallback)) throw deny()
+  return fallback
 }
 
 const nonceDigest = (nonce: string) => createHash('sha256').update('admin-webauthn-nonce.v1\u0000').update(nonce).digest('hex')
