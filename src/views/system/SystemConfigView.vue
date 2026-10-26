@@ -569,6 +569,25 @@ const validateNotificationRules = () => {
   return true
 }
 
+/**
+ * 与后端 VERIFICATION_SENSITIVE_VALUE_PLACEHOLDER 一致：已保存的请求头模板以该占位文本脱敏回显，
+ * 原样提交时后端先还原数据库原值再校验，前端不能把占位文本当 JSON 解析，否则未改动也无法保存。
+ */
+const VERIFICATION_SENSITIVE_VALUE_PLACEHOLDER = '[已隐藏敏感内容，保存时保留原值]'
+
+const isVerificationHeadersTemplateValid = (template: string) => {
+  const text = template.trim()
+  if (text === VERIFICATION_SENSITIVE_VALUE_PLACEHOLDER) {
+    return true
+  }
+  try {
+    JSON.parse(text || '{}')
+    return true
+  } catch {
+    return false
+  }
+}
+
 const getVerificationChannelLabel = (channel: 'mobile' | 'email') => {
   return channel === 'mobile' ? '短信验证码平台' : '邮箱验证码平台'
 }
@@ -601,9 +620,7 @@ const validateVerificationConfigs = () => {
       showTopWarning(`${label}已启用时必须填写 API 地址`)
       return false
     }
-    try {
-      JSON.parse(config.headersTemplate.trim() || '{}')
-    } catch {
+    if (!isVerificationHeadersTemplateValid(config.headersTemplate)) {
       showTopWarning(`${label}请求头模板必须是合法 JSON`)
       return false
     }
@@ -937,9 +954,7 @@ const validateSingleVerificationConfig = (channel: 'mobile' | 'email') => {
     showTopWarning(`${label}未填写 API 地址，无法发送测试消息`)
     return false
   }
-  try {
-    JSON.parse(config.headersTemplate.trim() || '{}')
-  } catch {
+  if (!isVerificationHeadersTemplateValid(config.headersTemplate)) {
     showTopWarning(`${label}请求头模板必须是合法 JSON`)
     return false
   }
