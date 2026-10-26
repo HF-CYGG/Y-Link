@@ -36,7 +36,7 @@
 - 客户端 `client-auth.ts` 负责登录、注册、找回密码、会话恢复，并在退出或账号切换时清理购物车、目录和订单缓存。
 - `client-cart.ts` 以“现有库存 + 单人限购”为统一约束，并在目录刷新后尽量重映射商品和 SKU，而不是直接清空。
 - `useStableRequest.ts` 通过“只保留最后一次请求结果 + 自动中止旧请求”解决高频筛选和详情切换的竞态问题。
-- 基础数据变更刷新：管理端 31 个路由开启 KeepAlive，缓存页只在首次挂载时加载的下拉选项会过期。`src/utils/data-change-signal.ts` 由 `http.ts` 响应拦截器在写请求成功（`code === 0`）后按 URL 前缀递增数据域版本：`products`（`/products`、`/tags`、`/inventory/categories|locations|docs|stocktakes`）、`departments`（`/system-configs/client-departments`、`/client-users/department-accounts`），预览/查询类 POST 不计。页面用 `useDataChangeRefresh(domains, refresh)` 订阅：停用期间发生变更才在激活时静默刷新，激活期间的变更视为本页自身操作只同步基线。已接入出库开单（商品、部门）、订单池与客户端用户管理（部门）、线上展示与报表中心（标签）、库存查询与库存主数据（分类、库位）、入库扫码、供方送货、O2O 入库（商品）。仅当前标签页内生效，不跨浏览器标签页。新增共享基础数据写接口或新的缓存页选项时，同步核对规则与接入点。
+- 基础数据变更刷新：管理端 31 个路由开启 KeepAlive，缓存页只在首次挂载时加载的下拉选项会过期。`src/utils/data-change-signal.ts` 由 `http.ts` 响应拦截器在写请求成功（`code === 0`）后按 URL 前缀递增数据域版本：`products`（`/products`、`/tags`、`/inventory/categories|locations|docs|stocktakes`）、`departments`（`/system-configs/client-departments`、`/client-users/department-accounts`），预览/查询类 POST 不计。页面用 `useDataChangeRefresh(domains, refresh)` 订阅：停用期间的变更在激活时静默刷新，激活期间收到的变更立即静默刷新（信号不带来源，其他页面的慢写请求可能在切回后才返回，不能当作本页自身操作跳过）；只有刷新成功（不抛错且不返回 `false`）才推进已同步版本，失败时下次继续重试。已接入出库开单（商品、部门）、订单池与客户端用户管理（部门）、线上展示与报表中心（标签）、库存查询与库存主数据（分类、库位）、入库扫码、供方送货、O2O 入库（商品）。仅当前标签页内生效，不跨浏览器标签页。新增共享基础数据写接口或新的缓存页选项时，同步核对规则与接入点。
 - `usePermissionAction.ts` 统一处理显隐、点击前权限拦截和越权提示。
 - 共享页面结构组件主要分三类：
   - 页面容器：`PageContainer`、`PageToolbarCard`、`PagePaginationBar`
