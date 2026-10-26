@@ -1,50 +1,33 @@
-# Y-Link 文创出入库与 O2O 预订系统
+<div align="center">
+
+<img src="./docs/photo/brand/y-link-logo.png" alt="Y-Link" width="128" height="128" />
+
+# Y-Link
+
+**文创出入库与 O2O 预订系统**
+
+面向文创、非遗、门店与活动场景的一体化库存管理平台
 
 ![Vue](https://img.shields.io/badge/Vue.js-3-4FC08D?logo=vue.js&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)
 ![Express](https://img.shields.io/badge/Express-4.x-000000?logo=express&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)
+![Database](https://img.shields.io/badge/Database-SQLite%20%7C%20MySQL-003B57?logo=sqlite&logoColor=white)
+![Node.js](https://img.shields.io/badge/Node.js-20%2B-5FA04E?logo=node.js&logoColor=white)
+[![License](https://img.shields.io/badge/License-GPL--3.0-blue)](./LICENSE)
 
-Y-Link 是一套面向文创、非遗、门店和活动场景的库存管理系统，覆盖“线上预订、线下核销、出库开单、供货入库、库存追踪、客户反馈”流程。
+[界面预览](#界面预览) · [功能概览](#功能概览) · [快速部署](#推荐部署1panel-单镜像) · [本地开发](#本地开发) · [更新日志](./docs/版本发布历史与更新日志.md) · [使用指南](./docs/Y-Link使用指南.md) · [GitHub Wiki](https://github.com/HF-CYGG/Y-Link/wiki)
 
-系统包含两端：
+</div>
+
+---
+
+Y-Link 覆盖“线上预订、线下核销、出库开单、供货入库、库存追踪、客户反馈”完整流程，包含管理端与客户端两端：
 
 - 管理端：管理员、运营人员、供货方使用，负责商品、库存、出入库、核销、用户、配置和审计。
 - 客户端：普通用户使用，负责注册登录、商品大厅、购物车、预订下单、订单查看、个人资料和反馈。
 
 技术栈：Vue 3、TypeScript、Element Plus、Pinia、Express、TypeORM。默认使用 SQLite，支持迁移到 MySQL。
-
-## Mobile 工程基础状态
-
-仓库包含 `apps/mobile` Expo 工程和 `packages/*` 跨端基础。Mobile 固定使用 Node.js `22.23.4`；根 npm workspace 让 Mobile 通过正式 package dependency 消费共享 Contract，同时不改变现有 Vue Web、Express 后端、数据库或部署方式。
-
-当前 Mobile 尚未接入真实 API，也没有实现正式登录会话、服务端购物车、订单、库存、退货、相机、相册、通知或 Deep Link。未运行模拟器或真机验证时，只能依据 SQLite migration 专项测试、typecheck 与 Android JS bundle export 判断工程基础，不代表设备交互、签名 APK 或发布链路可用。
-
-主要目录：
-
-- `apps/mobile`：根 npm workspace 中的 Expo package，自身保留 manifest，依赖统一锁定在根 `package-lock.json`；
-- `packages/api-client`：`@ylink/api-client`，传输无关 HTTP 契约与 Native/Web adapter；
-- `packages/shared-types`：`@ylink/shared-types`，已核对的跨端客户端 Contract 真源；
-- `packages/domain`、`packages/validation`、`packages/design-tokens`：已纳入 workspace 的最小共享边界，尚未由 Mobile 消费。
-
-常用命令：
-
-```bash
-npm ci
-npm run verify:mobile:workspace
-npm --workspace y-link-mobile run dependencies:check
-npm --workspace y-link-mobile run test:db
-npm --workspace y-link-mobile run typecheck
-npm --workspace y-link-mobile run export:android
-node ./node_modules/typescript/bin/tsc -p packages/tsconfig.json --noEmit
-node --experimental-strip-types --test packages/api-client/test/*.test.ts
-```
-
-开发者、GitHub Actions 与 Expo/EAS 构建入口统一使用根 workspace 与根 lockfile。Mobile 只能通过 `@ylink/*` package 名称消费共享包，禁止用相对路径跨目录导入 `packages/*`。详细边界见 [`docs/project-context/60-移动端工程与共享基础.md`](./docs/project-context/60-移动端工程与共享基础.md)。
-
-## 快速入口
-
-- [版本发布历史与更新日志](./docs/版本发布历史与更新日志.md)
 
 ## 界面预览
 
@@ -101,6 +84,35 @@ node --experimental-strip-types --test packages/api-client/test/*.test.ts
     <td><img src="./docs/photo/readme-preview/client-profile.png" alt="用户端我的资料页面" width="100%" /></td>
   </tr>
 </table>
+
+## 功能概览
+
+### 管理端
+
+- 工作台：业务数据看板、快捷入口。
+- 出库开单：商品搜索、数量录入、金额计算、单据生成。
+- 出库列表：历史单据、详情、导出、作废和删除治理。
+- 入库管理：供货方送货单、扫码入库、入库核销。
+- 商品管理：基础资料、标签、库存、线上展示、图片。
+- O2O 核销：客户预订单查询、核销、撤回和库存流水。
+- 用户中心：管理端用户、供货方用户、客户端用户。
+- 系统配置：验证码、部门、客户服务、业务规则等配置。
+- 审计日志：登录、权限拦截、关键业务操作追踪。
+
+### 客户端
+
+- 注册登录：用户名、手机号、邮箱等账号能力。
+- 商品大厅：商品浏览、搜索、分类、加购。
+- 购物车和结算：预订下单、库存占用、订单生成。
+- 我的订单：订单列表、详情、状态查看、撤回。
+- 我的：资料维护、修改密码、反馈与客服入口。
+
+### 供货方
+
+- 独立账号登录。
+- 录入送货单。
+- 查看历史送货单。
+- 配合管理端完成入库核销。
 
 ## 推荐部署：1Panel 单镜像
 
@@ -536,35 +548,6 @@ docker compose --env-file .env.docker.mysql -f compose.mysql.yml up -d --force-r
 - [.env.docker.mysql.example](./.env.docker.mysql.example)
 - [数据库迁移演练与验收手册](./docs/Y-Link数据库迁移向导演练与验收手册.md)
 
-## 功能概览
-
-### 管理端
-
-- 工作台：业务数据看板、快捷入口。
-- 出库开单：商品搜索、数量录入、金额计算、单据生成。
-- 出库列表：历史单据、详情、导出、作废和删除治理。
-- 入库管理：供货方送货单、扫码入库、入库核销。
-- 商品管理：基础资料、标签、库存、线上展示、图片。
-- O2O 核销：客户预订单查询、核销、撤回和库存流水。
-- 用户中心：管理端用户、供货方用户、客户端用户。
-- 系统配置：验证码、部门、客户服务、业务规则等配置。
-- 审计日志：登录、权限拦截、关键业务操作追踪。
-
-### 客户端
-
-- 注册登录：用户名、手机号、邮箱等账号能力。
-- 商品大厅：商品浏览、搜索、分类、加购。
-- 购物车和结算：预订下单、库存占用、订单生成。
-- 我的订单：订单列表、详情、状态查看、撤回。
-- 我的：资料维护、修改密码、反馈与客服入口。
-
-### 供货方
-
-- 独立账号登录。
-- 录入送货单。
-- 查看历史送货单。
-- 配合管理端完成入库核销。
-
 ## 本地开发
 
 ### 环境要求
@@ -697,3 +680,31 @@ Y-Link
 - [企业级维护与二开白皮书](./docs/Y-Link企业级维护与二开白皮书.md)
 - [移动端工程与共享基础](./docs/project-context/60-移动端工程与共享基础.md)
 - [GitHub Wiki](https://github.com/HF-CYGG/Y-Link/wiki)
+
+## Mobile 工程基础状态
+
+仓库包含 `apps/mobile` Expo 工程和 `packages/*` 跨端基础。Mobile 固定使用 Node.js `22.23.4`；根 npm workspace 让 Mobile 通过正式 package dependency 消费共享 Contract，同时不改变现有 Vue Web、Express 后端、数据库或部署方式。
+
+当前 Mobile 尚未接入真实 API，也没有实现正式登录会话、服务端购物车、订单、库存、退货、相机、相册、通知或 Deep Link。未运行模拟器或真机验证时，只能依据 SQLite migration 专项测试、typecheck 与 Android JS bundle export 判断工程基础，不代表设备交互、签名 APK 或发布链路可用。
+
+主要目录：
+
+- `apps/mobile`：根 npm workspace 中的 Expo package，自身保留 manifest，依赖统一锁定在根 `package-lock.json`；
+- `packages/api-client`：`@ylink/api-client`，传输无关 HTTP 契约与 Native/Web adapter；
+- `packages/shared-types`：`@ylink/shared-types`，已核对的跨端客户端 Contract 真源；
+- `packages/domain`、`packages/validation`、`packages/design-tokens`：已纳入 workspace 的最小共享边界，尚未由 Mobile 消费。
+
+常用命令：
+
+```bash
+npm ci
+npm run verify:mobile:workspace
+npm --workspace y-link-mobile run dependencies:check
+npm --workspace y-link-mobile run test:db
+npm --workspace y-link-mobile run typecheck
+npm --workspace y-link-mobile run export:android
+node ./node_modules/typescript/bin/tsc -p packages/tsconfig.json --noEmit
+node --experimental-strip-types --test packages/api-client/test/*.test.ts
+```
+
+开发者、GitHub Actions 与 Expo/EAS 构建入口统一使用根 workspace 与根 lockfile。Mobile 只能通过 `@ylink/*` package 名称消费共享包，禁止用相对路径跨目录导入 `packages/*`。详细边界见 [`docs/project-context/60-移动端工程与共享基础.md`](./docs/project-context/60-移动端工程与共享基础.md)。
