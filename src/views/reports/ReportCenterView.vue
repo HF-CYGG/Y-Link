@@ -238,8 +238,10 @@ const loadTags = async () => {
   tagsLoading.value = true
   try {
     tags.value = await getTagList()
+    return true
   } catch (error) {
     showAppError(extractErrorMessage(error, '获取标签失败'))
+    return false
   } finally {
     tagsLoading.value = false
   }

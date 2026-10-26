@@ -70,8 +70,10 @@ const loadData = async () => {
     const [categoryRows, locationRows] = await Promise.all([getCategories(), getLocations()])
     categories.value = categoryRows
     locations.value = locationRows
+    return true
   } catch (error) {
     showAppError(error, '主数据加载失败')
+    return false
   } finally {
     loading.value = false
   }

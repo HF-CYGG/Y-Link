@@ -112,9 +112,11 @@ const loadProducts = async () => {
   loading.value = true
   try {
     products.value = await getProductList({})
+    return true
   } catch (error) {
     products.value = []
     showAppError(extractErrorMessage(error, '加载商品列表失败，请稍后重试'))
+    return false
   } finally {
     loading.value = false
   }

@@ -513,6 +513,7 @@ export const useOrderEntryForm = () => {
     } finally {
       departmentOptionsLoading.value = false
     }
+    return !departmentOptionsLoadFailed.value
   }
 
   /**

@@ -66,8 +66,10 @@ const loadOptions = async () => {
     const [categoryRows, locationRows] = await Promise.all([getCategories(), getLocations()])
     categories.value = categoryRows
     locations.value = locationRows
+    return true
   } catch (error) {
     showAppError(error, '筛选项加载失败')
+    return false
   }
 }
 

@@ -895,12 +895,14 @@ const loadDepartmentOptions = async () => {
     departmentTree.value = result.tree
     departmentPathLookup.value = buildDepartmentPathLookup(result.tree)
     departmentNodeLookup.value = buildDepartmentNodeLookup(result.tree)
+    return true
   } catch (error) {
     departmentOptions.value = []
     departmentTree.value = []
     departmentPathLookup.value = {}
     departmentNodeLookup.value = {}
     showAppError(extractErrorMessage(error, '加载部门配置失败'))
+    return false
   } finally {
     departmentOptionsLoading.value = false
   }

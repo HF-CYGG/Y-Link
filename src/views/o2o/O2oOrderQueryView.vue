@@ -367,8 +367,10 @@ const loadDepartmentOptions = async () => {
   try {
     const result = await getClientDepartmentConfigs()
     departmentOptions.value = result.options
+    return true
   } catch (error) {
     showAppError(extractErrorMessage(error, '加载部门筛选项失败'))
+    return false
   } finally {
     departmentOptionsLoading.value = false
   }
