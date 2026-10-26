@@ -18,6 +18,7 @@ import {
   type ProductRecord,
   type ProductSkuRecord,
 } from '@/api/modules/product'
+import { useDataChangeRefresh } from '@/composables/useDataChangeRefresh'
 import { useDevice } from '@/composables/useDevice'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
@@ -323,6 +324,9 @@ async function batchSetListed(nextStatus: 'listed' | 'unlisted'): Promise<void> 
   }
 }
 
+// 商品列表在激活时已重新查询；标签在其他页面新增或改名后同样需要刷新筛选项。
+useDataChangeRefresh(['products'], () => getTagList().then((result) => { tags.value = result }))
+
 onMounted(async () => {
   await Promise.all([loadProducts(), getTagList().then((result) => { tags.value = result }).catch(() => {})])
   mountedReady = true
@@ -459,7 +463,8 @@ onDeactivated(() => {
       </div>
     </section>
 
-    <el-dialog v-model="editorVisible" title="线上展示设置" width="min(720px, 94vw)" destroy-on-close>
+    <!-- 本页作为产品中心页签嵌入，页签面板带 transform 会困住 fixed 弹窗并被外壳裁切，必须挂到 body。 -->
+    <el-dialog v-model="editorVisible" title="线上展示设置" width="min(720px, 94vw)" append-to-body destroy-on-close>
       <div v-if="editingProduct" v-loading="editorLoading" class="mall-editor">
         <div class="mall-editor__summary">
           <div class="mall-product">

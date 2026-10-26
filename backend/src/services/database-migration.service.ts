@@ -9,6 +9,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { format as formatMysqlQuery } from 'mysql2'
 import { DataSource, type DataSourceOptions, type EntityMetadata } from 'typeorm'
 import { appDataPaths } from '../config/app-data-paths.js'
 import { resolveSqliteDatabasePath } from '../config/database-bootstrap.js'
@@ -32,6 +33,19 @@ import type { AuthUserContext } from '../types/auth.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { BizError } from '../utils/errors.js'
 import { parseDatabaseInteger, readSqliteGeneratedNextId } from '../utils/migration-autoincrement.js'
+import {
+  buildSourceColumnRulesFromMetadata,
+  buildSourceColumnRulesFromMysqlSchema,
+  collectUniqueDuplicates,
+  describeSourceColumnViolation,
+  describeSourceUniqueCaseDuplicate,
+  describeSourceUniqueExactDuplicate,
+  isCaseInsensitiveMysqlCollation,
+  scanSourceColumnRules,
+  type MysqlColumnDefinitionRow,
+  type SourceColumnRule,
+  type SourceColumnViolation,
+} from '../utils/migration-source-compatibility.js'
 import {
   buildMySqlTargetConnectionIssue,
   buildMySqlTargetWritePermissionIssue,
@@ -345,6 +359,14 @@ const jsonSnapshotDir = appDataPaths.migrationJsonDir
 const migrationSecretDir = appDataPaths.migrationSecretDir
 const migrationLockFile = appDataPaths.migrationLockFile
 const MIGRATION_BATCH_SIZE = 300
+// 单条 INSERT 的估算字节上限；实际取它与目标 max_allowed_packet 一半中的较小值。
+const MIGRATION_INSERT_MAX_BYTES = 4 * 1024 * 1024
+/**
+ * 允许迁移时自动截断的诊断类文本列：
+ * - 早期版本写审计日志时未截断 UA，SQLite 不校验 VARCHAR 长度，历史超长值会让 MySQL 严格模式整批拒绝；
+ * - 仅收录排障辅助字段，截断尾部不影响任何业务口径；业务字段超长仍必须人工清理后再迁移。
+ */
+const MIGRATION_TRUNCATABLE_TEXT_COLUMNS = new Set(['sys_audit_log.user_agent', 'order_revision.user_agent'])
 const CRITICAL_VALIDATION_TABLES = new Set([
   'sys_user',
   'system_configs',
@@ -625,6 +647,84 @@ class AutomaticMigrationCancelledError extends Error {
     super('自动迁移已由管理员紧急回退取消')
     this.name = 'AutomaticMigrationCancelledError'
   }
+}
+
+class SourceDataIncompatibleError extends BizError {
+  constructor(messages: string[]) {
+    super(`SQLite 源库存在 MySQL 无法原样承接的数据：${messages.join('；')}`, 409)
+    this.name = 'SourceDataIncompatibleError'
+  }
+}
+
+function isTruncatableSourceViolation(violation: SourceColumnViolation): boolean {
+  return violation.kind === 'varchar_chars'
+    && MIGRATION_TRUNCATABLE_TEXT_COLUMNS.has(`${violation.tableName}.${violation.columnName}`)
+}
+
+/**
+ * MySQL 数据类错误对同一份不可变快照必然复现，续跑只会重复建表导入并拉长冻结窗口。
+ */
+const DETERMINISTIC_MYSQL_DATA_ERROR_CODES = new Set([
+  'ER_DATA_TOO_LONG',
+  'ER_DUP_ENTRY',
+  'ER_TRUNCATED_WRONG_VALUE',
+  'ER_TRUNCATED_WRONG_VALUE_FOR_FIELD',
+  'ER_WARN_DATA_OUT_OF_RANGE',
+  'ER_BAD_NULL_ERROR',
+  'ER_CHECK_CONSTRAINT_VIOLATED',
+  'ER_NO_REFERENCED_ROW_2',
+])
+
+function readMysqlErrorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object') {
+    return undefined
+  }
+  const candidate = error as { code?: unknown; driverError?: { code?: unknown } }
+  const code = candidate.code ?? candidate.driverError?.code
+  return typeof code === 'string' ? code : undefined
+}
+
+/**
+ * 估算单行在客户端转义后进入 INSERT 语句的字节数：字符串转义与 Buffer 十六进制最坏翻倍，其余值按固定开销计。
+ */
+function estimateInsertRowBytes(row: QueryRow, columnNames: string[]): number {
+  return columnNames.reduce((total, columnName) => {
+    const value = row[columnName]
+    if (typeof value === 'string') {
+      return total + Buffer.byteLength(value) * 2 + 8
+    }
+    if (Buffer.isBuffer(value)) {
+      return total + value.length * 2 + 8
+    }
+    return total + 32
+  }, 64)
+}
+
+function splitRowsByEstimatedBytes(
+  rows: QueryRow[],
+  columnNames: string[],
+  byteBudget: number,
+): Array<{ rows: QueryRow[]; estimatedBytes: number }> {
+  const chunks: Array<{ rows: QueryRow[]; estimatedBytes: number }> = []
+  let current: { rows: QueryRow[]; estimatedBytes: number } = { rows: [], estimatedBytes: 0 }
+  for (const row of rows) {
+    const rowBytes = estimateInsertRowBytes(row, columnNames)
+    if (current.rows.length > 0 && current.estimatedBytes + rowBytes > byteBudget) {
+      chunks.push(current)
+      current = { rows: [], estimatedBytes: 0 }
+    }
+    current.rows.push(row)
+    current.estimatedBytes += rowBytes
+  }
+  if (current.rows.length > 0) {
+    chunks.push(current)
+  }
+  return chunks
+}
+
+function isDeterministicMigrationDataError(error: unknown): boolean {
+  const code = readMysqlErrorCode(error)
+  return error instanceof SourceDataIncompatibleError || (code !== undefined && DETERMINISTIC_MYSQL_DATA_ERROR_CODES.has(code))
 }
 
 export class DatabaseMigrationService {
@@ -922,6 +1022,167 @@ export class DatabaseMigrationService {
       }
     }
     return issues
+  }
+
+  /**
+   * 汇总源库中 MySQL 严格模式无法原样承接的数据（目标排序规则未知时的口径）：
+   * - 列规则扫描覆盖超长文本、非法数值/时间、DECIMAL 小数位溢出与 NOT NULL 空值；
+   * - 唯一索引原值完全重复在任何排序规则下都会冲突，作为阻断项；
+   * - 仅大小写不同的重复只在目标列排序规则不区分大小写时冲突，此时尚未建表无法确认，只作为风险提示，
+   *   建表后由 assertSourceFitsTargetSchema 按实际排序规则复核；
+   * - 仅诊断类白名单列（UA）允许截断。
+   */
+  private async inspectSourceDataCompatibility(
+    dataSource: DataSource,
+    rules: SourceColumnRule[],
+    metadatas: EntityMetadata[],
+  ): Promise<{ truncatableViolations: SourceColumnViolation[]; blockingMessages: string[]; warningMessages: string[] }> {
+    const violations = await scanSourceColumnRules(dataSource, rules)
+    const truncatableViolations = violations.filter(isTruncatableSourceViolation)
+    const uniqueDuplicates = await collectUniqueDuplicates(dataSource, metadatas, () => true)
+    return {
+      truncatableViolations,
+      blockingMessages: [
+        ...violations.filter((violation) => !isTruncatableSourceViolation(violation)).map(describeSourceColumnViolation),
+        ...uniqueDuplicates.filter((duplicate) => duplicate.exactGroupCount > 0).map(describeSourceUniqueExactDuplicate),
+      ],
+      warningMessages: uniqueDuplicates
+        .filter((duplicate) => duplicate.exactGroupCount === 0)
+        .map(describeSourceUniqueCaseDuplicate),
+    }
+  }
+
+  private async collectSourceCompatibilityIssues(existingSourceTableNames: string[]): Promise<DatabaseMigrationIssue[]> {
+    const existingTableSet = new Set(existingSourceTableNames)
+    const metadatas = this.resolveOrderedEntityMetadatas(AppDataSource)
+      .filter((metadata) => existingTableSet.has(metadata.tableName))
+    const { truncatableViolations, blockingMessages, warningMessages } = await this.inspectSourceDataCompatibility(
+      AppDataSource,
+      buildSourceColumnRulesFromMetadata(metadatas),
+      metadatas,
+    )
+    return [
+      ...truncatableViolations.map((violation) => ({
+        level: 'warning' as const,
+        code: 'source_diagnostic_text_overlong',
+        message: `源 SQLite 中 ${describeSourceColumnViolation(violation)}，迁移时将自动截断（仅影响排障辅助信息）。`,
+      })),
+      ...warningMessages.map((message) => ({
+        level: 'warning' as const,
+        code: 'source_unique_case_conflict_risk',
+        message: `源 SQLite 中 ${message}；若目标库排序规则不区分大小写（MySQL 8 默认 utf8mb4_0900_ai_ci）将导入冲突，建表后会按实际排序规则复核并在导入前阻断。`,
+      })),
+      ...blockingMessages.map((message) => ({
+        level: 'error' as const,
+        code: 'source_data_incompatible',
+        message: `源 SQLite 中 ${message}，MySQL 无法原样承接，请先清理后再迁移。`,
+      })),
+    ]
+  }
+
+  /**
+   * 迁移前修正并校验源库数据：
+   * - 诊断类白名单列按字符截断到列长，返回修正行数供任务阶段提示；
+   * - 其余不兼容数据直接阻断，避免冻结后导入中途才被 MySQL 打断且看不出具体字段。
+   */
+  private async repairAndAssertSourceDataCompatibility(dataSource: DataSource): Promise<number> {
+    const metadatas = this.resolveOrderedEntityMetadatas(dataSource)
+    const { truncatableViolations, blockingMessages } = await this.inspectSourceDataCompatibility(
+      dataSource,
+      buildSourceColumnRulesFromMetadata(metadatas),
+      metadatas,
+    )
+    if (blockingMessages.length > 0) {
+      throw new SourceDataIncompatibleError(blockingMessages)
+    }
+
+    let repairedRows = 0
+    for (const violation of truncatableViolations) {
+      const column = quoteIdentifier(violation.columnName)
+      await dataSource.query(
+        `UPDATE ${quoteIdentifier(violation.tableName)} SET ${column} = SUBSTR(${column}, 1, ${violation.maxLength}) WHERE LENGTH(${column}) > ${violation.maxLength}`,
+      )
+      repairedRows += violation.violationCount
+    }
+    return repairedRows
+  }
+
+  /**
+   * 按目标 MySQL 实际列定义复核快照：
+   * - 实体在两种方言下 TEXT/LONGTEXT、整数宽度与有无符号不同，只有建表后才能拿到精确上限；
+   * - 在导入前一次性报出全部不兼容列，避免逐表导入到一半才失败。
+   */
+  private async assertSourceFitsTargetSchema(
+    sourceDataSource: DataSource,
+    targetDataSource: DataSource,
+    metadatas: EntityMetadata[],
+  ): Promise<void> {
+    const tableNames = new Set(metadatas.map((metadata) => metadata.tableName))
+    const columnRows = this.toQueryRows(
+      await targetDataSource.query(
+        `
+          SELECT
+            table_name AS tableName,
+            column_name AS columnName,
+            data_type AS dataType,
+            column_type AS columnType,
+            character_maximum_length AS characterMaximumLength,
+            numeric_precision AS numericPrecision,
+            numeric_scale AS numericScale,
+            is_nullable AS isNullable,
+            collation_name AS collationName
+          FROM information_schema.columns
+          WHERE table_schema = ?
+        `,
+        [targetDataSource.options.database],
+      ),
+    )
+    const caseInsensitiveColumns = new Set(
+      columnRows
+        .filter((row) => isCaseInsensitiveMysqlCollation(row.collationName === null ? null : String(row.collationName)))
+        .map((row) => `${String(row.tableName)}.${String(row.columnName)}`),
+    )
+    const definitions: MysqlColumnDefinitionRow[] = columnRows
+      .filter((row) => tableNames.has(String(row.tableName)))
+      .map((row) => ({
+        tableName: String(row.tableName),
+        columnName: String(row.columnName),
+        dataType: String(row.dataType),
+        columnType: String(row.columnType),
+        characterMaximumLength: row.characterMaximumLength === null ? null : Number(row.characterMaximumLength),
+        numericPrecision: row.numericPrecision === null ? null : Number(row.numericPrecision),
+        numericScale: row.numericScale === null ? null : Number(row.numericScale),
+        isNullable: String(row.isNullable).toUpperCase() === 'YES',
+      }))
+    const violations = await scanSourceColumnRules(sourceDataSource, buildSourceColumnRulesFromMysqlSchema(definitions))
+    // 只对目标排序规则不区分大小写的列折叠大小写；_bin/_cs 列允许 `ABC` 与 `abc` 共存，不能误报。
+    const uniqueConflicts = (await collectUniqueDuplicates(
+      sourceDataSource,
+      metadatas,
+      (tableName, columnName) => caseInsensitiveColumns.has(`${tableName}.${columnName}`),
+    )).filter((duplicate) => duplicate.caseFoldedGroupCount > 0)
+    if (violations.length > 0 || uniqueConflicts.length > 0) {
+      throw new SourceDataIncompatibleError([
+        ...violations.map(describeSourceColumnViolation),
+        ...uniqueConflicts.map(describeSourceUniqueCaseDuplicate),
+      ])
+    }
+  }
+
+  /**
+   * 给导入失败补充表名与主键：MySQL 只报“批内第 N 行”，这里换算成源表主键，便于直接定位脏数据。
+   * 保留原错误码，供重试判断识别确定性数据错误。
+   */
+  private describeImportBatchError(error: unknown, metadata: EntityMetadata, rows: QueryRow[]): Error {
+    const message = formatUnknownErrorMessage(error)
+    const rowNumber = Number(/at row (\d+)/.exec(message)?.[1])
+    const primaryKey = metadata.primaryColumns.length === 1 ? metadata.primaryColumns[0].databaseName : null
+    const primaryValue = primaryKey && Number.isInteger(rowNumber) ? rows[rowNumber - 1]?.[primaryKey] : undefined
+    const locator = primaryValue === undefined || primaryValue === null ? '' : `（主键 ${primaryKey}=${String(primaryValue)}）`
+    return Object.assign(new Error(`表 ${metadata.tableName} 导入失败${locator}：${message}`), {
+      code: readMysqlErrorCode(error),
+      cause: error,
+    })
   }
 
   private resolveOrderedEntityMetadatas(dataSource: DataSource): EntityMetadata[] {
@@ -1589,6 +1850,14 @@ export class DatabaseMigrationService {
 
     const queryRunner = targetDataSource.createQueryRunner()
     await queryRunner.connect()
+    // 固定行数分批时，大字段行（审计详情、富文本）可能让单条 INSERT 超过 max_allowed_packet，
+    // 服务端会直接断开连接（只表现为 ECONNABORTED），因此再按估算字节数切分语句。
+    const maxAllowedPacket = toNumber(
+      this.readFirstField(await queryRunner.query('SELECT @@max_allowed_packet AS maxAllowedPacket'), 'maxAllowedPacket') ?? 0,
+    )
+    const statementByteBudget = maxAllowedPacket > 0
+      ? Math.min(MIGRATION_INSERT_MAX_BYTES, Math.floor(maxAllowedPacket / 2))
+      : MIGRATION_INSERT_MAX_BYTES
     await queryRunner.startTransaction()
     try {
       const importedRows = await this.forEachTableBatch(sourceDataSource, metadata, async (rows) => {
@@ -1596,13 +1865,30 @@ export class DatabaseMigrationService {
           this.assertAutomaticTaskNotCancelled(taskId)
         }
         const rowPlaceholder = `(${columnNames.map(() => '?').join(',')})`
-        const sql = `
-          INSERT INTO ${quoteIdentifier(metadata.tableName)}
-          (${columnNames.map(quoteIdentifier).join(',')})
-          VALUES ${rows.map(() => rowPlaceholder).join(',')}
-        `
-        const parameters = rows.flatMap((row) => columnNames.map((columnName) => row[columnName]))
-        await queryRunner.query(sql, parameters)
+        for (const chunk of splitRowsByEstimatedBytes(rows, columnNames, statementByteBudget)) {
+          const sql = `
+            INSERT INTO ${quoteIdentifier(metadata.tableName)}
+            (${columnNames.map(quoteIdentifier).join(',')})
+            VALUES ${chunk.rows.map(() => rowPlaceholder).join(',')}
+          `
+          const parameters = chunk.rows.flatMap((row) => columnNames.map((columnName) => row[columnName]))
+          // 估算按最坏转义翻倍，只用于保守分批；单行是否真的发不出去，必须按驱动实际转义后的语句判断，
+          // 否则普通文本会被高估一倍而误拒原本可以导入的行。COM_QUERY 包另含 1 字节命令头。
+          if (chunk.rows.length === 1 && maxAllowedPacket > 0 && chunk.estimatedBytes >= maxAllowedPacket) {
+            const actualPacketBytes = Buffer.byteLength(formatMysqlQuery(sql, parameters as Parameters<typeof formatMysqlQuery>[1])) + 1
+            if (actualPacketBytes > maxAllowedPacket) {
+              const primaryKey = metadata.primaryColumns[0]?.databaseName
+              throw new SourceDataIncompatibleError([
+                `${metadata.tableName} 主键 ${primaryKey}=${String(chunk.rows[0][primaryKey])} 单行约 ${Math.ceil(actualPacketBytes / 1024 / 1024)} MB，超过目标 MySQL max_allowed_packet（${Math.floor(maxAllowedPacket / 1024 / 1024)} MB），请调大该参数后重试`,
+              ])
+            }
+          }
+          try {
+            await queryRunner.query(sql, parameters)
+          } catch (error) {
+            throw this.describeImportBatchError(error, metadata, chunk.rows)
+          }
+        }
       })
       await queryRunner.commitTransaction()
       return {
@@ -2657,6 +2943,7 @@ export class DatabaseMigrationService {
 
     const sourceTableStats = await this.collectSourceTableStats(AppDataSource)
     issues.push(...(await this.collectSourceBusinessConstraintIssues(existingSourceTableNames)))
+    issues.push(...(await this.collectSourceCompatibilityIssues(existingSourceTableNames)))
     const sourceTotalRows = sourceTableStats.reduce((sum, item) => sum + item.rowCount, 0)
     if (sourceTotalRows === 0) {
       issues.push({
@@ -3198,6 +3485,12 @@ export class DatabaseMigrationService {
         expectedTableNames: this.resolveOrderedEntityMetadatas(AppDataSource).map((metadata) => metadata.tableName),
       } : undefined)
 
+      // 写入已冻结，在生成不可变快照前修正历史超长诊断文本，保证快照、目标库与强校验哈希口径一致。
+      const repairedOverlongRows = await this.repairAndAssertSourceDataCompatibility(AppDataSource)
+      if (repairedOverlongRows > 0) {
+        await this.updateTaskStage(task, `已截断 ${repairedOverlongRows} 条超长诊断文本（UA）以适配 MySQL 列长`)
+      }
+
       await this.updateAutomaticTaskStage(task, 'snapshotting', '正在生成不可变 SQLite 一致性快照')
       let immutableSnapshotFile = task.immutableSnapshotFile
       if (immutableSnapshotFile) {
@@ -3266,6 +3559,7 @@ export class DatabaseMigrationService {
           }
           await this.runMysqlSchemaWorker(task.target)
           await this.maybeInterruptAutomaticMigrationE2E(attempt)
+          await this.assertSourceFitsTargetSchema(snapshotDataSource, targetDataSource, orderedMetadatas)
 
           for (const metadata of orderedMetadatas) {
             await this.updateAutomaticTaskStage(task, 'importing', `正在迁移表 ${metadata.tableName}`)
@@ -3301,7 +3595,7 @@ export class DatabaseMigrationService {
           }
           break
         } catch (error) {
-          if (error instanceof AutomaticMigrationCancelledError) {
+          if (error instanceof AutomaticMigrationCancelledError || isDeterministicMigrationDataError(error)) {
             throw error
           }
           if (attempt >= 2) {
@@ -3610,7 +3904,14 @@ export class DatabaseMigrationService {
     const sourceOrderedMetadatas = this.resolveOrderedEntityMetadatas(AppDataSource)
     const backupFile = await this.createSqliteBackupSnapshot()
     runningTask.backupFile = backupFile
-    await this.updateTaskStage(runningTask, '已完成 SQLite 物理备份，正在生成 JSON 快照')
+    // 物理备份保留原始数据后再修正超长诊断文本，JSON 快照与导入数据保持同一口径。
+    const repairedOverlongRows = await this.repairAndAssertSourceDataCompatibility(AppDataSource)
+    await this.updateTaskStage(
+      runningTask,
+      repairedOverlongRows > 0
+        ? `已完成 SQLite 物理备份并截断 ${repairedOverlongRows} 条超长诊断文本，正在生成 JSON 快照`
+        : '已完成 SQLite 物理备份，正在生成 JSON 快照',
+    )
 
     const jsonSnapshotFile = await this.createJsonSnapshotBackup(sourceOrderedMetadatas, latestPrecheck.source.tables)
     runningTask.jsonSnapshotFile = jsonSnapshotFile

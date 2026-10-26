@@ -45,6 +45,7 @@ import {
   type UpdateClientUserPayload,
 } from '@/api/modules/client-user-manage'
 import { getClientDepartmentConfigs, type ClientDepartmentTreeNode } from '@/api/modules/system-config'
+import { useDataChangeRefresh } from '@/composables/useDataChangeRefresh'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage, normalizeRequestError } from '@/utils/error'
@@ -894,12 +895,14 @@ const loadDepartmentOptions = async () => {
     departmentTree.value = result.tree
     departmentPathLookup.value = buildDepartmentPathLookup(result.tree)
     departmentNodeLookup.value = buildDepartmentNodeLookup(result.tree)
+    return true
   } catch (error) {
     departmentOptions.value = []
     departmentTree.value = []
     departmentPathLookup.value = {}
     departmentNodeLookup.value = {}
     showAppError(extractErrorMessage(error, '加载部门配置失败'))
+    return false
   } finally {
     departmentOptionsLoading.value = false
   }
@@ -1221,6 +1224,9 @@ const handleLifecycleConfirm = async (payload: AccountLifecycleReasonPayload | A
     lifecycleLoading.value = false
   }
 }
+
+// 部门配置或部门账号在其他页面变更后，切回时刷新部门树与选项。
+useDataChangeRefresh(['departments'], loadDepartmentOptions)
 
 onMounted(() => {
   void loadDepartmentOptions()

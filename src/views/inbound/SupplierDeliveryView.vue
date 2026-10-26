@@ -13,6 +13,7 @@
  */
 
 import { computed, onMounted, ref } from 'vue'
+import { useDataChangeRefresh } from '@/composables/useDataChangeRefresh'
 import { ElMessageBox } from 'element-plus'
 import QRCode from 'qrcode'
 import { useRouter } from 'vue-router'
@@ -111,9 +112,11 @@ const loadProducts = async () => {
   loading.value = true
   try {
     products.value = await getProductList({})
+    return true
   } catch (error) {
     products.value = []
     showAppError(extractErrorMessage(error, '加载商品列表失败，请稍后重试'))
+    return false
   } finally {
     loading.value = false
   }
@@ -227,6 +230,9 @@ const handleReset = () => {
 const goToHistory = () => {
   router.push('/supplier-history')
 }
+
+// 其他页面新增或调整商品后，切回送货单录入时刷新可选商品。
+useDataChangeRefresh(['products'], loadProducts)
 
 onMounted(() => {
   loadProducts()

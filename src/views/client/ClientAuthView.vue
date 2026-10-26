@@ -2620,7 +2620,9 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-.captcha-box--placeholder {
+/* 占位框只用于预留高度，必须始终不可见；暗色主题的 `.dark .captcha-box` 特异性更高，需同时覆盖。 */
+.captcha-box.captcha-box--placeholder,
+.dark .captcha-box.captcha-box--placeholder {
   border-color: transparent;
   background: transparent;
 }

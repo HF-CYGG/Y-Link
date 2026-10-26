@@ -34,6 +34,7 @@ import {
   type ReportType,
 } from '@/api/modules/report'
 import { getTagList, type Tag } from '@/api/modules/tag'
+import { useDataChangeRefresh } from '@/composables/useDataChangeRefresh'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
@@ -237,8 +238,10 @@ const loadTags = async () => {
   tagsLoading.value = true
   try {
     tags.value = await getTagList()
+    return true
   } catch (error) {
     showAppError(extractErrorMessage(error, '获取标签失败'))
+    return false
   } finally {
     tagsLoading.value = false
   }
@@ -387,6 +390,9 @@ const formatCellValue = (row: ReportRow, field: ReportFieldDefinition) => {
   }
   return String(value)
 }
+
+// 标签在其他页面新增或改名后，切回报表中心时刷新标签筛选项。
+useDataChangeRefresh(['products'], loadTags)
 
 onMounted(() => {
   void loadTags()

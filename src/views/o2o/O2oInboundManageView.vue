@@ -10,6 +10,7 @@ import { CameraFilled } from '@element-plus/icons-vue'
 import { PageContainer, PassiveNumberInput, UnifiedScanDialog } from '@/components/common'
 import { getProductList, type ProductRecord, type ProductSkuRecord } from '@/api/modules/product'
 import { getO2oInventoryLogsPaged, inboundO2oStock, type O2oInventoryLog } from '@/api/modules/o2o'
+import { useDataChangeRefresh } from '@/composables/useDataChangeRefresh'
 import { useCameraQrScanner } from '@/composables/useCameraQrScanner'
 import { extractErrorMessage } from '@/utils/error'
 
@@ -580,6 +581,9 @@ const handleBatchConfirmInbound = async () => {
     confirmingBatch.value = false
   }
 }
+
+// 其他页面新增或调整商品后，切回入库管理时刷新商品目录。
+useDataChangeRefresh(['products'], loadProducts)
 
 onMounted(async () => {
   await Promise.all([loadProducts(), loadLogs()])
