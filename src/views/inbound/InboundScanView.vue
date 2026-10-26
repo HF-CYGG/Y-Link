@@ -540,9 +540,26 @@ const handleReuseRecentScan = (verifyCode: string) => {
   void handleScan()
 }
 
-// 商品目录按需懒加载并缓存；其他页面改动商品后清空缓存，下次使用时重新拉取。
-useDataChangeRefresh(['products'], () => {
-  products.value = []
+/**
+ * 商品目录按需懒加载并缓存，其他页面改动商品后：
+ * - 改单弹窗关闭时只清空缓存，下次打开由 ensureProductsLoaded 重新拉取；
+ * - 弹窗正在使用时直接重拉并替换目录，不能清空，否则商品与规格下拉会失去候选、未保存的修改只能关窗重填；
+ * - 后台重拉失败时保留现有目录且不打断编辑，返回 false 留待后续变更或下次激活重试。
+ */
+useDataChangeRefresh(['products'], async () => {
+  if (!editDialogVisible.value) {
+    products.value = []
+    return true
+  }
+  editProductsLoading.value = true
+  try {
+    products.value = await getProductList({})
+    return true
+  } catch {
+    return false
+  } finally {
+    editProductsLoading.value = false
+  }
 })
 
 onMounted(() => {
