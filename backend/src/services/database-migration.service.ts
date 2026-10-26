@@ -36,9 +36,11 @@ import { parseDatabaseInteger, readSqliteGeneratedNextId } from '../utils/migrat
 import {
   buildSourceColumnRulesFromMetadata,
   buildSourceColumnRulesFromMysqlSchema,
-  collectCaseInsensitiveUniqueDuplicates,
+  collectUniqueDuplicates,
   describeSourceColumnViolation,
-  describeSourceUniqueDuplicate,
+  describeSourceUniqueCaseDuplicate,
+  describeSourceUniqueExactDuplicate,
+  isCaseInsensitiveMysqlCollation,
   scanSourceColumnRules,
   type MysqlColumnDefinitionRow,
   type SourceColumnRule,
@@ -1023,25 +1025,30 @@ export class DatabaseMigrationService {
   }
 
   /**
-   * 汇总源库中 MySQL 严格模式无法原样承接的数据：
+   * 汇总源库中 MySQL 严格模式无法原样承接的数据（目标排序规则未知时的口径）：
    * - 列规则扫描覆盖超长文本、非法数值/时间、DECIMAL 小数位溢出与 NOT NULL 空值；
-   * - 唯一索引额外按 MySQL 不区分大小写的口径找重复值；
-   * - 仅诊断类白名单列（UA）允许截断，其余一律作为阻断项返回。
+   * - 唯一索引原值完全重复在任何排序规则下都会冲突，作为阻断项；
+   * - 仅大小写不同的重复只在目标列排序规则不区分大小写时冲突，此时尚未建表无法确认，只作为风险提示，
+   *   建表后由 assertSourceFitsTargetSchema 按实际排序规则复核；
+   * - 仅诊断类白名单列（UA）允许截断。
    */
   private async inspectSourceDataCompatibility(
     dataSource: DataSource,
     rules: SourceColumnRule[],
     metadatas: EntityMetadata[],
-  ): Promise<{ truncatableViolations: SourceColumnViolation[]; blockingMessages: string[] }> {
+  ): Promise<{ truncatableViolations: SourceColumnViolation[]; blockingMessages: string[]; warningMessages: string[] }> {
     const violations = await scanSourceColumnRules(dataSource, rules)
     const truncatableViolations = violations.filter(isTruncatableSourceViolation)
-    const uniqueDuplicates = await collectCaseInsensitiveUniqueDuplicates(dataSource, metadatas)
+    const uniqueDuplicates = await collectUniqueDuplicates(dataSource, metadatas, () => true)
     return {
       truncatableViolations,
       blockingMessages: [
         ...violations.filter((violation) => !isTruncatableSourceViolation(violation)).map(describeSourceColumnViolation),
-        ...uniqueDuplicates.map(describeSourceUniqueDuplicate),
+        ...uniqueDuplicates.filter((duplicate) => duplicate.exactGroupCount > 0).map(describeSourceUniqueExactDuplicate),
       ],
+      warningMessages: uniqueDuplicates
+        .filter((duplicate) => duplicate.exactGroupCount === 0)
+        .map(describeSourceUniqueCaseDuplicate),
     }
   }
 
@@ -1049,7 +1056,7 @@ export class DatabaseMigrationService {
     const existingTableSet = new Set(existingSourceTableNames)
     const metadatas = this.resolveOrderedEntityMetadatas(AppDataSource)
       .filter((metadata) => existingTableSet.has(metadata.tableName))
-    const { truncatableViolations, blockingMessages } = await this.inspectSourceDataCompatibility(
+    const { truncatableViolations, blockingMessages, warningMessages } = await this.inspectSourceDataCompatibility(
       AppDataSource,
       buildSourceColumnRulesFromMetadata(metadatas),
       metadatas,
@@ -1059,6 +1066,11 @@ export class DatabaseMigrationService {
         level: 'warning' as const,
         code: 'source_diagnostic_text_overlong',
         message: `源 SQLite 中 ${describeSourceColumnViolation(violation)}，迁移时将自动截断（仅影响排障辅助信息）。`,
+      })),
+      ...warningMessages.map((message) => ({
+        level: 'warning' as const,
+        code: 'source_unique_case_conflict_risk',
+        message: `源 SQLite 中 ${message}；若目标库排序规则不区分大小写（MySQL 8 默认 utf8mb4_0900_ai_ci）将导入冲突，建表后会按实际排序规则复核并在导入前阻断。`,
       })),
       ...blockingMessages.map((message) => ({
         level: 'error' as const,
@@ -1117,12 +1129,18 @@ export class DatabaseMigrationService {
             character_maximum_length AS characterMaximumLength,
             numeric_precision AS numericPrecision,
             numeric_scale AS numericScale,
-            is_nullable AS isNullable
+            is_nullable AS isNullable,
+            collation_name AS collationName
           FROM information_schema.columns
           WHERE table_schema = ?
         `,
         [targetDataSource.options.database],
       ),
+    )
+    const caseInsensitiveColumns = new Set(
+      columnRows
+        .filter((row) => isCaseInsensitiveMysqlCollation(row.collationName === null ? null : String(row.collationName)))
+        .map((row) => `${String(row.tableName)}.${String(row.columnName)}`),
     )
     const definitions: MysqlColumnDefinitionRow[] = columnRows
       .filter((row) => tableNames.has(String(row.tableName)))
@@ -1137,8 +1155,17 @@ export class DatabaseMigrationService {
         isNullable: String(row.isNullable).toUpperCase() === 'YES',
       }))
     const violations = await scanSourceColumnRules(sourceDataSource, buildSourceColumnRulesFromMysqlSchema(definitions))
-    if (violations.length > 0) {
-      throw new SourceDataIncompatibleError(violations.map(describeSourceColumnViolation))
+    // 只对目标排序规则不区分大小写的列折叠大小写；_bin/_cs 列允许 `ABC` 与 `abc` 共存，不能误报。
+    const uniqueConflicts = (await collectUniqueDuplicates(
+      sourceDataSource,
+      metadatas,
+      (tableName, columnName) => caseInsensitiveColumns.has(`${tableName}.${columnName}`),
+    )).filter((duplicate) => duplicate.caseFoldedGroupCount > 0)
+    if (violations.length > 0 || uniqueConflicts.length > 0) {
+      throw new SourceDataIncompatibleError([
+        ...violations.map(describeSourceColumnViolation),
+        ...uniqueConflicts.map(describeSourceUniqueCaseDuplicate),
+      ])
     }
   }
 

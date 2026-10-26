@@ -38,7 +38,8 @@ export interface SourceUniqueDuplicate {
   tableName: string
   indexName: string
   columnNames: string[]
-  duplicateGroupCount: number
+  exactGroupCount: number
+  caseFoldedGroupCount: number
 }
 
 export interface MysqlColumnDefinitionRow {
@@ -213,15 +214,31 @@ export async function scanSourceColumnRules(
   return violations
 }
 
+function isStringColumnType(type: unknown): boolean {
+  const typeName = resolveColumnTypeName(type)
+  return STRING_COLUMN_TYPES.has(typeName) || typeName === 'string'
+}
+
 /**
- * 统计唯一索引在 MySQL 下会冲突的重复值：
- * - SQLite 唯一索引按二进制比较，MySQL utf8mb4 默认排序规则不区分大小写，`ABC` 与 `abc` 可在 SQLite 并存却在导入时 Duplicate entry；
+ * MySQL 排序规则名以 `_ci` 结尾即不区分大小写（如 utf8mb4_0900_ai_ci、utf8mb4_general_ci）；
+ * `_bin`、`_cs` 区分大小写，`ABC` 与 `abc` 可以共存。
+ */
+export function isCaseInsensitiveMysqlCollation(collationName: string | null | undefined): boolean {
+  return typeof collationName === 'string' && /_ci$/i.test(collationName)
+}
+
+/**
+ * 统计唯一索引在 MySQL 下可能冲突的重复值：
+ * - `exactGroupCount`：原值完全相同的重复组，任何排序规则下都会 Duplicate entry；
+ * - `caseFoldedGroupCount`：对 `shouldFoldCase` 指定的字符串列做 LOWER 归一后的重复组，只有目标列排序规则不区分大小写时才会冲突，
+ *   因此调用方须按目标列实际排序规则决定是否折叠，未确认排序规则时不能把它当作硬阻断；
  * - 只做 ASCII 大小写归一（SQLite LOWER 口径），重音、全半角等更细的排序规则差异仍以导入时的 Duplicate entry 报错兜底；
  * - 与 MySQL 一致，任一列为 NULL 的行不参与唯一性比较。
  */
-export async function collectCaseInsensitiveUniqueDuplicates(
+export async function collectUniqueDuplicates(
   dataSource: DataSource,
   metadatas: EntityMetadata[],
+  shouldFoldCase: (tableName: string, columnName: string) => boolean,
 ): Promise<SourceUniqueDuplicate[]> {
   const duplicates: SourceUniqueDuplicate[] = []
   for (const metadata of metadatas) {
@@ -230,27 +247,32 @@ export async function collectCaseInsensitiveUniqueDuplicates(
       ...metadata.uniques.map((unique) => ({ name: unique.name, columns: unique.columns })),
     ]
     for (const definition of uniqueDefinitions) {
-      const hasStringColumn = definition.columns.some((column) => STRING_COLUMN_TYPES.has(resolveColumnTypeName(column.type)) || resolveColumnTypeName(column.type) === 'string')
-      if (!hasStringColumn) {
+      if (!definition.columns.some((column) => isStringColumnType(column.type))) {
         continue
       }
-      const groupExpressions = definition.columns.map((column) => {
-        const identifier = quoteIdentifier(column.databaseName)
-        return STRING_COLUMN_TYPES.has(resolveColumnTypeName(column.type)) || resolveColumnTypeName(column.type) === 'string'
-          ? `LOWER(${identifier})`
-          : identifier
-      })
       const notNullClause = definition.columns.map((column) => `${quoteIdentifier(column.databaseName)} IS NOT NULL`).join(' AND ')
-      const rows = await dataSource.query(
-        `SELECT COUNT(1) AS total FROM (SELECT 1 FROM ${quoteIdentifier(metadata.tableName)} WHERE ${notNullClause} GROUP BY ${groupExpressions.join(', ')} HAVING COUNT(1) > 1)`,
-      ) as Array<Record<string, unknown>>
-      const duplicateGroupCount = Number(rows[0]?.total ?? 0)
-      if (duplicateGroupCount > 0) {
+      const countDuplicateGroups = async (groupExpressions: string[]): Promise<number> => {
+        const rows = await dataSource.query(
+          `SELECT COUNT(1) AS total FROM (SELECT 1 FROM ${quoteIdentifier(metadata.tableName)} WHERE ${notNullClause} GROUP BY ${groupExpressions.join(', ')} HAVING COUNT(1) > 1)`,
+        ) as Array<Record<string, unknown>>
+        return Number(rows[0]?.total ?? 0)
+      }
+      const exactExpressions = definition.columns.map((column) => quoteIdentifier(column.databaseName))
+      const foldedExpressions = definition.columns.map((column) =>
+        isStringColumnType(column.type) && shouldFoldCase(metadata.tableName, column.databaseName)
+          ? `LOWER(${quoteIdentifier(column.databaseName)})`
+          : quoteIdentifier(column.databaseName))
+      const exactGroupCount = await countDuplicateGroups(exactExpressions)
+      const caseFoldedGroupCount = foldedExpressions.some((expression, index) => expression !== exactExpressions[index])
+        ? await countDuplicateGroups(foldedExpressions)
+        : exactGroupCount
+      if (exactGroupCount > 0 || caseFoldedGroupCount > 0) {
         duplicates.push({
           tableName: metadata.tableName,
           indexName: definition.name,
           columnNames: definition.columns.map((column) => column.databaseName),
-          duplicateGroupCount,
+          exactGroupCount,
+          caseFoldedGroupCount,
         })
       }
     }
@@ -271,6 +293,10 @@ export function describeSourceColumnViolation(violation: SourceColumnViolation):
   return `${violation.tableName}.${violation.columnName} 有 ${violation.violationCount} 条${VIOLATION_LABELS[violation.kind](violation)}`
 }
 
-export function describeSourceUniqueDuplicate(duplicate: SourceUniqueDuplicate): string {
-  return `${duplicate.tableName} 唯一索引 ${duplicate.indexName}（${duplicate.columnNames.join('、')}）有 ${duplicate.duplicateGroupCount} 组值仅大小写不同或重复`
+export function describeSourceUniqueExactDuplicate(duplicate: SourceUniqueDuplicate): string {
+  return `${duplicate.tableName} 唯一索引 ${duplicate.indexName}（${duplicate.columnNames.join('、')}）有 ${duplicate.exactGroupCount} 组完全相同的重复值`
+}
+
+export function describeSourceUniqueCaseDuplicate(duplicate: SourceUniqueDuplicate): string {
+  return `${duplicate.tableName} 唯一索引 ${duplicate.indexName}（${duplicate.columnNames.join('、')}）有 ${duplicate.caseFoldedGroupCount} 组值在不区分大小写的排序规则下重复`
 }
