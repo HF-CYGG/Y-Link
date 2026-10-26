@@ -11,6 +11,7 @@
 *.webp binary
 *.ico binary
 *.pdf binary
+*.docx binary
 *.zip binary
 *.db binary
 *.sqlite binary
