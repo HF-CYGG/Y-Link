@@ -9,6 +9,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { format as formatMysqlQuery } from 'mysql2'
 import { DataSource, type DataSourceOptions, type EntityMetadata } from 'typeorm'
 import { appDataPaths } from '../config/app-data-paths.js'
 import { resolveSqliteDatabasePath } from '../config/database-bootstrap.js'
@@ -1838,18 +1839,23 @@ export class DatabaseMigrationService {
         }
         const rowPlaceholder = `(${columnNames.map(() => '?').join(',')})`
         for (const chunk of splitRowsByEstimatedBytes(rows, columnNames, statementByteBudget)) {
-          if (chunk.rows.length === 1 && maxAllowedPacket > 0 && chunk.estimatedBytes >= maxAllowedPacket) {
-            const primaryKey = metadata.primaryColumns[0]?.databaseName
-            throw new SourceDataIncompatibleError([
-              `${metadata.tableName} 主键 ${primaryKey}=${String(chunk.rows[0][primaryKey])} 单行约 ${Math.ceil(chunk.estimatedBytes / 1024 / 1024)} MB，超过目标 MySQL max_allowed_packet（${Math.floor(maxAllowedPacket / 1024 / 1024)} MB），请调大该参数后重试`,
-            ])
-          }
           const sql = `
             INSERT INTO ${quoteIdentifier(metadata.tableName)}
             (${columnNames.map(quoteIdentifier).join(',')})
             VALUES ${chunk.rows.map(() => rowPlaceholder).join(',')}
           `
           const parameters = chunk.rows.flatMap((row) => columnNames.map((columnName) => row[columnName]))
+          // 估算按最坏转义翻倍，只用于保守分批；单行是否真的发不出去，必须按驱动实际转义后的语句判断，
+          // 否则普通文本会被高估一倍而误拒原本可以导入的行。COM_QUERY 包另含 1 字节命令头。
+          if (chunk.rows.length === 1 && maxAllowedPacket > 0 && chunk.estimatedBytes >= maxAllowedPacket) {
+            const actualPacketBytes = Buffer.byteLength(formatMysqlQuery(sql, parameters as Parameters<typeof formatMysqlQuery>[1])) + 1
+            if (actualPacketBytes > maxAllowedPacket) {
+              const primaryKey = metadata.primaryColumns[0]?.databaseName
+              throw new SourceDataIncompatibleError([
+                `${metadata.tableName} 主键 ${primaryKey}=${String(chunk.rows[0][primaryKey])} 单行约 ${Math.ceil(actualPacketBytes / 1024 / 1024)} MB，超过目标 MySQL max_allowed_packet（${Math.floor(maxAllowedPacket / 1024 / 1024)} MB），请调大该参数后重试`,
+              ])
+            }
+          }
           try {
             await queryRunner.query(sql, parameters)
           } catch (error) {
