@@ -459,7 +459,8 @@ onDeactivated(() => {
       </div>
     </section>
 
-    <el-dialog v-model="editorVisible" title="线上展示设置" width="min(720px, 94vw)" destroy-on-close>
+    <!-- 本页作为产品中心页签嵌入，页签面板带 transform 会困住 fixed 弹窗并被外壳裁切，必须挂到 body。 -->
+    <el-dialog v-model="editorVisible" title="线上展示设置" width="min(720px, 94vw)" append-to-body destroy-on-close>
       <div v-if="editingProduct" v-loading="editorLoading" class="mall-editor">
         <div class="mall-editor__summary">
           <div class="mall-product">
