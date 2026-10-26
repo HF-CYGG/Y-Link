@@ -45,6 +45,7 @@ import {
   type UpdateClientUserPayload,
 } from '@/api/modules/client-user-manage'
 import { getClientDepartmentConfigs, type ClientDepartmentTreeNode } from '@/api/modules/system-config'
+import { useDataChangeRefresh } from '@/composables/useDataChangeRefresh'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage, normalizeRequestError } from '@/utils/error'
@@ -1221,6 +1222,9 @@ const handleLifecycleConfirm = async (payload: AccountLifecycleReasonPayload | A
     lifecycleLoading.value = false
   }
 }
+
+// 部门配置或部门账号在其他页面变更后，切回时刷新部门树与选项。
+useDataChangeRefresh(['departments'], loadDepartmentOptions)
 
 onMounted(() => {
   void loadDepartmentOptions()

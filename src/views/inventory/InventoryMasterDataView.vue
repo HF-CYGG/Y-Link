@@ -12,6 +12,7 @@
  */
 
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useDataChangeRefresh } from '@/composables/useDataChangeRefresh'
 import { BizCrudDialogShell, BizResponsiveDataCollectionShell, PageContainer, PassiveNumberInput, PassiveSegmentedTabs } from '@/components/common'
 import {
   createCategory,
@@ -168,6 +169,9 @@ const toggleLocation = async (row: LocationRecord) => {
     showAppError(error, '操作失败')
   }
 }
+
+// 分类、库位也可在产品中心等页面维护，切回时若有变更则重新加载。
+useDataChangeRefresh(['products'], loadData)
 
 onMounted(loadData)
 </script>

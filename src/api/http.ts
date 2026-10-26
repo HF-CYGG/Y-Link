@@ -14,6 +14,7 @@ import { useAppStore } from '@/store/modules/app'
 import { clearPersistedAuthState, getAdminCsrfToken } from '@/utils/auth-storage'
 import { getClientRiskHeaderSnapshot } from '@/utils/client-auth-risk'
 import { clearPersistedClientAuthState, getClientCsrfToken } from '@/utils/client-auth-storage'
+import { markDataChanged, resolveDataChangeDomains } from '@/utils/data-change-signal'
 import { AppRequestError, normalizeRequestError, unwrapApiResponse } from '@/utils/error'
 import pinia from '@/store/pinia'
 import {
@@ -342,6 +343,10 @@ http.interceptors.response.use(
     appStore.endLoading()
     if (response.data?.code === DATABASE_MAINTENANCE_READ_ONLY_CODE) {
       useDatabaseMaintenanceStore(pinia).activateMaintenance()
+    }
+    // 写请求成功后标记对应基础数据已变更，被缓存的页面切回时据此刷新商品、部门等选项。
+    if (!isSafeRequestMethod(response.config?.method) && response.data?.code === 0) {
+      markDataChanged(resolveDataChangeDomains(response.config?.url))
     }
     return response
   },

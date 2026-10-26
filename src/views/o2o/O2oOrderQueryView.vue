@@ -15,6 +15,7 @@ import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMoun
 import { ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { BizO2oItemSpecText, PageContainer, PagePaginationBar } from '@/components/common'
+import { useDataChangeRefresh } from '@/composables/useDataChangeRefresh'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import {
@@ -1428,6 +1429,9 @@ const deactivatePageRuntime = () => {
   scheduleAutoRefresh()
   stopSecondTick()
 }
+
+// 部门配置在系统配置中新增或调整后，切回订单池时刷新部门筛选项。
+useDataChangeRefresh(['departments'], loadDepartmentOptions)
 
 onMounted(async () => {
   // 偏好为开启时，刷新页面后的音频上下文仍需一次用户手势才能出声。

@@ -18,6 +18,7 @@ import {
   type ProductRecord,
   type ProductSkuRecord,
 } from '@/api/modules/product'
+import { useDataChangeRefresh } from '@/composables/useDataChangeRefresh'
 import { useDevice } from '@/composables/useDevice'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
@@ -322,6 +323,9 @@ async function batchSetListed(nextStatus: 'listed' | 'unlisted'): Promise<void> 
     batchSubmitting.value = false
   }
 }
+
+// 商品列表在激活时已重新查询；标签在其他页面新增或改名后同样需要刷新筛选项。
+useDataChangeRefresh(['products'], () => getTagList().then((result) => { tags.value = result }))
 
 onMounted(async () => {
   await Promise.all([loadProducts(), getTagList().then((result) => { tags.value = result }).catch(() => {})])

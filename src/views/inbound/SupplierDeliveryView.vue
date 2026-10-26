@@ -13,6 +13,7 @@
  */
 
 import { computed, onMounted, ref } from 'vue'
+import { useDataChangeRefresh } from '@/composables/useDataChangeRefresh'
 import { ElMessageBox } from 'element-plus'
 import QRCode from 'qrcode'
 import { useRouter } from 'vue-router'
@@ -227,6 +228,9 @@ const handleReset = () => {
 const goToHistory = () => {
   router.push('/supplier-history')
 }
+
+// 其他页面新增或调整商品后，切回送货单录入时刷新可选商品。
+useDataChangeRefresh(['products'], loadProducts)
 
 onMounted(() => {
   loadProducts()

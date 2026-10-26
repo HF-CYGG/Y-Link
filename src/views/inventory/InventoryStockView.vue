@@ -18,6 +18,7 @@ import { computed, defineAsyncComponent, onActivated, onMounted, reactive, ref }
 import { useRouter } from 'vue-router'
 import { PageContainer, PagePaginationBar, PageToolbarCard } from '@/components/common'
 import { getCategories, getLocations, getStocks, type CategoryRecord, type LocationRecord, type StockRow } from '@/api/modules/inventory'
+import { useDataChangeRefresh } from '@/composables/useDataChangeRefresh'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
@@ -126,6 +127,9 @@ const toggleMobileSelection = (row: StockRow) => {
 const viewLogs = (row: StockRow) => {
   void router.push({ path: '/inventory/logs', query: { skuId: row.skuId, label: `${row.productName} · ${row.specText}` } })
 }
+
+// 分类、库位在其他页面新增或调整后，切回时刷新筛选项；库存列表在激活时已重新查询。
+useDataChangeRefresh(['products'], loadOptions)
 
 onMounted(() => {
   void loadOptions()

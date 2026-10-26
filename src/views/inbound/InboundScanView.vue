@@ -25,6 +25,7 @@ import {
 } from '@/api/modules/inbound'
 import { getProductList, type ProductRecord } from '@/api/modules/product'
 import { CameraFilled, Check, Document, DocumentCopy, Edit, Loading, Picture, Search } from '@element-plus/icons-vue'
+import { useDataChangeRefresh } from '@/composables/useDataChangeRefresh'
 import { useCameraQrScanner } from '@/composables/useCameraQrScanner'
 import { useDevice } from '@/composables/useDevice'
 import { extractErrorMessage } from '@/utils/error'
@@ -538,6 +539,11 @@ const handleReuseRecentScan = (verifyCode: string) => {
   scanCode.value = verifyCode
   void handleScan()
 }
+
+// 商品目录按需懒加载并缓存；其他页面改动商品后清空缓存，下次使用时重新拉取。
+useDataChangeRefresh(['products'], () => {
+  products.value = []
+})
 
 onMounted(() => {
   resetEditForm()
