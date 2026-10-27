@@ -76,6 +76,9 @@ const special = {
   '@/store/pinia': { default: {} },
   '@/components/common': new Proxy({}, { get: () => slotComponent }),
   '@/composables/usePermissionAction': { usePermissionAction: () => ({ hasPermission: () => true, ensurePermission: () => true }) },
+  '@/composables/useCaptchaAutoRefresh': { useCaptchaAutoRefresh: () => ({
+    remainingSeconds: { value: 0 }, schedule: () => {}, cancel: () => {},
+  }) },
   '@/composables/useStableRequest': { useStableRequest: () => ({
     run: async (_key, callback) => callback(), cancel: () => {},
     runLatest: async ({ executor, onSuccess, onError, onFinally }) => {
@@ -961,6 +964,7 @@ test('生成四个 SFC 真实 setup 但不调用业务处理器的独立覆盖�
     "  if (source === '@/utils/list') return name === 'createPaginatedListState' ? () => ({ records: [], list: [], total: 0, loading: false, query: { page: 1, pageSize: 10 } }) : noop",
     "  if (source === '@/composables/usePermissionAction') return () => ({ hasPermission: () => true, ensurePermission: () => true })",
     "  if (source === '@/composables/useStableRequest') return () => ({ runLatest: noop, run: noop, cancel: noop })",
+    "  if (source === '@/composables/useCaptchaAutoRefresh') return () => ({ remainingSeconds: { value: 0 }, schedule: noop, cancel: noop })",
     "  if (source === '@/api/modules/auth') return name === 'ROLE_LABEL_MAP' ? {} : name === 'ADMIN_MFA_TICKET_EXPIRED_REASON' ? 'ADMIN_MFA_TICKET_EXPIRED' : async () => ({})",
     "  if (source === '@/constants/app-meta') return { name: 'Y-Link' }",
     "  if (source === '@/views/system/user-governance.helpers') return name === 'roleOptions' ? [] : name === 'accountTypeDescriptions' ? {} : noop",

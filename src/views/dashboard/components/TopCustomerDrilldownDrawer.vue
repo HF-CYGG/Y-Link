@@ -118,15 +118,15 @@ watch(
     <div v-loading="loading" class="space-y-4">
       <template v-if="data">
         <div class="grid gap-3 sm:grid-cols-3">
-          <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-slate-900/40">
+          <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-black/40">
             <div class="text-xs text-slate-500 dark:text-slate-400">总金额</div>
             <div class="mt-1 text-sm font-semibold text-slate-700 dark:text-slate-200">¥{{ formatAmount(data.totalAmount) }}</div>
           </div>
-          <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-slate-900/40">
+          <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-black/40">
             <div class="text-xs text-slate-500 dark:text-slate-400">总数量</div>
             <div class="mt-1 text-sm font-semibold text-slate-700 dark:text-slate-200">{{ formatQty(data.totalQty) }}</div>
           </div>
-          <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-slate-900/40">
+          <div class="rounded-xl bg-slate-50 px-3 py-2 dark:bg-black/40">
             <div class="text-xs text-slate-500 dark:text-slate-400">订单数</div>
             <div class="mt-1 text-sm font-semibold text-slate-700 dark:text-slate-200">{{ data.orderCount }} 单</div>
           </div>
@@ -150,7 +150,7 @@ watch(
             </el-table-column>
           </el-table>
         </div>
-        <div v-else class="flex min-h-[180px] items-center justify-center rounded-xl bg-slate-50 dark:bg-slate-900/40">
+        <div v-else class="flex min-h-[180px] items-center justify-center rounded-xl bg-slate-50 dark:bg-black/40">
           <el-empty :image-size="72" description="当前筛选条件下暂无明细" />
         </div>
       </template>

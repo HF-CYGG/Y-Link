@@ -67,7 +67,7 @@ const openDrilldown = (customerName: string) => {
         v-for="(item, index) in topCustomers"
         :key="`${item.customerName}-${index}`"
         type="button"
-        class="flex w-full items-center justify-between rounded-xl bg-slate-50 px-3 py-2.5 text-left transition hover:bg-slate-100 dark:bg-slate-900/40 dark:hover:bg-slate-900/60"
+        class="flex w-full items-center justify-between rounded-xl bg-slate-50 px-3 py-2.5 text-left transition hover:bg-slate-100 dark:bg-black/40 dark:hover:bg-slate-900/60"
         @click="openDrilldown(item.customerName)"
       >
         <div class="flex min-w-0 items-center gap-3">
@@ -79,7 +79,7 @@ const openDrilldown = (customerName: string) => {
         <div class="text-sm font-semibold text-slate-700 dark:text-slate-200">¥{{ formatAmount(item.totalAmount) }}</div>
       </button>
     </div>
-    <div v-else class="flex min-h-[180px] items-center justify-center rounded-xl bg-slate-50 text-slate-400 dark:bg-slate-900/40">
+    <div v-else class="flex min-h-[180px] items-center justify-center rounded-xl bg-slate-50 text-slate-400 dark:bg-black/40">
       <el-empty :image-size="64" description="所选区间暂无榜单数据" />
     </div>
   </div>

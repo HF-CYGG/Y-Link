@@ -7,7 +7,8 @@
 # - 仅适用于 DB_TYPE=mysql 的公网或正式部署；
 # - 如需 SQLite 一体化部署，继续使用 backend/Dockerfile。
 # ------------------------------
-ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:22-bookworm-slim
+# 固定到 Node 22 最新安全补丁版本；Node 发布新安全版本后 `npm run verify:security-updates` 会报红，需同步升级全部 Node 版本固定点。
+ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:22.23.4-bookworm-slim
 
 FROM ${Y_LINK_NODE_IMAGE} AS build
 

@@ -85,7 +85,7 @@ const emit = defineEmits<{
           </div>
         </div>
 
-        <div class="grid gap-3 rounded-2xl border border-slate-200/80 bg-slate-50/70 p-4 dark:border-white/10 dark:bg-slate-900/20">
+        <div class="grid gap-3 rounded-2xl border border-slate-200/80 bg-slate-50/70 p-4 dark:border-white/10 dark:bg-black/20">
           <div class="flex items-center justify-between gap-3">
             <div>
               <div class="text-sm font-medium text-slate-700 dark:text-slate-200">允许目标库已有业务数据</div>
@@ -150,7 +150,7 @@ const emit = defineEmits<{
       </div>
 
       <div class="space-y-4">
-        <div class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-4 dark:border-white/10 dark:bg-slate-900/20">
+        <div class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-4 dark:border-white/10 dark:bg-black/20">
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div>
               <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100">最近一次预检结果</h3>

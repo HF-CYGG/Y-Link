@@ -173,7 +173,7 @@ const trendOption = computed<EChartsOption>(() => ({
       <BaseEChart :option="trendOption" :min-height="260" />
     </div>
 
-    <div v-else class="flex min-h-[260px] items-center justify-center rounded-xl bg-slate-50 text-slate-400 dark:bg-slate-900/40">
+    <div v-else class="flex min-h-[260px] items-center justify-center rounded-xl bg-slate-50 text-slate-400 dark:bg-black/40">
       <el-empty :image-size="72" description="所选区间暂无趋势数据" />
     </div>
   </div>

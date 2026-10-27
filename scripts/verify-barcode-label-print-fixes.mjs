@@ -98,18 +98,21 @@ await check('合法原型键真实生成 SVG 并在标签卡片呈现', async ()
 })
 
 await check('生成图与缺码接入最终打印阻断，密度风险独立提示', () => {
-  const js = transpile(['getGeneratedBarcodeSvg', 'barcodeSvgFor', 'missingBarcodes', 'printBlockedReason'])
-  const checkGuard = (value, width, height, mapOverride, template = 'thermal') => {
+  // 打印改为只打勾选的规格后，缺码与阻断都按 selectedLabels / selectedFailedBarcodes 计算；
+  // 失败项过滤逻辑直接取组件源码，selectedLabels 默认等于全部标签（全选），也可传入空数组验证未勾选阻断。
+  const js = transpile(['getGeneratedBarcodeSvg', 'barcodeSvgFor', 'failureKeyFor', 'selectedFailedBarcodes', 'missingBarcodes', 'printBlockedReason'])
+  const checkGuard = (value, width, height, mapOverride, template = 'thermal', selectedOverride) => {
     const rendered = renderedCases.get(value)
     assert.ok(rendered)
     const settings = { template, barcodeSource: 'factory_barcode', labelWidthMm: width, labelHeightMm: height,
       showSpec: true, showCode: true, showPrice: true, showLocation: false, showPrintDate: true }
     const result = new Function(
-      'computed', 'barcodeSvgMap', 'barcodeModuleMap', 'labels', 'failedBarcodes', 'settings', 'resolveBarcodeValue',
+      'computed', 'barcodeSvgMap', 'barcodeModuleMap', 'labels', 'selectedLabels', 'failedBarcodes', 'settings', 'resolveBarcodeValue',
       'labelLayoutError', 'barcodeTextError', 'loading', 'loadError', 'exceedsLimit', 'totalLabelCount', 'a4LayoutError', 'MAX_TOTAL_LABELS',
       `${js}; return { getGeneratedBarcodeSvg, barcodeSvgFor, missingBarcodes, printBlockedReason }`,
     )((getter) => ({ get value() { return getter() } }), mapOverride ?? rendered.barcodeSvgMap, rendered.barcodeModuleMap,
-      rendered.labels, rendered.failedBarcodes, settings, helpers.resolveBarcodeValue, { value: helpers.getLabelLayoutError(settings) },
+      rendered.labels, selectedOverride ?? rendered.labels, rendered.failedBarcodes, settings, helpers.resolveBarcodeValue,
+      { value: helpers.getLabelLayoutError(settings) },
       { value: '' }, { value: false }, { value: '' }, { value: false }, { value: 1 }, { value: '' }, 2000)
     return { labelCount: rendered.labels.value.length, source: helpers.resolveBarcodeValue(rendered.labels.value[0], settings.barcodeSource),
       svg: result.barcodeSvgFor(rendered.labels.value[0]), direct: result.getGeneratedBarcodeSvg(value),
@@ -121,6 +124,9 @@ await check('生成图与缺码接入最终打印阻断，密度风险独立提�
   assert.equal(prototype.blocked, '', '宽标签的合法原型键应可打印')
   const missing = checkGuard('constructor', 60, 30, { value: {} })
   assert.match(missing.blocked, /无法生成/, `无自有SVG应阻断：${JSON.stringify(missing)}`)
+  const unselected = checkGuard('constructor', 60, 30, { value: {} }, 'thermal', { value: [] })
+  assert.deepEqual(unselected.missing, [], '未勾选的规格不参与缺码检查')
+  assert.equal(unselected.blocked, '请至少勾选一个要打印的规格')
   assert.equal(checkGuard('WC02001', 40, 10).blocked, '', '10mm适配后仍有基本图形区')
   assert.equal(checkGuard('A'.repeat(64), 40, 30).blocked, '', '密度风险不作为硬阻断')
   assert.equal(checkGuard('YZ0100001', 32, 30, undefined, 'a4').blocked, '')

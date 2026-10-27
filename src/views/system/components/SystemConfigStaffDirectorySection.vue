@@ -594,7 +594,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="rounded-2xl border border-slate-200/80 bg-white/90 p-4 shadow-sm dark:border-white/10 dark:bg-slate-950/40">
+  <div class="rounded-2xl border border-slate-200/80 bg-white/90 p-4 shadow-sm dark:border-white/10 dark:bg-black/40">
     <div class="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-4 dark:border-white/5">
       <div>
         <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100">教职工工号库</h3>

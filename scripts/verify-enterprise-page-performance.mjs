@@ -83,11 +83,17 @@ const reportPath = path.join(runtimeRoot, 'enterprise-performance-budget-report.
  * +49.81 KB / +0.05 KB / +0.43 KB。同一环境实测：总产物 4673.40 KB、OrderEntryView 34.76 KB、OrderListView 34.74 KB。
  * 因此总量上限调整为 4690 KB（约 0.36% 余量），OrderEntryView 与 OrderListView 路由分包上限均调整为 36 KB
  * （约 3.5% 余量），继续约束出库两页主包增长；其余各项预算维持不变。
+ *
+ * 2026-10 依赖安全补丁（vue 3.5.32 → 3.5.44、axios 1.18.1 → 1.20.0、vite 8.0.16 → 8.3.5）：同一环境下 main@f6b9539
+ * 基线实测总产物 4716.81 KB（基线即已超 4690）、首屏依赖图 1179.36 KB、首屏 JS 855.12 KB（基线即已超 855）；
+ * 升级后分别为 4719.79 / 1186.71 / 862.47 KB，首屏 CSS 不变。增量全部来自安全补丁本身：framework 块（vue）
+ * +4.06 KB、vendor 块（axios）+5.01 KB、ui-kit 块 -1.81 KB。漏洞修复不能回退，因此总产物上限调整为 4740 KB、
+ * 首屏依赖图上限调整为 1195 KB、首屏 JS 上限调整为 870 KB（余量均不足 1%），其余各项预算维持不变。
  */
 const performanceBudget = {
-  totalAssetsMaxKB: 4690,
-  criticalAssetsMaxKB: 1180,
-  initialLoadJsMaxKB: 855,
+  totalAssetsMaxKB: 4740,
+  criticalAssetsMaxKB: 1195,
+  initialLoadJsMaxKB: 870,
   initialLoadCssMaxKB: 325,
   entryChunkMaxKB: 80,
   loginChunkMaxKB: 25,

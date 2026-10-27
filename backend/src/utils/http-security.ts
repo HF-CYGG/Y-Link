@@ -55,7 +55,9 @@ const readSingleHeader = (value: string | string[] | undefined): string | null =
  * Fetch Metadata 资源隔离策略（web.dev / OWASP CSRF 速查表）：
  * - `/api/*` 拒绝 `Sec-Fetch-Site: cross-site`，防 CSRF、XSSI 与跨站信息泄露；
  * - `same-site`（兄弟子域）只放行安全方法，前端与接口同源部署，写请求不应来自其它子域；
- * - 浏览器未发送该头时（旧浏览器）对写方法回退到 Origin 主机名比对，`null` 来源一律拒绝；
+ * - 浏览器未发送该头时（旧浏览器）对写方法回退到 Origin 主机名比对；
+ * - 旧版 WebKit（如 iOS 17.5 Safari）同源 POST 可能带 `Origin: null`，此时改用 Referer 主机名比对，
+ *   Referer 缺失或非法仍拒绝；第三方页面无法伪造指向本站的 Referer；
  * - 移动端、脚本等原生客户端不带这两个头，照常放行，由会话与 CSRF 令牌继续把关。
  */
 export function resolveCrossSiteBlockReason(
@@ -72,10 +74,11 @@ export function resolveCrossSiteBlockReason(
   if (safeMethod) return null
   const origin = readSingleHeader(req.headers.origin)
   if (!origin) return null
-  if (origin === 'null') return 'origin_mismatch'
+  const source = origin === 'null' ? readSingleHeader(req.headers.referer) : origin
+  if (!source) return 'origin_mismatch'
   let originHostname: string
   try {
-    originHostname = new URL(origin).hostname.toLowerCase()
+    originHostname = new URL(source).hostname.toLowerCase()
   } catch {
     return 'origin_mismatch'
   }

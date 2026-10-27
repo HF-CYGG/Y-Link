@@ -61,6 +61,7 @@ import {
   readMallCatalogRevision,
 } from './mall-catalog-revision.service.js'
 import { buildSkuLogFields, snapshotSkuStock } from './inventory-ledger.service.js'
+import { formatLocationDeductions, reconcileSkuLocationStocks } from './sku-location-stock.service.js'
 import type { PaginationResult } from '../types/api.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import {
@@ -4754,6 +4755,8 @@ class O2oPreorderService {
         sku.preOrderedStock = beforeSkuPreOrderedStock - verifyQty
         await manager.getRepository(BaseProductSku).save(sku)
       }
+      // 核销出库按“先扣主库位、不够再扣其他库位”规整分库位件数，扣到的其他库位写进流水备注。
+      const locationNote = sku ? formatLocationDeductions((await reconcileSkuLocationStocks(manager, [sku])).get(String(sku.id))) : ''
       product.currentStock = beforeCurrentStock - verifyQty
       product.preOrderedStock = beforePreOrderedStock - verifyQty
       await manager.getRepository(BaseProduct).save(product)
@@ -4763,6 +4766,7 @@ class O2oPreorderService {
           ...buildSkuLogFields(sku, skuBefore),
           changeType: 'preorder_verify',
           changeQty: verifyQty,
+          ...(locationNote ? { remark: locationNote } : {}),
           beforeCurrentStock,
           afterCurrentStock: product.currentStock,
           beforePreorderedStock: beforePreOrderedStock,

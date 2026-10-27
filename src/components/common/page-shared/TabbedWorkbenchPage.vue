@@ -65,12 +65,12 @@ const resolvedComponentCacheKey = computed(() => {
   <PageContainer>
     <div
       :class="[
-        'supplier-workbench-shell overflow-hidden rounded-[30px] border border-slate-200/70 bg-white/95 shadow-[0_18px_48px_-40px_rgba(15,23,42,0.22)] dark:border-slate-700/80 dark:bg-slate-800/95',
+        'supplier-workbench-shell overflow-hidden rounded-[30px] border border-slate-200/70 bg-white/95 shadow-[0_18px_48px_-40px_rgba(15,23,42,0.22)] dark:border-white/10 dark:bg-[#141415]/95',
         props.compactOnPhone ? 'supplier-workbench-shell--compact-mobile' : '',
         props.cardClass,
       ]"
     >
-      <div class="supplier-workbench-shell__hero border-b border-slate-200/70 px-5 py-4 sm:px-6 sm:py-5 dark:border-slate-700/80">
+      <div class="supplier-workbench-shell__hero border-b border-slate-200/70 px-5 py-4 sm:px-6 sm:py-5 dark:border-white/10">
         <div class="flex flex-col gap-3">
           <div v-if="props.title || props.description" class="min-w-0 space-y-1">
             <div class="space-y-1">
@@ -121,9 +121,10 @@ const resolvedComponentCacheKey = computed(() => {
     linear-gradient(180deg, rgba(248, 250, 252, 0.88), rgba(255, 255, 255, 0.96));
 }
 
-/* 暗色：渐变是背景图，外层 dark:bg 盖不住，必须在暗色选择器里整体重写背景。 */
+/* 暗色：渐变是背景图，外层 dark:bg 盖不住，必须在暗色选择器里整体重写背景。
+ * 只叠加中性白色，不要回退到 slate（#1e293b 系）色值：壳层与 .apple-card（#141415）之间露出的蓝底会被看成蓝色卡片边框。 */
 .dark .supplier-workbench-shell__hero {
-  background: linear-gradient(180deg, rgba(30, 41, 59, 0.55), rgba(20, 20, 21, 0.9));
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(20, 20, 21, 0.9));
 }
 
 .supplier-workbench-shell__tab-wrap {
@@ -160,7 +161,7 @@ const resolvedComponentCacheKey = computed(() => {
   }
 
   .dark .supplier-workbench-shell__hero {
-    background: linear-gradient(180deg, rgba(30, 41, 59, 0.6), rgba(20, 20, 21, 0.95));
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(20, 20, 21, 0.95));
   }
 
   .supplier-workbench-shell--compact-mobile .supplier-workbench-shell__hero {

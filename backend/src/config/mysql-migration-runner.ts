@@ -94,6 +94,7 @@ const MYSQL_REQUIRED_TABLES = [
   'base_yz_series_seq_reservation',
   'sys_user_mfa',
   'sys_user_webauthn_credential',
+  'inv_sku_location_stock',
 ]
 
 /** 056 后必须物理移除的历史业务号永久占用结构。 */
@@ -106,8 +107,8 @@ const MYSQL_FORBIDDEN_TABLES = [
 // auth_risk_state 现同时存在于 001（供全新库一次建齐）与 033（供存量库补建），
 // 这里指向 033，因为它是白名单中专门为存量库补建该表的自动迁移脚本。
 const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
-  client_restock_request: '060_client_restock_requests.sql',
-  client_restock_request_key: '060_client_restock_requests.sql',
+  client_restock_request: '061_client_restock_requests.sql',
+  client_restock_request_key: '061_client_restock_requests.sql',
   base_product: '001_init_schema.sql',
   sys_user: '001_init_schema.sql',
   sys_user_session: '001_init_schema.sql',
@@ -145,6 +146,7 @@ const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
   base_yz_series_seq_reservation: '052_yz_series_seq_reservation.sql',
   sys_user_mfa: '057_admin_mfa.sql',
   sys_user_webauthn_credential: '058_admin_webauthn.sql',
+  inv_sku_location_stock: '060_sku_location_stock.sql',
 }
 
 interface MysqlRequiredColumn {
@@ -181,7 +183,7 @@ interface MysqlRequiredTrigger {
   tableName: string
   eventManipulation: 'UPDATE' | 'DELETE'
   actionTiming: 'BEFORE'
-  // 单语句触发体，须与引入脚本逐字一致：onebox 镜像不携带 backend/sql，迁移建表子进程据此补建。
+  /** 触发器正文，须与 introducingScript 中的定义保持一致；SQLite→MySQL 自动迁移按此补建。 */
   actionStatement: string
   introducingScript: string
 }
@@ -195,17 +197,19 @@ interface MysqlRequiredCheck {
 // 只列会被当前业务代码直接读写、缺失后必然导致运行时失败的增量字段。
 // 表不存在时由 MYSQL_REQUIRED_TABLES 先给出建表脚本，避免同一张缺表重复打印多条缺列提示。
 const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
+  // 060：按库位盘点的明细库位列，0 表示按规格总量盘点；缺失时盘点建单与计数都会写库失败。
+  { tableName: 'inv_stocktake_item', columnName: 'location_scope_id', introducingScript: '060_sku_location_stock.sql', expectedDataType: 'bigint', expectedNullable: false, expectedDefault: '0' },
   ...['conversation_id', 'client_user_id', 'product_id', 'sku_id', 'product_name_snapshot', 'product_code_snapshot', 'sku_code_snapshot', 'spec_text_snapshot', 'quantity', 'latest_pickup_at', 'remark', 'status', 'handled_at', 'client_request_id', 'payload_digest', 'created_at', 'updated_at']
-    .map((columnName) => ({ tableName: 'client_restock_request', columnName, introducingScript: '060_client_restock_requests.sql' })),
+    .map((columnName) => ({ tableName: 'client_restock_request', columnName, introducingScript: '061_client_restock_requests.sql' })),
   ...['client_user_id', 'client_request_id', 'payload_digest', 'restock_request_id', 'created_at']
-    .map((columnName) => ({ tableName: 'client_restock_request_key', columnName, introducingScript: '060_client_restock_requests.sql' })),
+    .map((columnName) => ({ tableName: 'client_restock_request_key', columnName, introducingScript: '061_client_restock_requests.sql' })),
   ...['client_restock_request', 'client_restock_request_key'].flatMap((tableName) => [
-    { tableName, columnName: 'client_request_id', introducingScript: '060_client_restock_requests.sql', expectedDataType: 'varchar', expectedNullable: false, expectedCharacterMaximumLength: 64 },
-    { tableName, columnName: 'payload_digest', introducingScript: '060_client_restock_requests.sql', expectedDataType: 'varchar', expectedNullable: false, expectedCharacterMaximumLength: 64 },
+    { tableName, columnName: 'client_request_id', introducingScript: '061_client_restock_requests.sql', expectedDataType: 'varchar', expectedNullable: false, expectedCharacterMaximumLength: 64 },
+    { tableName, columnName: 'payload_digest', introducingScript: '061_client_restock_requests.sql', expectedDataType: 'varchar', expectedNullable: false, expectedCharacterMaximumLength: 64 },
   ]),
-  { tableName: 'client_restock_request', columnName: 'quantity', introducingScript: '060_client_restock_requests.sql', expectedDataType: 'int', expectedNullable: false },
-  { tableName: 'client_restock_request', columnName: 'latest_pickup_at', introducingScript: '060_client_restock_requests.sql', expectedDataType: 'datetime', expectedNullable: false },
-  { tableName: 'client_restock_request', columnName: 'status', introducingScript: '060_client_restock_requests.sql', expectedDataType: 'varchar', expectedNullable: false, expectedCharacterMaximumLength: 16, expectedDefault: 'requested' },
+  { tableName: 'client_restock_request', columnName: 'quantity', introducingScript: '061_client_restock_requests.sql', expectedDataType: 'int', expectedNullable: false },
+  { tableName: 'client_restock_request', columnName: 'latest_pickup_at', introducingScript: '061_client_restock_requests.sql', expectedDataType: 'datetime', expectedNullable: false },
+  { tableName: 'client_restock_request', columnName: 'status', introducingScript: '061_client_restock_requests.sql', expectedDataType: 'varchar', expectedNullable: false, expectedCharacterMaximumLength: 16, expectedDefault: 'requested' },
   { tableName: 'sys_user_mfa', columnName: 'factor_revision', introducingScript: '059_admin_webauthn_second_factor.sql', expectedDataType: 'int', expectedNullable: false, expectedDefault: '1' },
   { tableName: 'sys_user_mfa', columnName: 'totp_secret_sealed', introducingScript: '059_admin_webauthn_second_factor.sql', expectedDataType: 'varchar', minCharacterMaximumLength: 255, expectedNullable: true },
   { tableName: 'sys_user_webauthn_credential', columnName: 'usage', introducingScript: '059_admin_webauthn_second_factor.sql', expectedDataType: 'varchar', minCharacterMaximumLength: 16, expectedNullable: false, expectedDefault: 'passwordless' },
@@ -475,12 +479,16 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
 
 // 不只按索引名判断，还校验列顺序与唯一性，避免旧库中存在同名但错误的索引时误判为可启动。
 const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
-  { tableName: 'client_restock_request', indexName: 'uk_restock_conversation', columns: ['conversation_id'], unique: true, introducingScript: '060_client_restock_requests.sql' },
-  { tableName: 'client_restock_request', indexName: 'uk_restock_client_request', columns: ['client_user_id', 'client_request_id'], unique: true, introducingScript: '060_client_restock_requests.sql' },
-  { tableName: 'client_restock_request', indexName: 'idx_restock_active', columns: ['client_user_id', 'sku_id', 'status', 'latest_pickup_at'], unique: false, introducingScript: '060_client_restock_requests.sql' },
-  { tableName: 'client_restock_request', indexName: 'idx_restock_product_created', columns: ['product_id', 'created_at'], unique: false, introducingScript: '060_client_restock_requests.sql' },
-  { tableName: 'client_restock_request', indexName: 'idx_restock_created', columns: ['created_at'], unique: false, introducingScript: '060_client_restock_requests.sql' },
-  { tableName: 'client_restock_request_key', indexName: 'uk_restock_key_client_request', columns: ['client_user_id', 'client_request_id'], unique: true, introducingScript: '060_client_restock_requests.sql' },
+  // 060：分库位库存同一规格同一库位至多一行；盘点明细唯一键扩展到“规格 × 库位”（旧的 uk_inv_stocktake_item_sku 由 060 删除）。
+  { tableName: 'inv_sku_location_stock', indexName: 'uk_inv_sku_location_stock_sku_location', columns: ['sku_id', 'location_id'], unique: true, introducingScript: '060_sku_location_stock.sql' },
+  { tableName: 'inv_sku_location_stock', indexName: 'idx_inv_sku_location_stock_location_id', columns: ['location_id'], unique: false, introducingScript: '060_sku_location_stock.sql' },
+  { tableName: 'inv_stocktake_item', indexName: 'uk_inv_stocktake_item_sku_location', columns: ['stocktake_id', 'sku_id', 'location_scope_id'], unique: true, introducingScript: '060_sku_location_stock.sql' },
+  { tableName: 'client_restock_request', indexName: 'uk_restock_conversation', columns: ['conversation_id'], unique: true, introducingScript: '061_client_restock_requests.sql' },
+  { tableName: 'client_restock_request', indexName: 'uk_restock_client_request', columns: ['client_user_id', 'client_request_id'], unique: true, introducingScript: '061_client_restock_requests.sql' },
+  { tableName: 'client_restock_request', indexName: 'idx_restock_active', columns: ['client_user_id', 'sku_id', 'status', 'latest_pickup_at'], unique: false, introducingScript: '061_client_restock_requests.sql' },
+  { tableName: 'client_restock_request', indexName: 'idx_restock_product_created', columns: ['product_id', 'created_at'], unique: false, introducingScript: '061_client_restock_requests.sql' },
+  { tableName: 'client_restock_request', indexName: 'idx_restock_created', columns: ['created_at'], unique: false, introducingScript: '061_client_restock_requests.sql' },
+  { tableName: 'client_restock_request_key', indexName: 'uk_restock_key_client_request', columns: ['client_user_id', 'client_request_id'], unique: true, introducingScript: '061_client_restock_requests.sql' },
   { tableName: 'sys_user', indexName: 'uk_sys_user_webauthn_user_handle', columns: ['webauthn_user_handle'], unique: true, introducingScript: '058_admin_webauthn.sql' },
   { tableName: 'sys_user_webauthn_credential', indexName: 'idx_sys_user_webauthn_credential_user_id', columns: ['user_id'], unique: false, introducingScript: '058_admin_webauthn.sql' },
   { tableName: 'sys_user_webauthn_credential', indexName: 'uk_sys_user_webauthn_rp_credential_sha256', columns: ['rp_id', 'credential_id_sha256'], unique: true, introducingScript: '058_admin_webauthn.sql' },
@@ -658,7 +666,6 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
     ['inv_stock_doc', 'uk_inv_stock_doc_no', ['doc_no']],
     ['inv_stock_doc', 'uk_inv_stock_doc_request', ['client_request_id']],
     ['inv_stocktake', 'uk_inv_stocktake_no', ['stocktake_no']],
-    ['inv_stocktake_item', 'uk_inv_stocktake_item_sku', ['stocktake_id', 'sku_id']],
   ] as const).map(([tableName, indexName, columns]) => ({
     tableName,
     indexName,
@@ -715,6 +722,9 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
 ]
 
 const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [
+  // 060：分库位库存随 SKU 级联清理；库位只停用不删除，被引用时必须拒绝删除。
+  { tableName: 'inv_sku_location_stock', columnName: 'sku_id', referencedTableName: 'base_product_sku', referencedColumnName: 'id', deleteRule: 'CASCADE', introducingScript: '060_sku_location_stock.sql' },
+  { tableName: 'inv_sku_location_stock', columnName: 'location_id', referencedTableName: 'base_storage_location', referencedColumnName: 'id', deleteRule: 'RESTRICT', introducingScript: '060_sku_location_stock.sql' },
   ...[
     ['client_restock_request', 'conversation_id', 'client_feedback_conversation'],
     ['client_restock_request', 'client_user_id', 'client_user'],
@@ -722,7 +732,7 @@ const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [
     ['client_restock_request', 'sku_id', 'base_product_sku'],
     ['client_restock_request_key', 'client_user_id', 'client_user'],
     ['client_restock_request_key', 'restock_request_id', 'client_restock_request'],
-  ].map(([tableName, columnName, referencedTableName]) => ({ tableName, columnName, referencedTableName, referencedColumnName: 'id', deleteRule: 'RESTRICT', introducingScript: '060_client_restock_requests.sql' })),
+  ].map(([tableName, columnName, referencedTableName]) => ({ tableName, columnName, referencedTableName, referencedColumnName: 'id', deleteRule: 'RESTRICT', introducingScript: '061_client_restock_requests.sql' })),
   { tableName: 'sys_user_webauthn_credential', columnName: 'user_id', referencedTableName: 'sys_user', referencedColumnName: 'id', deleteRule: 'RESTRICT', introducingScript: '058_admin_webauthn.sql' },
   ...[
     ['sys_user_session', 'user_id', 'sys_user'],
@@ -831,8 +841,8 @@ const MYSQL_REQUIRED_TRIGGERS: readonly MysqlRequiredTrigger[] = [
 ]
 
 const MYSQL_REQUIRED_CHECKS: readonly MysqlRequiredCheck[] = [
-  { tableName: 'client_restock_request', constraintName: 'ck_restock_quantity_positive', introducingScript: '060_client_restock_requests.sql' },
-  { tableName: 'client_restock_request', constraintName: 'ck_restock_status', introducingScript: '060_client_restock_requests.sql' },
+  { tableName: 'client_restock_request', constraintName: 'ck_restock_quantity_positive', introducingScript: '061_client_restock_requests.sql' },
+  { tableName: 'client_restock_request', constraintName: 'ck_restock_status', introducingScript: '061_client_restock_requests.sql' },
   {
     tableName: 'order_merge_relation',
     constraintName: 'ck_order_merge_relation_distinct_orders',
@@ -876,7 +886,8 @@ const AUTO_MIGRATABLE_FILES = [
   '057_admin_mfa.sql',
   '058_admin_webauthn.sql',
   '059_admin_webauthn_second_factor.sql',
-  '060_client_restock_requests.sql',
+  '060_sku_location_stock.sql',
+  '061_client_restock_requests.sql',
 ]
 
 /**
@@ -1575,46 +1586,53 @@ function collectMysqlTriggerIssues(
   })
 }
 
-// DataSource 与 QueryRunner 都满足该形状；迁移子进程用 QueryRunner，启动自检用 DataSource。
-type MysqlQueryable = { query: (sql: string, parameters?: unknown[]) => Promise<unknown> }
+/** DataSource 与 QueryRunner 都满足的最小查询接口，供迁移服务与建表子进程共用。 */
+interface MysqlQueryExecutor {
+  query(sql: string, parameters?: unknown[]): Promise<unknown>
+}
 
-async function queryMysqlRequiredTriggerIssues(
-  queryable: MysqlQueryable,
+const quoteMysqlIdentifier = (value: string): string => `\`${value.replaceAll('`', '``')}\``
+
+async function readMysqlRequiredTriggerIssues(
+  executor: MysqlQueryExecutor,
 ): Promise<Array<MysqlSchemaShapeIssue<MysqlRequiredTrigger>>> {
-  const triggerRows = await queryable.query(
+  const rows = await executor.query(
     `SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING
      FROM information_schema.TRIGGERS
      WHERE TRIGGER_SCHEMA = DATABASE()
        AND TRIGGER_NAME IN (${MYSQL_REQUIRED_TRIGGERS.map(() => '?').join(', ')})`,
     MYSQL_REQUIRED_TRIGGERS.map((item) => item.triggerName),
   ) as MysqlTriggerRow[]
-  return collectMysqlTriggerIssues(triggerRows, MYSQL_REQUIRED_TRIGGERS)
+  return collectMysqlTriggerIssues(rows, MYSQL_REQUIRED_TRIGGERS)
+}
+
+/** 返回缺失或定义不匹配的必需触发器名称；为空表示全部就绪。 */
+export async function findInvalidMysqlRequiredTriggers(executor: MysqlQueryExecutor): Promise<string[]> {
+  return (await readMysqlRequiredTriggerIssues(executor)).map((issue) => issue.requirement.triggerName)
 }
 
 /**
- * 迁移建表子进程专用：实体同步无法表达触发器，按 MYSQL_REQUIRED_TRIGGERS 补建缺失或形状不符的触发器。
- * - 只应作用于迁移任务独占的新目标库，导入阶段只有 INSERT，不会触发只追加保护；
- * - 与 044 一样先 DROP 再 CREATE（MySQL 不支持 CREATE TRIGGER IF NOT EXISTS），完成后再次只读校验。
+ * SQLite→MySQL 迁移在数据导入完成后补建必需触发器：TypeORM synchronize 不会创建触发器，
+ * 而启动期结构自检要求它们存在。只处理缺失或定义不匹配的触发器，先删后建保证定义与迁移脚本一致。
+ * 必须在导入之后执行，否则追加型保护触发器会阻断导入前的清表。
  */
-export async function ensureMysqlRequiredTriggers(queryable: MysqlQueryable): Promise<number> {
-  for (const { requirement } of await queryMysqlRequiredTriggerIssues(queryable)) {
-    const triggerName = `\`${requirement.triggerName.replaceAll('`', '``')}\``
-    await queryable.query(`DROP TRIGGER IF EXISTS ${triggerName}`)
-    await queryable.query(
-      `CREATE TRIGGER ${triggerName} ${requirement.actionTiming} ${requirement.eventManipulation}`
-      + ` ON \`${requirement.tableName.replaceAll('`', '``')}\` FOR EACH ROW ${requirement.actionStatement}`,
+export async function ensureMysqlRequiredTriggers(executor: MysqlQueryExecutor): Promise<string[]> {
+  const issues = await readMysqlRequiredTriggerIssues(executor)
+  for (const { requirement } of issues) {
+    await executor.query(`DROP TRIGGER IF EXISTS ${quoteMysqlIdentifier(requirement.triggerName)}`)
+    await executor.query(
+      `CREATE TRIGGER ${quoteMysqlIdentifier(requirement.triggerName)} ${requirement.actionTiming} ${requirement.eventManipulation}`
+      + ` ON ${quoteMysqlIdentifier(requirement.tableName)} FOR EACH ROW ${requirement.actionStatement}`,
     )
   }
-  return assertMysqlRequiredTriggers(queryable)
+  return issues.map((issue) => issue.requirement.triggerName)
 }
 
-/** 只读校验必需触发器，供迁移切换前后的结构验收复用，避免切换后才在启动自检进入救援。 */
-export async function assertMysqlRequiredTriggers(queryable: MysqlQueryable): Promise<number> {
-  const invalidTriggers = await queryMysqlRequiredTriggerIssues(queryable)
-  if (invalidTriggers.length > 0) {
-    throw new Error(`缺少或定义不匹配的必需触发器：${invalidTriggers.map((item) => item.requirement.triggerName).join(', ')}`)
+/** 迁移导入前清空目标表时先移除追加型保护触发器，导入完成后由 ensureMysqlRequiredTriggers 补回。 */
+export async function dropMysqlRequiredTriggers(executor: MysqlQueryExecutor): Promise<void> {
+  for (const requirement of MYSQL_REQUIRED_TRIGGERS) {
+    await executor.query(`DROP TRIGGER IF EXISTS ${quoteMysqlIdentifier(requirement.triggerName)}`)
   }
-  return MYSQL_REQUIRED_TRIGGERS.length
 }
 
 /** 启动期只读自检：确认当前代码会直接依赖的 MySQL 表、字段与索引结构均已落地。 */
@@ -1722,7 +1740,7 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
       )
     : []
   const invalidForeignKeys = collectMysqlForeignKeyIssues(foreignKeyRows, requiredForeignKeysOnExistingTables)
-  const invalidTriggers = await queryMysqlRequiredTriggerIssues(dataSource)
+  const invalidTriggers = await readMysqlRequiredTriggerIssues(dataSource)
   const requiredChecksOnExistingTables = MYSQL_REQUIRED_CHECKS.filter((requirement) => (
     existingTableSet.has(requirement.tableName)
   ))

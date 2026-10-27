@@ -23,7 +23,8 @@ services:
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_0900_ai_ci
-      # MySQL 8.4 默认开启 binlog；迁移账号需建 044 只追加触发器，对应部署前提由 DBA 放开该开关。
+      # MySQL 8.4 默认开启二进制日志，普通账号创建触发器会报 1419；迁移与 044 脚本需要补建
+      # 账号生命周期追加型保护触发器（只 SIGNAL 拒绝，不读写数据，对复制安全）。
       - --log-bin-trust-function-creators=1
     volumes:
       - verify_mysql_data:/var/lib/mysql
@@ -46,7 +47,7 @@ services:
       context: ..
       dockerfile: Dockerfile.onebox
       args:
-        Y_LINK_NODE_IMAGE: ${Y_LINK_NODE_IMAGE:-public.ecr.aws/docker/library/node:22-bookworm-slim}
+        Y_LINK_NODE_IMAGE: ${Y_LINK_NODE_IMAGE:-public.ecr.aws/docker/library/node:22.23.4-bookworm-slim}
     environment:
       NODE_ENV: production
       APP_PROFILE: verify-db-migration

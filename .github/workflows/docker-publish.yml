@@ -136,7 +136,7 @@ jobs:
           file: ${{ matrix.file }}
           platforms: linux/${{ matrix.platform }}
           build-args: |
-            Y_LINK_NODE_IMAGE=${{ needs.prepare.outputs.dockerhub_enabled == 'true' && 'docker.io/library/node:22-bookworm-slim' || 'public.ecr.aws/docker/library/node:22-bookworm-slim' }}
+            Y_LINK_NODE_IMAGE=${{ needs.prepare.outputs.dockerhub_enabled == 'true' && 'docker.io/library/node:22.23.4-bookworm-slim' || 'public.ecr.aws/docker/library/node:22.23.4-bookworm-slim' }}
           labels: ${{ steps.meta.outputs.labels }}
           # 关闭 provenance / sbom，确保 digest 直接指向平台镜像本身，便于清单合并。
           provenance: false

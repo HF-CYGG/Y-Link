@@ -7,9 +7,11 @@
  * - 编辑弹窗在主商品字段之外维护 SKU 行，提交时把颜色、款式、售价、库存和启停状态转换为后端规格数据；
  * - 未配置规格时继续使用默认规格，由后端同步主商品价格与库存，兼容历史单规格商品；
  * - 表格、移动卡片和筛选条件仍复用既有数据集合，避免规格能力影响原有基础资料工作台；
- * - 商品可归属一个分类；单规格商品在编辑弹窗直接维护条码、成本价与库位（通过 defaultSku 提交），多规格商品在规格配置里逐行维护；
+ * - 商品可归属一个分类；单规格商品在编辑弹窗直接维护条码、成本价与主库位（通过 defaultSku 提交），多规格商品在规格配置里逐行维护；
+ *   同一规格可分放多个库位，这里只维护主库位，其他库位的件数由库存查询 / 库位管理的拨转维护；
  * - 新增商品必须选择文创系列（seriesCode 非空的标签），选中后走 YZ 编码，productCode 由后端生成、前端禁用并清空该输入；
- *   编辑已有 YZ 编码商品时产品编码与文创系列均只读；编辑历史（legacy）商品保持原有自由编辑行为，并提供「升级到 YZ 编码」入口（ProductYzUpgradeDialog.vue）；
+ *   编辑已有 YZ 编码商品时产品编码只读，文创系列仅管理员可改选——改选不直接写入表单，而是打开「更换文创系列」二次确认弹窗
+ *   （ProductSeriesSwitchDialog.vue）预检并重算编码；编辑历史（legacy）商品保持原有自由编辑行为，并提供「升级到 YZ 编码」入口（ProductYzUpgradeDialog.vue）；
  * - 规格弹窗里一级变体轴（对应 YZ 编码位 1-9）展示并写入 key「颜色/款式」，尺码轴（对应 YZ 编码位 A-E）展示并
  *   写入 key「尺码」（B8 批次改名，新写入统一新 key）；读取历史 SKU 时兼容旧 key「颜色」「款式」，不做批量
  *   迁移，靠重新保存自然懒迁移，具体规则见 product-sku-matrix.helpers.ts 顶部注释；
@@ -31,6 +33,7 @@
  * - 后续扩展尺码、容量等规格维度时，优先扩展 SKU 表单和后端规格归一化逻辑，不要绕过商品服务直接写库存；
  * - 删除或停用已有 SKU 前需保留占用库存汇总，避免已下单未核销记录丢失库存占用；
  * - 升级到 YZ 编码属于不可逆操作，不要在本文件里叠加绕过 ProductYzUpgradeDialog 预检结果的“快速升级”入口；
+ * - 更换文创系列同样不可撤销且会让已打印的 YZ 标签失效，只能经 ProductSeriesSwitchDialog 预检与二次确认后提交，普通保存不提交系列；
  * - 历史编码字段（legacyProductCode/legacySkuCode）只读展示，不要在本文件里增加可编辑入口——它们只应由
  *   升级流程（upgradeProductToYzCode）写入。
  */
@@ -42,6 +45,7 @@ import { ArrowDown } from '@element-plus/icons-vue'
 import { type FormInstance, type FormRules, type TableInstance, type UploadRequestOptions } from 'element-plus'
 import type { RequestConfig } from '@/api/http'
 import { createTag, getTagList, type Tag } from '@/api/modules/tag'
+import { useAuthStore } from '@/store'
 import { createLocation, exportProducts, getCategories, getLocations, type CategoryRecord, type LocationRecord } from '@/api/modules/inventory'
 import { uploadImage } from '@/api/modules/upload'
 import {
@@ -90,6 +94,7 @@ import {
   buildSkuMatrixRows,
   evaluateSkuDimensionCapacity,
   extractSkuDimensionValues,
+  resolveSkuSpecAxes,
   SIZE_AXIS_SPEC_KEY,
   VARIANT_AXIS_SPEC_KEY,
   type ProductSkuMatrixRow,
@@ -99,6 +104,7 @@ const ProductImportDialog = defineAsyncComponent(() => import('@/views/inventory
 const ProductYzImportDialog = defineAsyncComponent(() => import('@/views/inventory/components/ProductYzImportDialog.vue'))
 const BarcodeLabelPrintDialog = defineAsyncComponent(() => import('@/views/inventory/components/BarcodeLabelPrintDialog.vue'))
 const ProductYzUpgradeDialog = defineAsyncComponent(() => import('@/views/base-data/components/ProductYzUpgradeDialog.vue'))
+const ProductSeriesSwitchDialog = defineAsyncComponent(() => import('@/views/base-data/components/ProductSeriesSwitchDialog.vue'))
 const ProductSpecValueRenameDialog = defineAsyncComponent(() => import('@/views/base-data/components/ProductSpecValueRenameDialog.vue'))
 const ProductZeroSpecEvolveDialog = defineAsyncComponent(() => import('@/views/base-data/components/ProductZeroSpecEvolveDialog.vue'))
 const ProductBatchFieldDialog = defineAsyncComponent(() => import('@/views/base-data/components/ProductBatchFieldDialog.vue'))
@@ -131,6 +137,8 @@ const batchCreateDialogVisible = ref(false)
 const batchCreateSubmitting = ref(false)
 const selectedProductIds = ref<string[]>([])
 const yzUpgradeDialogVisible = ref(false)
+const seriesSwitchDialogVisible = ref(false)
+const seriesSwitchTargetTagId = ref('')
 const specValueRenameDialogVisible = ref(false)
 const zeroSpecEvolveDialogVisible = ref(false)
 const route = useRoute()
@@ -271,6 +279,9 @@ const selectedProductCount = computed(() => selectedProductIds.value.length)
 const batchCreateRowCount = computed(() => batchCreateRows.value.length)
 const { hasPermission, ensurePermission } = usePermissionAction()
 const canManageProducts = computed(() => hasPermission('products:manage'))
+const authStore = useAuthStore()
+/** 更换 YZ 商品文创系列会重算编码，后端仅允许管理员角色调用，前端同口径控制入口显隐。 */
+const canSwitchProductSeries = computed(() => canManageProducts.value && authStore.isAdmin)
 const canImportProducts = computed(() => hasPermission('products:import') && hasPermission('products:manage'))
 const activeCategoryOptions = computed(() => allCategories.value.filter((item) => item.isActive || item.id === form.value.categoryId))
 const activeLocationOptions = computed(() => allLocations.value.filter((item) => item.isActive))
@@ -327,6 +338,35 @@ const handlePrimarySeriesTagChange = () => {
   if (!form.value.id) {
     form.value.productCode = ''
   }
+}
+
+/** 正在编辑的 YZ 商品且当前账号为管理员时，文创系列下拉可改选，改选会转入更换系列二次确认弹窗。 */
+const canSwitchExistingSeries = computed(() => !!form.value.id && form.value.codeScheme === 'yz' && canSwitchProductSeries.value)
+
+/**
+ * 文创系列下拉的写入口：
+ * - 新增商品直接写入表单并沿用原有清空产品编码的逻辑；
+ * - 编辑已有 YZ 商品时不改表单值（下拉仍显示当前系列），只记录目标系列并打开二次确认弹窗，
+ *   由弹窗预检、确认后调用专用接口，避免普通保存顺带提交系列变更。
+ */
+const handlePrimarySeriesTagSelect = (value: string) => {
+  if (!form.value.id) {
+    form.value.primarySeriesTagId = value
+    handlePrimarySeriesTagChange()
+    return
+  }
+  if (!canSwitchExistingSeries.value || !value || String(value) === String(form.value.primarySeriesTagId)) {
+    return
+  }
+  seriesSwitchTargetTagId.value = String(value)
+  seriesSwitchDialogVisible.value = true
+}
+
+/** 更换系列成功后：用最新商品数据回填当前编辑态，并刷新列表，让用户立刻看到新编码。 */
+const handleSeriesSwitched = async (updated: ProductRecord) => {
+  seriesSwitchDialogVisible.value = false
+  form.value = buildEditForm(updated)
+  await reloadProducts()
 }
 
 const openYzUpgradeDialog = () => {
@@ -596,18 +636,6 @@ const handleCardSelectionChange = async (productId: string, checked: boolean | s
  * - 标签集合转换为 id 数组，便于多选组件直接回填；
  * - 默认售价显式转 number，保持输入组件的数据类型稳定。
  */
-// B8 批次改名：新 key 优先，缺失时回退旧 key（颜色→颜色/款式，款式→尺码），兼容尚未重新保存过的历史数据。
-const resolveSkuFormColor = (specValues: Record<string, string> | undefined, specText: string | undefined) => {
-  const color = String(specValues?.[VARIANT_AXIS_SPEC_KEY] ?? specValues?.颜色 ?? '').trim()
-  if (color) {
-    return color
-  }
-  return String(specValues?.规格 || specText || '').trim()
-}
-
-const resolveSkuFormStyle = (specValues: Record<string, string> | undefined) =>
-  String(specValues?.[SIZE_AXIS_SPEC_KEY] ?? specValues?.款式 ?? '').trim()
-
 const buildSkuSpecValues = (sku: ProductSkuForm, index: number): Record<string, string> => {
   if (sku.specValues && Object.keys(sku.specValues).length) {
     return sku.specValues
@@ -684,8 +712,8 @@ const buildEditForm = (row: ProductRecord): ProductForm => {
         id: sku.id,
         specValues: sku.specValues ?? {},
         specText: sku.specText,
-        color: resolveSkuFormColor(sku.specValues, sku.specText),
-        style: resolveSkuFormStyle(sku.specValues),
+        // 归轴统一走 resolveSkuSpecAxes：旧「款式」无尺码编码位时归颜色/款式，规格文案只在两轴都为空时兜底。
+        ...resolveSkuSpecAxes(sku.specValues, sku.specText, sku.sizeCode),
         defaultPrice: Number(sku.defaultPrice ?? sku.originalPrice ?? row.defaultPrice),
         discountRate: Number(sku.discountRate ?? row.discountRate),
         currentStock: Number(sku.currentStock ?? 0),
@@ -2183,7 +2211,7 @@ onActivated(() => {
     >
       <template #default="{ isPhone }">
         <div v-if="isSkuDialog" class="product-sku-config-card flex flex-col gap-5">
-          <div class="sku-card sku-form rounded-xl border border-slate-200 bg-slate-50/50 p-4 dark:border-white/10 dark:bg-slate-900/20" style="min-inline-size: 0; max-width: 100%">
+          <div class="sku-card sku-form rounded-xl border border-slate-200 bg-slate-50/50 p-4 dark:border-white/10 dark:bg-black/20" style="min-inline-size: 0; max-width: 100%">
             <h3 class="mb-4 text-sm font-semibold text-slate-800 dark:text-slate-200">规格维度配置</h3>
             <p v-if="form.codeScheme === 'yz'" class="mb-2 text-xs leading-5 text-slate-400">
               YZ 编码规则：颜色/款式最多 9 个（编码位 1-9），尺码最多 5 个（编码位 A-E）
@@ -2355,7 +2383,7 @@ onActivated(() => {
                     <PassiveNumberInput v-model="row.costPrice" class="w-full" :controls="false" :min="0" :precision="2" placeholder="成本" />
                   </template>
                 </el-table-column>
-                <el-table-column label="库位" width="130">
+                <el-table-column label="主库位" width="130">
                   <template #default="{ row }">
                     <el-select
                       v-model="row.locationId"
@@ -2407,12 +2435,12 @@ onActivated(() => {
           </el-form-item>
           <el-form-item label="文创系列" prop="primarySeriesTagId">
             <el-select
-              v-model="form.primarySeriesTagId"
+              :model-value="form.primarySeriesTagId"
               filterable
-              :disabled="!!form.id"
+              :disabled="!!form.id && !canSwitchExistingSeries"
               placeholder="请选择文创系列"
               class="w-full"
-              @change="handlePrimarySeriesTagChange"
+              @update:model-value="handlePrimarySeriesTagSelect"
             >
               <el-option
                 v-for="tag in seriesTagOptions"
@@ -2425,8 +2453,11 @@ onActivated(() => {
               尚未配置文创系列，请先到标签管理页为标签设置两位系列编码
               <el-button link type="primary" size="small" class="ml-1" @click="goToTagManagement">前往标签管理</el-button>
             </p>
+            <p v-else-if="canSwitchExistingSeries" class="mt-1 text-xs leading-5 text-amber-500">
+              改选系列会重新生成产品编码与全部 SKU 编码，已打印标签需重新贴标，提交前需二次确认
+            </p>
             <p v-else-if="form.id && form.codeScheme === 'yz'" class="mt-1 text-xs leading-5 text-slate-400">
-              YZ 编码商品的文创系列不可修改
+              YZ 编码商品的文创系列仅管理员可更换
             </p>
             <template v-else-if="form.id && form.codeScheme === 'legacy'">
               <p class="mt-1 text-xs leading-5 text-slate-400">
@@ -2528,7 +2559,7 @@ onActivated(() => {
             <el-form-item label="成本价">
               <PassiveNumberInput v-model="form.defaultCostPrice" :min="0" :precision="2" class="w-full" placeholder="可选" />
             </el-form-item>
-            <el-form-item label="默认库位">
+            <el-form-item label="主库位">
               <el-select
                 v-model="form.defaultLocationId"
                 clearable
@@ -2546,7 +2577,7 @@ onActivated(() => {
                 <el-option v-for="location in activeLocationOptions" :key="location.id" :label="location.locationCode" :value="location.id" />
               </el-select>
               <p v-if="canManageProducts" class="mt-1 text-xs leading-5 text-slate-400">
-                可直接输入新库位编码（如 A-01-01）自动创建，无需前往库存主数据页
+                可直接输入新库位编码（如 A-01-01）自动创建。同一规格可分放多个库位，入库默认落在主库位；其他库位的件数请在「库存查询」或「库位管理」中按数量拨转
               </p>
             </el-form-item>
           </template>
@@ -2626,6 +2657,14 @@ onActivated(() => {
       :product-name="form.productName"
       :series-tag-options="seriesTagOptions"
       @upgraded="handleYzUpgraded"
+    />
+    <ProductSeriesSwitchDialog
+      v-if="canSwitchProductSeries && seriesSwitchDialogVisible"
+      v-model="seriesSwitchDialogVisible"
+      :product-id="form.id"
+      :product-name="form.productName"
+      :target-series-tag-id="seriesSwitchTargetTagId"
+      @switched="handleSeriesSwitched"
     />
     <ProductSpecValueRenameDialog
       v-if="canManageProducts && specValueRenameDialogVisible"

@@ -62,7 +62,7 @@ try {
     const triggerStatements = splitSqlStatements(accountSql).filter((statement) => /^(DROP|CREATE)\s+TRIGGER\s/i.test(statement.replace(/--[^\r\n]*/g, '').trim()))
     assert.equal(triggerStatements.length, 4, '既存 044 的账号保护触发器设置发生变化，需要重新核实测试初始化')
     for (const statement of triggerStatements) await db.query(statement)
-    const sql = fs.readFileSync(path.resolve('sql/060_client_restock_requests.sql'), 'utf8')
+    const sql = fs.readFileSync(path.resolve('sql/061_client_restock_requests.sql'), 'utf8')
     const checkViolation = (name: string) => (error: any) => (error.driverError?.code ?? error.code) === 'ER_CHECK_CONSTRAINT_VIOLATED' && String(error.message).includes(name)
     // 模拟先由同步建表、尚无CHECK的状态，构造非法历史数据验证060只失败关闭、不改写数据。
     const existingChecks = await db.query("SELECT CONSTRAINT_NAME AS name FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'client_restock_request' AND CONSTRAINT_TYPE = 'CHECK'") as Array<{ name: string }>
@@ -88,12 +88,12 @@ try {
     pass('060补齐同步先建表的CHECK、重复执行幂等，非法历史数量/状态失败关闭且保留原值')
     await db.query('DROP TABLE client_restock_request_key')
     await db.query('DROP TABLE client_restock_request')
-    await assert.rejects(() => assertMysqlRequiredSchemaExists(db), /060_client_restock_requests\.sql/)
+    await assert.rejects(() => assertMysqlRequiredSchemaExists(db), /061_client_restock_requests\.sql/)
     for (let round = 0; round < 2; round += 1) await runSql(sql)
     await assertMysqlRequiredSchemaExists(db)
     await assert.rejects(() => requestRepo.insert({ ...fixture, quantity: 0, status: 'requested' }), checkViolation('ck_restock_quantity_positive'))
     await assert.rejects(() => requestRepo.insert({ ...fixture, quantity: 1, status: 'invalid' as any }), checkViolation('ck_restock_status'))
-    const { normalizeStaticCheckClause } = await import('../src/utils/normalize-static-check-clause.js')
+    const { normalizeStaticCheckClause } = await import('../src/utils/mysql-check-clause.js')
     const checks = await db.query(`SELECT tc.CONSTRAINT_NAME AS name, cc.CHECK_CLAUSE AS clause
       FROM information_schema.TABLE_CONSTRAINTS tc JOIN information_schema.CHECK_CONSTRAINTS cc
       ON cc.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA AND cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
@@ -103,10 +103,10 @@ try {
       const entityCheck = db.getMetadata(e.ClientRestockRequest).checks.find((item) => item.name === check.name)
       assert.ok(entityCheck)
       assert.ok(normalizeStaticCheckClause(entityCheck.expression))
-      assert.equal(normalizeStaticCheckClause(check.clause, 'mysql-metadata'), normalizeStaticCheckClause(entityCheck.expression))
+      assert.equal(normalizeStaticCheckClause(check.clause), normalizeStaticCheckClause(entityCheck.expression))
     }
     fs.writeFileSync(path.join(runtime.runtimeDir, 'mysql-restock-check-metadata.json'), JSON.stringify(checks, null, 2))
-    pass('真实 MySQL 060 增量脚本可重放，默认不开自动迁移时缺表阻断启动')
+    pass('真实 MySQL 061 增量脚本可重放，默认不开自动迁移时缺表阻断启动')
 
     // 强制两名不同账号均完成空当前读，再一起竞争同商品锁；同账号锁无法掩盖 RR gap-lock 环。
     const isolation = await db.query('SELECT @@transaction_isolation AS isolationLevel') as Array<{ isolationLevel: string }>

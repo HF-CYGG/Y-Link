@@ -55,6 +55,15 @@ const locationSkuChangeSchema = z.object({
   expectedLocationId: z.string().trim().min(1).max(32).nullable(),
 })
 
+const locationSkuTransferSchema = z.object({
+  // 来源库位：传主库位 ID 表示从主库位拨出；主库位为空时传 null。
+  fromLocationId: z.string().trim().min(1).max(32).nullable(),
+  qty: z.number().int().min(1).max(999999),
+  expectedFromQty: z.number().int().min(0),
+  expectedMainLocationId: z.string().trim().min(1).max(32).nullable(),
+  setAsMain: z.boolean().optional(),
+})
+
 const locationSkuBatchChangeSchema = z.object({
   action: z.enum(['assign', 'remove']),
   items: z.array(z.object({
@@ -82,6 +91,8 @@ const createStocktakeSchema = z.object({
 
 const countSchema = z.object({
   skuId: idSchema,
+  // 按库位盘点时的当前盘点库位；只有一个候选库位时可不传。
+  locationId: idSchema.nullable().optional(),
   qty: z.number().int().nullable().optional(),
   mode: z.enum(['set', 'add', 'clear']),
 })
@@ -174,6 +185,23 @@ inventoryRouter.put('/locations/:id/skus/:skuId', requirePermission('products:ma
     authReq.auth,
     extractRequestMeta(req),
   ))
+}))
+
+// 按数量拨转：路径中的库位为目标库位。
+inventoryRouter.post('/locations/:id/skus/:skuId/transfer', requirePermission('products:manage'), asyncHandler(async (req, res) => {
+  const authReq = req as AuthenticatedRequest
+  ok(res, await inventoryMasterDataService.transferSkuStock(
+    req.params.id,
+    req.params.skuId,
+    locationSkuTransferSchema.parse(req.body),
+    authReq.auth,
+    extractRequestMeta(req),
+  ))
+}))
+
+// 单个规格的库位分布（主库位件数与各拆分库位件数）。
+inventoryRouter.get('/skus/:skuId/locations', requireAnyPermission('products:manage', 'inventory:view', 'stocktake:view'), asyncHandler(async (req, res) => {
+  ok(res, await inventoryMasterDataService.getSkuLocationDistribution(req.params.skuId))
 }))
 
 // ---- 当前库存与流水 ----

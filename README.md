@@ -1,50 +1,33 @@
-# Y-Link 文创出入库与 O2O 预订系统
+<div align="center">
+
+<img src="./docs/photo/brand/y-link-logo.png" alt="Y-Link" width="128" height="128" />
+
+# Y-Link
+
+**文创出入库与 O2O 预订系统**
+
+面向文创、非遗、门店与活动场景的一体化库存管理平台
 
 ![Vue](https://img.shields.io/badge/Vue.js-3-4FC08D?logo=vue.js&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)
 ![Express](https://img.shields.io/badge/Express-4.x-000000?logo=express&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)
+![Database](https://img.shields.io/badge/Database-SQLite%20%7C%20MySQL-003B57?logo=sqlite&logoColor=white)
+![Node.js](https://img.shields.io/badge/Node.js-20%2B-5FA04E?logo=node.js&logoColor=white)
+[![License](https://img.shields.io/badge/License-GPL--3.0-blue)](./LICENSE)
 
-Y-Link 是一套面向文创、非遗、门店和活动场景的库存管理系统，覆盖“线上预订、线下核销、出库开单、供货入库、库存追踪、客户反馈”流程。
+[界面预览](#界面预览) · [功能概览](#功能概览) · [使用说明书](#使用说明书) · [快速部署](#推荐部署1panel-单镜像) · [本地开发](#本地开发) · [更新日志](./docs/版本发布历史与更新日志.md) · [使用指南](./docs/Y-Link使用指南.md) · [GitHub Wiki](https://github.com/HF-CYGG/Y-Link/wiki)
 
-系统包含两端：
+</div>
+
+---
+
+Y-Link 覆盖“线上预订、线下核销、出库开单、供货入库、库存追踪、客户反馈”完整流程，包含管理端与客户端两端：
 
 - 管理端：管理员、运营人员、供货方使用，负责商品、库存、出入库、核销、用户、配置和审计。
 - 客户端：普通用户使用，负责注册登录、商品大厅、购物车、预订下单、订单查看、个人资料和反馈。
 
 技术栈：Vue 3、TypeScript、Element Plus、Pinia、Express、TypeORM。默认使用 SQLite，支持迁移到 MySQL。
-
-## Mobile 工程基础状态
-
-仓库包含 `apps/mobile` Expo 工程和 `packages/*` 跨端基础。Mobile 固定使用 Node.js `22.13.1`；根 npm workspace 让 Mobile 通过正式 package dependency 消费共享 Contract，同时不改变现有 Vue Web、Express 后端、数据库或部署方式。
-
-当前 Mobile 尚未接入真实 API，也没有实现正式登录会话、服务端购物车、订单、库存、退货、相机、相册、通知或 Deep Link。未运行模拟器或真机验证时，只能依据 SQLite migration 专项测试、typecheck 与 Android JS bundle export 判断工程基础，不代表设备交互、签名 APK 或发布链路可用。
-
-主要目录：
-
-- `apps/mobile`：根 npm workspace 中的 Expo package，自身保留 manifest，依赖统一锁定在根 `package-lock.json`；
-- `packages/api-client`：`@ylink/api-client`，传输无关 HTTP 契约与 Native/Web adapter；
-- `packages/shared-types`：`@ylink/shared-types`，已核对的跨端客户端 Contract 真源；
-- `packages/domain`、`packages/validation`、`packages/design-tokens`：已纳入 workspace 的最小共享边界，尚未由 Mobile 消费。
-
-常用命令：
-
-```bash
-npm ci
-npm run verify:mobile:workspace
-npm --workspace y-link-mobile run dependencies:check
-npm --workspace y-link-mobile run test:db
-npm --workspace y-link-mobile run typecheck
-npm --workspace y-link-mobile run export:android
-node ./node_modules/typescript/bin/tsc -p packages/tsconfig.json --noEmit
-node --experimental-strip-types --test packages/api-client/test/*.test.ts
-```
-
-开发者、GitHub Actions 与 Expo/EAS 构建入口统一使用根 workspace 与根 lockfile。Mobile 只能通过 `@ylink/*` package 名称消费共享包，禁止用相对路径跨目录导入 `packages/*`。详细边界见 [`docs/project-context/60-移动端工程与共享基础.md`](./docs/project-context/60-移动端工程与共享基础.md)。
-
-## 快速入口
-
-- [版本发布历史与更新日志](./docs/版本发布历史与更新日志.md)
 
 ## 界面预览
 
@@ -101,6 +84,48 @@ node --experimental-strip-types --test packages/api-client/test/*.test.ts
     <td><img src="./docs/photo/readme-preview/client-profile.png" alt="用户端我的资料页面" width="100%" /></td>
   </tr>
 </table>
+
+## 功能概览
+
+### 管理端
+
+- 工作台：业务数据看板、快捷入口。
+- 出库开单：商品搜索、数量录入、金额计算、单据生成。
+- 出库列表：历史单据、详情、导出、作废和删除治理。
+- 入库管理：供货方送货单、扫码入库、入库核销。
+- 商品管理：基础资料、标签、库存、线上展示、图片。
+- O2O 核销：客户预订单查询、核销、撤回和库存流水。
+- 用户中心：管理端用户、供货方用户、客户端用户。
+- 系统配置：验证码、部门、客户服务、业务规则等配置。
+- 审计日志：登录、权限拦截、关键业务操作追踪。
+
+### 客户端
+
+- 注册登录：用户名、手机号、邮箱等账号能力。
+- 商品大厅：商品浏览、搜索、分类、加购。
+- 购物车和结算：预订下单、库存占用、订单生成。
+- 我的订单：订单列表、详情、状态查看、撤回。
+- 我的：资料维护、修改密码、反馈与客服入口。
+
+### 供货方
+
+- 独立账号登录。
+- 录入送货单。
+- 查看历史送货单。
+- 配合管理端完成入库核销。
+
+## 使用说明书
+
+面向不同使用者提供图文版 Word 说明书，点击文件名即可在 GitHub 上下载：
+
+| 使用对象 | 说明书 | 适用场景 |
+| --- | --- | --- |
+| 管理端 | [Y-Link 管理端使用指南](./docs/使用说明书/Y-Link管理端使用指南.docx) | 按实际界面截图说明的完整操作手册，面向具备相应权限的管理端人员（适用版本 v1.5.65.0） |
+| 管理端 | [Y-Link 管理端使用指南（精简版）](./docs/使用说明书/Y-Link管理端使用指南-精简版.docx) | 精简版，便于快速上手与日常查阅（适用版本 v1.5.65.0） |
+| 客户端 | [Y-Link 客户端使用指南（个人）](./docs/使用说明书/Y-Link客户端使用指南-个人.docx) | 学生、教师个人账户的注册登录、选购商品与下单流程 |
+| 客户端 | [Y-Link 客户端使用指南（部门）](./docs/使用说明书/Y-Link客户端使用指南-部门.docx) | 部门账户的登录、选购商品与下单流程 |
+
+如需在线阅读或随代码一起维护，也可查看 Markdown 版：[管理端快速上手手册](./docs/Y-Link管理端快速上手手册.md)、[客户端快速上手手册](./docs/Y-Link客户端快速上手手册.md)。
 
 ## 推荐部署：1Panel 单镜像
 
@@ -208,6 +233,10 @@ INVITE_CODE_PEPPER=请生成至少32个随机字节的教师邀请码密钥
 | `SQLITE_DB_PATH` | `/app/data/y-link.sqlite` | SQLite 文件位置 |
 | `PORT` | `3001` | 容器内后端端口，通常不用改 |
 | `VERIFICATION_CODE_REQUEST_TIMEOUT_MS` | `8000` | 短信/邮件验证码平台请求超时（毫秒） |
+| `AUTH_WEBAUTHN_ENABLED` | `false` | 设为 `true` 才启用管理端通行密钥与安全密钥 |
+| `AUTH_WEBAUTHN_RP_ID` | 空 | 浏览器访问域名（不含协议、端口、路径），或本地测试用 `localhost` |
+| `AUTH_WEBAUTHN_RP_NAME` | 空 | 浏览器显示的非空站点名称，例如 `Y-Link` |
+| `AUTH_WEBAUTHN_ORIGINS` | 空 | 浏览器外部访问地址组成的非空 JSON 字符串数组 |
 
 首次启动后，系统会自动创建管理员账号。已有管理员时不会覆盖原账号密码。
 
@@ -279,6 +308,42 @@ node -e "console.log(require('node:crypto').randomBytes(48).toString('base64url'
 | `403` 或无权调用 API | 检查运行中的 AccessKey 是否属于已授权 RAM 用户；确认已授予 PNVS 所需权限 |
 | 发送成功但手机未收到 | 检查签名与模板是否来自同一 PNVS 控制台配置、测试手机号是否已绑定，以及账户余额和发送记录 |
 | MNS 回执显示配置异常 | 初次使用请保持 `ALIYUN_DYPNS_MNS_ENABLED=false`；只有需要送达/失败回执时才启用，并另行配置 MNS 权限与网络连通性 |
+
+### 4.2 管理端通行密钥与安全密钥
+
+启用前，先确认管理端由哪个固定域名和 HTTPS 地址供浏览器访问。`AUTH_WEBAUTHN_RP_ID` 填小写域名（例如 `erp.example.com`），不带协议、端口或路径，不能填 IP；`AUTH_WEBAUTHN_RP_NAME` 填非空的展示名称，也可使用中文。`AUTH_WEBAUTHN_ORIGINS` 填非空 JSON 字符串数组，其中每个 Origin 的主机必须与 RP ID 完全相同，且是完整、精确的浏览器外部访问地址；不能填容器服务名、容器端口、路径或末尾斜杠。公网使用 HTTPS，只有 `localhost` 可使用 HTTP。
+
+在 1Panel 的应用容器“环境变量”表单中，分别新增以下名称和值（右侧是直接填写的实际值）：
+
+| 变量名 | 值 |
+| --- | --- |
+| `AUTH_WEBAUTHN_ENABLED` | `true` |
+| `AUTH_WEBAUTHN_RP_ID` | `erp.example.com` |
+| `AUTH_WEBAUTHN_RP_NAME` | `Y-Link` |
+| `AUTH_WEBAUTHN_ORIGINS` | `["https://erp.example.com"]` |
+
+**1Panel 表单的 `AUTH_WEBAUTHN_ORIGINS` 值不能包含外层单引号，也不能给 JSON 双引号添加转义反斜杠。**只有写入 Compose 使用的私有 `.env` 文件时，才可以按 `.env` 语法加外层单引号，例如：
+
+```env
+AUTH_WEBAUTHN_ENABLED=true
+AUTH_WEBAUTHN_RP_ID=erp.example.com
+AUTH_WEBAUTHN_RP_NAME=Y-Link
+AUTH_WEBAUTHN_ORIGINS='["https://erp.example.com"]'
+```
+
+Compose 读取 `.env` 后会去掉这一层单引号，传给后端的仍是 JSON 数组文本 `["https://erp.example.com"]`。如果把 `.env` 写法原样贴进 1Panel 表单，外层单引号会成为变量值的一部分，后端解析 JSON 时会报 `AUTH_WEBAUTHN_ORIGINS 必须是 JSON 字符串数组`，应用可能进入返回 503 的救援状态。
+
+仅在本机测试时，可将 `RP_ID` 改为 `localhost`，将 `ORIGINS` 改为 `["http://localhost:8090"]`；若使用 `compose.onebox.yml`，还需在 `.env` 中设置 `Y_LINK_PORT=8090`。实际映射端口不同，就同步修改 Origin 中的端口。公网示例中的 `erp.example.com` 也必须替换成实际供浏览器访问的同一域名。
+
+保存变量后需要**重新创建应用容器**才能更新容器环境；普通 `docker restart` 或 `docker compose restart` 不会更新环境变量。仓库的 `compose.onebox.yml` 已向 `ylink` 服务映射这四项，`compose.cloud.yml` 已向 `backend` 服务映射；自定义编排也须将四项传给应用后端。仅修改环境变量无需重新构建镜像。默认 `.env` + 单文件 Onebox 的示例命令是：
+
+```bash
+docker compose --env-file .env -f compose.onebox.yml up -d --no-deps --force-recreate ylink
+```
+
+执行时必须沿用原部署的项目名（如原来使用 `-p`）、`--env-file`、所有 `-f` 叠加文件、端口、挂载和数据卷，只重建应用服务；不要使用 `down -v` 或删除数据。1Panel 中也应在保留这些设置后重新创建应用容器。需要回退配置时，恢复原变量值，再用原参数重新创建应用容器。
+
+重建后，通过浏览器外部访问地址检查 `/health` 返回 `status: "UP"`，并检查 `/api/auth/webauthn/capabilities` 的 `data.enabled` 为 `true`、`data.rpId` 与 `data.allowedOrigins` 与填写值一致。配置生效后还需用密码登录管理端，进入顶部账号菜单“通行密钥与安全密钥” → “添加密钥”，选择用途“直接登录”和类型“通行密钥”并完成绑定。选择“密码后验证”则是登录密码后的第二因素，不等于直接登录。若启动日志出现 `DATABASE_STARTUP_FAILED`，先核对以上变量值和容器是否已重建；启动入口也会将多数配置或运行时异常归到该通用错误码，不能据此认定数据库损坏。
 
 ### 5. 重启规则和资源
 
@@ -496,41 +561,13 @@ docker compose --env-file .env.docker.mysql -f compose.mysql.yml up -d --force-r
 - [.env.docker.mysql.example](./.env.docker.mysql.example)
 - [数据库迁移演练与验收手册](./docs/Y-Link数据库迁移向导演练与验收手册.md)
 
-## 功能概览
-
-### 管理端
-
-- 工作台：业务数据看板、快捷入口。
-- 出库开单：商品搜索、数量录入、金额计算、单据生成。
-- 出库列表：历史单据、详情、导出、作废和删除治理。
-- 入库管理：供货方送货单、扫码入库、入库核销。
-- 商品管理：基础资料、标签、库存、线上展示、图片。
-- O2O 核销：客户预订单查询、核销、撤回和库存流水。
-- 用户中心：管理端用户、供货方用户、客户端用户。
-- 系统配置：验证码、部门、客户服务、业务规则等配置。
-- 审计日志：登录、权限拦截、关键业务操作追踪。
-
-### 客户端
-
-- 注册登录：用户名、手机号、邮箱等账号能力。
-- 商品大厅：商品浏览、搜索、分类、加购。
-- 购物车和结算：预订下单、库存占用、订单生成。
-- 我的订单：订单列表、详情、状态查看、撤回。
-- 我的：资料维护、修改密码、反馈与客服入口。
-
-### 供货方
-
-- 独立账号登录。
-- 录入送货单。
-- 查看历史送货单。
-- 配合管理端完成入库核销。
-
 ## 本地开发
 
 ### 环境要求
 
 - Node.js 20+
 - 覆盖率命令 `npm run coverage:report` 需要 Node.js 22.6 及以上（与 CI、Docker 镜像一致使用 Node.js 22 即可）
+- 登录页主题切换浏览器回归脚本需要 Node.js 22 及以上和全局 WebSocket；不改变应用的 Node.js 20+ 要求
 - npm
 - Docker 可选，用于容器验证和 MySQL 并发验收
 
@@ -571,6 +608,12 @@ npm run local:dev
 | `npm run verify:db:migration` | SQLite -> MySQL 隔离环境端到端验收 |
 | `npm run verify:performance` | 性能预算验证 |
 | `npm run verify:all` | 全量质量验证 |
+
+登录页主题切换浏览器回归需先运行 `npm run build` 生成 `dist`，并在本机准备已安装的 Chrome 或 Chromium。脚本使用本机只读 API fixture，不连接实际后端，也不会安装或下载浏览器。浏览器可执行文件不在脚本默认路径时，先将 `CHROME_PATH` 设为该文件路径，再运行：
+
+```bash
+node scripts/verify-login-theme-transition.mjs
+```
 
 `verify:db:concurrency` 默认会通过 Docker 拉起 MySQL 8.4 临时环境。没有 Docker 时，可提供 `VERIFY_DB_CONCURRENCY_MYSQL_*` 连接到自备 MySQL。
 
@@ -650,3 +693,31 @@ Y-Link
 - [企业级维护与二开白皮书](./docs/Y-Link企业级维护与二开白皮书.md)
 - [移动端工程与共享基础](./docs/project-context/60-移动端工程与共享基础.md)
 - [GitHub Wiki](https://github.com/HF-CYGG/Y-Link/wiki)
+
+## Mobile 工程基础状态
+
+仓库包含 `apps/mobile` Expo 工程和 `packages/*` 跨端基础。Mobile 固定使用 Node.js `22.23.4`；根 npm workspace 让 Mobile 通过正式 package dependency 消费共享 Contract，同时不改变现有 Vue Web、Express 后端、数据库或部署方式。
+
+当前 Mobile 尚未接入真实 API，也没有实现正式登录会话、服务端购物车、订单、库存、退货、相机、相册、通知或 Deep Link。未运行模拟器或真机验证时，只能依据 SQLite migration 专项测试、typecheck 与 Android JS bundle export 判断工程基础，不代表设备交互、签名 APK 或发布链路可用。
+
+主要目录：
+
+- `apps/mobile`：根 npm workspace 中的 Expo package，自身保留 manifest，依赖统一锁定在根 `package-lock.json`；
+- `packages/api-client`：`@ylink/api-client`，传输无关 HTTP 契约与 Native/Web adapter；
+- `packages/shared-types`：`@ylink/shared-types`，已核对的跨端客户端 Contract 真源；
+- `packages/domain`、`packages/validation`、`packages/design-tokens`：已纳入 workspace 的最小共享边界，尚未由 Mobile 消费。
+
+常用命令：
+
+```bash
+npm ci
+npm run verify:mobile:workspace
+npm --workspace y-link-mobile run dependencies:check
+npm --workspace y-link-mobile run test:db
+npm --workspace y-link-mobile run typecheck
+npm --workspace y-link-mobile run export:android
+node ./node_modules/typescript/bin/tsc -p packages/tsconfig.json --noEmit
+node --experimental-strip-types --test packages/api-client/test/*.test.ts
+```
+
+开发者、GitHub Actions 与 Expo/EAS 构建入口统一使用根 workspace 与根 lockfile。Mobile 只能通过 `@ylink/*` package 名称消费共享包，禁止用相对路径跨目录导入 `packages/*`。详细边界见 [`docs/project-context/60-移动端工程与共享基础.md`](./docs/project-context/60-移动端工程与共享基础.md)。

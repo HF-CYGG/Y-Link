@@ -8,6 +8,7 @@
  */
 
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { useDataChangeRefresh } from '@/composables/useDataChangeRefresh'
 
 import { useRouter } from 'vue-router'
 import { orderApi, productApi } from '@/api'
@@ -512,6 +513,7 @@ export const useOrderEntryForm = () => {
     } finally {
       departmentOptionsLoading.value = false
     }
+    return !departmentOptionsLoadFailed.value
   }
 
   /**
@@ -912,6 +914,10 @@ export const useOrderEntryForm = () => {
       persistDraft()
     }
   })
+
+  // 开单页被缓存期间若其他页面新增或调整了商品、部门，切回时静默刷新候选，不改动已填写的表头与明细。
+  useDataChangeRefresh(['products'], loadProducts)
+  useDataChangeRefresh(['departments'], loadDepartmentOptions)
 
   /**
    * 部门名或选项变化时重新推导节点：

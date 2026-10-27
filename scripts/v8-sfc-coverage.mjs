@@ -164,6 +164,13 @@ const mapScript = (script, cache, target) => {
   let forwardAttributedBranches = 0
   let templateFallbackBranches = 0
   const firstTargetStart = mappedSegments.find((entry) => entry.source === target.source)?.start ?? generated.length
+  // rolldown 运行时 __esmMin（惰性 ESM 初始化）的整段声明区间。rolldown 1.2 起它多了错误缓存分支
+  // （`if (err) throw err[0]`、`catch (e) { throw err = [e], e; }`），这些 block range 属于打包器生成代码，
+  // 与原 SFC 条件无关；按声明区间精确识别，不再逐条追加文本特征，避免把 SFC 自身的 throw / catch 误判为生成代码。
+  const esmMinStart = generated.indexOf('var __esmMin = ')
+  const esmMinEnd = esmMinStart >= 0 ? generated.indexOf('\n};\n', esmMinStart) : -1
+  const insideEsmMinRuntime = (range) => esmMinEnd > esmMinStart
+    && range.startOffset >= esmMinStart && range.endOffset <= esmMinEnd + 3
   for (const fn of script.functions) {
     if (fn.isBlockCoverage !== true) continue
     for (const [rangeIndex, range] of fn.ranges.entries()) {
@@ -219,7 +226,8 @@ const mapScript = (script, cache, target) => {
         }
       }
       const wrapper = range.endOffset <= firstTargetStart && (
-        ['__esmMin', '__exportAll', 'startAuthentication', 'startRegistration'].includes(fn.functionName)
+        insideEsmMinRuntime(range)
+        || ['__esmMin', '__exportAll', 'startAuthentication', 'startRegistration'].includes(fn.functionName)
         || /fn &&|res = fn\(fn = 0\)|globalThis\.__pr153CoverageSdk|globalThis\.__barcodeTest/u.test(body)
       )
       if (wrapper) {

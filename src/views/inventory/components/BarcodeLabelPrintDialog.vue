@@ -5,8 +5,10 @@
  *   以及 YZ 编码体系新增的野辙完整标签 / 野辙简洁标签（均为单张一码，尺寸沿用热敏的自定义宽高）共四种模板。
  * 实现逻辑：
  * - 打开时按勾选的规格向服务端取打印数据，条码图在前端用 JsBarcode（Code128）生成 SVG；
+ * - 载入后按商品分组列出全部规格并默认全选，可只勾选其中部分规格打印；统计、告警、阻断、预览与打印只针对已选规格，
+ *   条码图仍按整批生成，切换勾选无需重新请求或重绘；
  * - JsBarcode 只在本组件内动态加载，不进入库存页或商品页主包；
- * - 条码内容来源（barcodeSource）决定实际编码值：内部 SKU 编码 / 原厂条码 / 原厂条码优先（历史合并值），
+ * - 条码内容来源（barcodeSource）决定实际编码值：商品编码（规格级编码，YZ 升级后即新编码，如 YZDW030A）/ 原厂条码 / 原厂条码优先（历史合并值），
  *   解析逻辑统一走 barcode-label-print.helpers.ts 的 resolveBarcodeValue，避免条码生成、条码下方文本、失败判定三处口径不一致；
  * - 单张标签的版式渲染下沉到 BarcodeLabelCard.vue，预览区与 Teleport 打印根节点共用同一份标签内容，模板切换时预览同步跟随；
  * - 打印时才通过 Teleport 渲染独立打印根节点（打印结束即移除，避免常驻大量 DOM），并按模板写入 @page 尺寸，除 A4 外均每张一页；
@@ -22,7 +24,8 @@
  * - 打印会话统一清理 afterprint/焦点监听、兜底定时器、临时样式与打印根节点；关闭或卸载期间不得让旧回调清理新会话；
  * - 调整标签版式或新增模板时，同时核对 applyPrintStyle() 的 @page 设置、BarcodeLabelCard.vue 的版式分支、
  *   以及 barcode-label-print.helpers.ts 里该模板的默认条码内容来源；
- * - A4 自动减少越界行列并在打印前复核，热敏与野辙模板每张一页；批次/来源异步更新不可回填已失效的标签。
+ * - A4 自动减少越界行列并在打印前复核，热敏与野辙模板每张一页；批次/来源异步更新不可回填已失效的标签；
+ * - 规格勾选只是本次打印的临时状态，不写入本机设置；新批次载入时重置为全选，未勾选规格的条码异常不阻断打印。
  */
 
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
@@ -153,7 +156,10 @@ const settings = reactive<LabelSettings>(readSettings())
 const loading = ref(false)
 const loadError = ref('')
 const printing = ref(false)
+/** 本批次服务端返回的全部规格标签（条码图按整批生成）。 */
 const labels = ref<ProductLabelRecord[]>([])
+/** 本次要打印的规格 ID；新批次载入后默认全选。 */
+const selectedSkuIds = ref<Set<string>>(new Set())
 const barcodeSvgMap = ref<Record<string, string>>(Object.create(null))
 const barcodeModuleMap = ref<Record<string, number>>(Object.create(null))
 const failedBarcodes = ref<string[]>([])
@@ -198,7 +204,51 @@ const getGeneratedBarcodeSvg = (value: string | null): string => value && Object
   : ''
 const barcodeSvgFor = (label: ProductLabelRecord) => getGeneratedBarcodeSvg(resolveBarcodeValue(label, settings.barcodeSource))
 
-const totalLabelCount = computed(() => labels.value.length * settings.copies)
+/** 已勾选、实际参与打印的标签，保持服务端返回顺序。 */
+const selectedLabels = computed(() => labels.value.filter((label) => selectedSkuIds.value.has(label.skuId)))
+interface LabelGroup {
+  key: string
+  productName: string
+  items: ProductLabelRecord[]
+}
+/** 按商品 ID 分组（商品名称不唯一，规格也不保证相邻），组顺序取各商品首个规格出现的位置。 */
+const labelGroups = computed(() => {
+  const groupMap = new Map<string, LabelGroup>()
+  for (const label of labels.value) {
+    const group = groupMap.get(label.productId)
+    if (group) group.items.push(label)
+    else groupMap.set(label.productId, { key: label.productId, productName: label.productName, items: [label] })
+  }
+  return [...groupMap.values()]
+})
+const allSelected = computed(() => labels.value.length > 0 && selectedLabels.value.length === labels.value.length)
+const partiallySelected = computed(() => selectedLabels.value.length > 0 && !allSelected.value)
+const groupSelectedCount = (group: LabelGroup) => group.items.reduce((count, item) => count + (selectedSkuIds.value.has(item.skuId) ? 1 : 0), 0)
+/** 整体替换 Set，保证依赖勾选状态的计算属性稳定触发更新。 */
+const setSkuSelected = (skuIds: string[], checked: boolean) => {
+  const next = new Set(selectedSkuIds.value)
+  for (const skuId of skuIds) {
+    if (checked) next.add(skuId)
+    else next.delete(skuId)
+  }
+  selectedSkuIds.value = next
+}
+const toggleAllSelected = (checked: boolean | string | number) => {
+  selectedSkuIds.value = checked ? new Set(labels.value.map((label) => label.skuId)) : new Set()
+}
+const toggleGroupSelected = (group: LabelGroup, checked: boolean | string | number) => {
+  setSkuSelected(group.items.map((item) => item.skuId), Boolean(checked))
+}
+const toggleSkuSelected = (skuId: string, checked: boolean | string | number) => setSkuSelected([skuId], Boolean(checked))
+/** 失败标识与 renderBarcodes 写入 failedBarcodes 的口径一致，用于只保留已选规格的失败项。 */
+const failureKeyFor = (label: ProductLabelRecord) => resolveBarcodeValue(label, settings.barcodeSource) || `${label.skuCode}（无原厂条码）`
+const selectedFailedBarcodes = computed(() => {
+  if (!failedBarcodes.value.length) return []
+  const selectedKeys = new Set(selectedLabels.value.map(failureKeyFor))
+  return failedBarcodes.value.filter((code) => selectedKeys.has(code))
+})
+
+const totalLabelCount = computed(() => selectedLabels.value.length * settings.copies)
 const exceedsLimit = computed(() => totalLabelCount.value > MAX_TOTAL_LABELS)
 const a4LayoutError = computed(() => {
   if (settings.template !== 'a4') return ''
@@ -211,7 +261,7 @@ const a4LayoutError = computed(() => {
 const labelLayoutError = computed(() => getLabelLayoutError(settings))
 const labelLayoutWarning = computed(() => getLabelLayoutWarning(settings))
 const barcodeDensityWarning = computed(() => {
-  for (const label of labels.value) {
+  for (const label of selectedLabels.value) {
     const value = resolveBarcodeValue(label, settings.barcodeSource)
     if (!value || !Object.prototype.hasOwnProperty.call(barcodeModuleMap.value, value)) continue
     const error = getCode128DensityError(settings, barcodeModuleMap.value[value])
@@ -221,7 +271,7 @@ const barcodeDensityWarning = computed(() => {
 })
 const barcodeTextWarning = computed(() => {
   if (!settings.showCode) return ''
-  for (const label of labels.value) {
+  for (const label of selectedLabels.value) {
     const value = resolveBarcodeValue(label, settings.barcodeSource)
     if (!value || !Object.prototype.hasOwnProperty.call(barcodeModuleMap.value, value)) continue
     const error = getHumanCodeFitWarning(settings, value)
@@ -267,7 +317,7 @@ watch([() => settings.labelWidthMm, () => settings.labelHeightMm, () => settings
 /** 缺少条码图的标签（解析结果为空、生成失败或尚未生成）。 */
 const missingBarcodes = computed(() => {
   const codes = new Set<string>()
-  for (const label of labels.value) {
+  for (const label of selectedLabels.value) {
     const value = resolveBarcodeValue(label, settings.barcodeSource)
     if (!getGeneratedBarcodeSvg(value)) codes.add(value || `${label.skuCode}（无原厂条码）`)
   }
@@ -277,8 +327,9 @@ const printBlockedReason = computed(() => {
   if (loading.value) return '条码数据加载中，请稍候'
   if (loadError.value) return loadError.value
   if (!labels.value.length) return '没有可打印的标签'
-  if (failedBarcodes.value.length || missingBarcodes.value.length) {
-    const codes = failedBarcodes.value.length ? failedBarcodes.value : missingBarcodes.value
+  if (!selectedLabels.value.length) return '请至少勾选一个要打印的规格'
+  if (selectedFailedBarcodes.value.length || missingBarcodes.value.length) {
+    const codes = selectedFailedBarcodes.value.length ? selectedFailedBarcodes.value : missingBarcodes.value
     return `以下条码无法生成，请修正后再打印：${codes.join('、')}`
   }
   if (exceedsLimit.value) return `单次最多打印 ${MAX_TOTAL_LABELS} 张标签，当前 ${totalLabelCount.value} 张，请减少规格或份数`
@@ -288,7 +339,7 @@ const printBlockedReason = computed(() => {
 })
 
 // 打印节点只在打印期间生成，平时不占用 DOM。
-const expandedLabels = computed(() => (printing.value ? labels.value.flatMap((label) => Array.from({ length: settings.copies }, () => label)) : []))
+const expandedLabels = computed(() => (printing.value ? selectedLabels.value.flatMap((label) => Array.from({ length: settings.copies }, () => label)) : []))
 const a4Pages = computed(() => {
   const perPage = Math.max(1, settings.columns * settings.rows)
   const pages: ProductLabelRecord[][] = []
@@ -300,7 +351,7 @@ const a4Pages = computed(() => {
 const previewA4Labels = computed(() => {
   const perPage = settings.columns * settings.rows
   const preview: ProductLabelRecord[] = []
-  for (const label of labels.value) {
+  for (const label of selectedLabels.value) {
     for (let copy = 0; copy < settings.copies && preview.length < perPage; copy++) preview.push(label)
     if (preview.length === perPage) break
   }
@@ -316,6 +367,7 @@ const invalidateBatch = () => {
   loadVersion += 1
   renderVersion += 1
   labels.value = []
+  selectedSkuIds.value = new Set()
   barcodeSvgMap.value = Object.create(null)
   barcodeModuleMap.value = Object.create(null)
   failedBarcodes.value = []
@@ -390,6 +442,7 @@ const loadLabels = async () => {
     const result = await getProductLabels(requestedSkuIds)
     if (requestVersion !== loadVersion) return
     labels.value = result
+    selectedSkuIds.value = new Set(result.map((label) => label.skuId))
     await renderBarcodes()
   } catch (error) {
     if (requestVersion !== loadVersion) return
@@ -589,7 +642,7 @@ const printDateText = formatPrintDate(new Date())
       </el-form-item>
       <el-form-item label="条码内容">
         <el-radio-group v-model="settings.barcodeSource" :disabled="printing">
-          <el-radio-button value="sku_code">内部 SKU 编码</el-radio-button>
+          <el-radio-button value="sku_code">商品编码</el-radio-button>
           <el-radio-button value="factory_barcode">原厂条码</el-radio-button>
           <el-radio-button value="factory_barcode_first">原厂条码优先</el-radio-button>
         </el-radio-group>
@@ -601,17 +654,51 @@ const printDateText = formatPrintDate(new Date())
         <el-checkbox v-model="settings.showLocation" :disabled="printing">库位</el-checkbox>
         <el-checkbox v-if="settings.template === 'yz-full'" v-model="settings.showPrintDate" :disabled="printing">打印日期</el-checkbox>
       </el-form-item>
+      <el-form-item v-if="labels.length" label="打印规格">
+        <div class="w-full min-w-0">
+          <div class="flex flex-wrap items-center gap-x-3">
+            <el-checkbox :model-value="allSelected" :indeterminate="partiallySelected" :disabled="printing" @change="toggleAllSelected">全选</el-checkbox>
+            <span class="text-sm text-slate-500 dark:text-slate-400">已选 {{ selectedLabels.length }} / {{ labels.length }} 个规格</span>
+          </div>
+          <div class="mt-1 max-h-48 overflow-auto rounded-lg border border-slate-200 px-3 py-1 dark:border-white/10">
+            <div v-for="group in labelGroups" :key="group.key" class="py-1">
+              <el-checkbox
+                v-if="group.items.length > 1"
+                :model-value="groupSelectedCount(group) === group.items.length"
+                :indeterminate="groupSelectedCount(group) > 0 && groupSelectedCount(group) < group.items.length"
+                :disabled="printing"
+                @change="toggleGroupSelected(group, $event)"
+              >
+                <span class="font-medium">{{ group.productName || '未命名商品' }}</span>
+                <span class="ml-1 text-xs text-slate-500 dark:text-slate-400">（{{ groupSelectedCount(group) }}/{{ group.items.length }}）</span>
+              </el-checkbox>
+              <div class="flex flex-wrap gap-x-4" :class="{ 'pl-6': group.items.length > 1 }">
+                <el-checkbox
+                  v-for="item in group.items"
+                  :key="item.skuId"
+                  :model-value="selectedSkuIds.has(item.skuId)"
+                  :disabled="printing"
+                  @change="toggleSkuSelected(item.skuId, $event)"
+                >
+                  <span v-if="group.items.length === 1">{{ item.productName || '未命名商品' }} · </span>{{ item.specText }}
+                  <span class="ml-1 text-xs text-slate-400">{{ item.skuCode }}</span>
+                </el-checkbox>
+              </div>
+            </div>
+          </div>
+        </div>
+      </el-form-item>
     </el-form>
 
     <el-alert v-if="autoLayoutNotice" type="info" :closable="false" show-icon :title="autoLayoutNotice" class="mb-3" />
     <el-alert v-if="loadError" type="error" :closable="false" show-icon :title="loadError" class="mb-3" />
     <el-alert
-      v-else-if="failedBarcodes.length"
+      v-else-if="selectedFailedBarcodes.length"
       type="error"
       :closable="false"
       show-icon
-      :title="`有 ${failedBarcodes.length} 个条码无法生成，请检查原厂条码是否为半角字符，修正后才能打印`"
-      :description="failedBarcodes.join('、')"
+      :title="`已选规格中有 ${selectedFailedBarcodes.length} 个条码无法生成，请检查原厂条码是否为半角字符，修正或取消勾选后才能打印`"
+      :description="selectedFailedBarcodes.join('、')"
       class="mb-3"
     />
     <el-alert
@@ -634,7 +721,7 @@ const printDateText = formatPrintDate(new Date())
       :title="`单次最多打印 ${MAX_TOTAL_LABELS} 张标签，当前 ${totalLabelCount} 张，请减少规格或份数`"
       class="mb-3"
     />
-    <div class="text-sm text-slate-500 dark:text-slate-400">共 {{ labels.length }} 个规格，打印 {{ totalLabelCount }} 张标签。预览：</div>
+    <div class="text-sm text-slate-500 dark:text-slate-400">已选 {{ selectedLabels.length }} 个规格，打印 {{ totalLabelCount }} 张标签。预览：</div>
     <div v-if="settings.template === 'a4'" class="mt-1 text-xs text-slate-500 dark:text-slate-400">屏幕预览按比例缩小，可滚动查看整页；打印时请选择 A4 纸、100% 缩放，并关闭页眉页脚。</div>
     <div v-else class="mt-1 text-xs text-slate-500 dark:text-slate-400">标签机请选与标签相同的纸型，并关闭“适应页面”。</div>
     <div v-loading="loading" class="mt-2 max-h-72 overflow-auto rounded-lg bg-slate-100 p-3 dark:bg-white/5">
@@ -662,7 +749,7 @@ const printDateText = formatPrintDate(new Date())
       </div>
       <div v-else class="flex flex-wrap gap-2">
         <BarcodeLabelCard
-          v-for="(label, index) in labels.slice(0, 12)"
+          v-for="(label, index) in selectedLabels.slice(0, 12)"
           :key="`${label.skuId}-${index}`"
           class="barcode-label--preview"
           :style="thermalStyle"

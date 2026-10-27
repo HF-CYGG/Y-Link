@@ -25,6 +25,7 @@ import {
 } from '@/api/modules/inbound'
 import { getProductList, type ProductRecord } from '@/api/modules/product'
 import { CameraFilled, Check, Document, DocumentCopy, Edit, Loading, Picture, Search } from '@element-plus/icons-vue'
+import { useDataChangeRefresh } from '@/composables/useDataChangeRefresh'
 import { useCameraQrScanner } from '@/composables/useCameraQrScanner'
 import { useDevice } from '@/composables/useDevice'
 import { extractErrorMessage } from '@/utils/error'
@@ -539,6 +540,28 @@ const handleReuseRecentScan = (verifyCode: string) => {
   void handleScan()
 }
 
+/**
+ * 商品目录按需懒加载并缓存，其他页面改动商品后：
+ * - 改单弹窗关闭时只清空缓存，下次打开由 ensureProductsLoaded 重新拉取；
+ * - 弹窗正在使用时直接重拉并替换目录，不能清空，否则商品与规格下拉会失去候选、未保存的修改只能关窗重填；
+ * - 后台重拉失败时保留现有目录且不打断编辑，返回 false 留待后续变更或下次激活重试。
+ */
+useDataChangeRefresh(['products'], async () => {
+  if (!editDialogVisible.value) {
+    products.value = []
+    return true
+  }
+  editProductsLoading.value = true
+  try {
+    products.value = await getProductList({})
+    return true
+  } catch {
+    return false
+  } finally {
+    editProductsLoading.value = false
+  }
+})
+
 onMounted(() => {
   resetEditForm()
   focusScanInput()
@@ -567,8 +590,8 @@ onBeforeUnmount(() => {
          - 窄屏端回退为自然流，避免把手机页面切成多个难以操作的内层滚动容器。 -->
     <div v-show="activeTab === 'scan'" class="inbound-scan-workbench">
       <!-- 左侧：扫码区 + 快捷指引 + 最近扫码 -->
-      <section class="inbound-scan-side bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-100 dark:border-slate-700 flex flex-col overflow-hidden">
-        <div class="p-5 border-b border-slate-100 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-900/40">
+      <section class="inbound-scan-side bg-white dark:bg-[#141415] rounded-2xl shadow-sm border border-slate-100 dark:border-white/10 flex flex-col overflow-hidden">
+        <div class="p-5 border-b border-slate-100 dark:border-white/10 bg-slate-50/60 dark:bg-black/40">
           <h2 class="text-lg font-semibold text-slate-800 dark:text-slate-100 mb-3 flex items-center gap-2">
             <el-icon class="text-brand"><Search /></el-icon>
             扫码作业区
@@ -627,7 +650,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="p-5 border-b border-slate-100 dark:border-slate-700">
+        <div class="p-5 border-b border-slate-100 dark:border-white/10">
           <h3 class="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-2">作业指引</h3>
           <div class="space-y-2 text-sm text-slate-500 dark:text-slate-400">
             <p>1. 扫码或输入二维码后点击查询。</p>
@@ -668,8 +691,8 @@ onBeforeUnmount(() => {
       </section>
 
       <!-- 右侧：详情区 -->
-      <section class="inbound-scan-detail bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-100 dark:border-slate-700 flex flex-col overflow-hidden relative">
-        <div v-if="loading" class="absolute inset-0 z-10 bg-white/80 dark:bg-slate-800/80 backdrop-blur-sm flex items-center justify-center">
+      <section class="inbound-scan-detail bg-white dark:bg-[#141415] rounded-2xl shadow-sm border border-slate-100 dark:border-white/10 flex flex-col overflow-hidden relative">
+        <div v-if="loading" class="absolute inset-0 z-10 bg-white/80 dark:bg-[#141415]/80 backdrop-blur-sm flex items-center justify-center">
           <el-icon class="is-loading text-brand text-4xl"><Loading /></el-icon>
         </div>
 
@@ -680,7 +703,7 @@ onBeforeUnmount(() => {
             <div class="h-1.5" :class="statusToneClassMap[currentOrder.order.status]" />
 
             <!-- 单据标题与状态 -->
-            <div class="p-5 border-b border-slate-100 dark:border-slate-700">
+            <div class="p-5 border-b border-slate-100 dark:border-white/10">
               <div class="flex flex-wrap items-center justify-between gap-3">
                 <div class="flex items-center gap-3">
                   <h2 class="text-xl font-semibold text-slate-800 dark:text-slate-100">送货单核对</h2>
@@ -700,7 +723,7 @@ onBeforeUnmount(() => {
                 <div
                   v-for="card in summaryCards"
                   :key="card.label"
-                  class="rounded-xl border border-slate-100 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-900/40 p-3"
+                  class="rounded-xl border border-slate-100 dark:border-white/10 bg-slate-50/70 dark:bg-black/40 p-3"
                 >
                   <p class="text-xs text-slate-500 dark:text-slate-400">{{ card.label }}</p>
                   <p class="mt-1 text-sm font-semibold text-slate-800 dark:text-slate-100 break-all">{{ card.value }}</p>
@@ -719,10 +742,10 @@ onBeforeUnmount(() => {
                 <div
                   v-for="(item, index) in currentOrder.items"
                   :key="item.id"
-                  class="flex items-center justify-between p-4 bg-slate-50 dark:bg-slate-900/50 rounded-xl border border-slate-100 dark:border-slate-700 hover:bg-brand/5 dark:hover:bg-brand/10 transition-colors"
+                  class="flex items-center justify-between p-4 bg-slate-50 dark:bg-black/50 rounded-xl border border-slate-100 dark:border-white/10 hover:bg-brand/5 dark:hover:bg-brand/10 transition-colors"
                 >
                   <div class="flex items-center gap-3">
-                    <div class="w-8 h-8 rounded-full bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 flex items-center justify-center text-slate-500 dark:text-slate-300 font-medium">
+                    <div class="w-8 h-8 rounded-full bg-white dark:bg-white/10 border border-slate-200 dark:border-white/15 flex items-center justify-center text-slate-500 dark:text-slate-300 font-medium">
                       {{ index + 1 }}
                     </div>
                     <div>
@@ -737,7 +760,7 @@ onBeforeUnmount(() => {
             </div>
 
             <!-- 底部操作栏 -->
-            <div class="inbound-scan-detail__footer p-5 border-t border-slate-100 dark:border-slate-700 bg-white/95 dark:bg-slate-800/95 backdrop-blur-sm flex flex-wrap gap-3 justify-between items-center">
+            <div class="inbound-scan-detail__footer p-5 border-t border-slate-100 dark:border-white/10 bg-white/95 dark:bg-[#141415]/95 backdrop-blur-sm flex flex-wrap gap-3 justify-between items-center">
               <el-button plain size="large" @click="handleReset" class="!rounded-xl px-8">
                 重置并扫码下一单
               </el-button>
@@ -821,7 +844,7 @@ onBeforeUnmount(() => {
           <div
             v-for="(item, index) in editForm.items"
             :key="item.uid"
-            class="inbound-scan-edit-row flex flex-col gap-3 rounded-2xl border border-slate-200/70 bg-slate-50/75 p-4 dark:border-slate-700/70 dark:bg-slate-900/40 lg:flex-row lg:items-start"
+            class="inbound-scan-edit-row flex flex-col gap-3 rounded-2xl border border-slate-200/70 bg-slate-50/75 p-4 dark:border-white/10 dark:bg-black/40 lg:flex-row lg:items-start"
           >
             <div class="inbound-scan-edit-row__index">{{ index + 1 }}</div>
             <div class="flex-1">
@@ -882,7 +905,7 @@ onBeforeUnmount(() => {
 
         <el-button plain @click="handleAddEditItem">添加商品</el-button>
 
-        <div class="rounded-2xl border border-slate-200/70 bg-slate-50/75 p-4 dark:border-slate-700/70 dark:bg-slate-900/40">
+        <div class="rounded-2xl border border-slate-200/70 bg-slate-50/75 p-4 dark:border-white/10 dark:bg-black/40">
           <p class="mb-2 text-sm font-medium text-slate-600 dark:text-slate-400">备注信息</p>
           <el-input
             v-model="editForm.remark"

@@ -810,7 +810,7 @@ onBeforeUnmount(() => {
           :key="tab.key"
           type="button"
           class="rounded-full px-3 py-1.5 text-xs"
-          :class="activeStatus === tab.key ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-600 dark:bg-white/10 dark:text-slate-300'"
+          :class="activeStatus === tab.key ? 'bg-slate-900 text-white dark:bg-brand' : 'bg-slate-100 text-slate-600 dark:bg-white/10 dark:text-slate-300'"
           @click="handleStatusChange(tab.key as 'all' | O2oPreorderSummary['status'])"
         >
           {{ tab.label }}

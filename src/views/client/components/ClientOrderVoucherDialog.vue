@@ -439,13 +439,25 @@ const handleExportPdf = () => {
   color: #cbd5e1;
 }
 
+/* 在线补填面板与预览外框同口径，避免暗色下白底面板配浅色表单标签造成低对比。 */
+.dark .voucher-editor-panel,
 .dark .voucher-preview-panel {
   border-color: rgba(255, 255, 255, 0.08);
   background: #141415;
 }
 
+.dark .voucher-editor-panel__title,
 .dark .voucher-preview-panel__title {
   color: #f1f5f9;
+}
+
+.dark .voucher-editor-panel__desc,
+.dark .voucher-preview-panel__desc {
+  color: #94a3b8;
+}
+
+.dark .voucher-editor-panel__meta {
+  color: #cbd5e1;
 }
 
 .dark .voucher-orientation-toolbar {

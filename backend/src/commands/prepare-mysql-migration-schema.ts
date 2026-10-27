@@ -4,8 +4,6 @@
  * 实现逻辑：
  * - 连接参数仅从子进程环境读取，不通过命令行参数或日志暴露密码；
  * - 显式调用 TypeORM synchronize 创建当前实体结构，再用 schema builder 确认不存在遗留差异；
- * - 实体无法表达的启动期必需触发器（044 只追加保护）在 initialize 时补建、两种模式均校验，
- *   避免切换后启动自检因缺触发器进入救援；
  * - 任何连接、建表或结构核验错误均以非零退出码返回给迁移状态机。
  * 维护说明：
  * - 本命令只允许由自动迁移服务在已通过空库预检后调用；
@@ -14,8 +12,8 @@
 
 import { AppDataSource } from '../config/data-source.js'
 import type { QueryRunner } from 'typeorm'
-import { assertMysqlRequiredTriggers, ensureMysqlRequiredTriggers } from '../config/mysql-migration-runner.js'
-import { normalizeStaticCheckClause } from '../utils/normalize-static-check-clause.js'
+import { normalizeStaticCheckClause } from '../utils/mysql-check-clause.js'
+import { findInvalidMysqlRequiredTriggers } from '../config/mysql-migration-runner.js'
 
 function quoteIdentifier(value: string): string {
   return `\`${value.replaceAll('`', '``')}\``
@@ -200,7 +198,7 @@ async function ensureMetadataCheckConstraints(
       throw new Error(`MySQL 表 ${metadata.tableName} 的 CHECK 约束数量与实体定义不一致`)
     }
     for (const [constraintName, normalizedExpectedClause] of expectedChecks) {
-      const normalizedActualClause = normalizeStaticCheckClause(existingChecks.get(constraintName), 'mysql-metadata')
+      const normalizedActualClause = normalizeStaticCheckClause(existingChecks.get(constraintName))
       if (normalizedActualClause !== normalizedExpectedClause) {
         throw new Error(`MySQL 表 ${metadata.tableName} 的 CHECK 约束 ${constraintName} 表达式与实体定义不一致`)
       }
@@ -227,9 +225,13 @@ async function main(): Promise<void> {
       await AppDataSource.synchronize(false)
     }
     const checkConstraintCount = await ensureMetadataCheckConstraints(queryRunner, workerMode)
-    const requiredTriggerCount = workerMode === 'initialize'
-      ? await ensureMysqlRequiredTriggers(queryRunner)
-      : await assertMysqlRequiredTriggers(queryRunner)
+    // 触发器由迁移服务在导入完成后补建；核验模式必须确认已就绪，否则切换后启动自检会进入救援。
+    if (workerMode === 'verify') {
+      const invalidTriggers = await findInvalidMysqlRequiredTriggers(queryRunner)
+      if (invalidTriggers.length > 0) {
+        throw new Error(`MySQL 缺少或定义不匹配的必需触发器：${invalidTriggers.join(', ')}`)
+      }
+    }
     const schemaLog = await AppDataSource.driver.createSchemaBuilder().log()
     const schemaQueries = schemaLog.upQueries.map((item) => item.query)
     const blockingSchemaQueries = await collectBlockingSchemaQueries(queryRunner, schemaQueries)
@@ -243,7 +245,6 @@ async function main(): Promise<void> {
       mode: workerMode,
       tableCount: AppDataSource.entityMetadatas.filter((metadata) => metadata.tableType !== 'view').length,
       checkConstraintCount,
-      requiredTriggerCount,
       equivalentDifferences: schemaQueries.length - blockingSchemaQueries.length,
     }))
   } finally {

@@ -15,6 +15,7 @@ import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMoun
 import { ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { BizO2oItemSpecText, PageContainer, PagePaginationBar } from '@/components/common'
+import { useDataChangeRefresh } from '@/composables/useDataChangeRefresh'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import {
@@ -114,7 +115,23 @@ const activeOrderId = ref('')
 const activeOrderDetail = ref<O2oConsolePreorderDetail | null>(null)
 const autoRefreshEnabled = ref(true)
 const pollIntervalSeconds = ref<(typeof POLL_INTERVAL_OPTIONS)[number]>(15)
-const soundNoticeEnabled = ref(false)
+// 提示音开关是本机个人偏好，读写都容错：隐私模式或存储被禁用时退回默认关闭。
+const SOUND_NOTICE_STORAGE_KEY = 'ylink:o2o-order-pool:sound-notice'
+const readSoundNoticePreference = () => {
+  try {
+    return globalThis.localStorage?.getItem(SOUND_NOTICE_STORAGE_KEY) === 'on'
+  } catch {
+    return false
+  }
+}
+const persistSoundNoticePreference = (enabled: boolean) => {
+  try {
+    globalThis.localStorage?.setItem(SOUND_NOTICE_STORAGE_KEY, enabled ? 'on' : 'off')
+  } catch {
+    // 存储不可用时只影响下次进入页面的默认值，不影响本次提醒。
+  }
+}
+const soundNoticeEnabled = ref(readSoundNoticePreference())
 const nowMs = ref(Date.now())
 const orderHighlightExpiresAtMap = ref<Record<string, number>>({})
 const latestNewOrderNotice = ref<{ count: number; expiresAt: number } | null>(null)
@@ -350,8 +367,10 @@ const loadDepartmentOptions = async () => {
   try {
     const result = await getClientDepartmentConfigs()
     departmentOptions.value = result.options
+    return true
   } catch (error) {
     showAppError(extractErrorMessage(error, '加载部门筛选项失败'))
+    return false
   } finally {
     departmentOptionsLoading.value = false
   }
@@ -615,32 +634,90 @@ const pruneTransientMarks = () => {
   }
 }
 
+/**
+ * 新单提示音：
+ * - 浏览器自动播放策略要求 AudioContext 在用户手势中创建或恢复，轮询回调里首次创建只会停在 suspended 而无声；
+ * - 因此在打开开关（用户点击）时解锁并试播，偏好为开启时再在页面首次点击/按键时补解锁；
+ * - 仍处于 suspended 时先等待 resume 成功再排程音调，避免音调排进挂起的时间轴后被丢弃。
+ */
+const ensureReminderAudioContext = () => {
+  if (reminderAudioContext && reminderAudioContext.state !== 'closed') {
+    return reminderAudioContext
+  }
+  const AudioContextCtor = globalThis.window?.AudioContext || (globalThis.window as any)?.webkitAudioContext
+  if (!AudioContextCtor) {
+    return null
+  }
+  reminderAudioContext = new AudioContextCtor()
+  return reminderAudioContext
+}
+
+const unlockReminderAudio = async () => {
+  const audioContext = ensureReminderAudioContext()
+  if (!audioContext) {
+    return false
+  }
+  if (audioContext.state === 'suspended') {
+    await audioContext.resume().catch(() => undefined)
+  }
+  return audioContext.state === 'running'
+}
+
+// 两声上扬短音，比单个弱正弦更容易在嘈杂柜台环境中被注意到。
+const scheduleReminderTone = (audioContext: AudioContext) => {
+  const startAt = audioContext.currentTime + 0.01
+  for (const [index, frequency] of [880, 1320].entries()) {
+    const toneStart = startAt + index * 0.2
+    const oscillator = audioContext.createOscillator()
+    const gainNode = audioContext.createGain()
+    oscillator.type = 'triangle'
+    oscillator.frequency.value = frequency
+    gainNode.gain.setValueAtTime(0.0001, toneStart)
+    gainNode.gain.exponentialRampToValueAtTime(0.35, toneStart + 0.02)
+    gainNode.gain.exponentialRampToValueAtTime(0.0001, toneStart + 0.18)
+    oscillator.connect(gainNode)
+    gainNode.connect(audioContext.destination)
+    oscillator.start(toneStart)
+    oscillator.stop(toneStart + 0.2)
+  }
+}
+
 const playNewOrderReminderSound = () => {
   if (!soundNoticeEnabled.value) {
     return
   }
-  const AudioContextCtor = globalThis.window.AudioContext || (globalThis.window as any).webkitAudioContext
-  if (!AudioContextCtor) {
+  const audioContext = ensureReminderAudioContext()
+  if (!audioContext) {
     return
   }
-  if (!reminderAudioContext) {
-    reminderAudioContext = new AudioContextCtor()
+  if (audioContext.state === 'running') {
+    scheduleReminderTone(audioContext)
+    return
   }
-  if (reminderAudioContext.state === 'suspended') {
-    reminderAudioContext.resume().catch(() => undefined)
+  audioContext.resume()
+    .then(() => {
+      if (audioContext.state === 'running') {
+        scheduleReminderTone(audioContext)
+      }
+    })
+    .catch(() => undefined)
+}
+
+const handleReminderAudioGesture = () => {
+  removeReminderAudioGestureListeners()
+  if (soundNoticeEnabled.value) {
+    void unlockReminderAudio()
   }
-  const oscillator = reminderAudioContext.createOscillator()
-  const gainNode = reminderAudioContext.createGain()
-  oscillator.type = 'sine'
-  oscillator.frequency.value = 880
-  gainNode.gain.value = 0.0001
-  oscillator.connect(gainNode)
-  gainNode.connect(reminderAudioContext.destination)
-  const startAt = reminderAudioContext.currentTime
-  gainNode.gain.exponentialRampToValueAtTime(0.08, startAt + 0.02)
-  gainNode.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.22)
-  oscillator.start(startAt)
-  oscillator.stop(startAt + 0.24)
+}
+
+const addReminderAudioGestureListeners = () => {
+  globalThis.document?.addEventListener('pointerdown', handleReminderAudioGesture, { once: true })
+  globalThis.document?.addEventListener('keydown', handleReminderAudioGesture, { once: true })
+}
+
+function removeReminderAudioGestureListeners() {
+  globalThis.document?.removeEventListener('pointerdown', handleReminderAudioGesture)
+  globalThis.document?.removeEventListener('keydown', handleReminderAudioGesture)
 }
 
 /**
@@ -1298,8 +1375,21 @@ const handlePollIntervalChange = () => {
   showAppSuccess(`轮询间隔已切换为 ${pollIntervalSeconds.value} 秒`)
 }
 
-const handleSoundSwitchChange = () => {
-  showAppSuccess(soundNoticeEnabled.value ? '已开启新单提示音' : '已关闭新单提示音')
+const handleSoundSwitchChange = async () => {
+  persistSoundNoticePreference(soundNoticeEnabled.value)
+  if (!soundNoticeEnabled.value) {
+    removeReminderAudioGestureListeners()
+    showAppSuccess('已关闭新单提示音')
+    return
+  }
+  // 开关点击本身就是用户手势，在这里解锁音频并试播一次，让操作员确认音量与设备输出。
+  if (await unlockReminderAudio()) {
+    playNewOrderReminderSound()
+    showAppSuccess('已开启新单提示音')
+    return
+  }
+  addReminderAudioGestureListeners()
+  showAppWarning('浏览器暂未允许播放声音，请点击页面任意位置后再试')
 }
 
 const handleVisibilityChange = () => {
@@ -1342,7 +1432,14 @@ const deactivatePageRuntime = () => {
   stopSecondTick()
 }
 
+// 部门配置在系统配置中新增或调整后，切回订单池时刷新部门筛选项。
+useDataChangeRefresh(['departments'], loadDepartmentOptions)
+
 onMounted(async () => {
+  // 偏好为开启时，刷新页面后的音频上下文仍需一次用户手势才能出声。
+  if (soundNoticeEnabled.value) {
+    addReminderAudioGestureListeners()
+  }
   await Promise.all([loadOrders(), loadDepartmentOptions()])
 })
 
@@ -1356,6 +1453,7 @@ onDeactivated(() => {
 
 onBeforeUnmount(() => {
   deactivatePageRuntime()
+  removeReminderAudioGestureListeners()
   // 清理音频上下文，避免内存泄漏
   if (reminderAudioContext && reminderAudioContext.state !== 'closed') {
     reminderAudioContext.close().catch(() => undefined)
@@ -1412,7 +1510,7 @@ onBeforeUnmount(() => {
             :key="tab.key"
             type="button"
             class="order-pool-tab flex min-w-0 items-center justify-between rounded-2xl px-3 py-2 text-left text-xs transition"
-            :class="activePool === tab.key ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-white/10 dark:text-slate-200'"
+            :class="activePool === tab.key ? 'bg-slate-900 text-white dark:bg-brand' : 'bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-white/10 dark:text-slate-200'"
             @click="handlePoolChange(tab.key)"
           >
             <span class="order-pool-tab__label">{{ tab.label }}</span>

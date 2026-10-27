@@ -281,7 +281,7 @@ watch(
           </div>
         </div>
         <div class="space-y-2">
-          <div v-for="(slice, index) in card.slices" :key="`${card.key}-${slice.key}-${index}`" class="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2 text-xs dark:bg-slate-900/40">
+          <div v-for="(slice, index) in card.slices" :key="`${card.key}-${slice.key}-${index}`" class="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2 text-xs dark:bg-black/40">
             <div class="flex min-w-0 items-center gap-2">
               <span class="h-2.5 w-2.5 shrink-0 rounded-full" :style="{ backgroundColor: resolvePieLegendColor(index) }" />
               <span class="truncate text-slate-700 dark:text-slate-200">{{ slice.label }}</span>
@@ -292,7 +292,7 @@ watch(
           </div>
         </div>
       </div>
-      <div v-else class="flex min-h-[220px] items-center justify-center rounded-xl bg-slate-50 dark:bg-slate-900/40">
+      <div v-else class="flex min-h-[220px] items-center justify-center rounded-xl bg-slate-50 dark:bg-black/40">
         <el-empty :image-size="64" :description="pieError || card.emptyText" />
       </div>
     </div>

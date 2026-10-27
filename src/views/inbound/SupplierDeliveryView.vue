@@ -13,6 +13,7 @@
  */
 
 import { computed, onMounted, ref } from 'vue'
+import { useDataChangeRefresh } from '@/composables/useDataChangeRefresh'
 import { ElMessageBox } from 'element-plus'
 import QRCode from 'qrcode'
 import { useRouter } from 'vue-router'
@@ -111,9 +112,11 @@ const loadProducts = async () => {
   loading.value = true
   try {
     products.value = await getProductList({})
+    return true
   } catch (error) {
     products.value = []
     showAppError(extractErrorMessage(error, '加载商品列表失败，请稍后重试'))
+    return false
   } finally {
     loading.value = false
   }
@@ -228,6 +231,9 @@ const goToHistory = () => {
   router.push('/supplier-history')
 }
 
+// 其他页面新增或调整商品后，切回送货单录入时刷新可选商品。
+useDataChangeRefresh(['products'], loadProducts)
+
 onMounted(() => {
   loadProducts()
   handleAddItem()
@@ -244,8 +250,8 @@ onMounted(() => {
           key="delivery-form"
           class="grid grid-cols-1 items-start gap-5 xl:grid-cols-[minmax(0,1fr)_340px]"
         >
-          <div class="delivery-main-card overflow-hidden rounded-[28px] border border-slate-200/70 bg-white/95 shadow-[0_18px_46px_-40px_rgba(15,23,42,0.2)] dark:border-slate-700/80 dark:bg-slate-800/95">
-            <div class="delivery-main-card__header flex flex-col gap-4 border-b border-slate-200/70 px-5 py-5 dark:border-slate-700/80 sm:px-6">
+          <div class="delivery-main-card overflow-hidden rounded-[28px] border border-slate-200/70 bg-white/95 shadow-[0_18px_46px_-40px_rgba(15,23,42,0.2)] dark:border-white/10 dark:bg-[#141415]/95">
+            <div class="delivery-main-card__header flex flex-col gap-4 border-b border-slate-200/70 px-5 py-5 dark:border-white/10 sm:px-6">
               <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                 <div class="min-w-0 space-y-2">
                   <h2 class="text-lg font-semibold text-slate-800 dark:text-slate-100">填写本次送货明细</h2>
@@ -276,9 +282,9 @@ onMounted(() => {
                 <div
                   v-for="(item, index) in items"
                   :key="item.uid"
-                  class="delivery-item-row flex flex-col gap-4 rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-slate-700/70 dark:bg-slate-900/50 lg:flex-row lg:items-start"
+                  class="delivery-item-row flex flex-col gap-4 rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-white/10 dark:bg-black/50 lg:flex-row lg:items-start"
                 >
-                  <div class="delivery-item-row__index flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-slate-200/80 bg-white text-sm font-medium text-slate-500 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-400">
+                  <div class="delivery-item-row__index flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-slate-200/80 bg-white text-sm font-medium text-slate-500 dark:border-white/15 dark:bg-[#141415] dark:text-slate-400">
                     {{ index + 1 }}
                   </div>
                   <div class="flex-1">
@@ -342,7 +348,7 @@ onMounted(() => {
                 </div>
               </transition-group>
 
-              <div class="rounded-2xl border border-slate-200/70 bg-slate-50/70 p-4 dark:border-slate-700/70 dark:bg-slate-900/40">
+              <div class="rounded-2xl border border-slate-200/70 bg-slate-50/70 p-4 dark:border-white/10 dark:bg-black/40">
                 <div class="mb-2 flex flex-wrap items-center gap-2">
                   <p class="text-sm font-medium text-slate-600 dark:text-slate-400">预计送达时间</p>
                   <span class="rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-semibold text-rose-600 dark:bg-rose-950/40 dark:text-rose-300">必填</span>
@@ -360,7 +366,7 @@ onMounted(() => {
                 </p>
               </div>
 
-              <div class="rounded-2xl border border-slate-200/70 bg-slate-50/70 p-4 dark:border-slate-700/70 dark:bg-slate-900/40">
+              <div class="rounded-2xl border border-slate-200/70 bg-slate-50/70 p-4 dark:border-white/10 dark:bg-black/40">
                 <p class="mb-2 text-sm font-medium text-slate-600 dark:text-slate-400">备注信息</p>
                 <el-input
                   v-model="remark"
@@ -373,7 +379,7 @@ onMounted(() => {
             </div>
 
             <!-- 吸附式操作栏：列表较长时仍可快速完成提交。 -->
-            <div class="delivery-submit-bar sticky bottom-0 z-10 flex flex-col gap-3 border-t border-slate-200/70 bg-white/92 px-5 py-4 backdrop-blur-md dark:border-slate-700/80 dark:bg-slate-800/96 sm:px-6 lg:flex-row lg:items-center lg:justify-between">
+            <div class="delivery-submit-bar sticky bottom-0 z-10 flex flex-col gap-3 border-t border-slate-200/70 bg-white/92 px-5 py-4 backdrop-blur-md dark:border-white/10 dark:bg-[#141415]/95 sm:px-6 lg:flex-row lg:items-center lg:justify-between">
               <div class="space-y-1 text-slate-600 dark:text-slate-400">
                 <p class="text-xs uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500">当前汇总</p>
                 <p>
@@ -394,7 +400,7 @@ onMounted(() => {
           </div>
 
           <aside class="space-y-4">
-            <div class="delivery-side-card rounded-[28px] border border-slate-200/70 bg-white/95 p-5 shadow-[0_16px_40px_-40px_rgba(15,23,42,0.18)] dark:border-slate-700/80 dark:bg-slate-800/95">
+            <div class="delivery-side-card rounded-[28px] border border-slate-200/70 bg-white/95 p-5 shadow-[0_16px_40px_-40px_rgba(15,23,42,0.18)] dark:border-white/10 dark:bg-[#141415]/95">
               <div class="flex items-start justify-between gap-3">
                 <div class="min-w-0">
                   <h3 class="text-sm font-semibold text-slate-800 dark:text-slate-100">提交前留意</h3>
@@ -408,12 +414,12 @@ onMounted(() => {
               </div>
 
               <div class="mt-4 space-y-4">
-                <div class="delivery-side-metric rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-slate-700/70 dark:bg-slate-900/40">
+                <div class="delivery-side-metric rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-white/10 dark:bg-black/40">
                   <div class="flex items-center justify-between">
                     <span class="text-sm text-slate-500 dark:text-slate-400">已完成选择</span>
                     <span class="text-lg font-semibold text-slate-900 dark:text-slate-100">{{ selectedCount }}/{{ items.length }}</span>
                   </div>
-                  <div class="mt-3 h-2 overflow-hidden rounded-full bg-slate-200/80 dark:bg-slate-700/80">
+                  <div class="mt-3 h-2 overflow-hidden rounded-full bg-slate-200/80 dark:bg-white/10">
                     <div class="delivery-side-metric__progress h-full rounded-full bg-teal-500/80" :style="{ width: `${completionRate}%` }" />
                   </div>
                 </div>
@@ -425,7 +431,7 @@ onMounted(() => {
               </div>
 
               <ul class="delivery-helper-list mt-4 space-y-3 text-sm leading-relaxed text-slate-600 dark:text-slate-400">
-                <li v-for="(tip, index) in helperSteps" :key="tip" class="flex gap-3 rounded-2xl border border-slate-200/70 bg-slate-50/75 p-3 dark:border-slate-700/70 dark:bg-slate-900/35">
+                <li v-for="(tip, index) in helperSteps" :key="tip" class="flex gap-3 rounded-2xl border border-slate-200/70 bg-slate-50/75 p-3 dark:border-white/10 dark:bg-black/35">
                   <span class="text-brand dark:text-teal-400">{{ index + 1 }}.</span>
                   <span>{{ tip }}</span>
                 </li>
@@ -438,7 +444,7 @@ onMounted(() => {
         <div
           v-else
           key="delivery-success"
-          class="delivery-success-shell mx-auto max-w-5xl overflow-hidden rounded-[32px] border border-slate-200/70 bg-white/95 shadow-[0_18px_48px_-40px_rgba(15,23,42,0.18)] dark:border-slate-700/80 dark:bg-slate-800/95"
+          class="delivery-success-shell mx-auto max-w-5xl overflow-hidden rounded-[32px] border border-slate-200/70 bg-white/95 shadow-[0_18px_48px_-40px_rgba(15,23,42,0.18)] dark:border-white/10 dark:bg-[#141415]/95"
         >
           <div class="grid gap-0 lg:grid-cols-[minmax(0,1.1fr)_380px]">
             <div class="delivery-success-shell__content p-6 sm:p-8 lg:p-10">
@@ -469,10 +475,10 @@ onMounted(() => {
               </div>
             </div>
 
-            <div class="delivery-success-qr border-t border-slate-200/70 bg-slate-50/60 p-6 dark:border-slate-700/70 dark:bg-slate-900/30 lg:border-l lg:border-t-0 lg:p-8">
+            <div class="delivery-success-qr border-t border-slate-200/70 bg-slate-50/60 p-6 dark:border-white/10 dark:bg-black/30 lg:border-l lg:border-t-0 lg:p-8">
               <p class="text-center text-sm font-medium text-emerald-700 dark:text-emerald-300">交货时出示二维码</p>
               <p class="mt-1 text-center text-xs text-slate-500 dark:text-slate-400">{{ currentShowNo }}</p>
-              <div class="mt-4 rounded-[24px] border border-white/80 bg-white p-4 shadow-[0_10px_24px_-22px_rgba(15,23,42,0.24)] dark:border-slate-700/70 dark:bg-slate-900/70">
+              <div class="mt-4 rounded-[24px] border border-white/80 bg-white p-4 shadow-[0_10px_24px_-22px_rgba(15,23,42,0.24)] dark:border-white/10 dark:bg-black/70">
                 <img v-if="qrCodeDataUrl" :src="qrCodeDataUrl" alt="核销二维码" class="mx-auto h-64 w-64 object-contain" />
                 <div v-else-if="!qrCodeUnavailable" class="mx-auto flex h-64 w-64 items-center justify-center">
                   <el-skeleton animated>
@@ -665,7 +671,7 @@ onMounted(() => {
 
 /* 暗色：渐变头部与成功页内容区是背景图，外层 dark:bg 盖不住，需要整体重写背景。 */
 .dark .delivery-main-card__header {
-  background: linear-gradient(180deg, rgba(30, 41, 59, 0.5), rgba(20, 20, 21, 0.9));
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(20, 20, 21, 0.9));
 }
 
 .dark .delivery-inline-metric {
@@ -678,7 +684,7 @@ onMounted(() => {
 }
 
 .dark .delivery-success-shell__content {
-  background: linear-gradient(180deg, rgba(20, 20, 21, 0.98), rgba(30, 41, 59, 0.5));
+  background: linear-gradient(180deg, rgba(20, 20, 21, 0.98), rgba(255, 255, 255, 0.03));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 </style>

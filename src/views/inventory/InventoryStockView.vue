@@ -5,10 +5,11 @@
  * 实现逻辑：
  * - 查询条件全部交给服务端分页，顶部同时展示命中规格数与库存合计；
  * - 勾选行后打开条码打印弹窗（异步组件，避免条码库进入本页主包）；
- * - 点击“流水”跳到库存流水页并带上 skuId 过滤。
+ * - 点击“流水”跳到库存流水页并带上 skuId 过滤；
+ * - 库位列展示主库位与拆分库位件数（同一规格可分放多个库位），有商品维护权限时可从“拨转”按数量调整分布。
  * - 筛选区与结果卡统一层级；桌面保留表格，窄屏用可勾选的规格卡复用表格的打印选择状态。
  * 维护说明：
- * - 库存数字只读，任何调整都要走扫码作业或盘点生成流水，不在这里提供直接修改入口；
+ * - 库存数字只读，任何调整都要走扫码作业或盘点生成流水，不在这里提供直接修改入口；拨转只搬件数、不改总库存；
  * - 成本价仅在有 products:manage 权限时展示，无权限时服务端返回 null，统一显示“—”；
  * - 列表请求经 useStableRequest 防乱序；缓存页首次进入只请求一次，再次激活时刷新。
  */
@@ -17,17 +18,34 @@ import { computed, defineAsyncComponent, onActivated, onMounted, reactive, ref }
 import { useRouter } from 'vue-router'
 import { PageContainer, PagePaginationBar, PageToolbarCard } from '@/components/common'
 import { getCategories, getLocations, getStocks, type CategoryRecord, type LocationRecord, type StockRow } from '@/api/modules/inventory'
+import { useDataChangeRefresh } from '@/composables/useDataChangeRefresh'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { showAppError, showAppWarning } from '@/utils/app-alert'
 
 const BarcodeLabelPrintDialog = defineAsyncComponent(() => import('./components/BarcodeLabelPrintDialog.vue'))
+const SkuLocationTransferDialog = defineAsyncComponent(() => import('./components/SkuLocationTransferDialog.vue'))
 
 const router = useRouter()
 const authStore = useAuthStore(pinia)
 const showCost = computed(() => authStore.hasPermission('products:manage'))
 const canPrint = computed(() => authStore.hasPermission('products:view'))
+// 库位拨转接口要求商品维护权限，与库位管理口径一致。
+const canTransfer = computed(() => authStore.hasPermission('products:manage'))
+const transferVisible = ref(false)
+const transferRow = ref<StockRow | null>(null)
+/** 库位分布文本：主库位在前，例如“C-03-05 ×6 · A-01-02 ×2”。 */
+const describeLocations = (row: StockRow) => {
+  if (!row.locationCode && !row.otherLocations?.length) return '—'
+  const parts = [`${row.locationCode || '未设置'} ×${row.mainLocationQty}`]
+  for (const item of row.otherLocations ?? []) parts.push(`${item.locationCode} ×${item.qty}`)
+  return parts.join(' · ')
+}
+const openTransfer = (row: StockRow) => {
+  transferRow.value = row
+  transferVisible.value = true
+}
 
 const filters = reactive({ keyword: '', categoryId: '', locationId: '', maxStock: '' as string, includeInactive: false })
 const pagination = reactive({ page: 1, pageSize: 20, total: 0 })
@@ -48,8 +66,10 @@ const loadOptions = async () => {
     const [categoryRows, locationRows] = await Promise.all([getCategories(), getLocations()])
     categories.value = categoryRows
     locations.value = locationRows
+    return true
   } catch (error) {
     showAppError(error, '筛选项加载失败')
+    return false
   }
 }
 
@@ -109,6 +129,9 @@ const toggleMobileSelection = (row: StockRow) => {
 const viewLogs = (row: StockRow) => {
   void router.push({ path: '/inventory/logs', query: { skuId: row.skuId, label: `${row.productName} · ${row.specText}` } })
 }
+
+// 分类、库位在其他页面新增或调整后，切回时刷新筛选项；库存列表在激活时已重新查询。
+useDataChangeRefresh(['products'], loadOptions)
 
 onMounted(() => {
   void loadOptions()
@@ -179,8 +202,8 @@ onActivated(() => {
         <el-table-column label="分类" width="110">
           <template #default="{ row }">{{ row.categoryName || '—' }}</template>
         </el-table-column>
-        <el-table-column label="库位" width="110">
-          <template #default="{ row }">{{ row.locationCode || '—' }}</template>
+        <el-table-column label="库位（主库位在前）" min-width="150">
+          <template #default="{ row }"><span class="text-xs leading-5">{{ describeLocations(row) }}</span></template>
         </el-table-column>
         <el-table-column v-if="showCost" label="成本价" width="90" align="right">
           <template #default="{ row }">{{ formatCost(row.costPrice) }}</template>
@@ -199,9 +222,10 @@ onActivated(() => {
             <el-tag size="small" :type="row.isActive ? 'success' : 'info'">{{ row.isActive ? '启用' : '停用' }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="80" fixed="right">
+        <el-table-column label="操作" :width="canTransfer ? 110 : 80" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="viewLogs(row)">流水</el-button>
+            <el-button v-if="canTransfer" link type="primary" :disabled="row.currentStock <= 0" @click="openTransfer(row)">拨转</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -226,10 +250,13 @@ onActivated(() => {
             <div><p class="text-xs text-slate-500 dark:text-slate-400">已预订 / 可用</p><p class="mt-0.5 tabular-nums">{{ row.preOrderedStock }} / {{ row.availableStock }}</p></div>
           </div>
           <div class="mt-3 grid grid-cols-2 gap-x-3 gap-y-2 text-xs text-slate-600 dark:text-slate-300">
-            <span>分类：{{ row.categoryName || '—' }}</span><span>库位：{{ row.locationCode || '—' }}</span>
+            <span>分类：{{ row.categoryName || '—' }}</span><span class="col-span-2 break-all">库位：{{ describeLocations(row) }}</span>
             <span>售价：{{ row.salePrice }}</span><span v-if="showCost">成本价：{{ formatCost(row.costPrice) }}</span>
           </div>
-          <div class="mt-3 flex justify-end border-t border-slate-100 pt-2 dark:border-white/10"><el-button link type="primary" @click="viewLogs(row)">查看流水</el-button></div>
+          <div class="mt-3 flex justify-end gap-3 border-t border-slate-100 pt-2 dark:border-white/10">
+            <el-button v-if="canTransfer" link type="primary" :disabled="row.currentStock <= 0" @click="openTransfer(row)">库位拨转</el-button>
+            <el-button link type="primary" @click="viewLogs(row)">查看流水</el-button>
+          </div>
         </article>
       </div>
       <PagePaginationBar
@@ -244,5 +271,13 @@ onActivated(() => {
     </section>
 
     <BarcodeLabelPrintDialog v-if="printVisible" v-model="printVisible" :sku-ids="selectedRows.map((row) => row.skuId)" />
+    <SkuLocationTransferDialog
+      v-if="transferRow"
+      v-model="transferVisible"
+      :sku-id="transferRow.skuId"
+      :sku-label="`${transferRow.productName} · ${transferRow.specText}`"
+      :locations="locations"
+      @transferred="loadData"
+    />
   </PageContainer>
 </template>

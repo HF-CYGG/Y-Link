@@ -36,6 +36,7 @@
 - 客户端 `client-auth.ts` 负责登录、注册、找回密码、会话恢复，并在退出或账号切换时清理购物车、目录和订单缓存。
 - `client-cart.ts` 以“现有库存 + 单人限购”为统一约束，并在目录刷新后尽量重映射商品和 SKU，而不是直接清空。
 - `useStableRequest.ts` 通过“只保留最后一次请求结果 + 自动中止旧请求”解决高频筛选和详情切换的竞态问题。
+- 基础数据变更刷新：管理端 31 个路由开启 KeepAlive，缓存页只在首次挂载时加载的下拉选项会过期。`src/utils/data-change-signal.ts` 由 `http.ts` 响应拦截器在写请求成功（`code === 0`）后按 URL 前缀递增数据域版本：`products`（`/products`、`/tags`、`/inventory/categories|locations|docs|stocktakes`）、`departments`（`/system-configs/client-departments`、`/client-users/department-accounts`），预览/查询类 POST 不计。页面用 `useDataChangeRefresh(domains, refresh)` 订阅：停用期间的变更在激活时静默刷新，激活期间收到的变更立即静默刷新（信号不带来源，其他页面的慢写请求可能在切回后才返回，不能当作本页自身操作跳过）；刷新严格串行，完成后若期间又出现新版本就继续补刷，避免并发刷新的旧响应覆盖新数据；只有刷新成功（不抛错且不返回 `false`）才推进已同步版本，失败时停止补刷，后续变更或下次激活继续重试。已接入出库开单（商品、部门）、订单池与客户端用户管理（部门）、线上展示与报表中心（标签）、库存查询与库存主数据（分类、库位）、入库扫码、供方送货、O2O 入库（商品）。仅当前标签页内生效，不跨浏览器标签页。新增共享基础数据写接口或新的缓存页选项时，同步核对规则与接入点。
 - `usePermissionAction.ts` 统一处理显隐、点击前权限拦截和越权提示。
 - 共享页面结构组件主要分三类：
   - 页面容器：`PageContainer`、`PageToolbarCard`、`PagePaginationBar`
@@ -74,6 +75,7 @@
 2. 客户端换号后购物车串号：查 `client-auth.ts` 的 `clearClientScopedStores()` 和 `client-cart.ts` 初始化逻辑。
 3. 弹层双滚动或高度异常：查页面是否绕过共享壳层自己再包一层主滚动容器。
 4. 按钮显示/禁用异常：查 `usePermissionAction.ts`、Store 权限集和页面 computed。
+5. 新增商品、部门、标签后其他页面不刷新：查写接口 URL 是否被 `data-change-signal.ts` 规则命中、消费页是否接入 `useDataChangeRefresh` 且 refresh 拉取的正是该选项。
 5. 刷新后局部状态丢失：查对应 Store 是否做了持久化快照。
 6. 暗色下某处仍是白块或深色字：
    - Tailwind 浅色类要配 `dark:` 变体（白底 `dark:bg-[#141415]`、浅灰底 `dark:bg-white/5`、边框 `dark:border-white/10`、正文 `dark:text-slate-100/300`）；
@@ -81,6 +83,7 @@
    - **禁止** `:global(.dark) .x`（会被编译成裸 `.dark` 规则作用到 html 并泄漏全站）和 `.dark :deep(.x)`（作用域属性落在 html 上永不生效）；传送到 body 的浮层用 `:global(.dark .浮层专属类 ...)`；
    - scoped 中 `background: linear-gradient(浅色)` 是背景图，`dark:bg-*` 只改背景色盖不住，必须在暗色选择器里整体重写 `background`；
    - 亮色规则若带 `is-checked`、`:hover` 等更高优先级选择器，暗色规则也要写到同等优先级。
+   - 暗色底色与边框禁止使用 slate 系（`dark:bg-slate-700~950`、`dark:border-slate-600/700`，以及 scoped 里的 `rgba(15, 23, 42 / 30, 41, 59 / 148, 163, 184, …)`）：slate 带蓝色调，叠在 `#141415` 卡片之间会显成蓝色卡片边框。卡片底用 `dark:bg-[#141415]`（半透明保留 `/95`），浅灰块用 `dark:bg-white/5~10`，加深块用 `dark:bg-black/N`，边框用 `dark:border-white/10`；亮色只写 `bg-slate-900` 一类深色选中态时也要补暗色变体（选中态用 `dark:bg-brand`）。
 7. 打印出来文字发灰：打印模板、凭证纸面、二维码区域必须保持白底黑字，`style.css` 已在 `@media print` 下把 html.dark 强制恢复亮色；不要给纸面或二维码容器加 `dark:` 背景。
 
 ## 验证与回归关注点
