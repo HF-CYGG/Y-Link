@@ -171,6 +171,12 @@ const mapScript = (script, cache, target) => {
   const esmMinEnd = esmMinStart >= 0 ? generated.indexOf('\n};\n', esmMinStart) : -1
   const insideEsmMinRuntime = (range) => esmMinEnd > esmMinStart
     && range.startOffset >= esmMinStart && range.endOffset <= esmMinEnd + 3
+  // 插件内联的虚拟模块（如 code128 条码库 `\0virtual:ylink-code128`）没有对应磁盘源码，按 rolldown 的
+  // `//#region \0virtual:...` 模块边界整体识别；完全落在其中的区间不可能是目标 SFC 条件，按其他来源忽略。
+  const virtualRegions = [...generated.matchAll(/^\/\/#region \\0virtual:[^\n]*\n[\s\S]*?^\/\/#endregion$/gmu)]
+    .map((match) => [match.index, match.index + match[0].length])
+  const insideVirtualModule = (range) => virtualRegions.some(([start, end]) =>
+    range.startOffset >= start && range.endOffset <= end)
   for (const fn of script.functions) {
     if (fn.isBlockCoverage !== true) continue
     for (const [rangeIndex, range] of fn.ranges.entries()) {
@@ -232,6 +238,10 @@ const mapScript = (script, cache, target) => {
       )
       if (wrapper) {
         ignoredGeneratedRanges += 1
+        continue
+      }
+      if (insideVirtualModule(range)) {
+        ignoredOtherSourceRanges += 1
         continue
       }
       throw new Error(`Vue V8 条件无法可信归属：${path.basename(generatedPath)} ${fn.functionName || '<anonymous>'} [${range.startOffset},${range.endOffset})`)
