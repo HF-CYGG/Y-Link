@@ -10,6 +10,7 @@
  * - 若前端需要独立的会话标签、附件或评价体系，请在现有会话/消息模型上平滑扩展，避免破坏当前接口语义。
  */
 
+import { randomInt } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { In, IsNull, LessThanOrEqual, MoreThan, type EntityManager } from 'typeorm'
@@ -1579,7 +1580,7 @@ class ClientFeedbackService {
       try { result = await createOnce(await this.getPortalConfigs()); break } catch (error) {
         const retryableMysqlLock = AppDataSource.options.type === 'mysql' && isRetryableMysqlTransactionError(error)
         if (attempt < maxAttempts && (retryableMysqlLock || isUniqueConstraintError(error, FEEDBACK_CONVERSATION_NO_UNIQUE_CONSTRAINT_MATCHER))) {
-          if (retryableMysqlLock) await new Promise<void>((resolve) => setTimeout(resolve, 25 * (2 ** (attempt - 1)) + Math.floor(Math.random() * 25)))
+          if (retryableMysqlLock) await new Promise<void>((resolve) => setTimeout(resolve, 25 * (2 ** (attempt - 1)) + randomInt(25)))
           // 重放完整账号锁、当前读、商品/SKU与期限检查，所有副作用仍受同一事务边界保护。
           continue
         }

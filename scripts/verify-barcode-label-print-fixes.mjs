@@ -51,7 +51,7 @@ globalThis.document = document
 let JsBarcode = LegacyJsBarcode
 if (process.argv.includes('--code128-preset')) {
   const { createPresetFactory } = await import('./code128-preset-test-runtime.mjs')
-  JsBarcode = createPresetFactory(document).factory
+  JsBarcode = (await createPresetFactory(document)).factory
 }
 
 const failures = []

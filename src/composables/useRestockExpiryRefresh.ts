@@ -22,7 +22,7 @@ export const useRestockExpiryRefresh = (records: () => FeedbackConversationRecor
       return delay === null || awakened.has(key) ? [] : [{ key, deadline: clockSamples.get(record.serverNow)! + delay }]
     })
     if (!targets.length) return
-    const first = targets.reduce((left, right) => left.deadline < right.deadline ? left : right)
+    const first = targets.reduce((left, right) => left.deadline < right.deadline ? left : right, targets[0])
     const wake = () => {
       const delay = first.deadline - Date.now()
       if (delay > 0) { timer = setTimeout(wake, Math.min(delay, 2147483647)); return }

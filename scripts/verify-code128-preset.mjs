@@ -9,7 +9,7 @@ import { createSvgDocument, createPresetFactory } from './code128-preset-test-ru
 
 const document = createSvgDocument()
 globalThis.document = document
-const { factory, moduleCode, globalAccess } = createPresetFactory(document)
+const { factory, moduleCode, globalAccess } = await createPresetFactory(document)
 const plugin = code128BarcodePlugin()
 assert.equal(plugin.resolveId(CODE128_BARCODE_MODULE_ID), CODE128_BARCODE_RESOLVED_ID)
 for (const id of ['jsbarcode', `${CODE128_BARCODE_MODULE_ID}/other`, `${CODE128_BARCODE_RESOLVED_ID}/other`]) {
