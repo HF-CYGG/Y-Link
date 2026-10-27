@@ -27,7 +27,7 @@
  * - 本文件只新建商品，不支持按导入覆盖已有商品，也不写库存流水（Excel 无库存列）。
  */
 
-import ExcelJS from 'exceljs'
+import { loadExcelJs } from '../utils/exceljs-loader.js'
 import { In, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
@@ -165,6 +165,7 @@ const normalizeHeader = (value: string) => value.replace(/[\s（）()/]/g, '')
 
 export class ProductImportYzService {
   async buildTemplate(): Promise<Buffer> {
+    const ExcelJS = await loadExcelJs()
     const workbook = new ExcelJS.Workbook()
     const sheet = workbook.addWorksheet('YZ建库导入')
     sheet.columns = [
@@ -308,6 +309,7 @@ export class ProductImportYzService {
 
   private async parseWorkbook(buffer: Buffer): Promise<ParsedYzRow[]> {
     assertXlsxArchiveWithinLimits(buffer, IMPORT_ARCHIVE_LIMITS)
+    const ExcelJS = await loadExcelJs()
     const workbook = new ExcelJS.Workbook()
     try {
       const workbookBuffer = Buffer.from(buffer) as unknown as Parameters<typeof workbook.xlsx.load>[0]

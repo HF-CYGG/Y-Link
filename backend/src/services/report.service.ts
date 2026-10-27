@@ -14,7 +14,8 @@
  * - 联表 + getRawMany 的查询必须用 offset/limit 分页，skip/take 在存在 join 时不会生成 SQL 分页子句。
  */
 
-import ExcelJS from 'exceljs'
+import type ExcelJS from 'exceljs'
+import { loadExcelJs } from '../utils/exceljs-loader.js'
 import type { Writable } from 'node:stream'
 import { In, type SelectQueryBuilder } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
@@ -383,6 +384,7 @@ export class ReportService {
     // 首批数据库查询完成前不创建 ZIP/写响应。这样输入或首查询失败仍可返回
     // 结构化错误；首批最后一个主键也锚定导出上界，后续新插入不会混入。
     let result = await fetchBatch()
+    const ExcelJS = await loadExcelJs()
     onReady?.()
     const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
       stream: output,

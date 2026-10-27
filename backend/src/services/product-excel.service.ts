@@ -8,7 +8,7 @@
  * 维护重点：V1 只新建商品，不按导入覆盖已有商品；列顺序调整时同步 TEMPLATE_COLUMNS 与前端说明。
  */
 
-import ExcelJS from 'exceljs'
+import { loadExcelJs } from '../utils/exceljs-loader.js'
 import { In, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
@@ -131,6 +131,7 @@ const readMoney = (raw: string, label: string, errors: string[]): string => {
 
 export class ProductExcelService {
   async buildTemplate(): Promise<Buffer> {
+    const ExcelJS = await loadExcelJs()
     const workbook = new ExcelJS.Workbook()
     const sheet = workbook.addWorksheet('商品导入')
     sheet.columns = TEMPLATE_COLUMNS.map((column) => ({ header: column.header, key: column.key, width: column.width }))
@@ -170,6 +171,7 @@ export class ProductExcelService {
     const productMap = new Map(products.map((product) => [String(product.id), product]))
     const categoryMap = new Map(categories.map((category) => [String(category.id), category]))
     const locationMap = new Map(locations.map((location) => [String(location.id), location.locationCode]))
+    const ExcelJS = await loadExcelJs()
     const workbook = new ExcelJS.Workbook()
     const sheet = workbook.addWorksheet('商品SKU')
     sheet.columns = [
@@ -228,6 +230,7 @@ export class ProductExcelService {
   async parseWorkbook(buffer: Buffer): Promise<ParsedRow[]> {
     // exceljs 会把整包解压进内存建模，先按真实解压体积做预检，防止压缩炸弹拖垮进程。
     assertXlsxArchiveWithinLimits(buffer, IMPORT_ARCHIVE_LIMITS)
+    const ExcelJS = await loadExcelJs()
     const workbook = new ExcelJS.Workbook()
     try {
       const workbookBuffer = Buffer.from(buffer) as unknown as Parameters<typeof workbook.xlsx.load>[0]
