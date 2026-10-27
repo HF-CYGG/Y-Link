@@ -49,6 +49,8 @@ const allowedScenarios = new Set([
   'corrupted-cutover-marker',
   'verifying-emergency-rollback',
   'failure-rollback',
+  'overlong-diagnostic-text',
+  'binlog-trigger-restricted',
 ])
 const terminalTaskStatuses = new Set(['succeeded', 'failed', 'rolled_back'])
 const acceptedTaskStatuses = new Set([
@@ -1346,6 +1348,15 @@ const runSuccessScenario = async ({ baseUrl, client, composeEnv, baselineSnapsho
     readOnly: false,
   })
   await assertMySqlRuntime(composeEnv, finalState.runtimeState)
+  const requiredTriggers = await runMySqlQuery(
+    composeEnv,
+    "SELECT GROUP_CONCAT(CONCAT(TRIGGER_NAME, ':', ACTION_TIMING, ' ', EVENT_MANIPULATION) ORDER BY TRIGGER_NAME) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = DATABASE() AND EVENT_OBJECT_TABLE = 'account_lifecycle_event'",
+  )
+  assert.equal(
+    requiredTriggers,
+    'trg_account_lifecycle_event_no_delete:BEFORE DELETE,trg_account_lifecycle_event_no_update:BEFORE UPDATE',
+    '迁移目标库缺少启动期必需的账号生命周期只追加触发器',
+  )
   await client.login()
   await assertMigrationAuditExists(client, 'database_migration.automatic_succeeded', createdTask.id)
   const mysqlSnapshot = await readExportSnapshot(client)
@@ -1424,6 +1435,22 @@ const runInsufficientPermissionsScenario = async (context) => {
   ))
   assert.equal(targetTableCount, 0, '权限不足预检不应在目标库留下探针或业务表')
   log('权限不足断言通过：缺少 ALTER 时在任何 DDL 探针前阻断，目标库保持为空')
+}
+
+const runBinlogTriggerRestrictedScenario = async (context) => {
+  // 模拟 DBA 尚未放开 binlog 下的触发器创建：预检探针必须在冻结前给出可操作提示，不得切换后才进救援。
+  await runMySqlRootQuery(context.composeEnv, 'SET GLOBAL log_bin_trust_function_creators = 0;')
+  await assertFailedTaskWithoutRestart({
+    ...context,
+    errorPattern: /二进制日志.*触发器.*log_bin_trust_function_creators/u,
+    label: 'binlog 触发器限制阻断',
+  })
+  const targetTableCount = Number(await runMySqlRootQuery(
+    context.composeEnv,
+    "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'y_link_migration_verify';",
+  ))
+  assert.equal(targetTableCount, 0, 'binlog 触发器限制预检不应在目标库留下探针或业务表')
+  log('binlog 触发器限制断言通过：冻结前阻断并提示 DBA 处理，目标库保持为空')
 }
 
 const runNonEmptyTargetScenario = async ({ baseUrl, client, composeEnv, baselineSnapshot, fixtureManifest }) => {
@@ -2171,6 +2198,103 @@ const runVerifyingEmergencyRollbackScenario = async ({
   log('verifying 阶段紧急回退断言通过：取消意图持久化、任务未被 succeeded 覆盖、SQLite 自检后解除维护')
 }
 
+// 早期审计日志未截断 UA，SQLite 又不校验 VARCHAR 长度；混入多字节字符以验证按字符而非字节截断。
+const overlongUserAgent = `Mozilla/5.0 (历史超长 UA 验收) ${'浏览器'.repeat(100)}`
+const diagnosticTextMaxLength = 255
+const truncatedUserAgentSha256 = crypto
+  .createHash('sha256')
+  .update(Array.from(overlongUserAgent).slice(0, diagnosticTextMaxLength).join(''), 'utf8')
+  .digest('hex')
+
+const runSourceSqliteScript = async (composeEnv, script, args, label) => {
+  const result = await runCompose(['exec', '-T', 'onebox', 'node', '--input-type=module', '-e', `
+    import { createRequire } from 'node:module';
+    const sqlite3 = createRequire('/app/backend/package.json')('sqlite3');
+    const db = new sqlite3.Database('/app/data/y-link.sqlite');
+    db.configure('busyTimeout', 10000);
+    const run = (sql, params = []) => new Promise((resolve, reject) => {
+      db.run(sql, params, function (error) { error ? reject(error) : resolve(this.changes) });
+    });
+    try {
+      ${script}
+    } finally {
+      await new Promise((resolve) => db.close(() => resolve()));
+    }
+  `, ...args], { capture: true, env: composeEnv, label })
+  return result.stdout.trim()
+}
+
+const readSqliteToMySqlPrecheck = async (client) => {
+  const { payload } = await client.request('/api/data-maintenance/db-migration/precheck', {
+    method: 'POST',
+    body: { target: { ...mysqlTarget, password: mysqlPassword } },
+    timeoutMs: 60_000,
+  })
+  assert.equal(payload?.code, 0, '迁移预检 envelope code 必须为 0')
+  assert.ok(Array.isArray(payload?.data?.issues), '迁移预检必须返回 issues 数组')
+  assert.ok(!JSON.stringify(payload.data).includes(mysqlPassword), '迁移预检响应泄露了 MySQL 密码')
+  return payload.data
+}
+
+const runOverlongDiagnosticTextScenario = async (context) => {
+  const { client, composeEnv } = context
+  const injected = JSON.parse(await runSourceSqliteScript(composeEnv, `
+    const pick = (table) => 'UPDATE ' + table + ' SET user_agent = ? WHERE rowid IN (SELECT rowid FROM ' + table + ' ORDER BY rowid LIMIT 2)';
+    const auditRows = await run(pick('sys_audit_log'), [process.argv[1]]);
+    const revisionRows = await run(pick('order_revision'), [process.argv[1]]);
+    console.log(JSON.stringify({ auditRows, revisionRows }));
+  `, [overlongUserAgent], '向源 SQLite 写入历史超长 UA'))
+  assert.ok(injected.auditRows >= 1 && injected.revisionRows >= 1, `超长 UA 注入行数异常：${JSON.stringify(injected)}`)
+  log(`已注入超长 UA（${Array.from(overlongUserAgent).length} 字符）：sys_audit_log=${injected.auditRows}，order_revision=${injected.revisionRows}`)
+
+  // 业务列超长必须作为错误阻断；用可逆追加构造，避免把原值经命令行往返。
+  const businessPadding = 'X'.repeat(65)
+  await runSourceSqliteScript(composeEnv, `
+    const changed = await run("UPDATE sys_user SET display_name = display_name || ? WHERE username = 'admin'", [process.argv[1]]);
+    if (changed !== 1) throw new Error('业务列超长注入行数异常：' + changed);
+  `, [businessPadding], '向源 SQLite 写入超长业务列')
+  const blockedPrecheck = await readSqliteToMySqlPrecheck(client)
+  const blockingIssue = blockedPrecheck.issues.find((issue) => issue.code === 'source_text_overlong')
+  assert.equal(blockedPrecheck.canProceed, false, '业务列超长时预检不得放行')
+  assert.equal(blockingIssue?.level, 'error', '业务列超长必须是 error 级阻断')
+  assert.match(blockingIssue.message, /sys_user\.display_name/u, '阻断信息必须指明超长业务列')
+  await runSourceSqliteScript(composeEnv, `
+    const changed = await run(
+      "UPDATE sys_user SET display_name = SUBSTR(display_name, 1, LENGTH(display_name) - ?) WHERE username = 'admin' AND display_name LIKE '%' || ?",
+      [${businessPadding.length}, process.argv[1]],
+    );
+    if (changed !== 1) throw new Error('业务列超长还原行数异常：' + changed);
+  `, [businessPadding], '还原源 SQLite 业务列')
+  log('业务列超长预检阻断通过，已还原源值')
+
+  const precheck = await readSqliteToMySqlPrecheck(client)
+  assert.equal(precheck.canProceed, true, `仅诊断列超长时预检必须放行：${JSON.stringify(precheck.issues)}`)
+  assert.ok(!precheck.issues.some((issue) => issue.code === 'source_text_overlong'), '还原后仍残留业务列超长阻断')
+  const diagnosticMessages = precheck.issues
+    .filter((issue) => issue.code === 'source_diagnostic_text_overlong')
+    .map((issue) => {
+      assert.equal(issue.level, 'warning', '诊断列超长只能是 warning')
+      return issue.message
+    })
+    .join('\n')
+  for (const column of ['sys_audit_log.user_agent', 'order_revision.user_agent']) {
+    assert.ok(diagnosticMessages.includes(column), `预检未提示 ${column} 超长`)
+  }
+  log('预检对超长 UA 仅给出 warning 并放行')
+
+  await runSuccessScenario(context)
+
+  for (const [table, expectedRows] of [['sys_audit_log', injected.auditRows], ['order_revision', injected.revisionRows]]) {
+    const [matchedRows, multibyteRows] = (await runMySqlQuery(
+      composeEnv,
+      `SELECT COUNT(*), SUM(LENGTH(user_agent) > ${diagnosticTextMaxLength}) FROM \`${table}\` WHERE SHA2(user_agent, 256) = '${truncatedUserAgentSha256}' AND CHAR_LENGTH(user_agent) = ${diagnosticTextMaxLength}`,
+    )).split(/\s+/u).map(Number)
+    assert.equal(matchedRows, expectedRows, `${table}.user_agent 未按字符精确截断到 ${diagnosticTextMaxLength}`)
+    assert.equal(multibyteRows, expectedRows, `${table}.user_agent 多字节字符未完整保留`)
+  }
+  log(`MySQL 中超长 UA 已按字符精确截断到 ${diagnosticTextMaxLength} 并保留多字节内容`)
+}
+
 const runSelectedScenario = async (context) => {
   if (scenario === 'success') {
     await runSuccessScenario(context)
@@ -2238,6 +2362,14 @@ const runSelectedScenario = async (context) => {
   }
   if (scenario === 'verifying-emergency-rollback') {
     await runVerifyingEmergencyRollbackScenario(context)
+    return
+  }
+  if (scenario === 'overlong-diagnostic-text') {
+    await runOverlongDiagnosticTextScenario(context)
+    return
+  }
+  if (scenario === 'binlog-trigger-restricted') {
+    await runBinlogTriggerRestrictedScenario(context)
     return
   }
   await runFailureRollbackScenario(context)

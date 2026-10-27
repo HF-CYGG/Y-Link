@@ -98,6 +98,13 @@ function buildFixtureValue(metadata: EntityMetadata, column: ColumnMetadata): un
   ) {
     return 'hyyzjd900001'
   }
+  // 账号生命周期事件的两列由 CHECK 约束取值，但实体未声明 enum，需显式给出合法值。
+  if (metadata.tableName === 'account_lifecycle_event' && columnName === 'account_domain') {
+    return 'sys_user'
+  }
+  if (metadata.tableName === 'account_lifecycle_event' && columnName === 'event_type') {
+    return 'deactivated'
+  }
   if (column.enum?.length) {
     return column.enum[0]
   }
@@ -217,6 +224,39 @@ async function createDistinctOutboundOrderFixture(
   return rows[0]
 }
 
+// 第二因素表只要存在行就会让关联账号登录必须过 MFA；挂到独立夹具账号，避免锁住验收管理员。
+const SECOND_FACTOR_TABLES = new Set(['sys_user_mfa', 'sys_user_webauthn_credential'])
+const SECOND_FACTOR_FIXTURE_USER_KEY = 'second-factor-sys-user:fixture'
+
+async function createSecondFactorSysUserFixture(
+  queryRunner: QueryRunner,
+  metadata: EntityMetadata,
+  firstRow: QueryRow,
+): Promise<QueryRow> {
+  const row: QueryRow = {}
+  for (const column of metadata.columns) {
+    if (column.isGenerated) continue
+    row[column.databaseName] = firstRow[column.databaseName]
+  }
+  row.username = 'migration-e2e-second-factor'
+  row.email = null
+  row.webauthn_user_handle = null
+
+  const columnNames = Object.keys(row)
+  await queryRunner.query(
+    `INSERT INTO ${quoteIdentifier(metadata.tableName)}
+     (${columnNames.map(quoteIdentifier).join(', ')})
+     VALUES (${columnNames.map(() => '?').join(', ')})`,
+    columnNames.map((columnName) => row[columnName]),
+  )
+  const rows = toRows(await queryRunner.query(
+    `SELECT * FROM ${quoteIdentifier(metadata.tableName)} WHERE ${quoteIdentifier('username')} = ?`,
+    [row.username],
+  ))
+  if (!rows[0]) throw new Error('未能读取第二因素夹具账号')
+  return rows[0]
+}
+
 export async function seedEmptyTable(
   queryRunner: QueryRunner,
   metadata: EntityMetadata,
@@ -250,9 +290,18 @@ export async function seedEmptyTable(
     const usesDistinctSourceOrder = foreignKey.columnNames.some(
       (columnName) => columnName === 'source_order_id' || columnName === 'sourceOrderId',
     )
-    const referencedRow = distinctOutboundOrderRow && usesDistinctSourceOrder
+    let referencedRow = distinctOutboundOrderRow && usesDistinctSourceOrder
       ? distinctOutboundOrderRow
       : firstReferencedRow
+    if (SECOND_FACTOR_TABLES.has(metadata.tableName) && referencedTableName === 'sys_user' && firstReferencedRow) {
+      if (!firstRows.has(SECOND_FACTOR_FIXTURE_USER_KEY)) {
+        firstRows.set(
+          SECOND_FACTOR_FIXTURE_USER_KEY,
+          await createSecondFactorSysUserFixture(queryRunner, foreignKey.referencedEntityMetadata, firstReferencedRow),
+        )
+      }
+      referencedRow = firstRows.get(SECOND_FACTOR_FIXTURE_USER_KEY)
+    }
     if (!referencedRow) {
       throw new Error(
         `实体表 ${metadata.tableName} 缺少外键夹具依赖 ${referencedTableName}`,

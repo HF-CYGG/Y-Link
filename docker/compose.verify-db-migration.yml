@@ -23,6 +23,8 @@ services:
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_0900_ai_ci
+      # MySQL 8.4 默认开启 binlog；迁移账号需建 044 只追加触发器，对应部署前提由 DBA 放开该开关。
+      - --log-bin-trust-function-creators=1
     volumes:
       - verify_mysql_data:/var/lib/mysql
     networks:
