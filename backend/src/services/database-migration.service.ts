@@ -2160,6 +2160,8 @@ export class DatabaseMigrationService {
       'INDEX',
       'REFERENCES',
       'CREATE TEMPORARY TABLES',
+      // 建表子进程需补建 044 只追加触发器，缺少时切换后启动自检会进入救援。
+      'TRIGGER',
     ]
     const missingPrivileges = requiredPrivileges.filter((privilege) => !grantedPrivileges.has(privilege))
     if (missingPrivileges.length > 0) {
@@ -2177,6 +2179,21 @@ export class DatabaseMigrationService {
       await targetDataSource.query(
         `ALTER TABLE ${quoteIdentifier(probeTableName)} ADD INDEX ${quoteIdentifier(`${probeTableName}_idx`)} (value_text)`,
       )
+      // 开启 binlog 且未放开 log_bin_trust_function_creators 时，非 SUPER 账号建触发器会报 1419，需在冻结前暴露。
+      try {
+        await targetDataSource.query(
+          `CREATE TRIGGER ${quoteIdentifier(`${probeTableName}_trg`)} BEFORE UPDATE ON ${quoteIdentifier(probeTableName)} FOR EACH ROW SET NEW.value_text = NEW.value_text`,
+        )
+      } catch (error) {
+        if ((error as { errno?: unknown } | null)?.errno === 1419) {
+          throw new BizError(
+            '目标 MySQL 已开启二进制日志，当前账号无法创建自动迁移必需的触发器（账号生命周期事件只追加保护）。'
+              + '请由 DBA 执行 SET PERSIST log_bin_trust_function_creators = 1，或改用具备 SUPER 权限的迁移账号后重新预检',
+            409,
+          )
+        }
+        throw error
+      }
       await targetDataSource.query(
         `UPDATE ${quoteIdentifier(probeTableName)} SET value_text = 'verified' WHERE id = 1`,
       )

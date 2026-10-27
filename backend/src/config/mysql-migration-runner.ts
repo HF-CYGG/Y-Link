@@ -174,8 +174,11 @@ interface MysqlRequiredForeignKey {
 
 interface MysqlRequiredTrigger {
   triggerName: string
+  tableName: string
   eventManipulation: 'UPDATE' | 'DELETE'
   actionTiming: 'BEFORE'
+  // 单语句触发体，须与引入脚本逐字一致：onebox 镜像不携带 backend/sql，迁移建表子进程据此补建。
+  actionStatement: string
   introducingScript: string
 }
 
@@ -782,14 +785,18 @@ const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [
 const MYSQL_REQUIRED_TRIGGERS: readonly MysqlRequiredTrigger[] = [
   {
     triggerName: 'trg_account_lifecycle_event_no_update',
+    tableName: 'account_lifecycle_event',
     eventManipulation: 'UPDATE',
     actionTiming: 'BEFORE',
+    actionStatement: "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'ACCOUNT_LIFECYCLE_EVENT_APPEND_ONLY'",
     introducingScript: '044_account_lifecycle_governance.sql',
   },
   {
     triggerName: 'trg_account_lifecycle_event_no_delete',
+    tableName: 'account_lifecycle_event',
     eventManipulation: 'DELETE',
     actionTiming: 'BEFORE',
+    actionStatement: "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'ACCOUNT_LIFECYCLE_EVENT_APPEND_ONLY'",
     introducingScript: '044_account_lifecycle_governance.sql',
   },
 ]
@@ -1536,6 +1543,48 @@ function collectMysqlTriggerIssues(
   })
 }
 
+// DataSource 与 QueryRunner 都满足该形状；迁移子进程用 QueryRunner，启动自检用 DataSource。
+type MysqlQueryable = { query: (sql: string, parameters?: unknown[]) => Promise<unknown> }
+
+async function queryMysqlRequiredTriggerIssues(
+  queryable: MysqlQueryable,
+): Promise<Array<MysqlSchemaShapeIssue<MysqlRequiredTrigger>>> {
+  const triggerRows = await queryable.query(
+    `SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING
+     FROM information_schema.TRIGGERS
+     WHERE TRIGGER_SCHEMA = DATABASE()
+       AND TRIGGER_NAME IN (${MYSQL_REQUIRED_TRIGGERS.map(() => '?').join(', ')})`,
+    MYSQL_REQUIRED_TRIGGERS.map((item) => item.triggerName),
+  ) as MysqlTriggerRow[]
+  return collectMysqlTriggerIssues(triggerRows, MYSQL_REQUIRED_TRIGGERS)
+}
+
+/**
+ * 迁移建表子进程专用：实体同步无法表达触发器，按 MYSQL_REQUIRED_TRIGGERS 补建缺失或形状不符的触发器。
+ * - 只应作用于迁移任务独占的新目标库，导入阶段只有 INSERT，不会触发只追加保护；
+ * - 与 044 一样先 DROP 再 CREATE（MySQL 不支持 CREATE TRIGGER IF NOT EXISTS），完成后再次只读校验。
+ */
+export async function ensureMysqlRequiredTriggers(queryable: MysqlQueryable): Promise<number> {
+  for (const { requirement } of await queryMysqlRequiredTriggerIssues(queryable)) {
+    const triggerName = `\`${requirement.triggerName.replaceAll('`', '``')}\``
+    await queryable.query(`DROP TRIGGER IF EXISTS ${triggerName}`)
+    await queryable.query(
+      `CREATE TRIGGER ${triggerName} ${requirement.actionTiming} ${requirement.eventManipulation}`
+      + ` ON \`${requirement.tableName.replaceAll('`', '``')}\` FOR EACH ROW ${requirement.actionStatement}`,
+    )
+  }
+  return assertMysqlRequiredTriggers(queryable)
+}
+
+/** 只读校验必需触发器，供迁移切换前后的结构验收复用，避免切换后才在启动自检进入救援。 */
+export async function assertMysqlRequiredTriggers(queryable: MysqlQueryable): Promise<number> {
+  const invalidTriggers = await queryMysqlRequiredTriggerIssues(queryable)
+  if (invalidTriggers.length > 0) {
+    throw new Error(`缺少或定义不匹配的必需触发器：${invalidTriggers.map((item) => item.requirement.triggerName).join(', ')}`)
+  }
+  return MYSQL_REQUIRED_TRIGGERS.length
+}
+
 /** 启动期只读自检：确认当前代码会直接依赖的 MySQL 表、字段与索引结构均已落地。 */
 export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): Promise<void> {
   if (env.DB_TYPE !== 'mysql') {
@@ -1641,14 +1690,7 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
       )
     : []
   const invalidForeignKeys = collectMysqlForeignKeyIssues(foreignKeyRows, requiredForeignKeysOnExistingTables)
-  const triggerRows: MysqlTriggerRow[] = await dataSource.query(
-    `SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING
-     FROM information_schema.TRIGGERS
-     WHERE TRIGGER_SCHEMA = DATABASE()
-       AND TRIGGER_NAME IN (${MYSQL_REQUIRED_TRIGGERS.map(() => '?').join(', ')})`,
-    MYSQL_REQUIRED_TRIGGERS.map((item) => item.triggerName),
-  )
-  const invalidTriggers = collectMysqlTriggerIssues(triggerRows, MYSQL_REQUIRED_TRIGGERS)
+  const invalidTriggers = await queryMysqlRequiredTriggerIssues(dataSource)
   const requiredChecksOnExistingTables = MYSQL_REQUIRED_CHECKS.filter((requirement) => (
     existingTableSet.has(requirement.tableName)
   ))
