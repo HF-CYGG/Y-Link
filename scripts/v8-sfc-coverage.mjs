@@ -171,10 +171,17 @@ const mapScript = (script, cache, target) => {
   const esmMinEnd = esmMinStart >= 0 ? generated.indexOf('\n};\n', esmMinStart) : -1
   const insideEsmMinRuntime = (range) => esmMinEnd > esmMinStart
     && range.startOffset >= esmMinStart && range.endOffset <= esmMinEnd + 3
-  // 插件内联的虚拟模块（如 code128 条码库 `\0virtual:ylink-code128`）没有对应磁盘源码，按 rolldown 的
-  // `//#region \0virtual:...` 模块边界整体识别；完全落在其中的区间不可能是目标 SFC 条件，按其他来源忽略。
-  const virtualRegions = [...generated.matchAll(/^\/\/#region \\0virtual:[^\n]*\n[\s\S]*?^\/\/#endregion$/gmu)]
-    .map((match) => [match.index, match.index + match[0].length])
+  // 插件内联的虚拟模块（如 code128 条码库 `\0virtual:ylink-code128`）没有对应磁盘源码，按 rolldown 的模块边界
+  // 整体识别；完全落在其中的区间不可能是目标 SFC 条件，按其他来源忽略。边界兼容两种产物格式：
+  // rolldown 1.0 的 `//#region <模块 id>` … `//#endregion`，以及 1.2 起只输出单行 `// <模块 id>` 标头。
+  const moduleBoundaries = [...generated.matchAll(
+    /^\/\/(?:#region)? (\\0\S+|\S+\.(?:vue|[cm]?[jt]sx?))$|^\/\/#endregion$/gmu,
+  )].map((match) => ({ index: match.index, moduleId: match[1] ?? null }))
+  const virtualRegions = moduleBoundaries.flatMap((boundary, index) => (
+    boundary.moduleId?.startsWith('\\0virtual:')
+      ? [[boundary.index, moduleBoundaries[index + 1]?.index ?? generated.length]]
+      : []
+  ))
   const insideVirtualModule = (range) => virtualRegions.some(([start, end]) =>
     range.startOffset >= start && range.endOffset <= end)
   for (const fn of script.functions) {
