@@ -52,9 +52,17 @@ await bundle.close()
 const component = (await import(pathToFileURL(output).href)).default
 const helperBundle = await rolldown({ input: helperPath })
 const helperOutput = path.join(outputRoot, 'barcode-label-print-helpers.mjs')
-await helperBundle.write({ file: helperOutput, format: 'esm' })
+await helperBundle.write({ file: helperOutput, format: 'esm', sourcemap: true })
 await helperBundle.close()
 const { getLabelContentFit } = await import(pathToFileURL(helperOutput).href)
+
+test('独立 helper 编译产物保留真实 TS 源码图供覆盖率归属', () => {
+  assert.match(fs.readFileSync(helperOutput, 'utf8'), /\/\/# sourceMappingURL=barcode-label-print-helpers\.mjs\.map/u)
+  const map = JSON.parse(fs.readFileSync(`${helperOutput}.map`, 'utf8'))
+  assert.equal(map.file, path.basename(helperOutput))
+  assert.deepEqual(map.sources.map((source) => path.resolve(outputRoot, source)), [helperPath])
+  assert.deepEqual(map.sourcesContent, [fs.readFileSync(helperPath, 'utf8')])
+})
 
 const renderer = createRenderer({
   createElement: (tag) => ({ tag, children: [], parent: null }),
