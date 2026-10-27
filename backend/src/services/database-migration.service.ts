@@ -31,6 +31,7 @@ import {
 import type { AuthUserContext } from '../types/auth.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { BizError } from '../utils/errors.js'
+import { normalizeStaticCheckClause } from '../utils/normalize-static-check-clause.js'
 import { parseDatabaseInteger, readSqliteGeneratedNextId } from '../utils/migration-autoincrement.js'
 import {
   buildMySqlTargetConnectionIssue,
@@ -435,150 +436,6 @@ function normalizeCanonicalNumber(value: string): string {
   const fraction = fractionPart.replace(/0+$/, '')
   const numeric = fraction ? `${integer}.${fraction}` : integer
   return negative && numeric !== '0' ? `-${numeric}` : numeric
-}
-
-/**
- * 将当前静态实体 CHECK 与 MySQL information_schema 返回值收敛到可严格比较的形式。
- * MySQL 可能补充冗余分组括号、调整关键字大小写，或给字符串增加字符集 introducer；
- * 这些格式差异会被消除。遇到需要依赖分组语义的 OR/NOT/算术表达式时返回 null，
- * 由调用方按约束不一致阻断迁移，避免误判。
- */
-function normalizeStaticCheckClause(value: unknown): string | null {
-  if (typeof value !== 'string' || !value.trim()) {
-    return null
-  }
-  const clause = value.trim().replace(/\\'/gu, "'")
-
-  const tokens: string[] = []
-  const parentheses: boolean[] = []
-  let cursor = 0
-
-  const appendToken = (token: string): void => {
-    tokens.push(token)
-  }
-
-  while (cursor < clause.length) {
-    const character = clause[cursor]
-    if (/\s/u.test(character)) {
-      cursor += 1
-      continue
-    }
-
-    if (character === '`') {
-      let identifier = ''
-      let closed = false
-      cursor += 1
-      while (cursor < clause.length) {
-        if (clause[cursor] === '`' && clause[cursor + 1] === '`') {
-          identifier += '`'
-          cursor += 2
-          continue
-        }
-        if (clause[cursor] === '`') {
-          cursor += 1
-          closed = true
-          break
-        }
-        identifier += clause[cursor]
-        cursor += 1
-      }
-      if (!closed) {
-        return null
-      }
-      appendToken(`identifier:${identifier.toLowerCase()}`)
-      continue
-    }
-
-    if (character === "'") {
-      let literal = ''
-      let closed = false
-      cursor += 1
-      while (cursor < clause.length) {
-        if (clause[cursor] === "'" && clause[cursor + 1] === "'") {
-          literal += "'"
-          cursor += 2
-          continue
-        }
-        if (clause[cursor] === "'") {
-          cursor += 1
-          closed = true
-          break
-        }
-        literal += clause[cursor]
-        cursor += 1
-      }
-      if (!closed) {
-        return null
-      }
-      appendToken(`string:${JSON.stringify(literal)}`)
-      continue
-    }
-
-    const remaining = clause.slice(cursor)
-    const numberMatch = /^(?:\d+(?:\.\d*)?|\.\d+)/u.exec(remaining)
-    if (numberMatch) {
-      appendToken(`number:${normalizeCanonicalNumber(numberMatch[0])}`)
-      cursor += numberMatch[0].length
-      continue
-    }
-
-    const wordMatch = /^[A-Za-z_][A-Za-z0-9_$]*/u.exec(remaining)
-    if (wordMatch) {
-      const word = wordMatch[0].toLowerCase()
-      cursor += wordMatch[0].length
-      let nextCursor = cursor
-      while (nextCursor < clause.length && /\s/u.test(clause[nextCursor])) {
-        nextCursor += 1
-      }
-      if (word.startsWith('_') && clause[nextCursor] === "'") {
-        continue
-      }
-      if (['or', 'not', 'between', 'is', 'in', 'like', 'xor'].includes(word)) {
-        return null
-      }
-      appendToken(word === 'and' ? 'keyword:and' : `word:${word}`)
-      continue
-    }
-
-    const operator = ['>=', '<=', '<>', '!='].find((candidate) => remaining.startsWith(candidate))
-    if (operator) {
-      appendToken(`operator:${operator === '!=' ? '<>' : operator}`)
-      cursor += operator.length
-      continue
-    }
-    if (['=', '>', '<', ','].includes(character)) {
-      appendToken(character === ',' ? 'comma' : `operator:${character}`)
-      cursor += 1
-      continue
-    }
-    if (['+', '-', '*', '/', '%', '|', '&', '^'].includes(character)) {
-      return null
-    }
-    if (character === '(') {
-      const previousToken = tokens[tokens.length - 1]
-      const isFunctionCall = typeof previousToken === 'string' && previousToken.startsWith('word:')
-      parentheses.push(isFunctionCall)
-      if (isFunctionCall) {
-        appendToken('left-parenthesis')
-      }
-      cursor += 1
-      continue
-    }
-    if (character === ')') {
-      const isFunctionCall = parentheses.pop()
-      if (isFunctionCall === undefined) {
-        return null
-      }
-      if (isFunctionCall) {
-        appendToken('right-parenthesis')
-      }
-      cursor += 1
-      continue
-    }
-    return null
-  }
-
-  return parentheses.length === 0 && tokens.length > 0 ? tokens.join('\u001f') : null
 }
 
 function normalizeCanonicalDate(value: string): string {
@@ -2094,7 +1951,7 @@ export class DatabaseMigrationService {
     const actualChecks = new Map<string, string>()
     for (const row of actualCheckRows) {
       const constraintName = this.readStringField(row, 'constraintName')?.toLowerCase()
-      const normalizedClause = normalizeStaticCheckClause(this.readStringField(row, 'checkClause'))
+      const normalizedClause = normalizeStaticCheckClause(this.readStringField(row, 'checkClause'), 'mysql-metadata')
       if (!constraintName || !normalizedClause || actualChecks.has(constraintName)) {
         return false
       }

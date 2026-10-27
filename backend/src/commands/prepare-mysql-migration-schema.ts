@@ -12,160 +12,10 @@
 
 import { AppDataSource } from '../config/data-source.js'
 import type { QueryRunner } from 'typeorm'
+import { normalizeStaticCheckClause } from '../utils/normalize-static-check-clause.js'
 
 function quoteIdentifier(value: string): string {
   return `\`${value.replaceAll('`', '``')}\``
-}
-
-function normalizeCheckNumber(value: string): string {
-  const [integerPart, fractionPart = ''] = value.split('.')
-  const integer = integerPart.replace(/^0+(?=\d)/u, '') || '0'
-  const fraction = fractionPart.replace(/0+$/u, '')
-  return fraction ? `${integer}.${fraction}` : integer
-}
-
-/**
- * MySQL 会为 CHECK 表达式补充冗余分组括号、统一关键字大小写，并可能给字符串
- * 增加字符集 introducer。当前实体 CHECK 均为静态 AND 条件链，因此这里只消除这些
- * 不改变语义的差异；遇到 OR/NOT/算术等需要保留分组语义的表达式时直接返回 null，
- * 让迁移失败关闭，避免把无法安全判等的约束误判为一致。
- */
-function normalizeStaticCheckClause(value: unknown): string | null {
-  if (typeof value !== 'string' || !value.trim()) {
-    return null
-  }
-  const clause = value.trim().replace(/\\'/gu, "'")
-
-  const tokens: string[] = []
-  const parentheses: boolean[] = []
-  let cursor = 0
-
-  const appendToken = (token: string): void => {
-    tokens.push(token)
-  }
-
-  while (cursor < clause.length) {
-    const character = clause[cursor]
-    if (/\s/u.test(character)) {
-      cursor += 1
-      continue
-    }
-
-    if (character === '`') {
-      let identifier = ''
-      let closed = false
-      cursor += 1
-      while (cursor < clause.length) {
-        if (clause[cursor] === '`' && clause[cursor + 1] === '`') {
-          identifier += '`'
-          cursor += 2
-          continue
-        }
-        if (clause[cursor] === '`') {
-          cursor += 1
-          closed = true
-          break
-        }
-        identifier += clause[cursor]
-        cursor += 1
-      }
-      if (!closed) {
-        return null
-      }
-      appendToken(`identifier:${identifier.toLowerCase()}`)
-      continue
-    }
-
-    if (character === "'") {
-      let literal = ''
-      let closed = false
-      cursor += 1
-      while (cursor < clause.length) {
-        if (clause[cursor] === "'" && clause[cursor + 1] === "'") {
-          literal += "'"
-          cursor += 2
-          continue
-        }
-        if (clause[cursor] === "'") {
-          cursor += 1
-          closed = true
-          break
-        }
-        literal += clause[cursor]
-        cursor += 1
-      }
-      if (!closed) {
-        return null
-      }
-      appendToken(`string:${JSON.stringify(literal)}`)
-      continue
-    }
-
-    const remaining = clause.slice(cursor)
-    const numberMatch = /^(?:\d+(?:\.\d*)?|\.\d+)/u.exec(remaining)
-    if (numberMatch) {
-      appendToken(`number:${normalizeCheckNumber(numberMatch[0])}`)
-      cursor += numberMatch[0].length
-      continue
-    }
-
-    const wordMatch = /^[A-Za-z_][A-Za-z0-9_$]*/u.exec(remaining)
-    if (wordMatch) {
-      const word = wordMatch[0].toLowerCase()
-      cursor += wordMatch[0].length
-      let nextCursor = cursor
-      while (nextCursor < clause.length && /\s/u.test(clause[nextCursor])) {
-        nextCursor += 1
-      }
-      if (word.startsWith('_') && clause[nextCursor] === "'") {
-        continue
-      }
-      if (['or', 'not', 'between', 'is', 'in', 'like', 'xor'].includes(word)) {
-        return null
-      }
-      appendToken(word === 'and' ? 'keyword:and' : `word:${word}`)
-      continue
-    }
-
-    const operator = ['>=', '<=', '<>', '!='].find((candidate) => remaining.startsWith(candidate))
-    if (operator) {
-      appendToken(`operator:${operator === '!=' ? '<>' : operator}`)
-      cursor += operator.length
-      continue
-    }
-    if (['=', '>', '<', ','].includes(character)) {
-      appendToken(character === ',' ? 'comma' : `operator:${character}`)
-      cursor += 1
-      continue
-    }
-    if (['+', '-', '*', '/', '%', '|', '&', '^'].includes(character)) {
-      return null
-    }
-    if (character === '(') {
-      const previousToken = tokens[tokens.length - 1]
-      const isFunctionCall = typeof previousToken === 'string' && previousToken.startsWith('word:')
-      parentheses.push(isFunctionCall)
-      if (isFunctionCall) {
-        appendToken('left-parenthesis')
-      }
-      cursor += 1
-      continue
-    }
-    if (character === ')') {
-      const isFunctionCall = parentheses.pop()
-      if (isFunctionCall === undefined) {
-        return null
-      }
-      if (isFunctionCall) {
-        appendToken('right-parenthesis')
-      }
-      cursor += 1
-      continue
-    }
-    return null
-  }
-
-  return parentheses.length === 0 && tokens.length > 0 ? tokens.join('\u001f') : null
 }
 
 function normalizeDefaultValue(value: unknown): string | undefined {
@@ -347,7 +197,7 @@ async function ensureMetadataCheckConstraints(
       throw new Error(`MySQL 表 ${metadata.tableName} 的 CHECK 约束数量与实体定义不一致`)
     }
     for (const [constraintName, normalizedExpectedClause] of expectedChecks) {
-      const normalizedActualClause = normalizeStaticCheckClause(existingChecks.get(constraintName))
+      const normalizedActualClause = normalizeStaticCheckClause(existingChecks.get(constraintName), 'mysql-metadata')
       if (normalizedActualClause !== normalizedExpectedClause) {
         throw new Error(`MySQL 表 ${metadata.tableName} 的 CHECK 约束 ${constraintName} 表达式与实体定义不一致`)
       }
