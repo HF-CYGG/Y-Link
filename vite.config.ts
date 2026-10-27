@@ -16,6 +16,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath, URL } from 'node:url'
 import { shortenHtml2pdfModuleIds } from './scripts/html2pdf-module-id-shortener.mjs'
 import { configureFeedbackSseProxy } from './scripts/feedback-sse-dev-proxy'
+import { code128BarcodePlugin, CODE128_BARCODE_RESOLVED_ID } from './scripts/code128-barcode-module.mjs'
 
 /**
  * 首帧主题脚本构建插件：
@@ -223,6 +224,7 @@ export default defineConfig(({ command, mode }) => {
 
   return {
     plugins: [
+      code128BarcodePlugin(),
       vue(),
       ...themeInitScriptPlugin(),
       html2pdfModuleIdPlugin(),
@@ -310,6 +312,7 @@ export default defineConfig(({ command, mode }) => {
         },
         output: {
           manualChunks(id) {
+            if (id === CODE128_BARCODE_RESOLVED_ID) return 'barcode'
             const normalizedId = id.replaceAll('\\', '/')
 
             if (!normalizedId.includes('/node_modules/')) {

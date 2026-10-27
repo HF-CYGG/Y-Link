@@ -12,7 +12,7 @@ import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
 import { showAppError, showAppWarning } from '@/utils/app-alert'
 
 
-type Html5QrcodeModule = typeof import('html5-qrcode')
+type Html5QrcodeModule = Pick<typeof import('html5-qrcode'), 'Html5Qrcode' | 'Html5QrcodeSupportedFormats'>
 type Html5QrcodeScannerInstance = import('html5-qrcode').Html5Qrcode
 type Html5QrcodeSupportedFormatsEnum = Html5QrcodeModule['Html5QrcodeSupportedFormats']
 type Html5QrcodeCameraScanConfig = import('html5-qrcode').Html5QrcodeCameraScanConfig
@@ -53,7 +53,7 @@ const loadHtml5QrcodeModule = async (): Promise<Html5QrcodeModule> => {
     // 详细注释：
     // - 首次进入时创建动态导入 Promise，后续复用同一个实例，避免重复拉取扫码库；
     // - 这里必须 `await`，这样导入失败会进入 catch，便于统一兜底与恢复重试能力。
-    html5QrcodeModulePromise ??= import('html5-qrcode')
+    html5QrcodeModulePromise ??= import('@/utils/html5-qrcode-module')
     return await html5QrcodeModulePromise
   } catch {
     // 导入失败后清空缓存 Promise：

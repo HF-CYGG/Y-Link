@@ -81,6 +81,10 @@ type WarmupNavigator = Navigator & {
  * - 让按需加载、预热与构建验证围绕同一套入口展开。
  */
 const loadTagCenterView = () => import('@/views/base-data/TagCenterView.vue')
+// 与标签工作台相同：同源入口共用工厂，不新增Promise缓存或改变预热顺序。
+const loadProductCenterView = () => import('@/views/product-center/ProductCenterView.vue')
+const loadSupplierWorkbenchView = () => import('@/views/inbound/SupplierWorkbenchView.vue')
+const loadUserCenterView = () => import('@/views/system/UserCenterView.vue')
 
 export const routeViewLoaders = {
   login: () => import('@/views/auth/LoginView.vue'),
@@ -101,7 +105,7 @@ export const routeViewLoaders = {
   'order-entry': () => import('@/views/order-entry/OrderEntryView.vue'),
   'order-list': () => import('@/views/order-list/OrderListView.vue'),
   reports: () => import('@/views/reports/ReportCenterView.vue'),
-  products: () => import('@/views/product-center/ProductCenterView.vue'),
+  products: loadProductCenterView,
   // 标签管理共享工作台：“商品标签”与“分类与库位”两个入口必须加载同一壳层模块，
   // 否则外层 KeepAlive 复用相同 viewKey 时会出现“同 key 不同组件类型”的切换异常；
   // 共用同一个加载函数，避免首屏路由包里重复生成一份依赖映射。
@@ -112,11 +116,11 @@ export const routeViewLoaders = {
   // - 供货方“录入”和“历史”两个旧入口都必须回到同一个共享工作台壳层；
   // - 否则在外层路由 KeepAlive 复用相同 viewKey 时，会出现“同 key 但不同组件类型”切换，
   //   进而打断 Vue 的反激活链路，触发 deactivate 相关运行时异常。
-  'supplier-delivery': () => import('@/views/inbound/SupplierWorkbenchView.vue'),
-  'supplier-history': () => import('@/views/inbound/SupplierWorkbenchView.vue'),
+  'supplier-delivery': loadSupplierWorkbenchView,
+  'supplier-history': loadSupplierWorkbenchView,
   'inbound-scan': () => import('@/views/inbound/InboundScanView.vue'),
 
-  'o2o-console-products': () => import('@/views/product-center/ProductCenterView.vue'),
+  'o2o-console-products': loadProductCenterView,
   'o2o-console-orders': () => import('@/views/o2o/O2oOrderQueryView.vue'),
   'o2o-console-verify': () => import('@/views/o2o/O2oVerifyConsoleView.vue'),
   'o2o-console-inbound': () => import('@/views/o2o/O2oInboundManageView.vue'),
@@ -128,8 +132,8 @@ export const routeViewLoaders = {
   'inventory-stocktake-work': () => import('@/views/inventory/StocktakeWorkView.vue'),
   'system-configs': () => import('@/views/system/SystemConfigViewLoader'),
   'system-db-migration': () => import('@/views/system/DatabaseMigrationView.vue'),
-  'system-users': () => import('@/views/system/UserCenterView.vue'),
-  'system-client-users': () => import('@/views/system/UserCenterView.vue'),
+  'system-users': loadUserCenterView,
+  'system-client-users': loadUserCenterView,
   'system-customer-service': () => import('@/views/system/CustomerServiceWorkbenchView.vue'),
   'system-audit-logs': () => import('@/views/system/AuditLogView.vue'),
   'not-found': () => import('@/views/not-found/NotFoundView.vue'),
