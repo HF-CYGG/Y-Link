@@ -7,6 +7,8 @@
 import { Router } from 'express'
 import path from 'node:path'
 import { z } from 'zod'
+import { RESTOCK_EFFECTIVE_STATUSES } from '../entities/client-restock-request.entity.js'
+import { BizError } from '../utils/errors.js'
 import { requirePermission } from '../middleware/auth.middleware.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 import { asyncHandler } from '../utils/async-handler.js'
@@ -33,6 +35,12 @@ import {
 } from '../services/client-feedback.service.js'
 
 const listServiceConversationsSchema = z.object({
+  issueType: z.enum(CLIENT_FEEDBACK_ISSUE_TYPES).optional(),
+  restockStatus: z.enum(RESTOCK_EFFECTIVE_STATUSES).optional(),
+  productId: z.string().trim().regex(/^[1-9]\d{0,19}$/).optional(),
+  dateRange: z.union([z.string(), z.array(z.string())]).optional(),
+  startDate: z.string().optional(),
+  endDate: z.string().optional(),
   status: z.enum(CLIENT_FEEDBACK_CONVERSATION_STATUSES).optional(),
   priority: z.enum(CLIENT_FEEDBACK_PRIORITIES).optional(),
   keyword: z.string().trim().max(64).optional(),
@@ -144,9 +152,16 @@ customerServiceRouter.get(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const query = listServiceConversationsSchema.parse(req.query)
+    const dates = typeof query.dateRange === 'string' ? query.dateRange.split(',').map((item) => item.trim()) : query.dateRange
+    if (dates && (dates.length !== 2 || dates.some((item) => !item.trim()))) throw new BizError('dateRange 参数格式错误，应为 startDate,endDate', 400)
     const data = await clientFeedbackService.listServiceConversations(
       {
         status: query.status,
+        issueType: query.issueType,
+        restockStatus: query.restockStatus,
+        productId: query.productId,
+        startDate: dates?.[0] ?? query.startDate,
+        endDate: dates?.[1] ?? query.endDate,
         priority: query.priority,
         keyword: query.keyword,
         assignedToMe: query.assignedToMe,
@@ -182,6 +197,16 @@ customerServiceRouter.post(
       authReq.auth,
       extractRequestMeta(req),
     )
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+customerServiceRouter.patch(
+  '/conversations/:id/restock',
+  requirePermission('customer_service:reply'),
+  asyncHandler(async (req, res) => {
+    const payload = z.object({ status: z.enum(['accepted', 'restocked']), publicNote: z.string().trim().max(CLIENT_FEEDBACK_MESSAGE_MAX_LENGTH - 100).optional() }).parse(req.body)
+    const data = await clientFeedbackService.updateRestockRequest(req.params.id, payload, (req as AuthenticatedRequest).auth, extractRequestMeta(req))
     res.json({ code: 0, message: 'ok', data })
   }),
 )

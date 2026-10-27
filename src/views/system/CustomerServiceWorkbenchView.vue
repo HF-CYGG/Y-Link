@@ -15,6 +15,7 @@
  */
 
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter, type LocationQueryRaw } from 'vue-router'
 
 import {
   compareSupportFeedbackConversationPriority,
@@ -39,6 +40,8 @@ import {
   updateFeedbackInternalRemark,
   updateFeedbackIssue,
   updateSupportConversationAssignee,
+  updateSupportRestockRequest,
+  type RestockEffectiveStatus,
   type FeedbackConversationRecord,
   type FeedbackConversationMessage,
   type FeedbackIssueCategory,
@@ -53,6 +56,10 @@ import {
 import { PageContainer, PassiveSegmentedTabs } from '@/components/common'
 import { useDevice } from '@/composables/useDevice'
 import { useStableRequest } from '@/composables/useStableRequest'
+import { usePermissionAction } from '@/composables/usePermissionAction'
+import { useRestockExpiryRefresh } from '@/composables/useRestockExpiryRefresh'
+import { RESTOCK_STATUS_LABELS } from '@/utils/restock'
+import RestockRequestSummary from '@/views/client/components/RestockRequestSummary.vue'
 import { useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { extractErrorMessage } from '@/utils/error'
@@ -69,6 +76,10 @@ import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/uti
  * - 这里改为显式传入单例，避免页面首次进入偶发白屏。
  */
 const authStore = useAuthStore(pinia)
+const route = useRoute()
+const router = useRouter()
+const { hasPermission, ensurePermission } = usePermissionAction()
+const restockUpdating = ref(false)
 
 type WorkbenchQuickViewKey = 'all' | 'pending' | 'processing' | 'urgent' | 'unassigned' | 'sla_risk' | 'waiting_staff_reply'
 type DetailTabKey = 'conversation' | 'detail'
@@ -174,6 +185,10 @@ const searchForm = reactive({
   status: '' as FeedbackIssueStatus | '',
   priority: '' as FeedbackIssuePriority | '',
   assigneeScope: 'all' as 'all' | 'mine' | 'unassigned',
+  issueType: '' as FeedbackIssueType | '',
+  restockStatus: '' as RestockEffectiveStatus | '',
+  productId: '',
+  dateRange: null as [string, string] | null,
 })
 
 /**
@@ -497,10 +512,15 @@ const activeFilterCount = computed(() => {
   return [
     searchForm.status,
     searchForm.priority,
+    searchForm.issueType,
+    searchForm.restockStatus,
+    searchForm.productId,
+    searchForm.dateRange,
     searchForm.assigneeScope !== 'all' ? searchForm.assigneeScope : '',
   ].filter(Boolean).length
 })
-const currentUserId = computed(() => authStore.currentUser?.id ?? '')
+// 鉴权Store在SQLite中可能提供数字ID；反馈模块统一为字符串后再判断负责人和构造转派请求。
+const currentUserId = computed(() => authStore.currentUser?.id == null ? '' : String(authStore.currentUser.id))
 
 /**
  * Element Plus Scrollbar 的公开实例带有 `wrapRef` 和 `setScrollTop`：
@@ -911,6 +931,10 @@ const loadConversations = async (
       status: searchForm.status,
       priority: searchForm.priority,
       assigneeScope: searchForm.assigneeScope,
+      issueType: searchForm.issueType,
+      restockStatus: searchForm.restockStatus,
+      productId: searchForm.productId,
+      dateRange: searchForm.dateRange,
     }, { signal }),
     onSuccess: async (nextConversations) => {
       conversations.value = nextConversations
@@ -973,6 +997,8 @@ const mergeSelectedConversationSummary = (summaryRecord: FeedbackConversationRec
     createdAt: summaryRecord.createdAt,
     updatedAt: summaryRecord.updatedAt,
     fields: summaryRecord.fields,
+    restock: summaryRecord.restock,
+    serverNow: summaryRecord.serverNow,
   }
 
   if (
@@ -1010,6 +1036,11 @@ const mergeRealtimeMessageIntoSelectedConversation = (message: FeedbackConversat
 const applyRealtimeConversationPatch = async (
   payload: FeedbackRealtimeConversationEvent,
 ) => {
+  // 带服务端筛选时不能把任意 SSE 记录直接插进当前页，重新读取权威筛选结果。
+  if (searchForm.issueType || searchForm.restockStatus || searchForm.productId || searchForm.dateRange) {
+    await loadConversations({ preserveUiState: true })
+    return
+  }
   conversations.value = replaceConversationSummary(conversations.value, payload.conversation)
 
   if (selectedConversationId.value !== payload.conversationId) {
@@ -1034,6 +1065,59 @@ const applyRealtimeConversationPatch = async (
   }
 }
 
+useRestockExpiryRefresh(() => selectedConversation.value
+  ? [...conversations.value.filter((item) => item.id !== selectedConversation.value?.id), selectedConversation.value]
+  : conversations.value, () => loadConversations({ preserveUiState: true }))
+
+const productFilterLabel = computed(() => {
+  const queryName = typeof route.query.productName === 'string' ? route.query.productName : ''
+  return queryName || conversations.value.find((item) => item.restock?.productId === searchForm.productId)?.restock?.productNameSnapshot || '已选商品'
+})
+const clearProductFilter = () => {
+  searchForm.productId = ''
+  const query: LocationQueryRaw = { ...route.query, issueType: searchForm.issueType || undefined, restockStatus: searchForm.restockStatus || undefined, dateRange: searchForm.dateRange?.join(',') }
+  delete query.productId
+  delete query.productName
+  delete query.startDate
+  delete query.endDate
+  void router.replace({ path: route.path, query })
+  void loadConversations()
+}
+let appliedRouteQuery = ''
+const syncRestockRouteQuery = () => {
+  if (route.path !== '/system/customer-service') return
+  const signature = JSON.stringify([route.query.issueType, route.query.restockStatus, route.query.productId, route.query.dateRange, route.query.startDate, route.query.endDate])
+  if (signature === appliedRouteQuery) return
+  appliedRouteQuery = signature
+  const text = (value: unknown) => typeof value === 'string' ? value : ''
+  const type = text(route.query.issueType)
+  searchForm.issueType = FEEDBACK_ISSUE_TYPE_OPTIONS.some((item) => item.value === type) ? type as FeedbackIssueType : ''
+  const status = text(route.query.restockStatus)
+  searchForm.restockStatus = Object.prototype.hasOwnProperty.call(RESTOCK_STATUS_LABELS, status) ? status as RestockEffectiveStatus : ''
+  searchForm.productId = text(route.query.productId)
+  const rawRange = text(route.query.dateRange).split(',')
+  const start = text(route.query.startDate) || rawRange[0] || ''
+  const end = text(route.query.endDate) || rawRange[1] || ''
+  searchForm.dateRange = /^\d{4}-\d{2}-\d{2}$/.test(start) && /^\d{4}-\d{2}-\d{2}$/.test(end) ? [start, end] : null
+  if (searchForm.issueType || searchForm.productId || searchForm.dateRange) { isFilterPanelExpanded.value = true; activeQuickView.value = 'all' }
+  if (workbenchComponentActive) void loadConversations()
+}
+watch(() => [route.path, route.query], syncRestockRouteQuery, { deep: true, immediate: true })
+
+const handleRestockStatus = async (status: 'accepted' | 'restocked') => {
+  const record = selectedConversation.value
+  if (!record?.restock || restockUpdating.value || !isSelectedConversationOwnedByCurrentUser.value || !ensurePermission('customer_service:reply', '处理补货申请')) return
+  const expected = status === 'accepted' ? 'requested' : 'accepted'
+  if (record.restock.effectiveStatus !== expected) return
+  restockUpdating.value = true
+  try {
+    await updateSupportRestockRequest(record.id, { status })
+    await loadConversations({ preserveUiState: true })
+    showAppSuccess(status === 'accepted' ? '补货需求已受理' : '补货需求已标记为已补货')
+  } catch (error) { showAppError(extractErrorMessage(error, '更新补货状态失败，请刷新后重试')) }
+  finally { restockUpdating.value = false }
+}
+
 const handleSearch = () => {
   void loadConversations()
 }
@@ -1043,6 +1127,11 @@ const handleReset = () => {
   searchForm.status = ''
   searchForm.priority = ''
   searchForm.assigneeScope = 'all'
+  searchForm.issueType = ''
+  searchForm.restockStatus = ''
+  searchForm.productId = ''
+  searchForm.dateRange = null
+  void router.replace({ path: route.path, query: {} })
   void loadConversations()
 }
 
@@ -1152,7 +1241,7 @@ const handleSaveIssue = async () => {
       title: normalizedTitle,
       status: issueForm.status,
       priority: issueForm.priority,
-      issueType: issueForm.issueType,
+      issueType: selectedConversation.value.restock ? undefined : issueForm.issueType,
       category: issueForm.category,
       orderRef: issueForm.orderRef,
       expectedResult: normalizedExpectedResult || undefined,
@@ -1293,11 +1382,11 @@ const handleReply = async () => {
 
   replying.value = true
   try {
-    await updateFeedbackIssue(selectedConversation.value.id, {
+    if (!selectedConversation.value.restock) await updateFeedbackIssue(selectedConversation.value.id, {
       title: issueForm.title,
       status: issueForm.status,
       priority: issueForm.priority,
-      issueType: issueForm.issueType,
+      issueType: selectedConversation.value.restock ? undefined : issueForm.issueType,
       category: issueForm.category,
       orderRef: issueForm.orderRef,
       expectedResult: issueForm.expectedResult,
@@ -1380,7 +1469,7 @@ const loadAssignableUsers = async () => {
   await assigneeRequest.runLatest({
     executor: (signal) => listSupportAssignableUsers({ signal }),
     onSuccess: (result) => {
-      assigneeOptions.value = result
+      assigneeOptions.value = result.map((user) => ({ ...user, id: String(user.id) }))
     },
     onFinally: () => {
       assigneeLoading.value = false
@@ -1704,7 +1793,7 @@ watch(
 )
 
 watch(
-  () => authStore.currentUser?.id,
+  currentUserId,
   (currentUserId, previousUserId) => {
     if (
       currentUserId
@@ -1735,6 +1824,7 @@ const handleVisibilityChange = () => {
 }
 
 onActivated(() => {
+  syncRestockRouteQuery()
   if (workbenchComponentActive) {
     return
   }
@@ -1834,6 +1924,24 @@ onBeforeUnmount(() => {
                         />
                       </el-select>
                     </el-form-item>
+                  </div>
+                  <div class="mt-2 grid grid-cols-2 gap-2">
+                    <el-form-item label="反馈类型" class="!mb-0">
+                      <el-select v-model="searchForm.issueType" clearable placeholder="全部类型" @change="handleSearch">
+                        <el-option v-for="item in FEEDBACK_ISSUE_TYPE_OPTIONS" :key="item.value" :label="item.label" :value="item.value" />
+                      </el-select>
+                    </el-form-item>
+                    <el-form-item label="补货状态" class="!mb-0">
+                      <el-select v-model="searchForm.restockStatus" clearable placeholder="全部补货状态" @change="handleSearch">
+                        <el-option v-for="(label, value) in RESTOCK_STATUS_LABELS" :key="value" :label="label" :value="value" />
+                      </el-select>
+                    </el-form-item>
+                  </div>
+                  <el-form-item label="申请日期" class="!mb-0 mt-2">
+                    <el-date-picker v-model="searchForm.dateRange" type="daterange" value-format="YYYY-MM-DD" start-placeholder="开始日期" end-placeholder="结束日期" class="!w-full" @change="handleSearch" />
+                  </el-form-item>
+                  <div v-if="searchForm.productId" class="mt-2">
+                    <el-tag closable @close="clearProductFilter">商品：{{ productFilterLabel }}</el-tag>
                   </div>
                   <div class="mt-2 flex items-end gap-2">
                     <el-form-item label="分配范围" class="!mb-0 min-w-0 flex-1">
@@ -2085,6 +2193,15 @@ onBeforeUnmount(() => {
                   </div>
                 </section>
 
+                <section v-if="selectedConversation.restock" class="cs-section">
+                  <RestockRequestSummary :restock="selectedConversation.restock" />
+                  <div v-if="hasPermission('customer_service:reply')" class="mt-3 flex flex-wrap gap-2">
+                    <el-button v-if="selectedConversation.restock.effectiveStatus === 'requested'" type="primary" :loading="restockUpdating" :disabled="!isSelectedConversationOwnedByCurrentUser" @click="handleRestockStatus('accepted')">标记已受理</el-button>
+                    <el-button v-if="selectedConversation.restock.effectiveStatus === 'accepted'" type="success" :loading="restockUpdating" :disabled="!isSelectedConversationOwnedByCurrentUser" @click="handleRestockStatus('restocked')">标记已补货</el-button>
+                  </div>
+                  <p class="cs-section__hint">补货状态与聊天状态独立，仅当前负责人可处理；其他说明请使用公开回复。</p>
+                </section>
+
                 <section class="cs-section">
                   <div class="cs-section__head">
                     <p class="cs-section__title">负责人</p>
@@ -2179,9 +2296,9 @@ onBeforeUnmount(() => {
 
                     <div class="grid grid-cols-2 gap-2">
                       <el-form-item label="问题类型">
-                        <el-select v-model="issueForm.issueType" class="w-full">
+                        <el-select v-model="issueForm.issueType" class="w-full" :disabled="Boolean(selectedConversation.restock)">
                           <el-option
-                            v-for="item in FEEDBACK_ISSUE_TYPE_OPTIONS"
+                            v-for="item in FEEDBACK_ISSUE_TYPE_OPTIONS.filter((option) => selectedConversation?.restock || option.value !== 'restock')"
                             :key="item.value"
                             :label="item.label"
                             :value="item.value"

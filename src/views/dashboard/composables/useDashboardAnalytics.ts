@@ -17,6 +17,8 @@ import dayjs from 'dayjs'
 
 import {
   getDashboardAnalytics,
+  getDashboardRestockRanking,
+  type RestockRankingResult,
   type DashboardAnalyticsResult,
   type DashboardProductSpecMode,
   type DashboardTopCustomer,
@@ -110,6 +112,27 @@ export const useDashboardAnalytics = () => {
     dateRange: null,
     orderType: '',
   })
+
+  // 补货排行只跟随已应用日期，不能继承出库类型、SKU 模式、指定商品或 Top N。
+  const restockRequest = useStableRequest()
+  const restockResult = ref<RestockRankingResult | null>(null)
+  const restockLoading = ref(false)
+  const restockError = ref('')
+  const restockLoadedSignature = ref('')
+  const restockSignature = () => appliedFilter.value.dateRange?.join(',') ?? new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 7)
+  const loadRestockRanking = async () => {
+    const signature = restockSignature()
+    const range = appliedFilter.value.dateRange ? [...appliedFilter.value.dateRange] as [string, string] : null
+    restockLoading.value = true
+    restockError.value = ''
+    restockResult.value = null
+    await restockRequest.runLatest({
+      executor: (signal) => getDashboardRestockRanking(range, { signal }),
+      onSuccess: (result) => { restockResult.value = result; restockLoadedSignature.value = signature },
+      onError: (error) => { restockLoadedSignature.value = ''; restockError.value = extractErrorMessage(error, '补货排行加载失败，请重试') },
+      onFinally: () => { restockLoading.value = false },
+    })
+  }
 
   const rankOptions = reactive<DashboardRankOptions>({
     productSpecMode: 'merged',
@@ -226,6 +249,7 @@ export const useDashboardAnalytics = () => {
   const handleSearch = () => {
     applyDraftFilter()
     void loadAnalytics()
+    void loadRestockRanking()
   }
 
   const handleReset = () => {
@@ -234,6 +258,7 @@ export const useDashboardAnalytics = () => {
     draftFilter.orderType = ''
     applyDraftFilter()
     void loadAnalytics()
+    void loadRestockRanking()
   }
 
   /**
@@ -245,6 +270,9 @@ export const useDashboardAnalytics = () => {
    */
   const resetLoadingOnLeave = () => {
     analyticsLoading.value = false
+    restockLoading.value = false
+    // 缓存页返回必须取一次最新申请次数，即使用户仍停留在同一月份或日期区间。
+    restockLoadedSignature.value = ''
   }
 
   onDeactivated(resetLoadingOnLeave)
@@ -256,6 +284,7 @@ export const useDashboardAnalytics = () => {
    * - 这样被取消的新筛选请求在重新进入时一定会补跑，榜单与下钻不会停留在两套区间上。
    */
   const ensureAnalyticsReady = () => {
+    if (restockLoadedSignature.value !== restockSignature() && !restockLoading.value) void loadRestockRanking()
     if (isAnalyticsStale.value && !analyticsLoading.value) {
       void loadAnalytics()
     }
@@ -275,6 +304,10 @@ export const useDashboardAnalytics = () => {
   }
 
   return {
+    restockResult,
+    restockLoading,
+    restockError,
+    loadRestockRanking,
     analyticsLoading,
     analyticsError,
     isAnalyticsStale,

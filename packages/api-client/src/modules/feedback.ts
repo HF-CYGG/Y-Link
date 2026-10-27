@@ -1,5 +1,8 @@
 import type {
   AppendClientFeedbackMessageInput,
+  ActiveRestockRequestResult,
+  CreateRestockRequestInput,
+  CreateRestockRequestResult,
   ClientFeedbackConversationCloseResult,
   ClientFeedbackConversationDetail,
   ClientFeedbackConversationMutationResult,
@@ -20,6 +23,14 @@ const encodePathSegment = (value: string) => encodeURIComponent(value)
  * 附件上传与 SSE 暂不纳入：二者需要单独确定 Native 文件体与流式连接适配。
  */
 export const createFeedbackApi = (http: HttpAdapter) => ({
+  getActiveRestockRequest(skuId: string, options: ApiRequestOptions = {}): Promise<ActiveRestockRequestResult> {
+    return http.request({ ...options, method: 'GET', url: '/client-feedback/restock-requests/active', params: { skuId } })
+  },
+
+  createRestockRequest(data: CreateRestockRequestInput, options: ApiRequestOptions = {}): Promise<CreateRestockRequestResult> {
+    return http.request({ ...options, method: 'POST', url: '/client-feedback/restock-requests', data })
+  },
+
   getPortalConfig(options: ApiRequestOptions = {}): Promise<ClientFeedbackPortalConfig> {
     return http.request({ ...options, method: 'GET', url: '/client-feedback/portal-config' })
   },

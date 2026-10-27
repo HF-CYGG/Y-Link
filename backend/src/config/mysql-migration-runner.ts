@@ -62,6 +62,8 @@ const MYSQL_REQUIRED_TABLES = [
   'client_user',
   'client_user_session',
   'client_feedback_conversation',
+  'client_restock_request',
+  'client_restock_request_key',
   'client_feedback_attachment',
   'o2o_preorder',
   'o2o_return_request',
@@ -104,6 +106,8 @@ const MYSQL_FORBIDDEN_TABLES = [
 // auth_risk_state 现同时存在于 001（供全新库一次建齐）与 033（供存量库补建），
 // 这里指向 033，因为它是白名单中专门为存量库补建该表的自动迁移脚本。
 const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
+  client_restock_request: '060_client_restock_requests.sql',
+  client_restock_request_key: '060_client_restock_requests.sql',
   base_product: '001_init_schema.sql',
   sys_user: '001_init_schema.sql',
   sys_user_session: '001_init_schema.sql',
@@ -191,6 +195,17 @@ interface MysqlRequiredCheck {
 // 只列会被当前业务代码直接读写、缺失后必然导致运行时失败的增量字段。
 // 表不存在时由 MYSQL_REQUIRED_TABLES 先给出建表脚本，避免同一张缺表重复打印多条缺列提示。
 const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
+  ...['conversation_id', 'client_user_id', 'product_id', 'sku_id', 'product_name_snapshot', 'product_code_snapshot', 'sku_code_snapshot', 'spec_text_snapshot', 'quantity', 'latest_pickup_at', 'remark', 'status', 'handled_at', 'client_request_id', 'payload_digest', 'created_at', 'updated_at']
+    .map((columnName) => ({ tableName: 'client_restock_request', columnName, introducingScript: '060_client_restock_requests.sql' })),
+  ...['client_user_id', 'client_request_id', 'payload_digest', 'restock_request_id', 'created_at']
+    .map((columnName) => ({ tableName: 'client_restock_request_key', columnName, introducingScript: '060_client_restock_requests.sql' })),
+  ...['client_restock_request', 'client_restock_request_key'].flatMap((tableName) => [
+    { tableName, columnName: 'client_request_id', introducingScript: '060_client_restock_requests.sql', expectedDataType: 'varchar', expectedNullable: false, expectedCharacterMaximumLength: 64 },
+    { tableName, columnName: 'payload_digest', introducingScript: '060_client_restock_requests.sql', expectedDataType: 'varchar', expectedNullable: false, expectedCharacterMaximumLength: 64 },
+  ]),
+  { tableName: 'client_restock_request', columnName: 'quantity', introducingScript: '060_client_restock_requests.sql', expectedDataType: 'int', expectedNullable: false },
+  { tableName: 'client_restock_request', columnName: 'latest_pickup_at', introducingScript: '060_client_restock_requests.sql', expectedDataType: 'datetime', expectedNullable: false },
+  { tableName: 'client_restock_request', columnName: 'status', introducingScript: '060_client_restock_requests.sql', expectedDataType: 'varchar', expectedNullable: false, expectedCharacterMaximumLength: 16, expectedDefault: 'requested' },
   { tableName: 'sys_user_mfa', columnName: 'factor_revision', introducingScript: '059_admin_webauthn_second_factor.sql', expectedDataType: 'int', expectedNullable: false, expectedDefault: '1' },
   { tableName: 'sys_user_mfa', columnName: 'totp_secret_sealed', introducingScript: '059_admin_webauthn_second_factor.sql', expectedDataType: 'varchar', minCharacterMaximumLength: 255, expectedNullable: true },
   { tableName: 'sys_user_webauthn_credential', columnName: 'usage', introducingScript: '059_admin_webauthn_second_factor.sql', expectedDataType: 'varchar', minCharacterMaximumLength: 16, expectedNullable: false, expectedDefault: 'passwordless' },
@@ -460,6 +475,12 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
 
 // 不只按索引名判断，还校验列顺序与唯一性，避免旧库中存在同名但错误的索引时误判为可启动。
 const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
+  { tableName: 'client_restock_request', indexName: 'uk_restock_conversation', columns: ['conversation_id'], unique: true, introducingScript: '060_client_restock_requests.sql' },
+  { tableName: 'client_restock_request', indexName: 'uk_restock_client_request', columns: ['client_user_id', 'client_request_id'], unique: true, introducingScript: '060_client_restock_requests.sql' },
+  { tableName: 'client_restock_request', indexName: 'idx_restock_active', columns: ['client_user_id', 'sku_id', 'status', 'latest_pickup_at'], unique: false, introducingScript: '060_client_restock_requests.sql' },
+  { tableName: 'client_restock_request', indexName: 'idx_restock_product_created', columns: ['product_id', 'created_at'], unique: false, introducingScript: '060_client_restock_requests.sql' },
+  { tableName: 'client_restock_request', indexName: 'idx_restock_created', columns: ['created_at'], unique: false, introducingScript: '060_client_restock_requests.sql' },
+  { tableName: 'client_restock_request_key', indexName: 'uk_restock_key_client_request', columns: ['client_user_id', 'client_request_id'], unique: true, introducingScript: '060_client_restock_requests.sql' },
   { tableName: 'sys_user', indexName: 'uk_sys_user_webauthn_user_handle', columns: ['webauthn_user_handle'], unique: true, introducingScript: '058_admin_webauthn.sql' },
   { tableName: 'sys_user_webauthn_credential', indexName: 'idx_sys_user_webauthn_credential_user_id', columns: ['user_id'], unique: false, introducingScript: '058_admin_webauthn.sql' },
   { tableName: 'sys_user_webauthn_credential', indexName: 'uk_sys_user_webauthn_rp_credential_sha256', columns: ['rp_id', 'credential_id_sha256'], unique: true, introducingScript: '058_admin_webauthn.sql' },
@@ -694,6 +715,14 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
 ]
 
 const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [
+  ...[
+    ['client_restock_request', 'conversation_id', 'client_feedback_conversation'],
+    ['client_restock_request', 'client_user_id', 'client_user'],
+    ['client_restock_request', 'product_id', 'base_product'],
+    ['client_restock_request', 'sku_id', 'base_product_sku'],
+    ['client_restock_request_key', 'client_user_id', 'client_user'],
+    ['client_restock_request_key', 'restock_request_id', 'client_restock_request'],
+  ].map(([tableName, columnName, referencedTableName]) => ({ tableName, columnName, referencedTableName, referencedColumnName: 'id', deleteRule: 'RESTRICT', introducingScript: '060_client_restock_requests.sql' })),
   { tableName: 'sys_user_webauthn_credential', columnName: 'user_id', referencedTableName: 'sys_user', referencedColumnName: 'id', deleteRule: 'RESTRICT', introducingScript: '058_admin_webauthn.sql' },
   ...[
     ['sys_user_session', 'user_id', 'sys_user'],
@@ -802,6 +831,8 @@ const MYSQL_REQUIRED_TRIGGERS: readonly MysqlRequiredTrigger[] = [
 ]
 
 const MYSQL_REQUIRED_CHECKS: readonly MysqlRequiredCheck[] = [
+  { tableName: 'client_restock_request', constraintName: 'ck_restock_quantity_positive', introducingScript: '060_client_restock_requests.sql' },
+  { tableName: 'client_restock_request', constraintName: 'ck_restock_status', introducingScript: '060_client_restock_requests.sql' },
   {
     tableName: 'order_merge_relation',
     constraintName: 'ck_order_merge_relation_distinct_orders',
@@ -845,6 +876,7 @@ const AUTO_MIGRATABLE_FILES = [
   '057_admin_mfa.sql',
   '058_admin_webauthn.sql',
   '059_admin_webauthn_second_factor.sql',
+  '060_client_restock_requests.sql',
 ]
 
 /**

@@ -3,7 +3,68 @@ import type { PaginationListResult, PaginationQueryInput } from './common.ts'
 
 export type ClientFeedbackConversationStatus = 'open' | 'processing' | 'resolved' | 'closed'
 export type ClientFeedbackPriority = 'low' | 'normal' | 'high' | 'urgent'
-export type ClientFeedbackIssueType = 'suggestion' | 'bug'
+export type ClientFeedbackIssueType = 'suggestion' | 'bug' | 'restock'
+export type RestockStatus = 'requested' | 'accepted' | 'restocked' | 'cancelled'
+export type RestockEffectiveStatus = RestockStatus | 'expired'
+
+export interface ClientRestockRequest {
+  id: string
+  conversationId: string
+  productId: string
+  skuId: string
+  productNameSnapshot: string
+  productCodeSnapshot: string
+  skuCodeSnapshot: string
+  specTextSnapshot: string
+  quantity: number
+  latestPickupAt: string
+  remark: string | null
+  status: RestockStatus
+  effectiveStatus: RestockEffectiveStatus
+  handledAt: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CreateRestockRequestInput {
+  productId: string
+  skuId: string
+  quantity: number
+  /** 带时区的 ISO 时间，秒和毫秒必须为零，界面按 UTC+8 展示。 */
+  latestPickupAt: string
+  remark?: string
+  clientRequestId: string
+}
+
+export interface ActiveRestockRequestResult {
+  restock: ClientRestockRequest | null
+  serverNow: string
+}
+
+export interface CreateRestockRequestResult {
+  created: boolean
+  conversation: ClientFeedbackConversationSummary
+  message: ClientFeedbackMessage | null
+  serverNow: string
+}
+
+export interface UpdateRestockRequestInput {
+  status: 'accepted' | 'restocked'
+  publicNote?: string
+}
+
+export interface UpdateRestockRequestResult {
+  changed: boolean
+  conversation: ClientFeedbackConversationSummary
+  message: ClientFeedbackMessage | null
+  serverNow: string
+}
+
+export interface RestockRankingResult {
+  range: { startDate: string; endDate: string; isDefault: boolean }
+  list: Array<{ productId: string; productName: string; productCode: string; requestCount: number }>
+  serverNow: string
+}
 export type ClientFeedbackSenderType = 'client' | 'service' | 'system'
 export type ClientFeedbackMessageType = 'text' | 'system' | 'internal_note'
 export type ClientFeedbackSatisfactionLevel = 'satisfied' | 'neutral' | 'unsatisfied'
@@ -48,6 +109,8 @@ export interface ClientFeedbackSatisfaction {
 }
 
 export interface ClientFeedbackConversationSummary {
+  restock: ClientRestockRequest | null
+  serverNow: string
   id: string
   conversationNo: string
   clientUserId: string
@@ -134,7 +197,19 @@ export interface ClientFeedbackListQuery extends PaginationQueryInput {
   status?: ClientFeedbackConversationStatus
 }
 
-export type ClientFeedbackListResult = PaginationListResult<ClientFeedbackConversationSummary>
+export type ClientFeedbackListResult = PaginationListResult<ClientFeedbackConversationSummary> & { serverNow: string }
+
+export interface CustomerServiceRestockListQuery extends ClientFeedbackListQuery {
+  issueType?: ClientFeedbackIssueType
+  restockStatus?: RestockEffectiveStatus
+  productId?: string
+  dateRange?: string | [string, string]
+  startDate?: string
+  endDate?: string
+  priority?: ClientFeedbackPriority
+  assignedToMe?: boolean
+  unreadOnly?: boolean
+}
 
 export interface CreateClientFeedbackConversationInput {
   issueType?: ClientFeedbackIssueType

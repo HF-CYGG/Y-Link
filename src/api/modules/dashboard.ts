@@ -8,6 +8,13 @@
  */
 
 import { request, type RequestConfig } from '@/api/http'
+import type { RestockRankingResult } from '../../../packages/shared-types/src/index'
+export type { RestockRankingResult } from '../../../packages/shared-types/src/index'
+
+/** 补货次数独立于出库维度，只按申请创建日期统计。 */
+export const getDashboardRestockRanking = (dateRange: [string, string] | null, config: RequestConfig = {}) => request<RestockRankingResult>({
+  ...config, method: 'GET', url: '/dashboard/restock-ranking', params: { dateRange: dateRange?.join(',') },
+})
 
 export interface DashboardStats {
   todayOrderCount: number

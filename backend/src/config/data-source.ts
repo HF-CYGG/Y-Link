@@ -38,6 +38,8 @@ import { InventoryLog } from '../entities/inventory-log.entity.js'
 import { BizInboundOrder } from '../entities/biz-inbound-order.entity.js'
 import { BizInboundOrderItem } from '../entities/biz-inbound-order-item.entity.js'
 import { ClientFeedbackConversation } from '../entities/client-feedback-conversation.entity.js'
+import { ClientRestockRequest } from '../entities/client-restock-request.entity.js'
+import { ClientRestockRequestKey } from '../entities/client-restock-request-key.entity.js'
 import { ClientFeedbackMessage } from '../entities/client-feedback-message.entity.js'
 import { ClientFeedbackAttachment } from '../entities/client-feedback-attachment.entity.js'
 import { NotificationRule } from '../entities/notification-rule.entity.js'
@@ -85,6 +87,8 @@ export const appEntities = [
   BizInboundOrder,
   BizInboundOrderItem,
   ClientFeedbackConversation,
+  ClientRestockRequest,
+  ClientRestockRequestKey,
   ClientFeedbackMessage,
   ClientFeedbackAttachment,
   NotificationRule,

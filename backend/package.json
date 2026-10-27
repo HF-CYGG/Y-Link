@@ -60,6 +60,8 @@
     "task7:verify": "tsx scripts/task7-verify.ts",
     "task8:verify": "tsx scripts/task8-verify.ts",
     "feedback:customer-service:verify": "tsx scripts/feedback-customer-service-verify.ts",
+    "feedback:restock:verify": "tsx scripts/restock-request-verify.ts",
+    "feedback:restock:ui": "tsx scripts/restock-ui-fixture.ts",
     "feedback:attachment-cleanup:verify": "node scripts/run-feedback-attachment-cleanup-verify.mjs",
     "client-auth:department-governance:verify": "tsx scripts/client-auth-department-governance-verify.ts",
     "mobile-auth:token:verify": "node --import tsx scripts/mobile-auth-token-unit-verify.ts",

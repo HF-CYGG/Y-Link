@@ -1,10 +1,11 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/client/ClientFeedbackCreateView.vue
- * 文件职责：提供客户端独立的新建反馈页面，让用户提交普通建议或专业 BUG，并在建单时一并上传图片附件。
+ * 文件职责：提供客户端独立的新建反馈页面，支持普通建议、专业 BUG 与商品补货需求。
  * 实现逻辑：
  * - 页面仅负责“新建反馈”链路，不再混合历史会话查看，减少反馈会话页首屏信息密度；
  * - 普通建议默认走轻量提交流程，切换为专业 BUG 后才显示优先级和结构化字段；
+ * - 补货模式由专用表单负责缺货规格、数量、截止时间与幂等提交，不混入普通反馈附件链路；
  * - 附件仍归属到当前反馈单首条消息，提交成功后自动跳到详情页继续沿用原有会话与实时链路。
  * 维护说明：
  * - 当前上传能力仅开放图片附件，如后续要扩展视频或文档，请同步调整前后端白名单与预览方式；
@@ -12,7 +13,8 @@
  */
 
 import { computed, onMounted, reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
+import ClientRestockForm from './components/ClientRestockForm.vue'
 
 import {
   FEEDBACK_CATEGORY_OPTIONS,
@@ -37,6 +39,8 @@ import { normalizeSubmitText } from '@/utils/submit-feedback'
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 const router = useRouter()
+const route = useRoute()
+const restockBusy = ref(false)
 const clientAuthStore = useClientAuthStore(pinia)
 const FEEDBACK_ATTACHMENT_LIMIT = 9
 const FEEDBACK_ATTACHMENT_MAX_SIZE = 10 * 1024 * 1024
@@ -49,7 +53,7 @@ const createAttachmentInputRef = ref<HTMLInputElement | null>(null)
 const previewImageUrl = ref('')
 
 const createForm = reactive({
-  issueType: 'suggestion' as FeedbackIssueType,
+  issueType: (route.query.type === 'restock' ? 'restock' : 'suggestion') as FeedbackIssueType,
   title: '',
   summary: '',
   category: 'order' as FeedbackIssueCategory,
@@ -63,6 +67,7 @@ const createForm = reactive({
 })
 
 const currentClientUser = computed(() => clientAuthStore.currentUser)
+const isRestockMode = computed(() => createForm.issueType === 'restock')
 const isBugMode = computed(() => createForm.issueType === 'bug')
 const hasCreateAttachments = computed(() => createAttachments.value.length > 0)
 const issueTypeSegmentedOptions = FEEDBACK_ISSUE_TYPE_OPTIONS.map((item) => ({
@@ -291,7 +296,7 @@ onMounted(async () => {
         <div class="min-w-0 flex-1">
           <p class="text-xl font-semibold text-slate-900 dark:text-slate-100">新建反馈</p>
           <p class="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
-            使用独立页面提交新的普通建议或专业 BUG，提交成功后会自动回到反馈会话页继续跟进。
+            使用独立页面提交普通建议、专业 BUG 或补货需求，提交成功后会自动回到反馈会话页继续跟进。
           </p>
         </div>
       </div>
@@ -305,7 +310,7 @@ onMounted(async () => {
       <div class="flex items-center justify-between gap-3">
         <div>
           <p class="text-base font-semibold text-slate-900 dark:text-slate-100">反馈信息</p>
-          <p class="mt-1 text-xs leading-5 text-slate-400">普通建议默认轻量提交，专业 BUG 再展开排查字段。</p>
+          <p class="mt-1 text-xs leading-5 text-slate-400">请选择反馈类型，补货需求使用商品与规格专用表单。</p>
         </div>
         <el-tag type="success" effect="light" round>独立提交页</el-tag>
       </div>
@@ -316,12 +321,15 @@ onMounted(async () => {
             v-model="createForm.issueType"
             class="feedback-type-segmented"
             :options="issueTypeSegmentedOptions"
+            :disabled="restockBusy"
             aria-label="反馈类型"
             @change="handleChangeIssueType"
           />
           <p class="text-xs leading-5 text-slate-500 dark:text-slate-400">{{ currentIssueTypeHint }}</p>
         </div>
 
+        <ClientRestockForm v-if="isRestockMode" @busy="restockBusy = $event" />
+        <template v-else>
         <div class="block">
           <span class="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">问题标题</span>
           <el-input
@@ -519,9 +527,11 @@ onMounted(async () => {
             </article>
           </div>
         </div>
+        </template>
       </div>
 
       <el-button
+        v-if="!isRestockMode"
         class="mt-4 w-full"
         type="primary"
         size="large"

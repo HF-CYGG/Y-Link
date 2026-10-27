@@ -6,6 +6,7 @@
  * 维护说明：重点维护“左侧标签高亮 <-> 右侧分组定位”一致性；规格选择不得虚构未配置组合，也不能绕过现有 SKU 库存与购物车校验。
  * 悬浮购物车遮挡：页面尾部留白、分类浏览列表高度与 scroll-padding 统一由摘要栏实测遮挡高度 `--mall-floating-occlusion` 驱动，不要改回固定常量估算。
  * 数量输入：迷你购物车与详情弹层的数量均可直接输入，购物车走 store 的 setQtyFromInput，详情弹层走 commitDetailQty，与加减按钮共用同一上限与提示。
+ * 补货入口：四套卡片复用当前缺货 SKU 判断，操作保持第三列上下堆叠，不改变虚拟行高；详情传递当前明确选择的规格。
  */
 
 
@@ -44,6 +45,7 @@ import ClientCartView from './ClientCartView.vue'
 import ClientCheckoutView from './ClientCheckoutView.vue'
 import ClientImagePreviewer from './components/ClientImagePreviewer.vue'
 import ClientQtyInput from './components/ClientQtyInput.vue'
+import ClientRestockButton from './components/ClientRestockButton.vue'
 
 
 import { showAppSuccess, showAppWarning } from '@/utils/app-alert'
@@ -348,6 +350,7 @@ const hasDetailSkuChoices = computed(() => resolveActiveSkus(detailProduct.value
 const detailSkuSpecGroups = computed(() => buildClientSkuSelectionModel(
   resolveActiveSkus(detailProduct.value),
   selectedDetailSku.value,
+  { allowOutOfStock: true },
 ))
 
 const detailMaxQty = computed(() => {
@@ -836,6 +839,7 @@ const selectDetailSkuOption = (groupName: string, optionValue: string) => {
     selectedDetailSku.value,
     groupName,
     optionValue,
+    { allowOutOfStock: true },
   )
   if (nextSku) {
     selectDetailSku(nextSku)
@@ -1641,7 +1645,7 @@ onBeforeUnmount(() => {
               </div>
             </div>
           </button>
-          <button type="button" class="client-product-card__add-button" @click="quickAdd(product)">+ 加购</button>
+          <div class="client-product-card__actions"><button type="button" class="client-product-card__add-button" @click="quickAdd(product)">+ 加购</button><ClientRestockButton :product="product" /></div>
         </article>
       </div>
     </section>
@@ -1747,7 +1751,7 @@ onBeforeUnmount(() => {
                 </div>
               </div>
             </button>
-            <button type="button" class="client-product-card__add-button" @click="quickAdd(row.data)">+ 加购</button>
+            <div class="client-product-card__actions"><button type="button" class="client-product-card__add-button" @click="quickAdd(row.data)">+ 加购</button><ClientRestockButton :product="row.data" /></div>
           </article>
         </div>
         <!-- 尾部只保留底部渐隐遮罩所需空间，保证最后一行完整可读。 -->
@@ -1798,7 +1802,7 @@ onBeforeUnmount(() => {
                   </div>
                 </div>
               </button>
-              <button type="button" class="client-product-card__add-button" @click="quickAdd(product)">+ 加购</button>
+              <div class="client-product-card__actions"><button type="button" class="client-product-card__add-button" @click="quickAdd(product)">+ 加购</button><ClientRestockButton :product="product" /></div>
             </article>
           </div>
         </section>
@@ -1844,7 +1848,7 @@ onBeforeUnmount(() => {
                     </div>
                   </div>
                 </button>
-                <button type="button" class="client-product-card__add-button" @click="quickAdd(product)">+ 加购</button>
+                <div class="client-product-card__actions"><button type="button" class="client-product-card__add-button" @click="quickAdd(product)">+ 加购</button><ClientRestockButton :product="product" /></div>
               </article>
             </div>
           </section>
@@ -2047,6 +2051,7 @@ onBeforeUnmount(() => {
               <button type="button" class="client-qty-button" aria-label="增加数量" @click="changeDetailQty(1)">+</button>
             </div>
           </div>
+          <ClientRestockButton v-if="detailProduct" :product="detailProduct" :sku="selectedDetailSku" />
           <button type="button" class="client-detail-cart-button" @click="addCurrentDetailToCart">
             加入购物车
           </button>
@@ -2919,6 +2924,8 @@ onBeforeUnmount(() => {
   line-height: 1;
   padding: 0.4rem 0.68rem;
 }
+
+.client-product-card__actions { display: flex; flex-direction: column; justify-content: center; align-items: flex-end; gap: 0.35rem; align-self: center; }
 
 .client-product-card__add-button {
   height: 1.95rem;

@@ -12,6 +12,8 @@
 
 import { request, type RequestConfig } from '@/api/http'
 import { compressImageForUpload } from '@/utils/image-upload'
+import type { ActiveRestockRequestResult, ClientRestockRequest, CreateRestockRequestInput, CreateRestockRequestResult, RestockEffectiveStatus, UpdateRestockRequestInput, UpdateRestockRequestResult } from '../../../packages/shared-types/src/index'
+export type { ClientRestockRequest, RestockEffectiveStatus } from '../../../packages/shared-types/src/index'
 
 /**
  * 会话列表统一分页口径：
@@ -22,7 +24,7 @@ const FEEDBACK_CONVERSATION_LIST_PAGE_SIZE = 100
 
 export type FeedbackIssueStatus = 'pending' | 'processing' | 'resolved' | 'closed'
 export type FeedbackIssuePriority = 'low' | 'medium' | 'high' | 'urgent'
-export type FeedbackIssueType = 'suggestion' | 'bug'
+export type FeedbackIssueType = 'suggestion' | 'bug' | 'restock'
 export type FeedbackIssueCategory = 'account' | 'order' | 'product' | 'delivery' | 'invoice' | 'other'
 export type FeedbackMessageSenderRole = 'client' | 'staff' | 'system'
 export type FeedbackSatisfactionLevel = 'satisfied' | 'neutral' | 'unsatisfied'
@@ -88,6 +90,8 @@ export interface FeedbackInternalRemarkRecord {
 }
 
 export interface FeedbackConversationRecord {
+  restock: ClientRestockRequest | null
+  serverNow: string
   id: string
   issueNo: string
   title: string
@@ -344,6 +348,10 @@ export interface UpdateFeedbackIssueInput {
 }
 
 export interface SupportFeedbackListQuery {
+  issueType?: FeedbackIssueType | ''
+  restockStatus?: RestockEffectiveStatus | ''
+  productId?: string
+  dateRange?: [string, string] | null
   keyword?: string
   status?: FeedbackIssueStatus | ''
   priority?: FeedbackIssuePriority | ''
@@ -352,9 +360,11 @@ export interface SupportFeedbackListQuery {
 
 type BackendConversationStatus = 'open' | 'processing' | 'resolved' | 'closed'
 type BackendConversationPriority = 'low' | 'normal' | 'high' | 'urgent'
-type BackendConversationIssueType = 'suggestion' | 'bug'
+type BackendConversationIssueType = FeedbackIssueType
 
 interface BackendConversationSummary {
+  restock: ClientRestockRequest | null
+  serverNow: string
   id: string
   conversationNo: string
   clientUserId: string
@@ -480,9 +490,12 @@ export const FEEDBACK_PRIORITY_META_MAP: Record<FeedbackIssuePriority, FeedbackI
 }
 
 export const FEEDBACK_ISSUE_TYPE_OPTIONS: Array<{ label: string; value: FeedbackIssueType; hint: string }> = [
+  { label: '补货需求', value: 'restock', hint: '选择缺货商品规格，填写期望数量和最晚取货时间。' },
   { label: '普通建议', value: 'suggestion', hint: '适合咨询、建议、体验反馈和一般诉求。' },
   { label: '专业 BUG', value: 'bug', hint: '适合存在明确异常、需要复现与排查的问题。' },
 ]
+
+export const getFeedbackIssueTypeLabel = (value: FeedbackIssueType) => FEEDBACK_ISSUE_TYPE_OPTIONS.find((item) => item.value === value)?.label ?? '反馈'
 
 export const FEEDBACK_CATEGORY_OPTIONS: Array<{ label: string; value: FeedbackIssueCategory }> = [
   { label: '账号与登录', value: 'account' },
@@ -743,6 +756,17 @@ export const buildClientFeedbackNextStepPrompt = (
   const groupKey = resolveClientFeedbackConversationGroupKey(conversation)
   const groupMeta = CLIENT_FEEDBACK_CONVERSATION_GROUP_META_MAP[groupKey]
 
+  if (conversation.restock) {
+    const prompts: Record<RestockEffectiveStatus, Pick<ClientFeedbackNextStepPrompt, 'stageLabel' | 'recentAction' | 'nextStep'>> = {
+      requested: { stageLabel: '等待受理补货需求', recentAction: '补货需求已登记，尚未生成订单或预留库存。', nextStep: '可在截止前等待客服处理；如有补充说明，可在当前会话留言。' },
+      accepted: { stageLabel: '补货需求已受理', recentAction: '客服已受理本次需求，补货进度会在当前会话更新。', nextStep: '请在截止前关注公开消息；到货后仍需返回商城按现有流程下单。' },
+      expired: { stageLabel: '补货需求已过期', recentAction: '本次需求已超过最晚取货时间，不再作为活跃补货需求处理。', nextStep: '如仍需商品，可返回商城查看库存；当前规格仍缺货时可重新申请补货。' },
+      cancelled: { stageLabel: '补货需求已撤回', recentAction: '本次补货需求已结束，历史沟通记录仍可查看。', nextStep: '如仍有需要，可返回商城；当前规格仍缺货时可重新申请补货。' },
+      restocked: { stageLabel: '客服已标记补货完成', recentAction: '本次需求已标记为已补货，未自动生成订单或预留库存。', nextStep: '请返回商城查看当前库存，并按现有流程下单。' },
+    }
+    return { groupKey, groupLabel: groupMeta.label, ...prompts[conversation.restock.effectiveStatus] }
+  }
+
   if (conversation.status === 'closed') {
     return {
       groupKey,
@@ -800,6 +824,14 @@ export const buildClientFeedbackNextStepPrompt = (
     recentAction: '你的问题已经提交成功，系统正在等待客服正式接入。',
     nextStep: '请保留当前反馈单；如问题影响范围扩大，可补充更具体的时间、现象与订单信息。',
   }
+}
+
+/** 已结束的补货需求允许继续聊天；聊天不会恢复需求资格，下一次按商城库存重新申请或下单。 */
+export const buildClientFeedbackReplyHint = (conversation: FeedbackConversationRecord | null): string => {
+  if (conversation?.restock && ['expired', 'cancelled', 'restocked'].includes(conversation.restock.effectiveStatus)) {
+    return `可在当前会话继续交流。${buildClientFeedbackNextStepPrompt(conversation).nextStep}`
+  }
+  return '同一问题后续有新现象时，直接追加消息即可，不需要重新新建反馈。'
 }
 
 const matchesSupportWorkbenchQuickView = (
@@ -989,13 +1021,13 @@ export const compareSupportFeedbackConversationPriority = (
 
 const mapMessage = (message: BackendConversationDetail['messages'][number]): FeedbackConversationMessage => {
   return {
-    id: message.id,
+    id: String(message.id),
     senderRole: message.senderType === 'service' ? 'staff' : message.senderType,
     senderName: message.senderName,
     body: message.content,
     createdAt: message.createdAt,
     internalOnly: Boolean(message.internalOnly),
-    attachments: Array.isArray(message.attachments) ? message.attachments : [],
+    attachments: Array.isArray(message.attachments) ? message.attachments.map((attachment) => ({ ...attachment, id: attachment.id == null ? attachment.id : String(attachment.id) })) : [],
   }
 }
 
@@ -1009,19 +1041,21 @@ const mapConversation = (
   const lastMessagePreview = conversation.lastMessagePreview || ''
 
   return {
-    id: conversation.id,
+    id: String(conversation.id),
+    restock: conversation.restock ?? null,
+    serverNow: conversation.serverNow ?? '',
     issueNo: conversation.conversationNo,
     title: conversation.subject,
     summary: conversation.fields.actualResult || conversation.subject,
     status,
     priority: BACKEND_PRIORITY_TO_FRONTEND_MAP[conversation.priority],
-    clientUserId: conversation.clientUserId,
+    clientUserId: String(conversation.clientUserId),
     clientAccount: conversation.clientAccount,
     clientDisplayName: conversation.clientUsername || conversation.clientAccount || '客户端用户',
     clientAccountType: conversation.clientAccountType === 'department' ? 'department' : 'personal',
     clientStaffNo: conversation.staffNoSnapshot?.trim() || null,
     clientDepartmentName: conversation.departmentNameSnapshot || null,
-    assigneeUserId: conversation.assignedUserId ?? null,
+    assigneeUserId: conversation.assignedUserId == null ? null : String(conversation.assignedUserId),
     assigneeUsername: conversation.assignedUsername ?? null,
     assigneeName: conversation.assignedDisplayName || null,
     lastMessagePreview,
@@ -1044,7 +1078,7 @@ const mapConversation = (
       sourceLabel: conversation.fields.sourceLabel,
     },
     messages,
-    internalRemark,
+    internalRemark: internalRemark ? { ...internalRemark, updatedByUserId: internalRemark.updatedByUserId == null ? internalRemark.updatedByUserId : String(internalRemark.updatedByUserId) } : null,
     isWithdrawnByClient: resolveIsWithdrawnByClient(status, lastMessageSenderRole, lastMessagePreview),
   }
 }
@@ -1054,8 +1088,8 @@ const mapRealtimeConversationEvent = (
 ): FeedbackRealtimeConversationEvent => {
   return {
     eventType: payload.eventType,
-    conversationId: payload.conversationId,
-    clientUserId: payload.clientUserId,
+    conversationId: String(payload.conversationId),
+    clientUserId: String(payload.clientUserId),
     occurredAt: payload.occurredAt,
     conversation: mapConversation(payload.conversation),
     message: payload.message ? mapMessage(payload.message) : undefined,
@@ -1293,6 +1327,10 @@ export const listSupportFeedbackConversations = async (
       status: query.status ? FRONTEND_STATUS_TO_BACKEND_MAP[query.status] : undefined,
       priority: query.priority ? FRONTEND_PRIORITY_TO_BACKEND_MAP[query.priority] : undefined,
       assignedToMe: query.assigneeScope === 'mine' ? true : undefined,
+      issueType: query.issueType || undefined,
+      restockStatus: query.restockStatus || undefined,
+      productId: query.productId || undefined,
+      dateRange: query.dateRange?.join(','),
     },
   })
 
@@ -1301,6 +1339,21 @@ export const listSupportFeedbackConversations = async (
     return records.filter((item) => !item.assigneeName)
   }
   return records
+}
+
+/** 补货申请始终使用专用事务接口，普通反馈字段编辑不能代替业务状态流转。 */
+export const getActiveClientRestockRequest = (skuId: string, config: RequestConfig = {}) => request<ActiveRestockRequestResult>({
+  ...config, method: 'GET', url: '/client-feedback/restock-requests/active', params: { skuId },
+})
+
+export const createClientRestockRequest = async (input: CreateRestockRequestInput) => {
+  const result = await request<CreateRestockRequestResult>({ method: 'POST', url: '/client-feedback/restock-requests', data: input })
+  return { ...result, conversation: mapConversation(result.conversation) }
+}
+
+export const updateSupportRestockRequest = async (id: string, input: UpdateRestockRequestInput) => {
+  const result = await request<UpdateRestockRequestResult>({ method: 'PATCH', url: `/customer-service/conversations/${encodeURIComponent(id)}/restock`, data: input })
+  return { ...result, conversation: mapConversation(result.conversation) }
 }
 
 export const getSupportFeedbackConversation = async (
@@ -1405,11 +1458,12 @@ export const getCustomerServicePresence = async (requestConfig: RequestConfig = 
  * - 后端会提前过滤不可接单的角色与停用账号。
  */
 export const listSupportAssignableUsers = async (requestConfig: RequestConfig = {}): Promise<SupportAssignableUser[]> => {
-  return request<SupportAssignableUser[]>({
+  const users = await request<SupportAssignableUser[]>({
     ...requestConfig,
     url: '/customer-service/assignees',
     method: 'GET',
   })
+  return users.map((user) => ({ ...user, id: String(user.id) }))
 }
 
 /**

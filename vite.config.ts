@@ -15,6 +15,7 @@ import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath, URL } from 'node:url'
 import { shortenHtml2pdfModuleIds } from './scripts/html2pdf-module-id-shortener.mjs'
+import { configureFeedbackSseProxy } from './scripts/feedback-sse-dev-proxy'
 
 /**
  * 首帧主题脚本构建插件：
@@ -276,6 +277,7 @@ export default defineConfig(({ command, mode }) => {
               '/api': {
                 target: localBackendOrigin,
                 changeOrigin: true,
+                configure: configureFeedbackSseProxy,
               },
               '/uploads': {
                 target: localBackendOrigin,

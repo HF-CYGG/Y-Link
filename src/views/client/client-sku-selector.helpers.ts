@@ -16,6 +16,15 @@ export interface ClientSkuSpecGroupView {
   options: ClientSkuOptionView[]
 }
 
+export interface ClientSkuSelectionOptions {
+  /** 商品详情为补货入口开放真实缺货规格；默认仍只允许有库存选项。 */
+  allowOutOfStock?: boolean
+}
+
+const selectableSkus = (skus: O2oMallSku[], options: ClientSkuSelectionOptions) => options.allowOutOfStock
+  ? skus.filter((sku) => sku.isCurrent && sku.isActive)
+  : skus
+
 type ClientSkuSpecSource = Pick<O2oMallSku, 'specValues' | 'specText' | 'skuCode'>
 
 const readSkuSpecEntries = (sku: ClientSkuSpecSource | null) => {
@@ -56,7 +65,9 @@ const resolvePreferredAvailableSku = (skus: O2oMallSku[]) => {
 export const buildClientSkuSelectionModel = (
   skus: O2oMallSku[],
   selectedSku: O2oMallSku | null,
+  options: ClientSkuSelectionOptions = {},
 ): ClientSkuSpecGroupView[] => {
+  skus = selectableSkus(skus, options)
   const groupNames = readSpecGroupNames(skus)
   const selectedSpecValues = readSkuSpecValueMap(selectedSku)
 
@@ -80,7 +91,7 @@ export const buildClientSkuSelectionModel = (
         return {
           value,
           selected: selectedSpecValues[name] === value,
-          disabled: matchingSkus.every((sku) => !hasAvailableStock(sku)),
+          disabled: !options.allowOutOfStock && matchingSkus.every((sku) => !hasAvailableStock(sku)),
         }
       }),
     }
@@ -92,11 +103,13 @@ export const resolveClientSkuSelection = (
   selectedSku: O2oMallSku | null,
   groupName: string,
   optionValue: string,
+  options: ClientSkuSelectionOptions = {},
 ): O2oMallSku | null => {
+  skus = selectableSkus(skus, options)
   const groupNames = readSpecGroupNames(skus)
   const changedGroupIndex = groupNames.indexOf(groupName)
   if (changedGroupIndex < 0) {
-    return selectedSku
+    return options.allowOutOfStock && !skus.some((sku) => sku.id === selectedSku?.id) ? null : selectedSku
   }
 
   const selectedSpecValues = readSkuSpecValueMap(selectedSku)
@@ -109,9 +122,9 @@ export const resolveClientSkuSelection = (
     (name) => readSkuSpecValueMap(sku)[name] === selectedSpecValues[name],
   ))
 
-  return exactCandidates.find(hasAvailableStock)
+  return (options.allowOutOfStock ? exactCandidates[0] : exactCandidates.find(hasAvailableStock))
     ?? resolvePreferredAvailableSku(prefixCandidates)
     ?? exactCandidates[0]
     ?? prefixCandidates[0]
-    ?? selectedSku
+    ?? (options.allowOutOfStock && !skus.some((sku) => sku.id === selectedSku?.id) ? null : selectedSku)
 }

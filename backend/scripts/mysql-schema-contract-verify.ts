@@ -18,6 +18,8 @@ const { assertMysqlRequiredSchemaExists } = await import('../src/config/mysql-mi
 const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
 const REQUIRED_TABLES = [
+  'client_restock_request',
+  'client_restock_request_key',
   'base_product',
   'base_product_sku',
   'sys_user',
@@ -58,6 +60,8 @@ const REQUIRED_TABLES = [
 ] as const
 
 const REQUIRED_COLUMNS = [
+  ...['conversation_id', 'client_user_id', 'product_id', 'sku_id', 'product_name_snapshot', 'product_code_snapshot', 'sku_code_snapshot', 'spec_text_snapshot', 'quantity', 'latest_pickup_at', 'remark', 'status', 'handled_at', 'client_request_id', 'payload_digest', 'created_at', 'updated_at'].map((columnName) => ['client_restock_request', columnName]),
+  ...['client_user_id', 'client_request_id', 'payload_digest', 'restock_request_id', 'created_at'].map((columnName) => ['client_restock_request_key', columnName]),
   // 050：YZ 通用 SKU 编码体系新增字段，需与 mysql-migration-runner 的 MYSQL_REQUIRED_COLUMNS 保持同一口径。
   ['base_tag', 'series_code'],
   ['base_product', 'primary_series_tag_id'],
@@ -188,6 +192,10 @@ interface ColumnFixture {
 }
 
 const REQUIRED_MANUAL_OUTBOUND_COLUMN_DEFINITIONS = new Map<string, ColumnFixture>([
+  ...['client_restock_request', 'client_restock_request_key'].flatMap((tableName): Array<[string, ColumnFixture]> => ['client_request_id', 'payload_digest'].map((columnName) => [`${tableName}.${columnName}`, { dataType: 'varchar', columnType: 'varchar(64)', isNullable: 'NO', characterMaximumLength: 64 }])),
+  ['client_restock_request.quantity', { dataType: 'int', columnType: 'int', isNullable: 'NO', characterMaximumLength: null }],
+  ['client_restock_request.latest_pickup_at', { dataType: 'datetime', columnType: 'datetime(6)', isNullable: 'NO', characterMaximumLength: null }],
+  ['client_restock_request.status', { dataType: 'varchar', columnType: 'varchar(16)', isNullable: 'NO', characterMaximumLength: 16, columnDefault: 'requested' }],
   ['sys_user_mfa.factor_revision', {
     dataType: 'int', columnType: 'int', isNullable: 'NO', characterMaximumLength: null, columnDefault: '1',
   }],
@@ -357,6 +365,12 @@ interface CheckFixture {
 }
 
 const REQUIRED_INDEXES: readonly IndexFixture[] = [
+  { tableName: 'client_restock_request', indexName: 'uk_restock_conversation', columns: ['conversation_id'], unique: true },
+  { tableName: 'client_restock_request', indexName: 'uk_restock_client_request', columns: ['client_user_id', 'client_request_id'], unique: true },
+  { tableName: 'client_restock_request', indexName: 'idx_restock_active', columns: ['client_user_id', 'sku_id', 'status', 'latest_pickup_at'], unique: false },
+  { tableName: 'client_restock_request', indexName: 'idx_restock_product_created', columns: ['product_id', 'created_at'], unique: false },
+  { tableName: 'client_restock_request', indexName: 'idx_restock_created', columns: ['created_at'], unique: false },
+  { tableName: 'client_restock_request_key', indexName: 'uk_restock_key_client_request', columns: ['client_user_id', 'client_request_id'], unique: true },
   { tableName: 'sys_user', indexName: 'uk_sys_user_webauthn_user_handle', columns: ['webauthn_user_handle'], unique: true },
   { tableName: 'sys_user_webauthn_credential', indexName: 'idx_sys_user_webauthn_credential_user_id', columns: ['user_id'], unique: false },
   { tableName: 'sys_user_webauthn_credential', indexName: 'uk_sys_user_webauthn_rp_credential_sha256', columns: ['rp_id', 'credential_id_sha256'], unique: true },
@@ -568,6 +582,14 @@ const REQUIRED_INDEXES: readonly IndexFixture[] = [
 
 const REQUIRED_FOREIGN_KEYS: readonly ForeignKeyFixture[] = [
   ...[
+    ['client_restock_request', 'fk_restock_conversation', 'conversation_id', 'client_feedback_conversation'],
+    ['client_restock_request', 'fk_restock_client', 'client_user_id', 'client_user'],
+    ['client_restock_request', 'fk_restock_product', 'product_id', 'base_product'],
+    ['client_restock_request', 'fk_restock_sku', 'sku_id', 'base_product_sku'],
+    ['client_restock_request_key', 'fk_restock_key_client', 'client_user_id', 'client_user'],
+    ['client_restock_request_key', 'fk_restock_key_request', 'restock_request_id', 'client_restock_request'],
+  ].map(([tableName, constraintName, columnName, referencedTableName]) => ({ tableName, constraintName, columnName, referencedTableName, referencedColumnName: 'id', ordinalPosition: 1, deleteRule: 'RESTRICT' })),
+  ...[
     ['sys_user_session', 'fk_sys_user_session_user_id', 'user_id', 'sys_user'],
     ['client_user_session', 'fk_client_user_session_user_id', 'user_id', 'client_user'],
     ['client_mobile_session', 'fk_client_mobile_session_user', 'client_user_id', 'client_user'],
@@ -652,6 +674,8 @@ const REQUIRED_TRIGGERS: readonly TriggerFixture[] = [
 ]
 
 const REQUIRED_CHECKS: readonly CheckFixture[] = [
+  { tableName: 'client_restock_request', constraintName: 'ck_restock_quantity_positive' },
+  { tableName: 'client_restock_request', constraintName: 'ck_restock_status' },
   { tableName: 'order_merge_relation', constraintName: 'ck_order_merge_relation_distinct_orders' },
 ]
 
@@ -781,6 +805,15 @@ async function expectSchemaFailure(
 }
 
 await assert.doesNotReject(() => assertMysqlRequiredSchemaExists(createDataSource(createCompleteFixture())))
+
+for (const tableName of ['client_restock_request', 'client_restock_request_key']) {
+  const fixture = createCompleteFixture()
+  fixture.tables.delete(tableName)
+  await expectSchemaFailure(fixture, [tableName, '060_client_restock_requests.sql'])
+}
+const missingRestockDedupeIndex = createCompleteFixture()
+missingRestockDedupeIndex.indexes.delete(objectKey('client_restock_request_key', 'uk_restock_key_client_request'))
+await expectSchemaFailure(missingRestockDedupeIndex, ['uk_restock_key_client_request', '060_client_restock_requests.sql'])
 
 const obsoleteBusinessNoTables = createCompleteFixture()
 obsoleteBusinessNoTables.tables.add('order_business_no_occupancy')

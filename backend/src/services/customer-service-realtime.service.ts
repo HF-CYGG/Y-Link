@@ -64,6 +64,8 @@ interface CustomerServiceRealtimeSubscriber {
   heartbeatTimer: NodeJS.Timeout | null
   revalidateTimer: NodeJS.Timeout | null
   slowConsumerTimer: NodeJS.Timeout | null
+  detachListeners: () => void
+  drainListener: (() => void) | null
   blocked: boolean
 }
 
@@ -217,9 +219,24 @@ class CustomerServiceRealtimeService {
   }
 
   private writeSseEvent(subscriber: CustomerServiceRealtimeSubscriber, eventName: string, data: unknown): boolean {
-    if (subscriber.blocked || subscriber.res.writableEnded || subscriber.res.destroyed) return false
+    if (!this.subscribers.has(subscriber.subscriberId) || this.isResponseClosed(subscriber.res)) {
+      this.closeSubscriber(subscriber.subscriberId)
+      return false
+    }
+    if (subscriber.blocked) return false
     const payload = `event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`
-    const accepted = subscriber.res.write(payload)
+    let accepted: boolean
+    try {
+      accepted = subscriber.res.write(payload)
+    } catch {
+      this.closeSubscriber(subscriber.subscriberId)
+      return false
+    }
+    if (!this.subscribers.has(subscriber.subscriberId) || this.isResponseClosed(subscriber.res)) {
+      this.closeSubscriber(subscriber.subscriberId)
+      return false
+    }
+    // write(false) 表示数据已进入缓冲区，等待 drain；不能当作断连立即释放健康连接。
     if (!accepted || subscriber.res.writableLength > CUSTOMER_SERVICE_REALTIME_POLICY.slowConsumerMaxBufferedBytes) {
       this.pauseSlowSubscriber(subscriber)
     }
@@ -232,9 +249,11 @@ class CustomerServiceRealtimeService {
     const resume = () => {
       if (!this.subscribers.has(subscriber.subscriberId)) return
       subscriber.blocked = false
+      subscriber.drainListener = null
       if (subscriber.slowConsumerTimer) clearTimeout(subscriber.slowConsumerTimer)
       subscriber.slowConsumerTimer = null
     }
+    subscriber.drainListener = resume
     subscriber.res.once('drain', resume)
     subscriber.slowConsumerTimer = setTimeout(() => this.closeSubscriber(subscriber.subscriberId), CUSTOMER_SERVICE_REALTIME_POLICY.slowConsumerTimeoutMs)
     subscriber.slowConsumerTimer.unref?.()
@@ -254,6 +273,19 @@ class CustomerServiceRealtimeService {
     if (subscriber.revalidateTimer) clearInterval(subscriber.revalidateTimer)
     if (subscriber.slowConsumerTimer) clearTimeout(subscriber.slowConsumerTimer)
     this.subscribers.delete(subscriberId)
+    subscriber.detachListeners()
+    if (subscriber.drainListener) subscriber.res.off('drain', subscriber.drainListener)
+    subscriber.drainListener = null
+  }
+
+  private isResponseClosed(res: Response) {
+    return res.destroyed || res.writableEnded || res.closed || res.socket?.destroyed === true
+  }
+
+  private pruneClosedSubscribers() {
+    for (const subscriber of this.subscribers.values()) {
+      if (this.isResponseClosed(subscriber.res)) this.removeSubscriber(subscriber.subscriberId)
+    }
   }
 
   private countSubscribers(predicate: (subscriber: CustomerServiceRealtimeSubscriber) => boolean) {
@@ -283,6 +315,7 @@ class CustomerServiceRealtimeService {
   }
 
   private assertConnectionCapacity(scope: RealtimeScope, ownerKey: string, sessionHash: string) {
+    this.pruneClosedSubscribers()
     if (this.subscribers.size >= CUSTOMER_SERVICE_REALTIME_POLICY.maxSubscribersPerProcess) throw new BizError('实时连接数量已达上限，请稍后重试', 503)
     if (this.countSubscribers((item) => item.scope === scope && item.sessionHash === sessionHash) >= CUSTOMER_SERVICE_REALTIME_POLICY.maxSubscribersPerSession) throw new BizError('当前会话已达到实时连接上限', 429)
     if (this.countSubscribers((item) => item.scope === scope && item.ownerKey === ownerKey) >= CUSTOMER_SERVICE_REALTIME_POLICY.maxSubscribersPerOwner) throw new BizError('当前账号已达到实时连接上限', 429)
@@ -350,6 +383,10 @@ class CustomerServiceRealtimeService {
   }
 
   private async revalidateActiveSubscribers(subscribers = Array.from(this.subscribers.values())) {
+    subscribers = subscribers.filter((subscriber) => {
+      if (this.isResponseClosed(subscriber.res)) this.removeSubscriber(subscriber.subscriberId)
+      return this.subscribers.has(subscriber.subscriberId)
+    })
     if (!subscribers.length) return new Set<string>()
     try {
       const validIds = await this.validateSubscribers(subscribers)
@@ -374,30 +411,53 @@ class CustomerServiceRealtimeService {
 
   private registerSubscriber(scope: RealtimeScope, ownerKey: string, sessionToken: string, res: Response, keepaliveSeconds: number, ticket: CustomerServiceRealtimeRegistrationTicket, initPayload?: CustomerServiceRealtimeInitPayloadResolver) {
     this.assertRegistrationTicket(ticket, scope, ownerKey, sessionToken)
-    const sessionHash = hashSessionToken(sessionToken)
-    const clientSessionKind: ClientSessionKind | null = scope === 'client'
-      ? (isMobileAccessToken(sessionToken) ? 'mobile' : 'web')
-      : null
-    this.assertConnectionCapacity(scope, ownerKey, sessionHash)
-    this.checkConnectRateLimit(scope, sessionHash)
     const subscriberId = this.buildSubscriberId(scope)
-    res.status(200)
-    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
-    res.setHeader('Cache-Control', 'no-cache, no-transform')
-    res.setHeader('Connection', 'keep-alive')
-    res.setHeader('X-Accel-Buffering', 'no')
-    res.flushHeaders()
-    const subscriber: CustomerServiceRealtimeSubscriber = { subscriberId, scope, clientSessionKind, ownerKey, sessionHash, res, heartbeatTimer: null, revalidateTimer: null, slowConsumerTimer: null, blocked: false }
-    this.subscribers.set(subscriberId, subscriber)
-    const sessionSnapshot = this.buildServiceSessionSnapshot()
-    const resolvedInitPayload = typeof initPayload === 'function' ? initPayload(sessionSnapshot) : initPayload
-    this.writeSseEvent(subscriber, 'connected', { eventType: 'connected', availability: resolvedInitPayload?.availability })
-    subscriber.heartbeatTimer = setInterval(() => this.writeSseEvent(subscriber, 'ping', { eventType: 'ping' }), Math.max(5, keepaliveSeconds) * 1000)
-    subscriber.heartbeatTimer.unref?.()
-    this.scheduleIdleRevalidation(subscriberId)
-    const cleanup = () => this.removeSubscriber(subscriberId)
+    const socket = res.socket
+    let closed = false
+    const detachListeners = () => {
+      res.off('close', cleanup)
+      res.off('error', cleanup)
+      res.off('finish', cleanup)
+      socket?.off('close', cleanup)
+    }
+    const cleanup = () => {
+      closed = true
+      this.removeSubscriber(subscriberId)
+      detachListeners()
+    }
+    // 配置/账号校验有异步窗口；必须先监听再检查，且先于headers、入表和首次写入。
     res.on('close', cleanup)
     res.on('error', cleanup)
+    res.on('finish', cleanup)
+    socket?.on('close', cleanup)
+    if (this.isResponseClosed(res)) { cleanup(); return }
+    try {
+      const sessionHash = hashSessionToken(sessionToken)
+      const clientSessionKind: ClientSessionKind | null = scope === 'client'
+        ? (isMobileAccessToken(sessionToken) ? 'mobile' : 'web')
+        : null
+      this.assertConnectionCapacity(scope, ownerKey, sessionHash)
+      this.checkConnectRateLimit(scope, sessionHash)
+      res.status(200)
+      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
+      res.setHeader('Cache-Control', 'no-cache, no-transform')
+      res.setHeader('Connection', 'keep-alive')
+      res.setHeader('X-Accel-Buffering', 'no')
+      res.flushHeaders()
+      if (closed || this.isResponseClosed(res)) { cleanup(); return }
+      const subscriber: CustomerServiceRealtimeSubscriber = { subscriberId, scope, clientSessionKind, ownerKey, sessionHash, res, heartbeatTimer: null, revalidateTimer: null, slowConsumerTimer: null, detachListeners, drainListener: null, blocked: false }
+      this.subscribers.set(subscriberId, subscriber)
+      const sessionSnapshot = this.buildServiceSessionSnapshot()
+      const resolvedInitPayload = typeof initPayload === 'function' ? initPayload(sessionSnapshot) : initPayload
+      if (!this.writeSseEvent(subscriber, 'connected', { eventType: 'connected', availability: resolvedInitPayload?.availability })) { cleanup(); return }
+      subscriber.heartbeatTimer = setInterval(() => {
+        if (this.isResponseClosed(res)) { cleanup(); return }
+        // 正常背压由既有慢消费者超时处理；心跳不得把一次 write(false) 误作断连。
+        if (!subscriber.blocked) this.writeSseEvent(subscriber, 'ping', { eventType: 'ping' })
+      }, Math.max(5, keepaliveSeconds) * 1000)
+      subscriber.heartbeatTimer.unref?.()
+      this.scheduleIdleRevalidation(subscriberId)
+    } catch (error) { cleanup(); throw error }
   }
 
   openClientStream(clientUserId: string, sessionToken: string, res: Response, keepaliveSeconds: number, ticket: CustomerServiceRealtimeRegistrationTicket, initPayload?: CustomerServiceRealtimeInitPayloadResolver) {
@@ -430,6 +490,7 @@ class CustomerServiceRealtimeService {
   }
 
   buildServiceSessionSnapshot(): CustomerServiceRealtimeSessionSnapshot {
+    this.pruneClosedSubscribers()
     const connections = Array.from(this.subscribers.values())
     return {
       currentConversationEventId: this.conversationEventSeed,

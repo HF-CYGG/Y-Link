@@ -38,6 +38,10 @@ const loadStatus = ref<'idle' | 'success' | 'error' | 'canceled'>('idle')
 const dashboardRequest = useStableRequest()
 const {
   analyticsLoading,
+  restockResult,
+  restockLoading,
+  restockError,
+  loadRestockRanking,
   analyticsError,
   ensureAnalyticsReady,
   trend,
@@ -58,6 +62,7 @@ const {
 const DashboardFilterBar = defineAsyncComponent(() => import('./components/DashboardFilterBar.vue'))
 const DashboardPieSection = defineAsyncComponent(() => import('./components/DashboardPieSection.vue'))
 const TrendChartCard = defineAsyncComponent(() => import('./components/TrendChartCard.vue'))
+const RestockRankingCard = defineAsyncComponent(() => import('./components/RestockRankingCard.vue'))
 const TopProductRankCard = defineAsyncComponent(() => import('./components/TopProductRankCard.vue'))
 const TopCustomerRankCard = defineAsyncComponent(() => import('./components/TopCustomerRankCard.vue'))
 
@@ -300,6 +305,7 @@ const ensureDashboardReady = () => {
 const retryLoadData = () => {
   void loadData()
   void loadAnalytics()
+  void loadRestockRanking()
 }
 
 
@@ -536,6 +542,7 @@ onActivated(() => {
             :loading="analyticsLoading"
             @update:options="handleRankOptionsChange"
           />
+          <RestockRankingCard :result="restockResult" :loading="restockLoading" :error="restockError" @retry="loadRestockRanking" />
           <TopCustomerRankCard
             :top-customers="topCustomers"
             :options="rankOptions"

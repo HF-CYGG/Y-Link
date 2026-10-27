@@ -50,7 +50,7 @@ for (const filename of fs.readdirSync(path.join(backendRoot, 'src', 'entities'))
     entityCheckCount += 1
   }
 }
-assert.ok(entityCheckCount >= 8, '实际实体 CHECK 数量低于已核对基线')
+assert.ok(entityCheckCount >= 10, '实际实体 CHECK 数量低于已核对基线')
 
 // 原始证据：output/admin-guide/migration/mysql-check-lab-utf8-b.tsv（MySQL 8.4.10 CHECK_CLAUSE 的 HEX）。
 // ck_biz_outbound_status 与真正失败的目标库 mysql-all-checks-b.tsv 字节一致。
@@ -63,8 +63,10 @@ const mysqlMetadataChecks = {
   ck_biz_outbound_order_item_positive: '((`line_no` >= 1) and (`qty` > 0) and (`unit_price` > 0) and (`line_amount` >= 0))',
   ck_biz_outbound_status: "(`status` in (_utf8mb4\\'active\\',_utf8mb4\\'merged\\'))",
   ck_order_merge_relation_distinct_orders: '(`parent_order_id` <> `source_order_id`)',
+  ck_restock_quantity_positive: '(`quantity` > 0)',
+  ck_restock_status: "(`status` in (_utf8mb4\\'requested\\',_utf8mb4\\'accepted\\',_utf8mb4\\'restocked\\',_utf8mb4\\'cancelled\\'))",
 }
-assert.equal(entityChecks.size, 8, '实体 CHECK 数量变化时必须更新真实 MySQL 元数据样本')
+assert.equal(entityChecks.size, 10, '实体 CHECK 数量变化时必须更新真实 MySQL 元数据样本')
 assert.deepEqual([...entityChecks.keys()].sort(), Object.keys(mysqlMetadataChecks).sort())
 for (const [name, actual] of Object.entries(mysqlMetadataChecks)) {
   const expectedNormalized = normalize(entityChecks.get(name))

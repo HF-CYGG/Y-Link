@@ -51,6 +51,8 @@ const SQLITE_REQUIRED_TABLES = [
   'biz_inbound_order',
   'biz_inbound_order_item',
   'client_feedback_conversation',
+  'client_restock_request',
+  'client_restock_request_key',
   'client_feedback_message',
   'client_feedback_attachment',
   'notification_rule',
@@ -344,6 +346,8 @@ const SQLITE_REQUIRED_CLIENT_FEEDBACK_CONVERSATION_COLUMNS = [
   'client_satisfaction_rated_at',
 ]
 const SQLITE_REQUIRED_CLIENT_FEEDBACK_MESSAGE_COLUMNS = ['internal_only', 'attachment_json']
+const SQLITE_REQUIRED_RESTOCK_COLUMNS = ['conversation_id', 'client_user_id', 'product_id', 'sku_id', 'product_name_snapshot', 'product_code_snapshot', 'sku_code_snapshot', 'spec_text_snapshot', 'quantity', 'latest_pickup_at', 'remark', 'status', 'handled_at', 'client_request_id', 'payload_digest', 'created_at', 'updated_at']
+const SQLITE_REQUIRED_RESTOCK_KEY_COLUMNS = ['client_user_id', 'client_request_id', 'payload_digest', 'restock_request_id', 'created_at']
 const SQLITE_REQUIRED_O2O_PREORDER_COLUMNS = [
   'client_request_id',
   'client_request_hash',
@@ -2126,6 +2130,32 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
   const clientFeedbackMessageColumnSet = await listSqliteTableColumns(dataSource, 'client_feedback_message')
   if (SQLITE_REQUIRED_CLIENT_FEEDBACK_MESSAGE_COLUMNS.some((column) => !clientFeedbackMessageColumnSet.has(column))) {
     return true
+  }
+
+  for (const [table, required] of [['client_restock_request', SQLITE_REQUIRED_RESTOCK_COLUMNS], ['client_restock_request_key', SQLITE_REQUIRED_RESTOCK_KEY_COLUMNS]] as const) {
+    const columns = await listSqliteTableColumns(dataSource, table)
+    if (required.some((column) => !columns.has(column))) return true
+  }
+  const restockIndexes = await listSqliteUniqueIndexes(dataSource, 'client_restock_request')
+  if (!restockIndexes.has('uk_restock_conversation') || !restockIndexes.has('uk_restock_client_request')) return true
+  if (!(await listSqliteUniqueIndexes(dataSource, 'client_restock_request_key')).has('uk_restock_key_client_request')) return true
+  for (const [index, expected] of [
+    ['uk_restock_conversation', ['conversation_id']],
+    ['uk_restock_client_request', ['client_user_id', 'client_request_id']],
+    ['uk_restock_key_client_request', ['client_user_id', 'client_request_id']],
+  ] as const) {
+    const columns = await dataSource.query(`PRAGMA index_info("${index}")`) as Array<{ seqno: number; name: string }>
+    if (columns.length !== expected.length || columns.some((column) => expected[Number(column.seqno)] !== column.name)) return true
+  }
+  for (const [table, column, referencedTable] of [
+    ['client_restock_request', 'conversation_id', 'client_feedback_conversation'],
+    ['client_restock_request', 'client_user_id', 'client_user'],
+    ['client_restock_request', 'product_id', 'base_product'],
+    ['client_restock_request', 'sku_id', 'base_product_sku'],
+    ['client_restock_request_key', 'client_user_id', 'client_user'],
+    ['client_restock_request_key', 'restock_request_id', 'client_restock_request'],
+  ] as const) {
+    if (!await hasSqliteForeignKeyShape(dataSource, table, { from: column, referencedTable, referencedColumn: 'id', onDelete: 'RESTRICT' })) return true
   }
 
   const o2oPreorderColumnSet = await listSqliteTableColumns(dataSource, 'o2o_preorder')
