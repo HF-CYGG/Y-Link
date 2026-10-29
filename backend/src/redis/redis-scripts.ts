@@ -178,3 +178,27 @@ if redis.call('GET', KEYS[1]) == ARGV[1] then
 end
 return 0
 `)
+
+/** 相邻两个固定窗口计数：KEYS[1]=当前窗口，KEYS[2]=上一窗口；ARGV=当前窗口键 TTL(ms)。返回 {current, previous}。 */
+const FIXED_WINDOW_PAIR_INCREMENT = defineScript(`
+local current = redis.call('INCR', KEYS[1])
+redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[1]))
+local previous = tonumber(redis.call('GET', KEYS[2]) or '0')
+return {current, previous}
+`)
+
+/**
+ * 近似滑动窗口计数：当前窗口计数 + 上一窗口计数 × 未过去的比例。
+ * 每个窗口只占一个整数键，计数不封顶，适合阈值可配置到很大的全站态势统计；不需要逐条精确时间戳的场景使用。
+ */
+export async function incrementApproxSlidingCounter(client: Redis, keyBase: string, windowMs: number, nowMs: number): Promise<number> {
+  const bucket = Math.floor(nowMs / windowMs)
+  const [current, previous] = await runRedisScript<[number, number]>(
+    client,
+    FIXED_WINDOW_PAIR_INCREMENT,
+    [`${keyBase}:${bucket}`, `${keyBase}:${bucket - 1}`],
+    [windowMs * 2],
+  )
+  const previousWeight = 1 - (nowMs - bucket * windowMs) / windowMs
+  return Math.floor(Number(current) + Number(previous) * previousWeight)
+}

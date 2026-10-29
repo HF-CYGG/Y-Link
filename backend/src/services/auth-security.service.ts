@@ -17,7 +17,7 @@ import { GLOBAL_LOGIN_FAILURE_POLICY } from '../config/load-protection-policy.js
 import { toRiskSourceKey } from '../utils/ip-subnet.js'
 import { AuditThrottle } from '../utils/audit-throttle.js'
 import { getRedisClient, isRedisEnabled, isRedisReady, recordRedisDegrade, redisKey } from '../redis/redis-client.js'
-import { REDIS_WINDOW_MAX_ENTRIES, runRedisScript, SLIDING_WINDOW_CONSUME } from '../redis/redis-scripts.js'
+import { incrementApproxSlidingCounter } from '../redis/redis-scripts.js'
 
 /** 管理端登录风控主体：`resolved` 为 false 表示账号不存在、subject 是输入原文，写审计前必须脱敏。 */
 export interface ResolvedLoginRiskSubject {
@@ -283,12 +283,8 @@ class GlobalLoginFailureMonitor {
     if (!client) return local
     try {
       const keys = this.clusterKeys(scope)
-      const [clusterFailures] = await runRedisScript<[number, number, number]>(
-        client,
-        SLIDING_WINDOW_CONSUME,
-        [keys.window],
-        [nowMs, GLOBAL_LOGIN_FAILURE_POLICY.windowMs, -1, `${nowMs}-${Math.random().toString(36).slice(2, 10)}`, REDIS_WINDOW_MAX_ENTRIES],
-      )
+      // 阈值可配置到十万、百万级：用不封顶的近似滑动窗口计数，避免逐条时间戳的窗口在 1000 条处饱和、永远达不到阈值。
+      const clusterFailures = await incrementApproxSlidingCounter(client, keys.window, GLOBAL_LOGIN_FAILURE_POLICY.windowMs, nowMs)
       if (clusterFailures < this.threshold(scope)) {
         return { activated: local.activated, recentFailures: Math.max(local.recentFailures, clusterFailures) }
       }
