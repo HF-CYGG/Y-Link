@@ -8,6 +8,7 @@
  * 维护说明：新增 O2O 管理写接口时，应在此脚本中补充对应的真实路由门禁断言。
  */
 
+import { resolveIssueVerificationRoot } from './issue-verification-paths.js'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -15,7 +16,7 @@ import { fileURLToPath } from 'node:url'
 
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
-const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
+const sqliteRoot = resolveIssueVerificationRoot(path.resolve(backendRoot, 'data', 'local-dev'))
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqlitePath = path.resolve(sqliteRoot, `o2o-governance-route-${verifySeed}.sqlite`)
 const adminPassword = `Admin_${verifySeed}_Zz9!`

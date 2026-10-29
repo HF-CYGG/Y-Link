@@ -1,4 +1,5 @@
 /** 管理端第二因素旧库升级验证：仅操作本脚本创建的隔离 SQLite 文件。 */
+import { resolveIssueVerificationRoot } from './issue-verification-paths.js'
 import assert from 'node:assert/strict'
 import { createHash, randomBytes } from 'node:crypto'
 import fs from 'node:fs'
@@ -12,7 +13,7 @@ assert.deepEqual(inherited, [], '隔离验证拒绝继承数据库、密钥或 e
 const backendRoot = path.resolve(process.cwd())
 assert.equal(fs.existsSync(path.join(backendRoot, '.env')), false)
 assert.equal(fs.existsSync(path.join(backendRoot, '.env.webauthn-compat-db-verify')), false)
-const fixtureRoot = path.resolve(backendRoot, '../tmp/webauthn-compat-db')
+const fixtureRoot = resolveIssueVerificationRoot(path.resolve(backendRoot, '../tmp/webauthn-compat-db'))
 fs.mkdirSync(fixtureRoot, { recursive: true })
 const runRoot = fs.mkdtempSync(path.join(fixtureRoot, 'run-'))
 process.env.NODE_ENV = 'test'

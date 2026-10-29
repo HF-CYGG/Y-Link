@@ -8,6 +8,7 @@
  * - 列表与查询：库位已关联规格、关联数、库存查询的库位筛选与分布；
  * - 商品编辑调低库存时按扣减规则规整分库位件数。
  */
+import { resolveIssueVerificationRoot } from './issue-verification-paths.js'
 import 'reflect-metadata'
 import assert from 'node:assert/strict'
 import { randomBytes } from 'node:crypto'
@@ -17,7 +18,7 @@ import { fileURLToPath } from 'node:url'
 import type { AuthUserContext } from '../src/types/auth.js'
 
 const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
+const sqliteRoot = resolveIssueVerificationRoot(path.resolve(backendRoot, 'data', 'local-dev'))
 const seed = `${Date.now()}-${randomBytes(8).toString('hex')}`
 const sqlitePath = path.resolve(sqliteRoot, `inventory-location-stock-${seed}.sqlite`)
 process.env.APP_PROFILE = `inventory-location-stock-${seed}`

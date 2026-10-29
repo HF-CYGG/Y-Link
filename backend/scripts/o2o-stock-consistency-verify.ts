@@ -11,6 +11,7 @@
  * - 本脚本只验证服务端一致性，不替代客户端购物车刷新或结算页提示的 UI 回归。
  */
 
+import { resolveIssueVerificationRoot } from './issue-verification-paths.js'
 import 'reflect-metadata'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -21,7 +22,7 @@ import type { ClientAuthContext } from '../src/types/client-auth.js'
 
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
-const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
+const sqliteRoot = resolveIssueVerificationRoot(path.resolve(backendRoot, 'data', 'local-dev'))
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqlitePath = path.resolve(sqliteRoot, `o2o-stock-consistency-${verifySeed}.sqlite`)
 

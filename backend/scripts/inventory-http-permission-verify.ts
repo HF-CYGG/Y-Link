@@ -8,6 +8,7 @@
  * 4) 无论成功失败都关闭服务并删除临时库。
  * 维护说明：新增库存接口时同步补充这里的越权用例；口令均为本轮随机生成，只用于临时库。
  */
+import { resolveIssueVerificationRoot } from './issue-verification-paths.js'
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
@@ -18,7 +19,7 @@ import ExcelJS from 'exceljs'
 import { requestLocalHttp } from './support/local-http-request.js'
 
 const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
+const sqliteRoot = resolveIssueVerificationRoot(path.resolve(backendRoot, 'data', 'local-dev'))
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqlitePath = path.resolve(sqliteRoot, `inventory-http-permission-${verifySeed}.sqlite`)
 const adminPassword = `Admin_${verifySeed}_Zz9!`

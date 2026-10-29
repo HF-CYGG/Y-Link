@@ -4,6 +4,7 @@
  * 实现逻辑：直接构造已核销预订单及其正式出库单，避免重复测试核销建单本身，聚焦合并后的身份与数据边界。
  */
 
+import { resolveIssueVerificationRoot } from './issue-verification-paths.js'
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
@@ -12,7 +13,7 @@ import type { AuthUserContext } from '../src/types/auth.js'
 import type { ClientAuthContext } from '../src/types/client-auth.js'
 
 const seed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
-const sqliteRoot = path.resolve(process.cwd(), 'data', 'local-dev')
+const sqliteRoot = resolveIssueVerificationRoot(path.resolve(process.cwd(), 'data', 'local-dev'))
 const sqlitePath = path.resolve(sqliteRoot, `order-merge-o2o-${seed}.sqlite`)
 process.env.APP_PROFILE = `order-merge-o2o-${seed}`
 process.env.DB_TYPE = 'sqlite'
