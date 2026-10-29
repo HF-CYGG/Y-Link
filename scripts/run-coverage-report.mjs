@@ -54,6 +54,11 @@ const kingdeeSfcTargets = [
   { generated: path.join(kingdeeBuildRoot, 'KingdeeRegistrationEditor-setup.mjs'), source: path.join(projectRoot, 'src/components/common/KingdeeRegistrationEditor.vue'), allowedSources: [kingdeeErrorSource, kingdeeRefreshSource] },
   { generated: path.join(kingdeeBuildRoot, 'ClientKingdeeReminder-setup.mjs'), source: path.join(projectRoot, 'src/views/client/components/ClientKingdeeReminder.vue'), allowedSources: [kingdeeRefreshSource] },
   { generated: path.join(kingdeeBuildRoot, 'kingdee-freshness.mjs'), source: path.join(projectRoot, 'src/utils/kingdee-freshness.ts') },
+  { generated: path.join(kingdeeBuildRoot, 'O2oVerifyConsoleView-setup.mjs'), source: path.join(projectRoot, 'src/views/o2o/O2oVerifyConsoleView.vue'), allowedSources: [
+    kingdeeErrorSource, kingdeeRefreshSource, path.join(projectRoot, 'src/composables/useStableRequest.ts'),
+    path.join(projectRoot, 'src/composables/usePermissionAction.ts'), path.join(projectRoot, 'src/utils/permission.ts'),
+    path.join(projectRoot, 'src/constants/o2o-order-status.ts'), path.join(projectRoot, 'src/views/o2o/o2o-verify-console.helpers.ts'),
+  ] },
 ]
 const markerBySource = new Map([
   ['src/components/account/AdminWebAuthnDialog.vue', 'form.name = credential.name'],
@@ -186,7 +191,7 @@ const SUITES = [
     ],
   },
   {
-    title: '金蝶编辑提醒与独立版本真实行为覆盖率',
+    title: '金蝶编辑提醒、核销目标与独立版本真实行为覆盖率',
     cwd: projectRoot,
     rawReportPath: path.join(rawReportRoot, 'frontend-kingdee.lcov'),
     rawV8Directory: path.join(rawReportRoot, 'v8-kingdee'),
@@ -196,7 +201,10 @@ const SUITES = [
       '--test-coverage-exclude=tmp/coverage-vue-kingdee/OrderVoucherTemplate-setup.mjs',
       '--test-coverage-exclude=tmp/coverage-vue-kingdee/client-order-summary.mjs',
       '--test-coverage-exclude=tmp/coverage-vue-kingdee/kingdee-status.mjs',
+      // 仅认证测试准备的生成产物；生产认证源码仍按原规则统计和扫描。
+      '--test-coverage-exclude=tmp/coverage-vue-kingdee/VerifyConsoleAuthStore.mjs',
       'scripts/coverage-vue-kingdee.test.mjs',
+      'scripts/coverage-vue-o2o-verify.test.mjs',
     ],
   },
 ]
@@ -479,7 +487,7 @@ const verifyKingdeeImportProbe = async (sourceHashes) => {
     cwd: projectRoot, env: { ...process.env, NODE_V8_COVERAGE: rawDirectory },
   })
   const mapped = mapV8SfcCoverage({ rawDirectory, targets: kingdeeSfcTargets })
-  const markers = ['if (busy.value || conflictVersion.value', 'if (!id || !auth.initialized', 'const known = session.registrations.get(id)']
+  const markers = ['if (busy.value || conflictVersion.value', 'if (!id || !auth.initialized', 'const known = session.registrations.get(id)', 'const orderId = preorderDetail.value?.order.id']
   for (const [index, target] of kingdeeSfcTargets.entries()) {
     const line = fs.readFileSync(target.source, 'utf8').split(/\r?\n/).findIndex((text) => text.includes(markers[index])) + 1
     if (line < 1 || mapped.bySource.get(target.source)?.get(line) !== 0) throw new Error(`金蝶未调用源码被记为命中：${target.source}`)

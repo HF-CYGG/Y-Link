@@ -15,6 +15,9 @@ const knownBehaviorBoundaries = new Set([
   '\\0behavior:@/components/common', '\\0behavior:@/api/modules/inventory', '\\0behavior:@/utils/app-alert',
   '\\0behavior:./BarcodeLabelCard.vue', '\\0behavior:router', '\\0behavior:@/store',
   '\\0behavior:@/store/pinia', '\\0behavior:@/api/modules/o2o',
+  '\\0behavior:element-plus', '\\0behavior:@element-plus/icons-vue',
+  '\\0behavior:@/composables/useDevice', '\\0behavior:@/composables/useCameraQrScanner',
+  '\\0behavior:@/api/modules/product', '\\0behavior:@/components/common/KingdeeRegistrationEditor.vue',
 ])
 export const isKnownCoverageBehaviorBoundary = (id) => knownBehaviorBoundaries.has(id)
 

@@ -12,7 +12,7 @@ import { rolldown } from 'rolldown'
 import { createRenderer, h, nextTick, reactive } from 'vue'
 import { code128BarcodePlugin } from './code128-barcode-module.mjs'
 export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-export const host = { api: {}, warnings: [], errors: [], tick: null, auth: null, navigations: [], refreshes: [] }
+export const host = { api: {}, warnings: [], errors: [], successes: [], tick: null, auth: null, route: null, confirm: null, navigations: [], refreshes: [] }
 globalThis.__ylinkBehavior = host
 const sharedFreshnessPath = path.join(root, 'tmp/coverage-vue-kingdee/kingdee-freshness.mjs')
 const compiled = new Map()
@@ -41,18 +41,28 @@ export async function compileBehaviorSfc(relative, output) {
         if (id === '@/utils/error') return path.join(root, 'src/utils/error.ts')
         if (id === '@/utils/client-order-refresh') return path.join(root, 'src/utils/client-order-refresh.ts')
         if (id === 'vue-router') return '\0behavior:router'
+        if (relative === 'src/views/o2o/O2oVerifyConsoleView.vue' && ['element-plus', '@element-plus/icons-vue', '@/composables/useDevice', '@/composables/useCameraQrScanner', '@/api/modules/product'].includes(id)) return `\0behavior:${id}`
+        if (relative === 'src/views/o2o/O2oVerifyConsoleView.vue' && [
+          '@/composables/useStableRequest', '@/composables/usePermissionAction', '@/utils/permission',
+          '@/constants/o2o-order-status', '@/views/o2o/o2o-verify-console.helpers',
+        ].includes(id)) return path.join(root, 'src', id.slice(2) + '.ts')
         if (['@/components/common','@/api/modules/inventory','@/utils/app-alert','@/api/modules/o2o','@/store','@/store/pinia'].includes(id) || id.endsWith('.vue')) return `\0behavior:${id}`
         if (id.startsWith('@/')) return path.join(root, 'src', id.slice(2))
       },
       load(id) {
         if (id === sourcePath) return { code: script.content, map: script.map, moduleType: 'ts' }
-        if (id === '\0behavior:@/components/common') return 'export const BizCrudDialogShell = {}; export const PassiveNumberInput = {}'
+        if (id === '\0behavior:@/components/common') return ['BizCrudDialogShell', 'PassiveNumberInput', 'BizO2oItemSpecText', 'PageContainer', 'UnifiedScanDialog'].map((name) => `export const ${name} = {}`).join('\n')
         if (id === '\0behavior:@/api/modules/inventory') return 'export const getProductLabels = (...args) => globalThis.__ylinkBehavior.api.getProductLabels(...args)'
-        if (id === '\0behavior:@/utils/app-alert') return 'export const showAppError = (...args) => globalThis.__ylinkBehavior.errors.push(args[0]); export const showAppWarning = (...args) => globalThis.__ylinkBehavior.warnings.push(args[0])'
-        if (id === '\0behavior:@/api/modules/o2o') return ['getMyKingdeeTodos','getO2oConsoleOrderDetail','getO2oPreorderDetail','updateAdminKingdeeRegistration','updateMyKingdeeRegistration'].map((name) => `export const ${name} = (...args) => globalThis.__ylinkBehavior.api.${name}(...args)`).join('\n')
-        if (id === '\0behavior:@/store') return 'export const useClientAuthStore = () => globalThis.__ylinkBehavior.auth'
+        if (id === '\0behavior:@/utils/app-alert') return 'export const showAppError = (...args) => globalThis.__ylinkBehavior.errors.push(args[0]); export const showAppWarning = (...args) => globalThis.__ylinkBehavior.warnings.push(args[0]); export const showAppSuccess = (...args) => globalThis.__ylinkBehavior.successes.push(args[0])'
+        if (id === '\0behavior:@/api/modules/o2o') return ['getMyKingdeeTodos','getO2oConsoleOrderDetail','getO2oPreorderDetail','updateAdminKingdeeRegistration','updateMyKingdeeRegistration','getO2oVerifyDetail','getO2oVerifyDetailByPreorderNo','rejectO2oReturnRequest','updateO2oOrderComplianceFlags','updateO2oOrderOnsite','verifyO2oPreorder'].map((name) => `export const ${name} = (...args) => globalThis.__ylinkBehavior.api.${name}(...args)`).join('\n')
+        if (id === '\0behavior:@/store') return 'export const useClientAuthStore = () => globalThis.__ylinkBehavior.auth; export const useAuthStore = () => globalThis.__ylinkBehavior.auth'
         if (id === '\0behavior:@/store/pinia') return 'export default {}'
-        if (id === '\0behavior:router') return 'export const useRouter = () => ({ push: async (url) => { globalThis.__ylinkBehavior.navigations.push(url) } })'
+        if (id === '\0behavior:router') return 'export const useRouter = () => ({ push: async (url) => { globalThis.__ylinkBehavior.navigations.push(url) } }); export const useRoute = () => globalThis.__ylinkBehavior.route'
+        if (id === '\0behavior:element-plus') return 'export const ElMessageBox = { confirm: (...args) => globalThis.__ylinkBehavior.confirm(...args) }'
+        if (id === '\0behavior:@element-plus/icons-vue') return 'export const CameraFilled = {}; export const DocumentCopy = {}; export const Search = {}'
+        if (id === '\0behavior:@/composables/useDevice') return 'import { ref } from "vue"; export const useDevice = () => ({ isPhone: ref(false) })'
+        if (id === '\0behavior:@/composables/useCameraQrScanner') return 'import { ref } from "vue"; export const useCameraQrScanner = () => ({ imageInputRef: ref(null), bindScannerContainer: () => {}, isSecureCameraContext: ref(true), scanModeLabel: ref("隔离摄像头"), scanButtonTitle: ref("扫码"), scanDialogVisible: ref(false), scanLoading: ref(false), scanStatusText: ref(""), closeScanDialog: () => {}, handleImageInputChange: () => {}, openScanDialog: () => {} })'
+        if (id === '\0behavior:@/api/modules/product') return 'export const getProductList = (...args) => globalThis.__ylinkBehavior.api.getProductList(...args)'
         if (id.startsWith('\0behavior:') && id.endsWith('.vue')) return 'export default {}'
         if (id.startsWith('\0behavior:')) throw new Error(`未声明的平台依赖 ${id}`)
       },
@@ -152,7 +162,7 @@ export const withBrowser = async (run) => {
   const replacements = {
     document,
     window: { addEventListener: (type, listener) => { if (!listeners.has(type)) listeners.set(type, new Set()); listeners.get(type).add(listener) }, removeEventListener: (type, listener) => listeners.get(type)?.delete(listener), dispatchEvent: (event) => { for (const listener of [...(listeners.get(event.type) ?? [])]) listener(event); return true } },
-    localStorage: { getItem: (key) => saved.get(key) ?? null, setItem: (key, value) => saved.set(key, value) },
+    localStorage: { getItem: (key) => saved.get(key) ?? null, setItem: (key, value) => saved.set(key, value), removeItem: (key) => saved.delete(key) },
     addEventListener: (type, callback) => {
       if (!listeners.has(type)) listeners.set(type, new Set())
       listeners.get(type).add(callback)

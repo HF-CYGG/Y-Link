@@ -7,6 +7,7 @@
  * - 查询接口返回“预订单 / 退货申请”联合结果后，页面按真实单据类型切换展示卡片、表格与按钮文案；
  * - 对待处理退货申请开放“拒绝”弹窗，对待核销预订单开放“现场改单”面板，并在成功后原位刷新当前单据详情；
  * - 预订单详情区同步展示总金额、总件数等关键统计，便于门店核对改单后的最终出库金额；
+ * - 金蝶登记刷新使用独立稳定请求通道，并绑定查询目标代次，查询开始、清空与离页后旧响应不得切回核销目标；
  * - 所有前端提示文案都与后端实际业务含义保持一致，避免门店误把退货码当取货码处理。
  * 维护说明：
  * - 若后端扩展新的核销目标类型，必须同步补充本文件的类型守卫、状态映射和模板分支；
@@ -82,6 +83,12 @@ const route = useRoute()
 const { hasPermission, ensurePermission } = usePermissionAction()
 const verifyDetailRequest = useStableRequest()
 const productCatalogRequest = useStableRequest()
+const kingdeeDetailRequest = useStableRequest()
+let verifyTargetGeneration = 0
+const invalidateKingdeeDetail = () => {
+  verifyTargetGeneration += 1
+  kingdeeDetailRequest.cancel()
+}
 const lastRouteVerifyKey = ref('')
 
 interface OnsiteProductOption {
@@ -141,7 +148,19 @@ const canOpenOnsiteAdjust = computed(() => {
 })
 
 const canEditComplianceFlags = computed(() => hasPermission('orders:update'))
-const refreshKingdeeDetail = async () => { if (preorderDetail.value) replacePreorderDetail(await getO2oConsoleOrderDetail(preorderDetail.value.order.id)) }
+const refreshKingdeeDetail = async () => {
+  const orderId = preorderDetail.value?.order.id
+  if (!orderId || loading.value) return
+  const generation = verifyTargetGeneration
+  const isCurrentTarget = () => generation === verifyTargetGeneration && String(preorderDetail.value?.order.id ?? '') === String(orderId)
+  await kingdeeDetailRequest.runLatest({
+    executor: (signal) => getO2oConsoleOrderDetail(orderId, { signal }),
+    onSuccess: (detail) => { if (isCurrentTarget()) replacePreorderDetail(detail) },
+    onError: (error) => {
+      if (isCurrentTarget()) showAppError(error instanceof Error ? error.message : '金蝶登记详情刷新失败，请稍后重试')
+    },
+  })
+}
 const isDepartmentPreorder = computed(() => preorderDetail.value?.order.clientOrderType === 'department')
 const canVerifyAction = computed(() => canVerifyStatus.value && hasPermission('orders:create'))
 const canSearch = computed(() => !loading.value && !submitting.value)
@@ -397,6 +416,7 @@ const handleSearch = async () => {
   }
   verifyCode.value = normalizedCode
 
+  invalidateKingdeeDetail()
   loading.value = true
   await verifyDetailRequest.runLatest({
     executor: () =>
@@ -811,9 +831,11 @@ watch(
   () => verifyCode.value,
   (value) => {
     if (!value.trim()) {
+      invalidateKingdeeDetail()
       verifyResult.value = null
     }
   },
+  { flush: 'sync' },
 )
 
 watch(
