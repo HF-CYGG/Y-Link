@@ -35,6 +35,7 @@ import { persistentRiskStateService } from './persistent-risk-state.service.js'
 import { notificationService } from './notification.service.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
+import { runExclusive } from '../redis/redis-lease.js'
 
 const ACCESS_ACTIVITY_WRITE_INTERVAL_MS = 60 * 1000
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000
@@ -1030,7 +1031,8 @@ export class MobileSessionService {
   private startCleanupTimer() {
     if (databaseOperationGate.isFrozen() || this.cleanupLoopTimer) return
     this.cleanupLoopTimer = globalThis.setInterval(() => {
-      void this.runCleanupCycle().catch(() => undefined)
+      // 多实例时同一轮只由抢到租约的实例执行；Redis 未启用或降级时各实例照常执行，正确性由数据库行锁兜底。
+      void runExclusive('job:mobile-session-cleanup', 60_000, () => this.runCleanupCycle()).catch(() => undefined)
     }, CLEANUP_INTERVAL_MS)
   }
 

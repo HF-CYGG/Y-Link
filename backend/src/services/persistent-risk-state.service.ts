@@ -14,9 +14,15 @@
  *   结论有效期内的后续请求直接拒绝、不读写数据库；攻击流量恰好集中在这些被拒绝的桶上。
  *   数据库仍是唯一事实来源：缓存只会让本实例多拒绝到结论自然到期为止，不会放行本应拒绝的请求，
  *   本实例内的回退、清零与重置会同步失效对应缓存。
+ * - 配置独立 Redis 且连接就绪时，限流窗口与失败计数改走 Redis Lua 原子脚本（ZSET 滑动窗口 / HASH 失败计数），
+ *   不再为每个请求开 MySQL 写事务；Redis 不可用或单条命令失败时回落到下方数据库实现，判定口径保持一致。
+ *   Redis 键沿用同一个 SHA-256 桶摘要，不出现原始账号、手机号或 IP。
+ * - prepareWindow / consumePreparedWindow 服务于 Mobile refresh“先锁会话、再在同一事务内锁限流桶”的顺序语义，
+ *   始终走数据库，不切换到 Redis。
  */
 
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
+import type { Redis } from 'ioredis'
 import { LessThanOrEqual, type EntityManager } from 'typeorm'
 import type { ClientRateLimitInfo, Options, Store } from 'express-rate-limit'
 import { AppDataSource } from '../config/data-source.js'
@@ -25,6 +31,17 @@ import { databaseOperationGate } from '../database/operation-gate.js'
 import { AuthRiskState } from '../entities/auth-risk-state.entity.js'
 import { isRetryableTransactionLockError } from '../utils/database-errors.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
+import { getRedisClient, isRedisEnabled, isRedisReady, recordRedisDegrade, redisKey } from '../redis/redis-client.js'
+import {
+  FAILURE_READ,
+  FAILURE_RECORD,
+  REDIS_WINDOW_MAX_ENTRIES,
+  runRedisScript,
+  SLIDING_WINDOW_CONSUME,
+  SLIDING_WINDOW_DECREMENT,
+  SLIDING_WINDOW_READ,
+} from '../redis/redis-scripts.js'
+import { runExclusive } from '../redis/redis-lease.js'
 
 export interface PersistentFailureState {
   count: number
@@ -86,6 +103,30 @@ const LOCK_RETRY_ATTEMPTS = 3
 const STATE_ROW_LOAD_ATTEMPTS = 3
 
 const digestBucketKey = (bucketKey: string) => createHash('sha256').update(bucketKey).digest('hex')
+
+const redisRiskKey = (bucketDigest: string) => redisKey('risk', bucketDigest)
+
+/** 未降级时返回 Redis 结果；返回 undefined 表示应回落数据库。 */
+async function tryRedis<T>(scope: string, operation: (client: Redis) => Promise<T>): Promise<{ value: T } | undefined> {
+  if (!isRedisEnabled()) return undefined
+  const client = getRedisClient()
+  if (!client || !isRedisReady()) {
+    recordRedisDegrade(`风控状态 ${scope}`)
+    return undefined
+  }
+  try {
+    return { value: await operation(client) }
+  } catch (error) {
+    recordRedisDegrade(`风控状态 ${scope}`, error)
+    return undefined
+  }
+}
+
+/**
+ * express-rate-limit 是否挂载共享 Store：MySQL（数据库共享桶）或已配置 Redis（Redis 优先、数据库兜底）时挂载；
+ * 纯 SQLite 单实例保持 express-rate-limit 自带的有界内存桶，避免匿名请求争用唯一写槽。
+ */
+export const shouldUseSharedRateLimitStore = (): boolean => AppDataSource.options.type === 'mysql' || isRedisEnabled()
 
 const parseTimestamps = (value: string | null): number[] => {
   if (!value) return []
@@ -230,7 +271,17 @@ class PersistentRiskStateService {
         return { totalHits: maxRequests + 1, resetTime: cachedResetTime, deniedFromCache: true }
       }
     }
-    const result = await this.runWithLockRetry(() =>
+    const redisResult = await tryRedis('consumeWindow', async (client) => {
+      const member = `${nowMs}-${randomBytes(6).toString('hex')}`
+      const [totalHits, resetAtMs] = await runRedisScript<[number, number, number]>(
+        client,
+        SLIDING_WINDOW_CONSUME,
+        [redisRiskKey(bucketDigest)],
+        [nowMs, windowMs, maxRequests ?? -1, member, REDIS_WINDOW_MAX_ENTRIES],
+      )
+      return { totalHits, resetTime: new Date(resetAtMs) }
+    })
+    const result = redisResult?.value ?? await this.runWithLockRetry(() =>
       runInTransaction(async (manager) => {
         const state = await this.loadLockedState(
           manager,
@@ -318,6 +369,13 @@ class PersistentRiskStateService {
   async readWindow(bucketKey: string, windowMs: number, nowMs = Date.now()): Promise<ClientRateLimitInfo | undefined> {
     const repository = AppDataSource.getRepository(AuthRiskState)
     const bucketDigest = digestBucketKey(`rate_limit:${bucketKey}`)
+    const redisResult = await tryRedis('readWindow', async (client) => {
+      const [totalHits, resetAtMs] = await runRedisScript<[number, number]>(
+        client, SLIDING_WINDOW_READ, [redisRiskKey(bucketDigest)], [nowMs, windowMs],
+      )
+      return totalHits > 0 ? { totalHits, resetTime: new Date(resetAtMs) } : undefined
+    })
+    if (redisResult) return redisResult.value
     const state = await repository.findOne({ where: { bucketDigest, stateType: 'rate_limit' } })
     if (!state) return undefined
     const activeTimestamps = parseTimestamps(state.requestTimestampsJson)
@@ -336,6 +394,10 @@ class PersistentRiskStateService {
     const bucketDigest = digestBucketKey(`rate_limit:${bucketKey}`)
     // 回退会腾出名额，本实例的超限结论随之失效。
     this.rateLimitDenials.delete(bucketDigest)
+    const redisResult = await tryRedis('decrementWindow', (client) => runRedisScript<number>(
+      client, SLIDING_WINDOW_DECREMENT, [redisRiskKey(bucketDigest)], [nowMs, windowMs],
+    ))
+    if (redisResult) return
     await this.runWithLockRetry(() =>
       runInTransaction(async (manager) => {
         const repository = manager.getRepository(AuthRiskState)
@@ -360,6 +422,7 @@ class PersistentRiskStateService {
   async resetWindow(bucketKey: string): Promise<void> {
     const bucketDigest = digestBucketKey(`rate_limit:${bucketKey}`)
     this.rateLimitDenials.delete(bucketDigest)
+    if (await tryRedis('resetWindow', (client) => client.del(redisRiskKey(bucketDigest)))) return
     await AppDataSource.getRepository(AuthRiskState).delete({ bucketDigest })
   }
 
@@ -368,6 +431,24 @@ class PersistentRiskStateService {
     const bucketDigest = digestBucketKey(`login_failure:${bucketKey}`)
     const cachedLock = this.failureLocks.get(bucketDigest, nowMs)
     if (cachedLock) return { ...cachedLock }
+    const redisResult = await tryRedis('readFailure', async (client) => {
+      const values = await runRedisScript<number[]>(client, FAILURE_READ, [redisRiskKey(bucketDigest)], [nowMs, resetWindowMs])
+      if (values.length < 4) return null
+      const [count, firstFailedAt, lastFailedAt, lockedUntil] = values
+      return { count, firstFailedAt, lastFailedAt, lockedUntil } satisfies PersistentFailureState
+    })
+    if (redisResult) {
+      let redisState = redisResult.value
+      if (!redisState || redisState.lockedUntil <= nowMs) {
+        // Redis 故障期间任一实例都可能把锁定写进数据库；恢复后 Redis 里没有这条锁定，
+        // 必须补读数据库，否则切换到未缓存该锁定的实例即可绕过尚未到期的账号锁定。
+        redisState = await this.readDatabaseFailureLock(bucketDigest, nowMs) ?? redisState
+      }
+      if (redisState && redisState.lockedUntil > nowMs) {
+        this.failureLocks.set(bucketDigest, redisState.lockedUntil, redisState, nowMs)
+      }
+      return redisState ? { ...redisState } : null
+    }
     const state = await repository.findOne({ where: { bucketDigest, stateType: 'login_failure' } })
     if (!state?.lastFailedAt) return null
     const lockedUntil = state.lockedUntil?.getTime() ?? 0
@@ -387,6 +468,45 @@ class PersistentRiskStateService {
     return result
   }
 
+  /**
+   * Redis 就绪时的兜底：只按主键读取数据库中仍然有效的锁定（降级期间写入），不加锁、不写入。
+   * 数据库读取失败时不影响 Redis 判定，只记录一次降级日志。
+   */
+  private async readDatabaseFailureLock(bucketDigest: string, nowMs: number): Promise<PersistentFailureState | null> {
+    try {
+      const state = await AppDataSource.getRepository(AuthRiskState).findOne({ where: { bucketDigest, stateType: 'login_failure' } })
+      const lockedUntil = state?.lockedUntil?.getTime() ?? 0
+      if (!state?.lastFailedAt || lockedUntil <= nowMs) return null
+      return {
+        count: state.failureCount,
+        firstFailedAt: state.firstFailedAt?.getTime() ?? state.lastFailedAt.getTime(),
+        lastFailedAt: state.lastFailedAt.getTime(),
+        lockedUntil,
+      }
+    } catch (error) {
+      console.warn('[risk-state] 读取数据库兜底锁定失败', error instanceof Error ? error.message : error)
+      return null
+    }
+  }
+
+  /** 把 Redis 中刚触发的锁定写入数据库；写入失败只记日志，不影响本次已在 Redis 生效的锁定。 */
+  private async mirrorFailureLockToDatabase(bucketDigest: string, state: PersistentFailureState, resetWindowMs: number): Promise<void> {
+    try {
+      await AppDataSource.getRepository(AuthRiskState).save({
+        bucketDigest,
+        stateType: 'login_failure',
+        requestTimestampsJson: null,
+        failureCount: state.count,
+        firstFailedAt: new Date(state.firstFailedAt),
+        lastFailedAt: new Date(state.lastFailedAt),
+        lockedUntil: new Date(state.lockedUntil),
+        expiresAt: new Date(Math.max(state.lastFailedAt + resetWindowMs, state.lockedUntil)),
+      })
+    } catch (error) {
+      console.warn('[risk-state] 锁定镜像到数据库失败', error instanceof Error ? error.message : error)
+    }
+  }
+
   async recordFailure(
     bucketKey: string,
     resetWindowMs: number,
@@ -396,7 +516,17 @@ class PersistentRiskStateService {
   ): Promise<PersistentFailureState> {
     const now = new Date(nowMs)
     const bucketDigest = digestBucketKey(`login_failure:${bucketKey}`)
-    const result = await this.runWithLockRetry(() =>
+    const redisResult = await tryRedis('recordFailure', async (client) => {
+      const [count, firstFailedAt, lastFailedAt, lockedUntil] = await runRedisScript<[number, number, number, number]>(
+        client, FAILURE_RECORD, [redisRiskKey(bucketDigest)], [nowMs, resetWindowMs, lockThreshold, lockMs],
+      )
+      return { count, firstFailedAt, lastFailedAt, lockedUntil } satisfies PersistentFailureState
+    })
+    if (redisResult && redisResult.value.lockedUntil > nowMs) {
+      // 只在触发锁定时镜像到数据库：Redis 随后故障时，回落数据库的实例仍能看到这条锁定，不能借降级绕过。
+      await this.mirrorFailureLockToDatabase(bucketDigest, redisResult.value, resetWindowMs)
+    }
+    const result = redisResult?.value ?? await this.runWithLockRetry(() =>
       runInTransaction(async (manager) => {
         const state = await this.loadLockedState(
           manager,
@@ -435,6 +565,15 @@ class PersistentRiskStateService {
   async resetFailure(bucketKey: string): Promise<void> {
     const bucketDigest = digestBucketKey(`login_failure:${bucketKey}`)
     this.failureLocks.delete(bucketDigest)
+    if (await tryRedis('resetFailure', (client) => client.del(redisRiskKey(bucketDigest)))) {
+      // 数据库里可能有触发锁定时的镜像或降级期间的计数，一并清除；否则 Redis 再次故障时旧计数会复活。
+      try {
+        await AppDataSource.getRepository(AuthRiskState).delete({ bucketDigest })
+      } catch (error) {
+        console.warn('[risk-state] 清除数据库失败状态失败', error instanceof Error ? error.message : error)
+      }
+      return
+    }
     await AppDataSource.getRepository(AuthRiskState).delete({ bucketDigest })
   }
 
@@ -482,7 +621,7 @@ class PersistentRiskStateService {
       if (databaseMaintenanceModeService.isReadOnly()) {
         return
       }
-      void this.cleanupExpired().catch(() => undefined)
+      void runExclusive('job:risk-state-cleanup', 60_000, () => this.cleanupExpired()).catch(() => undefined)
     }, CLEANUP_INTERVAL_MS)
   }
 
@@ -501,6 +640,10 @@ class PersistentRiskStateService {
 
 export const persistentRiskStateService = new PersistentRiskStateService()
 
+/**
+ * express-rate-limit 共享 Store：委托 persistentRiskStateService，Redis 就绪时走 Redis，否则走数据库共享桶。
+ * 类名沿用历史命名，挂载条件统一使用 shouldUseSharedRateLimitStore()。
+ */
 export class DatabaseRateLimitStore implements Store {
   localKeys = false
   readonly prefix: string

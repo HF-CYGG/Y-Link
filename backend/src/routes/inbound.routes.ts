@@ -14,8 +14,7 @@ import { createPermanentDeleteLimiter, createPermanentDeletePasswordGuard } from
 import type { AuthenticatedRequest } from '../types/auth.js'
 import { MAX_DATABASE_INT, MAX_INBOUND_ORDER_ITEM_COUNT } from '../constants/web-resource-limits.js'
 import { rateLimit } from 'express-rate-limit'
-import { DatabaseRateLimitStore } from '../services/persistent-risk-state.service.js'
-import { AppDataSource } from '../config/data-source.js'
+import { DatabaseRateLimitStore, shouldUseSharedRateLimitStore } from '../services/persistent-risk-state.service.js'
 import { auditService } from '../services/audit.service.js'
 
 export const inboundRouter = Router()
@@ -84,7 +83,7 @@ const verifiedSupplierDeleteLimiter = rateLimit({
   standardHeaders: 'draft-8',
   legacyHeaders: false,
   keyGenerator: (req) => `supplier:${(req as AuthenticatedRequest).auth.userId ?? 'unknown'}`,
-  ...(AppDataSource.options.type === 'mysql'
+  ...(shouldUseSharedRateLimitStore()
     ? { store: new DatabaseRateLimitStore('express-inbound-verified-delete') }
     : {}),
   handler: async (req, res) => {

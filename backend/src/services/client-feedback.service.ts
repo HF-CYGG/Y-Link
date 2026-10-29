@@ -55,6 +55,8 @@ import {
   type CustomerServiceRealtimeSessionSnapshot,
 } from './customer-service-realtime.service.js'
 import { systemConfigService } from './system-config.service.js'
+import { persistentRiskStateService } from './persistent-risk-state.service.js'
+import { isRedisEnabled } from '../redis/redis-client.js'
 import { notificationService } from './notification.service.js'
 import { ClientFeedbackAttachment } from '../entities/client-feedback-attachment.entity.js'
 import { ClientRestockRequest, type RestockEffectiveStatus } from '../entities/client-restock-request.entity.js'
@@ -69,6 +71,7 @@ import {
   lockActiveSysAccountForBusiness,
   lockActiveSysAccountsForBusiness,
 } from './account-business-guard.service.js'
+import { runExclusive } from '../redis/redis-lease.js'
 
 const MYSQL_FEEDBACK_ATTACHMENT_COORDINATION_LOCK = 'ylink:feedback:attachment-quota-cleanup'
 const MYSQL_FEEDBACK_ATTACHMENT_LOCK_TIMEOUT_SECONDS = 5
@@ -433,8 +436,20 @@ class ClientFeedbackService {
    * - 路由必须在 multer 接收文件、sharp 解码重编码之前调用，失败的上传同样计次；
    * - 若只在建档阶段计次，校验失败的大图永远不会消耗额度，单个账号即可反复占满全局图片处理队列。
    */
-  consumeAttachmentUploadRate(clientUserId: string) {
+  async consumeAttachmentUploadRate(clientUserId: string) {
     const now = Date.now()
+    if (isRedisEnabled()) {
+      // 多实例共享计数：Redis 优先、数据库兜底，避免 N 个实例把每账号额度放大 N 倍。
+      const limit = CLIENT_FEEDBACK_ATTACHMENT_POLICY.uploadRateLimit
+      const result = await persistentRiskStateService.consumeWindow(
+        `feedback-attachment-upload:${clientUserId}`,
+        CLIENT_FEEDBACK_ATTACHMENT_POLICY.uploadRateWindowMs,
+        now,
+        limit,
+      )
+      if (result.totalHits > limit) throw new BizError('反馈附件上传过于频繁，请稍后重试', 429)
+      return
+    }
     const previous = this.attachmentUploadRateWindows.get(clientUserId)
     const window = previous && now - previous.startedAt < CLIENT_FEEDBACK_ATTACHMENT_POLICY.uploadRateWindowMs
       ? previous
@@ -843,8 +858,9 @@ class ClientFeedbackService {
   private startAttachmentCleanupTimer(): void {
     if (databaseOperationGate.isFrozen() || this.attachmentCleanupTimer !== null) return
     const trigger = () => {
-      void this.runAttachmentCleanupOnce().then((result) => {
-        if (result.anomalies.length) {
+      // 多实例时同一轮只由抢到租约的实例执行（前提是各实例共享上传目录）；Redis 未启用或降级时各实例照常执行。
+      void runExclusive('job:feedback-attachment-cleanup', 60_000, () => this.runAttachmentCleanupOnce()).then(({ value: result }) => {
+        if (result?.anomalies.length) {
           console.warn(`[client-feedback-attachment] 清理发现 ${result.anomalies.length} 个不确定项，均已保留`)
         }
       }).catch((error) => {

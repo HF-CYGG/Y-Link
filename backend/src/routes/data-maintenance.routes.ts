@@ -26,6 +26,10 @@ import { EXISTING_PASSWORD_INPUT_MAX_LENGTH } from '../constants/auth-input-limi
 import { listConcurrencyGateSnapshots } from '../utils/bounded-concurrency.js'
 import { persistentRiskStateService } from '../services/persistent-risk-state.service.js'
 import { overloadMonitor } from '../middleware/overload-shedding.middleware.js'
+import { getRedisRuntimeSnapshot } from '../redis/redis-client.js'
+import { getRedisBusSnapshot } from '../redis/redis-bus.js'
+import { getSharedCacheSnapshot } from '../redis/redis-cache.js'
+import { customerServiceRealtimeService } from '../services/customer-service-realtime.service.js'
 
 const importPayloadSchema = z
   .object({
@@ -193,6 +197,13 @@ dataMaintenanceRouter.get(
         riskNegativeCache: persistentRiskStateService.negativeCacheSnapshot(),
         // 过载削峰：当前等级、最近一次采样信号与各类别削峰计数。
         overload: overloadMonitor.snapshot(),
+        // 独立 Redis：连接状态、降级次数、总线收发计数与集群在线态（不含地址以外的连接信息）。
+        redis: {
+          ...getRedisRuntimeSnapshot(),
+          bus: getRedisBusSnapshot(),
+          sharedCache: getSharedCacheSnapshot(),
+          customerServicePresence: customerServiceRealtimeService.buildClusterPresenceSnapshot(),
+        },
       },
     })
   }),

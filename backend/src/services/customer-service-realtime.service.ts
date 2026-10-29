@@ -2,7 +2,13 @@
  * 模块说明：backend/src/services/customer-service-realtime.service.ts
  * 文件职责：维护客服 SSE 连接，并在每次敏感业务事件前复核持久化会话与权限。
  * 实现逻辑：订阅表只保存令牌摘要；投递按会话批量复核，失效会话立即断开；写缓冲过载时停止累积并关闭慢消费者。
- * 维护说明：当前为单实例内存实现；多实例部署前需要把连接路由与撤权广播迁移到可信消息总线。
+ * 跨实例：
+ * - 连接对象只能留在本实例；配置 Redis 后，会话事件与撤权断连先在本实例生效，再经 Redis 总线广播给其他实例，
+ *   接收方走同一套“回库复核 + 背压上限”的投递路径；Pub/Sub 至多一次送达，丢失时由 30 秒空闲复核与客户端重连回读兜底；
+ * - 在线态按“本实例实时 + 其他实例每 5 秒上报”合并为集群口径，实例异常退出时其上报最长 30 秒后过期；
+ * - SSE 建连频控在 Redis 启用时并入共享风控桶，避免 N 个实例把每会话配额放大 N 倍；
+ * - eventId 由事件产生的实例分配，只保证同一实例内递增，前端不依赖其跨实例顺序。
+ * 维护说明：Redis 未配置时行为与单实例内存实现完全一致；每进程连接上限仍按实例计算，用来保护本进程资源。
  */
 
 import type { Response } from 'express'
@@ -20,6 +26,9 @@ import { isMobileAccessToken } from '../utils/mobile-token.js'
 import { BizError } from '../utils/errors.js'
 import { CUSTOMER_SERVICE_REALTIME_POLICY } from './client-feedback-security-policy.js'
 import { isAccountCurrentlyDeactivated } from './account-business-guard.service.js'
+import { persistentRiskStateService } from './persistent-risk-state.service.js'
+import { onRedisBusResync, publishRedisBus, subscribeRedisBus } from '../redis/redis-bus.js'
+import { getRedisClient, getRedisInstanceId, isRedisEnabled, isRedisReady, recordRedisDegrade, redisKey } from '../redis/redis-client.js'
 
 export interface CustomerServiceRealtimeEventPayload {
   eventType: string
@@ -88,6 +97,35 @@ interface ConnectRateWindow {
   attempts: number
 }
 
+const REALTIME_BUS_CONVERSATION_TOPIC = 'cs:conversation'
+const REALTIME_BUS_REVOKE_TOPIC = 'cs:revoke'
+/** 集群在线态：每 5 秒上报并读取一次，上报有效期 30 秒（实例异常退出后最多 30 秒从在线人数中消失）。 */
+const CLUSTER_PRESENCE_SYNC_INTERVAL_MS = 5_000
+const CLUSTER_PRESENCE_TTL_MS = 30_000
+const CLUSTER_PRESENCE_STALE_MS = 15_000
+
+interface ClusterPresenceCache {
+  /** 其他实例上报的在线客服 ownerKey（已排除本实例）。 */
+  remoteServiceOwners: Set<string>
+  /** 其他实例上报的客户端连接数之和（已排除本实例）。 */
+  remoteClientConnections: number
+  refreshedAt: number
+}
+
+const isRealtimeScope = (value: unknown): value is RealtimeScope => value === 'client' || value === 'service'
+
+/** 跨实例事件载荷校验：总线消息视为不可信输入，字段类型不符直接丢弃。 */
+const parseRemoteConversationEvent = (value: unknown): { payload: CustomerServiceRealtimeEventPayload; eventId: number } | null => {
+  if (!value || typeof value !== 'object') return null
+  const { payload, eventId } = value as { payload?: Partial<CustomerServiceRealtimeEventPayload>; eventId?: unknown }
+  if (!payload || typeof payload !== 'object' || typeof eventId !== 'number' || !Number.isFinite(eventId)) return null
+  if (typeof payload.eventType !== 'string' || typeof payload.conversationId !== 'string'
+    || typeof payload.clientUserId !== 'string' || typeof payload.occurredAt !== 'string') return null
+  if (payload.audience !== undefined && payload.audience !== 'all' && payload.audience !== 'service') return null
+  if (payload.detail !== undefined && (payload.detail === null || typeof payload.detail !== 'object')) return null
+  return { payload: payload as CustomerServiceRealtimeEventPayload, eventId }
+}
+
 class CustomerServiceRealtimeService {
   private readonly subscribers = new Map<string, CustomerServiceRealtimeSubscriber>()
   private readonly connectRateWindows = new Map<string, ConnectRateWindow>()
@@ -98,6 +136,31 @@ class CustomerServiceRealtimeService {
   private deliveryChain: Promise<void> = Promise.resolve()
   private pendingDeliveryMessages = 0
   private pendingDeliveryBytes = 0
+  private clusterPresence: ClusterPresenceCache | null = null
+  private clusterPresenceTimer: NodeJS.Timeout | null = null
+  private clusterPresenceSyncing = false
+
+  constructor() {
+    // 处理器在模块加载时注册；未配置 Redis 时总线不会启动，注册本身没有副作用。
+    subscribeRedisBus(REALTIME_BUS_CONVERSATION_TOPIC, (message) => {
+      const parsed = parseRemoteConversationEvent(message)
+      if (parsed) this.deliverConversationEvent(parsed.payload, parsed.eventId)
+    })
+    subscribeRedisBus(REALTIME_BUS_REVOKE_TOPIC, (message) => {
+      if (!message || typeof message !== 'object') return
+      const { kind, scope, key } = message as { kind?: unknown; scope?: unknown; key?: unknown }
+      if (!isRealtimeScope(scope) || typeof key !== 'string' || !key || key.length > 256) return
+      if (kind === 'owner') this.applyOwnerRevocation(scope, key)
+      else if (kind === 'session') this.applySessionRevocation(scope, key)
+    })
+    // 订阅连接断开期间其他实例的会话事件已丢失：关闭本实例全部 SSE，浏览器 EventSource 自动重连，
+    // 重连后的 connected 事件会触发详情与列表回读，补齐断开期间漏掉的消息。
+    onRedisBusResync(() => {
+      const subscriberIds = Array.from(this.subscribers.keys())
+      if (subscriberIds.length) console.warn(`[customer-service-realtime] 消息总线断开后恢复，关闭 ${subscriberIds.length} 个 SSE 连接以触发客户端重连补齐`)
+      for (const subscriberId of subscriberIds) this.closeSubscriber(subscriberId)
+    })
+  }
 
   private buildSubscriberId(scope: RealtimeScope) {
     this.subscriberSeed += 1
@@ -178,6 +241,7 @@ class CustomerServiceRealtimeService {
     this.assertRegistrationTicket(ticket, ticket.scope, ticket.ownerKey, sessionToken)
     const now = new Date()
     const sessionHash = hashSessionToken(sessionToken)
+    if (isRedisEnabled()) await this.checkClusterConnectRateLimit(ticket.scope, sessionHash)
     if (ticket.scope === 'client') {
       const sessionValid = isMobileAccessToken(sessionToken)
         ? Boolean(await AppDataSource.getRepository(ClientMobileSession)
@@ -273,6 +337,7 @@ class CustomerServiceRealtimeService {
     if (subscriber.revalidateTimer) clearInterval(subscriber.revalidateTimer)
     if (subscriber.slowConsumerTimer) clearTimeout(subscriber.slowConsumerTimer)
     this.subscribers.delete(subscriberId)
+    if (subscriber.scope === 'service') this.requestClusterPresenceSync()
     subscriber.detachListeners()
     if (subscriber.drainListener) subscriber.res.off('drain', subscriber.drainListener)
     subscriber.drainListener = null
@@ -292,6 +357,18 @@ class CustomerServiceRealtimeService {
     let count = 0
     for (const subscriber of this.subscribers.values()) if (predicate(subscriber)) count += 1
     return count
+  }
+
+  /** Redis 启用时的建连频控：并入共享风控桶（Redis 优先、数据库兜底），多实例合并计数。 */
+  private async checkClusterConnectRateLimit(scope: RealtimeScope, sessionHash: string) {
+    const limit = CUSTOMER_SERVICE_REALTIME_POLICY.connectionRateLimit
+    const result = await persistentRiskStateService.consumeWindow(
+      `cs-sse-connect:${scope}:${sessionHash}`,
+      CUSTOMER_SERVICE_REALTIME_POLICY.connectionRateWindowMs,
+      Date.now(),
+      limit,
+    )
+    if (result.totalHits > limit) throw new BizError('实时连接请求过于频繁，请稍后再试', 429)
   }
 
   private checkConnectRateLimit(scope: RealtimeScope, sessionHash: string) {
@@ -437,7 +514,8 @@ class CustomerServiceRealtimeService {
         ? (isMobileAccessToken(sessionToken) ? 'mobile' : 'web')
         : null
       this.assertConnectionCapacity(scope, ownerKey, sessionHash)
-      this.checkConnectRateLimit(scope, sessionHash)
+      // Redis 启用时频控已在 assertOwnerCanRegister 中按集群口径完成，这里只保留单实例的进程内频控。
+      if (!isRedisEnabled()) this.checkConnectRateLimit(scope, sessionHash)
       res.status(200)
       res.setHeader('Content-Type', 'text/event-stream; charset=utf-8')
       res.setHeader('Cache-Control', 'no-cache, no-transform')
@@ -447,6 +525,8 @@ class CustomerServiceRealtimeService {
       if (closed || this.isResponseClosed(res)) { cleanup(); return }
       const subscriber: CustomerServiceRealtimeSubscriber = { subscriberId, scope, clientSessionKind, ownerKey, sessionHash, res, heartbeatTimer: null, revalidateTimer: null, slowConsumerTimer: null, detachListeners, drainListener: null, blocked: false }
       this.subscribers.set(subscriberId, subscriber)
+      // 客服上线立即上报集群在线态，避免其他实例最长 5 秒才看到新客服。
+      if (scope === 'service') this.requestClusterPresenceSync()
       const sessionSnapshot = this.buildServiceSessionSnapshot()
       const resolvedInitPayload = typeof initPayload === 'function' ? initPayload(sessionSnapshot) : initPayload
       if (!this.writeSseEvent(subscriber, 'connected', { eventType: 'connected', availability: resolvedInitPayload?.availability })) { cleanup(); return }
@@ -468,12 +548,24 @@ class CustomerServiceRealtimeService {
     this.registerSubscriber('service', serviceUserId, sessionToken, res, keepaliveSeconds, ticket, initPayload)
   }
 
+  /** 撤销某会话的实时连接：先在本实例推进代际并断开，再广播给其他实例。 */
   disconnectBySessionHash(scope: RealtimeScope, tokenHash: string): void {
+    this.applySessionRevocation(scope, tokenHash)
+    void publishRedisBus(REALTIME_BUS_REVOKE_TOPIC, { kind: 'session', scope, key: tokenHash })
+  }
+
+  /** 撤销某账号的全部实时连接：先在本实例推进代际并断开，再广播给其他实例。 */
+  disconnectByOwner(scope: RealtimeScope, ownerKey: string): void {
+    this.applyOwnerRevocation(scope, ownerKey)
+    void publishRedisBus(REALTIME_BUS_REVOKE_TOPIC, { kind: 'owner', scope, key: ownerKey })
+  }
+
+  private applySessionRevocation(scope: RealtimeScope, tokenHash: string): void {
     this.advanceGeneration(this.buildSessionGenerationKey(scope, tokenHash))
     for (const subscriber of this.subscribers.values()) if (subscriber.scope === scope && subscriber.sessionHash === tokenHash) this.closeSubscriber(subscriber.subscriberId)
   }
 
-  disconnectByOwner(scope: RealtimeScope, ownerKey: string): void {
+  private applyOwnerRevocation(scope: RealtimeScope, ownerKey: string): void {
     this.advanceGeneration(this.buildOwnerGenerationKey(scope, ownerKey))
     for (const subscriber of this.subscribers.values()) if (subscriber.scope === scope && subscriber.ownerKey === ownerKey) this.closeSubscriber(subscriber.subscriberId)
   }
@@ -489,13 +581,132 @@ class CustomerServiceRealtimeService {
     }
   }
 
+  /**
+   * 在线态快照：本实例连接实时计算；集群缓存新鲜（15 秒内）时再合并其他实例的上报，
+   * 客服按 ownerKey 去重（同一客服在多个实例都有连接只算一人）。
+   */
   buildServiceSessionSnapshot(): CustomerServiceRealtimeSessionSnapshot {
     this.pruneClosedSubscribers()
     const connections = Array.from(this.subscribers.values())
+    const serviceOwners = new Set(connections.filter((item) => item.scope === 'service').map((item) => item.ownerKey))
+    let clientConnectionCount = connections.filter((item) => item.scope === 'client').length
+    const cluster = this.clusterPresence
+    if (cluster && Date.now() - cluster.refreshedAt <= CLUSTER_PRESENCE_STALE_MS) {
+      for (const ownerKey of cluster.remoteServiceOwners) serviceOwners.add(ownerKey)
+      clientConnectionCount += cluster.remoteClientConnections
+    }
     return {
       currentConversationEventId: this.conversationEventSeed,
-      clientConnectionCount: connections.filter((item) => item.scope === 'client').length,
-      serviceConnectionCount: new Set(connections.filter((item) => item.scope === 'service').map((item) => item.ownerKey)).size,
+      clientConnectionCount,
+      serviceConnectionCount: serviceOwners.size,
+    }
+  }
+
+  /** 集群在线态调试快照，供管理员性能接口观察。 */
+  buildClusterPresenceSnapshot() {
+    const cluster = this.clusterPresence
+    return {
+      enabled: isRedisEnabled(),
+      refreshedAt: cluster ? new Date(cluster.refreshedAt).toISOString() : null,
+      remoteServiceOwnerCount: cluster?.remoteServiceOwners.size ?? 0,
+      remoteClientConnections: cluster?.remoteClientConnections ?? 0,
+    }
+  }
+
+  private presenceKeys() {
+    return { service: redisKey('cs', 'presence', 'service'), clients: redisKey('cs', 'presence', 'clients') }
+  }
+
+  private requestClusterPresenceSync() {
+    if (!this.clusterPresenceTimer) return
+    void this.syncClusterPresence()
+  }
+
+  /**
+   * 上报本实例在线态并读取其他实例的上报：
+   * - 客服：ZSET 成员为 ownerKey|instanceId，分值为过期时刻；本实例先删旧成员再写当前成员，下线即时生效；
+   * - 客户端连接数：HASH 字段为 instanceId，值为 "连接数:过期时刻"。
+   */
+  private async syncClusterPresence(): Promise<void> {
+    if (this.clusterPresenceSyncing) return
+    const client = getRedisClient()
+    if (!client || !isRedisReady()) return
+    this.clusterPresenceSyncing = true
+    try {
+      this.pruneClosedSubscribers()
+      const nowMs = Date.now()
+      const expiresAt = nowMs + CLUSTER_PRESENCE_TTL_MS
+      const instanceId = getRedisInstanceId()
+      const memberSuffix = `|${instanceId}`
+      const keys = this.presenceKeys()
+      const connections = Array.from(this.subscribers.values())
+      const localOwners = [...new Set(connections.filter((item) => item.scope === 'service').map((item) => item.ownerKey))]
+      const localClients = connections.filter((item) => item.scope === 'client').length
+      const existing = await client.zrange(keys.service, 0, -1)
+      const pipeline = client.multi()
+      const staleOwnMembers = existing.filter((member) => member.endsWith(memberSuffix))
+      if (staleOwnMembers.length) pipeline.zrem(keys.service, ...staleOwnMembers)
+      for (const ownerKey of localOwners) pipeline.zadd(keys.service, expiresAt, `${ownerKey}${memberSuffix}`)
+      pipeline.zremrangebyscore(keys.service, '-inf', nowMs)
+      pipeline.pexpire(keys.service, CLUSTER_PRESENCE_TTL_MS * 2)
+      pipeline.hset(keys.clients, instanceId, `${localClients}:${expiresAt}`)
+      pipeline.pexpire(keys.clients, CLUSTER_PRESENCE_TTL_MS * 2)
+      pipeline.zrangebyscore(keys.service, nowMs, '+inf')
+      pipeline.hgetall(keys.clients)
+      const results = await pipeline.exec()
+      const failed = results?.find(([error]) => error)
+      if (!results || failed) throw failed?.[0] ?? new Error('在线态同步事务被中止')
+      const activeMembers = (results[results.length - 2]?.[1] ?? []) as string[]
+      const clientCounts = (results[results.length - 1]?.[1] ?? {}) as Record<string, string>
+      const remoteServiceOwners = new Set<string>()
+      for (const member of activeMembers) {
+        const separator = member.lastIndexOf('|')
+        if (separator <= 0 || member.slice(separator + 1) === instanceId) continue
+        remoteServiceOwners.add(member.slice(0, separator))
+      }
+      let remoteClientConnections = 0
+      const expiredFields: string[] = []
+      for (const [field, value] of Object.entries(clientCounts)) {
+        if (field === instanceId) continue
+        const [countText, expiresText] = value.split(':')
+        if (Number(expiresText) > nowMs) remoteClientConnections += Math.max(0, Number(countText) || 0)
+        else expiredFields.push(field)
+      }
+      if (expiredFields.length) await client.hdel(keys.clients, ...expiredFields)
+      this.clusterPresence = { remoteServiceOwners, remoteClientConnections, refreshedAt: Date.now() }
+    } catch (error) {
+      recordRedisDegrade('客服在线态同步', error)
+    } finally {
+      this.clusterPresenceSyncing = false
+    }
+  }
+
+  /** Redis 启用时启动集群在线态同步；幂等。 */
+  startClusterPresenceSync(): void {
+    if (!isRedisEnabled() || this.clusterPresenceTimer) return
+    this.clusterPresenceTimer = setInterval(() => {
+      void this.syncClusterPresence()
+    }, CLUSTER_PRESENCE_SYNC_INTERVAL_MS)
+    this.clusterPresenceTimer.unref?.()
+    void this.syncClusterPresence()
+  }
+
+  /** 停机时撤下本实例的在线上报，其他实例无需等待 30 秒过期。 */
+  async stopClusterPresenceSync(): Promise<void> {
+    if (this.clusterPresenceTimer) clearInterval(this.clusterPresenceTimer)
+    this.clusterPresenceTimer = null
+    this.clusterPresence = null
+    const client = getRedisClient()
+    if (!client || !isRedisReady()) return
+    try {
+      const keys = this.presenceKeys()
+      const instanceId = getRedisInstanceId()
+      const members = (await client.zrange(keys.service, 0, -1)).filter((member) => member.endsWith(`|${instanceId}`))
+      const pipeline = client.multi().hdel(keys.clients, instanceId)
+      if (members.length) pipeline.zrem(keys.service, ...members)
+      await pipeline.exec()
+    } catch (error) {
+      recordRedisDegrade('客服在线态下线', error)
     }
   }
 
@@ -515,10 +726,17 @@ class CustomerServiceRealtimeService {
     }
   }
 
+  /** 发布会话事件：先投递给本实例连接，再经 Redis 总线广播给其他实例（未配置 Redis 时只做本地投递）。 */
   publishConversationEvent(payload: CustomerServiceRealtimeEventPayload) {
     this.conversationEventSeed += 1
+    const eventId = this.conversationEventSeed
+    this.deliverConversationEvent(payload, eventId)
+    void publishRedisBus(REALTIME_BUS_CONVERSATION_TOPIC, { payload, eventId })
+  }
+
+  private deliverConversationEvent(payload: CustomerServiceRealtimeEventPayload, eventId: number) {
     const { audience: _audience, ...wirePayload } = payload
-    const enrichedPayload = { ...wirePayload, eventId: this.conversationEventSeed }
+    const enrichedPayload = { ...wirePayload, eventId }
     let payloadBytes: number
     try {
       payloadBytes = Buffer.byteLength(JSON.stringify(enrichedPayload), 'utf8')

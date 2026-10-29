@@ -116,7 +116,7 @@ auditLogRouter.get(
     const authReq = req as AuthenticatedRequest
     const query = parseAuditFilterQuery(req)
     // 每账号同时 1 个、每进程同时 3 个重型导出；租约覆盖整个流式写出过程。
-    const lease = dataExportLeasePool.acquire(authReq.auth.userId)
+    const lease = await dataExportLeasePool.acquireShared(authReq.auth.userId)
     try {
       const fileName = `audit-logs-${new Date().toISOString().slice(0, 19).replaceAll(/[:T]/g, '-')}.csv`
       const result = await auditService.exportCsvToStream(query, res, () => {

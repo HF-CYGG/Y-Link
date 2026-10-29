@@ -13,6 +13,7 @@ import { env, envLoadContext } from '../config/env.js'
 import { initializeDatabaseInfrastructure } from '../database/database-strategy.js'
 import { authService } from '../services/auth.service.js'
 import { clientFeedbackService } from '../services/client-feedback.service.js'
+import { customerServiceRealtimeService } from '../services/customer-service-realtime.service.js'
 import {
   assertDatabaseMigrationE2EStartupAllowed,
   completeDatabaseMigrationCutoverStartup,
@@ -35,6 +36,9 @@ import { toSafeErrorLog } from '../utils/safe-error-log.js'
 import { describeDataEncryptionKey } from '../utils/data-encryption.js'
 import { DataEncryptionKeyMissingError, runDataEncryptionPreflight } from './data-encryption-preflight.js'
 import { overloadMonitor } from '../middleware/overload-shedding.middleware.js'
+import { assertMultiInstancePrerequisites, closeRedis, connectRedis, describeRedisTarget, getRedisHealthStatus, isRedisEnabled } from '../redis/redis-client.js'
+import { startRedisBus, stopRedisBus } from '../redis/redis-bus.js'
+import { withStartupLock } from '../redis/redis-lease.js'
 import { getTransactionCoordinator } from '../database/transaction-coordinator.js'
 import { applyHttpServerHardening, resolveListenHost } from './http-server-hardening.js'
 import { registerRuntimeShutdownHandler } from './runtime-shutdown.js'
@@ -163,6 +167,10 @@ const shutdownRuntime = (reason: string, exitCode: number, exit = true): Promise
     server?.closeAllConnections?.()
     await Promise.race([serverClosed, sleep(1000)])
 
+    // Redis 晚于业务排空关闭：排空期间仍可能有请求在消费票据或广播撤权。
+    await customerServiceRealtimeService.stopClusterPresenceSync()
+    stopRedisBus()
+    await closeRedis()
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy().catch((error) => {
         console.error(paint('[y-link-backend] datasource shutdown failed:', 'red'), toSafeErrorLog(error))
@@ -376,9 +384,18 @@ export async function startBusinessRuntime(startup: { mode: 'normal' | 'cutover'
   logBanner('启动阶段')
   logLine('STEP', 'prepare runtime context')
   prepareDatabaseRuntime()
+  // 多实例前置条件（MySQL、Redis、统一加密密钥）必须在任何连接与写入之前确认。
+  assertMultiInstancePrerequisites(env.DB_TYPE)
   logLine('STEP', 'initialize datasource')
   await AppDataSource.initialize()
   await initializeDatabaseInfrastructure(AppDataSource)
+  if (isRedisEnabled()) {
+    logLine('STEP', `connect redis ${describeRedisTarget()}`)
+    await connectRedis()
+    startRedisBus()
+    customerServiceRealtimeService.startClusterPresenceSync()
+    logLine('REDIS', `status=${getRedisHealthStatus()}`, getRedisHealthStatus() === 'ready' ? 'success' : 'warn')
+  }
   // 必须早于任何读取加密列的启动步骤：库里已有密文而密钥文件缺失时阻断启动，而不是自动生成一把新密钥。
   logLine('STEP', 'data encryption key preflight')
   const dataEncryptionPreflight = await runDataEncryptionPreflight(AppDataSource).catch((error: unknown) => {
@@ -411,9 +428,12 @@ export async function startBusinessRuntime(startup: { mode: 'normal' | 'cutover'
   let mutableStartupBootstrapResult: MutableStartupBootstrapResult | null = null
   if (!cutoverMarkerAtStartup && startup.mode === 'normal') {
     logLine('STEP', 'initialize database schema')
-    const schemaInitResult = await initializeDatabaseSchemaIfNeeded(AppDataSource)
-    logLine('SCHEMA', `action=${schemaInitResult.action} reason=${schemaInitResult.reason}`)
-    mutableStartupBootstrapResult = await runMutableStartupBootstrap()
+    // 多实例同时启动时只允许一个实例建表与补数，其余实例排队后按幂等逻辑快速跳过。
+    mutableStartupBootstrapResult = await withStartupLock(async () => {
+      const schemaInitResult = await initializeDatabaseSchemaIfNeeded(AppDataSource)
+      logLine('SCHEMA', `action=${schemaInitResult.action} reason=${schemaInitResult.reason}`)
+      return runMutableStartupBootstrap()
+    }, () => logLine('SCHEMA', '其他实例正在执行启动期建表与补数，等待其完成', 'warn'))
   } else if (cutoverMarkerAtStartup) {
     await databaseMaintenanceModeService.beginReadOnly({
       taskId: cutoverMarkerAtStartup.taskId,
