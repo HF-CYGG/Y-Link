@@ -438,7 +438,12 @@ class PersistentRiskStateService {
       return { count, firstFailedAt, lastFailedAt, lockedUntil } satisfies PersistentFailureState
     })
     if (redisResult) {
-      const redisState = redisResult.value
+      let redisState = redisResult.value
+      if (!redisState || redisState.lockedUntil <= nowMs) {
+        // Redis 故障期间任一实例都可能把锁定写进数据库；恢复后 Redis 里没有这条锁定，
+        // 必须补读数据库，否则切换到未缓存该锁定的实例即可绕过尚未到期的账号锁定。
+        redisState = await this.readDatabaseFailureLock(bucketDigest, nowMs) ?? redisState
+      }
       if (redisState && redisState.lockedUntil > nowMs) {
         this.failureLocks.set(bucketDigest, redisState.lockedUntil, redisState, nowMs)
       }
@@ -461,6 +466,27 @@ class PersistentRiskStateService {
       this.failureLocks.set(bucketDigest, lockedUntil, result, nowMs)
     }
     return result
+  }
+
+  /**
+   * Redis 就绪时的兜底：只按主键读取数据库中仍然有效的锁定（降级期间写入），不加锁、不写入。
+   * 数据库读取失败时不影响 Redis 判定，只记录一次降级日志。
+   */
+  private async readDatabaseFailureLock(bucketDigest: string, nowMs: number): Promise<PersistentFailureState | null> {
+    try {
+      const state = await AppDataSource.getRepository(AuthRiskState).findOne({ where: { bucketDigest, stateType: 'login_failure' } })
+      const lockedUntil = state?.lockedUntil?.getTime() ?? 0
+      if (!state?.lastFailedAt || lockedUntil <= nowMs) return null
+      return {
+        count: state.failureCount,
+        firstFailedAt: state.firstFailedAt?.getTime() ?? state.lastFailedAt.getTime(),
+        lastFailedAt: state.lastFailedAt.getTime(),
+        lockedUntil,
+      }
+    } catch (error) {
+      console.warn('[risk-state] 读取数据库兜底锁定失败', error instanceof Error ? error.message : error)
+      return null
+    }
   }
 
   async recordFailure(

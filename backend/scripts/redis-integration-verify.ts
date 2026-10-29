@@ -363,6 +363,49 @@ async function runDegradedScenario() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// 子场景：Redis 恢复后 → 降级期间写进数据库、尚未到期的登录锁定仍然生效
+// ---------------------------------------------------------------------------------------------
+async function runRecoveredScenario() {
+  const tempRoot = prepareIsolatedEnv('recovered')
+  const { AppDataSource } = await import('../src/config/data-source.js')
+  const bootstrap = await import('../src/config/database-bootstrap.js')
+  const redisClient = await import('../src/redis/redis-client.js')
+  const { persistentRiskStateService } = await import('../src/services/persistent-risk-state.service.js')
+  const { AuthRiskState } = await import('../src/entities/auth-risk-state.entity.js')
+  const { createHash } = await import('node:crypto')
+  try {
+    bootstrap.prepareDatabaseRuntime()
+    await AppDataSource.initialize()
+    await bootstrap.initializeDatabaseSchemaIfNeeded(AppDataSource)
+    await redisClient.connectRedis()
+    assert.equal(redisClient.getRedisHealthStatus(), 'ready')
+
+    // 模拟另一实例在 Redis 故障期间走数据库回落路径写下的锁定（本进程负缓存里没有它）。
+    const now = Date.now()
+    const bucketKey = `recovered-lock-${process.pid}`
+    await AppDataSource.getRepository(AuthRiskState).save({
+      bucketDigest: createHash('sha256').update(`login_failure:${bucketKey}`).digest('hex'),
+      stateType: 'login_failure',
+      requestTimestampsJson: null,
+      failureCount: 5,
+      firstFailedAt: new Date(now - 60_000),
+      lastFailedAt: new Date(now - 1_000),
+      lockedUntil: new Date(now + 10 * 60_000),
+      expiresAt: new Date(now + 15 * 60_000),
+    })
+    const state = await persistentRiskStateService.readFailure(bucketKey, 15 * 60_000, now)
+    assert.ok(state && state.lockedUntil > now, 'Redis 恢复后必须补读数据库中尚未到期的锁定，不能被切换实例绕过')
+    assert.equal(state.count, 5)
+    assert.equal(await persistentRiskStateService.readFailure(`recovered-none-${process.pid}`, 15 * 60_000, now), null, '无锁定时仍返回空状态')
+    console.log('[redis-verify] 恢复场景：降级期间写入数据库的锁定在 Redis 恢复后仍生效 通过')
+  } finally {
+    await redisClient.closeRedis()
+    if (AppDataSource.isInitialized) await AppDataSource.destroy()
+    fs.rmSync(tempRoot, { recursive: true, force: true })
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
 // 子场景：未配置 Redis → 行为与单实例现状一致
 // ---------------------------------------------------------------------------------------------
 async function runDisabledScenario() {
@@ -405,6 +448,7 @@ async function runMultiInstanceScenario() {
 
 async function main() {
   if (mode === 'degraded') return runDegradedScenario()
+  if (mode === 'recovered') return runRecoveredScenario()
   if (mode === 'disabled') return runDisabledScenario()
   if (mode === 'multi') return runMultiInstanceScenario()
 
@@ -421,6 +465,7 @@ async function main() {
     await runMainScenario()
     const deadPort = await findFreePort()
     runChild('degraded', { REDIS_URL: `redis://127.0.0.1:${deadPort}/0`, REDIS_CONNECT_TIMEOUT_MS: '500', Y_LINK_MULTI_INSTANCE: undefined })
+    runChild('recovered', { Y_LINK_MULTI_INSTANCE: undefined })
     runChild('disabled', { REDIS_URL: undefined, Y_LINK_MULTI_INSTANCE: undefined })
     runChild('multi', { REDIS_URL: undefined, Y_LINK_MULTI_INSTANCE: 'true' })
     console.log('Redis 接入回归验证通过')
