@@ -31,6 +31,7 @@
     "release:verify": "tsx scripts/release-full-regression-verify.ts",
     "security:hardening:verify": "tsx scripts/security-hardening-verify.ts",
     "redis:integration:verify": "node --import tsx scripts/redis-integration-verify.ts",
+    "mysql:session-resilience:verify": "node --import tsx scripts/mysql-session-resilience-verify.ts",
     "security:auth-depth:verify": "node --import tsx scripts/security-hardening-auth-verify.ts",
     "auth:mfa:verify": "node --import tsx scripts/admin-mfa-verify.ts",
     "auth:webauthn:verify": "node --import tsx scripts/admin-webauthn-config-verify.ts && node --import tsx scripts/admin-webauthn-verify.ts && node --import tsx scripts/admin-webauthn-verify.ts --enabled && node --import tsx scripts/admin-webauthn-verify.ts --enabled --compat && node --import tsx scripts/admin-webauthn-negative-verify.ts && node --import tsx scripts/admin-webauthn-legacy-upgrade-verify.ts",

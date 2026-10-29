@@ -90,6 +90,12 @@ const envSchema = z.object({
   DB_ACQUIRE_TIMEOUT_MS: z.coerce.number().int().min(250).max(60_000).default(3000),
   DB_IDLE_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600_000).default(60_000),
   DB_QUEUE_LIMIT: z.coerce.number().int().min(1).max(10_000).default(100),
+  // MySQL 会话级锁等待上限（秒）：死锁或长事务持锁时，等待方在该时间后失败并由幂等事务重试或返回“数据库繁忙”，
+  // 不再沿用 MySQL 默认 50 秒把请求和连接长时间挂住。
+  DB_LOCK_WAIT_TIMEOUT_SECONDS: z.coerce.number().int().min(1).max(300).default(15),
+  // MySQL 会话空闲上限（秒）：应用容器意外停止或网络中断时，数据库端残留的未提交事务在空闲超过该时间后被回滚并释放行锁。
+  // 实际生效值不会小于连接池空闲回收时间 + 60 秒，确保池内连接总是先被应用回收，不会拿到被服务端断开的连接。
+  DB_SESSION_WAIT_TIMEOUT_SECONDS: z.coerce.number().int().min(60).max(28_800).default(600),
   DB_MAX_QUERY_MS: z.coerce.number().int().min(25).max(60_000).default(200),
   // MySQL 传输加密：disabled（默认，兼容内网直连）/ required（加密但不校验证书）/ verify-full（校验证书链与主机名）。
   DB_SSL_MODE: z.enum(['disabled', 'required', 'verify-full']).default('disabled'),
