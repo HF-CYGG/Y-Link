@@ -215,6 +215,35 @@ export async function applyInventoryDeltas(
   return lines
 }
 
+/**
+ * 已锁定实体的库存列显式落库，避免 RR 下 save() 的普通读快照跳过库存更新。
+ * 只写本次业务涉及的库存列；商品/SKU 元数据不回写，updatedAt 仍由 TypeORM 的
+ * UpdateDateColumn 自动维护。调用方负责同事务加锁、校验和逐明细流水。
+ */
+export async function persistLockedInventoryStocks(
+  manager: EntityManager,
+  input: {
+    products: Iterable<BaseProduct>
+    skus: Iterable<BaseProductSku>
+    columns: ReadonlyArray<'currentStock' | 'preOrderedStock'>
+  },
+): Promise<void> {
+  const valuesOf = (entity: BaseProduct | BaseProductSku) => {
+    const values: Partial<Pick<BaseProduct, 'currentStock' | 'preOrderedStock'>> = {}
+    for (const column of input.columns) values[column] = Number(entity[column])
+    return values
+  }
+  if (!input.columns.length) return
+  const products = new Map([...input.products].map((product) => [String(product.id), product]))
+  const skus = new Map([...input.skus].map((sku) => [String(sku.id), sku]))
+  for (const [id, product] of [...products].sort(([left], [right]) => left.localeCompare(right))) {
+    await manager.getRepository(BaseProduct).update({ id }, valuesOf(product))
+  }
+  for (const [id, sku] of [...skus].sort(([left], [right]) => left.localeCompare(right))) {
+    await manager.getRepository(BaseProductSku).update({ id }, valuesOf(sku))
+  }
+}
+
 export interface SkuStockSnapshot {
   skuId: string
   currentStock: number

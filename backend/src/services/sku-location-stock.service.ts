@@ -148,20 +148,39 @@ export async function reconcileSkuLocationStocks(
   skus: SkuStockLike[],
 ): Promise<Map<string, SkuLocationDeduction[]>> {
   const deductions = new Map<string, SkuLocationDeduction[]>()
-  if (!skus.length) return deductions
+  const transitions = await reconcileSkuLocationStockTransitions(manager, skus)
+  transitions.forEach((items, index) => {
+    if (items.length) {
+      const skuId = normalizeId(skus[index]!.id)
+      deductions.set(skuId, [...(deductions.get(skuId) ?? []), ...items])
+    }
+  })
+  return deductions
+}
+
+/**
+ * 批量加载并锁定分库位行，依次规整每条明细扣减后的 SKU 快照。
+ * 同 SKU 的后续明细读取前一条规整后的内存件数，逐明细返回真实扣减备注；
+ * 每个库位只在最后写入一次，不把最后一次扣减归给所有明细。
+ */
+export async function reconcileSkuLocationStockTransitions(
+  manager: EntityManager,
+  skus: SkuStockLike[],
+): Promise<SkuLocationDeduction[][]> {
+  if (!skus.length) return []
   const rowMap = await loadRows(manager, skus.map((sku) => normalizeId(sku.id)), true)
-  const repo = manager.getRepository(InvSkuLocationStock)
+  const removedIds = new Set<string>()
+  const updatedRows = new Map<string, InvSkuLocationStock>()
+  const deductions: SkuLocationDeduction[][] = []
   for (const sku of skus) {
     const skuId = normalizeId(sku.id)
-    const rows = rowMap.get(skuId) ?? []
-    if (!rows.length) continue
+    const rows = (rowMap.get(skuId) ?? []).filter(({ row }) => !removedIds.has(normalizeId(row.id)))
     const mainLocationId = normalizeNullableId(sku.locationId)
     const total = Math.max(0, Number(sku.currentStock ?? 0))
-    const removeIds: string[] = []
     const kept: StockRowWithCode[] = []
     for (const entry of rows) {
       if (normalizeId(entry.row.locationId) === mainLocationId || Number(entry.row.qty) <= 0) {
-        removeIds.push(normalizeId(entry.row.id))
+        removedIds.add(normalizeId(entry.row.id))
       } else {
         kept.push(entry)
       }
@@ -173,13 +192,17 @@ export async function reconcileSkuLocationStocks(
       const take = Math.min(Number(entry.row.qty), overflow)
       overflow -= take
       skuDeductions.push({ locationId: normalizeId(entry.row.locationId), locationCode: entry.locationCode, qty: take })
-      const next = Number(entry.row.qty) - take
-      if (next <= 0) removeIds.push(normalizeId(entry.row.id))
-      else await repo.update({ id: entry.row.id }, { qty: next })
+      entry.row.qty = Number(entry.row.qty) - take
+      if (entry.row.qty <= 0) removedIds.add(normalizeId(entry.row.id))
+      else updatedRows.set(normalizeId(entry.row.id), entry.row)
     }
-    if (removeIds.length) await repo.delete({ id: In(removeIds) })
-    if (skuDeductions.length) deductions.set(skuId, skuDeductions)
+    deductions.push(skuDeductions)
   }
+  const repo = manager.getRepository(InvSkuLocationStock)
+  for (const [id, row] of updatedRows) {
+    if (!removedIds.has(id)) await repo.update({ id }, { qty: row.qty })
+  }
+  if (removedIds.size) await repo.delete({ id: In([...removedIds]) })
   return deductions
 }
 
