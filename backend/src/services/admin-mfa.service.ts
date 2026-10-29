@@ -366,7 +366,13 @@ export class AdminMfaService {
         manager,
       )
     })
-    await pendingEnrollmentStore.delete(ticketKey)
+    // 绑定已提交，恢复码明文只在本次响应中出现：票据清理失败（Redis 抖动）不能吞掉这次唯一的展示。
+    // 残留票据无法再次确认（上面的 totpSecretSealed 检查会拒绝），到期后自动失效；降级已由票据存储记录。
+    try {
+      await pendingEnrollmentStore.delete(ticketKey)
+    } catch {
+      console.warn('[admin-mfa] 两步验证已绑定，待确认票据清理失败，将在有效期后自动失效')
+    }
     return { recoveryCodes: pending.mfaId ? [] : codes }
   }
 

@@ -56,6 +56,8 @@ const { SysAuditLog } = await import('../src/entities/sys-audit-log.entity.js')
 const { AuthRiskState } = await import('../src/entities/auth-risk-state.entity.js')
 const { auditService } = await import('../src/services/audit.service.js')
 const { persistentRiskStateService } = await import('../src/services/persistent-risk-state.service.js')
+const { EphemeralTicketStore } = await import('../src/utils/ephemeral-ticket-store.js')
+const { BizError } = await import('../src/utils/errors.js')
 
 interface ApiResponse {
   status: number
@@ -494,6 +496,36 @@ async function verifyPermanentDeleteAndCli() {
   assert.match(cliAudit?.detailJson ?? '', /"via":"cli"/, '命令行重置写审计并标明来源')
 }
 
+/** 绑定事务提交后票据清理失败（模拟 Redis 抖动）时，仍须返回唯一一次展示的恢复码。 */
+async function verifyCleanupFailureKeepsRecoveryCodes() {
+  const adminActor = await contextOf('admin')
+  await userService.create({ username: 'mfa-cleanup-target', password: OPERATOR_PASSWORD, displayName: '票据清理失败账号', role: 'operator', status: 'enabled' }, adminActor)
+  const login = await authService.login({ username: 'mfa-cleanup-target', password: OPERATOR_PASSWORD })
+  assert.ok('token' in login, '绑定前应取得真实登录会话')
+  const auth = await authService.resolveAuthUserByToken(login.token)
+  const enrollment = await adminMfaService.beginEnrollment(auth, { currentPassword: OPERATOR_PASSWORD })
+  plaintextSecrets.push(enrollment.secret)
+  // 只在确认绑定这一步模拟票据删除失败，登录与发起绑定照常执行。
+  const originalDelete = EphemeralTicketStore.prototype.delete
+  let failedDeletes = 0
+  EphemeralTicketStore.prototype.delete = async function () {
+    failedDeletes += 1
+    throw new BizError('安全票据服务暂不可用，请稍后重试', 503)
+  }
+  let recoveryCodes: string[]
+  try {
+    recoveryCodes = (await adminMfaService.confirmEnrollment(auth, codeAt(enrollment.secret, currentTotpStep()))).recoveryCodes
+  } finally {
+    EphemeralTicketStore.prototype.delete = originalDelete
+  }
+  plaintextSecrets.push(...recoveryCodes)
+  assert.ok(failedDeletes > 0, '应走到绑定提交后的票据清理')
+  assert.ok(recoveryCodes.length > 0, '票据清理失败时仍须返回恢复码')
+  const record = await AppDataSource.getRepository(SysUserMfa).createQueryBuilder('mfa').addSelect('mfa.totpSecretSealed')
+    .where('mfa.user_id = :userId', { userId: String(auth.userId) }).getOne()
+  assert.ok(record?.totpSecretSealed, '票据清理失败不影响已提交的绑定')
+}
+
 async function verifyAuditNeverStoresSecrets() {
   const logs = await AppDataSource.getRepository(SysAuditLog).find()
   const serialized = logs.map((log) => `${log.targetCode ?? ''}|${log.detailJson ?? ''}`).join('\n').toUpperCase()
@@ -521,8 +553,9 @@ try {
   const adminWithMfa = await verifyKeyMismatchFallback()
   await verifyAdminResetFactorFailureAccounting(adminWithMfa)
   await verifyPermanentDeleteAndCli()
+  await verifyCleanupFailureKeepsRecoveryCodes()
   await verifyAuditNeverStoresSecrets()
-  console.log('[admin-mfa-verify] 管理端两步验证回归通过：绑定与落库加密、两段登录、防重放、恢复码一次性、票据次数与账号锁定、并发单次成功、停用与重生成、管理员重置与旧票据作废、用户列表状态、密钥不匹配降级、永久删除联动、命令行重置、审计不落明文')
+  console.log('[admin-mfa-verify] 管理端两步验证回归通过：绑定与落库加密、两段登录、防重放、恢复码一次性、票据次数与账号锁定、并发单次成功、停用与重生成、管理员重置与旧票据作废、用户列表状态、密钥不匹配降级、永久删除联动、命令行重置、票据清理失败仍返回恢复码、审计不落明文')
 } finally {
   if (server) {
     await new Promise<void>((resolve) => server!.close(() => resolve()))
