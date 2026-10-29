@@ -50,6 +50,7 @@ import { BoundedConcurrencyGate } from './utils/bounded-concurrency.js'
 import { createInFlightLimitMiddleware } from './middleware/in-flight-limit.middleware.js'
 import { ANONYMOUS_AUTH_IN_FLIGHT_POLICY } from './config/load-protection-policy.js'
 import { overloadSheddingMiddleware } from './middleware/overload-shedding.middleware.js'
+import { businessDataCacheInvalidation } from './middleware/business-data-cache.middleware.js'
 import { extractRequestMeta } from './utils/request-meta.js'
 
 const UPLOAD_CACHE_CONTROL_VALUE = 'public, max-age=31536000, immutable'
@@ -295,6 +296,8 @@ export function createApp(options: CreateAppOptions = {}) {
 
   // 过载分级削峰：挂在健康检查之后、所有业务入口之前；正常负载时只做一次等级判断。
   app.use(overloadSheddingMiddleware)
+  // 业务写入成功后先递增缓存代际再发出响应，报表与工作台的共享缓存随之失效（未配置 Redis 时直接放行）。
+  app.use(businessDataCacheInvalidation)
 
   // 认证接口允许匿名访问，其中 logout / me 已在子路由内部再次做鉴权。
   const publicJsonParser = express.json({ limit: PUBLIC_JSON_BODY_LIMIT })

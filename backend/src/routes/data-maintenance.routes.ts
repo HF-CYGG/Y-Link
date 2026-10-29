@@ -28,6 +28,7 @@ import { persistentRiskStateService } from '../services/persistent-risk-state.se
 import { overloadMonitor } from '../middleware/overload-shedding.middleware.js'
 import { getRedisRuntimeSnapshot } from '../redis/redis-client.js'
 import { getRedisBusSnapshot } from '../redis/redis-bus.js'
+import { getSharedCacheSnapshot } from '../redis/redis-cache.js'
 import { customerServiceRealtimeService } from '../services/customer-service-realtime.service.js'
 
 const importPayloadSchema = z
@@ -200,6 +201,7 @@ dataMaintenanceRouter.get(
         redis: {
           ...getRedisRuntimeSnapshot(),
           bus: getRedisBusSnapshot(),
+          sharedCache: getSharedCacheSnapshot(),
           customerServicePresence: customerServiceRealtimeService.buildClusterPresenceSnapshot(),
         },
       },

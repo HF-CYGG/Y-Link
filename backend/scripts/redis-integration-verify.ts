@@ -226,6 +226,64 @@ async function runMainScenario() {
     persistentRiskStateService.resetNegativeCacheForTesting()
     assert.equal(await persistentRiskStateService.readFailure('verify-expire', 1000, now + 1000), null, '超过重置窗口且未锁定时失败计数应清零')
 
+    // 3b. 共享查询缓存：命中、同进程单飞、过期回源
+    const { getOrLoadShared, sharedCacheKey } = await import('../src/redis/redis-cache.js')
+    let loads = 0
+    const cacheKey = sharedCacheKey('verify', 'report', 'q1')
+    const loader = async () => {
+      loads += 1
+      await delay(30)
+      return { rows: [{ id: 1, name: '报表行' }], total: 1 }
+    }
+    const concurrent = await Promise.all(Array.from({ length: 10 }, () => getOrLoadShared(cacheKey, 300, loader)))
+    assert.equal(loads, 1, '同一键的并发未命中只回源一次')
+    assert.deepEqual(concurrent[9], { rows: [{ id: 1, name: '报表行' }], total: 1 })
+    await delay(20)
+    assert.equal(JSON.parse(await raw.get(cacheKey) ?? 'null')?.total, 1, '结果应写入 Redis 供其他实例复用')
+    await getOrLoadShared(cacheKey, 300, loader)
+    assert.equal(loads, 1, '有效期内再次读取应命中共享缓存')
+    await delay(350)
+    await getOrLoadShared(cacheKey, 300, loader)
+    assert.equal(loads, 2, '过期后必须回源数据库')
+
+    // 3c. 写入即失效：业务写请求成功后、响应发出前递增代际；失败请求与认证接口不递增；带代际的缓存写后立即回源
+    {
+      const express = (await import('express')).default
+      const { businessDataCacheInvalidation, BUSINESS_DATA_CACHE_GENERATION } = await import('../src/middleware/business-data-cache.middleware.js')
+      const { getOrLoadSharedVersioned, readSharedCacheGeneration } = await import('../src/redis/redis-cache.js')
+      const app = express()
+      app.use(businessDataCacheInvalidation)
+      app.post('/api/orders', (_req, res) => { res.json({ code: 0 }) })
+      app.post('/api/orders/invalid', (_req, res) => { res.status(400).json({ code: 400 }) })
+      app.post('/api/auth/login', (_req, res) => { res.json({ code: 0 }) })
+      const server = app.listen(0)
+      await new Promise((resolve) => server.once('listening', resolve))
+      const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`
+      try {
+        let reportLoads = 0
+        const loadReport = () => getOrLoadSharedVersioned(BUSINESS_DATA_CACHE_GENERATION, sharedCacheKey('verify', 'report-versioned'), 60_000, async () => {
+          reportLoads += 1
+          return { loads: reportLoads }
+        })
+        await loadReport()
+        await delay(20)
+        await loadReport()
+        assert.equal(reportLoads, 1, '代际未变时命中缓存')
+        const before = Number(await readSharedCacheGeneration(BUSINESS_DATA_CACHE_GENERATION))
+        await fetch(`${base}/api/orders/invalid`, { method: 'POST' })
+        await fetch(`${base}/api/auth/login`, { method: 'POST' })
+        assert.equal(Number(await readSharedCacheGeneration(BUSINESS_DATA_CACHE_GENERATION)), before, '失败的写请求与认证接口不递增代际')
+        const response = await fetch(`${base}/api/orders`, { method: 'POST' })
+        assert.equal(response.status, 200)
+        // 收到响应时代际必须已经递增：此后任意实例上的查询都读到新代际。
+        assert.equal(Number(await readSharedCacheGeneration(BUSINESS_DATA_CACHE_GENERATION)), before + 1, '成功写入在响应发出前递增代际')
+        await loadReport()
+        assert.equal(reportLoads, 2, '写入后的查询必须回源，不能读到写入前的缓存')
+      } finally {
+        await new Promise((resolve) => server.close(resolve))
+      }
+    }
+
     // 4. 消息总线：本实例发出的消息其他实例能收到，本实例不回环；其他实例的消息能触发处理器
     // 订阅连接断开后重新就绪：重新订阅并触发补齐回调（Pub/Sub 不补发断开期间的消息）
     let resyncCount = 0
@@ -420,7 +478,26 @@ async function runRecoveredScenario() {
     assert.equal(mirrored?.failureCount, 5)
     await persistentRiskStateService.resetFailure(redisLockKey)
     assert.equal(await riskRepository.countBy({ bucketDigest: redisLockDigest }), 0, '清零失败状态必须同时删除数据库镜像，避免 Redis 再故障时旧计数复活')
-    console.log('[redis-verify] 恢复场景：登录锁定在 Redis 与数据库间双向兜底 通过')
+
+    // 商城目录二级缓存：快照按集群修订号写入 Redis；目录失效后修订号递增，提交后的读取不会命中旧快照。
+    const { o2oPreorderService } = await import('../src/services/o2o-preorder.service.js')
+    const { invalidateMallCatalogReadCache, readMallCatalogClusterRevision } = await import('../src/services/mall-catalog-revision.service.js')
+    const cacheClient = redisClient.getRedisClient()
+    assert.ok(cacheClient)
+    const revisionBefore = await readMallCatalogClusterRevision()
+    assert.ok(revisionBefore !== null, 'Redis 就绪时应能读到集群修订号')
+    const firstSnapshot = await o2oPreorderService.getMallProductsPublicSnapshot()
+    await delay(50)
+    const sharedKey = redisClient.redisKey('cache', 'mall-products', revisionBefore)
+    assert.equal(await cacheClient.get(sharedKey), firstSnapshot.responseBody, '目录快照应按集群修订号写入 Redis')
+    invalidateMallCatalogReadCache()
+    const revisionAfter = await readMallCatalogClusterRevision()
+    assert.equal(Number(revisionAfter), Number(revisionBefore) + 1, '目录失效必须递增集群修订号')
+    const secondSnapshot = await o2oPreorderService.getMallProductsPublicSnapshot()
+    await delay(50)
+    assert.equal(await cacheClient.get(redisClient.redisKey('cache', 'mall-products', revisionAfter as string)), secondSnapshot.responseBody, '失效后应按新修订号重建并写入')
+    assert.equal(secondSnapshot.etag, firstSnapshot.etag, '内容未变时各实例生成的 ETag 一致')
+    console.log('[redis-verify] 恢复场景：登录锁定双向兜底、商城目录二级缓存与集群修订号 通过')
   } finally {
     await redisClient.closeRedis()
     if (AppDataSource.isInitialized) await AppDataSource.destroy()
@@ -448,6 +525,11 @@ async function runDisabledScenario() {
     assert.equal(await withStartupLock(async () => 'ok'), 'ok')
     assert.equal(await publishRedisBus('topic', {}), false)
     assert.equal(redisClient.getRedisRuntimeSnapshot().degradeEvents, 0, '未启用 Redis 不应产生降级记录')
+    const { getOrLoadShared } = await import('../src/redis/redis-cache.js')
+    let disabledLoads = 0
+    await getOrLoadShared('k', 60_000, async () => { disabledLoads += 1 })
+    await getOrLoadShared('k', 60_000, async () => { disabledLoads += 1 })
+    assert.equal(disabledLoads, 2, '未配置 Redis 时报表与工作台不缓存，每次都回源')
     console.log('[redis-verify] 未启用场景：行为与单实例现状一致 通过')
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true })

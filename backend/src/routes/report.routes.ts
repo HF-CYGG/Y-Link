@@ -13,8 +13,17 @@ import { BizError } from '../utils/errors.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { auditService } from '../services/audit.service.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
+import { digestCacheInput, getOrLoadSharedVersioned, sharedCacheKey } from '../redis/redis-cache.js'
+import { BUSINESS_DATA_CACHE_GENERATION } from '../middleware/business-data-cache.middleware.js'
 
 export const reportRouter = Router()
+
+/**
+ * 报表预览的跨实例共享缓存时长：多名管理员反复翻看同一报表时只回源一次数据库。
+ * 报表结果不随账号变化（权限门禁在路由层），因此缓存键只由报表类型与查询条件决定；未配置 Redis 时不缓存。
+ * 键名还编入业务数据缓存代际：任何业务写入成功后代际递增，写入后的查询不会读到写入前的结果。
+ */
+const REPORT_PREVIEW_CACHE_TTL_MS = 30_000
 
 const parseStringListQuery = (value: unknown): string[] => {
   if (Array.isArray(value)) {
@@ -47,7 +56,13 @@ const buildReportQuery = (query: Record<string, unknown>): ReportQueryInput => (
 
 const handleReportQuery = (type: ReportType) =>
   asyncHandler(async (req, res) => {
-    const data = await reportService.query(type, buildReportQuery(req.query as Record<string, unknown>))
+    const input = buildReportQuery(req.query as Record<string, unknown>)
+    const data = await getOrLoadSharedVersioned(
+      BUSINESS_DATA_CACHE_GENERATION,
+      sharedCacheKey('report', type, digestCacheInput(input)),
+      REPORT_PREVIEW_CACHE_TTL_MS,
+      () => reportService.query(type, input),
+    )
     res.json({
       code: 0,
       message: 'ok',
@@ -66,7 +81,13 @@ reportRouter.get(
   '/inventory/:productId/skus',
   requirePermission('reports:view'),
   asyncHandler(async (req, res) => {
-    const data = await reportService.listInventorySkus(req.params.productId)
+    const productId = req.params.productId
+    const data = await getOrLoadSharedVersioned(
+      BUSINESS_DATA_CACHE_GENERATION,
+      sharedCacheKey('report', 'inventory-skus', digestCacheInput(productId)),
+      REPORT_PREVIEW_CACHE_TTL_MS,
+      () => reportService.listInventorySkus(productId),
+    )
     res.json({
       code: 0,
       message: 'ok',
