@@ -135,6 +135,15 @@ async function probeServer(client: Redis): Promise<void> {
  * 探测通过才把状态置为 ready。探测失败（例如 INFO 短暂超时）时连接本身可能仍是 ready，
  * 不会再触发 ready 事件，所以必须自行定时重试，否则一次抖动会让票据等能力持续 503。
  */
+function scheduleProbe(client: Redis): void {
+  if (probeTimer) return
+  probeTimer = setTimeout(() => {
+    probeTimer = null
+    void verifyAndMarkReady(client).catch(() => undefined)
+  }, PROBE_RETRY_MS)
+  probeTimer.unref()
+}
+
 async function verifyAndMarkReady(client: Redis): Promise<void> {
   if (client !== commandClient) return
   try {
@@ -142,13 +151,7 @@ async function verifyAndMarkReady(client: Redis): Promise<void> {
   } catch (error) {
     if (client !== commandClient) return
     status = 'degraded'
-    if (!probeTimer) {
-      probeTimer = setTimeout(() => {
-        probeTimer = null
-        void verifyAndMarkReady(client).catch(() => undefined)
-      }, PROBE_RETRY_MS)
-      probeTimer.unref()
-    }
+    scheduleProbe(client)
     throw error
   }
   if (client !== commandClient) return
@@ -216,6 +219,9 @@ export async function connectRedis(): Promise<void> {
       throw new Error(`Redis 连接失败（${describeRedisTarget()}）：${message}`)
     }
     console.warn(`[redis] 启动期连接失败，进入降级并在后台重连：${message}（目标 ${describeRedisTarget()}）`)
+    // 失败可能发生在探测之前（例如命令连接已就绪、订阅连接首连失败）：命令连接的首次 ready
+    // 已在 connecting 阶段被忽略，不会再触发，必须主动安排探测重试，否则状态会一直停在降级。
+    if (commandClient) scheduleProbe(commandClient)
   }
 }
 
