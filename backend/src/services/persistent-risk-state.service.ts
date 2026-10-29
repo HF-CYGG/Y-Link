@@ -565,7 +565,15 @@ class PersistentRiskStateService {
   async resetFailure(bucketKey: string): Promise<void> {
     const bucketDigest = digestBucketKey(`login_failure:${bucketKey}`)
     this.failureLocks.delete(bucketDigest)
-    if (await tryRedis('resetFailure', (client) => client.del(redisRiskKey(bucketDigest)))) return
+    if (await tryRedis('resetFailure', (client) => client.del(redisRiskKey(bucketDigest)))) {
+      // 数据库里可能有触发锁定时的镜像或降级期间的计数，一并清除；否则 Redis 再次故障时旧计数会复活。
+      try {
+        await AppDataSource.getRepository(AuthRiskState).delete({ bucketDigest })
+      } catch (error) {
+        console.warn('[risk-state] 清除数据库失败状态失败', error instanceof Error ? error.message : error)
+      }
+      return
+    }
     await AppDataSource.getRepository(AuthRiskState).delete({ bucketDigest })
   }
 
