@@ -6,7 +6,7 @@ import { createTimedAsyncLoader as createSharedTimedAsyncLoader } from '../src/u
 
 assert.equal(createTimedAsyncLoader, createSharedTimedAsyncLoader, '旧卡片导出必须直接复用共享加载器')
 
-const listSource = readFileSync(new URL('../src/views/order-list/OrderListView.vue', import.meta.url), 'utf8')
+const listSource = readFileSync(new URL('../src/views/order-list/OrderListView.vue', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
 assert.match(listSource, /onError: handleDeleteDialogLoadError/, '删除弹窗首次加载失败须连接页面恢复处理')
 assert.match(listSource, /@click="handleOpenDeleteDialog\(row\)"/, '桌面删除入口须拦截缓存失败')
 assert.match(listSource, /@delete="handleOpenDeleteDialog"/, '移动端删除入口须拦截缓存失败')

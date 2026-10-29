@@ -19,6 +19,7 @@ import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { runCommand } from './process-runner-utils.mjs'
 import { mapV8SfcCoverage } from './v8-sfc-coverage.mjs'
+import { collectCoverageTestInputs, signCoverageInputs, canReuseCoverageCheckpoint } from './coverage-suite-inputs.mjs'
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const backendRoot = path.join(projectRoot, 'backend')
@@ -39,10 +40,20 @@ const authSfcTargets = [
 }))
 const barcodeCompiledPath = path.join(barcodeBuildRoot, 'BarcodeLabelPrintDialog-setup.mjs')
 const barcodeVuePath = path.join(projectRoot, 'src/views/inventory/components/BarcodeLabelPrintDialog.vue')
+const barcodePreflightPath = path.join(projectRoot, 'src/views/inventory/components/barcode-label-preflight.ts')
 const barcodeHelperPath = path.join(projectRoot, 'src/views/inventory/components/barcode-label-print.helpers.ts')
 const barcodeSfcTargets = [
-  { generated: barcodeCompiledPath, source: barcodeVuePath, allowedSources: [barcodeHelperPath] },
-  { generated: barcodeCompiledPath, source: barcodeHelperPath, allowedSources: [barcodeVuePath] },
+  { generated: barcodeCompiledPath, source: barcodePreflightPath, allowedSources: [barcodeVuePath, barcodeHelperPath] },
+  { generated: barcodeCompiledPath, source: barcodeVuePath, allowedSources: [barcodeHelperPath, barcodePreflightPath] },
+  { generated: barcodeCompiledPath, source: barcodeHelperPath, allowedSources: [barcodeVuePath, barcodePreflightPath] },
+]
+const kingdeeBuildRoot = path.join(projectRoot, 'tmp/coverage-vue-kingdee')
+const kingdeeErrorSource = path.join(projectRoot, 'src/utils/error.ts')
+const kingdeeRefreshSource = path.join(projectRoot, 'src/utils/client-order-refresh.ts')
+const kingdeeSfcTargets = [
+  { generated: path.join(kingdeeBuildRoot, 'KingdeeRegistrationEditor-setup.mjs'), source: path.join(projectRoot, 'src/components/common/KingdeeRegistrationEditor.vue'), allowedSources: [kingdeeErrorSource, kingdeeRefreshSource] },
+  { generated: path.join(kingdeeBuildRoot, 'ClientKingdeeReminder-setup.mjs'), source: path.join(projectRoot, 'src/views/client/components/ClientKingdeeReminder.vue'), allowedSources: [kingdeeRefreshSource] },
+  { generated: path.join(kingdeeBuildRoot, 'kingdee-freshness.mjs'), source: path.join(projectRoot, 'src/utils/kingdee-freshness.ts') },
 ]
 const markerBySource = new Map([
   ['src/components/account/AdminWebAuthnDialog.vue', 'form.name = credential.name'],
@@ -78,6 +89,7 @@ const BACKEND_SUITE = [
   'scripts/webauthn-compat-db-verify.ts',
   'scripts/pr153-upgrade-coverage.test.mjs',
   'scripts/admin-mfa-verify.ts',
+  'scripts/issues-177-178-verify.ts',
 ]
 
 const buildCoverageArgs = (lcovPath, excludeGlob) => [
@@ -139,9 +151,16 @@ const SUITES = [
       '--enable-source-maps',
       ...buildCoverageArgs(lcovPath, 'scripts/**'),
       '--test-concurrency=1',
+      '--test-coverage-exclude=tmp/coverage-vue-barcode/**',
+      '--test-coverage-exclude=tmp/coverage-vue-kingdee/**',
+      // 此目录仅为Code128 vendor预设测试生成的库副本，没有项目源码图；真实预检/SFC源码照常映射。
+      '--test-coverage-exclude=tmp/code128-preset/**',
       'scripts/verify-order-entry-submit-preparation.ts',
+      'scripts/verify-barcode-label-preflight.ts',
+      'scripts/verify-v8-sfc-coverage.test.mjs',
       'scripts/verify-order-list-mobile-card-loader.ts',
       'scripts/verify-barcode-label-print-fixes.mjs',
+      'scripts/verify-code128-preset.mjs',
     ],
   },
   {
@@ -157,9 +176,27 @@ const SUITES = [
       // 测试为调用 getLabelContentFit 单独打包的 helper 临时副本（无源码图），只是被测入口的依赖，不是源码；
       // helper.ts 的真实覆盖率由“订单与条码工具”套件经 tsx 直接执行与弹窗包的源码图提供，这里排除临时副本。
       '--test-coverage-exclude=tmp/coverage-vue-barcode/barcode-label-print-helpers.mjs',
+      '--test-concurrency=1',
+      '--test-coverage-exclude=tmp/coverage-vue-kingdee/**',
       'scripts/coverage-vue-barcode.test.mjs',
+      'scripts/verify-barcode-label-print-lifecycle.mjs',
+      'scripts/verify-barcode-label-location-ui.mjs',
       'scripts/html2pdf-module-id-shortener.test.mjs',
       'scripts/html2pdf-vite-plugin.test.mjs',
+    ],
+  },
+  {
+    title: '金蝶编辑提醒与独立版本真实行为覆盖率',
+    cwd: projectRoot,
+    rawReportPath: path.join(rawReportRoot, 'frontend-kingdee.lcov'),
+    rawV8Directory: path.join(rawReportRoot, 'v8-kingdee'),
+    sfcTargets: kingdeeSfcTargets,
+    buildArgs: (lcovPath) => [
+      '--enable-source-maps', ...buildCoverageArgs(lcovPath, 'scripts/**'), '--test-concurrency=1',
+      '--test-coverage-exclude=tmp/coverage-vue-kingdee/OrderVoucherTemplate-setup.mjs',
+      '--test-coverage-exclude=tmp/coverage-vue-kingdee/client-order-summary.mjs',
+      '--test-coverage-exclude=tmp/coverage-vue-kingdee/kingdee-status.mjs',
+      'scripts/coverage-vue-kingdee.test.mjs',
     ],
   },
 ]
@@ -419,9 +456,11 @@ const verifyBarcodeImportProbe = async (sourceHashes) => {
   const mapped = mapV8SfcCoverage({ rawDirectory, targets: barcodeSfcTargets })
   const vueLines = fs.readFileSync(barcodeVuePath, 'utf8').split(/\r?\n/)
   const helperLines = fs.readFileSync(barcodeHelperPath, 'utf8').split(/\r?\n/)
+  const preflightLines = fs.readFileSync(barcodePreflightPath, 'utf8').split(/\r?\n/)
+  const preflightHandler = preflightLines.findIndex((line) => line.includes("return '打印批次已变化，请刷新后确认'")) + 1
   const vueHandler = vueLines.findIndex((line) => line.includes('const handlePrint = async () =>')) + 1
   const helperHandler = helperLines.findIndex((line) => line.includes('return label.barcode || null')) + 1
-  if (vueHandler < 1 || helperHandler < 1 || mapped.bySource.get(barcodeVuePath)?.get(vueHandler) !== 0
+  if (preflightHandler < 1 || mapped.bySource.get(barcodePreflightPath)?.get(preflightHandler) !== 0 || vueHandler < 1 || helperHandler < 1 || mapped.bySource.get(barcodeVuePath)?.get(vueHandler) !== 0
     || mapped.bySource.get(barcodeHelperPath)?.get(helperHandler) !== 0
     || new RegExp('^BRDA:52,', 'm').test(mapped.text)) {
     throw new Error('条码只导入负例出现未调用函数命中或跨源模块壳分支冒领')
@@ -430,6 +469,61 @@ const verifyBarcodeImportProbe = async (sourceHashes) => {
     throw new Error('条码只导入探针运行后编译产物或源码图发生漂移')
   }
   return { probe: 'barcode-import-only', sources: mapped.summary, provenance: mapped.provenance }
+}
+
+const verifyKingdeeImportProbe = async (sourceHashes) => {
+  const rawDirectory = path.join(rawReportRoot, 'v8-kingdee-import-only')
+  fs.mkdirSync(rawDirectory, { recursive: true })
+  await runCommand({ title: '金蝶源码图只导入负例', command: process.execPath,
+    args: ['--enable-source-maps', ...buildCoverageArgs(path.join(rawReportRoot, 'kingdee-import-only.lcov'), 'scripts/**'), 'scripts/coverage-vue-kingdee-import-only.test.mjs'],
+    cwd: projectRoot, env: { ...process.env, NODE_V8_COVERAGE: rawDirectory },
+  })
+  const mapped = mapV8SfcCoverage({ rawDirectory, targets: kingdeeSfcTargets })
+  const markers = ['if (busy.value || conflictVersion.value', 'if (!id || !auth.initialized', 'const known = session.registrations.get(id)']
+  for (const [index, target] of kingdeeSfcTargets.entries()) {
+    const line = fs.readFileSync(target.source, 'utf8').split(/\r?\n/).findIndex((text) => text.includes(markers[index])) + 1
+    if (line < 1 || mapped.bySource.get(target.source)?.get(line) !== 0) throw new Error(`金蝶未调用源码被记为命中：${target.source}`)
+  }
+  if (JSON.stringify(hashGenerated(kingdeeSfcTargets)) !== JSON.stringify(sourceHashes)) throw new Error('金蝶源码图探针期间产物漂移')
+  return { probe: 'kingdee-import-only', sources: mapped.summary, provenance: mapped.provenance }
+}
+
+/** 仅显式续跑时复用已完成套件；源文件、测试、运行库清单和编译产物哈希均须一致。 */
+const coverageSuiteInputHash = (suite) => {
+  const digest = createHash('sha256').update(process.version)
+  const directories = suite.cwd === backendRoot ? ['backend/src', 'backend/sql', 'packages'] : ['src', 'packages']
+  const coveredFiles = []
+  const visit = (directory) => {
+    for (const item of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (['node_modules', 'dist'].includes(item.name)) continue
+      const filename = path.join(directory, item.name)
+      if (item.isDirectory()) visit(filename)
+      else if (/\.(?:ts|mjs|js|vue|sql|json)$/.test(item.name)) {
+        coveredFiles.push(filename)
+        digest.update(path.relative(projectRoot, filename)).update(fs.readFileSync(filename))
+      }
+    }
+  }
+  for (const relative of directories) visit(path.join(projectRoot, relative))
+  for (const relative of ['package.json', 'package-lock.json', 'backend/package.json', 'backend/package-lock.json', 'backend/tsconfig.json']) digest.update(relative).update(fs.readFileSync(path.join(projectRoot, relative)))
+  const inputs = suite.cwd === backendRoot ? BACKEND_SUITE : suite.buildArgs(suite.rawReportPath).filter((arg) => /^scripts\/.*\.(?:ts|mjs)$/.test(arg) || arg.startsWith('packages/'))
+  for (const relative of ['package.json', 'package-lock.json', 'backend/package.json', 'backend/package-lock.json', 'backend/tsconfig.json']) coveredFiles.push(path.join(projectRoot, relative))
+  const testInputs = collectCoverageTestInputs({ projectRoot, cwd: suite.cwd, entries: inputs, coveredFiles })
+  return signCoverageInputs(digest.digest('hex'), testInputs)
+}
+const loadBackendCoverageReuse = () => {
+  const filename = process.env.YLINK_COVERAGE_BACKEND_REUSE
+  if (!filename) return null
+  const value = JSON.parse(fs.readFileSync(filename, 'utf8'))
+  if (value.version !== 1 || !Array.isArray(value.sourceFiles) || !value.sourceFiles.length || !Array.isArray(value.retryScripts) || !value.retryScripts.length
+    || value.retryScripts.some((script) => !BACKEND_SUITE.includes(script))) throw new Error('后端覆盖率续跑凭据无效')
+  for (const entry of value.sourceFiles) {
+    const source = path.resolve(projectRoot, entry.path)
+    if (!source.startsWith(projectRoot + path.sep) || createHash('sha256').update(fs.readFileSync(source)).digest('hex') !== entry.sha256) throw new Error(`已覆盖后端源码变化，不能复用：${entry.path}`)
+  }
+  const prior = fs.readFileSync(value.reportPath, 'utf8')
+  if (createHash('sha256').update(prior).digest('hex') !== value.reportSha256 || !/^SF:/m.test(prior)) throw new Error('后端原始覆盖率产物变化')
+  return { ...value, prior }
 }
 
 const main = async () => {
@@ -445,22 +539,60 @@ const main = async () => {
     throw new Error('未找到前端验证依赖，请先执行 npm ci --workspaces=false --ignore-scripts')
   }
 
-  fs.rmSync(coverageRoot, { recursive: true, force: true })
+  const checkpointPath = path.join(rawReportRoot, 'suite-checkpoint.json')
+  const resume = process.env.YLINK_COVERAGE_RESUME === 'true'
+  const checkpoint = resume && fs.existsSync(checkpointPath) ? JSON.parse(fs.readFileSync(checkpointPath, 'utf8')) : {}
+  if (!resume) fs.rmSync(coverageRoot, { recursive: true, force: true })
   fs.mkdirSync(rawReportRoot, { recursive: true })
+  const backendReuse = loadBackendCoverageReuse()
+  const remapEntries = process.env.YLINK_COVERAGE_SFC_REMAP ? JSON.parse(fs.readFileSync(process.env.YLINK_COVERAGE_SFC_REMAP, 'utf8')) : []
+  const mapperHash = createHash('sha256').update(fs.readFileSync(path.join(projectRoot, 'scripts/v8-sfc-coverage.mjs'))).digest('hex')
 
   const reports = []
   const sourceHashes = {}
   const sfcEvidence = []
   for (const suite of SUITES) {
+    const inputs = coverageSuiteInputHash(suite)
+    const { signature } = inputs
+    if (!inputs.reusable) console.log(`[coverage] 本地输入无法完整确认，拒绝续跑复用：${suite.title}；${inputs.unresolved.slice(0, 3).join('；')}`)
+    const cached = checkpoint[suite.title]
+    if (resume && canReuseCoverageCheckpoint(cached, inputs) && (!suite.sfcTargets || cached.mapperHash === mapperHash)) {
+      if (suite.sfcTargets && JSON.stringify(hashGenerated(suite.sfcTargets)) !== JSON.stringify(cached.hashes)) throw new Error('续跑编译产物/源码图发生漂移')
+      reports.push(...cached.reports); Object.assign(sourceHashes, cached.hashes); sfcEvidence.push(...cached.evidence)
+      console.log(`[coverage] 复用源文件及产物哈希一致的已通过套件：${suite.title}`)
+      continue
+    }
+    const reportStart = reports.length, evidenceStart = sfcEvidence.length
+    const remap = resume && inputs.reusable ? remapEntries.find((entry) => entry.title === suite.title && canReuseCoverageCheckpoint(entry, inputs)) : undefined
+    if (remap) {
+      if (!suite.sfcTargets || !Array.isArray(remap.files) || !remap.files.length) throw new Error('V8重映射证据无效')
+      for (const entry of remap.files) {
+        const filename = path.resolve(projectRoot, entry.path)
+        if (!filename.startsWith(projectRoot + path.sep) || createHash('sha256').update(fs.readFileSync(filename)).digest('hex') !== entry.sha256) throw new Error(`V8重映射输入漂移：${entry.path}`)
+      }
+      console.log(`[coverage] 行为已通过且V8/编译产物/源码哈希一致，只重映射和重验受影响负例：${suite.title}`)
+    }
     console.log(`[coverage] 开始执行${suite.title}`)
-    if (suite.rawV8Directory) fs.mkdirSync(suite.rawV8Directory, { recursive: true })
-    await runCommand({
+    if (suite.rawV8Directory && !remap) {
+      const prefix = path.basename(suite.rawV8Directory)
+      for (const name of fs.readdirSync(rawReportRoot)) {
+        const target = path.resolve(rawReportRoot, name)
+        if ((name === prefix || name.startsWith(prefix + '-')) && target.startsWith(path.resolve(rawReportRoot) + path.sep)) fs.rmSync(target, { recursive: true, force: true })
+      }
+      fs.mkdirSync(suite.rawV8Directory, { recursive: true })
+    }
+    const reuseBackend = resume && suite.cwd === backendRoot && backendReuse && canReuseCoverageCheckpoint(backendReuse, inputs)
+    const args = reuseBackend ? suite.buildArgs(suite.rawReportPath).filter((arg) => !BACKEND_SUITE.includes(arg)).concat(backendReuse.retryScripts) : suite.buildArgs(suite.rawReportPath)
+    if (resume) { const reporter = args.indexOf('--test-reporter=dot'); if (reporter >= 0) args[reporter] = '--test-reporter=spec' }
+    if (reuseBackend) console.log('[coverage] 后端只重采失败脚本；其余真实V8原始产物按源码哈希复用')
+    if (!remap) await runCommand({
       title: suite.title,
       command: process.execPath,
-      args: suite.buildArgs(suite.rawReportPath),
+      args,
       cwd: suite.cwd,
       env: suite.rawV8Directory ? { ...process.env, NODE_V8_COVERAGE: suite.rawV8Directory } : process.env,
     })
+    if (reuseBackend) reports.push(normalizeLcovReport(backendReuse.prior, backendRoot))
     const rawReport = fs.readFileSync(suite.rawReportPath, 'utf8')
     const nativeReport = suite.sfcTargets
       ? withoutNativeSfcTargets(rawReport, suite.cwd, suite.sfcTargets) : rawReport
@@ -481,6 +613,9 @@ const main = async () => {
         const probes = await verifyAuthNegativeProbes(hashes)
         sfcEvidence.push({ suite: suite.title, positive: mapped.summary,
           provenance: mapped.provenance, negativeProbes: probes })
+      } else if (suite.sfcTargets === kingdeeSfcTargets) {
+        const negativeProbe = await verifyKingdeeImportProbe(hashes)
+        sfcEvidence.push({ suite: suite.title, positive: mapped.summary, provenance: mapped.provenance, negativeProbe })
       } else {
         const negativeProbe = await verifyBarcodeImportProbe(hashes)
         sfcEvidence.push({ suite: suite.title, positive: mapped.summary,
@@ -488,6 +623,8 @@ const main = async () => {
       }
       reports.push(normalizeLcovReport(mapped.text, projectRoot))
     }
+    checkpoint[suite.title] = { signature, inputVersion: inputs.inputVersion, reusable: inputs.reusable, unresolved: inputs.unresolved, inputFiles: inputs.files, mapperHash, reports: reports.slice(reportStart), hashes: suite.sfcTargets ? hashGenerated(suite.sfcTargets) : {}, evidence: sfcEvidence.slice(evidenceStart) }
+    fs.writeFileSync(checkpointPath, JSON.stringify(checkpoint, null, 2))
   }
 
   for (const [filename, hash] of Object.entries(sourceHashes)) {
@@ -519,4 +656,4 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   }
 }
 
-export { normalizeLcovReport, mergeLcovReports, withoutNativeSfcTargets }
+export { normalizeLcovReport, mergeLcovReports, withoutNativeSfcTargets, coverageSuiteInputHash, SUITES }
