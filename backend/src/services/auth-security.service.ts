@@ -16,6 +16,8 @@ import { describeClientRiskSubjectForAudit, maskLoginInputForAudit } from '../ut
 import { GLOBAL_LOGIN_FAILURE_POLICY } from '../config/load-protection-policy.js'
 import { toRiskSourceKey } from '../utils/ip-subnet.js'
 import { AuditThrottle } from '../utils/audit-throttle.js'
+import { getRedisClient, isRedisEnabled, isRedisReady, recordRedisDegrade, redisKey } from '../redis/redis-client.js'
+import { REDIS_WINDOW_MAX_ENTRIES, runRedisScript, SLIDING_WINDOW_CONSUME } from '../redis/redis-scripts.js'
 
 /** 管理端登录风控主体：`resolved` 为 false 表示账号不存在、subject 是输入原文，写审计前必须脱敏。 */
 export interface ResolvedLoginRiskSubject {
@@ -246,9 +248,11 @@ const FAILURE_RESET_WINDOW_MS = {
 } as const satisfies Record<FailureScope, number>
 
 /**
- * 全局登录失败态势（进程内）：分布式撞库时单个 IP、单个账号都可能低于阈值，
+ * 全局登录失败态势：分布式撞库时单个 IP、单个账号都可能低于阈值，
  * 这里按端统计 5 分钟内全站失败次数，超过阈值后该端所有登录强制图形验证码一段时间（分级响应）。
- * 多实例部署时各实例独立判断，任一实例触发即对打到该实例的请求生效。
+ * - 进程内计数始终保留：单实例部署与 Redis 故障时按本实例判断；
+ * - 配置 Redis 后额外维护集群级窗口与“强制验证码”标志，多实例的失败量合并计数，任一实例触发即全集群生效，
+ *   避免 N 个实例把阈值放大 N 倍；Redis 失败时静默回落到进程内判断。
  */
 class GlobalLoginFailureMonitor {
   private readonly failureTimes: Record<FailureScope, number[]> = { 'admin-login': [], 'client-login': [] }
@@ -258,8 +262,59 @@ class GlobalLoginFailureMonitor {
     return scope === 'admin-login' ? GLOBAL_LOGIN_FAILURE_POLICY.adminThreshold : GLOBAL_LOGIN_FAILURE_POLICY.clientThreshold
   }
 
-  /** 记录一次失败；返回本次是否刚刚进入“全员验证码”状态，供调用方只写一次审计。 */
-  record(scope: FailureScope, nowMs: number): { activated: boolean; recentFailures: number } {
+  private clusterKeys(scope: FailureScope) {
+    return { window: redisKey('global-login-failure', scope), forced: redisKey('global-login-captcha', scope) }
+  }
+
+  private readyRedisClient() {
+    if (!isRedisEnabled()) return null
+    const client = getRedisClient()
+    if (!client || !isRedisReady()) {
+      recordRedisDegrade('全局撞库态势')
+      return null
+    }
+    return client
+  }
+
+  /** 记录一次失败：先更新本实例计数，再合并集群计数；返回本次是否刚刚进入“全员验证码”状态。 */
+  async record(scope: FailureScope, nowMs: number): Promise<{ activated: boolean; recentFailures: number }> {
+    const local = this.recordLocal(scope, nowMs)
+    const client = this.readyRedisClient()
+    if (!client) return local
+    try {
+      const keys = this.clusterKeys(scope)
+      const [clusterFailures] = await runRedisScript<[number, number, number]>(
+        client,
+        SLIDING_WINDOW_CONSUME,
+        [keys.window],
+        [nowMs, GLOBAL_LOGIN_FAILURE_POLICY.windowMs, -1, `${nowMs}-${Math.random().toString(36).slice(2, 10)}`, REDIS_WINDOW_MAX_ENTRIES],
+      )
+      if (clusterFailures < this.threshold(scope)) {
+        return { activated: local.activated, recentFailures: Math.max(local.recentFailures, clusterFailures) }
+      }
+      this.forcedCaptchaUntil[scope] = nowMs + GLOBAL_LOGIN_FAILURE_POLICY.captchaHoldMs
+      // SET ... GET 返回旧值：旧值为空说明本次才触发，全集群只会有一个实例写这条审计。
+      const previous = await client.set(keys.forced, String(this.forcedCaptchaUntil[scope]), 'PX', GLOBAL_LOGIN_FAILURE_POLICY.captchaHoldMs, 'GET')
+      return { activated: previous === null, recentFailures: clusterFailures }
+    } catch (error) {
+      recordRedisDegrade('全局撞库态势', error)
+      return local
+    }
+  }
+
+  async isCaptchaForced(scope: FailureScope, nowMs: number): Promise<boolean> {
+    if (this.isCaptchaForcedLocally(scope, nowMs)) return true
+    const client = this.readyRedisClient()
+    if (!client) return false
+    try {
+      return (await client.exists(this.clusterKeys(scope).forced)) === 1
+    } catch (error) {
+      recordRedisDegrade('全局撞库态势', error)
+      return false
+    }
+  }
+
+  private recordLocal(scope: FailureScope, nowMs: number): { activated: boolean; recentFailures: number } {
     const times = this.failureTimes[scope]
     times.push(nowMs)
     while (times.length && nowMs - times[0] >= GLOBAL_LOGIN_FAILURE_POLICY.windowMs) times.shift()
@@ -274,7 +329,7 @@ class GlobalLoginFailureMonitor {
     return { activated: !wasActive, recentFailures: times.length }
   }
 
-  isCaptchaForced(scope: FailureScope, nowMs: number): boolean {
+  private isCaptchaForcedLocally(scope: FailureScope, nowMs: number): boolean {
     return this.forcedCaptchaUntil[scope] > nowMs
   }
 }
@@ -414,7 +469,7 @@ export class AuthSecurityService {
 
     return {
       captchaRequired: states.some((state) => Boolean(state && state.count > 0))
-        || globalLoginFailureMonitor.isCaptchaForced(scope, nowMs),
+        || await globalLoginFailureMonitor.isCaptchaForced(scope, nowMs),
     }
   }
 
@@ -438,7 +493,7 @@ export class AuthSecurityService {
       if (storeKey === subjectKey) currentSubjectState = next
     }
 
-    const globalState = globalLoginFailureMonitor.record(scope, nowMs)
+    const globalState = await globalLoginFailureMonitor.record(scope, nowMs)
     if (globalState.activated) {
       await this.recordRiskEvent({
         actionType: 'auth.guard.global_captcha',

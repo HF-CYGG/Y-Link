@@ -1,6 +1,6 @@
 /**
  * 文件说明：图形验证码服务，负责生成不可从响应文本还原答案的 PNG 验证码并校验一次性票据。
- * 实现逻辑：svg-captcha 使用包内字体生成字形路径，sharp 栅格化后输出 PNG；管理端与客户端使用独立、有界的票据存储。
+ * 实现逻辑：svg-captcha 使用包内字体生成字形路径，sharp 栅格化后输出 PNG；管理端与客户端使用独立的票据存储（配置 Redis 时跨实例共享）。
  * 维护说明：测试应通过构造函数注入固定验证码和渲染器，禁止从 HTTP 响应的图像或 SVG 文本反推出答案。
  */
 
@@ -10,7 +10,7 @@ import { CAPTCHA_RENDER_GATE_POLICY } from '../config/load-protection-policy.js'
 import { BoundedConcurrencyGate } from '../utils/bounded-concurrency.js'
 import svgCaptcha from 'svg-captcha'
 import { BizError } from '../utils/errors.js'
-import { EphemeralTicketStore } from '../utils/ephemeral-ticket-store.js'
+import { createTicketStore, type TicketStore } from '../utils/ephemeral-ticket-store.js'
 
 export type CaptchaScope = 'admin' | 'client'
 
@@ -22,14 +22,15 @@ interface CaptchaTicket {
 export type CaptchaRenderer = (svg: string) => Promise<Buffer>
 
 interface CaptchaServiceOptions {
-  stores?: Record<CaptchaScope, EphemeralTicketStore<CaptchaTicket>>
+  stores?: Record<CaptchaScope, TicketStore<CaptchaTicket>>
   createCode?: () => string
   renderPng?: CaptchaRenderer
 }
 
 const CAPTCHA_TTL_MS = 5 * 60 * 1000
 
-const createCaptchaStore = () => new EphemeralTicketStore<CaptchaTicket>({
+const createCaptchaStore = (scope: CaptchaScope) => createTicketStore<CaptchaTicket>({
+  namespace: `captcha-${scope}`,
   maxSize: 4000,
   resolveExpiresAt: (ticket) => ticket.expireAt,
 })
@@ -75,14 +76,14 @@ const wrapPngAsSvg = (pngDataUrl: string) => (
 )
 
 export class CaptchaService {
-  private readonly stores: Record<CaptchaScope, EphemeralTicketStore<CaptchaTicket>>
+  private readonly stores: Record<CaptchaScope, TicketStore<CaptchaTicket>>
   private readonly createCode: () => string
   private readonly renderPng: CaptchaRenderer
 
   constructor(options: CaptchaServiceOptions = {}) {
     this.stores = options.stores ?? {
-      admin: createCaptchaStore(),
-      client: createCaptchaStore(),
+      admin: createCaptchaStore('admin'),
+      client: createCaptchaStore('client'),
     }
     this.createCode = options.createCode ?? randomCaptchaCode
     this.renderPng = options.renderPng ?? renderCaptchaPng
@@ -92,7 +93,7 @@ export class CaptchaService {
     const captchaId = randomUUID()
     const code = this.createCode()
     const pngBuffer = await this.renderPng(buildCaptchaSvg(code))
-    this.stores[scope].set(captchaId, {
+    await this.stores[scope].set(captchaId, {
       code,
       expireAt: Date.now() + CAPTCHA_TTL_MS,
     })
@@ -109,13 +110,13 @@ export class CaptchaService {
   /**
    * 一次性校验：无论答案对错，票据在首次校验时即作废，
    * 防止同一张验证码被 OCR 多候选反复试答；调用方失败后必须重新获取验证码。
+   * 读取与作废合并为原子 take：多实例并发提交同一张验证码时只有一个请求能拿到票据。
    */
-  verifyCaptcha(scope: CaptchaScope, captchaId: string, captchaCode: string): void {
-    const ticket = this.stores[scope].get(captchaId)
+  async verifyCaptcha(scope: CaptchaScope, captchaId: string, captchaCode: string): Promise<void> {
+    const ticket = await this.stores[scope].take(captchaId)
     if (!ticket) {
       throw new BizError('验证码已失效，请刷新后重试', 400)
     }
-    this.stores[scope].delete(captchaId)
     if (ticket.code !== captchaCode.trim().toUpperCase()) {
       throw new BizError('验证码错误，请重新输入新验证码', 400)
     }

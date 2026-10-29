@@ -3,11 +3,11 @@
  * 文件职责：统一处理手机/邮箱验证码的发送与校验。
  * 设计说明：
  * - 验证码发送平台不写死在代码里，而是从系统配置读取 API 地址、请求头和请求体模板；
- * - 验证码状态当前使用内存 Map 保存，适合单机部署；
- * - 若后续升级多实例或需要更强可用性，应迁移到 Redis。
+ * - 通用 HTTP 通道的验证码票据经 createTicketStore() 保存：单实例为进程内存，配置 Redis 后跨实例共享；
+ * - 错误次数由票据存储原子计数，多实例并发撞码也无法突破五次上限；正确答案以原子 take 消费，只有一个请求能成功。
  */
 
-import { randomInt } from 'node:crypto'
+import { randomInt, timingSafeEqual } from 'node:crypto'
 import { env } from '../config/env.js'
 import type { AuthUserContext } from '../types/auth.js'
 import type { RequestMeta } from '../utils/request-meta.js'
@@ -21,7 +21,7 @@ import {
   type VerificationProviderConfigRecord,
 } from './system-config.service.js'
 import { auditService } from './audit.service.js'
-import { EphemeralTicketStore } from '../utils/ephemeral-ticket-store.js'
+import { createTicketStore, type TicketStore } from '../utils/ephemeral-ticket-store.js'
 import { safeHttpRequest } from '../utils/safe-http-request.js'
 import { renderProviderTemplate, resolveProviderBodyFormat } from '../utils/provider-template.js'
 import { maskMobileVerificationTarget, smsVerificationRecordService, type SmsVerificationRecordService } from './sms-verification-record.service.js'
@@ -38,7 +38,9 @@ export interface VerificationCodeTicket {
 }
 
 const CODE_EXPIRE_MS = 5 * 60 * 1000
-const verificationTicketStore = new EphemeralTicketStore<VerificationCodeTicket>({
+const VERIFICATION_CODE_MAX_FAILED_ATTEMPTS = 5
+const verificationTicketStore = createTicketStore<VerificationCodeTicket>({
+  namespace: 'verification-code',
   maxSize: 6000,
   resolveExpiresAt: (ticket) => ticket.expiresAt,
 })
@@ -50,27 +52,39 @@ const buildTicketKey = (channel: VerificationChannelType, target: string, scene:
  * 该类接受显式 store，测试可在进程内注入固定票据而不暴露任何 HTTP 答案通道。
  */
 export class VerificationCodeAttemptStore {
-  constructor(private readonly store: EphemeralTicketStore<VerificationCodeTicket>) {}
+  constructor(private readonly store: TicketStore<VerificationCodeTicket>) {}
 
-  set(key: string, ticket: VerificationCodeTicket): void {
-    this.store.set(key, ticket)
+  async set(key: string, ticket: VerificationCodeTicket): Promise<void> {
+    await this.store.set(key, ticket)
   }
 
-  consume(key: string, code: string): boolean | null {
-    const ticket = this.store.get(key)
+  async delete(key: string): Promise<void> {
+    await this.store.delete(key)
+  }
+
+  /** 返回 true=核验通过并已作废，false=答案错误，null=票据不存在、已过期或已因错误次数用尽作废。 */
+  async consume(key: string, code: string): Promise<boolean | null> {
+    const ticket = await this.store.get(key)
     if (!ticket) {
       return null
     }
-    if (ticket.code !== code.trim()) {
-      ticket.failedAttempts += 1
-      if (ticket.failedAttempts >= 5) {
-        this.store.delete(key)
-      }
+    if (!isSameCode(ticket.code, code.trim())) {
+      await this.store.recordFailedAttempt(key, VERIFICATION_CODE_MAX_FAILED_ATTEMPTS)
       return false
     }
-    this.store.delete(key)
-    return true
+    // 读到正确答案后以原子 take 消费：并发提交同一正确答案时只有一个请求能拿到票据。
+    const consumed = await this.store.take(key)
+    if (!consumed) {
+      return null
+    }
+    return isSameCode(consumed.code, code.trim())
   }
+}
+
+const isSameCode = (expected: string, actual: string) => {
+  const expectedBuffer = Buffer.from(expected, 'utf8')
+  const actualBuffer = Buffer.from(actual, 'utf8')
+  return expectedBuffer.length === actualBuffer.length && timingSafeEqual(expectedBuffer, actualBuffer)
 }
 
 const verificationAttemptStore = new VerificationCodeAttemptStore(verificationTicketStore)
@@ -271,7 +285,7 @@ export class VerificationCodeService {
         scene: input.scene,
         config: this.toAliyunDypnsConfig(provider),
       })
-      verificationTicketStore.delete(buildTicketKey(input.channel, normalizedTarget, input.scene))
+      await verificationAttemptStore.delete(buildTicketKey(input.channel, normalizedTarget, input.scene))
       return result
     }
     const code = this.buildCode()
@@ -288,7 +302,7 @@ export class VerificationCodeService {
         scene: input.scene,
       })
     }
-    verificationAttemptStore.set(buildTicketKey(input.channel, normalizedTarget, input.scene), {
+    await verificationAttemptStore.set(buildTicketKey(input.channel, normalizedTarget, input.scene), {
       channel: input.channel,
       target: normalizedTarget,
       scene: input.scene,
@@ -392,7 +406,7 @@ export class VerificationCodeService {
   }): Promise<void> {
     const normalizedTarget = normalizeClientVerificationTarget(input.channel, input.target)
     const key = buildTicketKey(input.channel, normalizedTarget, input.scene)
-    const localVerificationResult = verificationAttemptStore.consume(key, input.code)
+    const localVerificationResult = await verificationAttemptStore.consume(key, input.code)
     if (localVerificationResult !== null) {
       if (!localVerificationResult) {
         throw new BizError('验证码错误，请重新输入', 400)

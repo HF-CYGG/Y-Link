@@ -75,6 +75,7 @@ import {
   normalizeDiscountRate,
   parseMoneyToCents,
 } from '../utils/discount-price.js'
+import { runExclusive } from '../redis/redis-lease.js'
 
 /** 部门单到店取货时间允许的过去容差：覆盖客户端时钟偏差与提交网络耗时。 */
 const O2O_PICKUP_AT_PAST_TOLERANCE_MS = 5 * 60 * 1000
@@ -5005,7 +5006,10 @@ class O2oPreorderService {
       if (databaseMaintenanceModeService.isReadOnly()) {
         return
       }
-      void this.cancelTimeoutOrders({ skipRecentMs: O2O_TIMEOUT_RECYCLE_RECENT_WINDOW_MS }).catch(() => undefined)
+      // 多实例时同一轮只由抢到租约的实例执行；Redis 未启用或降级时各实例照常执行，正确性由数据库行锁兜底。
+      void runExclusive('job:o2o-timeout-recycle', 60_000, () => this.cancelTimeoutOrders({
+        skipRecentMs: O2O_TIMEOUT_RECYCLE_RECENT_WINDOW_MS,
+      })).catch(() => undefined)
     }, O2O_TIMEOUT_BACKGROUND_RECYCLE_INTERVAL_MS)
   }
 

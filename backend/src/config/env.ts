@@ -133,6 +133,23 @@ const envSchema = z.object({
   VERIFICATION_TICKET_HMAC_SECRET: z.string().optional().transform(normalizeOptionalString),
   ALIYUN_DYPNS_MNS_ENABLED: z.enum(['true', 'false']).optional().transform((value) => value === 'true'),
   INVITE_CODE_PEPPER: z.string().optional().transform(normalizeOptionalString),
+  // 独立部署的 Redis（可选）：留空时所有能力保持单实例现状；配置后承接共享票据、限流、实时广播与后台任务租约。
+  // 形如 redis://host:6379/0 或 rediss://host:6380；密码建议放在 REDIS_PASSWORD，避免写进 URL 后被日志或面板回显。
+  REDIS_URL: z.string().optional().transform(normalizeOptionalString)
+    .refine((value) => !value || /^rediss?:\/\//i.test(value), 'REDIS_URL 必须以 redis:// 或 rediss:// 开头'),
+  REDIS_USERNAME: z.string().optional().transform(normalizeOptionalString),
+  REDIS_PASSWORD: z.string().optional().transform(normalizeOptionalString),
+  // compose 透传未设置的变量时为空字符串，必须视为未设置，否则会覆盖 REDIS_URL 路径里的库号。
+  REDIS_DB: z.preprocess((value) => (typeof value === 'string' && !value.trim() ? undefined : value), z.coerce.number().int().min(0).max(15).optional()),
+  // 跨网连接时开启 TLS；rediss:// 视同开启。REDIS_TLS_CA 为自签 CA 的 PEM 文件路径，留空使用 Node 内置根证书。
+  REDIS_TLS: z.enum(['true', 'false']).optional().transform((value) => value === 'true'),
+  REDIS_TLS_CA: z.string().optional().transform(normalizeOptionalString),
+  REDIS_KEY_PREFIX: z.string().trim().regex(/^[A-Za-z0-9:_.-]{1,32}$/, 'REDIS_KEY_PREFIX 只允许 1-32 位字母、数字与 : _ . -').default('ylink:'),
+  REDIS_CONNECT_TIMEOUT_MS: z.coerce.number().int().min(250).max(60_000).default(3000),
+  // 单条命令超时：Redis 故障时尽快失败并走降级路径，不能拖住请求线程。
+  REDIS_COMMAND_TIMEOUT_MS: z.coerce.number().int().min(50).max(10_000).default(500),
+  // 声明多实例部署：开启后启动期强制要求 MySQL、Redis 与统一注入的数据加密密钥，缺一即拒绝启动。
+  Y_LINK_MULTI_INSTANCE: z.enum(['true', 'false']).optional().transform((value) => value === 'true'),
 })
 
 const parsed = envSchema.safeParse(process.env)

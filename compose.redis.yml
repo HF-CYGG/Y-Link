@@ -1,0 +1,60 @@
+#
+# 文件说明：Y-Link 独立 Redis 叠加编排（可选，仅多实例 / 高并发部署使用）。
+# 用途：
+# 1. 为后端提供共享的安全票据、限流风控、SSE 跨实例广播、客服在线态、缓存失效广播与后台任务租约；
+# 2. 不启用时后端行为与未接入 Redis 完全一致，单实例部署无需加载本文件。
+# 叠加方式（与 compose.mysql.yml / compose.cloud.yml 叠加，后端服务名均为 backend）：
+#   docker compose -f compose.mysql.yml -f compose.redis.yml up -d
+#   docker compose -f compose.cloud.yml -f compose.redis.yml up -d
+# 后端需要的环境变量（写入 .env 或容器面板，REDIS_PASSWORD 同时被本文件与后端读取）：
+#   REDIS_URL=redis://redis:6379/0
+#   REDIS_PASSWORD=<私有强密码，必填>
+#   Y_LINK_MULTI_INSTANCE=true   # 多实例部署时开启；同时要求 DB_TYPE=mysql 与统一的 Y_LINK_DATA_ENCRYPTION_KEY
+# 设计说明：
+# - Redis 7.4，要求 >= 6.2（后端使用 GETDEL、SET KEEPTTL）；
+# - maxmemory-policy 固定为 noeviction：内存写满时写入快速失败并触发后端降级，绝不静默淘汰尚未使用的安全票据；
+# - AOF 持久化到命名卷，重启后保留票据与限流状态；
+# - 不暴露宿主机端口，仅加入后端所在的 proxy_boundary 网络；
+# - 健康检查通过 REDISCLI_AUTH 环境变量传递密码，避免密码出现在进程参数中。
+# Onebox（compose.onebox.yml，服务名 ylink）为单实例 SQLite 起步形态，不要求 Redis；确需接入时，
+# 可参考本文件单独声明 redis 服务，并把 networks 改为 y_link_internal，再在 ylink 的 environment 中设置 REDIS_URL 与 REDIS_PASSWORD。
+# 注意：多实例扩容（docker compose up --scale backend=N）还需外部负载均衡，详见 docs/project-context/51-本地联调与部署模式.md。
+#
+services:
+  redis:
+    image: redis:7.4-alpine
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?请设置 REDIS_PASSWORD}
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-256mb}
+      - --maxmemory-policy
+      - noeviction
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?请设置 REDIS_PASSWORD}
+    volumes:
+      - y_link_redis_data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - redis-cli ping | grep -q PONG
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+    networks:
+      proxy_boundary: {}
+    restart: unless-stopped
+
+  # 仅追加对 redis 健康的依赖；其余配置沿用被叠加文件中的 backend 定义。
+  backend:
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  y_link_redis_data:

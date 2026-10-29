@@ -45,6 +45,18 @@ services:
       ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${ALIBABA_CLOUD_ACCESS_KEY_SECRET:-}
       VERIFICATION_TICKET_HMAC_SECRET: ${VERIFICATION_TICKET_HMAC_SECRET:-}
       ALIYUN_DYPNS_MNS_ENABLED: ${ALIYUN_DYPNS_MNS_ENABLED:-false}
+      # 可选 Redis 与多实例开关：REDIS_URL 留空即不启用；详见 compose.redis.yml 与部署文档。
+      REDIS_URL: ${REDIS_URL:-}
+      REDIS_USERNAME: ${REDIS_USERNAME:-}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: ${REDIS_DB:-}
+      REDIS_TLS: ${REDIS_TLS:-false}
+      REDIS_TLS_CA: ${REDIS_TLS_CA:-}
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-ylink:}
+      REDIS_CONNECT_TIMEOUT_MS: ${REDIS_CONNECT_TIMEOUT_MS:-3000}
+      REDIS_COMMAND_TIMEOUT_MS: ${REDIS_COMMAND_TIMEOUT_MS:-500}
+      Y_LINK_MULTI_INSTANCE: ${Y_LINK_MULTI_INSTANCE:-false}
+      Y_LINK_DATA_ENCRYPTION_KEY: ${Y_LINK_DATA_ENCRYPTION_KEY:-}
     volumes:
       # 数据目录保存维护状态与敏感配置加密密钥（secrets/data-encryption.key），重建容器后必须保留，
       # 否则会生成新密钥，已保存的验证码网关与飞书配置需要重新录入；备份数据库时一并备份该卷。

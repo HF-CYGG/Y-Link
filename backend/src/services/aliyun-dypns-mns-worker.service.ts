@@ -11,6 +11,7 @@ import { databaseOperationGate } from '../database/operation-gate.js'
 import type { SmsVerificationDeliveryStatus } from '../entities/sms-verification-record.entity.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { smsVerificationRecordService, type SmsVerificationRecordService } from './sms-verification-record.service.js'
+import { runExclusive } from '../redis/redis-lease.js'
 
 const DYPNS_SMS_RECEIPT_MESSAGE_TYPE = 'DypnsSmsVerifyReport'
 const DYPNS_SMS_RECEIPT_QUEUE_NAME = 'Alicom-Queue-1873897471328909-DypnsSmsVerifyReport'
@@ -434,7 +435,7 @@ export class AliyunDypnsMnsWorkerService {
     if (this.cleanupTimer !== null) return
     const cleanup = () => {
       if (databaseMaintenanceModeService.isReadOnly()) return
-      void this.recordService.cleanupExpiredRecords().catch((error) => {
+      void runExclusive('job:sms-record-retention', 60_000, () => this.recordService.cleanupExpiredRecords()).catch((error) => {
         void error
         console.error('[aliyun-dypns-mns] 短信回执历史清理失败，将在下一周期重试')
       })

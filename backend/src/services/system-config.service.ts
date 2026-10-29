@@ -24,6 +24,7 @@ import { createHash } from 'node:crypto'
 import { STAFF_INVITE_CONFIG_KEY } from '../utils/staff-invite-code.js'
 import { isSealedSensitiveValue, openSensitiveValue, sealSensitiveValue } from '../utils/data-encryption.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
+import { publishRedisBus, subscribeRedisBus } from '../redis/redis-bus.js'
 
 /**
  * 验证码网关中可能携带密钥的配置项（API 地址可能带签名参数，请求头/请求体模板常含 API Key）：
@@ -600,6 +601,9 @@ export interface UpdateCustomerServiceConfigsInput {
   offlineFaqs: Array<{ question: string; answer: string }>
   sseKeepaliveSeconds: number
 }
+
+/** 系统配置缓存跨实例失效主题：只携带缓存类别，不携带配置内容。 */
+const SYSTEM_CONFIG_CACHE_BUS_TOPIC = 'cache:system-config'
 
 class SystemConfigService {
   private readonly configRepo = AppDataSource.getRepository(SystemConfig)
@@ -1933,6 +1937,12 @@ class SystemConfigService {
     return manager !== AppDataSource.manager
   }
 
+  /** 其他实例写入配置后经 Redis 总线通知本实例丢弃对应缓存；下一次读取回源数据库。 */
+  handleRemoteCacheInvalidation(cache: unknown): void {
+    if (cache === 'o2o-rule') this.invalidateO2oRuleConfigCache()
+    else if (cache === 'customer-service') this.invalidateCustomerServiceConfigCache()
+  }
+
   private invalidateO2oRuleConfigCache(): void {
     this.o2oRuleConfigCache = null
   }
@@ -2052,6 +2062,7 @@ class SystemConfigService {
 
     // 事务已成功提交，此时 result.config 才是确认落库的值，可以安全发布进共享缓存。
     this.publishO2oRuleConfigCache(result.config)
+    void publishRedisBus(SYSTEM_CONFIG_CACHE_BUS_TOPIC, { cache: 'o2o-rule' })
     return result
   }
 
@@ -2261,6 +2272,7 @@ class SystemConfigService {
     // availability 依赖实时在线状态，从不进入这层缓存，因此发布前需要先剔除它。
     const { availability: _availability, ...baseConfigToPublish } = result.config
     this.publishCustomerServiceConfigCache(baseConfigToPublish)
+    void publishRedisBus(SYSTEM_CONFIG_CACHE_BUS_TOPIC, { cache: 'customer-service' })
     return result
   }
 
@@ -2830,3 +2842,7 @@ class SystemConfigService {
 }
 
 export const systemConfigService = new SystemConfigService()
+
+subscribeRedisBus(SYSTEM_CONFIG_CACHE_BUS_TOPIC, (message) => {
+  if (message && typeof message === 'object') systemConfigService.handleRemoteCacheInvalidation((message as { cache?: unknown }).cache)
+})

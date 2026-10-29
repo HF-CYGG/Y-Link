@@ -272,7 +272,7 @@ authRouter.post('/webauthn/login/options', asyncHandler(async (req, res) => {
   const { captchaRequired } = await authSecurityService.guardAdminLoginRequest(requestMeta, 'webauthn-anonymous')
   if (captchaRequired) {
     if (!payload.captchaId?.trim() || !payload.code?.trim()) throw new BizError('当前登录环境需要图形验证码', 428)
-    captchaService.verifyCaptcha('admin', payload.captchaId, payload.code)
+    await captchaService.verifyCaptcha('admin', payload.captchaId, payload.code)
   }
   const { nonce, ...data } = await adminWebauthnService.beginLogin(origin)
   res.cookie(nonceCookieName(data.challengeId), nonce, {
@@ -312,7 +312,7 @@ authRouter.post(
       if (!payload.captchaId?.trim() || !payload.captchaCode?.trim()) {
         throw new BizError('当前登录环境需要图形验证码', 428)
       }
-      captchaService.verifyCaptcha('admin', payload.captchaId, payload.captchaCode)
+      await captchaService.verifyCaptcha('admin', payload.captchaId, payload.captchaCode)
     }
     const data = await authService.login(payload, requestMeta)
     res.setHeader('Cache-Control', 'no-store')

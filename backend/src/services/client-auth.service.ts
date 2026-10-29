@@ -44,7 +44,7 @@ import { systemConfigService, type VerificationProviderConfigsResult } from './s
 import { clientStaffInviteCodeService } from './client-staff-invite-code.service.js'
 import { maskMobileVerificationTarget } from './sms-verification-record.service.js'
 import { verificationCodeService } from './verification-code.service.js'
-import { EphemeralTicketStore } from '../utils/ephemeral-ticket-store.js'
+import { createTicketStore } from '../utils/ephemeral-ticket-store.js'
 import {
   STAFF_INVITE_LOCK_MS,
   STAFF_INVITE_MAX_FAILURES,
@@ -72,7 +72,8 @@ interface ClientLoginSecuritySnapshot {
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const RESET_TICKET_TTL_MS = 10 * 60 * 1000
 const CLIENT_SESSION_ACTIVITY_WRITE_INTERVAL_MS = 60 * 1000
-const resetTicketStore = new EphemeralTicketStore<ResetTicket>({
+const resetTicketStore = createTicketStore<ResetTicket>({
+  namespace: 'client-password-reset',
   maxSize: 3000,
   resolveExpiresAt: (ticket) => ticket.expireAt,
 })
@@ -246,11 +247,11 @@ class ClientAuthService {
     }
   }
 
-  private verifyCaptchaIfRequired(input: { captchaId?: string; captchaCode?: string }, message = '请输入图形验证码') {
+  private async verifyCaptchaIfRequired(input: { captchaId?: string; captchaCode?: string }, message = '请输入图形验证码') {
     if (!input.captchaId?.trim() || !input.captchaCode?.trim()) {
       throw new BizError(message, 400)
     }
-    captchaService.verifyCaptcha('client', input.captchaId, input.captchaCode)
+    await captchaService.verifyCaptcha('client', input.captchaId, input.captchaCode)
   }
 
   /**
@@ -258,8 +259,8 @@ class ClientAuthService {
    * - 避免验证码发送接口被脚本直接滥刷；
    * - 图形验证码校验成功后即作废，减少重放空间。
    */
-  verifyCaptchaBeforeVerificationSend(input: ClientVerificationCodeSendInput) {
-    this.verifyCaptchaIfRequired(input, '发送验证码前请先输入图形验证码')
+  async verifyCaptchaBeforeVerificationSend(input: ClientVerificationCodeSendInput) {
+    await this.verifyCaptchaIfRequired(input, '发送验证码前请先输入图形验证码')
   }
 
   private async verifyCodeIfRequired(
@@ -417,7 +418,7 @@ class ClientAuthService {
       if (options.forceVerificationCode) {
         throw new BizError('教师注册必须填写手机号或邮箱', 400)
       }
-      this.verifyCaptchaIfRequired(input)
+      await this.verifyCaptchaIfRequired(input)
       return
     }
     if (validationMode === 'verification_code') {
@@ -435,7 +436,7 @@ class ClientAuthService {
     if (options.forceVerificationCode) {
       throw new BizError(`${account.channel === 'email' ? '邮箱' : '手机'}验证码通道未启用，请联系管理员`, 400)
     }
-    this.verifyCaptchaIfRequired(input)
+    await this.verifyCaptchaIfRequired(input)
   }
 
   private async assertRegisterIdentifiersAvailable(
@@ -907,7 +908,7 @@ class ClientAuthService {
     const account = this.resolveLoginAccount(input.account)
     const password = input.password.trim()
     if (captchaRequired) {
-      this.verifyCaptchaIfRequired(input)
+      await this.verifyCaptchaIfRequired(input)
     }
     const user = await this.findUserWithPasswordByAccount(account)
     const riskSubject = this.buildLoginRiskSubject(user, account)
@@ -1066,7 +1067,7 @@ class ClientAuthService {
     }
     await recordForgotVerifyAudit('success', { resetTicketIssued: true }, user.id)
     const resetToken = generateSessionToken()
-    resetTicketStore.set(resetToken, {
+    await resetTicketStore.set(resetToken, {
       userId: user.id,
       accountKey: `${account.channel}:${account.account}`,
       expireAt: Date.now() + RESET_TICKET_TTL_MS,
@@ -1080,7 +1081,7 @@ class ClientAuthService {
   async resetPassword(input: ClientResetPasswordInput, _requestMeta?: RequestMeta) {
     const account = this.resolveAccount(input.account)
     const newPassword = assertClientPasswordPolicy(input.newPassword, '新密码', { identifiers: [input.account] })
-    const ticket = resetTicketStore.take(input.resetToken)
+    const ticket = await resetTicketStore.take(input.resetToken)
     if (!ticket) {
       throw new BizError('重置凭证已失效', 400)
     }

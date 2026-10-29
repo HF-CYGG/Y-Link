@@ -11,7 +11,7 @@ import { SysUserMfa } from '../entities/sys-user-mfa.entity.js'
 import { SysUserWebauthnCredential } from '../entities/sys-user-webauthn-credential.entity.js'
 import { SysUserSession } from '../entities/sys-user-session.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
-import { EphemeralTicketStore } from '../utils/ephemeral-ticket-store.js'
+import { createTicketStore } from '../utils/ephemeral-ticket-store.js'
 import { BizError } from '../utils/errors.js'
 import { hashSessionToken } from '../utils/session-token.js'
 import { isAdminSessionIdleExpired } from '../utils/admin-session-idle.js'
@@ -33,7 +33,7 @@ interface LoginTicket {
   expectedRpId: string
   expiresAt: number
 }
-const loginTickets = new EphemeralTicketStore<LoginTicket>({ maxSize: 5000, resolveExpiresAt: (ticket) => ticket.expiresAt })
+const loginTickets = createTicketStore<LoginTicket>({ namespace: 'webauthn-login', maxSize: 5000, resolveExpiresAt: (ticket) => ticket.expiresAt })
 
 export const ADMIN_STEP_UP_ACTIONS = [
   'webauthn.register', 'webauthn.delete', 'mfa.totp.enroll', 'mfa.totp.disable',
@@ -72,9 +72,9 @@ interface MfaChallenge {
   allowedIds: string[]
   expiresAt: number
 }
-const mfaChallenges = new EphemeralTicketStore<MfaChallenge>({ maxSize: 5000, resolveExpiresAt: (ticket) => ticket.expiresAt })
-const stepUpChallenges = new EphemeralTicketStore<BoundChallenge>({ maxSize: 5000, resolveExpiresAt: (ticket) => ticket.expiresAt })
-const stepUpProofs = new EphemeralTicketStore<BoundChallenge>({ maxSize: 5000, resolveExpiresAt: (ticket) => ticket.expiresAt })
+const mfaChallenges = createTicketStore<MfaChallenge>({ namespace: 'webauthn-mfa', maxSize: 5000, resolveExpiresAt: (ticket) => ticket.expiresAt })
+const stepUpChallenges = createTicketStore<BoundChallenge>({ namespace: 'webauthn-step-up-challenge', maxSize: 5000, resolveExpiresAt: (ticket) => ticket.expiresAt })
+const stepUpProofs = createTicketStore<BoundChallenge>({ namespace: 'webauthn-step-up-proof', maxSize: 5000, resolveExpiresAt: (ticket) => ticket.expiresAt })
 
 interface RegisterTicket {
   purpose: 'register'
@@ -98,7 +98,7 @@ interface RegisterTicket {
   usage: 'passwordless' | 'second_factor'
   expiresAt: number
 }
-const registerTickets = new EphemeralTicketStore<RegisterTicket>({ maxSize: 5000, resolveExpiresAt: (ticket) => ticket.expiresAt })
+const registerTickets = createTicketStore<RegisterTicket>({ namespace: 'webauthn-register', maxSize: 5000, resolveExpiresAt: (ticket) => ticket.expiresAt })
 
 export function requireWebauthnEnabled(): { rpId: string; rpName: string; allowedOrigins: string[] } {
   if (!webauthnConfig.enabled || !webauthnConfig.rpId || !webauthnConfig.rpName) {
@@ -455,7 +455,7 @@ export class AdminWebauthnService {
       excludeCredentials: outcome.excludeCredentials,
     })
     const challengeId = randomBytes(32).toString('base64url')
-    registerTickets.set(challengeId, {
+    await registerTickets.set(challengeId, {
       purpose: 'register', userId: outcome.userId, sessionDigest: hashSessionToken(auth.sessionToken),
       challenge: options.challenge, expectedOrigin: origin, expectedRpId: rpId,
       securitySnapshot: outcome.securitySnapshot, name,
@@ -467,7 +467,7 @@ export class AdminWebauthnService {
 
   async completeRegistration(auth: AuthUserContext, challengeId: string, response: RegistrationResponseJSON, origin: string, requestMeta?: RequestMeta) {
     requireWebauthnEnabled()
-    const ticket = registerTickets.take(challengeId)
+    const ticket = await registerTickets.take(challengeId)
     if (!ticket || ticket.purpose !== 'register' || ticket.userId !== auth.userId
       || ticket.sessionDigest !== hashSessionToken(auth.sessionToken)
       || ticket.expectedOrigin !== origin || ticket.expectedRpId !== webauthnConfig.rpId) {
@@ -554,7 +554,7 @@ export class AdminWebauthnService {
 
   async beginMfaLogin(mfaTicket: string, origin: string, requestMeta?: RequestMeta) {
     const { rpId } = requireWebauthnEnabled()
-    const ticket = authService.inspectMfaLoginTicket(mfaTicket)
+    const ticket = await authService.inspectMfaLoginTicket(mfaTicket)
     await authSecurityService.guardAdminMfaLoginRequest(requestMeta, ticket.username)
     const credentials = await this.credentialRepo.createQueryBuilder('credential')
         .addSelect('credential.credentialId').where('credential.user_id = :userId AND credential.rp_id = :rpId',
@@ -569,7 +569,7 @@ export class AdminWebauthnService {
     const challengeId = randomBytes(32).toString('base64url')
     const nonce = randomBytes(32).toString('base64url')
     const expiresAt = Math.min(Date.now() + CHALLENGE_TTL_MS, ticket.expiresAt)
-    mfaChallenges.set(challengeId, { userId: ticket.userId, mfaTicketDigest: hashSessionToken(mfaTicket),
+    await mfaChallenges.set(challengeId, { userId: ticket.userId, mfaTicketDigest: hashSessionToken(mfaTicket),
       nonceDigest: nonceDigest(nonce),
       challenge: options.challenge, expectedOrigin: origin, expectedRpId: rpId,
       allowedIds: credentials.map((item) => item.credentialIdSha256), expiresAt })
@@ -579,7 +579,7 @@ export class AdminWebauthnService {
   async completeMfaLogin(mfaTicket: string, challengeId: string, response: AuthenticationResponseJSON,
     nonce: string | undefined, origin: string, requestMeta?: RequestMeta) {
     requireWebauthnEnabled()
-    const challenge = mfaChallenges.take(challengeId)
+    const challenge = await mfaChallenges.take(challengeId)
     if (!challenge || !nonce || !sameHex(challenge.nonceDigest, nonceDigest(nonce))
       || challenge.mfaTicketDigest !== hashSessionToken(mfaTicket)
       || challenge.expectedOrigin !== origin || challenge.expectedRpId !== webauthnConfig.rpId) {
@@ -618,7 +618,7 @@ export class AdminWebauthnService {
       userVerification: prepared.credentials.every((item) => item.usage === 'passwordless') ? 'required' : 'preferred',
       allowCredentials, timeout: CHALLENGE_TTL_MS })
     const challengeId = randomBytes(32).toString('base64url')
-    stepUpChallenges.set(challengeId, { ...prepared.snapshot, userId: String(auth.userId),
+    await stepUpChallenges.set(challengeId, { ...prepared.snapshot, userId: String(auth.userId),
       sessionDigest: hashSessionToken(auth.sessionToken), action: input.action, targetId,
       challenge: options.challenge, expectedOrigin: origin, expectedRpId: rpId,
       allowedIds: prepared.credentials.map((item) => item.credentialIdSha256), expiresAt: Date.now() + CHALLENGE_TTL_MS })
@@ -627,7 +627,7 @@ export class AdminWebauthnService {
 
   async completeStepUp(auth: AuthUserContext, challengeId: string, response: AuthenticationResponseJSON, origin: string) {
     requireWebauthnEnabled()
-    const challenge = stepUpChallenges.take(challengeId)
+    const challenge = await stepUpChallenges.take(challengeId)
     if (!challenge || challenge.userId !== String(auth.userId)
       || challenge.sessionDigest !== hashSessionToken(auth.sessionToken)
       || challenge.expectedOrigin !== origin || challenge.expectedRpId !== webauthnConfig.rpId) {
@@ -647,13 +647,13 @@ export class AdminWebauthnService {
       return usage
     })
     const stepUpProof = randomBytes(32).toString('base64url')
-    stepUpProofs.set(stepUpProof, { ...challenge, verifiedUsage, expiresAt: Date.now() + CHALLENGE_TTL_MS })
+    await stepUpProofs.set(stepUpProof, { ...challenge, verifiedUsage, expiresAt: Date.now() + CHALLENGE_TTL_MS })
     return { stepUpProof, expiresInSeconds: CHALLENGE_TTL_MS / 1000 }
   }
 
   async consumeStepUpProofInTransaction(manager: EntityManager, auth: AuthUserContext,
     stepUpProof: string, action: AdminStepUpAction, targetId?: string): Promise<void> {
-    const proof = stepUpProofs.take(stepUpProof)
+    const proof = await stepUpProofs.take(stepUpProof)
     if (!proof || proof.action !== action || proof.targetId !== (targetId ?? null)
       || proof.userId !== String(auth.userId) || proof.sessionDigest !== hashSessionToken(auth.sessionToken)) {
       throw new BizError('身份复核证明已过期，请重新验证', 409, { reason: 'WEBAUTHN_STEP_UP_EXPIRED' })
@@ -691,7 +691,7 @@ export class AdminWebauthnService {
     const nonce = randomBytes(32).toString('base64url')
     const options = await generateAuthenticationOptions({ rpID: rpId, userVerification: 'required', timeout: CHALLENGE_TTL_MS })
     const challengeId = randomBytes(32).toString('base64url')
-    loginTickets.set(challengeId, {
+    await loginTickets.set(challengeId, {
       purpose: 'login', challenge: options.challenge, nonceDigest: nonceDigest(nonce),
       expectedOrigin: origin, expectedRpId: rpId, expiresAt: Date.now() + CHALLENGE_TTL_MS,
     })
@@ -699,7 +699,7 @@ export class AdminWebauthnService {
   }
 
   async completeLogin(challengeId: string, response: AuthenticationResponseJSON, nonce: string | undefined, origin: string, requestMeta?: RequestMeta) {
-    const ticket = this.takeLoginTicket(challengeId, nonce, origin)
+    const ticket = await this.takeLoginTicket(challengeId, nonce, origin)
     const rawId = response.rawId
     const credentialIdBytes = typeof rawId === 'string' ? Buffer.from(rawId, 'base64url') : Buffer.alloc(0)
     if (!credentialIdBytes.length || credentialIdBytes.length > 1024
@@ -775,8 +775,8 @@ export class AdminWebauthnService {
     }
   }
 
-  takeLoginTicket(challengeId: string, nonce: string | undefined, origin: string): LoginTicket {
-    const ticket = loginTickets.take(challengeId)
+  async takeLoginTicket(challengeId: string, nonce: string | undefined, origin: string): Promise<LoginTicket> {
+    const ticket = await loginTickets.take(challengeId)
     if (!ticket || !nonce || !sameHex(ticket.nonceDigest, nonceDigest(nonce))
       || ticket.expectedOrigin !== origin || ticket.expectedRpId !== webauthnConfig.rpId) {
       throw new BizError('通行密钥登录挑战已过期，请重试', 401, { reason: 'WEBAUTHN_CHALLENGE_EXPIRED' })

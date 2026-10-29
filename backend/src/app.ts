@@ -40,8 +40,8 @@ import { userRouter } from './routes/user.routes.js'
 import { inboundRouter } from './routes/inbound.routes.js'
 import { BizError } from './utils/errors.js'
 import { databaseMaintenanceModeService } from './services/database-maintenance-mode.service.js'
-import { DatabaseRateLimitStore } from './services/persistent-risk-state.service.js'
-import { AppDataSource } from './config/data-source.js'
+import { DatabaseRateLimitStore, shouldUseSharedRateLimitStore } from './services/persistent-risk-state.service.js'
+import { getRedisHealthStatus } from './redis/redis-client.js'
 import { configureHttpSecurity } from './utils/http-security.js'
 import { databaseRescueRouter } from './routes/database-rescue.routes.js'
 import { auditService } from './services/audit.service.js'
@@ -150,8 +150,8 @@ export function createApp(options: CreateAppOptions = {}) {
   ) => {
     // SQLite Onebox 只有一个写者。验证码/能力探测等匿名 GET 若每次都落库，
     // 会与订单事务争用唯一写槽；单进程模式使用 express-rate-limit 自带的有界内存桶即可。
-    // MySQL 模式继续使用数据库共享桶，未来多实例接入 Redis 时只需替换这里的 Provider。
-    const sharedStore = AppDataSource.options.type === 'mysql'
+    // MySQL 或已配置 Redis 时挂载共享桶：Redis 就绪走 Redis 原子脚本，否则回落数据库共享桶。
+    const sharedStore = shouldUseSharedRateLimitStore()
       ? new DatabaseRateLimitStore(prefix)
       : undefined
     return rateLimit({
@@ -288,6 +288,8 @@ export function createApp(options: CreateAppOptions = {}) {
     res.json({
       status: 'UP',
       maintenance: databaseMaintenanceModeService.getPublicState(),
+      // 只暴露 disabled/connecting/ready/degraded 状态，不含地址；Redis 降级不影响存活判定。
+      redis: getRedisHealthStatus(),
     })
   })
 

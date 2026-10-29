@@ -124,17 +124,17 @@ const run = async () => {
   assert.match(clientCaptcha.captchaImage ?? '', /^data:image\/png;base64,/, '验证码必须提供 PNG data URL')
   assert.match(clientCaptcha.captchaSvg, /<image\b/i, '旧 SVG 字段必须仅包装 PNG 图像')
   assert.doesNotMatch(clientCaptcha.captchaSvg, /<text\b/i, 'SVG 不能再包含可读取的验证码答案文本')
-  assert.throws(
+  await assert.rejects(
     () => captcha.verifyCaptcha('admin', clientCaptcha.captchaId, 'ABC123'),
     /失效/,
     '管理端和客户端验证码票据必须隔离',
   )
-  captcha.verifyCaptcha('client', clientCaptcha.captchaId, 'ABC123')
+  await captcha.verifyCaptcha('client', clientCaptcha.captchaId, 'ABC123')
 
   const verificationStore = createTicketStore<VerificationCodeTicket>()
   const attempts = new VerificationCodeAttemptStore(verificationStore)
   const key = 'mobile:register:13800138000'
-  attempts.set(key, {
+  await attempts.set(key, {
     channel: 'mobile',
     target: '13800138000',
     scene: 'register',
@@ -143,9 +143,9 @@ const run = async () => {
     failedAttempts: 0,
   })
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    assert.equal(attempts.consume(key, '000000'), false, `第 ${attempt + 1} 次错误验证码必须失败`)
+    assert.equal(await attempts.consume(key, '000000'), false, `第 ${attempt + 1} 次错误验证码必须失败`)
   }
-  assert.equal(attempts.consume(key, '123456'), null, '连续五次错误后验证码必须作废，不能再被正确答案消费')
+  assert.equal(await attempts.consume(key, '123456'), null, '连续五次错误后验证码必须作废，不能再被正确答案消费')
 
   console.log('认证安全工作包核心回归验证通过')
 }

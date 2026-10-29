@@ -572,11 +572,11 @@ async function verifyExportLeasePoolPrimitives() {
   failed.emit('finish')
   assert.equal(pool.activeExports, 0)
 
-  // 两个一次性导出路由都必须把生成步骤包进租约，而不是只绑定响应事件。
+  // 两个一次性导出路由都必须把生成步骤包进租约，而不是只绑定响应事件；租约走 acquireShared，配置 Redis 时按集群计“每账号”名额。
   for (const relative of ['src/routes/inventory.routes.ts', 'src/routes/product.routes.ts']) {
     assert.match(
       fs.readFileSync(path.join(backendRoot, relative), 'utf8'),
-      /await runExportHoldingLease\(\s*dataExportLeasePool\.acquire\(authReq\.auth\.userId\),\s*res,\s*\(\) => /,
+      /await runExportHoldingLease\(\s*await dataExportLeasePool\.acquireShared\(authReq\.auth\.userId\),\s*res,\s*\(\) => /,
       `${relative} 的导出生成必须在租约内执行`,
     )
   }
@@ -1087,6 +1087,8 @@ async function verifyEncryptionKeyPreflightAndBackup() {
   ))
   const sealingFiles = listSources(path.join(backendRoot, 'src'))
     .filter((file) => !file.endsWith(path.join('utils', 'data-encryption.ts')))
+    // Redis 票据存储只加密短期票据（随 TTL 过期，不落数据库），不属于需要预检的数据库加密列。
+    .filter((file) => !file.endsWith(path.join('utils', 'ephemeral-ticket-store.ts')))
     .filter((file) => /createSealedColumnTransformer\(|sealSensitiveValue\(/.test(fs.readFileSync(file, 'utf8')))
     .map((file) => path.relative(backendRoot, file).replaceAll('\\', '/'))
     .sort()
