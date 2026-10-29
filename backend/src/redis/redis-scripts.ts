@@ -2,7 +2,8 @@
  * 模块说明：backend/src/redis/redis-scripts.ts
  * 文件职责：集中维护需要原子执行的 Redis Lua 脚本：滑动窗口限流、登录失败计数与锁定、票据错误次数、租约续期与释放。
  * 实现逻辑：
- * - 脚本先按 SHA1 走 EVALSHA，服务端缓存缺失（NOSCRIPT，例如 Redis 重启）时自动回退 EVAL 并重新缓存；
+ * - 首次执行时用 SCRIPT LOAD 取得服务端返回的脚本摘要，之后走 EVALSHA；服务端缓存缺失（NOSCRIPT，例如 Redis 重启）时回退 EVAL 并重新缓存；
+ * - 脚本摘要只作 Redis 协议标识、由服务端计算，本地不做任何哈希运算；
  * - 所有时间戳由调用方以毫秒传入，脚本内不读取 Redis 时钟，保证与数据库实现的窗口口径一致；
  * - 返回值统一为整数数组，Lua 中的数字在回复时被截断为整数，毫秒时间戳不会丢失精度。
  * 维护说明：
@@ -10,19 +11,20 @@
  * - 每个脚本只能操作 KEYS 中声明的键，保证将来切换到 Redis Cluster 时仍可按 hash tag 部署。
  */
 
-import { createHash } from 'node:crypto'
 import type { Redis } from 'ioredis'
 
 interface RedisScript {
   lua: string
-  sha: string
+  /** 服务端 SCRIPT LOAD 返回的摘要；同一脚本在任何 Redis 上摘要相同，首次加载后进程内复用。 */
+  sha: string | null
 }
 
-const defineScript = (lua: string): RedisScript => ({ lua, sha: createHash('sha1').update(lua).digest('hex') })
+const defineScript = (lua: string): RedisScript => ({ lua, sha: null })
 
-/** 执行脚本：优先 EVALSHA，NOSCRIPT 时回退 EVAL。 */
+/** 执行脚本：首次 SCRIPT LOAD 取摘要，之后优先 EVALSHA，NOSCRIPT 时回退 EVAL。 */
 export async function runRedisScript<T>(client: Redis, script: RedisScript, keys: string[], args: Array<string | number>): Promise<T> {
   try {
+    script.sha ??= String(await client.script('LOAD', script.lua))
     return await client.evalsha(script.sha, keys.length, ...keys, ...args) as T
   } catch (error) {
     if (error instanceof Error && error.message.includes('NOSCRIPT')) {
