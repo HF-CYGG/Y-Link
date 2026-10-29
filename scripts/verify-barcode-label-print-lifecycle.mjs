@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import test, { afterEach } from 'node:test'
 import { watch, nextTick } from 'vue'
-import { withBrowser, mountSetup, readyToPrint, resetBarcodeHost, flush } from './barcode-behavior-test-runtime.mjs'
+import { withBrowser, mountSetup, readyToPrint, resetBarcodeHost, flush, deferred, setLabelsResponse, testLabel, calls } from './barcode-behavior-test-runtime.mjs'
 afterEach(resetBarcodeHost)
 const resources = (state, browser) => ({ printing: state.printing.value, style: browser.styles.size, bodyClass: browser.classes.size,
   listeners: [...browser.listeners.values()].reduce((sum, entries) => sum + entries.size, 0), timers: browser.timers.size })
@@ -51,4 +51,20 @@ test('关闭和卸载均清理监听、计时器及打印样式', async () => wi
     if (action === 'close') props.modelValue = false; else unmount()
     await flush(); assert.deepEqual(resources(state, browser), cleaned, action)
   }
+}))
+
+test('真实复读期间份数意图变化中止打印，保留新设置等待用户重新确认', async () => withBrowser(async (browser) => {
+  const { state } = await mountSetup(); const label = testLabel(); await readyToPrint(state, label)
+  const waiting = deferred(), received = []
+  setLabelsResponse(async (...args) => { received.push(args); return waiting.promise })
+  const printing = state.handlePrint()
+  assert.equal(state.preflighting.value, true)
+  const requestCount = calls.loading
+  await state.handlePrint(); assert.equal(calls.loading, requestCount, '重复点击不得另开复读')
+  state.settings.copies = state.settings.copies + 1
+  waiting.resolve([label]); await printing
+  assert.deepEqual(received[0][0], [label.skuId], '实际SKU请求参数不能被测试适配丢弃')
+  assert.match(state.preflightMessage.value, /打印意图已变化/)
+  assert.equal(state.requiresLocationConfirmation.value, true); assert.equal(state.frozenPrint.value, null)
+  assert.equal(browser.printed.length, 0); assert.deepEqual(resources(state, browser), cleaned)
 }))

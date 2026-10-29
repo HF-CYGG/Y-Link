@@ -121,7 +121,9 @@ export const collectCoverageTestInputs = ({ projectRoot, cwd, entries, coveredFi
     for (const filename of parents) addInput(filename, absolute)
   }
   for (const entry of entries) expand(entry)
-  return { files: [...testFiles].sort(), visited: [...visited].sort(), unresolved: [...unresolved].sort(), reusable: unresolved.size === 0 }
+  // 与默认UTF-16字符串排序一致，不让运行机器的locale改变可信输入签名。
+  const compareText = (left, right) => Number(left > right) - Number(left < right)
+  return { files: [...testFiles].sort(compareText), visited: [...visited].sort(compareText), unresolved: [...unresolved].sort(compareText), reusable: unresolved.size === 0 }
 }
 
 /** 生产源码签名由runner提供；有限测试目录额外覆盖helper、传递fixture及JSON/二进制数据。 */

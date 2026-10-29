@@ -16,6 +16,23 @@ assert.deepEqual(preservePrintLocations(before, { '1': '99' }), { '1': null })
 const limited: ProductLabelRecord = { ...base, printLocations: { capability: 'main_only', mainLocationId: '10', mainLocationCode: 'A', mainLocationStatus: 'valid', options: [{ locationId: '10', locationCode: 'A', isMain: true }] } }
 assert.match(validateLabelPreflight(before, [limited], { '1': '10' }, new Set(['1']), true), /权限已变化/)
 assert.equal(validateLabelPreflight([limited], structuredClone([limited]), { '1': '10' }, new Set(['1']), true), '')
+assert.match(validateLabelPreflight(before, [], { '1': '10' }, new Set(['1']), true), /批次已变化/)
+for (const patch of [{ skuId: 'other-sku' }, { productName: '服务端商品已更名' }]) {
+  assert.match(validateLabelPreflight(before, [{ ...base, ...patch }], { '1': '10' }, new Set(['1']), true), /标签资料已变化/)
+}
+for (const patch of [{ mainLocationId: '12' }, { mainLocationCode: '新主库位' }, { mainLocationStatus: 'disabled' as const }]) {
+  assert.match(validateLabelPreflight(before, [{ ...base, printLocations: { ...base.printLocations, ...patch } }], { '1': '10' }, new Set(['1']), true), /主库位已变化/)
+}
+assert.equal(withPrintLocation(base, null).locationCode, null)
+assert.deepEqual(preservePrintLocations(before, { '1': '11' }), { '1': '11' }, '仍有效的独立SKU选择必须保留')
+assert.equal(validateLabelPreflight(before, before, { '1': null }, new Set(['1']), false), '', '不显示库位时缺少选择不阻断打印')
+assert.equal(validateLabelPreflight(before, before, { '1': null }, new Set(), true), '', '未选SKU不能因其临时选择缺失阻断其他标签')
+for (const status of ['unset', 'missing', 'disabled'] as const) {
+  const invalid = { ...limited, printLocations: { ...limited.printLocations, mainLocationStatus: status, options: [] } }
+  assert.deepEqual(initialPrintLocations([invalid]), { '1': null }, '无效主库位不能默认冒充有效选择')
+  assert.deepEqual(preservePrintLocations([invalid], { '1': '10' }), { '1': null })
+  assert.match(validateLabelPreflight([invalid], [invalid], { '1': '10' }, new Set(['1']), true), /失效/)
+}
 console.log('通过：真实预检 helper 场景')
 
 // 下单提交意图必须仅在有效非空编号时新增键，兼容旧请求键形状。

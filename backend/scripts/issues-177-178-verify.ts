@@ -60,7 +60,11 @@ try {
   assert.equal(normalizeKingdeeVoucherNo('   '), null)
   assert.throws(() => normalizeKingdeeVoucherNo('A\nB'), /控制字符/)
   assert.throws(() => normalizeKingdeeVoucherNo('A'.repeat(129)), /128/)
+  assert.throws(() => normalizeKingdeeVoucherNo(177), /控制字符/)
   const historical = await make()
+  await assert.rejects(() => service.updateKingdeeRegistration(String(historical.id), { kingdeeVoucherNo: '非法版本', expectedKingdeeVersion: -1 }, { client: auth }), /非负整数/)
+  const versionLimit = await make({ kingdeeVersion: 2147483647, isSystemApplied: true, kingdeeVoucherNo: '历史上限编号' })
+  await assert.rejects(() => service.updateKingdeeRegistration(String(versionLimit.id), { kingdeeVoucherNo: '不能溢出', expectedKingdeeVersion: 2147483647 }, { client: auth }), /上限/)
   assert.equal(kingdeeRegistrationView(historical).kingdeeStatus, 'unknown')
   const beforeLogs = await db.getRepository(InventoryLog).count()
   const first = await service.updateKingdeeRegistration(String(historical.id), { kingdeeVoucherNo: ' 001-AbC ', expectedKingdeeVersion: 0 }, { client: auth })
@@ -127,6 +131,22 @@ try {
   assert.notEqual(changed!.printLocations.capability === 'full' && changed!.printLocations.distributionKey, full!.printLocations.distributionKey)
   const [sameLimited] = await productService.listLabels([sku.id], 'main_only')
   assert.deepEqual(sameLimited, limited, '其他分布变化不能影响 main_only')
+  try {
+    await locationRepo.update(main.id, { isActive: false })
+    for (const capability of ['full', 'main_only'] as const) {
+      const [disabledMain] = await productService.listLabels([sku.id], capability)
+      assert.equal(disabledMain!.printLocations.mainLocationStatus, 'disabled')
+      assert.ok(!disabledMain!.printLocations.options.some((option) => option.locationId === String(main.id)))
+      if (capability === 'main_only') assert.equal(disabledMain!.printLocations.options.length, 0)
+    }
+    await db.getRepository(BaseProductSku).update(sku.id, { locationId: null })
+    const [unsetMain] = await productService.listLabels([sku.id], 'main_only')
+    assert.equal(unsetMain!.locationCode, null); assert.equal(unsetMain!.printLocations.mainLocationStatus, 'unset')
+    assert.equal(unsetMain!.printLocations.options.length, 0); assert.ok(!('distributionKey' in unsetMain!.printLocations))
+  } finally {
+    await locationRepo.update(main.id, { isActive: true })
+    await db.getRepository(BaseProductSku).update(sku.id, { locationId: main.id })
+  }
   const inventory = await db.getRepository(BaseProductSku).findOneByOrFail({ id: sku.id })
   assert.equal(Number(inventory.currentStock), 10)
   await db.getRepository(BaseProduct).update(product.id, { o2oStatus: 'listed' })
@@ -196,6 +216,17 @@ try {
   assert.equal(merged.order.sourcePreorderRegistrations.find((row) => row.sourcePreorderId === source.preorder.id)?.kingdeeVoucherNo, 'source-only-177')
   assert.equal(merged.order.sourcePreorderRegistrations.find((row) => row.sourcePreorderId === target.preorder.id)?.kingdeeStatus, 'not_applied')
   assert.equal(merged.order.isSystemApplied, true)
+  const assertSourceListProjection = async (version: number, voucherNo: string | null, status: string) => {
+    const page = await orderService.list({ page: 1, pageSize: 100 }, admin)
+    const parent = page.list.find((row) => String(row.id) === String(target.outbound.id))
+    assert.ok(parent); assert.equal(parent.isSystemApplied, true)
+    const projection = parent.sourcePreorderRegistrations.find((row) => String(row.sourcePreorderId) === String(source.preorder.id))
+    assert.ok(projection); assert.equal(projection.kingdeeVersion, version)
+    assert.equal(projection.kingdeeVoucherNo, voucherNo); assert.equal(projection.kingdeeStatus, status)
+    assert.equal(parent.sourcePreorderRegistrations.length, 2)
+    return page.total
+  }
+  const listTotal = await assertSourceListProjection(2, 'source-only-177', 'registered')
   // 报表按真实明细来源投影；替换/清空不增加行、金额或破坏主键游标导出。
   const { reportService } = await import('../src/services/report.service.js')
   const reportBefore = await reportService.query('kingdee', { pageSize: 100 })
@@ -211,9 +242,13 @@ try {
   await service.updateKingdeeRegistration(source.preorder.id, { kingdeeVoucherNo: 'source-replaced', expectedKingdeeVersion: sourceBefore.kingdeeVersion }, { admin })
   const replaced = await reportService.query('kingdee', { pageSize: 100 })
   assert.ok(replaced.list.some((row) => row.kingdeeVoucherNo === 'source-replaced'))
+  assert.equal(await assertSourceListProjection(sourceBefore.kingdeeVersion + 1, 'source-replaced', 'registered'), listTotal)
   await service.updateKingdeeRegistration(source.preorder.id, { kingdeeVoucherNo: null, expectedKingdeeVersion: sourceBefore.kingdeeVersion + 1 }, { admin })
   const clearedReport = await reportService.query('kingdee', { pageSize: 100 })
   assert.ok(!clearedReport.list.some((row) => row.kingdeeVoucherNo === 'source-replaced'))
+  assert.equal(await assertSourceListProjection(sourceBefore.kingdeeVersion + 2, null, 'applied_pending'), listTotal)
+  const emptyPage = await orderService.list({ page: 1, pageSize: 20, keyword: '不存在的隔离金蝶来源编号' }, admin)
+  assert.equal(emptyPage.total, 0); assert.deepEqual(emptyPage.list, [])
   // 自建旧数据模拟合法历史来源缺失，保留实际O2O身份；两种身份字段分别覆盖。
   const formalRepo = db.getRepository(BizOutboundOrder)
   await formalRepo.update(source.outbound.id, { sourceDocId: null })
@@ -245,6 +280,10 @@ try {
   // 验证 JSON 白名单归一化不丢失登记字段；真正 import/export 往返另在独立验收库执行。
   const payload = { version: EXPORT_VERSION, exportedAt: new Date().toISOString(), tables: { systemConfigs: [], products: [], clientUsers: [], preorders: [], preorderItems: [], inventoryLogs: [] } }
   assert.deepEqual(validateExportPayload(payload).tables.preorders, [])
+  if (!mysqlMode) {
+    const { verifyIssuesHttpRegistration } = await import('./issues-177-178-http-verify.js')
+    await verifyIssuesHttpRegistration()
+  }
   console.log(`通过：${mysqlMode ? '真实 MySQL' : '隔离 SQLite'} 服务场景；HTTP 权限和浏览器仍须单独验收`)
 } finally {
   if (db.isInitialized) await db.destroy()

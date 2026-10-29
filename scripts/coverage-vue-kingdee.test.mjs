@@ -48,6 +48,28 @@ test('409实际错误模型触发最新读取但保留输入，必须显式确�
   state.confirmConflict(); conflicts=false; await state.save()
   assert.equal(patches,2); assert.equal(state.localRegistration.value.kingdeeVoucherNo,'自己的意图'); assert.equal(state.localRegistration.value.kingdeeVersion,10)
 }))
+
+test('冲突刷新失败保留草稿，关闭编辑后重进；不可编辑与超长编号不发请求',async()=>withBrowser(async()=>{
+  let patches=0
+  host.api.updateMyKingdeeRegistration=async()=>{ patches+=1; throw new AxiosError('登记冲突',undefined,undefined,undefined,{status:409,data:{code:409,message:'登记已变化'},headers:{},config:{headers:{}}}) }
+  host.api.getO2oPreorderDetail=async()=>{ throw new Error('隔离网络不可用') }
+  const {state,props}=mountBehavior(editor,{orderId:'conflict-refresh',registration:registration(),canEdit:false})
+  state.begin(); state.draft.value='自己的草稿'; await state.save(); assert.equal(patches,0)
+  props.canEdit=true; state.draft.value='字'.repeat(129); await state.save(); assert.equal(patches,0); assert.match(state.message.value,/128/)
+  state.draft.value='自己的草稿'; await state.save()
+  assert.equal(patches,1); assert.equal(state.draft.value,'自己的草稿'); assert.equal(state.busy.value,false)
+  assert.match(state.message.value,/冲突且刷新失败/); assert.equal(state.editing.value,true)
+  state.begin(); assert.equal(state.version.value,5)
+  props.registration={...registration(),kingdeeEditable:false}; await flush(); await state.save(); assert.equal(patches,1)
+}))
+
+test('同一会话正常请求保留原错误，切换账号把旧请求失败转换为取消',async()=>{
+  const failure=new Error('当前会话真实网络失败')
+  await assert.rejects(api.requestWithKingdeeFreshness('client',async()=>{throw failure}),error=>error===failure)
+  const waiting=deferred(), pending=api.requestWithKingdeeFreshness('client',()=>waiting.promise)
+  api.setKingdeeIdentity('client','another-session'); waiting.reject(failure)
+  await assert.rejects(pending,error=>isCancel(error))
+})
 test('重复提交、失败、非法编号及换号/卸载迟到响应不会串入当前编辑',async()=>withBrowser(async()=>{
   const waiting=deferred(); const events=[]; let patches=0
   host.api.updateMyKingdeeRegistration=()=>{ patches+=1; return waiting.promise }

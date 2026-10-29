@@ -70,6 +70,7 @@ const verifiedFormal=await formal.findOneByOrFail({sourceDocType:'o2o_preorder',
 const manifest={preorderId:pending.order.id,preorderNo:pending.order.preorderNo,verifiedId:verified.order.id,verifiedNo:verified.order.preorderNo,verifiedFormalId:verifiedFormal.id,verifiedBusinessNo:verifiedFormal.businessNo,mergeParentId:ownFormal.id,mergeBusinessNo:ownFormal.businessNo,ownSourceId:ownSource.order.id,otherSourceId:otherSource.order.id,ownSourceNo:ownSource.order.preorderNo,otherSourceNo:otherSource.order.preorderNo,skuIds:product.skus.map((sku)=>sku.id),skuCodes:product.skus.map((sku)=>sku.skuCode),mainId:main.id,extraId:extra.id,disabledId:disabled.id,commerceProductName:commerce.productName}
 const bootstrap=`/__issues_verify/${randomUUID()}`
 const app=express()
+app.disable('x-powered-by')
 app.get(`${bootstrap}/:kind`,(req,res)=>{const value=sessions.get(req.params.kind);if(!value){res.sendStatus(404);return}if(['client','other'].includes(req.params.kind))setClientAuthCookie(req,res,value);else setAdminAuthCookies(req,res,value);res.json({code:0,message:'ok'})})
 app.get('/__issues_verify/manifest',(_req,res)=>res.json(manifest))
 app.use(createApp())

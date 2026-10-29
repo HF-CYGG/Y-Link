@@ -10,7 +10,7 @@ export const testLabel = (skuCode = 'WC02001', factoryBarcode = 'FACTORY-1', ove
   printLocations: { capability: 'full', mainLocationId: 'main', mainLocationCode: 'A', mainLocationStatus: 'valid', options: [{ locationId: 'main', locationCode: 'A', isMain: true, qty: 0 }, { locationId: 'other', locationCode: 'B', isMain: false, qty: 4 }], distributionKey: 'distribution-1' }, ...overrides,
 })
 export const calls = { loading: 0, requests: [], warnings: host.warnings, errors: host.errors }
-let response = async () => []
+let response = async (..._args) => []
 export const setLabelsResponse = (callback) => { response = callback }
 host.api.getProductLabels = async (...args) => { calls.loading += 1; calls.requests.push(args[0]); return response(...args) }
 const mountedByState = new WeakMap()
@@ -34,4 +34,4 @@ export const replaceLabels = async (state, labels) => {
   assert.equal(state.loading.value, false)
 }
 export const readyToPrint = async (state, label = testLabel()) => { await replaceLabels(state, [label]); assert.equal(state.printBlockedReason.value, '') }
-export const resetBarcodeHost = () => { unmountAll(); response = async () => []; calls.loading = 0; calls.requests.length = 0; calls.warnings.length = 0; calls.errors.length = 0 }
+export const resetBarcodeHost = () => { unmountAll(); response = async (..._args) => []; calls.loading = 0; calls.requests.length = 0; calls.warnings.length = 0; calls.errors.length = 0 }

@@ -66,6 +66,17 @@ test('已知JSON/二进制夹具按原字节签名，JSON实际执行值变化�
   assert.equal(canReuseCoverageCheckpoint(next, inputs()), false)
 }))
 
+test('输入路径按UTF-16稳定排序，保留旧签名的顺序且不受locale影响', () => sandbox(({ write, inputs, execute }) => {
+  write('scripts/parent.mjs', 'export const result = 1; console.log(result)\n')
+  for (const name of ['中', 'ä', 'a', 'Z', '10', '2']) write(`scripts/fixtures/${name}.json`, '{}')
+  const first = inputs(), second = inputs()
+  assert.equal(execute(), '1', '成功checkpoint必须来自真实执行')
+  const order = first.files.filter((filename) => filename.endsWith('.json') && !filename.endsWith('package.json')).map((filename) => path.basename(filename))
+  assert.deepEqual(order, ['10.json', '2.json', 'Z.json', 'a.json', 'ä.json', '中.json'])
+  assert.deepEqual(first.files, second.files); assert.equal(first.signature, second.signature)
+  assert.equal(canReuseCoverageCheckpoint({ ...first, status:'passed' }, second), true)
+}))
+
 test('真实.js存在时不漏签，TS同名候选与JS增删也保守失效', () => sandbox(({ write, inputs, execute, directory }) => {
   write('scripts/parent.mjs', "import { result } from './helper.js'; console.log(result)\n")
   write('scripts/helper.js', 'export const result = 31\n')

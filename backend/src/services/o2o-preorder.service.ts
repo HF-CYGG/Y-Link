@@ -4153,7 +4153,8 @@ class O2oPreorderService {
       const parentId = metadata?.role === 'source' ? metadata.parent?.id : linkedId
       const parentMetadata = parentId && parentId !== linkedId
         ? (await orderMergeService.getMetadataMap([parentId], manager)).get(parentId) : metadata
-      const orderIds = [...new Set([linkedId, ...(parentId ? [parentId] : []), ...(parentMetadata?.children.map((child) => child.id) ?? [])])].sort()
+      const orderIds = [...new Set([linkedId, ...(parentId ? [parentId] : []), ...(parentMetadata?.children.map((child) => child.id) ?? [])])]
+        .sort((left, right) => Number(left > right) - Number(left < right))
       return { linkedId, orderIds }
     }
     const before = await describe()
@@ -4165,7 +4166,8 @@ class O2oPreorderService {
       groupOrders = await query.getMany()
       if (groupOrders.length !== before.orderIds.length) throw new BizError('正式单关联已变化，请刷新重试', 409)
     }
-    const preorderIds = [...new Set([preorderId, ...groupOrders.flatMap((order) => order.sourceDocType === 'o2o_preorder' && order.sourceDocId ? [String(order.sourceDocId)] : [])])].sort()
+    const preorderIds = [...new Set([preorderId, ...groupOrders.flatMap((order) => order.sourceDocType === 'o2o_preorder' && order.sourceDocId ? [String(order.sourceDocId)] : [])])]
+      .sort((left, right) => Number(left > right) - Number(left < right))
     const query = manager.getRepository(O2oPreorder).createQueryBuilder('preorder')
       .where('preorder.id IN (:...ids)', { ids: preorderIds }).orderBy('preorder.id', 'ASC')
     if (manager.connection.options.type !== 'sqlite') query.setLock('pessimistic_write')
