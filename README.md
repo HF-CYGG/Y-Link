@@ -234,101 +234,30 @@ PERMANENT_DELETE_PASSWORD=请改成仅管理员知晓的删除密码
 
 #### 可选配置
 
-不填写即使用默认值，多数部署无需改动。
+只列出按基础配置运行起来时可能需要改的变量，不填即使用默认值。
 
 | 分类 | 变量 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | 基础运行 | `TZ` | `Asia/Shanghai`（镜像内） | 容器与日志时区，只影响显示，时钟校准见[第 7 节](#7-容器时间与北京时间校准) |
-| 基础运行 | `PORT` | `3001` | 容器内后端端口；onebox 内 Nginx 按默认端口代理，不要修改 |
-| 基础运行 | `NODE_ENV` | `production`（镜像内） | 运行环境，本地开发为 `development` |
-| 基础运行 | `Y_LINK_DATA_DIR` | onebox 为 `/app/data` | 数据目录，保存运行时覆盖配置、加密密钥文件等 |
-| 基础运行 | `UV_THREADPOOL_SIZE` | `8`（镜像内） | Node 线程池大小，须在进程启动前设置 |
-| 基础运行 | `LOG_COLOR` / `NO_COLOR` | `true` / 空 | 日志彩色输出；`NO_COLOR` 有值时关闭彩色 |
-| 基础运行 | `APP_PROFILE`、`ENV_FILE` | `default`、空 | 本地开发的配置档与额外加载的 env 文件 |
-| 管理员与数据治理 | `INIT_ADMIN_USERNAME` | `admin` | 初始管理员账号 |
-| 管理员与数据治理 | `INIT_ADMIN_DISPLAY_NAME` | `系统管理员` | 初始管理员显示名 |
-| 管理员与数据治理 | `PERMANENT_DELETE_PASSWORD` | 空 | 永久删除订单、订单池记录和供货方送货单时的服务端密码门禁；未配置时拒绝所有永久删除 |
-| 管理员与数据治理 | `Y_LINK_JSON_DATA_TRANSFER_ENABLED` | `false` | JSON 全量导入导出（含全部客户数据与密码哈希），只在迁移或运维窗口临时开启 |
-| 管理员与数据治理 | `Y_LINK_AUTOMATIC_DB_MIGRATION_ENABLED` | onebox 为 `true`，其余为 `false` | 是否允许管理端一键自动迁移数据库 |
-| 管理员与数据治理 | `Y_LINK_DATA_ENCRYPTION_KEY` | 空 | 单实例无需配置，首次启动自动生成在数据目录 `secrets/data-encryption.key`；备份或迁移时须一并带上 |
-| 数据库通用 | `DB_TYPE` | `sqlite` | `sqlite` 或 `mysql` |
-| 数据库通用 | `DB_SYNC` | 空 | 自动同步表结构：留空时 SQLite 首次启动建表、MySQL 关闭；生产不建议长期开启，存量 MySQL 禁止开启 |
-| 数据库通用 | `DB_AUTO_MIGRATE` | 空 | MySQL 启动时自动执行 `backend/sql/` 白名单内的幂等增量脚本 |
-| 数据库通用 | `DB_MAX_QUERY_MS` | `200` | 慢查询记录阈值（毫秒），只记录脱敏 SQL 形状 |
+| 管理员 | `INIT_ADMIN_USERNAME` | `admin` | 初始管理员账号 |
+| 管理员 | `INIT_ADMIN_DISPLAY_NAME` | `系统管理员` | 初始管理员显示名 |
+| 管理员 | `PERMANENT_DELETE_PASSWORD` | 空 | 永久删除订单、订单池记录和供货方送货单时的服务端密码门禁；未配置时拒绝所有永久删除 |
+| 数据库 | `DB_TYPE` | `sqlite` | `sqlite` 或 `mysql`，切换方式见 [MySQL 部署](#mysql-部署) |
+| 数据库 | `DB_SYNC` | 空 | 自动同步表结构：留空时 SQLite 首次启动自动建表；仅全新 MySQL 空库首次启动临时设为 `true`，存量库禁止开启 |
 | SQLite | `SQLITE_DB_PATH` | `/app/data/y-link.sqlite` | SQLite 文件位置 |
-| SQLite | `SQLITE_SYNCHRONOUS` | `FULL` | 耐久档；`NORMAL` 仅适合接受断电时丢失最近提交的场景 |
-| SQLite | `SQLITE_BUSY_TIMEOUT_MS` | `5000` | 锁等待超时（毫秒） |
-| SQLite | `SQLITE_CACHE_SIZE_KIB` | `65536` | 页缓存大小（KiB） |
-| SQLite | `SQLITE_WAL_AUTOCHECKPOINT_PAGES` | `1000` | WAL 自动检查点页数 |
-| SQLite | `SQLITE_JOURNAL_SIZE_LIMIT_BYTES` | `67108864`（64 MB） | WAL 文件保留上限 |
-| SQLite | `SQLITE_WRITE_QUEUE_MAX_PENDING` | `256` | 写队列最大排队数 |
-| SQLite | `SQLITE_WRITE_QUEUE_TIMEOUT_MS` | `5000` | 写队列等待超时（毫秒） |
 | MySQL | `DB_POOL_SIZE` | `20` | 每个实例的连接池大小，多实例按“实例数 × 连接池”核算总连接数 |
-| MySQL | `DB_CONNECT_TIMEOUT_MS` | `5000` | 建连超时（毫秒） |
-| MySQL | `DB_ACQUIRE_TIMEOUT_MS` | `3000` | 从连接池取连接的超时（毫秒） |
-| MySQL | `DB_IDLE_TIMEOUT_MS` | `60000` | 空闲连接回收时间（毫秒） |
-| MySQL | `DB_QUEUE_LIMIT` | `100` | 等待连接的请求队列上限 |
-| MySQL | `DB_LOCK_WAIT_TIMEOUT_SECONDS` | `15` | 行锁等待上限（1-300 秒）；死锁或长事务持锁时等待方快速失败，可重放的下单事务自动重试，其余请求返回“数据库繁忙” |
-| MySQL | `DB_SESSION_WAIT_TIMEOUT_SECONDS` | `600` | 会话空闲上限（60-28800 秒）；应用意外停止或网络中断留下的未提交事务超时后被回滚并释放行锁，实际值不小于 `DB_IDLE_TIMEOUT_MS` 换算秒数 + 60 |
-| MySQL | `DB_SSL_MODE` | `disabled` | 传输加密：`disabled`、`required`（加密不校验证书）、`verify-full`（校验证书链与主机名，外置或云数据库推荐） |
-| MySQL | `DB_SSL_CA` | 空 | `verify-full` 时使用的 CA 证书文件路径（PEM），留空用 Node 内置根证书 |
-| 账号与会话 | `AUTH_TOKEN_TTL_HOURS` | `168` | 登录态绝对有效期（小时） |
-| 账号与会话 | `AUTH_SESSION_IDLE_TIMEOUT_MINUTES` | `720` | 管理端会话空闲超时（分钟），`0` 表示关闭 |
-| 账号与会话 | `AUTH_WEBAUTHN_ENABLED` | `false` | 设为 `true` 启用管理端通行密钥与安全密钥 |
-| 账号与会话 | `MOBILE_ACCESS_TTL_MINUTES` | `15` | Mobile 访问令牌有效期（分钟） |
-| 账号与会话 | `MOBILE_REFRESH_TTL_DAYS` | `30` | Mobile 刷新令牌有效期（天） |
-| 账号与会话 | `MOBILE_SESSION_ABSOLUTE_TTL_DAYS` | `90` | Mobile 会话绝对有效期（天） |
-| 账号与会话 | `MOBILE_REFRESH_GRACE_SECONDS` | `60` | 刷新令牌轮换宽限期（秒） |
-| 账号与会话 | `MOBILE_MAX_ACTIVE_SESSIONS` | `10` | 每个账号的 Mobile 活跃会话上限 |
-| 账号与会话 | `MOBILE_REFRESH_ROTATION_RATE_LIMIT`、`MOBILE_REFRESH_ROTATION_RATE_WINDOW_SECONDS` | `10`、`60` | 刷新令牌轮换频控：窗口内次数与窗口秒数 |
-| 验证码与短信 | `VERIFICATION_CODE_REQUEST_TIMEOUT_MS` | `8000` | 短信/邮件验证码平台请求超时（毫秒） |
-| 验证码与短信 | `ALIYUN_DYPNS_MNS_ENABLED` | `false` | 是否启动阿里云 MNS 回执队列，初次配置保持 `false` |
-| 网络与代理 | `Y_LINK_LISTEN_HOST` | `0.0.0.0`（onebox 为 `127.0.0.1`） | 后端监听地址；与 Nginx 同机时用 `127.0.0.1`，避免绕过 Nginx 直连 |
-| 网络与代理 | `Y_LINK_TRUST_PROXY` | 空（onebox 为 `127.0.0.1,::1`） | 后端信任的上一跳代理 IP/CIDR，逗号分隔，不接受全网或布尔值 |
-| 网络与代理 | `Y_LINK_TRUSTED_EDGE_PROXIES` | 空 | Nginx 信任的上游反向代理或 CDN 的 IP/CIDR，逗号分隔；只采信这些来源的 `X-Forwarded-For` 与 `X-Forwarded-Proto` |
-| 网络与代理 | `Y_LINK_FORCE_SECURE_COOKIES` | `false` | 强制 Cookie 带 `Secure` 标记，全站 HTTPS 时开启 |
-| 网络与代理 | `Y_LINK_HSTS_MAX_AGE_SECONDS` | `15552000`（180 天） | 经 HTTPS 访问时下发 HSTS 的有效期（0-63072000 秒） |
-| Redis 与多实例 | `REDIS_URL` | 空 | `redis://host:6379/0` 或 `rediss://host:6380`，留空不启用 Redis |
-| Redis 与多实例 | `REDIS_USERNAME`、`REDIS_PASSWORD` | 空 | ACL 用户名与密码，密码建议写在这里而不是 URL 中 |
-| Redis 与多实例 | `REDIS_DB` | 空 | 库编号 0-15，留空沿用 URL 中的库号 |
-| Redis 与多实例 | `REDIS_TLS`、`REDIS_TLS_CA` | `false`、空 | 跨网络连接时开启 TLS（`rediss://` 视同开启）；自签 CA 填容器内可读的 PEM 文件路径 |
-| Redis 与多实例 | `REDIS_KEY_PREFIX` | `ylink:` | 键名前缀，多套环境共用一个 Redis 时用于隔离 |
-| Redis 与多实例 | `REDIS_CONNECT_TIMEOUT_MS`、`REDIS_COMMAND_TIMEOUT_MS` | `3000`、`500` | 连接与单命令超时（毫秒），Redis 抖动时快速失败并降级 |
-| Redis 与多实例 | `Y_LINK_MULTI_INSTANCE` | `false` | 声明多实例部署，启动期强制要求 MySQL、Redis 与统一的数据加密密钥 |
-| 登录风控 | `YLINK_ADMIN_GLOBAL_FAILURE_THRESHOLD`、`YLINK_CLIENT_GLOBAL_FAILURE_THRESHOLD` | `30`、`150` | 管理端、客户端 5 分钟内全站登录失败达到阈值后，该端所有登录强制图形验证码 |
-| 登录风控 | `YLINK_GLOBAL_CAPTCHA_HOLD_MINUTES` | `15` | 强制图形验证码的持续时间（分钟） |
-| 负载保护 | `YLINK_PASSWORD_HASH_CONCURRENCY`、`YLINK_PASSWORD_HASH_QUEUE`、`YLINK_PASSWORD_HASH_QUEUE_TIMEOUT_MS` | `min(4, CPU-1)`、`64`、`10000` | 密码派生的并发、排队上限与等待超时，超出返回 503 |
-| 负载保护 | `YLINK_PRODUCT_IMAGE_CONCURRENCY`、`YLINK_PRODUCT_IMAGE_QUEUE`、`YLINK_PRODUCT_IMAGE_QUEUE_TIMEOUT_MS` | `2`、`16`、`15000` | 商品图重编码的并发、排队上限与等待超时 |
-| 负载保护 | `YLINK_CAPTCHA_RENDER_CONCURRENCY`、`YLINK_CAPTCHA_RENDER_QUEUE`、`YLINK_CAPTCHA_RENDER_QUEUE_TIMEOUT_MS` | `4`、`32`、`3000` | 图形验证码渲染的并发、排队上限与等待超时 |
-| 负载保护 | `YLINK_ANONYMOUS_AUTH_MAX_IN_FLIGHT` | `64` | 匿名认证入口每进程的在途请求上限，超出返回 503 |
-| 负载保护 | `YLINK_OVERLOAD_SHEDDING_ENABLED` | `true` | 过载自适应削峰开关 |
-| 负载保护 | `YLINK_OVERLOAD_ELEVATED_LOOP_DELAY_MS`、`YLINK_OVERLOAD_CRITICAL_LOOP_DELAY_MS` | `500`、`1000` | 事件循环延迟 p99 达到“升高”“严重”的阈值（毫秒） |
-| 负载保护 | `YLINK_OVERLOAD_ELEVATED_WRITE_QUEUE_PERCENT` | `90` | SQLite 写队列占用达到该百分比视为升高 |
-| 负载保护 | `YLINK_SESSION_RATE_BURST`、`YLINK_SESSION_RATE_PER_SECOND` | `200`、`30` | 按会话的请求速率保险丝（令牌桶突发量与每秒补充量） |
-| 客服反馈附件 | `YLINK_FEEDBACK_MAX_ATTACHMENTS_PER_MESSAGE` | `5` | 每条消息的附件数上限（1-5） |
-| 客服反馈附件 | `YLINK_FEEDBACK_MAX_PENDING_ATTACHMENTS`、`YLINK_FEEDBACK_MAX_PENDING_BYTES` | `10`、`52428800`（50 MB） | 每个客户端尚未发送的附件数量与总字节上限 |
-| 客服反馈附件 | `YLINK_FEEDBACK_MAX_TOTAL_BYTES` | `10737418240`（10 GB） | 反馈附件总容量上限 |
-| 客服反馈附件 | `YLINK_FEEDBACK_MIN_FREE_BYTES` | `536870912`（512 MB） | 磁盘剩余空间低于该值时拒绝上传 |
-| 客服反馈附件 | `YLINK_FEEDBACK_UPLOADS_PER_WINDOW`、`YLINK_FEEDBACK_UPLOAD_WINDOW_MS` | `20`、`600000` | 附件上传频控：窗口内次数与窗口时长（毫秒） |
-| 客服反馈附件 | `YLINK_FEEDBACK_DRAFT_TTL_MS`、`YLINK_FEEDBACK_ORPHAN_GRACE_MS` | `86400000`、`86400000` | 草稿附件保留时长与孤儿附件清理宽限（毫秒） |
-| 客服反馈附件 | `YLINK_FEEDBACK_CLEANUP_INTERVAL_MS`、`YLINK_FEEDBACK_CLEANUP_BATCH_SIZE` | `3600000`、`500` | 附件清理任务的执行间隔（毫秒）与每批数量 |
-| 客服实时连接 | `YLINK_SSE_MAX_PER_SESSION`、`YLINK_SSE_MAX_PER_OWNER`、`YLINK_SSE_MAX_PER_PROCESS` | `3`、`20`、`1000` | 每会话、每账号、每进程的 SSE 连接上限 |
-| 客服实时连接 | `YLINK_SSE_CONNECTS_PER_WINDOW`、`YLINK_SSE_CONNECT_WINDOW_MS` | `12`、`60000` | SSE 建连频控：窗口内次数与窗口时长（毫秒） |
-| 客服实时连接 | `YLINK_SSE_CONNECT_RATE_MAX_ENTRIES` | `2000` | 本地建连频控记录的条目上限，记录满时新来源的建连直接限流 |
-| 客服实时连接 | `YLINK_SSE_MAX_PENDING_MESSAGES`、`YLINK_SSE_MAX_PENDING_BYTES` | `256`、`4194304`（4 MB） | 每进程待投递 SSE 事件的消息数与字节上限，超出时关闭相关连接，由客户端重连后重新同步 |
-| Compose 编排 | `Y_LINK_PORT` | `8080` | `compose.onebox.yml` 映射到宿主机的 Web 端口 |
-| Compose 编排 | `FRONTEND_PORT` | `8080` | 双容器与外置 MySQL 编排的前端宿主机端口 |
-| Compose 编排 | `BACKEND_IMAGE`、`FRONTEND_IMAGE` | Docker Hub `latest` 镜像 | 双容器编排使用的后端、前端镜像 |
-| Compose 编排 | `Y_LINK_FRONTEND_PROXY_IP`、`Y_LINK_PROXY_NETWORK_CIDR` | `172.30.91.2`、`172.30.91.0/24` | 前端 Nginx 在内部代理网络中的固定 IP 与网段，后端只信任该 IP |
-| Compose 编排 | `MYSQL_DATABASE`、`MYSQL_USER` | `y_link`、`ylink` | `compose.onebox.mysql.yml` 创建的库名与业务账号 |
-| Compose 编排 | `REDIS_MAXMEMORY` | `256mb` | `compose.redis.yml` 中 Redis 的内存上限 |
-| Compose 编排 | `FORCE_COLOR` | `1` | 双容器编排中后端日志的彩色输出 |
+| 数据加密 | `Y_LINK_DATA_ENCRYPTION_KEY` | 空 | 单实例无需配置，首次启动自动生成在数据目录 `secrets/data-encryption.key`；备份或迁移数据目录时须一并带上 |
+| 通行密钥 | `AUTH_WEBAUTHN_ENABLED` | `false` | 设为 `true` 启用管理端通行密钥与安全密钥，配置见[第 11 节](#11-可选管理端通行密钥与安全密钥) |
+| 反向代理 | `Y_LINK_TRUSTED_EDGE_PROXIES` | 空 | 前面还有 1Panel 反向代理或 CDN 时，填写其 IP/CIDR（逗号分隔），日志与风控才能拿到用户真实 IP |
+| 反向代理 | `Y_LINK_FORCE_SECURE_COOKIES` | `false` | 全站 HTTPS 访问时设为 `true`，Cookie 带 `Secure` 标记 |
+| Redis | `REDIS_URL` | 空 | 留空不启用 Redis；接入方式见 [Redis 与多实例部署](#redis-与多实例部署可选) |
+| Redis | `Y_LINK_MULTI_INSTANCE` | `false` | 多个后端实例部署时设为 `true`，启动期强制检查 MySQL、Redis 与统一加密密钥 |
+| Compose | `Y_LINK_PORT` / `FRONTEND_PORT` | `8080` | `compose.onebox.yml` / 双容器编排映射到宿主机的 Web 端口 |
 
 填写注意：
 
 - `true`/`false` 类变量要么不添加，要么填写 `true` 或 `false`，不要在面板里留空字符串，否则启动时校验失败。
-- 1Panel 与 `docker run` 传入的变量会直接生效；使用仓库的 compose 文件时，只有在对应服务 `environment` 中映射过的变量才会传进容器，表中未被映射的变量（如 `YLINK_*` 调优项）需要自行添加。
-- 验证脚本与测试专用变量（`VERIFY_*`、`Y_LINK_DB_MIGRATION_E2E_*` 等）不影响部署，未列入上表。
+- 其余变量（SQLite 与 MySQL 连接和会话参数、Redis TLS 与超时、短信平台、登录风控与负载保护阈值等）保持默认即可。确需调整时，先看对应章节：[MySQL 部署](#mysql-部署)、[Redis 与多实例部署](#redis-与多实例部署可选)、[阿里云 PNVS 短信验证码](#10-可选阿里云-pnvs-短信验证码)；变量模板 [backend/.env.example](./backend/.env.example)、[.env.docker.mysql.example](./.env.docker.mysql.example) 与 [.env.onebox.example](./.env.onebox.example) 的注释写明了各项含义与取值范围。
 
 ### 5. 重启规则和资源
 
@@ -605,7 +534,7 @@ MySQL 健康后，在管理端“系统管理 -> 数据库迁移”填写：`hos
 
 如果 MySQL 不是由可选叠加文件启动：安装在 Linux 宿主机时向导可填写 `host.docker.internal`，远程 MySQL 则填写 Onebox 容器可访问的 DNS 名称或 IP。`compose.onebox.yml` 已补齐 Linux 的 `host-gateway` 映射；无论目标在哪里，都不要把数据库公网端口开放给所有来源。
 
-迁移前应在 `.env` 中一并确认连接池与会话参数（`DB_POOL_SIZE`、`DB_CONNECT_TIMEOUT_MS`、`DB_ACQUIRE_TIMEOUT_MS`、`DB_IDLE_TIMEOUT_MS`、`DB_QUEUE_LIMIT`、`DB_LOCK_WAIT_TIMEOUT_SECONDS`、`DB_SESSION_WAIT_TIMEOUT_SECONDS`、`DB_MAX_QUERY_MS`，含义见[第 4 节可选配置](#可选配置)中的 MySQL 分类）。这些参数由 Onebox 容器持续保留，切换后同一个进程会用它们建立 MySQL 连接池；单实例默认连接池为 20，多个应用副本时必须按“实例数 × 每实例连接池”计算总连接数，并给 MySQL 运维连接留出余量。
+迁移前应在 `.env` 中一并确认连接池与会话参数（`DB_POOL_SIZE`、`DB_CONNECT_TIMEOUT_MS`、`DB_ACQUIRE_TIMEOUT_MS`、`DB_IDLE_TIMEOUT_MS`、`DB_QUEUE_LIMIT`、`DB_LOCK_WAIT_TIMEOUT_SECONDS`、`DB_SESSION_WAIT_TIMEOUT_SECONDS`、`DB_MAX_QUERY_MS`，含义与取值范围见 [.env.docker.mysql.example](./.env.docker.mysql.example) 中的注释）。这些参数由 Onebox 容器持续保留，切换后同一个进程会用它们建立 MySQL 连接池；单实例默认连接池为 20，多个应用副本时必须按“实例数 × 每实例连接池”计算总连接数，并给 MySQL 运维连接留出余量。
 
 切换到 MySQL 并产生第一笔新业务写入后，旧 SQLite 已经是历史快照，系统会禁用“直接清除覆盖/回到旧 SQLite”。如需回退，必须恢复 MySQL 备份或执行受控反向迁移，避免静默丢单。
 
@@ -667,7 +596,7 @@ Redis 是可选增强。`REDIS_URL` 留空时，系统行为与未接入 Redis �
 docker compose --env-file .env.docker.mysql -f compose.mysql.yml -f compose.redis.yml up -d
 ```
 
-至少需要配置 `REDIS_URL` 与 `REDIS_PASSWORD`；多实例部署再设置 `Y_LINK_MULTI_INSTANCE=true`，并给所有实例注入同一个 `Y_LINK_DATA_ENCRYPTION_KEY`。TLS、键名前缀、超时等其余变量见[第 4 节可选配置](#可选配置)中的“Redis 与多实例”分类。
+至少需要配置 `REDIS_URL` 与 `REDIS_PASSWORD`；多实例部署再设置 `Y_LINK_MULTI_INSTANCE=true`，并给所有实例注入同一个 `Y_LINK_DATA_ENCRYPTION_KEY`。TLS、键名前缀、超时等其余变量保持默认即可，确需调整时见 [.env.docker.mysql.example](./.env.docker.mysql.example) 中 Redis 段的注释。
 
 Redis 已配置但暂时不可用时按能力分级降级：限流与风控回落到数据库，客服消息只投递本实例并由客户端重连补齐，共享缓存直接回源数据库，安全票据返回 503 而不放行。公开 `/health` 的 `redis` 字段（`disabled`、`connecting`、`ready`、`degraded`）可用于观察状态，不影响 `status: UP` 的判定。
 
