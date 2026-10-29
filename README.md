@@ -202,55 +202,249 @@ Y-Link 覆盖“线上预订、线下核销、出库开单、供货入库、库�
 
 ### 4. 环境变量
 
-必须手动新增的变量只有初始管理员密码：
+首次部署至少填写下面几项（1Panel 在容器“环境变量”页逐项新增；`docker run` 用 `-e` 传入；Compose 写入不提交到仓库的私有 `.env`）：
 
 ```env
 INIT_ADMIN_PASSWORD=请改成你自己的强密码
 TZ=Asia/Shanghai
 # 建议配置：永久删除订单/送货单时的二次门禁密码。
 PERMANENT_DELETE_PASSWORD=请改成仅管理员知晓的删除密码
-# 启用教师统一邀请码时必须配置；至少 32 个随机字节。
-INVITE_CODE_PEPPER=请生成至少32个随机字节的教师邀请码密钥
 ```
 
-要求：
+- `INIT_ADMIN_PASSWORD` 不填容器会拒绝启动，不能使用 `Admin@123456`，建议至少 8 位并包含字母和数字；只在部署平台的环境变量里填写，不要写进公开文档或提交到仓库。
+- 首次启动会用它自动创建管理员账号；已有管理员时不会覆盖原密码。日志显示 `initialized=false` 表示库里已有管理员，属于正常情况。
+- 修改环境变量后需要**重新创建容器**才会生效，普通 `docker restart` 不会更新容器环境。
 
-- 必填，不填容器会拒绝启动。
-- 不能使用 `Admin@123456`。
-- 建议至少 8 位，并包含字母和数字。
-- 只在 1Panel 环境变量里填写，不要写进公开文档或提交到仓库。
-- `PERMANENT_DELETE_PASSWORD` 不影响容器启动；未配置时，系统会拒绝所有永久删除操作。修改后需重启后端容器才会生效。
+下面两张表列出全部可配置的环境变量。
 
-可选变量：
+#### 必须配置
 
-| 变量 | 默认值 | 说明 |
+| 变量 | 何时必须 | 说明 |
 | --- | --- | --- |
-| `INIT_ADMIN_USERNAME` | `admin` | 初始管理员账号 |
-| `INIT_ADMIN_DISPLAY_NAME` | `系统管理员` | 初始管理员显示名 |
-| `PERMANENT_DELETE_PASSWORD` | 空 | 永久删除订单、订单池记录和供货方送货单时的服务端密码门禁 |
-| `TZ` | `Asia/Shanghai` | 容器和日志时区；国内部署建议保持此值 |
-| `DB_TYPE` | `sqlite` | 默认 SQLite |
-| `SQLITE_DB_PATH` | `/app/data/y-link.sqlite` | SQLite 文件位置 |
-| `PORT` | `3001` | 容器内后端端口，通常不用改 |
-| `VERIFICATION_CODE_REQUEST_TIMEOUT_MS` | `8000` | 短信/邮件验证码平台请求超时（毫秒） |
-| `AUTH_WEBAUTHN_ENABLED` | `false` | 设为 `true` 才启用管理端通行密钥与安全密钥 |
-| `AUTH_WEBAUTHN_RP_ID` | 空 | 浏览器访问域名（不含协议、端口、路径），或本地测试用 `localhost` |
-| `AUTH_WEBAUTHN_RP_NAME` | 空 | 浏览器显示的非空站点名称，例如 `Y-Link` |
-| `AUTH_WEBAUTHN_ORIGINS` | 空 | 浏览器外部访问地址组成的非空 JSON 字符串数组 |
+| `INIT_ADMIN_PASSWORD` | 始终 | 初始管理员密码，要求见上文 |
+| `DB_HOST`、`DB_PORT`、`DB_USER`、`DB_PASSWORD`、`DB_NAME` | `DB_TYPE=mysql` | 外置 MySQL 的地址、端口（默认 `3306`）、账号、密码与库名（默认 `y_link`），库字符集使用 `utf8mb4` |
+| `INVITE_CODE_PEPPER` | 启用教师统一邀请码 | 邀请码 HMAC 密钥，至少 32 个随机字节 |
+| `ALIBABA_CLOUD_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_SECRET` | 短信通道使用阿里云 PNVS | RAM 用户的 AccessKey，见[阿里云 PNVS 短信验证码](#10-可选阿里云-pnvs-短信验证码) |
+| `VERIFICATION_TICKET_HMAC_SECRET` | 短信通道使用阿里云 PNVS | 关联手机号与受理记录的 HMAC 密钥，至少 32 个随机字节 |
+| `AUTH_WEBAUTHN_RP_ID`、`AUTH_WEBAUTHN_RP_NAME`、`AUTH_WEBAUTHN_ORIGINS` | `AUTH_WEBAUTHN_ENABLED=true` | 浏览器访问域名、展示名称与外部访问地址 JSON 数组，见[管理端通行密钥与安全密钥](#11-可选管理端通行密钥与安全密钥) |
+| `REDIS_URL` | `Y_LINK_MULTI_INSTANCE=true` | 独立 Redis 地址，见[Redis 与多实例部署](#redis-与多实例部署可选) |
+| `Y_LINK_DATA_ENCRYPTION_KEY` | `Y_LINK_MULTI_INSTANCE=true`；或数据库中已有加密配置、但数据目录丢失 `secrets/data-encryption.key` | 敏感配置与安全票据的加密主密钥，32 字节（base64 或 64 位十六进制），所有实例必须一致 |
+| `REDIS_PASSWORD` | 叠加 `compose.redis.yml` | Redis 访问密码，同时供 Redis 容器与后端读取 |
+| `MYSQL_PASSWORD`、`MYSQL_ROOT_PASSWORD` | 叠加 `compose.onebox.mysql.yml` | 随 Onebox 启动的 MySQL 8.4 的业务账号密码与 root 密码 |
 
-首次启动后，系统会自动创建管理员账号。已有管理员时不会覆盖原账号密码。
+#### 可选配置
 
-如果容器日志显示 `initialized=false`，通常表示数据库里已经存在管理员，系统没有再次初始化，这是正常行为。
+不填写即使用默认值，多数部署无需改动。
 
-不建议新手修改这些变量：
+| 分类 | 变量 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| 基础运行 | `TZ` | `Asia/Shanghai`（镜像内） | 容器与日志时区，只影响显示，时钟校准见[第 7 节](#7-容器时间与北京时间校准) |
+| 基础运行 | `PORT` | `3001` | 容器内后端端口；onebox 内 Nginx 按默认端口代理，不要修改 |
+| 基础运行 | `NODE_ENV` | `production`（镜像内） | 运行环境，本地开发为 `development` |
+| 基础运行 | `Y_LINK_DATA_DIR` | onebox 为 `/app/data` | 数据目录，保存运行时覆盖配置、加密密钥文件等 |
+| 基础运行 | `UV_THREADPOOL_SIZE` | `8`（镜像内） | Node 线程池大小，须在进程启动前设置 |
+| 基础运行 | `LOG_COLOR` / `NO_COLOR` | `true` / 空 | 日志彩色输出；`NO_COLOR` 有值时关闭彩色 |
+| 基础运行 | `APP_PROFILE`、`ENV_FILE` | `default`、空 | 本地开发的配置档与额外加载的 env 文件 |
+| 管理员与数据治理 | `INIT_ADMIN_USERNAME` | `admin` | 初始管理员账号 |
+| 管理员与数据治理 | `INIT_ADMIN_DISPLAY_NAME` | `系统管理员` | 初始管理员显示名 |
+| 管理员与数据治理 | `PERMANENT_DELETE_PASSWORD` | 空 | 永久删除订单、订单池记录和供货方送货单时的服务端密码门禁；未配置时拒绝所有永久删除 |
+| 管理员与数据治理 | `Y_LINK_JSON_DATA_TRANSFER_ENABLED` | `false` | JSON 全量导入导出（含全部客户数据与密码哈希），只在迁移或运维窗口临时开启 |
+| 管理员与数据治理 | `Y_LINK_AUTOMATIC_DB_MIGRATION_ENABLED` | onebox 为 `true`，其余为 `false` | 是否允许管理端一键自动迁移数据库 |
+| 管理员与数据治理 | `Y_LINK_DATA_ENCRYPTION_KEY` | 空 | 单实例无需配置，首次启动自动生成在数据目录 `secrets/data-encryption.key`；备份或迁移时须一并带上 |
+| 数据库通用 | `DB_TYPE` | `sqlite` | `sqlite` 或 `mysql` |
+| 数据库通用 | `DB_SYNC` | 空 | 自动同步表结构：留空时 SQLite 首次启动建表、MySQL 关闭；生产不建议长期开启，存量 MySQL 禁止开启 |
+| 数据库通用 | `DB_AUTO_MIGRATE` | 空 | MySQL 启动时自动执行 `backend/sql/` 白名单内的幂等增量脚本 |
+| 数据库通用 | `DB_MAX_QUERY_MS` | `200` | 慢查询记录阈值（毫秒），只记录脱敏 SQL 形状 |
+| SQLite | `SQLITE_DB_PATH` | `/app/data/y-link.sqlite` | SQLite 文件位置 |
+| SQLite | `SQLITE_SYNCHRONOUS` | `FULL` | 耐久档；`NORMAL` 仅适合接受断电时丢失最近提交的场景 |
+| SQLite | `SQLITE_BUSY_TIMEOUT_MS` | `5000` | 锁等待超时（毫秒） |
+| SQLite | `SQLITE_CACHE_SIZE_KIB` | `65536` | 页缓存大小（KiB） |
+| SQLite | `SQLITE_WAL_AUTOCHECKPOINT_PAGES` | `1000` | WAL 自动检查点页数 |
+| SQLite | `SQLITE_JOURNAL_SIZE_LIMIT_BYTES` | `67108864`（64 MB） | WAL 文件保留上限 |
+| SQLite | `SQLITE_WRITE_QUEUE_MAX_PENDING` | `256` | 写队列最大排队数 |
+| SQLite | `SQLITE_WRITE_QUEUE_TIMEOUT_MS` | `5000` | 写队列等待超时（毫秒） |
+| MySQL | `DB_POOL_SIZE` | `20` | 每个实例的连接池大小，多实例按“实例数 × 连接池”核算总连接数 |
+| MySQL | `DB_CONNECT_TIMEOUT_MS` | `5000` | 建连超时（毫秒） |
+| MySQL | `DB_ACQUIRE_TIMEOUT_MS` | `3000` | 从连接池取连接的超时（毫秒） |
+| MySQL | `DB_IDLE_TIMEOUT_MS` | `60000` | 空闲连接回收时间（毫秒） |
+| MySQL | `DB_QUEUE_LIMIT` | `100` | 等待连接的请求队列上限 |
+| MySQL | `DB_LOCK_WAIT_TIMEOUT_SECONDS` | `15` | 行锁等待上限（1-300 秒）；死锁或长事务持锁时等待方快速失败，可重放的下单事务自动重试，其余请求返回“数据库繁忙” |
+| MySQL | `DB_SESSION_WAIT_TIMEOUT_SECONDS` | `600` | 会话空闲上限（60-28800 秒）；应用意外停止或网络中断留下的未提交事务超时后被回滚并释放行锁，实际值不小于 `DB_IDLE_TIMEOUT_MS` 换算秒数 + 60 |
+| MySQL | `DB_SSL_MODE` | `disabled` | 传输加密：`disabled`、`required`（加密不校验证书）、`verify-full`（校验证书链与主机名，外置或云数据库推荐） |
+| MySQL | `DB_SSL_CA` | 空 | `verify-full` 时使用的 CA 证书文件路径（PEM），留空用 Node 内置根证书 |
+| 账号与会话 | `AUTH_TOKEN_TTL_HOURS` | `168` | 登录态绝对有效期（小时） |
+| 账号与会话 | `AUTH_SESSION_IDLE_TIMEOUT_MINUTES` | `720` | 管理端会话空闲超时（分钟），`0` 表示关闭 |
+| 账号与会话 | `AUTH_WEBAUTHN_ENABLED` | `false` | 设为 `true` 启用管理端通行密钥与安全密钥 |
+| 账号与会话 | `MOBILE_ACCESS_TTL_MINUTES` | `15` | Mobile 访问令牌有效期（分钟） |
+| 账号与会话 | `MOBILE_REFRESH_TTL_DAYS` | `30` | Mobile 刷新令牌有效期（天） |
+| 账号与会话 | `MOBILE_SESSION_ABSOLUTE_TTL_DAYS` | `90` | Mobile 会话绝对有效期（天） |
+| 账号与会话 | `MOBILE_REFRESH_GRACE_SECONDS` | `60` | 刷新令牌轮换宽限期（秒） |
+| 账号与会话 | `MOBILE_MAX_ACTIVE_SESSIONS` | `10` | 每个账号的 Mobile 活跃会话上限 |
+| 账号与会话 | `MOBILE_REFRESH_ROTATION_RATE_LIMIT`、`MOBILE_REFRESH_ROTATION_RATE_WINDOW_SECONDS` | `10`、`60` | 刷新令牌轮换频控：窗口内次数与窗口秒数 |
+| 验证码与短信 | `VERIFICATION_CODE_REQUEST_TIMEOUT_MS` | `8000` | 短信/邮件验证码平台请求超时（毫秒） |
+| 验证码与短信 | `ALIYUN_DYPNS_MNS_ENABLED` | `false` | 是否启动阿里云 MNS 回执队列，初次配置保持 `false` |
+| 网络与代理 | `Y_LINK_LISTEN_HOST` | `0.0.0.0`（onebox 为 `127.0.0.1`） | 后端监听地址；与 Nginx 同机时用 `127.0.0.1`，避免绕过 Nginx 直连 |
+| 网络与代理 | `Y_LINK_TRUST_PROXY` | 空（onebox 为 `127.0.0.1,::1`） | 后端信任的上一跳代理 IP/CIDR，逗号分隔，不接受全网或布尔值 |
+| 网络与代理 | `Y_LINK_TRUSTED_EDGE_PROXIES` | 空 | Nginx 信任的上游反向代理或 CDN 的 IP/CIDR，逗号分隔；只采信这些来源的 `X-Forwarded-For` 与 `X-Forwarded-Proto` |
+| 网络与代理 | `Y_LINK_FORCE_SECURE_COOKIES` | `false` | 强制 Cookie 带 `Secure` 标记，全站 HTTPS 时开启 |
+| 网络与代理 | `Y_LINK_HSTS_MAX_AGE_SECONDS` | `15552000`（180 天） | 经 HTTPS 访问时下发 HSTS 的有效期（0-63072000 秒） |
+| Redis 与多实例 | `REDIS_URL` | 空 | `redis://host:6379/0` 或 `rediss://host:6380`，留空不启用 Redis |
+| Redis 与多实例 | `REDIS_USERNAME`、`REDIS_PASSWORD` | 空 | ACL 用户名与密码，密码建议写在这里而不是 URL 中 |
+| Redis 与多实例 | `REDIS_DB` | 空 | 库编号 0-15，留空沿用 URL 中的库号 |
+| Redis 与多实例 | `REDIS_TLS`、`REDIS_TLS_CA` | `false`、空 | 跨网络连接时开启 TLS（`rediss://` 视同开启）；自签 CA 填容器内可读的 PEM 文件路径 |
+| Redis 与多实例 | `REDIS_KEY_PREFIX` | `ylink:` | 键名前缀，多套环境共用一个 Redis 时用于隔离 |
+| Redis 与多实例 | `REDIS_CONNECT_TIMEOUT_MS`、`REDIS_COMMAND_TIMEOUT_MS` | `3000`、`500` | 连接与单命令超时（毫秒），Redis 抖动时快速失败并降级 |
+| Redis 与多实例 | `Y_LINK_MULTI_INSTANCE` | `false` | 声明多实例部署，启动期强制要求 MySQL、Redis 与统一的数据加密密钥 |
+| 登录风控 | `YLINK_ADMIN_GLOBAL_FAILURE_THRESHOLD`、`YLINK_CLIENT_GLOBAL_FAILURE_THRESHOLD` | `30`、`150` | 管理端、客户端 5 分钟内全站登录失败达到阈值后，该端所有登录强制图形验证码 |
+| 登录风控 | `YLINK_GLOBAL_CAPTCHA_HOLD_MINUTES` | `15` | 强制图形验证码的持续时间（分钟） |
+| 负载保护 | `YLINK_PASSWORD_HASH_CONCURRENCY`、`YLINK_PASSWORD_HASH_QUEUE`、`YLINK_PASSWORD_HASH_QUEUE_TIMEOUT_MS` | `min(4, CPU-1)`、`64`、`10000` | 密码派生的并发、排队上限与等待超时，超出返回 503 |
+| 负载保护 | `YLINK_PRODUCT_IMAGE_CONCURRENCY`、`YLINK_PRODUCT_IMAGE_QUEUE`、`YLINK_PRODUCT_IMAGE_QUEUE_TIMEOUT_MS` | `2`、`16`、`15000` | 商品图重编码的并发、排队上限与等待超时 |
+| 负载保护 | `YLINK_CAPTCHA_RENDER_CONCURRENCY`、`YLINK_CAPTCHA_RENDER_QUEUE`、`YLINK_CAPTCHA_RENDER_QUEUE_TIMEOUT_MS` | `4`、`32`、`3000` | 图形验证码渲染的并发、排队上限与等待超时 |
+| 负载保护 | `YLINK_ANONYMOUS_AUTH_MAX_IN_FLIGHT` | `64` | 匿名认证入口每进程的在途请求上限，超出返回 503 |
+| 负载保护 | `YLINK_OVERLOAD_SHEDDING_ENABLED` | `true` | 过载自适应削峰开关 |
+| 负载保护 | `YLINK_OVERLOAD_ELEVATED_LOOP_DELAY_MS`、`YLINK_OVERLOAD_CRITICAL_LOOP_DELAY_MS` | `500`、`1000` | 事件循环延迟 p99 达到“升高”“严重”的阈值（毫秒） |
+| 负载保护 | `YLINK_OVERLOAD_ELEVATED_WRITE_QUEUE_PERCENT` | `90` | SQLite 写队列占用达到该百分比视为升高 |
+| 负载保护 | `YLINK_SESSION_RATE_BURST`、`YLINK_SESSION_RATE_PER_SECOND` | `200`、`30` | 按会话的请求速率保险丝（令牌桶突发量与每秒补充量） |
+| 客服反馈附件 | `YLINK_FEEDBACK_MAX_ATTACHMENTS_PER_MESSAGE` | `5` | 每条消息的附件数上限（1-5） |
+| 客服反馈附件 | `YLINK_FEEDBACK_MAX_PENDING_ATTACHMENTS`、`YLINK_FEEDBACK_MAX_PENDING_BYTES` | `10`、`52428800`（50 MB） | 每个客户端尚未发送的附件数量与总字节上限 |
+| 客服反馈附件 | `YLINK_FEEDBACK_MAX_TOTAL_BYTES` | `10737418240`（10 GB） | 反馈附件总容量上限 |
+| 客服反馈附件 | `YLINK_FEEDBACK_MIN_FREE_BYTES` | `536870912`（512 MB） | 磁盘剩余空间低于该值时拒绝上传 |
+| 客服反馈附件 | `YLINK_FEEDBACK_UPLOADS_PER_WINDOW`、`YLINK_FEEDBACK_UPLOAD_WINDOW_MS` | `20`、`600000` | 附件上传频控：窗口内次数与窗口时长（毫秒） |
+| 客服反馈附件 | `YLINK_FEEDBACK_DRAFT_TTL_MS`、`YLINK_FEEDBACK_ORPHAN_GRACE_MS` | `86400000`、`86400000` | 草稿附件保留时长与孤儿附件清理宽限（毫秒） |
+| 客服反馈附件 | `YLINK_FEEDBACK_CLEANUP_INTERVAL_MS`、`YLINK_FEEDBACK_CLEANUP_BATCH_SIZE` | `3600000`、`500` | 附件清理任务的执行间隔（毫秒）与每批数量 |
+| 客服实时连接 | `YLINK_SSE_MAX_PER_SESSION`、`YLINK_SSE_MAX_PER_OWNER`、`YLINK_SSE_MAX_PER_PROCESS` | `3`、`20`、`1000` | 每会话、每账号、每进程的 SSE 连接上限 |
+| 客服实时连接 | `YLINK_SSE_CONNECTS_PER_WINDOW`、`YLINK_SSE_CONNECT_WINDOW_MS` | `12`、`60000` | SSE 建连频控：窗口内次数与窗口时长（毫秒） |
+| 客服实时连接 | `YLINK_SSE_CONNECT_RATE_MAX_ENTRIES` | `2000` | 本地建连频控记录的条目上限，记录满时新来源的建连直接限流 |
+| 客服实时连接 | `YLINK_SSE_MAX_PENDING_MESSAGES`、`YLINK_SSE_MAX_PENDING_BYTES` | `256`、`4194304`（4 MB） | 每进程待投递 SSE 事件的消息数与字节上限，超出时关闭相关连接，由客户端重连后重新同步 |
+| Compose 编排 | `Y_LINK_PORT` | `8080` | `compose.onebox.yml` 映射到宿主机的 Web 端口 |
+| Compose 编排 | `FRONTEND_PORT` | `8080` | 双容器与外置 MySQL 编排的前端宿主机端口 |
+| Compose 编排 | `BACKEND_IMAGE`、`FRONTEND_IMAGE` | Docker Hub `latest` 镜像 | 双容器编排使用的后端、前端镜像 |
+| Compose 编排 | `Y_LINK_FRONTEND_PROXY_IP`、`Y_LINK_PROXY_NETWORK_CIDR` | `172.30.91.2`、`172.30.91.0/24` | 前端 Nginx 在内部代理网络中的固定 IP 与网段，后端只信任该 IP |
+| Compose 编排 | `MYSQL_DATABASE`、`MYSQL_USER` | `y_link`、`ylink` | `compose.onebox.mysql.yml` 创建的库名与业务账号 |
+| Compose 编排 | `REDIS_MAXMEMORY` | `256mb` | `compose.redis.yml` 中 Redis 的内存上限 |
+| Compose 编排 | `FORCE_COLOR` | `1` | 双容器编排中后端日志的彩色输出 |
 
-| 变量 | 原因 |
+填写注意：
+
+- `true`/`false` 类变量要么不添加，要么填写 `true` 或 `false`，不要在面板里留空字符串，否则启动时校验失败。
+- 1Panel 与 `docker run` 传入的变量会直接生效；使用仓库的 compose 文件时，只有在对应服务 `environment` 中映射过的变量才会传进容器，表中未被映射的变量（如 `YLINK_*` 调优项）需要自行添加。
+- 验证脚本与测试专用变量（`VERIFY_*`、`Y_LINK_DB_MIGRATION_E2E_*` 等）不影响部署，未列入上表。
+
+### 5. 重启规则和资源
+
+截图中选择“不重启”可以用于首次排错。正式使用建议改为“失败后重启”或“一直重启”。
+
+资源限制可按服务器情况配置：
+
+- CPU 权重：`1024` 可保持默认。
+- CPU 限制：`0` 表示不限制。
+- 内存限制：`0` 表示不限制；小服务器建议至少预留 512MB 以上。
+
+建议：
+
+- 首次启动排错：可先选“不重启”，方便看到真实错误日志。
+- 正式使用：建议选“失败后重启”或“一直重启”。
+- 如果服务器内存较小，不要同时跑太多同类容器。
+
+### 6. 启动检查与常见日志
+
+启动成功后建议做 4 个检查：
+
+1. 打开 `http://服务器IP:9050/health`，能返回健康信息。
+2. 打开 `http://服务器IP:9050/login`，能看到管理端登录页。
+3. 用 `admin` 和你配置的 `INIT_ADMIN_PASSWORD` 登录。
+4. 打开 `http://服务器IP:9050/client/login`，能看到客户端登录页。
+
+正常启动会看到类似内容：
+
+```text
+[onebox] starting backend on 127.0.0.1:3001
+[onebox] starting nginx on 0.0.0.0:80
+[y-link-backend] 服务启动完成
+```
+
+常见错误：
+
+| 日志 | 原因 | 处理 |
+| --- | --- | --- |
+| `INIT_ADMIN_PASSWORD is required` | 未配置初始管理员密码 | 在环境变量里添加 `INIT_ADMIN_PASSWORD` |
+| `refusing insecure INIT_ADMIN_PASSWORD=Admin@123456` | 使用了禁用弱密码 | 换成私有强密码 |
+| `Welcome to nginx!` | 旧容器或旧镜像残留 | 删除旧容器，重新拉取 onebox 镜像 |
+| 上传图片 404 | 未挂载或未保留 `/app/uploads` | 增加 `/app/uploads` 读写挂载 |
+| 日志时间显示 `+0000` 或 `Z` | 容器时区未配置，或仍在使用旧镜像 | 添加 `TZ=Asia/Shanghai`，拉取新镜像并重建容器 |
+| 日志 IP 总是 `10.255.0.1` | 容器只看到了 Docker/1Panel 的上一跳地址 | 确认 1Panel 反向代理传递 `X-Forwarded-For`，并使用新版镜像 |
+| 构建时报 Docker Hub `429 Too Many Requests` | 构建平台匿名拉取 Docker Hub 基础镜像被限流 | 默认 Dockerfile 已改用公开镜像源；若平台仍受限，可设置构建参数 `Y_LINK_NODE_IMAGE=你的私有 Node 20 bookworm-slim 镜像` |
+
+新版 nginx 访问日志会优先显示可信代理传来的真实用户 IP，并在同一行保留 `proxy="..." xff="..." real="..."` 便于排查。若 `xff="-"` 或为空，说明上游没有把真实 IP 传给容器，应用无法凭空还原用户 IP。
+
+### 7. 容器时间与北京时间校准
+
+`TZ=Asia/Shanghai` 只负责“时区显示”，真正时钟校准必须在宿主机完成（容器共享宿主机内核时钟，默认无权限直接改系统时间）。
+
+建议在服务器执行：
+
+```bash
+timedatectl set-timezone Asia/Shanghai
+timedatectl set-ntp true
+timedatectl status
+```
+
+确认 `System clock synchronized: yes` 后，重启容器。  
+新版 onebox 启动日志会打印：
+
+```text
+[onebox] timezone=Asia/Shanghai, now=2026-05-30 22:10:00 +0800 CST
+```
+
+### 8. 升级和备份
+
+升级前先备份两个目录：
+
+```text
+/opt/1panel/apps/y-link/data
+/opt/1panel/apps/y-link/uploads
+```
+
+升级步骤：
+
+1. 停止容器。
+2. 拉取最新镜像 `ghcr.io/hf-cygg/y-link-onebox:latest`。
+3. 用原来的端口、挂载和环境变量重建容器。
+4. 访问 `/health`、管理端登录页和客户端商品大厅确认可用。
+
+只要保留 `/app/data` 和 `/app/uploads` 对应的宿主机目录，账号、单据、商品、图片都能继续使用。
+
+回退方式：
+
+1. 停止新容器。
+2. 换回旧镜像标签或旧镜像 ID。
+3. 继续挂载原来的 `data` 和 `uploads` 目录。
+4. 启动后检查登录、商品图片、订单列表。
+
+如果升级前已经备份目录，必要时可以恢复备份目录后再启动容器。
+
+### 9. 1Panel 填写对照
+
+按照你截图里的页面，可逐项核对：
+
+| 1Panel 字段 | 推荐值 |
 | --- | --- |
-| `DB_SYNC` | 生产环境不建议长期启用自动同步结构 |
-| `DB_HOST` / `DB_USER` / `DB_PASSWORD` | 只有 `DB_TYPE=mysql` 时才需要 |
-| `PORT` | onebox 内部 Nginx 已按默认端口代理后端 |
+| 名称 | `y-link` |
+| 镜像 | `ghcr.io/hf-cygg/y-link-onebox:latest` |
+| 端口 | 服务器 `9050`，容器 `80`，协议 `tcp` |
+| 网络 | `bridge` |
+| 挂载 1 | 本机 `/opt/1panel/apps/y-link/data` -> 容器 `/app/data`，读写 |
+| 挂载 2 | 本机 `/opt/1panel/apps/y-link/uploads` -> 容器 `/app/uploads`，读写 |
+| Entrypoint | `/entrypoint.sh` |
+| Command | 留空 |
+| 环境变量 | 至少添加 `INIT_ADMIN_PASSWORD=你的私有强密码` 和 `TZ=Asia/Shanghai`；建议添加 `PERMANENT_DELETE_PASSWORD=你的永久删除密码`；全部变量见[第 4 节](#4-环境变量) |
+| 特权模式 | 不开启 |
+| 控制台交互 | 不需要开启 |
+| 重启规则 | 首次排错可不重启，正式使用建议失败后重启 |
 
-### 4.1 阿里云 PNVS 短信验证码
+截图中只有 `PATH`、`NODE_VERSION`、`YARN_VERSION` 这类镜像自带变量还不够，必须额外添加 `INIT_ADMIN_PASSWORD`；旧容器需要重建后才会应用新镜像和新环境变量。
+
+### 10. 可选：阿里云 PNVS 短信验证码
 
 短信验证码采用“后端私密凭证 + 管理端业务配置”两层设置：AccessKey 和手机号 HMAC 密钥只允许放在 1Panel 的环境变量中；短信签名、可选方案名和场景模板码才在管理端的“系统配置 -> 验证码平台”中保存。不要把 AccessKey、AccessKey Secret 或 HMAC 密钥填进管理端页面、前端 `.env` 或 Git 仓库。
 
@@ -309,7 +503,7 @@ node -e "console.log(require('node:crypto').randomBytes(48).toString('base64url'
 | 发送成功但手机未收到 | 检查签名与模板是否来自同一 PNVS 控制台配置、测试手机号是否已绑定，以及账户余额和发送记录 |
 | MNS 回执显示配置异常 | 初次使用请保持 `ALIYUN_DYPNS_MNS_ENABLED=false`；只有需要送达/失败回执时才启用，并另行配置 MNS 权限与网络连通性 |
 
-### 4.2 管理端通行密钥与安全密钥
+### 11. 可选：管理端通行密钥与安全密钥
 
 启用前，先确认管理端由哪个固定域名和 HTTPS 地址供浏览器访问。`AUTH_WEBAUTHN_RP_ID` 填小写域名（例如 `erp.example.com`），不带协议、端口或路径，不能填 IP；`AUTH_WEBAUTHN_RP_NAME` 填非空的展示名称，也可使用中文。`AUTH_WEBAUTHN_ORIGINS` 填非空 JSON 字符串数组，其中每个 Origin 的主机必须与 RP ID 完全相同，且是完整、精确的浏览器外部访问地址；不能填容器服务名、容器端口、路径或末尾斜杠。公网使用 HTTPS，只有 `localhost` 可使用 HTTP。
 
@@ -344,120 +538,6 @@ docker compose --env-file .env -f compose.onebox.yml up -d --no-deps --force-rec
 执行时必须沿用原部署的项目名（如原来使用 `-p`）、`--env-file`、所有 `-f` 叠加文件、端口、挂载和数据卷，只重建应用服务；不要使用 `down -v` 或删除数据。1Panel 中也应在保留这些设置后重新创建应用容器。需要回退配置时，恢复原变量值，再用原参数重新创建应用容器。
 
 重建后，通过浏览器外部访问地址检查 `/health` 返回 `status: "UP"`，并检查 `/api/auth/webauthn/capabilities` 的 `data.enabled` 为 `true`、`data.rpId` 与 `data.allowedOrigins` 与填写值一致。配置生效后还需用密码登录管理端，进入顶部账号菜单“通行密钥与安全密钥” → “添加密钥”，选择用途“直接登录”和类型“通行密钥”并完成绑定。选择“密码后验证”则是登录密码后的第二因素，不等于直接登录。若启动日志出现 `DATABASE_STARTUP_FAILED`，先核对以上变量值和容器是否已重建；启动入口也会将多数配置或运行时异常归到该通用错误码，不能据此认定数据库损坏。
-
-### 5. 重启规则和资源
-
-截图中选择“不重启”可以用于首次排错。正式使用建议改为“失败后重启”或“一直重启”。
-
-资源限制可按服务器情况配置：
-
-- CPU 权重：`1024` 可保持默认。
-- CPU 限制：`0` 表示不限制。
-- 内存限制：`0` 表示不限制；小服务器建议至少预留 512MB 以上。
-
-建议：
-
-- 首次启动排错：可先选“不重启”，方便看到真实错误日志。
-- 正式使用：建议选“失败后重启”或“一直重启”。
-- 如果服务器内存较小，不要同时跑太多同类容器。
-
-### 6. 常见启动日志
-
-正常启动会看到类似内容：
-
-```text
-[onebox] starting backend on 127.0.0.1:3001
-[onebox] starting nginx on 0.0.0.0:80
-[y-link-backend] 服务启动完成
-```
-
-常见错误：
-
-| 日志 | 原因 | 处理 |
-| --- | --- | --- |
-| `INIT_ADMIN_PASSWORD is required` | 未配置初始管理员密码 | 在环境变量里添加 `INIT_ADMIN_PASSWORD` |
-| `refusing insecure INIT_ADMIN_PASSWORD=Admin@123456` | 使用了禁用弱密码 | 换成私有强密码 |
-| `Welcome to nginx!` | 旧容器或旧镜像残留 | 删除旧容器，重新拉取 onebox 镜像 |
-| 上传图片 404 | 未挂载或未保留 `/app/uploads` | 增加 `/app/uploads` 读写挂载 |
-| 日志时间显示 `+0000` 或 `Z` | 容器时区未配置，或仍在使用旧镜像 | 添加 `TZ=Asia/Shanghai`，拉取新镜像并重建容器 |
-| 日志 IP 总是 `10.255.0.1` | 容器只看到了 Docker/1Panel 的上一跳地址 | 确认 1Panel 反向代理传递 `X-Forwarded-For`，并使用新版镜像 |
-| 构建时报 Docker Hub `429 Too Many Requests` | 构建平台匿名拉取 Docker Hub 基础镜像被限流 | 默认 Dockerfile 已改用公开镜像源；若平台仍受限，可设置构建参数 `Y_LINK_NODE_IMAGE=你的私有 Node 20 bookworm-slim 镜像` |
-
-新版 nginx 访问日志会优先显示可信代理传来的真实用户 IP，并在同一行保留 `proxy="..." xff="..." real="..."` 便于排查。若 `xff="-"` 或为空，说明上游没有把真实 IP 传给容器，应用无法凭空还原用户 IP。
-
-### 6.1 容器时间与北京时间校准
-
-`TZ=Asia/Shanghai` 只负责“时区显示”，真正时钟校准必须在宿主机完成（容器共享宿主机内核时钟，默认无权限直接改系统时间）。
-
-建议在服务器执行：
-
-```bash
-timedatectl set-timezone Asia/Shanghai
-timedatectl set-ntp true
-timedatectl status
-```
-
-确认 `System clock synchronized: yes` 后，重启容器。  
-新版 onebox 启动日志会打印：
-
-```text
-[onebox] timezone=Asia/Shanghai, now=2026-05-30 22:10:00 +0800 CST
-```
-
-启动成功后建议做 4 个检查：
-
-1. 打开 `http://服务器IP:9050/health`，能返回健康信息。
-2. 打开 `http://服务器IP:9050/login`，能看到管理端登录页。
-3. 用 `admin` 和你配置的 `INIT_ADMIN_PASSWORD` 登录。
-4. 打开 `http://服务器IP:9050/client/login`，能看到客户端登录页。
-
-### 7. 升级和备份
-
-升级前先备份两个目录：
-
-```text
-/opt/1panel/apps/y-link/data
-/opt/1panel/apps/y-link/uploads
-```
-
-升级步骤：
-
-1. 停止容器。
-2. 拉取最新镜像 `ghcr.io/hf-cygg/y-link-onebox:latest`。
-3. 用原来的端口、挂载和环境变量重建容器。
-4. 访问 `/health`、管理端登录页和客户端商品大厅确认可用。
-
-只要保留 `/app/data` 和 `/app/uploads` 对应的宿主机目录，账号、单据、商品、图片都能继续使用。
-
-回退方式：
-
-1. 停止新容器。
-2. 换回旧镜像标签或旧镜像 ID。
-3. 继续挂载原来的 `data` 和 `uploads` 目录。
-4. 启动后检查登录、商品图片、订单列表。
-
-如果升级前已经备份目录，必要时可以恢复备份目录后再启动容器。
-
-### 8. 1Panel 填写对照
-
-按照你截图里的页面，可逐项核对：
-
-| 1Panel 字段 | 推荐值 |
-| --- | --- |
-| 名称 | `y-link` |
-| 镜像 | `ghcr.io/hf-cygg/y-link-onebox:latest` |
-| 端口 | 服务器 `9050`，容器 `80`，协议 `tcp` |
-| 网络 | `bridge` |
-| 挂载 1 | 本机 `/opt/1panel/apps/y-link/data` -> 容器 `/app/data`，读写 |
-| 挂载 2 | 本机 `/opt/1panel/apps/y-link/uploads` -> 容器 `/app/uploads`，读写 |
-| Entrypoint | `/entrypoint.sh` |
-| Command | 留空 |
-| 环境变量 | 至少添加 `INIT_ADMIN_PASSWORD=你的私有强密码` 和 `TZ=Asia/Shanghai`；建议添加 `PERMANENT_DELETE_PASSWORD=你的永久删除密码` |
-| 特权模式 | 不开启 |
-| 控制台交互 | 不需要开启 |
-| 重启规则 | 首次排错可不重启，正式使用建议失败后重启 |
-
-截图中只有 `PATH`、`NODE_VERSION`、`YARN_VERSION` 这类镜像自带变量还不够，必须额外添加 `INIT_ADMIN_PASSWORD`。如果需要启用永久删除订单/送货单，还应添加 `PERMANENT_DELETE_PASSWORD`；未配置时永久删除接口会明确拒绝。若希望容器日志与国内现实时间一致，也建议添加 `TZ=Asia/Shanghai`；旧容器需要重建后才会应用新镜像和新时区。
 
 ## 其他部署方式
 
@@ -494,13 +574,15 @@ INIT_ADMIN_PASSWORD='请改成你自己的强密码' PERMANENT_DELETE_PASSWORD='
 - 不要只启动 `y-link-frontend`，单独前端镜像没有业务 API。
 - 如果要使用 MySQL，请确认 `DB_TYPE=mysql`，并填写 `DB_HOST`、`DB_PORT`、`DB_USER`、`DB_PASSWORD`、`DB_NAME`。
 
-### MySQL 部署建议
+### MySQL 部署
 
 默认 SQLite 适合个人、小团队、轻量部署和快速上线。以下情况建议迁移到 MySQL：
 
 - 多人高频同时下单、核销、入库。
 - 数据量持续增长。
 - 需要更标准的备份、审计、主机迁移和运维体系。
+
+运行边界：SQLite 模式固定为单 Onebox、单应用进程、本地持久化磁盘，100 个突发下单会进入有界写队列串行完成；需要持续百人并发写、第二个应用副本（还需接入 Redis，见下文[Redis 与多实例部署](#redis-与多实例部署可选)），或管理员接口 `GET /api/data-maintenance/database/performance` 中 `writeCoordinator.pendingWrites`、等待超时持续升高时，应迁移到 MySQL。万人浏览仍应由 Nginx/CDN 缓存吸收，不能把所有目录请求直接压到任一数据库。
 
 已有 SQLite 数据时，优先使用管理端“系统管理 -> 数据库迁移”功能迁移，不建议手工拼接导入。
 
@@ -523,18 +605,9 @@ MySQL 健康后，在管理端“系统管理 -> 数据库迁移”填写：`hos
 
 如果 MySQL 不是由可选叠加文件启动：安装在 Linux 宿主机时向导可填写 `host.docker.internal`，远程 MySQL 则填写 Onebox 容器可访问的 DNS 名称或 IP。`compose.onebox.yml` 已补齐 Linux 的 `host-gateway` 映射；无论目标在哪里，都不要把数据库公网端口开放给所有来源。
 
-迁移前应在 `.env` 中一并确认 `DB_POOL_SIZE`、`DB_CONNECT_TIMEOUT_MS`、`DB_ACQUIRE_TIMEOUT_MS`、`DB_IDLE_TIMEOUT_MS`、`DB_QUEUE_LIMIT` 与 `DB_MAX_QUERY_MS`。这些参数由 Onebox 容器持续保留，切换后同一个进程会用它们建立 MySQL 连接池；单实例默认连接池为 20，多个应用副本时必须按“实例数 × 每实例连接池”计算总连接数，并给 MySQL 运维连接留出余量。
-
-MySQL 连接还会设置两项会话上限，用于应对死锁、长事务和意外断连：
-
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `DB_LOCK_WAIT_TIMEOUT_SECONDS` | `15` | 行锁等待上限（1-300 秒）。死锁或长事务持锁时，等待方快速失败；可幂等重放的下单事务自动重试，其余请求返回“数据库繁忙”，不会长时间挂起 |
-| `DB_SESSION_WAIT_TIMEOUT_SECONDS` | `600` | 会话空闲上限（60-28800 秒）。应用容器意外停止或网络中断时，残留的未提交事务超过该时间后由 MySQL 回滚并释放行锁；实际值不小于 `DB_IDLE_TIMEOUT_MS` 换算秒数 + 60 |
+迁移前应在 `.env` 中一并确认连接池与会话参数（`DB_POOL_SIZE`、`DB_CONNECT_TIMEOUT_MS`、`DB_ACQUIRE_TIMEOUT_MS`、`DB_IDLE_TIMEOUT_MS`、`DB_QUEUE_LIMIT`、`DB_LOCK_WAIT_TIMEOUT_SECONDS`、`DB_SESSION_WAIT_TIMEOUT_SECONDS`、`DB_MAX_QUERY_MS`，含义见[第 4 节可选配置](#可选配置)中的 MySQL 分类）。这些参数由 Onebox 容器持续保留，切换后同一个进程会用它们建立 MySQL 连接池；单实例默认连接池为 20，多个应用副本时必须按“实例数 × 每实例连接池”计算总连接数，并给 MySQL 运维连接留出余量。
 
 切换到 MySQL 并产生第一笔新业务写入后，旧 SQLite 已经是历史快照，系统会禁用“直接清除覆盖/回到旧 SQLite”。如需回退，必须恢复 MySQL 备份或执行受控反向迁移，避免静默丢单。
-
-运行边界：SQLite 模式固定为单 Onebox、单应用进程、本地持久化磁盘，100 个突发下单会进入有界写队列串行完成；需要持续百人并发写、第二个应用副本（还需接入 Redis，见下文[Redis 与多实例部署](#redis-与多实例部署可选)），或管理员接口 `GET /api/data-maintenance/database/performance` 中 `writeCoordinator.pendingWrites`、等待超时持续升高时，应迁移到 MySQL。万人浏览仍应由 Nginx/CDN 缓存吸收，不能把所有目录请求直接压到任一数据库。
 
 #### 新库直接使用外置 MySQL
 
@@ -552,7 +625,9 @@ docker compose --env-file .env.docker.mysql -f compose.mysql.yml ps
 docker compose --env-file .env.docker.mysql -f compose.mysql.yml up -d --force-recreate backend frontend
 ```
 
-本轮高并发升级至少包含：
+#### 存量 MySQL 升级
+
+存量库升级不能开启 `DB_SYNC`，需按版本顺序执行 `backend/sql/` 中的增量脚本。高并发相关的升级至少包含：
 
 - `034_high_concurrency_indexes.sql`：订单、库存日志、通知收件箱和会话清理索引；
 - `035_o2o_idempotency_business_sequence.sql`：O2O 下单幂等键与并发安全业务序列；
@@ -592,16 +667,7 @@ Redis 是可选增强。`REDIS_URL` 留空时，系统行为与未接入 Redis �
 docker compose --env-file .env.docker.mysql -f compose.mysql.yml -f compose.redis.yml up -d
 ```
 
-主要环境变量（完整说明见 [.env.docker.mysql.example](./.env.docker.mysql.example)）：
-
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `REDIS_URL` | 空 | `redis://host:6379/0` 或 `rediss://host:6380`，留空不启用 |
-| `REDIS_PASSWORD` | 空 | Redis 密码，建议写在这里而不是 URL 中；`REDIS_USERNAME` 用于 ACL 用户 |
-| `REDIS_TLS` / `REDIS_TLS_CA` | `false` / 空 | 跨网络连接时开启 TLS；自签 CA 填容器内可读的 PEM 文件路径 |
-| `REDIS_KEY_PREFIX` | `ylink:` | 多套环境共用同一个 Redis 时用于隔离 |
-| `REDIS_CONNECT_TIMEOUT_MS` / `REDIS_COMMAND_TIMEOUT_MS` | `3000` / `500` | 连接与单命令超时；命令超时较短，Redis 抖动时快速失败并降级 |
-| `Y_LINK_MULTI_INSTANCE` | `false` | 设为 `true` 时启动期强制要求 `DB_TYPE=mysql`、已配置 `REDIS_URL`、所有实例注入同一个 `Y_LINK_DATA_ENCRYPTION_KEY`，缺一拒绝启动 |
+至少需要配置 `REDIS_URL` 与 `REDIS_PASSWORD`；多实例部署再设置 `Y_LINK_MULTI_INSTANCE=true`，并给所有实例注入同一个 `Y_LINK_DATA_ENCRYPTION_KEY`。TLS、键名前缀、超时等其余变量见[第 4 节可选配置](#可选配置)中的“Redis 与多实例”分类。
 
 Redis 已配置但暂时不可用时按能力分级降级：限流与风控回落到数据库，客服消息只投递本实例并由客户端重连补齐，共享缓存直接回源数据库，安全票据返回 503 而不放行。公开 `/health` 的 `redis` 字段（`disabled`、`connecting`、`ready`、`degraded`）可用于观察状态，不影响 `status: UP` 的判定。
 
@@ -723,7 +789,7 @@ Y-Link
 └─ README.md
 ```
 
-## 关键目录说明
+### 关键目录说明
 
 | 路径 | 说明 |
 | --- | --- |
