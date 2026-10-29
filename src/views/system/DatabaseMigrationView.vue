@@ -11,6 +11,8 @@
  * - 原预检、任务执行、手动切换和回退流程完整保留，并统一收进高级/应急折叠区。
  * - 主卡片单独提供连接测试，原位展示问题；连接参数变化会清除旧测试结果。
  * - 任务成功、校验通过且实际运行 MySQL 后显示完成态，收起连接表单，防止重复发起迁移。
+ * - 页面布局为“运行概况三卡 + 自动迁移主卡（连接表单与开始前须知两栏）+ 高级折叠区”，
+ *   手动流程的长段风险提示只放在高级区，首屏不再堆叠文字墙。
  * 维护说明：
  * - 自动任务新增状态时需同步 API 枚举、状态文案、标签颜色与执行按钮门禁；
  * - 紧急回退入口不能移出管理员权限与确认弹窗保护，自动迁移也不能在前端拼装后端治理选项。
@@ -18,14 +20,18 @@
 -->
 <script setup lang="ts">
 import dayjs from 'dayjs'
-import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
-import { PageContainer, PageToolbarCard } from '@/components/common'
+import { Coin, Lock, Refresh, Timer, WarningFilled } from '@element-plus/icons-vue'
+import { PageContainer } from '@/components/common'
 import DatabaseMigrationPrecheckSection from '@/views/system/components/DatabaseMigrationPrecheckSection.vue'
 import DatabaseMigrationRunSection from '@/views/system/components/DatabaseMigrationRunSection.vue'
 import DatabaseMigrationSwitchSection from '@/views/system/components/DatabaseMigrationSwitchSection.vue'
 import DatabaseMigrationAutomaticProgressSection from '@/views/system/components/DatabaseMigrationAutomaticProgressSection.vue'
 import DatabaseMigrationConnectionTestResult from '@/views/system/components/DatabaseMigrationConnectionTestResult.vue'
+import DatabaseMigrationAutomaticLogPanel from '@/views/system/components/DatabaseMigrationAutomaticLogPanel.vue'
+import DatabaseMigrationFailurePanel from '@/views/system/components/DatabaseMigrationFailurePanel.vue'
+import { diagnoseAutomaticMigrationFailure } from './database-migration-failure'
 import { useDatabaseMigrationConnectionTest } from './useDatabaseMigrationConnectionTest'
 import { isAutomaticMigrationCompleted } from './database-migration-completion'
 import {
@@ -48,11 +54,12 @@ import {
   type SQLiteToMySqlTaskRecord,
 } from '@/api/modules/data-maintenance'
 import { PassiveNumberInput } from '@/components/common'
+import { useDatabaseMaintenanceStore } from '@/store/modules/database-maintenance'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage, normalizeRequestError } from '@/utils/error'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
-import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
+import { copyAppAlertDiagnostic, showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 import { readStoredRescueCredential, storeRescueCredential } from '@/rescue/rescue-session-storage'
 import {
   DATABASE_MIGRATION_ASSISTANT_NAME,
@@ -85,6 +92,18 @@ type MigrationFormState = {
  * - 首屏概览不单独占用步骤键，避免把“看状态”与“做动作”混在一起。
  */
 type MigrationStepKey = 'precheck' | 'create' | 'run' | 'switch'
+
+/**
+ * 一键自动迁移的开始前须知：
+ * - 收拢原先散落在表单上方的空库警告、Docker 连接说明与只读维护提醒；
+ * - 侧栏逐条展示，避免长段落堆在表单前影响填写。
+ */
+const automaticMigrationTips = [
+  { title: '目标库必须是专用空库', description: '目标库已有业务数据时，请先停止并创建专用空库；一键自动迁移不提供删除目标库数据的快捷操作。' },
+  { title: '连接由 Y-Link 后端发起', description: 'Docker 中的 127.0.0.1 指向应用容器自身；同一 Compose 中的 MySQL 通常填写服务名 mysql。' },
+  { title: '迁移期间系统只读', description: '开始后全局进入只读维护，请提前与业务方约定维护与重启窗口。' },
+  { title: '自动备份、校验与回退', description: '系统会先生成快照，导入后强校验；失败时按后端编排受控回退到 SQLite。' },
+]
 
 const { hasPermission, ensurePermission } = usePermissionAction()
 const overviewRequest = useStableRequest()
@@ -355,6 +374,79 @@ const {
   testConnection,
 } = useDatabaseMigrationConnectionTest(buildNormalizedTarget, () => { precheckResult.value = null })
 
+// 自动任务进行中时收起连接表单与须知，主卡片只保留进度与日志，任务结束后表单状态原样恢复。
+const automaticTaskInProgress = computed(() => isActiveAutomaticTask(latestAutomaticTask.value))
+const automaticTaskStopped = computed(() => latestAutomaticTask.value?.mode === 'automatic'
+  && ['failed', 'rolled_back'].includes(latestAutomaticTask.value.status))
+/**
+ * 任务停止后的维护状态确认：
+ * - 后端失败收口先写“已恢复正常写入”文案、再解除只读维护，清理失败时文案不会修正，因此不能凭文案判断恢复；
+ * - 首次观察到任务停止时记录本地时刻并立即请求一次 /health，只采信该时刻之后由健康检查确认的维护状态；
+ * - 尚未确认时返回 null，诊断面板显示“正在确认”，维护 Store 后续轮询确认后自动更新。
+ */
+const databaseMaintenanceStore = useDatabaseMaintenanceStore()
+const automaticTaskStopObservedAt = ref(0)
+const automaticTaskStopKey = computed(() => automaticTaskStopped.value
+  ? `${latestAutomaticTask.value!.id}|${latestAutomaticTask.value!.status}`
+  : '')
+
+const MAINTENANCE_CONFIRM_RETRY_MS = 3_000
+const MAINTENANCE_CONFIRM_MAX_ATTEMPTS = 10
+let maintenanceConfirmTimer: ReturnType<typeof setTimeout> | null = null
+
+const clearMaintenanceConfirmTimer = () => {
+  if (maintenanceConfirmTimer !== null) {
+    clearTimeout(maintenanceConfirmTimer)
+    maintenanceConfirmTimer = null
+  }
+}
+
+const stoppedTaskMaintenanceReadOnly = computed<boolean | null>(() => {
+  if (!automaticTaskStopObservedAt.value) return null
+  return databaseMaintenanceStore.lastConfirmedAt > automaticTaskStopObservedAt.value
+    ? databaseMaintenanceStore.isReadOnly
+    : null
+})
+
+/**
+ * 主动确认维护状态：
+ * - Store 正常态轮询间隔为 60～120 秒，且已有请求在途时会直接跳过，因此停止后由本页有限次重试；
+ * - 取得确认、任务不再处于停止态或离开页面后立即停止，不形成常驻轮询。
+ */
+const confirmStoppedTaskMaintenance = async (stopKey: string, attempt = 1) => {
+  clearMaintenanceConfirmTimer()
+  await databaseMaintenanceStore.pollMaintenanceState()
+  if (!automaticTaskPollingPageActive || automaticTaskStopKey.value !== stopKey) return
+  if (stoppedTaskMaintenanceReadOnly.value !== null || attempt >= MAINTENANCE_CONFIRM_MAX_ATTEMPTS) return
+  maintenanceConfirmTimer = setTimeout(() => {
+    void confirmStoppedTaskMaintenance(stopKey, attempt + 1)
+  }, MAINTENANCE_CONFIRM_RETRY_MS)
+}
+
+watch(automaticTaskStopKey, (stopKey) => {
+  clearMaintenanceConfirmTimer()
+  if (!stopKey) {
+    automaticTaskStopObservedAt.value = 0
+    return
+  }
+  automaticTaskStopObservedAt.value = Date.now()
+  void confirmStoppedTaskMaintenance(stopKey)
+})
+
+// 失败后只有确认系统已恢复可写才重新展示连接表单；仍只读或尚在确认时隐藏，避免在人工处理前诱导重复发起迁移。
+const automaticTaskAwaitingWritable = computed(() => automaticTaskStopped.value
+  && diagnoseAutomaticMigrationFailure(latestAutomaticTask.value!, {
+    maintenanceReadOnly: stoppedTaskMaintenanceReadOnly.value,
+  }).dataSafety !== 'safe')
+
+/**
+ * 轮询连通状态：
+ * - 自动任务轮询中概况请求失败时置为 false，进度区据此提示“正在自动重连”；
+ * - 任一轮成功即恢复，并记录最后一次成功刷新时间。
+ */
+const automaticTaskServiceReachable = ref(true)
+const automaticTaskLastRefreshedAt = ref('')
+
 const automaticMigrationBusy = computed(() => automaticTaskCreating.value
   || Boolean(latestAutomaticTask.value && AUTOMATIC_MIGRATION_ACTIVE_STATUSES.includes(latestAutomaticTask.value.status)))
 
@@ -530,6 +622,11 @@ const runAutomaticTaskPoll = async () => {
     if (overviewResult.status === 'fulfilled') {
       applyOverviewState(...overviewResult.value)
       loadError.value = ''
+      automaticTaskServiceReachable.value = true
+      automaticTaskLastRefreshedAt.value = new Date().toISOString()
+    } else {
+      // 重启窗口内概况请求失败属预期，只标记连接状态供进度区提示“正在自动重连”，不弹错误。
+      automaticTaskServiceReachable.value = false
     }
     if (detailResult.status === 'fulfilled' && detailResult.value) {
       upsertTaskRecord(detailResult.value)
@@ -617,6 +714,8 @@ const loadOverview = async () => {
     },
     onSuccess: async (result) => {
       applyOverviewState(result.tasks, result.runtime)
+      automaticTaskServiceReachable.value = true
+      automaticTaskLastRefreshedAt.value = new Date().toISOString()
       await refreshSelectedTaskDetail()
     },
     onError: (error) => {
@@ -794,6 +893,29 @@ const handleCreateAutomaticTask = async () => {
  */
 const openDatabaseRescue = () => {
   window.location.assign('/database-rescue')
+}
+
+/**
+ * 复制自动任务排查信息：
+ * - 只拼装任务标识、状态、阶段、失败原因与回退结果，不包含目标库账号密码或文件路径；
+ * - 复制成功/失败提示复用全局 AppAlert 的诊断复制逻辑。
+ */
+const copyAutomaticTaskDiagnostic = () => {
+  const task = latestAutomaticTask.value
+  if (!task) return
+  const diagnosis = diagnoseAutomaticMigrationFailure(task, { maintenanceReadOnly: stoppedTaskMaintenanceReadOnly.value })
+  void copyAppAlertDiagnostic([
+    `任务：${task.id}`,
+    `诊断：${diagnosis.categoryLabel}（${diagnosis.category}）`,
+    `数据安全：${diagnosis.dataSafety}`,
+    `状态：${getTaskStatusLabel(task.status)}（${task.status}）`,
+    `阶段：${task.stage ?? '-'}`,
+    `进展：${task.progress.currentStage || '-'}`,
+    `开始：${formatDateTime(task.startedAt)}`,
+    `结束：${formatDateTime(task.finishedAt ?? task.updatedAt)}`,
+    `失败原因：${task.errorMessage || '-'}`,
+    `自动回退：${task.rollbackResult?.message || '-'}`,
+  ].join('\n'))
 }
 
 const restoreCurrentTabRescueCredential = () => {
@@ -1187,6 +1309,10 @@ onActivated(async () => {
     if (activeTask || loadError.value) {
       startAutomaticTaskPolling(activeTask?.id, AUTOMATIC_MIGRATION_POLL_INTERVAL_MS)
     }
+    // 离页期间维护状态确认可能被中断，回到页面后若仍未确认则重新发起有限次确认。
+    if (automaticTaskStopKey.value && stoppedTaskMaintenanceReadOnly.value === null) {
+      void confirmStoppedTaskMaintenance(automaticTaskStopKey.value)
+    }
   }
 })
 
@@ -1197,6 +1323,7 @@ const stopAutomaticTaskPolling = () => {
   automaticTaskPollController?.abort()
   automaticTaskPollController = null
   clearAutomaticTaskPollTimer()
+  clearMaintenanceConfirmTimer()
 }
 
 onDeactivated(stopAutomaticTaskPolling)
@@ -1209,28 +1336,6 @@ onBeforeUnmount(stopAutomaticTaskPolling)
     :description="DATABASE_MIGRATION_PAGE_DESCRIPTION"
   >
     <div class="flex min-w-0 flex-col gap-4">
-      <PageToolbarCard content-class="items-start">
-        <template #default>
-          <div class="space-y-3">
-            <div class="text-sm text-slate-600 dark:text-slate-300">
-              {{ canOperateMigration ? '当前账号可执行预检、创建任务、切换和回退操作' : '当前账号仅支持查看迁移状态，只有具备更新权限的账号可执行高风险动作' }}
-            </div>
-            <el-alert
-              title="风险提醒"
-              type="warning"
-              :closable="false"
-              show-icon
-              :description="`正式环境建议统一通过${DATABASE_MIGRATION_ASSISTANT_NAME}完成数据库治理，不建议绕过页面手工修改运行时配置。推荐闭环：${DATABASE_MIGRATION_RECOMMENDED_FLOW_TEXT}。${DATABASE_MIGRATION_RESTART_EFFECT_TEXT}执行前请确认目标 MySQL 可用、SQLite 备份已保留，并与业务方约定重启窗口。`"
-            />
-          </div>
-        </template>
-        <template #actions>
-          <div class="flex w-full flex-wrap items-center justify-end gap-2">
-            <el-button :loading="pageLoading" @click="loadOverview">刷新状态</el-button>
-          </div>
-        </template>
-      </PageToolbarCard>
-
       <el-alert
         v-if="!canViewMigration"
         title="当前账号暂无数据库迁移助手查看权限"
@@ -1238,126 +1343,191 @@ onBeforeUnmount(stopAutomaticTaskPolling)
         :closable="false"
         show-icon
       />
-      <el-alert v-else-if="loadError" :title="loadError" type="error" :closable="false" show-icon />
 
       <template v-if="canViewMigration">
-        <section class="apple-card p-5 sm:p-6">
-          <div class="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <h2 class="text-xl font-semibold text-slate-800 dark:text-slate-100">一键自动迁移</h2>
-              <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">
+        <section class="apple-card p-4 sm:p-5">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">运行概况</h2>
+            <el-button :icon="Refresh" :loading="pageLoading" @click="loadOverview">刷新状态</el-button>
+          </div>
+          <el-alert v-if="loadError" class="mt-3" :title="loadError" type="error" :closable="false" show-icon />
+          <div class="mt-3 grid gap-3 lg:grid-cols-3">
+            <div class="flex min-w-0 items-center gap-3 rounded-xl bg-slate-50 px-4 py-3 dark:bg-white/5">
+              <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-brand/10 text-brand">
+                <el-icon :size="20"><Coin /></el-icon>
+              </span>
+              <div class="min-w-0">
+                <p class="text-xs text-slate-500 dark:text-slate-400">当前数据库</p>
+                <p class="truncate text-base font-semibold text-slate-800 dark:text-slate-100">
+                  {{ effectiveDatabaseSummary?.displayName || '正在读取...' }}
+                </p>
+                <p class="truncate text-xs text-slate-500 dark:text-slate-400" :title="activeRuntimeModeLabel">
+                  {{ activeRuntimeModeLabel }}
+                </p>
+              </div>
+            </div>
+            <div class="flex min-w-0 items-center gap-3 rounded-xl bg-slate-50 px-4 py-3 dark:bg-white/5">
+              <span class="overview-icon overview-icon--task flex h-10 w-10 shrink-0 items-center justify-center rounded-lg">
+                <el-icon :size="20"><Timer /></el-icon>
+              </span>
+              <div class="min-w-0">
+                <p class="text-xs text-slate-500 dark:text-slate-400">最近自动任务</p>
+                <template v-if="latestAutomaticTask">
+                  <el-tag class="mt-0.5" :type="getTaskStatusTagType(latestAutomaticTask.status)" effect="light" size="small">
+                    {{ getTaskStatusLabel(latestAutomaticTask.status) }}
+                  </el-tag>
+                  <p class="mt-0.5 truncate text-xs text-slate-500 dark:text-slate-400" :title="latestAutomaticTask.progress.currentStage">
+                    {{ latestAutomaticTask.progress.currentStage || '-' }}
+                  </p>
+                </template>
+                <template v-else>
+                  <p class="text-base font-semibold text-slate-800 dark:text-slate-100">尚未创建</p>
+                  <p class="text-xs text-slate-500 dark:text-slate-400">填写下方目标库后即可发起</p>
+                </template>
+              </div>
+            </div>
+            <div class="flex min-w-0 items-center gap-3 rounded-xl bg-slate-50 px-4 py-3 dark:bg-white/5">
+              <span
+                class="overview-icon flex h-10 w-10 shrink-0 items-center justify-center rounded-lg"
+                :class="canOperateMigration ? 'overview-icon--operate' : 'overview-icon--readonly'"
+              >
+                <el-icon :size="20"><Lock /></el-icon>
+              </span>
+              <div class="min-w-0">
+                <p class="text-xs text-slate-500 dark:text-slate-400">当前账号权限</p>
+                <p class="text-base font-semibold text-slate-800 dark:text-slate-100">
+                  {{ canOperateMigration ? '可执行迁移' : '仅可查看' }}
+                </p>
+                <p class="truncate text-xs text-slate-500 dark:text-slate-400">
+                  {{ canOperateMigration ? '预检、创建任务、切换与回退' : '高风险动作需具备迁移操作权限' }}
+                </p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="apple-card overflow-hidden">
+          <header class="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 px-5 py-4 dark:border-white/5 sm:px-6">
+            <div class="min-w-0">
+              <h2 class="text-lg font-semibold text-slate-800 dark:text-slate-100">一键自动迁移</h2>
+              <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
                 自动完成预检、只读维护、快照、迁移、强校验、onebox 重启与失败回退。
               </p>
             </div>
-            <el-tag type="success">推荐入口</el-tag>
-          </div>
+            <el-tag type="success" effect="light" round>推荐入口</el-tag>
+          </header>
 
-          <div class="mt-4 grid gap-3 rounded-2xl bg-slate-50 p-4 text-sm dark:bg-black/30 sm:grid-cols-2">
-            <div>
-              <p class="text-slate-400">当前数据库</p>
-              <p class="mt-1 font-medium text-slate-700 dark:text-slate-200">
-                {{ effectiveDatabaseSummary?.displayName || '正在读取...' }}
-              </p>
-              <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ activeRuntimeModeLabel }}</p>
-            </div>
-            <div>
-              <p class="text-slate-400">最近自动任务</p>
-              <template v-if="latestAutomaticTask">
-                <el-tag class="mt-1" :type="getTaskStatusTagType(latestAutomaticTask.status)" effect="light">
-                  {{ getTaskStatusLabel(latestAutomaticTask.status) }}
-                </el-tag>
-                <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ latestAutomaticTask.progress.currentStage }}</p>
-              </template>
-              <p v-else class="mt-1 font-medium text-slate-700 dark:text-slate-200">尚未创建</p>
-            </div>
-          </div>
-
-          <DatabaseMigrationAutomaticProgressSection
-            :task="latestAutomaticTask"
-            :completed="automaticMigrationCompleted"
-            :has-current-tab-rescue-credential="hasCurrentTabRescueCredential"
-            @open-rescue="openDatabaseRescue"
-          />
-
-          <template v-if="!automaticMigrationCompleted">
-          <el-alert
-            class="mt-5"
-            title="目标库必须是专用空库"
-            type="warning"
-            :closable="false"
-            show-icon
-            description="目标库存在业务数据时，请先停止并创建专用空库；一键自动迁移不会提供删除目标库数据的快捷操作。"
-          />
-
-          <p class="mt-4 text-sm text-slate-500 dark:text-slate-400">
-            连接从 Y-Link 后端发起。Docker 中的 127.0.0.1 指向应用容器自身；同一 Compose 中的 MySQL 通常填写服务名 mysql。
-          </p>
-          <el-form label-position="top" :disabled="automaticMigrationBusy" class="mt-5 grid gap-x-4 sm:grid-cols-2 lg:grid-cols-3">
-              <el-form-item label="MySQL 主机">
-                <el-input v-model="migrationForm.target.host" placeholder="mysql.internal" />
-              </el-form-item>
-              <el-form-item label="端口">
-                <PassiveNumberInput
-                  v-model="migrationForm.target.port"
-                  :min="1"
-                  :max="65535"
-                  :controls="false"
-                  class="!w-full"
-                />
-              </el-form-item>
-              <el-form-item label="用户名">
-                <el-input v-model="migrationForm.target.user" placeholder="请输入 MySQL 用户名" />
-              </el-form-item>
-              <el-form-item label="密码">
-                <el-input
-                  v-model="migrationForm.target.password"
-                  type="password"
-                  show-password
-                  placeholder="请输入 MySQL 密码"
-                />
-              </el-form-item>
-              <el-form-item label="数据库名">
-                <el-input v-model="migrationForm.target.database" placeholder="独立 utf8mb4 空库" />
-              </el-form-item>
-              <el-form-item label="备注（可选）" class="sm:col-span-2">
-                <el-input
-                  v-model="migrationForm.note"
-                  maxlength="500"
-                  placeholder="本次迁移说明"
-                />
-              </el-form-item>
-            </el-form>
-
-            <div class="flex flex-wrap justify-end gap-3">
-              <el-button
-                size="large"
-                :loading="connectionTestLoading"
-                :disabled="!canViewMigration || pageLoading || precheckLoading || automaticMigrationBusy"
-                @click="handleTestConnection"
-              >
-                测试连接
-              </el-button>
-              <el-button
-                type="primary"
-                size="large"
-                :loading="automaticTaskCreating"
-                :disabled="!canOperateMigration || pageLoading || connectionTestLoading || precheckLoading || automaticMigrationBusy"
-                @click="handleCreateAutomaticTask"
-              >
-                一键开始自动迁移
-              </el-button>
-            </div>
-            <p class="mt-3 text-right text-xs text-slate-500 dark:text-slate-400">
-              测试会检查迁移条件，并用临时表验证基础写权限；不会创建迁移任务或导入业务数据。
-            </p>
-            <DatabaseMigrationConnectionTestResult
-              :loading="connectionTestLoading"
-              :result="connectionTestResult"
-              :error="connectionTestError"
-              :title="connectionTestTitle"
-              :alert-type="connectionTestAlertType"
+          <div class="flex flex-col gap-5 p-5 sm:p-6">
+            <DatabaseMigrationAutomaticProgressSection
+              :task="latestAutomaticTask"
+              :completed="automaticMigrationCompleted"
+              :has-current-tab-rescue-credential="hasCurrentTabRescueCredential"
+              :service-reachable="automaticTaskServiceReachable"
+              :last-refreshed-at="automaticTaskLastRefreshedAt"
+              @open-rescue="openDatabaseRescue"
             />
-          </template>
+
+            <DatabaseMigrationFailurePanel
+              v-if="latestAutomaticTask && automaticTaskStopped"
+              :task="latestAutomaticTask"
+              :maintenance-read-only="stoppedTaskMaintenanceReadOnly"
+              @copy-diagnostic="copyAutomaticTaskDiagnostic"
+            />
+
+            <DatabaseMigrationAutomaticLogPanel :task="latestAutomaticTask" />
+
+            <div
+              v-if="!automaticMigrationCompleted && !automaticTaskInProgress && !automaticTaskAwaitingWritable"
+              class="grid gap-5 xl:grid-cols-[minmax(0,1fr)_340px]"
+            >
+              <div class="min-w-0">
+                <h3 class="text-sm font-semibold text-slate-700 dark:text-slate-200">目标 MySQL 连接</h3>
+                <el-form label-position="top" :disabled="automaticMigrationBusy" class="mt-3 grid gap-x-4 sm:grid-cols-2">
+                  <el-form-item label="MySQL 主机">
+                    <el-input v-model="migrationForm.target.host" placeholder="例如：mysql 或 mysql.internal" />
+                  </el-form-item>
+                  <el-form-item label="端口">
+                    <PassiveNumberInput
+                      v-model="migrationForm.target.port"
+                      :min="1"
+                      :max="65535"
+                      :controls="false"
+                      class="!w-full"
+                    />
+                  </el-form-item>
+                  <el-form-item label="用户名">
+                    <el-input v-model="migrationForm.target.user" placeholder="请输入 MySQL 用户名" />
+                  </el-form-item>
+                  <el-form-item label="密码">
+                    <el-input
+                      v-model="migrationForm.target.password"
+                      type="password"
+                      show-password
+                      placeholder="请输入 MySQL 密码"
+                    />
+                  </el-form-item>
+                  <el-form-item label="数据库名">
+                    <el-input v-model="migrationForm.target.database" placeholder="独立 utf8mb4 空库" />
+                  </el-form-item>
+                  <el-form-item label="备注（可选）">
+                    <el-input
+                      v-model="migrationForm.note"
+                      maxlength="500"
+                      placeholder="本次迁移说明"
+                    />
+                  </el-form-item>
+                </el-form>
+
+                <div class="flex flex-col gap-3 border-t border-slate-100 pt-4 dark:border-white/5 sm:flex-row sm:items-center sm:justify-between">
+                  <p class="text-xs leading-5 text-slate-500 dark:text-slate-400">
+                    测试会检查迁移条件，并用临时表验证基础写权限；不会创建迁移任务或导入业务数据。
+                  </p>
+                  <div class="flex shrink-0 flex-wrap justify-end gap-3">
+                    <el-button
+                      :loading="connectionTestLoading"
+                      :disabled="!canViewMigration || pageLoading || precheckLoading || automaticMigrationBusy"
+                      @click="handleTestConnection"
+                    >
+                      测试连接
+                    </el-button>
+                    <el-button
+                      type="primary"
+                      :loading="automaticTaskCreating"
+                      :disabled="!canOperateMigration || pageLoading || connectionTestLoading || precheckLoading || automaticMigrationBusy"
+                      @click="handleCreateAutomaticTask"
+                    >
+                      一键开始自动迁移
+                    </el-button>
+                  </div>
+                </div>
+                <DatabaseMigrationConnectionTestResult
+                  :loading="connectionTestLoading"
+                  :result="connectionTestResult"
+                  :error="connectionTestError"
+                  :title="connectionTestTitle"
+                  :alert-type="connectionTestAlertType"
+                />
+              </div>
+
+              <aside class="tips-panel self-start rounded-xl border p-4">
+                <h3 class="flex items-center gap-2 text-sm font-semibold text-amber-800 dark:text-amber-300">
+                  <el-icon><WarningFilled /></el-icon>
+                  开始前请确认
+                </h3>
+                <ol class="mt-3 space-y-3">
+                  <li v-for="(tip, index) in automaticMigrationTips" :key="tip.title" class="flex gap-3">
+                    <span class="tips-badge">
+                      {{ index + 1 }}
+                    </span>
+                    <div class="min-w-0">
+                      <p class="text-sm font-medium text-slate-800 dark:text-slate-100">{{ tip.title }}</p>
+                      <p class="mt-0.5 text-xs leading-5 text-slate-600 dark:text-slate-400">{{ tip.description }}</p>
+                    </div>
+                  </li>
+                </ol>
+              </aside>
+            </div>
+          </div>
         </section>
 
         <el-collapse v-model="advancedPanels" class="apple-card !border-0 px-5 sm:px-6">
@@ -1370,24 +1540,30 @@ onBeforeUnmount(stopAutomaticTaskPolling)
                     手动预检、创建与执行任务，以及切换、SQLite 回退和运行时覆盖治理
                   </div>
                 </div>
-                <el-tag type="warning" effect="light">谨慎操作</el-tag>
+                <el-tag type="warning" effect="light" round>谨慎操作</el-tag>
               </div>
             </template>
 
             <div class="flex min-w-0 flex-col gap-4 pb-5">
-              <el-button
-                v-if="!hasEnteredStepFlow"
-                type="primary"
-                :disabled="pageLoading"
-                @click="handleEnterStepFlow"
-              >
-                进入手动预检流程
-              </el-button>
+              <el-alert
+                title="手动流程风险提醒"
+                type="warning"
+                :closable="false"
+                show-icon
+                :description="`正式环境优先使用一键自动迁移，不建议绕过页面手工修改运行时配置。手动闭环：${DATABASE_MIGRATION_RECOMMENDED_FLOW_TEXT}。${DATABASE_MIGRATION_RESTART_EFFECT_TEXT}执行前请确认目标 MySQL 可用、SQLite 备份已保留，并与业务方约定重启窗口。`"
+              />
 
-              <div v-if="hasEnteredStepFlow" class="apple-card flex flex-wrap gap-2 p-4">
+              <div v-if="!hasEnteredStepFlow">
+                <el-button type="primary" :disabled="pageLoading" @click="handleEnterStepFlow">
+                  进入手动预检流程
+                </el-button>
+              </div>
+
+              <div v-else class="flex flex-wrap gap-2 rounded-xl bg-slate-50 p-2 dark:bg-white/5">
                 <el-button
                   v-for="step in manualStepOptions"
                   :key="step.key"
+                  class="!ml-0"
                   :type="activeStepKey === step.key ? 'primary' : undefined"
                   :disabled="!step.unlocked"
                   @click="handleOpenStep(step.key, step.unlocked)"
@@ -1412,7 +1588,7 @@ onBeforeUnmount(stopAutomaticTaskPolling)
 
               <section
                 v-if="hasEnteredStepFlow && activeStepKey === 'create'"
-                class="apple-card space-y-4 p-5 sm:p-6"
+                class="space-y-4 rounded-xl border border-slate-200/80 p-5 dark:border-white/10 sm:p-6"
               >
                 <div class="flex flex-wrap items-start justify-between gap-3">
                   <div>
@@ -1448,41 +1624,41 @@ onBeforeUnmount(stopAutomaticTaskPolling)
               </section>
 
               <DatabaseMigrationRunSection
-          :has-entered-step-flow="hasEnteredStepFlow"
-          :active-step-key="activeStepKey"
-          :task-list="taskList"
-          :selected-task="selectedTask"
-          :can-operate-migration="canOperateMigration"
-          :task-running-id="taskRunningId"
-          :selected-task-progress-percent="selectedTaskProgressPercent"
-          :has-succeeded-task="hasSucceededTask"
-          :format-date-time="formatDateTime"
-          :get-task-status-label="getTaskStatusLabel"
-          :get-task-status-tag-type="getTaskStatusTagType"
-          :get-task-read-state-label="getTaskReadStateLabel"
-          :get-task-read-state-tag-type="getTaskReadStateTagType"
-          @select-task="handleSelectTask"
-          @run-task="handleRunTask"
+                :has-entered-step-flow="hasEnteredStepFlow"
+                :active-step-key="activeStepKey"
+                :task-list="taskList"
+                :selected-task="selectedTask"
+                :can-operate-migration="canOperateMigration"
+                :task-running-id="taskRunningId"
+                :selected-task-progress-percent="selectedTaskProgressPercent"
+                :has-succeeded-task="hasSucceededTask"
+                :format-date-time="formatDateTime"
+                :get-task-status-label="getTaskStatusLabel"
+                :get-task-status-tag-type="getTaskStatusTagType"
+                :get-task-read-state-label="getTaskReadStateLabel"
+                :get-task-read-state-tag-type="getTaskReadStateTagType"
+                @select-task="handleSelectTask"
+                @run-task="handleRunTask"
               />
 
               <DatabaseMigrationSwitchSection
-          :has-entered-step-flow="hasEnteredStepFlow"
-          :active-step-key="activeStepKey"
-          :has-prepared-mysql-switch="hasPreparedMysqlSwitch"
-          :active-runtime-mode-label="activeRuntimeModeLabel"
-          :runtime-state="runtimeState"
-          :runtime-override-status="runtimeOverrideStatus"
-          :selected-succeeded-task="selectedSucceededTask"
-          :switching-task-id="switchingTaskId"
-          :rollback-loading="rollbackLoading"
-          :clear-override-loading="clearOverrideLoading"
-          :can-operate-migration="canOperateMigration"
-          :page-loading="pageLoading"
-          :format-date-time="formatDateTime"
-          :get-runtime-mode-tag-type="getRuntimeModeTagType"
-          @switch-task="handleSwitchToTask"
-          @rollback="handleRollbackToSqlite"
-          @clear-override="handleClearRuntimeOverride"
+                :has-entered-step-flow="hasEnteredStepFlow"
+                :active-step-key="activeStepKey"
+                :has-prepared-mysql-switch="hasPreparedMysqlSwitch"
+                :active-runtime-mode-label="activeRuntimeModeLabel"
+                :runtime-state="runtimeState"
+                :runtime-override-status="runtimeOverrideStatus"
+                :selected-succeeded-task="selectedSucceededTask"
+                :switching-task-id="switchingTaskId"
+                :rollback-loading="rollbackLoading"
+                :clear-override-loading="clearOverrideLoading"
+                :can-operate-migration="canOperateMigration"
+                :page-loading="pageLoading"
+                :format-date-time="formatDateTime"
+                :get-runtime-mode-tag-type="getRuntimeModeTagType"
+                @switch-task="handleSwitchToTask"
+                @rollback="handleRollbackToSqlite"
+                @clear-override="handleClearRuntimeOverride"
               />
             </div>
           </el-collapse-item>
@@ -1491,3 +1667,57 @@ onBeforeUnmount(stopAutomaticTaskPolling)
     </div>
   </PageContainer>
 </template>
+
+<style scoped>
+/* 概况图标底色与须知侧栏配色只在本页使用，写在 scoped 样式中，避免新增 Tailwind 全局原子类撑大首屏 CSS。 */
+.overview-icon--task {
+  background-color: rgb(14 165 233 / 0.1);
+  color: rgb(2 132 199);
+}
+
+.overview-icon--operate {
+  background-color: rgb(16 185 129 / 0.1);
+  color: rgb(5 150 105);
+}
+
+.overview-icon--readonly {
+  background-color: rgb(100 116 139 / 0.1);
+  color: rgb(100 116 139);
+}
+
+.tips-panel {
+  border-color: rgb(253 230 138 / 0.8);
+  background-color: rgb(255 251 235 / 0.6);
+}
+
+.tips-badge {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 9999px;
+  background-color: rgb(245 158 11 / 0.15);
+  font-size: 11px;
+  font-weight: 600;
+  color: rgb(180 83 9);
+}
+
+.dark .overview-icon--task {
+  color: rgb(56 189 248);
+}
+
+.dark .overview-icon--operate {
+  color: rgb(52 211 153);
+}
+
+.dark .tips-panel {
+  border-color: rgb(120 53 15 / 0.5);
+  background-color: rgb(69 26 3 / 0.15);
+}
+
+.dark .tips-badge {
+  color: rgb(252 211 77);
+}
+</style>
