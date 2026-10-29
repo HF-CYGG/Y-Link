@@ -391,7 +391,7 @@ productRouter.get(
     const includeCostPrice = canViewCostPrice(req)
     // 租约持有到“生成结束”且“文件完整发出或连接关闭”：生成期间断连不会提前归还，慢速客户端也无法借未读完的响应叠加导出。
     const exported = await runExportHoldingLease(
-      dataExportLeasePool.acquire(authReq.auth.userId),
+      await dataExportLeasePool.acquireShared(authReq.auth.userId),
       res,
       () => productExcelService.exportProductsWithSummary({ includeCostPrice }),
     )

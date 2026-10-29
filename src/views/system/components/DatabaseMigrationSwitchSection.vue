@@ -40,7 +40,7 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <section v-if="hasEnteredStepFlow && activeStepKey === 'switch'" class="apple-card space-y-5 p-5 sm:p-6">
+  <section v-if="hasEnteredStepFlow && activeStepKey === 'switch'" class="space-y-5 rounded-xl border border-slate-200/80 p-5 dark:border-white/10 sm:p-6">
     <div class="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-4 dark:border-white/5">
       <div>
         <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">第 4 步：切换到 MySQL 或回退 SQLite</h2>

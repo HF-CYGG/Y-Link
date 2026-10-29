@@ -1,13 +1,12 @@
 import { Router } from 'express'
 import rateLimit from 'express-rate-limit'
 import { z } from 'zod'
-import { AppDataSource } from '../config/data-source.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 import { USER_ROLES, USER_STATUSES } from '../types/auth.js'
 import { requirePermission, requireRole } from '../middleware/auth.middleware.js'
 import { userService } from '../services/user.service.js'
 import { auditService } from '../services/audit.service.js'
-import { DatabaseRateLimitStore } from '../services/persistent-risk-state.service.js'
+import { DatabaseRateLimitStore, shouldUseSharedRateLimitStore } from '../services/persistent-risk-state.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { createPermanentDeletePasswordGuard } from '../utils/permanent-delete-guard.js'
@@ -66,7 +65,7 @@ const permanentDeleteLimiter = rateLimit({
   standardHeaders: 'draft-8',
   legacyHeaders: false,
   keyGenerator: (req) => `sys-user:${(req as AuthenticatedRequest).auth.userId ?? 'unknown'}:${String(req.params.id ?? '')}`,
-  ...(AppDataSource.options.type === 'mysql'
+  ...(shouldUseSharedRateLimitStore()
     ? { store: new DatabaseRateLimitStore('express-sys-user-permanent-delete') }
     : {}),
   handler: async (req, res) => {

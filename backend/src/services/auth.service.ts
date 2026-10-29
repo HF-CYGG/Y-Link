@@ -27,7 +27,7 @@ import {
 } from '../utils/password.js'
 import { hashSessionToken } from '../utils/session-token.js'
 import { generateSessionToken } from '../utils/token.js'
-import { EphemeralTicketStore } from '../utils/ephemeral-ticket-store.js'
+import { createTicketStore } from '../utils/ephemeral-ticket-store.js'
 import { maskLoginInputForAudit } from '../utils/audit-subject-mask.js'
 import { isAdminSessionIdleExpired } from '../utils/admin-session-idle.js'
 import { auditService } from './audit.service.js'
@@ -101,7 +101,8 @@ interface AdminMfaLoginTicket {
 
 const MFA_LOGIN_TICKET_TTL_MS = 5 * 60 * 1000
 const MFA_LOGIN_MAX_ATTEMPTS = 5
-const mfaLoginTicketStore = new EphemeralTicketStore<AdminMfaLoginTicket>({
+const mfaLoginTicketStore = createTicketStore<AdminMfaLoginTicket>({
+  namespace: 'admin-mfa-login',
   maxSize: 5000,
   resolveExpiresAt: (ticket) => ticket.expiresAt,
 })
@@ -402,7 +403,7 @@ export class AuthService {
     })
     if (data.mfaRequired) {
       const mfaTicket = generateSessionToken()
-      mfaLoginTicketStore.set(mfaTicket, {
+      await mfaLoginTicketStore.set(mfaTicket, {
         userId: String(user.id),
         username: user.username,
         securitySnapshot: data.snapshot,
@@ -445,7 +446,7 @@ export class AuthService {
    */
   async completeMfaLogin(input: AdminMfaLoginInput, requestMeta?: RequestMeta): Promise<AdminLoginSession> {
     const ticketId = input.mfaTicket.trim()
-    const ticket = ticketId ? mfaLoginTicketStore.take(ticketId) : undefined
+    const ticket = ticketId ? await mfaLoginTicketStore.take(ticketId) : undefined
     if (!ticket) {
       throw new BizError('登录验证已过期，请重新输入账号和密码', 401, { reason: MFA_TICKET_EXPIRED_REASON })
     }
@@ -483,7 +484,7 @@ export class AuthService {
       throw new BizError('账号安全设置已变化，请重新登录', 401, { reason: MFA_TICKET_EXPIRED_REASON })
     }
     if (outcome.factor.reason === 'factor_missing') {
-      mfaLoginTicketStore.set(ticketId, ticket)
+      await mfaLoginTicketStore.set(ticketId, ticket)
       throw new BizError('请输入 6 位动态码或恢复码', 400)
     }
 
@@ -503,7 +504,7 @@ export class AuthService {
 
     const attemptsLeft = ticket.attemptsLeft - 1
     if (attemptsLeft > 0) {
-      mfaLoginTicketStore.set(ticketId, { ...ticket, attemptsLeft })
+      await mfaLoginTicketStore.set(ticketId, { ...ticket, attemptsLeft })
     }
     await authSecurityService.recordAdminLoginFailure(requestMeta, ticket.username)
     await auditService.safeRecord({ ...auditBase, detail: { reason: 'mfa_code_mismatch', attemptsLeft } })
@@ -514,8 +515,8 @@ export class AuthService {
   }
 
   /** WebAuthn 挑战可读取密码票据主体，但只有最终验签可消费票据。 */
-  inspectMfaLoginTicket(ticketId: string): { userId: string; username: string; expiresAt: number } {
-    const ticket = mfaLoginTicketStore.get(ticketId)
+  async inspectMfaLoginTicket(ticketId: string): Promise<{ userId: string; username: string; expiresAt: number }> {
+    const ticket = await mfaLoginTicketStore.get(ticketId)
     if (!ticket) throw new BizError('登录验证已过期，请重新输入账号和密码', 401, { reason: MFA_TICKET_EXPIRED_REASON })
     return { userId: ticket.userId, username: ticket.username, expiresAt: ticket.expiresAt }
   }
@@ -526,7 +527,7 @@ export class AuthService {
     verify: (manager: EntityManager, user: SysUser) => Promise<boolean>,
     requestMeta?: RequestMeta,
   ): Promise<AdminLoginSession> {
-    const ticket = mfaLoginTicketStore.take(ticketId)
+    const ticket = await mfaLoginTicketStore.take(ticketId)
     if (!ticket) throw new BizError('登录验证已过期，请重新输入账号和密码', 401, { reason: MFA_TICKET_EXPIRED_REASON })
     await authSecurityService.guardAdminMfaLoginRequest(requestMeta, ticket.username)
     const outcome = await runInTransaction(async (manager) => {
@@ -551,7 +552,7 @@ export class AuthService {
       throw new BizError('账号安全设置已变化，请重新登录', 401, { reason: MFA_TICKET_EXPIRED_REASON })
     }
     const attemptsLeft = ticket.attemptsLeft - 1
-    if (attemptsLeft > 0) mfaLoginTicketStore.set(ticketId, { ...ticket, attemptsLeft })
+    if (attemptsLeft > 0) await mfaLoginTicketStore.set(ticketId, { ...ticket, attemptsLeft })
     await authSecurityService.recordAdminLoginFailure(requestMeta, ticket.username)
     await auditService.safeRecord({ actionType: 'auth.login', actionLabel: '密码后密钥验证失败',
       targetType: 'user', targetId: ticket.userId, targetCode: ticket.username, requestMeta,

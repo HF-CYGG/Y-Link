@@ -176,7 +176,7 @@ clientAuthRouter.post(
     const requestMeta = extractRequestMeta(req)
     const normalizedTarget = normalizeClientVerificationTarget(payload.channel, payload.target)
     // 发短信/邮箱验证码前先校验图形验证码，降低接口被批量滥用的风险。
-    clientAuthService.verifyCaptchaBeforeVerificationSend(payload)
+    await clientAuthService.verifyCaptchaBeforeVerificationSend(payload)
     if (payload.scene === 'forgot_password') {
       const capabilities = await clientAuthService.getCapabilities()
       if (!capabilities.forgotPasswordEnabled) {

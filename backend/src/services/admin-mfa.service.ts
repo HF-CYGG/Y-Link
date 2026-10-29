@@ -25,7 +25,7 @@ import { SysUserWebauthnCredential } from '../entities/sys-user-webauthn-credent
 import { SysUserSession } from '../entities/sys-user-session.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { deriveDataSubkey, describeDataEncryptionKey, openSensitiveValue, sealSensitiveValue } from '../utils/data-encryption.js'
-import { EphemeralTicketStore } from '../utils/ephemeral-ticket-store.js'
+import { createTicketStore } from '../utils/ephemeral-ticket-store.js'
 import { BizError } from '../utils/errors.js'
 import { isAdminSessionIdleExpired } from '../utils/admin-session-idle.js'
 import { hashSessionToken } from '../utils/session-token.js'
@@ -65,7 +65,8 @@ interface PendingEnrollment {
   attemptsLeft: number
 }
 
-const pendingEnrollmentStore = new EphemeralTicketStore<PendingEnrollment>({
+const pendingEnrollmentStore = createTicketStore<PendingEnrollment>({
+  namespace: 'admin-mfa-enrollment',
   maxSize: 2000,
   resolveExpiresAt: (ticket) => ticket.expiresAt,
 })
@@ -269,7 +270,7 @@ export class AdminMfaService {
       throw new BizError(KEY_UNAVAILABLE_MESSAGE, 503)
     }
     const secret = generateTotpSecret()
-    pendingEnrollmentStore.set(String(auth.userId), {
+    await pendingEnrollmentStore.set(String(auth.userId), {
       userId: String(auth.userId),
       secret,
       ...snapshot,
@@ -295,18 +296,15 @@ export class AdminMfaService {
   /** 确认绑定：动态码正确才落库；错误次数用尽后作废待确认秘钥，需重新发起。 */
   async confirmEnrollment(auth: AuthUserContext, code: string, requestMeta?: RequestMeta): Promise<{ recoveryCodes: string[] }> {
     const ticketKey = String(auth.userId)
-    const pending = pendingEnrollmentStore.get(ticketKey)
+    const pending = await pendingEnrollmentStore.get(ticketKey)
     if (!pending) {
       throw new BizError('绑定已过期，请重新发起绑定', 409)
     }
     const matchedStep = matchTotpStep(pending.secret, code)
     if (matchedStep === null) {
-      const attemptsLeft = pending.attemptsLeft - 1
-      if (attemptsLeft > 0) {
-        pendingEnrollmentStore.set(ticketKey, { ...pending, attemptsLeft })
-      } else {
-        pendingEnrollmentStore.delete(ticketKey)
-      }
+      // 错误次数由票据存储原子计数：多实例并发提交错误动态码也无法突破上限，用尽即作废。
+      const failedAttempts = await pendingEnrollmentStore.recordFailedAttempt(ticketKey, pending.attemptsLeft)
+      const attemptsLeft = failedAttempts === null ? 0 : Math.max(0, pending.attemptsLeft - failedAttempts)
       await auditService.safeRecord({
         actionType: 'auth.mfa.enable',
         actionLabel: '开启两步验证',
@@ -368,7 +366,13 @@ export class AdminMfaService {
         manager,
       )
     })
-    pendingEnrollmentStore.delete(ticketKey)
+    // 绑定已提交，恢复码明文只在本次响应中出现：票据清理失败（Redis 抖动）不能吞掉这次唯一的展示。
+    // 残留票据无法再次确认（上面的 totpSecretSealed 检查会拒绝），到期后自动失效；降级已由票据存储记录。
+    try {
+      await pendingEnrollmentStore.delete(ticketKey)
+    } catch {
+      console.warn('[admin-mfa] 两步验证已绑定，待确认票据清理失败，将在有效期后自动失效')
+    }
     return { recoveryCodes: pending.mfaId ? [] : codes }
   }
 

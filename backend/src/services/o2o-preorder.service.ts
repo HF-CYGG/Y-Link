@@ -59,6 +59,7 @@ import {
 } from './account-business-guard.service.js'
 import {
   invalidateMallCatalogReadCache,
+  readMallCatalogClusterRevision,
   readMallCatalogRevision,
 } from './mall-catalog-revision.service.js'
 import { buildSkuLogFields, snapshotSkuStock } from './inventory-ledger.service.js'
@@ -76,6 +77,8 @@ import {
   normalizeDiscountRate,
   parseMoneyToCents,
 } from '../utils/discount-price.js'
+import { runExclusive } from '../redis/redis-lease.js'
+import { readSharedCacheRaw, sharedCacheKey, writeSharedCacheRaw } from '../redis/redis-cache.js'
 
 /** 部门单到店取货时间允许的过去容差：覆盖客户端时钟偏差与提交网络耗时。 */
 const O2O_PICKUP_AT_PAST_TOLERANCE_MS = 5 * 60 * 1000
@@ -2373,13 +2376,46 @@ class O2oPreorderService {
   }
 
   private createPublicJsonSnapshot<T>(data: T): O2oPublicJsonSnapshot<T> {
-    const responseBody = JSON.stringify({ code: 0, message: 'ok', data })
+    return this.createPublicJsonSnapshotFromBody(JSON.stringify({ code: 0, message: 'ok', data }), data)
+  }
+
+  private createPublicJsonSnapshotFromBody<T>(responseBody: string, data: T): O2oPublicJsonSnapshot<T> {
     return {
       data,
       responseBody,
       etag: `"${createHash('sha256').update(responseBody).digest('base64url')}"`,
       generatedAt: Date.now(),
     }
+  }
+
+  /**
+   * 进程内缓存未命中时的二级缓存：Redis 就绪时按“集群修订号”读取其他实例已构建好的完整响应体，
+   * 未命中再回源数据库构建并写回，过期时间与进程内新鲜期一致。多实例下同一修订号在一个新鲜期内
+   * 通常只回源一次，且各实例返回同一响应体，ETag 一致，客户端在实例间切换也能得到 304。
+   * Redis 不可用时直接回源，与未接入 Redis 时一致。
+   */
+  private async loadSharedPublicSnapshot<T>(
+    name: string,
+    ttlMs: number,
+    build: () => Promise<T>,
+  ): Promise<O2oPublicJsonSnapshot<T>> {
+    const clusterRevision = await readMallCatalogClusterRevision()
+    if (clusterRevision === null) return this.createPublicJsonSnapshot(await build())
+    const key = sharedCacheKey(name, clusterRevision)
+    const cachedBody = await readSharedCacheRaw(key)
+    if (cachedBody) {
+      try {
+        const parsed = JSON.parse(cachedBody) as { data?: T }
+        if (parsed && typeof parsed === 'object' && 'data' in parsed) {
+          return this.createPublicJsonSnapshotFromBody(cachedBody, parsed.data as T)
+        }
+      } catch {
+        // 损坏的共享快照按未命中处理，下面回源并覆盖。
+      }
+    }
+    const snapshot = this.createPublicJsonSnapshot(await build())
+    void writeSharedCacheRaw(key, snapshot.responseBody, ttlMs)
+    return snapshot
   }
 
   /**
@@ -2743,8 +2779,11 @@ class O2oPreorderService {
       this.mallProductsRefreshRevision = refreshRevision
       const refresh = (async () => {
         try {
-          const data = await this.buildMallProductsUncached()
-          const snapshot = this.createPublicJsonSnapshot(data)
+          const snapshot = await this.loadSharedPublicSnapshot(
+            'mall-products',
+            O2O_MALL_CATALOG_FRESH_TTL_MS,
+            () => this.buildMallProductsUncached(),
+          )
           this.mallProductsCache = {
             revision: refreshRevision,
             freshUntil: Date.now() + O2O_MALL_CATALOG_FRESH_TTL_MS,
@@ -2790,8 +2829,11 @@ class O2oPreorderService {
       this.mallStorefrontRefreshRevision = refreshRevision
       const refresh = (async () => {
         try {
-          const data = await this.loadMallStorefrontConfig()
-          const snapshot = this.createPublicJsonSnapshot(data)
+          const snapshot = await this.loadSharedPublicSnapshot(
+            'mall-storefront',
+            O2O_MALL_STOREFRONT_FRESH_TTL_MS,
+            () => this.loadMallStorefrontConfig(),
+          )
           this.mallStorefrontCache = {
             revision: refreshRevision,
             freshUntil: Date.now() + O2O_MALL_STOREFRONT_FRESH_TTL_MS,
@@ -5132,7 +5174,10 @@ class O2oPreorderService {
       if (databaseMaintenanceModeService.isReadOnly()) {
         return
       }
-      void this.cancelTimeoutOrders({ skipRecentMs: O2O_TIMEOUT_RECYCLE_RECENT_WINDOW_MS }).catch(() => undefined)
+      // 多实例时同一轮只由抢到租约的实例执行；Redis 未启用或降级时各实例照常执行，正确性由数据库行锁兜底。
+      void runExclusive('job:o2o-timeout-recycle', 60_000, () => this.cancelTimeoutOrders({
+        skipRecentMs: O2O_TIMEOUT_RECYCLE_RECENT_WINDOW_MS,
+      })).catch(() => undefined)
     }, O2O_TIMEOUT_BACKGROUND_RECYCLE_INTERVAL_MS)
   }
 

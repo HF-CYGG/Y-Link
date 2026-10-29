@@ -34,6 +34,7 @@ import {
   summarizeProductInventory,
   type ProductInventorySummary,
 } from '../utils/product-inventory-summary.js'
+import { acquireWithClusterActorSlot } from '../utils/export-lease-pool.js'
 
 export const REPORT_TYPES = ['inventory', 'tag-sales', 'kingdee', 'walkin', 'outbound-flow'] as const
 export type ReportType = (typeof REPORT_TYPES)[number]
@@ -205,6 +206,14 @@ export class ReportExportLeasePool {
   get activeExports() {
     return this.activeCount
   }
+
+  /**
+   * 跨实例获取导出租约：先占本进程名额，再占集群级“每账号”名额（Redis 启用时），
+   * 避免多实例把每账号上限放大 N 倍；Redis 不可用时只按本进程口径限制。
+   */
+  acquireShared(actorId: string | number) {
+    return acquireWithClusterActorSlot('report', actorId, () => this.acquire(actorId), '当前账号已有报表导出正在进行，请等待完成后再试')
+  }
 }
 
 export const reportExportLeasePool = new ReportExportLeasePool()
@@ -373,7 +382,7 @@ export class ReportService {
     onReady?: () => void,
     actorId?: string | number,
   ): Promise<ReportExportResult> {
-    const lease = reportExportLeasePool.acquire(actorId ?? '')
+    const lease = await reportExportLeasePool.acquireShared(actorId ?? '')
     try {
       const query = this.resolveQuery(type, input)
     const fetchBatch = (cursor?: string) => {

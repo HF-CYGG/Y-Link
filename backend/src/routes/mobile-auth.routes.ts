@@ -148,7 +148,7 @@ mobileAuthRouter.post('/verification-code', asyncHandler(async (req, res) => {
   const payload = verificationCodeSchema.parse(req.body)
   const requestMeta = extractRequestMeta(req)
   const target = normalizeClientVerificationTarget(payload.channel, payload.target)
-  clientAuthService.verifyCaptchaBeforeVerificationSend(payload)
+  await clientAuthService.verifyCaptchaBeforeVerificationSend(payload)
   if (payload.scene === 'forgot_password') {
     const capabilities = await clientAuthService.getCapabilities()
     if (!capabilities.forgotPasswordEnabled) {

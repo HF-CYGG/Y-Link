@@ -36,6 +36,8 @@ export function createDatabaseStrategy(dataSource: DataSource): DatabaseStrategy
   }
   return new MysqlDatabaseStrategy(capabilities, {
     acquireTimeoutMs: env.DB_ACQUIRE_TIMEOUT_MS,
+    lockWaitTimeoutSeconds: env.DB_LOCK_WAIT_TIMEOUT_SECONDS,
+    sessionWaitTimeoutSeconds: Math.max(env.DB_SESSION_WAIT_TIMEOUT_SECONDS, Math.ceil(env.DB_IDLE_TIMEOUT_MS / 1000) + 60),
   })
 }
 

@@ -11,9 +11,23 @@ import { asyncHandler } from '../utils/async-handler.js'
 import { dashboardService } from '../services/dashboard.service.js'
 import { BizError } from '../utils/errors.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
+import { digestCacheInput, getOrLoadSharedVersioned, sharedCacheKey } from '../redis/redis-cache.js'
+import { BUSINESS_DATA_CACHE_GENERATION } from '../middleware/business-data-cache.middleware.js'
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export const dashboardRouter = Router()
+
+/**
+ * 工作台统计的跨实例共享缓存时长：多名管理员同时打开或自动刷新工作台时，同一组聚合在该时长内只计算一次。
+ * 服务层只按“是否管理员”决定是否展示系统单号，因此缓存键编入该视角；未配置 Redis 时不缓存。
+ * 键名还编入业务数据缓存代际：任何业务写入成功后代际递增，写入后的查询不会读到写入前的结果。
+ */
+const DASHBOARD_CACHE_TTL_MS = 30_000
+
+const loadDashboardCached = <T>(name: string, req: unknown, input: unknown, loader: () => Promise<T>): Promise<T> => {
+  const viewer = (req as Partial<AuthenticatedRequest>).auth?.role === 'admin' ? 'admin' : 'staff'
+  return getOrLoadSharedVersioned(BUSINESS_DATA_CACHE_GENERATION, sharedCacheKey('dashboard', name, viewer, digestCacheInput(input)), DASHBOARD_CACHE_TTL_MS, loader)
+}
 
 const dashboardFilterQuerySchema = z.object({
   dateRange: z.union([z.string(), z.array(z.string())]).optional(),
@@ -82,7 +96,7 @@ dashboardRouter.get(
   asyncHandler(async (req, res) => {
     const query = dashboardFilterQuerySchema.parse(req.query)
     const { startDate, endDate } = resolveDateRangeQuery(query)
-    const data = await dashboardService.getRestockRanking({ startDate, endDate })
+    const data = await loadDashboardCached('getRestockRanking', req, { startDate, endDate }, () => dashboardService.getRestockRanking({ startDate, endDate }))
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -93,7 +107,7 @@ dashboardRouter.get(
   requirePermission('dashboard:view'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
-    const data = await dashboardService.getStats(authReq.auth)
+    const data = await loadDashboardCached('getStats', req, null, () => dashboardService.getStats(authReq.auth))
     res.json({
       code: 0,
       message: 'ok',
@@ -110,13 +124,14 @@ dashboardRouter.get(
     const authReq = req as AuthenticatedRequest
     const query = analyticsQuerySchema.parse(req.query)
     const filter = resolveDateRangeQuery(query)
-    const data = await dashboardService.getAnalytics({
+    const input = {
       ...filter,
       granularity: query.granularity,
       productSpecMode: query.productSpecMode,
       productId: query.productId,
       topN: query.topN,
-    }, authReq.auth)
+    }
+    const data = await loadDashboardCached('getAnalytics', req, input, () => dashboardService.getAnalytics(input, authReq.auth))
     res.json({
       code: 0,
       message: 'ok',
@@ -133,11 +148,12 @@ dashboardRouter.get(
     const authReq = req as AuthenticatedRequest
     const query = productDrilldownQuerySchema.parse(req.query)
     const filter = resolveDateRangeQuery(query)
-    const data = await dashboardService.getProductRankDrilldown({
+    const input = {
       productId: query.productId,
       nameSnapshot: query.nameSnapshot,
       ...filter,
-    }, authReq.auth)
+    }
+    const data = await loadDashboardCached('getProductRankDrilldown', req, input, () => dashboardService.getProductRankDrilldown(input, authReq.auth))
     res.json({
       code: 0,
       message: 'ok',
@@ -154,10 +170,11 @@ dashboardRouter.get(
     const authReq = req as AuthenticatedRequest
     const query = customerDrilldownQuerySchema.parse(req.query)
     const filter = resolveDateRangeQuery(query)
-    const data = await dashboardService.getCustomerRankDrilldown({
+    const input = {
       customerName: query.customerName,
       ...filter,
-    }, authReq.auth)
+    }
+    const data = await loadDashboardCached('getCustomerRankDrilldown', req, input, () => dashboardService.getCustomerRankDrilldown(input, authReq.auth))
     res.json({
       code: 0,
       message: 'ok',
@@ -174,10 +191,11 @@ dashboardRouter.get(
     const authReq = req as AuthenticatedRequest
     const query = tagAggregateQuerySchema.parse(req.query)
     const filter = resolveDateRangeQuery(query)
-    const data = await dashboardService.getTagAggregate({
+    const input = {
       tagId: query.tagId,
       ...filter,
-    }, authReq.auth)
+    }
+    const data = await loadDashboardCached('getTagAggregate', req, input, () => dashboardService.getTagAggregate(input, authReq.auth))
     res.json({
       code: 0,
       message: 'ok',
@@ -194,7 +212,7 @@ dashboardRouter.get(
     const authReq = req as AuthenticatedRequest
     const query = dashboardFilterQuerySchema.parse(req.query)
     const filter = resolveDateRangeQuery(query)
-    const data = await dashboardService.getDashboardPieData(filter, authReq.auth)
+    const data = await loadDashboardCached('getDashboardPieData', req, filter, () => dashboardService.getDashboardPieData(filter, authReq.auth))
     res.json({
       code: 0,
       message: 'ok',

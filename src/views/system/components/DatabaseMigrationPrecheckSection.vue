@@ -47,7 +47,7 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <section v-if="hasEnteredStepFlow && activeStepKey === 'precheck'" class="apple-card space-y-5 p-5 sm:p-6">
+  <section v-if="hasEnteredStepFlow && activeStepKey === 'precheck'" class="space-y-5 rounded-xl border border-slate-200/80 p-5 dark:border-white/10 sm:p-6">
     <div class="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-4 dark:border-white/5">
       <div>
         <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">第 1 步：填写目标 MySQL 并执行预检</h2>

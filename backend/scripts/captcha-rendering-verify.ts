@@ -49,15 +49,15 @@ if (!process.argv.includes('--no-fonts-worker')) {
       }
       assert.ok(foregroundPixels >= 35, `字符 ${char} 的第 ${index + 1} 位不可见：仅 ${foregroundPixels} 个前景像素`)
     }
-    assert.throws(() => service.verifyCaptcha('admin', ticket.captchaId, code), /失效/)
+    await assert.rejects(() => service.verifyCaptcha('admin', ticket.captchaId, code), /失效/)
     // 答错一次即作废：同一票据不能再用正确答案补救，防止 OCR 多候选反复试答。
-    assert.throws(() => service.verifyCaptcha('client', ticket.captchaId, 'wrong'), /错误/)
-    assert.throws(() => service.verifyCaptcha('client', ticket.captchaId, code), /失效/)
+    await assert.rejects(() => service.verifyCaptcha('client', ticket.captchaId, 'wrong'), /错误/)
+    await assert.rejects(() => service.verifyCaptcha('client', ticket.captchaId, code), /失效/)
     const retryTicket = await service.createCaptcha('client')
-    service.verifyCaptcha('client', retryTicket.captchaId, ` ${code.toLowerCase()} `)
-    assert.throws(() => service.verifyCaptcha('client', retryTicket.captchaId, code), /失效/)
+    await service.verifyCaptcha('client', retryTicket.captchaId, ` ${code.toLowerCase()} `)
+    await assert.rejects(() => service.verifyCaptcha('client', retryTicket.captchaId, code), /失效/)
     const adminTicket = await service.createCaptcha('admin')
-    service.verifyCaptcha('admin', adminTicket.captchaId, code)
+    await service.verifyCaptcha('admin', adminTicket.captchaId, code)
   }
   console.log('验证码无字体渲染验证通过：36 种字符 × 6 个位置、PNG/SVG 兼容、作用域隔离与一次性校验')
 }

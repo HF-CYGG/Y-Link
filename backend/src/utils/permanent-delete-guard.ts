@@ -14,9 +14,8 @@
 
 import type { Request, RequestHandler } from 'express'
 import rateLimit from 'express-rate-limit'
-import { AppDataSource } from '../config/data-source.js'
 import { auditService } from '../services/audit.service.js'
-import { DatabaseRateLimitStore } from '../services/persistent-risk-state.service.js'
+import { DatabaseRateLimitStore, shouldUseSharedRateLimitStore } from '../services/persistent-risk-state.service.js'
 import type { AuthUserContext, AuthenticatedRequest } from '../types/auth.js'
 import { BizError } from './errors.js'
 import { assertPermanentDeletePassword } from './permanent-delete-password.js'
@@ -71,7 +70,7 @@ function getSharedPasswordFailureLimiter(): RequestHandler {
     skipSuccessfulRequests: true,
     requestWasSuccessful: (_req, res) => isPasswordAttemptAccepted(res.statusCode),
     keyGenerator: (req) => `account:${(req as AuthenticatedRequest).auth?.userId ?? 'unknown'}`,
-    ...(AppDataSource.options.type === 'mysql'
+    ...(shouldUseSharedRateLimitStore()
       ? { store: new DatabaseRateLimitStore('express-permanent-delete-password') }
       : {}),
     handler: async (req, res) => {
@@ -110,7 +109,7 @@ export function createAccountScopedLimiter(options: PermanentDeleteAuditTarget &
     standardHeaders: 'draft-8',
     legacyHeaders: false,
     keyGenerator: (req) => `${options.storePrefix}:${(req as AuthenticatedRequest).auth?.userId ?? 'unknown'}`,
-    ...(AppDataSource.options.type === 'mysql'
+    ...(shouldUseSharedRateLimitStore()
       ? { store: new DatabaseRateLimitStore(options.storePrefix) }
       : {}),
     handler: async (req, res) => {

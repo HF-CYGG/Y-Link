@@ -213,7 +213,9 @@ export function createDataSourceOptions(runtimeOverride?: DatabaseRuntimeOverrid
     extra: {
       waitForConnections: true,
       connectionLimit: env.DB_POOL_SIZE,
-      maxIdle: env.DB_POOL_SIZE,
+      // mysql2 只有在 maxIdle 小于 connectionLimit 时才启动空闲回收定时器（idleTimeout 才会生效）。
+      // 让池内连接空闲超过 DB_IDLE_TIMEOUT_MS 就由应用主动关闭，配合会话 wait_timeout 回收僵尸事务时不会误用已被服务端断开的连接。
+      maxIdle: Math.max(0, env.DB_POOL_SIZE - 1),
       idleTimeout: env.DB_IDLE_TIMEOUT_MS,
       queueLimit: env.DB_QUEUE_LIMIT,
       enableKeepAlive: true,

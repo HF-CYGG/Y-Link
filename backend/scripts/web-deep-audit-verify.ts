@@ -101,8 +101,8 @@ async function verifyCaptchaOneShot() {
   const { CaptchaService } = await import('../src/services/captcha.service.js')
   const service = new CaptchaService({ createCode: () => 'ABCDEF', renderPng: async () => Buffer.from('png') })
   const ticket = await service.createCaptcha('admin')
-  assert.throws(() => service.verifyCaptcha('admin', ticket.captchaId, 'WRONG1'), /错误/)
-  assert.throws(() => service.verifyCaptcha('admin', ticket.captchaId, 'ABCDEF'), /失效/, '答错一次后原验证码必须作废')
+  await assert.rejects(() => service.verifyCaptcha('admin', ticket.captchaId, 'WRONG1'), /错误/)
+  await assert.rejects(() => service.verifyCaptcha('admin', ticket.captchaId, 'ABCDEF'), /失效/, '答错一次后原验证码必须作废')
   const loginView = readRepo('src/views/auth/LoginView.vue')
   assert.match(loginView, /captchaAlreadyVisible[\s\S]{0,160}refreshCaptcha\(\)/, '管理端登录页答错验证码后必须换新图')
 }
