@@ -118,20 +118,61 @@ const logConnectionError = (role: string, error: Error) => {
   console.warn(`[redis] ${role} 连接异常：${error.name}: ${error.message}（目标 ${describeRedisTarget() ?? '-'}）`)
 }
 
+const PROBE_RETRY_MS = 5_000
+let probeTimer: NodeJS.Timeout | null = null
+
+/** 版本探测：依赖 GETDEL 与 SET KEEPTTL，低于 6.2 直接视为不可用。 */
+async function probeServer(client: Redis): Promise<void> {
+  const info = await client.info('server')
+  const version = /redis_version:(\S+)/.exec(info)?.[1] ?? '0'
+  const [major = 0, minor = 0] = version.split('.').map((part) => Number(part))
+  if (major < 6 || (major === 6 && minor < 2)) {
+    throw new Error(`Redis 版本 ${version} 过低，至少需要 6.2（依赖 GETDEL 与 SET KEEPTTL）`)
+  }
+}
+
+/**
+ * 探测通过才把状态置为 ready。探测失败（例如 INFO 短暂超时）时连接本身可能仍是 ready，
+ * 不会再触发 ready 事件，所以必须自行定时重试，否则一次抖动会让票据等能力持续 503。
+ */
+async function verifyAndMarkReady(client: Redis): Promise<void> {
+  if (client !== commandClient) return
+  try {
+    await probeServer(client)
+  } catch (error) {
+    if (client !== commandClient) return
+    status = 'degraded'
+    if (!probeTimer) {
+      probeTimer = setTimeout(() => {
+        probeTimer = null
+        void verifyAndMarkReady(client).catch(() => undefined)
+      }, PROBE_RETRY_MS)
+      probeTimer.unref()
+    }
+    throw error
+  }
+  if (client !== commandClient) return
+  const recovered = status === 'degraded'
+  status = 'ready'
+  if (recovered) console.log(`[redis] 连接已恢复：${describeRedisTarget()}`)
+  for (const listener of readyListeners) {
+    try {
+      listener()
+    } catch (error) {
+      console.warn('[redis] ready 回调执行失败', error instanceof Error ? error.message : error)
+    }
+  }
+}
+
 const attachLifecycle = (client: Redis, role: 'command' | 'subscriber') => {
   client.on('error', (error: Error) => logConnectionError(role, error))
   if (role !== 'command') return
   client.on('ready', () => {
-    const recovered = status === 'degraded'
-    status = 'ready'
-    if (recovered) console.log(`[redis] 连接已恢复：${describeRedisTarget()}`)
-    for (const listener of readyListeners) {
-      try {
-        listener()
-      } catch (error) {
-        console.warn('[redis] ready 回调执行失败', error instanceof Error ? error.message : error)
-      }
-    }
+    // 启动期由 connectRedis 自己探测；之后每次（重）连就绪都重新探测再恢复 ready。
+    if (status === 'connecting') return
+    void verifyAndMarkReady(client).catch((error: unknown) => {
+      logConnectionError(role, error instanceof Error ? error : new Error(String(error)))
+    })
   })
   const markDegraded = () => {
     if (status === 'ready') {
@@ -166,13 +207,7 @@ export async function connectRedis(): Promise<void> {
   attachLifecycle(subscriberClient, 'subscriber')
   try {
     await Promise.all([commandClient.connect(), subscriberClient.connect()])
-    const info = await commandClient.info('server')
-    const version = /redis_version:(\S+)/.exec(info)?.[1] ?? '0'
-    const [major = 0, minor = 0] = version.split('.').map((part) => Number(part))
-    if (major < 6 || (major === 6 && minor < 2)) {
-      throw new Error(`Redis 版本 ${version} 过低，至少需要 6.2（依赖 GETDEL 与 SET KEEPTTL）`)
-    }
-    status = 'ready'
+    await verifyAndMarkReady(commandClient)
   } catch (error) {
     status = 'degraded'
     const message = error instanceof Error ? error.message : String(error)
@@ -187,6 +222,8 @@ export async function connectRedis(): Promise<void> {
 /** 停机时关闭连接；先尝试 QUIT，超时后强制断开。 */
 export async function closeRedis(): Promise<void> {
   const clients = [subscriberClient, commandClient].filter((client): client is Redis => client !== null)
+  if (probeTimer) clearTimeout(probeTimer)
+  probeTimer = null
   subscriberClient = null
   commandClient = null
   if (status !== 'disabled') status = 'degraded'

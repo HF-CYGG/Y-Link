@@ -98,6 +98,7 @@ async function runMainScenario() {
   const redisClient = await import('../src/redis/redis-client.js')
   const redisBus = await import('../src/redis/redis-bus.js')
   const redisLease = await import('../src/redis/redis-lease.js')
+  const { incrementApproxSlidingCounter } = await import('../src/redis/redis-scripts.js')
   const { RedisTicketStore, createTicketStore } = await import('../src/utils/ephemeral-ticket-store.js')
   const { VerificationCodeAttemptStore } = await import('../src/services/verification-code.service.js')
   const { persistentRiskStateService, shouldUseSharedRateLimitStore } = await import('../src/services/persistent-risk-state.service.js')
@@ -107,6 +108,27 @@ async function runMainScenario() {
   await redisClient.connectRedis()
   redisBus.startRedisBus()
   assert.equal(redisClient.getRedisHealthStatus(), 'ready', 'Redis 应在启动期连接就绪')
+
+  // 0. 就绪探测短暂失败（连接本身仍 ready、不会再触发 ready 事件）后必须自动重试恢复，不能永久停在 degraded
+  {
+    const probeClient = redisClient.getRedisClient()
+    assert.ok(probeClient)
+    const originalInfo = probeClient.info.bind(probeClient)
+    let failOnce = true
+    probeClient.info = (async (...args: Parameters<typeof originalInfo>) => {
+      if (failOnce) {
+        failOnce = false
+        throw new Error('模拟 INFO 超时')
+      }
+      return originalInfo(...args)
+    }) as typeof probeClient.info
+    probeClient.emit('ready')
+    await delay(50)
+    assert.equal(redisClient.isRedisReady(), false, '探测失败后应进入降级')
+    for (let index = 0; index < 80 && !redisClient.isRedisReady(); index += 1) await delay(100)
+    probeClient.info = originalInfo as typeof probeClient.info
+    assert.equal(redisClient.isRedisReady(), true, '探测失败后必须在重试周期内自动恢复 ready')
+  }
   const prefix = process.env.REDIS_KEY_PREFIX as string
   const raw = new Redis(process.env.REDIS_URL as string, { password: process.env.REDIS_PASSWORD, lazyConnect: true })
   const rawSubscriber = new Redis(process.env.REDIS_URL as string, { password: process.env.REDIS_PASSWORD, lazyConnect: true })
@@ -154,6 +176,23 @@ async function runMainScenario() {
     await codeStore.set('k3', codeTicket)
     for (let index = 0; index < 4; index += 1) assert.equal(await codeStore.consume('k3', '999999'), false)
     assert.equal(await codeStore.consume('k3', '123456'), true, '重新发送验证码后错误次数必须清零')
+
+    // 2b. 全站撞库态势的近似滑动窗口计数不得在 1000 处封顶（阈值可配置到十万级以上）
+    const counterWindowMs = 60_000
+    const counterStart = Math.floor(Date.now() / counterWindowMs) * counterWindowMs
+    const counterKey = redisClient.redisKey('verify-approx-counter')
+    const redisCommand = redisClient.getRedisClient()
+    assert.ok(redisCommand)
+    let counted = 0
+    for (let index = 0; index < 1500; index += 1) {
+      counted = await incrementApproxSlidingCounter(redisCommand, counterKey, counterWindowMs, counterStart)
+    }
+    assert.equal(counted, 1500, '近似滑动窗口计数必须超过 1000 继续累加')
+    assert.equal(
+      await incrementApproxSlidingCounter(redisCommand, counterKey, counterWindowMs, counterStart + counterWindowMs * 1.5),
+      751,
+      '跨入下一窗口一半时，上一窗口计数按剩余比例折算（1 + 1500 × 0.5）',
+    )
 
     // 3. 限流滑动窗口与失败计数走 Redis，且多“实例”共享
     assert.equal(shouldUseSharedRateLimitStore(), true, 'SQLite + Redis 也必须挂载共享限流 Store')
