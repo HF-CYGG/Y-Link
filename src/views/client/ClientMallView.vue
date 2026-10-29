@@ -7,6 +7,8 @@
  * 悬浮购物车遮挡：页面尾部留白、分类浏览列表高度与 scroll-padding 统一由摘要栏实测遮挡高度 `--mall-floating-occlusion` 驱动，不要改回固定常量估算。
  * 数量输入：迷你购物车与详情弹层的数量均可直接输入，购物车走 store 的 setQtyFromInput，详情弹层走 commitDetailQty，与加减按钮共用同一上限与提示。
  * 补货入口：四套卡片复用当前缺货 SKU 判断，操作保持第三列上下堆叠，不改变虚拟行高；详情传递当前明确选择的规格。
+ * 目录新鲜度：本地快照有效期内先秒开再后台重新校验；页面激活期间每 30 秒与切回前台时也会静默校验，
+ * 新上架商品无需顾客手动刷新即可出现。校验依赖 ETag 条件请求，不要改成带随机参数的绕缓存请求。
  */
 
 
@@ -171,6 +173,12 @@ const DEFAULT_PRODUCT_IMAGE_WARMUP_BATCH = 12
 const DEFAULT_PRODUCT_IMAGE_WARMUP_DELAY_MS = 180
 const PRODUCT_CARD_SEARCH_DETAIL_MAX_LENGTH = 80
 const STOREFRONT_REFRESH_MIN_INTERVAL_MS = 60_000
+/** 停留在商城页时后台重新校验目录的周期；请求命中 Nginx 微缓存或 304，开销很小。 */
+const CATALOG_BACKGROUND_REVALIDATE_MS = 30_000
+/** 两次后台校验的最小间隔，避免页面切换、可见性变化与定时器同时触发重复请求。 */
+const CATALOG_REVALIDATE_MIN_GAP_MS = 10_000
+let lastCatalogRevalidateAt = 0
+let catalogRevalidateTimer: number | null = null
 let lastStorefrontRefreshAt = 0
 let mallRuntimeActive = false
 let hasActivatedOnce = false
@@ -578,14 +586,62 @@ watch([mallAnnouncementText, isPhone], () => {
   void updateCompactAnnouncementOverflow()
 })
 
+const applyCatalogResult = async (result: Awaited<ReturnType<typeof getO2oMallProducts>>) => {
+  // 成功返回后同步更新两个域：
+  // 1. 目录 Store 负责商品列表、分类与搜索上下文；
+  // 2. 购物车 Store 负责把已选商品映射到最新库存/限购规则。
+  lastCatalogRevalidateAt = Date.now()
+  clientCatalogStore.setProducts(result)
+  lastStorefrontRefreshAt = Date.now()
+  clientCartStore.syncWithCatalog(result.list)
+  warmupProductImages(result.list)
+  const activeExists = categoryOptions.value.some((option) => option.key === activeCategoryKey.value)
+  if (!activeExists) {
+    activeCategoryKey.value = 'all'
+  }
+  const requestedKey = requestedCategoryKey.value
+  if (requestedKey && !categoryOptions.value.some((option) => option.key === requestedKey)) {
+    // 刷新后点击目标已不存在，立刻解锁，避免会话一直等一个不会出现的分组。
+    releaseCategoryScrollLock()
+  }
+  await nextTick()
+  handleProductListScroll()
+}
+
+/**
+ * 后台静默重新校验目录：新商品上架、下架或库存变化后，停留在商城页或从其他页面返回的顾客无需手动刷新。
+ * 浏览器按 ETag 发起条件请求，目录未变化时只得到 304，开销很小；失败时保留当前目录，不打扰顾客。
+ */
+const revalidateCatalogInBackground = async () => {
+  if (refreshing.value || globalThis.document?.visibilityState === 'hidden') {
+    return
+  }
+  if (Date.now() - lastCatalogRevalidateAt < CATALOG_REVALIDATE_MIN_GAP_MS) {
+    return
+  }
+  lastCatalogRevalidateAt = Date.now()
+  await runLatest({
+    executor: (signal) => getO2oMallProducts({ signal }),
+    onSuccess: applyCatalogResult,
+    onError: () => undefined,
+  })
+}
+
+const handleMallVisibilityChange = () => {
+  if (globalThis.document?.visibilityState === 'visible') {
+    void revalidateCatalogInBackground()
+  }
+}
+
 const loadProducts = async (force = false) => {
-  // 如果缓存仍在有效期内，则直接复用本地目录快照，并只同步购物车库存信息。
-  // 这样从订单页返回商城页时可以“秒开”，同时避免旧库存继续污染购物车状态。
+  // 如果缓存仍在有效期内，则先直接复用本地目录快照“秒开”，再在后台重新校验，
+  // 既不拉长首屏等待，又能让新上架商品与库存变化及时出现。
   if (!force && clientCatalogStore.products.length > 0 && clientCatalogStore.isFreshNow()) {
     requestError.value = null
     await refreshStorefrontConfig()
     clientCartStore.syncWithCatalog(clientCatalogStore.products)
     warmupProductImages(clientCatalogStore.products)
+    void revalidateCatalogInBackground()
     return
   }
   loading.value = clientCatalogStore.products.length === 0
@@ -593,26 +649,7 @@ const loadProducts = async (force = false) => {
   requestError.value = null
   await runLatest({
     executor: (signal) => getO2oMallProducts({ signal }),
-    onSuccess: async (result) => {
-      // 成功返回后同步更新两个域：
-      // 1. 目录 Store 负责商品列表、分类与搜索上下文；
-      // 2. 购物车 Store 负责把已选商品映射到最新库存/限购规则。
-      clientCatalogStore.setProducts(result)
-      lastStorefrontRefreshAt = Date.now()
-      clientCartStore.syncWithCatalog(result.list)
-      warmupProductImages(result.list)
-      const activeExists = categoryOptions.value.some((option) => option.key === activeCategoryKey.value)
-      if (!activeExists) {
-        activeCategoryKey.value = 'all'
-      }
-      const requestedKey = requestedCategoryKey.value
-      if (requestedKey && !categoryOptions.value.some((option) => option.key === requestedKey)) {
-        // 刷新后点击目标已不存在，立刻解锁，避免会话一直等一个不会出现的分组。
-        releaseCategoryScrollLock()
-      }
-      await nextTick()
-      handleProductListScroll()
-    },
+    onSuccess: applyCatalogResult,
     onError: (error) => {
       const normalizedError = normalizeRequestError(error, '商品加载失败，请稍后重试')
       requestError.value = {
@@ -1337,6 +1374,10 @@ const activateMallRuntime = () => {
   globalThis.window.addEventListener('orientationchange', scheduleMallFloatingLayoutSync)
   // 移动端地址栏收起/展开只改变可视视口，不一定触发 window resize。
   globalThis.window.visualViewport?.addEventListener('resize', scheduleMallFloatingLayoutSync)
+  globalThis.document?.addEventListener('visibilitychange', handleMallVisibilityChange)
+  catalogRevalidateTimer = globalThis.window.setInterval(() => {
+    void revalidateCatalogInBackground()
+  }, CATALOG_BACKGROUND_REVALIDATE_MS)
   void syncMallViewportAfterRender()
   if (hasActivatedOnce && globalThis.document?.visibilityState !== 'hidden') {
     // KeepAlive 返回时只在 TTL 过期或轻量快照尚未补全时重拉，避免每次切页都请求完整目录。
@@ -1354,6 +1395,11 @@ const deactivateMallRuntime = () => {
   globalThis.window.removeEventListener('resize', scheduleMallFloatingLayoutSync)
   globalThis.window.removeEventListener('orientationchange', scheduleMallFloatingLayoutSync)
   globalThis.window.visualViewport?.removeEventListener('resize', scheduleMallFloatingLayoutSync)
+  globalThis.document?.removeEventListener('visibilitychange', handleMallVisibilityChange)
+  if (catalogRevalidateTimer !== null) {
+    globalThis.window.clearInterval(catalogRevalidateTimer)
+    catalogRevalidateTimer = null
+  }
   floatingLayoutResizeObserver?.disconnect()
   floatingLayoutResizeObserver = null
   if (floatingOcclusionFrameId !== null) {
