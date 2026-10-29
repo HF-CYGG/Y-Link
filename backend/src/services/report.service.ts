@@ -670,9 +670,10 @@ export class ReportService {
       baseQb.andWhere('item.id < :cursorId', { cursorId: keyset.cursor })
     }
 
-    const total = keyset ? 0 : (knownTotal ?? await baseQb.clone().getCount())
-    // 汇总必须在追加排序与分页前基于同一筛选条件聚合，保证总数量/总金额覆盖全部命中明细而非当前页。
-    const summary = keyset ? undefined : await this.querySalesSummary(baseQb)
+    // 预览的总条数与汇总共用一次聚合；已知 total 时不重算 COUNT，游标导出不执行任何聚合。
+    const aggregate = keyset ? undefined : await this.querySalesSummary(baseQb, knownTotal === undefined)
+    const total = keyset ? 0 : (knownTotal ?? aggregate!.total)
+    const summary = aggregate?.summary
     // 明细查询联表了出库主单：TypeORM 在存在 join 时不会把 skip/take 翻译成 SQL 的 OFFSET/LIMIT（只在 getMany 走去重子查询），
     // getRawMany 下会静默返回全部命中行，因此这里必须使用 offset/limit 才能真正分页，流式导出的批次大小同理。
     if (keyset) {
@@ -697,16 +698,25 @@ export class ReportService {
     )
   }
 
-  private async querySalesSummary(baseQb: SelectQueryBuilder<BizOutboundOrderItem>): Promise<ReportSalesSummary> {
+  private async querySalesSummary(
+    baseQb: SelectQueryBuilder<BizOutboundOrderItem>,
+    includeTotal: boolean,
+  ): Promise<{ total: number; summary: ReportSalesSummary }> {
     // select() 会替换明细列，只保留聚合列；SQLite 返回 number、MySQL 返回 decimal 字符串，统一走 normalizeAmount 收口。
-    const raw = await baseQb
-      .clone()
+    const aggregateQb = baseQb.clone()
       .select('COALESCE(SUM(item.qty), 0)', 'totalQty')
       .addSelect('COALESCE(SUM(item.lineAmount), 0)', 'totalAmount')
-      .getRawOne<{ totalQty: string | number | null, totalAmount: string | number | null }>()
+    // 原 getCount 在联表时按实体主键去重。当前仅联表唯一主单，SUM 不会扩行，COUNT 仍保留去重口径。
+    if (includeTotal) aggregateQb.addSelect('COUNT(DISTINCT item.id)', 'total')
+    const raw = await aggregateQb.getRawOne<{
+      total?: string | number; totalQty: string | number | null; totalAmount: string | number | null
+    }>()
     return {
-      totalQty: normalizeNumberText(raw?.totalQty),
-      totalAmount: normalizeAmount(raw?.totalAmount),
+      total: Number(raw?.total ?? 0),
+      summary: {
+        totalQty: normalizeNumberText(raw?.totalQty),
+        totalAmount: normalizeAmount(raw?.totalAmount),
+      },
     }
   }
 
