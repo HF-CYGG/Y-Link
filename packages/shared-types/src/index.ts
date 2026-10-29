@@ -8,3 +8,5 @@ export * from './mobile-auth.ts'
 export * from './o2o-status.ts'
 export * from './orders.ts'
 export * from './returns.ts'
+
+export * from './product-labels.ts'

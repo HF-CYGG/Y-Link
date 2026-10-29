@@ -1,52 +1,22 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import ts from 'typescript'
 import LegacyJsBarcode from 'jsbarcode'
 import * as Vue from 'vue'
 import { parse } from '@vue/compiler-sfc'
+import { withBrowser, mountSetup, replaceLabels, testLabel } from './barcode-behavior-test-runtime.mjs'
 import { compile } from '@vue/compiler-ssr'
 import * as VueServerRenderer from '@vue/server-renderer'
 
 const dialogSource = fs.readFileSync('src/views/inventory/components/BarcodeLabelPrintDialog.vue', 'utf8')
 const cardSource = fs.readFileSync('src/views/inventory/components/BarcodeLabelCard.vue', 'utf8')
-const script = parse(dialogSource).descriptor.scriptSetup.content
-const ast = ts.createSourceFile('dialog.ts', script, ts.ScriptTarget.Latest, true)
 const helpers = await import('../src/views/inventory/components/barcode-label-print.helpers.ts')
 
-const declaration = (name) => {
-  for (const statement of ast.statements) {
-    if (!ts.isVariableStatement(statement)) continue
-    const item = statement.declarationList.declarations.find((entry) => entry.name.getText(ast) === name)
-    if (item) return `const ${item.getText(ast)};`
-  }
-  throw new Error(`找不到 ${name}`)
-}
-const transpile = (names) => ts.transpileModule(names.map(declaration).join('\n'), {
-  compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
-}).outputText
 const cardRender = new Function('require', compile(parse(cardSource).descriptor.template.content).code)((name) =>
   name === 'vue' ? Vue : VueServerRenderer,
 )
 
-class SvgNode {
-  constructor(name) {
-    this.nodeName = name
-    this.attributes = new Map()
-    this.children = []
-  }
-  hasAttribute(key) { return this.attributes.has(key) }
-  getAttribute(key) { return this.attributes.get(key) ?? null }
-  setAttribute(key, value) { this.attributes.set(key, String(value)) }
-  appendChild(node) { this.children.push(node); return node }
-  removeChild(node) { this.children.splice(this.children.indexOf(node), 1) }
-  get firstChild() { return this.children[0] ?? null }
-  get outerHTML() {
-    const attrs = [...this.attributes].map(([key, value]) => ` ${key}="${value}"`).join('')
-    return `<${this.nodeName}${attrs}>${this.children.map((node) => node.outerHTML ?? node.textContent).join('')}</${this.nodeName}>`
-  }
-}
-const document = { createElementNS(_namespace, name) { return new SvgNode(name) }, createTextNode(text) { return { textContent: text } } }
-globalThis.document = document
+await withBrowser(async (browser) => {
+const document = browser.document
 // 同一组原有断言可直接验证产品virtual预设，避免只验证旧完整库。
 let JsBarcode = LegacyJsBarcode
 if (process.argv.includes('--code128-preset')) {
@@ -67,19 +37,15 @@ const check = async (name, task) => {
 }
 
 await check('合法原型键真实生成 SVG 并在标签卡片呈现', async () => {
-  const js = transpile(['renderBarcodes'])
   for (const value of ['constructor', 'toString', '__proto__', 'WC02001', 'YZ0100001', 'A'.repeat(64)]) {
-    const labels = Vue.ref([{ skuCode: 'WC02001', barcode: value, factoryBarcode: value }])
-    const barcodeSvgMap = Vue.ref(Object.create(null))
-    const barcodeModuleMap = Vue.ref(Object.create(null))
-    const failedBarcodes = Vue.ref([])
-    const loadError = Vue.ref('')
-    const renderBarcodes = new Function(
-      'loadJsBarcode', 'barcodeSvgMap', 'barcodeModuleMap', 'failedBarcodes', 'labels', 'resolveBarcodeValue', 'settings', 'document', 'showAppWarning', 'showAppError', 'loadError', 'CODE128_QUIET_ZONE_MODULES_PER_SIDE',
-      `let renderVersion = 0; ${js}; return renderBarcodes`,
-    )(async () => ({ default: JsBarcode }), barcodeSvgMap, barcodeModuleMap, failedBarcodes, labels, helpers.resolveBarcodeValue,
-      { barcodeSource: 'factory_barcode' }, document, () => {}, () => {}, loadError, helpers.CODE128_QUIET_ZONE_MODULES_PER_SIDE)
-    await renderBarcodes()
+    const { state, unmount } = await mountSetup()
+    state.settings.barcodeSource = 'factory_barcode'
+    await replaceLabels(state, [testLabel('WC02001', value, { barcode: value })])
+    const labels = { value: state.labels.value.map((label) => ({ ...label })) }
+    const barcodeSvgMap = { value: { ...state.barcodeSvgMap.value } }
+    const barcodeModuleMap = { value: { ...state.barcodeModuleMap.value } }
+    const failedBarcodes = { value: [...state.failedBarcodes.value] }
+    unmount()
     assert.equal(Object.hasOwn(barcodeSvgMap.value, value), true, `${value} 必须是自有键`)
     const svg = barcodeSvgMap.value[value]
     assert.match(svg, /^<svg\b/)
@@ -97,44 +63,25 @@ await check('合法原型键真实生成 SVG 并在标签卡片呈现', async ()
   }
 })
 
-await check('生成图与缺码接入最终打印阻断，密度风险独立提示', () => {
-  // 打印改为只打勾选的规格后，缺码与阻断都按 selectedLabels / selectedFailedBarcodes 计算；
-  // 失败项过滤逻辑直接取组件源码，selectedLabels 默认等于全部标签（全选），也可传入空数组验证未勾选阻断。
-  const js = transpile(['getGeneratedBarcodeSvg', 'barcodeSvgFor', 'failureKeyFor', 'selectedFailedBarcodes', 'missingBarcodes', 'printBlockedReason'])
-  const checkGuard = (value, width, height, mapOverride, template = 'thermal', selectedOverride) => {
-    const rendered = renderedCases.get(value)
-    assert.ok(rendered)
-    const settings = { template, barcodeSource: 'factory_barcode', labelWidthMm: width, labelHeightMm: height,
-      showSpec: true, showCode: true, showPrice: true, showLocation: false, showPrintDate: true }
-    const result = new Function(
-      'computed', 'barcodeSvgMap', 'barcodeModuleMap', 'labels', 'selectedLabels', 'failedBarcodes', 'settings', 'resolveBarcodeValue',
-      'labelLayoutError', 'barcodeTextError', 'loading', 'loadError', 'exceedsLimit', 'totalLabelCount', 'a4LayoutError', 'MAX_TOTAL_LABELS',
-      `${js}; return { getGeneratedBarcodeSvg, barcodeSvgFor, missingBarcodes, printBlockedReason }`,
-    )((getter) => ({ get value() { return getter() } }), mapOverride ?? rendered.barcodeSvgMap, rendered.barcodeModuleMap,
-      rendered.labels, selectedOverride ?? rendered.labels, rendered.failedBarcodes, settings, helpers.resolveBarcodeValue,
-      { value: helpers.getLabelLayoutError(settings) },
-      { value: '' }, { value: false }, { value: '' }, { value: false }, { value: 1 }, { value: '' }, 2000)
-    return { labelCount: rendered.labels.value.length, source: helpers.resolveBarcodeValue(rendered.labels.value[0], settings.barcodeSource),
-      svg: result.barcodeSvgFor(rendered.labels.value[0]), direct: result.getGeneratedBarcodeSvg(value),
-      missing: result.missingBarcodes.value, blocked: result.printBlockedReason.value }
+await check('生成图与缺码接入最终打印阻断，密度风险独立提示', async () => {
+  const checkGuard = async (value, width, height, mapOverride, template = 'thermal', selectedOverride) => {
+    const { state, unmount } = await mountSetup()
+    try {
+      Object.assign(state.settings, { template, barcodeSource: 'factory_barcode', labelWidthMm: width, labelHeightMm: height, showSpec: true, showCode: true, showPrice: true, showLocation: false, showPrintDate: true })
+      await replaceLabels(state, [testLabel('WC02001', value, { barcode: value })])
+      if (mapOverride) state.barcodeSvgMap.value = mapOverride.value
+      if (selectedOverride?.value.length === 0) state.toggleAllSelected(false)
+      return { svg: state.barcodeSvgFor(state.labels.value[0]), missing: state.missingBarcodes.value, blocked: state.printBlockedReason.value }
+    } finally { unmount() }
   }
-  const prototype = checkGuard('constructor', 60, 30)
-  assert.match(prototype.svg, /^<svg\b/)
-  assert.deepEqual(prototype.missing, [])
-  assert.equal(prototype.blocked, '', '宽标签的合法原型键应可打印')
-  const missing = checkGuard('constructor', 60, 30, { value: {} })
-  assert.match(missing.blocked, /无法生成/, `无自有SVG应阻断：${JSON.stringify(missing)}`)
-  const unselected = checkGuard('constructor', 60, 30, { value: {} }, 'thermal', { value: [] })
-  assert.deepEqual(unselected.missing, [], '未勾选的规格不参与缺码检查')
-  assert.equal(unselected.blocked, '请至少勾选一个要打印的规格')
-  assert.equal(checkGuard('WC02001', 40, 10).blocked, '', '10mm适配后仍有基本图形区')
-  assert.equal(checkGuard('A'.repeat(64), 40, 30).blocked, '', '密度风险不作为硬阻断')
-  assert.equal(checkGuard('YZ0100001', 32, 30, undefined, 'a4').blocked, '')
-  assert.equal(checkGuard('YZ0100001', 37, 30).blocked, '', '含两侧10X静区后热敏 37mm 达到 0.25mm 基线')
-  assert.equal(checkGuard('WC02001', 40, 30).blocked, '')
-  assert.equal(checkGuard('YZ0100001', 40, 30).blocked, '')
-  assert.equal(checkGuard('WC02001', 40, 30, undefined, 'a4').blocked, '')
-  assert.equal(checkGuard('YZ0100001', 40, 30, undefined, 'a4').blocked, '')
+  const prototype = await checkGuard('constructor', 60, 30)
+  assert.match(prototype.svg, /^<svg/); assert.deepEqual(prototype.missing, []); assert.equal(prototype.blocked, '')
+  assert.match((await checkGuard('constructor', 60, 30, { value: {} })).blocked, /无法生成/)
+  const unselected = await checkGuard('constructor', 60, 30, { value: {} }, 'thermal', { value: [] })
+  assert.deepEqual(unselected.missing, []); assert.equal(unselected.blocked, '请至少勾选一个要打印的规格')
+  for (const [value, width, height, template] of [['WC02001',40,10,'thermal'], ['A'.repeat(64),40,30,'thermal'], ['YZ0100001',32,30,'a4'], ['YZ0100001',37,30,'thermal'], ['WC02001',40,30,'thermal'], ['YZ0100001',40,30,'thermal'], ['WC02001',40,30,'a4'], ['YZ0100001',40,30,'a4']]) {
+    assert.equal((await checkGuard(value, width, height, undefined, template)).blocked, '', value)
+  }
 })
 
 await check('固定纸张适配后 20mm 有保守图形高度，10mm 有基本可见区与风险提示', () => {
@@ -262,3 +209,5 @@ if (failures.length) {
 } else {
   console.log('barcode-label-print-fixes: 全部通过')
 }
+
+})

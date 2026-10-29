@@ -379,7 +379,7 @@ productRouter.post(
   requirePermission('products:view'),
   asyncHandler(async (req, res) => {
     const payload = z.object({ skuIds: z.array(productTagIdSchema).min(1).max(500) }).parse(req.body)
-    res.json({ code: 0, message: 'ok', data: await productService.listLabels(payload.skuIds) })
+    res.json({ code: 0, message: 'ok', data: await productService.listLabels(payload.skuIds, (req as AuthenticatedRequest).auth.permissions.some((permission) => permission === 'products:manage' || permission === 'inventory:view' || permission === 'stocktake:view') ? 'full' : 'main_only') })
   }),
 )
 

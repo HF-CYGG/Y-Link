@@ -21,7 +21,9 @@
  *   均禁止打印并列出失败标签，不能静默打印空白；
  * - 四模板字号、行高、padding、A4 单元格边框或条码样式变化时，同步核对 helpers 的可用净高；
  *   低于 8mm 图形或 0.25mm 模块仅警告，基本条形空间不足或编码缺失才阻断；10X 静区不能代替实机扫码验证；
+ * - 弹窗开始关闭时立即撤销加载与前检代次，不等待退场动画结束后的 modelValue 回传；
  * - 打印会话统一清理 afterprint/焦点监听、兜底定时器、临时样式与打印根节点；关闭或卸载期间不得让旧回调清理新会话；
+ * - 库位候选按 SKU 临时选择，打印前同批复读；变化/失败均中止，冻结后的模板只读打印快照；
  * - 调整标签版式或新增模板时，同时核对 applyPrintStyle() 的 @page 设置、BarcodeLabelCard.vue 的版式分支、
  *   以及 barcode-label-print.helpers.ts 里该模板的默认条码内容来源；
  * - A4 自动减少越界行列并在打印前复核，热敏与野辙模板每张一页；批次/来源异步更新不可回填已失效的标签；
@@ -33,6 +35,7 @@ import { BizCrudDialogShell, PassiveNumberInput } from '@/components/common'
 import { getProductLabels, type ProductLabelRecord } from '@/api/modules/inventory'
 import { showAppError, showAppWarning } from '@/utils/app-alert'
 import BarcodeLabelCard from './BarcodeLabelCard.vue'
+import { initialPrintLocations, preservePrintLocations, validateLabelPreflight, withPrintLocation, type PrintLocationSelection } from './barcode-label-preflight'
 import {
   CODE128_QUIET_ZONE_MODULES_PER_SIDE,
   type BarcodeSource,
@@ -160,6 +163,34 @@ const printing = ref(false)
 const labels = ref<ProductLabelRecord[]>([])
 /** 本次要打印的规格 ID；新批次载入后默认全选。 */
 const selectedSkuIds = ref<Set<string>>(new Set())
+/** 库位意图仅存在本批内存中；Terra 控件通过 setPrintLocation 修改。 */
+const selectedLocationIds = ref<PrintLocationSelection>({})
+const preflighting = ref(false)
+const preflightMessage = ref('')
+const requiresLocationConfirmation = ref(false)
+interface FrozenLabelPrint {
+  labels: ProductLabelRecord[]
+  settings: LabelSettings
+  svg: Record<string, string>
+  printDate: string
+  thermalStyle: Record<string, string>
+  a4Style: Record<string, string>
+}
+const frozenPrint = ref<FrozenLabelPrint | null>(null)
+const printSettings = computed(() => frozenPrint.value?.settings ?? settings)
+const setPrintLocation = (skuId: string, locationId: string) => {
+  if (printing.value || preflighting.value) return
+  const label = labels.value.find((item) => item.skuId === skuId)
+  if (!label?.printLocations.options.some((option) => option.locationId === locationId)) return
+  selectedLocationIds.value = { ...selectedLocationIds.value, [skuId]: locationId }
+}
+const confirmRefreshedPrintData = () => {
+  if (preflighting.value || loading.value) return
+  requiresLocationConfirmation.value = false
+  preflightMessage.value = ''
+}
+const printBarcodeSvgFor = (label: ProductLabelRecord) => frozenPrint.value?.svg[resolveBarcodeValue(label, printSettings.value.barcodeSource) ?? ''] ?? ''
+const printEncodedTextFor = (label: ProductLabelRecord) => resolveBarcodeValue(label, printSettings.value.barcodeSource) ?? ''
 const barcodeSvgMap = ref<Record<string, string>>(Object.create(null))
 const barcodeModuleMap = ref<Record<string, number>>(Object.create(null))
 const failedBarcodes = ref<string[]>([])
@@ -205,7 +236,7 @@ const getGeneratedBarcodeSvg = (value: string | null): string => value && Object
 const barcodeSvgFor = (label: ProductLabelRecord) => getGeneratedBarcodeSvg(resolveBarcodeValue(label, settings.barcodeSource))
 
 /** 已勾选、实际参与打印的标签，保持服务端返回顺序。 */
-const selectedLabels = computed(() => labels.value.filter((label) => selectedSkuIds.value.has(label.skuId)))
+const selectedLabels = computed(() => labels.value.filter((label) => selectedSkuIds.value.has(label.skuId)).map((label) => withPrintLocation(label, selectedLocationIds.value[label.skuId])))
 interface LabelGroup {
   key: string
   productName: string
@@ -324,7 +355,10 @@ const missingBarcodes = computed(() => {
   return [...codes]
 })
 const printBlockedReason = computed(() => {
-  if (loading.value) return '条码数据加载中，请稍候'
+  if (loading.value || preflighting.value) return '条码数据复核中，请稍候'
+  if (preflightMessage.value) return preflightMessage.value
+  if (requiresLocationConfirmation.value) return '请核对刷新后的标签和库位，并确认后打印'
+  if (settings.showLocation && selectedLabels.value.some((label) => !selectedLocationIds.value[label.skuId])) return '请为已选规格选择有效打印库位'
   if (loadError.value) return loadError.value
   if (!labels.value.length) return '没有可打印的标签'
   if (!selectedLabels.value.length) return '请至少勾选一个要打印的规格'
@@ -339,9 +373,9 @@ const printBlockedReason = computed(() => {
 })
 
 // 打印节点只在打印期间生成，平时不占用 DOM。
-const expandedLabels = computed(() => (printing.value ? selectedLabels.value.flatMap((label) => Array.from({ length: settings.copies }, () => label)) : []))
+const expandedLabels = computed(() => frozenPrint.value ? frozenPrint.value.labels.flatMap((label) => Array.from({ length: frozenPrint.value!.settings.copies }, () => label)) : [])
 const a4Pages = computed(() => {
-  const perPage = Math.max(1, settings.columns * settings.rows)
+  const perPage = Math.max(1, printSettings.value.columns * printSettings.value.rows)
   const pages: ProductLabelRecord[][] = []
   for (let index = 0; index < expandedLabels.value.length; index += perPage) {
     pages.push(expandedLabels.value.slice(index, index + perPage))
@@ -367,6 +401,11 @@ const invalidateBatch = () => {
   loadVersion += 1
   renderVersion += 1
   labels.value = []
+  selectedLocationIds.value = {}
+  preflighting.value = false
+  preflightMessage.value = ''
+  requiresLocationConfirmation.value = false
+  frozenPrint.value = null
   selectedSkuIds.value = new Set()
   barcodeSvgMap.value = Object.create(null)
   barcodeModuleMap.value = Object.create(null)
@@ -442,6 +481,7 @@ const loadLabels = async () => {
     const result = await getProductLabels(requestedSkuIds)
     if (requestVersion !== loadVersion) return
     labels.value = result
+    selectedLocationIds.value = initialPrintLocations(result)
     selectedSkuIds.value = new Set(result.map((label) => label.skuId))
     await renderBarcodes()
   } catch (error) {
@@ -454,11 +494,30 @@ const loadLabels = async () => {
   }
 }
 
+/** 主动刷新保留仍有效的选择，失效选择留空，不静默回主库位。 */
+const refreshPrintData = async () => {
+  if (printing.value || preflighting.value || loading.value) return
+  const version = loadVersion
+  const ids = [...props.skuIds]
+  preflighting.value = true
+  try {
+    const result = await getProductLabels(ids)
+    if (version !== loadVersion || !props.modelValue) return
+    selectedLocationIds.value = preservePrintLocations(result, selectedLocationIds.value)
+    labels.value = result
+    selectedSkuIds.value = new Set([...selectedSkuIds.value].filter((id) => result.some((label) => label.skuId === id)))
+    preflightMessage.value = ''
+    requiresLocationConfirmation.value = true
+    await renderBarcodes()
+  } catch { if (version === loadVersion) preflightMessage.value = '刷新失败，保留本次选择，请重试' }
+  finally { if (version === loadVersion) preflighting.value = false }
+}
+
 const applyPrintStyle = () => {
   // thermal / yz-full / yz-compact 都是单张一页，共用同一份自定义宽高；只有 a4 走多格排版的整页尺寸。
-  const pageRule = settings.template === 'a4'
+  const pageRule = printSettings.value.template === 'a4'
     ? '@page { size: A4 portrait; margin: 8mm; }'
-    : `@page { size: ${settings.labelWidthMm}mm ${settings.labelHeightMm}mm; margin: 0; }`
+    : `@page { size: ${printSettings.value.labelWidthMm}mm ${printSettings.value.labelHeightMm}mm; margin: 0; }`
   let style = document.getElementById(PRINT_STYLE_ID) as HTMLStyleElement | null
   if (!style) {
     style = document.createElement('style')
@@ -500,6 +559,7 @@ const finishPrintSession = (session: PrintSession | null = activePrintSession) =
   globalThis.removeEventListener('focus', session.onFocus)
   clearPrintStyle()
   printing.value = false
+  frozenPrint.value = null
 }
 
 const schedulePrintFallback = (session: PrintSession, delayMs: number) => {
@@ -517,7 +577,7 @@ const schedulePrintFallback = (session: PrintSession, delayMs: number) => {
 }
 
 const handlePrint = async () => {
-  if (printing.value) return
+  if (printing.value || preflighting.value) return
   ensureA4Grid()
   if (printBlockedReason.value) {
     showAppWarning(printBlockedReason.value)
@@ -528,6 +588,32 @@ const handlePrint = async () => {
   } catch {
     // 本机存储不可用时仅本次生效
   }
+  const preflightVersion = loadVersion
+  const requestedSkuIdsForPreflight = [...props.skuIds]
+  const intention = JSON.stringify({ selected: [...selectedSkuIds.value], locations: selectedLocationIds.value, settings })
+  const before = labels.value
+  const selection = { ...selectedLocationIds.value }
+  const selected = new Set(selectedSkuIds.value)
+  preflighting.value = true
+  try {
+    const latest = await getProductLabels(requestedSkuIdsForPreflight)
+    if (preflightVersion !== loadVersion || !props.modelValue) return
+    if (intention !== JSON.stringify({ selected: [...selectedSkuIds.value], locations: selectedLocationIds.value, settings })) {
+      preflightMessage.value = '打印意图已变化，请核对后重试'; requiresLocationConfirmation.value = true; return
+    }
+    const mismatch = validateLabelPreflight(before, latest, selection, selected, settings.showLocation)
+    if (mismatch) {
+      labels.value = latest; selectedLocationIds.value = preservePrintLocations(latest, selection)
+      preflightMessage.value = mismatch; requiresLocationConfirmation.value = true
+      await renderBarcodes(); return
+    }
+    frozenPrint.value = {
+      labels: structuredClone(latest.filter((label) => selected.has(label.skuId)).map((label) => withPrintLocation(label, selection[label.skuId]))),
+      settings: { ...sanitizeSettings(settings) }, svg: { ...barcodeSvgMap.value }, printDate: formatPrintDate(new Date()),
+      thermalStyle: { ...thermalStyle.value }, a4Style: { ...a4GridStyle.value },
+    }
+  } catch { if (preflightVersion === loadVersion) preflightMessage.value = '打印前复核失败，请刷新后重试'; return }
+  finally { if (preflightVersion === loadVersion) preflighting.value = false }
   const session: PrintSession = {
     timerId: null,
     wasUnfocused: false,
@@ -542,6 +628,8 @@ const handlePrint = async () => {
   printing.value = true
   const requestedSkuIds = JSON.stringify(props.skuIds)
   try {
+    // 打印态触发的同步父级关闭/切批次可能已清理会话；此时不得重新挂样式和监听。
+    if (activePrintSession !== session || !props.modelValue || preflightVersion !== loadVersion) return
     applyPrintStyle()
     globalThis.addEventListener('afterprint', session.onAfterPrint)
     globalThis.addEventListener('blur', session.onBlur)
@@ -560,6 +648,12 @@ const handlePrint = async () => {
     finishPrintSession(session)
     showAppError(error, '打印窗口打开失败，请重试')
   }
+}
+
+/** ElDialog 的 close 经共享壳层根节点透传，早于退场动画结束后的 modelValue 更新。 */
+const handleDialogClosing = () => {
+  finishPrintSession()
+  invalidateBatch()
 }
 
 watch([() => props.modelValue, () => JSON.stringify(props.skuIds)], ([visible]) => {
@@ -594,13 +688,14 @@ const printDateText = formatPrintDate(new Date())
     title="打印条码标签"
     desktop-width="760px"
     confirm-text="打印"
-    :confirm-loading="loading || printing"
+    :confirm-loading="loading || printing || preflighting"
     @update:model-value="emit('update:modelValue', $event)"
+    @close="handleDialogClosing"
     @confirm="handlePrint"
   >
-    <el-form label-width="88px" :disabled="printing" @submit.prevent>
+    <el-form label-width="88px" :disabled="printing || preflighting" @submit.prevent>
       <el-form-item label="打印机">
-        <el-radio-group v-model="settings.template" :disabled="printing">
+        <el-radio-group v-model="settings.template" :disabled="printing || preflighting">
           <el-radio-button value="thermal">热敏标签机</el-radio-button>
           <el-radio-button value="a4">A4 不干胶</el-radio-button>
           <el-radio-button value="yz-full">野辙完整标签</el-radio-button>
@@ -610,10 +705,10 @@ const printDateText = formatPrintDate(new Date())
       <el-form-item label="标签尺寸">
         <div class="flex flex-wrap items-center gap-2">
           <div class="flex shrink-0 items-center gap-2">
-            <div class="w-28" @click="syncAfterNumberControlClick('labelWidthMm', $event)"><PassiveNumberInput v-model="labelWidthModel" :display-sync-token="inputRevision.labelWidthMm" :min="NUMBER_LIMITS.labelWidthMm.min" :max="NUMBER_LIMITS.labelWidthMm.max" :precision="0" :disabled="printing" @blur="commitNumberDraft('labelWidthMm', $event)" /></div>
+            <div class="w-28" @click="syncAfterNumberControlClick('labelWidthMm', $event)"><PassiveNumberInput v-model="labelWidthModel" :display-sync-token="inputRevision.labelWidthMm" :min="NUMBER_LIMITS.labelWidthMm.min" :max="NUMBER_LIMITS.labelWidthMm.max" :precision="0" :disabled="printing || preflighting" @blur="commitNumberDraft('labelWidthMm', $event)" /></div>
             <span class="whitespace-nowrap">×</span>
           </div>
-          <div class="w-28 shrink-0" @click="syncAfterNumberControlClick('labelHeightMm', $event)"><PassiveNumberInput v-model="labelHeightModel" :display-sync-token="inputRevision.labelHeightMm" :min="NUMBER_LIMITS.labelHeightMm.min" :max="NUMBER_LIMITS.labelHeightMm.max" :precision="0" :disabled="printing" @blur="commitNumberDraft('labelHeightMm', $event)" /></div>
+          <div class="w-28 shrink-0" @click="syncAfterNumberControlClick('labelHeightMm', $event)"><PassiveNumberInput v-model="labelHeightModel" :display-sync-token="inputRevision.labelHeightMm" :min="NUMBER_LIMITS.labelHeightMm.min" :max="NUMBER_LIMITS.labelHeightMm.max" :precision="0" :disabled="printing || preflighting" @blur="commitNumberDraft('labelHeightMm', $event)" /></div>
           <span class="shrink-0 whitespace-nowrap text-sm text-slate-500 dark:text-slate-400">毫米（宽 × 高）</span>
         </div>
       </el-form-item>
@@ -623,41 +718,41 @@ const printDateText = formatPrintDate(new Date())
       <el-form-item v-if="settings.template === 'a4'" label="排版">
         <div class="flex flex-wrap items-center gap-2">
           <div class="flex shrink-0 items-center gap-2">
-            <div class="w-[108px]" @click="syncAfterNumberControlClick('columns', $event)"><PassiveNumberInput v-model="columnsModel" :display-sync-token="inputRevision.columns" :min="NUMBER_LIMITS.columns.min" :max="NUMBER_LIMITS.columns.max" :precision="0" :disabled="printing" @blur="commitNumberDraft('columns', $event)" /></div>
+            <div class="w-[108px]" @click="syncAfterNumberControlClick('columns', $event)"><PassiveNumberInput v-model="columnsModel" :display-sync-token="inputRevision.columns" :min="NUMBER_LIMITS.columns.min" :max="NUMBER_LIMITS.columns.max" :precision="0" :disabled="printing || preflighting" @blur="commitNumberDraft('columns', $event)" /></div>
             <span class="whitespace-nowrap">列 ×</span>
           </div>
           <div class="flex shrink-0 items-center gap-2">
-            <div class="w-[108px]" @click="syncAfterNumberControlClick('rows', $event)"><PassiveNumberInput v-model="rowsModel" :display-sync-token="inputRevision.rows" :min="NUMBER_LIMITS.rows.min" :max="NUMBER_LIMITS.rows.max" :precision="0" :disabled="printing" @blur="commitNumberDraft('rows', $event)" /></div>
+            <div class="w-[108px]" @click="syncAfterNumberControlClick('rows', $event)"><PassiveNumberInput v-model="rowsModel" :display-sync-token="inputRevision.rows" :min="NUMBER_LIMITS.rows.min" :max="NUMBER_LIMITS.rows.max" :precision="0" :disabled="printing || preflighting" @blur="commitNumberDraft('rows', $event)" /></div>
             <span class="whitespace-nowrap">行 / 页</span>
           </div>
         </div>
       </el-form-item>
       <el-form-item label="每个份数">
         <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
-          <div class="w-28 shrink-0" @click="syncAfterNumberControlClick('copies', $event)"><PassiveNumberInput v-model="copiesModel" :display-sync-token="inputRevision.copies" :min="NUMBER_LIMITS.copies.min" :max="NUMBER_LIMITS.copies.max" :precision="0" :disabled="printing" @blur="commitNumberDraft('copies', $event)" /></div>
+          <div class="w-28 shrink-0" @click="syncAfterNumberControlClick('copies', $event)"><PassiveNumberInput v-model="copiesModel" :display-sync-token="inputRevision.copies" :min="NUMBER_LIMITS.copies.min" :max="NUMBER_LIMITS.copies.max" :precision="0" :disabled="printing || preflighting" @blur="commitNumberDraft('copies', $event)" /></div>
           <span class="whitespace-nowrap text-sm">字体大小</span>
-          <div class="w-28 shrink-0" @click="syncAfterNumberControlClick('fontSizePt', $event)"><PassiveNumberInput v-model="fontSizeModel" :display-sync-token="inputRevision.fontSizePt" :min="NUMBER_LIMITS.fontSizePt.min" :max="NUMBER_LIMITS.fontSizePt.max" :precision="0" :disabled="printing" aria-label="字体大小" @blur="commitNumberDraft('fontSizePt', $event)" /></div>
+          <div class="w-28 shrink-0" @click="syncAfterNumberControlClick('fontSizePt', $event)"><PassiveNumberInput v-model="fontSizeModel" :display-sync-token="inputRevision.fontSizePt" :min="NUMBER_LIMITS.fontSizePt.min" :max="NUMBER_LIMITS.fontSizePt.max" :precision="0" :disabled="printing || preflighting" aria-label="字体大小" @blur="commitNumberDraft('fontSizePt', $event)" /></div>
           <span class="whitespace-nowrap text-sm">pt（空间不足时自动缩小）</span>
         </div>
       </el-form-item>
       <el-form-item label="条码内容">
-        <el-radio-group v-model="settings.barcodeSource" :disabled="printing">
+        <el-radio-group v-model="settings.barcodeSource" :disabled="printing || preflighting">
           <el-radio-button value="sku_code">商品编码</el-radio-button>
           <el-radio-button value="factory_barcode">原厂条码</el-radio-button>
           <el-radio-button value="factory_barcode_first">原厂条码优先</el-radio-button>
         </el-radio-group>
       </el-form-item>
       <el-form-item label="显示">
-        <el-checkbox v-model="settings.showCode" :disabled="printing">条码下方编码文字</el-checkbox>
-        <el-checkbox v-model="settings.showSpec" :disabled="printing">规格</el-checkbox>
-        <el-checkbox v-model="settings.showPrice" :disabled="printing">售价</el-checkbox>
-        <el-checkbox v-model="settings.showLocation" :disabled="printing">库位</el-checkbox>
-        <el-checkbox v-if="settings.template === 'yz-full'" v-model="settings.showPrintDate" :disabled="printing">打印日期</el-checkbox>
+        <el-checkbox v-model="settings.showCode" :disabled="printing || preflighting">条码下方编码文字</el-checkbox>
+        <el-checkbox v-model="settings.showSpec" :disabled="printing || preflighting">规格</el-checkbox>
+        <el-checkbox v-model="settings.showPrice" :disabled="printing || preflighting">售价</el-checkbox>
+        <el-checkbox v-model="settings.showLocation" :disabled="printing || preflighting">库位</el-checkbox>
+        <el-checkbox v-if="settings.template === 'yz-full'" v-model="settings.showPrintDate" :disabled="printing || preflighting">打印日期</el-checkbox>
       </el-form-item>
       <el-form-item v-if="labels.length" label="打印规格">
         <div class="w-full min-w-0">
           <div class="flex flex-wrap items-center gap-x-3">
-            <el-checkbox :model-value="allSelected" :indeterminate="partiallySelected" :disabled="printing" @change="toggleAllSelected">全选</el-checkbox>
+            <el-checkbox :model-value="allSelected" :indeterminate="partiallySelected" :disabled="printing || preflighting" @change="toggleAllSelected">全选</el-checkbox>
             <span class="text-sm text-slate-500 dark:text-slate-400">已选 {{ selectedLabels.length }} / {{ labels.length }} 个规格</span>
           </div>
           <div class="mt-1 max-h-48 overflow-auto rounded-lg border border-slate-200 px-3 py-1 dark:border-white/10">
@@ -666,23 +761,28 @@ const printDateText = formatPrintDate(new Date())
                 v-if="group.items.length > 1"
                 :model-value="groupSelectedCount(group) === group.items.length"
                 :indeterminate="groupSelectedCount(group) > 0 && groupSelectedCount(group) < group.items.length"
-                :disabled="printing"
+                :disabled="printing || preflighting"
                 @change="toggleGroupSelected(group, $event)"
               >
                 <span class="font-medium">{{ group.productName || '未命名商品' }}</span>
                 <span class="ml-1 text-xs text-slate-500 dark:text-slate-400">（{{ groupSelectedCount(group) }}/{{ group.items.length }}）</span>
               </el-checkbox>
-              <div class="flex flex-wrap gap-x-4" :class="{ 'pl-6': group.items.length > 1 }">
-                <el-checkbox
-                  v-for="item in group.items"
-                  :key="item.skuId"
-                  :model-value="selectedSkuIds.has(item.skuId)"
-                  :disabled="printing"
-                  @change="toggleSkuSelected(item.skuId, $event)"
-                >
-                  <span v-if="group.items.length === 1">{{ item.productName || '未命名商品' }} · </span>{{ item.specText }}
-                  <span class="ml-1 text-xs text-slate-400">{{ item.skuCode }}</span>
-                </el-checkbox>
+              <div :class="{ 'pl-6': group.items.length > 1 }">
+                <div v-for="item in group.items" :key="item.skuId" class="py-1">
+                  <el-checkbox :model-value="selectedSkuIds.has(item.skuId)" :disabled="loading || printing || preflighting" @change="toggleSkuSelected(item.skuId, $event)">
+                    <span v-if="group.items.length === 1">{{ item.productName || '未命名商品' }} · </span>{{ item.specText }}
+                    <span class="ml-1 text-xs text-slate-400">{{ item.skuCode }}</span>
+                  </el-checkbox>
+                  <div v-if="selectedSkuIds.has(item.skuId)" class="flex flex-wrap items-center gap-2 pb-1 text-sm">
+                    <span>本次打印库位</span>
+                    <el-select :model-value="selectedLocationIds[item.skuId] ?? undefined" :disabled="loading || preflighting || printing || !item.printLocations.options.length" :aria-label="`${item.skuCode} 本次打印库位`" placeholder="请选择库位" class="w-52 max-w-full" @change="setPrintLocation(item.skuId, $event)">
+                      <el-option v-for="option in item.printLocations.options" :key="option.locationId" :value="option.locationId" :label="item.printLocations.capability === 'full' ? `${option.isMain ? '主库位' : '其他库位'} · ${option.locationCode} · ${'qty' in option ? option.qty : ''} 件` : `主库位 · ${option.locationCode}`" />
+                    </el-select>
+                    <span v-if="item.printLocations.mainLocationStatus !== 'valid'" class="text-xs text-amber-700 dark:text-amber-300">{{ item.printLocations.mainLocationStatus === 'unset' ? '主库位未设置' : item.printLocations.mainLocationStatus === 'missing' ? '主库位不存在' : '主库位已停用' }}；{{ item.printLocations.options.length ? '请选择可用库位' : '没有可用库位，可关闭显示库位后打印' }}。</span>
+                    <span v-else-if="!item.printLocations.options.length" class="text-xs text-amber-700 dark:text-amber-300">没有可用库位，可关闭显示库位后打印。</span>
+                    <span v-else-if="!selectedLocationIds[item.skuId]" class="text-xs text-amber-700 dark:text-amber-300">请选择本次打印库位。</span>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -690,6 +790,14 @@ const printDateText = formatPrintDate(new Date())
       </el-form-item>
     </el-form>
 
+    <div v-if="preflightMessage || requiresLocationConfirmation" class="mb-3">
+      <el-alert v-if="preflightMessage" type="warning" :closable="false" show-icon :title="preflightMessage" />
+      <div class="mt-2 flex flex-wrap gap-2">
+        <el-button :disabled="loading || preflighting || printing" @click="refreshPrintData">刷新打印数据</el-button>
+        <el-button v-if="requiresLocationConfirmation" type="primary" :disabled="loading || preflighting || printing" @click="confirmRefreshedPrintData">确认最新数据</el-button>
+      </div>
+      <div v-if="requiresLocationConfirmation" class="mt-1 text-xs text-slate-500 dark:text-slate-400">确认后请再次点击打印。</div>
+    </div>
     <el-alert v-if="autoLayoutNotice" type="info" :closable="false" show-icon :title="autoLayoutNotice" class="mb-3" />
     <el-alert v-if="loadError" type="error" :closable="false" show-icon :title="loadError" class="mb-3" />
     <el-alert
@@ -772,47 +880,47 @@ const printDateText = formatPrintDate(new Date())
   </BizCrudDialogShell>
 
   <Teleport to="body">
-    <div v-if="props.modelValue && printing" class="barcode-label-print-root" aria-hidden="true">
-      <template v-if="settings.template !== 'a4'">
+    <div v-if="props.modelValue && printing && frozenPrint" class="barcode-label-print-root" aria-hidden="true">
+      <template v-if="printSettings.template !== 'a4'">
         <BarcodeLabelCard
           v-for="(label, index) in expandedLabels"
           :key="`p-${label.skuId}-${index}`"
           class="barcode-label--thermal"
-          :style="thermalStyle"
+          :style="frozenPrint.thermalStyle"
           :label="label"
-          :template="settings.template"
-          :label-width-mm="settings.labelWidthMm"
-          :label-height-mm="settings.labelHeightMm"
-          :font-size-pt="settings.fontSizePt"
-          :barcode-svg="barcodeSvgFor(label)"
-          :encoded-text="encodedTextFor(label)"
-          :show-spec="settings.showSpec"
-          :show-code="settings.showCode"
-          :show-price="settings.showPrice"
-          :show-location="settings.showLocation"
-          :show-print-date="settings.showPrintDate"
-          :print-date-text="printDateText"
+          :template="printSettings.template"
+          :label-width-mm="printSettings.labelWidthMm"
+          :label-height-mm="printSettings.labelHeightMm"
+          :font-size-pt="printSettings.fontSizePt"
+          :barcode-svg="printBarcodeSvgFor(label)"
+          :encoded-text="printEncodedTextFor(label)"
+          :show-spec="printSettings.showSpec"
+          :show-code="printSettings.showCode"
+          :show-price="printSettings.showPrice"
+          :show-location="printSettings.showLocation"
+          :show-print-date="printSettings.showPrintDate"
+          :print-date-text="frozenPrint.printDate"
         />
       </template>
       <template v-else>
-        <div v-for="(page, pageIndex) in a4Pages" :key="`page-${pageIndex}`" class="barcode-a4-page" :style="a4GridStyle">
+        <div v-for="(page, pageIndex) in a4Pages" :key="`page-${pageIndex}`" class="barcode-a4-page" :style="frozenPrint.a4Style">
           <BarcodeLabelCard
             v-for="(label, index) in page"
             :key="`a4-${label.skuId}-${index}`"
             class="barcode-label--cell"
             template="a4"
-            :label-width-mm="settings.labelWidthMm"
-            :label-height-mm="settings.labelHeightMm"
-            :font-size-pt="settings.fontSizePt"
+            :label-width-mm="printSettings.labelWidthMm"
+            :label-height-mm="printSettings.labelHeightMm"
+            :font-size-pt="printSettings.fontSizePt"
             :label="label"
-            :barcode-svg="barcodeSvgFor(label)"
-            :encoded-text="encodedTextFor(label)"
-            :show-spec="settings.showSpec"
-            :show-code="settings.showCode"
-            :show-price="settings.showPrice"
-            :show-location="settings.showLocation"
-            :show-print-date="settings.showPrintDate"
-            :print-date-text="printDateText"
+            :barcode-svg="printBarcodeSvgFor(label)"
+            :encoded-text="printEncodedTextFor(label)"
+            :show-spec="printSettings.showSpec"
+            :show-code="printSettings.showCode"
+            :show-price="printSettings.showPrice"
+            :show-location="printSettings.showLocation"
+            :show-print-date="printSettings.showPrintDate"
+            :print-date-text="frozenPrint.printDate"
           />
         </div>
       </template>

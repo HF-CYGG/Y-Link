@@ -6,6 +6,8 @@
  * 3. 同时向管理端和 O2O 业务提供稳定的商品查询与写入能力，保证商品治理口径统一。
  */
 
+import { loadProductPrintLocations } from './product-label-locations.service.js'
+import type { ProductPrintLocations } from '../types/product-labels.js'
 import { In, type EntityManager, type Repository } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
@@ -340,6 +342,7 @@ export interface ProductLookupView {
 }
 
 export interface ProductLabelView {
+  printLocations: ProductPrintLocations
   skuId: string
   /** 所属商品 ID，前端按它分组，商品名称不唯一不能代替。 */
   productId: string
@@ -3257,21 +3260,23 @@ export class ProductService {
   }
 
   /** 条码打印数据：按传入顺序返回，条码图由前端生成。 */
-  async listLabels(skuIds: Array<string | number>): Promise<ProductLabelView[]> {
+  async listLabels(skuIds: Array<string | number>, capability: 'full' | 'main_only' = 'main_only'): Promise<ProductLabelView[]> {
+    return runInTransaction(async (manager) => {
     const ids = [...new Set(skuIds.map((id) => normalizeEntityId(id)).filter(Boolean))]
     if (!ids.length) throw new BizError('请至少选择一个规格', 400)
     if (ids.length > 500) throw new BizError('单次最多打印 500 个规格', 400)
-    const skus = await AppDataSource.getRepository(BaseProductSku).find({ where: { id: In(ids) } })
+    const skus = await manager.getRepository(BaseProductSku).find({ where: { id: In(ids) } })
     if (skus.length !== ids.length) throw new BizError('存在无效的规格，请刷新后重试', 404)
-    const products = await this.productRepo.find({ where: { id: In([...new Set(skus.map((sku) => String(sku.productId)))]) } })
+    const products = await manager.getRepository(BaseProduct).find({ where: { id: In([...new Set(skus.map((sku) => String(sku.productId)))]) } })
+    const printLocationMap = await loadProductPrintLocations(manager, skus, capability)
     const productMap = new Map(products.map((product) => [String(product.id), product]))
     const categoryIds = [...new Set(products.map((product) => product.categoryId).filter(Boolean).map(String))]
     const locationIds = [...new Set(skus.map((sku) => sku.locationId).filter(Boolean).map(String))]
     const seriesTagIds = [...new Set(products.map((product) => product.primarySeriesTagId).filter(Boolean).map(String))]
     const [categories, locations, seriesTags] = await Promise.all([
-      categoryIds.length ? AppDataSource.getRepository(BaseCategory).find({ where: { id: In(categoryIds) } }) : [],
-      locationIds.length ? AppDataSource.getRepository(BaseStorageLocation).find({ where: { id: In(locationIds) } }) : [],
-      seriesTagIds.length ? AppDataSource.getRepository(BaseTag).find({ where: { id: In(seriesTagIds) }, select: ['id', 'tagName'] }) : [],
+      categoryIds.length ? manager.getRepository(BaseCategory).find({ where: { id: In(categoryIds) } }) : [],
+      locationIds.length ? manager.getRepository(BaseStorageLocation).find({ where: { id: In(locationIds) } }) : [],
+      seriesTagIds.length ? manager.getRepository(BaseTag).find({ where: { id: In(seriesTagIds) }, select: ['id', 'tagName'] }) : [],
     ])
     const categoryMap = new Map(categories.map((category) => [String(category.id), category.categoryName]))
     const locationMap = new Map(locations.map((location) => [String(location.id), location.locationCode]))
@@ -3282,6 +3287,7 @@ export class ProductService {
       const product = productMap.get(String(sku.productId))
       return {
         skuId: id,
+        printLocations: printLocationMap.get(id)!,
         productId: String(sku.productId),
         skuCode: sku.skuCode,
         barcode: sku.barcode || sku.skuCode,
@@ -3297,6 +3303,7 @@ export class ProductService {
         codeScheme: product?.codeScheme || 'legacy',
       }
     })
+    }, { mysqlIsolationLevel: 'REPEATABLE READ' })
   }
 
   /** 分类只能指向存在的分类；新指定的分类必须启用，保持原分类不变时允许其已停用。 */
