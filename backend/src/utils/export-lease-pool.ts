@@ -107,15 +107,21 @@ export class ExportLeasePool {
  * - 客户端在生成期间断连：生成任务不会被取消，租约继续占用直到它真正结束，同账号无法借“发起即断开”叠加任务；
  * - 生成完成但响应未读完：租约继续占用直到响应结束；
  * - 生成失败：错误响应写出（finish）或连接关闭后归还。归还本身幂等。
- * 必须在 acquire 之后立即调用，确保响应事件监听在任何 await 之前注册。
+ * acquireShared 需要等待 Redis，客户端可能在拿到租约前就已断开，此时 close 事件早已发出、不会再触发；
+ * 因此注册监听时还要检查响应是否已结束或连接已关闭，否则租约与集群名额会被永久占用。
  */
 export async function runExportHoldingLease<T>(
   lease: ExportLease,
-  res: { once: (event: 'finish' | 'close', listener: () => void) => unknown },
+  res: {
+    once: (event: 'finish' | 'close', listener: () => void) => unknown
+    readonly writableFinished?: boolean
+    readonly closed?: boolean
+    readonly destroyed?: boolean
+  },
   generate: () => Promise<T>,
 ): Promise<T> {
   let generationSettled = false
-  let responseEnded = false
+  let responseEnded = Boolean(res.writableFinished || res.closed || res.destroyed)
   const releaseWhenBothDone = () => {
     if (generationSettled && responseEnded) lease.release()
   }

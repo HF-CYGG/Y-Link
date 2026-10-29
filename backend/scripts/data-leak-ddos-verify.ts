@@ -572,6 +572,11 @@ async function verifyExportLeasePoolPrimitives() {
   failed.emit('finish')
   assert.equal(pool.activeExports, 0)
 
+  // 4) 等待 Redis 集群名额期间客户端已断开：close 早于监听注册且不会再触发，生成结束后仍必须归还。
+  const closedEarly = Object.assign(new EventEmitter(), { closed: true, destroyed: true, writableFinished: false })
+  assert.equal(await m.runExportHoldingLease(pool.acquire('closed-before-lease'), closedEarly, async () => 'buffer'), 'buffer')
+  assert.equal(pool.activeExports, 0, '获取租约前已断开的连接，生成结束后必须归还租约')
+
   // 两个一次性导出路由都必须把生成步骤包进租约，而不是只绑定响应事件；租约走 acquireShared，配置 Redis 时按集群计“每账号”名额。
   for (const relative of ['src/routes/inventory.routes.ts', 'src/routes/product.routes.ts']) {
     assert.match(
