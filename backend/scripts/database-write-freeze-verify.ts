@@ -181,6 +181,18 @@ const verifyTypeOrmWriteEntrypoints = async () => {
 
     const rows = await dataSource.getRepository(FreezeProbeEntity).find()
     assert.equal(rows.length, 1, '冻结期间数据库读取必须保持可用')
+    const inspectRunner = dataSource.createQueryRunner()
+    try {
+      // 维护态重启时的启动预检依赖结构内省；SQLite 上它们走 PRAGMA table_xinfo，不能被当成写拒绝。
+      assert.equal(await inspectRunner.hasTable('database_write_freeze_probe'), true)
+      assert.equal(await inspectRunner.hasColumn('database_write_freeze_probe', 'label'), true)
+      assert.equal(await inspectRunner.hasColumn('database_write_freeze_probe', 'missing_column'), false)
+    } finally {
+      await inspectRunner.release()
+    }
+    await assertFrozen(() => dataSource.query('PRAGMA user_version = 7'), '带赋值的 PRAGMA 必须按写拦截')
+    await assertFrozen(() => dataSource.query('PRAGMA table_info(database_write_freeze_probe); DELETE FROM database_write_freeze_probe'), '内省 PRAGMA 拼接多语句必须按写拦截')
+    await assertFrozen(() => dataSource.query('PRAGMA optimize'), '非白名单 PRAGMA 必须按写拦截')
 
     await assertFrozen(
       () => dataSource.getRepository(FreezeProbeEntity).insert({ id: 2, label: 'repository' }),
