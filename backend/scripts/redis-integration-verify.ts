@@ -397,7 +397,21 @@ async function runRecoveredScenario() {
     assert.ok(state && state.lockedUntil > now, 'Redis 恢复后必须补读数据库中尚未到期的锁定，不能被切换实例绕过')
     assert.equal(state.count, 5)
     assert.equal(await persistentRiskStateService.readFailure(`recovered-none-${process.pid}`, 15 * 60_000, now), null, '无锁定时仍返回空状态')
-    console.log('[redis-verify] 恢复场景：降级期间写入数据库的锁定在 Redis 恢复后仍生效 通过')
+
+    // 反方向：Redis 中触发的锁定必须镜像到数据库，Redis 随后故障时回落数据库的实例仍能看到；未触发锁定的失败不落库。
+    const redisLockKey = `redis-lock-${process.pid}`
+    const redisLockDigest = createHash('sha256').update(`login_failure:${redisLockKey}`).digest('hex')
+    const riskRepository = AppDataSource.getRepository(AuthRiskState)
+    for (let index = 0; index < 4; index += 1) {
+      await persistentRiskStateService.recordFailure(redisLockKey, 15 * 60_000, 5, 10 * 60_000, now + index)
+    }
+    assert.equal(await riskRepository.countBy({ bucketDigest: redisLockDigest }), 0, '未达锁定阈值的失败计数不应写数据库')
+    const locked = await persistentRiskStateService.recordFailure(redisLockKey, 15 * 60_000, 5, 10 * 60_000, now + 4)
+    assert.ok(locked.lockedUntil > now)
+    const mirrored = await riskRepository.findOneBy({ bucketDigest: redisLockDigest })
+    assert.equal(mirrored?.lockedUntil?.getTime(), locked.lockedUntil, 'Redis 触发的锁定必须镜像到数据库')
+    assert.equal(mirrored?.failureCount, 5)
+    console.log('[redis-verify] 恢复场景：登录锁定在 Redis 与数据库间双向兜底 通过')
   } finally {
     await redisClient.closeRedis()
     if (AppDataSource.isInitialized) await AppDataSource.destroy()

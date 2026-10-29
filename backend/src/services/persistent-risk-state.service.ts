@@ -489,6 +489,24 @@ class PersistentRiskStateService {
     }
   }
 
+  /** 把 Redis 中刚触发的锁定写入数据库；写入失败只记日志，不影响本次已在 Redis 生效的锁定。 */
+  private async mirrorFailureLockToDatabase(bucketDigest: string, state: PersistentFailureState, resetWindowMs: number): Promise<void> {
+    try {
+      await AppDataSource.getRepository(AuthRiskState).save({
+        bucketDigest,
+        stateType: 'login_failure',
+        requestTimestampsJson: null,
+        failureCount: state.count,
+        firstFailedAt: new Date(state.firstFailedAt),
+        lastFailedAt: new Date(state.lastFailedAt),
+        lockedUntil: new Date(state.lockedUntil),
+        expiresAt: new Date(Math.max(state.lastFailedAt + resetWindowMs, state.lockedUntil)),
+      })
+    } catch (error) {
+      console.warn('[risk-state] 锁定镜像到数据库失败', error instanceof Error ? error.message : error)
+    }
+  }
+
   async recordFailure(
     bucketKey: string,
     resetWindowMs: number,
@@ -504,6 +522,10 @@ class PersistentRiskStateService {
       )
       return { count, firstFailedAt, lastFailedAt, lockedUntil } satisfies PersistentFailureState
     })
+    if (redisResult && redisResult.value.lockedUntil > nowMs) {
+      // 只在触发锁定时镜像到数据库：Redis 随后故障时，回落数据库的实例仍能看到这条锁定，不能借降级绕过。
+      await this.mirrorFailureLockToDatabase(bucketDigest, redisResult.value, resetWindowMs)
+    }
     const result = redisResult?.value ?? await this.runWithLockRetry(() =>
       runInTransaction(async (manager) => {
         const state = await this.loadLockedState(
