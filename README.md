@@ -248,9 +248,12 @@ PERMANENT_DELETE_PASSWORD=请改成仅管理员知晓的删除密码
 | MySQL | `DB_POOL_SIZE` | `20` | 每个实例的连接池大小，多实例按“实例数 × 连接池”核算总连接数 |
 | 数据加密 | `Y_LINK_DATA_ENCRYPTION_KEY` | 空 | 单实例无需配置，首次启动自动生成在数据目录 `secrets/data-encryption.key`；备份或迁移数据目录时须一并带上 |
 | 通行密钥 | `AUTH_WEBAUTHN_ENABLED` | `false` | 设为 `true` 启用管理端通行密钥与安全密钥，配置见[第 11 节](#11-可选管理端通行密钥与安全密钥) |
+| 短信验证码 | `ALIYUN_DYPNS_MNS_ENABLED` | `false` | 是否启用阿里云 MNS 送达回执，初次配置保持 `false`，见[第 10 节](#10-可选阿里云-pnvs-短信验证码) |
 | 反向代理 | `Y_LINK_TRUSTED_EDGE_PROXIES` | 空 | 前面还有 1Panel 反向代理或 CDN 时，填写其 IP/CIDR（逗号分隔），日志与风控才能拿到用户真实 IP |
 | 反向代理 | `Y_LINK_FORCE_SECURE_COOKIES` | `false` | 全站 HTTPS 访问时设为 `true`，Cookie 带 `Secure` 标记 |
-| Redis | `REDIS_URL` | 空 | 留空不启用 Redis；接入方式见 [Redis 与多实例部署](#redis-与多实例部署可选) |
+| Redis | `REDIS_URL` | 空 | Redis 开关：填写 `redis://host:6379/0` 即启用，留空不启用；接入方式见 [Redis 与多实例部署](#redis-与多实例部署可选) |
+| Redis | `REDIS_USERNAME` | 空 | Redis 6+ ACL 用户名，使用账号密码登录时填写；只设密码时留空 |
+| Redis | `REDIS_PASSWORD` | 空 | Redis 密码，建议写在这里而不是 URL 中；叠加 `compose.redis.yml` 时为必填 |
 | Redis | `Y_LINK_MULTI_INSTANCE` | `false` | 多个后端实例部署时设为 `true`，启动期强制检查 MySQL、Redis 与统一加密密钥 |
 | Compose | `Y_LINK_PORT` / `FRONTEND_PORT` | `8080` | `compose.onebox.yml` / 双容器编排映射到宿主机的 Web 端口 |
 
