@@ -16,6 +16,7 @@ import { pathToFileURL } from 'node:url'
 import type { EntityMetadata, QueryRunner } from 'typeorm'
 import type { ColumnMetadata } from 'typeorm/metadata/ColumnMetadata.js'
 import { AppDataSource } from '../config/data-source.js'
+import { backfillSqliteOrderIdentifierNamespaces } from '../config/database-bootstrap.js'
 import { env } from '../config/env.js'
 
 type QueryRow = Record<string, unknown>
@@ -414,6 +415,9 @@ async function main(): Promise<void> {
       }
       // 模拟历史高位记录删除后的序列空洞，迁移不能把自增状态退回 MAX(id)。
       await queryRunner.query('UPDATE sqlite_sequence SET seq = seq + 17')
+      // 夹具直接写入了业务号，需按启动期同一校准口径推进编号计数器；否则回退重启的自愈会改写
+      // system_configs，使“回退后 SQLite 内容不变”的断言误报。
+      await backfillSqliteOrderIdentifierNamespaces(queryRunner.manager)
     }
     for (const metadata of orderedMetadatas) {
       const countRows = toRows(await queryRunner.query(
