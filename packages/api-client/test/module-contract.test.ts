@@ -200,6 +200,18 @@ test('orders module 保留服务端分页原始结构且不自动生成幂等请
   ])
 })
 
+test('补货 API 固定缺货申请与本人活跃需求路径', async () => {
+  const { adapter, requests } = createRecordingAdapter()
+  const api = createFeedbackApi(adapter)
+  const payload = { productId: '1', skuId: '2', quantity: 3, latestPickupAt: '2026-12-01T09:30:00+08:00', clientRequestId: 'verify_request_1' }
+  await api.getActiveRestockRequest('2')
+  await api.createRestockRequest(payload)
+  assert.deepEqual(requests, [
+    { method: 'GET', url: '/client-feedback/restock-requests/active', params: { skuId: '2' } },
+    { method: 'POST', url: '/client-feedback/restock-requests', data: payload },
+  ])
+})
+
 test('feedback module 使用后端原始会话 contract，不混入 Web UI 映射', async () => {
   const { adapter, requests } = createRecordingAdapter()
   const api = createFeedbackApi(adapter)

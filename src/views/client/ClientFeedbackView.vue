@@ -16,6 +16,7 @@ import { useRouter } from 'vue-router'
 import {
   buildClientFeedbackConversationGroups,
   buildClientFeedbackNextStepPrompt,
+  getFeedbackIssueTypeLabel,
   FEEDBACK_PRIORITY_META_MAP,
   FEEDBACK_STATUS_META_MAP,
   getClientFeedbackPortalConfig,
@@ -27,6 +28,8 @@ import {
   type FeedbackRealtimeConnection,
 } from '@/api/modules/customer-service-feedback'
 import { useStableRequest } from '@/composables/useStableRequest'
+import { useRestockExpiryRefresh } from '@/composables/useRestockExpiryRefresh'
+import RestockRequestSummary from './components/RestockRequestSummary.vue'
 import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { formatDateTime } from '@/utils/date-time'
@@ -108,6 +111,8 @@ const handleNavigateBack = () => {
   router.push('/client/profile')
 }
 
+const handleNavigateToRestock = () => router.push({ path: '/client/feedback/create', query: { type: 'restock' } })
+
 const handleNavigateToCreate = () => {
   router.push('/client/feedback/create')
 }
@@ -153,6 +158,8 @@ const loadConversations = async () => {
     },
   })
 }
+
+useRestockExpiryRefresh(() => conversations.value, () => loadConversations())
 
 const refreshAuthoritativeFeedbackState = async () => {
   await Promise.all([loadPortalConfig(), loadConversations()])
@@ -399,6 +406,12 @@ onBeforeUnmount(() => {
         </button>
       </article>
 
+      <article class="rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
+        <p class="text-base font-semibold text-slate-900 dark:text-slate-100">补货需求</p>
+        <p class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">缺货商品可以提交期望数量与最晚取货时间，已有需求可在原会话继续跟进。</p>
+        <el-button type="primary" plain class="mt-3 w-full" @click="handleNavigateToRestock">申请商品补货</el-button>
+      </article>
+
       <article v-if="showOfflineFaq" class="rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
         <div class="flex items-start justify-between gap-3">
           <div>
@@ -498,7 +511,7 @@ onBeforeUnmount(() => {
                   <span class="rounded-full px-2.5 py-1 font-medium" :class="FEEDBACK_PRIORITY_META_MAP[item.priority].className">
                     {{ FEEDBACK_PRIORITY_META_MAP[item.priority].label }}
                   </span>
-                  <span>{{ item.fields.issueType === 'bug' ? '专业 BUG' : '普通建议' }}</span>
+                  <span>{{ getFeedbackIssueTypeLabel(item.fields.issueType) }}</span>
                   <span>更新于 {{ formatDateTime(item.lastMessageAt) }}</span>
                   <span
                     v-if="item.unreadForClient > 0"
@@ -507,6 +520,7 @@ onBeforeUnmount(() => {
                     {{ item.unreadForClient }} 条未读
                   </span>
                 </div>
+                <RestockRequestSummary v-if="item.restock" :restock="item.restock" class="mt-3" />
               </article>
             </div>
 

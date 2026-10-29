@@ -16,11 +16,13 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 import {
   buildClientFeedbackNextStepPrompt,
+  getFeedbackIssueTypeLabel,
   FEEDBACK_CATEGORY_OPTIONS,
   FEEDBACK_PRIORITY_META_MAP,
   FEEDBACK_SATISFACTION_META_MAP,
   FEEDBACK_STATUS_META_MAP,
   appendClientFeedbackMessage,
+  buildClientFeedbackReplyHint,
   confirmClientFeedbackResolved,
   getClientFeedbackConversation,
   getClientFeedbackPortalConfig,
@@ -38,6 +40,8 @@ import {
   type FeedbackSatisfactionLevel,
 } from '@/api/modules/customer-service-feedback'
 import { useStableRequest } from '@/composables/useStableRequest'
+import { useRestockExpiryRefresh } from '@/composables/useRestockExpiryRefresh'
+import RestockRequestSummary from './components/RestockRequestSummary.vue'
 import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { formatDateTime } from '@/utils/date-time'
@@ -91,9 +95,12 @@ const currentClientUser = computed(() => clientAuthStore.currentUser)
 const currentConversationId = computed(() => {
   return typeof route.params.id === 'string' ? route.params.id : ''
 })
+useRestockExpiryRefresh(() => conversation.value ? [conversation.value] : [], () => refreshAuthoritativeConversationDetail(currentConversationId.value))
+
 const nextStepPrompt = computed(() => {
   return conversation.value ? buildClientFeedbackNextStepPrompt(conversation.value) : null
 })
+const replyComposerHint = computed(() => buildClientFeedbackReplyHint(conversation.value))
 const offlineFaqEntries = computed(() => availability.value?.offlineFaqs ?? [])
 const showOfflineFaq = computed(() => Boolean(availability.value && !availability.value.isOnline && offlineFaqEntries.value.length))
 const canConfirmResolved = computed(() => conversation.value?.status === 'resolved')
@@ -844,6 +851,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="space-y-4 pb-4">
+    <RestockRequestSummary v-if="conversation?.restock" :restock="conversation.restock" />
     <div class="rounded-[1.5rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0 flex-1">
@@ -1074,7 +1082,7 @@ onBeforeUnmount(() => {
             <dl class="mt-3 space-y-3 text-sm">
               <div>
                 <dt class="text-slate-400">问题类型</dt>
-                <dd class="mt-1 font-medium text-slate-900 dark:text-slate-100">{{ conversation.fields.issueType === 'bug' ? '专业 BUG' : '普通建议' }}</dd>
+                <dd class="mt-1 font-medium text-slate-900 dark:text-slate-100">{{ getFeedbackIssueTypeLabel(conversation.fields.issueType) }}</dd>
               </div>
               <div>
                 <dt class="text-slate-400">问题分类</dt>
@@ -1253,7 +1261,7 @@ onBeforeUnmount(() => {
 
       <article v-if="shouldShowReplyComposer" class="rounded-[1rem] border border-slate-200 bg-white p-4 dark:border-white/10 dark:bg-[#141415]">
         <p class="text-base font-semibold text-slate-900 dark:text-slate-100">继续补充说明</p>
-        <p class="mt-1 text-xs text-slate-400">同一问题后续有新现象时，直接追加消息即可，不需要重新新建反馈。</p>
+        <p class="mt-1 text-xs text-slate-400">{{ replyComposerHint }}</p>
         <textarea
           ref="replyTextareaRef"
           v-model="replyDraft"

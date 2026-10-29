@@ -22,6 +22,7 @@ import { BizInboundOrderItem } from '../entities/biz-inbound-order-item.entity.j
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
 import { InventoryLog } from '../entities/inventory-log.entity.js'
 import { O2oPreorderItem } from '../entities/o2o-preorder-item.entity.js'
+import { ClientRestockRequest } from '../entities/client-restock-request.entity.js'
 import type { PaginationResult } from '../types/api.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { isRetryableSqliteLockError, isUniqueConstraintError } from '../utils/database-errors.js'
@@ -670,6 +671,7 @@ const PRODUCT_FIELD_LIMITS = {
 const SKU_BARCODE_PATTERN = /^[!-~]{1,64}$/
 
 const PRODUCT_REFERENCE_LABELS = [
+  { repoEntity: ClientRestockRequest, label: '补货需求' },
   { repoEntity: BizInboundOrderItem, label: '入库明细' },
   { repoEntity: BizOutboundOrderItem, label: '出库明细' },
   { repoEntity: InventoryLog, label: '库存流水' },

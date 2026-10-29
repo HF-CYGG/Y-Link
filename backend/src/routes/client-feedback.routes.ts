@@ -98,6 +98,23 @@ clientFeedbackRouter.get(
 
 authenticatedClientFeedbackRouter.use(requireClientAuth)
 
+authenticatedClientFeedbackRouter.get('/restock-requests/active', asyncHandler(async (req, res) => {
+  const query = z.object({ skuId: z.string().trim().regex(/^[1-9]\d{0,19}$/) }).parse(req.query)
+  const data = await clientFeedbackService.getActiveRestockRequest((req as ClientAuthenticatedRequest).clientAuth, query.skuId)
+  res.json({ code: 0, message: 'ok', data })
+}))
+
+authenticatedClientFeedbackRouter.post('/restock-requests', asyncHandler(async (req, res) => {
+  const payload = z.object({
+    productId: z.coerce.string().trim().regex(/^[1-9]\d{0,19}$/),
+    skuId: z.coerce.string().trim().regex(/^[1-9]\d{0,19}$/),
+    quantity: z.number().int().min(1).max(2147483647), latestPickupAt: z.string().trim().max(40),
+    remark: z.string().trim().max(1000).optional(), clientRequestId: z.string().trim().regex(/^[A-Za-z0-9_-]{1,64}$/),
+  }).parse(req.body)
+  const data = await clientFeedbackService.createRestockRequest(payload, (req as ClientAuthenticatedRequest).clientAuth, extractRequestMeta(req))
+  res.json({ code: 0, message: 'ok', data })
+}))
+
 authenticatedClientFeedbackRouter.get(
   '/conversations',
   asyncHandler(async (req, res) => {

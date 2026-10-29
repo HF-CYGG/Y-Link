@@ -2102,9 +2102,11 @@ export class DatabaseMigrationService {
         .filter((name): name is string => Boolean(name))
         .map((name) => name.toLowerCase()),
     )
-    const expectedUniqueNames = normalizeNames(
-      metadata.indices.filter((index) => index.isUnique).map((index) => index.name),
-    )
+    // 一对一拥有方与 @Unique 在 SQLite 元数据中登记为 uniques，MySQL 建表后却是唯一索引，需一并纳入。
+    const expectedUniqueNames = normalizeNames([...new Set([
+      ...metadata.indices.filter((index) => index.isUnique).map((index) => index.name),
+      ...metadata.uniques.map((unique) => unique.name),
+    ])])
     const expectedForeignKeyNames = normalizeNames(metadata.foreignKeys.map((foreignKey) => foreignKey.name))
     const expectedChecks = new Map<string, string>()
     for (const check of metadata.checks) {

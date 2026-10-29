@@ -7,7 +7,7 @@
  * 维护重点：只读服务，不参与任何写库存流程。
  */
 
-import ExcelJS from 'exceljs'
+import { loadExcelJs } from '../utils/exceljs-loader.js'
 import { AppDataSource } from '../config/data-source.js'
 import { INVENTORY_CHANGE_TYPE_LABELS } from '../constants/inventory-change-types.js'
 import { BaseProductSku } from '../entities/base-product-sku.entity.js'
@@ -219,6 +219,7 @@ export class InventoryQueryService {
     const total = await qb.getCount()
     if (total > LOG_EXPORT_LIMIT) throw new BizError(`导出结果 ${total} 条，超过 ${LOG_EXPORT_LIMIT} 条上限，请缩小时间范围`, 400)
     const rows = await qb.orderBy('log.id', 'DESC').getMany()
+    const ExcelJS = await loadExcelJs()
     const workbook = new ExcelJS.Workbook()
     const sheet = workbook.addWorksheet('库存流水')
     sheet.columns = [

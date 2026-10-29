@@ -35,7 +35,8 @@ const HEAVY_IMPORT_RULES = [
   },
   {
     packageName: 'html5-qrcode',
-    runtimeStaticAllowedFiles: new Set(),
+    // 此桥仅由composable动态导入；低层导出保持同一惰性chunk，不引入聚合UI。
+    runtimeStaticAllowedFiles: new Set([path.join(srcRoot, 'utils', 'html5-qrcode-module.ts')]),
     description: '扫码库必须延迟到用户触发扫码能力时再加载',
   },
   {
@@ -117,6 +118,11 @@ const extractStaticImports = (source) => {
     })
   }
 
+  const exportPattern = /^\s*export\s+(type\s+)?(?:\{[^}]*\}|\*)\s+from\s+['"]([^'"]+)['"]/gm
+  while ((match = exportPattern.exec(source)) !== null) {
+    records.push({ isTypeOnly: Boolean(match[1]), specifier: match[2], sourceIndex: match.index })
+  }
+
   return records
 }
 
@@ -143,7 +149,7 @@ const main = () => {
       const normalizedSpecifier = record.specifier.trim()
 
       HEAVY_IMPORT_RULES.forEach((rule) => {
-        if (normalizedSpecifier !== rule.packageName) {
+        if (normalizedSpecifier !== rule.packageName && !normalizedSpecifier.startsWith(`${rule.packageName}/`)) {
           return
         }
 
@@ -169,6 +175,18 @@ const main = () => {
   })
 
   assert.equal(violations.length, 0, `发现低频重库静态导入回退：\n- ${violations.join('\n- ')}`)
+
+  const scannerBridgePath = path.join(srcRoot, 'utils', 'html5-qrcode-module.ts')
+  const bridgeImports = extractStaticImports(readUtf8(scannerBridgePath)).filter((item) => !item.isTypeOnly)
+  assert.deepEqual(bridgeImports.map((item) => item.specifier), ['html5-qrcode/esm/html5-qrcode', 'html5-qrcode/esm/core'])
+  assert.match(readUtf8(scannerBridgePath), /export \{ Html5Qrcode \} from 'html5-qrcode\/esm\/html5-qrcode'/)
+  assert.match(readUtf8(scannerBridgePath), /export \{ Html5QrcodeSupportedFormats \} from 'html5-qrcode\/esm\/core'/)
+  const scannerSource = readUtf8(path.join(srcRoot, 'composables', 'useCameraQrScanner.ts'))
+  assert.ok(scannerSource.includes("html5QrcodeModulePromise ??= import('@/utils/html5-qrcode-module')"))
+  for (const file of sourceFiles) {
+    assert.equal(extractStaticImports(readUtf8(file)).some((item) => !item.isTypeOnly && /(?:^|\/)html5-qrcode-module(?:\.ts)?$/.test(item.specifier)), false,
+      `${path.relative(projectRoot, file)}不得静态导入扫码桥使其回到首屏`)
+  }
 
   const orderListViewPath = path.join(srcRoot, 'views', 'order-list', 'OrderListView.vue')
   const orderListViewSource = readUtf8(orderListViewPath)

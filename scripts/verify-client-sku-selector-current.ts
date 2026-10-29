@@ -163,7 +163,29 @@ assert.equal(
   '切换中间规格后应按已选上层前缀解析新的完整 SKU',
 )
 
+// 商品详情显式开放真实缺货组合；普通调用的库存置灰规则保持原断言。
+const restockOptions = { allowOutOfStock: true }
+const emptyRed = createSku({ id: 'empty-red', specValues: { 颜色: '红色', 尺码: 'S' }, availableStock: 0 })
+const stockedBlue = createSku({ id: 'stocked-blue', specValues: { 颜色: '蓝色', 尺码: 'L' }, availableStock: 4 })
+const mixedSkus = [emptyRed, stockedBlue]
+const mixedDetail = buildClientSkuSelectionModel(mixedSkus, stockedBlue, restockOptions)
+assert.equal(mixedDetail[0]?.options.find((option) => option.value === '红色')?.disabled, false, '详情可从有货蓝色明确选缺货红色')
+const selectedEmptyRed = resolveClientSkuSelection(mixedSkus, stockedBlue, '颜色', '红色', restockOptions)
+assert.equal(selectedEmptyRed?.id, emptyRed.id, '详情选择链必须返回真实缺货SKU')
+assert.equal(Math.min(Number(selectedEmptyRed?.availableStock ?? 0), 5), 0, '选缺货规格仍没有可加购数量')
+assert.deepEqual(buildClientSkuSelectionModel(mixedSkus, selectedEmptyRed, restockOptions)[1]?.options.map((option) => option.value), ['S'], '不能给红色虚构蓝色的L组合')
+const allEmpty = mixedSkus.map((sku) => ({ ...sku, availableStock: 0, currentStock: 0 }))
+assert.equal(resolveClientSkuSelection(allEmpty, allEmpty[0]!, '颜色', '蓝色', restockOptions)?.id, stockedBlue.id, '全缺货仍可切换真实规格')
+const emptyCottonLarge = multiDimensionSkus[1]!
+const detailThreeAxis = resolveClientSkuSelection(multiDimensionSkus, blackCottonMedium, '尺码', 'L', restockOptions)
+assert.equal(detailThreeAxis?.id, emptyCottonLarge.id, '三维规格可以明确选中当前材质下真实缺货尺码')
+assert.equal(resolveClientSkuSelection(multiDimensionSkus, detailThreeAxis, '材质', '亚麻', restockOptions)?.id, blackLinenSmall.id, '缺货组合切换中间轴仍解析真实组合')
+const excludedSku = { ...emptyRed, id: 'disabled-current', isActive: false, specValues: { 颜色: '停用', 尺码: 'S' } }
+const retiredSku = { ...emptyRed, id: 'retired-current', isCurrent: false, specValues: { 颜色: '退役', 尺码: 'S' } }
+assert.deepEqual(buildClientSkuSelectionModel([...mixedSkus, excludedSku, retiredSku], stockedBlue, restockOptions)[0]?.options.map((option) => option.value), ['红色', '蓝色'], '开放缺货不开放停用或退役SKU')
+
 const clientMallSource = readFileSync('src/views/client/ClientMallView.vue', 'utf8')
+assert.equal((clientMallSource.match(/allowOutOfStock: true/g) ?? []).length, 2, '详情分组与选择解析必须同时启用补货规则')
 assert.ok(
   clientMallSource.includes('buildClientSkuSelectionModel'),
   '客户端商城详情应接入独立的 SKU 分组选择模型',

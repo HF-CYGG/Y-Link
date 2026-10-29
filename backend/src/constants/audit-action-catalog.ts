@@ -192,6 +192,8 @@ export const AUDIT_ACTION_CATALOG: Readonly<Record<string, AuditActionDefinition
 
   // 客服与消息
   'client_feedback.create': { label: '客户端提交反馈', category: 'customer_service' },
+  'client_feedback.restock_create': { label: '客户端申请补货', category: 'customer_service' },
+  'customer_service.restock_status': { label: '处理补货需求', category: 'customer_service' },
   'client_feedback.reply_by_client': { label: '客户端追加反馈消息', category: 'customer_service' },
   'client_feedback.confirm_resolved': { label: '客户端确认反馈已解决', category: 'customer_service' },
   'client_feedback.withdraw': { label: '客户端撤回反馈单', category: 'customer_service' },

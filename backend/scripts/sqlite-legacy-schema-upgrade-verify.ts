@@ -168,6 +168,14 @@ try {
   const pickupAtColumn = preorderColumns.find((column) => column.name === 'pickup_at')
   assert.ok(pickupAtColumn, '结构升级后必须补齐 o2o_preorder.pickup_at 列')
   assert.equal(Number(pickupAtColumn?.notnull), 0, '历史订单没有到店取货时间，pickup_at 必须允许为空')
+  for (const tableName of ['client_restock_request', 'client_restock_request_key']) {
+    const tables = await AppDataSource.query('SELECT name FROM sqlite_master WHERE type = ? AND name = ?', ['table', tableName])
+    assert.equal(tables.length, 1, 'SQLite 旧库必须升级补货实体与幂等键表')
+    assert.deepEqual(await AppDataSource.query(`SELECT COUNT(*) AS total FROM "${tableName}"`), [{ total: 0 }], '旧反馈不能自动伪造成补货历史')
+    const foreignKeys = await AppDataSource.query(`PRAGMA foreign_key_list("${tableName}")`) as Array<{ on_delete: string }>
+    assert.ok(foreignKeys.length >= 2 && foreignKeys.every((key) => key.on_delete.toUpperCase() === 'RESTRICT'), '补货历史引用必须采用 RESTRICT')
+  }
+
   // Issue #95：预计送达时间对历史送货单必须是可空新列，升级不得要求回填。
   const expectedArrivalColumn = inboundOrderColumns.find((column) => column.name === 'expected_arrival_at')
   assert.ok(expectedArrivalColumn, '结构升级后必须补齐 biz_inbound_order.expected_arrival_at 列')

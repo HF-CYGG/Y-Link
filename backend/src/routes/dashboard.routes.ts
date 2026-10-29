@@ -77,6 +77,17 @@ const resolveDateRangeQuery = (query: z.infer<typeof dashboardFilterQuerySchema>
 }
 
 dashboardRouter.get(
+  '/restock-ranking',
+  requirePermission('dashboard:view'),
+  asyncHandler(async (req, res) => {
+    const query = dashboardFilterQuerySchema.parse(req.query)
+    const { startDate, endDate } = resolveDateRangeQuery(query)
+    const data = await dashboardService.getRestockRanking({ startDate, endDate })
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+dashboardRouter.get(
   '/stats',
   // 看板统计数据属于 dashboard:view 范围，避免低权限账户直接读取经营指标。
   requirePermission('dashboard:view'),

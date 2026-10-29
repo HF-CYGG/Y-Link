@@ -47,7 +47,14 @@ const SUPERSEDED_AUTO_MIGRATIONS = new Map<string, string>([
 ])
 // GET_LOCK 的锁名在同一 MySQL 服务端是全局的（不区分 database），
 // 因此必须把库名拼进锁名，否则同一实例上部署的多套 Y-Link 库会互相阻塞迁移。
-const buildMigrationAdvisoryLockName = (databaseName: string) => `y_link:schema_migration:${databaseName}`
+// MySQL 锁名上限 64 字符而库名本身可达 64 字符：超长时改用库名摘要；未超长的保持原锁名，滚动升级时新旧实例仍互斥。
+const MYSQL_USER_LOCK_NAME_MAX_LENGTH = 64
+const buildMigrationAdvisoryLockName = (databaseName: string) => {
+  const lockName = `y_link:schema_migration:${databaseName}`
+  return lockName.length <= MYSQL_USER_LOCK_NAME_MAX_LENGTH
+    ? lockName
+    : `y_link:schema_migration:sha256:${createHash('sha256').update(databaseName).digest('hex').slice(0, 32)}`
+}
 // 等待锁的上限：迁移本身很快，等待超过这个时长通常意味着另一实例卡住或存在长事务，
 // 此时宁可 fail-fast 让运维介入，也不要无限期挂起启动流程。
 const MIGRATION_ADVISORY_LOCK_TIMEOUT_SECONDS = 60
@@ -62,6 +69,8 @@ const MYSQL_REQUIRED_TABLES = [
   'client_user',
   'client_user_session',
   'client_feedback_conversation',
+  'client_restock_request',
+  'client_restock_request_key',
   'client_feedback_attachment',
   'o2o_preorder',
   'o2o_return_request',
@@ -105,6 +114,8 @@ const MYSQL_FORBIDDEN_TABLES = [
 // auth_risk_state 现同时存在于 001（供全新库一次建齐）与 033（供存量库补建），
 // 这里指向 033，因为它是白名单中专门为存量库补建该表的自动迁移脚本。
 const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
+  client_restock_request: '061_client_restock_requests.sql',
+  client_restock_request_key: '061_client_restock_requests.sql',
   base_product: '001_init_schema.sql',
   sys_user: '001_init_schema.sql',
   sys_user_session: '001_init_schema.sql',
@@ -195,6 +206,17 @@ interface MysqlRequiredCheck {
 const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
   // 060：按库位盘点的明细库位列，0 表示按规格总量盘点；缺失时盘点建单与计数都会写库失败。
   { tableName: 'inv_stocktake_item', columnName: 'location_scope_id', introducingScript: '060_sku_location_stock.sql', expectedDataType: 'bigint', expectedNullable: false, expectedDefault: '0' },
+  ...['conversation_id', 'client_user_id', 'product_id', 'sku_id', 'product_name_snapshot', 'product_code_snapshot', 'sku_code_snapshot', 'spec_text_snapshot', 'quantity', 'latest_pickup_at', 'remark', 'status', 'handled_at', 'client_request_id', 'payload_digest', 'created_at', 'updated_at']
+    .map((columnName) => ({ tableName: 'client_restock_request', columnName, introducingScript: '061_client_restock_requests.sql' })),
+  ...['client_user_id', 'client_request_id', 'payload_digest', 'restock_request_id', 'created_at']
+    .map((columnName) => ({ tableName: 'client_restock_request_key', columnName, introducingScript: '061_client_restock_requests.sql' })),
+  ...['client_restock_request', 'client_restock_request_key'].flatMap((tableName) => [
+    { tableName, columnName: 'client_request_id', introducingScript: '061_client_restock_requests.sql', expectedDataType: 'varchar', expectedNullable: false, expectedCharacterMaximumLength: 64 },
+    { tableName, columnName: 'payload_digest', introducingScript: '061_client_restock_requests.sql', expectedDataType: 'varchar', expectedNullable: false, expectedCharacterMaximumLength: 64 },
+  ]),
+  { tableName: 'client_restock_request', columnName: 'quantity', introducingScript: '061_client_restock_requests.sql', expectedDataType: 'int', expectedNullable: false },
+  { tableName: 'client_restock_request', columnName: 'latest_pickup_at', introducingScript: '061_client_restock_requests.sql', expectedDataType: 'datetime', expectedNullable: false },
+  { tableName: 'client_restock_request', columnName: 'status', introducingScript: '061_client_restock_requests.sql', expectedDataType: 'varchar', expectedNullable: false, expectedCharacterMaximumLength: 16, expectedDefault: 'requested' },
   { tableName: 'sys_user_mfa', columnName: 'factor_revision', introducingScript: '059_admin_webauthn_second_factor.sql', expectedDataType: 'int', expectedNullable: false, expectedDefault: '1' },
   { tableName: 'sys_user_mfa', columnName: 'totp_secret_sealed', introducingScript: '059_admin_webauthn_second_factor.sql', expectedDataType: 'varchar', minCharacterMaximumLength: 255, expectedNullable: true },
   { tableName: 'sys_user_webauthn_credential', columnName: 'usage', introducingScript: '059_admin_webauthn_second_factor.sql', expectedDataType: 'varchar', minCharacterMaximumLength: 16, expectedNullable: false, expectedDefault: 'passwordless' },
@@ -468,6 +490,12 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
   { tableName: 'inv_sku_location_stock', indexName: 'uk_inv_sku_location_stock_sku_location', columns: ['sku_id', 'location_id'], unique: true, introducingScript: '060_sku_location_stock.sql' },
   { tableName: 'inv_sku_location_stock', indexName: 'idx_inv_sku_location_stock_location_id', columns: ['location_id'], unique: false, introducingScript: '060_sku_location_stock.sql' },
   { tableName: 'inv_stocktake_item', indexName: 'uk_inv_stocktake_item_sku_location', columns: ['stocktake_id', 'sku_id', 'location_scope_id'], unique: true, introducingScript: '060_sku_location_stock.sql' },
+  { tableName: 'client_restock_request', indexName: 'uk_restock_conversation', columns: ['conversation_id'], unique: true, introducingScript: '061_client_restock_requests.sql' },
+  { tableName: 'client_restock_request', indexName: 'uk_restock_client_request', columns: ['client_user_id', 'client_request_id'], unique: true, introducingScript: '061_client_restock_requests.sql' },
+  { tableName: 'client_restock_request', indexName: 'idx_restock_active', columns: ['client_user_id', 'sku_id', 'status', 'latest_pickup_at'], unique: false, introducingScript: '061_client_restock_requests.sql' },
+  { tableName: 'client_restock_request', indexName: 'idx_restock_product_created', columns: ['product_id', 'created_at'], unique: false, introducingScript: '061_client_restock_requests.sql' },
+  { tableName: 'client_restock_request', indexName: 'idx_restock_created', columns: ['created_at'], unique: false, introducingScript: '061_client_restock_requests.sql' },
+  { tableName: 'client_restock_request_key', indexName: 'uk_restock_key_client_request', columns: ['client_user_id', 'client_request_id'], unique: true, introducingScript: '061_client_restock_requests.sql' },
   { tableName: 'sys_user', indexName: 'uk_sys_user_webauthn_user_handle', columns: ['webauthn_user_handle'], unique: true, introducingScript: '058_admin_webauthn.sql' },
   { tableName: 'sys_user_webauthn_credential', indexName: 'idx_sys_user_webauthn_credential_user_id', columns: ['user_id'], unique: false, introducingScript: '058_admin_webauthn.sql' },
   { tableName: 'sys_user_webauthn_credential', indexName: 'uk_sys_user_webauthn_rp_credential_sha256', columns: ['rp_id', 'credential_id_sha256'], unique: true, introducingScript: '058_admin_webauthn.sql' },
@@ -704,6 +732,14 @@ const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [
   // 060：分库位库存随 SKU 级联清理；库位只停用不删除，被引用时必须拒绝删除。
   { tableName: 'inv_sku_location_stock', columnName: 'sku_id', referencedTableName: 'base_product_sku', referencedColumnName: 'id', deleteRule: 'CASCADE', introducingScript: '060_sku_location_stock.sql' },
   { tableName: 'inv_sku_location_stock', columnName: 'location_id', referencedTableName: 'base_storage_location', referencedColumnName: 'id', deleteRule: 'RESTRICT', introducingScript: '060_sku_location_stock.sql' },
+  ...[
+    ['client_restock_request', 'conversation_id', 'client_feedback_conversation'],
+    ['client_restock_request', 'client_user_id', 'client_user'],
+    ['client_restock_request', 'product_id', 'base_product'],
+    ['client_restock_request', 'sku_id', 'base_product_sku'],
+    ['client_restock_request_key', 'client_user_id', 'client_user'],
+    ['client_restock_request_key', 'restock_request_id', 'client_restock_request'],
+  ].map(([tableName, columnName, referencedTableName]) => ({ tableName, columnName, referencedTableName, referencedColumnName: 'id', deleteRule: 'RESTRICT', introducingScript: '061_client_restock_requests.sql' })),
   { tableName: 'sys_user_webauthn_credential', columnName: 'user_id', referencedTableName: 'sys_user', referencedColumnName: 'id', deleteRule: 'RESTRICT', introducingScript: '058_admin_webauthn.sql' },
   ...[
     ['sys_user_session', 'user_id', 'sys_user'],
@@ -812,6 +848,8 @@ const MYSQL_REQUIRED_TRIGGERS: readonly MysqlRequiredTrigger[] = [
 ]
 
 const MYSQL_REQUIRED_CHECKS: readonly MysqlRequiredCheck[] = [
+  { tableName: 'client_restock_request', constraintName: 'ck_restock_quantity_positive', introducingScript: '061_client_restock_requests.sql' },
+  { tableName: 'client_restock_request', constraintName: 'ck_restock_status', introducingScript: '061_client_restock_requests.sql' },
   {
     tableName: 'order_merge_relation',
     constraintName: 'ck_order_merge_relation_distinct_orders',
@@ -856,6 +894,7 @@ const AUTO_MIGRATABLE_FILES = [
   '058_admin_webauthn.sql',
   '059_admin_webauthn_second_factor.sql',
   '060_sku_location_stock.sql',
+  '061_client_restock_requests.sql',
 ]
 
 /**

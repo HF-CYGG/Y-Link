@@ -13,6 +13,7 @@ import { BaseTag } from '../entities/base-tag.entity.js'
 import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
+import { ClientRestockRequest } from '../entities/client-restock-request.entity.js'
 import { RelProductTag } from '../entities/rel-product-tag.entity.js'
 import { SysAuditLog } from '../entities/sys-audit-log.entity.js'
 import type {
@@ -393,7 +394,7 @@ const resolveTopN = (value: number | string | undefined): number => {
  * - defaultRange 为 all 时保持历史行为（未传区间即全量），供标签聚合等旧调用方继续使用；
  * - 区间统一左闭右开（>= 起始日 00:00，< 结束日次日 00:00），因此结束日整天都会被覆盖。
  */
-const resolveDashboardFilter = (
+export const resolveDashboardFilter = (
   input: DashboardFilterInput,
   options: { defaultRange?: 'all' | 'currentMonth' } = {},
 ): DashboardResolvedFilter => {
@@ -497,6 +498,20 @@ const parseAuditDetail = (detailJson: string | null): Record<string, unknown> =>
 }
 
 export const dashboardService = {
+  async getRestockRanking(input: Pick<DashboardFilterInput, 'startDate' | 'endDate'> = {}) {
+    const filter = resolveDashboardFilter(input, { defaultRange: 'currentMonth' })
+    const rows = await AppDataSource.getRepository(ClientRestockRequest).createQueryBuilder('restock')
+      .innerJoin(BaseProduct, 'product', 'product.id = restock.productId')
+      .select('restock.productId', 'productId').addSelect('product.productName', 'productName')
+      .addSelect('product.productCode', 'productCode').addSelect('COUNT(restock.id)', 'requestCount')
+      .where('restock.createdAt >= :startAt AND restock.createdAt < :endExclusive', { startAt: filter.startAt, endExclusive: filter.endExclusive })
+      .groupBy('restock.productId').addGroupBy('product.productName').addGroupBy('product.productCode')
+      .orderBy('requestCount', 'DESC').addOrderBy('restock.productId', 'ASC').limit(5)
+      .getRawMany<{ productId: string; productName: string; productCode: string; requestCount: string | number }>()
+    return { range: { startDate: filter.startDate, endDate: filter.endDate, isDefault: filter.isDefaultRange },
+      list: rows.map((row) => ({ ...row, productId: String(row.productId), requestCount: Number(row.requestCount) })), serverNow: new Date() }
+  },
+
   async getStats(actor?: Pick<AuthUserContext, 'role'>): Promise<DashboardStatsResult> {
     const exposeSystemNo = canViewSystemNo(actor)
     const today = new Date()

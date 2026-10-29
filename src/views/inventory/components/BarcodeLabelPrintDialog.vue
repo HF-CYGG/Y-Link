@@ -358,7 +358,7 @@ const previewA4Labels = computed(() => {
   return preview
 })
 
-const loadJsBarcode = () => import('jsbarcode')
+const loadJsBarcode = () => import('virtual:ylink-code128')
 
 let loadVersion = 0
 let renderVersion = 0

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import ts from 'typescript'
-import JsBarcode from 'jsbarcode'
+import LegacyJsBarcode from 'jsbarcode'
 import * as Vue from 'vue'
 import { parse } from '@vue/compiler-sfc'
 import { compile } from '@vue/compiler-ssr'
@@ -47,6 +47,12 @@ class SvgNode {
 }
 const document = { createElementNS(_namespace, name) { return new SvgNode(name) }, createTextNode(text) { return { textContent: text } } }
 globalThis.document = document
+// 同一组原有断言可直接验证产品virtual预设，避免只验证旧完整库。
+let JsBarcode = LegacyJsBarcode
+if (process.argv.includes('--code128-preset')) {
+  const { createPresetFactory } = await import('./code128-preset-test-runtime.mjs')
+  JsBarcode = (await createPresetFactory(document)).factory
+}
 
 const failures = []
 const renderedCases = new Map()

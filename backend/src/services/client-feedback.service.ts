@@ -10,6 +10,7 @@
  * - 若前端需要独立的会话标签、附件或评价体系，请在现有会话/消息模型上平滑扩展，避免破坏当前接口语义。
  */
 
+import { randomInt } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { In, IsNull, LessThanOrEqual, MoreThan, type EntityManager } from 'typeorm'
@@ -41,7 +42,7 @@ import { ClientUser } from '../entities/client-user.entity.js'
 import { SysUser } from '../entities/sys-user.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import type { ClientAuthContext } from '../types/client-auth.js'
-import { isUniqueConstraintError } from '../utils/database-errors.js'
+import { isRetryableMysqlTransactionError, isUniqueConstraintError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
 import { toSafeErrorLog } from '../utils/safe-error-log.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
@@ -56,6 +57,12 @@ import {
 import { systemConfigService } from './system-config.service.js'
 import { notificationService } from './notification.service.js'
 import { ClientFeedbackAttachment } from '../entities/client-feedback-attachment.entity.js'
+import { ClientRestockRequest, type RestockEffectiveStatus } from '../entities/client-restock-request.entity.js'
+import { ClientRestockRequestKey } from '../entities/client-restock-request-key.entity.js'
+import { BaseProduct } from '../entities/base-product.entity.js'
+import { BaseProductSku } from '../entities/base-product-sku.entity.js'
+import { buildRestockView, effectiveRestockStatus, effectiveRestockStatusSql, normalizeRestockRequest, type CreateRestockRequestInput } from './restock-policy.js'
+import { resolveDashboardFilter } from './dashboard.service.js'
 import { CLIENT_FEEDBACK_ATTACHMENT_POLICY } from './client-feedback-security-policy.js'
 import {
   lockActiveClientAccountForBusiness,
@@ -105,6 +112,8 @@ const FEEDBACK_CONVERSATION_NO_UNIQUE_CONSTRAINT_MATCHER = {
 } as const
 
 export interface ClientFeedbackConversationSummary {
+  restock: ReturnType<typeof buildRestockView>
+  serverNow: Date
   id: string
   conversationNo: string
   clientUserId: string
@@ -242,6 +251,11 @@ export interface ClientFeedbackListQuery {
 }
 
 export interface CustomerServiceConversationListQuery extends ClientFeedbackListQuery {
+  issueType?: ClientFeedbackIssueType
+  restockStatus?: RestockEffectiveStatus
+  productId?: string
+  startDate?: string
+  endDate?: string
   assignedToMe?: boolean
   unreadOnly?: boolean
   priority?: ClientFeedbackPriority
@@ -1112,8 +1126,11 @@ class ClientFeedbackService {
   private buildConversationSummary(
     conversation: ClientFeedbackConversation,
     currentServiceUserId?: string,
+    serverNow = new Date(),
   ): ClientFeedbackConversationSummary {
     return {
+      restock: buildRestockView(conversation.restock, serverNow),
+      serverNow,
       id: conversation.id,
       conversationNo: conversation.conversationNo,
       clientUserId: conversation.clientUserId,
@@ -1204,6 +1221,7 @@ class ClientFeedbackService {
   private async requireConversationById(id: string, manager?: EntityManager) {
     const repository = (manager ?? AppDataSource.manager).getRepository(ClientFeedbackConversation)
     const query = repository.createQueryBuilder('conversation')
+      .leftJoinAndSelect('conversation.restock', 'restock')
       .where('conversation.id = :id', { id })
     if (manager && manager !== AppDataSource.manager && manager.connection.options.type === 'mysql') {
       query.setLock('pessimistic_write')
@@ -1460,7 +1478,169 @@ class ClientFeedbackService {
     )
   }
 
+  /** 当前读在账号锁之后执行，避免 MySQL REPEATABLE READ 读到锁等待之前的旧快照。 */
+  private async findRestockInTransaction(manager: EntityManager, clientUserId: string, filter: { clientRequestId: string } | { skuId: string }, now: Date) {
+    const query = manager.getRepository(ClientRestockRequest).createQueryBuilder('restock')
+      .where('restock.clientUserId = :clientUserId', { clientUserId })
+    if ('clientRequestId' in filter) query.andWhere('restock.clientRequestId = :clientRequestId', filter)
+    else query.andWhere('restock.skuId = :skuId', filter)
+      .andWhere(`(${effectiveRestockStatusSql('restock')}) IN ('requested', 'accepted')`, { restockNow: now })
+    query.orderBy('restock.id', 'DESC')
+    if (manager.connection.options.type === 'mysql') query.setLock('pessimistic_write')
+    return query.getOne()
+  }
+
+  async getActiveRestockRequest(clientAuth: ClientAuthContext, skuId: string) {
+    if (!/^[1-9]\d{0,19}$/.test(skuId)) throw new BizError('规格标识无效', 400)
+    const serverNow = new Date()
+    const restock = await AppDataSource.getRepository(ClientRestockRequest).createQueryBuilder('restock')
+      .where('restock.clientUserId = :clientUserId AND restock.skuId = :skuId', { clientUserId: clientAuth.userId, skuId })
+      .andWhere(`(${effectiveRestockStatusSql('restock')}) IN ('requested', 'accepted')`, { restockNow: serverNow })
+      .orderBy('restock.id', 'DESC').getOne()
+    return { restock: buildRestockView(restock, serverNow), serverNow }
+  }
+
+  async createRestockRequest(input: CreateRestockRequestInput, clientAuth: ClientAuthContext, requestMeta?: RequestMeta) {
+    const normalized = normalizeRestockRequest(input)
+    // 只读配置在事务外取值，不能在已获取业务锁之后触发配置的惰性初始化。
+    const createOnce = (portalConfig: ClientFeedbackPortalConfigRecord) => runInTransaction(async (manager) => {
+      const account = await lockActiveClientAccountForBusiness(manager, clientAuth.userId)
+      const now = new Date()
+      const keyRepo = manager.getRepository(ClientRestockRequestKey)
+      const keyQuery = keyRepo.createQueryBuilder('key').where('key.clientUserId = :clientUserId AND key.clientRequestId = :clientRequestId', { clientUserId: clientAuth.userId, clientRequestId: normalized.clientRequestId })
+      if (manager.connection.options.type === 'mysql') keyQuery.setLock('pessimistic_write')
+      const existingKey = await keyQuery.getOne()
+      if (existingKey && existingKey.payloadDigest !== normalized.payloadDigest) throw new BizError('相同请求标识不能提交不同补货内容', 409)
+      let existing: ClientRestockRequest | null
+      if (existingKey) {
+        const requestQuery = manager.getRepository(ClientRestockRequest).createQueryBuilder('restock').where('restock.id = :id AND restock.clientUserId = :clientUserId', { id: existingKey.restockRequestId, clientUserId: clientAuth.userId })
+        if (manager.connection.options.type === 'mysql') requestQuery.setLock('pessimistic_write')
+        existing = await requestQuery.getOne()
+        if (!existing) throw new BizError('补货请求记录异常，请联系客服', 409)
+      } else existing = await this.findRestockInTransaction(manager, clientAuth.userId, { skuId: normalized.skuId }, now)
+      // 活跃查询可能等待客服持有的行锁；等待期间到期的需求应立即释放新申请资格。
+      if (!existingKey && existing && effectiveRestockStatus(existing, new Date()) === 'expired') existing = null
+      if (existing) {
+        if (!existingKey) await keyRepo.save(keyRepo.create({ clientUserId: clientAuth.userId, clientRequestId: normalized.clientRequestId, payloadDigest: normalized.payloadDigest, restockRequestId: existing.id }))
+        // 这里不获取会话写锁：既有需求仅回读，避免与客服的“会话 -> 补货”锁序交叉。
+        const conversation = await manager.getRepository(ClientFeedbackConversation).findOneBy({ id: existing.conversationId })
+        if (!conversation) throw new BizError('补货会话记录异常，请联系客服', 409)
+        conversation.restock = existing
+        return { conversation, message: null as ClientFeedbackMessage | null, created: false }
+      }
+      if (!portalConfig.enabled) throw new BizError('当前系统暂未开放在线反馈入口', 403)
+      if (normalized.latestPickupAt.getTime() <= Date.now()) throw new BizError('最晚取货时间必须晚于当前时间', 400)
+      const productQuery = manager.getRepository(BaseProduct).createQueryBuilder('product').where('product.id = :id', { id: normalized.productId })
+      if (manager.connection.options.type === 'mysql') productQuery.setLock('pessimistic_write')
+      const product = await productQuery.getOne()
+      if (!product || !product.isActive || product.o2oStatus !== 'listed') throw new BizError('商品已下架或停用，暂不能申请补货', 409)
+      const skuQuery = manager.getRepository(BaseProductSku).createQueryBuilder('sku').where('sku.id = :id AND sku.productId = :productId', { id: normalized.skuId, productId: product.id })
+      if (manager.connection.options.type === 'mysql') skuQuery.setLock('pessimistic_write')
+      const sku = await skuQuery.getOne()
+      if (!sku || !sku.isActive || !sku.isCurrent) throw new BizError('当前规格已停用或退役，请刷新商品后重试', 409)
+      if (Math.max(0, Number(sku.currentStock) - Number(sku.preOrderedStock)) !== 0) throw new BizError('当前规格仍有可售库存，请直接选购', 409)
+      if (normalized.latestPickupAt.getTime() <= Date.now()) throw new BizError('最晚取货时间已到，请重新选择', 409)
+      const snapshot = this.buildClientUserSnapshot(account)
+      const pickupTime = new Date(normalized.latestPickupAt.getTime() + 8 * 3600_000).toISOString().slice(0, 16).replace('T', ' ')
+      const content = `申请补货：${product.productName}（${sku.specText || '默认规格'}），数量 ${normalized.quantity}，最晚取货时间 ${pickupTime}（UTC+8）。${normalized.remark ? `备注：${normalized.remark}` : ''}`
+      const repo = manager.getRepository(ClientFeedbackConversation)
+      const conversationNo = await this.buildConversationNo(manager)
+      // 编号分配也是可能等待的锁；必须在最后一次锁等待之后复核截止时间。
+      if (normalized.latestPickupAt.getTime() <= Date.now()) throw new BizError('最晚取货时间已到，请重新选择', 409)
+      const conversation = await repo.save(repo.create({
+        ...snapshot, clientUserId: clientAuth.userId, conversationNo,
+        issueType: 'restock', category: 'restock', sourceCode: 'client_mall', sourceLabel: '商城补货需求',
+        subject: `补货需求：${product.productName}`.slice(0, CLIENT_FEEDBACK_SUBJECT_MAX_LENGTH), priority: 'normal',
+        expectedResult: '请在最晚取货时间前安排补货', actualResult: '当前规格无可售库存', tagJson: '[]',
+        status: 'open', lastMessagePreview: this.previewMessage(content), lastMessageSenderType: 'client',
+        lastMessageAt: now, unreadForClientCount: 0, unreadForServiceCount: 0,
+      }))
+      const restockRepo = manager.getRepository(ClientRestockRequest)
+      conversation.restock = await restockRepo.save(restockRepo.create({ ...normalized,
+        conversationId: conversation.id, clientUserId: clientAuth.userId, productNameSnapshot: product.productName,
+        productCodeSnapshot: product.productCode, skuCodeSnapshot: sku.skuCode, specTextSnapshot: sku.specText || '默认规格',
+        status: 'requested', handledAt: null,
+      }))
+      await keyRepo.save(keyRepo.create({ clientUserId: clientAuth.userId, clientRequestId: normalized.clientRequestId, payloadDigest: normalized.payloadDigest, restockRequestId: conversation.restock.id }))
+      const message = await this.createMessage(manager, conversation, { senderType: 'client', senderUserId: clientAuth.userId,
+        senderName: snapshot.clientUsername || snapshot.clientAccount, conversationStatus: 'open' }, content)
+      await auditService.record({ actionType: 'client_feedback.restock_create', actionLabel: '客户端申请补货',
+        targetType: 'feedback_conversation', targetId: conversation.id, targetCode: conversation.conversationNo,
+        actor: { userId: clientAuth.userId, username: clientAuth.account, displayName: snapshot.clientUsername || snapshot.clientAccount }, requestMeta,
+        detail: { productId: product.id, skuId: sku.id, quantity: normalized.quantity, latestPickupAt: normalized.latestPickupAt.toISOString() },
+      }, manager)
+      await notificationService.emitEvent({ eventType: 'customer_service_client_message_created', sourceType: 'client_feedback_conversation', sourceId: conversation.id,
+        payload: { conversationNo: conversation.conversationNo, sourceUserId: clientAuth.userId, sourceUserDisplayName: snapshot.clientUsername || snapshot.clientAccount, summary: content.slice(0, 100) }, requestMeta,
+      }, manager)
+      return { conversation, message, created: true }
+    })
+    let result: Awaited<ReturnType<typeof createOnce>> | undefined
+    const maxAttempts = AppDataSource.options.type === 'mysql' ? 4 : 3
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try { result = await createOnce(await this.getPortalConfigs()); break } catch (error) {
+        const retryableMysqlLock = AppDataSource.options.type === 'mysql' && isRetryableMysqlTransactionError(error)
+        if (attempt < maxAttempts && (retryableMysqlLock || isUniqueConstraintError(error, FEEDBACK_CONVERSATION_NO_UNIQUE_CONSTRAINT_MATCHER))) {
+          if (retryableMysqlLock) await new Promise<void>((resolve) => setTimeout(resolve, 25 * (2 ** (attempt - 1)) + randomInt(25)))
+          // 重放完整账号锁、当前读、商品/SKU与期限检查，所有副作用仍受同一事务边界保护。
+          continue
+        }
+        throw error
+      }
+    }
+    if (!result) throw new BizError('补货申请未能提交，请重试', 500)
+    const message = result.message ? this.buildMessageView(result.message, { scope: 'client', userId: clientAuth.userId }) : null
+    if (result.created) this.publishConversationEvent('conversation_created', result.conversation, { source: 'restock_create' }, message ?? undefined)
+    const serverNow = new Date()
+    return { created: result.created, conversation: this.buildConversationSummary(result.conversation, undefined, serverNow), message, serverNow }
+  }
+
+  private async cancelActiveRestock(manager: EntityManager, conversation: ClientFeedbackConversation) {
+    const restock = conversation.restock
+    if (!restock) return
+    const status = effectiveRestockStatus(restock, new Date())
+    if (status === 'requested' || status === 'accepted') {
+      restock.status = 'cancelled'
+      restock.handledAt = new Date()
+      await manager.getRepository(ClientRestockRequest).save(restock)
+    }
+  }
+
+  async updateRestockRequest(id: string, input: { status: 'accepted' | 'restocked'; publicNote?: string }, actor: AuthUserContext, requestMeta?: RequestMeta) {
+    if (!['accepted', 'restocked'].includes(input.status)) throw new BizError('补货处理状态无效', 400)
+    const publicNote = input.publicNote?.trim() || ''
+    if (publicNote.length > CLIENT_FEEDBACK_MESSAGE_MAX_LENGTH - 100) throw new BizError('公开说明过长', 400)
+    const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const conversation = await this.requireConversationById(id, manager)
+      this.ensureConversationOwnedByActor(conversation, actor)
+      const restock = conversation.restock
+      if (!restock) throw new BizError('该会话不是补货需求', 400)
+      if (conversation.status === 'closed') throw new BizError('补货会话已关闭，不能继续处理', 409)
+      const statusBefore = effectiveRestockStatus(restock, new Date())
+      if (statusBefore === 'expired' || statusBefore === 'cancelled' || statusBefore === 'restocked') throw new BizError('补货需求已过期或已结束，不能继续处理', 409)
+      if (statusBefore === input.status) return { conversation, message: null as ClientFeedbackMessage | null, changed: false }
+      if (input.status === 'restocked' && statusBefore !== 'accepted') throw new BizError('请先受理补货需求，再标记已补货', 409)
+      // 在所有锁与归属检查完成后再次用服务端时间判定，不能让等待锁的旧请求越过截止时间。
+      if (effectiveRestockStatus(restock, new Date()) === 'expired') throw new BizError('补货需求已过期，不能继续处理', 409)
+      restock.status = input.status
+      restock.handledAt = new Date()
+      await manager.getRepository(ClientRestockRequest).save(restock)
+      const nextStatus = input.status === 'restocked' ? 'resolved' : 'processing'
+      const content = `${input.status === 'restocked' ? '客服已标记补货完成，请返回商城查看库存并按现有流程下单。' : '客服已受理补货需求。'}${publicNote ? `\n公开说明：${publicNote}` : ''}`
+      const message = await this.createMessage(manager, conversation, { senderType: 'system', senderUserId: null, senderName: '系统', conversationStatus: nextStatus }, content, 'system')
+      await auditService.record({ actionType: 'customer_service.restock_status', actionLabel: '处理补货需求', targetType: 'feedback_conversation', targetId: conversation.id,
+        targetCode: conversation.conversationNo, actor, requestMeta, detail: { statusBefore, statusAfter: input.status, publicNoteLength: publicNote.length },
+      }, manager)
+      return { conversation, message, changed: true }
+    })
+    const message = result.message ? this.buildMessageView(result.message, { scope: 'service', userId: actor.userId }) : null
+    if (result.changed) this.publishConversationEvent('conversation_status_changed', result.conversation, { restockStatus: input.status }, message ?? undefined)
+    const serverNow = new Date()
+    return { changed: result.changed, conversation: this.buildConversationSummary(result.conversation, actor.userId, serverNow), message, serverNow }
+  }
+
   async createConversation(input: CreateClientFeedbackConversationInput, clientAuth: ClientAuthContext, requestMeta?: RequestMeta) {
+    if (input.issueType === 'restock') throw new BizError('请从商城缺货商品入口提交补货需求', 400)
     const portalConfig = await this.getPortalConfigs()
     if (!portalConfig.enabled) {
       throw new BizError('当前系统暂未开放在线反馈入口', 403)
@@ -1613,6 +1793,7 @@ class ClientFeedbackService {
   async listMyConversations(clientAuth: ClientAuthContext, query: ClientFeedbackListQuery) {
     const qb = this.conversationRepo
       .createQueryBuilder('conversation')
+      .leftJoinAndSelect('conversation.restock', 'restock')
       .where('conversation.clientUserId = :clientUserId', { clientUserId: clientAuth.userId })
 
     if (query.status) {
@@ -1639,11 +1820,13 @@ class ClientFeedbackService {
       .take(query.pageSize)
       .getManyAndCount()
 
+    const serverNow = new Date()
     return {
       page: query.page,
       pageSize: query.pageSize,
       total,
-      list: list.map((item) => this.buildConversationSummary(item)),
+      serverNow,
+      list: list.map((item) => this.buildConversationSummary(item, undefined, serverNow)),
     }
   }
 
@@ -1767,6 +1950,7 @@ class ClientFeedbackService {
     const clientSnapshot = await this.getClientUserSnapshot(clientAuth.userId)
 
     const result = await runInTransaction(async (manager) => {
+      await lockActiveClientAccountForBusiness(manager, clientAuth.userId)
       const conversation = await this.requireOwnedConversation(id, clientAuth, manager)
       if (conversation.status === 'closed') {
         return {
@@ -1777,6 +1961,10 @@ class ClientFeedbackService {
       }
       if (conversation.status !== 'resolved') {
         throw new BizError('当前反馈单还未进入待确认阶段，暂不能确认完成', 400)
+      }
+
+      if (conversation.restock && effectiveRestockStatus(conversation.restock, new Date()) !== 'restocked') {
+        throw new BizError('补货需求尚未标记已补货，暂不能确认完成', 409)
       }
 
       conversation.status = 'closed'
@@ -1844,6 +2032,7 @@ class ClientFeedbackService {
     const clientSnapshot = await this.getClientUserSnapshot(clientAuth.userId)
 
     const result = await runInTransaction(async (manager) => {
+      await lockActiveClientAccountForBusiness(manager, clientAuth.userId)
       const conversation = await this.requireOwnedConversation(id, clientAuth, manager)
       if (conversation.status === 'closed') {
         return {
@@ -1854,6 +2043,7 @@ class ClientFeedbackService {
       }
 
       const statusBefore = conversation.status
+      await this.cancelActiveRestock(manager, conversation)
       conversation.status = 'closed'
       conversation.closedAt = new Date()
       await manager.getRepository(ClientFeedbackConversation).save(conversation)
@@ -1994,6 +2184,17 @@ class ClientFeedbackService {
 
   async listServiceConversations(query: CustomerServiceConversationListQuery, actor: AuthUserContext) {
     const qb = this.conversationRepo.createQueryBuilder('conversation')
+      .leftJoinAndSelect('conversation.restock', 'restock')
+    const serverNow = new Date()
+    if (query.issueType) qb.andWhere('conversation.issueType = :issueType', { issueType: query.issueType })
+    if (query.productId) qb.andWhere('restock.productId = :productId', { productId: query.productId })
+    if (query.restockStatus) {
+      qb.andWhere(`(${effectiveRestockStatusSql('restock')}) = :restockStatus`, { restockStatus: query.restockStatus, restockNow: serverNow })
+    }
+    if (query.startDate || query.endDate) {
+      const range = resolveDashboardFilter({ startDate: query.startDate, endDate: query.endDate })
+      qb.andWhere('COALESCE(restock.createdAt, conversation.createdAt) >= :restockStart AND COALESCE(restock.createdAt, conversation.createdAt) < :restockEnd', { restockStart: range.startAt, restockEnd: range.endExclusive })
+    }
 
     if (query.status) {
       qb.andWhere('conversation.status = :status', { status: query.status })
@@ -2036,7 +2237,8 @@ class ClientFeedbackService {
       page: query.page,
       pageSize: query.pageSize,
       total,
-      list: list.map((item) => this.buildConversationSummary(item, actor.userId)),
+      serverNow,
+      list: list.map((item) => this.buildConversationSummary(item, actor.userId, serverNow)),
     }
   }
 
@@ -2151,6 +2353,12 @@ class ClientFeedbackService {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
       const conversation = await this.requireConversationById(id, manager)
       this.ensureConversationOwnedByActor(conversation, actor)
+      if (conversation.restock) {
+        const effectiveStatus = effectiveRestockStatus(conversation.restock, new Date())
+        if (input.status === 'resolved' && effectiveStatus !== 'restocked') throw new BizError('请通过补货处理入口标记已补货', 409)
+        if (conversation.status === 'closed' && input.status !== 'closed') throw new BizError('补货会话关闭后不能重新打开，请保留历史需求', 409)
+        if (input.status === 'closed') await this.cancelActiveRestock(manager, conversation)
+      }
       if (conversation.status === input.status) {
         return {
           conversation,
@@ -2377,6 +2585,9 @@ class ClientFeedbackService {
       const subjectBefore = conversation.subject
 
       if (typeof input.issueType === 'string') {
+        if ((conversation.issueType === 'restock' || input.issueType === 'restock') && input.issueType !== conversation.issueType) {
+          throw new BizError('补货类型不能通过普通工单编辑进行转换', 409)
+        }
         conversation.issueType = this.normalizeIssueType(input.issueType)
       }
       if (typeof input.subject === 'string') {

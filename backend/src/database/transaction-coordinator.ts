@@ -228,7 +228,13 @@ const resolveSqlCommand = (query: string): string | null => {
   return firstCommand
 }
 
+// TypeORM 的 hasColumn/getTable 在 SQLite 上用这些 PRAGMA 读结构；维护冻结期的启动预检也要能读，
+// 因此只放行“名称在白名单、整条只有一个括号参数、不含赋值和多语句”的写法，其余 PRAGMA 仍按写处理。
+const READ_ONLY_SQLITE_PRAGMA_PATTERN =
+  /^\s*PRAGMA\s+(?:"?[A-Za-z_]\w*"?\.)?(?:table_x?info|index_list|index_x?info|foreign_key_list)\s*\(\s*(?:"[^"=;]*"|'[^'=;]*'|[A-Za-z_]\w*)\s*\)\s*;?\s*$/i
+
 const isReadOnlySql = (query: string): boolean => {
+  if (READ_ONLY_SQLITE_PRAGMA_PATTERN.test(query)) return true
   const command = resolveSqlCommand(query)
   return command !== null && READ_ONLY_SQL_COMMANDS.has(command)
 }

@@ -8,6 +8,7 @@ import { parse, compileScript } from '@vue/compiler-sfc'
 import { rolldown } from 'rolldown'
 import { createRenderer, createSSRApp, h, nextTick, reactive, watch } from 'vue'
 import { renderToString } from '@vue/server-renderer'
+import { code128BarcodePlugin } from './code128-barcode-module.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const sourcePath = path.join(root, 'src/views/inventory/components/BarcodeLabelPrintDialog.vue')
@@ -26,7 +27,7 @@ let loadResult = async () => []
 const bundle = await rolldown({
   input: sourcePath,
   external: (specifier) => specifier === 'vue' || specifier === 'jsbarcode',
-  plugins: [{
+  plugins: [code128BarcodePlugin(), {
     name: '条码弹窗测试依赖隔离',
     resolveId(specifier) {
       if (specifier === sourcePath) return sourcePath
@@ -47,14 +48,22 @@ globalThis.__barcodeTestLoad = async () => { calls.loading += 1; return loadResu
 globalThis.__barcodeTestError = (message) => calls.errors.push(message)
 globalThis.__barcodeTestWarning = (message) => calls.warnings.push(message)
 const output = path.join(outputRoot, 'BarcodeLabelPrintDialog-setup.mjs')
-await bundle.write({ file: output, format: 'esm', sourcemap: true })
+await bundle.write({ file: output, format: 'esm', sourcemap: true, codeSplitting: false })
 await bundle.close()
 const component = (await import(pathToFileURL(output).href)).default
 const helperBundle = await rolldown({ input: helperPath })
 const helperOutput = path.join(outputRoot, 'barcode-label-print-helpers.mjs')
-await helperBundle.write({ file: helperOutput, format: 'esm' })
+await helperBundle.write({ file: helperOutput, format: 'esm', sourcemap: true })
 await helperBundle.close()
 const { getLabelContentFit } = await import(pathToFileURL(helperOutput).href)
+
+test('独立 helper 编译产物保留真实 TS 源码图供覆盖率归属', () => {
+  assert.match(fs.readFileSync(helperOutput, 'utf8'), /\/\/# sourceMappingURL=barcode-label-print-helpers\.mjs\.map/u)
+  const map = JSON.parse(fs.readFileSync(`${helperOutput}.map`, 'utf8'))
+  assert.equal(map.file, path.basename(helperOutput))
+  assert.deepEqual(map.sources.map((source) => path.resolve(outputRoot, source)), [helperPath])
+  assert.deepEqual(map.sourcesContent, [fs.readFileSync(helperPath, 'utf8')])
+})
 
 const renderer = createRenderer({
   createElement: (tag) => ({ tag, children: [], parent: null }),

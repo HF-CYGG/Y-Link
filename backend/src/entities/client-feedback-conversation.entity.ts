@@ -4,7 +4,8 @@
  * 维护重点：变更会话状态、指派信息或 SLA 相关字段时，需要同步检查服务层状态机和前端状态映射。
  */
 
-import { Column, CreateDateColumn, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, UpdateDateColumn, type Relation } from 'typeorm'
+import { Column, CreateDateColumn, Entity, Index, JoinColumn, ManyToOne, OneToOne, PrimaryGeneratedColumn, UpdateDateColumn, type Relation } from 'typeorm'
+import { ClientRestockRequest } from './client-restock-request.entity.js'
 import { entityColumnOptions } from './entity-column-options.js'
 import { ClientUser, type ClientUserAccountType } from './client-user.entity.js'
 import { SysUser } from './sys-user.entity.js'
@@ -32,7 +33,7 @@ export type ClientFeedbackPriority = (typeof CLIENT_FEEDBACK_PRIORITIES)[number]
  * - suggestion：普通建议、咨询或体验反馈；
  * - bug：具备复现特征、需要结构化排查的专业问题。
  */
-export const CLIENT_FEEDBACK_ISSUE_TYPES = ['suggestion', 'bug'] as const
+export const CLIENT_FEEDBACK_ISSUE_TYPES = ['suggestion', 'bug', 'restock'] as const
 export type ClientFeedbackIssueType = (typeof CLIENT_FEEDBACK_ISSUE_TYPES)[number]
 
 /**
@@ -62,6 +63,9 @@ export type ClientFeedbackLastSenderType = (typeof CLIENT_FEEDBACK_LAST_SENDER_T
 
 @Entity({ name: 'client_feedback_conversation' })
 export class ClientFeedbackConversation {
+  @OneToOne(() => ClientRestockRequest, (request) => request.conversation)
+  restock?: Relation<ClientRestockRequest> | null
+
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })
   id!: string
 

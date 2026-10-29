@@ -2,9 +2,12 @@
  * 文件说明：backend/scripts/release-full-regression-verify.ts
  * 文件职责：提供发布前后端全功能 HTTP 回归验证，覆盖管理端、客户端、上传与静态读取核心链路。
  * 实现逻辑：使用独立 SQLite 运行时启动真实 Express 服务，再通过 fetch 串联鉴权、商品、预订、上传与静态访问断言。
+ * MySQL 模式：设置 RELEASE_REGRESSION_MYSQL_PORT 后改连本机隔离 MySQL 测试实例，在随机新库中按自动迁移同一路径
+ * （建表子进程 initialize → 补建必需触发器 → 子进程 verify）建表，再走 MySQL 生产启动自检，最后删除随机库并回查。
  */
 
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -27,11 +30,68 @@ const supplierPassword = process.env.Y_LINK_VERIFY_SUPPLIER_PASSWORD?.trim() || 
 const clientPassword = process.env.Y_LINK_VERIFY_CLIENT_PASSWORD?.trim() || `Cl_${verifySeed}_Dd4!`
 const clientResetPassword = process.env.Y_LINK_VERIFY_CLIENT_RESET_PASSWORD?.trim() || `ClReset_${randomBytes(16).toString('base64url')}_Ee5!`
 
+const mysqlPortText = process.env.RELEASE_REGRESSION_MYSQL_PORT?.trim()
+const mysqlMode = Boolean(mysqlPortText)
+const mysqlTarget = {
+  host: '127.0.0.1',
+  port: Number(mysqlPortText),
+  user: process.env.RELEASE_REGRESSION_MYSQL_USER?.trim() || 'root',
+  password: process.env.RELEASE_REGRESSION_MYSQL_PASSWORD ?? '',
+  // 42 字符的随机库名刻意让迁移锁名超过 MySQL 64 字符上限，覆盖锁名摘要分支。
+  database:`y_link_release_regression_${randomBytes(8).toString('hex')}`,
+}
+if (mysqlMode) {
+  assert.equal(process.env.RELEASE_REGRESSION_MYSQL_CONFIRM_TEST_SERVER, 'true', 'MySQL 模式必须显式确认本机隔离测试实例')
+  assert.ok(Number.isInteger(mysqlTarget.port) && mysqlTarget.port >= 10_000 && mysqlTarget.port <= 65_535, 'MySQL 模式必须使用隔离高位端口')
+  assert.match(mysqlTarget.database, /^y_link_release_regression_[a-f0-9]{16}$/, '随机库名不在受控命名空间')
+}
+
 process.env.APP_PROFILE = `release-full-regression-${verifySeed}`
-process.env.DB_TYPE = 'sqlite'
 process.env.DB_SYNC = 'false'
-process.env.SQLITE_DB_PATH = sqlitePath
 process.env.INIT_ADMIN_PASSWORD = adminPassword
+if (mysqlMode) {
+  process.env.Y_LINK_SKIP_DATABASE_RUNTIME_OVERRIDE = 'true'
+  process.env.DB_TYPE = 'mysql'
+  process.env.DB_HOST = mysqlTarget.host
+  process.env.DB_PORT = String(mysqlTarget.port)
+  process.env.DB_USER = mysqlTarget.user
+  process.env.DB_PASSWORD = mysqlTarget.password
+  process.env.DB_NAME = mysqlTarget.database
+} else {
+  process.env.DB_TYPE = 'sqlite'
+  process.env.SQLITE_DB_PATH = sqlitePath
+}
+
+/** 与自动迁移的 runMysqlSchemaWorker 同口径：独立 DB_TYPE=mysql 子进程按实体建表或核验，不经命令行传递密码。 */
+function runMysqlSchemaWorker(mode: 'initialize' | 'verify') {
+  const workerEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    Y_LINK_SKIP_DATABASE_RUNTIME_OVERRIDE: 'true',
+    Y_LINK_MYSQL_SCHEMA_WORKER: 'true',
+    Y_LINK_MYSQL_SCHEMA_WORKER_MODE: mode,
+    DB_SYNC: 'false',
+  }
+  delete workerEnv.APP_PROFILE
+  delete workerEnv.ENV_FILE
+  const result = spawnSync(process.execPath, ['--import', 'tsx', 'src/commands/prepare-mysql-migration-schema.ts'], {
+    cwd: backendRoot,
+    env: workerEnv,
+    encoding: 'utf8',
+    windowsHide: true,
+  })
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`.replaceAll(mysqlTarget.password || '\u0000', '***').trim()
+  assert.equal(result.status, 0, `MySQL 建表子进程 ${mode} 失败：${output.slice(-4_000)}`)
+}
+
+async function withMysqlAdmin<T>(action: (connection: import('mysql2/promise').Connection) => Promise<T>) {
+  const { createConnection } = await import('mysql2/promise')
+  const connection = await createConnection({ host: mysqlTarget.host, port: mysqlTarget.port, user: mysqlTarget.user, password: mysqlTarget.password })
+  try {
+    return await action(connection)
+  } finally {
+    await connection.end()
+  }
+}
 
 const TEST_CAPTCHA_CODE = 'ABC123'
 installCaptchaServiceForTesting({ createCode: () => TEST_CAPTCHA_CODE })
@@ -161,6 +221,16 @@ async function main() {
   fs.mkdirSync(sqliteRoot, { recursive: true })
   fs.mkdirSync(uploadsRoot, { recursive: true })
 
+  if (mysqlMode) {
+    await withMysqlAdmin(async (connection) => {
+      const [rows] = await connection.query('SELECT VERSION() AS version')
+      console.log(`MySQL 隔离实例版本：${(rows as Array<{ version: string }>)[0]?.version}`)
+      await connection.query(`CREATE DATABASE \`${mysqlTarget.database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci`)
+    })
+    runMysqlSchemaWorker('initialize')
+    pass('MySQL 随机库已按自动迁移建表子进程初始化')
+  }
+
   const { createApp } = await import('../src/app.js')
   const { AppDataSource } = await import('../src/config/data-source.js')
   const { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } = await import('../src/config/database-bootstrap.js')
@@ -170,6 +240,13 @@ async function main() {
 
   prepareDatabaseRuntime()
   await AppDataSource.initialize()
+  if (mysqlMode) {
+    // 迁移导入后补建实体同步不表达的追加型保护触发器，再由子进程核验，与自动迁移成功前的最后两步一致。
+    const { ensureMysqlRequiredTriggers } = await import('../src/config/mysql-migration-runner.js')
+    await ensureMysqlRequiredTriggers(AppDataSource)
+    runMysqlSchemaWorker('verify')
+    pass('MySQL 必需触发器补建与结构子进程核验通过')
+  }
 
   const app = createApp()
   const server = app.listen(0, '127.0.0.1')
@@ -265,9 +342,9 @@ async function main() {
         }),
       '管理员数据库性能摘要读取',
     )
-    assert.equal(databasePerformance.engine, 'sqlite')
-    assert.equal(databasePerformance.supportsConcurrentWriters, false)
-    assert.equal(databasePerformance.supportsMultipleApiInstances, false)
+    assert.equal(databasePerformance.engine, mysqlMode ? 'mysql' : 'sqlite')
+    assert.equal(databasePerformance.supportsConcurrentWriters, mysqlMode)
+    assert.equal(databasePerformance.supportsMultipleApiInstances, mysqlMode)
     assert.ok(Object.hasOwn(databasePerformance, 'writeCoordinator'))
     pass('管理员数据库性能摘要读取通过')
 
@@ -1483,6 +1560,9 @@ async function main() {
     })
 
     if (AppDataSource.isInitialized) {
+      // 与生产停机同序：先排空 HTTP 响应后仍在途的异步写，再销毁连接池。
+      const { databaseMaintenanceModeService } = await import('../src/services/database-maintenance-mode.service.js')
+      await databaseMaintenanceModeService.shutdownAndDrain()
       await AppDataSource.destroy()
     }
 
@@ -1500,9 +1580,19 @@ async function main() {
 
 try {
   await main()
-  console.log('\n发布前后端全功能回归通过')
+  console.log(`\n发布前后端全功能回归通过（${mysqlMode ? 'MySQL' : 'SQLite'}）`)
 } catch (error) {
   console.error('\n发布前后端全功能回归失败')
   console.error(error)
-  process.exit(1)
+  process.exitCode = 1
+} finally {
+  // 建库在服务启动前完成，失败也可能已建库，因此统一在最外层删除随机库并回查。
+  if (mysqlMode) {
+    await withMysqlAdmin(async (connection) => {
+      await connection.query(`DROP DATABASE IF EXISTS \`${mysqlTarget.database}\``)
+      const [rows] = await connection.query('SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?', [mysqlTarget.database])
+      assert.equal((rows as unknown[]).length, 0, 'MySQL 随机回归库删除后仍存在')
+    })
+  }
 }
+process.exit(process.exitCode ?? 0)
