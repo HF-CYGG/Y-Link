@@ -27,7 +27,7 @@ Y-Link 覆盖“线上预订、线下核销、出库开单、供货入库、库�
 - 管理端：管理员、运营人员、供货方使用，负责商品、库存、出入库、核销、用户、配置和审计。
 - 客户端：普通用户使用，负责注册登录、商品大厅、购物车、预订下单、订单查看、个人资料和反馈。
 
-技术栈：Vue 3、TypeScript、Element Plus、Pinia、Express、TypeORM。默认使用 SQLite，支持迁移到 MySQL。
+技术栈：Vue 3、TypeScript、Element Plus、Pinia、Express、TypeORM。默认使用 SQLite，支持迁移到 MySQL；高并发或多实例部署可选接入独立 Redis。
 
 ## 界面预览
 
@@ -525,9 +525,16 @@ MySQL 健康后，在管理端“系统管理 -> 数据库迁移”填写：`hos
 
 迁移前应在 `.env` 中一并确认 `DB_POOL_SIZE`、`DB_CONNECT_TIMEOUT_MS`、`DB_ACQUIRE_TIMEOUT_MS`、`DB_IDLE_TIMEOUT_MS`、`DB_QUEUE_LIMIT` 与 `DB_MAX_QUERY_MS`。这些参数由 Onebox 容器持续保留，切换后同一个进程会用它们建立 MySQL 连接池；单实例默认连接池为 20，多个应用副本时必须按“实例数 × 每实例连接池”计算总连接数，并给 MySQL 运维连接留出余量。
 
+MySQL 连接还会设置两项会话上限，用于应对死锁、长事务和意外断连：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `DB_LOCK_WAIT_TIMEOUT_SECONDS` | `15` | 行锁等待上限（1-300 秒）。死锁或长事务持锁时，等待方快速失败；可幂等重放的下单事务自动重试，其余请求返回“数据库繁忙”，不会长时间挂起 |
+| `DB_SESSION_WAIT_TIMEOUT_SECONDS` | `600` | 会话空闲上限（60-28800 秒）。应用容器意外停止或网络中断时，残留的未提交事务超过该时间后由 MySQL 回滚并释放行锁；实际值不小于 `DB_IDLE_TIMEOUT_MS` 换算秒数 + 60 |
+
 切换到 MySQL 并产生第一笔新业务写入后，旧 SQLite 已经是历史快照，系统会禁用“直接清除覆盖/回到旧 SQLite”。如需回退，必须恢复 MySQL 备份或执行受控反向迁移，避免静默丢单。
 
-运行边界：SQLite 模式固定为单 Onebox、单应用进程、本地持久化磁盘，100 个突发下单会进入有界写队列串行完成；需要持续百人并发写、第二个应用副本，或管理员接口 `GET /api/data-maintenance/database/performance` 中 `writeCoordinator.pendingWrites`、等待超时持续升高时，应迁移到 MySQL。万人浏览仍应由 Nginx/CDN 缓存吸收，不能把所有目录请求直接压到任一数据库。
+运行边界：SQLite 模式固定为单 Onebox、单应用进程、本地持久化磁盘，100 个突发下单会进入有界写队列串行完成；需要持续百人并发写、第二个应用副本（还需接入 Redis，见下文[Redis 与多实例部署](#redis-与多实例部署可选)），或管理员接口 `GET /api/data-maintenance/database/performance` 中 `writeCoordinator.pendingWrites`、等待超时持续升高时，应迁移到 MySQL。万人浏览仍应由 Nginx/CDN 缓存吸收，不能把所有目录请求直接压到任一数据库。
 
 #### 新库直接使用外置 MySQL
 
@@ -560,6 +567,53 @@ docker compose --env-file .env.docker.mysql -f compose.mysql.yml up -d --force-r
 - [compose.mysql.yml](./compose.mysql.yml)
 - [.env.docker.mysql.example](./.env.docker.mysql.example)
 - [数据库迁移演练与验收手册](./docs/Y-Link数据库迁移向导演练与验收手册.md)
+
+### Redis 与多实例部署（可选）
+
+Redis 是可选增强。`REDIS_URL` 留空时，系统行为与未接入 Redis 时完全一致，单实例部署不需要配置。以下情况建议接入独立 Redis：
+
+- 需要两个及以上后端实例横向扩容（必须同时使用 MySQL）；
+- 单实例 MySQL 部署希望减轻限流风控对数据库的写压力，或希望商城目录、报表与工作台统计有共享缓存。
+
+接入后 Redis 承担以下工作：
+
+| 能力 | 说明 |
+| --- | --- |
+| 安全票据 | 图形验证码、短信与邮箱验证码、MFA、找回密码、通行密钥挑战跨实例共享并原子消费；敏感票据值加密存储，键名只用摘要 |
+| 限流与登录风控 | 改走 Redis 原子脚本，不再每次请求写一笔数据库事务；撞库态势、SSE 建连、附件上传与导出名额按集群计数 |
+| 客服实时消息 | 会话事件与撤权断连跨实例广播，客服在线态按集群合并，负载均衡不再需要会话粘滞 |
+| 共享查询缓存 | 商城目录与门店快照作为二级缓存跨实例共享；报表预览与工作台统计缓存 30 秒；业务写入成功后、响应发出前即令缓存失效，写后立即查询在任意实例上都是新数据 |
+| 后台任务与启动 | 超时回收、会话清理等后台任务同一时刻只在一个实例执行；启动期建表与补数串行进行 |
+
+仓库提供 [compose.redis.yml](./compose.redis.yml) 叠加层（`redis:7.4-alpine`，开启密码、AOF 与 `noeviction`，不暴露宿主机端口），可与 `compose.mysql.yml` 或 `compose.cloud.yml` 叠加：
+
+```bash
+# 在 .env.docker.mysql 中填写 REDIS_URL=redis://redis:6379/0 与 REDIS_PASSWORD
+docker compose --env-file .env.docker.mysql -f compose.mysql.yml -f compose.redis.yml up -d
+```
+
+主要环境变量（完整说明见 [.env.docker.mysql.example](./.env.docker.mysql.example)）：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `REDIS_URL` | 空 | `redis://host:6379/0` 或 `rediss://host:6380`，留空不启用 |
+| `REDIS_PASSWORD` | 空 | Redis 密码，建议写在这里而不是 URL 中；`REDIS_USERNAME` 用于 ACL 用户 |
+| `REDIS_TLS` / `REDIS_TLS_CA` | `false` / 空 | 跨网络连接时开启 TLS；自签 CA 填容器内可读的 PEM 文件路径 |
+| `REDIS_KEY_PREFIX` | `ylink:` | 多套环境共用同一个 Redis 时用于隔离 |
+| `REDIS_CONNECT_TIMEOUT_MS` / `REDIS_COMMAND_TIMEOUT_MS` | `3000` / `500` | 连接与单命令超时；命令超时较短，Redis 抖动时快速失败并降级 |
+| `Y_LINK_MULTI_INSTANCE` | `false` | 设为 `true` 时启动期强制要求 `DB_TYPE=mysql`、已配置 `REDIS_URL`、所有实例注入同一个 `Y_LINK_DATA_ENCRYPTION_KEY`，缺一拒绝启动 |
+
+Redis 已配置但暂时不可用时按能力分级降级：限流与风控回落到数据库，客服消息只投递本实例并由客户端重连补齐，共享缓存直接回源数据库，安全票据返回 503 而不放行。公开 `/health` 的 `redis` 字段（`disabled`、`connecting`、`ready`、`degraded`）可用于观察状态，不影响 `status: UP` 的判定。
+
+多实例部署注意事项：
+
+- Redis 版本不低于 6.2（推荐 7.x），只放内网，必须设置密码或 ACL，跨网络必须开启 TLS。
+- 连接数预算：`实例数 × DB_POOL_SIZE` 不超过 MySQL `max_connections` 的 80%。
+- 多个实例需要外部负载均衡，并挂载同一个上传目录（共享卷或 NFS）。
+- 数据库维护、只读模式与迁移助手的状态只在本实例，执行迁移、数据恢复或 JSON 导入前先缩容到 1 个实例。
+- Onebox 与 SQLite 只能单实例，不支持多实例。
+
+详细说明见 [本地联调与部署模式](./docs/project-context/51-本地联调与部署模式.md) 的“多实例 + 独立 MySQL + 独立 Redis”一节，以及 [Redis 可选定位与选型 ADR](./docs/adr/0001-redis-可选定位与选型.md)。
 
 ## 本地开发
 
@@ -606,6 +660,8 @@ npm run local:dev
 | `npm run verify:db:concurrency` | SQLite 副本 + MySQL 临时库并发验收 |
 | `npm run verify:db:migration:timeout` | 数据库迁移 Docker 前置门禁超时验证 |
 | `npm run verify:db:migration` | SQLite -> MySQL 隔离环境端到端验收 |
+| `npm --prefix backend run redis:integration:verify` | 通过 Docker 拉起临时 Redis，验证票据、限流、跨实例广播、租约、共享缓存与降级 |
+| `npm --prefix backend run mysql:session-resilience:verify` | 通过 Docker 拉起临时 MySQL 8.4，验证锁等待上限、连接池空闲回收与失联事务回滚（约 1.5 分钟） |
 | `npm run verify:performance` | 性能预算验证 |
 | `npm run verify:all` | 全量质量验证 |
 
@@ -661,6 +717,7 @@ Y-Link
 ├─ scripts/                     构建、验证、部署辅助脚本
 ├─ compose.cloud.yml            云端双容器部署
 ├─ compose.mysql.yml            外置 MySQL 部署
+├─ compose.redis.yml            可选独立 Redis 叠加层
 ├─ Dockerfile                   前端镜像
 ├─ Dockerfile.onebox            单镜像
 └─ README.md
@@ -684,13 +741,16 @@ Y-Link
 - 不要把真实密码、数据库连接、Token 写入仓库。
 - 生产环境建议使用 HTTPS 和反向代理。
 - 管理端已做登录失败风控、验证码、权限校验和审计记录。
-- SQLite 适合轻量部署；多人高并发和长期生产建议使用 MySQL。
+- SQLite 适合轻量部署；多人高并发和长期生产建议使用 MySQL，多实例部署还需接入 Redis。
+- Redis 只放内网，必须设置密码或 ACL，跨网络开启 TLS；安全票据中的敏感值写入 Redis 前已加密。
 
 ## 相关文档
 
 - [Y-Link 使用指南](./docs/Y-Link使用指南.md)
 - [数据库迁移演练与验收手册](./docs/Y-Link数据库迁移向导演练与验收手册.md)
 - [企业级维护与二开白皮书](./docs/Y-Link企业级维护与二开白皮书.md)
+- [本地联调与部署模式（含多实例 + Redis）](./docs/project-context/51-本地联调与部署模式.md)
+- [Redis 可选定位与选型 ADR](./docs/adr/0001-redis-可选定位与选型.md)
 - [移动端工程与共享基础](./docs/project-context/60-移动端工程与共享基础.md)
 - [GitHub Wiki](https://github.com/HF-CYGG/Y-Link/wiki)
 
