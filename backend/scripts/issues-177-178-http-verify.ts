@@ -7,9 +7,10 @@ import assert from 'node:assert/strict'
 import { fork } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
-export async function verifyIssuesHttpRegistration() {
+export async function verifyIssuesHttpRegistration(verificationRoot: string) {
   const child = fork(fileURLToPath(new URL('./issues-177-178-ui-fixture.ts', import.meta.url)), [], {
-    cwd: process.cwd(), execArgv: ['--import', 'tsx'], env: process.env, windowsHide: true,
+    // 使用调用方已经自建的独占目录，不依赖CI或外部shell恰好设置了环境变量。
+    cwd: process.cwd(), execArgv: ['--import', 'tsx'], env: { ...process.env, YLINK_ISSUES_VERIFY_ROOT: verificationRoot }, windowsHide: true,
     stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
   })
   const exited = new Promise<number | null>((resolve) => child.once('exit', resolve))

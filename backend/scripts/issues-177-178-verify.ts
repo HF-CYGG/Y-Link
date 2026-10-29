@@ -282,7 +282,7 @@ try {
   assert.deepEqual(validateExportPayload(payload).tables.preorders, [])
   if (!mysqlMode) {
     const { verifyIssuesHttpRegistration } = await import('./issues-177-178-http-verify.js')
-    await verifyIssuesHttpRegistration()
+    await verifyIssuesHttpRegistration(runtime)
   }
   console.log(`通过：${mysqlMode ? '真实 MySQL' : '隔离 SQLite'} 服务场景；HTTP 权限和浏览器仍须单独验收`)
 } finally {
