@@ -33,7 +33,7 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <section v-if="hasEnteredStepFlow && activeStepKey === 'run'" class="apple-card space-y-5 p-5 sm:p-6">
+  <section v-if="hasEnteredStepFlow && activeStepKey === 'run'" class="space-y-5 rounded-xl border border-slate-200/80 p-5 dark:border-white/10 sm:p-6">
     <div class="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-4 dark:border-white/5">
       <div>
         <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">第 3 步：执行迁移并核验结果</h2>
@@ -134,6 +134,20 @@ const emit = defineEmits<{
               :description="`系统当前展示的是占位记录。文件：${selectedTask.recordFilePath || selectedTask.recordFileName || '-'}；原因：${selectedTask.recordErrorMessage || selectedTask.errorMessage || '未知错误'}`"
             />
 
+            <el-alert
+              v-if="selectedTask.readState !== 'corrupted' && ['failed', 'rolled_back'].includes(selectedTask.status)"
+              :title="selectedTask.status === 'rolled_back' ? '任务未完成，已回退到 SQLite' : '任务执行失败'"
+              type="error"
+              :closable="false"
+              show-icon
+            >
+              <template #default>
+                <p class="whitespace-pre-wrap break-all font-mono text-xs leading-5">
+                  {{ selectedTask.errorMessage || selectedTask.progress.currentStage || '后端未返回失败原因' }}
+                </p>
+                <p v-if="selectedTask.rollbackResult" class="mt-1 text-xs">自动回退：{{ selectedTask.rollbackResult.message }}</p>
+              </template>
+            </el-alert>
             <el-progress
               :percentage="selectedTaskProgressPercent"
               :status="selectedTask.status === 'failed' ? 'exception' : selectedTask.status === 'succeeded' ? 'success' : undefined"
