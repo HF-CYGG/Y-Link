@@ -227,6 +227,13 @@ async function runMainScenario() {
     assert.equal(await persistentRiskStateService.readFailure('verify-expire', 1000, now + 1000), null, '超过重置窗口且未锁定时失败计数应清零')
 
     // 4. 消息总线：本实例发出的消息其他实例能收到，本实例不回环；其他实例的消息能触发处理器
+    // 订阅连接断开后重新就绪：重新订阅并触发补齐回调（Pub/Sub 不补发断开期间的消息）
+    let resyncCount = 0
+    const stopResync = redisBus.onRedisBusResync(() => { resyncCount += 1 })
+    redisClient.getRedisSubscriber()?.emit('ready')
+    for (let index = 0; index < 20 && resyncCount === 0; index += 1) await delay(50)
+    stopResync()
+    assert.equal(resyncCount, 1, '订阅连接重新就绪后必须触发总线补齐回调')
     const received: unknown[] = []
     await rawSubscriber.subscribe(`${prefix}bus:verify-topic`, `${prefix}bus:cs:revoke`, `${prefix}bus:cs:conversation`, `${prefix}bus:cache:mall-catalog`)
     rawSubscriber.on('message', (channel, message) => {
@@ -411,6 +418,8 @@ async function runRecoveredScenario() {
     const mirrored = await riskRepository.findOneBy({ bucketDigest: redisLockDigest })
     assert.equal(mirrored?.lockedUntil?.getTime(), locked.lockedUntil, 'Redis 触发的锁定必须镜像到数据库')
     assert.equal(mirrored?.failureCount, 5)
+    await persistentRiskStateService.resetFailure(redisLockKey)
+    assert.equal(await riskRepository.countBy({ bucketDigest: redisLockDigest }), 0, '清零失败状态必须同时删除数据库镜像，避免 Redis 再故障时旧计数复活')
     console.log('[redis-verify] 恢复场景：登录锁定在 Redis 与数据库间双向兜底 通过')
   } finally {
     await redisClient.closeRedis()

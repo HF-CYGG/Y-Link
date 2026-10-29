@@ -27,7 +27,7 @@ import { BizError } from '../utils/errors.js'
 import { CUSTOMER_SERVICE_REALTIME_POLICY } from './client-feedback-security-policy.js'
 import { isAccountCurrentlyDeactivated } from './account-business-guard.service.js'
 import { persistentRiskStateService } from './persistent-risk-state.service.js'
-import { publishRedisBus, subscribeRedisBus } from '../redis/redis-bus.js'
+import { onRedisBusResync, publishRedisBus, subscribeRedisBus } from '../redis/redis-bus.js'
 import { getRedisClient, getRedisInstanceId, isRedisEnabled, isRedisReady, recordRedisDegrade, redisKey } from '../redis/redis-client.js'
 
 export interface CustomerServiceRealtimeEventPayload {
@@ -152,6 +152,13 @@ class CustomerServiceRealtimeService {
       if (!isRealtimeScope(scope) || typeof key !== 'string' || !key || key.length > 256) return
       if (kind === 'owner') this.applyOwnerRevocation(scope, key)
       else if (kind === 'session') this.applySessionRevocation(scope, key)
+    })
+    // 订阅连接断开期间其他实例的会话事件已丢失：关闭本实例全部 SSE，浏览器 EventSource 自动重连，
+    // 重连后的 connected 事件会触发详情与列表回读，补齐断开期间漏掉的消息。
+    onRedisBusResync(() => {
+      const subscriberIds = Array.from(this.subscribers.keys())
+      if (subscriberIds.length) console.warn(`[customer-service-realtime] 消息总线断开后恢复，关闭 ${subscriberIds.length} 个 SSE 连接以触发客户端重连补齐`)
+      for (const subscriberId of subscriberIds) this.closeSubscriber(subscriberId)
     })
   }
 

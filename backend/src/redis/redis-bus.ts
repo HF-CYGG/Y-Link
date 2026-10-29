@@ -23,6 +23,13 @@ interface RedisBusEnvelope {
 const MAX_MESSAGE_BYTES = 256 * 1024
 
 const handlers = new Map<string, Set<RedisBusHandler>>()
+const resyncListeners = new Set<() => void>()
+
+/** 订阅连接断开后重新就绪时回调（断开期间可能丢消息）；返回取消函数。 */
+export function onRedisBusResync(listener: () => void): () => void {
+  resyncListeners.add(listener)
+  return () => resyncListeners.delete(listener)
+}
 const stats = { published: 0, received: 0, dropped: 0, handlerErrors: 0 }
 let listenerAttached = false
 
@@ -68,7 +75,17 @@ export function startRedisBus(): void {
   listenerAttached = true
   subscriber.on('message', dispatch)
   subscriber.on('ready', () => {
-    void subscribeChannels(Array.from(handlers.keys()))
+    // 走到这里说明订阅连接在总线启动后发生过断开：断开期间其他实例的消息已经丢失（Pub/Sub 不补发），
+    // 重新订阅后通知各模块自行补齐，例如客服实时关闭本实例连接，让客户端重连回读。
+    void subscribeChannels(Array.from(handlers.keys())).then(() => {
+      for (const listener of resyncListeners) {
+        try {
+          listener()
+        } catch (error) {
+          console.warn('[redis-bus] 总线恢复回调执行失败', error instanceof Error ? error.message : error)
+        }
+      }
+    })
   })
   void subscribeChannels(Array.from(handlers.keys()))
 }
