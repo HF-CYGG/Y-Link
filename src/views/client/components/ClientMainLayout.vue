@@ -10,7 +10,8 @@
  */
 
 
-import { computed, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, ref, watch } from 'vue'
+const ClientKingdeeReminder = defineAsyncComponent(() => import('./ClientKingdeeReminder.vue'))
 import type { RouteLocationNormalizedLoaded } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 import { APP_META } from '@/constants/app-meta'
@@ -186,6 +187,7 @@ const handleLogout = async () => {
 </script>
 
 <template>
+  <ClientKingdeeReminder v-if="clientAuthStore.initialized && !clientAuthStore.initializing && clientAuthStore.isAuthenticated" />
   <div
     class="client-main-layout min-h-[100dvh] text-slate-900 dark:text-slate-100"
     :class="{ 'client-main-layout--without-tab': !shouldShowBottomNav }"

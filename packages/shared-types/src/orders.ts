@@ -127,7 +127,18 @@ export interface O2oLatestReturnRequestSummary {
   rejectedReason: string | null
 }
 
-export interface O2oPreorderSummary {
+export type KingdeeStatus = 'not_applied' | 'applied_pending' | 'registered' | 'unknown'
+export interface KingdeeRegistration {
+  kingdeeVoucherNo: string | null
+  kingdeeVersion: number
+  kingdeeStatus: KingdeeStatus | null
+  kingdeeEditable: boolean
+}
+export interface UpdateKingdeeRegistrationPayload {
+  kingdeeVoucherNo: string | null
+  expectedKingdeeVersion: number
+}
+export interface O2oPreorderSummary extends KingdeeRegistration {
   statusReport: O2oOrderStatusReport
   totalAmount: string
   expireInSeconds: number
@@ -187,7 +198,7 @@ export interface O2oPreorderDetailItem {
   subTotal: string
 }
 
-export interface O2oPreorderDetailOrder {
+export interface O2oPreorderDetailOrder extends KingdeeRegistration {
   statusReport: O2oOrderStatusReport
   totalAmount: string
   expireInSeconds: number
@@ -248,6 +259,7 @@ export interface O2oPreorderDetail {
 }
 
 export interface SubmitO2oPreorderPayload {
+  kingdeeVoucherNo?: string | null
   /** 同一次下单及其弱网重试必须复用同一请求键。 */
   clientRequestId: string
   isSystemApplied: boolean

@@ -55,6 +55,7 @@ const remark = ref('')
 const pickupContact = ref('')
 const submitting = ref(false)
 const departmentSystemApplyChoice = ref<boolean | null>(null)
+const kingdeeVoucherNo = ref('')
 
 // 到店取货时间：日期与时段分开选择，避免在手机上使用体积更大的日期时间弹层。
 const pickupDateKey = ref<string | null>(null)
@@ -342,13 +343,6 @@ const orderTypeDescription = computed(() => {
     : '当前账号为个人账号，下单后自动按散客归属处理'
 })
 
-const systemApplyStatusText = computed(() => {
-  if (!isDepartmentOrder.value) return '散客单无需填写金蝶系统申请状态'
-  if (departmentSystemApplyChoice.value === true) return '已选择：金蝶系统内已完成审批申请'
-  if (departmentSystemApplyChoice.value === false) return '已选择：金蝶系统内未完成审批申请'
-  return '必填：请先选择金蝶系统是否已申请'
-})
-
 const handleBack = () => {
   if (props.standalone) {
     router.back()
@@ -405,6 +399,8 @@ const handleSubmit = async () => {
     requestedPickupAt = pickupAtIso.value
   }
 
+  const requestedKingdeeVoucherNo = isDepartmentOrder.value && departmentSystemApplyChoice.value ? kingdeeVoucherNo.value.trim() || null : null
+  if (isDepartmentOrder.value && departmentSystemApplyChoice.value && !requestedKingdeeVoucherNo) { showAppWarning('请填写金蝶单据编号'); return }
   const submitRemark = remark.value.trim() || undefined
   const requestedClientOrderType = enforcedClientOrderType.value
   const requestedIsSystemApplied = isDepartmentOrder.value ? Boolean(departmentSystemApplyChoice.value) : false
@@ -419,6 +415,7 @@ const handleSubmit = async () => {
     clientUserId: clientAuthStore.currentUser?.id,
     clientOrderType: requestedClientOrderType,
     isSystemApplied: requestedIsSystemApplied,
+          kingdeeVoucherNo: requestedKingdeeVoucherNo,
     pickupContact: normalizedPickupContact,
     pickupAt: requestedPickupAt,
     remark: submitRemark,
@@ -443,6 +440,7 @@ const handleSubmit = async () => {
           clientUserId: clientAuthStore.currentUser?.id,
           clientOrderType: requestedClientOrderType,
           isSystemApplied: requestedIsSystemApplied,
+          kingdeeVoucherNo: requestedKingdeeVoucherNo,
           pickupContact: normalizedPickupContact,
           pickupAt: requestedPickupAt,
           remark: submitRemark,
@@ -476,6 +474,7 @@ const handleSubmit = async () => {
         const result = await submitO2oPreorder({
           clientRequestId: submitRequestKey,
           isSystemApplied: requestedIsSystemApplied,
+          kingdeeVoucherNo: requestedKingdeeVoucherNo,
           pickupContact: normalizedPickupContact,
           pickupAt: requestedPickupAt,
           remark: submitRemark,
@@ -592,35 +591,12 @@ const handleSubmit = async () => {
             <span class="rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-semibold text-rose-600 dark:bg-rose-500/10 dark:text-rose-400">必填</span>
           </div>
           <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">用于标记本次部门出库是否已在金蝶系统完成审批申请。</p>
-          <div class="mt-3 grid grid-cols-2 gap-3">
-            <button
-              type="button"
-              class="rounded-[0.9rem] border px-3 py-2 text-sm font-medium transition"
-              :class="
-                departmentSystemApplyChoice === true
-                  ? 'border-emerald-300 bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300'
-                  : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 dark:border-white/10 dark:bg-[#141415] dark:text-slate-300'
-              "
-              @click="departmentSystemApplyChoice = true"
-            >
-              已申请
-            </button>
-            <button
-              type="button"
-              class="rounded-[0.9rem] border px-3 py-2 text-sm font-medium transition"
-              :class="
-                departmentSystemApplyChoice === false
-                  ? 'border-amber-300 bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300'
-                  : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 dark:border-white/10 dark:bg-[#141415] dark:text-slate-300'
-              "
-              @click="departmentSystemApplyChoice = false"
-            >
-              未申请
-            </button>
-          </div>
-          <p class="mt-2 text-xs" :class="departmentSystemApplyChoice === null ? 'text-rose-600 dark:text-rose-400' : 'text-slate-500 dark:text-slate-400'">
-            {{ systemApplyStatusText }}
-          </p>
+          <el-radio-group v-model="departmentSystemApplyChoice" class="mt-3">
+            <el-radio-button :value="true">已申请</el-radio-button>
+            <el-radio-button :value="false">未申请</el-radio-button>
+          </el-radio-group>
+          <el-input v-if="departmentSystemApplyChoice === true" v-model="kingdeeVoucherNo" class="mt-3" maxlength="128" placeholder="请输入金蝶单据编号" clearable />
+          <p v-if="departmentSystemApplyChoice === false" class="mt-2 text-sm text-red-600">请及时在金蝶申请并填写金蝶单据编号</p>
 
           <div class="mt-4 border-t border-slate-200 pt-3 dark:border-white/10">
             <div class="flex flex-wrap items-center gap-2">
@@ -650,6 +626,7 @@ const handleSubmit = async () => {
               v-model="pickupTimeSlot"
               class="mt-3 w-full"
               placeholder="请选择到店时段"
+              aria-label="到店时段"
               :disabled="!pickupDateKey"
             >
               <el-option v-for="slot in pickupTimeOptions" :key="slot.value" :label="slot.label" :value="slot.value" />

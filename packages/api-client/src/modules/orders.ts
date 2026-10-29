@@ -1,4 +1,5 @@
 import type {
+  UpdateKingdeeRegistrationPayload,
   O2oMyOrderListQuery,
   O2oMyOrderListResult,
   O2oPreorderDetail,
@@ -30,6 +31,13 @@ export const createOrdersApi = (http: HttpAdapter) => ({
         keyword: query.keyword,
       },
     })
+  },
+
+  listKingdeeTodos(query: { page?: number; pageSize?: number } = {}, options: ApiRequestOptions = {}): Promise<O2oMyOrderListResult> {
+    return http.request({ ...options, method: 'GET', url: '/o2o/mall/preorders/kingdee-todos', params: query })
+  },
+  updateKingdeeRegistration(id: string, data: UpdateKingdeeRegistrationPayload, options: ApiRequestOptions = {}): Promise<O2oPreorderDetail> {
+    return http.request({ ...options, method: 'PATCH', url: `/o2o/mall/preorders/${encodePathSegment(id)}/kingdee-registration`, data })
   },
 
   submitPreorder(

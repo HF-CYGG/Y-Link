@@ -10,7 +10,8 @@
  * - 若登录成功结果结构变更，需要同时检查 `applyAuthResult()` 与本地持久化字段兼容性。
  */
 
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { setKingdeeIdentity } from '@/utils/kingdee-freshness'
 import { defineStore } from 'pinia'
 import {
   type ClientAccountType,
@@ -47,6 +48,7 @@ import { useClientOrderStore } from './client-order'
  */
 export const useClientAuthStore = defineStore('client-auth', () => {
   const currentUser = ref<ClientSafeProfile | null>(null)
+  watch(() => currentUser.value?.id ?? null, (id) => setKingdeeIdentity('client', id === null ? null : String(id)), { immediate: true, flush: 'sync' })
   const expiresAt = ref<string | null>(null)
   const initialized = ref(false)
   const initializing = ref(false)

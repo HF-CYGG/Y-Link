@@ -5,6 +5,7 @@
  */
 
 import {
+  Check,
   Column,
   CreateDateColumn,
   Entity,
@@ -42,6 +43,7 @@ export const O2O_CLIENT_ORDER_TYPES = ['department', 'walkin'] as const
 export type O2oClientOrderType = (typeof O2O_CLIENT_ORDER_TYPES)[number]
 
 @Entity({ name: 'o2o_preorder' })
+@Check('ck_o2o_kingdee_version_non_negative', '`kingdee_version` >= 0')
 @Index('idx_o2o_preorder_client_id', ['clientUserId', 'id'])
 @Index('idx_o2o_preorder_client_status_id', ['clientUserId', 'status', 'id'])
 @Index('idx_o2o_preorder_due_claim', ['status', 'isDeleted', 'timeoutAt', 'id'])
@@ -115,6 +117,14 @@ export class O2oPreorder {
   // 后续核销生成出库单时直接复用这个快照，避免被服务端默认值覆盖。
   @Column({ name: 'is_system_applied', ...entityColumnOptions.booleanFlag, default: 0, comment: '是否系统申请（客户端选择快照）' })
   isSystemApplied!: boolean
+
+  /** 原预订单唯一持久金蝶编号，历史空值不回填。 */
+  @Column({ name: 'kingdee_voucher_no', type: 'varchar', length: 128, nullable: true, comment: '金蝶单据编号' })
+  kingdeeVoucherNo!: string | null
+
+  /** 独立登记版本：历史为 0，新订单为 1，不占商品改单次数。 */
+  @Column({ name: 'kingdee_version', type: 'int', default: 0, unsigned: true, comment: '金蝶登记版本' })
+  kingdeeVersion!: number
 
   // hasCustomerOrder 用于记录客户端是否触发过“正式出库单打印/导出”，
   // 核销生成后台出库单时将作为 hasCustomerOrder 的来源快照，避免继续写死为 false。

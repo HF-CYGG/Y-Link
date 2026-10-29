@@ -17,6 +17,8 @@
  * 6. 清理早期设备调试文案，避免把“手机卡片 / 平板卡片”等开发态信息暴露给最终用户。
  * 7. 内容编辑只在服务端判定可编辑且当前用户具有 `orders:edit` 时开放，成功后同步刷新列表与详情。
  */
+import { formatOrderKingdeeStatus } from '@/utils/kingdee-status'
+
 
 import dayjs from 'dayjs'
 
@@ -251,6 +253,7 @@ const orderTreeRows = computed<OrderTreeRecord[]>(() => listState.records.map((o
   children: order.merge.children.map((child) => ({
     ...order,
     ...child,
+    sourcePreorderRegistrations: order.sourcePreorderRegistrations?.filter((source) => source.sourceOrderId === child.id),
     contentEditable: false,
     contentEditBlockers: ['已合并至父单，内容不可编辑'],
     merge: { role: 'source', parent: order, children: [] },
@@ -618,10 +621,10 @@ const handleSaveComplianceFlags = async () => {
                   </el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="系统申请" width="96" align="center">
+              <el-table-column label="金蝶状态" width="96" align="center">
                 <template #default="{ row }">
                   <el-tag :type="row.orderType === 'department' && row.isSystemApplied ? 'warning' : 'info'" effect="light">
-                    {{ row.orderType === 'department' ? (row.isSystemApplied ? '已申请' : '未申请') : '不适用' }}
+                    {{ formatOrderKingdeeStatus(row) }}
                   </el-tag>
                 </template>
               </el-table-column>

@@ -7,6 +7,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto'
+import { kingdeeRegistrationView, normalizeKingdeeVoucherNo, type KingdeeStatus } from '../utils/kingdee-registration.js'
 import { Brackets, type EntityManager, In, Not, type SelectQueryBuilder } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
@@ -92,6 +93,7 @@ export interface SubmitPreorderInput {
   items: SubmitPreorderItemInput[]
   remark?: string
   isSystemApplied: boolean
+  kingdeeVoucherNo?: string | null
   pickupContact: string
   /** 到店取货时间（ISO 字符串）：部门单必填，散客单忽略。 */
   pickupAt?: string | null
@@ -116,6 +118,7 @@ export interface UpdateOrderComplianceFlagsInput {
   orderId: string
   hasCustomerOrder?: boolean
   isSystemApplied?: boolean
+  expectedKingdeeVersion?: number
 }
 
 export interface UpdateOnsitePreorderInput {
@@ -335,6 +338,10 @@ export interface O2oPreorderSummaryView {
   businessStatus: O2oPreorder['businessStatus']
   hasCustomerOrder: boolean
   isSystemApplied: boolean
+  kingdeeVoucherNo: string | null
+  kingdeeVersion: number
+  kingdeeStatus: KingdeeStatus | null
+  kingdeeEditable: boolean
   merchantMessage: string | null
   clientOrderType: O2oPreorder['clientOrderType']
   departmentNameSnapshot: string | null
@@ -399,6 +406,10 @@ export interface O2oPreorderDetailView {
     businessStatus: O2oPreorder['businessStatus']
     hasCustomerOrder: boolean
     isSystemApplied: boolean
+    kingdeeVoucherNo: string | null
+    kingdeeVersion: number
+    kingdeeStatus: KingdeeStatus | null
+    kingdeeEditable: boolean
     pickupContact: string | null
     pickupAt: Date | null
     merchantMessage: string | null
@@ -766,7 +777,7 @@ class O2oPreorderService {
    * - 摘要只用于判断同一 clientRequestId 是否被不同载荷复用，不存放任何用户明文。
    */
   private buildClientRequestHash(
-    input: Pick<SubmitPreorderInput, 'isSystemApplied' | 'pickupContact'>,
+    input: Pick<SubmitPreorderInput, 'isSystemApplied' | 'pickupContact' | 'kingdeeVoucherNo'>,
     normalizedRemark: string | null,
     normalizedItems: Array<{ productId: string; skuId: string | null; qty: number }>,
     normalizedPickupAt: Date | null = null,
@@ -780,6 +791,7 @@ class O2oPreorderService {
     return createHash('sha256')
       .update(JSON.stringify({
         isSystemApplied: Boolean(input.isSystemApplied),
+        ...(input.kingdeeVoucherNo ? { kingdeeVoucherNo: input.kingdeeVoucherNo } : {}),
         pickupContact: String(input.pickupContact ?? '').trim(),
         remark: normalizedRemark,
         items,
@@ -1355,6 +1367,7 @@ class O2oPreorderService {
     manager: EntityManager,
     preorderId: string,
     payload: {
+      registrationChange?: { preorderId: string; before: unknown; after: unknown }
       hasCustomerOrder?: boolean
       isSystemApplied?: boolean
       actor?: {
@@ -1465,6 +1478,7 @@ class O2oPreorderService {
     manager: EntityManager,
     outboundOrder: BizOutboundOrder,
     payload: {
+      registrationChange?: { preorderId: string; before: unknown; after: unknown }
       hasCustomerOrder?: boolean
       isSystemApplied?: boolean
       actor?: { userId: string | null; username: string; displayName: string }
@@ -1492,7 +1506,8 @@ class O2oPreorderService {
       outboundOrder.isSystemApplied = payload.isSystemApplied
     }
     if (
-      beforeSnapshot.hasCustomerOrder === Boolean(outboundOrder.hasCustomerOrder)
+      !payload.registrationChange
+      && beforeSnapshot.hasCustomerOrder === Boolean(outboundOrder.hasCustomerOrder)
       && beforeSnapshot.isSystemApplied === Boolean(outboundOrder.isSystemApplied)
     ) {
       return
@@ -1508,9 +1523,10 @@ class O2oPreorderService {
       orderIdSnapshot: String(outboundOrder.id),
       orderUuid: outboundOrder.orderUuid,
       revisionNo: outboundOrder.editVersion,
-      beforeSnapshotJson: JSON.stringify(beforeSnapshot),
+      beforeSnapshotJson: JSON.stringify({ ...beforeSnapshot, ...(payload.registrationChange ? { kingdeeRegistration: { preorderId: payload.registrationChange.preorderId, value: payload.registrationChange.before } } : {}) }),
       afterSnapshotJson: JSON.stringify({
         ...beforeSnapshot,
+        ...(payload.registrationChange ? { kingdeeRegistration: { preorderId: payload.registrationChange.preorderId, value: payload.registrationChange.after } } : {}),
         hasCustomerOrder: Boolean(outboundOrder.hasCustomerOrder),
         isSystemApplied: Boolean(outboundOrder.isSystemApplied),
         editVersion: outboundOrder.editVersion,
@@ -2162,6 +2178,7 @@ class O2oPreorderService {
         businessStatus: order.businessStatus ?? null,
         hasCustomerOrder: Boolean(order.hasCustomerOrder),
         isSystemApplied: Boolean(order.isSystemApplied),
+        ...kingdeeRegistrationView(order),
         pickupContact: resolvedPickupContact,
         pickupAt: order.pickupAt ?? null,
         merchantMessage: order.merchantMessage ?? null,
@@ -2490,6 +2507,7 @@ class O2oPreorderService {
       businessStatus: item.businessStatus ?? null,
       hasCustomerOrder: Boolean(item.hasCustomerOrder),
       isSystemApplied: Boolean(item.isSystemApplied),
+      ...kingdeeRegistrationView(item),
       merchantMessage: item.merchantMessage ?? null,
       clientOrderType: item.clientOrderType === 'department' ? 'department' : 'walkin',
       departmentNameSnapshot: item.departmentNameSnapshot?.trim() || null,
@@ -2940,8 +2958,9 @@ class O2oPreorderService {
     const normalizedClientRequestId = this.normalizeClientRequestId(input.clientRequestId)
     const normalizedPickupContact = this.normalizePickupContact(input.pickupContact)
     const normalizedPickupAt = this.normalizePickupAtInput(input.pickupAt)
+    const kingdeeVoucherNo = normalizeKingdeeVoucherNo(input.kingdeeVoucherNo)
     const clientRequestHash = this.buildClientRequestHash(
-      { isSystemApplied: input.isSystemApplied, pickupContact: normalizedPickupContact },
+      { isSystemApplied: input.isSystemApplied, pickupContact: normalizedPickupContact, kingdeeVoucherNo },
       normalizedRemark,
       normalizedItems,
       normalizedPickupAt,
@@ -2979,6 +2998,10 @@ class O2oPreorderService {
           return { orderId: String(existedOrder.id), created: false }
         }
 
+        // 必填门禁在历史请求键重放之后、库存锁与占号之前执行。
+        if (clientUser.accountType === 'department' && normalizedIsSystemApplied && !kingdeeVoucherNo) {
+          throw new BizError('已申请的部门订单必须填写金蝶单据编号', 400)
+        }
         const pendingProductQtyMap = await this.loadPendingProductQtyMap(manager, auth.userId)
         const productIds = [...new Set(normalizedItems.map((item) => item.productId))]
         const productMap = await this.loadSubmitProductsInManager(manager, productIds)
@@ -3028,7 +3051,9 @@ class O2oPreorderService {
             clientOrderType: normalizedClientOrderType,
             departmentNameSnapshot,
             staffNoSnapshot,
-            isSystemApplied: normalizedIsSystemApplied,
+            isSystemApplied: normalizedIsSystemApplied || (normalizedClientOrderType === 'department' && Boolean(kingdeeVoucherNo)),
+            kingdeeVoucherNo: normalizedClientOrderType === 'department' ? kingdeeVoucherNo : null,
+            kingdeeVersion: 1,
             hasCustomerOrder: false,
             pickupContact: normalizedPickupContact,
             pickupAt,
@@ -3398,6 +3423,8 @@ class O2oPreorderService {
     const o2oRules = await systemConfigService.getO2oRuleConfigs()
 
     const result = await runInTransaction(async (manager) => {
+      // 与金蝶登记共用账号先锁顺序，锁后复核启用/注销，再进入订单和库存约束。
+      await lockActiveClientAccountForBusiness(manager, auth.userId)
       const orderRepo = manager.getRepository(O2oPreorder)
       const orderItemRepo = manager.getRepository(O2oPreorderItem)
 
@@ -3408,11 +3435,6 @@ class O2oPreorderService {
       if (!order) {
         throw new BizError('预订单不存在', 404)
       }
-      await manager.getRepository(ClientUser).findOne({
-        where: { id: order.clientUserId },
-        select: ['id'],
-        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
-      })
       if (await this.cancelTimedOutOrderInManager(manager, order)) {
         return { timedOut: true as const, detail: null }
       }
@@ -4057,18 +4079,119 @@ class O2oPreorderService {
     })
   }
 
+  private async runKingdeeTransaction<T>(work: (manager: EntityManager) => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await runInTransaction(work, { mysqlIsolationLevel: 'READ COMMITTED' })
+      } catch (error) {
+        if (!(error instanceof BizError) || error.data !== 'KINGDEE_GROUP_CHANGED' || attempt >= 1) throw error
+      }
+    }
+  }
+
+  /** 调用方先锁账号；锁定完整正式单组，再按稳定顺序锁原预订单，最后复查关联。 */
+  private async lockKingdeeOrder(manager: EntityManager, preorderId: string): Promise<O2oPreorder> {
+    const describe = async () => {
+      const linked = await this.loadLinkedOutboundOrderInManager(manager, preorderId)
+      if (!linked) return { linkedId: null, orderIds: [] as string[] }
+      const linkedId = String(linked.id)
+      const metadata = (await orderMergeService.getMetadataMap([linkedId], manager)).get(linkedId)
+      const parentId = metadata?.role === 'source' ? metadata.parent?.id : linkedId
+      const parentMetadata = parentId && parentId !== linkedId
+        ? (await orderMergeService.getMetadataMap([parentId], manager)).get(parentId) : metadata
+      const orderIds = [...new Set([linkedId, ...(parentId ? [parentId] : []), ...(parentMetadata?.children.map((child) => child.id) ?? [])])].sort()
+      return { linkedId, orderIds }
+    }
+    const before = await describe()
+    let groupOrders: BizOutboundOrder[] = []
+    if (before.orderIds.length) {
+      const query = manager.getRepository(BizOutboundOrder).createQueryBuilder('outbound')
+        .where('outbound.id IN (:...ids)', { ids: before.orderIds }).orderBy('outbound.id', 'ASC')
+      if (manager.connection.options.type !== 'sqlite') query.setLock('pessimistic_write')
+      groupOrders = await query.getMany()
+      if (groupOrders.length !== before.orderIds.length) throw new BizError('正式单关联已变化，请刷新重试', 409)
+    }
+    const preorderIds = [...new Set([preorderId, ...groupOrders.flatMap((order) => order.sourceDocType === 'o2o_preorder' && order.sourceDocId ? [String(order.sourceDocId)] : [])])].sort()
+    const query = manager.getRepository(O2oPreorder).createQueryBuilder('preorder')
+      .where('preorder.id IN (:...ids)', { ids: preorderIds }).orderBy('preorder.id', 'ASC')
+    if (manager.connection.options.type !== 'sqlite') query.setLock('pessimistic_write')
+    const preorders = await query.getMany()
+    const after = await describe()
+    if (JSON.stringify(before) !== JSON.stringify(after)) {
+      throw new BizError('正式单关联已变化，请重试', 409, { data: 'KINGDEE_GROUP_CHANGED' })
+    }
+    const order = preorders.find((row) => String(row.id) === preorderId)
+    if (!order || order.isDeleted) throw new BizError('预订单不存在', 404)
+    return order
+  }
+
+  async updateKingdeeRegistration(
+    orderId: string,
+    input: { kingdeeVoucherNo: string | null; expectedKingdeeVersion: number },
+    identity: { client: ClientAuthContext } | { admin: AuthUserContext },
+    requestMeta?: RequestMeta,
+  ) {
+    const kingdeeVoucherNo = normalizeKingdeeVoucherNo(input.kingdeeVoucherNo)
+    if (!Number.isSafeInteger(input.expectedKingdeeVersion) || input.expectedKingdeeVersion < 0) throw new BizError('登记版本必须是非负整数', 400)
+    return this.runKingdeeTransaction(async (manager) => {
+      const actor = 'client' in identity ? {
+        userId: identity.client.userId,
+        username: identity.client.account || identity.client.mobile,
+        displayName: identity.client.realName || identity.client.account,
+      } : identity.admin
+      if ('client' in identity) await lockActiveClientAccountForBusiness(manager, actor.userId)
+      else await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const order = await this.lockKingdeeOrder(manager, orderId)
+      if ('client' in identity && String(order.clientUserId) !== String(identity.client.userId)) throw new BizError('预订单不存在', 404)
+      const before = { ...kingdeeRegistrationView(order), isSystemApplied: Boolean(order.isSystemApplied) }
+      if (!before.kingdeeEditable) throw new BizError('当前预订单不支持金蝶登记', 409)
+      // 先比版本再判同值，旧版本即使恰好同值仍必须冲突。
+      if (before.kingdeeVersion !== input.expectedKingdeeVersion) throw new BizError('金蝶登记已变化，请刷新后重新确认', 409)
+      if (before.kingdeeVoucherNo === kingdeeVoucherNo) return this.buildOrderDetail(order, manager, 'admin' in identity && canViewSystemNo(identity.admin))
+      if (before.kingdeeVersion >= MAX_DATABASE_INT) throw new BizError('登记版本已达上限，请联系管理员', 409)
+      order.kingdeeVoucherNo = kingdeeVoucherNo
+      order.kingdeeVersion = before.kingdeeVersion + 1
+      // 清空保留申请意图，重新进入待补编号；不会修改主状态与库存。
+      if (kingdeeVoucherNo) order.isSystemApplied = true
+      await manager.getRepository(O2oPreorder).save(order)
+      await this.syncOutboundOrderComplianceFlags(manager, orderId, {
+        isSystemApplied: Boolean(order.isSystemApplied), allowMergeMemberMutation: true,
+        actor, reason: '金蝶登记联动',
+        registrationChange: { preorderId: orderId, before, after: kingdeeRegistrationView(order) },
+      })
+      await auditService.record({ actionType: 'o2o.preorder.kingdee_registration', actionLabel: '登记金蝶单据编号',
+        targetType: 'o2o_order', targetId: orderId, targetCode: order.preorderNo, actor, requestMeta,
+        detail: { before, after: { ...kingdeeRegistrationView(order), isSystemApplied: Boolean(order.isSystemApplied) } },
+      }, manager)
+      return this.buildOrderDetail(order, manager, 'admin' in identity && canViewSystemNo(identity.admin))
+    })
+  }
+
+  async listMyKingdeeTodos(auth: ClientAuthContext, input: { page?: number; pageSize?: number }) {
+    const page = Math.max(1, Math.trunc(input.page ?? 1))
+    const pageSize = Math.min(50, Math.max(1, Math.trunc(input.pageSize ?? 20)))
+    // GET 只查状态，不做超时取消或库存释放；已核销记录不受原超时时间影响。
+    const query = this.preorderRepo.createQueryBuilder('preorder')
+      .where('preorder.clientUserId = :userId', { userId: auth.userId })
+      .andWhere('preorder.clientOrderType = :type', { type: 'department' })
+      .andWhere('preorder.isDeleted = :deleted', { deleted: false })
+      .andWhere("(preorder.kingdeeVoucherNo IS NULL OR TRIM(preorder.kingdeeVoucherNo) = '')")
+      .andWhere("(preorder.status = 'verified' OR (preorder.status = 'pending' AND (preorder.timeoutAt IS NULL OR preorder.timeoutAt > :now)))", { now: new Date() })
+      .orderBy('preorder.id', 'DESC')
+    const [rows, total] = await query.skip((page - 1) * pageSize).take(pageSize).getManyAndCount()
+    return { list: await this.buildOrderSummaryViews(rows, { exposeSystemNo: false }), total, page, pageSize }
+  }
+
   async updateComplianceFlagsByAdmin(input: UpdateOrderComplianceFlagsInput, actor: AuthUserContext, requestMeta?: RequestMeta) {
     if (typeof input.hasCustomerOrder !== 'boolean' && typeof input.isSystemApplied !== 'boolean') {
       throw new BizError('请至少传入一个可更新字段', 400)
     }
-    return runInTransaction(async (manager) => {
+    return this.runKingdeeTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
-      const mergeMetadata = await this.lockLinkedOutboundOrderGroupInManager(manager, input.orderId)
+      const order = await this.lockKingdeeOrder(manager, input.orderId)
+      const linked = await this.loadLinkedOutboundOrderInManager(manager, input.orderId)
+      const mergeMetadata = linked ? (await orderMergeService.getMetadataMap([String(linked.id)], manager)).get(String(linked.id)) : undefined
       const orderRepo = manager.getRepository(O2oPreorder)
-      const order = await orderRepo.findOne({
-        where: { id: input.orderId, isDeleted: false },
-        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
-      })
       if (!order) {
         throw new BizError('预订单不存在', 404)
       }
@@ -4082,7 +4205,11 @@ class O2oPreorderService {
       if (typeof input.hasCustomerOrder === 'boolean' && !preserveMergePrintEvidence) {
         order.hasCustomerOrder = input.hasCustomerOrder
       }
-      if (typeof input.isSystemApplied === 'boolean') {
+      if (typeof input.isSystemApplied === 'boolean' && input.isSystemApplied !== Boolean(order.isSystemApplied)) {
+        if (input.expectedKingdeeVersion !== Number(order.kingdeeVersion ?? 0)) throw new BizError('金蝶登记已变化，请刷新后重新确认', 409)
+        if (order.kingdeeVoucherNo && !input.isSystemApplied) throw new BizError('已有金蝶编号，不能改为未申请', 409)
+        if (Number(order.kingdeeVersion ?? 0) >= MAX_DATABASE_INT) throw new BizError('登记版本已达上限', 409)
+        order.kingdeeVersion = Number(order.kingdeeVersion ?? 0) + 1
         order.isSystemApplied = input.isSystemApplied
       }
       await orderRepo.save(order)

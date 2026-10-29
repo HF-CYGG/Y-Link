@@ -10,6 +10,7 @@
  * - 详情页与列表页收到单条订单变更时会复用 `syncOrderSummary()`，因此新增摘要字段时也要同步合并策略。
  */
 
+import { synchronizeKingdeeResponse } from '@/utils/kingdee-freshness'
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import type { O2oPreorderSummary } from '@/api/modules/o2o'
@@ -137,7 +138,7 @@ export const useClientOrderStore = defineStore('client-order', () => {
       total?: number
     },
   ) => {
-    orders.value = nextOrders
+    orders.value = synchronizeKingdeeResponse('client', nextOrders)
     // 每次订单列表更新都刷新时间戳，为“订单页回到前台是否立即重拉”提供依据。
     page.value = payload?.page ?? 1
     pageSize.value = payload?.pageSize ?? pageSize.value
@@ -159,7 +160,7 @@ export const useClientOrderStore = defineStore('client-order', () => {
       ...orders.value,
       ...nextOrders.filter((item) => !existedOrderIdSet.has(item.id)),
     ]
-    orders.value = mergedOrders
+    orders.value = synchronizeKingdeeResponse('client', mergedOrders)
     page.value = payload.page
     pageSize.value = payload.pageSize
     total.value = payload.total
@@ -199,7 +200,8 @@ export const useClientOrderStore = defineStore('client-order', () => {
     persist()
   }
 
-  const upsertOrder = (nextOrder: O2oPreorderSummary, options?: { preserveFresh?: boolean }) => {
+  const upsertOrder = (incomingOrder: O2oPreorderSummary, options?: { preserveFresh?: boolean }) => {
+    const nextOrder = synchronizeKingdeeResponse('client', incomingOrder)
     const index = orders.value.findIndex((item) => item.id === nextOrder.id)
     if (index < 0) {
       // 新订单或详情页首次打开后同步回列表缓存，统一插入顶部便于用户立即看到结果。

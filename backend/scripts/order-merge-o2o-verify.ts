@@ -321,6 +321,7 @@ async function main() {
 
     const sourceComplianceSet = await o2oPreorderService.updateComplianceFlagsByAdmin({
       orderId: String(source.preorder.id),
+      expectedKingdeeVersion: Number((await preorderRepo.findOneByOrFail({ id: source.preorder.id })).kingdeeVersion),
       isSystemApplied: true,
     }, actor)
     assert.equal(sourceComplianceSet.order.hasCustomerOrder, false)
@@ -332,6 +333,7 @@ async function main() {
 
     await o2oPreorderService.updateComplianceFlagsByAdmin({
       orderId: String(source.preorder.id),
+      expectedKingdeeVersion: Number((await preorderRepo.findOneByOrFail({ id: source.preorder.id })).kingdeeVersion),
       isSystemApplied: false,
     }, actor)
     assert.equal(Boolean((await outboundRepo.findOneByOrFail({ id: source.outbound.id })).hasCustomerOrder), false)
@@ -341,6 +343,7 @@ async function main() {
 
     await o2oPreorderService.updateComplianceFlagsByAdmin({
       orderId: String(target.preorder.id),
+      expectedKingdeeVersion: Number((await preorderRepo.findOneByOrFail({ id: target.preorder.id })).kingdeeVersion),
       isSystemApplied: true,
     }, actor)
     assert.equal(Boolean((await preorderRepo.findOneByOrFail({ id: source.preorder.id })).isSystemApplied), false, '父预订单更新不得篡改跨账号来源预订单')
@@ -348,15 +351,18 @@ async function main() {
     assert.equal(Boolean((await outboundRepo.findOneByOrFail({ id: target.outbound.id })).isSystemApplied), true)
     await o2oPreorderService.updateComplianceFlagsByAdmin({
       orderId: String(source.preorder.id),
+      expectedKingdeeVersion: Number((await preorderRepo.findOneByOrFail({ id: source.preorder.id })).kingdeeVersion),
       isSystemApplied: true,
     }, actor)
     await o2oPreorderService.updateComplianceFlagsByAdmin({
       orderId: String(source.preorder.id),
+      expectedKingdeeVersion: Number((await preorderRepo.findOneByOrFail({ id: source.preorder.id })).kingdeeVersion),
       isSystemApplied: false,
     }, actor)
     assert.equal(Boolean((await outboundRepo.findOneByOrFail({ id: target.outbound.id })).isSystemApplied), true, '另一成员仍已系统申请时清除来源单不得清除父单聚合状态')
     await o2oPreorderService.updateComplianceFlagsByAdmin({
       orderId: String(target.preorder.id),
+      expectedKingdeeVersion: Number((await preorderRepo.findOneByOrFail({ id: target.preorder.id })).kingdeeVersion),
       isSystemApplied: false,
     }, actor)
     assert.equal(Boolean((await outboundRepo.findOneByOrFail({ id: target.outbound.id })).isSystemApplied), false)
@@ -417,6 +423,7 @@ async function main() {
     assert.equal(Boolean(printedParent.hasCustomerOrder), true, '来源客户端打印必须同步锁定父单')
     await o2oPreorderService.updateComplianceFlagsByAdmin({
       orderId: String(source.preorder.id),
+      expectedKingdeeVersion: Number((await preorderRepo.findOneByOrFail({ id: source.preorder.id })).kingdeeVersion),
       hasCustomerOrder: false,
       isSystemApplied: true,
     }, actor)
@@ -425,6 +432,7 @@ async function main() {
     assert.equal(Boolean((await outboundRepo.findOneByOrFail({ id: target.outbound.id })).hasCustomerOrder), true, '系统申请更新不得解锁已打印父单')
     await o2oPreorderService.updateComplianceFlagsByAdmin({
       orderId: String(source.preorder.id),
+      expectedKingdeeVersion: Number((await preorderRepo.findOneByOrFail({ id: source.preorder.id })).kingdeeVersion),
       isSystemApplied: false,
     }, actor)
     const appendAfterPrint = await orderMergeService.preview({
@@ -482,8 +490,9 @@ async function main() {
     rollbackTarget.outbound.sourceDocNo = null
     await outboundRepo.save(rollbackTarget.outbound)
     await assert.rejects(
-      () => o2oPreorderService.updateComplianceFlagsByAdmin({
+      async () => o2oPreorderService.updateComplianceFlagsByAdmin({
         orderId: String(rollbackSource.preorder.id),
+      expectedKingdeeVersion: Number((await preorderRepo.findOneByOrFail({ id: rollbackSource.preorder.id })).kingdeeVersion),
         isSystemApplied: true,
       }, actor),
       (error: unknown) => error instanceof BizError && error.statusCode === 409,

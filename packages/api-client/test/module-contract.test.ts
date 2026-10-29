@@ -242,3 +242,14 @@ test('feedback module 使用后端原始会话 contract，不混入 Web UI 映�
     },
   ])
 })
+
+test('金蝶待办与登记保留服务端分页、空值与独立版本', async () => {
+  const { adapter, requests } = createRecordingAdapter()
+  const api = createOrdersApi(adapter)
+  await api.listKingdeeTodos({ page: 2, pageSize: 20 })
+  await api.updateKingdeeRegistration('order/177', { kingdeeVoucherNo: null, expectedKingdeeVersion: 3 })
+  assert.deepEqual(requests, [
+    { method: 'GET', url: '/o2o/mall/preorders/kingdee-todos', params: { page: 2, pageSize: 20 } },
+    { method: 'PATCH', url: '/o2o/mall/preorders/order%2F177/kingdee-registration', data: { kingdeeVoucherNo: null, expectedKingdeeVersion: 3 } },
+  ])
+})

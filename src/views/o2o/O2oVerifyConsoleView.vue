@@ -13,6 +13,8 @@
  * - 若变更退货申请状态枚举或现场改单结构，需同时更新共享 API 类型、表单构造逻辑与按钮显隐规则。
  */
 
+import { getO2oConsoleOrderDetail } from '@/api/modules/o2o'
+import KingdeeRegistrationEditor from '@/components/common/KingdeeRegistrationEditor.vue'
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { useRoute } from 'vue-router'
@@ -139,6 +141,7 @@ const canOpenOnsiteAdjust = computed(() => {
 })
 
 const canEditComplianceFlags = computed(() => hasPermission('orders:update'))
+const refreshKingdeeDetail = async () => { if (preorderDetail.value) replacePreorderDetail(await getO2oConsoleOrderDetail(preorderDetail.value.order.id)) }
 const isDepartmentPreorder = computed(() => preorderDetail.value?.order.clientOrderType === 'department')
 const canVerifyAction = computed(() => canVerifyStatus.value && hasPermission('orders:create'))
 const canSearch = computed(() => !loading.value && !submitting.value)
@@ -707,7 +710,7 @@ const handleSaveComplianceFlags = async () => {
   try {
     const nextDetail = await updateO2oOrderComplianceFlags(preorderDetail.value.order.id, {
       hasCustomerOrder: complianceForm.value.hasCustomerOrder,
-      isSystemApplied: complianceForm.value.isSystemApplied,
+      expectedKingdeeVersion: preorderDetail.value?.order.kingdeeVersion,
     })
     replacePreorderDetail(nextDetail)
     syncComplianceFormFromDetail(nextDetail)
@@ -1010,18 +1013,9 @@ watch(
                 </div>
               </div>
               <div class="rounded-xl bg-white px-3 py-3 dark:bg-[#141415]">
-                <p class="text-xs text-slate-500 dark:text-slate-400">系统申请</p>
+                <p class="text-xs text-slate-500 dark:text-slate-400">金蝶状态</p>
                 <div class="mt-2">
-                  <el-switch
-                    v-if="canEditComplianceFlags && isDepartmentPreorder"
-                    v-model="complianceForm.isSystemApplied"
-                    inline-prompt
-                    active-text="已申请"
-                    inactive-text="未申请"
-                  />
-                  <span v-else class="text-sm font-medium text-slate-700 dark:text-slate-200">
-                    {{ isDepartmentPreorder ? (preorderDetail.order.isSystemApplied ? '已申请' : '未申请') : '不适用' }}
-                  </span>
+                  <KingdeeRegistrationEditor :order-id="preorderDetail.order.id" :registration="preorderDetail.order" admin :can-edit="canEditComplianceFlags" @saved="refreshKingdeeDetail" />
                 </div>
               </div>
             </div>

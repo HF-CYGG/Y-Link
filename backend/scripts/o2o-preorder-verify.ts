@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 文件说明：backend/scripts/o2o-preorder-verify.ts
  * 文件职责：验证 O2O 预订的注册、下单、撤回、超时取消、核销与备份导出链路。
  * 实现逻辑：
@@ -361,6 +361,7 @@ const run = async () => {
     items: [{ productId: product.id, qty: 1 }],
     remark: '部门快照固化验证',
     isSystemApplied: true,
+    kingdeeVoucherNo: 'VERIFY-DEPARTMENT-SNAPSHOT',
     pickupContact: '脚本提货人-部门快照',
   })
   assert.equal(departmentSnapshotPreorder.order.clientOrderType, 'department')
