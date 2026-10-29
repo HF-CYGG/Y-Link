@@ -47,7 +47,14 @@ const SUPERSEDED_AUTO_MIGRATIONS = new Map<string, string>([
 ])
 // GET_LOCK 的锁名在同一 MySQL 服务端是全局的（不区分 database），
 // 因此必须把库名拼进锁名，否则同一实例上部署的多套 Y-Link 库会互相阻塞迁移。
-const buildMigrationAdvisoryLockName = (databaseName: string) => `y_link:schema_migration:${databaseName}`
+// MySQL 锁名上限 64 字符而库名本身可达 64 字符：超长时改用库名摘要；未超长的保持原锁名，滚动升级时新旧实例仍互斥。
+const MYSQL_USER_LOCK_NAME_MAX_LENGTH = 64
+const buildMigrationAdvisoryLockName = (databaseName: string) => {
+  const lockName = `y_link:schema_migration:${databaseName}`
+  return lockName.length <= MYSQL_USER_LOCK_NAME_MAX_LENGTH
+    ? lockName
+    : `y_link:schema_migration:sha256:${createHash('sha256').update(databaseName).digest('hex').slice(0, 32)}`
+}
 // 等待锁的上限：迁移本身很快，等待超过这个时长通常意味着另一实例卡住或存在长事务，
 // 此时宁可 fail-fast 让运维介入，也不要无限期挂起启动流程。
 const MIGRATION_ADVISORY_LOCK_TIMEOUT_SECONDS = 60
