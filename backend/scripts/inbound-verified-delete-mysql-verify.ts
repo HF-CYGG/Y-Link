@@ -331,7 +331,7 @@ async function main() {
     }),
     o2oPreorderService.deleteConsoleOrder({
       orderId: String(releasePreorder.order.id),
-      confirmShowNo: releasePreorder.order.showNo,
+      confirmPreorderNo: releasePreorder.order.preorderNo,
     }, adminActor),
   ])
   assert.equal(adminDeleteRaceResults.filter((result) => result.status === 'fulfilled').length, 2, JSON.stringify(adminDeleteRaceResults))
@@ -349,15 +349,22 @@ async function main() {
   assert.equal(Boolean((await AppDataSource.getRepository(BizInboundOrder).findOneByOrFail({
     id: String(releaseInboundDelivery.order.id),
   })).isDeleted), true)
+  // 永久删除会匿名化本单库存事实：释放流水仍保留，但来源与操作人被清空。
   assert.equal(await AppDataSource.getRepository(InventoryLog).count({
-    where: { refType: 'o2o_preorder', refId: String(releasePreorder.order.id), changeType: 'preorder_release' },
-  }), 2)
+    where: { refType: 'o2o_preorder', refId: String(releasePreorder.order.id) },
+  }), 0)
+  assert.equal(await AppDataSource.getRepository(InventoryLog).countBy(
+    [releaseFirst, releaseSecond].map((item) => ({ productId: item.productId, changeType: 'preorder_release', operatorType: 'anonymized' })),
+  ), 2)
   assert.equal(await AppDataSource.getRepository(InventoryLog).count({
     where: { refType: 'biz_inbound_order', refId: String(releaseInboundDelivery.order.id), changeType: 'inbound_reverse' },
   }), 2)
   assert.equal(await AppDataSource.getRepository(SysAuditLog).count({
-    where: { actionType: 'o2o.preorder.delete', targetId: String(releasePreorder.order.id), resultStatus: 'success' },
+    where: { actionType: 'o2o.preorder.delete', resultStatus: 'success' },
   }), 1)
+  assert.equal(await AppDataSource.getRepository(SysAuditLog).count({
+    where: { actionType: 'o2o.preorder.delete', targetId: String(releasePreorder.order.id) },
+  }), 0, '永久删除审计只保留脱敏目标，不得留存原订单 ID')
   assert.equal(await AppDataSource.getRepository(SysAuditLog).count({
     where: { actionType: 'inbound.supplier.delete_verified', targetId: String(releaseInboundDelivery.order.id), resultStatus: 'success' },
   }), 1)
@@ -441,6 +448,9 @@ async function main() {
   }
 
   console.log('inbound verified delete mysql verify: passed')
+  // 与生产停机同序：HTTP 响应后仍可能有审计等异步写在途，先排空再销毁连接池。
+  const { databaseMaintenanceModeService } = await import('../src/services/database-maintenance-mode.service.js')
+  await databaseMaintenanceModeService.shutdownAndDrain()
   await AppDataSource.destroy()
 }
 
