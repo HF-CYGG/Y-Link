@@ -6,7 +6,8 @@
  * - 正常态采用 60～120 秒随机轮询，维护态才切换为约 3 秒快速确认，隐藏页完全停止请求；
  * - 同源标签页使用租约选出一个轮询者，并通过 BroadcastChannel 同步状态，避免多标签重复放大 `/health`；
  * - 已确认进入维护后把状态保存在会话存储中，后端重启断线期间不因轮询失败误清除横幅；
- * - 只有健康检查明确返回 `readOnly=false` 时才结束维护，业务码 50301 也可立即激活维护态。
+ * - 只有健康检查明确返回 `readOnly=false` 时才结束维护，业务码 50301 也可立即激活维护态；
+ * - `lastConfirmedAt` 只在健康检查（或其它标签广播的健康结果）明确返回时更新，供迁移页区分“已确认”与“初始默认值”。
  * 维护说明：
  * - 健康检查不能复用统一 HTTP 实例，否则会与 HTTP 拦截器形成循环依赖；
  * - 不要根据普通请求恢复或网络失败推断维护结束，服务端健康状态是唯一结束依据。
@@ -104,6 +105,8 @@ const resolveHealthCheckUrl = () => {
 
 export const useDatabaseMaintenanceStore = defineStore('database-maintenance', () => {
   const isReadOnly = ref(readPersistedMaintenanceState())
+  // 最近一次由健康检查（本标签或其它标签广播）明确确认维护状态的本地时间；0 表示本会话尚未确认，isReadOnly 只是默认值或会话缓存。
+  const lastConfirmedAt = ref(0)
 
   let pollingTimer: number | null = null
   let leadershipTimer: number | null = null
@@ -279,6 +282,7 @@ export const useDatabaseMaintenanceStore = defineStore('database-maintenance', (
       if (typeof readOnly === 'boolean') {
         lastSuccessfulPollAt = Date.now()
         setMaintenanceState(readOnly, { checkedAt: lastSuccessfulPollAt })
+        lastConfirmedAt.value = lastSuccessfulPollAt
       }
     } catch {
       // 已进入维护后必须保留状态；重启窗口中的短暂断线属于预期现象。
@@ -363,6 +367,7 @@ export const useDatabaseMaintenanceStore = defineStore('database-maintenance', (
       }
       lastSuccessfulPollAt = Math.max(lastSuccessfulPollAt, message.checkedAt)
       setMaintenanceState(message.readOnly, { broadcast: false })
+      lastConfirmedAt.value = Math.max(lastConfirmedAt.value, message.checkedAt)
       if (holdsLeadership()) {
         scheduleNextPoll()
       }
@@ -448,6 +453,7 @@ export const useDatabaseMaintenanceStore = defineStore('database-maintenance', (
 
   return {
     isReadOnly,
+    lastConfirmedAt,
     activateMaintenance,
     pollMaintenanceState,
     startPolling,

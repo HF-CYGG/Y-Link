@@ -17,7 +17,7 @@ const base = {
   readState: 'healthy',
   progress: { currentStage: '自动迁移失败，已恢复正常写入', tableResults: [] },
 }
-const diagnose = (over) => diagnoseAutomaticMigrationFailure({ ...base, ...over, progress: { ...base.progress, ...(over.progress ?? {}) } })
+const diagnose = (over, options) => diagnoseAutomaticMigrationFailure({ ...base, ...over, progress: { ...base.progress, ...(over.progress ?? {}) } }, options)
 
 const cases = [
   [{ errorMessage: "表 sys_audit_log 导入失败（第 3 批）：Data too long for column 'user_agent' at row 1" }, 'data_too_long'],
@@ -57,18 +57,30 @@ assert.equal(stuck.category, 'stuck_read_only')
 assert.equal(stuck.dataSafety, 'read_only')
 assert.ok(stuck.suggestions.some((item) => item.includes('不要再次发起迁移')))
 
-// 数据安全判定只依据后端终态文案与回退结果。
-assert.equal(diagnose({ errorMessage: 'x' }).dataSafety, 'safe')
-assert.equal(diagnose({ errorMessage: 'x', progress: { currentStage: '迁移执行失败' } }).dataSafety, 'unknown')
+// 后端在解除只读维护之前就写入“已恢复正常写入”，清理失败也不会修正文案：
+// 数据安全只认任务停止后由健康检查确认的维护状态，未确认时不得仅凭文案判定为安全。
+const restoredText = { errorMessage: "Data too long for column 'note' at row 1" }
+assert.equal(diagnose(restoredText).dataSafety, 'unknown', '未确认维护状态时不得因“已恢复正常写入”文案判定安全')
+assert.equal(diagnose(restoredText, { maintenanceReadOnly: null }).dataSafety, 'unknown')
+assert.equal(diagnose(restoredText, { maintenanceReadOnly: false }).dataSafety, 'safe')
+const cleanupFailed = diagnose(restoredText, { maintenanceReadOnly: true })
+assert.equal(cleanupFailed.dataSafety, 'read_only', '清理失败、维护仍只读时必须判定为只读')
+assert.equal(cleanupFailed.category, 'data_too_long', '确认只读不应吞掉原始失败类别')
+assert.ok(cleanupFailed.suggestions[0].includes('不要再次发起迁移'), '确认只读时先给出只读处置步骤')
+assert.ok(!cleanupFailed.suggestions.some((item) => item.includes('再次发起一键迁移')), '确认只读时不得建议重新发起迁移')
+// 后端明确声明保持只读时，即使健康检查暂未确认也判定为只读。
+assert.equal(diagnose({ progress: { currentStage: '自动迁移失败，切换持久化撤销未完成，系统保持只读等待人工处理' } }, { maintenanceReadOnly: false }).dataSafety, 'read_only')
 
-const rolledBack = diagnose({
+const rolledBackTask = {
   status: 'rolled_back',
   errorMessage: undefined,
   progress: { currentStage: 'MySQL 连续启动失败，已自动回退 SQLite 并通过启动自检' },
   rollbackResult: { rolledBackAt: '2026-10-29T12:00:00Z', sourceSqlitePath: '-', mysqlStartupAttempts: 3, message: '已自动恢复原 SQLite 运行时覆盖并完成启动自检' },
-})
+}
+const rolledBack = diagnose(rolledBackTask, { maintenanceReadOnly: false })
 assert.equal(rolledBack.category, 'mysql_startup_failed')
 assert.equal(rolledBack.dataSafety, 'safe')
+assert.equal(diagnose(rolledBackTask).dataSafety, 'unknown', '回退结果同样需要维护状态确认后才判定安全')
 assert.equal(rolledBack.title, '迁移未完成，已回退到 SQLite')
 assert.equal(rolledBack.rawMessage, '')
 
@@ -76,4 +88,11 @@ const unknown = diagnose({ errorMessage: '某个从未见过的异常', progress
 assert.equal(unknown.category, 'unknown')
 assert.ok(unknown.suggestions.length >= 2, '未识别原因仍需给出排查与重试建议')
 
-console.log(`[verify:db-migration-failure-diagnosis] ${cases.length} 类失败归类、只读优先级、数据安全判定与表/列提取通过`)
+// 页面只能采信任务停止之后由健康检查确认的维护状态，不得使用 Store 初始默认值。
+const viewSource = fs.readFileSync('src/views/system/DatabaseMigrationView.vue', 'utf8')
+assert.match(viewSource, /databaseMaintenanceStore\.lastConfirmedAt > automaticTaskStopObservedAt\.value/)
+assert.match(viewSource, /maintenance-read-only="stoppedTaskMaintenanceReadOnly"/)
+const storeSource = fs.readFileSync('src/store/modules/database-maintenance.ts', 'utf8')
+assert.match(storeSource, /lastConfirmedAt\.value = lastSuccessfulPollAt/, '维护 Store 必须只在健康检查明确返回时更新确认时间')
+
+console.log(`[verify:db-migration-failure-diagnosis] ${cases.length} 类失败归类、只读优先级、停止后维护确认的数据安全判定与表/列提取通过`)

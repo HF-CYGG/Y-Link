@@ -29,9 +29,9 @@ export type MigrationFailureCategory =
 
 /**
  * 数据安全状态：
- * - safe：已恢复 SQLite 正常写入或已完成回退，原数据未受影响；
- * - read_only：系统仍处于只读维护，必须人工处理后才能恢复写入；
- * - unknown：后端文案无法确认恢复情况，提示管理员以页面状态为准。
+ * - safe：任务停止后已由健康检查确认解除只读维护，系统恢复正常读写；
+ * - read_only：后端文案明确保持只读，或任务停止后健康检查确认仍处于只读维护，必须人工处理；
+ * - unknown：尚未取得任务停止后的维护状态确认，不能把清理前写入的“已恢复”文案当作恢复成功的证据。
  */
 export type MigrationDataSafety = 'safe' | 'read_only' | 'unknown'
 
@@ -231,24 +231,48 @@ const extractAffectedColumn = (text: string) => {
   return text.match(/for column\s+[`'"]?([A-Za-z0-9_]+)[`'"]?/i)?.[1] ?? ''
 }
 
+export interface MigrationFailureDiagnosisOptions {
+  /**
+   * 任务停止之后由 /health 健康检查明确确认的只读维护状态；null/undefined 表示尚未确认。
+   * 调用方只能传入停止后取得的确认结果，不得使用页面初始默认值或停止前的缓存值。
+   */
+  maintenanceReadOnly?: boolean | null
+}
+
 /**
- * 判断原数据安全状态：只依据后端写回的终态文案与回退结果，不做额外推测。
+ * 判断原数据安全状态：
+ * - 后端失败收口先持久化“已恢复正常写入”文案，再删除迁移锁、凭据并解除只读维护，清理失败时不会回写文案；
+ * - 因此“恢复成功”只认停止后的维护状态确认，文案只用于识别后端已明确声明的“保持只读”。
  */
-const resolveDataSafety = (task: SQLiteToMySqlTaskRecord, category: MigrationFailureCategory): MigrationDataSafety => {
-  if (category === 'stuck_read_only') return 'read_only'
-  if (task.status === 'rolled_back' || task.rollbackResult) return 'safe'
-  const stage = task.progress?.currentStage ?? ''
-  if (/已恢复(正常写入|\s*SQLite)|SQLite 正常写入/.test(stage)) return 'safe'
+const resolveDataSafety = (
+  category: MigrationFailureCategory,
+  maintenanceReadOnly: boolean | null | undefined,
+): MigrationDataSafety => {
+  if (category === 'stuck_read_only' || maintenanceReadOnly === true) return 'read_only'
+  if (maintenanceReadOnly === false) return 'safe'
   return 'unknown'
 }
 
-export const diagnoseAutomaticMigrationFailure = (task: SQLiteToMySqlTaskRecord): MigrationFailureDiagnosis => {
+export const diagnoseAutomaticMigrationFailure = (
+  task: SQLiteToMySqlTaskRecord,
+  options: MigrationFailureDiagnosisOptions = {},
+): MigrationFailureDiagnosis => {
   const rawMessage = (task.errorMessage ?? '').trim()
   const stage = task.progress?.currentStage ?? ''
   const haystack = [stage, rawMessage, task.rollbackResult?.message ?? ''].join('\n')
   const rule = FAILURE_RULES.find((item) => item.pattern.test(haystack))
   const category = rule?.category ?? 'unknown'
   const isRolledBack = task.status === 'rolled_back'
+  const dataSafety = resolveDataSafety(category, options.maintenanceReadOnly)
+  const baseSuggestions = rule?.suggestions ?? [
+    '复制排查信息，结合后端日志定位具体原因。',
+    RETRY_SUGGESTION,
+  ]
+  // 已确认仍只读但报错属于其它类别时，先给出只读处置步骤，再保留原类别的排查建议。
+  const stuckSuggestions = FAILURE_RULES.find((item) => item.category === 'stuck_read_only')!.suggestions
+  const suggestions = dataSafety === 'read_only' && category !== 'stuck_read_only'
+    ? [...stuckSuggestions, ...baseSuggestions.filter((item) => item !== RETRY_SUGGESTION)]
+    : baseSuggestions
 
   return {
     category,
@@ -257,13 +281,10 @@ export const diagnoseAutomaticMigrationFailure = (task: SQLiteToMySqlTaskRecord)
     summary: rule?.summary ?? (isRolledBack
       ? '本次迁移未能完成切换，系统已回退到原 SQLite。'
       : '迁移过程中出现未归类的错误，请结合下方原始报错排查。'),
-    dataSafety: resolveDataSafety(task, category),
+    dataSafety,
     affectedTable: extractAffectedTable(rawMessage),
     affectedColumn: extractAffectedColumn(rawMessage),
     rawMessage,
-    suggestions: rule?.suggestions ?? [
-      '复制排查信息，结合后端日志定位具体原因。',
-      RETRY_SUGGESTION,
-    ],
+    suggestions,
   }
 }

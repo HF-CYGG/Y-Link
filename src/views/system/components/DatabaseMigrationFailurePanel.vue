@@ -5,6 +5,7 @@
  * 实现逻辑：
  * - 诊断由 database-migration-failure.ts 纯函数给出，本组件只负责分级配色与排版；
  * - 先给结论（数据是否安全、失败类别与白话说明），再给建议，原始报错默认折叠，未识别原因时自动展开；
+ * - 数据安全以父页面传入的“任务停止后已确认的维护状态”为准，未确认前显示“正在确认”，不采信清理前写入的恢复文案；
  * - 系统仍处于只读时使用最高警示级别，并明确提示不要再次发起迁移；
  * - “复制排查信息”交给父页面拼装脱敏文本，本组件不接触剪贴板与连接凭据。
  * 维护说明：新增失败类别时先在 database-migration-failure.ts 补规则与验证脚本用例，再按需调整这里的展示。
@@ -15,13 +16,16 @@ import { diagnoseAutomaticMigrationFailure } from '../database-migration-failure
 
 const props = defineProps<{
   task: SQLiteToMySqlTaskRecord
+  maintenanceReadOnly?: boolean | null
 }>()
 
 const emit = defineEmits<{
   (event: 'copy-diagnostic'): void
 }>()
 
-const diagnosis = computed(() => diagnoseAutomaticMigrationFailure(props.task))
+const diagnosis = computed(() => diagnoseAutomaticMigrationFailure(props.task, {
+  maintenanceReadOnly: props.maintenanceReadOnly,
+}))
 const rawExpanded = ref(false)
 
 watch(() => [props.task.id, diagnosis.value.category] as const, () => {
@@ -36,7 +40,7 @@ const tone = computed(() => {
 const safetyText = computed(() => {
   if (diagnosis.value.dataSafety === 'safe') return '原 SQLite 数据未受影响，系统已恢复正常读写。'
   if (diagnosis.value.dataSafety === 'read_only') return '系统仍处于只读维护，业务暂时无法写入，需要人工处理。'
-  return '无法从任务记录确认恢复情况，请以顶部“运行概况”中的当前数据库为准。'
+  return '正在确认系统是否已解除只读维护；确认前请以页面顶部的全局只读横幅为准，暂勿重新发起迁移。'
 })
 
 const formatTime = (value?: string) => {

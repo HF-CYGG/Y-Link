@@ -20,7 +20,7 @@
 -->
 <script setup lang="ts">
 import dayjs from 'dayjs'
-import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { Coin, Lock, Refresh, Timer, WarningFilled } from '@element-plus/icons-vue'
 import { PageContainer } from '@/components/common'
@@ -54,6 +54,7 @@ import {
   type SQLiteToMySqlTaskRecord,
 } from '@/api/modules/data-maintenance'
 import { PassiveNumberInput } from '@/components/common'
+import { useDatabaseMaintenanceStore } from '@/store/modules/database-maintenance'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage, normalizeRequestError } from '@/utils/error'
@@ -377,9 +378,66 @@ const {
 const automaticTaskInProgress = computed(() => isActiveAutomaticTask(latestAutomaticTask.value))
 const automaticTaskStopped = computed(() => latestAutomaticTask.value?.mode === 'automatic'
   && ['failed', 'rolled_back'].includes(latestAutomaticTask.value.status))
-// 失败后系统仍处于只读维护时不再展示连接表单，避免在人工处理前诱导重复发起迁移。
-const automaticTaskStuckReadOnly = computed(() => automaticTaskStopped.value
-  && diagnoseAutomaticMigrationFailure(latestAutomaticTask.value!).dataSafety === 'read_only')
+/**
+ * 任务停止后的维护状态确认：
+ * - 后端失败收口先写“已恢复正常写入”文案、再解除只读维护，清理失败时文案不会修正，因此不能凭文案判断恢复；
+ * - 首次观察到任务停止时记录本地时刻并立即请求一次 /health，只采信该时刻之后由健康检查确认的维护状态；
+ * - 尚未确认时返回 null，诊断面板显示“正在确认”，维护 Store 后续轮询确认后自动更新。
+ */
+const databaseMaintenanceStore = useDatabaseMaintenanceStore()
+const automaticTaskStopObservedAt = ref(0)
+const automaticTaskStopKey = computed(() => automaticTaskStopped.value
+  ? `${latestAutomaticTask.value!.id}|${latestAutomaticTask.value!.status}`
+  : '')
+
+const MAINTENANCE_CONFIRM_RETRY_MS = 3_000
+const MAINTENANCE_CONFIRM_MAX_ATTEMPTS = 10
+let maintenanceConfirmTimer: ReturnType<typeof setTimeout> | null = null
+
+const clearMaintenanceConfirmTimer = () => {
+  if (maintenanceConfirmTimer !== null) {
+    clearTimeout(maintenanceConfirmTimer)
+    maintenanceConfirmTimer = null
+  }
+}
+
+const stoppedTaskMaintenanceReadOnly = computed<boolean | null>(() => {
+  if (!automaticTaskStopObservedAt.value) return null
+  return databaseMaintenanceStore.lastConfirmedAt > automaticTaskStopObservedAt.value
+    ? databaseMaintenanceStore.isReadOnly
+    : null
+})
+
+/**
+ * 主动确认维护状态：
+ * - Store 正常态轮询间隔为 60～120 秒，且已有请求在途时会直接跳过，因此停止后由本页有限次重试；
+ * - 取得确认、任务不再处于停止态或离开页面后立即停止，不形成常驻轮询。
+ */
+const confirmStoppedTaskMaintenance = async (stopKey: string, attempt = 1) => {
+  clearMaintenanceConfirmTimer()
+  await databaseMaintenanceStore.pollMaintenanceState()
+  if (!automaticTaskPollingPageActive || automaticTaskStopKey.value !== stopKey) return
+  if (stoppedTaskMaintenanceReadOnly.value !== null || attempt >= MAINTENANCE_CONFIRM_MAX_ATTEMPTS) return
+  maintenanceConfirmTimer = setTimeout(() => {
+    void confirmStoppedTaskMaintenance(stopKey, attempt + 1)
+  }, MAINTENANCE_CONFIRM_RETRY_MS)
+}
+
+watch(automaticTaskStopKey, (stopKey) => {
+  clearMaintenanceConfirmTimer()
+  if (!stopKey) {
+    automaticTaskStopObservedAt.value = 0
+    return
+  }
+  automaticTaskStopObservedAt.value = Date.now()
+  void confirmStoppedTaskMaintenance(stopKey)
+})
+
+// 失败后只有确认系统已恢复可写才重新展示连接表单；仍只读或尚在确认时隐藏，避免在人工处理前诱导重复发起迁移。
+const automaticTaskAwaitingWritable = computed(() => automaticTaskStopped.value
+  && diagnoseAutomaticMigrationFailure(latestAutomaticTask.value!, {
+    maintenanceReadOnly: stoppedTaskMaintenanceReadOnly.value,
+  }).dataSafety !== 'safe')
 
 /**
  * 轮询连通状态：
@@ -845,7 +903,7 @@ const openDatabaseRescue = () => {
 const copyAutomaticTaskDiagnostic = () => {
   const task = latestAutomaticTask.value
   if (!task) return
-  const diagnosis = diagnoseAutomaticMigrationFailure(task)
+  const diagnosis = diagnoseAutomaticMigrationFailure(task, { maintenanceReadOnly: stoppedTaskMaintenanceReadOnly.value })
   void copyAppAlertDiagnostic([
     `任务：${task.id}`,
     `诊断：${diagnosis.categoryLabel}（${diagnosis.category}）`,
@@ -1251,6 +1309,10 @@ onActivated(async () => {
     if (activeTask || loadError.value) {
       startAutomaticTaskPolling(activeTask?.id, AUTOMATIC_MIGRATION_POLL_INTERVAL_MS)
     }
+    // 离页期间维护状态确认可能被中断，回到页面后若仍未确认则重新发起有限次确认。
+    if (automaticTaskStopKey.value && stoppedTaskMaintenanceReadOnly.value === null) {
+      void confirmStoppedTaskMaintenance(automaticTaskStopKey.value)
+    }
   }
 })
 
@@ -1261,6 +1323,7 @@ const stopAutomaticTaskPolling = () => {
   automaticTaskPollController?.abort()
   automaticTaskPollController = null
   clearAutomaticTaskPollTimer()
+  clearMaintenanceConfirmTimer()
 }
 
 onDeactivated(stopAutomaticTaskPolling)
@@ -1367,13 +1430,14 @@ onBeforeUnmount(stopAutomaticTaskPolling)
             <DatabaseMigrationFailurePanel
               v-if="latestAutomaticTask && automaticTaskStopped"
               :task="latestAutomaticTask"
+              :maintenance-read-only="stoppedTaskMaintenanceReadOnly"
               @copy-diagnostic="copyAutomaticTaskDiagnostic"
             />
 
             <DatabaseMigrationAutomaticLogPanel :task="latestAutomaticTask" />
 
             <div
-              v-if="!automaticMigrationCompleted && !automaticTaskInProgress && !automaticTaskStuckReadOnly"
+              v-if="!automaticMigrationCompleted && !automaticTaskInProgress && !automaticTaskAwaitingWritable"
               class="grid gap-5 xl:grid-cols-[minmax(0,1fr)_340px]"
             >
               <div class="min-w-0">
