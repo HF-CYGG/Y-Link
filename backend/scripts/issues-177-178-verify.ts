@@ -139,10 +139,36 @@ try {
   const newOrder = await service.submit(auth, { ...request, isSystemApplied: false, clientRequestId: 'isolated-verify-race-177-178' })
   assert.equal(newOrder.order.kingdeeVersion, 1)
   assert.equal(newOrder.order.kingdeeStatus, 'not_applied')
+  // 现场仍可处理停用/注销客户；系统操作员状态、客户端自身门禁与改单次数保持原规则。
+  const onsiteStockBefore = await db.getRepository(BaseProductSku).findOneByOrFail({ id: sku.id })
+  try {
+    for (const inactive of [{ status: 'disabled' as const }, { status: 'enabled' as const, deactivatedAt: new Date(), restoredAt: null }]) {
+      await clientRepo.update(client.id, inactive)
+      await assert.rejects(() => service.updateMyOrder(auth, newOrder.order.id, { items: request.items }), /停用|注销/)
+      const enlarged = await service.updateOrderOnsite(admin, { orderId: newOrder.order.id, items: [{ ...request.items[0]!, qty: 2 }] })
+      assert.equal(enlarged.order.totalQty, 2); assert.equal(enlarged.order.updateCount, 0)
+      const restored = await service.updateOrderOnsite(admin, { orderId: newOrder.order.id, items: request.items })
+      assert.equal(restored.order.totalQty, 1); assert.equal(restored.order.updateCount, 0)
+    }
+    await userRepo.update(user.id, { status: 'disabled' })
+    await assert.rejects(() => service.updateOrderOnsite(admin, { orderId: newOrder.order.id, items: request.items }), /停用|注销/)
+  } finally {
+    await userRepo.update(user.id, { status: 'enabled' })
+    await clientRepo.update(client.id, { status: 'enabled', deactivatedAt: null, restoredAt: null })
+  }
+  const onsiteStockAfter = await db.getRepository(BaseProductSku).findOneByOrFail({ id: sku.id })
+  assert.equal(Number(onsiteStockAfter.currentStock), Number(onsiteStockBefore.currentStock))
+  assert.equal(Number(onsiteStockAfter.preOrderedStock), Number(onsiteStockBefore.preOrderedStock))
+  await assert.rejects(() => service.updateOrderOnsite(admin, { orderId: String(verified.id), items: request.items }), /已核销/)
   if (mysqlMode) {
-    const { verifyMysqlRegistrationEditLockOrder } = await import('./issues-177-178-mysql-lock-order.js')
+    const { verifyMysqlRegistrationEditLockOrder, verifyMysqlOnsiteEditLockOrder, verifyMysqlOnsiteSourceRecheck } = await import('./issues-177-178-mysql-lock-order.js')
     const editable = await service.submit(auth, { ...request, isSystemApplied: false, clientRequestId: 'isolated-mysql-edit-lock' })
     await verifyMysqlRegistrationEditLockOrder(db, auth, editable.order.id, request.items[0]!)
+    for (const first of ['onsite', 'client'] as const) {
+      const concurrent = await service.submit(auth, { ...request, isSystemApplied: false, clientRequestId: `isolated-mysql-onsite-${first}` })
+      await verifyMysqlOnsiteEditLockOrder(db, auth, admin, concurrent.order.id, request.items[0]!, first)
+    }
+    await verifyMysqlOnsiteSourceRecheck(db, admin, editable.order.id, String(other.id), request.items[0]!)
   }
   await Promise.all([
     service.updateKingdeeRegistration(newOrder.order.id, { kingdeeVoucherNo: 'verify-race-177', expectedKingdeeVersion: 1 }, { client: auth }),

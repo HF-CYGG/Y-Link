@@ -3553,11 +3553,25 @@ class O2oPreorderService {
     const normalizedItems = this.normalizePreorderItems(input.items)
     const normalizedRemark = this.normalizePreorderRemark(input.remark)
     const o2oRules = await systemConfigService.getO2oRuleConfigs()
+    // 仅在事务外发现来源账号，避免等待账号锁前建立 MySQL 的旧一致性读快照。
+    const source = await this.preorderRepo.findOne({
+      where: { id: input.orderId, isDeleted: false },
+      select: ['id', 'clientUserId'],
+    })
 
     const result = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, auth.userId)
       const orderRepo = manager.getRepository(O2oPreorder)
       const orderItemRepo = manager.getRepository(O2oPreorderItem)
+      if (!source) {
+        throw new BizError('预订单不存在', 404)
+      }
+      // 保留现场处理停用客户的既有规则，只统一为客户账号 → 原预订单的相对锁序。
+      await manager.getRepository(ClientUser).findOne({
+        where: { id: source.clientUserId },
+        select: ['id'],
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
       const order = await orderRepo.findOne({
         where: { id: input.orderId, isDeleted: false },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
@@ -3565,11 +3579,9 @@ class O2oPreorderService {
       if (!order) {
         throw new BizError('预订单不存在', 404)
       }
-      await manager.getRepository(ClientUser).findOne({
-        where: { id: order.clientUserId },
-        select: ['id'],
-        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
-      })
+      if (String(order.clientUserId) !== String(source.clientUserId)) {
+        throw new BizError('预订单归属已变化，请刷新后重试', 409)
+      }
       if (await this.cancelTimedOutOrderInManager(manager, order)) {
         return { timedOut: true as const, detail: null }
       }
