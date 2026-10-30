@@ -129,7 +129,10 @@ export interface ProductLookupResult {
     & Pick<ProductSkuRecord, 'barcode' | 'effectiveBarcode' | 'locationCode' | 'thumbnail'>
 }
 
+export type { ProductPrintLocations, PrintLocationOption, PrintMainLocationStatus } from '../../../packages/shared-types/src/product-labels'
+import type { ProductPrintLocations } from '../../../packages/shared-types/src/product-labels'
 export interface ProductLabelRecord {
+  printLocations: ProductPrintLocations
   skuId: string
   /** 所属商品 ID，打印弹窗按它分组（商品名称不唯一）。 */
   productId: string

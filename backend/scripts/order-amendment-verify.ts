@@ -4,6 +4,7 @@
  * 维护边界：业务号释放/永久删除由 order-business-no-release-verify 单独覆盖；本文件不依赖已停用的永久占用模型。
  */
 
+import { resolveIssueVerificationRoot } from './issue-verification-paths.js'
 import 'reflect-metadata'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -11,7 +12,7 @@ import path from 'node:path'
 import type { AuthUserContext } from '../src/types/auth.js'
 
 const seed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
-const sqliteRoot = path.resolve(process.cwd(), 'data', 'local-dev')
+const sqliteRoot = resolveIssueVerificationRoot(path.resolve(process.cwd(), 'data', 'local-dev'))
 const sqlitePath = path.resolve(sqliteRoot, `order-amendment-${seed}.sqlite`)
 
 process.env.APP_PROFILE = `order-amendment-${seed}`

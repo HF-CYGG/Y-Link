@@ -10,7 +10,8 @@
  * - 任何新增管理端鉴权逻辑都应优先复用本 Store，而不是页面自行判断 Cookie 状态。
  */
 
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { setKingdeeIdentity } from '@/utils/kingdee-freshness'
 import { defineStore } from 'pinia'
 import {
   completeMfaLogin as completeMfaLoginApi,
@@ -47,6 +48,7 @@ export const useAuthStore = defineStore('auth', () => {
 
   // 当前用户信息：可先用本地快照回填，再通过 /auth/me 做服务端校验刷新。
   const currentUser = ref<UserSafeProfile | null>(persisted.user ? normalizeUserSafeProfile(persisted.user) : null)
+  watch(() => currentUser.value?.id ?? null, (id) => setKingdeeIdentity('admin', id === null ? null : String(id)), { immediate: true, flush: 'sync' })
 
   // 会话过期时间：用于登录页与头部的提示扩展，也便于后续增加即将过期提醒。
   const expiresAt = ref<string | null>(persisted.expiresAt)

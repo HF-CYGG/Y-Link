@@ -4,7 +4,9 @@
  * 维护说明：维护时重点关注提交参数幂等语义、金额字段精度处理与分页结果字段映射一致性。
  */
 
-import { request, type RequestConfig } from '@/api/http'
+import { request as rawRequest, type RequestConfig } from '@/api/http'
+import { requestWithKingdeeFreshness } from '@/utils/kingdee-freshness'
+const request = <T>(config: Parameters<typeof rawRequest>[0]): Promise<T> => requestWithKingdeeFreshness('admin', () => rawRequest<T>(config))
 import type { PaginationQueryInput, PaginationResult } from '@/types/api'
 import type {
   OrderMergeCommitInput,
@@ -183,6 +185,7 @@ export type OrderInventoryMode = 'legacy_none' | 'manual_applied' | 'o2o_preappl
 export type OrderMergeStatus = 'active' | 'merged'
 
 export interface OrderRecord {
+  sourcePreorderRegistrations?: OrderSourcePreorderRegistrationRecord[]
   id: string
   /** 正式出库内部追溯编号。 */
   systemNo: string
@@ -236,6 +239,7 @@ interface OrderListRawResult {
 export type OrderListResult = PaginationResult<OrderRecord>
 
 interface OrderRecordRaw {
+  sourcePreorderRegistrations?: OrderSourcePreorderRegistrationRecord[]
   id: PrimitiveTextValue
   systemNo?: PrimitiveTextValue
   /** @deprecated 后端旧响应别名。 */
@@ -315,7 +319,18 @@ export interface OrderItemRecord {
   sourceOrderItemId: string | null
 }
 
+export interface OrderSourcePreorderRegistrationRecord {
+  sourceOrderId: string
+  businessNo: string
+  sourcePreorderId: string | null
+  sourcePreorderNo: string | null
+  kingdeeVoucherNo: string | null
+  kingdeeVersion: number
+  kingdeeStatus: 'not_applied' | 'applied_pending' | 'registered' | 'unknown' | null
+  kingdeeEditable: boolean
+}
 export interface OrderDetailResult extends OrderRecord {
+  sourcePreorderRegistrations?: OrderSourcePreorderRegistrationRecord[]
   sourcePreorderPickupContact: string | null
   sourcePreorderPickupAt: string | null
   /** 管理端详情才返回逐来源记录；客户端合成的本人凭证可不提供。 */
@@ -338,6 +353,7 @@ const normalizeNullableTextField = (value: PrimitiveTextValue): string | null =>
 }
 
 const normalizeOrderRecord = (record: OrderRecordRaw): OrderRecord => ({
+  sourcePreorderRegistrations: record.sourcePreorderRegistrations ?? [],
   id: normalizeTextField(record.id),
   systemNo: normalizeTextField(record.systemNo ?? record.showNo),
   businessNo: normalizeTextField(record.businessNo),
@@ -403,6 +419,7 @@ interface OrderItemRawRecord {
 }
 
 interface OrderDetailOrderRaw extends Omit<OrderRecord, 'totalAmount' | 'totalQty'> {
+  sourcePreorderRegistrations?: OrderSourcePreorderRegistrationRecord[]
   totalAmount: PrimitiveTextValue
   totalQty: PrimitiveTextValue
   sourcePreorderPickupContact?: PrimitiveTextValue
@@ -568,6 +585,7 @@ const normalizeOrderDetail = (payload: OrderDetailRawResult): OrderDetailResult 
   ...normalizeOrderRecord(payload.order),
   sourcePreorderPickupContact: normalizeNullableTextField(payload.order.sourcePreorderPickupContact),
   sourcePreorderPickupAt: normalizeNullableTextField(payload.order.sourcePreorderPickupAt),
+  sourcePreorderRegistrations: payload.order.sourcePreorderRegistrations ?? [],
   sourcePreorderPickups: Array.isArray(payload.order.sourcePreorderPickups)
     ? payload.order.sourcePreorderPickups.filter((item) => item && typeof item === 'object').map((item) => ({
       sourceOrderId: normalizeTextField(item.sourceOrderId),

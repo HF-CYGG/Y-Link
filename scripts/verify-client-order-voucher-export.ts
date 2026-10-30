@@ -15,7 +15,12 @@ assert.match(detail, /exportSnapshot\?\.dispose\(\)/, '导出失败或成功都�
 assert.match(dialog, /:show-close="!exportPdfLoading"/, '导出期间应禁用标题栏关闭')
 assert.match(dialog, /:disabled="exportPdfLoading"[^>]*>关闭/, '导出期间应禁用页脚关闭')
 assert.match(dialog, /<el-radio-group[^>]*:disabled="exportPdfLoading"/, '导出期间应禁用方向切换')
-assert.equal((dialog.match(/:disabled="exportPdfLoading"/g) ?? []).length >= 6, true, '导出期间应禁用四个补填输入、方向和关闭')
+// 金蝶编号已按原来源只读；剩余三个补填输入必须全部锁定，不能靠总数掩盖某个漏锁字段。
+const editableInputs = [...dialog.matchAll(/<el-input\b[\s\S]*?\/>/g)].map((match) => match[0])
+assert.equal(editableInputs.length, 3)
+assert.deepEqual(editableInputs.map((input) => input.match(/editableFields\.(\w+)/)?.[1]).sort(), ['completionDate', 'departmentOperator', 'receiverSignature'])
+for (const input of editableInputs) assert.match(input, /:disabled="exportPdfLoading"/, '每个可编辑补填字段必须在导出期间禁用')
+assert.match(dialog, /<p>\{\{ voucherOrder\?\.sourcePreorderRegistrations\?\.\[0\]\?\.kingdeeVoucherNo/, '金蝶编号只读来源必须为持久登记投影')
 
 const originalDocument = globalThis.document
 const host = { style: {} as Record<string, string>, setAttribute: () => {}, appendChild: () => {}, remove: () => {} }

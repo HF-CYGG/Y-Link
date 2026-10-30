@@ -26,7 +26,7 @@ type VoucherEditableFieldKey = keyof OrderVoucherEditableFields
  */
 const ORDER_VOUCHER_FIXED_FIELDS_TEXT = '固定版式字段：标题区、基础信息区、明细区、汇总区与签字区'
 const ORDER_VOUCHER_AUTO_FIELDS_TEXT = '自动填充字段：申请部门、商品名称、产品编码、单价、数量、小计、总计、业务单号'
-const ORDER_VOUCHER_EDITABLE_FIELDS_TEXT = '在线补填字段：部门经办人、金蝶单据编号、领取人签字、完成日期'
+const ORDER_VOUCHER_EDITABLE_FIELDS_TEXT = '在线补填字段：部门经办人、领取人签字、完成日期；金蝶编号取订单持久登记值'
 const ORDER_VOUCHER_OFFLINE_SIGNATURE_TEXT = '线下手写字段：文创工坊管理员签字、出库人签字'
 
 const props = defineProps<{
@@ -143,13 +143,7 @@ const handleExportPdf = () => {
               />
             </el-form-item>
             <el-form-item label="金蝶单据编号">
-              <el-input
-                :model-value="editableFields.kingdeeVoucherNo"
-                :disabled="exportPdfLoading"
-                placeholder="请输入金蝶单据编号"
-                clearable
-                @update:model-value="emitEditableFieldUpdate('kingdeeVoucherNo', $event)"
-              />
+              <p>{{ voucherOrder?.sourcePreorderRegistrations?.[0]?.kingdeeVoucherNo || '未登记，请在订单详情填写' }}</p>
             </el-form-item>
             <el-form-item label="领取人签字">
               <el-input

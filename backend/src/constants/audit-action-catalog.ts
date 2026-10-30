@@ -128,6 +128,7 @@ export const AUDIT_ACTION_CATALOG: Readonly<Record<string, AuditActionDefinition
   'o2o.preorder.verify': { label: '核销预订单并出库', category: 'order_outbound' },
   'o2o.preorder.update_by_client': { label: '客户端修改订单', category: 'order_outbound' },
   'o2o.preorder.submit': { label: '客户端提交预订单', category: 'order_outbound' },
+  'o2o.preorder.kingdee_registration': { label: '登记金蝶单据编号', category: 'order_outbound' },
   'o2o.preorder.compliance_flags': { label: '修改预订单合规状态', category: 'order_outbound' },
   'o2o.preorder.onsite_adjust': { label: '门店现场改单', category: 'order_outbound' },
   'o2o.preorder.customer_order_print': { label: '客户端标记部门订单已打印', category: 'order_outbound' },

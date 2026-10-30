@@ -10,7 +10,13 @@
  * - 若后端新增或删减状态，需同步共享 Contract、Web 常量与消费页面分支。
  */
 
-import { request, type RequestConfig } from '@/api/http'
+import { request as rawRequest, type RequestConfig } from '@/api/http'
+import { requestWithKingdeeFreshness } from '@/utils/kingdee-freshness'
+const request = <T>(config: Parameters<typeof rawRequest>[0]): Promise<T> => {
+  const url = config.url ?? ''
+  if (/^\/o2o\/(mall\/preorders|orders|verify)(?:\/|$)/.test(url)) return requestWithKingdeeFreshness(url.startsWith('/o2o/mall/') ? 'client' : 'admin', () => rawRequest<T>(config))
+  return rawRequest<T>(config)
+}
 import type {
   O2oOrderBusinessStatus,
   O2oOrderStatus,
@@ -18,6 +24,7 @@ import type {
 import type { ClientUserAccountType } from '@/api/modules/client-user-manage'
 import type { PaginationQueryInput, PaginationResult } from '@/types/api'
 import type {
+  UpdateKingdeeRegistrationPayload,
   O2oClientOrderType,
   O2oMallProductsResult,
   O2oMallStorefrontConfig,
@@ -110,6 +117,7 @@ export interface UpdateConsoleO2oPreorderPayload {
 export interface UpdateO2oComplianceFlagsPayload {
   hasCustomerOrder?: boolean
   isSystemApplied?: boolean
+  expectedKingdeeVersion?: number
 }
 
 export interface DeleteO2oConsoleOrderPayload {
@@ -264,6 +272,13 @@ export const getO2oMallStorefront = (config?: RequestConfig) =>
     url: '/o2o/mall/storefront',
     ...config,
   })
+
+export const getMyKingdeeTodos = (params: { page?: number; pageSize?: number } = {}, config?: RequestConfig) =>
+  request<O2oMyOrderListResult>({ ...config, method: 'GET', url: '/o2o/mall/preorders/kingdee-todos', params })
+export const updateMyKingdeeRegistration = (id: string, data: UpdateKingdeeRegistrationPayload, config?: RequestConfig) =>
+  request<O2oPreorderDetail>({ ...config, method: 'PATCH', url: `/o2o/mall/preorders/${encodeURIComponent(id)}/kingdee-registration`, data }).then(normalizeO2oPreorderDetail)
+export const updateAdminKingdeeRegistration = (id: string, data: UpdateKingdeeRegistrationPayload, config?: RequestConfig) =>
+  request<O2oConsolePreorderDetail>({ ...config, method: 'PATCH', url: `/o2o/orders/${encodeURIComponent(id)}/kingdee-registration`, data }).then(normalizeConsoleO2oPreorderDetail)
 
 export const submitO2oPreorder = (payload: SubmitO2oPreorderPayload, config?: RequestConfig) =>
   request<O2oPreorderDetail>({

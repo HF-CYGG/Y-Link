@@ -15,6 +15,8 @@
  */
 
 import type ExcelJS from 'exceljs'
+import { kingdeeRegistrationView } from '../utils/kingdee-registration.js'
+import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
 import { loadExcelJs } from '../utils/exceljs-loader.js'
 import type { Writable } from 'node:stream'
 import { In, type SelectQueryBuilder } from 'typeorm'
@@ -119,6 +121,12 @@ interface KeysetQueryOptions {
 }
 
 interface OrderItemReportRaw {
+  sourceDocType: string | null
+  sourceInventoryMode: string | null
+  sourceClientOrderType: string | null
+  kingdeeVoucherNo: string | null
+  kingdeeVersion: number | null
+  sourceIsSystemApplied: boolean | null
   rowId?: string | number
   createdAt: Date | string
   businessNo: string | null
@@ -252,7 +260,8 @@ const REPORT_FIELD_DEFINITIONS: Record<ReportType, ReportFieldDefinition[]> = {
     { key: 'departmentName', label: '部门', width: 22 },
     { key: 'receiverName', label: '领取人', width: 18 },
     { key: 'hasCustomerOrder', label: '是否有出库单', width: 16 },
-    { key: 'isSystemApplied', label: '是否系统申请', width: 16 },
+    { key: 'kingdeeVoucherNo', label: '金蝶单据编号', width: 24 },
+    { key: 'kingdeeStatus', label: '金蝶状态', width: 20 },
     { key: 'operatorName', label: '订单操作记录人员', width: 20 },
   ],
   walkin: [
@@ -473,6 +482,8 @@ export class ReportService {
   private resolveFields(type: ReportType, fields: string[] | undefined): ReportFieldDefinition[] {
     const availableFields = REPORT_FIELD_DEFINITIONS[type]
     const availableFieldMap = new Map(availableFields.map((field) => [field.key, field]))
+    // 已保存的合法旧字段继续可查可导出；新默认字段只显示持久编号和逐来源状态。
+    if (type === 'kingdee') availableFieldMap.set('isSystemApplied', { key: 'isSystemApplied', label: '是否系统申请', width: 16 })
     if (!fields?.length) {
       return availableFields
     }
@@ -632,7 +643,15 @@ export class ReportService {
     const baseQb = AppDataSource.getRepository(BizOutboundOrderItem)
       .createQueryBuilder('item')
       .innerJoin(BizOutboundOrder, 'order', 'order.id = item.orderId')
+      .leftJoin(BizOutboundOrder, 'sourceOrder', 'sourceOrder.id = COALESCE(item.sourceOrderId, order.id)')
+      .leftJoin(O2oPreorder, 'sourcePreorder', "sourceOrder.sourceDocType = 'o2o_preorder' AND sourcePreorder.id = sourceOrder.sourceDocId")
       .select('item.id', 'rowId')
+      .addSelect('sourceOrder.sourceDocType', 'sourceDocType')
+      .addSelect('sourceOrder.inventoryMode', 'sourceInventoryMode')
+      .addSelect('sourcePreorder.clientOrderType', 'sourceClientOrderType')
+      .addSelect('sourcePreorder.kingdeeVoucherNo', 'kingdeeVoucherNo')
+      .addSelect('sourcePreorder.kingdeeVersion', 'kingdeeVersion')
+      .addSelect('sourcePreorder.isSystemApplied', 'sourceIsSystemApplied')
       .addSelect('order.createdAt', 'createdAt')
       .addSelect('order.businessNo', 'businessNo')
       .addSelect('order.orderType', 'orderType')
@@ -789,6 +808,12 @@ export class ReportService {
   private buildOrderItemReportRow(raw: OrderItemReportRaw, tagMap: Map<string, string[]>): ReportRow {
     const productId = String(raw.productId ?? '').trim()
     const orderType = String(raw.orderType ?? '').trim()
+    const isO2oSource = raw.sourceDocType === 'o2o_preorder' || raw.sourceInventoryMode === 'o2o_preapplied'
+    const registration = raw.sourceClientOrderType
+      ? kingdeeRegistrationView({ clientOrderType: raw.sourceClientOrderType, kingdeeVoucherNo: raw.kingdeeVoucherNo, kingdeeVersion: Number(raw.kingdeeVersion ?? 0), isSystemApplied: normalizeBoolean(raw.sourceIsSystemApplied), status: 'verified' })
+      : null
+    // 历史 O2O 来源追溯缺失只表示未知；手工单/非部门原来源才是不适用。
+    const status = registration?.kingdeeStatus ?? (isO2oSource && orderType === 'department' && !raw.sourceClientOrderType ? 'unknown' : null)
     return {
       time: formatDateTime(raw.createdAt),
       tags: (tagMap.get(productId) ?? []).join('、') || '未分类',
@@ -798,6 +823,8 @@ export class ReportService {
       unitPrice: normalizeAmount(raw.unitPrice),
       amount: normalizeAmount(raw.amount),
       departmentName: orderType === 'department' ? normalizeText(raw.departmentName) : '不适用',
+      kingdeeVoucherNo: registration?.kingdeeVoucherNo ?? '',
+      kingdeeStatus: status ? { not_applied: '未申请', applied_pending: '已申请待补编号', registered: '已登记', unknown: '待确认' }[status] : '不适用',
       receiverName: normalizeText(raw.receiverName),
       businessNo: normalizeText(raw.businessNo),
       hasCustomerOrder: orderType === 'department' ? getFlagLabel(raw.hasCustomerOrder) : '不适用',

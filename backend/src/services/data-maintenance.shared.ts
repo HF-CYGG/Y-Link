@@ -1,3 +1,4 @@
+import { normalizeKingdeeVoucherNo } from '../utils/kingdee-registration.js'
 /**
  * 模块说明：backend/src/services/data-maintenance.shared.ts
  * 文件职责：沉淀数据维护模块可复用的导出结构类型、字段校验器、行映射器与导入摘要构建逻辑。
@@ -406,7 +407,9 @@ function validatePreorderRows(rows: ExportRow[]) {
         merchantMessage: readOptionalText(rawRow, 'merchantMessage', 500),
         clientOrderType,
         departmentNameSnapshot: readOptionalText(rawRow, 'departmentNameSnapshot', 271),
-        isSystemApplied: readBooleanFlag(rawRow, 'isSystemApplied', '是否系统申请'),
+        isSystemApplied: readBooleanFlag(rawRow, 'isSystemApplied', '是否系统申请') || Boolean(normalizeKingdeeVoucherNo(rawRow.kingdeeVoucherNo)),
+        kingdeeVoucherNo: normalizeKingdeeVoucherNo(rawRow.kingdeeVoucherNo),
+        kingdeeVersion: rawRow.kingdeeVersion === undefined ? 0 : readInteger(rawRow, 'kingdeeVersion', '金蝶登记版本', { min: 0, max: 2147483647 }),
         hasCustomerOrder: readBooleanFlag(rawRow, 'hasCustomerOrder', '是否已触发正式出库单'),
         totalQty: readInteger(rawRow, 'totalQty', '预订单总件数', { min: 0, max: 999999 }),
         remark: readOptionalText(rawRow, 'remark', 255),

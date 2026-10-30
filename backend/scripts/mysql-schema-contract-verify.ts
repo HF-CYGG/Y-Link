@@ -104,6 +104,8 @@ const REQUIRED_COLUMNS = [
   ['o2o_preorder', 'cancellation_remark'],
   ['o2o_preorder', 'cancelled_at'],
   ['o2o_preorder', 'pickup_at'],
+  ['o2o_preorder', 'kingdee_voucher_no'],
+  ['o2o_preorder', 'kingdee_version'],
   ['biz_inbound_order', 'expected_arrival_at'],
   ['base_product', 'category_id'],
   ['base_product_sku', 'barcode'],
@@ -178,6 +180,7 @@ const REQUIRED_COLUMNS = [
 
 const REQUIRED_COLUMN_LENGTHS = new Map<string, number>([
   ['o2o_preorder.department_name_snapshot', 271],
+  ['o2o_preorder.kingdee_voucher_no', 128],
   ['client_feedback_conversation.department_name_snapshot', 271],
   ['biz_outbound_order.customer_department_name', 271],
   ['sms_verification_record.scheme_name', 20],
@@ -199,6 +202,8 @@ const REQUIRED_MANUAL_OUTBOUND_COLUMN_DEFINITIONS = new Map<string, ColumnFixtur
   ['client_restock_request.quantity', { dataType: 'int', columnType: 'int', isNullable: 'NO', characterMaximumLength: null }],
   ['client_restock_request.latest_pickup_at', { dataType: 'datetime', columnType: 'datetime(6)', isNullable: 'NO', characterMaximumLength: null }],
   ['client_restock_request.status', { dataType: 'varchar', columnType: 'varchar(16)', isNullable: 'NO', characterMaximumLength: 16, columnDefault: 'requested' }],
+  ['o2o_preorder.kingdee_voucher_no', { dataType: 'varchar', columnType: 'varchar(128)', isNullable: 'YES', characterMaximumLength: 128 }],
+  ['o2o_preorder.kingdee_version', { dataType: 'int', columnType: 'int unsigned', isNullable: 'NO', characterMaximumLength: null, columnDefault: '0' }],
   ['sys_user_mfa.factor_revision', {
     dataType: 'int', columnType: 'int', isNullable: 'NO', characterMaximumLength: null, columnDefault: '1',
   }],
@@ -686,6 +691,7 @@ const REQUIRED_TRIGGERS: readonly TriggerFixture[] = [
 ]
 
 const REQUIRED_CHECKS: readonly CheckFixture[] = [
+  { tableName: 'o2o_preorder', constraintName: 'ck_o2o_kingdee_version_non_negative' },
   { tableName: 'client_restock_request', constraintName: 'ck_restock_quantity_positive' },
   { tableName: 'client_restock_request', constraintName: 'ck_restock_status' },
   { tableName: 'order_merge_relation', constraintName: 'ck_order_merge_relation_distinct_orders' },
@@ -912,6 +918,11 @@ await expectSchemaFailure(missingOutboundSourceDocIndex, [
   '046_outbound_order_source_doc.sql',
 ])
 
+for (const column of ['kingdee_voucher_no', 'kingdee_version']) {
+  const fixture = createCompleteFixture()
+  fixture.columns.delete(objectKey('o2o_preorder', column))
+  await expectSchemaFailure(fixture, [`o2o_preorder.${column}`, '062_o2o_preorder_kingdee_registration.sql'])
+}
 const missingPreorderPickupAt = createCompleteFixture()
 missingPreorderPickupAt.columns.delete(objectKey('o2o_preorder', 'pickup_at'))
 await expectSchemaFailure(missingPreorderPickupAt, [
@@ -1082,7 +1093,9 @@ await expectSchemaFailure(missingSmsSchemeColumn, [
 for (const [columnKey] of REQUIRED_COLUMN_LENGTHS) {
   const shortRequiredColumn = createCompleteFixture()
   shortRequiredColumn.columnDefinitions.get(columnKey)!.characterMaximumLength = 1
-  const introducingScript = columnKey === 'sms_verification_record.scheme_name'
+  const introducingScript = columnKey === 'o2o_preorder.kingdee_voucher_no'
+    ? '062_o2o_preorder_kingdee_registration.sql'
+    : columnKey === 'sms_verification_record.scheme_name'
     ? '039_aliyun_pnvs_sms_verification.sql'
     : columnKey === 'sys_user.webauthn_user_handle'
       ? '058_admin_webauthn.sql'
@@ -1091,7 +1104,7 @@ for (const [columnKey] of REQUIRED_COLUMN_LENGTHS) {
       : '038_department_path_capacity.sql'
   await expectSchemaFailure(shortRequiredColumn, [
     `字段 ${columnKey}`,
-    '字符容量不足',
+    columnKey === 'o2o_preorder.kingdee_voucher_no' ? '长度应为 128' : '字符容量不足',
     introducingScript,
   ])
 }

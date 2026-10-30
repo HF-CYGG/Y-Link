@@ -10,6 +10,17 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { TraceMap, decodedMappings } from '@jridgewell/trace-mapping'
 
+// 生产SFC宿主中已声明的平台边界替身，有限枚举；未知behavior模块不能静默丢弃。
+const knownBehaviorBoundaries = new Set([
+  '\\0behavior:@/components/common', '\\0behavior:@/api/modules/inventory', '\\0behavior:@/utils/app-alert',
+  '\\0behavior:./BarcodeLabelCard.vue', '\\0behavior:router', '\\0behavior:@/store',
+  '\\0behavior:@/store/pinia', '\\0behavior:@/api/modules/o2o',
+  '\\0behavior:element-plus', '\\0behavior:@element-plus/icons-vue',
+  '\\0behavior:@/composables/useDevice', '\\0behavior:@/composables/useCameraQrScanner',
+  '\\0behavior:@/api/modules/product', '\\0behavior:@/components/common/KingdeeRegistrationEditor.vue',
+])
+export const isKnownCoverageBehaviorBoundary = (id) => knownBehaviorBoundaries.has(id)
+
 const same = (left, right) => JSON.stringify(left) === JSON.stringify(right)
 const isInteger = (value) => Number.isSafeInteger(value)
 
@@ -178,7 +189,7 @@ const mapScript = (script, cache, target) => {
     /^\/\/(?:#region)? (\\0\S+|\S+\.(?:vue|[cm]?[jt]sx?))$|^\/\/#endregion$/gmu,
   )].map((match) => ({ index: match.index, moduleId: match[1] ?? null }))
   const virtualRegions = moduleBoundaries.flatMap((boundary, index) => (
-    boundary.moduleId?.startsWith('\\0virtual:')
+    (boundary.moduleId?.startsWith('\\0virtual:') || isKnownCoverageBehaviorBoundary(boundary.moduleId))
       ? [[boundary.index, moduleBoundaries[index + 1]?.index ?? generated.length]]
       : []
   ))
@@ -264,11 +275,16 @@ const mapScript = (script, cache, target) => {
  */
 export const mapV8SfcCoverage = ({ rawDirectory, targets }) => {
   const byGenerated = new Map()
-  const helperPath = path.resolve('src/views/inventory/components/barcode-label-print.helpers.ts')
+  // 仅允许真实参与这些 SFC 运行时包的三个明确 TS 源码；不能放宽为任意 .ts。
+  const allowedTsTargets = new Set([
+    'src/views/inventory/components/barcode-label-print.helpers.ts',
+    'src/views/inventory/components/barcode-label-preflight.ts',
+    'src/utils/kingdee-freshness.ts',
+  ].map((source) => path.resolve(source)))
   for (const item of targets) {
     const generated = path.resolve(item.generated)
     const source = path.resolve(item.source)
-    if (!source.endsWith('.vue') && source !== helperPath) throw new Error('Vue 映射目标源码无效')
+    if (!source.endsWith('.vue') && !allowedTsTargets.has(source)) throw new Error('Vue 映射目标源码无效')
     const entry = byGenerated.get(generated) ?? { targets: [], allowedPaths: new Set() }
     if (entry.targets.some((target) => target.source === source)) throw new Error('Vue 映射目标重复')
     entry.targets.push({ source })

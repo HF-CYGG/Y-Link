@@ -46,6 +46,7 @@ const submitPreorderSchema = z.object({
     .regex(/^[A-Za-z0-9:_-]+$/, '下单请求键格式不正确'),
   // 详细注释：客户端必须显式传入“是否系统申请”，避免服务端继续使用默认值导致语义失真。
   isSystemApplied: z.boolean(),
+  kingdeeVoucherNo: z.string().nullable().optional(),
   // 详细注释：提货人由客户端显式填写后传入服务端，避免继续退回为账号默认名导致代领场景失真。
   pickupContact: z.string().trim().min(1).max(32),
   // 到店取货时间：部门单必填、散客单忽略；格式为带时区偏移的 ISO 时间，业务范围由服务层按自动取消时间校验。
@@ -129,10 +130,19 @@ const merchantMessageSchema = z.object({
   merchantMessage: z.string().trim().max(O2O_MERCHANT_MESSAGE_MAX_LENGTH).nullable(),
 })
 
+const kingdeeRegistrationSchema = z.object({
+  kingdeeVoucherNo: z.string().nullable(),
+  expectedKingdeeVersion: z.number().int().min(0).max(MAX_DATABASE_INT),
+})
+const kingdeeTodosSchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(50).default(20),
+})
 const complianceFlagsSchema = z
   .object({
     hasCustomerOrder: z.boolean().optional(),
     isSystemApplied: z.boolean().optional(),
+    expectedKingdeeVersion: z.number().int().min(0).max(MAX_DATABASE_INT).optional(),
   })
   .refine((payload) => payload.hasCustomerOrder !== undefined || payload.isSystemApplied !== undefined, {
     message: '至少传入一个可更新字段',
@@ -288,6 +298,20 @@ o2oRouter.get(
     res.json({ code: 0, message: 'ok', data })
   }),
 )
+
+// 静态待办路由必须先于 :id，客户端只读本人原预订单。
+o2oRouter.get('/mall/preorders/kingdee-todos', requireClientAuth, asyncHandler(async (req, res) => {
+  const data = await o2oPreorderService.listMyKingdeeTodos((req as ClientAuthenticatedRequest).clientAuth, kingdeeTodosSchema.parse(req.query))
+  res.json({ code: 0, message: 'ok', data })
+}))
+o2oRouter.patch('/mall/preorders/:id/kingdee-registration', requireClientAuth, asyncHandler(async (req, res) => {
+  const data = await o2oPreorderService.updateKingdeeRegistration(req.params.id, kingdeeRegistrationSchema.parse(req.body), { client: (req as ClientAuthenticatedRequest).clientAuth }, extractRequestMeta(req))
+  res.json({ code: 0, message: 'ok', data })
+}))
+o2oAdminRouter.patch('/orders/:id/kingdee-registration', requirePermission('orders:update'), asyncHandler(async (req, res) => {
+  const data = await o2oPreorderService.updateKingdeeRegistration(req.params.id, kingdeeRegistrationSchema.parse(req.body), { admin: (req as AuthenticatedRequest).auth }, extractRequestMeta(req))
+  res.json({ code: 0, message: 'ok', data })
+}))
 
 // 订单详情：客户端查看自己的核销码、商品明细与状态。
 o2oRouter.get(
@@ -714,6 +738,7 @@ o2oAdminRouter.patch(
       orderId: req.params.id,
       hasCustomerOrder: payload.hasCustomerOrder,
       isSystemApplied: payload.isSystemApplied,
+      expectedKingdeeVersion: payload.expectedKingdeeVersion,
     }, authReq.auth, extractRequestMeta(req))
     res.json({ code: 0, message: 'ok', data })
   }),

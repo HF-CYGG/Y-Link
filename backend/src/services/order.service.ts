@@ -8,6 +8,7 @@
  * 4. 兼容幂等重试、编号冲突与 SQLite 锁冲突，减少并发下的重复单与失败单。
  */
 
+import { kingdeeRegistrationView, type KingdeeStatus } from '../utils/kingdee-registration.js'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { Brackets, In, type EntityManager } from 'typeorm'
@@ -142,6 +143,7 @@ export interface OrderDetailItemView {
 }
 
 export interface OrderSummaryView {
+  sourcePreorderRegistrations?: OrderDetailSummaryView['sourcePreorderRegistrations']
   id: string
   /** 仅管理员技术追溯可见。 */
   systemNo?: string
@@ -185,6 +187,16 @@ export interface OrderSummaryView {
 }
 
 export interface OrderDetailSummaryView extends OrderSummaryView {
+  sourcePreorderRegistrations: Array<{
+    sourceOrderId: string
+    businessNo: string
+    sourcePreorderId: string | null
+    sourcePreorderNo: string | null
+    kingdeeVoucherNo: string | null
+    kingdeeVersion: number
+    kingdeeStatus: KingdeeStatus | null
+    kingdeeEditable: boolean
+  }>
   /** 仅从实际来源预订单读取；历史来源记录缺失时保持 null。 */
   sourcePreorderPickupContact: string | null
   sourcePreorderPickupAt: string | null
@@ -529,11 +541,27 @@ export class OrderService {
       list.filter((order) => order.isDeleted && order.inventoryMode === 'manual_applied').map((order) => normalizeEntityId(order.id)),
     )
 
+    const sourceIds = [...new Set(list.flatMap((order) => [String(order.id), ...(metadataMap.get(String(order.id))?.children.map((child) => child.id) ?? [])]))]
+    const sourceOrders = sourceIds.length ? await AppDataSource.getRepository(BizOutboundOrder).find({ where: { id: In(sourceIds) } }) : []
+    const preorderIds = sourceOrders.flatMap((order) => order.sourceDocType === 'o2o_preorder' && order.sourceDocId ? [String(order.sourceDocId)] : [])
+    const sourcePreorders = preorderIds.length ? await AppDataSource.getRepository(O2oPreorder).find({ where: { id: In(preorderIds) } }) : []
+    const sourcePreorderMap = new Map(sourcePreorders.map((preorder) => [String(preorder.id), preorder]))
+    const registrationsFor = (order: BizOutboundOrder) => {
+      const ids = new Set([String(order.id), ...(metadataMap.get(String(order.id))?.children.map((child) => child.id) ?? [])])
+      return sourceOrders.filter((source) => ids.has(String(source.id)) && source.sourceDocType === 'o2o_preorder').map((source) => {
+        const preorder = source.sourceDocId ? sourcePreorderMap.get(String(source.sourceDocId)) : undefined
+        return { sourceOrderId: String(source.id), businessNo: source.businessNo, sourcePreorderId: preorder ? String(preorder.id) : null,
+          sourcePreorderNo: source.sourceDocNo ?? null,
+          ...(preorder ? kingdeeRegistrationView(preorder) : { kingdeeVoucherNo: null, kingdeeVersion: 0, kingdeeStatus: 'unknown' as const, kingdeeEditable: false }),
+        }
+      })
+    }
     return {
       page: query.page,
       pageSize: query.pageSize,
       total,
       list: list.map((order) => ({
+        sourcePreorderRegistrations: registrationsFor(order),
         ...this.buildOrderSummaryView(
           order,
           metadataMap.get(normalizeEntityId(order.id)),
@@ -1683,7 +1711,7 @@ export class OrderService {
     const preorders = linkedPreorderIds.length
       ? await manager.getRepository(O2oPreorder).find({
         where: { id: In(linkedPreorderIds) },
-        select: ['id', 'preorderNo', 'pickupContact', 'pickupAt'],
+        select: ['id', 'preorderNo', 'pickupContact', 'pickupAt', 'clientOrderType', 'kingdeeVoucherNo', 'kingdeeVersion', 'isSystemApplied', 'isDeleted', 'status', 'timeoutAt'],
       })
       : []
     const preorderMap = new Map(preorders.map((preorder) => [normalizeEntityId(preorder.id), preorder]))
@@ -1703,12 +1731,24 @@ export class OrderService {
         pickupAt: preorder?.pickupAt ? normalizeDateTime(preorder.pickupAt) : null,
       }]
     })
+    // 与领取人投影独立，父单 OR 标记不能替代每个来源的登记状态。
+    const sourcePreorderRegistrations = sourcePreorderPickups.map((pickup) => {
+      const source = sourceOrderMap.get(pickup.sourceOrderId)
+      const id = source ? this.resolveLinkedO2oPreorderId(source) ?? this.resolveLegacyPickupPreorderId(source) : null
+      const candidate = id ? preorderMap.get(id) : null
+      const preorder = candidate?.preorderNo === pickup.sourcePreorderNo ? candidate : null
+      return { sourceOrderId: pickup.sourceOrderId, businessNo: pickup.businessNo,
+        sourcePreorderId: preorder ? String(preorder.id) : null, sourcePreorderNo: pickup.sourcePreorderNo,
+        ...(preorder ? kingdeeRegistrationView(preorder) : { kingdeeVoucherNo: null, kingdeeVersion: 0, kingdeeStatus: 'unknown' as const, kingdeeEditable: false }),
+      }
+    })
     const ownPickup = sourcePreorderPickups.find((pickup) => pickup.sourceOrderId === normalizeEntityId(order.id))
     return {
       ...summary,
       sourcePreorderPickupContact: ownPickup?.pickupContact ?? null,
       sourcePreorderPickupAt: ownPickup?.pickupAt ?? null,
       sourcePreorderPickups,
+      sourcePreorderRegistrations,
     }
   }
 

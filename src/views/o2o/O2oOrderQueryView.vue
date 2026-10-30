@@ -11,6 +11,7 @@
  * - 详情区的状态文案必须复用共享状态配置，避免“主动撤回”被错误展示成普通取消。
  */
 
+import KingdeeRegistrationEditor from '@/components/common/KingdeeRegistrationEditor.vue'
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
@@ -558,6 +559,8 @@ const hasOrderSummaryChanged = (previous: O2oConsolePreorderSummary | undefined,
     || previous.businessStatus !== next.businessStatus
     || previous.hasCustomerOrder !== next.hasCustomerOrder
     || previous.isSystemApplied !== next.isSystemApplied
+    || previous.kingdeeVersion !== next.kingdeeVersion
+    || previous.kingdeeVoucherNo !== next.kingdeeVoucherNo
     || previous.merchantMessage !== next.merchantMessage
     || previous.returnRequestCount !== next.returnRequestCount
     || previous.pendingReturnRequestCount !== next.pendingReturnRequestCount
@@ -806,6 +809,10 @@ const mergeOrderSummaryFromDetail = (detail: O2oConsolePreorderDetail) => {
     businessStatus: nextOrder.businessStatus,
     hasCustomerOrder: Boolean(nextOrder.hasCustomerOrder),
     isSystemApplied: Boolean(nextOrder.isSystemApplied),
+    kingdeeVoucherNo: nextOrder.kingdeeVoucherNo,
+    kingdeeVersion: nextOrder.kingdeeVersion,
+    kingdeeStatus: nextOrder.kingdeeStatus,
+    kingdeeEditable: nextOrder.kingdeeEditable,
     merchantMessage: nextOrder.merchantMessage,
     clientOrderType: nextOrder.clientOrderType,
     departmentNameSnapshot: nextOrder.departmentNameSnapshot,
@@ -1314,7 +1321,7 @@ const handleSaveComplianceFlags = async () => {
   try {
     const latestDetail = await updateO2oOrderComplianceFlags(activeOrderDetail.value.order.id, {
       hasCustomerOrder: complianceForm.value.hasCustomerOrder,
-      isSystemApplied: complianceForm.value.isSystemApplied,
+      expectedKingdeeVersion: activeOrderDetail.value?.order.kingdeeVersion,
     })
     activeOrderDetail.value = latestDetail
     mergeOrderSummaryFromDetail(latestDetail)
@@ -1600,6 +1607,10 @@ onBeforeUnmount(() => {
                 isOrderRefreshed(order.id) ? 'order-card--refreshed' : '',
               ]"
               :data-order-pool-card-id="order.id"
+              :data-kingdee-version="order.kingdeeVersion"
+              :data-kingdee-no="order.kingdeeVoucherNo ?? ''"
+              :data-kingdee-status="order.kingdeeStatus"
+              :data-kingdee-editable="order.kingdeeEditable"
             >
               <div v-if="canBatchPurgeCancelledOrders" class="absolute right-3 top-3 z-10">
                 <el-checkbox
@@ -1770,18 +1781,9 @@ onBeforeUnmount(() => {
                       </div>
                     </div>
                     <div class="rounded-xl border border-slate-100 bg-white px-3 py-2.5 dark:border-white/5 dark:bg-[#141415]">
-                      <p class="text-xs text-slate-500 dark:text-slate-400">系统申请</p>
+                      <p class="text-xs text-slate-500 dark:text-slate-400">金蝶状态</p>
                       <div class="mt-2">
-                        <el-switch
-                          v-if="canEditComplianceFlags && activeOrderDetail.order.clientOrderType === 'department'"
-                          v-model="complianceForm.isSystemApplied"
-                          inline-prompt
-                          active-text="已申请"
-                          inactive-text="未申请"
-                        />
-                        <span v-else class="text-sm font-medium text-slate-700 dark:text-slate-200">
-                          {{ activeOrderDetail.order.clientOrderType === 'department' ? (activeOrderDetail.order.isSystemApplied ? '已申请' : '未申请') : '不适用' }}
-                        </span>
+                        <KingdeeRegistrationEditor :order-id="activeOrderDetail.order.id" :registration="activeOrderDetail.order" admin :can-edit="canEditComplianceFlags" @saved="loadOrderDetail(activeOrderDetail.order.id, { silent: true })" />
                       </div>
                     </div>
                   </div>

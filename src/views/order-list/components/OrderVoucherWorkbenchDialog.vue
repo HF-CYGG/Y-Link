@@ -295,7 +295,8 @@ const handleExportVoucherPdf = async () => {
               <el-input v-model="voucherEditableForm.departmentOperator" :disabled="exportPdfLoading" placeholder="请输入部门经办人" clearable />
             </el-form-item>
             <el-form-item label="金蝶单据编号">
-              <el-input v-model="voucherEditableForm.kingdeeVoucherNo" :disabled="exportPdfLoading" placeholder="请输入金蝶单据编号" clearable />
+              <p v-if="order.inventoryMode === 'o2o_preapplied' || order.sourceDocType === 'o2o_preorder'">{{ order.merge.role === 'parent' ? '按各来源登记，详见凭证明细' : order.sourcePreorderRegistrations?.[0]?.kingdeeVoucherNo || '未登记，请在原预订单填写' }}</p>
+              <el-input v-else v-model="voucherEditableForm.kingdeeVoucherNo" :disabled="exportPdfLoading" placeholder="请输入金蝶单据编号" clearable />
             </el-form-item>
             <el-form-item label="领取人签字">
               <el-input v-model="voucherEditableForm.receiverSignature" :disabled="exportPdfLoading" placeholder="请输入领取人签字" clearable />

@@ -4,7 +4,8 @@
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { assertSourceMapSegmentShape, segmentFullyExecuted, validateRanges } from './v8-sfc-coverage.mjs'
+import path from 'node:path'
+import { isKnownCoverageBehaviorBoundary, mapV8SfcCoverage, assertSourceMapSegmentShape, segmentFullyExecuted, validateRanges } from './v8-sfc-coverage.mjs'
 
 test('跨越未执行内层范围的源码片段不能由外层命中冒领', () => {
   const generated = 'const 值 = () => 1;'
@@ -40,4 +41,16 @@ test('原始 V8 条件标志或源码映射片段畸形时拒绝报告', () => {
   assert.throws(() => assertSourceMapSegmentShape([1, 2, 3]), /结构非法/u)
   assert.doesNotThrow(() => assertSourceMapSegmentShape([1]))
   assert.doesNotThrow(() => assertSourceMapSegmentShape([1, 0, 2, 3]))
+})
+
+// 正向真实 V8/source-map 与只导入零命中由 coverage:report 的两个 suite/probe 执行。
+test('有限 TS 目标之外的任意路径仍在读取覆盖率前拒绝', () => {
+  for (const source of ['src/utils/error.ts', 'src/utils/kingdee-freshness-copy.ts', '../kingdee-freshness.ts']) {
+    assert.throws(() => mapV8SfcCoverage({ rawDirectory: path.resolve('不存在的原始目录'), targets: [{ generated: path.resolve('tmp/伪产物.mjs'), source: path.resolve(source) }] }), /映射目标源码无效/)
+  }
+})
+
+test('仅登记明确宿主边界，未知替身和真实源码不能被忽略', () => {
+  assert.equal(isKnownCoverageBehaviorBoundary('\\0behavior:@/api/modules/inventory'), true)
+  for (const id of ['\\0behavior:@/api/modules/未知', '\\0behavior:src/真实源码.ts', 'src/utils/kingdee-freshness.ts']) assert.equal(isKnownCoverageBehaviorBoundary(id), false)
 })
