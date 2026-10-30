@@ -62,8 +62,8 @@ import {
   readMallCatalogClusterRevision,
   readMallCatalogRevision,
 } from './mall-catalog-revision.service.js'
-import { buildSkuLogFields, snapshotSkuStock } from './inventory-ledger.service.js'
-import { formatLocationDeductions, reconcileSkuLocationStocks } from './sku-location-stock.service.js'
+import { buildSkuLogFields, persistLockedInventoryStocks, skuContributesToProductAggregate, snapshotSkuStock } from './inventory-ledger.service.js'
+import { formatLocationDeductions, reconcileSkuLocationStockTransitions } from './sku-location-stock.service.js'
 import type { PaginationResult } from '../types/api.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import {
@@ -1627,10 +1627,10 @@ class O2oPreorderService {
       const skuBefore = snapshotSkuStock(sku)
       if (sku) {
         sku.preOrderedStock = Math.max(0, Number(sku.preOrderedStock ?? 0) - qty)
-        await manager.getRepository(BaseProductSku).save(sku)
+        await manager.getRepository(BaseProductSku).update({ id: sku.id }, { preOrderedStock: sku.preOrderedStock })
       }
       product.preOrderedStock = Math.max(0, beforePreOrderedStock - qty)
-      await manager.getRepository(BaseProduct).save(product)
+      await manager.getRepository(BaseProduct).update({ id: product.id }, { preOrderedStock: product.preOrderedStock })
       await manager.getRepository(InventoryLog).save(
         manager.getRepository(InventoryLog).create({
           productId: product.id,
@@ -1937,12 +1937,7 @@ class O2oPreorderService {
         }),
       )
     }
-    if (skus.length) {
-      await manager.getRepository(BaseProductSku).save(skus)
-    }
-    if (products.length) {
-      await manager.getRepository(BaseProduct).save(products)
-    }
+    await persistLockedInventoryStocks(manager, { products, skus, columns: ['preOrderedStock'] })
     if (inventoryLogs.length) {
       await inventoryLogRepo.save(inventoryLogs)
     }
@@ -3151,8 +3146,9 @@ class O2oPreorderService {
             refId: savedOrder.id,
           }))
         }
-        await manager.getRepository(BaseProductSku).save([...skuMap.values()])
-        await manager.getRepository(BaseProduct).save([...productMap.values()])
+        await persistLockedInventoryStocks(manager, {
+          products: productMap.values(), skus: skuMap.values(), columns: ['preOrderedStock'],
+        })
         await inventoryLogRepo.save(inventoryLogs)
         // 只在真正建单时留痕，幂等重放直接返回已有订单，不重复记审计。
         await this.recordPreorderSubmitAudit(manager, auth, savedOrder, requestMeta, {
@@ -3252,6 +3248,7 @@ class O2oPreorderService {
     const productRepo = manager.getRepository(BaseProduct)
     const products = await productRepo.find({
       where: { id: In(productIds) },
+      order: { id: 'ASC' },
       lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
     })
     if (products.length !== productIds.length) {
@@ -3379,13 +3376,13 @@ class O2oPreorderService {
         sku.preOrderedStock = deltaQty > 0
           ? Number(sku.preOrderedStock ?? 0) + deltaQty
           : Math.max(0, Number(sku.preOrderedStock ?? 0) - changeQty)
-        await skuRepo.save(sku)
+        await skuRepo.update({ id: sku.id }, { preOrderedStock: sku.preOrderedStock })
       }
 
       product.preOrderedStock = deltaQty > 0
         ? beforePreOrderedStock + deltaQty
         : Math.max(0, beforePreOrderedStock - changeQty)
-      await productRepo.save(product)
+      await productRepo.update({ id: product.id }, { preOrderedStock: product.preOrderedStock })
       await inventoryLogRepo.save(
         inventoryLogRepo.create({
           productId: product.id,
@@ -3495,6 +3492,7 @@ class O2oPreorderService {
       const productMap = await this.loadEditableOrderProductsInManager(manager, productIds)
       const skus = await manager.getRepository(BaseProductSku).find({
         where: { productId: In(productIds) },
+        order: { productId: 'ASC', id: 'ASC' },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
       const { skuMap, skuByProductMap } = this.groupSkusByProduct(skus)
@@ -3599,6 +3597,7 @@ class O2oPreorderService {
       const productMap = await this.loadEditableOrderProductsInManager(manager, productIds)
       const skus = await manager.getRepository(BaseProductSku).find({
         where: { productId: In(productIds) },
+        order: { productId: 'ASC', id: 'ASC' },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
       const { skuMap, skuByProductMap } = this.groupSkusByProduct(skus)
@@ -4675,6 +4674,7 @@ class O2oPreorderService {
     const productIds = [...new Set(requestItems.map((item) => String(item.productId)))]
     const products = await manager.getRepository(BaseProduct).find({
       where: { id: In(productIds) },
+      order: { id: 'ASC' },
       lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
     })
     const productMap = new Map(products.map((item) => [String(item.id), item]))
@@ -4682,6 +4682,7 @@ class O2oPreorderService {
     const skus = skuIds.length
       ? await manager.getRepository(BaseProductSku).find({
           where: { id: In(skuIds) },
+          order: { productId: 'ASC', id: 'ASC' },
           lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
         })
       : []
@@ -4704,8 +4705,9 @@ class O2oPreorderService {
     const itemKey = this.buildOrderItemKey(String(requestItem.productId), requestItem.skuId ? String(requestItem.skuId) : null)
     const orderItem = orderItemMap.get(itemKey)
     const sku = requestItem.skuId ? skuMap.get(String(requestItem.skuId)) : null
-    if (!product || !orderItem) {
-      throw new BizError('存在已失效商品，无法核销退货', 409)
+    if (!requestItem.skuId || !product || !orderItem || !sku || String(sku.productId) !== String(product.id)) {
+      // nullable/SET NULL 只保留旧单读取能力，退货写库存必须能定位原商品下的真实 SKU。
+      throw new BizError('退货明细的商品或 SKU 已失效或归属不一致，无法核销退货', 409)
     }
     const requestQty = Math.max(0, Number(requestItem.qty ?? 0))
     const currentOrderQty = Math.max(0, Number(orderItem.qty ?? 0))
@@ -4717,12 +4719,10 @@ class O2oPreorderService {
     const beforePreOrderedStock = Math.max(0, Number(product.preOrderedStock ?? 0))
     const skuBefore = snapshotSkuStock(sku)
     if (returnRequest.sourceOrderStatus === 'pending') {
-      if (sku) {
-        sku.preOrderedStock = Math.max(0, Number(sku.preOrderedStock ?? 0) - requestQty)
-        await manager.getRepository(BaseProductSku).save(sku)
-      }
+      sku.preOrderedStock = Math.max(0, Number(sku.preOrderedStock ?? 0) - requestQty)
+      await manager.getRepository(BaseProductSku).update({ id: sku.id }, { preOrderedStock: sku.preOrderedStock })
       product.preOrderedStock = Math.max(0, beforePreOrderedStock - requestQty)
-      await manager.getRepository(BaseProduct).save(product)
+      await manager.getRepository(BaseProduct).update({ id: product.id }, { preOrderedStock: product.preOrderedStock })
       await manager.getRepository(InventoryLog).save(
         manager.getRepository(InventoryLog).create({
           productId: product.id,
@@ -4742,12 +4742,11 @@ class O2oPreorderService {
         }),
       )
     } else {
-      if (sku) {
-        sku.currentStock = Math.max(0, Number(sku.currentStock ?? 0)) + requestQty
-        await manager.getRepository(BaseProductSku).save(sku)
-      }
-      product.currentStock = beforeCurrentStock + requestQty
-      await manager.getRepository(BaseProduct).save(product)
+      sku.currentStock = Math.max(0, Number(sku.currentStock ?? 0)) + requestQty
+      await manager.getRepository(BaseProductSku).update({ id: sku.id }, { currentStock: sku.currentStock })
+      const contributes = skuContributesToProductAggregate(sku)
+      product.currentStock = beforeCurrentStock + (contributes ? requestQty : 0)
+      if (contributes) await manager.getRepository(BaseProduct).update({ id: product.id }, { currentStock: product.currentStock })
       await manager.getRepository(InventoryLog).save(
         manager.getRepository(InventoryLog).create({
           productId: product.id,
@@ -4763,7 +4762,7 @@ class O2oPreorderService {
           operatorName: actor.displayName,
           refType: 'o2o_return_request',
           refId: String(returnRequest.id),
-          remark: `退货核销重新入库，退货单号：${returnRequest.returnNo}`,
+          remark: `退货核销重新入库，退货单号：${returnRequest.returnNo}${contributes ? '' : '（规格已停用或退役，不计入商品汇总）'}`,
         }),
       )
     }
@@ -4894,13 +4893,16 @@ class O2oPreorderService {
     if (pendingReturnCount > 0) {
       throw new BizError('该订单存在待处理退货申请，请先完成退货核销后再执行取货核销', 409)
     }
-    const items = await manager.getRepository(O2oPreorderItem).find({ where: { orderId: String(order.id) } })
+    const items = await manager.getRepository(O2oPreorderItem).find({
+      where: { orderId: String(order.id) }, order: { id: 'ASC' },
+    })
     if (!items.length || items.every((item) => Number(item.qty ?? 0) <= 0)) {
       throw new BizError('当前订单已无可核销商品', 409)
     }
     const productIds = [...new Set(items.map((item) => String(item.productId)))]
     const products = await manager.getRepository(BaseProduct).find({
       where: { id: In(productIds) },
+      order: { id: 'ASC' },
       lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
     })
     const productMap = new Map(products.map((item) => [String(item.id), item]))
@@ -4908,10 +4910,17 @@ class O2oPreorderService {
     const skus = skuIds.length
       ? await manager.getRepository(BaseProductSku).find({
           where: { id: In(skuIds) },
+          order: { productId: 'ASC', id: 'ASC' },
           lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
         })
       : []
     const skuMap = new Map(skus.map((item) => [String(item.id), item]))
+    const changedProducts = new Map<string, BaseProduct>()
+    const changedSkus = new Map<string, BaseProductSku>()
+    const logs: InventoryLog[] = []
+    const locationTransitions: Array<{ id: string; locationId: string | null; currentStock: number }> = []
+    const transitionLogIndexes: number[] = []
+    const logRepo = manager.getRepository(InventoryLog)
     for (const row of items) {
       const verifyQty = Math.max(0, Number(row.qty ?? 0))
       if (verifyQty <= 0) {
@@ -4936,20 +4945,19 @@ class O2oPreorderService {
         }
         sku.currentStock = beforeSkuCurrentStock - verifyQty
         sku.preOrderedStock = beforeSkuPreOrderedStock - verifyQty
-        await manager.getRepository(BaseProductSku).save(sku)
+        changedSkus.set(String(sku.id), sku)
+        locationTransitions.push({ id: String(sku.id), locationId: sku.locationId, currentStock: sku.currentStock })
+        transitionLogIndexes.push(logs.length)
       }
-      // 核销出库按“先扣主库位、不够再扣其他库位”规整分库位件数，扣到的其他库位写进流水备注。
-      const locationNote = sku ? formatLocationDeductions((await reconcileSkuLocationStocks(manager, [sku])).get(String(sku.id))) : ''
       product.currentStock = beforeCurrentStock - verifyQty
       product.preOrderedStock = beforePreOrderedStock - verifyQty
-      await manager.getRepository(BaseProduct).save(product)
-      await manager.getRepository(InventoryLog).save(
-        manager.getRepository(InventoryLog).create({
+      changedProducts.set(String(product.id), product)
+      logs.push(
+        logRepo.create({
           productId: product.id,
           ...buildSkuLogFields(sku, skuBefore),
           changeType: 'preorder_verify',
           changeQty: verifyQty,
-          ...(locationNote ? { remark: locationNote } : {}),
           beforeCurrentStock,
           afterCurrentStock: product.currentStock,
           beforePreorderedStock: beforePreOrderedStock,
@@ -4962,6 +4970,15 @@ class O2oPreorderService {
         }),
       )
     }
+    const deductions = await reconcileSkuLocationStockTransitions(manager, locationTransitions)
+    deductions.forEach((items, index) => {
+      const note = formatLocationDeductions(items)
+      if (note) logs[transitionLogIndexes[index]!]!.remark = note
+    })
+    await persistLockedInventoryStocks(manager, {
+      products: changedProducts.values(), skus: changedSkus.values(), columns: ['currentStock', 'preOrderedStock'],
+    })
+    await logRepo.save(logs)
     order.status = 'verified'
     order.verifiedAt = new Date()
     order.verifiedBy = actor.displayName
@@ -5096,8 +5113,7 @@ class O2oPreorderService {
         .where('sku.productId = :productId', { productId })
         .andWhere('sku.isActive = :isActive', { isActive: true })
         .andWhere('sku.isCurrent = :isCurrent', { isCurrent: true })
-        .orderBy('sku.sortOrder', 'ASC')
-        .addOrderBy('sku.id', 'ASC')
+        .orderBy('sku.id', 'ASC')
       if (manager.connection.options.type !== 'sqlite') skuQuery.setLock('pessimistic_write')
       const activeSkus = await skuQuery.getMany()
       const requestedSku = skuId
@@ -5123,8 +5139,8 @@ class O2oPreorderService {
       // 入库只增加现货库存，不改动预订占用库存，因为预订占用代表已承诺但未核销的数量。
       sku.currentStock = Number(sku.currentStock ?? 0) + normalizedQty
       product.currentStock = beforeCurrentStock + normalizedQty
-      await manager.getRepository(BaseProductSku).save(sku)
-      await manager.getRepository(BaseProduct).save(product)
+      await manager.getRepository(BaseProductSku).update({ id: sku.id }, { currentStock: sku.currentStock })
+      await manager.getRepository(BaseProduct).update({ id: product.id }, { currentStock: product.currentStock })
       await manager.getRepository(InventoryLog).save(
         manager.getRepository(InventoryLog).create({
           productId: product.id,

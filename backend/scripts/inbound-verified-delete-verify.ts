@@ -451,9 +451,41 @@ async function main() {
   }), duplicateBefore)
   const duplicateReversalLogs = await AppDataSource.getRepository(InventoryLog).find({
     where: { refType: 'biz_inbound_order', refId: String(duplicateDelivery.order.id), changeType: 'inbound_reverse' },
+    order: { id: 'ASC' },
   })
-  assert.equal(duplicateReversalLogs.length, 1)
-  assert.equal(Number(duplicateReversalLogs[0]?.changeQty), -5)
+  const duplicateSourceItems = await duplicateItemRepo.find({
+    where: { orderId: String(duplicateDelivery.order.id) },
+    order: { id: 'ASC' },
+  })
+  assert.deepEqual(duplicateSourceItems.map((item) => Number(item.qty)), [2, 3])
+  assert.equal(duplicateReversalLogs.length, 2)
+  assert.deepEqual(duplicateReversalLogs.map((log) => Number(log.changeQty)), duplicateSourceItems.map((item) => -Number(item.qty)))
+  assert.equal(duplicateReversalLogs.reduce((sum, log) => sum + Number(log.changeQty), 0), -5)
+  let duplicateProductCurrent = duplicateAfterVerify.productCurrent
+  let duplicateSkuCurrent = duplicateAfterVerify.skuCurrent
+  for (const [index, log] of duplicateReversalLogs.entries()) {
+    const qty = Number(duplicateSourceItems[index]!.qty)
+    assert.equal(Number(log.beforeCurrentStock), duplicateProductCurrent)
+    assert.equal(Number(log.beforeSkuCurrentStock), duplicateSkuCurrent)
+    duplicateProductCurrent -= qty
+    duplicateSkuCurrent -= qty
+    assert.equal(Number(log.afterCurrentStock), duplicateProductCurrent)
+    assert.equal(Number(log.afterSkuCurrentStock), duplicateSkuCurrent)
+    assert.equal(Number(log.beforePreorderedStock), duplicateBefore.productReserved)
+    assert.equal(Number(log.afterPreorderedStock), duplicateBefore.productReserved)
+    assert.equal(Number(log.beforeSkuPreorderedStock), duplicateBefore.skuReserved)
+    assert.equal(Number(log.afterSkuPreorderedStock), duplicateBefore.skuReserved)
+    assert.equal(String(log.productId), String(duplicateProduct.id))
+    assert.equal(String(log.skuId), String(duplicateSku.id))
+    assert.equal(log.refType, 'biz_inbound_order')
+    assert.equal(String(log.refId), String(duplicateDelivery.order.id))
+    assert.equal(log.operatorType, 'supplier')
+    assert.equal(log.operatorId, supplierActor.userId)
+    assert.equal(log.operatorName, supplierActor.displayName || supplierActor.username)
+    assert.ok(log.remark?.startsWith(`冲销已入库送货单 ${duplicateDelivery.order.showNo}；SKU ${duplicateSku.id}；数量 ${qty}`))
+  }
+  assert.equal(duplicateProductCurrent, duplicateBefore.productCurrent)
+  assert.equal(duplicateSkuCurrent, duplicateBefore.skuCurrent)
 
   const crossProductVerified = await createTwoProductDelivery(true)
   const crossVerifiedItems = await AppDataSource.getRepository(BizInboundOrderItem).find({

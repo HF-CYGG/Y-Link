@@ -147,6 +147,8 @@ function toSafeProfile(user: SysUser): UserSafeProfile {
 export class AuthService {
   private readonly userRepo = AppDataSource.getRepository(SysUser)
   private readonly sessionRepo = AppDataSource.getRepository(SysUserSession)
+  // 仅关联本次查库返回的上下文；不缓存鉴权结果，也不向用户响应或 actor fixture 增加字段。
+  private readonly sessionActivitySnapshots = new WeakMap<AuthUserContext, number | null>()
 
   /**
    * 按账号加载带密码哈希的用户：
@@ -807,7 +809,7 @@ export class AuthService {
       throw new BizError('当前账号已停用，请联系管理员', 403)
     }
 
-    return {
+    const auth: AuthUserContext = {
       userId: user.id,
       username: user.username,
       displayName: user.displayName,
@@ -818,12 +820,22 @@ export class AuthService {
       // 认证来源由中间件根据“本次请求从 Cookie 还是 Bearer 进入”最终覆写。
       authSource: 'bearer',
     }
+    this.sessionActivitySnapshots.set(auth, session.lastAccessAt?.getTime() ?? null)
+    return auth
+  }
+
+  /** 先用本次鉴权已加载的时间跳过无效 SQL；缺少快照时仍允许原有 touch 路径处理。 */
+  isSessionActivityUpdateDue(auth: AuthUserContext, minIntervalMs = 60_000): boolean {
+    const lastAccessAt = this.sessionActivitySnapshots.get(auth)
+    return lastAccessAt == null || !Number.isFinite(lastAccessAt)
+      || lastAccessAt < Date.now() - Math.max(1_000, minIntervalMs)
   }
 
   /**
    * 会话活跃时间写入节流：
    * - 管理端每个请求都可能走鉴权链路，若每次都更新 last_access_at，会在 SQLite 下产生额外写压；
-   * - 仅当上次活跃时间超过最小间隔时才写库，兼顾在线状态准确性和并发稳定性。
+   * - 普通鉴权先用已加载时间跳过窗口内 SQL，此处条件继续防止并发旧快照重复更新；
+   * - 显式在线心跳仍可独立指定 1 秒间隔，不受普通鉴权的 60 秒前置判断影响。
    */
   async touchSessionActivity(sessionToken: string, minIntervalMs = 60_000): Promise<void> {
     const now = new Date()

@@ -5,7 +5,7 @@
  * 1. 四宫格与近期动态维持“今日/本月”固定口径，区间相关的趋势与排行统一由 getAnalytics 提供；
  * 2. 区间过滤、订单类型过滤、软删除排除全部收敛到 applyOrderFilter，保证各接口口径一致；
  * 3. 商品排行支持“按商品合并 / 按规格细分”两种维度，聚合在 SQL 内先完成再截断 Top N；
- * 4. 时间分桶一律在服务层完成，不使用任何数据库方言日期函数，保证 SQLite 与 MySQL 行为一致。
+ * 4. 服务层生成本地日历边界，数据库按边界聚合，只返回桶级结果且不依赖方言日期函数。
  */
 
 import { AppDataSource } from '../config/data-source.js'
@@ -29,7 +29,6 @@ import type {
   DashboardRankCustomerRowRaw,
   DashboardRankProductRowRaw,
   DashboardTagAggregateRaw,
-  DashboardTrendOrderRowRaw,
 } from '../types/dashboard.js'
 import { BizError } from '../utils/errors.js'
 import type { AuthUserContext } from '../types/auth.js'
@@ -58,7 +57,25 @@ interface DashboardTopCustomer {
   orderCount: number
 }
 
-type DashboardAmountAggregateRaw = { totalAmount: string | number | null }
+interface DashboardStatsAggregateRaw {
+  todayOrderCount: string | number | null
+  todayOrderAmount: string | number | null
+  monthOrderCount: string | number | null
+  monthOrderAmount: string | number | null
+}
+
+interface DashboardTrendAggregateRaw {
+  bucketIndex: string | number
+  totalAmount: string | number | null
+  orderCount: string | number
+  totalQty: string | number | null
+}
+
+interface DashboardTrendBucket {
+  date: string
+  label: string
+  endExclusive: Date
+}
 
 interface DashboardStatsResult {
   todayOrderCount: number
@@ -93,7 +110,7 @@ const ORDER_TYPE_VALUES = ['department', 'walkin'] as const
 const DEPARTMENT_RANK_LABEL_EXPR = `COALESCE(TRIM(order.customerDepartmentName), '')`
 type DashboardOrderType = (typeof ORDER_TYPE_VALUES)[number]
 
-// 区间上限：统计区间最长一年，既覆盖“年末/学期报告”场景，也避免趋势分桶扫描无界行数。
+// 区间上限：统计区间最长一年，既覆盖“年末/学期报告”场景，也约束日历桶及查询参数数量。
 const MAX_RANGE_DAYS = 366
 // 超过该天数时趋势默认切换为按月分桶，避免跨年区间画出数百个日点。
 const TREND_DAY_BUCKET_MAX_DAYS = 62
@@ -523,44 +540,19 @@ export const dashboardService = {
     const productRepo = AppDataSource.getRepository(BaseProduct)
     const auditLogRepo = AppDataSource.getRepository(SysAuditLog)
 
-    const [
-      todayOrderCount,
-      todayOrderAmountResult,
-      monthOrderCount,
-      monthOrderAmountResult,
-      totalProductCount,
-      recentAuditLogs,
-    ] = await Promise.all([
-      // 今日单数（软删除单据不计入看板）。
+    const [orderStats, totalProductCount, recentAuditLogs] = await Promise.all([
+      // 今日属于本月：一次扫描同时统计两个区间，保留原有“仅下界、不设上界”的口径。
       orderRepo
         .createQueryBuilder('order')
-        .where('order.createdAt >= :today', { today })
-        .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
-        .andWhere('order.status = :activeOrderStatus', { activeOrderStatus: 'active' })
-        .getCount(),
-      // 今日总金额（软删除单据不计入看板）。
-      orderRepo
-        .createQueryBuilder('order')
-        .select('SUM(order.totalAmount)', 'totalAmount')
-        .where('order.createdAt >= :today', { today })
-        .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
-        .andWhere('order.status = :activeOrderStatus', { activeOrderStatus: 'active' })
-        .getRawOne<DashboardAmountAggregateRaw>(),
-      // 本月累计单据数（用于补充周期维度）。
-      orderRepo
-        .createQueryBuilder('order')
+        .select('COUNT(order.id)', 'monthOrderCount')
+        .addSelect('SUM(order.totalAmount)', 'monthOrderAmount')
+        .addSelect('SUM(CASE WHEN order.createdAt >= :today THEN 1 ELSE 0 END)', 'todayOrderCount')
+        .addSelect('SUM(CASE WHEN order.createdAt >= :today THEN order.totalAmount ELSE 0 END)', 'todayOrderAmount')
         .where('order.createdAt >= :monthStart', { monthStart })
         .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
         .andWhere('order.status = :activeOrderStatus', { activeOrderStatus: 'active' })
-        .getCount(),
-      // 本月累计出库金额（用于核心四宫格）。
-      orderRepo
-        .createQueryBuilder('order')
-        .select('SUM(order.totalAmount)', 'totalAmount')
-        .where('order.createdAt >= :monthStart', { monthStart })
-        .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
-        .andWhere('order.status = :activeOrderStatus', { activeOrderStatus: 'active' })
-        .getRawOne<DashboardAmountAggregateRaw>(),
+        .setParameter('today', today)
+        .getRawOne<DashboardStatsAggregateRaw>(),
       // 产品总数（仅统计启用产品）。
       productRepo
         .createQueryBuilder('product')
@@ -576,8 +568,10 @@ export const dashboardService = {
         .limit(10)
         .getMany(),
     ])
-    const todayOrderAmountRaw = todayOrderAmountResult?.totalAmount
-    const monthOrderAmountRaw = monthOrderAmountResult?.totalAmount
+    const todayOrderCount = Number(orderStats?.todayOrderCount ?? 0)
+    const monthOrderCount = Number(orderStats?.monthOrderCount ?? 0)
+    const todayOrderAmountRaw = orderStats?.todayOrderAmount
+    const monthOrderAmountRaw = orderStats?.monthOrderAmount
 
     const recentActivities: DashboardRecentActivity[] = recentAuditLogs.map((audit) => {
       const detail = parseAuditDetail(audit.detailJson)
@@ -649,15 +643,21 @@ export const dashboardService = {
     const orderRepo = AppDataSource.getRepository(BizOutboundOrder)
     const orderItemRepo = AppDataSource.getRepository(BizOutboundOrderItem)
 
-    // 趋势原始行：只取分桶必需的列，日期分桶放到服务层，避免引入方言日期函数。
-    // 必须走 getMany 的实体水合而不是 getRawMany：原始结果会跳过驱动的时间归一化，
-    // SQLite 会返回不带时区标记的 UTC 字符串，再被 new Date() 当成本地时间解析，导致整段趋势串日。
-    // 主键一并选出，否则 TypeORM 无法区分实体行，会把同一分钟的多张单据折叠成一条。
+    const buckets = this.buildTrendBuckets(filter.startAt, filter.endExclusive, granularity)
+    // 查询已按整个区间过滤，只需比较每桶上界。最多 366 个参数，避免 SQLite UNION/绑定数量限制。
+    // Date 参数交给 QueryBuilder 的驱动转换：SQLite 使用 UTC datetime 文本，MySQL 按 timezone=Z 绑定。
+    // 不把数据库裸时间字符串交回 JS 解析，避免 UTC 无后缀文本被当成本地时间而串日。
+    const bucketExpression = 'CASE ' + buckets.map((_, index) =>
+      `WHEN order.createdAt < :trendEnd${index} THEN ${index}`,
+    ).join(' ') + ' END'
     const trendRowsQb = orderRepo
       .createQueryBuilder('order')
-      .select(['order.id', 'order.createdAt', 'order.totalAmount', 'order.totalQty'])
-      .where('1=1')
-      .orderBy('order.createdAt', 'ASC')
+      .select(bucketExpression, 'bucketIndex')
+      .addSelect('SUM(order.totalAmount)', 'totalAmount')
+      .addSelect('COUNT(order.id)', 'orderCount')
+      .addSelect('SUM(order.totalQty)', 'totalQty')
+      .groupBy('bucketIndex')
+    buckets.forEach((bucket, index) => trendRowsQb.setParameter(`trendEnd${index}`, bucket.endExclusive))
     this.applyOrderFilter(trendRowsQb, filter)
 
     // 商品榜：合并模式只按商品分组，细分模式追加名称快照分组以区分规格。
@@ -702,12 +702,12 @@ export const dashboardService = {
     this.applyOrderFilter(customerRankQb, filter)
 
     const [trendRows, productRankRows, customerRankRows] = await Promise.all([
-      trendRowsQb.getMany(),
+      trendRowsQb.getRawMany<DashboardTrendAggregateRaw>(),
       productRankQb.getRawMany<DashboardRankProductRowRaw>(),
       customerRankQb.getRawMany<DashboardRankCustomerRowRaw>(),
     ])
 
-    const trend = this.buildTrendPoints(trendRows, filter.startAt, filter.endExclusive, granularity)
+    const trend = this.buildTrendPoints(trendRows, buckets)
 
     const topProducts: DashboardTopProduct[] = productRankRows.map((row) => {
       const normalizedProductId = String(row.productId ?? '').trim()
@@ -1087,60 +1087,35 @@ export const dashboardService = {
     queryBuilder.andWhere('item.productNameSnapshot = :nameSnapshot', { nameSnapshot })
   },
 
-  /**
-   * 趋势分桶：
-   * - 桶键使用本地日期/月份，避免 toISOString 的 UTC 日期在 +08 时区把凌晨单据算到前一天；
-   * - 区间内没有单据的桶补零，保证折线连续且横轴覆盖完整所选区间。
-   */
-  buildTrendPoints(
-    rows: DashboardTrendOrderRowRaw[],
-    startAt: Date,
-    endExclusive: Date,
-    granularity: DashboardTrendGranularity,
-  ): DashboardTrendPoint[] {
-    const metricsMap = new Map<string, { amount: number; orderCount: number; totalQty: number }>()
-    rows.forEach((row) => {
-      const createdAtDate = row.createdAt instanceof Date ? row.createdAt : new Date(row.createdAt)
-      if (Number.isNaN(createdAtDate.getTime())) {
-        return
+  /** 本地日历决定真实边界；DST 日可为 23/25 小时，月桶边界也不能用固定毫秒推算。 */
+  buildTrendBuckets(startAt: Date, endExclusive: Date, granularity: DashboardTrendGranularity): DashboardTrendBucket[] {
+    const buckets: DashboardTrendBucket[] = []
+    let cursor = new Date(startAt.getTime())
+    while (cursor.getTime() < endExclusive.getTime()) {
+      const date = granularity === 'month' ? formatLocalMonthKey(cursor) : formatLocalDateKey(cursor)
+      const next = granularity === 'month'
+        ? new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1)
+        : new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate() + 1)
+      const bucketEnd = new Date(Math.min(next.getTime(), endExclusive.getTime()))
+      buckets.push({ date, label: granularity === 'month' ? date.replace('-', '/') : date.slice(5).replace('-', '/'), endExclusive: bucketEnd })
+      cursor = bucketEnd
+    }
+    return buckets
+  },
+
+  /** 数据库只返回非空桶，服务层补零并保留既有两位小数格式。 */
+  buildTrendPoints(rows: DashboardTrendAggregateRaw[], buckets: DashboardTrendBucket[]): DashboardTrendPoint[] {
+    const metrics = new Map(rows.map((row) => [Number(row.bucketIndex), row]))
+    return buckets.map((bucket, index) => {
+      const row = metrics.get(index)
+      return {
+        date: bucket.date,
+        label: bucket.label,
+        amount: normalizeAmount(row?.totalAmount),
+        orderCount: Number(row?.orderCount ?? 0),
+        totalQty: normalizeQty(row?.totalQty),
       }
-      const bucketKey = granularity === 'month' ? formatLocalMonthKey(createdAtDate) : formatLocalDateKey(createdAtDate)
-      const currentMetrics = metricsMap.get(bucketKey) ?? { amount: 0, orderCount: 0, totalQty: 0 }
-      currentMetrics.amount += Number(row.totalAmount ?? 0)
-      currentMetrics.orderCount += 1
-      currentMetrics.totalQty += Number(row.totalQty ?? 0)
-      metricsMap.set(bucketKey, currentMetrics)
     })
-
-    const points: DashboardTrendPoint[] = []
-    const appendPoint = (bucketKey: string, label: string) => {
-      const currentMetrics = metricsMap.get(bucketKey) ?? { amount: 0, orderCount: 0, totalQty: 0 }
-      points.push({
-        date: bucketKey,
-        label,
-        amount: normalizeAmount(currentMetrics.amount),
-        orderCount: currentMetrics.orderCount,
-        totalQty: normalizeQty(currentMetrics.totalQty),
-      })
-    }
-
-    if (granularity === 'month') {
-      let monthCursor = new Date(startAt.getFullYear(), startAt.getMonth(), 1)
-      while (monthCursor.getTime() < endExclusive.getTime()) {
-        const bucketKey = formatLocalMonthKey(monthCursor)
-        appendPoint(bucketKey, bucketKey.replace('-', '/'))
-        monthCursor = new Date(monthCursor.getFullYear(), monthCursor.getMonth() + 1, 1)
-      }
-      return points
-    }
-
-    let dayCursor = new Date(startAt.getFullYear(), startAt.getMonth(), startAt.getDate())
-    while (dayCursor.getTime() < endExclusive.getTime()) {
-      const bucketKey = formatLocalDateKey(dayCursor)
-      appendPoint(bucketKey, bucketKey.slice(5).replace('-', '/'))
-      dayCursor = new Date(dayCursor.getFullYear(), dayCursor.getMonth(), dayCursor.getDate() + 1)
-    }
-    return points
   },
 
   buildDrilldownOrderRecord(row: {

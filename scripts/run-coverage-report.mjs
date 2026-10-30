@@ -2,7 +2,7 @@
  * 模块说明：scripts/run-coverage-report.mjs
  * 文件职责：用 Node 内置测试运行器的覆盖率功能执行现有自动化验证，合并生成 coverage/lcov.info，供 SonarCloud CI 分析导入。
  * 实现逻辑：
- * - 后端：在 backend 目录用 tsx 加载 TypeScript，串行执行 PR 必要检查中会真实运行业务代码的验证脚本（均使用临时 SQLite），脚本自身不计入覆盖率；
+ * - 后端：在 backend 目录用 tsx 加载 TypeScript，串行执行核心业务与已交付修复的验证脚本（默认使用临时 SQLite），脚本自身不计入覆盖率；
  * - 共享包：在仓库根用 Node 原生类型剥离执行各共享包 test 目录下的 node:test 单测；
  * - 前端：执行 SFC 原源码行为测试、订单与条码既有验证脚本，保留编译后的源码映射并核验未执行路径为零；
  * - Node 输出的 lcov 路径相对各自的运行目录，这里统一改写为相对仓库根，否则 Sonar 会把 backend/src 错配到前端 src；
@@ -79,7 +79,7 @@ const isNodeVersionAtLeast = (version, minimum) => {
   return true
 }
 
-// 与 .github/workflows/verify-db-concurrency.yml 中会执行业务代码的检查保持一致；
+// 显式维护后端覆盖率入口，包含 PR 必要检查与已交付修复的业务专项；
 // 路由权限契约与写事务闸门只做 AST 静态检查，不产生业务代码覆盖率，因此不在此列。
 const BACKEND_SUITE = [
   'scripts/safe-http-request-verify.ts',
@@ -94,6 +94,10 @@ const BACKEND_SUITE = [
   'scripts/webauthn-compat-db-verify.ts',
   'scripts/pr153-upgrade-coverage.test.mjs',
   'scripts/admin-mfa-verify.ts',
+  'scripts/auth-activity-throttle-verify.ts',
+  'scripts/reporting-query-performance-verify.ts',
+  'scripts/o2o-inventory-persistence-verify.ts',
+  'scripts/issue186-inventory-consistency-verify.ts',
   'scripts/issues-177-178-verify.ts',
 ]
 

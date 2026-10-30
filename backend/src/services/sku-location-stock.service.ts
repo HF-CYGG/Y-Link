@@ -92,14 +92,16 @@ async function loadLocationCodes(manager: EntityManager, locationIds: Array<stri
 }
 
 /**
- * 只读：按当前数据计算一批 SKU 的库位分布，用于列表与详情展示。
+ * 默认只读：计算一批 SKU 的库位分布，用于列表与详情展示。
+ * 写事务已锁定商品/SKU 后须显式传 forUpdate，以当前读校验件数，避免 RR 快照回退。
  * 正常情况下写路径已规整，这里仍对“其他库位之和超过总库存”的异常数据按扣减规则折算展示，避免出现负数主库位件数。
  */
 export async function loadSkuLocationDistributions(
   manager: EntityManager,
   skus: SkuStockLike[],
+  options: { forUpdate?: boolean } = {},
 ): Promise<Map<string, SkuLocationDistribution>> {
-  const rowMap = await loadRows(manager, skus.map((sku) => normalizeId(sku.id)), false)
+  const rowMap = await loadRows(manager, skus.map((sku) => normalizeId(sku.id)), options.forUpdate === true)
   const mainCodes = await loadLocationCodes(manager, skus.map((sku) => normalizeNullableId(sku.locationId)))
   const result = new Map<string, SkuLocationDistribution>()
   for (const sku of skus) {
@@ -148,20 +150,39 @@ export async function reconcileSkuLocationStocks(
   skus: SkuStockLike[],
 ): Promise<Map<string, SkuLocationDeduction[]>> {
   const deductions = new Map<string, SkuLocationDeduction[]>()
-  if (!skus.length) return deductions
+  const transitions = await reconcileSkuLocationStockTransitions(manager, skus)
+  transitions.forEach((items, index) => {
+    if (items.length) {
+      const skuId = normalizeId(skus[index]!.id)
+      deductions.set(skuId, [...(deductions.get(skuId) ?? []), ...items])
+    }
+  })
+  return deductions
+}
+
+/**
+ * 批量加载并锁定分库位行，依次规整每条明细扣减后的 SKU 快照。
+ * 同 SKU 的后续明细读取前一条规整后的内存件数，逐明细返回真实扣减备注；
+ * 每个库位只在最后写入一次，不把最后一次扣减归给所有明细。
+ */
+export async function reconcileSkuLocationStockTransitions(
+  manager: EntityManager,
+  skus: SkuStockLike[],
+): Promise<SkuLocationDeduction[][]> {
+  if (!skus.length) return []
   const rowMap = await loadRows(manager, skus.map((sku) => normalizeId(sku.id)), true)
-  const repo = manager.getRepository(InvSkuLocationStock)
+  const removedIds = new Set<string>()
+  const updatedRows = new Map<string, InvSkuLocationStock>()
+  const deductions: SkuLocationDeduction[][] = []
   for (const sku of skus) {
     const skuId = normalizeId(sku.id)
-    const rows = rowMap.get(skuId) ?? []
-    if (!rows.length) continue
+    const rows = (rowMap.get(skuId) ?? []).filter(({ row }) => !removedIds.has(normalizeId(row.id)))
     const mainLocationId = normalizeNullableId(sku.locationId)
     const total = Math.max(0, Number(sku.currentStock ?? 0))
-    const removeIds: string[] = []
     const kept: StockRowWithCode[] = []
     for (const entry of rows) {
       if (normalizeId(entry.row.locationId) === mainLocationId || Number(entry.row.qty) <= 0) {
-        removeIds.push(normalizeId(entry.row.id))
+        removedIds.add(normalizeId(entry.row.id))
       } else {
         kept.push(entry)
       }
@@ -173,13 +194,17 @@ export async function reconcileSkuLocationStocks(
       const take = Math.min(Number(entry.row.qty), overflow)
       overflow -= take
       skuDeductions.push({ locationId: normalizeId(entry.row.locationId), locationCode: entry.locationCode, qty: take })
-      const next = Number(entry.row.qty) - take
-      if (next <= 0) removeIds.push(normalizeId(entry.row.id))
-      else await repo.update({ id: entry.row.id }, { qty: next })
+      entry.row.qty = Number(entry.row.qty) - take
+      if (entry.row.qty <= 0) removedIds.add(normalizeId(entry.row.id))
+      else updatedRows.set(normalizeId(entry.row.id), entry.row)
     }
-    if (removeIds.length) await repo.delete({ id: In(removeIds) })
-    if (skuDeductions.length) deductions.set(skuId, skuDeductions)
+    deductions.push(skuDeductions)
   }
+  const repo = manager.getRepository(InvSkuLocationStock)
+  for (const [id, row] of updatedRows) {
+    if (!removedIds.has(id)) await repo.update({ id }, { qty: row.qty })
+  }
+  if (removedIds.size) await repo.delete({ id: In([...removedIds]) })
   return deductions
 }
 
@@ -200,7 +225,11 @@ export async function readSkuLocationQty(manager: EntityManager, sku: SkuStockLi
 
 async function upsertRowQty(manager: EntityManager, skuId: string, locationId: string, delta: number) {
   const repo = manager.getRepository(InvSkuLocationStock)
-  const existing = await repo.findOne({ where: { skuId, locationId } })
+  // 调用方持有 SKU 锁；旧行与缺行都必须按当前读判断，不能回到事务的普通读快照。
+  const existing = await repo.findOne({
+    where: { skuId, locationId },
+    lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+  })
   const next = Number(existing?.qty ?? 0) + delta
   if (next < 0) throw new BizError('库位件数不足，请刷新后重试', 409)
   if (next > MAX_DATABASE_INT) throw new BizError('库位件数超过系统可处理上限', 409)
@@ -269,7 +298,7 @@ export async function transferSkuLocationStock(
 ): Promise<TransferSkuLocationResult> {
   if (!Number.isSafeInteger(input.qty) || input.qty <= 0) throw new BizError('拨转件数必须为正整数', 400)
   await reconcileSkuLocationStocks(manager, [sku])
-  const before = (await loadSkuLocationDistributions(manager, [sku])).get(normalizeId(sku.id)) as SkuLocationDistribution
+  const before = (await loadSkuLocationDistributions(manager, [sku], { forUpdate: true })).get(normalizeId(sku.id)) as SkuLocationDistribution
   const mainLocationId = normalizeNullableId(sku.locationId)
   const fromId = normalizeNullableId(input.fromLocationId)
   const toId = normalizeId(input.toLocationId)
@@ -295,7 +324,7 @@ export async function transferSkuLocationStock(
     mainChanged = true
   }
   await reconcileSkuLocationStocks(manager, [sku])
-  const after = (await loadSkuLocationDistributions(manager, [sku])).get(skuId) as SkuLocationDistribution
+  const after = (await loadSkuLocationDistributions(manager, [sku], { forUpdate: true })).get(skuId) as SkuLocationDistribution
   return { before, after, mainChanged }
 }
 
