@@ -952,6 +952,7 @@ async function verifyOrderSerialConcurrency(mysqlConfig: VerifyMysqlRuntimeConfi
     }))
     const updatedDetail = await o2oPreorderService.updateComplianceFlagsByAdmin({
       orderId: String(preorder.id),
+      expectedKingdeeVersion: Number(preorder.kingdeeVersion ?? 0),
       hasCustomerOrder: true,
       isSystemApplied: true,
     }, concurrencyActor)

@@ -35,6 +35,11 @@ const props = withDefaults(defineProps<{
 })
 const emit = defineEmits<{ 'pages-change': [pages: VoucherRenderRow[][], fillerCounts: number[]] }>()
 const resolvedEditableFields = computed(() => props.editableFields)
+const isO2oVoucher = computed(() => props.order.sourceDocType === 'o2o_preorder' || props.order.inventoryMode === 'o2o_preapplied')
+const registrationMap = computed(() => new Map((props.order.sourcePreorderRegistrations ?? []).map((source) => [source.sourceOrderId, source])))
+const voucherKingdeeNo = computed(() => !isO2oVoucher.value ? props.editableFields.kingdeeVoucherNo
+  : props.order.merge.role === 'parent' ? '各来源编号见明细' : props.order.sourcePreorderRegistrations?.[0]?.kingdeeVoucherNo || '未登记')
+const registrationForRow = (row: VoucherRenderRow) => registrationMap.value.get(row.detail?.sourceOrderId || props.order.id)
 const groups = computed(() => aggregateOrderVoucherItems(props.order.items))
 const rows = computed(() => buildVoucherRows(groups.value))
 const ownPages = ref<VoucherRenderRow[][]>([[]])
@@ -132,7 +137,7 @@ onBeforeUnmount(() => { measurementRevision += 1 })
             <tr class="voucher-meta-row voucher-meta-row--primary">
               <th scope="row">申请部门</th><td>{{ props.order.customerDepartmentName || '散客' }}</td>
               <th scope="row">部门经办人</th><td class="is-editable-cell"><span class="editable-line">{{ editableText(resolvedEditableFields.departmentOperator) }}</span></td>
-              <th scope="row">金蝶单据编号</th><td class="is-editable-cell"><span class="editable-line">{{ editableText(resolvedEditableFields.kingdeeVoucherNo) }}</span></td>
+              <th scope="row">金蝶单据编号</th><td class="is-editable-cell"><span class="editable-line">{{ editableText(voucherKingdeeNo) }}</span></td>
             </tr>
             <tr class="voucher-meta-row voucher-meta-row--secondary">
               <th scope="row">业务单号</th><td>{{ props.order.businessNo }}</td>
@@ -153,7 +158,7 @@ onBeforeUnmount(() => { measurementRevision += 1 })
                   {{ productLabel(row, rowIndex, pageIndex) || ' ' }}
                   <small v-if="showLineSource" class="voucher-source-line">
                     来源正式单：{{ sourcePickupForRow(row)?.businessNo || '未记录' }} · 线上预订单：{{ sourcePickupForRow(row)?.sourcePreorderNo || '未记录' }}<br>
-                    领取人：{{ sourcePickupForRow(row)?.pickupContact || '未记录' }} · 到店取货时间：{{ formatDateTime(sourcePickupForRow(row)?.pickupAt) }}
+                    领取人：{{ sourcePickupForRow(row)?.pickupContact || '未记录' }} · 到店取货时间：{{ formatDateTime(sourcePickupForRow(row)?.pickupAt) }}<br>金蝶编号：{{ registrationForRow(row)?.kingdeeVoucherNo || '未登记' }}
                   </small>
                 </td>
                 <td>{{ row.detail.unitPrice }}</td>

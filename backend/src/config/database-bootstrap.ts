@@ -365,6 +365,8 @@ const SQLITE_REQUIRED_O2O_PREORDER_COLUMNS = [
   'has_customer_order',
   'pickup_contact',
   'pickup_at',
+  'kingdee_voucher_no',
+  'kingdee_version',
   'update_count',
   'is_deleted',
   'deleted_at',
@@ -2273,6 +2275,11 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
     await prepareSqliteOrderAmendmentColumns(dataSource)
     await prepareSqliteOrderContentInventoryColumns(dataSource)
     await prepareSqliteOrderSourceDocColumns(dataSource)
+    const kingdeeColumns = await listSqliteTableColumns(dataSource, 'o2o_preorder')
+    if (kingdeeColumns.size) {
+      if (!kingdeeColumns.has('kingdee_voucher_no')) await dataSource.query('ALTER TABLE "o2o_preorder" ADD COLUMN "kingdee_voucher_no" varchar(128) NULL')
+      if (!kingdeeColumns.has('kingdee_version')) await dataSource.query('ALTER TABLE "o2o_preorder" ADD COLUMN "kingdee_version" integer NOT NULL DEFAULT 0 CHECK (kingdee_version >= 0)')
+    }
     await prepareSqliteStocktakeLocationScope(dataSource)
     await backfillSqliteLegacySkuCodeFromBarcode(dataSource)
     await prepareSqliteYzReservationSeriesCodeColumns(dataSource)

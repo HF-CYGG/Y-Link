@@ -48,6 +48,7 @@ interface AmendmentDraft {
   hasCustomerOrder: boolean
   isSystemApplied: boolean
   remark: string
+  isO2o: boolean
   originalOrderType: 'department' | 'walkin'
   originalBusinessNo: string
   /** 最近一次自动编排写入的业务号；用户手改后不再展示自动编排提示。 */
@@ -126,6 +127,7 @@ const initializeDrafts = () => {
     issuerName: order.issuerName || '',
     hasCustomerOrder: Boolean(order.hasCustomerOrder),
     isSystemApplied: Boolean(order.isSystemApplied),
+    isO2o: order.sourceDocType === 'o2o_preorder' || order.inventoryMode === 'o2o_preapplied',
     remark: order.remark || '',
     originalOrderType: order.orderType,
     originalBusinessNo: order.businessNo,
@@ -349,7 +351,7 @@ const handleCommit = async () => {
             </div>
           </el-form-item>
           <el-form-item label="订单类型" class="!mb-0">
-            <el-radio-group v-model="draft.orderType" @change="handleOrderTypeChange(draft)">
+            <el-radio-group v-model="draft.orderType" :disabled="draft.isO2o" @change="handleOrderTypeChange(draft)">
               <el-radio-button value="department">部门单</el-radio-button>
               <el-radio-button value="walkin">散客单</el-radio-button>
             </el-radio-group>
@@ -387,7 +389,8 @@ const handleCommit = async () => {
           </el-form-item>
           <div v-if="draft.orderType === 'department'" class="flex flex-wrap items-center gap-5 md:col-span-2">
             <el-checkbox v-model="draft.hasCustomerOrder">已有客户出库单</el-checkbox>
-            <el-checkbox v-model="draft.isSystemApplied">已完成系统申请</el-checkbox>
+            <el-checkbox v-model="draft.isSystemApplied" :disabled="draft.isO2o">已完成系统申请</el-checkbox>
+            <span v-if="draft.isO2o" class="text-xs text-slate-500">O2O 金蝶状态请在原来源登记入口修改</span>
           </div>
           <el-form-item label="备注" class="!mb-0 md:col-span-2">
             <el-input v-model="draft.remark" type="textarea" :rows="2" maxlength="500" show-word-limit />

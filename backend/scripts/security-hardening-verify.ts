@@ -9,6 +9,7 @@
  * - 新增安全边界时优先补到本脚本，形成可重复执行的最小安全回归集；
  * - 脚本不得输出原始 token、Webhook 完整地址、密码或其他敏感配置值。
  */
+import { resolveIssueVerificationRoot } from './issue-verification-paths.js'
 import 'reflect-metadata'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -18,7 +19,7 @@ import type { UpdateNotificationRuleInput } from '../src/services/notification.s
 
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
-const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
+const sqliteRoot = resolveIssueVerificationRoot(path.resolve(backendRoot, 'data', 'local-dev'))
 
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqlitePath = path.resolve(sqliteRoot, `security-hardening-${verifySeed}.sqlite`)

@@ -1,4 +1,5 @@
 import 'reflect-metadata'
+import { resolveIssueVerificationRoot } from './issue-verification-paths.js'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -8,7 +9,7 @@ import { isDatabaseFlagEnabled } from '../src/utils/product-inventory-summary.js
 
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
-const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
+const sqliteRoot = resolveIssueVerificationRoot(path.resolve(backendRoot, 'data', 'local-dev'))
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqlitePath = path.resolve(sqliteRoot, `product-yz-code-${verifySeed}.sqlite`)
 

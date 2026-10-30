@@ -6,6 +6,7 @@
  * - 页面以报表类型为主入口，统一维护时间段、标签、字段勾选和分页预览参数；
  * - 报表预览与 Excel 导出共用同一套查询参数，避免用户看到的列表与导出的文件口径不一致；
  * - 字段勾选只负责用户偏好，最终字段白名单仍由后端报表服务二次校验；
+ * - 金蝶默认列与后端保持一致，预览/查询/导出均消费逐明细来源的持久编号和状态；
  * - 标签销售汇总表在说明卡下方展示总数量与总金额，数值直接取后端 summary（全部命中明细 SUM），与分页无关；
  * - 库存一览表每行提供“规格明细”入口，按行内 productId 元数据异步打开 InventorySkuDetailDrawer，不改变主表聚合列。
  * 维护说明：
@@ -57,7 +58,7 @@ const reportTypeOptions: ReportTypeOption[] = [
     description: '当前库存按当前且启用的 SKU 合计；预订库存表示已占用数量；可用库存为当前库存减预订占用，最低显示为 0。',
   },
   { label: '标签销售汇总表', value: 'tag-sales', description: '按时间段和标签查看商品销售明细，适用于品宣、联名、海右等分类查账。' },
-  { label: '金蝶汇总表', value: 'kingdee', description: '仅统计部门单，包含部门、领取人、出库单与系统申请状态。' },
+  { label: '金蝶汇总表', value: 'kingdee', description: '仅统计部门单，包含部门、领取人、出库单及逐来源金蝶编号与状态。' },
   { label: '散客汇总表', value: 'walkin', description: '仅统计个人购买，保留商品、数量、金额、领取人和操作人员。' },
   { label: '出库单流水表', value: 'outbound-flow', description: '按出库主单生成流水，包含单号、购买类型、金额和操作人员。' },
 ]
@@ -96,7 +97,8 @@ const reportFieldOptions: Record<ReportType, ReportFieldDefinition[]> = {
     { key: 'departmentName', label: '部门', width: 22 },
     { key: 'receiverName', label: '领取人', width: 18 },
     { key: 'hasCustomerOrder', label: '是否有出库单', width: 16 },
-    { key: 'isSystemApplied', label: '是否系统申请', width: 16 },
+    { key: 'kingdeeVoucherNo', label: '金蝶单据编号', width: 24 },
+    { key: 'kingdeeStatus', label: '金蝶状态', width: 20 },
     { key: 'operatorName', label: '订单操作记录人员', width: 20 },
   ],
   walkin: [
@@ -422,6 +424,7 @@ onActivated(() => {
             <el-select
               v-model="reportType"
               placeholder="选择报表"
+              aria-label="选择报表"
               :class="isPhone ? '!w-full' : isTablet ? '!w-[220px]' : '!w-[240px]'"
               @change="handleReportTypeChange"
             >

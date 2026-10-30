@@ -9,8 +9,11 @@
  * 4. 金额、库存模式与订单类型在组件内统一格式化，确保表格端与移动端展示口径一致。
  * 维护说明：revision 请求使用订单 ID 与版本号抑制过期响应，不得用当前商品数据覆盖历史快照；合规草稿由父层拥有。
  */
+import { formatOrderKingdeeStatus } from '@/utils/kingdee-status'
 
 
+
+import KingdeeRegistrationEditor from '@/components/common/KingdeeRegistrationEditor.vue'
 import dayjs from 'dayjs'
 import { computed, ref, watch } from 'vue'
 import { getOrderRevisions, type OrderDetailResult, type OrderRevisionRecord } from '@/api/modules/order'
@@ -167,10 +170,10 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
         </div>
       </div>
       <div class="rounded-xl bg-white px-3 py-3 dark:bg-[#141415]">
-        <p class="text-xs text-slate-500 dark:text-slate-400">系统申请</p>
+        <p class="text-xs text-slate-500 dark:text-slate-400">金蝶状态</p>
         <div class="mt-2">
           <el-switch
-            v-if="canEditStandaloneComplianceFlags"
+            v-if="canEditStandaloneComplianceFlags && order.inventoryMode !== 'o2o_preapplied'"
             :model-value="complianceForm.isSystemApplied"
             inline-prompt
             active-text="已申请"
@@ -178,13 +181,21 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
             @update:model-value="emit('update:isSystemApplied', $event)"
           />
           <span v-else class="text-sm font-medium text-slate-700 dark:text-slate-200">
-            {{ order.orderType === 'department' ? (order.isSystemApplied ? '已申请' : '未申请') : '不适用' }}
+            {{ formatOrderKingdeeStatus(order) }}
           </span>
         </div>
       </div>
     </div>
   </div>
 
+  <section v-if="order.sourcePreorderRegistrations?.length" class="mb-5 space-y-3">
+    <p class="font-semibold">各来源金蝶登记</p>
+    <div v-for="source in order.sourcePreorderRegistrations" :key="source.sourceOrderId">
+      <p>{{ source.businessNo }} · {{ source.sourcePreorderNo || '未记录' }}</p>
+      <KingdeeRegistrationEditor v-if="source.sourcePreorderId" :order-id="source.sourcePreorderId" :registration="source" admin :can-edit="Boolean(authStore.currentUser?.permissions.includes('orders:update'))" @saved="emit('navigate', order.id)" />
+      <p v-else>来源预订单未记录</p>
+    </div>
+  </section>
   <section class="mb-5 rounded-2xl border border-slate-100 bg-slate-50/70 p-3 sm:p-4 dark:border-white/10 dark:bg-white/5">
     <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
       <h3 class="flex items-center gap-2 text-base font-semibold text-slate-800 dark:text-slate-100">
@@ -206,8 +217,8 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
       <el-descriptions-item label="出库单状态">
         {{ order.orderType === 'department' ? (order.hasCustomerOrder ? '已带单' : '未带单') : '不适用' }}
       </el-descriptions-item>
-      <el-descriptions-item label="系统申请">
-        {{ order.orderType === 'department' ? (order.isSystemApplied ? '已申请' : '未申请') : '不适用' }}
+      <el-descriptions-item label="金蝶状态">
+        {{ formatOrderKingdeeStatus(order) }}
       </el-descriptions-item>
       <el-descriptions-item v-if="order.customerName" :label="order.merge.role === 'parent' ? '父单客户名称' : '客户名称'">{{ order.customerName }}</el-descriptions-item>
       <el-descriptions-item label="出单人">{{ order.issuerName || '-' }}</el-descriptions-item>

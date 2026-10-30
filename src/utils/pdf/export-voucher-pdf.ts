@@ -4,6 +4,7 @@
  * 实现逻辑：
  * - 调用时按需动态导入 `html2pdf.js`，避免非导出场景把 PDF 依赖提前打入首屏链路；
  * - 统一接收源节点、文件名、边距、缩放和方向等参数，减少各页面重复拼装导出配置；
+ * - 捕获期间只纠正隐藏字体测量图片的布局，避免全局图片 reset 使文字基线下移，结束后释放样式；
  * - 工具层只负责导出执行，不关心具体业务凭证内容，由调用页面提供最终 DOM 节点。
  */
 
@@ -34,27 +35,40 @@ export const exportVoucherPdf = async (options: ExportVoucherPdfOptions) => {
   const scale = options.scale ?? 2
   const orientation = options.orientation ?? 'portrait'
 
-  await factory()
-    .set({
-      margin,
-      filename: options.filename,
-      image: { type: 'jpeg', quality: 0.98 },
-      html2canvas: {
-        scale,
-        useCORS: true,
-        backgroundColor: '#ffffff',
-        logging: false,
-      },
-      jsPDF: {
-        unit: 'mm',
-        format: 'a4',
-        orientation,
-        compress: true,
-      },
-      pagebreak: {
-        mode: ['css', 'legacy'],
-      },
-    })
-    .from(options.sourceElement)
-    .save(options.filename)
+  // html2canvas 在文档 body 的隐藏直接子节点中用行内 1×1 图片测量基线；
+  // Tailwind 的 img 块级 reset 会让测量多出一行，导致文字穿表格线。
+  // 只覆盖这种隐藏测量节点，既不改业务图片，也不改变已冻结纸面的行高和分页。
+  const captureDocument = options.sourceElement.ownerDocument
+  const metricStyle = captureDocument.createElement('style')
+  metricStyle.dataset.voucherPdfFontMetrics = ''
+  metricStyle.textContent = 'body > div[style*="visibility: hidden"][style*="font-family:"] > img { display: inline-block !important; }'
+  captureDocument.head.appendChild(metricStyle)
+  try {
+    await captureDocument.fonts.ready
+    await factory()
+      .set({
+        margin,
+        filename: options.filename,
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: {
+          scale,
+          useCORS: true,
+          backgroundColor: '#ffffff',
+          logging: false,
+        },
+        jsPDF: {
+          unit: 'mm',
+          format: 'a4',
+          orientation,
+          compress: true,
+        },
+        pagebreak: {
+          mode: ['css', 'legacy'],
+        },
+      })
+      .from(options.sourceElement)
+      .save(options.filename)
+  } finally {
+    metricStyle.remove()
+  }
 }

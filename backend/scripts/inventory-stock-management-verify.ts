@@ -5,6 +5,7 @@
  * 每一步都校验：商品库存 = 当前启用 SKU 合计、流水 after − before = changeQty、库存不为负。
  */
 
+import { resolveIssueVerificationRoot } from './issue-verification-paths.js'
 import 'reflect-metadata'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -15,7 +16,7 @@ import ExcelJS from 'exceljs'
 import type { AuthUserContext } from '../src/types/auth.js'
 
 const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
+const sqliteRoot = resolveIssueVerificationRoot(path.resolve(backendRoot, 'data', 'local-dev'))
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqlitePath = path.resolve(sqliteRoot, `inventory-stock-management-${verifySeed}.sqlite`)
 

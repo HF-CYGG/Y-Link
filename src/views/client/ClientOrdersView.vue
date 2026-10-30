@@ -257,6 +257,8 @@ const hasOrderCardChanged = (previous: PersistedO2oPreorderSummary | undefined, 
     || previous.businessStatus !== next.businessStatus
     || previous.hasCustomerOrder !== next.hasCustomerOrder
     || previous.isSystemApplied !== next.isSystemApplied
+    || previous.kingdeeVersion !== next.kingdeeVersion
+    || previous.kingdeeVoucherNo !== next.kingdeeVoucherNo
     || previous.merchantMessage !== next.merchantMessage
     || previous.returnRequestCount !== next.returnRequestCount
     || previous.pendingReturnRequestCount !== next.pendingReturnRequestCount

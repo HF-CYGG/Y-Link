@@ -21,6 +21,7 @@ export interface ClientPreorderSubmitIntentInput {
   clientUserId: ClientPreorderSubmitUserId
   clientOrderType: O2oClientOrderType
   isSystemApplied: boolean
+  kingdeeVoucherNo?: string | null
   pickupContact: string
   /** 部门单到店取货时间；改变取货时间属于不同下单意图，不得复用结果未知订单的请求键。 */
   pickupAt?: string | null
@@ -83,6 +84,7 @@ export const buildClientPreorderSubmitIntentKey = (input: ClientPreorderSubmitIn
     clientUserId: normalizeClientUserId(input.clientUserId),
     clientOrderType: input.clientOrderType,
     isSystemApplied: Boolean(input.isSystemApplied),
+    ...(input.kingdeeVoucherNo?.trim() ? { kingdeeVoucherNo: input.kingdeeVoucherNo.trim() } : {}),
     pickupContact: normalizeText(input.pickupContact),
     remark: normalizeRemark(input.remark),
     items: normalizedItems,

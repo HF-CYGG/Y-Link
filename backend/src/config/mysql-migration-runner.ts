@@ -253,6 +253,8 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
   { tableName: 'o2o_preorder', columnName: 'cancellation_source', introducingScript: '040_o2o_preorder_governance.sql' },
   { tableName: 'o2o_preorder', columnName: 'cancellation_remark', introducingScript: '040_o2o_preorder_governance.sql' },
   { tableName: 'o2o_preorder', columnName: 'cancelled_at', introducingScript: '040_o2o_preorder_governance.sql' },
+  { tableName: 'o2o_preorder', columnName: 'kingdee_voucher_no', introducingScript: '062_o2o_preorder_kingdee_registration.sql', expectedDataType: 'varchar', expectedNullable: true, expectedCharacterMaximumLength: 128 },
+  { tableName: 'o2o_preorder', columnName: 'kingdee_version', introducingScript: '062_o2o_preorder_kingdee_registration.sql', expectedDataType: 'int', expectedNullable: false, expectedDefault: '0' },
   { tableName: 'o2o_preorder', columnName: 'pickup_at', introducingScript: '047_o2o_preorder_pickup_at.sql', expectedNullable: true },
   { tableName: 'biz_inbound_order', columnName: 'expected_arrival_at', introducingScript: '048_inbound_order_expected_arrival.sql', expectedNullable: true },
   { tableName: 'base_product', columnName: 'category_id', introducingScript: '049_inventory_sku_barcode_stocktake.sql', expectedNullable: true },
@@ -848,6 +850,7 @@ const MYSQL_REQUIRED_TRIGGERS: readonly MysqlRequiredTrigger[] = [
 ]
 
 const MYSQL_REQUIRED_CHECKS: readonly MysqlRequiredCheck[] = [
+  { tableName: 'o2o_preorder', constraintName: 'ck_o2o_kingdee_version_non_negative', introducingScript: '062_o2o_preorder_kingdee_registration.sql' },
   { tableName: 'client_restock_request', constraintName: 'ck_restock_quantity_positive', introducingScript: '061_client_restock_requests.sql' },
   { tableName: 'client_restock_request', constraintName: 'ck_restock_status', introducingScript: '061_client_restock_requests.sql' },
   {
@@ -895,6 +898,7 @@ const AUTO_MIGRATABLE_FILES = [
   '059_admin_webauthn_second_factor.sql',
   '060_sku_location_stock.sql',
   '061_client_restock_requests.sql',
+  '062_o2o_preorder_kingdee_registration.sql',
 ]
 
 /**

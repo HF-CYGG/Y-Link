@@ -161,4 +161,43 @@ assert.equal((vue.match(/<el-input[\s\S]*?:disabled="exportPdfLoading"/g) ?? [])
 assert.match(vue, /<el-button[^>]*:disabled="exportPdfLoading"[^>]*>关闭/, '导出期间应锁页脚关闭')
 assert.match(vue, /<el-button[^>]*:disabled="exportPdfLoading\s*\|\|[^>]*"[^>]*>打印/, '导出期间应锁打印')
 
+// 直接执行生产导出函数，验证字体测量样式只活在本次捕获期，等待字体且失败也清理。
+const pdfTool = readFileSync(new URL('../src/utils/pdf/export-voucher-pdf.ts', import.meta.url), 'utf8')
+const pdfSource = ts.createSourceFile('export-voucher-pdf.ts', pdfTool, ts.ScriptTarget.Latest, true)
+const pdfInitializer = pdfSource.statements.filter(ts.isVariableStatement)
+  .flatMap((statement) => [...statement.declarationList.declarations])
+  .find((declaration) => declaration.name.getText(pdfSource) === 'exportVoucherPdf')?.initializer?.getText(pdfSource)
+assert.ok(pdfInitializer)
+for (const failure of [false, true]) {
+  const fontsReady = deferred(), capture = deferred()
+  const styles: Array<{ dataset: Record<string, string>; textContent: string; remove: () => void }> = []
+  const captureDocument = {
+    createElement: () => { const node = { dataset: {} as Record<string, string>, textContent: '', remove: () => { styles.splice(styles.indexOf(node), 1) } }; return node },
+    head: { appendChild: (node: typeof styles[number]) => styles.push(node) },
+    fonts: { ready: fontsReady.promise },
+  }
+  const frozenPaper = { ownerDocument: captureDocument }
+  const calls: Array<{ options: Record<string, any>; source?: unknown; filename?: string }> = []
+  const factory = () => {
+    const call = { options: {} } as typeof calls[number]; calls.push(call)
+    const worker = { set: (options: Record<string, any>) => { call.options = options; return worker }, from: (source: unknown) => { call.source = source; return worker }, save: (filename: string) => { call.filename = filename; return capture.promise } }
+    return worker
+  }
+  const actualExport = evaluate<(options: unknown) => Promise<void>>(pdfInitializer, { resolveHtml2PdfFactory: async () => factory })
+  const run = actualExport({ sourceElement: frozenPaper, filename: '两联.pdf', orientation: 'landscape' })
+  await Promise.resolve(); await Promise.resolve()
+  assert.equal(styles.length, 1, '字体等待期间已安装独立的测量样式')
+  assert.match(styles[0]!.textContent, /body > div\[style\*="visibility: hidden"\]\[style\*="font-family:"\] > img/, '只能影响隐藏字体测量图片，不能覆盖凭证或全站业务图片')
+  assert.equal(calls.length, 0, '字体尚未就绪不能开始捕获')
+  fontsReady.resolve(); await Promise.resolve(); await Promise.resolve()
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0]!.source, frozenPaper, '继续使用调用方冻结的纸面')
+  assert.equal(calls[0]!.options.margin, 8); assert.equal(calls[0]!.options.html2canvas.scale, 2)
+  assert.equal(calls[0]!.options.jsPDF.orientation, 'landscape')
+  assert.deepEqual(calls[0]!.options.pagebreak.mode, ['css', 'legacy'])
+  if (failure) { capture.reject(new Error('捕获失败')); await assert.rejects(run, /捕获失败/) }
+  else { capture.resolve(); await run }
+  assert.equal(styles.length, 0, '成功或失败都必须释放本次测量样式')
+}
+
 console.log('管理端正式出库单导出竞态验证通过')

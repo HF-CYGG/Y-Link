@@ -260,6 +260,10 @@ export class OrderAmendmentService {
       const before = this.snapshot(order)
       const after = this.buildAfterSnapshot(before, amendment)
       const blockingReasons: string[] = []
+      if ((order.sourceDocType === 'o2o_preorder' || order.inventoryMode === 'o2o_preapplied')
+        && (after.isSystemApplied !== before.isSystemApplied || after.orderType !== before.orderType)) {
+        blockingReasons.push('O2O 来源申请状态由原预订单维护，请到金蝶登记入口修改')
+      }
       const mergeMetadata = (await orderMergeService.getMetadataMap([orderId], manager)).get(orderId)
       if (order.isDeleted) {
         blockingReasons.push('已删除订单不可修订')

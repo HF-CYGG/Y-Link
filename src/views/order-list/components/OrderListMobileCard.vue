@@ -9,6 +9,7 @@
   - 此组件保持异步加载，不能把管理端订单页的高频桌面路由重新拉回移动端专属展示代码。
 -->
 <script setup lang="ts">
+import { formatOrderKingdeeStatus } from '@/utils/kingdee-status'
 import dayjs from 'dayjs'
 import type { OrderRecord } from '@/api/modules/order'
 
@@ -48,9 +49,9 @@ const getShipmentStatusMeta = (order: Pick<OrderRecord, 'orderType' | 'hasCustom
   if (order.orderType !== 'department') return { label: '不适用', toneClass: 'is-neutral' }
   return order.hasCustomerOrder ? { label: '已带单', toneClass: 'is-positive' } : { label: '未带单', toneClass: 'is-warning' }
 }
-const getSystemApplyStatusMeta = (order: Pick<OrderRecord, 'orderType' | 'isSystemApplied'>) => {
+const getSystemApplyStatusMeta = (order: Pick<OrderRecord, 'orderType' | 'inventoryMode' | 'isSystemApplied' | 'sourcePreorderRegistrations'>) => {
   if (order.orderType !== 'department') return { label: '不适用', toneClass: 'is-neutral' }
-  return order.isSystemApplied ? { label: '已申请', toneClass: 'is-warning' } : { label: '未申请', toneClass: 'is-neutral' }
+  return { label: formatOrderKingdeeStatus(order), toneClass: 'is-neutral' }
 }
 </script>
 
@@ -84,7 +85,7 @@ const getSystemApplyStatusMeta = (order: Pick<OrderRecord, 'orderType' | 'isSyst
 
     <div class="mobile-order-card__meta" :class="isTablet ? 'is-tablet' : ''">
       <div class="mobile-order-card__meta-item"><span class="mobile-order-card__meta-label">出库单状态</span><span class="mobile-order-card__meta-value" :class="getShipmentStatusMeta(item).toneClass">{{ getShipmentStatusMeta(item).label }}</span></div>
-      <div class="mobile-order-card__meta-item"><span class="mobile-order-card__meta-label">系统申请</span><span class="mobile-order-card__meta-value" :class="getSystemApplyStatusMeta(item).toneClass">{{ getSystemApplyStatusMeta(item).label }}</span></div>
+      <div class="mobile-order-card__meta-item"><span class="mobile-order-card__meta-label">金蝶状态</span><span class="mobile-order-card__meta-value" :class="getSystemApplyStatusMeta(item).toneClass">{{ getSystemApplyStatusMeta(item).label }}</span></div>
       <div class="mobile-order-card__meta-item"><span class="mobile-order-card__meta-label">出单人</span><span class="mobile-order-card__meta-value">{{ item.issuerName || '-' }}</span></div>
       <div class="mobile-order-card__meta-item"><span class="mobile-order-card__meta-label">开单人</span><span class="mobile-order-card__meta-value">{{ item.creatorDisplayName || item.creatorUsername || '-' }}</span></div>
       <div v-if="item.orderType === 'department'" class="mobile-order-card__meta-item"><span class="mobile-order-card__meta-label">客户部门</span><span class="mobile-order-card__meta-value">{{ item.customerDepartmentName || '-' }}</span></div>

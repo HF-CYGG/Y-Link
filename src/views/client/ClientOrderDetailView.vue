@@ -25,6 +25,7 @@ import {
   type O2oPreorderSummary,
   type O2oReturnRequestDetail,
 } from '@/api/modules/o2o'
+import KingdeeRegistrationEditor from '@/components/common/KingdeeRegistrationEditor.vue'
 import type { OrderDetailResult } from '@/api/modules/order'
 import type { VoucherRenderRow } from '@/views/order-list/order-voucher-pagination'
 import { createClientVoucherExportSnapshot } from '@/views/client/client-order-voucher-export'
@@ -360,6 +361,8 @@ const voucherOrder = computed<OrderDetailResult | null>(() => {
     // 客户端预览/打印以当前预订单为来源单据，与管理端正式出库单的结构化来源口径一致。
     sourceDocType: 'o2o_preorder',
     sourceDocId: order.id,
+    sourcePreorderRegistrations: [{ sourceOrderId: order.id, businessNo, sourcePreorderId: order.id, sourcePreorderNo: order.preorderNo,
+      kingdeeVoucherNo: order.kingdeeVoucherNo, kingdeeVersion: order.kingdeeVersion, kingdeeStatus: order.kingdeeStatus, kingdeeEditable: order.kingdeeEditable }],
     sourcePreorderNo: order.preorderNo,
     matchedIdentifierType: null,
     matchedIdentifierValue: null,
@@ -1530,6 +1533,7 @@ onBeforeUnmount(() => {
 
     <section v-else-if="detail" class="grid gap-4 lg:grid-cols-[24rem_minmax(0,1fr)]">
       <aside class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
+        <KingdeeRegistrationEditor v-if="detail.order.clientOrderType === 'department'" :order-id="detail.order.id" :registration="detail.order" @saved="loadDetail({ silent: true })" />
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div class="flex flex-wrap items-center gap-2">

@@ -1,4 +1,5 @@
 /** PR #153 旧认证库兼容回归：所有 SQLite 文件只创建在本脚本独占的临时目录。 */
+import { resolveIssueVerificationRoot } from './issue-verification-paths.js'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -15,7 +16,7 @@ const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 const profile = 'pr153-upgrade-coverage-test'
 assert.equal(fs.existsSync(path.join(backendRoot, '.env')), false, '隔离测试拒绝读取 backend/.env')
 assert.equal(fs.existsSync(path.join(backendRoot, `.env.${profile}`)), false, '隔离测试拒绝读取 profile env')
-const fixtureRoot = path.resolve(backendRoot, '../tmp/pr153-upgrade-coverage-20261011')
+const fixtureRoot = resolveIssueVerificationRoot(path.resolve(backendRoot, '../tmp/pr153-upgrade-coverage-20261011'))
 fs.mkdirSync(fixtureRoot, { recursive: true })
 process.env.NODE_ENV = 'test'
 process.env.APP_PROFILE = profile
