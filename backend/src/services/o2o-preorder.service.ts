@@ -61,7 +61,7 @@ import {
   readMallCatalogClusterRevision,
   readMallCatalogRevision,
 } from './mall-catalog-revision.service.js'
-import { buildSkuLogFields, persistLockedInventoryStocks, snapshotSkuStock } from './inventory-ledger.service.js'
+import { buildSkuLogFields, persistLockedInventoryStocks, skuContributesToProductAggregate, snapshotSkuStock } from './inventory-ledger.service.js'
 import { formatLocationDeductions, reconcileSkuLocationStockTransitions } from './sku-location-stock.service.js'
 import type { PaginationResult } from '../types/api.js'
 import type { RequestMeta } from '../utils/request-meta.js'
@@ -4564,8 +4564,9 @@ class O2oPreorderService {
     const itemKey = this.buildOrderItemKey(String(requestItem.productId), requestItem.skuId ? String(requestItem.skuId) : null)
     const orderItem = orderItemMap.get(itemKey)
     const sku = requestItem.skuId ? skuMap.get(String(requestItem.skuId)) : null
-    if (!product || !orderItem) {
-      throw new BizError('存在已失效商品，无法核销退货', 409)
+    if (!requestItem.skuId || !product || !orderItem || !sku || String(sku.productId) !== String(product.id)) {
+      // nullable/SET NULL 只保留旧单读取能力，退货写库存必须能定位原商品下的真实 SKU。
+      throw new BizError('退货明细的商品或 SKU 已失效或归属不一致，无法核销退货', 409)
     }
     const requestQty = Math.max(0, Number(requestItem.qty ?? 0))
     const currentOrderQty = Math.max(0, Number(orderItem.qty ?? 0))
@@ -4577,10 +4578,8 @@ class O2oPreorderService {
     const beforePreOrderedStock = Math.max(0, Number(product.preOrderedStock ?? 0))
     const skuBefore = snapshotSkuStock(sku)
     if (returnRequest.sourceOrderStatus === 'pending') {
-      if (sku) {
-        sku.preOrderedStock = Math.max(0, Number(sku.preOrderedStock ?? 0) - requestQty)
-        await manager.getRepository(BaseProductSku).update({ id: sku.id }, { preOrderedStock: sku.preOrderedStock })
-      }
+      sku.preOrderedStock = Math.max(0, Number(sku.preOrderedStock ?? 0) - requestQty)
+      await manager.getRepository(BaseProductSku).update({ id: sku.id }, { preOrderedStock: sku.preOrderedStock })
       product.preOrderedStock = Math.max(0, beforePreOrderedStock - requestQty)
       await manager.getRepository(BaseProduct).update({ id: product.id }, { preOrderedStock: product.preOrderedStock })
       await manager.getRepository(InventoryLog).save(
@@ -4602,12 +4601,11 @@ class O2oPreorderService {
         }),
       )
     } else {
-      if (sku) {
-        sku.currentStock = Math.max(0, Number(sku.currentStock ?? 0)) + requestQty
-        await manager.getRepository(BaseProductSku).update({ id: sku.id }, { currentStock: sku.currentStock })
-      }
-      product.currentStock = beforeCurrentStock + requestQty
-      await manager.getRepository(BaseProduct).update({ id: product.id }, { currentStock: product.currentStock })
+      sku.currentStock = Math.max(0, Number(sku.currentStock ?? 0)) + requestQty
+      await manager.getRepository(BaseProductSku).update({ id: sku.id }, { currentStock: sku.currentStock })
+      const contributes = skuContributesToProductAggregate(sku)
+      product.currentStock = beforeCurrentStock + (contributes ? requestQty : 0)
+      if (contributes) await manager.getRepository(BaseProduct).update({ id: product.id }, { currentStock: product.currentStock })
       await manager.getRepository(InventoryLog).save(
         manager.getRepository(InventoryLog).create({
           productId: product.id,
@@ -4623,7 +4621,7 @@ class O2oPreorderService {
           operatorName: actor.displayName,
           refType: 'o2o_return_request',
           refId: String(returnRequest.id),
-          remark: `退货核销重新入库，退货单号：${returnRequest.returnNo}`,
+          remark: `退货核销重新入库，退货单号：${returnRequest.returnNo}${contributes ? '' : '（规格已停用或退役，不计入商品汇总）'}`,
         }),
       )
     }

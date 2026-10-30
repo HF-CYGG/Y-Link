@@ -92,14 +92,16 @@ async function loadLocationCodes(manager: EntityManager, locationIds: Array<stri
 }
 
 /**
- * 只读：按当前数据计算一批 SKU 的库位分布，用于列表与详情展示。
+ * 默认只读：计算一批 SKU 的库位分布，用于列表与详情展示。
+ * 写事务已锁定商品/SKU 后须显式传 forUpdate，以当前读校验件数，避免 RR 快照回退。
  * 正常情况下写路径已规整，这里仍对“其他库位之和超过总库存”的异常数据按扣减规则折算展示，避免出现负数主库位件数。
  */
 export async function loadSkuLocationDistributions(
   manager: EntityManager,
   skus: SkuStockLike[],
+  options: { forUpdate?: boolean } = {},
 ): Promise<Map<string, SkuLocationDistribution>> {
-  const rowMap = await loadRows(manager, skus.map((sku) => normalizeId(sku.id)), false)
+  const rowMap = await loadRows(manager, skus.map((sku) => normalizeId(sku.id)), options.forUpdate === true)
   const mainCodes = await loadLocationCodes(manager, skus.map((sku) => normalizeNullableId(sku.locationId)))
   const result = new Map<string, SkuLocationDistribution>()
   for (const sku of skus) {
@@ -223,7 +225,11 @@ export async function readSkuLocationQty(manager: EntityManager, sku: SkuStockLi
 
 async function upsertRowQty(manager: EntityManager, skuId: string, locationId: string, delta: number) {
   const repo = manager.getRepository(InvSkuLocationStock)
-  const existing = await repo.findOne({ where: { skuId, locationId } })
+  // 调用方持有 SKU 锁；旧行与缺行都必须按当前读判断，不能回到事务的普通读快照。
+  const existing = await repo.findOne({
+    where: { skuId, locationId },
+    lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+  })
   const next = Number(existing?.qty ?? 0) + delta
   if (next < 0) throw new BizError('库位件数不足，请刷新后重试', 409)
   if (next > MAX_DATABASE_INT) throw new BizError('库位件数超过系统可处理上限', 409)
@@ -292,7 +298,7 @@ export async function transferSkuLocationStock(
 ): Promise<TransferSkuLocationResult> {
   if (!Number.isSafeInteger(input.qty) || input.qty <= 0) throw new BizError('拨转件数必须为正整数', 400)
   await reconcileSkuLocationStocks(manager, [sku])
-  const before = (await loadSkuLocationDistributions(manager, [sku])).get(normalizeId(sku.id)) as SkuLocationDistribution
+  const before = (await loadSkuLocationDistributions(manager, [sku], { forUpdate: true })).get(normalizeId(sku.id)) as SkuLocationDistribution
   const mainLocationId = normalizeNullableId(sku.locationId)
   const fromId = normalizeNullableId(input.fromLocationId)
   const toId = normalizeId(input.toLocationId)
@@ -318,7 +324,7 @@ export async function transferSkuLocationStock(
     mainChanged = true
   }
   await reconcileSkuLocationStocks(manager, [sku])
-  const after = (await loadSkuLocationDistributions(manager, [sku])).get(skuId) as SkuLocationDistribution
+  const after = (await loadSkuLocationDistributions(manager, [sku], { forUpdate: true })).get(skuId) as SkuLocationDistribution
   return { before, after, mainChanged }
 }
 

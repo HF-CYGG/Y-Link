@@ -81,6 +81,7 @@ const BACKEND_SUITE = [
   'scripts/auth-activity-throttle-verify.ts',
   'scripts/reporting-query-performance-verify.ts',
   'scripts/o2o-inventory-persistence-verify.ts',
+  'scripts/issue186-inventory-consistency-verify.ts',
 ]
 
 const buildCoverageArgs = (lcovPath, excludeGlob) => [
