@@ -70,6 +70,19 @@ for (const file of ['docker/nginx/default.conf', 'docker/nginx/default.conf.temp
     assert.match(body, /limit_req zone=ylink_api_general /, `${file} ${declaration} 应计入通用限流`)
   }
   assert.match(blockOf('location ^~ /api/'), /limit_req zone=ylink_api_general burst=\d+ nodelay;/, `${file} /api/ 缺少通用每 IP 限流`)
+  assert.match(blockOf('location ^~ /uploads/'), /limit_req zone=ylink_api_general burst=\d+ nodelay;/, `${file} /uploads/ 缺少通用每 IP 限流`)
+  // “变量 + URI”的 proxy_pass 会让 Nginx 用 URI 整体替换请求路径并丢弃查询参数（/api/orders?page=2 被转成 /api/），必须使用具名 upstream 或字面地址。
+  assert.doesNotMatch(source, /proxy_pass\s+https?:\/\/\$[A-Za-z_]+\/[^;]*;/, `${file} 禁止在 proxy_pass 中同时使用变量与 URI`)
+  // 压缩：优先发送构建期预压缩产物，且 JS 的两种 MIME 写法都要覆盖。
+  assert.match(source, /^    gzip_static on;$/m, `${file} 缺少 gzip_static`)
+  for (const mime of ['application/javascript', 'text/javascript', 'image/svg+xml', 'application/json']) {
+    assert.match(source, new RegExp(`gzip_types[\\s\\S]*?${mime.replace('+', '\\+')}[\\s\\S]*?;`), `${file} gzip_types 缺少 ${mime}`)
+  }
+  // 未带哈希的站点图标不得按 immutable 缓存一年，且该规则必须位于通用静态资源正则之前。
+  const iconLocation = source.indexOf('location ~ ^/(?:favicon\\.ico|y-link-icon\\.png|apple-touch-icon\\.png|icons\\.svg)$')
+  const assetLocation = source.indexOf('location ~* \\.(?:css|js|mjs|json|map|svg|ico|png|jpe?g|webp|gif|woff2?|ttf|otf|eot)$')
+  assert.ok(iconLocation >= 0 && iconLocation < assetLocation, `${file} 站点图标缓存规则缺失或顺序错误`)
+  assert.doesNotMatch(source.slice(iconLocation, source.indexOf('\n    }', iconLocation)), /immutable/, `${file} 站点图标不得声明 immutable`)
   if (!file.endsWith('.template')) {
     const pagePattern = source.match(/location ~ (\^\/\(\?:database-rescue\|login\S+) \{/)
     assert.ok(pagePattern, `${file} 缺少页面路由白名单`)
@@ -86,6 +99,12 @@ for (const file of ['docker/nginx/default.conf', 'docker/nginx/default.conf.temp
     }
   }
 }
+// 分体模板：后端走具名 upstream（运行期解析 + keepalive），商品图边缘缓存不得覆盖私有反馈附件。
+const splitTemplate = readFileSync('docker/nginx/default.conf.template', 'utf8')
+assert.match(splitTemplate, /upstream ylink_backend \{[\s\S]*?server backend:3001 resolve;[\s\S]*?keepalive \d+;[\s\S]*?\}/, '分体模板需使用带 resolve 与 keepalive 的具名 upstream')
+const productImageBlock = splitTemplate.slice(splitTemplate.indexOf('location ^~ /uploads/products/'), splitTemplate.indexOf('\n    }', splitTemplate.indexOf('location ^~ /uploads/products/')))
+assert.match(productImageBlock, /proxy_cache ylink_product_images;/, '分体模板商品图需启用边缘缓存')
+assert.doesNotMatch(splitTemplate, /location \^~ \/uploads\/client-feedback\/[\s\S]*?proxy_cache/, '私有反馈附件不得进入边缘缓存')
 const pageHeaders = readFileSync('docker/nginx/page-security-headers.conf', 'utf8')
 const connectSources = pageHeaders.match(/connect-src\s+([^;]+);/)
 assert.ok(connectSources, '页面 CSP 必须显式约束网络连接来源')
@@ -98,4 +117,4 @@ for (const file of ['compose.yml', 'compose.mysql.yml', 'compose.cloud.yml']) {
   assert.match(backend, /Y_LINK_TRUST_PROXY/)
   assert.match(source, /ipv4_address: \$\{Y_LINK_FRONTEND_PROXY_IP/)
 }
-console.log('[web-edge-security] 代理头覆盖、HTML安全头、端口静态契约与边缘限流/连接/请求体上限通过')
+console.log('[web-edge-security] 代理头覆盖、HTML安全头、端口静态契约、边缘限流/连接/请求体上限、代理路径改写与静态缓存/压缩策略通过')

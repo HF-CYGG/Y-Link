@@ -1127,10 +1127,13 @@ class ClientAuthService {
 
   async resolveClientByToken(token: string): Promise<ClientAuthContext> {
     const now = new Date()
-    const session = await this.sessionRepo.findOne({
-      where: { sessionToken: hashSessionToken(token) },
-      relations: { user: true },
-    })
+    // 每个客户端请求都要鉴权：用 QueryBuilder 一次联表取回会话与账号；
+    // findOne 带 relations 时 TypeORM 会拆成“先取主键、再取数据”两条查询（与管理端鉴权同一处理方式）。
+    const session = await this.sessionRepo
+      .createQueryBuilder('session')
+      .leftJoinAndSelect('session.user', 'user')
+      .where('session.sessionToken = :sessionToken', { sessionToken: hashSessionToken(token) })
+      .getOne()
     if (!session || session.expiresAt <= now || !session.user) {
       throw new BizError('未登录或登录状态已失效', 401)
     }

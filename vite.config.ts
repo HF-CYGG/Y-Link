@@ -12,7 +12,9 @@ import basicSsl from '@vitejs/plugin-basic-ssl'
 import Components from 'unplugin-vue-components/vite'
 import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
+import { constants as zlibConstants, gzipSync } from 'node:zlib'
 import { fileURLToPath, URL } from 'node:url'
 import { shortenHtml2pdfModuleIds } from './scripts/html2pdf-module-id-shortener.mjs'
 import { configureFeedbackSseProxy } from './scripts/feedback-sse-dev-proxy'
@@ -30,6 +32,42 @@ import { code128BarcodePlugin, CODE128_BARCODE_RESOLVED_ID } from './scripts/cod
 const THEME_INIT_SOURCE_URL = '/src/theme-init.js'
 const THEME_INIT_PLACEHOLDER = '<!-- ylink-theme-init-script -->'
 const THEME_INIT_TAG_PATTERN = /<script\s+src=["']\/src\/theme-init\.js["']\s*><\/script>/
+
+/**
+ * 构建期预压缩插件：
+ * - 生产构建写出产物后，为 js/css/svg/json 等文本资源生成同名 `.gz`（gzip 最高压缩级别）；
+ * - Nginx 开启 `gzip_static on` 后直接发送预压缩文件，省去每次请求的实时压缩 CPU，且压缩率高于运行时的 level 5；
+ * - 只在压缩后至少节省 10% 且原文件不小于 1KB 时写出，避免为小文件或已压缩内容生成无意义副本；
+ * - 只使用 Node 自带 zlib，不引入新依赖；性能预算脚本按原始文件统计，`.gz` 副本不计入体积预算。
+ */
+const PRECOMPRESS_EXTENSIONS = new Set(['.js', '.mjs', '.css', '.svg', '.json', '.html'])
+const PRECOMPRESS_MIN_BYTES = 1024
+const precompressAssetsPlugin = (): Plugin => ({
+  name: 'ylink-precompress-assets',
+  apply: 'build',
+  enforce: 'post',
+  writeBundle(outputOptions, bundle) {
+    const outputDir = outputOptions.dir
+    if (!outputDir) {
+      return
+    }
+    for (const [fileName, output] of Object.entries(bundle)) {
+      if (!PRECOMPRESS_EXTENSIONS.has(path.extname(fileName).toLowerCase())) {
+        continue
+      }
+      const source = output.type === 'chunk' ? output.code : output.source
+      const buffer = typeof source === 'string' ? Buffer.from(source) : Buffer.from(source)
+      if (buffer.byteLength < PRECOMPRESS_MIN_BYTES) {
+        continue
+      }
+      const compressed = gzipSync(buffer, { level: zlibConstants.Z_BEST_COMPRESSION })
+      if (compressed.byteLength > buffer.byteLength * 0.9) {
+        continue
+      }
+      writeFileSync(path.join(outputDir, `${fileName}.gz`), compressed)
+    }
+  },
+})
 
 /** 仅在生产构建时压缩已核验供应商包的内部模块 ID；不改变 PDF 实现和外部 html2canvas 导入。 */
 const html2pdfModuleIdPlugin = (): Plugin => {
@@ -228,6 +266,7 @@ export default defineConfig(({ command, mode }) => {
       vue(),
       ...themeInitScriptPlugin(),
       html2pdfModuleIdPlugin(),
+      precompressAssetsPlugin(),
       /**
        * Element Plus 编译期按需引入：
        * - 仅为模板中真实使用到的组件生成 import；

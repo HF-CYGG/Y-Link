@@ -201,7 +201,8 @@ assert(fs.existsSync(distAssetsRoot), `构建产物不存在：${distAssetsRoot}
 
 const assetEntries = fs
   .readdirSync(distAssetsRoot, { withFileTypes: true })
-  .filter((entry) => entry.isFile())
+  // 构建期预压缩生成的 `.gz` 只是同名产物的传输副本，预算按原始文件统计，避免重复计入体积。
+  .filter((entry) => entry.isFile() && !entry.name.endsWith('.gz'))
   .map((entry) => {
     const absolutePath = path.join(distAssetsRoot, entry.name)
     const stat = fs.statSync(absolutePath)
