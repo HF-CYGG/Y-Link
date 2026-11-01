@@ -13,6 +13,8 @@ import sharp, { type Metadata } from 'sharp'
 import { PRODUCT_IMAGE_GATE_POLICY } from '../config/load-protection-policy.js'
 import { BoundedConcurrencyGate } from './bounded-concurrency.js'
 import { BizError } from './errors.js'
+import { generateProductThumbnailForFile } from './product-thumbnail.js'
+import { toSafeErrorLog } from './safe-error-log.js'
 
 export type UploadCategory = 'products' | 'client-feedback'
 
@@ -334,6 +336,13 @@ export const finalizeUploadedImageFile = async (
     const finalFilePath = path.resolve(ensureUploadCategoryDir(category), finalFileName)
     await fs.promises.writeFile(finalFilePath, reencodedBuffer)
     await cleanupUploadFileIfExists(tempFilePath)
+    if (category === 'products') {
+      // 商品图同步生成小尺寸 WebP 缩略图（仍在商品图处理闸门内）；失败只记日志，不影响原图上传结果，
+      // 商城目录发现缩略图缺失时会自动回退原图，后续可用回填脚本补齐。
+      await generateProductThumbnailForFile(finalFilePath, reencodedBuffer).catch((error) => {
+        console.warn('[upload-storage] 商品缩略图生成失败，已回退使用原图', toSafeErrorLog(error))
+      })
+    }
 
     return {
       fileName: finalFileName,

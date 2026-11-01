@@ -33,6 +33,7 @@ import { aliyunDypnsMnsWorkerService } from '../services/aliyun-dypns-mns-worker
 import { systemConfigService } from '../services/system-config.service.js'
 import { migrateLegacyUploadReferences } from '../utils/upload-migration.js'
 import { toSafeErrorLog } from '../utils/safe-error-log.js'
+import { scheduleProductThumbnailBackfill } from '../utils/product-thumbnail.js'
 import { describeDataEncryptionKey } from '../utils/data-encryption.js'
 import { DataEncryptionKeyMissingError, runDataEncryptionPreflight } from './data-encryption-preflight.js'
 import { overloadMonitor } from '../middleware/overload-shedding.middleware.js'
@@ -556,6 +557,8 @@ export async function startBusinessRuntime(startup: { mode: 'normal' | 'cutover'
     persistentRiskStateService.startCleanupLoop()
     mobileSessionService.startCleanupLoop()
     clientFeedbackService.startAttachmentCleanupWorker()
+    // 商品缩略图存量回填只读写 uploads/products 文件、不触碰数据库，延迟到启动完成后低优先级执行。
+    scheduleProductThumbnailBackfill()
     if (databaseMaintenanceModeService.isReadOnly()) {
       logLine('DB MIGRATION', '数据库仍处于只读维护，后台写任务保持暂停', 'warn')
     }

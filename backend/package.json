@@ -119,7 +119,9 @@
     "order-query:baseline:verify": "tsx scripts/order-query-baseline-verify.ts",
     "reports:contract:verify": "tsx scripts/report-center-contract-verify.ts",
     "reports:inventory:verify": "tsx scripts/report-inventory-verify.ts",
-    "uploads:legacy:inspect": "tsx scripts/inspect-legacy-upload-urls.ts"
+    "uploads:legacy:inspect": "tsx scripts/inspect-legacy-upload-urls.ts",
+    "product:thumbnail:backfill": "tsx scripts/product-thumbnail-backfill.ts",
+    "product:thumbnail:verify": "tsx scripts/product-thumbnail-verify.ts"
   },
   "dependencies": {
     "@alicloud/dypnsapi20170525": "^2.0.0",
