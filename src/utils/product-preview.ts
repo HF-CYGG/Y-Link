@@ -9,11 +9,13 @@ export interface ProductPreviewSku {
   availableStock?: number
   sortOrder?: number
   thumbnail?: string | null
+  thumbnailSmall?: string | null
 }
 
 export interface ProductPreviewSource<TSku extends ProductPreviewSku> {
   o2oRecommended: boolean
   thumbnail?: string | null
+  thumbnailSmall?: string | null
   skus?: TSku[] | null
 }
 
@@ -46,4 +48,16 @@ export function resolveProductPreviewSku<TSku extends ProductPreviewSku>(product
 /** 返回真实图片 URL；缺图返回 null，调用方可据此筛选，再按需显示占位图。 */
 export function resolveProductPreviewImage<TSku extends ProductPreviewSku>(product: ProductPreviewSource<TSku>): string | null {
   return imageUrl(resolveProductPreviewSku(product)?.thumbnail) ?? imageUrl(product.thumbnail)
+}
+
+/**
+ * 列表小图：与 resolveProductPreviewImage 选取同一张图，但优先返回服务端生成的小尺寸缩略图；
+ * 缩略图缺失时返回原图。必须先确定“哪张图”再取其缩略图，不能出现规格原图与商品缩略图错配。
+ */
+export function resolveProductPreviewSmallImage<TSku extends ProductPreviewSku>(product: ProductPreviewSource<TSku>): string | null {
+  const previewSku = resolveProductPreviewSku(product)
+  if (imageUrl(previewSku?.thumbnail)) {
+    return imageUrl(previewSku?.thumbnailSmall) ?? imageUrl(previewSku?.thumbnail)
+  }
+  return imageUrl(product.thumbnailSmall) ?? imageUrl(product.thumbnail)
 }

@@ -122,10 +122,16 @@ const normalizeSkuRecords = (skus: unknown): O2oMallSku[] => {
         isCurrent: row.isCurrent === false || row.isCurrent === 0 || row.isCurrent === '0' || row.isCurrent === 'false' ? false : true,
         o2oRecommended: normalizeBoolean(row.o2oRecommended),
         thumbnail: typeof row.thumbnail === 'string' ? row.thumbnail : null,
+        thumbnailSmall: normalizeThumbnailSmall(row.thumbnailSmall),
         sortOrder: normalizeNonNegativeInteger(row.sortOrder),
       } satisfies O2oMallSku
     })
     .filter((item): item is O2oMallSku => item !== null)
+}
+
+// 缩略图只接受站内商品图目录下的 .thumb.webp，旧缓存或异常值一律视为缺失并回退原图。
+const normalizeThumbnailSmall = (value: unknown): string | null => {
+  return typeof value === 'string' && /^\/uploads\/products\/[A-Za-z0-9_-]+\.thumb\.webp$/.test(value) ? value : null
 }
 
 const normalizeProducts = (products: unknown): O2oMallProduct[] => {
@@ -156,6 +162,7 @@ const normalizeProducts = (products: unknown): O2oMallProduct[] => {
         o2oRecommended: normalizeBoolean(row.o2oRecommended),
         tags: Array.isArray(row.tags) ? row.tags.map(String) : [],
         thumbnail: typeof row.thumbnail === 'string' ? row.thumbnail : null,
+        thumbnailSmall: normalizeThumbnailSmall(row.thumbnailSmall),
         detailContent: typeof row.detailContent === 'string' ? row.detailContent : null,
         limitPerUser: Number.isFinite(row.limitPerUser) ? Number(row.limitPerUser) : 0,
         currentStock: Number.isFinite(row.currentStock) ? Number(row.currentStock) : 0,

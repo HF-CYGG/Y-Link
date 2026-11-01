@@ -7,6 +7,8 @@
  * 悬浮购物车遮挡：页面尾部留白、分类浏览列表高度与 scroll-padding 统一由摘要栏实测遮挡高度 `--mall-floating-occlusion` 驱动，不要改回固定常量估算。
  * 数量输入：迷你购物车与详情弹层的数量均可直接输入，购物车走 store 的 setQtyFromInput，详情弹层走 commitDetailQty，与加减按钮共用同一上限与提示。
  * 补货入口：四套卡片复用当前缺货 SKU 判断，操作保持第三列上下堆叠，不改变虚拟行高；详情传递当前明确选择的规格。
+ * 加购交互：单规格卡片的“+ 加购”加购后分裂为“− 数量 +”步进器（ClientCardCartStepper），加购成功伴随飞入购物车、角标弹跳与轻触震动，均在减少动效时降级。
+ * 详情底栏：按当前规格在“数量 + 加入购物车”与“申请补货”之间切换，数量栏收起、按钮文字先隐去再显现，形成合并/拆分过渡。
  * 目录新鲜度：本地快照有效期内先秒开再后台重新校验；页面激活期间每 30 秒与切回前台时也会静默校验，
  * 新上架商品无需顾客手动刷新即可出现。校验依赖 ETag 条件请求，不要改成带随机参数的绕缓存请求。
  */
@@ -17,16 +19,20 @@ import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMoun
 import { useRoute } from 'vue-router'
 
 import { ArrowDown, ArrowRight, Close, Search, ShoppingCart } from '@element-plus/icons-vue'
+import { ElMessageBox } from 'element-plus'
 import { getO2oMallProducts, getO2oMallStorefront, type O2oMallProduct, type O2oMallSku } from '@/api/modules/o2o'
 import { BaseRequestState } from '@/components/common'
 import { useStableRequest } from '@/composables/useStableRequest'
+import { useClientRestockEntry } from '@/composables/useClientRestockEntry'
 import { useClientAuthStore, useClientCartStore, useClientCatalogStore } from '@/store'
 import pinia from '@/store/pinia'
 import { normalizeRequestError } from '@/utils/error'
 import { useDevice } from '@/composables/useDevice'
 import { resolveProductPlaceholder } from '@/utils/product-placeholder'
-import { resolveProductPreviewImage, resolveProductPreviewSku, resolveSortedActivePreviewSkus } from '@/utils/product-preview'
+import { resolveProductPreviewImage, resolveProductPreviewSku, resolveProductPreviewSmallImage, resolveSortedActivePreviewSkus } from '@/utils/product-preview'
 import { resolveO2oPriceView } from '@/utils/o2o-price'
+import { htmlToPlainText } from '@/utils/plain-text'
+import { flyToClientCart, triggerClientHaptic } from '@/utils/client-motion'
 import {
   buildClientSkuSelectionModel,
   resolveClientSkuSelection,
@@ -44,13 +50,14 @@ import {
 } from './client-mall-viewport.helpers'
 
 import ClientCartView from './ClientCartView.vue'
+import ClientCardCartStepper from './components/ClientCardCartStepper.vue'
 import ClientCheckoutView from './ClientCheckoutView.vue'
 import ClientImagePreviewer from './components/ClientImagePreviewer.vue'
 import ClientQtyInput from './components/ClientQtyInput.vue'
 import ClientRestockButton from './components/ClientRestockButton.vue'
 
 
-import { showAppSuccess, showAppWarning } from '@/utils/app-alert'
+import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 interface ProductCategoryGroup {
   key: string
@@ -64,7 +71,10 @@ interface ProductSearchEntry {
 }
 
 interface ProductCardDisplay {
+  /** 卡片小图：优先服务端缩略图，缺失时为原图。 */
   thumbnail: string
+  /** 原图：点开预览时使用，保证查看大图仍是清晰原图。 */
+  previewImage: string
   priceView: ReturnType<typeof resolveO2oPriceView>
   description: string
 }
@@ -114,6 +124,8 @@ const imagePreviewVisible = ref(false)
 const previewImageUrl = ref('')
 const miniCartVisible = ref(false)
 const settlePulsing = ref(false)
+const miniCartBadgeBouncing = ref(false)
+const miniCartIconRef = ref<HTMLElement | null>(null)
 const searchInputFocused = ref(false)
 const mobileSearchVisible = ref(false)
 const mobileSearchInputRef = ref<HTMLInputElement | null>(null)
@@ -264,11 +276,16 @@ const classifyProduct = (product: O2oMallProduct) => {
 const resolveHallProductPreviewSku = (product: Pick<O2oMallProduct, 'o2oRecommended' | 'skus'>) =>
   resolveProductPreviewSku(product)
 
-const resolveHallProductThumbnail = (product: Pick<O2oMallProduct, 'productName' | 'productCode' | 'thumbnail' | 'o2oRecommended' | 'skus'>) => {
+const resolveHallProductThumbnail = (product: Pick<O2oMallProduct, 'productName' | 'productCode' | 'thumbnail' | 'thumbnailSmall' | 'o2oRecommended' | 'skus'>) => {
+  return resolveProductPlaceholder(resolveProductPreviewSmallImage(product))
+}
+
+const resolveHallProductPreviewImage = (product: Pick<O2oMallProduct, 'productName' | 'productCode' | 'thumbnail' | 'o2oRecommended' | 'skus'>) => {
   return resolveProductPlaceholder(resolveProductPreviewImage(product))
 }
 
-const normalizeProductCardDescription = (product: Pick<O2oMallProduct, 'detailContent'>) => product.detailContent?.trim() ?? ''
+// 商品描述可能被录入了 HTML 标签（管理端为纯文本输入框），展示与搜索统一先转为纯文本，避免露出 <p> 等原始标签。
+const normalizeProductCardDescription = (product: Pick<O2oMallProduct, 'detailContent'>) => htmlToPlainText(product.detailContent)
 
 const normalizeProductCardSearchText = (product: O2oMallProduct, categoryKeys: string[]) => {
   const boundedDetailText = normalizeProductCardDescription(product).slice(0, PRODUCT_CARD_SEARCH_DETAIL_MAX_LENGTH)
@@ -284,6 +301,7 @@ const buildProductCardDisplay = (product: O2oMallProduct): ProductCardDisplay =>
   const previewSku = resolveHallProductPreviewSku(product)
   return {
     thumbnail: resolveHallProductThumbnail(product),
+    previewImage: resolveHallProductPreviewImage(product),
     priceView: resolveO2oPriceView(previewSku ?? product),
     description: normalizeProductCardDescription(product),
   }
@@ -313,6 +331,33 @@ const resolveDetailProductThumbnail = (product: Pick<O2oMallProduct, 'productNam
   return resolveProductPlaceholder(selectedDetailSku.value?.thumbnail || product.thumbnail)
 }
 
+// 详情页多规格头部的小方图只有约 5rem，用缩略图即可；单规格大图与“查看大图”仍使用原图。
+const resolveDetailProductSmallThumbnail = (product: Pick<O2oMallProduct, 'productName' | 'productCode' | 'thumbnail' | 'thumbnailSmall'>) => {
+  const sku = selectedDetailSku.value
+  if (sku?.thumbnail) {
+    return resolveProductPlaceholder(sku.thumbnailSmall || sku.thumbnail)
+  }
+  return resolveProductPlaceholder(product.thumbnailSmall || product.thumbnail)
+}
+
+// 缩略图加载失败（例如回填前被清理或网络异常）时回退原图，原图也失败再显示统一占位图；用 data 标记避免 onerror 循环。
+const handleProductImageError = (event: Event, fallbackUrl: string) => {
+  const image = event.target
+  if (!(image instanceof HTMLImageElement)) {
+    return
+  }
+  const stage = image.dataset.fallbackStage ?? ''
+  if (!stage && fallbackUrl && image.getAttribute('src') !== fallbackUrl) {
+    image.dataset.fallbackStage = 'original'
+    image.src = fallbackUrl
+    return
+  }
+  if (stage !== 'placeholder') {
+    image.dataset.fallbackStage = 'placeholder'
+    image.src = resolveProductPlaceholder(null)
+  }
+}
+
 const resolveActiveSkus = (product: O2oMallProduct | null): O2oMallSku[] => product ? resolveSortedActivePreviewSkus(product) : []
 
 const resolveCurrentDetailSpecText = () => {
@@ -330,11 +375,11 @@ const resolveCurrentDetailDisplayName = (product: O2oMallProduct) => {
 
 const resolveCurrentDetailDescription = (product: O2oMallProduct) => {
   const specText = resolveCurrentDetailSpecText()
-  const detailContent = product.detailContent?.trim()
+  const detailContent = htmlToPlainText(product.detailContent)
   if (!specText) {
     return detailContent || '暂无商品描述'
   }
-  return detailContent ? `${detailContent} · 当前规格：${specText}` : `当前规格：${specText}`
+  return detailContent ? `${detailContent}\n当前规格：${specText}` : `当前规格：${specText}`
 }
 
 const resolveCurrentDetailPriceView = (product: O2oMallProduct) => {
@@ -367,9 +412,31 @@ const detailMaxQty = computed(() => {
   return Math.max(0, Math.min(stock, limit || stock))
 })
 
+// 详情底栏状态机：
+// - purchase：当前规格有可预订库存，展示“数量 + 加入购物车”；
+// - restock：当前启用规格缺货（口径同补货按钮，不用限购后的可购量判断），数量栏收起并合并为“申请补货”；
+// - unavailable：其余不可购情况，展示禁用的“暂不可购”。
+type DetailActionMode = 'purchase' | 'restock' | 'unavailable'
+const detailRestockEntry = useClientRestockEntry(() => detailProduct.value, () => selectedDetailSku.value)
+const detailRestockLoading = detailRestockEntry.loading
+const detailActionMode = computed<DetailActionMode>(() => {
+  if (!detailProduct.value) {
+    return 'unavailable'
+  }
+  if (resolveCurrentDetailAvailableStock(detailProduct.value) > 0) {
+    return 'purchase'
+  }
+  return detailRestockEntry.restockAvailable.value ? 'restock' : 'unavailable'
+})
+const detailActionLabel = computed(() => {
+  if (detailActionMode.value === 'purchase') return '加入购物车'
+  if (detailActionMode.value === 'restock') return '申请补货'
+  return '暂不可购'
+})
+
 // 商城图片预览统一走同一套状态，避免商品卡和详情抽屉各自维护一套弹层开关。
 const openProductImagePreview = (product: O2oMallProduct) => {
-  previewImageUrl.value = resolveProductThumbnail(product)
+  previewImageUrl.value = resolveProductCardDisplay(product).previewImage
   imagePreviewVisible.value = true
 }
 
@@ -496,6 +563,28 @@ const triggerSettlePulse = () => {
       settlePulsing.value = false
     }, 360)
   }, 12)
+}
+
+// 迷你购物车角标弹跳：飞入小圆点落点时触发，复用短暂切换 class 的方式保证连续加购可重复播放。
+let miniCartBadgeBounceTimer = 0
+const bumpMiniCartBadge = () => {
+  miniCartBadgeBouncing.value = false
+  globalThis.window.clearTimeout(miniCartBadgeBounceTimer)
+  globalThis.window.requestAnimationFrame(() => {
+    miniCartBadgeBouncing.value = true
+    miniCartBadgeBounceTimer = globalThis.window.setTimeout(() => {
+      miniCartBadgeBouncing.value = false
+    }, 420)
+  })
+}
+
+// 加购成功的统一视觉反馈：轻触震动 → 小圆点飞入购物车 → 落点时购物车脉冲与角标弹跳；减少动效时只保留脉冲。
+const celebrateCartAdd = (source?: Element | null) => {
+  triggerClientHaptic()
+  void flyToClientCart(source, miniCartIconRef.value).then(() => {
+    triggerSettlePulse()
+    bumpMiniCartBadge()
+  })
 }
 
 const resolveProductImageWarmupBatch = () => {
@@ -839,9 +928,20 @@ const changeDetailQty = (delta: number) => {
     return
   }
   const maxQty = detailMaxQty.value
+  // 无可购库存时数量保持 1，不能被收敛成 0（底栏此时已切换为申请补货或暂不可购）。
+  if (maxQty <= 0) {
+    if (delta > 0) {
+      warnDetailQtyLimit(maxQty)
+    }
+    detailQty.value = 1
+    return
+  }
   const nextQty = Math.min(maxQty, Math.max(1, detailQty.value + delta))
-  if (detailQty.value === maxQty && delta > 0) {
+  if (detailQty.value >= maxQty && delta > 0) {
     warnDetailQtyLimit(maxQty)
+  }
+  if (nextQty !== detailQty.value) {
+    triggerClientHaptic(6)
   }
   detailQty.value = nextQty
 }
@@ -883,7 +983,7 @@ const selectDetailSkuOption = (groupName: string, optionValue: string) => {
   }
 }
 
-const addCurrentDetailToCart = () => {
+const addCurrentDetailToCart = (source?: Element | null) => {
   if (!detailProduct.value) {
     return
   }
@@ -891,12 +991,26 @@ const addCurrentDetailToCart = () => {
   if (addedQty <= 0) {
     return
   }
+  // 详情加购后抽屉关闭、页面上下文切换，保留文字提示让用户确认结果。
   showAppSuccess('已加入购物车')
-  triggerSettlePulse()
+  celebrateCartAdd(source)
   detailVisible.value = false
 }
 
-const quickAdd = (product: O2oMallProduct) => {
+// 详情底栏主按钮：按当前状态分派到加购或申请补货，两种动作共用同一个按钮以实现合并过渡。
+const handleDetailPrimaryAction = (event: MouseEvent) => {
+  if (detailActionMode.value === 'purchase') {
+    addCurrentDetailToCart(event.currentTarget instanceof Element ? event.currentTarget : null)
+    return
+  }
+  if (detailActionMode.value === 'restock') {
+    void detailRestockEntry.openRestock()
+  }
+}
+
+// 卡片加购：卡片上的步进器已即时显示数量，不再额外弹“已加入购物车”提示，减少连续加购时的打扰；
+// 库存与限购提示仍由购物车 store 统一给出。
+const quickAdd = (product: O2oMallProduct, source?: Element | null) => {
   const activeSkus = resolveActiveSkus(product)
   if (activeSkus.length > 1) {
     openProductDetail(product)
@@ -906,8 +1020,35 @@ const quickAdd = (product: O2oMallProduct) => {
   if (addedQty <= 0) {
     return
   }
-  showAppSuccess('已加入购物车')
-  triggerSettlePulse()
+  celebrateCartAdd(source)
+}
+
+// 卡片步进器减一：减到 0 时由购物车 store 移除该行，步进器随之收拢回“+ 加购”。
+const decreaseCardQty = (itemId: string) => {
+  clientCartStore.incrementQty(itemId, -1)
+  triggerClientHaptic(6)
+}
+
+// 迷你购物车“清空”：二次确认后只清商品行；不能调用 clearAll（登出专用，会解除账号绑定导致后续加购无法持久化）。
+const confirmClearMiniCart = async () => {
+  if (!clientCartStore.items.length) {
+    return
+  }
+  try {
+    await ElMessageBox.confirm('确认清空购物车中的全部商品吗？', '清空购物车', {
+      type: 'warning',
+      confirmButtonText: '确认清空',
+      cancelButtonText: '再想想',
+      closeOnClickModal: false,
+    })
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') {
+      return
+    }
+    showAppError('清空确认失败，请稍后重试')
+    return
+  }
+  clientCartStore.clearItems()
 }
 
 const clearCategoryScrollSettleTimer = () => {
@@ -1667,6 +1808,7 @@ onBeforeUnmount(() => {
               class="client-product-card__cover"
               loading="lazy"
               decoding="async"
+              @error="handleProductImageError($event, resolveProductCardDisplay(product).previewImage)"
             />
           </button>
           <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
@@ -1691,7 +1833,7 @@ onBeforeUnmount(() => {
               </div>
             </div>
           </button>
-          <div class="client-product-card__actions"><button type="button" class="client-product-card__add-button" @click="quickAdd(product)">+ 加购</button><ClientRestockButton :product="product" /></div>
+          <div class="client-product-card__actions"><ClientCardCartStepper :product="product" @add="quickAdd(product, $event)" @decrease="decreaseCardQty" @choose="openProductDetail(product)" /><ClientRestockButton :product="product" /></div>
         </article>
       </div>
     </section>
@@ -1779,6 +1921,7 @@ onBeforeUnmount(() => {
                 class="client-product-card__cover"
                 loading="lazy"
                 decoding="async"
+                @error="handleProductImageError($event, resolveProductCardDisplay(row.data).previewImage)"
               />
             </button>
             <button type="button" class="client-product-card__body" @click="openProductDetail(row.data)">
@@ -1797,7 +1940,7 @@ onBeforeUnmount(() => {
                 </div>
               </div>
             </button>
-            <div class="client-product-card__actions"><button type="button" class="client-product-card__add-button" @click="quickAdd(row.data)">+ 加购</button><ClientRestockButton :product="row.data" /></div>
+            <div class="client-product-card__actions"><ClientCardCartStepper :product="row.data" @add="quickAdd(row.data, $event)" @decrease="decreaseCardQty" @choose="openProductDetail(row.data)" /><ClientRestockButton :product="row.data" /></div>
           </article>
         </div>
         <!-- 尾部只保留底部渐隐遮罩所需空间，保证最后一行完整可读。 -->
@@ -1830,6 +1973,7 @@ onBeforeUnmount(() => {
                   class="client-product-card__cover"
                   loading="lazy"
                   decoding="async"
+                  @error="handleProductImageError($event, resolveProductCardDisplay(product).previewImage)"
                 />
               </button>
               <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
@@ -1848,7 +1992,7 @@ onBeforeUnmount(() => {
                   </div>
                 </div>
               </button>
-              <div class="client-product-card__actions"><button type="button" class="client-product-card__add-button" @click="quickAdd(product)">+ 加购</button><ClientRestockButton :product="product" /></div>
+              <div class="client-product-card__actions"><ClientCardCartStepper :product="product" @add="quickAdd(product, $event)" @decrease="decreaseCardQty" @choose="openProductDetail(product)" /><ClientRestockButton :product="product" /></div>
             </article>
           </div>
         </section>
@@ -1876,6 +2020,7 @@ onBeforeUnmount(() => {
                     class="client-product-card__cover"
                     loading="lazy"
                     decoding="async"
+                    @error="handleProductImageError($event, resolveProductCardDisplay(product).previewImage)"
                   />
                 </button>
                 <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
@@ -1894,7 +2039,7 @@ onBeforeUnmount(() => {
                     </div>
                   </div>
                 </button>
-                <div class="client-product-card__actions"><button type="button" class="client-product-card__add-button" @click="quickAdd(product)">+ 加购</button><ClientRestockButton :product="product" /></div>
+                <div class="client-product-card__actions"><ClientCardCartStepper :product="product" @add="quickAdd(product, $event)" @decrease="decreaseCardQty" @choose="openProductDetail(product)" /><ClientRestockButton :product="product" /></div>
               </article>
             </div>
           </section>
@@ -1909,7 +2054,7 @@ onBeforeUnmount(() => {
       <section ref="miniCartCardRef" class="mini-cart-card" :class="{ 'is-pulse': settlePulsing }">
         <div ref="miniCartSummaryBarRef" class="cart-summary-bar" @click="miniCartVisible = !miniCartVisible">
           <div class="summary-info">
-            <div class="cart-icon-wrapper">
+            <div ref="miniCartIconRef" class="cart-icon-wrapper" :class="{ 'is-bouncing': miniCartBadgeBouncing }">
               <el-icon><ShoppingCart /></el-icon>
               <Transition name="qty-pop" mode="out-in">
                 <span v-if="bottomSelectedQty > 0" :key="`mini-badge-${bottomSelectedQty}`" class="badge">{{ bottomSelectedQty }}</span>
@@ -1935,7 +2080,7 @@ onBeforeUnmount(() => {
           <div class="expand-inner">
             <header class="expand-header">
               <span class="title">已选商品</span>
-              <button type="button" class="expand-clear-btn" @click="clientCartStore.clearAll()">清空</button>
+              <button type="button" class="expand-clear-btn" :disabled="clientCartStore.items.length === 0" @click="confirmClearMiniCart">清空</button>
             </header>
 
             <TransitionGroup name="cart-item-flow" tag="div" class="item-list">
@@ -1950,14 +2095,14 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="item-stepper">
                   <p v-if="item.specText" class="text-xs text-slate-500 dark:text-slate-400">{{ item.specText }}</p>
-                  <button type="button" class="step-btn" @click="clientCartStore.incrementQty(item.skuId || item.productId, -1)">-</button>
+                  <button type="button" class="step-btn" aria-label="减少数量" @click="clientCartStore.incrementQty(item.skuId || item.productId, -1)">-</button>
                   <ClientQtyInput
                     size="compact"
                     :model-value="item.qty"
                     :aria-label="`${item.productName}数量`"
                     @commit="clientCartStore.setQtyFromInput(item.skuId || item.productId, $event)"
                   />
-                  <button type="button" class="step-btn" @click="clientCartStore.incrementQty(item.skuId || item.productId, 1)">+</button>
+                  <button type="button" class="step-btn" aria-label="增加数量" @click="clientCartStore.incrementQty(item.skuId || item.productId, 1)">+</button>
                 </div>
               </article>
             </TransitionGroup>
@@ -2003,26 +2148,27 @@ onBeforeUnmount(() => {
                 <span>可预订 {{ resolveCurrentDetailAvailableStock(detailProduct) }}</span>
                 <span>已预订 {{ resolveCurrentDetailPreOrderedStock(detailProduct) }}</span>
                 <span>已售 {{ resolveSoldQty(detailProduct) }}</span>
-                <span>限购 {{ detailProduct.limitPerUser }}</span>
+                <span v-if="detailProduct.limitPerUser > 0">限购 {{ detailProduct.limitPerUser }}</span>
               </div>
             </div>
             <div class="client-detail-side-actions">
               <button
                 type="button"
                 class="client-detail-close-button"
-                aria-label="Close product detail"
+                aria-label="关闭商品详情"
                 @click="detailVisible = false"
               >
                 <ElIcon>
                   <Close />
                 </ElIcon>
               </button>
-              <button type="button" class="client-detail-thumb-button" aria-label="Preview product image" @click="openDetailImagePreview">
+              <button type="button" class="client-detail-thumb-button" aria-label="预览商品图片" @click="openDetailImagePreview">
                 <img
-                  :src="resolveDetailProductThumbnail(detailProduct)"
+                  :src="resolveDetailProductSmallThumbnail(detailProduct)"
                   :alt="resolveCurrentDetailDisplayName(detailProduct)"
                   loading="lazy"
                   decoding="async"
+                  @error="handleProductImageError($event, resolveDetailProductThumbnail(detailProduct))"
                 />
                 <span>查看大图</span>
               </button>
@@ -2042,7 +2188,7 @@ onBeforeUnmount(() => {
               <button
                 type="button"
                 class="client-detail-hero-close"
-                aria-label="Close product detail"
+                aria-label="关闭商品详情"
                 @click="detailVisible = false"
               >
                 <ElIcon>
@@ -2061,7 +2207,7 @@ onBeforeUnmount(() => {
                 <span>可预订 {{ resolveCurrentDetailAvailableStock(detailProduct) }}</span>
                 <span>已预订 {{ resolveCurrentDetailPreOrderedStock(detailProduct) }}</span>
                 <span>已售 {{ resolveSoldQty(detailProduct) }}</span>
-                <span>限购 {{ detailProduct.limitPerUser }}</span>
+                <span v-if="detailProduct.limitPerUser > 0">限购 {{ detailProduct.limitPerUser }}</span>
               </div>
             </div>
           </header>
@@ -2088,18 +2234,45 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </div>
-        <footer class="client-detail-action-bar">
-          <div class="client-detail-qty-row">
-            <span>数量</span>
-            <div class="client-detail-qty-control">
-              <button type="button" class="client-qty-button" aria-label="减少数量" @click="changeDetailQty(-1)">-</button>
-              <ClientQtyInput :model-value="detailQty" aria-label="商品数量" @commit="commitDetailQty" />
-              <button type="button" class="client-qty-button" aria-label="增加数量" @click="changeDetailQty(1)">+</button>
+        <!-- 底栏按当前规格在“数量 + 加入购物车”与“申请补货”之间合并/拆分：数量栏折叠收起，主按钮换色并先隐去旧文字再显现新文字。 -->
+        <footer class="client-detail-action-bar" :class="`is-${detailActionMode}`">
+          <div class="client-detail-qty-collapse" :inert="detailActionMode !== 'purchase'" :aria-hidden="detailActionMode !== 'purchase'">
+            <div class="client-detail-qty-collapse__inner">
+              <div class="client-detail-qty-row">
+                <span>数量</span>
+                <div class="client-detail-qty-control">
+                  <button
+                    type="button"
+                    class="client-qty-button"
+                    :class="{ 'is-disabled': detailQty <= 1 }"
+                    aria-label="减少数量"
+                    :aria-disabled="detailQty <= 1"
+                    @click="changeDetailQty(-1)"
+                  >-</button>
+                  <ClientQtyInput :model-value="detailQty" aria-label="商品数量" @commit="commitDetailQty" />
+                  <button
+                    type="button"
+                    class="client-qty-button"
+                    :class="{ 'is-disabled': detailQty >= detailMaxQty }"
+                    aria-label="增加数量"
+                    :aria-disabled="detailQty >= detailMaxQty"
+                    @click="changeDetailQty(1)"
+                  >+</button>
+                </div>
+              </div>
             </div>
           </div>
-          <ClientRestockButton v-if="detailProduct" :product="detailProduct" :sku="selectedDetailSku" />
-          <button type="button" class="client-detail-cart-button" @click="addCurrentDetailToCart">
-            加入购物车
+          <button
+            type="button"
+            class="client-detail-cart-button"
+            :class="`is-${detailActionMode}`"
+            :disabled="detailActionMode === 'unavailable' || detailRestockLoading"
+            :aria-busy="detailRestockLoading"
+            @click="handleDetailPrimaryAction"
+          >
+            <Transition name="detail-action-label" mode="out-in">
+              <span :key="detailActionMode" class="client-detail-cart-button__label">{{ detailActionLabel }}</span>
+            </Transition>
           </button>
         </footer>
       </section>
@@ -2713,6 +2886,8 @@ onBeforeUnmount(() => {
 
 .client-detail-desc {
   margin-top: 0.55rem;
+  /* 描述已转为纯文本，保留段落换行。 */
+  white-space: pre-line;
   color: #64748b;
   font-size: 0.86rem;
   line-height: 1.45;
@@ -2973,18 +3148,10 @@ onBeforeUnmount(() => {
 
 .client-product-card__actions { display: flex; flex-direction: column; justify-content: center; align-items: flex-end; gap: 0.35rem; align-self: center; }
 
-.client-product-card__add-button {
-  height: 1.95rem;
-  align-self: center;
+/* 操作列固定最小宽度等于步进器展开宽度，加购展开/收起与缺货切换时卡片中间列不重排。 */
+.client-product-card__actions {
+  min-width: 5.1rem;
   justify-self: end;
-  border-radius: 9999px;
-  border: none;
-  background: var(--ylink-color-primary-strong);
-  color: #ffffff;
-  font-size: 0.72rem;
-  font-weight: 700;
-  padding: 0 0.72rem;
-  white-space: nowrap;
 }
 
 .client-qty-button {
@@ -2996,6 +3163,101 @@ onBeforeUnmount(() => {
   color: #ffffff;
   font-size: 1.05rem;
   font-weight: 800;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    transform 120ms ease,
+    opacity 160ms ease;
+}
+
+.client-qty-button:active {
+  transform: scale(0.9);
+}
+
+/* 触顶/触底只做视觉弱化，不禁用点击：点击时仍会给出“已达限购/库存不足”等提示。 */
+.client-qty-button.is-disabled {
+  opacity: 0.38;
+}
+
+/* 详情底栏合并/拆分：数量栏用 grid 行高 1fr→0fr 折叠，主按钮颜色过渡，文字由 detail-action-label 先隐去再显现。 */
+.client-detail-qty-collapse {
+  display: grid;
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transition:
+    grid-template-rows var(--ylink-motion-normal) var(--ylink-motion-ease),
+    opacity var(--ylink-motion-fast) ease;
+}
+
+.client-detail-qty-collapse__inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.client-detail-action-bar:not(.is-purchase) .client-detail-qty-collapse {
+  grid-template-rows: 0fr;
+  opacity: 0;
+}
+
+.client-detail-action-bar .client-detail-cart-button {
+  transition:
+    margin-top var(--ylink-motion-normal) var(--ylink-motion-ease),
+    background-color var(--ylink-motion-normal) ease,
+    color var(--ylink-motion-normal) ease,
+    transform 120ms ease;
+}
+
+.client-detail-action-bar:not(.is-purchase) .client-detail-cart-button {
+  margin-top: 0;
+}
+
+.client-detail-cart-button.is-restock {
+  background: var(--ylink-color-primary-strong);
+  color: #ffffff;
+}
+
+.client-detail-cart-button.is-unavailable,
+.client-detail-cart-button:disabled {
+  cursor: not-allowed;
+}
+
+.client-detail-cart-button.is-unavailable {
+  background: #cbd5e1;
+  color: #64748b;
+}
+
+.client-detail-cart-button__label {
+  display: inline-block;
+}
+
+.detail-action-label-enter-active,
+.detail-action-label-leave-active {
+  transition:
+    opacity 150ms ease,
+    transform 150ms ease,
+    filter 150ms ease;
+}
+
+.detail-action-label-enter-from {
+  opacity: 0;
+  transform: translateY(35%);
+  filter: blur(2px);
+}
+
+.detail-action-label-leave-to {
+  opacity: 0;
+  transform: translateY(-35%);
+  filter: blur(2px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .client-detail-qty-collapse,
+  .client-detail-action-bar .client-detail-cart-button,
+  .detail-action-label-enter-active,
+  .detail-action-label-leave-active,
+  .client-qty-button {
+    transition: none;
+  }
 }
 
 .mall-search-launcher-wrap {
@@ -3478,6 +3740,7 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   border: none;
+  transition: transform 120ms ease;
   border-radius: 0.9rem;
   background: #0f172a;
   color: #ffffff;
@@ -3552,6 +3815,16 @@ onBeforeUnmount(() => {
   background: transparent;
   color: #e11d48;
   font-size: 0.78rem;
+  transition: opacity 160ms ease;
+}
+
+.expand-clear-btn:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.expand-clear-btn:not(:disabled):active {
+  opacity: 0.6;
 }
 
 .item-list {
@@ -3644,6 +3917,32 @@ onBeforeUnmount(() => {
   background: #ffffff;
   color: #1e293b;
   font-weight: 700;
+  touch-action: manipulation;
+  transition: transform 120ms ease;
+}
+
+/* 按压反馈：移动端没有 hover，需要 :active 让用户确认点击已被接收。 */
+.step-btn:active,
+.btn-checkout:active {
+  transform: scale(0.94);
+}
+
+/* 迷你购物车图标在飞入小圆点落点时弹跳一次。 */
+.cart-icon-wrapper.is-bouncing {
+  animation: mini-cart-icon-bounce 420ms var(--ylink-motion-ease);
+}
+
+@keyframes mini-cart-icon-bounce {
+  0% { transform: scale(1); }
+  35% { transform: scale(1.16) rotate(-6deg); }
+  65% { transform: scale(0.94) rotate(3deg); }
+  100% { transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cart-icon-wrapper.is-bouncing {
+    animation: none;
+  }
 }
 
 .expand-footer {
@@ -4055,10 +4354,8 @@ onBeforeUnmount(() => {
     font-size: 0.68rem;
   }
 
-  .client-product-card__add-button {
-    height: 1.9rem;
-    font-size: 0.7rem;
-    padding: 0 0.58rem;
+  .client-product-card__actions {
+    min-width: 4.9rem;
   }
 
   .mini-cart-wrapper {
@@ -4271,17 +4568,23 @@ onBeforeUnmount(() => {
   box-shadow:
     0 1px 2px rgba(15, 23, 42, 0.02),
     0 12px 24px -10px rgba(15, 23, 42, 0.06) !important;
-  transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1) !important;
+  /* 只过渡实际变化的属性；不再使用 all + !important，避免压过全局“减少动效”规则。 */
+  transition:
+    transform 0.35s cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 0.35s cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 0.35s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-/* 悬停高度抬升动效 */
-.client-product-card:hover {
-  transform: translate3d(0, -3px, 0) scale(1.005);
-  background: #ffffff !important;
-  border-color: rgba(13, 148, 136, 0.25) !important; /* 触碰时微透品牌绿 */
-  box-shadow:
-    0 1px 3px rgba(0, 0, 0, 0.02),
-    0 20px 32px -8px rgba(15, 23, 42, 0.08) !important;
+/* 悬停高度抬升动效：仅在真正支持悬停的设备生效，避免触屏点按后卡片停留在抬起状态。 */
+@media (hover: hover) and (pointer: fine) {
+  .client-product-card:hover {
+    transform: translate3d(0, -3px, 0) scale(1.005);
+    background: #ffffff !important;
+    border-color: rgba(13, 148, 136, 0.25) !important; /* 触碰时微透品牌绿 */
+    box-shadow:
+      0 1px 3px rgba(0, 0, 0, 0.02),
+      0 20px 32px -8px rgba(15, 23, 42, 0.08) !important;
+  }
 }
 
 /* 商品略缩图占位符高亮柔化 */
@@ -4643,6 +4946,17 @@ onBeforeUnmount(() => {
 .dark .client-detail-qty-row {
   background: rgba(255, 255, 255, 0.06);
   color: #cbd5e1;
+}
+
+/* 暗色下深蓝按钮几乎与背景融为一体，改为浅色主按钮保证对比度；补货态仍使用品牌主色。 */
+.dark .client-detail-cart-button.is-purchase {
+  background: #e2e8f0;
+  color: #0f172a;
+}
+
+.dark .client-detail-cart-button.is-unavailable {
+  background: rgba(255, 255, 255, 0.08);
+  color: #64748b;
 }
 
 /* 悬浮迷你购物车 */

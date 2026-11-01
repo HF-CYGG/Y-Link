@@ -15,6 +15,8 @@ export interface O2oMallSku {
   isCurrent: boolean
   o2oRecommended: boolean
   thumbnail: string | null
+  /** 小尺寸 WebP 缩略图（服务端按需生成）；缺失时客户端回退 thumbnail 原图。 */
+  thumbnailSmall?: string | null
   sortOrder: number
 }
 
@@ -29,6 +31,8 @@ export interface O2oMallProduct {
   o2oRecommended: boolean
   tags: string[]
   thumbnail: string | null
+  /** 小尺寸 WebP 缩略图（服务端按需生成）；缺失时客户端回退 thumbnail 原图。 */
+  thumbnailSmall?: string | null
   detailContent: string | null
   limitPerUser: number
   currentStock: number

@@ -120,7 +120,7 @@ assert.equal(rankingCalls[5], null, '重置统计条件也应恢复本月最新�
 
 const vueFiles = [
   'src/views/client/ClientMallView.vue', 'src/views/client/ClientFeedbackView.vue', 'src/views/client/ClientFeedbackCreateView.vue', 'src/views/client/ClientFeedbackDetailView.vue',
-  'src/views/client/components/ClientRestockButton.vue', 'src/views/client/components/ClientRestockForm.vue', 'src/views/client/components/RestockRequestSummary.vue',
+  'src/views/client/components/ClientRestockButton.vue', 'src/views/client/components/ClientCardCartStepper.vue', 'src/views/client/components/ClientRestockForm.vue', 'src/views/client/components/RestockRequestSummary.vue',
   'src/views/system/CustomerServiceWorkbenchView.vue', 'src/views/dashboard/DashboardView.vue', 'src/views/dashboard/components/RestockRankingCard.vue',
 ]
 for (const filename of vueFiles) {
@@ -135,7 +135,13 @@ const read = (path: string) => readFileSync(path, 'utf8')
 const mall = read('src/views/client/ClientMallView.vue')
 assert.equal((mall.match(/<ClientRestockButton :product=/g) ?? []).length, 4, '四套卡片均有补货按钮')
 assert.match(mall, /itemHeight: 98/, '虚拟列表高度契约保留')
-assert.match(mall, /ClientRestockButton v-if="detailProduct"/, '商品详情覆盖缺货入口')
+assert.match(mall, /useClientRestockEntry\(\(\) => detailProduct\.value, \(\) => selectedDetailSku\.value\)/, '商品详情按当前明确选择的规格覆盖缺货入口')
+assert.match(mall, /return detailRestockEntry\.restockAvailable\.value \? 'restock' : 'unavailable'/, '详情底栏缺货时合并为申请补货')
+assert.match(mall, /void detailRestockEntry\.openRestock\(\)/, '详情主按钮在补货态打开补货入口')
+assert.match(read('src/views/client/components/ClientRestockButton.vue'), /useClientRestockEntry\(/, '卡片补货按钮与详情共用补货入口逻辑')
+const restockEntry = read('src/composables/useClientRestockEntry.ts')
+assert.match(restockEntry, /getRestockSkus\(product\)/, '补货入口以真实缺货规格为准，不用限购后的可购量')
+assert.match(restockEntry, /if \(auth\.currentUser\?\.id !== userId\) return/, '补货查询返回时校验账号未切换')
 const form = read('src/views/client/components/ClientRestockForm.vue')
 assert.match(form, /const payload = pendingSubmission.value/, '结果未知的重试保留原始请求载荷')
 assert.match(form, /clientRequestId: crypto.randomUUID\(\)/, '新意图生成请求键')

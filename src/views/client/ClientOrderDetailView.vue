@@ -40,7 +40,7 @@ import {
   isO2oOrderPending,
   isO2oOrderVerified,
 } from '@/constants/o2o-order-status'
-import { useClientAuthStore, useClientOrderStore } from '@/store'
+import { useClientAuthStore, useClientCatalogStore, useClientOrderStore } from '@/store'
 import pinia from '@/store/pinia'
 import { buildClientOrderSummaryFromDetail } from '@/utils/client-order-summary'
 import { notifyClientOrderRefresh, subscribeClientOrderRefresh } from '@/utils/client-order-refresh'
@@ -127,6 +127,9 @@ const deletedOrderRedirecting = ref(false)
 const { runLatest } = useStableRequest()
 const clientAuthStore = useClientAuthStore(pinia)
 const clientOrderStore = useClientOrderStore(pinia)
+// 取货时段与结算页同源：读取门店配置的营业时间文案（商城目录同步时回填），不在详情页写死。
+const clientCatalogStore = useClientCatalogStore(pinia)
+const pickupBusinessHoursText = computed(() => clientCatalogStore.storefront.businessHoursText || '10:00 - 22:00')
 let disposeClientOrderRefresh: () => void = () => {}
 let voucherUiModulePromise: VoucherUiModulePromise | null = null
 let voucherPdfExportModulePromise: ReturnType<typeof loadVoucherPdfExportModule> | null = null
@@ -1605,6 +1608,15 @@ onBeforeUnmount(() => {
             alt="预订单二维码"
             class="mx-auto h-64 w-64 rounded-2xl bg-white p-3 shadow-sm"
           />
+          <!-- 二维码库按需懒加载，生成完成前显示占位，避免可用订单短暂闪现“二维码已停用”。 -->
+          <div
+            v-else-if="canUseQrCode"
+            class="client-qr-loading mx-auto flex h-64 w-64 flex-col items-center justify-center rounded-2xl bg-white p-3 shadow-sm dark:bg-[#141415]"
+            role="status"
+          >
+            <span class="client-qr-loading__block" aria-hidden="true"></span>
+            <p class="mt-3 text-xs text-slate-400">二维码生成中…</p>
+          </div>
           <div
             v-else
             class="mx-auto flex h-64 w-64 flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-white px-6 text-center dark:border-white/10 dark:bg-[#141415]"
@@ -1620,7 +1632,7 @@ onBeforeUnmount(() => {
 
         <div class="mt-4 space-y-2 rounded-2xl bg-amber-50 px-4 py-4 text-sm text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
           <p>取货地址：海右书院112房间</p>
-          <p>取货时段：10:00 - 22:00</p>
+          <p>取货时段：{{ pickupBusinessHoursText }}</p>
           <p>联系人：门店值班人员</p>
           <p>温馨提示：请在有效时段内到店核销，过期将自动取消。可截图或打印此二维码前往店铺核销取货。</p>
         </div>
@@ -1870,6 +1882,14 @@ onBeforeUnmount(() => {
                     class="mx-auto h-52 w-52 rounded-2xl bg-white p-3 shadow-sm dark:bg-[#141415]"
                   />
                   <div
+                    v-else-if="request.status === 'pending' && request.qrPayload"
+                    class="client-qr-loading mx-auto flex h-52 w-52 flex-col items-center justify-center rounded-2xl bg-slate-50 p-3 dark:bg-white/5"
+                    role="status"
+                  >
+                    <span class="client-qr-loading__block" aria-hidden="true"></span>
+                    <p class="mt-3 text-xs text-slate-400">二维码生成中…</p>
+                  </div>
+                  <div
                     v-else
                     class="mx-auto flex h-52 w-52 flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-6 text-center dark:border-white/10 dark:bg-white/5"
                   >
@@ -1998,6 +2018,33 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* 二维码生成中占位：浅色骨架块 + 轻量呼吸动画，减少动效时静止。 */
+.client-qr-loading__block {
+  display: block;
+  width: 72%;
+  aspect-ratio: 1;
+  border-radius: 0.9rem;
+  background: linear-gradient(110deg, #f1f5f9 30%, #e2e8f0 50%, #f1f5f9 70%);
+  background-size: 220% 100%;
+  animation: client-qr-shimmer 1.3s ease-in-out infinite;
+}
+
+:global(html.dark) .client-qr-loading__block {
+  background: linear-gradient(110deg, rgba(255, 255, 255, 0.04) 30%, rgba(255, 255, 255, 0.1) 50%, rgba(255, 255, 255, 0.04) 70%);
+  background-size: 220% 100%;
+}
+
+@keyframes client-qr-shimmer {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .client-qr-loading__block {
+    animation: none;
+  }
+}
+
 /* 订单详情页根容器：为固定底部导航与安全区预留空间，避免末尾卡片被遮挡。 */
 .order-detail-page {
   padding-bottom: calc(7.5rem + env(safe-area-inset-bottom));

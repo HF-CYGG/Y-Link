@@ -281,6 +281,9 @@ const handleLogout = async () => {
     var(--client-tab-bar-height) + var(--client-tab-bar-bottom-offset) + var(--client-tab-bar-safe-area)
   );
   padding-bottom: calc(var(--client-tab-bar-clearance) + 1.75rem);
+  /* 移动端点按优化：取消双击缩放带来的点击延迟与系统灰色点按高亮，按钮统一用自身 :active 反馈。 */
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
   background:
     radial-gradient(circle at top, rgba(13, 148, 136, 0.14), transparent 36%),
     radial-gradient(circle at bottom right, rgba(15, 118, 110, 0.12), transparent 30%),
