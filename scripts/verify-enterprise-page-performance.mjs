@@ -89,9 +89,15 @@ const reportPath = path.join(runtimeRoot, 'enterprise-performance-budget-report.
  * 升级后分别为 4719.79 / 1186.71 / 862.47 KB，首屏 CSS 不变。增量全部来自安全补丁本身：framework 块（vue）
  * +4.06 KB、vendor 块（axios）+5.01 KB、ui-kit 块 -1.81 KB。漏洞修复不能回退，因此总产物上限调整为 4740 KB、
  * 首屏依赖图上限调整为 1195 KB、首屏 JS 上限调整为 870 KB（余量均不足 1%），其余各项预算维持不变。
+ *
+ * 客户端商城交互升级（卡片加购步进器、详情底栏有货/缺货合并动画、加购飞入反馈、二维码生成占位）：
+ * 基线实测总产物 4738.38 KB（余量仅 1.62 KB），升级后 4754.78 KB；增量 16.4 KB 全部位于按需加载的商城页
+ * ClientMallView（JS +6.99 KB、CSS +7.43 KB）与订单详情页（+1.35 KB）；首屏 JS 仅 +0.42 KB（购物车 store 的数量映射），
+ * 首屏 CSS 与入口块不变，首屏各项仍在原上限内。
+ * 因此仅将总产物上限调整为 4770 KB（余量约 0.3%），其余预算维持不变；构建期生成的 .gz 副本不计入预算。
  */
 const performanceBudget = {
-  totalAssetsMaxKB: 4740,
+  totalAssetsMaxKB: 4770,
   criticalAssetsMaxKB: 1195,
   initialLoadJsMaxKB: 870,
   initialLoadCssMaxKB: 325,
