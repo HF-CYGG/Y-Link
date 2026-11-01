@@ -1242,6 +1242,8 @@ onBeforeUnmount(() => {
                   :src="resolveAttachmentUrl(attachment)"
                   :alt="attachment.name"
                   class="message-attachment-card__image"
+                  loading="lazy"
+                  decoding="async"
                 />
                 <div
                   v-else

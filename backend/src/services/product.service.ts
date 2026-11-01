@@ -55,6 +55,7 @@ import {
   SPEC_VALUE_MAX_LENGTH,
   VARIANT_CODE_POOL,
 } from './product-code.service.js'
+import { buildSqlLikePrefix } from '../utils/sql-like.js'
 
 /**
  * YZ 通用 SKU 编码体系的规格两轴映射（B8 批次改名）：
@@ -2744,7 +2745,7 @@ export class ProductService {
     // 但手工填写 productCode（如导入脚本）仍可能绕开该保护，这里作为最后一道防线。
     const prefixedBarcodeRows = await skuRepo.createQueryBuilder('sku')
       .select('sku.barcode', 'barcode')
-      .where('sku.barcode LIKE :codePrefix', { codePrefix: `${product.productCode}%` })
+      .where("sku.barcode LIKE :codePrefix ESCAPE '!'", { codePrefix: buildSqlLikePrefix(product.productCode) })
       .getRawMany<{ barcode: string | null }>()
     prefixedBarcodeRows.forEach((row) => {
       if (row.barcode) existingSkuCodeSet.add(row.barcode)
@@ -2756,7 +2757,7 @@ export class ProductService {
     // 为前缀的全部历史编码，纳入去重集合，让下面已有的 allocateSkuCode 自动避开，从根源上消除这种撞码。
     const legacySkuCodeRows = await skuRepo.createQueryBuilder('sku')
       .select('sku.legacySkuCode', 'legacySkuCode')
-      .where('sku.legacySkuCode LIKE :codePrefix', { codePrefix: `${product.productCode}%` })
+      .where("sku.legacySkuCode LIKE :codePrefix ESCAPE '!'", { codePrefix: buildSqlLikePrefix(product.productCode) })
       .getRawMany<{ legacySkuCode: string | null }>()
     legacySkuCodeRows.forEach((row) => {
       if (row.legacySkuCode) existingSkuCodeSet.add(row.legacySkuCode)
