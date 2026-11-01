@@ -57,6 +57,7 @@
 - 商品视图的 `currentStock`、`preOrderedStock` 只汇总当前规格矩阵中启用的 SKU；存在当前 SKU 但全部停用时汇总为 0，仅无当前 SKU（包括只剩历史 SKU）时回退商品主表字段。
 - `availableStock` 统一按 `max(0, currentStock - preOrderedStock)` 计算；商品服务与库存报表复用同一纯汇总函数，报表查询不回写商品、SKU 或 `InventoryLog`。
 - SKU 关键字段：`skuCode`、`specText`、`specValuesJson`、`defaultPrice`、`discountRate`、`thumbnail`、`o2oRecommended`、`sortOrder`。
+- **商品缩略图**（`backend/src/utils/product-thumbnail.ts`）：不改表结构，也不改库里保存的原图 URL。原图 `uploads/products/<name>.<ext>` 对应缩略图 `uploads/products/<name>.thumb.webp`（长边不超过 480px、只缩不放、动图取首帧）。商品图上传在处理闸门内同步生成缩略图，失败只记日志，不影响原图上传。商城目录为商品与 SKU 输出可空字段 `thumbnailSmall`，只有缩略图文件真实存在才返回，客户端缺失时回退原图。服务启动约 30 秒后以并发 1 在后台补齐存量缩略图（幂等，`Y_LINK_PRODUCT_THUMBNAIL_BACKFILL=false` 可关闭）；本地也可手动执行 `npm --prefix backend run product:thumbnail:backfill -- --dry-run`。私有反馈附件不生成也不解析缩略图。专项验证：`npm --prefix backend run product:thumbnail:verify`。
 - 若只有一个默认 SKU，产品与 SKU 会做双向同步，避免主记录和默认 SKU 口径分裂。
 - 新手工出库只允许选择产品中心已建档、当前启用且具有当前启用 SKU 的商品；开单流程不承担商品建档或库存初始化。单 SKU 可兼容省略后自动解析，多 SKU 必须显式选择。SKU `defaultPrice` 只预填开单单价，人工覆盖不会修改 SKU 默认价；新单与后续内容编辑会按差额同步商品/SKU 库存并写可还原流水。退役 SKU 只允许在既有明细中减量或删除，不允许新增或增量。
 - 标签关系通过中间关联表维护，不是产品表内简单字符串。
