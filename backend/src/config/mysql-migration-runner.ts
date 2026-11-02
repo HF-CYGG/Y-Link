@@ -255,6 +255,7 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
   { tableName: 'o2o_preorder', columnName: 'cancelled_at', introducingScript: '040_o2o_preorder_governance.sql' },
   { tableName: 'o2o_preorder', columnName: 'kingdee_voucher_no', introducingScript: '062_o2o_preorder_kingdee_registration.sql', expectedDataType: 'varchar', expectedNullable: true, expectedCharacterMaximumLength: 128 },
   { tableName: 'o2o_preorder', columnName: 'kingdee_version', introducingScript: '062_o2o_preorder_kingdee_registration.sql', expectedDataType: 'int', expectedNullable: false, expectedDefault: '0' },
+  { tableName: 'o2o_preorder', columnName: 'reserved_business_no', introducingScript: '063_o2o_preorder_reserved_business_no.sql', expectedDataType: 'varchar', expectedNullable: true, expectedCharacterMaximumLength: 32 },
   { tableName: 'o2o_preorder', columnName: 'pickup_at', introducingScript: '047_o2o_preorder_pickup_at.sql', expectedNullable: true },
   { tableName: 'biz_inbound_order', columnName: 'expected_arrival_at', introducingScript: '048_inbound_order_expected_arrival.sql', expectedNullable: true },
   { tableName: 'base_product', columnName: 'category_id', introducingScript: '049_inventory_sku_barcode_stocktake.sql', expectedNullable: true },
@@ -586,6 +587,13 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
     introducingScript: '035_o2o_idempotency_business_sequence.sql',
   },
   {
+    tableName: 'o2o_preorder',
+    indexName: 'uk_o2o_preorder_reserved_business_no',
+    columns: ['reserved_business_no'],
+    unique: true,
+    introducingScript: '063_o2o_preorder_reserved_business_no.sql',
+  },
+  {
     tableName: 'notification_event',
     indexName: 'idx_notification_event_pending_claim',
     columns: ['status', 'next_attempt_at', 'id'],
@@ -899,6 +907,7 @@ const AUTO_MIGRATABLE_FILES = [
   '060_sku_location_stock.sql',
   '061_client_restock_requests.sql',
   '062_o2o_preorder_kingdee_registration.sql',
+  '063_o2o_preorder_reserved_business_no.sql',
 ]
 
 /**

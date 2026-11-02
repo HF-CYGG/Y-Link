@@ -367,6 +367,7 @@ const SQLITE_REQUIRED_O2O_PREORDER_COLUMNS = [
   'pickup_at',
   'kingdee_voucher_no',
   'kingdee_version',
+  'reserved_business_no',
   'update_count',
   'is_deleted',
   'deleted_at',
@@ -2189,6 +2190,9 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
   if (!o2oPreorderUniqueIndexSet.has('uk_o2o_preorder_client_request')) {
     return true
   }
+  if (!o2oPreorderUniqueIndexSet.has('uk_o2o_preorder_reserved_business_no')) {
+    return true
+  }
 
   const o2oPreorderItemColumnSet = await listSqliteTableColumns(dataSource, 'o2o_preorder_item')
   if (SQLITE_REQUIRED_O2O_PREORDER_ITEM_COLUMNS.some((column) => !o2oPreorderItemColumnSet.has(column))) {
@@ -2279,6 +2283,8 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
     if (kingdeeColumns.size) {
       if (!kingdeeColumns.has('kingdee_voucher_no')) await dataSource.query('ALTER TABLE "o2o_preorder" ADD COLUMN "kingdee_voucher_no" varchar(128) NULL')
       if (!kingdeeColumns.has('kingdee_version')) await dataSource.query('ALTER TABLE "o2o_preorder" ADD COLUMN "kingdee_version" integer NOT NULL DEFAULT 0 CHECK (kingdee_version >= 0)')
+      if (!kingdeeColumns.has('reserved_business_no')) await dataSource.query('ALTER TABLE "o2o_preorder" ADD COLUMN "reserved_business_no" varchar(32) NULL')
+      await dataSource.query('CREATE UNIQUE INDEX IF NOT EXISTS "uk_o2o_preorder_reserved_business_no" ON "o2o_preorder" ("reserved_business_no")')
     }
     await prepareSqliteStocktakeLocationScope(dataSource)
     await backfillSqliteLegacySkuCodeFromBarcode(dataSource)
