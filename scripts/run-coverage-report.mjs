@@ -50,6 +50,7 @@ const barcodeSfcTargets = [
 const kingdeeBuildRoot = path.join(projectRoot, 'tmp/coverage-vue-kingdee')
 const kingdeeErrorSource = path.join(projectRoot, 'src/utils/error.ts')
 const kingdeeRefreshSource = path.join(projectRoot, 'src/utils/client-order-refresh.ts')
+const kingdeeStatusSource = path.join(projectRoot, 'src/utils/kingdee-status.ts')
 const kingdeeSfcTargets = [
   { generated: path.join(kingdeeBuildRoot, 'KingdeeRegistrationEditor-setup.mjs'), source: path.join(projectRoot, 'src/components/common/KingdeeRegistrationEditor.vue'), allowedSources: [kingdeeErrorSource, kingdeeRefreshSource] },
   { generated: path.join(kingdeeBuildRoot, 'ClientKingdeeReminder-setup.mjs'), source: path.join(projectRoot, 'src/views/client/components/ClientKingdeeReminder.vue'), allowedSources: [kingdeeRefreshSource] },
@@ -59,6 +60,10 @@ const kingdeeSfcTargets = [
     path.join(projectRoot, 'src/composables/usePermissionAction.ts'), path.join(projectRoot, 'src/utils/permission.ts'),
     path.join(projectRoot, 'src/constants/o2o-order-status.ts'), path.join(projectRoot, 'src/views/o2o/o2o-verify-console.helpers.ts'),
   ] },
+  // 这些产物包含真实业务 setup/模板，必须映射回源码，不能当作临时生成壳丢弃。
+  { generated: path.join(kingdeeBuildRoot, 'KingdeeRegistrationEditor.vue.render.mjs'), source: path.join(projectRoot, 'src/components/common/KingdeeRegistrationEditor.vue'), allowedSources: [kingdeeErrorSource, kingdeeRefreshSource] },
+  { generated: path.join(kingdeeBuildRoot, 'OrderDetailDrawerContent.vue.mjs'), source: path.join(projectRoot, 'src/views/order-list/components/OrderDetailDrawerContent.vue'), allowedSources: [kingdeeStatusSource, path.join(projectRoot, 'src/views/order-list/order-revision.helpers.ts')] },
+  { generated: path.join(kingdeeBuildRoot, 'OrderListView.vue.mjs'), source: path.join(projectRoot, 'src/views/order-list/OrderListView.vue'), allowedSources: [kingdeeStatusSource, kingdeeErrorSource, path.join(projectRoot, 'src/utils/timed-async-loader.ts')] },
 ]
 const markerBySource = new Map([
   ['src/components/account/AdminWebAuthnDialog.vue', 'form.name = credential.name'],
@@ -491,7 +496,8 @@ const verifyKingdeeImportProbe = async (sourceHashes) => {
     cwd: projectRoot, env: { ...process.env, NODE_V8_COVERAGE: rawDirectory },
   })
   const mapped = mapV8SfcCoverage({ rawDirectory, targets: kingdeeSfcTargets })
-  const markers = ['if (busy.value || conflictVersion.value', 'if (!id || !auth.initialized', 'const known = session.registrations.get(id)', 'const orderId = preorderDetail.value?.order.id']
+  const markers = ['if (!editing.value || busy.value || conflictPending.value || !editable.value)', 'if (!id || !auth.initialized', 'const known = session.registrations.get(id)', 'const orderId = preorderDetail.value?.order.id',
+    'if (!editing.value || busy.value || conflictPending.value || !editable.value)', 'revisionRequestVersion += 1', 'const handleSaveComplianceFlags = async']
   for (const [index, target] of kingdeeSfcTargets.entries()) {
     const line = fs.readFileSync(target.source, 'utf8').split(/\r?\n/).findIndex((text) => text.includes(markers[index])) + 1
     if (line < 1 || mapped.bySource.get(target.source)?.get(line) !== 0) throw new Error(`金蝶未调用源码被记为命中：${target.source}`)

@@ -19,8 +19,9 @@ const formatter = await buildModule('src/utils/kingdee-status.ts',path.join(outp
 
 // 直接编译实际父页面/抽屉 setup，仅替换平台与网络边界，不复制保存实现。
 async function compileOrderBehavior(relative, inlineTemplate=false) {
-  const input=path.join(root,relative), parsed=parse(fs.readFileSync(input,'utf8'),{filename:input})
-  const script=compileScript(parsed.descriptor,{id:relative,inlineTemplate})
+  const input=path.join(root,relative), parsed=parse(fs.readFileSync(input,'utf8'),{filename:input,sourceMap:true})
+  assert.deepEqual(parsed.errors,[])
+  const script=compileScript(parsed.descriptor,{id:relative,inlineTemplate,sourceMap:true})
   const proxies=(names)=>names.map(name=>`export const ${name}=(...args)=>globalThis.__ylinkBehavior.api.${name}(...args)`).join('\n')
   const stubs={
     '@/api/modules/order':proxies(['getOrderDetailById','getOrderRevisions','updateOrderComplianceFlags']),
@@ -34,7 +35,9 @@ async function compileOrderBehavior(relative, inlineTemplate=false) {
     '@/composables/usePermissionAction':'export const usePermissionAction=()=>{const allowed=()=>Boolean(globalThis.__ylinkBehavior.auth.currentUser?.permissions.includes("orders:update"));return {hasPermission:allowed,ensurePermission:allowed}}',
     './composables/useOrderListView':'export const useOrderListView=()=>globalThis.__ylinkBehavior.orderView',
   }
-  const bundle=await rolldown({input,external:['vue','axios','dayjs'],plugins:[{
+  const bundle=await rolldown({input,external:['vue','axios','dayjs'],
+    // 交给打包器转换环境常量，避免直接替换源码破坏 Vue map 的列偏移。
+    transform:{define:{'import.meta.env.VITE_ORDER_VOUCHER_HTML2PDF_ENABLED':'undefined'}},plugins:[{
     name:'出库详情实际行为隔离',
     resolveId(id){
       if(id===input)return input
@@ -43,12 +46,12 @@ async function compileOrderBehavior(relative, inlineTemplate=false) {
       if(id.startsWith('@/'))return path.join(root,'src',id.slice(2)+'.ts')
     },
     load(id){
-      if(id===input)return {code:script.content.replaceAll('import.meta.env.VITE_ORDER_VOUCHER_HTML2PDF_ENABLED','undefined'),moduleType:'ts'}
+      if(id===input)return {code:script.content,map:script.map,moduleType:'ts'}
       if(id.startsWith('\0order:'))return stubs[id.slice(7)]??'export default {}'
     },
   }]})
   const file=path.join(output,path.basename(relative)+(inlineTemplate?'.render':'')+'.mjs')
-  await bundle.write({file,format:'esm',codeSplitting:false});await bundle.close()
+  await bundle.write({file,format:'esm',codeSplitting:false,sourcemap:true});await bundle.close()
   return (await import(pathToFileURL(file).href)).default
 }
 const orderPage=await compileOrderBehavior('src/views/order-list/OrderListView.vue')
