@@ -410,6 +410,7 @@ function validatePreorderRows(rows: ExportRow[]) {
         isSystemApplied: readBooleanFlag(rawRow, 'isSystemApplied', '是否系统申请') || Boolean(normalizeKingdeeVoucherNo(rawRow.kingdeeVoucherNo)),
         kingdeeVoucherNo: normalizeKingdeeVoucherNo(rawRow.kingdeeVoucherNo),
         kingdeeVersion: rawRow.kingdeeVersion === undefined ? 0 : readInteger(rawRow, 'kingdeeVersion', '金蝶登记版本', { min: 0, max: 2147483647 }),
+        reservedBusinessNo: readOptionalText(rawRow, 'reservedBusinessNo', 32),
         hasCustomerOrder: readBooleanFlag(rawRow, 'hasCustomerOrder', '是否已触发正式出库单'),
         totalQty: readInteger(rawRow, 'totalQty', '预订单总件数', { min: 0, max: 999999 }),
         remark: readOptionalText(rawRow, 'remark', 255),

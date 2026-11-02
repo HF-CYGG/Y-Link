@@ -131,6 +131,13 @@ export class O2oPreorder {
   @Column({ name: 'has_customer_order', ...entityColumnOptions.booleanFlag, default: 0, comment: '是否已触发正式出库单打印/导出（客户端快照）' })
   hasCustomerOrder!: boolean
 
+  // reservedBusinessNo 是部门单下单时预留的正式出库业务号，核销前打印的纸质单据即使用该号；
+  // 核销时由正式出库单继承并在同一事务清空，因此一个号任一时刻只占用预订单或正式单其中一处。
+  // 撤单、超时后保留占用（纸质单可能已流出），物理清理预订单后才释放；散客单与历史已结单为 NULL。
+  @Index('uk_o2o_preorder_reserved_business_no', { unique: true })
+  @Column({ name: 'reserved_business_no', type: 'varchar', length: 32, nullable: true, comment: '预留正式出库业务号' })
+  reservedBusinessNo!: string | null
+
   // pickupContact 记录用户本次下单明确填写的提货人，
   // 不能再回退为账号用户名，否则“代同事下单/代部门领取”场景会丢失真实提货口径。
   @Column({ name: 'pickup_contact', type: 'varchar', length: 32, nullable: true, comment: '提货人' })
