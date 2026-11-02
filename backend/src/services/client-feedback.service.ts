@@ -1554,7 +1554,7 @@ class ClientFeedbackService {
       if (manager.connection.options.type === 'mysql') skuQuery.setLock('pessimistic_write')
       const sku = await skuQuery.getOne()
       if (!sku || !sku.isActive || !sku.isCurrent) throw new BizError('当前规格已停用或退役，请刷新商品后重试', 409)
-      if (Math.max(0, Number(sku.currentStock) - Number(sku.preOrderedStock)) !== 0) throw new BizError('当前规格仍有可售库存，请直接选购', 409)
+      // 补货独立登记期望数量，不受现货或购物限购限制，也不预占库存。
       if (normalized.latestPickupAt.getTime() <= Date.now()) throw new BizError('最晚取货时间已到，请重新选择', 409)
       const snapshot = this.buildClientUserSnapshot(account)
       const pickupTime = new Date(normalized.latestPickupAt.getTime() + 8 * 3600_000).toISOString().slice(0, 16).replace('T', ' ')
@@ -1567,7 +1567,7 @@ class ClientFeedbackService {
         ...snapshot, clientUserId: clientAuth.userId, conversationNo,
         issueType: 'restock', category: 'restock', sourceCode: 'client_mall', sourceLabel: '商城补货需求',
         subject: `补货需求：${product.productName}`.slice(0, CLIENT_FEEDBACK_SUBJECT_MAX_LENGTH), priority: 'normal',
-        expectedResult: '请在最晚取货时间前安排补货', actualResult: '当前规格无可售库存', tagJson: '[]',
+        expectedResult: '请在最晚取货时间前安排补货', actualResult: '申请登记商品补货需求', tagJson: '[]',
         status: 'open', lastMessagePreview: this.previewMessage(content), lastMessageSenderType: 'client',
         lastMessageAt: now, unreadForClientCount: 0, unreadForServiceCount: 0,
       }))
@@ -1656,7 +1656,7 @@ class ClientFeedbackService {
   }
 
   async createConversation(input: CreateClientFeedbackConversationInput, clientAuth: ClientAuthContext, requestMeta?: RequestMeta) {
-    if (input.issueType === 'restock') throw new BizError('请从商城缺货商品入口提交补货需求', 400)
+    if (input.issueType === 'restock') throw new BizError('请从商城商品补货入口提交补货需求', 400)
     const portalConfig = await this.getPortalConfigs()
     if (!portalConfig.enabled) {
       throw new BizError('当前系统暂未开放在线反馈入口', 403)

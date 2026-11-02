@@ -204,6 +204,7 @@ interface MysqlRequiredCheck {
 // 只列会被当前业务代码直接读写、缺失后必然导致运行时失败的增量字段。
 // 表不存在时由 MYSQL_REQUIRED_TABLES 先给出建表脚本，避免同一张缺表重复打印多条缺列提示。
 const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
+  { tableName: 'sys_user', columnName: 'governance_permissions_json', introducingScript: '063_sys_user_governance_permissions.sql', expectedDataType: 'text', expectedNullable: true },
   // 060：按库位盘点的明细库位列，0 表示按规格总量盘点；缺失时盘点建单与计数都会写库失败。
   { tableName: 'inv_stocktake_item', columnName: 'location_scope_id', introducingScript: '060_sku_location_stock.sql', expectedDataType: 'bigint', expectedNullable: false, expectedDefault: '0' },
   ...['conversation_id', 'client_user_id', 'product_id', 'sku_id', 'product_name_snapshot', 'product_code_snapshot', 'sku_code_snapshot', 'spec_text_snapshot', 'quantity', 'latest_pickup_at', 'remark', 'status', 'handled_at', 'client_request_id', 'payload_digest', 'created_at', 'updated_at']
@@ -899,6 +900,7 @@ const AUTO_MIGRATABLE_FILES = [
   '060_sku_location_stock.sql',
   '061_client_restock_requests.sql',
   '062_o2o_preorder_kingdee_registration.sql',
+  '063_sys_user_governance_permissions.sql',
 ]
 
 /**

@@ -1,8 +1,8 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/client/components/ClientRestockButton.vue
- * 文件职责：为四类商城卡片及商品详情提供一致的缺货入口。
- * 实现逻辑：只展示当前启用且缺货的规格；单规格先查询有效申请，多规格进入表单明确选择。
+ * 文件职责：为四类商城卡片及商品详情提供一致的补货入口。
+ * 实现逻辑：展示当前启用规格，不以库存数量限制补货资格；单规格先查询有效申请，多规格进入表单明确选择。
  * 维护说明：不能用商城限购后的可购数量判断缺货，不改变父卡片和虚拟列表尺寸。
  */
 import { computed, onBeforeUnmount, onDeactivated, ref, watch } from 'vue'
@@ -15,7 +15,7 @@ import pinia from '@/store/pinia'
 import { getRestockSkus } from '@/utils/restock'
 import { extractErrorMessage } from '@/utils/error'
 import { showAppError } from '@/utils/app-alert'
-const props = defineProps<{ product: O2oMallProduct; sku?: O2oMallSku | null }>()
+const props = defineProps<{ product: O2oMallProduct; sku?: O2oMallSku | null; variant?: 'primary' | 'compact' }>()
 const router = useRouter()
 const auth = useClientAuthStore(pinia)
 const request = useStableRequest()
@@ -46,8 +46,9 @@ const open = async () => {
 }
 </script>
 <template>
-  <el-button v-if="visible" size="small" plain type="primary" :loading="loading" class="client-restock-button" @click.stop="open">请补货</el-button>
+  <el-button v-if="visible" :size="variant === 'primary' ? 'large' : 'small'" :plain="variant !== 'primary'" type="primary" :loading="loading" class="client-restock-button" :class="{ 'client-restock-button--primary': variant === 'primary' }" @click.stop="open">申请补货</el-button>
 </template>
 <style scoped>
 .client-restock-button { height: 1.7rem; margin: 0 !important; padding: 0 0.55rem; font-size: 0.7rem; border-radius: 999px; }
+.client-restock-button--primary { width: 100%; height: 2.9rem; font-size: 0.92rem; font-weight: 700; }
 </style>

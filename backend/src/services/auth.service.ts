@@ -10,7 +10,7 @@ import { LessThan, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { env } from '../config/env.js'
-import { resolvePermissionsByRole } from '../constants/auth-permissions.js'
+import { GOVERNANCE_PERMISSION_CODES, resolveUserPermissions } from '../constants/auth-permissions.js'
 import { SysUser } from '../entities/sys-user.entity.js'
 import { SysUserSession } from '../entities/sys-user-session.entity.js'
 import { SysUserWebauthnCredential } from '../entities/sys-user-webauthn-credential.entity.js'
@@ -123,7 +123,8 @@ function toSafeProfile(user: SysUser): UserSafeProfile {
     displayName: user.displayName,
     email: user.email,
     role: user.role,
-    permissions: resolvePermissionsByRole(user.role),
+    permissions: resolveUserPermissions(user),
+    governancePermissions: user.governancePermissionsJson == null ? null : resolveUserPermissions(user).filter((permission) => GOVERNANCE_PERMISSION_CODES.includes(permission)),
     status: user.status,
     accountState: resolveAccountState(user),
     deactivatedAt: user.deactivatedAt,
@@ -814,7 +815,7 @@ export class AuthService {
       username: user.username,
       displayName: user.displayName,
       role: user.role,
-      permissions: resolvePermissionsByRole(user.role),
+      permissions: resolveUserPermissions(user),
       status: user.status,
       sessionToken,
       // 认证来源由中间件根据“本次请求从 Cookie 还是 Bearer 进入”最终覆写。

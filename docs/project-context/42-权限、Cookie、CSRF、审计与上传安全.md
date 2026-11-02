@@ -139,3 +139,28 @@
 - 改图形验证码时执行 `npm --prefix backend run captcha:rendering:verify`，覆盖无系统字体的真实 PNG 渲染、兼容字段、作用域隔离和一次性校验。
 - 改上述任一边界时执行 `npm --prefix backend run security:web-deep-audit:verify`（畸形 JSON、模板转义、验证码一次性、空闲超时、永久删除限流与跨入口共享口令桶、本人改密、客户端频控、onebox 上传边界、导入预检、登录锁定主体、multipart 加固、附件与资料发码频控）。
 - 升级 `multer`、`sharp` 等上传链路依赖后执行 `npm --prefix backend audit --omit=dev`，并回归 `task4:upload-security:verify` 与 `feedback:customer-service:verify`。
+
+## 系统账号治理权限覆盖与恢复保底
+
+- `sys_user.governance_permissions_json` 为可空文本列，仅保存既有治理子集的允许集合。NULL（含历史未配置）沿用角色默认，JSON `[]` 取消全部治理子集；非治理业务权限始终来自角色。损坏 JSON、错误类型或未知条目收窄为无治理权限，绝不恢复全角色默认。
+- POST 创建与 PUT 编辑用户接口、服务层均校验 admin 角色、操作权限和目标角色权限上界；服务层锁后从数据库解析实际权限，不能信任客户端 effective permissions 或鉴权时的旧权限快照。既有角色 hard gates 不变。创建的治理配置与账号、成功审计同事务提交，省略或 NULL 沿用默认，显式空集合不回退；不使用创建后补写权限的流程。
+- 用户权限或角色变化与会话撤销、成功审计在同一事务提交，提交后断开该账号 SSE。前端空数组不触发角色默认回退。
+- 用户角色、权限、状态及生命周期治理在事务首次获取账号锁时即按 ID 稳定顺序锁定系统账号集合，MySQL 使用锁定读取返回的当前快照判定，SQLite 复用既有单写队列；不扩大普通业务账号锁范围，不改事务重试机制。
+- 至少保留一个启用、未注销并实际持有 `users:view` 与 `users:update` 的管理员；不能仅统计角色。本人不能移除这两个恢复入口权限。注销预检仅作提示，写入时仍以锁后快照复核。
+- SQLite 启动仅幂等补 nullable 列，MySQL 使用 `063_sys_user_governance_permissions.sql` 和必需列结构校验；不回填、不重写历史数据。本地部署不得为验收修改真实权限，验证只使用隔离库。
+- 回滚限制：旧 image 会忽略已保存的非 NULL 权限限制，可能扩大授权。保留闲置列只保证结构可保留，不表示权限语义兼容；生产回退须评估并明确处理已保存限制，可优先回滚前端或向前修复。不得自动清空覆盖配置，也不自动执行删列回滚。
+
+### 治理权限专项验收入口
+
+- `npm --prefix backend run permission:governance:verify`：默认只创建本轮临时 SQLite 文件，验证服务、真实 HTTP 路由、nullable 补列、旧会话和互削权限/互停用/互降级三组并发；结束清理本次库。
+- MySQL 使用同一入口，显式设置 `Y_LINK_PERMISSION_VERIFY_DB_TYPE=mysql`、`Y_LINK_PERMISSION_MYSQL_CONFIRM_TEST_SERVER=true`、`Y_LINK_PERMISSION_MYSQL_HOST=127.0.0.1`、10000–65535 的 `Y_LINK_PERMISSION_MYSQL_PORT` 及测试实例用户/密码变量。支持 MySQL 8.4，打印实际服务版本，创建随机新库，执行新增列 SQL 两次并验证列结构及三组真实并发；不接受业务库名，仅清理创建成功的本次随机库。实例与容器由统一 QA 管理，本脚本不启动或清理 Docker。
+- `npm --prefix backend run verify:mysql:schema-contract` 是只读结构替身验证（新增缺列、错误类型、NOT NULL 拒绝），不能作为真实 MySQL 并发证据。
+- Web 在 `/system/users` 验证默认、显式空、角色切换、本人恢复权限不可取消、分步保存反馈；暗色横向滚动 hover 时采样右 fixed 动作 cell 背景 alpha 并截图，同时检查条纹、亮色和完整六动作。
+- 生效合同：撤会话后新请求拒绝；已有业务锁权限门禁使用取得锁时的数据库实际权限。用户治理、客户端生命周期及订单编号配置写入口按此复核；密码重置使用实际权限，MFA 与管理员 WebAuthn 撤销保留既有锁后会话检查。撤销前已取得锁且已授权的事务允许正常完成，不宣称取消全部已开始请求。
+
+### F1 锁后治理权限复核合同
+
+- 客户端账号批量/单个开户、资料编辑、启停及重置密码保留原“Sys actor → 部门配置/Client target”的锁序，取得原账号锁后分别复核 `users:create`、`users:update`、`users:status`、`users:reset_password` 与 admin 角色；不信任请求中早先解析的角色/权限。
+- 预订规则、客服配置、部门树、验证码平台及显式自动补部门写入口在原 Sys actor 锁后复核 `system_configs:update + admin`，早于默认配置补齐、业务行修改、会话撤销与成功审计。普通业务账号锁 helper 行为及锁范围不变，只在这些治理入口显式追加断言。
+- 当前生产代码没有 `ensureClientDepartmentOptions` 调用方，亦无无 actor 变体。该方法属于显式配置治理：包括空输入、传入 manager 的复用调用都要求锁后配置权限，manager 不是授权凭证。合法客户端开户/编辑使用 `assertClientDepartmentOption` 只读校验已有部门，不走自动补部门，不额外要求配置权限。未来若增加内部补齐调用，须先定义其所属入口合同，不能从外部接收 permission 参数绕过门禁。
+- 撤权先提交、旧请求后取得账号锁时应返回 403，目标数据、客户端会话及成功审计保持不变；撤权前已取得锁且合法授权的事务允许正常完成。新专项在 MySQL 8.4 观察真实 `performance_schema.data_lock_waits` 连接等待边，在 SQLite 观察实际单写队列；两类运行结果分别记录，不以替身或单纯延时冒充锁等待。
