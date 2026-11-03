@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ClientProductSmallImage from './components/ClientProductSmallImage.vue'
 /**
  * 模块说明：src/views/client/ClientCheckoutView.vue
  * 文件职责：承载客户端确认订单页，展示实名归属信息、提货信息、商品明细与下单提交入口。
@@ -660,6 +661,7 @@ const handleSubmit = async () => {
           :key="item.skuId || item.productId"
           class="mb-2 flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 dark:bg-white/5"
         >
+          <ClientProductSmallImage :small="item.thumbnailSmall" :original="item.thumbnail" :source-key="item.skuId || item.productId" :alt="item.productName" />
           <div class="min-w-0">
             <p class="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">{{ item.productName }}</p>
             <p v-if="item.specText" class="mt-0.5 text-xs text-slate-400">{{ item.specText }}</p>

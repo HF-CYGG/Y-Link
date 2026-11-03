@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ClientProductSmallImage from './components/ClientProductSmallImage.vue'
 /**
  * 模块说明：src/views/client/ClientMallView.vue
  * 文件职责：承载客户端商城的商品浏览、标签联动、分组规格选择、加购与结算入口能力。
@@ -1803,7 +1804,8 @@ onBeforeUnmount(() => {
         >
           <button type="button" class="client-product-card__image-button" @click="openProductImagePreview(product)">
             <img
-              :src="resolveProductThumbnail(product)"
+              :key="`${product.id}:${resolveProductThumbnail(product)}:${resolveProductCardDisplay(product).previewImage}`"
+                  :src="resolveProductThumbnail(product)"
               :alt="product.productName"
               class="client-product-card__cover"
               loading="lazy"
@@ -1916,7 +1918,8 @@ onBeforeUnmount(() => {
           >
             <button type="button" class="client-product-card__image-button" @click="openProductImagePreview(row.data)">
               <img
-                :src="resolveProductThumbnail(row.data)"
+                :key="`${row.data.id}:${resolveProductThumbnail(row.data)}:${resolveProductCardDisplay(row.data).previewImage}`"
+                  :src="resolveProductThumbnail(row.data)"
                 :alt="row.data.productName"
                 class="client-product-card__cover"
                 loading="lazy"
@@ -1968,6 +1971,7 @@ onBeforeUnmount(() => {
             >
               <button type="button" class="client-product-card__image-button" @click="openProductImagePreview(product)">
                 <img
+                  :key="`${product.id}:${resolveProductThumbnail(product)}:${resolveProductCardDisplay(product).previewImage}`"
                   :src="resolveProductThumbnail(product)"
                   :alt="product.productName"
                   class="client-product-card__cover"
@@ -2015,7 +2019,8 @@ onBeforeUnmount(() => {
               >
                 <button type="button" class="client-product-card__image-button" @click="openProductImagePreview(product)">
                   <img
-                    :src="resolveProductThumbnail(product)"
+                    :key="`${product.id}:${resolveProductThumbnail(product)}:${resolveProductCardDisplay(product).previewImage}`"
+                  :src="resolveProductThumbnail(product)"
                     :alt="product.productName"
                     class="client-product-card__cover"
                     loading="lazy"
@@ -2086,6 +2091,7 @@ onBeforeUnmount(() => {
             <TransitionGroup name="cart-item-flow" tag="div" class="item-list">
               <div v-if="clientCartStore.items.length === 0" key="mini-empty" class="empty-state">购物车还是空的，去挑挑好物吧</div>
               <article v-for="item in clientCartStore.items" :key="`mini-${item.skuId || item.productId}`" class="cart-item">
+                <ClientProductSmallImage :small="item.thumbnailSmall" :original="item.thumbnail" :source-key="item.skuId || item.productId" :alt="item.productName" />
                 <div class="item-main">
                   <p class="item-name">{{ item.productName }}</p>
                   <p class="item-price">¥{{ Number(resolveO2oPriceView(item).discountedPrice).toFixed(2) }}</p>
@@ -2164,6 +2170,7 @@ onBeforeUnmount(() => {
               </button>
               <button type="button" class="client-detail-thumb-button" aria-label="预览商品图片" @click="openDetailImagePreview">
                 <img
+                  :key="`${detailProduct.id}:${selectedDetailSku?.id}:${resolveDetailProductSmallThumbnail(detailProduct)}:${resolveDetailProductThumbnail(detailProduct)}`"
                   :src="resolveDetailProductSmallThumbnail(detailProduct)"
                   :alt="resolveCurrentDetailDisplayName(detailProduct)"
                   loading="lazy"

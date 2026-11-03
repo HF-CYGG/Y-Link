@@ -27,6 +27,7 @@ export interface ClientCartItem {
   skuId: string | null
   productName: string
   thumbnail: string | null
+  thumbnailSmall: string | null
   specText: string | null
   defaultPrice: string
   originalPrice: string
@@ -105,6 +106,7 @@ const createCartItemFromProduct = (product: O2oMallProduct, qty: number, sku: O2
     skuId,
     productName: product.productName,
     thumbnail: resolveCartItemThumbnail(product, sku),
+    thumbnailSmall: (sku?.thumbnail ? sku.thumbnailSmall : product.thumbnailSmall)?.trim() || null,
     specText: skuUnavailable ? null : (sku?.specText ?? null),
     defaultPrice: !skuUnavailable && sku ? sku.discountedPrice : productPrice.unitPrice,
     originalPrice: price.originalPrice,
@@ -176,6 +178,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
       skuId: item.skuId,
       productName: item.productName,
       thumbnail: item.thumbnail,
+      thumbnailSmall: item.thumbnailSmall ?? null,
       specText: item.specText,
       defaultPrice: item.defaultPrice,
       originalPrice: item.originalPrice,
@@ -294,6 +297,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
           specText: latestSku?.specText ?? item.specText,
           productName: latest.productName,
           thumbnail: resolveCartItemThumbnail(latest, latestSku),
+          thumbnailSmall: (latestSku?.thumbnail ? latestSku.thumbnailSmall : latest.thumbnailSmall)?.trim() || null,
           defaultPrice: latestSku ? latestSku.discountedPrice : productPrice.unitPrice,
           originalPrice: latestPrice.originalPrice,
           discountRate: latestPrice.discountRate,

@@ -23,6 +23,7 @@ export interface ClientCartSnapshotItem {
   skuId: string | null
   productName: string
   thumbnail: string | null
+  thumbnailSmall: string | null
   specText: string | null
   defaultPrice: string
   originalPrice: string
@@ -75,6 +76,7 @@ const normalizeSnapshotItems = (items: unknown): ClientCartSnapshotItem[] => {
       const skuId = typeof row.skuId === 'string' && row.skuId.trim() ? row.skuId.trim() : null
       const productName = typeof row.productName === 'string' ? row.productName : ''
       const thumbnail = typeof row.thumbnail === 'string' && row.thumbnail.trim() ? row.thumbnail.trim() : null
+      const thumbnailSmall = typeof row.thumbnailSmall === 'string' && row.thumbnailSmall.trim() ? row.thumbnailSmall.trim() : null
       const specText = typeof row.specText === 'string' && row.specText.trim() ? row.specText.trim() : null
       const originalPrice = normalizePrice(row.originalPrice ?? row.defaultPrice)
       const discountRate = normalizeDiscountRateText(row.discountRate as string | number | null | undefined)
@@ -100,6 +102,7 @@ const normalizeSnapshotItems = (items: unknown): ClientCartSnapshotItem[] => {
         skuId,
         productName,
         thumbnail,
+        thumbnailSmall,
         specText,
         defaultPrice,
         originalPrice,
