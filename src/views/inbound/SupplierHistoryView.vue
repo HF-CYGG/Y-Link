@@ -7,14 +7,20 @@
  * - 历史页使用服务端筛选与分页，并通过自动同步保持库管入库、供货方删除恢复后的列表状态及时更新；
  * - 列表请求、详情请求与操作前状态校验都接入稳定请求或最新详情读取，避免旧结果覆盖新状态；
  * - 详情抽屉在打开期间进行轻量刷新，状态变化后立即收起不可用操作入口，降低误改单、误撤销风险；
- * - 列表与详情展示预计送达时间，改单弹窗可调整该时间；未选择时不回传，服务端保持原值。
+ * - 列表与详情展示预计送达时间，改单弹窗仅在用户实际改动日期时才回传，原值已早于今天时只作说明展示，避免只改数量被服务端拒绝；
+ * - 撤销与改单各自使用独立的稳定请求通道，并在进入处理函数时立即锁定提交状态，前置状态校验期间也不能重复点击；
+ * - 页面失活（KeepAlive）时停止自动刷新与详情同步，激活后恢复；首次挂载只刷新一次，不与激活钩子重复；
+ * - 顶部展示未读的“送货单状态变更”站内提醒（库管入库、现场改单触发），可逐条或全部标记已读，请求失败静默；
+ * - “再来一单”把明细写入录入页本地草稿并跳转，详情抽屉内可复制单号、查看规格、已删除单据的删除信息。
  * 维护说明：
  * - 若后续要增加更多筛选维度，优先继续扩展服务端查询参数，而不是回退到前端全量筛选；
  * - 二维码生成失败时不能静默吞掉，否则用户只会看到空白占位而不知道单据本身已存在；
- * - 自动同步必须避开弹窗确认与表单编辑过程，避免覆盖用户正在输入的内容。
+ * - 自动同步必须避开弹窗确认与表单编辑过程，避免覆盖用户正在输入的内容；
+ * - 判断单据被永久删除只依据 HTTP 404，不要再用中文文案关键词匹配，否则通用错误会被误判；
+ * - 草稿结构与键名由 src/utils/supplier-delivery-draft.ts 维护，改动字段需与录入页同步。
  */
 
-import { computed, onActivated, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
 
 import { ElMessageBox } from 'element-plus'
 import QRCode from 'qrcode'
@@ -34,11 +40,23 @@ import {
   type SupplierDeliverySummary,
 } from '@/api/modules/inbound'
 import { getProductList, type ProductRecord } from '@/api/modules/product'
+import {
+  getNotificationInbox,
+  markNotificationInboxRead,
+  markNotificationInboxReadByEventType,
+  type NotificationInboxItem,
+} from '@/api/modules/notification'
+import { useAuthStore } from '@/store'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { AppRequestError, extractErrorMessage } from '@/utils/error'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
+import { disabledInboundExpectedArrivalDate } from '@/utils/inbound-expected-arrival'
+import { readSupplierDeliveryDraft, writeSupplierDeliveryDraft } from '@/utils/supplier-delivery-draft'
 import dayjs from 'dayjs'
-import InboundDeliverySheetWorkbenchDialog from './components/InboundDeliverySheetWorkbenchDialog.vue'
+// 打印 / PDF 弹窗体积较大，首次打开时才加载。
+const InboundDeliverySheetWorkbenchDialog = defineAsyncComponent(
+  () => import('./components/InboundDeliverySheetWorkbenchDialog.vue'),
+)
 
 
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
@@ -49,6 +67,11 @@ const listRequest = useStableRequest()
 const detailRequest = useStableRequest()
 const productRequest = useStableRequest()
 const actionRequest = useStableRequest()
+// 撤销与改单各用独立通道，避免共用实例时后发起的请求把前一个的回调丢弃。
+const cancelRequest = useStableRequest()
+const editRequest = useStableRequest()
+const reminderRequest = useStableRequest()
+const authStore = useAuthStore()
 const AUTO_REFRESH_INTERVAL_MS = 30_000
 const DETAIL_SYNC_INTERVAL_MS = 30_000
 const listRenderKey = ref(0)
@@ -81,12 +104,20 @@ const editDialogVisible = ref(false)
 const editSubmitting = ref(false)
 const editProductLoading = ref(false)
 const deliverySheetDialogVisible = ref(false)
+const deliverySheetDialogMounted = ref(false)
 const products = ref<ProductRecord[]>([])
 const interactionLockCount = ref(0)
 const silentRefreshing = ref(false)
 const detailSyncing = ref(false)
 let autoRefreshTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let detailSyncTimer: ReturnType<typeof globalThis.setInterval> | null = null
+// 页面是否处于激活态：KeepAlive 失活后后台同步必须暂停。
+let pageActive = true
+let hasActivatedOnce = false
+const reorderingOrderId = ref('')
+const reminders = ref<NotificationInboxItem[]>([])
+const reminderTotal = ref(0)
+const reminderActionLoading = ref(false)
 
 interface EditItemRow {
   uid: string
@@ -116,16 +147,15 @@ const handleEditProductChange = (item: EditItemRow) => {
 const editForm = reactive({
   orderId: '',
   remark: '',
-  // 预计送达时间可在改单时调整；未改动时保持原值，不回传给服务端。
+  // 预计送达时间可在改单时调整；仅当用户实际改动（与原值不同）时才回传给服务端。
   expectedArrivalAt: null as Date | null,
+  // 原预计送达时间：用于判断是否被改动，以及原值已早于今天时作为说明展示。
+  originalExpectedArrivalAt: null as string | null,
   items: [] as EditItemRow[],
 })
 
-const disabledExpectedArrivalDate = (date: Date) => {
-  const todayStart = new Date()
-  todayStart.setHours(0, 0, 0, 0)
-  return date.getTime() < todayStart.getTime()
-}
+// 预计送达日期与服务端范围保持一致：今天起 90 天内可选。
+const disabledExpectedArrivalDate = disabledInboundExpectedArrivalDate
 
 const statusMap = {
   pending: { label: '待入库', type: 'warning' },
@@ -183,6 +213,15 @@ const emptyDescription = computed(() => {
   return isFiltering.value ? '当前筛选下暂无单据' : '暂无历史送货记录'
 })
 
+// 原预计送达时间已不在可选范围内（早于今天）：改单时不预填，仅展示原值说明。
+const editOriginalArrivalExpired = computed(() => {
+  if (!editForm.originalExpectedArrivalAt) {
+    return false
+  }
+  const original = new Date(editForm.originalExpectedArrivalAt)
+  return !Number.isNaN(original.getTime()) && disabledInboundExpectedArrivalDate(original)
+})
+
 const canEditOrder = (order: InboundOrder) => order.status === 'pending' && !order.isDeleted
 const canCancelOrder = (order: InboundOrder) => order.status === 'pending' && !order.isDeleted
 const canSoftDeleteOrder = (order: InboundOrder) => !order.isDeleted && order.status !== 'verified'
@@ -229,13 +268,19 @@ const resetEditForm = () => {
   editForm.orderId = ''
   editForm.remark = ''
   editForm.expectedArrivalAt = null
+  editForm.originalExpectedArrivalAt = null
   editForm.items = [createEditItemRow()]
 }
 
 const ensureEditRowsFromDetail = (detail: InboundOrderDetail) => {
   editForm.orderId = detail.order.id
   editForm.remark = detail.order.remark ?? ''
-  editForm.expectedArrivalAt = detail.order.expectedArrivalAt ? new Date(detail.order.expectedArrivalAt) : null
+  editForm.originalExpectedArrivalAt = detail.order.expectedArrivalAt
+  // 原值已早于今天（或超出可选范围）时不预填，否则只改数量也会带着非法日期被服务端拒绝。
+  const originalArrival = detail.order.expectedArrivalAt ? new Date(detail.order.expectedArrivalAt) : null
+  editForm.expectedArrivalAt = originalArrival && !Number.isNaN(originalArrival.getTime()) && !disabledInboundExpectedArrivalDate(originalArrival)
+    ? originalArrival
+    : null
   editForm.items = detail.items.map((item) => ({
     uid: `supplier-history-edit-item-${editUidSeed.value++}`,
     productId: String(item.productId),
@@ -254,7 +299,7 @@ const ensureProductOptionsFromDetail = (detail: InboundOrderDetail) => {
     .filter((item) => item.productId && !existingIds.has(String(item.productId)))
     .map((item) => ({
       id: String(item.productId),
-      productCode: '历史商品',
+      productCode: '已停用',
       productName: item.productNameSnapshot || '未匹配商品',
       pinyinAbbr: '',
       defaultPrice: '0',
@@ -292,15 +337,12 @@ const ensureProductOptionsFromDetail = (detail: InboundOrderDetail) => {
   }
 }
 
-// 商品目录懒加载：改单弹窗打开时再取一次，保证能拿到当前仍可选的启用商品。
-const ensureProductsLoaded = async () => {
-  if (products.value.length > 0) {
-    return
-  }
-
+// 商品目录刷新：改单弹窗每次打开都重新取一次，避免长期停留的页面里商品已停用/新增而目录过期。
+// 请求失败时保留已有目录继续使用，由 ensureProductOptionsFromDetail 兜底展示原明细商品。
+const refreshProductOptions = async () => {
   editProductLoading.value = true
   await productRequest.runLatest({
-    executor: (signal) => getProductList({}, { signal }),
+    executor: (signal) => getProductList({ isActive: true }, { signal }),
     onSuccess: (result) => {
       products.value = result
     },
@@ -313,17 +355,13 @@ const ensureProductsLoaded = async () => {
   })
 }
 
+// 只依据 HTTP 404 判定单据已被永久删除或不可访问；文案匹配“无效”等通用词会把普通校验错误误判为单据消失。
 const isMissingDeliveryError = (error: unknown) => {
-  if (error instanceof AppRequestError && error.status === 404) {
-    return true
-  }
-
-  const message = extractErrorMessage(error, '')
-  return /不存在|已被删除|不可访问|无效/.test(message)
+  return error instanceof AppRequestError && error.status === 404
 }
 
 const canRunBackgroundSync = () => {
-  return isOnSupplierHistoryRoute.value && !isInteractionLocked.value
+  return pageActive && isOnSupplierHistoryRoute.value && !isInteractionLocked.value
 }
 
 const runWithInteractionLock = async <T,>(executor: () => Promise<T>) => {
@@ -381,7 +419,7 @@ const loadData = async (options: { silent?: boolean; force?: boolean } = {}) => 
 const generateQRCode = async (verifyCode: string) => {
   try {
     qrCodeDataUrl.value = await QRCode.toDataURL(verifyCode, {
-      width: 200,
+      width: 440,
       margin: 1,
       color: { dark: '#000000', light: '#ffffff' },
     })
@@ -476,11 +514,16 @@ const syncCurrentDetail = async (options: { notifyMissing?: boolean } = {}) => {
   }
 
   detailSyncing.value = true
+  const syncingOrderId = currentDetail.value.order.id
   try {
     const detail = await fetchLatestDetailForOrder(currentDetail.value.order)
+    // 请求期间用户可能已切换到别的单据或关闭抽屉，回写前必须确认仍是同一张单，避免旧详情覆盖新抽屉。
+    if (!detailVisible.value || currentDetail.value?.order.id !== syncingOrderId || detail.order.id !== syncingOrderId) {
+      return
+    }
     await applyDetailResult(detail, { openDrawer: false })
   } catch (error) {
-    if (isMissingDeliveryError(error)) {
+    if (isMissingDeliveryError(error) && currentDetail.value?.order.id === syncingOrderId) {
       await handleMissingCurrentDetail({ notify: options.notifyMissing })
     }
   } finally {
@@ -533,11 +576,70 @@ const ensureLatestActionableDetail = async (
   }
 }
 
+// 状态变更提醒：只拉取当前账号未读的“送货单状态变更”通知；失败静默，不打扰用户。
+const loadReminders = async () => {
+  await reminderRequest.runLatest({
+    executor: (signal) => getNotificationInbox({
+      unreadOnly: true,
+      eventType: 'inbound_order_status_changed',
+      pageSize: 5,
+    }, { signal }),
+    onSuccess: (result) => {
+      reminders.value = result.list
+      reminderTotal.value = result.total
+    },
+    onError: (error) => {
+      console.warn('[SupplierHistory] 加载送货单状态提醒失败', error)
+    },
+  })
+}
+
+const handleDismissReminder = async (item: NotificationInboxItem) => {
+  if (reminderActionLoading.value) {
+    return
+  }
+
+  reminderActionLoading.value = true
+  try {
+    await markNotificationInboxRead(item.id)
+    reminders.value = reminders.value.filter((entry) => entry.id !== item.id)
+    reminderTotal.value = Math.max(0, reminderTotal.value - 1)
+    if (reminders.value.length === 0 && reminderTotal.value > 0) {
+      void loadReminders()
+    }
+  } catch (error) {
+    showAppWarning(extractErrorMessage(error, '标记已读失败，请稍后重试'))
+  } finally {
+    reminderActionLoading.value = false
+  }
+}
+
+const handleDismissAllReminders = async () => {
+  if (reminderActionLoading.value || reminders.value.length === 0) {
+    return
+  }
+
+  reminderActionLoading.value = true
+  try {
+    // 服务端按当前账号 + 事件类型批量已读，覆盖未展示的积压提醒，而不只是当前这一页。
+    await markNotificationInboxReadByEventType('inbound_order_status_changed')
+    reminders.value = []
+    reminderTotal.value = 0
+    // 批量已读期间可能有新提醒到达，重新拉一次保持与服务端一致。
+    void loadReminders()
+  } catch (error) {
+    showAppWarning(extractErrorMessage(error, '标记已读失败，请稍后重试'))
+  } finally {
+    reminderActionLoading.value = false
+  }
+}
+
 const refreshVisibleSupplierHistory = async () => {
   if (!canRunBackgroundSync()) {
     return
   }
 
+  void loadReminders()
   await loadData({ silent: true })
 }
 
@@ -546,6 +648,7 @@ const refreshSupplierHistoryNow = async () => {
     return
   }
 
+  void loadReminders()
   await loadData({ silent: true, force: true })
   await syncCurrentDetail({ notifyMissing: true })
 }
@@ -589,8 +692,86 @@ const stopDetailSync = () => {
 }
 
 const handleVisibilitySync = () => {
-  if (globalThis.document?.visibilityState === 'visible') {
+  if (pageActive && globalThis.document?.visibilityState === 'visible') {
     void refreshSupplierHistoryNow()
+  }
+}
+
+// 复制单号：剪贴板不可用或被拒绝时提示手动复制。
+const copyShowNo = async (showNo: string) => {
+  try {
+    await globalThis.navigator.clipboard.writeText(showNo)
+    showAppSuccess('单号已复制')
+  } catch {
+    showAppWarning(`复制失败，请手动复制单号：${showNo}`)
+  }
+}
+
+// 再来一单：把该单明细与备注写入录入页草稿（预计送达时间留空）后跳转；录入页已有未提交草稿时先确认覆盖。
+const handleReorder = async (order: InboundOrder) => {
+  if (reorderingOrderId.value) {
+    return
+  }
+
+  reorderingOrderId.value = order.id
+  try {
+    let detail: InboundOrderDetail | null = currentDetail.value?.order.id === order.id ? currentDetail.value : null
+    if (!detail) {
+      try {
+        detail = await fetchLatestDetailForOrder(order)
+      } catch (error) {
+        if (isMissingDeliveryError(error)) {
+          await loadData({ silent: true, force: true })
+          showAppWarning(`送货单“${order.showNo}”已被永久删除或不可访问`)
+        } else {
+          showAppError(extractErrorMessage(error, '读取送货单明细失败，请稍后重试'))
+        }
+        return
+      }
+    }
+
+    const draftItems = detail.items
+      .filter((item) => item.productId)
+      .map((item) => ({
+        productId: String(item.productId),
+        skuId: String(item.skuId ?? ''),
+        qty: Number(item.qty) || 1,
+      }))
+    if (!draftItems.length) {
+      showAppWarning('该送货单没有可复用的商品明细')
+      return
+    }
+
+    if (readSupplierDeliveryDraft(authStore.currentUser?.id)) {
+      try {
+        await runWithInteractionLock(() => ElMessageBox.confirm(
+          '送货单录入页还有未提交的草稿，继续将用该单明细覆盖草稿，确认吗？',
+          '覆盖录入草稿',
+          {
+            type: 'warning',
+            confirmButtonText: '覆盖并前往',
+            cancelButtonText: '取消',
+          },
+        ))
+      } catch {
+        return
+      }
+    }
+
+    const saved = writeSupplierDeliveryDraft(authStore.currentUser?.id, {
+      items: draftItems,
+      remark: detail.order.remark ?? '',
+      expectedArrivalAt: null,
+    })
+    if (!saved) {
+      showAppWarning('无法写入本地草稿，请检查浏览器存储权限后重试')
+      return
+    }
+
+    detailVisible.value = false
+    goToDelivery()
+  } finally {
+    reorderingOrderId.value = ''
   }
 }
 
@@ -632,6 +813,7 @@ const openDeliverySheetDialog = () => {
     return
   }
 
+  deliverySheetDialogMounted.value = true
   deliverySheetDialogVisible.value = true
 }
 
@@ -646,7 +828,7 @@ const openEditDialog = async (row: InboundOrder) => {
     return
   }
 
-  await ensureProductsLoaded()
+  await refreshProductOptions()
   ensureProductOptionsFromDetail(latestDetail)
 
   const shouldReuseCurrentDetail = currentDetail.value?.order.id === latestDetail.order.id
@@ -662,7 +844,7 @@ const openEditDialog = async (row: InboundOrder) => {
 }
 
 const handleSubmitCancel = async () => {
-  if (!targetCancelOrder.value) {
+  if (!targetCancelOrder.value || cancelSubmitting.value) {
     return
   }
 
@@ -672,31 +854,33 @@ const handleSubmitCancel = async () => {
     return
   }
 
-  const latestDetail = await ensureLatestActionableDetail(targetCancelOrder.value, '撤销', canCancelOrder)
-  if (!latestDetail) {
-    cancelDialogVisible.value = false
-    return
-  }
-  targetCancelOrder.value = latestDetail.order
-
+  // 进入处理函数即锁定提交状态：前置状态校验是异步的，期间不能再次点击。
   cancelSubmitting.value = true
-  await actionRequest.runLatest({
-    executor: (signal) => cancelSupplierDelivery(targetCancelOrder.value!.id, { reason }, { signal }),
-    onSuccess: async (detail) => {
+  try {
+    const latestDetail = await ensureLatestActionableDetail(targetCancelOrder.value, '撤销', canCancelOrder)
+    if (!latestDetail) {
       cancelDialogVisible.value = false
-      cancelReason.value = ''
-      targetCancelOrder.value = null
-      await applyDetailResult(detail)
-      await loadData()
-      showAppSuccess('送货单已撤销')
-    },
-    onError: (error) => {
-      showAppError(extractErrorMessage(error, '撤销送货单失败'))
-    },
-    onFinally: () => {
-      cancelSubmitting.value = false
-    },
-  })
+      return
+    }
+    targetCancelOrder.value = latestDetail.order
+
+    await cancelRequest.runLatest({
+      executor: (signal) => cancelSupplierDelivery(latestDetail.order.id, { reason }, { signal }),
+      onSuccess: async (detail) => {
+        cancelDialogVisible.value = false
+        cancelReason.value = ''
+        targetCancelOrder.value = null
+        await applyDetailResult(detail)
+        await loadData()
+        showAppSuccess('送货单已撤销')
+      },
+      onError: (error) => {
+        showAppError(extractErrorMessage(error, '撤销送货单失败'))
+      },
+    })
+  } finally {
+    cancelSubmitting.value = false
+  }
 }
 
 const handleSoftDeleteOrder = async (order: InboundOrder) => {
@@ -920,6 +1104,16 @@ const handlePermanentDeleteOrder = async (order: InboundOrder) => {
   })
 }
 
+const shouldSubmitExpectedArrivalAt = () => {
+  if (!editForm.expectedArrivalAt) {
+    return false
+  }
+  if (!editForm.originalExpectedArrivalAt) {
+    return true
+  }
+  return editForm.expectedArrivalAt.getTime() !== new Date(editForm.originalExpectedArrivalAt).getTime()
+}
+
 const buildEditPayload = () => {
   const validItems = editForm.items.filter((item) => item.productId && item.skuId && item.qty > 0)
   if (!validItems.length) {
@@ -936,8 +1130,8 @@ const buildEditPayload = () => {
 
   return {
     remark: editForm.remark.trim(),
-    // 未选择时不回传该字段，服务端保持原有预计送达时间。
-    ...(editForm.expectedArrivalAt ? { expectedArrivalAt: editForm.expectedArrivalAt.toISOString() } : {}),
+    // 仅在用户实际改动日期时回传，未改动则保持服务端原值，避免原值已过期时被“不能早于今天”拒绝。
+    ...(shouldSubmitExpectedArrivalAt() && editForm.expectedArrivalAt ? { expectedArrivalAt: editForm.expectedArrivalAt.toISOString() } : {}),
     items: Array.from(uniqueItems.entries()).map(([key, qty]) => {
       const [productId, skuId] = key.split(':')
       return { productId, skuId, qty }
@@ -946,7 +1140,7 @@ const buildEditPayload = () => {
 }
 
 const handleSubmitEdit = async () => {
-  if (!editForm.orderId) {
+  if (!editForm.orderId || editSubmitting.value) {
     return
   }
 
@@ -958,34 +1152,37 @@ const handleSubmitEdit = async () => {
     return
   }
 
-  const targetOrder = currentDetail.value?.order.id === editForm.orderId
-    ? currentDetail.value.order
-    : listState.records.find((order) => order.id === editForm.orderId)
-  if (targetOrder) {
-    const latestDetail = await ensureLatestActionableDetail(targetOrder, '改单', canEditOrder)
-    if (!latestDetail) {
-      editDialogVisible.value = false
-      return
-    }
-  }
-
+  // 进入处理函数即锁定提交状态：前置状态校验是异步的，期间不能再次点击。
   editSubmitting.value = true
-  await actionRequest.runLatest({
-    executor: (signal) => updateSupplierDelivery(editForm.orderId, payload, { signal }),
-    onSuccess: async (detail) => {
-      editDialogVisible.value = false
-      resetEditForm()
-      await applyDetailResult(detail)
-      await loadData()
-      showAppSuccess('送货单已更新')
-    },
-    onError: (error) => {
-      showAppError(extractErrorMessage(error, '改单失败'))
-    },
-    onFinally: () => {
-      editSubmitting.value = false
-    },
-  })
+  try {
+    const targetOrder = currentDetail.value?.order.id === editForm.orderId
+      ? currentDetail.value.order
+      : listState.records.find((order) => order.id === editForm.orderId)
+    if (targetOrder) {
+      const latestDetail = await ensureLatestActionableDetail(targetOrder, '改单', canEditOrder)
+      if (!latestDetail) {
+        editDialogVisible.value = false
+        return
+      }
+    }
+
+    const submitOrderId = editForm.orderId
+    await editRequest.runLatest({
+      executor: (signal) => updateSupplierDelivery(submitOrderId, payload, { signal }),
+      onSuccess: async (detail) => {
+        editDialogVisible.value = false
+        resetEditForm()
+        await applyDetailResult(detail)
+        await loadData()
+        showAppSuccess('送货单已更新')
+      },
+      onError: (error) => {
+        showAppError(extractErrorMessage(error, '改单失败'))
+      },
+    })
+  } finally {
+    editSubmitting.value = false
+  }
 }
 
 const goToDelivery = () => {
@@ -1008,19 +1205,8 @@ const handlePageSizeChange = (pageSize: number) => {
   void loadData()
 }
 
-// 进入“历史单据”标签时主动刷新列表：
-// - 供货工作台现在通过 KeepAlive 保留历史页状态，单纯依赖 onMounted 无法覆盖二次进入场景；
-// - 这里监听路由名切回 supplier-history，在保留筛选条件和分页位置的前提下重新请求当前列表。
-watch(() => route.name, (nextName, previousName) => {
-  if (nextName !== 'supplier-history' || previousName === nextName) {
-    return
-  }
-
-  void refreshSupplierHistoryNow()
-})
-
 watch(detailVisible, (visible) => {
-  if (visible) {
+  if (visible && pageActive) {
     startDetailSync()
     void syncCurrentDetail({ notifyMissing: true })
     return
@@ -1029,13 +1215,35 @@ watch(detailVisible, (visible) => {
   stopDetailSync()
 })
 
+// 进入“历史单据”标签时主动刷新列表：
+// - 供货工作台通过 KeepAlive 保留历史页状态，二次进入只会触发 onActivated，不会再触发 onMounted；
+// - 首次挂载已由 onMounted 加载过数据，这里跳过首次激活，避免同一次进入重复刷新；
+// - 激活时恢复自动刷新与详情同步定时器（失活时已停止）。
 onActivated(() => {
+  pageActive = true
+  startAutoRefresh()
+  if (detailVisible.value) {
+    startDetailSync()
+  }
+
+  if (!hasActivatedOnce) {
+    hasActivatedOnce = true
+    return
+  }
+
   void refreshSupplierHistoryNow()
+})
+
+onDeactivated(() => {
+  pageActive = false
+  stopAutoRefresh()
+  stopDetailSync()
 })
 
 onMounted(() => {
   resetEditForm()
   void loadData()
+  void loadReminders()
   startAutoRefresh()
   globalThis.document?.addEventListener('visibilitychange', handleVisibilitySync)
 })
@@ -1050,6 +1258,45 @@ onBeforeUnmount(() => {
 <template>
   <PageContainer>
     <div class="supplier-history-page mx-auto max-w-7xl">
+      <!-- 送货单状态变更提醒：库管入库或现场改单后，供货方在此看到未读通知。 -->
+      <div
+        v-if="reminders.length"
+        class="history-reminder-card mb-4 rounded-[26px] border border-amber-200/70 bg-amber-50/70 p-4 dark:border-amber-900/60 dark:bg-amber-950/20 sm:p-5"
+        role="status"
+      >
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <p class="text-sm font-semibold text-amber-800 dark:text-amber-200">
+            送货单状态提醒（未读 {{ reminderTotal }} 条）
+          </p>
+          <el-button link type="primary" :disabled="reminderActionLoading" @click="handleDismissAllReminders">全部知道了</el-button>
+        </div>
+        <ul class="mt-3 space-y-2">
+          <li
+            v-for="reminder in reminders"
+            :key="reminder.id"
+            class="flex flex-col gap-2 rounded-2xl border border-amber-200/70 bg-white/80 px-4 py-3 dark:border-amber-900/50 dark:bg-black/30 sm:flex-row sm:items-center sm:justify-between"
+          >
+            <div class="min-w-0">
+              <p class="text-sm font-medium text-slate-800 dark:text-slate-100">{{ reminder.title }}</p>
+              <p class="mt-1 break-words text-xs leading-5 text-slate-500 dark:text-slate-400">{{ reminder.content }}</p>
+              <p class="mt-1 text-xs text-slate-400 dark:text-slate-500">{{ dayjs(reminder.createdAt).format('YYYY-MM-DD HH:mm') }}</p>
+            </div>
+            <el-button
+              class="shrink-0 self-start sm:self-auto"
+              size="small"
+              plain
+              :disabled="reminderActionLoading"
+              @click="handleDismissReminder(reminder)"
+            >
+              知道了
+            </el-button>
+          </li>
+        </ul>
+        <p v-if="reminderTotal > reminders.length" class="mt-2 text-xs text-amber-700/80 dark:text-amber-200/70">
+          还有 {{ reminderTotal - reminders.length }} 条未读，处理后会自动补充显示。
+        </p>
+      </div>
+
       <transition-group name="history-summary-card" tag="div" class="history-summary-grid mb-5 grid gap-4 md:grid-cols-2 xl:grid-cols-4" appear>
         <div
           v-for="(card, index) in summaryCards"
@@ -1115,7 +1362,12 @@ onBeforeUnmount(() => {
               stripe
               class="history-table-shell__table w-full flex-1"
             >
-              <el-table-column prop="showNo" label="送货单号" min-width="180" />
+              <el-table-column prop="showNo" label="送货单号" min-width="200">
+                <template #default="{ row }">
+                  <span>{{ row.showNo }}</span>
+                  <el-button class="ml-1" link type="primary" size="small" @click="copyShowNo(row.showNo)">复制</el-button>
+                </template>
+              </el-table-column>
               <el-table-column prop="totalQty" label="总数量" min-width="110">
                 <template #default="{ row }">
                   <span class="font-medium text-slate-800 dark:text-slate-200">{{ Number(row.totalQty) }}</span> 件
@@ -1144,7 +1396,7 @@ onBeforeUnmount(() => {
                   {{ row.verifiedAt ? dayjs(row.verifiedAt).format('YYYY-MM-DD HH:mm') : '-' }}
                 </template>
               </el-table-column>
-              <el-table-column label="操作" min-width="220" fixed="right" align="right">
+              <el-table-column label="操作" min-width="320" fixed="right" align="right">
                 <template #default="{ row }">
                   <div class="history-table-shell__actions flex items-center justify-end gap-2">
                     <el-button
@@ -1191,6 +1443,15 @@ onBeforeUnmount(() => {
                       @click="handlePermanentDeleteOrder(row as InboundOrder)"
                     >
                       永久删除
+                    </el-button>
+                    <el-button
+                      class="history-detail-button"
+                      link
+                      type="primary"
+                      :loading="reorderingOrderId === row.id"
+                      @click="handleReorder(row as InboundOrder)"
+                    >
+                      再来一单
                     </el-button>
                     <el-button class="history-detail-button" link type="primary" @click="handleViewDetail(row as InboundOrder)">
                       查看详情
@@ -1245,18 +1506,30 @@ onBeforeUnmount(() => {
                 <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                   <div>
                     <p class="text-xs uppercase tracking-[0.2em] text-slate-400 dark:text-slate-500">送货单详情</p>
-                    <h3 class="mt-2 text-lg font-semibold text-slate-900 dark:text-slate-100">{{ currentDetail.order.showNo }}</h3>
+                    <h3 class="mt-2 text-lg font-semibold text-slate-900 dark:text-slate-100">
+                      {{ currentDetail.order.showNo }}
+                      <el-button class="ml-1 align-middle" link type="primary" size="small" @click="copyShowNo(currentDetail.order.showNo)">复制</el-button>
+                    </h3>
                     <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
                       创建于 {{ dayjs(currentDetail.order.createdAt).format('YYYY-MM-DD HH:mm') }}
                     </p>
                   </div>
                   <div class="history-detail-hero__actions flex shrink-0 flex-wrap items-center justify-start gap-2 lg:justify-end">
                     <el-button
+                      v-if="currentDetail.order.status !== 'cancelled' && !currentDetail.order.isDeleted"
                       type="primary"
                       plain
                       @click="openDeliverySheetDialog"
                     >
-                      生成送货单
+                      打印 / 导出送货单
+                    </el-button>
+                    <el-button
+                      type="primary"
+                      plain
+                      :loading="reorderingOrderId === currentDetail.order.id"
+                      @click="handleReorder(currentDetail.order)"
+                    >
+                      再来一单
                     </el-button>
                     <el-button
                       v-if="canEditOrder(currentDetail.order)"
@@ -1307,6 +1580,26 @@ onBeforeUnmount(() => {
                   </div>
                 </div>
 
+                <!-- 待入库二维码紧邻头部信息展示，库管扫码时无需滚动到页面底部。 -->
+                <transition name="history-detail-fade">
+                  <div
+                    v-if="shouldShowPendingQrCode && qrCodeDataUrl"
+                    class="mt-4 rounded-2xl border border-amber-200/70 bg-amber-50/65 p-4 text-center dark:border-amber-900/60 dark:bg-amber-950/20"
+                  >
+                    <p class="text-sm font-medium text-amber-700 dark:text-amber-300">向库管员出示此二维码完成入库</p>
+                    <img :src="qrCodeDataUrl" alt="核销二维码" class="mx-auto mt-3 h-[220px] w-[220px] rounded-2xl border border-white/80 bg-white p-2 shadow-sm dark:border-white/10 dark:bg-black/70" />
+                  </div>
+                  <div
+                    v-else-if="shouldShowPendingQrCode && qrCodeUnavailable"
+                    class="mt-4 rounded-2xl border border-amber-200/70 bg-amber-50/65 p-4 text-center dark:border-amber-900/60 dark:bg-amber-950/20"
+                  >
+                    <p class="text-sm font-medium text-amber-700 dark:text-amber-300">二维码暂未生成</p>
+                    <p class="mt-2 text-sm leading-6 text-amber-700/85 dark:text-amber-200/85">
+                      单据详情已加载，可稍后重新打开查看。
+                    </p>
+                  </div>
+                </transition>
+
                 <div class="mt-4 grid gap-3 sm:grid-cols-4">
                   <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-white/10 dark:bg-black/40">
                     <p class="text-xs text-slate-500 dark:text-slate-400">总件数</p>
@@ -1348,6 +1641,18 @@ onBeforeUnmount(() => {
                     </p>
                   </div>
                   <div
+                    v-if="currentDetail.order.isDeleted"
+                    class="rounded-2xl border border-slate-300/80 bg-slate-100/80 p-4 dark:border-white/15 dark:bg-white/5"
+                  >
+                    <p class="text-xs text-slate-500 dark:text-slate-400">删除信息</p>
+                    <p class="mt-2 text-sm font-medium text-slate-700 dark:text-slate-200">
+                      {{ currentDetail.order.deletedAt ? `删除于 ${dayjs(currentDetail.order.deletedAt).format('YYYY-MM-DD HH:mm')}` : '删除时间未记录' }}
+                    </p>
+                    <p class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">
+                      {{ currentDetail.order.deletedByDisplayName || currentDetail.order.deletedByUsername || '删除人未记录' }}
+                    </p>
+                  </div>
+                  <div
                     v-if="currentDetail.order.status === 'cancelled'"
                     class="rounded-2xl border border-rose-200/70 bg-rose-50/75 p-4 dark:border-rose-900/60 dark:bg-rose-950/20"
                   >
@@ -1375,39 +1680,24 @@ onBeforeUnmount(() => {
                   >
                     <div class="flex min-w-0 items-center gap-3">
                       <span class="history-detail-item__index">{{ index + 1 }}</span>
-                      <span class="truncate text-slate-700 dark:text-slate-300">{{ item.productNameSnapshot }}</span>
+                      <div class="min-w-0">
+                        <p class="truncate text-slate-700 dark:text-slate-300">{{ item.productNameSnapshot }}</p>
+                        <p class="mt-0.5 truncate text-xs text-slate-400 dark:text-slate-500">
+                          {{ item.sku?.specText || item.sku?.skuCode || '默认规格' }}
+                        </p>
+                      </div>
                     </div>
                     <span class="shrink-0 font-medium text-slate-800 dark:text-slate-200">x {{ Number(item.qty) }}</span>
                   </div>
                 </div>
               </div>
-
-              <!-- 若未入库，展示二维码以便补扫。 -->
-              <transition name="history-detail-fade">
-                <div v-if="shouldShowPendingQrCode && qrCodeDataUrl" class="rounded-[26px] border border-amber-200/70 bg-amber-50/65 p-5 text-center shadow-[0_12px_28px_-28px_rgba(245,158,11,0.18)] dark:border-amber-900/60 dark:bg-amber-950/20">
-                  <p class="text-sm font-medium text-amber-700 dark:text-amber-300">向库管员出示此二维码完成入库</p>
-                  <img :src="qrCodeDataUrl" alt="核销二维码" class="mx-auto mt-4 h-40 w-40 rounded-2xl border border-white/80 bg-white p-2 shadow-sm dark:border-white/10 dark:bg-black/70" />
-                </div>
-              </transition>
-
-              <!-- 二维码生成失败时保留页面内提示，避免用户误以为详情尚未加载完成。 -->
-              <transition name="history-detail-fade">
-                <div
-                  v-if="shouldShowPendingQrCode && qrCodeUnavailable"
-                  class="rounded-[26px] border border-amber-200/70 bg-amber-50/65 p-5 text-center shadow-[0_12px_28px_-28px_rgba(245,158,11,0.14)] dark:border-amber-900/60 dark:bg-amber-950/20"
-                >
-                  <p class="text-sm font-medium text-amber-700 dark:text-amber-300">二维码暂未生成</p>
-                  <p class="mt-2 text-sm leading-6 text-amber-700/85 dark:text-amber-200/85">
-                    单据详情已加载，可稍后重新打开查看。
-                  </p>
-                </div>
-              </transition>
             </div>
           </transition>
         </div>
       </BizResponsiveDrawerShell>
 
       <InboundDeliverySheetWorkbenchDialog
+        v-if="deliverySheetDialogMounted"
         v-model="deliverySheetDialogVisible"
         :detail="currentDetail"
       />
@@ -1415,7 +1705,7 @@ onBeforeUnmount(() => {
       <el-dialog
         v-model="cancelDialogVisible"
         title="撤销送货单"
-        width="28rem"
+        width="min(28rem, 92vw)"
         append-to-body
         destroy-on-close
         @closed="targetCancelOrder = null"
@@ -1438,9 +1728,9 @@ onBeforeUnmount(() => {
           />
         </div>
         <template #footer>
-          <div class="flex justify-end gap-3">
-            <el-button @click="cancelDialogVisible = false">取消</el-button>
-            <el-button type="danger" :loading="cancelSubmitting" @click="handleSubmitCancel">确认撤销</el-button>
+          <div class="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+            <el-button class="!ml-0" @click="cancelDialogVisible = false">取消</el-button>
+            <el-button class="!ml-0" type="danger" :loading="cancelSubmitting" :disabled="cancelSubmitting" @click="handleSubmitCancel">确认撤销</el-button>
           </div>
         </template>
       </el-dialog>
@@ -1448,7 +1738,7 @@ onBeforeUnmount(() => {
       <el-dialog
         v-model="editDialogVisible"
         title="修改送货单"
-        width="46rem"
+        width="min(46rem, 92vw)"
         append-to-body
         destroy-on-close
         @closed="resetEditForm"
@@ -1468,6 +1758,9 @@ onBeforeUnmount(() => {
               format="YYYY-MM-DD HH:mm"
               :disabled-date="disabledExpectedArrivalDate"
             />
+            <p v-if="editOriginalArrivalExpired" class="mt-2 text-xs leading-5 text-slate-500 dark:text-slate-400">
+              原预计送达时间：{{ dayjs(editForm.originalExpectedArrivalAt).format('YYYY-MM-DD HH:mm') }}（已早于今天，不修改则保持原值）
+            </p>
           </div>
 
           <div class="space-y-3">
@@ -1553,13 +1846,13 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <template #footer>
-          <div class="flex justify-between gap-3">
+          <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div class="text-sm leading-6 text-slate-500 dark:text-slate-400">
               当前共 {{ editForm.items.filter((item) => item.productId && item.skuId && item.qty > 0).length }} 行有效规格
             </div>
-            <div class="flex justify-end gap-3">
-              <el-button @click="editDialogVisible = false">取消</el-button>
-              <el-button type="primary" :loading="editSubmitting" @click="handleSubmitEdit">保存改单</el-button>
+            <div class="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+              <el-button class="!ml-0" @click="editDialogVisible = false">取消</el-button>
+              <el-button class="!ml-0" type="primary" :loading="editSubmitting" :disabled="editSubmitting" @click="handleSubmitEdit">保存改单</el-button>
             </div>
           </div>
         </template>
@@ -1638,19 +1931,12 @@ onBeforeUnmount(() => {
   min-height: 1.25rem;
 }
 
+/* 状态筛选允许换行：窄屏下不再横向滚动隐藏选项。 */
 .history-filter-card__tabs {
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   gap: 0.45rem;
   max-width: 100%;
-  overflow-x: auto;
-  overflow-y: hidden;
-  white-space: nowrap;
-  scrollbar-width: none;
-}
-
-.history-filter-card__tabs::-webkit-scrollbar {
-  display: none;
 }
 
 .history-filter-card__tabs :deep(.el-radio-button) {

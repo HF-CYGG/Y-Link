@@ -56,6 +56,53 @@ const canViewCostPrice = (req: import('express').Request) =>
 const maskSkuCostPrice = <T extends { costPrice: string | null }>(sku: T): T => ({ ...sku, costPrice: null })
 const maskProductCostPrice = (product: ProductView): ProductView => ({ ...product, skus: product.skus.map(maskSkuCostPrice) })
 
+/**
+ * 供货方只需要商品与规格来填送货单：售价、折扣与库存同属经营数据，统一置零后再返回，
+ * 避免供货方通过商品目录推算门店销量与定价。
+ */
+const isSupplierCatalogView = (req: import('express').Request) => (req as AuthenticatedRequest).auth.role === 'supplier'
+type SupplierMaskableSku = {
+  costPrice: string | null
+  defaultPrice: string
+  originalPrice: string
+  discountRate: string
+  discountedPrice: string
+  currentStock: number
+  preOrderedStock: number
+  availableStock: number
+}
+const maskSkuForSupplier = <T extends SupplierMaskableSku>(sku: T): T => ({
+  ...sku,
+  costPrice: null,
+  defaultPrice: '0.00',
+  originalPrice: '0.00',
+  discountRate: '10.0',
+  discountedPrice: '0.00',
+  currentStock: 0,
+  preOrderedStock: 0,
+  availableStock: 0,
+})
+const maskProductForSupplier = (product: ProductView): ProductView => ({
+  ...product,
+  defaultPrice: '0.00',
+  discountRate: '10.0',
+  discountedPrice: '0.00',
+  currentStock: 0,
+  preOrderedStock: 0,
+  availableStock: 0,
+  skus: product.skus.map(maskSkuForSupplier),
+})
+const presentProductForViewer = (req: import('express').Request, product: ProductView): ProductView => {
+  if (isSupplierCatalogView(req)) return maskProductForSupplier(product)
+  return canViewCostPrice(req) ? product : maskProductCostPrice(product)
+}
+
+// 商品导出会带出售价、库存与成本等内部经营数据，供货方业务上用不到，直接拒绝而不是返回残缺数据。
+// 标签打印不在此列：#178 已为供货方设计 main_only 投影（只含主库位、不含数量与分布指纹），贴签需要售价。
+const rejectSupplierCatalogExport: import('express').RequestHandler = (req, _res, next) => {
+  next(isSupplierCatalogView(req) ? new BizError('供货方账号无权导出商品', 403) : undefined)
+}
+
 const productTagIdSchema = z.union([z.string(), z.number()])
 
 const optionalNonNegativeNumberSchema = z.preprocess((value) => {
@@ -262,7 +309,7 @@ productRouter.get(
     res.json({
       code: 0,
       message: 'ok',
-      data: canViewCostPrice(req) ? data : data.map(maskProductCostPrice),
+      data: data.map((product) => presentProductForViewer(req, product)),
     })
   }),
 )
@@ -295,7 +342,7 @@ productRouter.get(
     res.json({
       code: 0,
       message: 'ok',
-      data: canViewCostPrice(req) ? data : { ...data, list: data.list.map(maskProductCostPrice) },
+      data: { ...data, list: data.list.map((product) => presentProductForViewer(req, product)) },
     })
   }),
 )
@@ -363,11 +410,14 @@ productRouter.get(
     const code = typeof req.query.code === 'string' ? req.query.code : ''
     const data = await productService.lookupByCode(code)
     const hideStock = req.query.purpose === 'stocktake'
+      || isSupplierCatalogView(req)
       || !(auth.permissions.includes('inventory:view') || auth.permissions.includes('products:view'))
     if (hideStock) {
       data.sku = { ...data.sku, currentStock: 0, preOrderedStock: 0, availableStock: 0 }
     }
-    if (!canViewCostPrice(req)) {
+    if (isSupplierCatalogView(req)) {
+      data.sku = maskSkuForSupplier(data.sku)
+    } else if (!canViewCostPrice(req)) {
       data.sku = maskSkuCostPrice(data.sku)
     }
     res.json({ code: 0, message: 'ok', data: { ...data, stockHidden: hideStock } })
@@ -386,6 +436,7 @@ productRouter.post(
 productRouter.get(
   '/export',
   requirePermission('products:view'),
+  rejectSupplierCatalogExport,
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const includeCostPrice = canViewCostPrice(req)
@@ -500,7 +551,7 @@ productRouter.get(
     res.json({
       code: 0,
       message: 'ok',
-      data: canViewCostPrice(req) ? data : maskProductCostPrice(data),
+      data: presentProductForViewer(req, data),
     })
   }),
 )

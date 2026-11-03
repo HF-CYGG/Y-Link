@@ -89,9 +89,15 @@ const reportPath = path.join(runtimeRoot, 'enterprise-performance-budget-report.
  * 升级后分别为 4719.79 / 1186.71 / 862.47 KB，首屏 CSS 不变。增量全部来自安全补丁本身：framework 块（vue）
  * +4.06 KB、vendor 块（axios）+5.01 KB、ui-kit 块 -1.81 KB。漏洞修复不能回退，因此总产物上限调整为 4740 KB、
  * 首屏依赖图上限调整为 1195 KB、首屏 JS 上限调整为 870 KB（余量均不足 1%），其余各项预算维持不变。
+ *
+ * 2026-11 供货端完善（录入草稿、再来一单、送货单状态提醒、复制单号、打印弹窗）：同一环境下 main@d873b04 基线实测
+ * 总产物 4735.82 KB，本分支 4747.59 KB（+11.77 KB）。增量全部落在供货工作台路由分包：工作台主包 68.32 → 67.99 KB，
+ * 打印 / PDF 弹窗改为按需异步分包（11.68 KB），首屏依赖图、首屏 JS/CSS 不变。总产物上限调整为 4760 KB，其余预算不变。
+ * 合入 main@bba35c5（v1.5.77.1：角色内权限分配、补货申请、订单修订展示等）后复测：main 自身总产物 4759.10 KB
+ * （基线即已超其 4740 KB 上限），本分支 4770.71 KB（+11.61 KB，增量口径与上条一致）。总产物上限调整为 4780 KB，其余预算不变。
  */
 const performanceBudget = {
-  totalAssetsMaxKB: 4740,
+  totalAssetsMaxKB: 4780,
   criticalAssetsMaxKB: 1195,
   initialLoadJsMaxKB: 870,
   initialLoadCssMaxKB: 325,
