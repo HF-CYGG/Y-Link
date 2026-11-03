@@ -175,7 +175,7 @@ onBeforeUnmount(() => { activeRequest.cancel(); catalogRequest.cancel() })
         </el-select>
       </el-form-item>
       <el-form-item label="期望数量（正整数）">
-        <PassiveNumberInput v-model="form.quantity" :min="1" :max="RESTOCK_MAX_QUANTITY" :step="1" :precision="0" :step-strictly="true" controls-position="right" class="restock-quantity !w-full" aria-label="期望补货数量" />
+        <PassiveNumberInput v-model="form.quantity" :disabled="locked" :min="1" :max="RESTOCK_MAX_QUANTITY" :step="1" :precision="0" :step-strictly="true" controls-position="right" class="restock-quantity !w-full" aria-label="期望补货数量" />
       </el-form-item>
       <el-form-item label="最晚取货时间（北京时间 UTC+8）">
         <el-date-picker v-model="form.latestPickupAt" type="datetime" format="YYYY-MM-DD HH:mm" value-format="YYYY-MM-DD HH:mm" class="!w-full" placeholder="请选择未来时间，精确到分钟" />

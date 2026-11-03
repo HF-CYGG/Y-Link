@@ -178,6 +178,51 @@ const detailFunction = (name: string, globals: Record<string, unknown>, property
   vm.runInNewContext(compiled, { exports, ...globals })
   return exports.callback
 }
+// 编译实际数量控件模板并执行共享步进函数，验证每种表单锁均传到控件。
+const formAst = ts.createSourceFile('ClientRestockForm.ts', parse(form).descriptor.scriptSetup!.content, ts.ScriptTarget.Latest, true)
+const checkingLock = vue.ref(false), creatingLock = vue.ref(false), pendingLock = vue.ref<any>(null)
+const locked = detailFunction('locked', { computed: vue.computed, checking: checkingLock, creating: creatingLock, pendingSubmission: pendingLock }, false, formAst)
+const quantityTag = parse(form).descriptor.template!.content.match(/<PassiveNumberInput\b[^>]*\/>/)![0]
+const quantityTemplate = compileTemplate({ source: quantityTag, filename: 'restock-quantity.vue', id: 'restock-quantity' })
+assert.deepEqual(quantityTemplate.errors, [])
+const quantityModule = ts.transpileModule(quantityTemplate.code, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
+const quantityExports: Record<string, any> = {}
+vm.runInNewContext(quantityModule, { exports: quantityExports, require: () => ({ ...vue, resolveComponent: () => 'PassiveNumberInput' }) })
+const numberAst = ts.createSourceFile('PassiveNumberInput.ts', parse(read('src/components/common/page-shared/PassiveNumberInput.vue')).descriptor.scriptSetup!.content, ts.ScriptTarget.Latest, true)
+const numberProps = vue.reactive({ modelValue: 5, disabled: false, readonly: false, min: 1, max: RESTOCK_MAX_QUANTITY, step: 1, precision: 0, stepStrictly: true })
+const numberGlobals: Record<string, any> = { props: numberProps }
+for (const name of ['toPrecision', 'clampValue', 'normalizeStepStrictly', 'normalizeNumberValue']) numberGlobals[name] = detailFunction(name, numberGlobals, false, numberAst)
+numberGlobals.commitValue = (value: number) => { numberProps.modelValue = value }
+const adjust = detailFunction('adjustValueByStep', numberGlobals, false, numberAst)
+for (const [state, value] of [[checkingLock, true], [creatingLock, true], [pendingLock, { quantity: 5 }]] as const) {
+  state.value = value as never
+  const vnode = quantityExports.render({ form: { quantity: numberProps.modelValue }, locked: locked.value, RESTOCK_MAX_QUANTITY }, [])
+  numberProps.disabled = vnode.props.disabled
+  assert.equal(numberProps.disabled, true, '锁定状态必须传递到数量控件')
+  adjust(-1); assert.equal(numberProps.modelValue, 5, '锁定时减号不能改变数量')
+  adjust(1); assert.equal(numberProps.modelValue, 5, '锁定时加号不能改变数量')
+  state.value = false as never
+  if (state === pendingLock) pendingLock.value = null
+}
+numberProps.disabled = quantityExports.render({ form: { quantity: 5 }, locked: locked.value, RESTOCK_MAX_QUANTITY }, []).props.disabled
+assert.equal(numberProps.disabled, false, '清除锁定后恢复编辑')
+adjust(1); assert.equal(numberProps.modelValue, 6)
+adjust(-1); assert.equal(numberProps.modelValue, 5)
+
+// 结果未知后重试实际提交函数，必须重用同一个载荷和请求键。
+const originalPayload = { productId: 'p1', skuId: 's1', quantity: 5, latestPickupAt: '2028-01-01T00:00:00+08:00', clientRequestId: 'request-1' }
+const pendingRetry = vue.shallowRef<any>(originalPayload), retryCreating = vue.ref(false), sentPayloads: any[] = []
+const submitRetry = detailFunction('submit', {
+  creating: retryCreating, checking: vue.ref(false), auth: { currentUser: { id: 'u1' } }, pendingSubmission: pendingRetry,
+  createClientRestockRequest: async (payload: any) => { sentPayloads.push(payload); throw new Error('timeout') },
+  normalizeRequestError: () => ({ status: 408 }), extractErrorMessage: String, showAppError: () => undefined,
+}, false, formAst)
+await submitRetry(); await submitRetry()
+assert.equal(sentPayloads.length, 2)
+assert.equal(sentPayloads[0], originalPayload)
+assert.equal(sentPayloads[1], originalPayload)
+assert.equal(sentPayloads[1].quantity, 5)
+assert.equal(sentPayloads[1].clientRequestId, 'request-1')
 // 执行商城真实 computed 和动作栏模板，验证切换时数量控件与缺货替换入口互斥。
 const mallAst = ts.createSourceFile('ClientMallView.ts', parse(mall).descriptor.scriptSetup!.content, ts.ScriptTarget.Latest, true)
 const isSingleRestockSku = detailFunction('isSingleRestockSku', { getRestockSkus }, false, mallAst)
