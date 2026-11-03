@@ -49,4 +49,17 @@ assert.ok(
   'build 作业应在登录时改用 Docker Hub 基础镜像，无凭据时保留公共 ECR 默认值',
 )
 
+// 启动期 MySQL 自动迁移按 dist 相对路径读取 backend/sql，三类后端镜像都必须把 sql 放在 dist 同级。
+const sqlPackagingRules = [
+  ['Dockerfile.onebox', 'COPY backend/sql /app/backend/sql'],
+  ['backend/Dockerfile', 'COPY --chown=node:node sql ./sql'],
+  ['backend/Dockerfile.mysql', 'COPY --from=build --chown=node:node /app/sql ./sql'],
+]
+for (const [filePath, copyInstruction] of sqlPackagingRules) {
+  assert.ok(
+    readFileSync(filePath, 'utf8').includes(copyInstruction),
+    `${filePath} 必须打包 MySQL 迁移脚本目录（${copyInstruction}），否则开启 DB_AUTO_MIGRATE 的启动会因缺脚本阻断`,
+  )
+}
+
 console.log('[verify:docker-base-image] Docker base image registry guard passed')
