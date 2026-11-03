@@ -1249,6 +1249,19 @@ async function verifyOrderSerialConcurrency(mysqlConfig: VerifyMysqlRuntimeConfi
     const replayedAfterAdoption = await runMysqlSchemaMigrations(AppDataSource)
     assert.deepEqual(replayedAfterAdoption, { appliedFiles: [], baselinedFiles: [] }, '接管后再次启动必须零执行')
 
+    // 人工执行 060 在删除旧索引前中断：新索引已在、契约通过，但基线不得登记 060，必须重放其幂等收尾删除旧索引。
+    await AppDataSource.query('DELETE FROM schema_migrations')
+    await AppDataSource.query('CREATE INDEX uk_inv_stocktake_item_sku ON inv_stocktake_item (stocktake_id, sku_id)')
+    const adoptedWithLeftoverIndex = await runMysqlSchemaMigrations(AppDataSource)
+    assert.ok(adoptedWithLeftoverIndex.appliedFiles.includes('060_sku_location_stock.sql'), '旧索引残留时必须重放 060 收尾')
+    assert.ok(!adoptedWithLeftoverIndex.baselinedFiles.includes('060_sku_location_stock.sql'), '旧索引残留时 060 不得登记为基线')
+    const leftoverIndexRows = await AppDataSource.query(
+      `SELECT INDEX_NAME FROM information_schema.STATISTICS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'inv_stocktake_item' AND INDEX_NAME = 'uk_inv_stocktake_item_sku'`,
+    ) as unknown[]
+    assert.equal(leftoverIndexRows.length, 0, '重放 060 后旧索引必须已删除')
+    await assertMysqlRequiredSchemaExists(AppDataSource)
+
     const createMergeCandidate = async (suffix: string) => {
       const preorderResult = await o2oPreorderService.submit(clientAuth, {
         clientRequestId: `db-concurrency-order-merge-${suffix}`,

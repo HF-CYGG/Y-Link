@@ -870,6 +870,19 @@ const MYSQL_REQUIRED_CHECKS: readonly MysqlRequiredCheck[] = [
   },
 ]
 
+/**
+ * 首次接管基线的附加不变量：启动契约只校验“新结构存在”，但部分脚本的收尾步骤是删除旧索引或放宽旧列，
+ * 人工执行若在收尾前中断，契约仍会通过。基线登记必须同时确认这些收尾已完成，否则交给脚本重放其幂等收尾。
+ * 这里只用于基线判定，不进入启动契约，避免改变未开启自动迁移部署的启动口径。
+ */
+const MYSQL_BASELINE_ABSENT_INDEXES: readonly { tableName: string; indexName: string; introducingScript: string }[] = [
+  { tableName: 'base_yz_series_seq_reservation', indexName: 'uk_yz_series_seq_reservation', introducingScript: '053_yz_reservation_series_code.sql' },
+  { tableName: 'inv_stocktake_item', indexName: 'uk_inv_stocktake_item_sku', introducingScript: '060_sku_location_stock.sql' },
+]
+const MYSQL_BASELINE_EXTRA_COLUMNS: readonly MysqlRequiredColumn[] = [
+  { tableName: 'client_user', columnName: 'department_name', introducingScript: '037_department_account_node_binding.sql', minCharacterMaximumLength: 271 },
+]
+
 // 不可重复执行的历史脚本。
 // 原先 006/008/014/015/016 因裸 ALTER TABLE ADD COLUMN 也在此列，已改造为
 // information_schema 判断 + PREPARE 动态 DDL，可安全重放，因此不再列入。
@@ -1290,7 +1303,7 @@ export async function reconcileMysqlOrderIdentifierNamespaces(dataSource: DataSo
  * 对异常同名表无操作后仍被误记为“已应用”。
  */
 async function assertAutoMigrationResult(queryRunner: QueryRunner, filename: string): Promise<void> {
-  const { issues } = await collectAutoMigrationContractIssues(queryRunner, filename, { includeTables: false })
+  const { issues } = await collectAutoMigrationContractIssues(queryRunner, filename, { forBaseline: false })
   if (issues.length === 0) return
   throw new Error(
     `[启动失败] 自动迁移 ${filename} 执行后结构仍不完整，未写入迁移记录：${issues.join('、')}。`
@@ -1300,25 +1313,32 @@ async function assertAutoMigrationResult(queryRunner: QueryRunner, filename: str
 
 /**
  * 按脚本收集其负责的契约结构缺口。verifiable=false 表示该脚本没有任何可只读核对的契约项，
- * 调用方不能据此推断脚本“已执行”；includeTables 只供首次接管基线使用，执行后断言保持原口径。
+ * 调用方不能据此推断脚本“已执行”；forBaseline 额外核对表存在与收尾不变量，只供首次接管基线使用，执行后断言保持原口径。
  */
 async function collectAutoMigrationContractIssues(
   queryRunner: QueryRunner,
   filename: string,
-  options: { includeTables: boolean },
+  options: { forBaseline: boolean },
 ): Promise<{ verifiable: boolean; issues: string[] }> {
-  const requiredTables = options.includeTables
+  const requiredTables = options.forBaseline
     ? Object.entries(TABLE_INTRODUCING_SCRIPT)
       .filter(([, script]) => script === filename)
       .map(([tableName]) => tableName)
     : []
-  const requiredColumns = MYSQL_REQUIRED_COLUMNS.filter((item) => item.introducingScript === filename)
+  const absentIndexes = options.forBaseline
+    ? MYSQL_BASELINE_ABSENT_INDEXES.filter((item) => item.introducingScript === filename)
+    : []
+  const requiredColumns = [
+    ...MYSQL_REQUIRED_COLUMNS,
+    ...(options.forBaseline ? MYSQL_BASELINE_EXTRA_COLUMNS : []),
+  ].filter((item) => item.introducingScript === filename)
   const requiredIndexes = MYSQL_REQUIRED_INDEXES.filter((item) => item.introducingScript === filename)
   const requiredForeignKeys = MYSQL_REQUIRED_FOREIGN_KEYS.filter((item) => item.introducingScript === filename)
   const requiredTriggers = MYSQL_REQUIRED_TRIGGERS.filter((item) => item.introducingScript === filename)
   const requiredChecks = MYSQL_REQUIRED_CHECKS.filter((item) => item.introducingScript === filename)
   if (
     requiredTables.length === 0
+    && absentIndexes.length === 0
     && requiredColumns.length === 0
     && requiredIndexes.length === 0
     && requiredForeignKeys.length === 0
@@ -1336,6 +1356,14 @@ async function collectAutoMigrationContractIssues(
     : []
   const existingTables = new Set(tableRows.map((row) => row.TABLE_NAME))
   const missingTables = requiredTables.filter((tableName) => !existingTables.has(tableName))
+  const leftoverIndexes: Array<MysqlTableRow & { INDEX_NAME: string }> = absentIndexes.length > 0
+    ? await queryRunner.query(
+        `SELECT DISTINCT TABLE_NAME, INDEX_NAME FROM information_schema.STATISTICS
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND (${absentIndexes.map(() => '(TABLE_NAME = ? AND INDEX_NAME = ?)').join(' OR ')})`,
+        absentIndexes.flatMap((item) => [item.tableName, item.indexName]),
+      )
+    : []
 
   const tableNames = [...new Set([
     ...requiredColumns.map((item) => item.tableName),
@@ -1433,6 +1461,7 @@ async function collectAutoMigrationContractIssues(
     verifiable: true,
     issues: [
       ...missingTables.map((tableName) => `表 ${tableName}`),
+      ...leftoverIndexes.map((row) => `旧索引 ${row.TABLE_NAME}.${row.INDEX_NAME} 仍存在`),
       ...missingColumns.map((item) => `字段 ${item.tableName}.${item.columnName}`),
       ...invalidColumnDefinitions.map((item) => item.label),
       ...invalidIndexes.map((item) => `索引 ${item.tableName}.${item.indexName}`),
@@ -1535,16 +1564,23 @@ async function baselineSatisfiedMigrations(
   queryRunner: QueryRunner,
   appliedSet: Set<string>,
 ): Promise<string[]> {
-  const baselinedFiles: string[] = []
+  const baselineEntries: Array<{ filename: string; checksum: string }> = []
   for (const filename of AUTO_MIGRATABLE_FILES) {
     if (!fs.existsSync(path.join(SQL_DIR, filename))) continue
-    const { verifiable, issues } = await collectAutoMigrationContractIssues(queryRunner, filename, { includeTables: true })
+    const { verifiable, issues } = await collectAutoMigrationContractIssues(queryRunner, filename, { forBaseline: true })
     if (!verifiable || issues.length > 0) continue
-    await recordAppliedMigration(queryRunner, filename, readMigrationFile(filename).checksum)
-    appliedSet.add(filename)
-    baselinedFiles.push(filename)
+    baselineEntries.push({ filename, checksum: readMigrationFile(filename).checksum })
   }
-  return baselinedFiles
+  if (baselineEntries.length === 0) return []
+  // 全部只读核对完成后用单条 INSERT 整批写入：InnoDB 单语句原子，中途失败不会留下“非空但不完整”的 tracking，
+  // 否则下次启动 tracking 非空不再走基线，会退回重放尚未登记的历史脚本。
+  await queryRunner.query(
+    `INSERT INTO ${MIGRATION_TABLE} (filename, checksum) VALUES ${baselineEntries.map(() => '(?, ?)').join(', ')}
+     ON DUPLICATE KEY UPDATE checksum = VALUES(checksum), applied_at = CURRENT_TIMESTAMP(6)`,
+    baselineEntries.flatMap((entry) => [entry.filename, entry.checksum]),
+  )
+  for (const entry of baselineEntries) appliedSet.add(entry.filename)
+  return baselineEntries.map((entry) => entry.filename)
 }
 
 interface MysqlTableRow {
