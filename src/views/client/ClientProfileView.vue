@@ -12,7 +12,7 @@
  *   通道状态以打开弹窗时读取的 capabilities 为准，读取失败按不可用处理；服务端会再次校验。
  */
 
-import { computed, onBeforeUnmount, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   CLIENT_PERSONAL_USERNAME_RULE_MESSAGE,
@@ -271,10 +271,29 @@ const openPasswordDialog = () => {
   }
 }
 
-const submitChangePassword = async () => {
+type ProfileAction = 'password' | 'profile'
+const profileRuns = new Map<ProfileAction, symbol>()
+let profilePageActive = true
+const invalidateProfileAction = (kind: ProfileAction) => {
+  profileRuns.delete(kind)
+  if (kind === 'password') submitting.value = false; else profileSubmitting.value = false
+}
+watch(passwordDialogVisible, () => invalidateProfileAction('password'), { flush: 'sync' })
+watch(profileDialogVisible, () => invalidateProfileAction('profile'), { flush: 'sync' })
+watch(() => clientAuthStore.currentUser?.id, () => { invalidateProfileAction('password'); invalidateProfileAction('profile') }, { flush: 'sync' })
+onBeforeUnmount(() => { profilePageActive = false; profileRuns.clear() })
+const withProfileAction = async (kind: ProfileAction, action: (valid: () => boolean) => Promise<void>) => {
+  if (profileRuns.has(kind)) return
+  const token = Symbol(), userId = clientAuthStore.currentUser?.id
+  profileRuns.set(kind, token)
+  const valid = () => profilePageActive && profileRuns.get(kind) === token && userId === clientAuthStore.currentUser?.id && (kind === 'password' ? passwordDialogVisible.value : profileDialogVisible.value)
+  if (kind === 'password') submitting.value = true; else profileSubmitting.value = true
+  try { await action(valid) } finally { if (profileRuns.get(kind) === token) invalidateProfileAction(kind) }
+}
+const submitChangePassword = () => withProfileAction('password', async (isCurrent) => {
   if (!formRef.value) return
   const valid = await formRef.value.validate().catch(() => false)
-  if (!valid) return
+  if (!valid || !isCurrent()) return
 
   try {
     submitting.value = true
@@ -282,22 +301,24 @@ const submitChangePassword = async () => {
       currentPassword: form.currentPassword,
       newPassword: form.newPassword,
     })
+    if (!isCurrent()) return
     showAppSuccess('密码修改成功，请重新登录')
     passwordDialogVisible.value = false
     clientAuthStore.clearAuthState()
     // 改密后强制重建客户端页面树，避免旧登录态壳层残留。
     redirectToClientLogin()
   } catch (error: any) {
+    if (!isCurrent()) return
     showAppError(error.message || '修改密码失败')
   } finally {
-    submitting.value = false
+    // 门禁由外层按操作代次释放。
   }
-}
+})
 
-const submitUpdateProfile = async () => {
+const submitUpdateProfile = () => withProfileAction('profile', async (isCurrent) => {
   if (!profileFormRef.value) return
   const valid = await profileFormRef.value.validate().catch(() => false)
-  if (!valid) return
+  if (!valid || !isCurrent()) return
 
   const normalizedPersonalUsername = normalizePersonalClientUsername(profileForm.username)
   const normalizedUsername = profileUsernameUnchanged.value || isTeacherAccount.value
@@ -334,21 +355,24 @@ const submitUpdateProfile = async () => {
       emailVerificationCode: emailVerificationMode.value === 'verify_new'
         ? profileForm.emailVerificationCode || undefined
         : undefined,
-    })
+    }, { isCurrent })
+    if (!isCurrent()) return
     if (profile.requiresRelogin) {
       showAppSuccess('资料更新成功，请重新登录')
       profileDialogVisible.value = false
+      clientAuthStore.clearAuthState()
       redirectToClientLogin()
       return
     }
     showAppSuccess('资料更新成功')
     profileDialogVisible.value = false
   } catch (error: any) {
+    if (!isCurrent()) return
     showAppError(error.message || '资料更新失败')
   } finally {
-    profileSubmitting.value = false
+    // 门禁由外层按操作代次释放。
   }
-}
+})
 
 const sendProfileCode = async (channel: 'mobile' | 'email') => {
   const target = channel === 'mobile' ? profileForm.mobile.trim() : profileForm.email.trim().toLowerCase()
