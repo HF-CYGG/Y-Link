@@ -14,7 +14,7 @@ import ClientProductSmallImage from './components/ClientProductSmallImage.vue'
  * - 若调整下单归属说明文案，请保持“前端只展示，服务端强制判定”的口径不变；
  * - 到店取货时间必须同时进入提交载荷与提交意图指纹，否则弱网重试会用同一请求键提交不同取货时间并被服务端判为冲突。
  */
-import { computed, onMounted, ref, watch } from 'vue'
+import { onActivated, onDeactivated, onBeforeUnmount, computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { ArrowLeft } from '@element-plus/icons-vue'
@@ -39,6 +39,7 @@ import {
 
 const props = defineProps<{
   standalone?: boolean
+  active?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -344,7 +345,16 @@ const orderTypeDescription = computed(() => {
     : '当前账号为个人账号，下单后自动按散客归属处理'
 })
 
+let checkoutActive = true
+watch(() => props.active, (active) => { if (active === false) invalidateCheckout(); else if (active === true) { checkoutActive = true; checkoutGeneration += 1 } }, { flush: 'sync' })
+let checkoutGeneration = 0
+const invalidateCheckout = () => { checkoutActive = false; checkoutGeneration += 1 }
+onBeforeUnmount(invalidateCheckout)
+onDeactivated(invalidateCheckout)
+onActivated(() => { checkoutActive = true })
+watch(() => clientAuthStore.currentUser?.id, () => { checkoutGeneration += 1 }, { flush: 'sync' })
 const handleBack = () => {
+  invalidateCheckout()
   if (props.standalone) {
     router.back()
   } else {
@@ -353,6 +363,10 @@ const handleBack = () => {
 }
 
 const handleSubmit = async () => {
+  if (!checkoutActive) return
+  const initiatingUserId = clientAuthStore.currentUser?.id
+  const generation = checkoutGeneration
+  const isCurrent = () => checkoutActive && generation === checkoutGeneration && initiatingUserId === clientAuthStore.currentUser?.id
   const normalizedPickupContact = isDepartmentOrder.value
     ? pickupContact.value.trim()
     : (pickupContact.value.trim() || resolveDefaultPickupContact())
@@ -413,7 +427,7 @@ const handleSubmit = async () => {
     qty: item.qty,
   }))
   const requestedIntentKey = buildClientPreorderSubmitIntentKey({
-    clientUserId: clientAuthStore.currentUser?.id,
+    clientUserId: initiatingUserId,
     clientOrderType: requestedClientOrderType,
     isSystemApplied: requestedIsSystemApplied,
           kingdeeVoucherNo: requestedKingdeeVoucherNo,
@@ -422,7 +436,7 @@ const handleSubmit = async () => {
     remark: submitRemark,
     items: requestedItemSnapshot,
   })
-  const activeSubmitLock = readActiveClientPreorderSubmitLock(clientAuthStore.currentUser?.id)
+  const activeSubmitLock = readActiveClientPreorderSubmitLock(initiatingUserId)
   let submitIntentKey = ''
   let submitRequestKey = ''
 
@@ -435,10 +449,11 @@ const handleSubmit = async () => {
       submitting.value = true
       try {
         // 提交前必须等待一次成功的最新目录刷新；失败或被取消时绝不能沿用旧快照提交。
-        const refreshResult = await refreshMallSnapshot()
+        const refreshResult = await refreshMallSnapshot({ isCurrent })
+        if (!isCurrent()) return
         const freshItemSnapshot = clientCartStore.createSelectedCheckoutSnapshot()
         const freshIntentKey = freshItemSnapshot ? buildClientPreorderSubmitIntentKey({
-          clientUserId: clientAuthStore.currentUser?.id,
+          clientUserId: initiatingUserId,
           clientOrderType: requestedClientOrderType,
           isSystemApplied: requestedIsSystemApplied,
           kingdeeVoucherNo: requestedKingdeeVoucherNo,
@@ -471,7 +486,7 @@ const handleSubmit = async () => {
         submitIntentKey = submitDecision.intentKey
         submitRequestKey = submitDecision.type === 'retry_pending'
           ? submitDecision.requestKey
-          : createClientPreorderSubmitLock(clientAuthStore.currentUser?.id, submitIntentKey)
+          : createClientPreorderSubmitLock(initiatingUserId, submitIntentKey)
         const result = await submitO2oPreorder({
           clientRequestId: submitRequestKey,
           isSystemApplied: requestedIsSystemApplied,
@@ -482,12 +497,13 @@ const handleSubmit = async () => {
           items: submitItemSnapshot,
         })
 
+        if (!isCurrent()) return
         submitItemSnapshot.forEach((item) => {
           clientCartStore.removeItem(String(item.skuId || item.productId))
         })
         clientCatalogStore.applyPreorderSubmission(submitItemSnapshot)
         clientCartStore.syncWithCatalog(clientCatalogStore.products)
-        clearClientPreorderSubmitLock(clientAuthStore.currentUser?.id, submitRequestKey)
+        clearClientPreorderSubmitLock(initiatingUserId, submitRequestKey)
 
         showAppSuccess('预订单提交成功')
         if (!props.standalone) {
@@ -495,13 +511,14 @@ const handleSubmit = async () => {
         }
         await router.replace(`/client/orders/${result.order.id}`)
       } catch (error) {
+        if (!isCurrent()) return
         const normalizedError = normalizeRequestError(error, '提交失败，请稍后再试')
         if (AMBIGUOUS_PREORDER_SUBMIT_STATUS_SET.has(normalizedError.status)) {
-          refreshClientPreorderSubmitLock(clientAuthStore.currentUser?.id, submitIntentKey, submitRequestKey)
+          refreshClientPreorderSubmitLock(initiatingUserId, submitIntentKey, submitRequestKey)
           showAppWarning('提交结果确认中，请勿重复提交。可前往“我的订单”查询是否已创建成功。')
           return
         }
-        clearClientPreorderSubmitLock(clientAuthStore.currentUser?.id, submitRequestKey)
+        clearClientPreorderSubmitLock(initiatingUserId, submitRequestKey)
         void showCriticalErrorDialog(normalizedError, {
           title: '预订单提交失败',
           fallback: '提交失败，请稍后再试',

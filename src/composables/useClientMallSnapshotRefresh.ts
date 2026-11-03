@@ -12,11 +12,12 @@
 import { ref } from 'vue'
 import { getO2oMallProducts } from '@/api/modules/o2o'
 import { useStableRequest } from '@/composables/useStableRequest'
-import { useClientCartStore, useClientCatalogStore } from '@/store'
+import { useClientAuthStore, useClientCartStore, useClientCatalogStore } from '@/store'
 import pinia from '@/store/pinia'
 import { normalizeRequestError, type AppRequestError } from '@/utils/error'
 
 export const useClientMallSnapshotRefresh = () => {
+  const auth = useClientAuthStore(pinia)
   const clientCartStore = useClientCartStore(pinia)
   const clientCatalogStore = useClientCatalogStore(pinia)
   const { runLatest, cancel } = useStableRequest()
@@ -28,13 +29,15 @@ export const useClientMallSnapshotRefresh = () => {
    * - 失败时返回归一化错误对象，由页面层自行决定是否展示；
    * - 不额外抛错，避免辅助刷新影响主流程。
    */
-  const refreshMallSnapshot = async (): Promise<{ success: boolean; error: AppRequestError | null }> => {
+  const refreshMallSnapshot = async (context?: { isCurrent: () => boolean }): Promise<{ success: boolean; error: AppRequestError | null }> => {
+    const userId = auth.currentUser?.id
     let requestError: AppRequestError | null = null
     let succeeded = false
     syncing.value = true
     await runLatest({
       executor: (signal) => getO2oMallProducts({ signal }),
       onSuccess: (catalog) => {
+        if (userId !== auth.currentUser?.id || (context && !context.isCurrent())) return
         clientCatalogStore.setProducts(catalog)
         clientCartStore.syncWithCatalog(catalog.list)
         succeeded = true
