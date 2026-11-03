@@ -96,6 +96,8 @@ COPY docker/nginx/configure-proxy-boundary.sh /usr/local/bin/ylink-proxy-boundar
 COPY --from=backend-build /backend/dist /app/backend/dist
 COPY --from=backend-prod-deps /backend/node_modules /app/backend/node_modules
 COPY backend/package.json /app/backend/package.json
+# 启动期 MySQL 自动迁移与订单编号领养按 dist 相对路径读取 backend/sql，缺失会阻断开启 DB_AUTO_MIGRATE 的启动。
+COPY backend/sql /app/backend/sql
 
 COPY docker/onebox/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

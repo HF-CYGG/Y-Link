@@ -33,6 +33,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 import type { DataSource, EntityManager, QueryRunner } from 'typeorm'
 import { env } from './env.js'
 import {
@@ -41,7 +42,9 @@ import {
   type OrderBusinessNoRetirementBackupPublishOptions,
 } from './order-business-no-retirement-backup.js'
 
-const SQL_DIR = path.resolve(process.cwd(), 'sql')
+// 按模块位置定位 backend/sql，而不是依赖进程工作目录：onebox 以 /app 为工作目录启动 /app/backend/dist，
+// 按 cwd 解析会指向不存在的 /app/sql；源码（src/config）与产物（dist/config）向上两级都是后端根目录。
+const SQL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../sql')
 const MIGRATION_TABLE = 'schema_migrations'
 const ORDER_BUSINESS_NO_REUSE_MIGRATION = '054_order_business_no_reuse.sql'
 const SUPERSEDED_AUTO_MIGRATIONS = new Map<string, string>([
@@ -1555,6 +1558,14 @@ async function applyPendingMigrations(
   )
   const appliedSet = new Set(appliedRows.map((row) => row.filename))
   const appliedFiles: string[] = []
+  // 镜像漏打包迁移脚本时必须在任何基线登记与执行之前明确失败，不能逐个静默跳过后在半路才暴露。
+  const missingScripts = AUTO_MIGRATABLE_FILES.filter((filename) => !fs.existsSync(path.join(SQL_DIR, filename)))
+  if (missingScripts.length > 0) {
+    throw new Error(
+      `[启动失败] 已开启 DB_AUTO_MIGRATE，但运行环境缺少 ${missingScripts.length} 个 MySQL 迁移脚本`
+      + `（目录 ${SQL_DIR}，首个缺失：${missingScripts[0]}）。请确认镜像已包含 backend/sql，未写入任何迁移记录。`,
+    )
+  }
   // tracking 为空且已有账号数据，说明是人工执行脚本的存量库首次开启自动迁移：先登记已具备的结构再执行缺口。
   // 全新空库仍按白名单完整执行，保持 042 建表、056 备份清退等首装路径不变。
   const baselinedFiles = appliedSet.size === 0 && await hasExistingDeploymentData(queryRunner)
