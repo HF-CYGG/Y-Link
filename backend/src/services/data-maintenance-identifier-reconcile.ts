@@ -120,6 +120,10 @@ export async function reconcileOrderIdentifierConfigsAfterImport(
   const outboundRows = await manager.query(
     'SELECT show_no AS showNo, business_no AS businessNo, order_type AS orderType FROM biz_outbound_order',
   ) as Array<{ showNo: string; businessNo: string; orderType: string }>
+  // 部门预订单预留的业务号同样占用流水，游标校准不能低于它们，否则后续分配会撞上已打印的号。
+  outboundRows.push(...await manager.query(
+    `SELECT '' AS showNo, reserved_business_no AS businessNo, client_order_type AS orderType FROM o2o_preorder WHERE reserved_business_no IS NOT NULL`,
+  ) as Array<{ showNo: string; businessNo: string; orderType: string }>)
   const preorderRows = await manager.query(
     'SELECT show_no AS preorderNo, client_order_type AS orderType FROM o2o_preorder',
   ) as Array<{ preorderNo: string; orderType: string }>

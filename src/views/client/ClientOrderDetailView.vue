@@ -196,7 +196,8 @@ const orderTypeLabel = computed(() => {
   return detail.value ? ORDER_TYPE_LABEL_MAP[detail.value.order.clientOrderType] : '散客'
 })
 
-const shouldShowVoucherButton = computed(() => Boolean(detail.value?.order.customerOrderBusinessNo))
+// 部门单下单即预留正式业务号，待核销阶段也可打印；散客单不提供正式出库单，已取消订单不再下发预留号。
+const shouldShowVoucherButton = computed(() => detail.value?.order.clientOrderType === 'department' && Boolean(detail.value.order.customerOrderBusinessNo))
 const displayPreorderNo = computed(() => {
   if (!detail.value) {
     return ''
@@ -1252,9 +1253,10 @@ const handleSubmitOrderEdit = async () => {
     return
   }
 
+  const wasCustomerOrderPrinted = Boolean(detail.value.order.hasCustomerOrder)
   try {
     await ElMessageBox.confirm(
-      `确认修改预订单“${displayPreorderNo.value}”吗？保存后将按最新商品和数量重算预订库存。`,
+      `确认修改预订单“${displayPreorderNo.value}”吗？保存后将按最新商品和数量重算预订库存。${wasCustomerOrderPrinted ? '该单已打印过正式出库单，内容变更后旧单作废，需重新打印。' : ''}`,
       '修改订单',
       {
         type: 'warning',
@@ -1291,7 +1293,11 @@ const handleSubmitOrderEdit = async () => {
       reason: 'updated',
       sourceId: clientOrderRefreshSourceId,
     })
-    showAppSuccess('订单修改成功')
+    if (wasCustomerOrderPrinted && !nextDetail.order.hasCustomerOrder) {
+      showAppWarning('订单修改成功，原打印的正式出库单已作废，请重新打印')
+    } else {
+      showAppSuccess('订单修改成功')
+    }
   } catch (error) {
     const normalizedError = normalizeRequestError(error, '订单修改失败')
     void showCriticalErrorDialog(normalizedError, {

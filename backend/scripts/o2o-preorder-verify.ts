@@ -353,7 +353,18 @@ const run = async () => {
     SCRIPT_PICKUP_AT,
     '部门单必须原样保存客户端选择的到店取货时间',
   )
+  const cancelledReservedBusinessNo = departmentOwnedResult.order.customerOrderBusinessNo
+  assert.match(cancelledReservedBusinessNo ?? '', /^hyyzjd\d+$/, '部门单下单即应预留 hyyzjd 正式业务号')
   await o2oPreorderService.cancelMyOrder(clientAuth, departmentOwnedResult.order.id)
+  assert.equal(
+    (await o2oPreorderService.getMyOrderDetail(clientAuth, departmentOwnedResult.order.id)).order.customerOrderBusinessNo,
+    null,
+    '已取消预订单不再对外展示预留业务号',
+  )
+  assert.ok(
+    (await orderBusinessNoService.inspectConfirmed(cancelledReservedBusinessNo ?? '', 'department', AppDataSource.manager)).blockingReason,
+    '已取消预订单的预留号需继续占用，避免已打印纸质单与新单撞号',
+  )
   log('服务端会按部门账号强制判定订单归属通过')
 
   const departmentSnapshotPreorder = await submitPreorderWithPickup(clientAuth, {
@@ -368,6 +379,19 @@ const run = async () => {
   assert.equal(departmentSnapshotPreorder.order.departmentNameSnapshot, '脚本部门-A')
   assert.ok(departmentSnapshotPreorder.order.staffNoSnapshot)
   assert.equal(departmentSnapshotPreorder.order.pickupContact, '脚本提货人-部门快照')
+  const reservedBusinessNo = departmentSnapshotPreorder.order.customerOrderBusinessNo ?? ''
+  assert.match(reservedBusinessNo, /^hyyzjd\d+$/, '待核销部门单必须返回预留业务号，核销前才能打印正式出库单')
+  assert.ok(
+    (await orderBusinessNoService.inspectConfirmed(reservedBusinessNo, 'department', AppDataSource.manager)).blockingReason,
+    '人工改单不得占用预订单已预留的业务号',
+  )
+  const reservedSuggestion = await orderBusinessNoService.suggestForAmendment('department', 1, [], AppDataSource.manager)
+  assert.notEqual(reservedSuggestion.businessNos[0], reservedBusinessNo, '改单建议号不得落在预留号上')
+  const reservedNoSearchResult = await o2oPreorderService.listMyOrders(clientAuth, { page: 1, pageSize: 10, keyword: reservedBusinessNo })
+  assert.ok(
+    reservedNoSearchResult.list.some((row) => row.id === departmentSnapshotPreorder.order.id),
+    '按纸质单上的预留业务号必须能查到待核销预订单',
+  )
   try {
     await preorderRepo.update({ id: departmentSnapshotPreorder.order.id }, { pickupContact: null })
     const historicalDetail = await o2oPreorderService.getMyOrderDetail(clientAuth, departmentSnapshotPreorder.order.id)
@@ -793,7 +817,15 @@ const run = async () => {
     adminAuth = await authService.resolveAuthUserByToken(adminLogin.token)
   }
   const verifyActor = adminAuth ?? scriptAdminActor
+  const reservedDetailBeforeVerify = await o2oPreorderService.detailById(departmentSnapshotPreorder.order.id, verifyActor)
+  assert.equal(reservedDetailBeforeVerify.order.customerOrderBusinessNo, reservedBusinessNo)
+  assert.equal(reservedDetailBeforeVerify.order.customerOrderSystemNo, null, '正式单生成前不得虚构技术追溯号')
   const departmentSnapshotVerified = await o2oPreorderService.verifyByCode(departmentSnapshotPreorder.order.verifyCode, verifyActor)
+  assert.equal(
+    (await preorderRepo.findOneByOrFail({ id: departmentSnapshotPreorder.order.id })).reservedBusinessNo,
+    null,
+    '正式单继承后必须清空预留，避免一个号占用两处',
+  )
   const printedDepartmentOrder = await o2oPreorderService.markCustomerOrderPrintedByClient(clientAuth, departmentSnapshotPreorder.order.id)
   assert.equal(printedDepartmentOrder.detail.order.hasCustomerOrder, true, '已核销的有效部门订单仍应支持补打出库单')
   assert.equal((await o2oPreorderService.markCustomerOrderPrintedByClient(clientAuth, departmentSnapshotPreorder.order.id)).printedNow, false, '重复打印上报必须幂等')
@@ -874,7 +906,46 @@ const run = async () => {
     departmentSnapshotOutboundOrder.businessNo,
     'O2O 仍以原预订单关联正式单，但客户端应展示正式单据 businessNo',
   )
+  assert.equal(departmentSnapshotOutboundOrder.businessNo, reservedBusinessNo, '核销生成的正式单必须继承下单时预留的业务号')
   log('部门订单下单快照会稳定继承到正式出库单通过')
+
+  const reprintPreorder = await submitPreorderWithPickup(clientAuth, {
+    clientRequestId: 'o2o-verify-reprint-after-edit-01',
+    items: [{ productId: product.id, qty: 1 }],
+    remark: '改单作废打印标记验证',
+    isSystemApplied: false,
+    pickupContact: '脚本提货人-重新打印',
+  })
+  const reprintBusinessNo = reprintPreorder.order.customerOrderBusinessNo
+  const markReprinted = () => o2oPreorderService.markCustomerOrderPrintedByClient(clientAuth, reprintPreorder.order.id)
+  await markReprinted()
+  const unchangedEdit = await o2oPreorderService.updateMyOrder(clientAuth, reprintPreorder.order.id, {
+    items: [{ productId: product.id, qty: 1 }],
+    remark: '改单作废打印标记验证',
+  })
+  assert.equal(unchangedEdit?.order.hasCustomerOrder, true, '内容未变化的保存不得作废打印标记')
+  const changedEdit = await o2oPreorderService.updateMyOrder(clientAuth, reprintPreorder.order.id, {
+    items: [{ productId: product.id, qty: 2 }],
+    remark: '改单作废打印标记验证',
+  })
+  assert.equal(changedEdit?.order.hasCustomerOrder, false, '客户改单后旧纸质单已过期，打印标记必须作废')
+  assert.equal(changedEdit?.order.customerOrderBusinessNo, reprintBusinessNo, '改单不换业务号')
+  assert.equal((await markReprinted()).printedNow, true, '作废后重新打印必须能再次记录')
+  const onsiteEdit = await o2oPreorderService.updateOrderOnsite(verifyActor, {
+    orderId: reprintPreorder.order.id,
+    items: [{ productId: product.id, qty: 1 }],
+    remark: '改单作废打印标记验证',
+  })
+  assert.equal(onsiteEdit?.order.hasCustomerOrder, false, '现场改单同样必须作废打印标记')
+  assert.equal(onsiteEdit?.order.customerOrderBusinessNo, reprintBusinessNo, '现场改单不换业务号')
+  await markReprinted()
+  const remarkEdit = await o2oPreorderService.updateMyOrder(clientAuth, reprintPreorder.order.id, {
+    items: [{ productId: product.id, qty: 1 }],
+    remark: '仅修改备注',
+  })
+  assert.equal(remarkEdit?.order.hasCustomerOrder, false, '备注会印在出库单上，变更后同样作废打印标记')
+  await o2oPreorderService.cancelMyOrder(clientAuth, reprintPreorder.order.id)
+  log('打印后改单作废打印标记且不换业务号通过')
 
   const verifiedPreorder = await submitPreorderWithPickup(clientAuth, {
     clientRequestId: 'o2o-verify-completed-order-001',
@@ -883,8 +954,27 @@ const run = async () => {
     isSystemApplied: false,
     pickupContact: '脚本提货人-C',
   })
+  // 模拟升级前已下单的待核销部门单：补号只覆盖缺号订单，已有预留号的不变。
+  const prePrintedBusinessNo = verifiedPreorder.order.customerOrderBusinessNo
+  await preorderRepo.update({ id: verifiedPreorder.order.id }, { reservedBusinessNo: null })
+  await o2oPreorderService.backfillPendingDepartmentBusinessNos()
+  const backfilledBusinessNo = (await preorderRepo.findOneByOrFail({ id: verifiedPreorder.order.id })).reservedBusinessNo
+  assert.match(backfilledBusinessNo ?? '', /^hyyzjd\d+$/, '历史待核销部门单启动后必须补上预留业务号')
+  await preorderRepo.update({ id: verifiedPreorder.order.id }, { reservedBusinessNo: prePrintedBusinessNo })
+  assert.equal(
+    (await o2oPreorderService.backfillPendingDepartmentBusinessNos()).backfilledCount,
+    0,
+    '补号必须幂等，已有预留号的订单不得再占新号',
+  )
+  assert.equal(
+    (await o2oPreorderService.markCustomerOrderPrintedByClient(clientAuth, verifiedPreorder.order.id)).printedNow,
+    true,
+    '待核销部门单必须可打印正式出库单',
+  )
   const verified = await o2oPreorderService.verifyByCode(verifiedPreorder.order.verifyCode, verifyActor)
   const verifiedDetail = assertPreorderVerifyDetail(verified)
+  assert.equal(verifiedDetail.order.customerOrderBusinessNo, prePrintedBusinessNo, '核销前后打印的出库单必须同号')
+  assert.equal(verifiedDetail.order.hasCustomerOrder, true, '核销前打印的证据必须继承到核销后')
   assert.equal(verifiedDetail.order.status, 'verified')
   const verifiedOutboundOrder = await outboundOrderRepo.findOne({
     where: { idempotencyKey: `o2o-preorder-verify:${verifiedPreorder.order.id}` },

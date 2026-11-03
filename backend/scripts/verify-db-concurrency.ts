@@ -1223,6 +1223,71 @@ async function verifyOrderSerialConcurrency(mysqlConfig: VerifyMysqlRuntimeConfi
     assert.deepEqual(replayedOrderMergeMigration.appliedFiles, ['045_order_merge_governance.sql'])
     await assertMysqlRequiredSchemaExists(AppDataSource)
 
+    // 人工执行脚本的存量库首次开启自动迁移：tracking 为空、已有账号且只缺最新脚本时，只补缺口，已就位脚本仅登记基线。
+    await AppDataSource.query('DELETE FROM schema_migrations')
+    await AppDataSource.query('DROP INDEX uk_o2o_preorder_reserved_business_no ON o2o_preorder')
+    await AppDataSource.query('ALTER TABLE o2o_preorder DROP COLUMN reserved_business_no')
+    const adoptedLegacyMigration = await runMysqlSchemaMigrations(AppDataSource)
+    assert.deepEqual(
+      [...adoptedLegacyMigration.appliedFiles].sort(),
+      [
+        '055_order_identifier_namespaces.sql',
+        '056_disable_order_business_no_permanent_occupancy.sql',
+        '063_o2o_preorder_reserved_business_no.sql',
+      ],
+      '存量库首次接管只执行结构缺口与无契约项的守卫脚本，不得在历史数据上重放 042 等已就位脚本',
+    )
+    assert.ok(adoptedLegacyMigration.baselinedFiles.includes('042_order_business_no_amendment.sql'), '已就位的 042 必须仅登记基线')
+    assert.ok(!adoptedLegacyMigration.baselinedFiles.includes('063_o2o_preorder_reserved_business_no.sql'), '缺结构的脚本不得被登记为基线')
+    await assertMysqlRequiredSchemaExists(AppDataSource)
+    const adoptedTrackingRows = await AppDataSource.query('SELECT filename FROM schema_migrations') as Array<{ filename: string }>
+    assert.equal(
+      adoptedTrackingRows.length,
+      adoptedLegacyMigration.appliedFiles.length + adoptedLegacyMigration.baselinedFiles.length,
+      '基线登记与真实执行的脚本都必须写入 tracking',
+    )
+    const replayedAfterAdoption = await runMysqlSchemaMigrations(AppDataSource)
+    assert.deepEqual(replayedAfterAdoption, { appliedFiles: [], baselinedFiles: [] }, '接管后再次启动必须零执行')
+
+    // 人工执行 060 在删除旧索引前中断：新索引已在、契约通过，但基线不得登记 060，必须重放其幂等收尾删除旧索引。
+    await AppDataSource.query('DELETE FROM schema_migrations')
+    await AppDataSource.query('CREATE INDEX uk_inv_stocktake_item_sku ON inv_stocktake_item (stocktake_id, sku_id)')
+    const adoptedWithLeftoverIndex = await runMysqlSchemaMigrations(AppDataSource)
+    assert.ok(adoptedWithLeftoverIndex.appliedFiles.includes('060_sku_location_stock.sql'), '旧索引残留时必须重放 060 收尾')
+    assert.ok(!adoptedWithLeftoverIndex.baselinedFiles.includes('060_sku_location_stock.sql'), '旧索引残留时 060 不得登记为基线')
+    const leftoverIndexRows = await AppDataSource.query(
+      `SELECT INDEX_NAME FROM information_schema.STATISTICS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'inv_stocktake_item' AND INDEX_NAME = 'uk_inv_stocktake_item_sku'`,
+    ) as unknown[]
+    assert.equal(leftoverIndexRows.length, 0, '重放 060 后旧索引必须已删除')
+    await assertMysqlRequiredSchemaExists(AppDataSource)
+
+    // 人工执行 043 在数据回填前中断：结构全部就位，但存在未规范化的 inventory_mode，基线不得登记 043，必须重放回填。
+    // 检查约束已限定取值，因此模拟 043 回填前的另一种存量形态：O2O 核销出库单仍是 legacy_none。
+    const [pendingInventoryModeOrder] = await AppDataSource.query(
+      `SELECT id, inventory_mode AS inventoryMode, idempotency_key AS idempotencyKey FROM biz_outbound_order
+       ORDER BY id LIMIT 1`,
+    ) as Array<{ id: string; inventoryMode: string; idempotencyKey: string | null }>
+    assert.ok(pendingInventoryModeOrder, '前序场景应已产生出库单')
+    await AppDataSource.query('DELETE FROM schema_migrations')
+    await AppDataSource.query(
+      "UPDATE biz_outbound_order SET inventory_mode = 'legacy_none', idempotency_key = ? WHERE id = ?",
+      [`o2o-preorder-verify:baseline-${randomUUID()}`, pendingInventoryModeOrder.id],
+    )
+    const adoptedWithPendingBackfill = await runMysqlSchemaMigrations(AppDataSource)
+    assert.ok(adoptedWithPendingBackfill.appliedFiles.includes('043_order_content_inventory_mode.sql'), '数据回填未完成时必须重放 043')
+    assert.ok(!adoptedWithPendingBackfill.baselinedFiles.includes('043_order_content_inventory_mode.sql'), '数据回填未完成时 043 不得登记为基线')
+    const [normalizedOrder] = await AppDataSource.query(
+      'SELECT inventory_mode AS inventoryMode FROM biz_outbound_order WHERE id = ?',
+      [pendingInventoryModeOrder.id],
+    ) as Array<{ inventoryMode: string }>
+    assert.equal(normalizedOrder?.inventoryMode, 'o2o_preapplied', '重放 043 后 O2O 核销出库单的 inventory_mode 必须被回填')
+    await AppDataSource.query('UPDATE biz_outbound_order SET inventory_mode = ?, idempotency_key = ? WHERE id = ?', [
+      pendingInventoryModeOrder.inventoryMode,
+      pendingInventoryModeOrder.idempotencyKey,
+      pendingInventoryModeOrder.id,
+    ])
+
     const createMergeCandidate = async (suffix: string) => {
       const preorderResult = await o2oPreorderService.submit(clientAuth, {
         clientRequestId: `db-concurrency-order-merge-${suffix}`,

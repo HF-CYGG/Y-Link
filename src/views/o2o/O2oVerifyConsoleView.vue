@@ -688,6 +688,7 @@ const handleSubmitOnsiteAdjust = async () => {
   }
 
   onsiteAdjustSubmitting.value = true
+  const wasCustomerOrderPrinted = Boolean(preorderDetail.value.order.hasCustomerOrder)
   try {
     const nextDetail = await updateO2oOrderOnsite(preorderDetail.value.order.id, {
       remark: onsiteRemark.value.trim() || undefined,
@@ -700,7 +701,11 @@ const handleSubmitOnsiteAdjust = async () => {
     replacePreorderDetail(nextDetail)
     notifyPreorderChanged(nextDetail.order.id, 'updated')
     onsiteAdjustDialogVisible.value = false
-    showAppSuccess('现场改单已保存')
+    if (wasCustomerOrderPrinted && !nextDetail.order.hasCustomerOrder) {
+      showAppWarning('现场改单已保存，客户此前打印的出库单已作废，需重新打印或补交')
+    } else {
+      showAppSuccess('现场改单已保存')
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : '现场改单失败，请稍后重试'
     showAppError(message)

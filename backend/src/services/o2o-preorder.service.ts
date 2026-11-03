@@ -8,7 +8,7 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import { kingdeeRegistrationView, normalizeKingdeeVoucherNo, type KingdeeStatus } from '../utils/kingdee-registration.js'
-import { Brackets, type EntityManager, In, Not, type SelectQueryBuilder } from 'typeorm'
+import { Brackets, type EntityManager, In, IsNull, Not, type SelectQueryBuilder } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { databaseOperationGate } from '../database/operation-gate.js'
@@ -84,6 +84,14 @@ import { readSharedCacheRaw, sharedCacheKey, writeSharedCacheRaw } from '../redi
 const O2O_PICKUP_AT_PAST_TOLERANCE_MS = 5 * 60 * 1000
 /** 未开启自动取消时，到店取货时间最远允许选择的范围。 */
 const O2O_PICKUP_AT_MAX_AHEAD_MS = 30 * 24 * 60 * 60 * 1000
+
+/** 预订单关联的正式单号；待核销部门单只有预留业务号，技术追溯号在正式单生成前为 null。 */
+interface CustomerOrderIdentifiers {
+  systemNo: string | null
+  businessNo: string
+  originalSystemNo: string | null
+  originalBusinessNo: string
+}
 
 export interface SubmitPreorderItemInput {
   productId: string | number
@@ -1287,7 +1295,14 @@ class O2oPreorderService {
     const departmentNameSnapshot = this.resolveDepartmentNameSnapshotFromPreorder(input.preorder)
     const orderUuid = generateOrderUuid()
     const systemNo = await orderSerialService.generateSystemNo(outboundOrderType, manager)
-    const businessNo = await orderBusinessNoService.allocate(outboundOrderType, orderUuid, manager)
+    // 部门单继承下单时预留的业务号，确保核销前打印的纸质单与正式单同号；无预留的散客单才在此分配。
+    const reservedBusinessNo = input.preorder.reservedBusinessNo?.trim() || null
+    if (reservedBusinessNo) {
+      await orderBusinessNoService.assertInheritableByPreorder(reservedBusinessNo, orderUuid, String(input.preorder.id), manager)
+      input.preorder.reservedBusinessNo = null
+      await manager.getRepository(O2oPreorder).save(input.preorder)
+    }
+    const businessNo = reservedBusinessNo ?? await orderBusinessNoService.allocate(outboundOrderType, orderUuid, manager)
 
     let totalQty = 0
     let totalAmountCents = 0
@@ -1655,19 +1670,15 @@ class O2oPreorderService {
   }
 
   // 详细注释：批量回查正式出库单号，供“我的订单列表”和“订单详情”共用。
-  // - 未核销或尚未生成正式出库单时返回空映射；
+  // - 尚未生成正式出库单的待核销部门单返回下单时预留的业务号，技术追溯号此时仍为空；
+  // - 已撤单、超时的预订单不再对外展示预留号，但号本身继续占用；
   // - 命中后以预订单 ID 为键，便于前端页面继续保留原订单实体，同时替换展示单号。
   private async resolveCustomerOrderIdentifierMap(
     preorderIds: string[],
     manager: EntityManager = AppDataSource.manager,
   ) {
     if (!preorderIds.length) {
-      return new Map<string, {
-        systemNo: string
-        businessNo: string
-        originalSystemNo: string
-        originalBusinessNo: string
-      }>()
+      return new Map<string, CustomerOrderIdentifiers>()
     }
     const outboundOrders = await manager.getRepository(BizOutboundOrder).find({
       select: ['id', 'sourceDocId', 'systemNo', 'businessNo'],
@@ -1694,12 +1705,7 @@ class O2oPreorderService {
       String(relation.sourceOrderId).trim(),
       String(relation.parentOrderId).trim(),
     ]))
-    const customerOrderIdentifierMap = new Map<string, {
-      systemNo: string
-      businessNo: string
-      originalSystemNo: string
-      originalBusinessNo: string
-    }>()
+    const customerOrderIdentifierMap = new Map<string, CustomerOrderIdentifiers>()
     outboundOrders.forEach((outboundOrder) => {
       const preorderId = String(outboundOrder.sourceDocId ?? '').trim()
       if (!preorderId || !outboundOrder.systemNo?.trim()) {
@@ -1713,6 +1719,20 @@ class O2oPreorderService {
         businessNo: currentOrder.businessNo?.trim() || '',
         originalSystemNo: outboundOrder.systemNo.trim(),
         originalBusinessNo: outboundOrder.businessNo?.trim() || '',
+      })
+    })
+    const reservedPreorders = await manager.getRepository(O2oPreorder).find({
+      select: ['id', 'reservedBusinessNo'],
+      where: { id: In(preorderIds), status: 'pending', reservedBusinessNo: Not(IsNull()) },
+    })
+    reservedPreorders.forEach((preorder) => {
+      const reservedBusinessNo = preorder.reservedBusinessNo?.trim()
+      if (!reservedBusinessNo || customerOrderIdentifierMap.has(String(preorder.id))) return
+      customerOrderIdentifierMap.set(String(preorder.id), {
+        systemNo: null,
+        businessNo: reservedBusinessNo,
+        originalSystemNo: null,
+        originalBusinessNo: reservedBusinessNo,
       })
     })
     return customerOrderIdentifierMap
@@ -1769,6 +1789,14 @@ class O2oPreorderService {
       }
       preorderIdSet.add(preorderId)
     })
+    // 客户持核销前打印的纸质单到店时，门店要能按单上的业务号查到待核销预订单。
+    const reservedRows = await AppDataSource.getRepository(O2oPreorder)
+      .createQueryBuilder('preorder')
+      .select('preorder.id', 'preorderId')
+      .where('preorder.status = :status', { status: 'pending' })
+      .andWhere(String.raw`preorder.reservedBusinessNo LIKE :reservedPrefix ESCAPE '\'`, { reservedPrefix: `${escapedKeyword}%` })
+      .getRawMany<{ preorderId: string }>()
+    reservedRows.forEach((row) => preorderIdSet.add(String(row.preorderId).trim()))
     return [...preorderIdSet]
   }
 
@@ -2556,12 +2584,7 @@ class O2oPreorderService {
 
   private resolveMatchedPreorderIdentifier(
     preorder: O2oPreorder,
-    customerOrderNumbers: {
-      systemNo: string
-      businessNo: string
-      originalSystemNo: string
-      originalBusinessNo: string
-    } | null,
+    customerOrderNumbers: CustomerOrderIdentifiers | null,
     keyword?: string,
     exposeSystemNo = true,
   ): Pick<O2oPreorderSummaryView, 'matchedIdentifierType' | 'matchedIdentifierValue'> {
@@ -3077,9 +3100,14 @@ class O2oPreorderService {
           ? this.assertDepartmentPickupAt(normalizedPickupAt, timeoutAt, o2oRules.autoCancelHours)
           : null
         const preorderNo = await this.generatePreorderNo(normalizedClientOrderType, manager)
+        // 部门单下单即预留正式业务号，供核销前打印；放在库存行锁之后占号，与核销链路的加锁顺序一致，事务失败时游标一并回滚。
+        const reservedBusinessNo = normalizedClientOrderType === 'department'
+          ? await orderBusinessNoService.allocate('department', generateOrderUuid(), manager)
+          : null
         const savedOrder = await preorderRepo.save(
           preorderRepo.create({
             preorderNo,
+            reservedBusinessNo,
             clientUserId: auth.userId,
             clientRequestId: normalizedClientRequestId,
             clientRequestHash,
@@ -3404,6 +3432,31 @@ class O2oPreorderService {
     }
   }
 
+  /** 汇总出库单纸面承载的改单可变内容；价格按数值比较，避免不同数据库的小数格式差异造成误判。 */
+  private buildVoucherContentFingerprint(items: O2oPreorderItem[], remark: string | null) {
+    const rows = items
+      .filter((item) => Number(item.qty ?? 0) > 0)
+      .map((item) => [this.buildPreorderItemKey(item), Number(item.qty), Number(item.unitPrice ?? 0), item.specTextSnapshot ?? ''] as const)
+      .sort(([left], [right]) => left.localeCompare(right))
+    return JSON.stringify({ rows, remark: remark ?? '' })
+  }
+
+  /**
+   * 改单不换业务号，因此打印后内容变化时要作废打印标记：
+   * 门店才能看出手里的纸质单已过期，客户重新打印后标记再次置位；未实际变化的保存不影响已打印状态。
+   */
+  private async invalidatePrintEvidenceIfVoucherChanged(
+    manager: EntityManager,
+    order: O2oPreorder,
+    voucherContentBefore: string,
+  ) {
+    if (!order.hasCustomerOrder) return
+    const currentItems = await manager.getRepository(O2oPreorderItem).find({ where: { orderId: String(order.id) } })
+    if (this.buildVoucherContentFingerprint(currentItems, order.remark) !== voucherContentBefore) {
+      order.hasCustomerOrder = false
+    }
+  }
+
   private async saveUpdatedPreorderItemsInManager(
     manager: EntityManager,
     order: O2oPreorder,
@@ -3484,6 +3537,7 @@ class O2oPreorderService {
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
       const existingQtyMap = new Map(existingItems.map((item) => [this.buildPreorderItemKey(item), Math.max(0, Number(item.qty ?? 0))]))
+      const voucherContentBefore = this.buildVoucherContentFingerprint(existingItems, order.remark)
 
       const productIds = [...new Set([
         ...normalizedItems.map((item) => item.productId),
@@ -3537,6 +3591,7 @@ class O2oPreorderService {
       order.totalQty = totalQty
       order.remark = normalizedRemark
       order.updateCount = this.normalizeOrderUpdateCount(order.updateCount) + 1
+      await this.invalidatePrintEvidenceIfVoucherChanged(manager, order, voucherContentBefore)
       await orderRepo.save(order)
       return { timedOut: false as const, detail: await this.buildOrderDetail(order, manager, false) }
     })
@@ -3590,6 +3645,7 @@ class O2oPreorderService {
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
       const existingQtyMap = new Map(existingItems.map((item) => [this.buildPreorderItemKey(item), Math.max(0, Number(item.qty ?? 0))]))
+      const voucherContentBefore = this.buildVoucherContentFingerprint(existingItems, order.remark)
       const productIds = [...new Set([
         ...normalizedItems.map((item) => item.productId),
         ...existingItems.map((item) => String(item.productId)),
@@ -3641,6 +3697,7 @@ class O2oPreorderService {
 
       order.totalQty = totalQty
       order.remark = normalizedRemark
+      await this.invalidatePrintEvidenceIfVoucherChanged(manager, order, voucherContentBefore)
       await orderRepo.save(order)
       return { timedOut: false as const, detail: await this.buildOrderDetail(order, manager, canViewSystemNo(auth)) }
     })
@@ -5209,6 +5266,45 @@ class O2oPreorderService {
         skipRecentMs: O2O_TIMEOUT_RECYCLE_RECENT_WINDOW_MS,
       })).catch(() => undefined)
     }, O2O_TIMEOUT_BACKGROUND_RECYCLE_INTERVAL_MS)
+    if (!databaseMaintenanceModeService.isReadOnly()) {
+      void runExclusive('job:o2o-reserved-business-no-backfill', 60_000, () => this.backfillPendingDepartmentBusinessNos())
+        .catch(() => undefined)
+    }
+  }
+
+  /**
+   * 升级前已下单、仍待核销的部门单没有预留号，会一直看不到打印入口，这里在服务启动时逐单补号。
+   * 单笔失败只记录并跳过，不阻断启动；未补上的订单在核销时仍会正常分配业务号。
+   */
+  async backfillPendingDepartmentBusinessNos(): Promise<{ backfilledCount: number }> {
+    const candidates = await this.preorderRepo.find({
+      select: ['id'],
+      where: { status: 'pending', clientOrderType: 'department', isDeleted: false, reservedBusinessNo: IsNull() },
+      order: { id: 'ASC' },
+    })
+    let backfilledCount = 0
+    for (const candidate of candidates) {
+      try {
+        const backfilled = await runInTransaction(async (manager) => {
+          const orderRepo = manager.getRepository(O2oPreorder)
+          const order = await orderRepo.findOne({
+            where: { id: String(candidate.id) },
+            lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+          })
+          if (!order || order.status !== 'pending' || order.reservedBusinessNo) return false
+          order.reservedBusinessNo = await orderBusinessNoService.allocate('department', generateOrderUuid(), manager)
+          await orderRepo.save(order)
+          return true
+        })
+        if (backfilled) backfilledCount += 1
+      } catch (error) {
+        console.warn(`[y-link-backend] 预订单 ${candidate.id} 预留业务号补录失败：${error instanceof Error ? error.message : '未知错误'}`)
+      }
+    }
+    if (backfilledCount > 0) {
+      console.log(`[y-link-backend] 已为 ${backfilledCount} 张待核销部门单补录预留业务号`)
+    }
+    return { backfilledCount }
   }
 
   async stopTimeoutRecycleLoop(): Promise<void> {
