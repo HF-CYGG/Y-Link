@@ -2332,6 +2332,9 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
     // 这里补上两层保障：按需自动执行迁移脚本，随后对关键表、列和索引做只读契约自检，
     // 任一必需结构缺失或索引形状不符都直接阻止启动。
     const migrationResult = await runMysqlSchemaMigrations(dataSource)
+    if (migrationResult.baselinedFiles.length > 0) {
+      console.log(`[y-link-backend] MySQL 首次接管迁移记录，结构已就位的脚本仅登记未执行：${migrationResult.baselinedFiles.join(', ')}`)
+    }
     if (migrationResult.appliedFiles.length > 0) {
       console.log(`[y-link-backend] MySQL 迁移脚本已自动执行：${migrationResult.appliedFiles.join(', ')}`)
     }
