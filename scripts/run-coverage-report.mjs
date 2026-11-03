@@ -104,6 +104,7 @@ const BACKEND_SUITE = [
   'scripts/o2o-inventory-persistence-verify.ts',
   'scripts/issue186-inventory-consistency-verify.ts',
   'scripts/issues-177-178-verify.ts',
+  'scripts/user-governance-permissions-verify.ts',
 ]
 
 const buildCoverageArgs = (lcovPath, excludeGlob) => [
@@ -170,6 +171,8 @@ const SUITES = [
       // 此目录仅为Code128 vendor预设测试生成的库副本，没有项目源码图；真实预检/SFC源码照常映射。
       '--test-coverage-exclude=tmp/code128-preset/**',
       'scripts/verify-order-entry-submit-preparation.ts',
+      'scripts/verify-client-order-progress.ts',
+      'scripts/verify-order-revision-presentation.ts',
       'scripts/verify-barcode-label-preflight.ts',
       'scripts/verify-v8-sfc-coverage.test.mjs',
       'scripts/verify-order-list-mobile-card-loader.ts',
