@@ -43,11 +43,18 @@ export const NOTIFICATION_EVENT_TYPES = [
   'o2o_preorder_created',
   'customer_service_client_message_created',
   'mobile_refresh_replay_detected',
+  'inbound_order_submitted',
+  'inbound_order_status_changed',
 ] as const
 
 export type NotificationEventType = (typeof NOTIFICATION_EVENT_TYPES)[number]
 
-type NotificationRuleCode = 'preorder_created_rule' | 'customer_service_message_rule' | 'mobile_refresh_replay_rule'
+type NotificationRuleCode =
+  | 'preorder_created_rule'
+  | 'customer_service_message_rule'
+  | 'mobile_refresh_replay_rule'
+  | 'inbound_submitted_rule'
+  | 'inbound_status_changed_rule'
 
 const MANAGEMENT_ROLES: Array<SysUser['role']> = ['admin', 'operator', 'supplier']
 const ADMIN_MANAGEMENT_ROLES: Array<SysUser['role']> = ['admin', 'operator']
@@ -86,7 +93,21 @@ const DEFAULT_RULES: Array<{
     ruleName: 'Mobile 刷新令牌重放安全告警',
     eventType: 'mobile_refresh_replay_detected',
   },
+  {
+    ruleCode: 'inbound_submitted_rule',
+    ruleName: '新送货单通知规则',
+    eventType: 'inbound_order_submitted',
+  },
+  {
+    ruleCode: 'inbound_status_changed_rule',
+    ruleName: '送货单状态变更通知规则（发给对应供货方）',
+    eventType: 'inbound_order_status_changed',
+  },
 ]
+
+// 送货单事件的接收边界：新单只发后台库管，状态变更只发该单所属供货方，避免供货方之间互相看到单据。
+const INBOUND_SUPPLIER_TARGETED_EVENT_TYPES: ReadonlySet<NotificationEventType> = new Set(['inbound_order_status_changed'])
+const INBOUND_ADMIN_ONLY_EVENT_TYPES: ReadonlySet<NotificationEventType> = new Set(['inbound_order_submitted'])
 
 export interface NotificationRuleRecord {
   id: string
@@ -171,6 +192,12 @@ interface NotificationEventPayload {
   summary?: string
   generation?: number
   trigger?: 'prev_expired' | 'burst'
+  inboundShowNo?: string
+  /** 送货单所属供货方账号 ID：状态变更通知只投递给该账号。 */
+  supplierUserId?: string
+  supplierDisplayName?: string
+  inboundAction?: 'verified' | 'admin_updated'
+  totalQty?: number
 }
 
 interface EmitNotificationEventInput {
@@ -863,6 +890,29 @@ export class NotificationService {
       }
     }
 
+    if (eventType === 'inbound_order_submitted') {
+      const showNo = payload.inboundShowNo?.trim() || '-'
+      const supplierName = payload.supplierDisplayName?.trim() || '供货方'
+      return {
+        title: `新送货单 ${showNo}`,
+        content: `${supplierName} 提交了送货单 ${showNo}，共 ${payload.totalQty ?? '-'} 件，请在送货单池安排入库。`,
+      }
+    }
+
+    if (eventType === 'inbound_order_status_changed') {
+      const showNo = payload.inboundShowNo?.trim() || '-'
+      if (payload.inboundAction === 'verified') {
+        return {
+          title: `送货单 ${showNo} 已入库`,
+          content: `您的送货单 ${showNo} 已由库管核验入库，共 ${payload.totalQty ?? '-'} 件。`,
+        }
+      }
+      return {
+        title: `送货单 ${showNo} 已被库管修改`,
+        content: `库管已现场修改您的送货单 ${showNo}（当前共 ${payload.totalQty ?? '-'} 件），请到历史单据核对明细。`,
+      }
+    }
+
     const conversationNo = payload.conversationNo?.trim() || '-'
     const sourceUser = payload.sourceUserDisplayName?.trim() || '客户'
     const summary = payload.summary?.trim() || '收到新的消息'
@@ -872,7 +922,7 @@ export class NotificationService {
     }
   }
 
-  private async resolveRuleRecipients(rule: NotificationRuleRecord): Promise<SysUser[]> {
+  private async resolveRuleRecipients(rule: NotificationRuleRecord, payload: NotificationEventPayload): Promise<SysUser[]> {
     const whereConditions = MANAGEMENT_ROLES.map((role) => ({ role, status: 'enabled' as const }))
     const allManagementUsers = await this.userRepo.find({
       where: whereConditions,
@@ -884,14 +934,22 @@ export class NotificationService {
         email: true,
       },
     })
+    if (INBOUND_SUPPLIER_TARGETED_EVENT_TYPES.has(rule.eventType)) {
+      const targetSupplierId = normalizeId(payload.supplierUserId ?? '')
+      return allManagementUsers.filter((item) => item.role === SUPPLIER_ROLE && normalizeId(item.id) === targetSupplierId)
+    }
+    const adminOnly = INBOUND_ADMIN_ONLY_EVENT_TYPES.has(rule.eventType)
     if (!rule.recipientUserIds.length) {
-      return allManagementUsers
+      // 未指定接收人时默认只发后台账号：供货方不应收到订单、客服等与其无关的业务通知。
+      return allManagementUsers.filter((item) => ADMIN_MANAGEMENT_ROLES.includes(item.role))
     }
     const idSet = new Set(rule.recipientUserIds)
-    return allManagementUsers.filter((item) => idSet.has(normalizeId(item.id)))
+    return allManagementUsers.filter((item) =>
+      idSet.has(normalizeId(item.id)) && (!adminOnly || ADMIN_MANAGEMENT_ROLES.includes(item.role)),
+    )
   }
 
-  private async resolveRuleEmailRecipients(rule: NotificationRuleRecord): Promise<SysUser[]> {
+  private async resolveRuleEmailRecipients(rule: NotificationRuleRecord, payload: NotificationEventPayload): Promise<SysUser[]> {
     const whereConditions = MANAGEMENT_ROLES.map((role) => ({ role, status: 'enabled' as const }))
     const allManagementUsers = await this.userRepo.find({
       where: whereConditions,
@@ -909,11 +967,20 @@ export class NotificationService {
         rule.emailRecipientAdminUserIds.includes(normalizeId(item.id)) && ADMIN_MANAGEMENT_ROLES.includes(item.role),
       )
       : []
-    const supplierRecipients = rule.emailRecipientSupplierUserIds.length
+    const targetSupplierId = INBOUND_SUPPLIER_TARGETED_EVENT_TYPES.has(rule.eventType)
+      ? normalizeId(payload.supplierUserId ?? '')
+      : null
+    // 状态变更邮件只发给该单所属供货方，且该供货方必须已被勾选为邮件接收人；新送货单邮件不发供货方。
+    const supplierRecipients = rule.emailRecipientSupplierUserIds.length && !INBOUND_ADMIN_ONLY_EVENT_TYPES.has(rule.eventType)
       ? allManagementUsers.filter((item) =>
-        rule.emailRecipientSupplierUserIds.includes(normalizeId(item.id)) && item.role === SUPPLIER_ROLE,
+        rule.emailRecipientSupplierUserIds.includes(normalizeId(item.id))
+        && item.role === SUPPLIER_ROLE
+        && (targetSupplierId === null || normalizeId(item.id) === targetSupplierId),
       )
       : []
+    if (targetSupplierId !== null) {
+      return supplierRecipients
+    }
     const deduped = new Map<string, SysUser>()
     for (const user of [...adminRecipients, ...supplierRecipients]) {
       deduped.set(normalizeId(user.id), user)
@@ -1145,7 +1212,7 @@ export class NotificationService {
         feishuSignSecretMasked: Boolean(normalizedDraft.feishuSignSecret),
         emailSubjectPrefix: normalizedDraft.emailSubjectPrefix,
         updatedAt: new Date(),
-      })
+      }, {})
 
       const failures: NotificationRuleTestSendResult['failures'] = []
       let attempted = 0
@@ -1310,8 +1377,8 @@ export class NotificationService {
       const ruleRecipients = await Promise.all(
         matchedRules.map(async (item) => ({
           ...item,
-          inboxUsers: await this.resolveRuleRecipients(item.rule),
-          emailUsers: await this.resolveRuleEmailRecipients(item.rule),
+          inboxUsers: await this.resolveRuleRecipients(item.rule, input.payload),
+          emailUsers: await this.resolveRuleEmailRecipients(item.rule, input.payload),
         })),
       )
 
@@ -1897,7 +1964,7 @@ export class NotificationService {
 
   async listInbox(
     auth: AuthUserContext,
-    query: { page: number; pageSize: number; unreadOnly?: boolean },
+    query: { page: number; pageSize: number; unreadOnly?: boolean; eventType?: string },
   ): Promise<{ page: number; pageSize: number; total: number; list: Array<{
     id: string
     eventType: string
@@ -1911,6 +1978,9 @@ export class NotificationService {
       .where('inbox.userId = :userId', { userId: auth.userId })
     if (query.unreadOnly) {
       qb.andWhere('inbox.isRead = :isRead', { isRead: 0 })
+    }
+    if (query.eventType) {
+      qb.andWhere('inbox.eventType = :eventType', { eventType: query.eventType })
     }
 
     const [rows, total] = await qb

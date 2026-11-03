@@ -32,6 +32,8 @@ export const NOTIFICATION_EVENT_TYPE_CATALOG: Readonly<Record<string, { label: s
   o2o_preorder_created: { label: '新预订单通知', category: 'order' },
   customer_service_client_message_created: { label: '客服新消息通知', category: 'customer_service' },
   mobile_refresh_replay_detected: { label: 'Mobile 刷新令牌重放告警', category: 'security' },
+  inbound_order_submitted: { label: '新送货单通知', category: 'order' },
+  inbound_order_status_changed: { label: '送货单状态变更通知', category: 'order' },
 }
 
 export const NOTIFICATION_EVENT_RESULT_STATUSES = [

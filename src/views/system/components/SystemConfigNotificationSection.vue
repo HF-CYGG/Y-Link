@@ -40,6 +40,8 @@ const eventLabelMap: Record<NotificationRuleRecord['eventType'], string> = {
   o2o_preorder_created: '新预订单',
   customer_service_client_message_created: '新客服消息',
   mobile_refresh_replay_detected: 'Mobile 会话安全告警',
+  inbound_order_submitted: '新送货单（只发后台账号）',
+  inbound_order_status_changed: '送货单核验入库 / 现场改单（站内只发该单供货方）',
 }
 
 const hasManagementUsers = computed(() => props.managementUsers.length > 0)

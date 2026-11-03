@@ -3,7 +3,9 @@ import { z } from 'zod'
 import { requirePermission, requireRole } from '../middleware/auth.middleware.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 import {
+  NOTIFICATION_EVENT_TYPES,
   notificationService,
+  type NotificationEventType,
 } from '../services/notification.service.js'
 import { NOTIFICATION_EXTERNAL_TRIGGER_MODES } from '../entities/notification-rule.entity.js'
 import { asyncHandler } from '../utils/async-handler.js'
@@ -125,10 +127,15 @@ notificationRouter.get(
     const page = Number(req.query.page ?? 1)
     const pageSize = Number(req.query.pageSize ?? 20)
     const unreadOnly = String(req.query.unreadOnly ?? '') === '1'
+    // 可选按事件类型过滤：供货方历史页只拉送货单状态变更提醒，不受其它事件干扰。
+    const eventType = typeof req.query.eventType === 'string' && NOTIFICATION_EVENT_TYPES.includes(req.query.eventType as NotificationEventType)
+      ? req.query.eventType
+      : undefined
     const data = await notificationService.listInbox(authReq.auth, {
       page: Number.isFinite(page) && page > 0 ? page : 1,
       pageSize: Number.isFinite(pageSize) && pageSize > 0 ? Math.min(pageSize, 100) : 20,
       unreadOnly,
+      eventType,
     })
     res.json({
       code: 0,

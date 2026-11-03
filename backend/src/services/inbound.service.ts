@@ -14,6 +14,7 @@ import { BizInboundOrder } from '../entities/biz-inbound-order.entity.js'
 import { BizInboundOrderItem } from '../entities/biz-inbound-order-item.entity.js'
 import { InventoryLog } from '../entities/inventory-log.entity.js'
 import { auditService } from './audit.service.js'
+import { notificationService } from './notification.service.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
 import type { RequestMeta } from '../utils/request-meta.js'
@@ -405,6 +406,31 @@ class InboundService {
     return `${prefix}${String(current + 1).padStart(4, '0')}`
   }
 
+  /**
+   * 送货单通知与业务写入同一事务落库：
+   * - 新单提醒发给后台库管，状态变更（核验入库、现场改单）只发该单所属供货方；
+   * - 规则展开与外发由通知中心 Worker 异步处理，不拖慢入库热路径。
+   */
+  private async emitInboundNotification(
+    manager: EntityManager,
+    order: BizInboundOrder,
+    event: { type: 'submitted' } | { type: 'status_changed'; action: 'verified' | 'admin_updated' },
+  ) {
+    const totalQty = Number(order.totalQty)
+    await notificationService.emitEvent({
+      eventType: event.type === 'submitted' ? 'inbound_order_submitted' : 'inbound_order_status_changed',
+      sourceType: 'biz_inbound_order',
+      sourceId: String(order.id),
+      payload: {
+        inboundShowNo: order.showNo,
+        supplierUserId: String(order.supplierId),
+        supplierDisplayName: order.supplierName ?? undefined,
+        totalQty: Number.isFinite(totalQty) ? totalQty : undefined,
+        ...(event.type === 'status_changed' ? { inboundAction: event.action } : {}),
+      },
+    }, manager)
+  }
+
   // 供货方创建送货单
   async submitSupplierDelivery(actor: AuthUserContext, input: SubmitInboundInput, requestMeta?: RequestMeta) {
     this.assertSupplierActor(actor)
@@ -467,6 +493,7 @@ class InboundService {
           expectedArrivalAt: savedOrder.expectedArrivalAt?.toISOString() ?? null,
         },
       }, manager)
+      await this.emitInboundNotification(manager, savedOrder, { type: 'submitted' })
 
       return this.detailById(savedOrder.id, manager)
     })
@@ -1096,6 +1123,7 @@ class InboundService {
           previousExpectedArrivalAt: this.toAuditTimeText(previousExpectedArrivalAt),
         },
       }, manager)
+      await this.emitInboundNotification(manager, savedOrder, { type: 'status_changed', action: 'admin_updated' })
       return {
         order: savedOrder,
         items: nextItems,
@@ -1393,6 +1421,7 @@ class InboundService {
           totalQty: savedOrder.totalQty,
         },
       }, manager)
+      await this.emitInboundNotification(manager, savedOrder, { type: 'status_changed', action: 'verified' })
       return { order: savedOrder, items }
     })
     invalidateMallCatalogReadCache()
