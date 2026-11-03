@@ -53,9 +53,9 @@ export const htmlToPlainText = (value: string | null | undefined): string => {
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/(p|div|li|h[1-6]|tr|section|article|blockquote)\s*>/gi, '\n')
     .replace(/<li\b[^>]*>/gi, '· ')
-    .replace(/<[^>]*>/g, '')
+    .replace(/<\/?(?:a|abbr|b|blockquote|br|code|div|em|h[1-6]|hr|i|img|li|ol|p|pre|section|article|span|strong|table|tbody|td|th|thead|tr|u|ul|script|style)(?=[\s/>])(?:[^"'>]|"[^"]*"|'[^']*')*>/gi, '')
     // 本地缓存会截断长描述，可能留下未闭合的半截标签（如结尾的 “<p”），一并去掉。
-    .replace(/<[a-z/!][^>]*$/i, '')
+    .replace(/<\/?(?:p|div|span|br|li|strong|em|img)(?:\s[^>]*)?$/i, '')
   return decodeHtmlEntities(withoutBlocks)
     .replace(/[ \t\f\v]+/g, ' ')
     .replace(/ *\n */g, '\n')
