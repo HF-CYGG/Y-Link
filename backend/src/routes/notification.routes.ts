@@ -159,6 +159,26 @@ notificationRouter.get(
   }),
 )
 
+// 按事件类型批量已读：只作用于当前登录账号，事件类型必须在白名单内。
+const markInboxReadByEventTypeSchema = z.object({
+  eventType: z.enum(NOTIFICATION_EVENT_TYPES),
+})
+
+notificationRouter.post(
+  '/inbox/read-by-event-type',
+  requirePermission('products:view'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = markInboxReadByEventTypeSchema.parse(req.body)
+    const changed = await notificationService.markInboxReadByEventType(payload.eventType, authReq.auth)
+    res.json({
+      code: 0,
+      message: 'ok',
+      data: { changed },
+    })
+  }),
+)
+
 notificationRouter.post(
   '/inbox/:id/read',
   requirePermission('products:view'),

@@ -43,6 +43,7 @@ import { getProductList, type ProductRecord } from '@/api/modules/product'
 import {
   getNotificationInbox,
   markNotificationInboxRead,
+  markNotificationInboxReadByEventType,
   type NotificationInboxItem,
 } from '@/api/modules/notification'
 import { useAuthStore } from '@/store'
@@ -620,17 +621,14 @@ const handleDismissAllReminders = async () => {
 
   reminderActionLoading.value = true
   try {
-    const targets = [...reminders.value]
-    const results = await Promise.allSettled(targets.map((item) => markNotificationInboxRead(item.id)))
-    const doneIds = new Set(targets.filter((_, index) => results[index]?.status === 'fulfilled').map((item) => item.id))
-    reminders.value = reminders.value.filter((entry) => !doneIds.has(entry.id))
-    reminderTotal.value = Math.max(0, reminderTotal.value - doneIds.size)
-    if (doneIds.size < targets.length) {
-      showAppWarning('部分提醒标记已读失败，请稍后重试')
-    }
-    if (reminderTotal.value > 0) {
-      void loadReminders()
-    }
+    // 服务端按当前账号 + 事件类型批量已读，覆盖未展示的积压提醒，而不只是当前这一页。
+    await markNotificationInboxReadByEventType('inbound_order_status_changed')
+    reminders.value = []
+    reminderTotal.value = 0
+    // 批量已读期间可能有新提醒到达，重新拉一次保持与服务端一致。
+    void loadReminders()
+  } catch (error) {
+    showAppWarning(extractErrorMessage(error, '标记已读失败，请稍后重试'))
   } finally {
     reminderActionLoading.value = false
   }

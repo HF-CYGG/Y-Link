@@ -159,3 +159,13 @@ export const markNotificationInboxRead = (id: string) =>
     method: 'POST',
     url: `/notifications/inbox/${id}/read`,
   })
+
+/**
+ * 把当前账号某一事件类型的未读提醒全部标记已读，返回实际变更条数。
+ */
+export const markNotificationInboxReadByEventType = (eventType: NotificationEventType) =>
+  request<{ changed: number }>({
+    method: 'POST',
+    url: '/notifications/inbox/read-by-event-type',
+    data: { eventType },
+  })

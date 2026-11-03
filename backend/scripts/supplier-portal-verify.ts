@@ -332,11 +332,57 @@ async function main() {
         `其它供货方不得标记他人提醒：status=${otherRead.status}`,
       )
       assert.equal((await inboxOf(supplier.id, 'inbound_order_status_changed')).filter((item) => !item.isRead).length, 1, '他人请求不得改变本人提醒的已读状态')
+
+      // “全部知道了”：积压超过前端一页（5 条）时也必须一次全部已读，且只影响本人该事件类型。
+      for (let index = 0; index < 6; index += 1) {
+        await notificationService.emitEvent({
+          eventType: 'inbound_order_status_changed',
+          sourceType: 'biz_inbound_order',
+          sourceId: `verify-bulk-${verifySeed}-${index}`,
+          payload: { inboundShowNo: `VERIFY-BULK-${index}`, supplierUserId: String(supplier.id), inboundAction: 'verified', totalQty: 1 },
+        })
+      }
+      await notificationService.emitEvent({
+        eventType: 'inbound_order_status_changed',
+        sourceType: 'biz_inbound_order',
+        sourceId: `verify-bulk-other-${verifySeed}`,
+        payload: { inboundShowNo: 'VERIFY-BULK-OTHER', supplierUserId: String(otherSupplier.id), inboundAction: 'verified', totalQty: 1 },
+      })
+      await notificationService.emitEvent({
+        eventType: 'o2o_preorder_created',
+        sourceType: 'o2o_preorder',
+        sourceId: `verify-bulk-preorder-${verifySeed}`,
+        payload: { preorderNo: `VERIFY-BULK-${verifySeed}` },
+      })
+      await drainOutbox()
+      const unreadStatusOf = async (userId: string | number) =>
+        (await inboxOf(userId, 'inbound_order_status_changed')).filter((item) => !item.isRead).length
+      assert.equal(await unreadStatusOf(supplier.id), 7, '批量已读前供货方应有 7 条未读状态提醒（超过一页）')
+      const operatorPreorderUnreadBefore = (await inboxOf(operator.id, 'o2o_preorder_created')).filter((item) => !item.isRead).length
+
+      await expectStatus(() => fetch(`${baseUrl}/api/notifications/inbox/read-by-event-type`, {
+        method: 'POST',
+        headers: { ...writeHeaders(supplierSession), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventType: 'not_a_real_event' }),
+      }), 400, '未知事件类型必须拒绝')
+      const bulkRead = await expectStatus(() => fetch(`${baseUrl}/api/notifications/inbox/read-by-event-type`, {
+        method: 'POST',
+        headers: { ...writeHeaders(supplierSession), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventType: 'inbound_order_status_changed' }),
+      }), 200, '供货方一次性标记全部状态提醒已读')
+      assert.equal((bulkRead.data as { changed: number }).changed, 7, '批量已读必须覆盖全部 7 条，而不只是一页')
+      assert.equal(await unreadStatusOf(supplier.id), 0, '批量已读后供货方不得再有未读状态提醒')
+      assert.equal(await unreadStatusOf(otherSupplier.id), 1, '批量已读不得影响其它供货方')
+      assert.equal(
+        (await inboxOf(operator.id, 'o2o_preorder_created')).filter((item) => !item.isRead).length,
+        operatorPreorderUnreadBefore,
+        '批量已读不得影响其它账号的其它事件',
+      )
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()))
     }
 
-    console.log('供货端专项验证通过：商品目录对供货方脱敏、停用商品可过滤、导出与标签拒绝供货方、送货单通知按角色定向投递、收件箱过滤与已读均符合预期')
+    console.log('供货端专项验证通过：商品目录对供货方脱敏、停用商品可过滤、导出与标签拒绝供货方、送货单通知按角色定向投递、收件箱过滤、单条与按事件类型批量已读均符合预期')
   } finally {
     await notificationService.stopOutboxWorker().catch(() => undefined)
     if (AppDataSource.isInitialized) await AppDataSource.destroy()

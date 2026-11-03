@@ -2020,6 +2020,21 @@ export class NotificationService {
     })
   }
 
+  /**
+   * 把当前账号某一事件类型的未读提醒一次性标记已读。
+   * 只按 userId + eventType 收口，不受前端分页影响，保证“全部知道了”与按钮含义一致。
+   */
+  async markInboxReadByEventType(eventType: NotificationEventType, actor: AuthUserContext): Promise<number> {
+    return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const result = await manager.getRepository(NotificationInbox).update(
+        { userId: actor.userId, eventType, isRead: 0 },
+        { isRead: 1, readAt: new Date() },
+      )
+      return result.affected ?? 0
+    })
+  }
+
   async getUnreadCount(auth: AuthUserContext): Promise<number> {
     return this.inboxRepo.count({
       where: {
