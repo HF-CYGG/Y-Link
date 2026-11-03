@@ -104,6 +104,13 @@ const returnDialogVisible = ref(false)
 const returnSubmitting = ref(false)
 const detail = ref<O2oPreorderDetail | null>(null)
 const qrDataUrl = ref('')
+const pickupQrState = ref<'loading' | 'success' | 'error' | 'disabled'>('disabled')
+const returnQrErrors = ref<Record<string, boolean>>({})
+let pickupQrGeneration = 0
+let returnQrGeneration = 0
+let qrScopeActive = true
+let pickupRenderKey = ''
+let returnRenderKey = ''
 const returnQrMap = ref<Record<string, string>>({})
 const mallProducts = ref<O2oMallProduct[]>([])
 const editOrderItems = ref<EditableOrderItem[]>([])
@@ -920,28 +927,51 @@ const handleReturnQtyChange = (
   updateReturnQty(itemKey, value ?? undefined, maxQty)
 }
 
+const pickupContextKey = () => JSON.stringify([route.params.id, clientAuthStore.currentUser?.id, detail.value?.order.id, detail.value?.order.status, detail.value?.qrPayload, canUseQrCode.value])
+const returnContextKey = () => JSON.stringify([route.params.id, clientAuthStore.currentUser?.id, detail.value?.order.id, detail.value?.returnRequests.map((item) => [item.id, item.status, item.qrPayload])])
+/** 二维码错误仅属于局部区域，不传播成整页详情失败；结果严格绑定订单/载荷/状态代次。 */
 const renderQrCode = async () => {
-  // 二维码仅允许待提货订单展示，撤回、超时取消、已核销后立即切换为禁用态。
-  if (!detail.value?.qrPayload || !canUseQrCode.value) {
-    qrDataUrl.value = ''
-    return
+  const key = pickupContextKey(), payload = detail.value?.qrPayload
+  if (key === pickupRenderKey && (pickupQrState.value === 'loading' || pickupQrState.value === 'success')) return
+  const generation = ++pickupQrGeneration
+  pickupRenderKey = key; qrDataUrl.value = ''
+  if (!payload || !canUseQrCode.value || !qrScopeActive) { pickupQrState.value = 'disabled'; return }
+  pickupQrState.value = 'loading'
+  try {
+    const url = await renderQrCodeDataUrl(payload, 260)
+    if (!qrScopeActive || generation !== pickupQrGeneration || key !== pickupContextKey()) return
+    qrDataUrl.value = url; pickupQrState.value = 'success'
+  } catch {
+    if (qrScopeActive && generation === pickupQrGeneration && key === pickupContextKey()) pickupQrState.value = 'error'
   }
-
-  qrDataUrl.value = await renderQrCodeDataUrl(detail.value.qrPayload, 260)
 }
-
-const renderReturnRequestQrs = async () => {
-  // 退货二维码仅在 pending 阶段展示；进入 verified 后仅保留记录，不再展示可用二维码。
-  const nextQrMap: Record<string, string> = {}
-  const returnRequests = detail.value?.returnRequests ?? []
-  for (const request of returnRequests) {
-    if (request.status !== 'pending' || !request.qrPayload) {
-      continue
-    }
-    nextQrMap[request.id] = await renderQrCodeDataUrl(request.qrPayload, 220)
-  }
-  returnQrMap.value = nextQrMap
+const returnQrRuns = new Map<string, symbol>()
+const renderReturnRequestQrs = async (retryId?: string) => {
+  const key = returnContextKey()
+  if (!retryId && key === returnRenderKey) return
+  const changed = key !== returnRenderKey
+  returnRenderKey = key
+  if (changed) { returnQrRuns.clear(); returnQrMap.value = {}; returnQrErrors.value = {} }
+  const requests = (detail.value?.returnRequests ?? []).filter((request) => !retryId || request.id === retryId)
+  await Promise.all(requests.map(async (request) => {
+    if (request.status !== 'pending' || !request.qrPayload) return
+    const token = Symbol(); returnQrRuns.set(request.id, token)
+    const valid = () => qrScopeActive && key === returnContextKey() && returnQrRuns.get(request.id) === token
+    delete returnQrErrors.value[request.id]
+    try {
+      const url = await renderQrCodeDataUrl(request.qrPayload, 220)
+      if (valid()) returnQrMap.value = { ...returnQrMap.value, [request.id]: url }
+    } catch { if (valid()) returnQrErrors.value = { ...returnQrErrors.value, [request.id]: true } }
+  }))
 }
+// 路由或账号先改变时立即撤下旧详情，不能在新订单加载前显示旧载荷。
+watch([() => route.params.id, () => clientAuthStore.currentUser?.id], () => {
+  pickupQrGeneration += 1; returnQrGeneration += 1
+  detail.value = null; qrDataUrl.value = ''; returnQrMap.value = {}; returnQrErrors.value = {}
+  pickupQrState.value = 'disabled'; pickupRenderKey = ''; returnRenderKey = ''
+}, { flush: 'sync' })
+watch(pickupContextKey, () => { void renderQrCode() }, { flush: 'sync' })
+watch(returnContextKey, () => { void renderReturnRequestQrs() }, { flush: 'sync' })
 
 const loadMallProducts = async () => {
   if (mallProducts.value.length || editProductsLoading.value) {
@@ -1501,6 +1531,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  qrScopeActive = false; pickupQrGeneration += 1; returnQrGeneration += 1
   voucherDetailUnmounted = true
   disposeClientOrderRefresh()
   globalThis.document?.removeEventListener('visibilitychange', handleVisibilityChange)
@@ -1609,8 +1640,12 @@ onBeforeUnmount(() => {
             class="mx-auto h-64 w-64 rounded-2xl bg-white p-3 shadow-sm"
           />
           <!-- 二维码库按需懒加载，生成完成前显示占位，避免可用订单短暂闪现“二维码已停用”。 -->
+          <div v-else-if="canUseQrCode && pickupQrState === 'error'" class="mx-auto flex h-64 w-64 flex-col items-center justify-center rounded-2xl bg-white dark:bg-[#141415]" role="alert">
+            <p class="text-sm">二维码生成失败</p>
+            <el-button class="mt-3" @click="renderQrCode()">重新生成</el-button>
+          </div>
           <div
-            v-else-if="canUseQrCode"
+            v-else-if="canUseQrCode && pickupQrState === 'loading'"
             class="client-qr-loading mx-auto flex h-64 w-64 flex-col items-center justify-center rounded-2xl bg-white p-3 shadow-sm dark:bg-[#141415]"
             role="status"
           >
@@ -1881,6 +1916,10 @@ onBeforeUnmount(() => {
                     :alt="`${request.returnNo} 退货二维码`"
                     class="mx-auto h-52 w-52 rounded-2xl bg-white p-3 shadow-sm dark:bg-[#141415]"
                   />
+                  <div v-else-if="request.status === 'pending' && returnQrErrors[request.id]" class="mx-auto flex h-52 w-52 flex-col items-center justify-center rounded-2xl bg-slate-50 dark:bg-white/5" role="alert">
+                    <p class="text-sm">退货二维码生成失败</p>
+                    <el-button class="mt-3" @click="renderReturnRequestQrs(request.id)">重新生成</el-button>
+                  </div>
                   <div
                     v-else-if="request.status === 'pending' && request.qrPayload"
                     class="client-qr-loading mx-auto flex h-52 w-52 flex-col items-center justify-center rounded-2xl bg-slate-50 p-3 dark:bg-white/5"
