@@ -418,7 +418,7 @@ const detailMaxQty = computed(() => {
 // - restock：当前启用规格缺货（口径同补货按钮，不用限购后的可购量判断），数量栏收起并合并为“申请补货”；
 // - unavailable：其余不可购情况，展示禁用的“暂不可购”。
 type DetailActionMode = 'purchase' | 'restock' | 'unavailable'
-const detailRestockEntry = useClientRestockEntry(() => detailProduct.value, () => selectedDetailSku.value)
+const detailRestockEntry = useClientRestockEntry(() => detailProduct.value, () => selectedDetailSku.value, () => detailVisible.value)
 const detailRestockLoading = detailRestockEntry.loading
 const detailActionMode = computed<DetailActionMode>(() => {
   if (!detailProduct.value) {
@@ -1054,24 +1054,47 @@ const decreaseCardQty = (itemId: string) => {
 }
 
 // 迷你购物车“清空”：二次确认后只清商品行；不能调用 clearAll（登出专用，会解除账号绑定导致后续加购无法持久化）。
+const clearCartConfirming = ref(false)
+let clearCartGeneration = 0
+let cancelClearCartConfirm: (() => void) | null = null
+const invalidateClearCartConfirm = () => {
+  clearCartGeneration += 1
+  const cancel = cancelClearCartConfirm
+  cancelClearCartConfirm = null
+  // 只走本次 Element Plus 确认框的取消动作，结算其 Promise 并释放焦点，不关闭其他 MessageBox。
+  cancel?.()
+}
+watch(() => clientAuthStore.currentUser?.id, invalidateClearCartConfirm, { flush: 'sync' })
 const confirmClearMiniCart = async () => {
+  if (clearCartConfirming.value) return
+  const generation = ++clearCartGeneration
+  const userId = clientAuthStore.currentUser?.id
   if (!clientCartStore.items.length) {
     return
   }
+  clearCartConfirming.value = true
   try {
-    await ElMessageBox.confirm('确认清空购物车中的全部商品吗？', '清空购物车', {
+    const confirmation = ElMessageBox.confirm('确认清空购物车中的全部商品吗？', '清空购物车', {
       type: 'warning',
       confirmButtonText: '确认清空',
       cancelButtonText: '再想想',
+      cancelButtonClass: 'client-mini-cart-clear-cancel',
       closeOnClickModal: false,
     })
+    // MessageBox 没有公开的单实例 close API；捕获本次同步挂载的按钮，避免全局 close 误伤其他确认。
+    await nextTick()
+    const cancelButton = document.querySelector<HTMLButtonElement>('.client-mini-cart-clear-cancel')
+    cancelClearCartConfirm = () => cancelButton?.click()
+    if (generation !== clearCartGeneration || !mallRuntimeActive) cancelClearCartConfirm()
+    await confirmation
   } catch (error) {
     if (error === 'cancel' || error === 'close') {
       return
     }
-    showAppError('清空确认失败，请稍后重试')
+    if (generation === clearCartGeneration && mallRuntimeActive) showAppError('清空确认失败，请稍后重试')
     return
-  }
+  } finally { cancelClearCartConfirm = null; clearCartConfirming.value = false }
+  if (generation !== clearCartGeneration || !mallRuntimeActive || clientAuthStore.currentUser?.id !== userId) return
   clientCartStore.clearItems()
 }
 
@@ -1609,6 +1632,8 @@ const activateMallRuntime = () => {
 
 const deactivateMallRuntime = () => {
   stopMallFeedback()
+  invalidateClearCartConfirm()
+  detailVisible.value = false
   cartDrawerVisible.value = false
   checkoutDrawerVisible.value = false
   drawerHandoffGeneration += 1; drawerHandoff.value = null; cartReturnFocus = null; checkoutFromCart = false
@@ -2191,7 +2216,7 @@ onBeforeUnmount(() => {
           <div class="expand-inner">
             <header class="expand-header">
               <span class="title">已选商品</span>
-              <button type="button" class="expand-clear-btn" :disabled="clientCartStore.items.length === 0" @click="confirmClearMiniCart">清空</button>
+              <ElButton native-type="button" class="expand-clear-btn" :disabled="clearCartConfirming || clientCartStore.items.length === 0" @click="confirmClearMiniCart">清空</ElButton>
             </header>
 
             <TransitionGroup name="cart-item-flow" tag="div" class="item-list">

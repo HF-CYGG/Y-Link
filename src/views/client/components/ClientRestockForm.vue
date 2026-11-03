@@ -10,6 +10,7 @@ import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import type { CreateRestockRequestInput } from '../../../../packages/shared-types/src/index'
 import { createClientRestockRequest, getActiveClientRestockRequest } from '@/api/modules/customer-service-feedback'
 import { getO2oMallProducts, type O2oMallProduct } from '@/api/modules/o2o'
+import { PassiveNumberInput } from '@/components/common/page-shared'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
@@ -174,7 +175,7 @@ onBeforeUnmount(() => { activeRequest.cancel(); catalogRequest.cancel() })
         </el-select>
       </el-form-item>
       <el-form-item label="期望数量（正整数）">
-        <el-input-number v-model="form.quantity" :min="1" :max="RESTOCK_MAX_QUANTITY" :step="1" :precision="0" :step-strictly="true" controls-position="right" class="!w-full" aria-label="期望补货数量" />
+        <PassiveNumberInput v-model="form.quantity" :min="1" :max="RESTOCK_MAX_QUANTITY" :step="1" :precision="0" :step-strictly="true" controls-position="right" class="restock-quantity !w-full" aria-label="期望补货数量" />
       </el-form-item>
       <el-form-item label="最晚取货时间（北京时间 UTC+8）">
         <el-date-picker v-model="form.latestPickupAt" type="datetime" format="YYYY-MM-DD HH:mm" value-format="YYYY-MM-DD HH:mm" class="!w-full" placeholder="请选择未来时间，精确到分钟" />
@@ -191,3 +192,13 @@ onBeforeUnmount(() => { activeRequest.cancel(); catalogRequest.cancel() })
     <p v-if="!loading && !products.length" class="mt-3 text-sm text-slate-500 dark:text-slate-400">当前没有可申请补货的缺货商品。</p>
   </section>
 </template>
+
+<style scoped>
+/* 数量控件继续保持满宽与右侧上下按钮，不改变表单布局。 */
+.restock-quantity { position: relative; }
+.restock-quantity :deep(.passive-number-input__control) { position: absolute; right: 1px; z-index: 1; width: 32px; min-width: 32px; height: calc(50% - 1px); padding: 0; line-height: 1; border: 0; border-left: 1px solid var(--el-border-color); }
+.restock-quantity :deep(.passive-number-input__control--increase) { top: 1px; border-bottom: 1px solid var(--el-border-color); border-radius: 0 var(--el-border-radius-base) 0 0; }
+.restock-quantity :deep(.passive-number-input__control--decrease) { bottom: 1px; border-radius: 0 0 var(--el-border-radius-base) 0; }
+.restock-quantity :deep(.el-input__wrapper) { border-radius: var(--el-border-radius-base); padding-right: 40px; }
+.restock-quantity :deep(.el-input__inner) { text-align: center; }
+</style>

@@ -10,7 +10,7 @@
  * - 入参使用 getter，保证卡片复用与详情切换规格时都读取最新值；
  * - 这里只负责跳转，不修改购物车或库存。
  */
-import { computed, onBeforeUnmount, onDeactivated, ref, watch } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onDeactivated, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { getActiveClientRestockRequest } from '@/api/modules/customer-service-feedback'
@@ -25,19 +25,24 @@ import { getRestockSkus } from '@/utils/restock'
 export const useClientRestockEntry = (
   resolveProduct: () => O2oMallProduct | null | undefined,
   resolveSku: () => O2oMallSku | null | undefined = () => null,
+  resolveVisible: () => boolean = () => true,
 ) => {
   const router = useRouter()
   const auth = useClientAuthStore(pinia)
   const request = useStableRequest()
   const loading = ref(false)
+  let active = true
+  let generation = 0
 
   const resetPending = () => {
+    generation += 1
     request.cancel()
     loading.value = false
   }
-  watch(() => [resolveProduct()?.id, resolveSku()?.id, auth.currentUser?.id], resetPending)
-  onDeactivated(resetPending)
-  onBeforeUnmount(resetPending)
+  watch(() => [resolveProduct()?.id, resolveSku()?.id, auth.currentUser?.id, resolveVisible()], resetPending, { flush: 'sync' })
+  onActivated(() => { active = true })
+  onDeactivated(() => { active = false; resetPending() })
+  onBeforeUnmount(() => { active = false; resetPending() })
 
   const candidates = computed(() => {
     const product = resolveProduct()
@@ -52,8 +57,10 @@ export const useClientRestockEntry = (
 
   const openRestock = async () => {
     const product = resolveProduct()
-    if (!product || loading.value || !restockAvailable.value || !auth.currentUser?.id) return
+    if (!active || !resolveVisible() || !product || loading.value || !restockAvailable.value || !auth.currentUser?.id) return
     const userId = auth.currentUser.id
+    const runId = ++generation
+    const valid = () => active && resolveVisible() && runId === generation && resolveProduct()?.id === product.id && auth.currentUser?.id === userId
     const activeSkus = product.skus.filter((sku) => sku.isActive && sku.isCurrent)
     const sku = resolveSku() ?? (activeSkus.length === 1 ? candidates.value[0] : null)
     const query = { type: 'restock', productId: product.id, ...(sku ? { skuId: sku.id } : {}) }
@@ -65,10 +72,10 @@ export const useClientRestockEntry = (
     await request.runLatest({
       executor: (signal) => getActiveClientRestockRequest(sku.id, { signal }),
       onSuccess: async (result) => {
-        if (auth.currentUser?.id !== userId) return
+        if (!valid()) return
         await router.push(result.restock ? `/client/feedback/${result.restock.conversationId}` : { path: '/client/feedback/create', query })
       },
-      onError: (error) => { showAppError(extractErrorMessage(error, '查询补货申请失败，请重试')) },
+      onError: (error) => { if (!valid()) return; showAppError(extractErrorMessage(error, '查询补货申请失败，请重试')) },
       onFinally: () => { loading.value = false },
     })
   }
