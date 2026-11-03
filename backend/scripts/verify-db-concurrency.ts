@@ -1223,6 +1223,32 @@ async function verifyOrderSerialConcurrency(mysqlConfig: VerifyMysqlRuntimeConfi
     assert.deepEqual(replayedOrderMergeMigration.appliedFiles, ['045_order_merge_governance.sql'])
     await assertMysqlRequiredSchemaExists(AppDataSource)
 
+    // 人工执行脚本的存量库首次开启自动迁移：tracking 为空、已有账号且只缺最新脚本时，只补缺口，已就位脚本仅登记基线。
+    await AppDataSource.query('DELETE FROM schema_migrations')
+    await AppDataSource.query('DROP INDEX uk_o2o_preorder_reserved_business_no ON o2o_preorder')
+    await AppDataSource.query('ALTER TABLE o2o_preorder DROP COLUMN reserved_business_no')
+    const adoptedLegacyMigration = await runMysqlSchemaMigrations(AppDataSource)
+    assert.deepEqual(
+      [...adoptedLegacyMigration.appliedFiles].sort(),
+      [
+        '055_order_identifier_namespaces.sql',
+        '056_disable_order_business_no_permanent_occupancy.sql',
+        '063_o2o_preorder_reserved_business_no.sql',
+      ],
+      '存量库首次接管只执行结构缺口与无契约项的守卫脚本，不得在历史数据上重放 042 等已就位脚本',
+    )
+    assert.ok(adoptedLegacyMigration.baselinedFiles.includes('042_order_business_no_amendment.sql'), '已就位的 042 必须仅登记基线')
+    assert.ok(!adoptedLegacyMigration.baselinedFiles.includes('063_o2o_preorder_reserved_business_no.sql'), '缺结构的脚本不得被登记为基线')
+    await assertMysqlRequiredSchemaExists(AppDataSource)
+    const adoptedTrackingRows = await AppDataSource.query('SELECT filename FROM schema_migrations') as Array<{ filename: string }>
+    assert.equal(
+      adoptedTrackingRows.length,
+      adoptedLegacyMigration.appliedFiles.length + adoptedLegacyMigration.baselinedFiles.length,
+      '基线登记与真实执行的脚本都必须写入 tracking',
+    )
+    const replayedAfterAdoption = await runMysqlSchemaMigrations(AppDataSource)
+    assert.deepEqual(replayedAfterAdoption, { appliedFiles: [], baselinedFiles: [] }, '接管后再次启动必须零执行')
+
     const createMergeCandidate = async (suffix: string) => {
       const preorderResult = await o2oPreorderService.submit(clientAuth, {
         clientRequestId: `db-concurrency-order-merge-${suffix}`,

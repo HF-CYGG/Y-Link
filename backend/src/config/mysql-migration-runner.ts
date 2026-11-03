@@ -17,6 +17,8 @@
  *   **重要边界**：这里不做"扫描目录、执行全部未记录文件"的通用回放，而是维护一份
  *   人工审计过的 AUTO_MIGRATABLE_FILES 白名单，只有确认幂等安全的文件才会被自动执行；
  *   005 是只应人工触发的破坏性回滚脚本（会删除 004 生成的备份表），始终排除在外。
+ * - 人工维护的存量库首次开启 DB_AUTO_MIGRATE 时 tracking 为空：先按契约只读核对，结构已就位的脚本只登记基线，
+ *   只执行真正的缺口，避免含历史数据守卫的脚本在已演进数据上重放；全新空库仍完整执行白名单。
  * 维护说明：
  * - 新增迁移文件若要加入自动执行范围，必须先人工确认其为幂等写法
  *   （CREATE TABLE IF NOT EXISTS / information_schema 判断 + PREPARE-EXECUTE 动态 DDL），
@@ -1125,12 +1127,18 @@ export interface RunMysqlSchemaMigrationsOptions {
   retirementBackup?: OrderBusinessNoRetirementBackupPublishOptions
 }
 
+/** appliedFiles 为本次真实执行的脚本；baselinedFiles 为首次接管时结构已就位、只登记未执行的脚本。 */
+export interface MysqlSchemaMigrationResult {
+  appliedFiles: string[]
+  baselinedFiles: string[]
+}
+
 export async function runMysqlSchemaMigrations(
   dataSource: DataSource,
   options: RunMysqlSchemaMigrationsOptions = {},
-): Promise<{ appliedFiles: string[] }> {
+): Promise<MysqlSchemaMigrationResult> {
   if (env.DB_TYPE !== 'mysql' || !env.DB_AUTO_MIGRATE) {
-    return { appliedFiles: [] }
+    return { appliedFiles: [], baselinedFiles: [] }
   }
 
   await ensureMigrationTrackingTable(dataSource)
@@ -1282,12 +1290,52 @@ export async function reconcileMysqlOrderIdentifierNamespaces(dataSource: DataSo
  * 对异常同名表无操作后仍被误记为“已应用”。
  */
 async function assertAutoMigrationResult(queryRunner: QueryRunner, filename: string): Promise<void> {
+  const { issues } = await collectAutoMigrationContractIssues(queryRunner, filename, { includeTables: false })
+  if (issues.length === 0) return
+  throw new Error(
+    `[启动失败] 自动迁移 ${filename} 执行后结构仍不完整，未写入迁移记录：${issues.join('、')}。`
+    + '请先人工核查并修复异常的部分表结构，再重启服务。',
+  )
+}
+
+/**
+ * 按脚本收集其负责的契约结构缺口。verifiable=false 表示该脚本没有任何可只读核对的契约项，
+ * 调用方不能据此推断脚本“已执行”；includeTables 只供首次接管基线使用，执行后断言保持原口径。
+ */
+async function collectAutoMigrationContractIssues(
+  queryRunner: QueryRunner,
+  filename: string,
+  options: { includeTables: boolean },
+): Promise<{ verifiable: boolean; issues: string[] }> {
+  const requiredTables = options.includeTables
+    ? Object.entries(TABLE_INTRODUCING_SCRIPT)
+      .filter(([, script]) => script === filename)
+      .map(([tableName]) => tableName)
+    : []
   const requiredColumns = MYSQL_REQUIRED_COLUMNS.filter((item) => item.introducingScript === filename)
   const requiredIndexes = MYSQL_REQUIRED_INDEXES.filter((item) => item.introducingScript === filename)
   const requiredForeignKeys = MYSQL_REQUIRED_FOREIGN_KEYS.filter((item) => item.introducingScript === filename)
   const requiredTriggers = MYSQL_REQUIRED_TRIGGERS.filter((item) => item.introducingScript === filename)
   const requiredChecks = MYSQL_REQUIRED_CHECKS.filter((item) => item.introducingScript === filename)
-  if (requiredColumns.length === 0 && requiredIndexes.length === 0 && requiredForeignKeys.length === 0 && requiredTriggers.length === 0 && requiredChecks.length === 0) return
+  if (
+    requiredTables.length === 0
+    && requiredColumns.length === 0
+    && requiredIndexes.length === 0
+    && requiredForeignKeys.length === 0
+    && requiredTriggers.length === 0
+    && requiredChecks.length === 0
+  ) return { verifiable: false, issues: [] }
+
+  const tableRows: MysqlTableRow[] = requiredTables.length > 0
+    ? await queryRunner.query(
+        `SELECT TABLE_NAME FROM information_schema.TABLES
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME IN (${requiredTables.map(() => '?').join(', ')})`,
+        requiredTables,
+      )
+    : []
+  const existingTables = new Set(tableRows.map((row) => row.TABLE_NAME))
+  const missingTables = requiredTables.filter((tableName) => !existingTables.has(tableName))
 
   const tableNames = [...new Set([
     ...requiredColumns.map((item) => item.tableName),
@@ -1381,34 +1429,25 @@ async function assertAutoMigrationResult(queryRunner: QueryRunner, filename: str
   const missingChecks = requiredChecks.filter((item) => (
     !existingChecks.has(schemaObjectKey(item.tableName, item.constraintName))
   ))
-  if (
-    missingColumns.length === 0
-    && invalidColumnDefinitions.length === 0
-    && invalidIndexes.length === 0
-    && invalidForeignKeys.length === 0
-    && invalidTriggers.length === 0
-    && missingChecks.length === 0
-  ) return
-
-  const missingLabels = [
-    ...missingColumns.map((item) => `字段 ${item.tableName}.${item.columnName}`),
-    ...invalidColumnDefinitions.map((item) => item.label),
-    ...invalidIndexes.map((item) => `索引 ${item.tableName}.${item.indexName}`),
-    ...invalidForeignKeys.map((item) => item.label),
-    ...invalidTriggers.map((item) => item.label),
-    ...missingChecks.map((item) => `检查约束 ${item.tableName}.${item.constraintName}`),
-  ]
-  throw new Error(
-    `[启动失败] 自动迁移 ${filename} 执行后结构仍不完整，未写入迁移记录：${missingLabels.join('、')}。`
-    + '请先人工核查并修复异常的部分表结构，再重启服务。',
-  )
+  return {
+    verifiable: true,
+    issues: [
+      ...missingTables.map((tableName) => `表 ${tableName}`),
+      ...missingColumns.map((item) => `字段 ${item.tableName}.${item.columnName}`),
+      ...invalidColumnDefinitions.map((item) => item.label),
+      ...invalidIndexes.map((item) => `索引 ${item.tableName}.${item.indexName}`),
+      ...invalidForeignKeys.map((item) => item.label),
+      ...invalidTriggers.map((item) => item.label),
+      ...missingChecks.map((item) => `检查约束 ${item.tableName}.${item.constraintName}`),
+    ],
+  }
 }
 
 /** 实际的迁移执行体；必须在 withMysqlAdvisoryLock 内调用，保证跨实例互斥。 */
 async function applyPendingMigrations(
   queryRunner: QueryRunner,
   options: RunMysqlSchemaMigrationsOptions = {},
-): Promise<{ appliedFiles: string[] }> {
+): Promise<MysqlSchemaMigrationResult> {
   // 已应用记录必须在持锁之后再读：若在锁外读取，另一个实例可能在我们拿到锁之前刚写入记录，
   // 我们仍会拿着过期的快照重复执行脚本。
   const appliedRows: Array<{ filename: string }> = await queryRunner.query(
@@ -1416,6 +1455,11 @@ async function applyPendingMigrations(
   )
   const appliedSet = new Set(appliedRows.map((row) => row.filename))
   const appliedFiles: string[] = []
+  // tracking 为空且已有账号数据，说明是人工执行脚本的存量库首次开启自动迁移：先登记已具备的结构再执行缺口。
+  // 全新空库仍按白名单完整执行，保持 042 建表、056 备份清退等首装路径不变。
+  const baselinedFiles = appliedSet.size === 0 && await hasExistingDeploymentData(queryRunner)
+    ? await baselineSatisfiedMigrations(queryRunner, appliedSet)
+    : []
 
   for (const filename of AUTO_MIGRATABLE_FILES) {
     // 042 会在旧库/空库补建永久占用表，因此 retirement preflight 必须位于 042 之后、
@@ -1467,7 +1511,40 @@ async function applyPendingMigrations(
     appliedFiles.push(filename)
   }
 
-  return { appliedFiles }
+  return { appliedFiles, baselinedFiles }
+}
+
+/** 账号表有数据即视为已运行过的部署；账号种子在建表之后写入，全新空库此时一定为空。 */
+async function hasExistingDeploymentData(queryRunner: QueryRunner): Promise<boolean> {
+  const tableRows: MysqlTableRow[] = await queryRunner.query(
+    `SELECT TABLE_NAME FROM information_schema.TABLES
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'sys_user'`,
+  )
+  if (tableRows.length === 0) return false
+  const userRows: unknown[] = await queryRunner.query('SELECT 1 FROM sys_user LIMIT 1')
+  return userRows.length > 0
+}
+
+/**
+ * 首次接管存量库的基线登记：人工维护的库从未写过 tracking，若按白名单从头重放，
+ * 042 等脚本会在已演进的历史数据上重跑格式守卫与回填，可能直接阻断启动。
+ * 这里只读核对每个脚本负责的表/列/索引/外键/触发器/检查约束，全部就位的只登记、不执行；
+ * 存在缺口的脚本，以及没有可核对契约项的 054/055/056（各自有清退或领养守卫）仍交给常规流程执行。
+ */
+async function baselineSatisfiedMigrations(
+  queryRunner: QueryRunner,
+  appliedSet: Set<string>,
+): Promise<string[]> {
+  const baselinedFiles: string[] = []
+  for (const filename of AUTO_MIGRATABLE_FILES) {
+    if (!fs.existsSync(path.join(SQL_DIR, filename))) continue
+    const { verifiable, issues } = await collectAutoMigrationContractIssues(queryRunner, filename, { includeTables: true })
+    if (!verifiable || issues.length > 0) continue
+    await recordAppliedMigration(queryRunner, filename, readMigrationFile(filename).checksum)
+    appliedSet.add(filename)
+    baselinedFiles.push(filename)
+  }
+  return baselinedFiles
 }
 
 interface MysqlTableRow {

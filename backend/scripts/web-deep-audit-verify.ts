@@ -55,9 +55,20 @@ async function verifyMalformedJsonIsClientErrorWithoutBodyLog() {
   }
   assert.ok(!logged.some((line) => line.includes(secret)), '错误日志不得包含原始请求体中的密码')
 
-  const { toSafeErrorLog } = await import('../src/utils/safe-error-log.js')
+  const { toSafeErrorLog, toSafeStartupErrorLog } = await import('../src/utils/safe-error-log.js')
   const withBody = Object.assign(new SyntaxError('Unexpected end of JSON input'), { body: `{"password":"${secret}"` })
   assert.ok(!JSON.stringify(toSafeErrorLog(withBody)).includes(secret), '兜底日志不得展开错误对象自有属性')
+
+  const accessDenied = Object.assign(new Error(`Access denied for user 'ylink'@'10.0.0.8' (using password: ${secret})`), {
+    code: 'ER_ACCESS_DENIED_ERROR', errno: 1045, sqlState: '28000',
+  })
+  const accessDeniedLog = toSafeStartupErrorLog(accessDenied)
+  assert.equal(accessDeniedLog.code, 'ER_ACCESS_DENIED_ERROR', '启动失败日志必须保留驱动错误码')
+  assert.ok(!JSON.stringify(accessDeniedLog).includes('ylink') && !JSON.stringify(accessDeniedLog).includes(secret), '带 code 的驱动异常不得输出消息中的账号与口令')
+  const contractFailure = new Error(`[启动失败] 缺少字段 o2o_preorder.reserved_business_no，连接 mysql://ylink:${secret}@db:3306/ylink`)
+  const contractLog = JSON.stringify(toSafeStartupErrorLog(contractFailure))
+  assert.ok(contractLog.includes('o2o_preorder.reserved_business_no'), '自有启动异常必须保留可定位根因的消息')
+  assert.ok(!contractLog.includes(secret) && !contractLog.includes('ylink:'), '启动失败日志必须抹掉连接串中的账号口令')
 }
 
 async function verifyProviderTemplateEscaping() {
