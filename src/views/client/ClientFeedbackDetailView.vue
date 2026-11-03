@@ -57,14 +57,6 @@ const clientAuthStore = useClientAuthStore(pinia)
 const detailRequest = useStableRequest()
 const FEEDBACK_ATTACHMENT_LIMIT = 9
 const FEEDBACK_ATTACHMENT_MAX_SIZE = 10 * 1024 * 1024
-type ClientFeedbackDetailUiSnapshot = {
-  replyDraft: string
-  replyAttachments: FeedbackConversationMessageAttachment[]
-  satisfactionComment: string
-  selectedSatisfactionLevel: FeedbackSatisfactionLevel
-  satisfactionDialogVisible: boolean
-  windowScrollY: number
-}
 
 const loading = ref(false)
 const detailLoading = ref(false)
@@ -76,6 +68,8 @@ const satisfactionSubmitting = ref(false)
 const satisfactionDialogVisible = ref(false)
 const conversation = ref<FeedbackConversationRecord | null>(null)
 const replyDraft = ref('')
+let replyDraftRevision = 0
+watch(replyDraft, () => { replyDraftRevision += 1 }, { flush: 'sync' })
 const replyAttachments = ref<FeedbackConversationMessageAttachment[]>([])
 const satisfactionComment = ref('')
 const selectedSatisfactionLevel = ref<FeedbackSatisfactionLevel>('satisfied')
@@ -90,6 +84,8 @@ let realtimeConnection: FeedbackRealtimeConnection | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let freshMessageTimer: ReturnType<typeof setTimeout> | null = null
 let pageRuntimeMounted = false
+let attachmentGeneration = 0
+watch([() => route.params.id, () => clientAuthStore.currentUser?.id], () => { attachmentGeneration += 1; replyAttachments.value = []; uploadingReplyAttachments.value = false }, { flush: 'sync' })
 
 const currentClientUser = computed(() => clientAuthStore.currentUser)
 const currentConversationId = computed(() => {
@@ -306,33 +302,6 @@ const resolveAttachmentUrl = (attachment: FeedbackConversationMessageAttachment)
  * - 补充说明、待发送附件与评价弹窗输入都属于用户临时编辑内容，不能被实时刷新覆盖；
  * - 页面整体滚动位置也一起记录，避免有新进展时把用户拉回顶部。
  */
-const captureDetailUiSnapshot = (): ClientFeedbackDetailUiSnapshot => {
-  return {
-    replyDraft: replyDraft.value,
-    replyAttachments: [...replyAttachments.value],
-    satisfactionComment: satisfactionComment.value,
-    selectedSatisfactionLevel: selectedSatisfactionLevel.value,
-    satisfactionDialogVisible: satisfactionDialogVisible.value,
-    windowScrollY: globalThis.window?.scrollY ?? 0,
-  }
-}
-
-const restoreDetailUiSnapshot = async (snapshot: ClientFeedbackDetailUiSnapshot | null) => {
-  if (!snapshot) {
-    return
-  }
-  replyDraft.value = snapshot.replyDraft
-  replyAttachments.value = [...snapshot.replyAttachments]
-  satisfactionComment.value = snapshot.satisfactionComment
-  selectedSatisfactionLevel.value = snapshot.selectedSatisfactionLevel
-  satisfactionDialogVisible.value = snapshot.satisfactionDialogVisible
-  await nextTick()
-  globalThis.window?.scrollTo({
-    top: snapshot.windowScrollY,
-    behavior: 'auto',
-  })
-}
-
 /**
  * 新消息高亮只保留一个很短的窗口：
  * - 让用户能快速分辨“这次自动刷新到底更新了哪里”；
@@ -407,7 +376,6 @@ const loadConversationDetail = async (
 
   const previousConversationId = conversation.value?.id ?? ''
   const shouldPreserveLocalState = Boolean(options.preserveLocalState && previousConversationId === conversationId)
-  const detailUiSnapshot = shouldPreserveLocalState ? captureDetailUiSnapshot() : null
   const previousMessageIds = shouldPreserveLocalState
     ? new Set(conversation.value?.messages.map((message) => message.id) ?? [])
     : null
@@ -430,8 +398,10 @@ const loadConversationDetail = async (
       }
 
       conversation.value = detail
-      satisfactionComment.value = detail.satisfaction?.comment || ''
-      selectedSatisfactionLevel.value = detail.satisfaction?.level || 'satisfied'
+      if (!shouldPreserveLocalState) {
+        satisfactionComment.value = detail.satisfaction?.comment || ''
+        selectedSatisfactionLevel.value = detail.satisfaction?.level || 'satisfied'
+      }
       if (detail.satisfaction) {
         satisfactionDialogVisible.value = false
       }
@@ -441,7 +411,7 @@ const loadConversationDetail = async (
             .filter((message) => !previousMessageIds?.has(message.id))
             .map((message) => message.id),
         )
-        await restoreDetailUiSnapshot(detailUiSnapshot)
+        // 后台响应只更新服务端数据，不恢复旧草稿或抢占用户滚动。
       }
     },
     onError: (error) => {
@@ -470,6 +440,10 @@ const openReplyAttachmentPicker = () => {
  * - 仅支持图片，减少客服侧消息渲染与安全策略分叉。
  */
 const handleReplyAttachmentChange = async (event: Event) => {
+  if (replySubmitting.value || uploadingReplyAttachments.value) return
+  const generation = ++attachmentGeneration
+  const owner = currentClientUser.value?.id, target = currentConversationId.value
+  const validUpload = () => pageRuntimeMounted && generation === attachmentGeneration && owner === currentClientUser.value?.id && target === currentConversationId.value
   const input = event.target as HTMLInputElement | null
   const files = Array.from(input?.files ?? [])
   if (!files.length) {
@@ -489,6 +463,7 @@ const handleReplyAttachmentChange = async (event: Event) => {
   uploadingReplyAttachments.value = true
   try {
     for (const file of targetFiles) {
+      if (!validUpload()) return
       if (!file.type.startsWith('image/')) {
         showAppWarning(`文件 ${file.name} 不是图片，已跳过`)
         continue
@@ -498,13 +473,16 @@ const handleReplyAttachmentChange = async (event: Event) => {
         continue
       }
       const attachment = await uploadClientFeedbackAttachment(file)
+      if (!validUpload()) return
       replyAttachments.value = [...replyAttachments.value, attachment]
     }
+    if (!validUpload()) return
     showAppSuccess('补充图片上传完成，可随消息一起发送')
   } catch (error) {
+    if (!validUpload()) return
     showAppError(extractErrorMessage(error, '附件上传失败，请稍后重试'))
   } finally {
-    uploadingReplyAttachments.value = false
+    if (validUpload()) uploadingReplyAttachments.value = false
     if (input) {
       input.value = ''
     }
@@ -512,10 +490,12 @@ const handleReplyAttachmentChange = async (event: Event) => {
 }
 
 const handleRemoveReplyAttachment = (attachmentIndex: number) => {
+  if (replySubmitting.value) return
   replyAttachments.value = replyAttachments.value.filter((_, index) => index !== attachmentIndex)
 }
 
 const handleReply = async () => {
+  if (replySubmitting.value || uploadingReplyAttachments.value) return
   if (!conversation.value) {
     showAppWarning('当前反馈单尚未加载完成')
     return
@@ -527,18 +507,27 @@ const handleReply = async () => {
     return
   }
 
+  const submittedRevision = replyDraftRevision
+  const submittedConversationId = conversation.value.id
+  const submittedUserId = currentClientUser.value?.id
+  const attachments = [...replyAttachments.value]
+  const isCurrent = () => pageRuntimeMounted && currentConversationId.value === submittedConversationId && currentClientUser.value?.id === submittedUserId
   replySubmitting.value = true
   try {
-    await appendClientFeedbackMessage(conversation.value.id, {
+    await appendClientFeedbackMessage(submittedConversationId, {
       body: normalizedReply,
-      attachments: replyAttachments.value,
+      attachments,
     })
-    replyDraft.value = ''
-    replyAttachments.value = []
-    await loadConversationDetail(conversation.value.id)
+    if (!isCurrent()) return
+    if (submittedRevision === replyDraftRevision) replyDraft.value = ''
+    const sentIds = new Set(attachments.map((item) => item.id))
+    replyAttachments.value = replyAttachments.value.filter((item) => !sentIds.has(item.id))
+    await loadConversationDetail(submittedConversationId, { preserveLocalState: true })
+    if (!isCurrent()) return
     reconnectTip.value = '已自动续接当前反馈单，你的新补充已提交给客服。'
     showAppSuccess('补充说明已发送')
   } catch (error) {
+    if (!isCurrent()) return
     void showCriticalErrorDialog(error, {
       title: '补充说明发送失败',
       fallback: '补充说明发送失败，请稍后重试',
@@ -1279,14 +1268,14 @@ onBeforeUnmount(() => {
                 新的异常截图、界面对比图或订单凭证可直接附在本次补充说明里，方便客服继续定位。
               </p>
             </div>
-            <button
-              type="button"
+            <el-button
+              native-type="button"
               class="rounded-[0.9rem] border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:border-slate-300 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-white/10 dark:bg-[#141415] dark:text-slate-200"
-              :disabled="uploadingReplyAttachments || replyAttachments.length >= FEEDBACK_ATTACHMENT_LIMIT"
+              :disabled="replySubmitting || uploadingReplyAttachments || replyAttachments.length >= FEEDBACK_ATTACHMENT_LIMIT"
               @click="openReplyAttachmentPicker"
             >
               {{ uploadingReplyAttachments ? '上传中...' : replyAttachments.length ? '继续添加图片' : '上传图片附件' }}
-            </button>
+            </el-button>
           </div>
           <input
             ref="replyAttachmentInputRef"
@@ -1341,14 +1330,14 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="mt-3 flex justify-end">
-          <button
-            type="button"
+          <el-button
+            native-type="button"
             class="rounded-[1rem] bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
-            :disabled="replySubmitting"
+            :disabled="replySubmitting || uploadingReplyAttachments"
             @click="handleReply"
           >
             {{ replySubmitting ? '发送中...' : '发送补充说明' }}
-          </button>
+          </el-button>
         </div>
       </article>
     </article>
@@ -1657,6 +1646,8 @@ onBeforeUnmount(() => {
 .client-feedback-satisfaction-dialog__radio-card {
   margin-right: 0;
   min-width: 0;
+  height: auto;
+  white-space: normal;
 }
 
 .client-feedback-satisfaction-dialog__radio-card :deep(.el-radio__input) {
@@ -1665,6 +1656,9 @@ onBeforeUnmount(() => {
 
 .client-feedback-satisfaction-dialog__radio-card :deep(.el-radio__label) {
   display: flex;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
   min-height: 6.25rem;
   width: 100%;
   flex-direction: column;
