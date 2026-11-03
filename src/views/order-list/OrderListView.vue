@@ -22,8 +22,11 @@ import { formatOrderKingdeeStatus } from '@/utils/kingdee-status'
 
 import dayjs from 'dayjs'
 
-import { computed, defineAsyncComponent, defineComponent, h, ref, watch, type ComponentPublicInstance } from 'vue'
-import { updateOrderComplianceFlags, type OrderDetailResult, type OrderRecord } from '@/api/modules/order'
+import { computed, defineAsyncComponent, defineComponent, h, onBeforeUnmount, ref, watch, type ComponentPublicInstance } from 'vue'
+import { getOrderDetailById, updateOrderComplianceFlags, type OrderDetailResult, type OrderRecord } from '@/api/modules/order'
+import { updateO2oOrderComplianceFlags } from '@/api/modules/o2o'
+import { getKingdeeSession } from '@/utils/kingdee-freshness'
+import { normalizeRequestError } from '@/utils/error'
 import { createTimedAsyncLoader } from './order-list-mobile-card-loader'
 import {
   BizResponsiveDataCollectionShell,
@@ -219,6 +222,41 @@ const complianceForm = ref({
   hasCustomerOrder: false,
   isSystemApplied: false,
 })
+const isO2oComplianceOrder = computed(() => currentOrder.value?.inventoryMode === 'o2o_preapplied' || currentOrder.value?.sourceDocType === 'o2o_preorder')
+const complianceSource = computed(() => {
+  const order = currentOrder.value
+  const sources = order?.sourcePreorderRegistrations ?? []
+  return order?.merge.role === 'standalone' && sources.length === 1 && sources[0]?.sourceOrderId === order.id
+    ? sources[0] : null
+})
+const canEditSystemApplied = computed(() => canEditStandaloneComplianceFlags.value && (!isO2oComplianceOrder.value || Boolean(
+  complianceSource.value?.sourcePreorderId && complianceSource.value.kingdeeStatus !== null
+  && Number.isSafeInteger(complianceSource.value.kingdeeVersion) && complianceSource.value.kingdeeVersion >= 0,
+)))
+// 草稿基线独立于轮询投影；有未保存输入或冲突时不能偷偷采用新 CAS 版本。
+const complianceBaseline = ref({ hasCustomerOrder: false, isSystemApplied: false, editVersion: 0, sourceId: null as string | null, kingdeeVersion: 0 })
+const complianceRefreshRequired = ref<'conflict' | 'partial' | 'saved' | null>(null)
+const complianceFeedback = ref('')
+let complianceGeneration = 0
+let complianceRequestSequence = 0
+let activeComplianceRequest: number | null = null
+const invalidateComplianceRequest = () => {
+  complianceGeneration += 1
+  activeComplianceRequest = null
+  complianceSaving.value = false
+}
+const beginComplianceRequest = () => {
+  const token = ++complianceRequestSequence
+  activeComplianceRequest = token
+  complianceSaving.value = true
+  return token
+}
+const finishComplianceRequest = (token: number) => {
+  if (activeComplianceRequest !== token) return
+  activeComplianceRequest = null
+  complianceSaving.value = false
+}
+onBeforeUnmount(invalidateComplianceRequest)
 const emptyDescription = computed(() => {
   return searchForm.value.keyword || searchForm.value.orderType !== 'all' || searchForm.value.dateRange
     ? '未匹配到符合条件的订单，请调整筛选条件后重试'
@@ -262,7 +300,7 @@ const orderTreeRows = computed<OrderTreeRecord[]>(() => listState.records.map((o
 })))
 
 const syncComplianceFormFromCurrentOrder = (options: { force?: boolean } = {}) => {
-  if (!options.force && hasUnsavedComplianceDraft.value) {
+  if (!options.force && (hasUnsavedComplianceDraft.value || complianceSaving.value || complianceRefreshRequired.value)) {
     return
   }
 
@@ -271,23 +309,30 @@ const syncComplianceFormFromCurrentOrder = (options: { force?: boolean } = {}) =
     hasCustomerOrder: Boolean(currentOrder.value?.hasCustomerOrder),
     isSystemApplied: Boolean(currentOrder.value?.isSystemApplied),
   }
+  complianceBaseline.value = {
+    ...complianceForm.value,
+    editVersion: currentOrder.value?.editVersion ?? 0,
+    sourceId: complianceSource.value?.sourcePreorderId ?? null,
+    kingdeeVersion: complianceSource.value?.kingdeeVersion ?? 0,
+  }
   hasUnsavedComplianceDraft.value = false
   complianceDraftTrackingSuspended.value = false
 }
 
 watch(
-  () => currentOrder.value?.id ?? '',
-  (currentOrderId, previousOrderId) => {
-    syncComplianceFormFromCurrentOrder({
-      // 详细注释：切换到另一张单据时必须强制重置编辑表单，
-      // 否则上一张单据的本地草稿会错误带到新详情里。
-      force: currentOrderId !== previousOrderId,
-    })
+  [() => currentOrder.value?.id, () => complianceSource.value?.sourcePreorderId, () => drawerVisible.value, () => getKingdeeSession('admin').epoch],
+  (values, previous) => {
+    invalidateComplianceRequest()
+    complianceRefreshRequired.value = null
+    complianceFeedback.value = ''
+    syncComplianceFormFromCurrentOrder({ force: true })
+    if (previous && values[3] !== previous[3] && currentOrder.value) complianceRefreshRequired.value = 'conflict'
   },
+  { flush: 'sync' },
 )
 
 watch(
-  () => [currentOrder.value?.hasCustomerOrder, currentOrder.value?.isSystemApplied],
+  () => [currentOrder.value?.hasCustomerOrder, currentOrder.value?.isSystemApplied, currentOrder.value?.editVersion, complianceSource.value?.kingdeeVersion],
   () => {
     syncComplianceFormFromCurrentOrder()
   },
@@ -301,9 +346,10 @@ watch(
     }
 
     hasUnsavedComplianceDraft.value =
-      complianceForm.value.hasCustomerOrder !== Boolean(currentOrder.value?.hasCustomerOrder)
-      || complianceForm.value.isSystemApplied !== Boolean(currentOrder.value?.isSystemApplied)
+      complianceForm.value.hasCustomerOrder !== complianceBaseline.value.hasCustomerOrder
+      || complianceForm.value.isSystemApplied !== complianceBaseline.value.isSystemApplied
   },
+  { flush: 'sync' },
 )
 
 watch(
@@ -424,51 +470,147 @@ const handleContentEditCommitted = async (result: OrderDetailResult) => {
   await refreshOrders()
 }
 
-const handleSaveComplianceFlags = async () => {
-  if (!currentOrder.value) {
-    return
-  }
-  // 状态编辑属于高频越权入口，统一收口到共享权限动作工具：
-  // - 保持按钮显隐与点击后二次拦截一致；
-  // - 避免订单页继续维护散点 showPermissionDenied 调用。
-  if (!ensurePermission('orders:update', '合规状态编辑')) {
-    return
-  }
-  if (currentOrder.value.orderType !== 'department') {
-    showAppInfo('散客单不适用该状态编辑')
-    return
-  }
-  complianceSaving.value = true
+const applyComplianceDetail = (detail: OrderDetailResult) => {
+  currentOrder.value = detail
+  listState.records = listState.records.map((item) => item.id === detail.id ? { ...item, ...detail } : item)
+}
+
+// 409 后由用户明确刷新并确认最新版本，保留输入；成功但刷新失败只重读，不重放 PATCH。
+const handleRefreshCompliance = async () => {
+  if (complianceSaving.value || !currentOrder.value || !drawerVisible.value) return
+  const id = currentOrder.value.id
+  const generation = complianceGeneration
+  const session = getKingdeeSession('admin')
+  const reason = complianceRefreshRequired.value
+  const draft = { ...complianceForm.value }
+  const sourceId = complianceBaseline.value.sourceId
+  const active = () => generation === complianceGeneration && session === getKingdeeSession('admin') && drawerVisible.value && currentOrder.value?.id === id
+  const token = beginComplianceRequest()
   try {
-    const nextDetail = await updateOrderComplianceFlags(currentOrder.value.id, {
-      editVersion: currentOrder.value.editVersion,
-      hasCustomerOrder: complianceForm.value.hasCustomerOrder,
-      isSystemApplied: complianceForm.value.isSystemApplied,
-    })
-    currentOrder.value = nextDetail
-    hasUnsavedComplianceDraft.value = false
-    syncComplianceFormFromCurrentOrder({
-      force: true,
-    })
-    listState.records = listState.records.map((item) =>
-      item.id === nextDetail.id
-        ? {
-            ...item,
-            editVersion: nextDetail.editVersion,
-            hasCustomerOrder: nextDetail.hasCustomerOrder,
-            isSystemApplied: nextDetail.isSystemApplied,
-          }
-        : item,
-    )
+    const detail = await getOrderDetailById(id)
+    if (!active()) return
+    applyComplianceDetail(detail)
+    complianceRefreshRequired.value = null
+    complianceFeedback.value = ''
+    syncComplianceFormFromCurrentOrder({ force: true })
+    if ((reason === 'conflict' || reason === 'partial') && sourceId === complianceBaseline.value.sourceId) {
+      // 部分成功后只保留未保存的申请意图，客户标记采用本次明确读取的正式单状态。
+      complianceForm.value = reason === 'partial'
+        ? { ...complianceForm.value, isSystemApplied: draft.isSystemApplied }
+        : draft
+      complianceFeedback.value = reason === 'partial'
+        ? '已确认最新状态，仅保留未保存的系统申请草稿，请核对后保存。'
+        : '已读取最新状态并确认版本，请核对后再次保存。'
+      showAppInfo(complianceFeedback.value)
+    }
+  } catch (error) {
+    if (active()) showAppWarning('状态刷新失败，已保留输入，请重试刷新')
+  } finally {
+    finishComplianceRequest(token)
+  }
+}
+
+const handleSaveComplianceFlags = async () => {
+  if (complianceSaving.value || !currentOrder.value || !drawerVisible.value) return
+  if (!ensurePermission('orders:update', '合规状态编辑') || !canEditStandaloneComplianceFlags.value) return
+  if (complianceRefreshRequired.value) {
+    showAppWarning('请先刷新并确认最新状态，再保存')
+    return
+  }
+  const order = currentOrder.value
+  const baseline = { ...complianceBaseline.value }
+  const draft = { ...complianceForm.value }
+  const o2o = isO2oComplianceOrder.value
+  const customerChanged = draft.hasCustomerOrder !== baseline.hasCustomerOrder
+  const appliedChanged = draft.isSystemApplied !== baseline.isSystemApplied
+  if (!customerChanged && !appliedChanged) {
+    showAppInfo('状态未变化，无需保存')
+    return
+  }
+  if (o2o && appliedChanged && (!canEditSystemApplied.value || baseline.sourceId !== complianceSource.value?.sourcePreorderId)) {
+    showAppWarning('来源预订单未唯一确认，系统申请仅供查看')
+    return
+  }
+  if (o2o && appliedChanged && !draft.isSystemApplied && complianceSource.value?.kingdeeVoucherNo) {
+    showAppWarning('已有金蝶编号，请先清空编号再改为未申请')
+    return
+  }
+  const generation = complianceGeneration
+  const session = getKingdeeSession('admin')
+  const active = () => generation === complianceGeneration && session === getKingdeeSession('admin') && drawerVisible.value && currentOrder.value?.id === order.id
+  let customerSaved = false
+  let appliedSaved = false
+  let persisted = false
+  const notifyDetachedSave = () => {
+    if (session !== getKingdeeSession('admin') || (!persisted && !customerSaved && !appliedSaved)) return
+    const result = customerSaved && appliedChanged && !appliedSaved
+      ? '客户订单标记已保存；系统申请未保存，请重新打开原单核对。'
+      : '提交的状态已保存，请重新打开原单查看最新状态。'
+    showAppInfo(`单据 ${order.businessNo || order.id}：${result}`)
+  }
+  const token = beginComplianceRequest()
+  try {
+    let nextDetail: OrderDetailResult = order
+    if (o2o) {
+      if (customerChanged) {
+        nextDetail = await updateOrderComplianceFlags(order.id, {
+          editVersion: baseline.editVersion,
+          hasCustomerOrder: draft.hasCustomerOrder,
+        })
+        customerSaved = true
+        if (!active()) { notifyDetachedSave(); return }
+        applyComplianceDetail(nextDetail)
+        if (!active()) { notifyDetachedSave(); return }
+        // 仅确认已成功的正式单字段，不能从其投影抬高仍待提交的申请 CAS 版本。
+        complianceBaseline.value = { ...baseline, hasCustomerOrder: Boolean(nextDetail.hasCustomerOrder), editVersion: nextDetail.editVersion }
+        complianceForm.value = { hasCustomerOrder: Boolean(nextDetail.hasCustomerOrder), isSystemApplied: draft.isSystemApplied }
+      }
+      if (appliedChanged && baseline.sourceId) {
+        await updateO2oOrderComplianceFlags(baseline.sourceId, {
+          isSystemApplied: draft.isSystemApplied,
+          expectedKingdeeVersion: baseline.kingdeeVersion,
+        })
+        appliedSaved = true
+        if (!active()) { notifyDetachedSave(); return }
+        nextDetail = await getOrderDetailById(order.id)
+      }
+    } else {
+      nextDetail = await updateOrderComplianceFlags(order.id, {
+        editVersion: baseline.editVersion,
+        hasCustomerOrder: draft.hasCustomerOrder,
+        isSystemApplied: draft.isSystemApplied,
+      })
+      persisted = true
+    }
+    if (!active()) { notifyDetachedSave(); return }
+    applyComplianceDetail(nextDetail)
+    complianceRefreshRequired.value = null
+    complianceFeedback.value = ''
+    syncComplianceFormFromCurrentOrder({ force: true })
     showAppSuccess('状态已更新')
   } catch (error) {
+    if (!active()) { notifyDetachedSave(); return }
+    if (customerSaved && appliedChanged && !appliedSaved) {
+      complianceRefreshRequired.value = 'partial'
+      complianceFeedback.value = `客户订单标记已保存；系统申请未保存：${normalizeRequestError(error).message}。请刷新并确认后仅重试未保存部分。`
+      showAppWarning(complianceFeedback.value)
+      return
+    }
+    if (persisted || appliedSaved) {
+      complianceRefreshRequired.value = 'saved'
+      complianceFeedback.value = '状态已保存，但详情刷新失败；请刷新状态，不要重复提交。'
+      showAppWarning(complianceFeedback.value)
+      return
+    }
+    const normalized = normalizeRequestError(error)
+    if (normalized.status === 409 || normalized.code === 409) complianceRefreshRequired.value = 'conflict'
     void showCriticalErrorDialog(error, {
       title: '订单状态更新失败',
       fallback: '状态更新失败，请稍后重试',
       operation: '更新出库单状态',
     })
   } finally {
-    complianceSaving.value = false
+    finishComplianceRequest(token)
   }
 }
 
@@ -585,7 +727,7 @@ const handleSaveComplianceFlags = async () => {
               row-key="id"
               :tree-props="{ children: 'children' }"
               stripe
-              class="flex-1 w-full"
+              class="order-list-table flex-1 w-full"
               height="100%"
               table-layout="auto"
               v-loading="listState.loading"
@@ -656,7 +798,7 @@ const handleSaveComplianceFlags = async () => {
                   <el-tag v-else type="success" effect="light">正常</el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="310" fixed="right" align="right">
+              <el-table-column label="操作" width="310" fixed="right" align="right" class-name="order-list-table__actions-cell">
                 <template #default="{ row }">
                   <el-button link type="primary" @click="handleViewDetail(row)">详情</el-button>
                   <el-button v-if="canAmendOrders && !row.isDeleted && !isSourceOrder(row)" link type="warning" @click="openOrderAmendment([row])">修订</el-button>
@@ -740,16 +882,18 @@ const handleSaveComplianceFlags = async () => {
       <template #header>
         <div class="order-detail-drawer-header">
           <span class="order-detail-drawer-header__title">单据详情</span>
-          <el-button
-            v-if="hasPermission('orders:edit') && currentOrder?.merge.role !== 'source'"
-            plain
-            type="warning"
-            :disabled="!canEditOrderContent"
-            @click="handleOpenContentEdit"
-          >
-            编辑内容
-          </el-button>
-          <el-button v-if="canUseOrderVoucher" plain type="primary" @click="handleOpenVoucherDialog">正式出库单</el-button>
+          <div class="order-detail-drawer-header__actions">
+            <el-button
+              v-if="hasPermission('orders:edit') && currentOrder?.merge.role !== 'source'"
+              plain
+              type="warning"
+              :disabled="!canEditOrderContent"
+              @click="handleOpenContentEdit"
+            >
+              编辑内容
+            </el-button>
+            <el-button v-if="canUseOrderVoucher" plain type="primary" @click="handleOpenVoucherDialog">正式出库单</el-button>
+          </div>
         </div>
       </template>
       <template #default="{ isPhone, isDesktop }">
@@ -762,9 +906,13 @@ const handleSaveComplianceFlags = async () => {
           :can-edit-standalone-compliance-flags="canEditStandaloneComplianceFlags"
           :compliance-form="complianceForm"
           :compliance-saving="complianceSaving"
+          :can-edit-system-applied="canEditSystemApplied"
+          :compliance-refresh-required="complianceRefreshRequired"
+          :compliance-feedback="complianceFeedback"
           @update:has-customer-order="complianceForm.hasCustomerOrder = $event"
           @update:is-system-applied="complianceForm.isSystemApplied = $event"
           @save-compliance="handleSaveComplianceFlags"
+          @refresh-compliance="handleRefreshCompliance"
           @navigate="handleViewDetail({ id: $event })"
         />
       </template>
@@ -823,6 +971,7 @@ const handleSaveComplianceFlags = async () => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 10px;
   padding-right: 10px;
 }
@@ -842,7 +991,15 @@ const handleSaveComplianceFlags = async () => {
 }
 
 /* 相邻按钮间距交给容器 gap，清零 Element Plus 默认 margin-left，避免间距与 gap 叠加 */
-.order-detail-drawer-header > :deep(.el-button + .el-button) {
+.order-detail-drawer-header__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.order-detail-drawer-header__actions :deep(.el-button + .el-button) {
   margin-left: 0;
 }
 
@@ -880,6 +1037,57 @@ const handleSaveComplianceFlags = async () => {
 
 .dark .order-detail-content :deep(.el-descriptions__content) {
   color: #e2e8f0;
+}
+
+/* 固定操作列自身合成不透明底色，防止横向滚动的单元格内容透出。 */
+.order-list-table :deep(.el-table__body tr > td.order-list-table__actions-cell) {
+  --order-fixed-row-bg: var(--el-table-tr-bg-color);
+  background-color: var(--order-fixed-row-bg);
+}
+
+.order-list-table :deep(.el-table__body tr.el-table__row--striped > td.order-list-table__actions-cell) {
+  --order-fixed-row-bg: var(--el-fill-color-lighter);
+  background-color: var(--order-fixed-row-bg);
+}
+
+.order-list-table :deep(.el-table__body tr.hover-row > td.order-list-table__actions-cell),
+.order-list-table :deep(.el-table__body tr:hover > td.order-list-table__actions-cell) {
+  --order-fixed-row-bg: var(--el-fill-color-light);
+  background-color: var(--order-fixed-row-bg);
+}
+
+:global(.dark .order-list-table .el-table__body tr.hover-row > td.order-list-table__actions-cell),
+:global(.dark .order-list-table .el-table__body tr:hover > td.order-list-table__actions-cell) {
+  --order-fixed-row-bg: #1d1d1e;
+}
+
+.order-list-table :deep(.el-table__body tr.order-list-table-row--active > td.order-list-table__actions-cell) {
+  --order-fixed-row-bg: #e7f4f3;
+  background: var(--order-fixed-row-bg) !important;
+}
+
+:global(.dark .order-list-table .el-table__body tr.order-list-table-row--active > td.order-list-table__actions-cell) {
+  --order-fixed-row-bg: #132121;
+}
+
+.order-list-table :deep(.el-table__body tr.order-list-table-row--new > td.order-list-table__actions-cell) {
+  animation-name: order-table-fixed-row-fade-highlight;
+}
+
+:global(.dark .order-list-table .el-table__body tr.order-list-table-row--new > td.order-list-table__actions-cell) {
+  animation-name: order-table-fixed-row-fade-highlight-dark;
+}
+
+@keyframes order-table-fixed-row-fade-highlight {
+  0% { background-color: #fef4cd; }
+  65% { background-color: #fefdf0; }
+  100% { background-color: var(--order-fixed-row-bg); }
+}
+
+@keyframes order-table-fixed-row-fade-highlight-dark {
+  0% { background-color: #41321a; }
+  65% { background-color: #2b2114; }
+  100% { background-color: var(--order-fixed-row-bg); }
 }
 
 :deep(.el-table__body tr.order-list-table-row--active > td) {

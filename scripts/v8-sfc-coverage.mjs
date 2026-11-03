@@ -9,6 +9,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { TraceMap, decodedMappings } from '@jridgewell/trace-mapping'
+import ts from 'typescript'
+import { parse as parseSfc } from '@vue/compiler-sfc'
 
 // 生产SFC宿主中已声明的平台边界替身，有限枚举；未知behavior模块不能静默丢弃。
 const knownBehaviorBoundaries = new Set([
@@ -18,8 +20,96 @@ const knownBehaviorBoundaries = new Set([
   '\\0behavior:element-plus', '\\0behavior:@element-plus/icons-vue',
   '\\0behavior:@/composables/useDevice', '\\0behavior:@/composables/useCameraQrScanner',
   '\\0behavior:@/api/modules/product', '\\0behavior:@/components/common/KingdeeRegistrationEditor.vue',
+  // compileOrderBehavior 实际生成的有限平台替身；不能按整个 order: 前缀忽略。
+  '\\0order:@/api/modules/order', '\\0order:@/api/modules/o2o',
+  '\\0order:@/components/common', '\\0order:@/components/common/business-composite/BizCrudDialogShell.vue',
+  '\\0order:@/components/common/KingdeeRegistrationEditor.vue',
+  '\\0order:@/store', '\\0order:@/store/pinia', '\\0order:@/utils/error-dialog', '\\0order:@/utils/app-alert',
+  '\\0order:@/composables/usePermissionAction', '\\0order:./composables/useOrderListView',
+  '\\0order:./components/OrderDetailDrawerContent.vue', '\\0order:./components/OrderVoucherWorkbenchDialog.vue',
+  '\\0order:./components/OrderAmendmentDialog.vue', '\\0order:./components/OrderContentEditDialog.vue',
+  '\\0order:./components/OrderMergeDialog.vue', '\\0order:./components/OrderDeleteConfirmDialog.vue',
+  '\\0order:./components/OrderListMobileCard.vue',
 ])
 export const isKnownCoverageBehaviorBoundary = (id) => knownBehaviorBoundaries.has(id)
+
+/** 只识别 Vue defineComponent 的 setup 直接返回的客户端 render 首 range。 */
+export const isClientRenderRootRange = (generated, fn, rangeIndex) => {
+  if (rangeIndex !== 0 || fn.functionName !== '' || fn.isBlockCoverage !== true) return false
+  const range = fn.ranges[0]
+  if (!range || !/^\(_ctx,\s*_cache\) => \{/u.test(generated.slice(range.startOffset, range.endOffset))) return false
+  const ast = ts.createSourceFile('coverage-generated.mjs', generated, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
+  if (ast.parseDiagnostics.length) return false
+  const vueFactories = new Set()
+  for (const statement of ast.statements) {
+    if (!ts.isImportDeclaration(statement) || statement.moduleSpecifier.text !== 'vue') continue
+    const bindings = statement.importClause?.namedBindings
+    if (bindings && ts.isNamedImports(bindings)) {
+      for (const item of bindings.elements) if ((item.propertyName ?? item.name).text === 'defineComponent') vueFactories.add(item.name.text)
+    }
+  }
+  let matched = false
+  const visit = (node) => {
+    if (ts.isArrowFunction(node) && node.getStart(ast) === range.startOffset && node.end === range.endOffset
+      && node.parameters.length === 2 && node.parameters.every((parameter, index) =>
+        ts.isIdentifier(parameter.name) && parameter.name.text === ['_ctx', '_cache'][index]
+        && !parameter.initializer && !parameter.dotDotDotToken) && !node.modifiers?.length) {
+      const returned = node.parent, block = returned.parent, setup = block?.parent
+      const object = setup?.parent, call = object?.parent
+      matched = ts.isReturnStatement(returned) && ts.isBlock(block)
+        && ts.isMethodDeclaration(setup) && setup.name.getText(ast) === 'setup' && setup.body === block
+        && ts.isObjectLiteralExpression(object) && ts.isCallExpression(call)
+        && call.arguments[0] === object && ts.isIdentifier(call.expression) && vueFactories.has(call.expression.text)
+    }
+    if (!matched) ts.forEachChild(node, visit)
+  }
+  visit(ast)
+  return matched
+}
+
+/** CSR 的 v-if 注释无自身 segment；仅凭条件 AST 与原指令表达式的精确映射归属。 */
+export const resolveClientVIfCommentBranch = ({ generated, fn, rangeIndex, source, sourceText, mappedSegments }) => {
+  if (rangeIndex < 1 || !isClientRenderRootRange(generated, fn, 0)) return null
+  const range = fn.ranges[rangeIndex]
+  if (!range || generated.slice(range.startOffset, range.endOffset) !== ': createCommentVNode("v-if", true)') return null
+  const ast = ts.createSourceFile('coverage-generated.mjs', generated, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
+  const vueCommentNames = new Set()
+  for (const statement of ast.statements) {
+    if (!ts.isImportDeclaration(statement) || statement.moduleSpecifier.text !== 'vue') continue
+    const bindings = statement.importClause?.namedBindings
+    if (bindings && ts.isNamedImports(bindings)) for (const item of bindings.elements) {
+      if ((item.propertyName ?? item.name).text === 'createCommentVNode') vueCommentNames.add(item.name.text)
+    }
+  }
+  let condition
+  const visit = (node) => {
+    if (ts.isConditionalExpression(node) && node.colonToken.getStart(ast) === range.startOffset
+      && node.whenFalse.end === range.endOffset && ts.isCallExpression(node.whenFalse)
+      && ts.isIdentifier(node.whenFalse.expression) && vueCommentNames.has(node.whenFalse.expression.text)
+      && node.whenFalse.arguments.length === 2 && ts.isStringLiteral(node.whenFalse.arguments[0])
+      && node.whenFalse.arguments[0].text === 'v-if' && node.whenFalse.arguments[1].kind === ts.SyntaxKind.TrueKeyword
+      && ts.isPropertyAccessExpression(node.condition) && node.condition.name.text === 'value'
+      && ts.isIdentifier(node.condition.expression)) condition = node.condition
+    ts.forEachChild(node, visit)
+  }
+  visit(ast)
+  if (!condition) return null
+  const position = mappedSegments.find((entry) => entry.start === condition.getStart(ast) && entry.source === source)
+  if (!position) return null
+  const parsed = parseSfc(sourceText, { filename: source, sourceMap: true })
+  if (parsed.errors.length || !parsed.descriptor.template?.ast) return null
+  let branch = null
+  const visitTemplate = (node) => {
+    if (node.type === 1) for (const prop of node.props ?? []) {
+      const expression = prop.type === 7 && prop.name === 'if' ? prop.exp : null
+      if (expression?.loc.start.line === position.line && expression.loc.start.column === position.column + 1
+        && expression.loc.source === condition.expression.text) branch = { line: position.line, count: range.count }
+    }
+    for (const child of node.children ?? []) visitTemplate(child)
+  }
+  visitTemplate(parsed.descriptor.template.ast)
+  return branch
+}
 
 const same = (left, right) => JSON.stringify(left) === JSON.stringify(right)
 const isInteger = (value) => Number.isSafeInteger(value)
@@ -160,7 +250,7 @@ const mapScript = (script, cache, target) => {
       }
       const end = Math.min(lineEnd, lineStart + (segments[index + 1]?.[0] ?? lineEnd - lineStart))
       if (end < lineStart + column) throw new Error('Vue 源码映射片段区间非法')
-      mappedSegments.push({ start: lineStart + column, end, source: sources[sourceIndex], line: originalLine + 1 })
+      mappedSegments.push({ start: lineStart + column, end, source: sources[sourceIndex], line: originalLine + 1, column: originalColumn })
       if (sources[sourceIndex] !== target.source) continue
       if (originalLine >= sourceLines.length) throw new Error('Vue 源码映射目标行越界')
       const hit = segmentFullyExecuted(generated, lineStart + column, end, ranges) ? 1 : 0
@@ -175,6 +265,8 @@ const mapScript = (script, cache, target) => {
   let forwardAttributedBranches = 0
   let templateFallbackBranches = 0
   const firstTargetStart = mappedSegments.find((entry) => entry.source === target.source)?.start ?? generated.length
+  const templateStart = sourceLines.findIndex((line) => /^<template(?:\s|>)/u.test(line)) + 1
+  const templateEnd = sourceLines.findLastIndex((line) => /^<\/template>/u.test(line)) + 1
   // rolldown 运行时 __esmMin（惰性 ESM 初始化）的整段声明区间。rolldown 1.2 起它多了错误缓存分支
   // （`if (err) throw err[0]`、`catch (e) { throw err = [e], e; }`），这些 block range 属于打包器生成代码，
   // 与原 SFC 条件无关；按声明区间精确识别，不再逐条追加文本特征，避免把 SFC 自身的 throw / catch 误判为生成代码。
@@ -218,6 +310,15 @@ const mapScript = (script, cache, target) => {
         ignoredGeneratedRanges += 1
         continue
       }
+      const renderSegments = mappedSegments.filter((entry) => entry.source
+        && entry.start >= range.startOffset && entry.start < range.endOffset)
+      if (isClientRenderRootRange(generated, fn, rangeIndex) && templateStart > 0 && templateEnd > templateStart
+        && renderSegments.length > 0 && renderSegments.every((entry) => entry.source === target.source
+          && entry.line > templateStart && entry.line < templateEnd)) {
+        // 仅函数入口是编译器壳；继续遍历其余 ranges，保留模板分支及零命中。
+        ignoredGeneratedRanges += 1
+        continue
+      }
       const within = mappedSegments.find((entry) =>
         entry.source === target.source && entry.start >= range.startOffset && entry.start < range.endOffset)
       const previous = [...mappedSegments].reverse().find((entry) =>
@@ -240,8 +341,16 @@ const mapScript = (script, cache, target) => {
       // Vue SSR 在条件不成立时生成无源码图的注释节点。必须由紧邻的
       // 同一源 v-if/v-else-if 行精确归零，不能因为无映射就丢掉分母。
       if (body === ': createCommentVNode("v-if", true)') {
+        const clientBranch = resolveClientVIfCommentBranch({ generated, fn, rangeIndex,
+          source: target.source, sourceText: sourceLines.join('\n'), mappedSegments })
+        if (clientBranch) {
+          branches.push(clientBranch)
+          templateFallbackBranches += 1
+          continue
+        }
         const next = mappedSegments.find((entry) => entry.source && entry.start >= range.endOffset)
-        if (previous?.source === target.source && next?.source === target.source
+        if (!isClientRenderRootRange(generated, fn, 0)
+          && previous?.source === target.source && next?.source === target.source
           && next.line === previous.line + 1
           && /\bv-(?:else-)?if\s*=/u.test(sourceLines[previous.line - 1] ?? '')) {
           branches.push({ line: previous.line, count: range.count })

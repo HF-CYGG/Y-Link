@@ -7,6 +7,7 @@
  */
 
 import { AppDataSource } from '../config/data-source.js'
+import { resolveUserPermissions } from '../constants/auth-permissions.js'
 import { env } from '../config/env.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { BusinessSequence } from '../entities/business-sequence.entity.js'
@@ -23,7 +24,7 @@ import type { EntityManager } from 'typeorm'
 import { createHash } from 'node:crypto'
 import { STAFF_INVITE_CONFIG_KEY } from '../utils/staff-invite-code.js'
 import { isSealedSensitiveValue, openSensitiveValue, sealSensitiveValue } from '../utils/data-encryption.js'
-import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
+import { assertSysAccountGovernancePermission, lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 import { publishRedisBus, subscribeRedisBus } from '../redis/redis-bus.js'
 
 /**
@@ -1730,7 +1731,7 @@ class SystemConfigService {
 
     const changed = await runInTransaction(async (manager) => {
       const lockedActor = await lockActiveSysAccountForBusiness(manager, actor.userId)
-      if (lockedActor.role !== 'admin' || actor.role !== 'admin' || !actor.permissions.includes('system_configs:update')) {
+      if (lockedActor.role !== 'admin' || actor.role !== 'admin' || !resolveUserPermissions(lockedActor).includes('system_configs:update')) {
         throw new BizError('当前账号无权执行该操作', 403)
       }
 
@@ -1982,7 +1983,8 @@ class SystemConfigService {
     }
 
     const result = await runInTransaction(async (manager) => {
-      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const lockedActor = await lockActiveSysAccountForBusiness(manager, actor.userId)
+      assertSysAccountGovernancePermission(lockedActor, 'system_configs:update')
       await this.ensureDefaultConfigs(manager)
       const useForUpdate = manager.connection.options.type === 'mysql'
       const placeholders = this.o2oConfigKeys.map(() => '?').join(', ')
@@ -2202,7 +2204,8 @@ class SystemConfigService {
     }
 
     const result = await runInTransaction(async (manager) => {
-      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const lockedActor = await lockActiveSysAccountForBusiness(manager, actor.userId)
+      assertSysAccountGovernancePermission(lockedActor, 'system_configs:update')
       await this.ensureDefaultConfigs(manager)
       const useForUpdate = manager.connection.options.type === 'mysql'
       const placeholders = this.customerServiceConfigKeys.map(() => '?').join(', ')
@@ -2388,7 +2391,8 @@ class SystemConfigService {
       ? this.normalizeClientDepartmentTree(input.tree)
       : null
     return runInTransaction(async (manager) => {
-      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const lockedActor = await lockActiveSysAccountForBusiness(manager, actor.userId)
+      assertSysAccountGovernancePermission(lockedActor, 'system_configs:update')
       await this.ensureDefaultConfigs(manager)
       const useForUpdate = manager.connection.options.type === 'mysql'
       const lockedRows: Array<{ id: string; configKey: string; configValue: string; updatedAt: string }> = await manager.query(
@@ -2514,18 +2518,18 @@ class SystemConfigService {
   ): Promise<EnsureClientDepartmentOptionsResult> {
     await this.assertAdminActor(actor, requestMeta, 'system_config.ensure_client_departments', '自动补齐客户端部门配置')
     const normalizedDepartmentNames = [...new Set(departmentNames.map((item) => this.normalizeDepartmentLabel(item)))]
-    if (normalizedDepartmentNames.length === 0) {
-      const config = await this.getClientDepartmentConfigs()
-      return {
-        config,
-        changed: false,
-        createdDepartments: [],
-        resolvedDepartmentMap: new Map<string, string>(),
-      }
-    }
-
     const execute = async (transactionManager: EntityManager): Promise<EnsureClientDepartmentOptionsResult> => {
-      await lockActiveSysAccountForBusiness(transactionManager, actor.userId)
+      const lockedActor = await lockActiveSysAccountForBusiness(transactionManager, actor.userId)
+      assertSysAccountGovernancePermission(lockedActor, 'system_configs:update')
+      // manager 只复用既有事务，不绕过当前入口的治理授权；空输入同样先复核。
+      if (normalizedDepartmentNames.length === 0) {
+        return {
+          config: await this.getClientDepartmentConfigs(transactionManager),
+          changed: false,
+          createdDepartments: [],
+          resolvedDepartmentMap: new Map<string, string>(),
+        }
+      }
       await this.ensureDefaultConfigs(transactionManager)
       const useForUpdate = transactionManager.connection.options.type === 'mysql'
       const lockedRows: Array<{ id: string; configValue: string; updatedAt: string }> = await transactionManager.query(
@@ -2712,7 +2716,8 @@ class SystemConfigService {
   ): Promise<{ config: VerificationProviderConfigsResult; changed: boolean }> {
     await this.assertAdminActor(actor, requestMeta, 'system_config.update_verification_providers', '更新验证码平台配置')
     return runInTransaction(async (manager) => {
-      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const lockedActor = await lockActiveSysAccountForBusiness(manager, actor.userId)
+      assertSysAccountGovernancePermission(lockedActor, 'system_configs:update')
       await this.ensureDefaultConfigs(manager)
       const useForUpdate = manager.connection.options.type === 'mysql'
       const placeholders = this.verificationConfigKeys.map(() => '?').join(', ')

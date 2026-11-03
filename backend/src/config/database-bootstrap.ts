@@ -315,6 +315,7 @@ const SQLITE_REQUIRED_CLIENT_STAFF_DIRECTORY_COLUMNS = [
 const SQLITE_REQUIRED_SYS_USER_COLUMNS = [
   'email',
   'webauthn_user_handle',
+  'governance_permissions_json',
   'deactivated_at',
   'deactivation_reason',
   'deactivated_by_user_id',
@@ -2275,6 +2276,11 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   if (env.DB_TYPE === 'sqlite') {
     await dropSqliteOrderBusinessNoPermanentOccupancy(dataSource)
     await ensureSqliteMobileSessionSchema(dataSource)
+    // 仅补 nullable 列，不回填、不重建用户表；NULL 继续沿用角色默认权限。
+    const sysUserColumns = await listSqliteTableColumns(dataSource, 'sys_user')
+    if (sysUserColumns.size && !sysUserColumns.has('governance_permissions_json')) {
+      await dataSource.query('ALTER TABLE "sys_user" ADD COLUMN "governance_permissions_json" text NULL')
+    }
     await prepareSqliteAdminMfaCompatibility(dataSource)
     await prepareSqliteOrderAmendmentColumns(dataSource)
     await prepareSqliteOrderContentInventoryColumns(dataSource)

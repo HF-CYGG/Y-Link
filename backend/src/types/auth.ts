@@ -74,6 +74,9 @@ export interface UserSafeProfile {
   email: string | null
   role: UserRole
   permissions: PermissionCode[]
+  governancePermissions?: PermissionCode[] | null
+  /** 仅编辑响应返回，通知本人当前会话已撤销。 */
+  sessionsRevoked?: boolean
   status: UserStatus
   accountState: AccountState
   deactivatedAt: Date | null

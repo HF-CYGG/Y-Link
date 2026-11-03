@@ -15,7 +15,6 @@ import type { Server } from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createConnection } from 'mysql2/promise'
-import { installCaptchaServiceForTesting } from '../src/services/captcha.service.js'
 import { requestLocalHttp } from './support/local-http-request.js'
 
 const currentFilePath = fileURLToPath(import.meta.url)
@@ -88,6 +87,8 @@ if (verifyDatabaseType === 'sqlite') {
 process.env.INIT_ADMIN_PASSWORD = adminPassword
 
 const TEST_CAPTCHA_CODE = 'ABC123'
+// 验证码经票据存储间接加载 env，必须等本轮隔离环境设置完成后才求值。
+const { installCaptchaServiceForTesting } = await import('../src/services/captcha.service.js')
 installCaptchaServiceForTesting({ createCode: () => TEST_CAPTCHA_CODE })
 
 function assertInitialDatabaseIsolation() {

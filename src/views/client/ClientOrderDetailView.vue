@@ -4,7 +4,8 @@
  * 文件职责：承载客户端订单详情展示、进度查看、二维码展示、订单撤回与退货申请。
  * 实现逻辑：
  * - 详情页加载成功后会同步刷新订单摘要缓存，方便返回列表页时立即看到最新状态；
- * - 订单 Store 初始化按当前客户端账号执行，避免共享终端切换账号后把旧订单摘要带入新账号上下文。
+ * - 订单 Store 初始化按当前客户端账号执行，避免共享终端切换账号后把旧订单摘要带入新账号上下文；
+ * - 进度只用真实下单、核销、取消事件，截止时间单独说明，商家标记不替代主状态。
  * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
  */
 
@@ -26,6 +27,7 @@ import {
   type O2oReturnRequestDetail,
 } from '@/api/modules/o2o'
 import KingdeeRegistrationEditor from '@/components/common/KingdeeRegistrationEditor.vue'
+import { buildClientOrderProgress } from './client-order-progress.helpers'
 import type { OrderDetailResult } from '@/api/modules/order'
 import type { VoucherRenderRow } from '@/views/order-list/order-voucher-pagination'
 import { createClientVoucherExportSnapshot } from '@/views/client/client-order-voucher-export'
@@ -34,8 +36,6 @@ import { useStableRequest } from '@/composables/useStableRequest'
 import {
   CLIENT_O2O_ORDER_STATUS_LABEL_MAP,
   getO2oOrderBusinessStatusMeta,
-  getClientOrderStatusReportConfig,
-  getClientOrderReportScenario,
   isO2oOrderCancelled,
   isO2oOrderPending,
   isO2oOrderVerified,
@@ -135,26 +135,8 @@ let detailAutoRefreshTimer: ReturnType<typeof globalThis.setInterval> | null = n
 let voucherDetailUnmounted = false
 clientOrderStore.initialize(clientAuthStore.currentUser?.id)
 
-const currentReportScenario = computed(() => {
-  if (!detail.value) {
-    return 'pending'
-  }
-  if (detail.value.order.statusReport?.scenario) {
-    return detail.value.order.statusReport.scenario
-  }
-  return getClientOrderReportScenario(detail.value.order.status, detail.value.order.timeoutAt)
-})
-
-const statusLabel = computed(() => {
-  if (!detail.value) {
-    return '待取货'
-  }
-  return getClientOrderStatusReportConfig({
-    statusReport: detail.value.order.statusReport,
-    status: detail.value.order.status,
-    timeoutAt: detail.value.order.timeoutAt,
-  }).statusLabel
-})
+const orderProgress = computed(() => buildClientOrderProgress(detail.value?.order ?? { status: 'pending' }))
+const statusLabel = computed(() => orderProgress.value.report.statusLabel)
 
 const getOrderStatusLabel = (status: O2oPreorderSummary['status']) => {
   return CLIENT_O2O_ORDER_STATUS_LABEL_MAP[status] ?? '未知状态'
@@ -193,16 +175,7 @@ const handleBack = () => {
 }
 
 const statusBanner = computed(() => {
-  const report = detail.value
-    ? getClientOrderStatusReportConfig({
-        statusReport: detail.value.order.statusReport,
-        status: detail.value.order.status,
-        timeoutAt: detail.value.order.timeoutAt,
-      })
-    : getClientOrderStatusReportConfig({
-        status: 'pending',
-        timeoutAt: null,
-      })
+  const report = orderProgress.value.report
   return { className: report.cardClassName, title: report.cardTitle, description: report.cardDescription }
 })
 
@@ -419,70 +392,6 @@ const handleVoucherPagesChange = (pages: VoucherRenderRow[][], fillerCounts: num
   voucherFillerCounts.value = fillerCounts
 }
 
-const timelineItems = computed(() => {
-  if (!detail.value) {
-    return []
-  }
-  const order = detail.value.order
-  const nowMs = Date.now()
-  const report = getClientOrderStatusReportConfig({
-    statusReport: order.statusReport,
-    status: order.status,
-    timeoutAt: order.timeoutAt,
-  }, nowMs)
-  const cancelledByTimeout = currentReportScenario.value === 'timeout_cancelled'
-
-  if (isO2oOrderVerified(order.status)) {
-    return [
-      { key: 'created', title: '已下单', time: formatOrderDateTime(order.createdAt, '已下单'), active: true },
-      { key: 'prepare', title: '备货完成', time: formatOrderDateTime(order.timeoutAt, '门店已备货'), active: true },
-      { key: 'verify', title: '已核销', time: formatOrderDateTime(order.verifiedAt, '核销成功'), active: true },
-      { key: 'done', title: '订单完成', time: formatOrderDateTime(order.verifiedAt, '已完成'), active: true },
-    ]
-  }
-
-  if (isO2oOrderCancelled(order.status)) {
-    return [
-      { key: 'created', title: '已下单', time: formatOrderDateTime(order.createdAt, '已下单'), active: true },
-      { key: 'prepare', title: '备货中', time: formatOrderDateTime(order.timeoutAt, '门店处理中'), active: !cancelledByTimeout },
-      {
-        key: 'cancelled',
-        title: report.timelineCurrentTitle,
-        time: formatOrderDateTime(order.statusReport?.cancelledAt, '历史订单未留存取消时间'),
-        active: true,
-      },
-      {
-        key: 'closed',
-        title: '订单关闭',
-        time: report.timelineCurrentHint,
-        active: true,
-      },
-    ]
-  }
-
-  return [
-    { key: 'created', title: '已下单', time: formatOrderDateTime(order.createdAt, '已下单'), active: true },
-    {
-      key: 'prepare',
-      title: '备货中',
-      time: formatOrderDateTime(order.timeoutAt, '按门店通知准备'),
-      active: true,
-    },
-    {
-      key: 'pending',
-      title: report.timelineCurrentTitle,
-      time: formatOrderDateTime(order.timeoutAt, report.timelineCurrentHint),
-      active: true,
-    },
-    {
-      key: 'future',
-      title: '核销后完成订单',
-      time: '待完成',
-      active: false,
-    },
-  ]
-})
-
 const totalAmount = computed(() => {
   if (!detail.value) {
     return 0
@@ -658,7 +567,7 @@ const qrDisabledHint = computed(() => {
     return '订单已核销完成，二维码与取货码已停用'
   }
   if (detail.value.order.status === 'cancelled') {
-    const cancellationSource = detail.value.order.statusReport?.cancellationSource ?? null
+    const cancellationSource = orderProgress.value.cancellationSource
     if (cancellationSource === 'client') {
       return '订单已撤回，二维码与取货码已停用'
     }
@@ -1539,7 +1448,6 @@ onBeforeUnmount(() => {
 
     <section v-else-if="detail" class="grid gap-4 lg:grid-cols-[24rem_minmax(0,1fr)]">
       <aside class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
-        <KingdeeRegistrationEditor v-if="detail.order.clientOrderType === 'department'" :order-id="detail.order.id" :registration="detail.order" @saved="loadDetail({ silent: true })" />
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div class="flex flex-wrap items-center gap-2">
@@ -1595,7 +1503,7 @@ onBeforeUnmount(() => {
         >
           {{ canModifyOrder ? modifyOrderQuotaText : modifyOrderDisabledHint }}
         </p>
-        <div class="mt-3 rounded-2xl px-3 py-2" :class="statusBanner.className">
+        <div class="mt-3 min-w-0 break-words rounded-2xl px-3 py-2 [overflow-wrap:anywhere]" :class="statusBanner.className">
           <p class="text-sm font-semibold">{{ statusBanner.title }}</p>
           <p class="mt-1 text-xs">{{ statusBanner.description }}</p>
         </div>
@@ -1636,6 +1544,10 @@ onBeforeUnmount(() => {
         <div class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
           <p class="text-lg font-semibold text-slate-900 dark:text-slate-100">订单信息</p>
           <div class="mt-4 grid gap-3 sm:grid-cols-2">
+            <div v-if="detail.order.clientOrderType === 'department'" class="min-w-0 rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
+              <p class="text-sm text-slate-400">金蝶单据编号</p>
+              <KingdeeRegistrationEditor class="mt-1" :order-id="detail.order.id" :registration="detail.order" number-only @saved="loadDetail({ silent: true })" />
+            </div>
             <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-white/5">
               <p class="text-sm text-slate-400">创建时间</p>
               <p class="mt-1 text-sm text-slate-700 dark:text-slate-200">{{ formatOrderDateTime(detail.order.createdAt) }}</p>
@@ -1901,22 +1813,50 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
+        <div role="region" aria-label="订单进度" class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
           <p class="text-lg font-semibold text-slate-900 dark:text-slate-100">订单进度</p>
-          <div class="mt-4 space-y-3">
-            <div
-              v-for="timeline in timelineItems"
-              :key="timeline.key"
-              class="flex items-start gap-3 rounded-2xl px-3 py-2"
-              :class="timeline.active ? 'bg-teal-50 dark:bg-teal-500/10' : 'bg-slate-50 dark:bg-white/5'"
-            >
-              <span class="mt-1 h-2.5 w-2.5 rounded-full" :class="timeline.active ? 'bg-teal-500' : 'bg-slate-300'" />
-              <div>
-                <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">{{ timeline.title }}</p>
-                <p class="text-xs text-slate-500 dark:text-slate-400">{{ timeline.time }}</p>
-              </div>
+          <div class="mt-3 min-w-0 rounded-2xl border border-slate-200 bg-slate-50 p-3 dark:border-white/10 dark:bg-white/5">
+            <p class="text-xs text-slate-500 dark:text-slate-400">当前状态</p>
+            <p class="mt-1 break-words text-sm font-semibold text-slate-900 dark:text-slate-100">{{ statusBanner.title }}</p>
+            <p class="mt-1 break-words text-xs leading-5 text-slate-600 dark:text-slate-300 [overflow-wrap:anywhere]">{{ statusBanner.description }}</p>
+            <div role="group" aria-label="核销截止时间说明" class="mt-3 border-t border-slate-200 pt-2 text-xs dark:border-white/10">
+              <p class="text-slate-600 dark:text-slate-300">
+                {{ orderProgress.deadlineLabel }}：
+                <span class="break-words font-medium">{{ orderProgress.deadline ? formatOrderDateTime(orderProgress.deadline, '未记录') : orderProgress.deadlineHint }}</span>
+              </p>
+              <p v-if="orderProgress.deadline" class="mt-1 leading-5 text-slate-500 dark:text-slate-400">{{ orderProgress.deadlineHint }}</p>
             </div>
           </div>
+          <ol class="mt-4" aria-label="订单进度时间线">
+            <li
+              v-for="(timeline, index) in orderProgress.nodes"
+              :key="timeline.key"
+              class="relative flex min-w-0 gap-3 pb-5 last:pb-0"
+              :data-progress-state="timeline.state"
+              :data-progress-event="timeline.key"
+              :aria-current="timeline.state === 'current' ? 'step' : undefined"
+            >
+              <span v-if="index < orderProgress.nodes.length - 1" aria-hidden="true" class="absolute bottom-0 left-[9px] top-5 w-px bg-slate-200 dark:bg-white/15" />
+              <span
+                aria-hidden="true"
+                class="relative mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-xs font-bold"
+                :class="timeline.state === 'terminated' ? 'border-rose-300 bg-rose-50 text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-300' : timeline.state === 'current' ? 'border-amber-400 bg-amber-50 text-amber-700 dark:border-amber-500/50 dark:bg-amber-500/10 dark:text-amber-300' : timeline.state === 'occurred' ? 'border-teal-500 bg-teal-500 text-white dark:border-teal-400 dark:bg-teal-600' : 'border-slate-300 bg-slate-50 text-slate-400 dark:border-white/20 dark:bg-white/5 dark:text-slate-500'"
+              >{{ timeline.state === 'occurred' ? '✓' : timeline.state === 'terminated' ? '×' : timeline.state === 'current' ? '•' : '·' }}</span>
+              <div class="min-w-0 flex-1 break-words [overflow-wrap:anywhere]">
+                <div class="flex min-w-0 flex-wrap items-baseline gap-x-1">
+                  <p class="min-w-0 text-sm font-semibold" :class="timeline.state === 'future' ? 'text-slate-500 dark:text-slate-400' : 'text-slate-900 dark:text-slate-100'">
+                    {{ timeline.title }}
+                    <span v-if="timeline.state !== 'occurred'" class="ml-1 text-xs font-normal text-slate-500 dark:text-slate-400">{{ timeline.state === 'current' ? '当前' : timeline.state === 'terminated' ? '已终止' : '后续' }}</span>
+                  </p>
+                  <span v-if="timeline.event" data-progress-time class="shrink-0 whitespace-nowrap text-xs tabular-nums text-slate-500 dark:text-slate-400 [overflow-wrap:normal]">
+                    <time v-if="timeline.time" :datetime="timeline.time">{{ formatOrderDateTime(timeline.time, '未记录') }}</time>
+                    <span v-else>未记录</span>
+                  </span>
+                </div>
+                <p class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">{{ timeline.hint }}</p>
+              </div>
+            </li>
+          </ol>
         </div>
       </div>
     </section>

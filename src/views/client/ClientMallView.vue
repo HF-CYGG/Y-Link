@@ -6,7 +6,7 @@
  * 维护说明：重点维护“左侧标签高亮 <-> 右侧分组定位”一致性；规格选择不得虚构未配置组合，也不能绕过现有 SKU 库存与购物车校验。
  * 悬浮购物车遮挡：页面尾部留白、分类浏览列表高度与 scroll-padding 统一由摘要栏实测遮挡高度 `--mall-floating-occlusion` 驱动，不要改回固定常量估算。
  * 数量输入：迷你购物车与详情弹层的数量均可直接输入，购物车走 store 的 setQtyFromInput，详情弹层走 commitDetailQty，与加减按钮共用同一上限与提示。
- * 补货入口：四套卡片复用当前缺货 SKU 判断，操作保持第三列上下堆叠，不改变虚拟行高；详情传递当前明确选择的规格。
+ * 补货入口：四套卡片仅单个当前启用 SKU 显示补货，详情缺货时以补货替代数量和加购。
  * 目录新鲜度：本地快照有效期内先秒开再后台重新校验；页面激活期间每 30 秒与切回前台时也会静默校验，
  * 新上架商品无需顾客手动刷新即可出现。校验依赖 ETag 条件请求，不要改成带随机参数的绕缓存请求。
  */
@@ -48,6 +48,7 @@ import ClientCheckoutView from './ClientCheckoutView.vue'
 import ClientImagePreviewer from './components/ClientImagePreviewer.vue'
 import ClientQtyInput from './components/ClientQtyInput.vue'
 import ClientRestockButton from './components/ClientRestockButton.vue'
+import { getRestockSkus } from '@/utils/restock'
 
 
 import { showAppSuccess, showAppWarning } from '@/utils/app-alert'
@@ -360,6 +361,15 @@ const detailSkuSpecGroups = computed(() => buildClientSkuSelectionModel(
   selectedDetailSku.value,
   { allowOutOfStock: true },
 ))
+
+const isSingleRestockSku = (product: O2oMallProduct) => getRestockSkus(product).length === 1
+const isSingleRestockSkuEmpty = (product: O2oMallProduct) => isSingleRestockSku(product) && Number(getRestockSkus(product)[0].availableStock) === 0
+
+// 只有明确选中的真实启用 SKU 可触发缺货替换；限购触顶不能当作缺货。
+const detailNeedsRestock = computed(() => {
+  const sku = selectedDetailSku.value
+  return Boolean(sku && getRestockSkus(detailProduct.value).some((item) => item.id === sku.id) && Number(sku.availableStock) === 0)
+})
 
 const detailMaxQty = computed(() => {
   const limit = Math.max(0, Number(detailProduct.value?.limitPerUser ?? 0))
@@ -1144,7 +1154,7 @@ const measureCategoryRailBottomInset = (scroller: HTMLElement) => {
 
 /**
  * 左侧分类栏跟随可见：
- * - 只滚动分类栏自身容器，显式计算 scrollTop，不用 scrollIntoView，避免带动页面或右侧列表；
+ * - 只滚动分类栏自身容器，侧栏使用 scrollTop，窄屏横排使用 scrollLeft，不带动页面或商品列表；
  * - 激活项已完整可见时不动，越界时按最小位移滚入；减少动画偏好下直接跳转；
  * - 可视区底部扣掉悬浮购物车遮挡，并同步补齐尾部占位，末尾分类才能被抬到购物车上方。
  */
@@ -1156,6 +1166,23 @@ const ensureActiveCategoryVisible = (behavior: ScrollBehavior = 'smooth') => {
   }
   if (scroller.classList.contains('mall-category-panel-enter-active') || scroller.classList.contains('mall-category-panel-leave-active')) {
     // 分类栏展开/收起过渡中高度仍在变化，交给过渡结束回调再对齐。
+    return
+  }
+  const horizontal = globalThis.window.getComputedStyle(scroller).display === 'flex'
+  const prefersReducedMotion = globalThis.window?.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  if (horizontal) {
+    const scrollerRect = scroller.getBoundingClientRect()
+    const buttonRect = button.getBoundingClientRect()
+    // 几何算法与纵向一致，仅映射当前轴；不改分类选择或商品列表滚动规则。
+    const nextScrollLeft = resolveKeepVisibleScrollTop({
+      scrollTop: scroller.scrollLeft,
+      viewportHeight: scroller.clientWidth,
+      contentHeight: scroller.scrollWidth,
+      itemTop: buttonRect.left - scrollerRect.left - scroller.clientLeft + scroller.scrollLeft,
+      itemHeight: buttonRect.width,
+      padding: CATEGORY_RAIL_VISIBLE_PADDING,
+    })
+    if (nextScrollLeft !== null) scroller.scrollTo({ left: nextScrollLeft, behavior: prefersReducedMotion ? 'auto' : behavior })
     return
   }
   const bottomInset = measureCategoryRailBottomInset(scroller)
@@ -1175,7 +1202,6 @@ const ensureActiveCategoryVisible = (behavior: ScrollBehavior = 'smooth') => {
   if (nextScrollTop === null) {
     return
   }
-  const prefersReducedMotion = globalThis.window?.matchMedia?.('(prefers-reduced-motion: reduce)').matches
   scroller.scrollTo({
     top: nextScrollTop,
     behavior: prefersReducedMotion ? 'auto' : behavior,
@@ -1669,9 +1695,9 @@ onBeforeUnmount(() => {
               decoding="async"
             />
           </button>
+          <el-button text class="client-product-card__name" @click="openProductDetail(product)">{{ product.productName }}</el-button>
           <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
             <div class="client-product-card__content">
-              <p class="client-product-card__name">{{ product.productName }}</p>
               <div class="client-product-card__price-wrap">
                 <p class="client-product-card__price">¥{{ Number(resolveProductPriceView(product).discountedPrice).toFixed(2) }}</p>
                 <p v-if="resolveProductPriceView(product).isDiscounted" class="client-product-card__price-extra">
@@ -1691,7 +1717,7 @@ onBeforeUnmount(() => {
               </div>
             </div>
           </button>
-          <div class="client-product-card__actions"><button type="button" class="client-product-card__add-button" @click="quickAdd(product)">+ 加购</button><ClientRestockButton :product="product" /></div>
+          <div class="client-product-card__actions"><button v-if="!isSingleRestockSkuEmpty(product)" type="button" class="client-product-card__add-button" @click="quickAdd(product)">+ 加购</button><ClientRestockButton v-if="isSingleRestockSku(product)" :product="product" /></div>
         </article>
       </div>
     </section>
@@ -1700,7 +1726,7 @@ onBeforeUnmount(() => {
       v-else
       class="mall-browse-panel grid rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-3 sm:p-4 shadow-[var(--ylink-shadow-soft)]"
       ref="browsePanelRef"
-      :class="{ 'is-recommended-flow': isRecommendedSortMode, 'has-measured-height': browseListHeight > 0 }"
+      :class="{ 'is-recommended-flow': isRecommendedSortMode, 'has-category-navigation': !isRecommendedSortMode, 'has-measured-height': browseListHeight > 0 }"
       :style="browseListHeight > 0 ? { '--mall-browse-list-height': `${browseListHeight}px` } : undefined"
     >
       <div class="mall-search-launcher-wrap mall-search-launcher-wrap--inside mall-search-launcher-wrap--browse">
@@ -1781,9 +1807,9 @@ onBeforeUnmount(() => {
                 decoding="async"
               />
             </button>
+            <el-button text class="client-product-card__name" @click="openProductDetail(row.data)">{{ row.data.productName }}</el-button>
             <button type="button" class="client-product-card__body" @click="openProductDetail(row.data)">
               <div class="client-product-card__content">
-                <p class="client-product-card__name">{{ row.data.productName }}</p>
                 <div class="client-product-card__price-wrap">
                   <p class="client-product-card__price">¥{{ Number(resolveProductPriceView(row.data).discountedPrice).toFixed(2) }}</p>
                   <p v-if="resolveProductPriceView(row.data).isDiscounted" class="client-product-card__price-extra">
@@ -1797,7 +1823,7 @@ onBeforeUnmount(() => {
                 </div>
               </div>
             </button>
-            <div class="client-product-card__actions"><button type="button" class="client-product-card__add-button" @click="quickAdd(row.data)">+ 加购</button><ClientRestockButton :product="row.data" /></div>
+            <div class="client-product-card__actions"><button v-if="!isSingleRestockSkuEmpty(row.data)" type="button" class="client-product-card__add-button" @click="quickAdd(row.data)">+ 加购</button><ClientRestockButton v-if="isSingleRestockSku(row.data)" :product="row.data" /></div>
           </article>
         </div>
         <!-- 尾部只保留底部渐隐遮罩所需空间，保证最后一行完整可读。 -->
@@ -1832,9 +1858,9 @@ onBeforeUnmount(() => {
                   decoding="async"
                 />
               </button>
+              <el-button text class="client-product-card__name" @click="openProductDetail(product)">{{ product.productName }}</el-button>
               <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
                 <div class="client-product-card__content">
-                  <p class="client-product-card__name">{{ product.productName }}</p>
                   <div class="client-product-card__price-wrap">
                     <p class="client-product-card__price">¥{{ Number(resolveProductPriceView(product).discountedPrice).toFixed(2) }}</p>
                     <p v-if="resolveProductPriceView(product).isDiscounted" class="client-product-card__price-extra">
@@ -1848,7 +1874,7 @@ onBeforeUnmount(() => {
                   </div>
                 </div>
               </button>
-              <div class="client-product-card__actions"><button type="button" class="client-product-card__add-button" @click="quickAdd(product)">+ 加购</button><ClientRestockButton :product="product" /></div>
+              <div class="client-product-card__actions"><button v-if="!isSingleRestockSkuEmpty(product)" type="button" class="client-product-card__add-button" @click="quickAdd(product)">+ 加购</button><ClientRestockButton v-if="isSingleRestockSku(product)" :product="product" /></div>
             </article>
           </div>
         </section>
@@ -1878,9 +1904,9 @@ onBeforeUnmount(() => {
                     decoding="async"
                   />
                 </button>
+                <el-button text class="client-product-card__name" @click="openProductDetail(product)">{{ product.productName }}</el-button>
                 <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
                   <div class="client-product-card__content">
-                    <p class="client-product-card__name">{{ product.productName }}</p>
                     <div class="client-product-card__price-wrap">
                       <p class="client-product-card__price">¥{{ Number(resolveProductPriceView(product).discountedPrice).toFixed(2) }}</p>
                       <p v-if="resolveProductPriceView(product).isDiscounted" class="client-product-card__price-extra">
@@ -1894,7 +1920,7 @@ onBeforeUnmount(() => {
                     </div>
                   </div>
                 </button>
-                <div class="client-product-card__actions"><button type="button" class="client-product-card__add-button" @click="quickAdd(product)">+ 加购</button><ClientRestockButton :product="product" /></div>
+                <div class="client-product-card__actions"><button v-if="!isSingleRestockSkuEmpty(product)" type="button" class="client-product-card__add-button" @click="quickAdd(product)">+ 加购</button><ClientRestockButton v-if="isSingleRestockSku(product)" :product="product" /></div>
               </article>
             </div>
           </section>
@@ -2089,7 +2115,8 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <footer class="client-detail-action-bar">
-          <div class="client-detail-qty-row">
+          <ClientRestockButton v-if="detailProduct && detailNeedsRestock" :product="detailProduct" :sku="selectedDetailSku" variant="primary" />
+          <div v-if="!detailNeedsRestock" class="client-detail-qty-row">
             <span>数量</span>
             <div class="client-detail-qty-control">
               <button type="button" class="client-qty-button" aria-label="减少数量" @click="changeDetailQty(-1)">-</button>
@@ -2097,8 +2124,7 @@ onBeforeUnmount(() => {
               <button type="button" class="client-qty-button" aria-label="增加数量" @click="changeDetailQty(1)">+</button>
             </div>
           </div>
-          <ClientRestockButton v-if="detailProduct" :product="detailProduct" :sku="selectedDetailSku" />
-          <button type="button" class="client-detail-cart-button" @click="addCurrentDetailToCart">
+          <button v-if="!detailNeedsRestock" type="button" class="client-detail-cart-button" @click="addCurrentDetailToCart">
             加入购物车
           </button>
         </footer>
@@ -2475,9 +2501,11 @@ onBeforeUnmount(() => {
   box-sizing: border-box;
   display: grid;
   grid-template-columns: 3.9rem minmax(0, 1fr) auto;
+  grid-template-rows: auto 1fr;
+  min-width: 0;
   min-height: 6.8rem;
   align-items: stretch;
-  gap: 0.68rem;
+  column-gap: 0.68rem;
   border-radius: 0.85rem;
   border: 1px solid var(--ylink-color-border);
   background: var(--ylink-color-surface-soft);
@@ -2485,6 +2513,8 @@ onBeforeUnmount(() => {
 }
 
 .client-product-card__image-button {
+  grid-column: 1;
+  grid-row: 1 / 3;
   display: inline-flex;
   align-self: center;
   flex-shrink: 0;
@@ -2496,6 +2526,8 @@ onBeforeUnmount(() => {
 }
 
 .client-product-card__body {
+  grid-column: 2;
+  grid-row: 2;
   display: block;
   align-self: stretch;
   min-width: 0;
@@ -2510,25 +2542,41 @@ onBeforeUnmount(() => {
   display: flex;
   height: 100%;
   min-width: 0;
-  flex: 1;
   flex-direction: column;
   justify-content: space-between;
   text-align: left;
 }
 
-.client-product-card__name {
-  overflow: visible;
+.client-product-card__name.el-button {
+  grid-column: 2 / 4;
+  grid-row: 1;
+  display: block;
+  width: 100%;
+  height: auto;
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
+  text-align: left;
+  max-width: 100%;
+  overflow: hidden;
   color: #0f172a;
   font-size: 0.98rem;
   font-weight: 700;
   line-height: 1.22;
-  overflow-wrap: normal;
-  text-overflow: clip;
+  text-overflow: ellipsis;
   white-space: nowrap;
-  word-break: keep-all;
+}
+
+.client-product-card__name :deep(span) {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .client-product-card__price-wrap {
+  min-width: 0;
   display: flex;
   min-height: 2.6rem;
   flex-direction: column;
@@ -2547,11 +2595,11 @@ onBeforeUnmount(() => {
 .client-product-card__meta {
   margin-top: auto;
   display: grid;
-  grid-template-columns: max-content max-content;
+  grid-template-columns: minmax(0, max-content) minmax(0, max-content);
   min-width: 0;
   align-items: center;
   gap: 0.26rem 0.32rem;
-  overflow: visible;
+  overflow: hidden;
   font-size: 0.72rem;
 }
 
@@ -2971,7 +3019,7 @@ onBeforeUnmount(() => {
   padding: 0.4rem 0.68rem;
 }
 
-.client-product-card__actions { display: flex; flex-direction: column; justify-content: center; align-items: flex-end; gap: 0.35rem; align-self: center; }
+.client-product-card__actions { grid-column: 3; grid-row: 2; display: flex; flex-direction: column; justify-content: center; align-items: flex-end; gap: 0.35rem; align-self: center; }
 
 .client-product-card__add-button {
   height: 1.95rem;
@@ -4026,7 +4074,7 @@ onBeforeUnmount(() => {
   .client-product-card {
     grid-template-columns: 3.45rem minmax(0, 1fr) auto;
     min-height: 6.25rem;
-    gap: 0.5rem;
+    column-gap: 0.5rem;
     border-radius: 0.85rem;
     padding: 0.58rem 0.56rem;
   }
@@ -4037,7 +4085,7 @@ onBeforeUnmount(() => {
     border-radius: 0.68rem;
   }
 
-  .client-product-card__name {
+  .client-product-card__name.el-button {
     font-size: 0.94rem;
   }
 
@@ -4134,6 +4182,46 @@ onBeforeUnmount(() => {
 
   .cart-expand-trigger {
     align-self: flex-end;
+  }
+}
+
+/* 窄屏普通与虚拟分类导航横排，释放商品正文与动作宽度；推荐、搜索和虚拟行高保持原规则。 */
+@media (max-width: 639px) {
+  .mall-browse-panel.has-category-navigation {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(0, 1fr);
+  }
+
+  .mall-browse-panel.has-category-navigation .mall-browse-categories {
+    grid-column: 1;
+    grid-row: 2;
+    display: flex;
+    gap: 0.4rem;
+    min-width: 0;
+    width: 100%;
+    height: auto;
+    /* 横向分类条不继承侧栏与商品列表等高的约束。 */
+    max-height: none !important;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding-right: 0;
+  }
+
+  .mall-browse-panel.has-category-navigation .mall-category-button {
+    flex: 0 0 auto;
+    width: auto;
+    max-width: 10rem;
+    margin-bottom: 0;
+    padding: 0.45rem 0.65rem;
+  }
+
+  .mall-browse-panel.has-category-navigation .mall-category-rail-tail {
+    display: none;
+  }
+
+  .mall-browse-panel.has-category-navigation .mall-browse-list {
+    grid-column: 1;
+    grid-row: 3;
   }
 }
 
@@ -4504,7 +4592,7 @@ onBeforeUnmount(() => {
   border-color: rgba(45, 212, 191, 0.3) !important;
 }
 
-.dark .client-product-card__name {
+.dark .client-product-card__name.el-button {
   color: #f1f5f9;
 }
 
@@ -4653,6 +4741,17 @@ onBeforeUnmount(() => {
   box-shadow:
     0 20px 48px -10px rgba(0, 0, 0, 0.6),
     inset 0 1px 0 rgba(255, 255, 255, 0.05) !important;
+}
+
+/* 主卡片的暗色背景不会覆盖伪元素，需同步降低其高光和内描边。 */
+.dark .mini-cart-card::before {
+  background:
+    radial-gradient(circle at top left, rgba(161, 161, 170, 0.06), transparent 34%),
+    linear-gradient(180deg, rgba(161, 161, 170, 0.03), transparent 52%);
+}
+
+.dark .mini-cart-card::after {
+  border-color: rgba(161, 161, 170, 0.08);
 }
 
 .dark .badge {

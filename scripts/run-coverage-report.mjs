@@ -2,7 +2,7 @@
  * 模块说明：scripts/run-coverage-report.mjs
  * 文件职责：用 Node 内置测试运行器的覆盖率功能执行现有自动化验证，合并生成 coverage/lcov.info，供 SonarCloud CI 分析导入。
  * 实现逻辑：
- * - 后端：在 backend 目录用 tsx 加载 TypeScript，串行执行 PR 必要检查中会真实运行业务代码的验证脚本（均使用临时 SQLite），脚本自身不计入覆盖率；
+ * - 后端：在 backend 目录用 tsx 加载 TypeScript，串行执行核心业务与已交付修复的验证脚本（默认使用临时 SQLite），脚本自身不计入覆盖率；
  * - 共享包：在仓库根用 Node 原生类型剥离执行各共享包 test 目录下的 node:test 单测；
  * - 前端：执行 SFC 原源码行为测试、订单与条码既有验证脚本，保留编译后的源码映射并核验未执行路径为零；
  * - Node 输出的 lcov 路径相对各自的运行目录，这里统一改写为相对仓库根，否则 Sonar 会把 backend/src 错配到前端 src；
@@ -50,6 +50,7 @@ const barcodeSfcTargets = [
 const kingdeeBuildRoot = path.join(projectRoot, 'tmp/coverage-vue-kingdee')
 const kingdeeErrorSource = path.join(projectRoot, 'src/utils/error.ts')
 const kingdeeRefreshSource = path.join(projectRoot, 'src/utils/client-order-refresh.ts')
+const kingdeeStatusSource = path.join(projectRoot, 'src/utils/kingdee-status.ts')
 const kingdeeSfcTargets = [
   { generated: path.join(kingdeeBuildRoot, 'KingdeeRegistrationEditor-setup.mjs'), source: path.join(projectRoot, 'src/components/common/KingdeeRegistrationEditor.vue'), allowedSources: [kingdeeErrorSource, kingdeeRefreshSource] },
   { generated: path.join(kingdeeBuildRoot, 'ClientKingdeeReminder-setup.mjs'), source: path.join(projectRoot, 'src/views/client/components/ClientKingdeeReminder.vue'), allowedSources: [kingdeeRefreshSource] },
@@ -59,6 +60,10 @@ const kingdeeSfcTargets = [
     path.join(projectRoot, 'src/composables/usePermissionAction.ts'), path.join(projectRoot, 'src/utils/permission.ts'),
     path.join(projectRoot, 'src/constants/o2o-order-status.ts'), path.join(projectRoot, 'src/views/o2o/o2o-verify-console.helpers.ts'),
   ] },
+  // 这些产物包含真实业务 setup/模板，必须映射回源码，不能当作临时生成壳丢弃。
+  { generated: path.join(kingdeeBuildRoot, 'KingdeeRegistrationEditor.vue.render.mjs'), source: path.join(projectRoot, 'src/components/common/KingdeeRegistrationEditor.vue'), allowedSources: [kingdeeErrorSource, kingdeeRefreshSource] },
+  { generated: path.join(kingdeeBuildRoot, 'OrderDetailDrawerContent.vue.mjs'), source: path.join(projectRoot, 'src/views/order-list/components/OrderDetailDrawerContent.vue'), allowedSources: [kingdeeStatusSource, path.join(projectRoot, 'src/views/order-list/order-revision.helpers.ts')] },
+  { generated: path.join(kingdeeBuildRoot, 'OrderListView.vue.mjs'), source: path.join(projectRoot, 'src/views/order-list/OrderListView.vue'), allowedSources: [kingdeeStatusSource, kingdeeErrorSource, path.join(projectRoot, 'src/utils/timed-async-loader.ts')] },
 ]
 const markerBySource = new Map([
   ['src/components/account/AdminWebAuthnDialog.vue', 'form.name = credential.name'],
@@ -79,7 +84,7 @@ const isNodeVersionAtLeast = (version, minimum) => {
   return true
 }
 
-// 与 .github/workflows/verify-db-concurrency.yml 中会执行业务代码的检查保持一致；
+// 显式维护后端覆盖率入口，包含 PR 必要检查与已交付修复的业务专项；
 // 路由权限契约与写事务闸门只做 AST 静态检查，不产生业务代码覆盖率，因此不在此列。
 const BACKEND_SUITE = [
   'scripts/safe-http-request-verify.ts',
@@ -94,7 +99,12 @@ const BACKEND_SUITE = [
   'scripts/webauthn-compat-db-verify.ts',
   'scripts/pr153-upgrade-coverage.test.mjs',
   'scripts/admin-mfa-verify.ts',
+  'scripts/auth-activity-throttle-verify.ts',
+  'scripts/reporting-query-performance-verify.ts',
+  'scripts/o2o-inventory-persistence-verify.ts',
+  'scripts/issue186-inventory-consistency-verify.ts',
   'scripts/issues-177-178-verify.ts',
+  'scripts/user-governance-permissions-verify.ts',
 ]
 
 const buildCoverageArgs = (lcovPath, excludeGlob) => [
@@ -161,6 +171,8 @@ const SUITES = [
       // 此目录仅为Code128 vendor预设测试生成的库副本，没有项目源码图；真实预检/SFC源码照常映射。
       '--test-coverage-exclude=tmp/code128-preset/**',
       'scripts/verify-order-entry-submit-preparation.ts',
+      'scripts/verify-client-order-progress.ts',
+      'scripts/verify-order-revision-presentation.ts',
       'scripts/verify-barcode-label-preflight.ts',
       'scripts/verify-v8-sfc-coverage.test.mjs',
       'scripts/verify-order-list-mobile-card-loader.ts',
@@ -487,7 +499,8 @@ const verifyKingdeeImportProbe = async (sourceHashes) => {
     cwd: projectRoot, env: { ...process.env, NODE_V8_COVERAGE: rawDirectory },
   })
   const mapped = mapV8SfcCoverage({ rawDirectory, targets: kingdeeSfcTargets })
-  const markers = ['if (busy.value || conflictVersion.value', 'if (!id || !auth.initialized', 'const known = session.registrations.get(id)', 'const orderId = preorderDetail.value?.order.id']
+  const markers = ['if (!editing.value || busy.value || conflictPending.value || !editable.value)', 'if (!id || !auth.initialized', 'const known = session.registrations.get(id)', 'const orderId = preorderDetail.value?.order.id',
+    'if (!editing.value || busy.value || conflictPending.value || !editable.value)', 'revisionRequestVersion += 1', 'const handleSaveComplianceFlags = async']
   for (const [index, target] of kingdeeSfcTargets.entries()) {
     const line = fs.readFileSync(target.source, 'utf8').split(/\r?\n/).findIndex((text) => text.includes(markers[index])) + 1
     if (line < 1 || mapped.bySource.get(target.source)?.get(line) !== 0) throw new Error(`金蝶未调用源码被记为命中：${target.source}`)

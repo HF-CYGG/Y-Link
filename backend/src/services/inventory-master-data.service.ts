@@ -344,7 +344,7 @@ export class InventoryMasterDataService {
     await reconcileSkuLocationStocks(manager, [sku])
     const skuId = String(sku.id)
     const locationId = String(location.id)
-    const before = (await loadSkuLocationDistributions(manager, [sku])).get(skuId) as SkuLocationDistribution
+    const before = (await loadSkuLocationDistributions(manager, [sku], { forUpdate: true })).get(skuId) as SkuLocationDistribution
     const mainLocationId = sku.locationId == null ? null : String(sku.locationId)
     const hereQty = before.others.find((item) => item.locationId === locationId)?.qty ?? 0
     if (action === 'assign') {
@@ -366,7 +366,7 @@ export class InventoryMasterDataService {
       throw new BizError('商品规格不属于当前库位，请刷新后重试', 409)
     }
     await reconcileSkuLocationStocks(manager, [sku])
-    const after = (await loadSkuLocationDistributions(manager, [sku])).get(skuId) as SkuLocationDistribution
+    const after = (await loadSkuLocationDistributions(manager, [sku], { forUpdate: true })).get(skuId) as SkuLocationDistribution
     return { changed: true, before, after }
   }
 
@@ -525,7 +525,7 @@ export class InventoryMasterDataService {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
       const { product, sku } = await this.lockSkuForLocationChange(manager, skuId, input.expectedMainLocationId)
       await reconcileSkuLocationStocks(manager, [sku])
-      const distribution = (await loadSkuLocationDistributions(manager, [sku])).get(String(sku.id)) as SkuLocationDistribution
+      const distribution = (await loadSkuLocationDistributions(manager, [sku], { forUpdate: true })).get(String(sku.id)) as SkuLocationDistribution
       const fromLocationId = input.fromLocationId ?? null
       const mainLocationId = sku.locationId == null ? null : String(sku.locationId)
       const fromQty = fromLocationId === mainLocationId

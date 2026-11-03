@@ -12,6 +12,7 @@
 import {
   GOVERNANCE_PERMISSION_CODES,
   PERMISSION_LABEL_MAP,
+  ROLE_DEFAULT_PERMISSION_MAP,
   type PermissionCode,
   type UserRole,
   type UserStatus,
@@ -91,3 +92,8 @@ export const getGovernancePermissionLabels = (permissions: PermissionCode[]) => 
     .filter((permission) => permissions.includes(permission))
     .map((permission) => PERMISSION_LABEL_MAP[permission])
 }
+
+/** 编辑候选只包含目标角色原有的治理权限，不扩张角色边界。 */
+export const getEditableGovernancePermissions = (role: UserRole) => GOVERNANCE_PERMISSION_CODES
+  .filter((permission) => ROLE_DEFAULT_PERMISSION_MAP[role].includes(permission))
+  .map((value) => ({ value, label: PERMISSION_LABEL_MAP[value] }))

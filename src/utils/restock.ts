@@ -1,4 +1,4 @@
-/** 补货专用纯规则：只认真实当前启用 SKU 库存，时间固定为 UTC+8，数量不受购物限购约束。 */
+/** 补货专用纯规则：只认真实当前启用 SKU，不以库存数量限制资格，时间固定为 UTC+8，数量不受购物限购约束。 */
 import type { ClientRestockRequest, O2oMallProduct, O2oMallSku, RestockEffectiveStatus } from '../../packages/shared-types/src/index'
 
 export const RESTOCK_MAX_QUANTITY = 2147483647
@@ -6,7 +6,7 @@ export const RESTOCK_STATUS_LABELS: Record<RestockEffectiveStatus, string> = {
   requested: '待受理', accepted: '已受理', restocked: '已补货', cancelled: '已撤回', expired: '已过期',
 }
 export const getRestockSkus = (product: Pick<O2oMallProduct, 'skus'> | null | undefined): O2oMallSku[] =>
-  (product?.skus ?? []).filter((sku) => sku.isCurrent && sku.isActive && Number(sku.availableStock) === 0)
+  (product?.skus ?? []).filter((sku) => sku.isCurrent && sku.isActive)
 
 export const formatRestockTime = (value: string): string => {
   const time = Date.parse(value)

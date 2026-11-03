@@ -115,12 +115,14 @@ export async function requireAuth(req: Request, _res: Response, next: NextFuncti
     const auth = await authService.resolveAuthUserByToken(credential.token)
     auth.authSource = credential.source
     ;(req as AuthenticatedRequest).auth = auth
-    const releaseActivityLease = databaseMaintenanceModeService.registerInFlightWrite()
-    if (releaseActivityLease) {
-      try {
-        await authService.touchSessionActivity(auth.sessionToken).catch(() => undefined)
-      } finally {
-        releaseActivityLease()
+    if (authService.isSessionActivityUpdateDue(auth)) {
+      const releaseActivityLease = databaseMaintenanceModeService.registerInFlightWrite()
+      if (releaseActivityLease) {
+        try {
+          await authService.touchSessionActivity(auth.sessionToken).catch(() => undefined)
+        } finally {
+          releaseActivityLease()
+        }
       }
     }
     next()
