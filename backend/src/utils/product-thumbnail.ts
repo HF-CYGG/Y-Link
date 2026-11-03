@@ -4,7 +4,7 @@
  * - 命名约定：原图 `uploads/products/<name>.<ext>` 对应缩略图 `uploads/products/<name>.thumb.webp`，不改表结构、不改数据库里保存的原图 URL；
  * - 生成规则：长边不超过 480px、只缩不放、取动图首帧，统一输出 WebP，供商城卡片、购物车等小尺寸场景使用；
  * - 对外解析：商城目录构建时把原图 URL 映射为缩略图 URL，仅当缩略图文件真实存在才返回，缺失时返回 null，前端回退原图；
- * - 存在性判断带有界内存缓存：已存在的结果长期缓存（缩略图不会被删除），不存在的结果短期缓存，回填后约一分钟内生效；
+ * - 商城构建前异步准备目录索引，同步解析只读内存；索引过期或失败时回退原图，上传和回填增量更新；
  * - 存量回填：服务启动后延迟在后台以并发 1、共享资源闸门及集群租约补齐缺失缩略图（幂等，可用 Y_LINK_PRODUCT_THUMBNAIL_BACKFILL=false 关闭），
  *   生产镜像只包含编译产物，因此回填核心放在 src 内，命令行脚本 scripts/product-thumbnail-backfill.ts 仅做本地入口。
  * 维护重点：
@@ -30,12 +30,86 @@ export const PRODUCT_THUMBNAIL_SUFFIX = '.thumb.webp'
 const PRODUCT_UPLOAD_DIR = path.resolve(process.cwd(), 'uploads', 'products')
 const ORIGINAL_FILE_NAME_MATCHER = /^([A-Za-z0-9][A-Za-z0-9_-]{0,127})\.(?:jpg|jpeg|png|webp|gif)$/i
 const PRODUCT_IMAGE_URL_MATCHER = /^\/uploads\/(?:products\/)?([^/?#]+)$/
-const EXISTENCE_CACHE_LIMIT = 5000
-const MISSING_CACHE_TTL_MS = 60_000
-
-/** 已存在的缩略图文件名（长期缓存）与“不存在”的短期缓存（记录失效时间）。 */
-const existingThumbnailCache = new Set<string>()
-const missingThumbnailCache = new Map<string, number>()
+const INDEX_TTL_MS = 60_000
+const INDEX_RETRY_MS = 1_000
+interface DirectorySnapshot { originals: Map<string, Set<string>>; thumbnails: Set<string> }
+interface DirectoryIndex {
+  snapshot?: DirectorySnapshot
+  expiresAt: number
+  retryAt: number
+  revision: number
+  pending: Set<string>
+  flight?: Promise<void>
+}
+// 生产只有一个商品目录；限制隔离目录数，不再按商品数量整表驱逐。
+const directoryIndexes = new Map<string, DirectoryIndex>()
+const getDirectoryIndex = (uploadDir: string) => {
+  const key = path.resolve(uploadDir)
+  let index = directoryIndexes.get(key)
+  if (!index) {
+    if (directoryIndexes.size >= 8) directoryIndexes.delete(directoryIndexes.keys().next().value!)
+    index = { expiresAt: 0, retryAt: 0, revision: 0, pending: new Set() }
+    directoryIndexes.set(key, index)
+  }
+  return index
+}
+const addIndexedFile = (snapshot: DirectorySnapshot, name: string) => {
+  const original = ORIGINAL_FILE_NAME_MATCHER.exec(name)
+  if (original) {
+    // 把 stem 大小写也归并：在大小写敏感磁盘上同样不能任选一张。
+    const key = original[1]!.toLowerCase()
+    const names = snapshot.originals.get(key) ?? new Set<string>()
+    names.add(name)
+    snapshot.originals.set(key, names)
+  } else if (isProductThumbnailFileName(name)) snapshot.thumbnails.add(name)
+}
+const rememberIndexedFile = (name: string, uploadDir: string) => {
+  const index = getDirectoryIndex(uploadDir)
+  if (index.flight) index.pending.add(name)
+  if (index.snapshot) addIndexedFile(index.snapshot, name)
+}
+/** 未知、过期、显式失效期间都不读取旧快照；扫描失败可重试且不会产生未处理拒绝。 */
+export const prepareProductThumbnailIndex = (uploadDir = PRODUCT_UPLOAD_DIR): Promise<void> => {
+  const index = getDirectoryIndex(uploadDir)
+  if (index.flight) return index.flight
+  if ((index.snapshot && index.expiresAt > Date.now()) || index.retryAt > Date.now()) return Promise.resolve()
+  index.snapshot = undefined
+  const revision = index.revision
+  index.flight = (async () => {
+    try {
+      const entries = await fs.promises.readdir(uploadDir, { withFileTypes: true })
+      const snapshot: DirectorySnapshot = { originals: new Map(), thumbnails: new Set() }
+      for (const entry of entries) addIndexedFile(snapshot, entry.name)
+      for (const name of index.pending) addIndexedFile(snapshot, name)
+      if (index.revision === revision) {
+        index.snapshot = snapshot
+        index.expiresAt = Date.now() + INDEX_TTL_MS
+      }
+    } catch {
+      index.snapshot = undefined
+      index.retryAt = Date.now() + INDEX_RETRY_MS
+    } finally {
+      index.pending.clear()
+      index.flight = undefined
+    }
+  })()
+  return index.flight
+}
+export const invalidateProductThumbnailIndex = (uploadDir = PRODUCT_UPLOAD_DIR) => {
+  const index = getDirectoryIndex(uploadDir)
+  index.snapshot = undefined
+  index.expiresAt = 0
+  index.retryAt = 0
+  index.revision += 1
+}
+const currentSnapshot = (uploadDir: string) => {
+  const index = getDirectoryIndex(uploadDir)
+  if (!index.snapshot || index.expiresAt <= Date.now()) {
+    void prepareProductThumbnailIndex(uploadDir)
+    return undefined
+  }
+  return index.snapshot
+}
 
 /** 原图文件名 → 缩略图文件名；原图文件名不合法时返回 null。 */
 export const buildProductThumbnailFileName = (originalFileName: string): string | null => {
@@ -68,23 +142,30 @@ export const generateProductThumbnail = async (imageBuffer: Buffer, targetFilePa
 const sourceExtensions = ['jpg', 'jpeg', 'png', 'webp', 'gif'].flatMap((ext) =>
   [...ext].reduce<string[]>((forms, char) => forms.flatMap((prefix) => [prefix + char, prefix + char.toUpperCase()]), ['']))
 /** 历史同 stem 不同扩展名会映射同一个目标，必须回退原图，不能任选一张。 */
-const collisionCache = new Map<string, { source: string; collision: boolean; expiresAt: number }>()
-const hasOriginalCollision = (filePath: string, refresh = false) => {
-  const stem = filePath.slice(0, -path.extname(filePath).length)
-  const cached = collisionCache.get(stem)
-  if (!refresh && cached && cached.expiresAt > Date.now() && (cached.collision || cached.source === filePath)) return cached.collision
-  const collision = sourceExtensions.some((ext) => {
-    const candidate = `${stem}.${ext}`
-    return candidate !== filePath && fs.existsSync(candidate)
-      && (process.platform !== 'win32' || candidate.toLowerCase() !== filePath.toLowerCase())
-  })
-  if (collisionCache.size >= EXISTENCE_CACHE_LIMIT) collisionCache.clear()
-  collisionCache.set(stem, { source: filePath, collision, expiresAt: Date.now() + MISSING_CACHE_TTL_MS })
-  return collision
+const hasOriginalCollision = (filePath: string, snapshot: DirectorySnapshot) => {
+  const name = path.basename(filePath)
+  const stem = name.slice(0, -path.extname(name).length).toLowerCase()
+  const names = snapshot.originals.get(stem)
+  return !names || names.size !== 1 || (process.platform === 'win32'
+    ? [...names][0]!.toLowerCase() !== name.toLowerCase() : !names.has(name))
 }
 export const generateProductThumbnailForFile = async (originalFilePath: string, imageBuffer?: Buffer, canPublish?: () => Promise<boolean>): Promise<string | null> => {
   const thumbnailFileName = buildProductThumbnailFileName(path.basename(originalFilePath))
-  if (!thumbnailFileName || hasOriginalCollision(originalFilePath, true)) return null
+  if (!thumbnailFileName) return null
+  const uploadDir = path.dirname(originalFilePath)
+  rememberIndexedFile(path.basename(originalFilePath), uploadDir)
+  await prepareProductThumbnailIndex(uploadDir)
+  const snapshot = currentSnapshot(uploadDir)
+  if (!snapshot || hasOriginalCollision(originalFilePath, snapshot)) return null
+  // 生成是低频写路径，异步复核同 stem 的历史扩展名；不在每张回填后重扫整目录。
+  const stem = originalFilePath.slice(0, -path.extname(originalFilePath).length)
+  const siblings = await Promise.all(sourceExtensions.map(async (ext) => {
+    const candidate = `${stem}.${ext}`
+    if (candidate === originalFilePath || (process.platform === 'win32' && candidate.toLowerCase() === originalFilePath.toLowerCase())) return false
+    try { await fs.promises.access(candidate); rememberIndexedFile(path.basename(candidate), uploadDir); return true }
+    catch (error) { return (error as NodeJS.ErrnoException).code !== 'ENOENT' }
+  }))
+  if (siblings.some(Boolean)) return null
   const handle = imageBuffer ? null : await fs.promises.open(originalFilePath, 'r')
   try {
     // 与上传相同的 10MB 上限，在分配原图 buffer 前检查；读入时再限定长度，防止文件增长绕过。
@@ -102,46 +183,17 @@ export const generateProductThumbnailForFile = async (originalFilePath: string, 
       sourceBuffer = buffer.subarray(0, size)
     }
     if (!sourceBuffer) return null
-    const published = await generateProductThumbnail(sourceBuffer, path.resolve(path.dirname(originalFilePath), thumbnailFileName), canPublish)
+    const published = await generateProductThumbnail(sourceBuffer, path.resolve(path.dirname(originalFilePath), thumbnailFileName), async () => {
+      await prepareProductThumbnailIndex(uploadDir)
+      const latest = currentSnapshot(uploadDir)
+      return !!latest && !hasOriginalCollision(originalFilePath, latest) && (!canPublish || await canPublish())
+    })
     return published ? thumbnailFileName : null
   } finally { await handle?.close() }
 }
 
-const trimCache = () => {
-  if (existingThumbnailCache.size > EXISTENCE_CACHE_LIMIT) {
-    existingThumbnailCache.clear()
-  }
-  if (missingThumbnailCache.size > EXISTENCE_CACHE_LIMIT) {
-    missingThumbnailCache.clear()
-  }
-}
-
 export const rememberThumbnailExists = (fileName: string, uploadDir = PRODUCT_UPLOAD_DIR) => {
-  const thumbnailFileName = path.resolve(uploadDir, fileName)
-  trimCache()
-  existingThumbnailCache.add(thumbnailFileName)
-  missingThumbnailCache.delete(thumbnailFileName)
-}
-
-const thumbnailFileExists = (fileName: string, uploadDir: string) => {
-  const thumbnailFileName = path.resolve(uploadDir, fileName)
-  if (existingThumbnailCache.has(thumbnailFileName)) {
-    return true
-  }
-  const missingUntil = missingThumbnailCache.get(thumbnailFileName)
-  const now = Date.now()
-  if (missingUntil !== undefined && missingUntil > now) {
-    return false
-  }
-  const exists = fs.existsSync(path.resolve(uploadDir, thumbnailFileName))
-  trimCache()
-  if (exists) {
-    existingThumbnailCache.add(thumbnailFileName)
-    missingThumbnailCache.delete(thumbnailFileName)
-  } else {
-    missingThumbnailCache.set(thumbnailFileName, now + MISSING_CACHE_TTL_MS)
-  }
-  return exists
+  rememberIndexedFile(fileName, uploadDir)
 }
 
 /**
@@ -161,7 +213,9 @@ export const resolveProductThumbnailUrl = (
     return null
   }
   const thumbnailFileName = buildProductThumbnailFileName(fileName)
-  if (!thumbnailFileName || hasOriginalCollision(path.resolve(uploadDir, fileName)) || !thumbnailFileExists(thumbnailFileName, uploadDir)) {
+  if (!thumbnailFileName) return null
+  const snapshot = currentSnapshot(uploadDir)
+  if (!snapshot || hasOriginalCollision(path.resolve(uploadDir, fileName), snapshot) || !snapshot.thumbnails.has(thumbnailFileName)) {
     return null
   }
   return `/uploads/products/${thumbnailFileName}`
@@ -178,7 +232,35 @@ export interface ProductThumbnailBackfillResult {
 const INVALIDATION_TOPIC = 'cache:product-thumbnails'
 let invalidateCatalog: (() => unknown) | undefined
 export const configureProductThumbnailInvalidation = (callback: () => unknown) => { invalidateCatalog = callback }
-subscribeRedisBus(INVALIDATION_TOPIC, () => { missingThumbnailCache.clear() })
+export const applyProductThumbnailIndexUpdate = async (payload: unknown, uploadDir = PRODUCT_UPLOAD_DIR): Promise<void> => {
+  // 回填只新增缩略图，按批增量合并，不能每 50 张使其他实例重扫整目录。
+  if (Array.isArray(payload) && payload.length <= 50 && payload.every((name) =>
+    typeof name === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}\.thumb\.webp$/.test(name))) {
+    const directory = path.resolve(uploadDir)
+    const index = getDirectoryIndex(directory)
+    const revision = index.revision
+    // 消息不代表本机文件已可见：只验证本批文件，不重扫目录；失败保持原图回退。
+    const visible = await Promise.all(payload.map(async (name: string) => {
+      try { return (await fs.promises.stat(path.resolve(directory, name))).isFile() ? name : null }
+      catch { return null }
+    }))
+    // 失效、隔离目录驱逐或测试重置后，旧验证不能写回新代次。
+    if (directoryIndexes.get(directory) !== index || index.revision !== revision) return
+    for (const name of visible) if (name) rememberThumbnailExists(name, directory)
+  } else if (payload && typeof payload === 'object' && 'original' in payload
+    && typeof payload.original === 'string' && ORIGINAL_FILE_NAME_MATCHER.test(payload.original)) {
+    rememberIndexedFile(payload.original, uploadDir)
+  } else invalidateProductThumbnailIndex(uploadDir)
+}
+subscribeRedisBus(INVALIDATION_TOPIC, (payload) => {
+  void applyProductThumbnailIndexUpdate(payload).catch(() => undefined)
+})
+/** 上传写入原图后立即登记；独立于缩略图是否生成成功，其他实例也必须看到新增冲突。 */
+export const notifyProductOriginalCreated = async (fileName: string, uploadDir = PRODUCT_UPLOAD_DIR) => {
+  if (!ORIGINAL_FILE_NAME_MATCHER.test(fileName)) return
+  rememberIndexedFile(fileName, uploadDir)
+  await publishRedisBus(INVALIDATION_TOPIC, { original: fileName }).catch(() => undefined)
+}
 
 /** 流式扫描，最多一个后台工作；与上传共享闸门，失败后可幂等重试。 */
 export const backfillProductThumbnails = async (options: {
@@ -188,6 +270,8 @@ export const backfillProductThumbnails = async (options: {
   const log = options.log ?? console.log
   const result: ProductThumbnailBackfillResult = { scanned: 0, generated: 0, skippedExisting: 0, skippedInvalid: 0, failed: 0 }
   if (!fs.existsSync(uploadDir)) return result
+  invalidateProductThumbnailIndex(uploadDir)
+  await prepareProductThumbnailIndex(uploadDir)
   let lease = options.dryRun ? { valid: async () => !options.signal?.aborted, release: async () => {} } : await acquireThumbnailLease(options.signal)
   const waitForLease = async () => {
     while (!options.signal?.aborted) {
@@ -207,7 +291,7 @@ export const backfillProductThumbnails = async (options: {
     flushAt = Date.now()
     for (const name of names) rememberThumbnailExists(name, uploadDir)
     flushChain = flushChain.then(async () => {
-      // 同一连接先广播负缓存失效，再推进目录代次，避免新代次仍读到旧缺失结果。
+      // 同一连接先广播缩略图索引增量，再推进目录代次，避免新代次仍读到旧缺失结果。
       await publishRedisBus(INVALIDATION_TOPIC, names).catch(() => undefined)
       invalidateCatalog?.()
     })
@@ -222,8 +306,10 @@ export const backfillProductThumbnails = async (options: {
       result.scanned += 1
       const name = buildProductThumbnailFileName(entry.name)
       const filePath = path.resolve(uploadDir, entry.name)
-      if (!name || hasOriginalCollision(filePath, true)) { result.skippedInvalid += 1; continue }
-      if (fs.existsSync(path.resolve(uploadDir, name))) { result.skippedExisting += 1; continue }
+      await prepareProductThumbnailIndex(uploadDir)
+      const snapshot = currentSnapshot(uploadDir)
+      if (!name || !snapshot || hasOriginalCollision(filePath, snapshot)) { result.skippedInvalid += 1; continue }
+      if (snapshot.thumbnails.has(name)) { result.skippedExisting += 1; continue }
       if (options.dryRun) continue
       try {
         // 外层独占一次资源租约；generate 内部不能再次申请，否则并发 1 时会死锁。
@@ -280,4 +366,4 @@ export const stopProductThumbnailBackfill = async () => {
   backfillController = null; backfillTask = null
 }
 /** 仅供隔离验证使用。 */
-export const resetProductThumbnailCacheForTest = () => { existingThumbnailCache.clear(); missingThumbnailCache.clear(); collisionCache.clear() }
+export const resetProductThumbnailCacheForTest = () => { directoryIndexes.clear() }

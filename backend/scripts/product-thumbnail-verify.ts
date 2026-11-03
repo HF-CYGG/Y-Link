@@ -20,6 +20,7 @@ import {
   buildProductThumbnailFileName,
   generateProductThumbnailForFile,
   PRODUCT_THUMBNAIL_MAX_EDGE,
+  prepareProductThumbnailIndex,
   resetProductThumbnailCacheForTest,
   resolveProductThumbnailUrl,
 } from '../src/utils/product-thumbnail.js'
@@ -68,6 +69,7 @@ try {
 
   // 3. URL 解析安全边界
   resetProductThumbnailCacheForTest()
+  await prepareProductThumbnailIndex(uploadDir)
   assert.equal(resolveProductThumbnailUrl('/uploads/products/large-photo.jpg', uploadDir), '/uploads/products/large-photo.thumb.webp')
   assert.equal(resolveProductThumbnailUrl('/uploads/large-photo.jpg', uploadDir), '/uploads/products/large-photo.thumb.webp', '历史单层路径兼容')
   assert.equal(resolveProductThumbnailUrl('/uploads/products/missing.jpg', uploadDir), null, '缩略图缺失时返回 null 以便前端回退原图')

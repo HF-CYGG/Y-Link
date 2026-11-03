@@ -79,7 +79,7 @@ import {
 } from '../utils/discount-price.js'
 import { runExclusive } from '../redis/redis-lease.js'
 import { readSharedCacheRaw, sharedCacheKey, writeSharedCacheRaw } from '../redis/redis-cache.js'
-import { resolveProductThumbnailUrl } from '../utils/product-thumbnail.js'
+import { prepareProductThumbnailIndex, resolveProductThumbnailUrl } from '../utils/product-thumbnail.js'
 
 /** 部门单到店取货时间允许的过去容差：覆盖客户端时钟偏差与提交网络耗时。 */
 const O2O_PICKUP_AT_PAST_TOLERANCE_MS = 5 * 60 * 1000
@@ -2683,6 +2683,8 @@ class O2oPreorderService {
       order: { productId: 'ASC', sortOrder: 'ASC', id: 'ASC' },
     })
     const soldQtyMap = await this.resolveProductSoldQtyMap(productIds)
+    // 一次异步准备供商品和 SKU 共用；冷启动/刷新不把未准备的小图结果写入共享目录缓存。
+    await prepareProductThumbnailIndex()
 
     const productTagMap = new Map<string, string[]>()
     relations.forEach((relation) => {

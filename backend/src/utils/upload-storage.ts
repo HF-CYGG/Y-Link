@@ -12,7 +12,7 @@ import type { Express } from 'express'
 import sharp, { type Metadata } from 'sharp'
 import { productImageProcessingGate } from './product-image-gate.js'
 import { BizError } from './errors.js'
-import { generateProductThumbnailForFile } from './product-thumbnail.js'
+import { generateProductThumbnailForFile, notifyProductOriginalCreated } from './product-thumbnail.js'
 import { toSafeErrorLog } from './safe-error-log.js'
 
 export type UploadCategory = 'products' | 'client-feedback'
@@ -336,6 +336,7 @@ export const finalizeUploadedImageFile = async (
     await fs.promises.writeFile(finalFilePath, reencodedBuffer)
     await cleanupUploadFileIfExists(tempFilePath)
     if (category === 'products') {
+      await notifyProductOriginalCreated(finalFileName, path.dirname(finalFilePath))
       // 商品图同步生成小尺寸 WebP 缩略图（仍在商品图处理闸门内）；失败只记日志，不影响原图上传结果，
       // 商城目录发现缩略图缺失时会自动回退原图，后续可用回填脚本补齐。
       await generateProductThumbnailForFile(finalFilePath, reencodedBuffer).catch((error) => {
