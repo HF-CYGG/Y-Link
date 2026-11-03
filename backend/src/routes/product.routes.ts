@@ -97,9 +97,10 @@ const presentProductForViewer = (req: import('express').Request, product: Produc
   return canViewCostPrice(req) ? product : maskProductCostPrice(product)
 }
 
-// 商品导出与标签打印会带出售价/库存，供货方业务上用不到，直接拒绝而不是返回残缺数据。
+// 商品导出会带出售价、库存与成本等内部经营数据，供货方业务上用不到，直接拒绝而不是返回残缺数据。
+// 标签打印不在此列：#178 已为供货方设计 main_only 投影（只含主库位、不含数量与分布指纹），贴签需要售价。
 const rejectSupplierCatalogExport: import('express').RequestHandler = (req, _res, next) => {
-  next(isSupplierCatalogView(req) ? new BizError('供货方账号无权导出商品或打印标签', 403) : undefined)
+  next(isSupplierCatalogView(req) ? new BizError('供货方账号无权导出商品', 403) : undefined)
 }
 
 const productTagIdSchema = z.union([z.string(), z.number()])
@@ -426,7 +427,6 @@ productRouter.get(
 productRouter.post(
   '/labels',
   requirePermission('products:view'),
-  rejectSupplierCatalogExport,
   asyncHandler(async (req, res) => {
     const payload = z.object({ skuIds: z.array(productTagIdSchema).min(1).max(500) }).parse(req.body)
     res.json({ code: 0, message: 'ok', data: await productService.listLabels(payload.skuIds, (req as AuthenticatedRequest).auth.permissions.some((permission) => permission === 'products:manage' || permission === 'inventory:view' || permission === 'stocktake:view') ? 'full' : 'main_only') })

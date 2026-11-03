@@ -234,11 +234,15 @@ async function main() {
       assertSupplierMasked(detailPayload.data as ProductPayload, '供货方商品详情')
 
       await expectStatus(() => fetch(`${baseUrl}/api/products/export`, { headers: readHeaders(supplierSession) }), 403, '供货方导出商品')
-      await expectStatus(() => fetch(`${baseUrl}/api/products/labels`, {
+      // 标签打印沿用 #178 的 main_only 投影：供货方可打印，但不得带出库位数量与分布指纹。
+      const supplierLabels = await expectStatus(() => fetch(`${baseUrl}/api/products/labels`, {
         method: 'POST',
         headers: writeHeaders(supplierSession),
         body: JSON.stringify({ skuIds: [String(activeSku.id)] }),
-      }), 403, '供货方打印标签')
+      }), 200, '供货方打印标签')
+      const supplierLabel = (supplierLabels.data as Array<{ printLocations: { capability: string } }>)[0]!
+      assert.equal(supplierLabel.printLocations.capability, 'main_only', '供货方标签只能拿到主库位投影')
+      assert.ok(!JSON.stringify(supplierLabel.printLocations).includes('qty'), '供货方标签不得带出库位数量')
 
       const operatorList = await expectStatus(() => fetch(`${baseUrl}/api/products?isActive=true`, { headers: readHeaders(operatorSession) }), 200, '库管读取商品')
       const operatorProduct = (operatorList.data as ProductPayload[]).find((item) => String(item.id) === String(activeProduct.id))
@@ -382,7 +386,7 @@ async function main() {
       await new Promise<void>((resolve) => server.close(() => resolve()))
     }
 
-    console.log('供货端专项验证通过：商品目录对供货方脱敏、停用商品可过滤、导出与标签拒绝供货方、送货单通知按角色定向投递、收件箱过滤、单条与按事件类型批量已读均符合预期')
+    console.log('供货端专项验证通过：商品目录对供货方脱敏、停用商品可过滤、导出拒绝供货方、标签仅主库位投影、送货单通知按角色定向投递、收件箱过滤、单条与按事件类型批量已读均符合预期')
   } finally {
     await notificationService.stopOutboxWorker().catch(() => undefined)
     if (AppDataSource.isInitialized) await AppDataSource.destroy()
