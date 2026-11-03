@@ -883,6 +883,64 @@ const MYSQL_BASELINE_EXTRA_COLUMNS: readonly MysqlRequiredColumn[] = [
   { tableName: 'client_user', columnName: 'department_name', introducingScript: '037_department_account_node_binding.sql', minCharacterMaximumLength: 271 },
 ]
 
+/**
+ * 首次接管基线的数据回填完成性检查：结构就位不代表脚本末尾的数据回填已执行。
+ * 每条 SQL 只读统计“仍待该脚本回填”的行数，>0 时不登记基线，交给脚本重放；列入这里的脚本，其回填语句
+ * 都只处理尚未补过的行（IS NULL / NOT EXISTS 等守卫），在已演进的数据上重放是安全的，误报至多多重放一次。
+ * 未列入的含数据脚本：042 的回填已由 business_no NOT NULL 契约与 055 领养覆盖；051 把旧格式条码迁入
+ * legacy_sku_code，在已演进数据上无法与合法新条码区分，重放反而会误改，因此不做完成性推断。
+ */
+const MYSQL_BASELINE_DATA_PENDING_CHECKS: readonly { introducingScript: string; label: string; sql: string }[] = [
+  {
+    introducingScript: '033_inventory_security_invariants.sql',
+    label: '入库明细缺少可回填的 sku_id',
+    sql: `SELECT COUNT(1) AS pending FROM biz_inbound_order_item AS item
+          WHERE item.sku_id IS NULL
+            AND EXISTS (SELECT 1 FROM base_product_sku AS sku
+                        WHERE sku.product_id = item.product_id AND sku.is_active = 1 AND sku.is_current = 1)`,
+  },
+  {
+    introducingScript: '043_order_content_inventory_mode.sql',
+    label: '出库单 inventory_mode 未规范化',
+    sql: `SELECT COUNT(1) AS pending FROM biz_outbound_order
+          WHERE inventory_mode NOT IN ('legacy_none', 'manual_applied', 'o2o_preapplied')
+             OR (inventory_mode = 'legacy_none' AND idempotency_key LIKE 'o2o-preorder-verify:%')`,
+  },
+  {
+    introducingScript: '045_order_merge_governance.sql',
+    label: '出库单 status 或合并操作 result_json 未规范化',
+    sql: `SELECT
+            (SELECT COUNT(1) FROM biz_outbound_order WHERE status NOT IN ('active', 'merged'))
+            + (SELECT COUNT(1) FROM order_merge_operation WHERE LENGTH(TRIM(result_json)) = 0) AS pending`,
+  },
+  {
+    introducingScript: '046_outbound_order_source_doc.sql',
+    label: 'O2O 核销出库单缺少来源单据',
+    sql: `SELECT COUNT(1) AS pending FROM biz_outbound_order AS o
+          INNER JOIN o2o_preorder AS p ON o.idempotency_key = CONCAT('o2o-preorder-verify:', p.id)
+          WHERE o.source_doc_type IS NULL`,
+  },
+  {
+    introducingScript: '053_yz_reservation_series_code.sql',
+    label: '存活 YZ 商品缺少序号永久占用登记',
+    sql: `SELECT COUNT(1) AS pending FROM base_product AS p
+          WHERE p.code_scheme = 'yz'
+            AND p.primary_series_tag_id IS NOT NULL
+            AND p.series_seq IS NOT NULL
+            AND p.product_code IS NOT NULL
+            AND LENGTH(p.product_code) BETWEEN 5 AND 8
+            AND RIGHT(p.product_code, 2) = LPAD(p.series_seq, 2, '0')
+            AND SUBSTRING(p.product_code, LENGTH(p.product_code) - 3, 2) REGEXP '^[A-Z]{2}$'
+            AND SUBSTRING(p.product_code, 1, LENGTH(p.product_code) - 4) REGEXP '^[A-Z]{1,4}$'
+            AND NOT EXISTS (
+              SELECT 1 FROM base_yz_series_seq_reservation AS r
+              WHERE r.code_prefix = SUBSTRING(p.product_code, 1, LENGTH(p.product_code) - 4)
+                AND r.series_code = SUBSTRING(p.product_code, LENGTH(p.product_code) - 3, 2)
+                AND r.series_seq = p.series_seq
+            )`,
+  },
+]
+
 // 不可重复执行的历史脚本。
 // 原先 006/008/014/015/016 因裸 ALTER TABLE ADD COLUMN 也在此列，已改造为
 // information_schema 判断 + PREPARE 动态 DDL，可安全重放，因此不再列入。
@@ -1313,7 +1371,7 @@ async function assertAutoMigrationResult(queryRunner: QueryRunner, filename: str
 
 /**
  * 按脚本收集其负责的契约结构缺口。verifiable=false 表示该脚本没有任何可只读核对的契约项，
- * 调用方不能据此推断脚本“已执行”；forBaseline 额外核对表存在与收尾不变量，只供首次接管基线使用，执行后断言保持原口径。
+ * 调用方不能据此推断脚本“已执行”；forBaseline 额外核对表存在、收尾不变量与数据回填完成性，只供首次接管基线使用，执行后断言保持原口径。
  */
 async function collectAutoMigrationContractIssues(
   queryRunner: QueryRunner,
@@ -1457,9 +1515,22 @@ async function collectAutoMigrationContractIssues(
   const missingChecks = requiredChecks.filter((item) => (
     !existingChecks.has(schemaObjectKey(item.tableName, item.constraintName))
   ))
+  const structuralIssueCount = missingTables.length + leftoverIndexes.length + missingColumns.length
+    + invalidColumnDefinitions.length + invalidIndexes.length + invalidForeignKeys.length
+    + invalidTriggers.length + missingChecks.length
+  // 数据回填检查依赖脚本建好的表与列，结构有缺口时脚本本就会被执行，不再查询以免引用不存在的列。
+  const pendingDataLabels: string[] = []
+  if (options.forBaseline && structuralIssueCount === 0) {
+    for (const check of MYSQL_BASELINE_DATA_PENDING_CHECKS.filter((item) => item.introducingScript === filename)) {
+      const rows = await queryRunner.query(check.sql) as Array<{ pending: number | string }>
+      const pending = Number(rows[0]?.pending ?? 0)
+      if (pending > 0) pendingDataLabels.push(`数据回填未完成：${check.label}（${pending} 行）`)
+    }
+  }
   return {
     verifiable: true,
     issues: [
+      ...pendingDataLabels,
       ...missingTables.map((tableName) => `表 ${tableName}`),
       ...leftoverIndexes.map((row) => `旧索引 ${row.TABLE_NAME}.${row.INDEX_NAME} 仍存在`),
       ...missingColumns.map((item) => `字段 ${item.tableName}.${item.columnName}`),

@@ -1262,6 +1262,32 @@ async function verifyOrderSerialConcurrency(mysqlConfig: VerifyMysqlRuntimeConfi
     assert.equal(leftoverIndexRows.length, 0, '重放 060 后旧索引必须已删除')
     await assertMysqlRequiredSchemaExists(AppDataSource)
 
+    // 人工执行 043 在数据回填前中断：结构全部就位，但存在未规范化的 inventory_mode，基线不得登记 043，必须重放回填。
+    // 检查约束已限定取值，因此模拟 043 回填前的另一种存量形态：O2O 核销出库单仍是 legacy_none。
+    const [pendingInventoryModeOrder] = await AppDataSource.query(
+      `SELECT id, inventory_mode AS inventoryMode, idempotency_key AS idempotencyKey FROM biz_outbound_order
+       ORDER BY id LIMIT 1`,
+    ) as Array<{ id: string; inventoryMode: string; idempotencyKey: string | null }>
+    assert.ok(pendingInventoryModeOrder, '前序场景应已产生出库单')
+    await AppDataSource.query('DELETE FROM schema_migrations')
+    await AppDataSource.query(
+      "UPDATE biz_outbound_order SET inventory_mode = 'legacy_none', idempotency_key = ? WHERE id = ?",
+      [`o2o-preorder-verify:baseline-${randomUUID()}`, pendingInventoryModeOrder.id],
+    )
+    const adoptedWithPendingBackfill = await runMysqlSchemaMigrations(AppDataSource)
+    assert.ok(adoptedWithPendingBackfill.appliedFiles.includes('043_order_content_inventory_mode.sql'), '数据回填未完成时必须重放 043')
+    assert.ok(!adoptedWithPendingBackfill.baselinedFiles.includes('043_order_content_inventory_mode.sql'), '数据回填未完成时 043 不得登记为基线')
+    const [normalizedOrder] = await AppDataSource.query(
+      'SELECT inventory_mode AS inventoryMode FROM biz_outbound_order WHERE id = ?',
+      [pendingInventoryModeOrder.id],
+    ) as Array<{ inventoryMode: string }>
+    assert.equal(normalizedOrder?.inventoryMode, 'o2o_preapplied', '重放 043 后 O2O 核销出库单的 inventory_mode 必须被回填')
+    await AppDataSource.query('UPDATE biz_outbound_order SET inventory_mode = ?, idempotency_key = ? WHERE id = ?', [
+      pendingInventoryModeOrder.inventoryMode,
+      pendingInventoryModeOrder.idempotencyKey,
+      pendingInventoryModeOrder.id,
+    ])
+
     const createMergeCandidate = async (suffix: string) => {
       const preorderResult = await o2oPreorderService.submit(clientAuth, {
         clientRequestId: `db-concurrency-order-merge-${suffix}`,
