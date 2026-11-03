@@ -33,7 +33,8 @@ import { aliyunDypnsMnsWorkerService } from '../services/aliyun-dypns-mns-worker
 import { systemConfigService } from '../services/system-config.service.js'
 import { migrateLegacyUploadReferences } from '../utils/upload-migration.js'
 import { toSafeErrorLog } from '../utils/safe-error-log.js'
-import { scheduleProductThumbnailBackfill } from '../utils/product-thumbnail.js'
+import { invalidateMallCatalogReadCache } from '../services/mall-catalog-revision.service.js'
+import { configureProductThumbnailInvalidation, scheduleProductThumbnailBackfill, stopProductThumbnailBackfill } from '../utils/product-thumbnail.js'
 import { describeDataEncryptionKey } from '../utils/data-encryption.js'
 import { DataEncryptionKeyMissingError, runDataEncryptionPreflight } from './data-encryption-preflight.js'
 import { overloadMonitor } from '../middleware/overload-shedding.middleware.js'
@@ -162,6 +163,7 @@ const shutdownRuntime = (reason: string, exitCode: number, exit = true): Promise
       : Promise.resolve()
 
     overloadMonitor.stop()
+    await stopProductThumbnailBackfill()
     // HTTP 断开不代表业务 Promise 完成；先关闭新准入，排空所有操作和 worker 才销毁连接。
     await databaseMaintenanceModeService.shutdownAndDrain()
     await mobileSessionService.stopCleanupLoop()
@@ -558,6 +560,7 @@ export async function startBusinessRuntime(startup: { mode: 'normal' | 'cutover'
     mobileSessionService.startCleanupLoop()
     clientFeedbackService.startAttachmentCleanupWorker()
     // 商品缩略图存量回填只读写 uploads/products 文件、不触碰数据库，延迟到启动完成后低优先级执行。
+    configureProductThumbnailInvalidation(invalidateMallCatalogReadCache)
     scheduleProductThumbnailBackfill()
     if (databaseMaintenanceModeService.isReadOnly()) {
       logLine('DB MIGRATION', '数据库仍处于只读维护，后台写任务保持暂停', 'warn')
