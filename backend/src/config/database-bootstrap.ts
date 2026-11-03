@@ -315,6 +315,7 @@ const SQLITE_REQUIRED_CLIENT_STAFF_DIRECTORY_COLUMNS = [
 const SQLITE_REQUIRED_SYS_USER_COLUMNS = [
   'email',
   'webauthn_user_handle',
+  'governance_permissions_json',
   'deactivated_at',
   'deactivation_reason',
   'deactivated_by_user_id',
@@ -367,6 +368,7 @@ const SQLITE_REQUIRED_O2O_PREORDER_COLUMNS = [
   'pickup_at',
   'kingdee_voucher_no',
   'kingdee_version',
+  'reserved_business_no',
   'update_count',
   'is_deleted',
   'deleted_at',
@@ -2189,6 +2191,9 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
   if (!o2oPreorderUniqueIndexSet.has('uk_o2o_preorder_client_request')) {
     return true
   }
+  if (!o2oPreorderUniqueIndexSet.has('uk_o2o_preorder_reserved_business_no')) {
+    return true
+  }
 
   const o2oPreorderItemColumnSet = await listSqliteTableColumns(dataSource, 'o2o_preorder_item')
   if (SQLITE_REQUIRED_O2O_PREORDER_ITEM_COLUMNS.some((column) => !o2oPreorderItemColumnSet.has(column))) {
@@ -2271,6 +2276,11 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   if (env.DB_TYPE === 'sqlite') {
     await dropSqliteOrderBusinessNoPermanentOccupancy(dataSource)
     await ensureSqliteMobileSessionSchema(dataSource)
+    // 仅补 nullable 列，不回填、不重建用户表；NULL 继续沿用角色默认权限。
+    const sysUserColumns = await listSqliteTableColumns(dataSource, 'sys_user')
+    if (sysUserColumns.size && !sysUserColumns.has('governance_permissions_json')) {
+      await dataSource.query('ALTER TABLE "sys_user" ADD COLUMN "governance_permissions_json" text NULL')
+    }
     await prepareSqliteAdminMfaCompatibility(dataSource)
     await prepareSqliteOrderAmendmentColumns(dataSource)
     await prepareSqliteOrderContentInventoryColumns(dataSource)
@@ -2279,6 +2289,8 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
     if (kingdeeColumns.size) {
       if (!kingdeeColumns.has('kingdee_voucher_no')) await dataSource.query('ALTER TABLE "o2o_preorder" ADD COLUMN "kingdee_voucher_no" varchar(128) NULL')
       if (!kingdeeColumns.has('kingdee_version')) await dataSource.query('ALTER TABLE "o2o_preorder" ADD COLUMN "kingdee_version" integer NOT NULL DEFAULT 0 CHECK (kingdee_version >= 0)')
+      if (!kingdeeColumns.has('reserved_business_no')) await dataSource.query('ALTER TABLE "o2o_preorder" ADD COLUMN "reserved_business_no" varchar(32) NULL')
+      await dataSource.query('CREATE UNIQUE INDEX IF NOT EXISTS "uk_o2o_preorder_reserved_business_no" ON "o2o_preorder" ("reserved_business_no")')
     }
     await prepareSqliteStocktakeLocationScope(dataSource)
     await backfillSqliteLegacySkuCodeFromBarcode(dataSource)
@@ -2326,6 +2338,9 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
     // 这里补上两层保障：按需自动执行迁移脚本，随后对关键表、列和索引做只读契约自检，
     // 任一必需结构缺失或索引形状不符都直接阻止启动。
     const migrationResult = await runMysqlSchemaMigrations(dataSource)
+    if (migrationResult.baselinedFiles.length > 0) {
+      console.log(`[y-link-backend] MySQL 首次接管迁移记录，结构已就位的脚本仅登记未执行：${migrationResult.baselinedFiles.join(', ')}`)
+    }
     if (migrationResult.appliedFiles.length > 0) {
       console.log(`[y-link-backend] MySQL 迁移脚本已自动执行：${migrationResult.appliedFiles.join(', ')}`)
     }

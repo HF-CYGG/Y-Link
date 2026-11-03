@@ -61,6 +61,7 @@ const REQUIRED_TABLES = [
 ] as const
 
 const REQUIRED_COLUMNS = [
+  ['sys_user', 'governance_permissions_json'],
   ...['conversation_id', 'client_user_id', 'product_id', 'sku_id', 'product_name_snapshot', 'product_code_snapshot', 'sku_code_snapshot', 'spec_text_snapshot', 'quantity', 'latest_pickup_at', 'remark', 'status', 'handled_at', 'client_request_id', 'payload_digest', 'created_at', 'updated_at'].map((columnName) => ['client_restock_request', columnName]),
   ...['client_user_id', 'client_request_id', 'payload_digest', 'restock_request_id', 'created_at'].map((columnName) => ['client_restock_request_key', columnName]),
   // 050：YZ 通用 SKU 编码体系新增字段，需与 mysql-migration-runner 的 MYSQL_REQUIRED_COLUMNS 保持同一口径。
@@ -106,6 +107,7 @@ const REQUIRED_COLUMNS = [
   ['o2o_preorder', 'pickup_at'],
   ['o2o_preorder', 'kingdee_voucher_no'],
   ['o2o_preorder', 'kingdee_version'],
+  ['o2o_preorder', 'reserved_business_no'],
   ['biz_inbound_order', 'expected_arrival_at'],
   ['base_product', 'category_id'],
   ['base_product_sku', 'barcode'],
@@ -181,6 +183,7 @@ const REQUIRED_COLUMNS = [
 const REQUIRED_COLUMN_LENGTHS = new Map<string, number>([
   ['o2o_preorder.department_name_snapshot', 271],
   ['o2o_preorder.kingdee_voucher_no', 128],
+  ['o2o_preorder.reserved_business_no', 32],
   ['client_feedback_conversation.department_name_snapshot', 271],
   ['biz_outbound_order.customer_department_name', 271],
   ['sms_verification_record.scheme_name', 20],
@@ -198,12 +201,14 @@ interface ColumnFixture {
 }
 
 const REQUIRED_MANUAL_OUTBOUND_COLUMN_DEFINITIONS = new Map<string, ColumnFixture>([
+  ['sys_user.governance_permissions_json', { dataType: 'text', columnType: 'text', isNullable: 'YES', characterMaximumLength: 65535 }],
   ...['client_restock_request', 'client_restock_request_key'].flatMap((tableName): Array<[string, ColumnFixture]> => ['client_request_id', 'payload_digest'].map((columnName) => [`${tableName}.${columnName}`, { dataType: 'varchar', columnType: 'varchar(64)', isNullable: 'NO', characterMaximumLength: 64 }])),
   ['client_restock_request.quantity', { dataType: 'int', columnType: 'int', isNullable: 'NO', characterMaximumLength: null }],
   ['client_restock_request.latest_pickup_at', { dataType: 'datetime', columnType: 'datetime(6)', isNullable: 'NO', characterMaximumLength: null }],
   ['client_restock_request.status', { dataType: 'varchar', columnType: 'varchar(16)', isNullable: 'NO', characterMaximumLength: 16, columnDefault: 'requested' }],
   ['o2o_preorder.kingdee_voucher_no', { dataType: 'varchar', columnType: 'varchar(128)', isNullable: 'YES', characterMaximumLength: 128 }],
   ['o2o_preorder.kingdee_version', { dataType: 'int', columnType: 'int unsigned', isNullable: 'NO', characterMaximumLength: null, columnDefault: '0' }],
+  ['o2o_preorder.reserved_business_no', { dataType: 'varchar', columnType: 'varchar(32)', isNullable: 'YES', characterMaximumLength: 32 }],
   ['sys_user_mfa.factor_revision', {
     dataType: 'int', columnType: 'int', isNullable: 'NO', characterMaximumLength: null, columnDefault: '1',
   }],
@@ -508,6 +513,12 @@ const REQUIRED_INDEXES: readonly IndexFixture[] = [
     tableName: 'o2o_preorder',
     indexName: 'uk_o2o_preorder_client_request',
     columns: ['client_user_id', 'client_request_id'],
+    unique: true,
+  },
+  {
+    tableName: 'o2o_preorder',
+    indexName: 'uk_o2o_preorder_reserved_business_no',
+    columns: ['reserved_business_no'],
     unique: true,
   },
   {
@@ -1095,6 +1106,8 @@ for (const [columnKey] of REQUIRED_COLUMN_LENGTHS) {
   shortRequiredColumn.columnDefinitions.get(columnKey)!.characterMaximumLength = 1
   const introducingScript = columnKey === 'o2o_preorder.kingdee_voucher_no'
     ? '062_o2o_preorder_kingdee_registration.sql'
+    : columnKey === 'o2o_preorder.reserved_business_no'
+    ? '063_o2o_preorder_reserved_business_no.sql'
     : columnKey === 'sms_verification_record.scheme_name'
     ? '039_aliyun_pnvs_sms_verification.sql'
     : columnKey === 'sys_user.webauthn_user_handle'
@@ -1104,7 +1117,9 @@ for (const [columnKey] of REQUIRED_COLUMN_LENGTHS) {
       : '038_department_path_capacity.sql'
   await expectSchemaFailure(shortRequiredColumn, [
     `字段 ${columnKey}`,
-    columnKey === 'o2o_preorder.kingdee_voucher_no' ? '长度应为 128' : '字符容量不足',
+    columnKey === 'o2o_preorder.kingdee_voucher_no'
+      ? '长度应为 128'
+      : columnKey === 'o2o_preorder.reserved_business_no' ? '长度应为 32' : '字符容量不足',
     introducingScript,
   ])
 }
@@ -1328,3 +1343,15 @@ restrictLocationStockSku.foreignKeys.get(objectKey('inv_sku_location_stock', 'fk
 await expectSchemaFailure(restrictLocationStockSku, ['外键 inv_sku_location_stock.sku_id 必须使用 ON DELETE CASCADE', '060_sku_location_stock.sql'])
 
 console.log('[mysql-schema-contract-verify] MySQL 启动结构契约验证通过')
+
+// 治理覆盖必须是可空文本；缺列、错类型或 NOT NULL 均在对外启动前失败。
+const missingGovernanceColumn = createCompleteFixture()
+missingGovernanceColumn.columns.delete(objectKey('sys_user', 'governance_permissions_json'))
+await expectSchemaFailure(missingGovernanceColumn, ['字段 sys_user.governance_permissions_json', '063_sys_user_governance_permissions.sql'])
+const nonNullableGovernance = createCompleteFixture()
+nonNullableGovernance.columnDefinitions.get(objectKey('sys_user', 'governance_permissions_json'))!.isNullable = 'NO'
+await expectSchemaFailure(nonNullableGovernance, ['字段 sys_user.governance_permissions_json 必须允许 NULL'])
+const wrongGovernanceType = createCompleteFixture()
+wrongGovernanceType.columnDefinitions.get(objectKey('sys_user', 'governance_permissions_json'))!.dataType = 'varchar'
+await expectSchemaFailure(wrongGovernanceType, ['字段 sys_user.governance_permissions_json 类型应为 text'])
+console.log('治理权限 MySQL 结构契约通过（只读替身，不代表真实 MySQL 并发验证）')

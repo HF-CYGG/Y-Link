@@ -8,7 +8,7 @@
 
 import type { EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
-import { resolvePermissionsByRole, type PermissionCode } from '../constants/auth-permissions.js'
+import { GOVERNANCE_PERMISSION_CODES, resolvePermissionsByRole, resolveUserPermissions, isUserGovernanceAdmin, type PermissionCode } from '../constants/auth-permissions.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { SysUser } from '../entities/sys-user.entity.js'
 import { SysUserSession } from '../entities/sys-user-session.entity.js'
@@ -34,7 +34,7 @@ import { customerServiceRealtimeService } from './customer-service-realtime.serv
 import {
   isAccountCurrentlyDeactivated,
   lockActiveSysAccountForBusiness,
-  lockSysAccountsInStableOrder,
+  lockSysAccountGovernanceSnapshot,
 } from './account-business-guard.service.js'
 
 export interface UserListQuery {
@@ -53,6 +53,7 @@ export interface CreateUserInput {
   email?: string
   role: UserRole
   status?: UserStatus
+  governancePermissions?: PermissionCode[] | null
 }
 
 export interface UpdateUserInput {
@@ -60,6 +61,7 @@ export interface UpdateUserInput {
   email?: string
   role?: UserRole
   password?: string
+  governancePermissions?: PermissionCode[] | null
 }
 
 /**
@@ -173,7 +175,7 @@ export class UserService {
       || user.status !== 'enabled'
       || isAccountCurrentlyDeactivated(user)
       || user.role !== 'admin'
-      || !resolvePermissionsByRole(user.role).includes(requiredPermission)
+      || !resolveUserPermissions(user).includes(requiredPermission)
     ) {
       throw new BizError('当前管理员账号已失效或权限不足', 403)
     }
@@ -185,12 +187,29 @@ export class UserService {
     targetId: string,
     actor: AuthUserContext,
     requiredPermission: PermissionCode,
-  ): Promise<SysUser> {
-    const accounts = await lockSysAccountsInStableOrder(manager, [actor.userId, targetId])
+  ): Promise<{ user: SysUser; accounts: Map<string, SysUser> }> {
+    const accounts = await lockSysAccountGovernanceSnapshot(manager)
     this.assertLifecycleActor(accounts.get(String(actor.userId)), requiredPermission)
     const target = accounts.get(String(targetId))
     if (!target) throw new BizError('用户不存在', 404)
-    return target
+    return { user: target, accounts }
+  }
+
+  private assertGovernanceRecovery(accounts: Map<string, SysUser>, candidate: SysUser): void {
+    const remaining = [...accounts.values()].some((account) => isUserGovernanceAdmin(account.id === candidate.id ? candidate : account))
+    if (!remaining) throw new BizError('必须保留至少一名启用且拥有用户查看、编辑权限的管理员', 409)
+  }
+
+  private normalizeGovernancePermissions(input: unknown, role: UserRole): string | null {
+    if (input === null) return null
+    const upper = resolvePermissionsByRole(role)
+    if (!Array.isArray(input) || input.length > GOVERNANCE_PERMISSION_CODES.length
+      || !input.every((permission: unknown) => typeof permission === 'string'
+        && GOVERNANCE_PERMISSION_CODES.includes(permission as PermissionCode)
+        && upper.includes(permission as PermissionCode))) {
+      throw new BizError('关键权限必须属于目标角色现有的治理权限范围', 400)
+    }
+    return JSON.stringify(GOVERNANCE_PERMISSION_CODES.filter((permission) => input.includes(permission)))
   }
 
   private async buildReferenceSummary(manager: EntityManager, userId: string) {
@@ -229,13 +248,14 @@ export class UserService {
     manager: EntityManager,
     user: SysUser,
     actor: AuthUserContext,
+    lockedAccounts?: Map<string, SysUser>,
   ): Promise<UserLifecyclePreview> {
     const referenceSummary = await this.buildReferenceSummary(manager, user.id)
     const blockers: AccountLifecycleBlocker[] = []
     if (actor.userId === user.id) blockers.push({ code: 'current_account', message: '不能注销当前登录账号', count: 1 })
-    if (user.role === 'admin' && user.status === 'enabled') {
-      const enabledAdmins = await manager.getRepository(SysUser).count({ where: { role: 'admin', status: 'enabled' } })
-      if (enabledAdmins <= 1) blockers.push({ code: 'last_enabled_admin', message: '该账号是系统中唯一启用的管理员', count: 1 })
+    if (isUserGovernanceAdmin(user)) {
+      const enabledAdmins = (lockedAccounts ? [...lockedAccounts.values()] : await manager.getRepository(SysUser).find()).filter(isUserGovernanceAdmin).length
+      if (enabledAdmins <= 1) blockers.push({ code: 'last_enabled_admin', message: '该账号是系统中唯一启用且可查看、编辑用户的管理员', count: 1 })
     }
     if (referenceSummary.activeAssignments > 0) blockers.push({ code: 'customer_service_assignment', message: '仍有未关闭客服会话需要人工交接', count: referenceSummary.activeAssignments })
     if (referenceSummary.notificationResponsibilities > 0) blockers.push({ code: 'notification_responsibility', message: '仍承担通知接收或离线监测职责，需要人工交接', count: referenceSummary.notificationResponsibilities })
@@ -299,11 +319,12 @@ export class UserService {
   ): Promise<UserSafeProfile> {
     const reason = this.normalizeLifecycleReason(input.reason, '注销')
     const result = await runInTransaction(async (manager) => {
-      const user = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:deactivate')
+      const { user, accounts } = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:deactivate')
       if (isCurrentlyDeactivated(user)) return { profile: sanitizeUserProfile(user), changed: false }
-      const preview = await this.buildLifecyclePreview(manager, user, actor)
+      const preview = await this.buildLifecyclePreview(manager, user, actor, accounts)
       if (!preview.canDeactivate) throw new BizError(preview.blockers.map((item) => item.message).join('；'), 409)
 
+      this.assertGovernanceRecovery(accounts, { ...user, status: 'disabled' })
       const now = new Date(Math.max(Date.now(), (user.restoredAt?.getTime() ?? 0) + 1))
       user.status = 'disabled'
       user.deactivatedAt = now
@@ -337,7 +358,7 @@ export class UserService {
   ): Promise<UserSafeProfile> {
     const reason = this.normalizeLifecycleReason(input.reason, '恢复')
     const result = await runInTransaction(async (manager) => {
-      const user = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:deactivate')
+      const { user } = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:deactivate')
       if (!isCurrentlyDeactivated(user)) {
         if (user.restoredAt) return { profile: sanitizeUserProfile(user), changed: false }
         throw new BizError('账号当前未处于已注销状态', 409)
@@ -371,7 +392,7 @@ export class UserService {
     try {
       assertPermanentDeletePassword(input.permanentDeletePassword)
       const result = await runInTransaction(async (manager) => {
-        const user = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:permanent_delete')
+        const { user, accounts } = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:permanent_delete')
         if (!isCurrentlyDeactivated(user)) throw new BizError('仅允许永久删除已注销账号', 409)
         if (input.confirmAccount !== user.username) throw new BizError('确认账号与目标账号不一致', 400)
         const preview = await this.buildLifecyclePreview(manager, user, actor)
@@ -393,6 +414,7 @@ export class UserService {
           removedWebauthnCredentials: removedWebauthn.affected ?? 0,
           removedMfaRecords: removedMfa ? 1 : 0,
         })
+        this.assertGovernanceRecovery(accounts, { ...user, status: 'disabled' })
         await manager.getRepository(SysUser).delete({ id: user.id })
         return { deleted: true as const, accountId: user.id, accountMasked: maskAccountIdentifier(user.username) }
       })
@@ -483,7 +505,9 @@ export class UserService {
     const passwordHash = await hashPassword(password)
     try {
       return await runInTransaction(async (manager) => {
-        await lockActiveSysAccountForBusiness(manager, actor.userId)
+        this.assertLifecycleActor(await lockActiveSysAccountForBusiness(manager, actor.userId), 'users:create')
+        // 与账号、成功审计同事务保存，禁止先以角色默认创建再补写限制。
+        const governancePermissionsJson = this.normalizeGovernancePermissions(input.governancePermissions ?? null, input.role)
         const userRepo = manager.getRepository(SysUser)
         const entity = userRepo.create({
           username,
@@ -491,6 +515,7 @@ export class UserService {
           displayName,
           email,
           role: input.role,
+          governancePermissionsJson,
           status: input.status ?? 'enabled',
         })
         const savedUser = await userRepo.save(entity)
@@ -508,6 +533,7 @@ export class UserService {
               role: savedUser.role,
               status: savedUser.status,
               displayName: savedUser.displayName,
+              governancePermissions: sanitizeUserProfile(savedUser).governancePermissions,
             },
           },
           manager,
@@ -535,7 +561,8 @@ export class UserService {
       normalizedDisplayName === undefined &&
       normalizedEmail === undefined &&
       input.role === undefined &&
-      normalizedPassword === undefined
+      normalizedPassword === undefined &&
+      input.governancePermissions === undefined
     ) {
       throw new BizError('至少提供一项可更新字段', 400)
     }
@@ -551,7 +578,7 @@ export class UserService {
     const newPasswordHash = normalizedPassword === undefined ? undefined : await hashPassword(normalizedPassword)
     try {
       const result = await runInTransaction(async (manager) => {
-        const user = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:update')
+        const { user, accounts } = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:update')
         const userRepo = manager.getRepository(SysUser)
         const sessionRepo = manager.getRepository(SysUserSession)
         if (isCurrentlyDeactivated(user)) {
@@ -562,7 +589,27 @@ export class UserService {
           throw new BizError('不能将当前登录管理员降级为非管理员角色', 400)
         }
 
+        const beforeGovernance = user.governancePermissionsJson ?? null
+        const targetRole = input.role ?? user.role
+        let nextGovernance = beforeGovernance
+        if (input.governancePermissions !== undefined) {
+          nextGovernance = this.normalizeGovernancePermissions(input.governancePermissions, targetRole)
+        } else if (targetRole !== user.role && beforeGovernance !== null) {
+          const currentSelection = resolveUserPermissions(user).filter((permission) => GOVERNANCE_PERMISSION_CODES.includes(permission))
+          nextGovernance = JSON.stringify(currentSelection.filter((permission) => resolvePermissionsByRole(targetRole).includes(permission)))
+        }
+        const candidate = { ...user, role: targetRole, governancePermissionsJson: nextGovernance }
+        if (actor.userId === user.id && !isUserGovernanceAdmin(candidate)) {
+          throw new BizError('不能移除本人用户查看或编辑权限，请保留恢复入口', 400)
+        }
+        this.assertGovernanceRecovery(accounts, candidate)
         const changeSummary: Record<string, string | null> = {}
+        const governanceChanged = beforeGovernance !== nextGovernance
+        if (governanceChanged) {
+          changeSummary.governancePermissionsBefore = beforeGovernance
+          changeSummary.governancePermissionsAfter = nextGovernance
+          user.governancePermissionsJson = nextGovernance
+        }
         const roleChanged = input.role !== undefined && input.role !== user.role
         if (normalizedPassword !== undefined) {
           assertPasswordAvoidsAccountIdentifiers(normalizedPassword, '密码', [user.username, user.email])
@@ -589,7 +636,7 @@ export class UserService {
         }
 
         const savedUser = await userRepo.save(user)
-        const sessionMustBeRevoked = normalizedPassword !== undefined || roleChanged
+        const sessionMustBeRevoked = normalizedPassword !== undefined || roleChanged || governanceChanged
         if (sessionMustBeRevoked) {
         /**
          * 安全修复：
@@ -619,7 +666,7 @@ export class UserService {
       if (result.sessionMustBeRevoked) {
         customerServiceRealtimeService.disconnectByOwner('service', id)
       }
-      return result.profile
+      return { ...result.profile, sessionsRevoked: result.sessionMustBeRevoked }
     } catch (error) {
       if (isUniqueConstraintError(error, EMAIL_UNIQUE_CONSTRAINT_MATCHER)) {
         throw new BizError('邮箱已被其他账号使用', 409)
@@ -635,7 +682,7 @@ export class UserService {
     requestMeta?: RequestMeta,
   ): Promise<UserSafeProfile> {
     const result = await runInTransaction(async (manager) => {
-      const user = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:status')
+      const { user, accounts } = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:status')
       const userRepo = manager.getRepository(SysUser)
 
       if (actor.userId === user.id && status !== 'enabled') {
@@ -650,6 +697,7 @@ export class UserService {
         return { profile: sanitizeUserProfile(user), sessionMustBeRevoked: false }
       }
 
+      this.assertGovernanceRecovery(accounts, { ...user, status })
       const previousStatus = user.status
       user.status = status
       const savedUser = await userRepo.save(user)
@@ -707,7 +755,7 @@ export class UserService {
     // 新密码哈希在事务外预先计算，事务内只做账号信息校验与写入。
     const newPasswordHash = await hashPassword(newPassword)
     const profile = await runInTransaction(async (manager) => {
-      const user = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:reset_password')
+      const { user } = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:reset_password')
       assertPasswordAvoidsAccountIdentifiers(newPassword, '新密码', [user.username, user.email])
       const userRepo = manager.getRepository(SysUser)
       const sessionRepo = manager.getRepository(SysUserSession)
@@ -754,7 +802,7 @@ export class UserService {
     }
     await authService.verifyStepUpPassword(actor, input.currentPassword, requestMeta, 'user.mfa.reset')
     const outcome = await runInTransaction(async (manager) => {
-      const user = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:reset_password')
+      const { user } = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:reset_password')
       const actorSecret = await manager.getRepository(SysUser).createQueryBuilder('account')
         .addSelect('account.passwordHash').where('account.id = :id', { id: actor.userId }).getOneOrFail()
       if (!await verifyPassword(input.currentPassword.trim(), actorSecret.passwordHash)) throw new BizError('当前密码错误', 400)

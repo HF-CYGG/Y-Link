@@ -13,10 +13,11 @@ const sku = (id: string, stock: number, isActive = true, isCurrent = true): O2oM
   id, productId: 'p1', skuCode: id, specValues: {}, specText: id, defaultPrice: '1', originalPrice: '1', discountRate: '1', discountedPrice: '1',
   currentStock: stock, preOrderedStock: 0, availableStock: stock, isActive, isCurrent, o2oRecommended: false, thumbnail: null, sortOrder: 0,
 })
-// 总库存有货、多 SKU 混合时仍可对确切缺货规格申请；限购不参与此函数。
-assert.deepEqual(getRestockSkus({ skus: [sku('stocked', 5), sku('empty', 0), sku('disabled', 0, false), sku('retired', 0, true, false)] }).map((item) => item.id), ['empty'])
+// 补货资格不看库存；保留当前启用规格，购物限购独立。
+assert.deepEqual(getRestockSkus({ skus: [sku('stocked', 5), sku('empty', 0), sku('disabled', 0, false), sku('retired', 0, true, false)] }).map((item) => item.id), ['stocked', 'empty'])
 assert.deepEqual(getRestockSkus(null), [])
-assert.deepEqual(getRestockSkus({ skus: [sku('unknown', Number.NaN), sku('negative', -1)] }), [])
+assert.deepEqual(getRestockSkus({ skus: [sku('unknown', Number.NaN), sku('negative', -1)] }).map((item) => item.id), ['unknown', 'negative'], '补货资格完全不看库存数量')
+for (const quantity of [5, 50]) assert.equal(isValidRestockQuantity(quantity), true, '期望量既可小于也可大于现货15')
 assert.equal(isValidRestockQuantity(1), true)
 assert.equal(isValidRestockQuantity(RESTOCK_MAX_QUANTITY), true)
 for (const value of [0, -1, 1.2, Number.NaN, Infinity, RESTOCK_MAX_QUANTITY + 1]) assert.equal(isValidRestockQuantity(value), false)
@@ -63,6 +64,7 @@ for (const status of ['pending', 'processing', 'resolved', 'closed']) {
   const getPrompt = (effectiveStatus: string) => feedbackRuntime.buildClientFeedbackNextStepPrompt({ ...promptBase, status, restock: { effectiveStatus } })
   assert.match(getPrompt('expired').nextStep, /重新申请补货/, '过期指导不受聊天状态覆盖')
   assert.match(getPrompt('cancelled').nextStep, /重新申请补货/, '撤回需求按业务终态说明')
+  for (const ended of ['expired', 'cancelled']) assert.doesNotMatch(getPrompt(ended).nextStep, /仍缺货|缺货时/, '再次申请不以缺货为门槛')
   assert.match(getPrompt('restocked').nextStep, /返回商城.*现有流程下单/, '已补货仍需正常下单')
   for (const effectiveStatus of ['expired', 'cancelled', 'restocked']) assert.doesNotMatch(getPrompt(effectiveStatus).nextStep, /无需重复|保持消息/)
   for (const effectiveStatus of ['expired', 'cancelled']) assert.match(feedbackRuntime.buildClientFeedbackReplyHint({ ...promptBase, status, restock: { effectiveStatus } }), /当前会话继续交流.*重新申请/)
@@ -133,10 +135,10 @@ for (const filename of vueFiles) {
 }
 const read = (path: string) => readFileSync(path, 'utf8')
 const mall = read('src/views/client/ClientMallView.vue')
-assert.equal((mall.match(/<ClientRestockButton :product=/g) ?? []).length, 4, '四套卡片均有补货按钮')
+assert.equal((mall.match(/<ClientRestockButton v-if="isSingleRestockSku\([^)]*\)" :product=/g) ?? []).length, 4, '四套卡片仅单规格显示补货')
 assert.match(mall, /itemHeight: 98/, '虚拟列表高度契约保留')
 assert.match(mall, /useClientRestockEntry\(\(\) => detailProduct\.value, \(\) => selectedDetailSku\.value, \(\) => detailVisible\.value\)/, '商品详情按当前明确选择的规格覆盖缺货入口')
-assert.match(mall, /return detailRestockEntry\.restockAvailable\.value \? 'restock' : 'unavailable'/, '详情底栏缺货时合并为申请补货')
+assert.match(mall, /return detailNeedsRestock\.value && detailRestockEntry\.restockAvailable\.value \? 'restock' : 'unavailable'/, '详情底栏仅真实缺货时合并为申请补货')
 assert.match(mall, /void detailRestockEntry\.openRestock\(\)/, '详情主按钮在补货态打开补货入口')
 assert.match(read('src/views/client/components/ClientRestockButton.vue'), /useClientRestockEntry\(/, '卡片补货按钮与详情共用补货入口逻辑')
 const restockEntry = read('src/composables/useClientRestockEntry.ts')
@@ -176,6 +178,77 @@ const detailFunction = (name: string, globals: Record<string, unknown>, property
   vm.runInNewContext(compiled, { exports, ...globals })
   return exports.callback
 }
+// 执行商城真实 computed 和动作栏模板，验证切换时数量控件与缺货替换入口互斥。
+const mallAst = ts.createSourceFile('ClientMallView.ts', parse(mall).descriptor.scriptSetup!.content, ts.ScriptTarget.Latest, true)
+const isSingleRestockSku = detailFunction('isSingleRestockSku', { getRestockSkus }, false, mallAst)
+assert.equal(isSingleRestockSku({ skus: [sku('one', 15), sku('old', 0, false)] }), true, '只计算当前启用规格')
+assert.equal(isSingleRestockSku({ skus: [sku('one', 15), sku('two', 0)] }), false, '多规格不显示卡片补货')
+const detailProductRef = vue.ref<any>({ id: 'p1', limitPerUser: 1, availableStock: 15, skus: [sku('stocked', 15), sku('empty', 0)] })
+const selectedSkuRef = vue.ref<any>(detailProductRef.value.skus[1])
+const needsRestock = detailFunction('detailNeedsRestock', { computed: vue.computed, selectedDetailSku: selectedSkuRef, detailProduct: detailProductRef, getRestockSkus }, false, mallAst)
+const detailMax = detailFunction('detailMaxQty', { computed: vue.computed, selectedDetailSku: selectedSkuRef, detailProduct: detailProductRef }, false, mallAst)
+const resolveStock = detailFunction('resolveCurrentDetailAvailableStock', { selectedDetailSku: selectedSkuRef }, false, mallAst)
+const eligible = vue.computed(() => getRestockSkus(detailProductRef.value).some((item) => item.id === selectedSkuRef.value?.id))
+const actionMode = detailFunction('detailActionMode', { computed: vue.computed, detailProduct: detailProductRef, detailNeedsRestock: needsRestock,
+  resolveCurrentDetailAvailableStock: resolveStock, detailRestockEntry: { restockAvailable: eligible } }, false, mallAst)
+for (const index of [1, 0, 1, 0]) {
+  selectedSkuRef.value = detailProductRef.value.skus[index]
+  const empty = index === 1
+  assert.equal(needsRestock.value, empty)
+  assert.equal(detailMax.value, empty ? 0 : 1, '购物数量上限仍受现货和限购控制')
+  assert.equal(actionMode.value, empty ? 'restock' : 'purchase', '详情合并动作只根据真实库存切换')
+}
+selectedSkuRef.value = detailProductRef.value.skus[0]
+for (const limit of [0, 1]) {
+  detailProductRef.value.limitPerUser = limit
+  assert.equal(actionMode.value, 'purchase', '有货不限购或已达到限购时仍保留购买动作，不能虚构缺货')
+}
+assert.match(mall, /:inert="detailActionMode !== 'purchase'"/, '非购买状态数量区域失活')
+assert.match(mall, /:disabled="detailActionMode === 'unavailable' \|\| detailRestockLoading"/, '缺货主动作仍可申请')
+const stepperAst = ts.createSourceFile('ClientCardCartStepper.ts', parse(read('src/views/client/components/ClientCardCartStepper.vue')).descriptor.scriptSetup!.content, ts.ScriptTarget.Latest, true)
+const cartQtyForVisibility = vue.ref(0), hasStockForVisibility = vue.ref(false)
+const stepperVisible = detailFunction('visible', { computed: vue.computed, cartQty: cartQtyForVisibility, hasAnyStock: hasStockForVisibility }, false, stepperAst)
+assert.equal(stepperVisible.value, false, '缺货且未加购时隐藏步进器')
+cartQtyForVisibility.value = 2
+assert.equal(stepperVisible.value, true, '库存归零后保留已在车数量与减购入口')
+cartQtyForVisibility.value = 0; hasStockForVisibility.value = true
+assert.equal(stepperVisible.value, true, '有库存时显示加购入口')
+for (const invalid of [null, sku('foreign', 0), sku('disabled', 0, false), sku('retired', 0, true, false)]) {
+  selectedSkuRef.value = invalid
+  assert.equal(needsRestock.value, false, '无真实eligible SKU时不能虚构缺货上下文')
+}
+// 执行组件实际使用的共享入口，覆盖现货资格、选中规格、多规格未选中以及换号后的迟到响应。
+const pushes: any[] = []
+const checkedIds: string[] = []
+const buttonProps: any = vue.reactive({ product: detailProductRef.value, sku: null })
+const restockAuth = vue.reactive({ currentUser: { id: 'u1' } })
+let beforeRestockResponse: (() => void) | undefined
+const entryRuntime = evaluate('src/composables/useClientRestockEntry.ts', {
+  vue: { ...vueRuntime, onActivated: () => undefined }, 'vue-router': { useRouter: () => ({ push: async (target: any) => { pushes.push(target) } }) },
+  '@/api/modules/customer-service-feedback': { getActiveClientRestockRequest: async (id: string) => { checkedIds.push(id); beforeRestockResponse?.(); return { restock: null } } },
+  '@/store': { useClientAuthStore: () => restockAuth }, '@/store/pinia': { default: {} }, '@/utils/restock': { getRestockSkus },
+  '@/composables/useStableRequest': stableRequestRuntime, '@/utils/error': { extractErrorMessage: String },
+  '@/utils/app-alert': { showAppError: (message: string) => { throw new Error(message) } },
+})
+const entry = entryRuntime.useClientRestockEntry(() => buttonProps.product, () => buttonProps.sku)
+for (const selected of detailProductRef.value.skus) {
+  buttonProps.sku = selected
+  assert.equal(entry.restockAvailable.value, true, '启用SKU正库存/零库存都可显式申请')
+  await entry.openRestock()
+  assert.equal(pushes.at(-1).query.productId, 'p1')
+  assert.equal(pushes.at(-1).query.skuId, selected.id)
+  assert.equal(checkedIds.at(-1), selected.id)
+}
+buttonProps.sku = null
+await entry.openRestock()
+assert.equal(Object.hasOwn(pushes.at(-1).query, 'skuId'), false, '多规格未选择时不能猜SKU')
+buttonProps.sku = detailProductRef.value.skus[0]
+const beforeStale = pushes.length
+beforeRestockResponse = () => { restockAuth.currentUser.id = 'u2' }
+await entry.openRestock()
+assert.equal(pushes.length, beforeStale, '换号后的旧响应不能导航')
+beforeRestockResponse = undefined
+
 const wireSummary: any = {
   id: 3, clientUserId: 2, assignedUserId: 1, assignedUsername: 'operator', assignedDisplayName: '客服', conversationNo: 'F3', subject: '补货',
   status: 'open', priority: 'normal', clientAccount: '测试账号', clientUsername: '测试客户', clientAccountType: 'personal',

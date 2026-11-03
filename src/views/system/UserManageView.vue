@@ -4,6 +4,9 @@
  * 文件职责：提供管理端用户治理页，承接账号查询、创建编辑、启停控制、密码维护与角色配置等操作。
  * 实现逻辑：
  * - 页面统一收口管理端用户的筛选、表格展示和弹窗编辑流程，避免治理入口分散；
+ * - 桌面表格使用固定布局落实列宽，避免内容测量压缩右侧操作列与日期列；
+ * - 新增及编辑账号共用目标角色上界内的治理权限子集，创建时原子保存，默认、空集合及普通业务权限保持各自语义；
+ * - 列表仅显示单行权限数量，全部权限由点击或键盘打开的浮层查看，避免标签撑高行；
  * - 用户状态变更、密码处理和角色字段都在同一页闭环，便于系统管理员集中维护账号权限；
  * - 列表展示各账号两步验证状态，管理员可为丢失手机的他人重置两步验证（与重置密码同一权限，不能重置自己）。
  * 维护说明：
@@ -27,6 +30,8 @@ import type {
 import {
   changePassword,
   ROLE_LABEL_MAP,
+  GOVERNANCE_PERMISSION_CODES,
+  type PermissionCode,
   type UserRole,
   type UserSafeProfile,
   type UserStatus,
@@ -61,6 +66,7 @@ import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 import { guardRecoveryCodePaste } from '@/utils/admin-mfa-recovery-code'
 import { validateAdminPasswordShape } from '@/utils/admin-password-policy'
+import { getKingdeeSession } from '@/utils/kingdee-freshness'
 import { getAdminMfaStatus, type AdminMfaStatus } from '@/api/modules/admin-mfa'
 import { startAdminWebAuthnStepUp, verifyAdminWebAuthnStepUp, type AdminWebAuthnStepUpAction } from '@/api/modules/admin-webauthn'
 import { createWebAuthnFlow, isWebAuthnCancellation } from '@/utils/admin-webauthn'
@@ -68,6 +74,7 @@ import {
   accountTypeDescriptions,
   getAccountTypeDescription,
   getGovernancePermissionLabels,
+  getEditableGovernancePermissions,
   getRoleTagType,
   getStatusTagType,
   roleOptions,
@@ -127,6 +134,10 @@ const dialogVisible = ref(false)
 const dialogMode = ref<'create' | 'edit'>('create')
 const submitting = ref(false)
 const formRef = ref<FormInstance>()
+let userDialogGeneration = 0
+watch(dialogVisible, (visible) => {
+  if (!visible) userDialogGeneration += 1
+}, { flush: 'sync' })
 const resetPasswordVisible = ref(false)
 const resetPasswordSubmitting = ref(false)
 const resetPasswordFormRef = ref<FormInstance>()
@@ -181,6 +192,12 @@ let revokeWebAuthnRefreshOnActivate = false
  * - 新增时 password 必填；
  * - 编辑时 password 不走该弹窗，密码调整统一走独立重置入口。
  */
+const governanceSelection = ref<PermissionCode[]>([])
+const governanceOriginalSelection = ref<PermissionCode[]>([])
+const governanceUseDefault = ref(true)
+const governanceDirty = ref(false)
+const editableGovernanceOptions = computed(() => getEditableGovernancePermissions(userForm.role))
+
 const userForm = reactive({
   id: '',
   username: '',
@@ -190,6 +207,18 @@ const userForm = reactive({
   role: 'operator' as UserRole,
   status: 'enabled' as UserStatus,
 })
+
+watch(() => userForm.role, () => {
+  const allowed = getEditableGovernancePermissions(userForm.role).map((option) => option.value)
+  governanceSelection.value = governanceUseDefault.value ? allowed : (governanceDirty.value ? governanceSelection.value : governanceOriginalSelection.value).filter((permission) => allowed.includes(permission))
+}, { flush: 'sync' })
+
+const handleGovernanceDefaultChange = () => {
+  governanceDirty.value = true
+  if (governanceUseDefault.value) governanceSelection.value = editableGovernanceOptions.value.map((option) => option.value)
+}
+const isRecoveryPermissionLocked = (permission: PermissionCode) => dialogMode.value === 'edit' && userForm.id === authStore.currentUser?.id
+  && (permission === 'users:view' || permission === 'users:update')
 
 /**
  * 重置密码表单：
@@ -400,13 +429,14 @@ const loadData = async () => {
 /**
  * 打开新增弹窗：
  * - 每次都重建默认表单，避免残留上次编辑数据；
- * - 默认创建启用状态的普通操作员。
+ * - 默认创建启用状态的供货方，权限草稿与上次编辑隔离。
  */
 const handleOpenCreate = () => {
   if (!ensurePermission('users:create', '新增用户')) {
     return
   }
 
+  userDialogGeneration += 1
   dialogMode.value = 'create'
   dialogVisible.value = true
   userForm.id = ''
@@ -416,7 +446,22 @@ const handleOpenCreate = () => {
   userForm.email = ''
   userForm.role = 'supplier'
   userForm.status = 'enabled'
+  governanceUseDefault.value = true
+  governanceDirty.value = false
+  governanceSelection.value = getEditableGovernancePermissions(userForm.role).map((option) => option.value)
+  governanceOriginalSelection.value = [...governanceSelection.value]
   formRef.value?.clearValidate()
+}
+
+const handleUserDialogClosed = () => {
+  // 关闭动画结束时可能已重新打开；不能清空新一轮表单。
+  if (dialogVisible.value) return
+  userForm.id = ''
+  userForm.password = ''
+  governanceUseDefault.value = true
+  governanceDirty.value = false
+  governanceSelection.value = []
+  governanceOriginalSelection.value = []
 }
 
 /**
@@ -465,6 +510,7 @@ const handleOpenEdit = (row: UserSafeProfile) => {
     return
   }
 
+  userDialogGeneration += 1
   dialogMode.value = 'edit'
   dialogVisible.value = true
   userForm.id = row.id
@@ -474,6 +520,12 @@ const handleOpenEdit = (row: UserSafeProfile) => {
   userForm.email = row.email ?? ''
   userForm.role = row.role
   userForm.status = row.status
+  governanceUseDefault.value = row.governancePermissions == null
+  governanceSelection.value = governanceUseDefault.value
+    ? getEditableGovernancePermissions(row.role).map((option) => option.value)
+    : (row.governancePermissions ?? row.permissions).filter((permission) => GOVERNANCE_PERMISSION_CODES.includes(permission))
+  governanceOriginalSelection.value = [...governanceSelection.value]
+  governanceDirty.value = false
   formRef.value?.clearValidate()
 }
 
@@ -501,67 +553,107 @@ const handleOpenResetPassword = (row: UserSafeProfile) => {
  */
 const handleSubmit = async () => {
   const form = formRef.value
-  if (!form) {
-    return
-  }
+  if (!form || submitting.value || !dialogVisible.value) return
 
-  const valid = await form.validate().catch(() => false)
-  if (!valid) {
-    return
-  }
-
-  if (dialogMode.value === 'create' && !ensurePermission('users:create', '新增用户')) {
-    return
-  }
-  if (dialogMode.value === 'edit' && !ensurePermission('users:update', '编辑用户')) {
-    return
-  }
-
+  // 提交流程不能再读取可由关闭、重开或角色切换重置的草稿。
+  const submitted = { ...userForm }
+  const mode = dialogMode.value
+  const generation = userDialogGeneration
+  // 复用管理端已有会话身份代际；同账号退出后重登也不能消费旧请求。
+  const session = getKingdeeSession('admin')
+  const sameSession = () => getKingdeeSession('admin') === session && authStore.currentUser?.id === session.identity
+  const ownsDraft = () => sameSession() && dialogVisible.value && generation === userDialogGeneration
+  const isOwnTarget = mode === 'edit' && submitted.id === session.identity
+  const originalStatus = listState.records.find((item) => item.id === submitted.id)?.status
+  const governanceOverride = governanceUseDefault.value ? null : [...governanceSelection.value]
+  const permissionsDirty = governanceDirty.value
   submitting.value = true
+  let profileSaved = false
   try {
-    if (dialogMode.value === 'create') {
+    const valid = await form.validate().catch(() => false)
+    if (!valid || !ownsDraft()) return
+    if (!ensurePermission(mode === 'create' ? 'users:create' : 'users:update', mode === 'create' ? '新增用户' : '编辑用户')) return
+    if (authStore.currentUser?.role !== 'admin') {
+      showAppWarning('仅管理员可创建或编辑用户权限')
+      return
+    }
+    if (isOwnTarget && submitted.status !== 'enabled') {
+      showAppWarning('不能停用当前登录账号')
+      return
+    }
+
+    if (mode === 'create') {
       const payload: CreateUserPayload = {
-        username: userForm.username.trim(),
-        password: userForm.password,
-        displayName: userForm.displayName.trim(),
-        email: userForm.email.trim(),
-        role: userForm.role,
-        status: userForm.status,
+        username: submitted.username.trim(),
+        password: submitted.password,
+        displayName: submitted.displayName.trim(),
+        email: submitted.email.trim(),
+        role: submitted.role,
+        status: submitted.status,
+        governancePermissions: governanceOverride,
       }
       await createUser(payload)
+      if (!sameSession()) return
       showAppSuccess(
-        userForm.role === 'supplier'
+        submitted.role === 'supplier'
           ? '供货方账号创建成功，该账号登录后将进入送货单录入页'
           : '用户创建成功',
       )
     } else {
-      const originalStatus = listState.records.find((item) => item.id === userForm.id)?.status
-      if (userForm.status !== originalStatus && !ensurePermission('users:status', '启停用户')) {
+      if (submitted.status !== originalStatus && !ensurePermission('users:status', '启停用户')) {
         return
       }
 
       const payload: UpdateUserPayload = {
-        displayName: userForm.displayName.trim(),
-        email: userForm.email.trim(),
-        role: userForm.role,
+        displayName: submitted.displayName.trim(),
+        email: submitted.email.trim(),
+        role: submitted.role,
       }
 
-      await updateUser(userForm.id, payload)
-
-      if (userForm.status !== originalStatus) {
-        await updateUserStatus(userForm.id, userForm.status)
+      if (permissionsDirty) {
+        payload.governancePermissions = governanceOverride
       }
-
+      const saved = await updateUser(submitted.id, payload)
+      profileSaved = true
+      if (!sameSession()) return
+      if (ownsDraft()) {
+        governanceUseDefault.value = saved.governancePermissions == null
+        governanceSelection.value = governanceUseDefault.value
+          ? getEditableGovernancePermissions(saved.role).map((option) => option.value)
+          : [...(saved.governancePermissions ?? [])]
+        governanceOriginalSelection.value = [...governanceSelection.value]
+        governanceDirty.value = false
+      }
+      // 权限变化会撤销本人会话，不能继续拿旧会话发状态请求。
+      const ownPermissionsChanged = isOwnTarget && saved.sessionsRevoked === true
+      if (ownPermissionsChanged) {
+        showAppSuccess('权限已保存，请重新登录')
+        authStore.clearAuthState({ resetInitialized: true })
+        redirectToAdminLogin()
+        return
+      }
+      if (submitted.status !== originalStatus) {
+        await updateUserStatus(submitted.id, submitted.status)
+      }
+      if (!sameSession()) return
       showAppSuccess('用户信息更新成功')
     }
 
-    dialogVisible.value = false
+    if (ownsDraft()) dialogVisible.value = false
     await loadData()
   } catch (error) {
+    if (!sameSession()) return
+    if (profileSaved) {
+      // 两个接口分步提交：明确反馈已生效部分，并刷新列表避免重复覆盖资料。
+      if (ownsDraft()) governanceDirty.value = false
+      await loadData()
+      if (!sameSession()) return
+      showAppWarning('用户资料与权限已保存，状态更新未完成，请刷新后单独调整状态')
+    }
     void showCriticalErrorDialog(error, {
-      title: '保存用户失败',
+      title: profileSaved ? '资料已保存，状态更新失败' : '保存用户失败',
       fallback: '保存用户失败',
-      operation: userForm.id ? '编辑管理端用户' : '新增管理端用户',
+      operation: mode === 'edit' ? '编辑管理端用户' : '新增管理端用户',
     })
   } finally {
     submitting.value = false
@@ -1095,7 +1187,7 @@ onMounted(() => {
           card-container-class="pb-4"
         >
           <template #table>
-            <el-table native-scrollbar :data="listState.records" stripe class="user-manage-table w-full flex-1" height="100%" table-layout="auto">
+            <el-table native-scrollbar :data="listState.records" stripe class="user-manage-table w-full flex-1" height="100%" table-layout="fixed">
               <el-table-column prop="username" label="账号" min-width="150" show-overflow-tooltip />
               <el-table-column prop="displayName" label="姓名" min-width="132" show-overflow-tooltip />
               <el-table-column prop="email" label="邮箱" min-width="200" show-overflow-tooltip>
@@ -1151,21 +1243,23 @@ onMounted(() => {
                   <span v-else>-</span>
                 </template>
               </el-table-column>
-              <el-table-column label="关键权限边界" min-width="360" class-name="user-manage__permission-cell">
+              <el-table-column label="关键权限边界" min-width="240" class-name="user-manage__permission-cell">
                 <template #default="{ row }">
-                  <div class="flex flex-wrap items-start gap-2 py-1">
-                    <el-tag
-                      v-for="label in getGovernancePermissionLabels(row.permissions)"
-                      :key="`${row.id}-${label}`"
-                      class="user-manage__permission-tag max-w-full"
-                      size="small"
-                      effect="plain"
-                      type="info"
-                    >
-                      {{ label }}
-                    </el-tag>
-                    <span v-if="getGovernancePermissionLabels(row.permissions).length === 0" class="text-sm text-slate-400">无系统治理权限</span>
+                  <div v-if="getGovernancePermissionLabels(row.permissions).length" class="user-manage__permission-summary flex items-center gap-2 whitespace-nowrap">
+                    <span>已启用 {{ getGovernancePermissionLabels(row.permissions).length }} 项</span>
+                    <el-popover trigger="click" placement="bottom" :width="280">
+                      <template #reference>
+                        <el-button link type="primary" :aria-label="`查看${row.displayName}的全部治理权限`">查看全部</el-button>
+                      </template>
+                      <div class="max-h-64 overflow-y-auto" role="region" :aria-label="`${row.displayName}的全部治理权限`">
+                        <p class="mb-2 font-medium">全部治理权限</p>
+                        <ul class="space-y-1">
+                          <li v-for="label in getGovernancePermissionLabels(row.permissions)" :key="label">{{ label }}</li>
+                        </ul>
+                      </div>
+                    </el-popover>
                   </div>
+                  <span v-else class="text-sm text-slate-400">无系统治理权限</span>
                 </template>
               </el-table-column>
               <el-table-column label="最后登录" min-width="176">
@@ -1229,18 +1323,21 @@ onMounted(() => {
                 </div>
                 <div class="flex items-start justify-between gap-3">
                   <span class="text-slate-400">治理权限</span>
-                  <div class="flex max-w-[70%] flex-wrap justify-end gap-1.5">
-                    <el-tag
-                      v-for="label in getGovernancePermissionLabels(item.permissions)"
-                      :key="`${item.id}-${label}`"
-                      size="small"
-                      effect="plain"
-                      type="info"
-                    >
-                      {{ label }}
-                    </el-tag>
-                    <span v-if="getGovernancePermissionLabels(item.permissions).length === 0">无</span>
+                  <div v-if="getGovernancePermissionLabels(item.permissions).length" class="user-manage__permission-summary flex items-center gap-2 whitespace-nowrap">
+                    <span>已启用 {{ getGovernancePermissionLabels(item.permissions).length }} 项</span>
+                    <el-popover trigger="click" placement="bottom" :width="280">
+                      <template #reference>
+                        <el-button link type="primary" :aria-label="`查看${item.displayName}的全部治理权限`">查看全部</el-button>
+                      </template>
+                      <div class="max-h-64 overflow-y-auto" role="region" :aria-label="`${item.displayName}的全部治理权限`">
+                        <p class="mb-2 font-medium">全部治理权限</p>
+                        <ul class="space-y-1">
+                          <li v-for="label in getGovernancePermissionLabels(item.permissions)" :key="label">{{ label }}</li>
+                        </ul>
+                      </div>
+                    </el-popover>
                   </div>
+                  <span v-else>无</span>
                 </div>
                 <div class="flex items-center justify-between gap-3">
                   <span class="text-slate-400">两步验证</span>
@@ -1305,6 +1402,7 @@ onMounted(() => {
       :confirm-loading="submitting"
       confirm-text="保存"
       @confirm="handleSubmit"
+      @closed="handleUserDialogClosed"
     >
       <el-form ref="formRef" :model="userForm" :rules="rules" label-position="top">
         <el-form-item label="登录账号" prop="username">
@@ -1322,7 +1420,7 @@ onMounted(() => {
           v-else
           class="mb-4 rounded-2xl bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-500 dark:bg-white/5 dark:text-slate-400"
         >
-          编辑用户仅修改姓名、角色与状态；若需调整密码，请使用列表中的“重置密码”独立入口。
+          编辑用户可修改姓名、角色、状态与关键权限边界；若需调整密码，请使用列表中的“重置密码”独立入口。
         </div>
         <el-form-item label="用户姓名" prop="displayName">
           <el-input v-model.trim="userForm.displayName" placeholder="请输入用户姓名" />
@@ -1348,6 +1446,19 @@ onMounted(() => {
             </el-select>
           </el-form-item>
         </div>
+        <el-form-item v-if="authStore.isAdmin" label="关键权限边界">
+          <div class="w-full">
+            <el-checkbox v-model="governanceUseDefault" @change="handleGovernanceDefaultChange">沿用角色默认权限</el-checkbox>
+            <el-checkbox-group v-model="governanceSelection" :disabled="governanceUseDefault" class="grid gap-1 sm:grid-cols-2" @change="governanceDirty = true">
+              <el-checkbox v-for="option in editableGovernanceOptions" :key="option.value" :value="option.value" :disabled="isRecoveryPermissionLocked(option.value)">
+                {{ option.label }}
+              </el-checkbox>
+            </el-checkbox-group>
+            <p class="mt-2 text-xs text-slate-500">仅调整当前角色已有的治理权限，其他业务权限保持不变。取消全部勾选表示不授予治理子集权限。</p>
+            <p v-if="editableGovernanceOptions.length === 0" class="text-xs text-slate-500">该角色没有可编辑的治理权限。</p>
+            <p v-if="dialogMode === 'edit' && userForm.id === authStore.currentUser?.id" class="text-xs text-slate-500">本人须保留用户查看与编辑权限；权限变更保存后需要重新登录。</p>
+          </div>
+        </el-form-item>
         <div
           :class="[
             'rounded-2xl border px-4 py-3 text-sm leading-6',
@@ -1550,9 +1661,14 @@ onMounted(() => {
 </template>
 
 <style scoped>
+/* 暗色全局 hover 为透明白色，固定操作列因此透出滚动内容；仅本表使用合成实色。 */
+html.dark .user-manage-table {
+  --el-table-row-hover-bg-color: #1d1d1e !important;
+}
+
 /* 用户管理表格：
- * - 让多枚权限标签在列宽不足时安全换行，避免标签内容把单元格撑坏；
- * - 操作列与权限列统一增加上下留白，弱化多行内容时的拥挤感。
+ * - 权限摘要始终单行，完整列表交由浮层滚动展示；
+ * - 操作列与权限列保留统一上下留白。
  */
 .user-manage-table :deep(.user-manage__permission-cell .cell),
 .user-manage-table :deep(.user-manage__action-cell .cell) {
@@ -1560,10 +1676,8 @@ onMounted(() => {
   padding-bottom: 4px;
 }
 
-.user-manage-table :deep(.user-manage__permission-tag) {
-  height: auto;
-  white-space: normal;
-  line-height: 1.25rem;
+.user-manage__permission-summary > :deep(.el-button) {
+  margin-left: 0;
 }
 
 </style>

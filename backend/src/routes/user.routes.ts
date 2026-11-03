@@ -11,7 +11,12 @@ import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { createPermanentDeletePasswordGuard } from '../utils/permanent-delete-guard.js'
 import { adminWebauthnService } from '../services/admin-webauthn.service.js'
+import { GOVERNANCE_PERMISSION_CODES, PERMISSION_CODES } from '../constants/auth-permissions.js'
 import { existingPasswordInput } from '../constants/auth-input-limits.js'
+
+const governancePermissionsSchema = z.array(
+  z.enum(PERMISSION_CODES).refine((value) => GOVERNANCE_PERMISSION_CODES.includes(value), '不可编辑的治理权限'),
+).max(GOVERNANCE_PERMISSION_CODES.length).nullable().optional()
 
 const createUserSchema = z.object({
   username: z.string().min(1, '账号不能为空').max(64, '账号长度不能超过 64'),
@@ -20,6 +25,7 @@ const createUserSchema = z.object({
   email: z.string().trim().max(128, '邮箱长度不能超过 128').optional(),
   role: z.enum(USER_ROLES),
   status: z.enum(USER_STATUSES).optional(),
+  governancePermissions: governancePermissionsSchema,
 })
 
 const updateUserSchema = z
@@ -28,7 +34,9 @@ const updateUserSchema = z
     email: z.string().trim().max(128, '邮箱长度不能超过 128').optional(),
     password: z.string().min(8, '密码至少 8 位').max(64, '密码长度不能超过 64 位').optional(),
     role: z.enum(USER_ROLES).optional(),
+    governancePermissions: governancePermissionsSchema,
   })
+  .strict()
   .refine((value) => Object.values(value).some((item) => item !== undefined), {
     message: '至少提供一项可更新字段',
   })

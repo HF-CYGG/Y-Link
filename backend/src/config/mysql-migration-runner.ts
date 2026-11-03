@@ -17,6 +17,8 @@
  *   **重要边界**：这里不做"扫描目录、执行全部未记录文件"的通用回放，而是维护一份
  *   人工审计过的 AUTO_MIGRATABLE_FILES 白名单，只有确认幂等安全的文件才会被自动执行；
  *   005 是只应人工触发的破坏性回滚脚本（会删除 004 生成的备份表），始终排除在外。
+ * - 人工维护的存量库首次开启 DB_AUTO_MIGRATE 时 tracking 为空：先按契约只读核对，结构已就位的脚本只登记基线，
+ *   只执行真正的缺口，避免含历史数据守卫的脚本在已演进数据上重放；全新空库仍完整执行白名单。
  * 维护说明：
  * - 新增迁移文件若要加入自动执行范围，必须先人工确认其为幂等写法
  *   （CREATE TABLE IF NOT EXISTS / information_schema 判断 + PREPARE-EXECUTE 动态 DDL），
@@ -31,6 +33,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 import type { DataSource, EntityManager, QueryRunner } from 'typeorm'
 import { env } from './env.js'
 import {
@@ -39,7 +42,9 @@ import {
   type OrderBusinessNoRetirementBackupPublishOptions,
 } from './order-business-no-retirement-backup.js'
 
-const SQL_DIR = path.resolve(process.cwd(), 'sql')
+// 按模块位置定位 backend/sql，而不是依赖进程工作目录：onebox 以 /app 为工作目录启动 /app/backend/dist，
+// 按 cwd 解析会指向不存在的 /app/sql；源码（src/config）与产物（dist/config）向上两级都是后端根目录。
+const SQL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../sql')
 const MIGRATION_TABLE = 'schema_migrations'
 const ORDER_BUSINESS_NO_REUSE_MIGRATION = '054_order_business_no_reuse.sql'
 const SUPERSEDED_AUTO_MIGRATIONS = new Map<string, string>([
@@ -204,6 +209,7 @@ interface MysqlRequiredCheck {
 // 只列会被当前业务代码直接读写、缺失后必然导致运行时失败的增量字段。
 // 表不存在时由 MYSQL_REQUIRED_TABLES 先给出建表脚本，避免同一张缺表重复打印多条缺列提示。
 const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
+  { tableName: 'sys_user', columnName: 'governance_permissions_json', introducingScript: '063_sys_user_governance_permissions.sql', expectedDataType: 'text', expectedNullable: true },
   // 060：按库位盘点的明细库位列，0 表示按规格总量盘点；缺失时盘点建单与计数都会写库失败。
   { tableName: 'inv_stocktake_item', columnName: 'location_scope_id', introducingScript: '060_sku_location_stock.sql', expectedDataType: 'bigint', expectedNullable: false, expectedDefault: '0' },
   ...['conversation_id', 'client_user_id', 'product_id', 'sku_id', 'product_name_snapshot', 'product_code_snapshot', 'sku_code_snapshot', 'spec_text_snapshot', 'quantity', 'latest_pickup_at', 'remark', 'status', 'handled_at', 'client_request_id', 'payload_digest', 'created_at', 'updated_at']
@@ -255,6 +261,7 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
   { tableName: 'o2o_preorder', columnName: 'cancelled_at', introducingScript: '040_o2o_preorder_governance.sql' },
   { tableName: 'o2o_preorder', columnName: 'kingdee_voucher_no', introducingScript: '062_o2o_preorder_kingdee_registration.sql', expectedDataType: 'varchar', expectedNullable: true, expectedCharacterMaximumLength: 128 },
   { tableName: 'o2o_preorder', columnName: 'kingdee_version', introducingScript: '062_o2o_preorder_kingdee_registration.sql', expectedDataType: 'int', expectedNullable: false, expectedDefault: '0' },
+  { tableName: 'o2o_preorder', columnName: 'reserved_business_no', introducingScript: '063_o2o_preorder_reserved_business_no.sql', expectedDataType: 'varchar', expectedNullable: true, expectedCharacterMaximumLength: 32 },
   { tableName: 'o2o_preorder', columnName: 'pickup_at', introducingScript: '047_o2o_preorder_pickup_at.sql', expectedNullable: true },
   { tableName: 'biz_inbound_order', columnName: 'expected_arrival_at', introducingScript: '048_inbound_order_expected_arrival.sql', expectedNullable: true },
   { tableName: 'base_product', columnName: 'category_id', introducingScript: '049_inventory_sku_barcode_stocktake.sql', expectedNullable: true },
@@ -586,6 +593,13 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
     introducingScript: '035_o2o_idempotency_business_sequence.sql',
   },
   {
+    tableName: 'o2o_preorder',
+    indexName: 'uk_o2o_preorder_reserved_business_no',
+    columns: ['reserved_business_no'],
+    unique: true,
+    introducingScript: '063_o2o_preorder_reserved_business_no.sql',
+  },
+  {
     tableName: 'notification_event',
     indexName: 'idx_notification_event_pending_claim',
     columns: ['status', 'next_attempt_at', 'id'],
@@ -860,6 +874,77 @@ const MYSQL_REQUIRED_CHECKS: readonly MysqlRequiredCheck[] = [
   },
 ]
 
+/**
+ * 首次接管基线的附加不变量：启动契约只校验“新结构存在”，但部分脚本的收尾步骤是删除旧索引或放宽旧列，
+ * 人工执行若在收尾前中断，契约仍会通过。基线登记必须同时确认这些收尾已完成，否则交给脚本重放其幂等收尾。
+ * 这里只用于基线判定，不进入启动契约，避免改变未开启自动迁移部署的启动口径。
+ */
+const MYSQL_BASELINE_ABSENT_INDEXES: readonly { tableName: string; indexName: string; introducingScript: string }[] = [
+  { tableName: 'base_yz_series_seq_reservation', indexName: 'uk_yz_series_seq_reservation', introducingScript: '053_yz_reservation_series_code.sql' },
+  { tableName: 'inv_stocktake_item', indexName: 'uk_inv_stocktake_item_sku', introducingScript: '060_sku_location_stock.sql' },
+]
+const MYSQL_BASELINE_EXTRA_COLUMNS: readonly MysqlRequiredColumn[] = [
+  { tableName: 'client_user', columnName: 'department_name', introducingScript: '037_department_account_node_binding.sql', minCharacterMaximumLength: 271 },
+]
+
+/**
+ * 首次接管基线的数据回填完成性检查：结构就位不代表脚本末尾的数据回填已执行。
+ * 每条 SQL 只读统计“仍待该脚本回填”的行数，>0 时不登记基线，交给脚本重放；列入这里的脚本，其回填语句
+ * 都只处理尚未补过的行（IS NULL / NOT EXISTS 等守卫），在已演进的数据上重放是安全的，误报至多多重放一次。
+ * 未列入的含数据脚本：042 的回填已由 business_no NOT NULL 契约与 055 领养覆盖；051 把旧格式条码迁入
+ * legacy_sku_code，在已演进数据上无法与合法新条码区分，重放反而会误改，因此不做完成性推断。
+ */
+const MYSQL_BASELINE_DATA_PENDING_CHECKS: readonly { introducingScript: string; label: string; sql: string }[] = [
+  {
+    introducingScript: '033_inventory_security_invariants.sql',
+    label: '入库明细缺少可回填的 sku_id',
+    sql: `SELECT COUNT(1) AS pending FROM biz_inbound_order_item AS item
+          WHERE item.sku_id IS NULL
+            AND EXISTS (SELECT 1 FROM base_product_sku AS sku
+                        WHERE sku.product_id = item.product_id AND sku.is_active = 1 AND sku.is_current = 1)`,
+  },
+  {
+    introducingScript: '043_order_content_inventory_mode.sql',
+    label: '出库单 inventory_mode 未规范化',
+    sql: `SELECT COUNT(1) AS pending FROM biz_outbound_order
+          WHERE inventory_mode NOT IN ('legacy_none', 'manual_applied', 'o2o_preapplied')
+             OR (inventory_mode = 'legacy_none' AND idempotency_key LIKE 'o2o-preorder-verify:%')`,
+  },
+  {
+    introducingScript: '045_order_merge_governance.sql',
+    label: '出库单 status 或合并操作 result_json 未规范化',
+    sql: `SELECT
+            (SELECT COUNT(1) FROM biz_outbound_order WHERE status NOT IN ('active', 'merged'))
+            + (SELECT COUNT(1) FROM order_merge_operation WHERE LENGTH(TRIM(result_json)) = 0) AS pending`,
+  },
+  {
+    introducingScript: '046_outbound_order_source_doc.sql',
+    label: 'O2O 核销出库单缺少来源单据',
+    sql: `SELECT COUNT(1) AS pending FROM biz_outbound_order AS o
+          INNER JOIN o2o_preorder AS p ON o.idempotency_key = CONCAT('o2o-preorder-verify:', p.id)
+          WHERE o.source_doc_type IS NULL`,
+  },
+  {
+    introducingScript: '053_yz_reservation_series_code.sql',
+    label: '存活 YZ 商品缺少序号永久占用登记',
+    sql: `SELECT COUNT(1) AS pending FROM base_product AS p
+          WHERE p.code_scheme = 'yz'
+            AND p.primary_series_tag_id IS NOT NULL
+            AND p.series_seq IS NOT NULL
+            AND p.product_code IS NOT NULL
+            AND LENGTH(p.product_code) BETWEEN 5 AND 8
+            AND RIGHT(p.product_code, 2) = LPAD(p.series_seq, 2, '0')
+            AND SUBSTRING(p.product_code, LENGTH(p.product_code) - 3, 2) REGEXP '^[A-Z]{2}$'
+            AND SUBSTRING(p.product_code, 1, LENGTH(p.product_code) - 4) REGEXP '^[A-Z]{1,4}$'
+            AND NOT EXISTS (
+              SELECT 1 FROM base_yz_series_seq_reservation AS r
+              WHERE r.code_prefix = SUBSTRING(p.product_code, 1, LENGTH(p.product_code) - 4)
+                AND r.series_code = SUBSTRING(p.product_code, LENGTH(p.product_code) - 3, 2)
+                AND r.series_seq = p.series_seq
+            )`,
+  },
+]
+
 // 不可重复执行的历史脚本。
 // 原先 006/008/014/015/016 因裸 ALTER TABLE ADD COLUMN 也在此列，已改造为
 // information_schema 判断 + PREPARE 动态 DDL，可安全重放，因此不再列入。
@@ -899,6 +984,8 @@ const AUTO_MIGRATABLE_FILES = [
   '060_sku_location_stock.sql',
   '061_client_restock_requests.sql',
   '062_o2o_preorder_kingdee_registration.sql',
+  '063_sys_user_governance_permissions.sql',
+  '063_o2o_preorder_reserved_business_no.sql',
 ]
 
 /**
@@ -1116,12 +1203,18 @@ export interface RunMysqlSchemaMigrationsOptions {
   retirementBackup?: OrderBusinessNoRetirementBackupPublishOptions
 }
 
+/** appliedFiles 为本次真实执行的脚本；baselinedFiles 为首次接管时结构已就位、只登记未执行的脚本。 */
+export interface MysqlSchemaMigrationResult {
+  appliedFiles: string[]
+  baselinedFiles: string[]
+}
+
 export async function runMysqlSchemaMigrations(
   dataSource: DataSource,
   options: RunMysqlSchemaMigrationsOptions = {},
-): Promise<{ appliedFiles: string[] }> {
+): Promise<MysqlSchemaMigrationResult> {
   if (env.DB_TYPE !== 'mysql' || !env.DB_AUTO_MIGRATE) {
-    return { appliedFiles: [] }
+    return { appliedFiles: [], baselinedFiles: [] }
   }
 
   await ensureMigrationTrackingTable(dataSource)
@@ -1273,12 +1366,67 @@ export async function reconcileMysqlOrderIdentifierNamespaces(dataSource: DataSo
  * 对异常同名表无操作后仍被误记为“已应用”。
  */
 async function assertAutoMigrationResult(queryRunner: QueryRunner, filename: string): Promise<void> {
-  const requiredColumns = MYSQL_REQUIRED_COLUMNS.filter((item) => item.introducingScript === filename)
+  const { issues } = await collectAutoMigrationContractIssues(queryRunner, filename, { forBaseline: false })
+  if (issues.length === 0) return
+  throw new Error(
+    `[启动失败] 自动迁移 ${filename} 执行后结构仍不完整，未写入迁移记录：${issues.join('、')}。`
+    + '请先人工核查并修复异常的部分表结构，再重启服务。',
+  )
+}
+
+/**
+ * 按脚本收集其负责的契约结构缺口。verifiable=false 表示该脚本没有任何可只读核对的契约项，
+ * 调用方不能据此推断脚本“已执行”；forBaseline 额外核对表存在、收尾不变量与数据回填完成性，只供首次接管基线使用，执行后断言保持原口径。
+ */
+async function collectAutoMigrationContractIssues(
+  queryRunner: QueryRunner,
+  filename: string,
+  options: { forBaseline: boolean },
+): Promise<{ verifiable: boolean; issues: string[] }> {
+  const requiredTables = options.forBaseline
+    ? Object.entries(TABLE_INTRODUCING_SCRIPT)
+      .filter(([, script]) => script === filename)
+      .map(([tableName]) => tableName)
+    : []
+  const absentIndexes = options.forBaseline
+    ? MYSQL_BASELINE_ABSENT_INDEXES.filter((item) => item.introducingScript === filename)
+    : []
+  const requiredColumns = [
+    ...MYSQL_REQUIRED_COLUMNS,
+    ...(options.forBaseline ? MYSQL_BASELINE_EXTRA_COLUMNS : []),
+  ].filter((item) => item.introducingScript === filename)
   const requiredIndexes = MYSQL_REQUIRED_INDEXES.filter((item) => item.introducingScript === filename)
   const requiredForeignKeys = MYSQL_REQUIRED_FOREIGN_KEYS.filter((item) => item.introducingScript === filename)
   const requiredTriggers = MYSQL_REQUIRED_TRIGGERS.filter((item) => item.introducingScript === filename)
   const requiredChecks = MYSQL_REQUIRED_CHECKS.filter((item) => item.introducingScript === filename)
-  if (requiredColumns.length === 0 && requiredIndexes.length === 0 && requiredForeignKeys.length === 0 && requiredTriggers.length === 0 && requiredChecks.length === 0) return
+  if (
+    requiredTables.length === 0
+    && absentIndexes.length === 0
+    && requiredColumns.length === 0
+    && requiredIndexes.length === 0
+    && requiredForeignKeys.length === 0
+    && requiredTriggers.length === 0
+    && requiredChecks.length === 0
+  ) return { verifiable: false, issues: [] }
+
+  const tableRows: MysqlTableRow[] = requiredTables.length > 0
+    ? await queryRunner.query(
+        `SELECT TABLE_NAME FROM information_schema.TABLES
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME IN (${requiredTables.map(() => '?').join(', ')})`,
+        requiredTables,
+      )
+    : []
+  const existingTables = new Set(tableRows.map((row) => row.TABLE_NAME))
+  const missingTables = requiredTables.filter((tableName) => !existingTables.has(tableName))
+  const leftoverIndexes: Array<MysqlTableRow & { INDEX_NAME: string }> = absentIndexes.length > 0
+    ? await queryRunner.query(
+        `SELECT DISTINCT TABLE_NAME, INDEX_NAME FROM information_schema.STATISTICS
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND (${absentIndexes.map(() => '(TABLE_NAME = ? AND INDEX_NAME = ?)').join(' OR ')})`,
+        absentIndexes.flatMap((item) => [item.tableName, item.indexName]),
+      )
+    : []
 
   const tableNames = [...new Set([
     ...requiredColumns.map((item) => item.tableName),
@@ -1372,34 +1520,39 @@ async function assertAutoMigrationResult(queryRunner: QueryRunner, filename: str
   const missingChecks = requiredChecks.filter((item) => (
     !existingChecks.has(schemaObjectKey(item.tableName, item.constraintName))
   ))
-  if (
-    missingColumns.length === 0
-    && invalidColumnDefinitions.length === 0
-    && invalidIndexes.length === 0
-    && invalidForeignKeys.length === 0
-    && invalidTriggers.length === 0
-    && missingChecks.length === 0
-  ) return
-
-  const missingLabels = [
-    ...missingColumns.map((item) => `字段 ${item.tableName}.${item.columnName}`),
-    ...invalidColumnDefinitions.map((item) => item.label),
-    ...invalidIndexes.map((item) => `索引 ${item.tableName}.${item.indexName}`),
-    ...invalidForeignKeys.map((item) => item.label),
-    ...invalidTriggers.map((item) => item.label),
-    ...missingChecks.map((item) => `检查约束 ${item.tableName}.${item.constraintName}`),
-  ]
-  throw new Error(
-    `[启动失败] 自动迁移 ${filename} 执行后结构仍不完整，未写入迁移记录：${missingLabels.join('、')}。`
-    + '请先人工核查并修复异常的部分表结构，再重启服务。',
-  )
+  const structuralIssueCount = missingTables.length + leftoverIndexes.length + missingColumns.length
+    + invalidColumnDefinitions.length + invalidIndexes.length + invalidForeignKeys.length
+    + invalidTriggers.length + missingChecks.length
+  // 数据回填检查依赖脚本建好的表与列，结构有缺口时脚本本就会被执行，不再查询以免引用不存在的列。
+  const pendingDataLabels: string[] = []
+  if (options.forBaseline && structuralIssueCount === 0) {
+    for (const check of MYSQL_BASELINE_DATA_PENDING_CHECKS.filter((item) => item.introducingScript === filename)) {
+      const rows = await queryRunner.query(check.sql) as Array<{ pending: number | string }>
+      const pending = Number(rows[0]?.pending ?? 0)
+      if (pending > 0) pendingDataLabels.push(`数据回填未完成：${check.label}（${pending} 行）`)
+    }
+  }
+  return {
+    verifiable: true,
+    issues: [
+      ...pendingDataLabels,
+      ...missingTables.map((tableName) => `表 ${tableName}`),
+      ...leftoverIndexes.map((row) => `旧索引 ${row.TABLE_NAME}.${row.INDEX_NAME} 仍存在`),
+      ...missingColumns.map((item) => `字段 ${item.tableName}.${item.columnName}`),
+      ...invalidColumnDefinitions.map((item) => item.label),
+      ...invalidIndexes.map((item) => `索引 ${item.tableName}.${item.indexName}`),
+      ...invalidForeignKeys.map((item) => item.label),
+      ...invalidTriggers.map((item) => item.label),
+      ...missingChecks.map((item) => `检查约束 ${item.tableName}.${item.constraintName}`),
+    ],
+  }
 }
 
 /** 实际的迁移执行体；必须在 withMysqlAdvisoryLock 内调用，保证跨实例互斥。 */
 async function applyPendingMigrations(
   queryRunner: QueryRunner,
   options: RunMysqlSchemaMigrationsOptions = {},
-): Promise<{ appliedFiles: string[] }> {
+): Promise<MysqlSchemaMigrationResult> {
   // 已应用记录必须在持锁之后再读：若在锁外读取，另一个实例可能在我们拿到锁之前刚写入记录，
   // 我们仍会拿着过期的快照重复执行脚本。
   const appliedRows: Array<{ filename: string }> = await queryRunner.query(
@@ -1407,6 +1560,19 @@ async function applyPendingMigrations(
   )
   const appliedSet = new Set(appliedRows.map((row) => row.filename))
   const appliedFiles: string[] = []
+  // 镜像漏打包迁移脚本时必须在任何基线登记与执行之前明确失败，不能逐个静默跳过后在半路才暴露。
+  const missingScripts = AUTO_MIGRATABLE_FILES.filter((filename) => !fs.existsSync(path.join(SQL_DIR, filename)))
+  if (missingScripts.length > 0) {
+    throw new Error(
+      `[启动失败] 已开启 DB_AUTO_MIGRATE，但运行环境缺少 ${missingScripts.length} 个 MySQL 迁移脚本`
+      + `（目录 ${SQL_DIR}，首个缺失：${missingScripts[0]}）。请确认镜像已包含 backend/sql，未写入任何迁移记录。`,
+    )
+  }
+  // tracking 为空且已有账号数据，说明是人工执行脚本的存量库首次开启自动迁移：先登记已具备的结构再执行缺口。
+  // 全新空库仍按白名单完整执行，保持 042 建表、056 备份清退等首装路径不变。
+  const baselinedFiles = appliedSet.size === 0 && await hasExistingDeploymentData(queryRunner)
+    ? await baselineSatisfiedMigrations(queryRunner, appliedSet)
+    : []
 
   for (const filename of AUTO_MIGRATABLE_FILES) {
     // 042 会在旧库/空库补建永久占用表，因此 retirement preflight 必须位于 042 之后、
@@ -1458,7 +1624,47 @@ async function applyPendingMigrations(
     appliedFiles.push(filename)
   }
 
-  return { appliedFiles }
+  return { appliedFiles, baselinedFiles }
+}
+
+/** 账号表有数据即视为已运行过的部署；账号种子在建表之后写入，全新空库此时一定为空。 */
+async function hasExistingDeploymentData(queryRunner: QueryRunner): Promise<boolean> {
+  const tableRows: MysqlTableRow[] = await queryRunner.query(
+    `SELECT TABLE_NAME FROM information_schema.TABLES
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'sys_user'`,
+  )
+  if (tableRows.length === 0) return false
+  const userRows: unknown[] = await queryRunner.query('SELECT 1 FROM sys_user LIMIT 1')
+  return userRows.length > 0
+}
+
+/**
+ * 首次接管存量库的基线登记：人工维护的库从未写过 tracking，若按白名单从头重放，
+ * 042 等脚本会在已演进的历史数据上重跑格式守卫与回填，可能直接阻断启动。
+ * 这里只读核对每个脚本负责的表/列/索引/外键/触发器/检查约束，全部就位的只登记、不执行；
+ * 存在缺口的脚本，以及没有可核对契约项的 054/055/056（各自有清退或领养守卫）仍交给常规流程执行。
+ */
+async function baselineSatisfiedMigrations(
+  queryRunner: QueryRunner,
+  appliedSet: Set<string>,
+): Promise<string[]> {
+  const baselineEntries: Array<{ filename: string; checksum: string }> = []
+  for (const filename of AUTO_MIGRATABLE_FILES) {
+    if (!fs.existsSync(path.join(SQL_DIR, filename))) continue
+    const { verifiable, issues } = await collectAutoMigrationContractIssues(queryRunner, filename, { forBaseline: true })
+    if (!verifiable || issues.length > 0) continue
+    baselineEntries.push({ filename, checksum: readMigrationFile(filename).checksum })
+  }
+  if (baselineEntries.length === 0) return []
+  // 全部只读核对完成后用单条 INSERT 整批写入：InnoDB 单语句原子，中途失败不会留下“非空但不完整”的 tracking，
+  // 否则下次启动 tracking 非空不再走基线，会退回重放尚未登记的历史脚本。
+  await queryRunner.query(
+    `INSERT INTO ${MIGRATION_TABLE} (filename, checksum) VALUES ${baselineEntries.map(() => '(?, ?)').join(', ')}
+     ON DUPLICATE KEY UPDATE checksum = VALUES(checksum), applied_at = CURRENT_TIMESTAMP(6)`,
+    baselineEntries.flatMap((entry) => [entry.filename, entry.checksum]),
+  )
+  for (const entry of baselineEntries) appliedSet.add(entry.filename)
+  return baselineEntries.map((entry) => entry.filename)
 }
 
 interface MysqlTableRow {

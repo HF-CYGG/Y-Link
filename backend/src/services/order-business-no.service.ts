@@ -2,11 +2,13 @@
  * 模块说明：订单独立业务号服务。
  * 文件职责：维护 hyyzjd/hyyz 两个业务号命名空间，并在事务中严格按 cursor + 1 分配新号。
  * 实现逻辑：业务号只在物理存在的订单之间唯一；软删除仍占用，永久删除后可由普通改单复用。
+ * 部门预订单下单时预留的号与正式单共用同一占用口径，预订单被物理清理后才释放。
  */
 
 import type { EntityManager } from 'typeorm'
 import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BusinessSequence } from '../entities/business-sequence.entity.js'
+import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
 import { SystemConfig } from '../entities/system-config.entity.js'
 import { BizError } from '../utils/errors.js'
 import type { OrderType } from './order-serial.service.js'
@@ -85,6 +87,16 @@ export class OrderBusinessNoService {
     await manager.getRepository(BusinessSequence).save(sequence)
     await this.updateCurrentMirror(config.currentKey, next, manager)
     return businessNo
+  }
+
+  /** 核销继承预留号：只放行预留方自身，其他订单或预订单占用都按冲突拒绝，不推进游标。 */
+  async assertInheritableByPreorder(
+    businessNo: string,
+    orderUuid: string,
+    preorderId: string,
+    manager: EntityManager,
+  ): Promise<void> {
+    await this.assertBusinessNoAvailable(businessNo, orderUuid, manager, preorderId)
   }
 
   async reserveConfirmed(
@@ -188,7 +200,16 @@ export class OrderBusinessNoService {
           endBusinessNo: formatSerial(windowEnd),
         })
         .getRawMany<{ businessNo: string }>()
-      const occupied = new Set(occupiedRows.map((row) => String(row.businessNo).trim().toLowerCase()))
+      const reservedRows = await manager.getRepository(O2oPreorder)
+        .createQueryBuilder('preorder')
+        .select('preorder.reservedBusinessNo', 'businessNo')
+        .where('preorder.clientOrderType = :orderType', { orderType })
+        .andWhere('preorder.reservedBusinessNo BETWEEN :startBusinessNo AND :endBusinessNo', {
+          startBusinessNo: formatSerial(windowStart),
+          endBusinessNo: formatSerial(windowEnd),
+        })
+        .getRawMany<{ businessNo: string }>()
+      const occupied = new Set([...occupiedRows, ...reservedRows].map((row) => String(row.businessNo).trim().toLowerCase()))
       for (let serial = windowStart; serial <= windowEnd && businessNos.length < count; serial += 1) {
         const businessNo = formatSerial(serial)
         if (occupied.has(businessNo)) {
@@ -224,6 +245,7 @@ export class OrderBusinessNoService {
       }
     }
     const occupied = await manager.getRepository(BizOutboundOrder).existsBy({ businessNo: parsed.businessNo })
+      || await manager.getRepository(O2oPreorder).existsBy({ reservedBusinessNo: parsed.businessNo })
     return occupied
       ? { parsed, blockingReason: `业务号 ${parsed.businessNo} 当前已被其他订单使用` }
       : { parsed, blockingReason: null }
@@ -244,13 +266,25 @@ export class OrderBusinessNoService {
     return { orderType, namespace: rule.namespace, serialValue, businessNo: normalizedBusinessNo }
   }
 
-  private async assertBusinessNoAvailable(businessNo: string, orderUuid: string, manager: EntityManager): Promise<void> {
+  private async assertBusinessNoAvailable(
+    businessNo: string,
+    orderUuid: string,
+    manager: EntityManager,
+    ownerPreorderId?: string,
+  ): Promise<void> {
     const query = manager.getRepository(BizOutboundOrder)
       .createQueryBuilder('order')
       .where('order.businessNo = :businessNo', { businessNo })
       .andWhere('order.orderUuid <> :orderUuid', { orderUuid })
-    if (manager.connection.options.type !== 'sqlite') query.setLock('pessimistic_read')
-    if (await query.getExists()) {
+    const reservationQuery = manager.getRepository(O2oPreorder)
+      .createQueryBuilder('preorder')
+      .where('preorder.reservedBusinessNo = :businessNo', { businessNo })
+    if (ownerPreorderId) reservationQuery.andWhere('preorder.id <> :ownerPreorderId', { ownerPreorderId })
+    if (manager.connection.options.type !== 'sqlite') {
+      query.setLock('pessimistic_read')
+      reservationQuery.setLock('pessimistic_read')
+    }
+    if (await query.getExists() || await reservationQuery.getExists()) {
       throw new BizError(`业务号 ${businessNo} 当前已被其他订单使用`, 409)
     }
   }
@@ -305,6 +339,19 @@ export class OrderBusinessNoService {
         throw new BizError(`订单 ${row.id || '未知'} 的当前业务号流水值非法，无法安全校准游标`, 500)
       }
       maxSerial = Math.max(maxSerial, serialValue)
+    }
+    const reservedRows = await manager.getRepository(O2oPreorder)
+      .createQueryBuilder('preorder')
+      .select('preorder.reservedBusinessNo', 'businessNo')
+      .where('preorder.clientOrderType = :orderType', { orderType })
+      .andWhere('preorder.reservedBusinessNo IS NOT NULL')
+      .getRawMany<{ businessNo: string }>()
+    for (const row of reservedRows) {
+      const businessNo = String(row.businessNo ?? '').trim().toLowerCase()
+      if (!pattern.test(businessNo)) {
+        throw new BizError(`预订单预留业务号 ${businessNo} 不符合 ${rule.namespace} 命名空间，无法安全校准游标`, 500)
+      }
+      maxSerial = Math.max(maxSerial, Number.parseInt(businessNo.slice(rule.namespace.length), 10))
     }
     return maxSerial
   }

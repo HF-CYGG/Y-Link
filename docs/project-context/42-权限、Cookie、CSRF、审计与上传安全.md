@@ -40,10 +40,10 @@
 - Fetch Metadata 资源隔离（`http-security.ts` 的 `resolveCrossSiteBlockReason`，主应用与救援入口共用）：`/api/*` 拒绝 `Sec-Fetch-Site: cross-site`；`same-site` 只放行 GET/HEAD/OPTIONS；浏览器未发送该头时对写方法回退为 Origin 主机名比对（忽略端口）；`Origin: null`（旧版 WebKit 如 iOS 17.5 Safari 的同源 POST 可能如此）改用 `Referer` 主机名比对，`Referer` 缺失、无法解析或主机不一致仍拒绝（`origin_mismatch`）；移动端、脚本等不带这两个头的原生客户端照常放行，仍由会话与 CSRF 令牌把关。拒绝返回 403，并写 `security.cross_site_request_blocked`（同一来源 IP + 方法路径 10 分钟只记一次，`utils/audit-throttle.ts`）。前端与接口必须同源部署；若将来拆分到不同子域，需先调整本策略。
 - 管理端与客户端图形验证码由 `captcha.service.ts` 共用生成链路：`svg-captcha` 使用包内字体绘制字符路径，`sharp` 转为 140×40 PNG，不依赖容器系统字体。答案仍由 `node:crypto` 生成；旧 `captchaSvg` 字段仅包装 PNG，不返回答案文本或字形路径。
 - 图形验证码为一次性票据：首次校验无论对错都立即作废，前端答错后必须重新获取（管理端登录页已在“验证码”类错误时换新图）。
-- 管理端会话除 `AUTH_TOKEN_TTL_HOURS` 绝对时效外，还有 `AUTH_SESSION_IDLE_TIMEOUT_MINUTES` 空闲超时（默认 720 分钟，0 关闭）：按 `lastAccessAt` 判定，HTTP 鉴权与客服 SSE 复核共用 `utils/admin-session-idle.ts`。标签页可见时每 60 秒心跳续期，隐藏或关闭超过时长后需重新登录。
+- 管理端会话除 `AUTH_TOKEN_TTL_HOURS` 绝对时效外，还有 `AUTH_SESSION_IDLE_TIMEOUT_MINUTES` 空闲超时（默认 720 分钟，0 关闭）：按 `lastAccessAt` 判定，HTTP 鉴权与客服 SSE 复核共用 `utils/admin-session-idle.ts`。普通 HTTP 鉴权用本次查库的 `lastAccessAt` 在 60 秒窗口内跳过活动 UPDATE，SQL 时间条件继续拦截并发旧快照；时间快照仅在服务内部按请求上下文保存，不新增公开响应字段，也不缓存认证结果。显式 `/auth/presence/heartbeat` 保持 1 秒写入间隔；标签页可见时每 60 秒发送心跳，隐藏或关闭超过时长后需重新登录。
 - body-parser 解析错误（畸形 JSON、超限、编码不支持等）在 `error-handler.ts` 按 4xx 返回；兜底 500 与审计写入失败日志只记录名称/消息/堆栈或驱动错误码（`utils/safe-error-log.ts`），不得展开错误对象属性，避免原始请求体中的密码进入日志。通知外发 Worker、反馈附件清理、迁移续跑等后台任务的错误日志同样走该工具（SQL 参数可能带通知正文、客户姓名或目标库连接信息）。
 - 登录失败锁定与“需要图形验证码”判定按规范账号主体计数：管理端用库中真实用户名（`authService.resolveLoginRiskSubject`），客户端 Web/Mobile 用 `uid:<用户ID>`（`clientAuthService.resolveLoginRiskSubject`），账号不存在时才退回输入原文。MySQL 常用排序规则大小写、重音、全角不敏感，按输入计数会让 `Ádmin`、全角 `ａｄｍｉｎ` 各得一份失败额度；客户端同一账号的手机号、邮箱、用户名、工号也必须共用一个桶。
-- 全局撞库态势（`GlobalLoginFailureMonitor`，阈值见 `config/load-protection-policy.ts`）：分布式撞库时单个来源、单个账号都可能低于各自阈值，因此按端在进程内统计 5 分钟全站登录失败数（含会话内密码复核失败）。管理端达到 30 次、客户端（Web 与 Mobile 共用）达到 150 次后，该端所有登录强制图形验证码 15 分钟，持续失败会顺延；进入该状态时只写一次 `auth.guard.global_captcha`。阈值可用 `YLINK_ADMIN_GLOBAL_FAILURE_THRESHOLD`、`YLINK_CLIENT_GLOBAL_FAILURE_THRESHOLD`、`YLINK_GLOBAL_CAPTCHA_HOLD_MINUTES` 调整，非法值启动即报错。多实例部署各实例独立计数。前端沿用既有“需要验证码”响应（管理端 428、客户端“请输入图形验证码”）自动显示验证码，无需改动。
+- 全局撞库态势（`GlobalLoginFailureMonitor`，阈值见 `config/load-protection-policy.ts`）：分布式撞库时单个来源、单个账号都可能低于各自阈值，因此按端在进程内统计 5 分钟全站登录失败数（含会话内密码复核失败）。管理端达到 30 次、客户端（Web 与 Mobile 共用）达到 150 次后，该端所有登录强制图形验证码 15 分钟，持续失败会顺延；进入该状态时只写一次 `auth.guard.global_captcha`。阈值可用 `YLINK_ADMIN_GLOBAL_FAILURE_THRESHOLD`、`YLINK_CLIENT_GLOBAL_FAILURE_THRESHOLD`、`YLINK_GLOBAL_CAPTCHA_HOLD_MINUTES` 调整，非法值启动即报错。未配置 Redis 时按实例统计；Redis 就绪时额外合并集群失败量与强制验证码标志，Redis 故障时本项全局态势回退本实例计数，并非数据库共享桶。前端沿用既有“需要验证码”响应（管理端 428、客户端“请输入图形验证码”）自动显示验证码，无需改动。
 - 自研风控（登录/注册/发码/找回等频控与锁定，`normalizeRiskSource`）与救援入口的来源键经 `utils/ip-subnet.ts` 归一：IPv4 映射地址（`::ffff:a.b.c.d`）还原为 IPv4，IPv6 聚合到 /64。运营商通常给每个终端一整个 /64，按完整地址计数时攻击者在网段内轮换地址即可绕过。审计 `ipAddress` 仍记录完整 IP，`detail.source` 为聚合后的来源键。express-rate-limit 默认按 /56 聚合，无需改动；新增按 IP 计数的自研限流必须复用该工具。
 - 管理端与 Web 客户端认证入参在路由 schema 层限长（`constants/auth-input-limits.ts`）：账号与发码目标 ≤128，已有密码（登录、当前密码复核、JSON 导入导出复核）≤256（main 上客户端密码曾无上限，放宽以兼容历史口令），新密码 ≤64，图形验证码 ID ≤64、答案 ≤16，找回重置凭证 ≤256。超长输入在进入账号归一化、查库、密码派生与审计前即返回中文 400。移动端契约独立，未纳入。
 - 管理端密码登录第二因素策略（所有管理端账号自愿开启，`services/admin-mfa.service.ts`、`services/admin-webauthn.service.ts`、`utils/totp.ts`、表 `sys_user_mfa`）：
@@ -57,18 +57,18 @@
 - 密码派生并发闸门（`utils/bounded-concurrency.ts` + `utils/password.ts`）：所有 scrypt 派生（登录、改密、建号、重置、密码复核、账号不存在时的等量计算）经同一闸门执行，默认并发 `min(4, CPU-1)`、排队 64、排队超时 10 秒，超出即返回 503 + `Retry-After`，避免登录洪水占满 libuv 线程池拖垮数据库查询。可用 `YLINK_PASSWORD_HASH_CONCURRENCY/QUEUE/QUEUE_TIMEOUT_MS` 调整；闸门快照（活跃、排队、峰值、拒绝计数）见管理员接口 `GET /api/data-maintenance/database/performance` 的 `concurrencyGates`。闸门任务内部不得再次申请同一闸门。503 错误若携带 `retryAfterSeconds`，错误处理中间件按该值下发 `Retry-After`，不再统一改写为 1 秒。闸门拒绝不得留下持久副作用：账号不存在时用于对齐耗时的计时哈希生成失败不缓存（下次请求重新生成，避免此后所有不存在账号的登录都返回 503 并与存在账号形成可区分信号）；登录成功后的透明重哈希被拒绝时保持旧哈希、下次登录再升级，不影响本次登录。
 - 商品图上传（`POST /api/upload`）的 sharp 校验与重编码经 `product-image-processing` 闸门执行（默认并发 2、排队 16、超时 15 秒，`YLINK_PRODUCT_IMAGE_*` 可调），满载返回 503 且临时文件照常清理；反馈附件仍用独立闸门，两者互不挤占。
 - 新密码 scrypt 派生一律在数据库事务外预先完成（管理端建号、编辑改密、重置他人密码，本人改密，客户端注册、找回重置、改密，管理员重置客户端密码），事务内只做账号锁定、信息校验与写入，避免在 SQLite 唯一写槽内等待并发闸门。**旧密码的最终校验仍在事务内锁定账号后进行**（账号生命周期契约与 `mobile-auth:review:verify` 的 Web 改密断言），不得改为事务外快照比对。
-- 风控负缓存（`persistent-risk-state.service.ts`，进程内 ≤2 万条）：只缓存“某限流桶已超限至某时刻”“某失败桶已锁定至某时刻”这类确定性拒绝结论，有效期内的后续请求直接拒绝、不读写数据库（`DatabaseRateLimitStore` 同样受益）；本实例的回退、清零与重置同步失效缓存，数据库仍是唯一事实来源，多实例下只会让本实例多拒绝到结论到期。拒绝审计去重：频控只在首次（走库判定）超限时记一次，锁定拒绝同一端同一主体每分钟最多记一次，避免攻击流量灌满审计表。负缓存规模见数据库性能接口 `riskNegativeCache`。直接清空 `auth_risk_state` 的同进程回归脚本须同时调用 `resetNegativeCacheForTesting()`。
+- 风控负缓存（`persistent-risk-state.service.ts`，进程内 ≤2 万条）：只缓存“某限流桶已超限至某时刻”“某失败桶已锁定至某时刻”这类确定性拒绝结论，有效期内的后续请求直接拒绝、不读写数据库（`DatabaseRateLimitStore` 同样受益）；本实例的回退、清零与重置同步失效缓存，Redis 未启用或故障时由数据库承接共享状态；Redis 正常时使用 Redis 窗口与失败状态，已触发的账号锁定另有数据库镜像。负缓存只保存拒绝结论，多实例下可能让本实例额外拒绝到结论到期，不作为放行依据。拒绝审计去重：频控只在首次（走库判定）超限时记一次，锁定拒绝同一端同一主体每分钟最多记一次，避免攻击流量灌满审计表。负缓存规模见数据库性能接口 `riskNegativeCache`。直接清空 `auth_risk_state` 的同进程回归脚本须同时调用 `resetNegativeCacheForTesting()`。
 - 匿名认证入口在途上限（`middleware/in-flight-limit.middleware.ts`，挂在 `/api/auth` 与 `/api/client-auth` 的限流中间件之前）：管理端 `/captcha`、`/login`、`/login/mfa` 与 Web 客户端登录/验证码/能力/注册/发码/找回入口共用一个进程级闸门，默认同时处理 64 个（`YLINK_ANONYMOUS_AUTH_MAX_IN_FLIGHT`），超出直接 503 不排队；移动端入口不纳入。图形验证码 PNG 渲染另经 `captcha-render` 闸门（默认并发 4、排队 32、超时 3 秒，`YLINK_CAPTCHA_RENDER_*` 可调，Web 与移动端共用）。所有闸门均为模块级单例，同一进程多次 `createApp` 共用。
 - 过载自适应削峰（`utils/overload-monitor.ts` + `middleware/overload-shedding.middleware.ts`，挂在 `/health` 之后、所有业务入口之前）：正式运行时每秒采样事件循环延迟 p99 与 SQLite 写队列占用，连续 3 次越线升级、连续 5 次回落到阈值一半以下降级。elevated（延迟 ≥500ms 或写队列 ≥90%）拒绝匿名认证入口、新建 SSE（`/client-feedback/stream`、`/customer-service/stream`）与各类导出；critical（延迟 ≥1 秒持续，写队列拥堵最多到 elevated）再拒绝 GET/HEAD 读请求，但保留 `/auth/me`、`/client-auth/me`。已登录写请求、`/health`、救援面与移动端 `/api/v1/*` 永不削峰；被削峰返回 503 + `Retry-After: 5`、`data.reason=SERVER_OVERLOADED`，不写审计。阈值与开关见 `YLINK_OVERLOAD_*`，等级、最近信号与削峰计数见数据库性能接口 `overload`。直接 `createApp` 的回归脚本不启动采样器（等级恒为 normal），测试削峰时用 `overloadMonitor.evaluate()` 注入信号。削峰只是自保手段，容量型 DDoS 仍需上游 CDN/高防。
-- 按会话的请求速率保险丝（`utils/session-rate-fuse.ts`）：管理端 `requireAuth` 与 Web 客户端 `requireClientAuth` 在查库之前按会话令牌哈希做令牌桶判定（默认突发 200、每秒补 30，`YLINK_SESSION_RATE_BURST/PER_SECOND` 可调，进程内 ≤5 万个会话桶，淘汰最久未活动者）。按会话而非账号计数，部门共享账号的多个会话互不影响；超出返回 429 + `Retry-After`、`data.reason=SESSION_RATE_LIMITED`。移动端访问令牌不纳入。
+- 按会话的请求速率保险丝（`utils/session-rate-fuse.ts`）：管理端 `requireAuth` 与 Web 客户端 `requireClientAuth` 在查库之前按会话令牌哈希做令牌桶判定（默认突发 200、每秒补 30，`YLINK_SESSION_RATE_BURST/PER_SECOND` 可调，进程内 ≤5 万个会话桶，淘汰最久未活动者）。按会话而非账号计数，部门共享账号的多个会话互不影响；超出返回 429 + `Retry-After`、`data.reason=SESSION_RATE_LIMITED`。移动端访问令牌不纳入。该保险丝仍是进程级资源保护，Redis 启用时也不改为集群总额度；同一会话轮询多个实例会分别消耗各实例的桶，不能将它宣称为全集群统一会话限额。
 - 边缘层（Nginx）另有按 IP 的登录/验证码/敏感匿名入口/通用 API 限流、每 IP 在途请求上限与分入口请求体上限，超限返回 JSON 429/413（`EDGE_RATE_LIMITED` / `EDGE_PAYLOAD_TOO_LARGE`），前端按普通业务错误展示；阈值与调参见 `51-本地联调与部署模式.md`。
-- 进程内短期票据（验证码、找回重置凭证、验证码发送票据、两步验证登录与绑定票据）统一用 `utils/ephemeral-ticket-store.ts`：过期清理为增量式（从最旧开始、遇未过期即停、单次最多 64 条），覆盖写入移到队尾，读写摊销 O(1)，验证码洪水时不再每次全表扫描；读取时仍逐张校验有效期，容量上限兜底。
+- 短期票据统一经 `utils/ephemeral-ticket-store.ts` 的异步 `TicketStore` 接口与 `createTicketStore` 工厂；未配置 Redis 时使用进程内实现（验证码、找回重置凭证、验证码发送票据、两步验证登录与绑定票据等）：过期清理为增量式（从最旧开始、遇未过期即停、单次最多 64 条），覆盖写入移到队尾，读写摊销 O(1)，验证码洪水时不再每次全表扫描；读取时仍逐张校验有效期，容量上限兜底。
 
 ## Redis 承接的票据与风控（可选，`REDIS_URL` 非空时启用）
 
-- 9 类安全票据改存 Redis：图形验证码、通用短信/邮箱验证码、管理端 MFA 登录票据、TOTP 绑定、找回密码重置凭证、WebAuthn 各类挑战。存储实现见 `utils/ephemeral-ticket-store.ts`：键名为 `REDIS_KEY_PREFIX` + 命名空间 + 票据标识的 SHA-256 摘要（Redis 中看不到原始票据），值整体经 AES-256-GCM 加密（AAD 绑定命名空间），多实例必须注入同一把 `Y_LINK_DATA_ENCRYPTION_KEY`。一次性消费使用 `GETDEL`，需要保留 TTL 的更新使用 `SET KEEPTTL`，因此要求 Redis >= 6.2。
+- 9 类安全票据改存 Redis：图形验证码、通用短信/邮箱验证码、管理端 MFA 登录票据、TOTP 绑定、找回密码重置凭证、WebAuthn 各类挑战。存储实现见 `utils/ephemeral-ticket-store.ts`：键名为 `REDIS_KEY_PREFIX` + 命名空间 + 票据标识的 SHA-256 摘要（Redis 中看不到原始票据），值整体经 AES-256-GCM 加密（AAD 绑定命名空间），多实例必须注入同一把 `Y_LINK_DATA_ENCRYPTION_KEY`。一次性消费使用 `GETDEL`，错误尝试次数由 Lua 原子累加并沿用票据 TTL，达到上限即作废；Redis 连接层要求版本 >= 6.2。
 - 降级语义：票据在 Redis 已配置但不可用时返回 503，**不放行也不回落到进程内存**（回落会让票据只在单实例可见，且破坏一次性语义）；未配置 Redis 时保持原有进程内存储。
-- 限流与登录风控（Lua 滑动窗口/失败计数）改走 Redis，替代每个请求一笔 MySQL 写事务；全站撞库态势、SSE 建连频控、反馈附件上传频控、每账号导出名额同样由 Redis 承接。Redis 不可用时限流与风控回落到数据库共享桶，仍保持跨实例共享。登录锁定在两种存储间双向兜底：Redis 中触发锁定时同步镜像一行到数据库（只在触发时写，失败计数本身不落库），Redis 就绪但无有效锁定时按主键只读补查数据库，降级与恢复两个方向都不能借切换实例绕过未到期的锁定；每进程的并发闸门与导出租约仍按实例计算。
+- 限流与登录风控（Lua 滑动窗口/失败计数）改走 Redis，替代每个请求一笔 MySQL 写事务；全站撞库态势、SSE 建连频控、反馈附件上传频控、每账号导出名额同样由 Redis 承接。Redis 不可用时，持久化频控与账号失败锁定回落到数据库共享桶；全站撞库态势的全员验证码判断则回退本实例统计，会话保险丝始终按进程计数，不能把这些能力统称为故障期仍共享。登录锁定在两种存储间双向兜底：Redis 中触发锁定时同步镜像一行到数据库（只在触发时写，失败计数本身不落库），Redis 就绪但无有效锁定时按主键只读补查数据库，降级与恢复两个方向都不能借切换实例绕过未到期的锁定；每进程的并发闸门与导出租约仍按实例计算。
 - 日志与快照只输出主机、端口与库号，不输出 Redis URL、用户名或密码。
 
 ## 代理、HTTPS 与救援传输边界
@@ -132,10 +132,35 @@
 - 改 CSRF 时回归：管理端写接口在 Cookie 会话下的正常提交与失败提示。
 - 改两步验证、管理端登录流程或相关路由时执行 `npm --prefix backend run auth:mfa:verify`，覆盖绑定与加密落库、两段登录、防重放、恢复码一次性、票据次数与账号锁定、并发单次成功、停用与重生成、管理员与命令行重置、密钥不匹配降级、永久删除联动与审计不落明文。
 - 管理端 WebAuthn 可由所有 `SysUser` 角色自愿绑定。`usage=passwordless` 是直接登录的强凭据，默认及历史记录均属此类；旧请求即使选择 `kind=security_key`，未显式指定 `usage` 时仍保持直接登录。它要求驻留凭据和用户验证（UV），发现式登录只能使用此类凭据。显式 `usage=second_factor` 的注册请求必须选择 `kind=security_key`，并向浏览器优先请求安全密钥；它作为密码后的第二步，不可匿名直接登录。该用途只放宽 UV，不能把 `passwordless` 凭据在混合列表中降级为低 UV。浏览器选型提示不等于服务端已证明认证器为物理设备，当前尚无真实设备验收。Google Password Manager、iCloud 钥匙串等是标准 passkey 或密码保存来源，不是本应用的 Google/Apple OAuth 登录。
-- 注册、登录挑战 5 分钟一次性且单进程有界；匿名挑战绑定独立 HttpOnly、SameSite=Strict 短期 nonce Cookie；所有敏感 WebAuthn POST 精确匹配配置的 Origin，不从 Host 推断（`assertWebauthnOrigin`）：显式非 `null` 的 Origin 不匹配即拒绝且不回退；仅当 Origin 缺失或为 `null` 时，以 `Referer` 解析出的完整 origin 精确匹配白名单，此时若带 `Sec-Fetch-Site` 必须为 `same-origin`，`Referer` 缺失或非法仍返回 `WEBAUTHN_ORIGIN_DENIED`；断言端仍由 SimpleWebAuthn 校验 `clientDataJSON.origin`。注册挑战还绑定当前会话摘要与密码、角色、状态、MFA 行/版本及用户句柄快照，完成时在账号锁内确认会话仍有效。`passwordless` 凭据既可直接登录，也可在密码票据后作为第二步；直接登录不会因账号有第二因素策略而再次要求第二步。
+- 注册、登录挑战 5 分钟一次性；未配置 Redis 时单进程有界，配置后经 Redis 加密票据跨实例共享、原子消费，不可用时返回 503；匿名挑战绑定独立 HttpOnly、SameSite=Strict 短期 nonce Cookie；所有敏感 WebAuthn POST 精确匹配配置的 Origin，不从 Host 推断（`assertWebauthnOrigin`）：显式非 `null` 的 Origin 不匹配即拒绝且不回退；仅当 Origin 缺失或为 `null` 时，以 `Referer` 解析出的完整 origin 精确匹配白名单，此时若带 `Sec-Fetch-Site` 必须为 `same-origin`，`Referer` 缺失或非法仍返回 `WEBAUTHN_ORIGIN_DENIED`；断言端仍由 SimpleWebAuthn 校验 `clientDataJSON.origin`。注册挑战还绑定当前会话摘要与密码、角色、状态、MFA 行/版本及用户句柄快照，完成时在账号锁内确认会话仍有效。`passwordless` 凭据既可直接登录，也可在密码票据后作为第二步；直接登录不会因账号有第二因素策略而再次要求第二步。
 - WebAuthn 身份复核走 `/auth/webauthn/step-up/options`、`verify`，证明绑定本人会话、明确的 `action`、必要的 `targetId` 与账号安全快照，只能在对应操作中消费一次；开启仅密钥的密码两步验证必须使用已绑定的 `passwordless` 强凭据证明。本人添加/删除凭据须复核当前密码，已有策略时还须验证第二因素；删除最后一个可完成密码第二步的密钥会被拒绝。改名仅需本人会话及 CSRF；删除凭据吊销本人全部会话。管理员撤销他人全部凭据要求 `admin`、`users:reset_password`、操作者密码及其已启用的第二因素，禁止撤销自己，记录 1–500 字原因并同事务吊销目标会话。开关关闭时仍可查询、改名和撤销已有凭据。
 - WebAuthn 接口统一返回 `Cache-Control: no-store`；本人安全列表只含记录 ID、名称、用途、创建/最近使用时间、设备类型、备份状态，`/auth/me` 与用户列表可返回 `webauthnCredentialsCount`。`POST /auth/webauthn/login/options` 的可选验证码字段为 `captchaId`、`code`；匿名 options 与 verify 接入来源/账号风控、在途上限、过载削峰和 Nginx 登录限流/64k 请求体边界。审计只记凭据记录主键、用途与脱敏失败原因，不写原始 ID、断言、挑战、Cookie 或密码。
 - 改接口缓存头、Fetch Metadata 拦截、管理端 CSRF、密钥类配置加密、JSON 全量导出、数据导出留痕与上限、审计脱敏、密码哈希/策略、风控来源聚合与负缓存、全局撞库态势、各类并发闸门、在途上限、过载削峰、会话保险丝、服务端超时或回环监听时执行 `npm --prefix backend run security:data-leak-ddos:verify`（分阶段隔离运行，详见文档 52）。
 - 改图形验证码时执行 `npm --prefix backend run captcha:rendering:verify`，覆盖无系统字体的真实 PNG 渲染、兼容字段、作用域隔离和一次性校验。
 - 改上述任一边界时执行 `npm --prefix backend run security:web-deep-audit:verify`（畸形 JSON、模板转义、验证码一次性、空闲超时、永久删除限流与跨入口共享口令桶、本人改密、客户端频控、onebox 上传边界、导入预检、登录锁定主体、multipart 加固、附件与资料发码频控）。
 - 升级 `multer`、`sharp` 等上传链路依赖后执行 `npm --prefix backend audit --omit=dev`，并回归 `task4:upload-security:verify` 与 `feedback:customer-service:verify`。
+
+## 系统账号治理权限覆盖与恢复保底
+
+- `sys_user.governance_permissions_json` 为可空文本列，仅保存既有治理子集的允许集合。NULL（含历史未配置）沿用角色默认，JSON `[]` 取消全部治理子集；非治理业务权限始终来自角色。损坏 JSON、错误类型或未知条目收窄为无治理权限，绝不恢复全角色默认。
+- POST 创建与 PUT 编辑用户接口、服务层均校验 admin 角色、操作权限和目标角色权限上界；服务层锁后从数据库解析实际权限，不能信任客户端 effective permissions 或鉴权时的旧权限快照。既有角色 hard gates 不变。创建的治理配置与账号、成功审计同事务提交，省略或 NULL 沿用默认，显式空集合不回退；不使用创建后补写权限的流程。
+- 用户权限或角色变化与会话撤销、成功审计在同一事务提交，提交后断开该账号 SSE。前端空数组不触发角色默认回退。
+- 用户角色、权限、状态及生命周期治理在事务首次获取账号锁时即按 ID 稳定顺序锁定系统账号集合，MySQL 使用锁定读取返回的当前快照判定，SQLite 复用既有单写队列；不扩大普通业务账号锁范围，不改事务重试机制。
+- 至少保留一个启用、未注销并实际持有 `users:view` 与 `users:update` 的管理员；不能仅统计角色。本人不能移除这两个恢复入口权限。注销预检仅作提示，写入时仍以锁后快照复核。
+- SQLite 启动仅幂等补 nullable 列，MySQL 使用 `063_sys_user_governance_permissions.sql` 和必需列结构校验；不回填、不重写历史数据。本地部署不得为验收修改真实权限，验证只使用隔离库。
+- 回滚限制：旧 image 会忽略已保存的非 NULL 权限限制，可能扩大授权。保留闲置列只保证结构可保留，不表示权限语义兼容；生产回退须评估并明确处理已保存限制，可优先回滚前端或向前修复。不得自动清空覆盖配置，也不自动执行删列回滚。
+
+### 治理权限专项验收入口
+
+- `npm --prefix backend run permission:governance:verify`：默认只创建本轮临时 SQLite 文件，验证服务、真实 HTTP 路由、nullable 补列、旧会话和互削权限/互停用/互降级三组并发；结束清理本次库。
+- MySQL 使用同一入口，显式设置 `Y_LINK_PERMISSION_VERIFY_DB_TYPE=mysql`、`Y_LINK_PERMISSION_MYSQL_CONFIRM_TEST_SERVER=true`、`Y_LINK_PERMISSION_MYSQL_HOST=127.0.0.1`、10000–65535 的 `Y_LINK_PERMISSION_MYSQL_PORT` 及测试实例用户/密码变量。支持 MySQL 8.4，打印实际服务版本，创建随机新库，执行新增列 SQL 两次并验证列结构及三组真实并发；不接受业务库名，仅清理创建成功的本次随机库。实例与容器由统一 QA 管理，本脚本不启动或清理 Docker。
+- `npm --prefix backend run verify:mysql:schema-contract` 是只读结构替身验证（新增缺列、错误类型、NOT NULL 拒绝），不能作为真实 MySQL 并发证据。
+- Web 在 `/system/users` 验证默认、显式空、角色切换、本人恢复权限不可取消、分步保存反馈；暗色横向滚动 hover 时采样右 fixed 动作 cell 背景 alpha 并截图，同时检查条纹、亮色和完整六动作。
+- 生效合同：撤会话后新请求拒绝；已有业务锁权限门禁使用取得锁时的数据库实际权限。用户治理、客户端生命周期及订单编号配置写入口按此复核；密码重置使用实际权限，MFA 与管理员 WebAuthn 撤销保留既有锁后会话检查。撤销前已取得锁且已授权的事务允许正常完成，不宣称取消全部已开始请求。
+
+### F1 锁后治理权限复核合同
+
+- 客户端账号批量/单个开户、资料编辑、启停及重置密码保留原“Sys actor → 部门配置/Client target”的锁序，取得原账号锁后分别复核 `users:create`、`users:update`、`users:status`、`users:reset_password` 与 admin 角色；不信任请求中早先解析的角色/权限。
+- 预订规则、客服配置、部门树、验证码平台及显式自动补部门写入口在原 Sys actor 锁后复核 `system_configs:update + admin`，早于默认配置补齐、业务行修改、会话撤销与成功审计。普通业务账号锁 helper 行为及锁范围不变，只在这些治理入口显式追加断言。
+- 当前生产代码没有 `ensureClientDepartmentOptions` 调用方，亦无无 actor 变体。该方法属于显式配置治理：包括空输入、传入 manager 的复用调用都要求锁后配置权限，manager 不是授权凭证。合法客户端开户/编辑使用 `assertClientDepartmentOption` 只读校验已有部门，不走自动补部门，不额外要求配置权限。未来若增加内部补齐调用，须先定义其所属入口合同，不能从外部接收 permission 参数绕过门禁。
+- 撤权先提交、旧请求后取得账号锁时应返回 403，目标数据、客户端会话及成功审计保持不变；撤权前已取得锁且合法授权的事务允许正常完成。新专项在 MySQL 8.4 观察真实 `performance_schema.data_lock_waits` 连接等待边，在 SQLite 观察实际单写队列；两类运行结果分别记录，不以替身或单纯延时冒充锁等待。

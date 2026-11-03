@@ -39,7 +39,7 @@ import {
   notifyClientOrderRefresh,
   subscribeClientOrderRefresh,
 } from '@/utils/client-order-refresh'
-import { buildClientOrderSummaryFromDetail } from '@/utils/client-order-summary'
+import { buildClientOrderSummaryFromDetail, needsKingdeeRegistration } from '@/utils/client-order-summary'
 import type { PersistedO2oPreorderSummary } from '@/utils/client-order-storage'
 import { formatDateTime } from '@/utils/date-time'
 import { normalizeRequestError } from '@/utils/error'
@@ -940,6 +940,13 @@ onBeforeUnmount(() => {
               >
                 {{ statusChip.label }}
               </span>
+            </div>
+
+            <div v-if="needsKingdeeRegistration(card.order)" class="mt-3 flex items-center justify-between gap-3 rounded-xl bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
+              <span>金蝶单据编号未填写</span>
+              <router-link v-slot="{ navigate }" :to="`/client/orders/${card.order.id}`" custom>
+                <el-button size="small" type="warning" plain @click="navigate">去填写</el-button>
+              </router-link>
             </div>
 
             <div class="mt-3 rounded-2xl px-3 py-2.5" :class="card.report.cardClassName">

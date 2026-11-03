@@ -59,6 +59,7 @@ export interface CreateUserPayload {
   email?: string
   role: UserRole
   status?: UserStatus
+  governancePermissions?: UserSafeProfile['permissions'] | null
 }
 
 /**
@@ -71,6 +72,7 @@ export interface UpdateUserPayload {
   email?: string
   password?: string
   role?: UserRole
+  governancePermissions?: UserSafeProfile['permissions'] | null
 }
 
 /**

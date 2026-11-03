@@ -10,7 +10,7 @@ import { LessThan, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { env } from '../config/env.js'
-import { resolvePermissionsByRole } from '../constants/auth-permissions.js'
+import { GOVERNANCE_PERMISSION_CODES, resolveUserPermissions } from '../constants/auth-permissions.js'
 import { SysUser } from '../entities/sys-user.entity.js'
 import { SysUserSession } from '../entities/sys-user-session.entity.js'
 import { SysUserWebauthnCredential } from '../entities/sys-user-webauthn-credential.entity.js'
@@ -123,7 +123,8 @@ function toSafeProfile(user: SysUser): UserSafeProfile {
     displayName: user.displayName,
     email: user.email,
     role: user.role,
-    permissions: resolvePermissionsByRole(user.role),
+    permissions: resolveUserPermissions(user),
+    governancePermissions: user.governancePermissionsJson == null ? null : resolveUserPermissions(user).filter((permission) => GOVERNANCE_PERMISSION_CODES.includes(permission)),
     status: user.status,
     accountState: resolveAccountState(user),
     deactivatedAt: user.deactivatedAt,
@@ -150,6 +151,8 @@ const ADMIN_SESSION_ACTIVITY_WRITE_INTERVAL_MS = 60_000
 export class AuthService {
   private readonly userRepo = AppDataSource.getRepository(SysUser)
   private readonly sessionRepo = AppDataSource.getRepository(SysUserSession)
+  // 仅关联本次查库返回的上下文；不缓存鉴权结果，也不向用户响应或 actor fixture 增加字段。
+  private readonly sessionActivitySnapshots = new WeakMap<AuthUserContext, number | null>()
 
   /**
    * 按账号加载带密码哈希的用户：
@@ -778,14 +781,6 @@ export class AuthService {
   }
 
   async resolveAuthUserByToken(sessionToken: string): Promise<AuthUserContext> {
-    return (await this.resolveAuthSessionByToken(sessionToken)).auth
-  }
-
-  /**
-   * 鉴权并返回会话上次活跃时间：中间件据此在内存中判断是否需要写回活跃时间，
-   * 未到节流间隔的请求不再发出 UPDATE（SQLite 下即使命中 0 行也要竞争唯一写锁）。
-   */
-  async resolveAuthSessionByToken(sessionToken: string): Promise<{ auth: AuthUserContext; lastAccessAt: Date | null }> {
     const now = new Date()
     const sessionTokenHash = hashSessionToken(sessionToken)
     // 每个管理端请求都要鉴权：会话与账号一次联表取回，不再先查会话、再按 userId 查账号（密码哈希列默认不选取）。
@@ -818,34 +813,33 @@ export class AuthService {
       throw new BizError('当前账号已停用，请联系管理员', 403)
     }
 
-    return {
-      auth: {
-        userId: user.id,
-        username: user.username,
-        displayName: user.displayName,
-        role: user.role,
-        permissions: resolvePermissionsByRole(user.role),
-        status: user.status,
-        sessionToken,
-        // 认证来源由中间件根据“本次请求从 Cookie 还是 Bearer 进入”最终覆写。
-        authSource: 'bearer',
-      },
-      lastAccessAt: session.lastAccessAt ?? null,
+    const auth: AuthUserContext = {
+      userId: user.id,
+      username: user.username,
+      displayName: user.displayName,
+      role: user.role,
+      permissions: resolveUserPermissions(user),
+      status: user.status,
+      sessionToken,
+      // 认证来源由中间件根据“本次请求从 Cookie 还是 Bearer 进入”最终覆写。
+      authSource: 'bearer',
     }
+    this.sessionActivitySnapshots.set(auth, session.lastAccessAt?.getTime() ?? null)
+    return auth
   }
 
-  /** 会话活跃时间是否已超过写回节流间隔；与 touchSessionActivity 的 SQL 条件保持同一口径。 */
-  shouldTouchSessionActivity(lastAccessAt: Date | null, minIntervalMs = ADMIN_SESSION_ACTIVITY_WRITE_INTERVAL_MS, now = new Date()): boolean {
-    if (!lastAccessAt) {
-      return true
-    }
-    return lastAccessAt.getTime() < now.getTime() - Math.max(1_000, minIntervalMs)
+  /** 先用本次鉴权已加载的时间跳过无效 SQL；缺少快照时仍允许原有 touch 路径处理。 */
+  isSessionActivityUpdateDue(auth: AuthUserContext, minIntervalMs = 60_000): boolean {
+    const lastAccessAt = this.sessionActivitySnapshots.get(auth)
+    return lastAccessAt == null || !Number.isFinite(lastAccessAt)
+      || lastAccessAt < Date.now() - Math.max(1_000, minIntervalMs)
   }
 
   /**
    * 会话活跃时间写入节流：
    * - 管理端每个请求都可能走鉴权链路，若每次都更新 last_access_at，会在 SQLite 下产生额外写压；
-   * - 仅当上次活跃时间超过最小间隔时才写库，兼顾在线状态准确性和并发稳定性。
+   * - 普通鉴权先用已加载时间跳过窗口内 SQL，此处条件继续防止并发旧快照重复更新；
+   * - 显式在线心跳仍可独立指定 1 秒间隔，不受普通鉴权的 60 秒前置判断影响。
    */
   async touchSessionActivity(sessionToken: string, minIntervalMs = ADMIN_SESSION_ACTIVITY_WRITE_INTERVAL_MS): Promise<void> {
     const now = new Date()

@@ -5,27 +5,47 @@
  * 实现逻辑：
  * - 页面使用“录入主卡 + 侧边辅助卡 + 成功结果区”的结构，突出主操作区并统一工作台视觉语言；
  * - 商品明细仍然允许多行录入，提交前继续按商品 ID 聚合数量，保证现有业务兼容；
- * - 通过克制的局部反馈增强新增、删除、提交成功等关键动作的可感知性，但不阻塞输入与连续录入。
+ * - 录入中的明细、备注与预计送达时间按登录用户防抖写入本地草稿，刷新、切页后恢复，提交成功或重新录入后清除；
+ *   历史页“再来一单”也通过同一份草稿把明细带回本页，恢复时会剔除已失效的商品与规格；
+ * - 已选商品但未选规格的行不计入合计，提交前会明确指出行号并阻止提交，避免被静默丢弃；
+ * - 成功页可复用送货单打印 / PDF 弹窗（按需异步加载），单号旁提供复制按钮。
  * 维护说明：
  * - 页面允许同一商品多行录入，提交前会自动合并数量，调整提交流程时需保留该兼容；
+ * - 草稿在商品目录加载成功并完成恢复前不得写入，否则会用空表单覆盖尚未恢复的草稿；
  * - 二维码生成失败不代表送货单创建失败，因此必须保留“订单已生成但二维码缺失”的友好提示；
  * - 当前页面在供货工作台中作为被嵌入子页面渲染，不要重新恢复独立页头。
  */
 
-import { computed, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { useDataChangeRefresh } from '@/composables/useDataChangeRefresh'
 import { ElMessageBox } from 'element-plus'
 import QRCode from 'qrcode'
 import { useRouter } from 'vue-router'
 import { PageContainer, PassiveNumberInput } from '@/components/common'
 import { getProductList, type ProductRecord } from '@/api/modules/product'
-import { submitSupplierDelivery } from '@/api/modules/inbound'
+import { submitSupplierDelivery, type InboundOrderDetail } from '@/api/modules/inbound'
+import { useAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
-
+import { disabledInboundExpectedArrivalDate } from '@/utils/inbound-expected-arrival'
+import {
+  SUPPLIER_DELIVERY_ITEM_QTY_MAX,
+  SUPPLIER_DELIVERY_MAX_ITEM_COUNT,
+  clearSupplierDeliveryDraft,
+  readSupplierDeliveryDraft,
+  writeSupplierDeliveryDraft,
+} from '@/utils/supplier-delivery-draft'
 
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
+// 打印 / PDF 弹窗体积较大，仅在成功页首次点击时才加载。
+const InboundDeliverySheetWorkbenchDialog = defineAsyncComponent(
+  () => import('./components/InboundDeliverySheetWorkbenchDialog.vue'),
+)
+
+const DRAFT_SAVE_DEBOUNCE_MS = 400
+
 const router = useRouter()
+const authStore = useAuthStore()
 const loading = ref(false)
 const submitting = ref(false)
 const products = ref<ProductRecord[]>([])
@@ -62,26 +82,32 @@ const items = ref<DeliveryItemRow[]>([])
 const remark = ref('')
 // 预计送达时间为必填项：库管据此在送货单池安排备货与入库，不允许留空提交。
 const expectedArrivalAt = ref<Date | null>(null)
-const disabledExpectedArrivalDate = (date: Date) => {
-  const todayStart = new Date()
-  todayStart.setHours(0, 0, 0, 0)
-  return date.getTime() < todayStart.getTime()
-}
+// 预计送达日期与服务端范围保持一致：今天起 90 天内可选。
+const disabledExpectedArrivalDate = disabledInboundExpectedArrivalDate
 
 // 二维码与成功状态
 const qrCodeDataUrl = ref('')
 const currentShowNo = ref('')
 const isSuccess = ref(false)
 const qrCodeUnavailable = ref(false)
+const submittedDetail = ref<InboundOrderDetail | null>(null)
+const deliverySheetDialogVisible = ref(false)
+const deliverySheetDialogMounted = ref(false)
+// 提交校验失败后才把“未选规格”行标红，避免刚选完商品就出现红框。
+const submitAttempted = ref(false)
 
-// 统计总数量，用于底部汇总与禁用状态判断
+// 行是否完整：商品与规格都已选择才会被提交，也才计入合计。
+const isCompleteRow = (item: DeliveryItemRow) => Boolean(item.productId && item.skuId)
+const isIncompleteRow = (item: DeliveryItemRow) => Boolean(item.productId) && !item.skuId
+
+// 统计总数量：仅统计完整行，保证合计与实际提交内容一致。
 const totalQty = computed(() => {
-  return items.value.reduce((sum, item) => sum + (Number(item.qty) || 0), 0)
+  return items.value.reduce((sum, item) => sum + (isCompleteRow(item) ? Number(item.qty) || 0 : 0), 0)
 })
 
-// 统计已选择商品行数，辅助右侧信息面板展示当前录入进度
+// 统计已选择完整商品行数，辅助右侧信息面板展示当前录入进度
 const selectedCount = computed(() => {
-  return items.value.filter((item) => item.productId && item.skuId).length
+  return items.value.filter(isCompleteRow).length
 })
 
 // 录入完成度：用于侧边辅助区展示当前选择进度，帮助供货方快速判断是否仍有空行待补全。
@@ -92,6 +118,8 @@ const completionRate = computed(() => {
 
   return Math.round((selectedCount.value / items.value.length) * 100)
 })
+
+const reachedItemLimit = computed(() => items.value.length >= SUPPLIER_DELIVERY_MAX_ITEM_COUNT)
 
 // 提交按钮统一可用性判定，避免模板中散落复杂表达式
 const canSubmit = computed(() => {
@@ -107,11 +135,123 @@ const helperSteps = [
   '如二维码未显示，可稍后到历史单据中补查。',
 ] as const
 
+// ---------------------------------------------------------------------------
+// 本地草稿：按登录用户隔离，防抖写入；商品目录加载并完成恢复前禁止写入。
+// ---------------------------------------------------------------------------
+const currentUserId = computed(() => authStore.currentUser?.id ?? null)
+let draftReady = false
+let draftSaveTimer: ReturnType<typeof globalThis.setTimeout> | null = null
+let hasActivatedOnce = false
+
+const cancelPendingDraftSave = () => {
+  if (draftSaveTimer) {
+    globalThis.clearTimeout(draftSaveTimer)
+    draftSaveTimer = null
+  }
+}
+
+const saveDraftNow = () => {
+  cancelPendingDraftSave()
+  if (!draftReady || isSuccess.value) {
+    return
+  }
+
+  writeSupplierDeliveryDraft(currentUserId.value, {
+    items: items.value.map((item) => ({
+      productId: String(item.productId || ''),
+      skuId: String(item.skuId || ''),
+      qty: Number(item.qty) || 1,
+    })),
+    remark: remark.value,
+    expectedArrivalAt: expectedArrivalAt.value ? expectedArrivalAt.value.toISOString() : null,
+  })
+}
+
+const scheduleDraftSave = () => {
+  if (!draftReady || isSuccess.value) {
+    return
+  }
+
+  cancelPendingDraftSave()
+  draftSaveTimer = globalThis.setTimeout(saveDraftNow, DRAFT_SAVE_DEBOUNCE_MS)
+}
+
+const clearDraft = () => {
+  cancelPendingDraftSave()
+  clearSupplierDeliveryDraft(currentUserId.value)
+}
+
+/**
+ * 读取并应用本地草稿：
+ * - 返回 false 表示没有可用草稿，页面保持当前状态；
+ * - 不在当前启用商品目录中的商品、规格会被剔除，并只提示一次；
+ * - 已超出可选范围的预计送达时间不恢复。
+ */
+const applyStoredDraft = () => {
+  const draft = readSupplierDeliveryDraft(currentUserId.value)
+  if (!draft) {
+    return false
+  }
+
+  let droppedCount = 0
+  const restoredRows: DeliveryItemRow[] = []
+  for (const draftItem of draft.items) {
+    const product = products.value.find((entry) => String(entry.id) === draftItem.productId)
+    if (!product) {
+      droppedCount += 1
+      continue
+    }
+
+    const skuAvailable = getActiveProductSkus(draftItem.productId).some((sku) => String(sku.id) === draftItem.skuId)
+    if (draftItem.skuId && !skuAvailable) {
+      droppedCount += 1
+    }
+    restoredRows.push({
+      ...createDeliveryItemRow(),
+      productId: draftItem.productId,
+      skuId: skuAvailable ? draftItem.skuId : '',
+      qty: draftItem.qty,
+    })
+  }
+
+  let restoredArrivalAt: Date | null = null
+  if (draft.expectedArrivalAt) {
+    const parsed = new Date(draft.expectedArrivalAt)
+    if (!Number.isNaN(parsed.getTime()) && !disabledInboundExpectedArrivalDate(parsed)) {
+      restoredArrivalAt = parsed
+    }
+  }
+
+  isSuccess.value = false
+  submitAttempted.value = false
+  items.value = restoredRows.length ? restoredRows : [createDeliveryItemRow()]
+  remark.value = draft.remark
+  expectedArrivalAt.value = restoredArrivalAt
+
+  if (droppedCount > 0) {
+    showAppWarning(`草稿中有 ${droppedCount} 项商品或规格已失效，已自动移除，请重新选择`)
+  }
+  return true
+}
+
+// 商品目录首次加载成功后才恢复草稿并放开草稿写入。
+const initializeDraftIfNeeded = () => {
+  if (draftReady) {
+    return
+  }
+
+  applyStoredDraft()
+  draftReady = true
+}
+
+watch([items, remark, expectedArrivalAt], scheduleDraftSave, { deep: true })
+
 // 读取商品列表，录入页初始化必须先有可选商品
 const loadProducts = async () => {
   loading.value = true
   try {
-    products.value = await getProductList({})
+    products.value = await getProductList({ isActive: true })
+    initializeDraftIfNeeded()
     return true
   } catch (error) {
     products.value = []
@@ -123,6 +263,10 @@ const loadProducts = async () => {
 }
 
 const handleAddItem = () => {
+  if (items.value.length >= SUPPLIER_DELIVERY_MAX_ITEM_COUNT) {
+    showAppWarning(`单次最多添加 ${SUPPLIER_DELIVERY_MAX_ITEM_COUNT} 条商品明细`)
+    return
+  }
   items.value.push(createDeliveryItemRow())
 }
 
@@ -130,7 +274,7 @@ const handleRemoveItem = (index: number) => {
   items.value.splice(index, 1)
 }
 
-// 送货单创建成功后立即生成二维码；若失败，只提醒二维码渲染失败，不回滚已创建单据。
+// 送货单创建成功后立即生成二维码；失败只标记状态，不回滚已创建单据，提示由调用方统一给出。
 const generateQRCode = async (verifyCode: string) => {
   try {
     qrCodeDataUrl.value = await QRCode.toDataURL(verifyCode, {
@@ -142,10 +286,11 @@ const generateQRCode = async (verifyCode: string) => {
       },
     })
     qrCodeUnavailable.value = false
-  } catch (err) {
+    return true
+  } catch {
     qrCodeDataUrl.value = ''
     qrCodeUnavailable.value = true
-    showAppWarning(extractErrorMessage(err, '送货单已生成，但二维码渲染失败，请刷新后到历史单据查看'))
+    return false
   }
 }
 
@@ -160,8 +305,16 @@ const handleSubmit = async () => {
     return
   }
 
+  // 已选商品但未选规格的行必须明确提示，不能静默丢弃。
+  const incompleteIndex = items.value.findIndex(isIncompleteRow)
+  if (incompleteIndex >= 0) {
+    submitAttempted.value = true
+    showAppWarning(`第 ${incompleteIndex + 1} 行未选择规格，请补全后再提交`)
+    return
+  }
+
   // 仅提交“商品已选中且数量>0”的有效行，避免空行污染数据
-  const validItems = items.value.filter((item) => item.productId && item.skuId && item.qty > 0)
+  const validItems = items.value.filter((item) => isCompleteRow(item) && item.qty > 0)
   if (!validItems.length) {
     showAppWarning('请至少添加一件有效的送货商品')
     return
@@ -205,9 +358,16 @@ const handleSubmit = async () => {
     const result = await submitSupplierDelivery(submitData)
     const verifyCode = result.order.verifyCode
     currentShowNo.value = result.order.showNo
-    await generateQRCode(verifyCode)
+    submittedDetail.value = result
+    // 提交成功后草稿即失效，先清除再切到成功页，避免成功页期间被防抖写回。
     isSuccess.value = true
-    showAppSuccess('送货单生成成功，可在历史单据中继续改单或撤销')
+    clearDraft()
+    const qrReady = await generateQRCode(verifyCode)
+    if (qrReady) {
+      showAppSuccess('送货单生成成功，可在历史单据中继续改单或撤销')
+    } else {
+      showAppWarning('送货单已生成，但二维码渲染失败，请到历史单据中查看')
+    }
   } catch (err) {
     showAppError(extractErrorMessage(err, '生成失败'))
   } finally {
@@ -217,18 +377,41 @@ const handleSubmit = async () => {
 
 // 重置时恢复为首行可编辑状态，方便供应商连续录入下一单。
 const handleReset = () => {
+  clearDraft()
   items.value = []
   remark.value = ''
   expectedArrivalAt.value = null
   isSuccess.value = false
+  submitAttempted.value = false
   qrCodeDataUrl.value = ''
   qrCodeUnavailable.value = false
   currentShowNo.value = ''
+  submittedDetail.value = null
+  deliverySheetDialogVisible.value = false
   handleAddItem()
 }
 
 const goToHistory = () => {
   router.push('/supplier-history')
+}
+
+const openDeliverySheetDialog = () => {
+  if (!submittedDetail.value) {
+    showAppWarning('送货单详情尚未加载完成')
+    return
+  }
+  deliverySheetDialogMounted.value = true
+  deliverySheetDialogVisible.value = true
+}
+
+// 复制单号：剪贴板不可用或被拒绝时提示手动复制。
+const copyShowNo = async (showNo: string) => {
+  try {
+    await globalThis.navigator.clipboard.writeText(showNo)
+    showAppSuccess('单号已复制')
+  } catch {
+    showAppWarning(`复制失败，请手动复制单号：${showNo}`)
+  }
 }
 
 // 其他页面新增或调整商品后，切回送货单录入时刷新可选商品。
@@ -238,10 +421,30 @@ onMounted(() => {
   loadProducts()
   handleAddItem()
 })
+
+// 切走时立即落盘，保证历史页“再来一单”读取到的是最新草稿；切回时若有新草稿（再来一单）则恢复。
+onDeactivated(() => {
+  saveDraftNow()
+})
+
+onActivated(() => {
+  if (!hasActivatedOnce) {
+    hasActivatedOnce = true
+    return
+  }
+
+  if (draftReady) {
+    applyStoredDraft()
+  }
+})
+
+onBeforeUnmount(() => {
+  saveDraftNow()
+})
 </script>
 
 <template>
-  <PageContainer title="送货单录入">
+  <PageContainer>
     <div class="mx-auto max-w-7xl">
       <!-- 录入态与成功态使用同一过渡，降低视图切换突兀感。 -->
       <transition name="supplier-form-switch" mode="out-in">
@@ -261,9 +464,13 @@ onMounted(() => {
                     <span class="delivery-inline-metric">总件数 {{ totalQty }}</span>
                   </div>
                 </div>
-                <el-button type="primary" class="delivery-action-button self-start lg:self-auto" @click="handleAddItem">
-                  <el-icon class="mr-1"><Plus /></el-icon>添加商品
-                </el-button>
+                <el-tooltip :disabled="!reachedItemLimit" :content="`单次最多 ${SUPPLIER_DELIVERY_MAX_ITEM_COUNT} 条明细，已达上限`" placement="top">
+                  <span class="self-start lg:self-auto">
+                    <el-button type="primary" class="delivery-action-button" :disabled="reachedItemLimit" @click="handleAddItem">
+                      <el-icon class="mr-1"><Plus /></el-icon>添加商品
+                    </el-button>
+                  </span>
+                </el-tooltip>
               </div>
             </div>
 
@@ -282,7 +489,12 @@ onMounted(() => {
                 <div
                   v-for="(item, index) in items"
                   :key="item.uid"
-                  class="delivery-item-row flex flex-col gap-4 rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-white/10 dark:bg-black/50 lg:flex-row lg:items-start"
+                  :class="[
+                    'delivery-item-row flex flex-col gap-4 rounded-2xl border p-4 lg:flex-row lg:items-start',
+                    submitAttempted && isIncompleteRow(item)
+                      ? 'border-rose-300 bg-rose-50/70 dark:border-rose-900/70 dark:bg-rose-950/20'
+                      : 'border-slate-200/70 bg-slate-50/80 dark:border-white/10 dark:bg-black/50',
+                  ]"
                 >
                   <div class="delivery-item-row__index flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-slate-200/80 bg-white text-sm font-medium text-slate-500 dark:border-white/15 dark:bg-[#141415] dark:text-slate-400">
                     {{ index + 1 }}
@@ -293,7 +505,7 @@ onMounted(() => {
                       placeholder="请选择商品"
                       filterable
                       :disabled="hasNoProducts"
-                      empty-text="暂无可送货商品"
+                      no-data-text="暂无可送货商品"
                       class="w-full"
                       @change="handleProductChange(item)"
                     >
@@ -323,11 +535,15 @@ onMounted(() => {
                         :value="String(sku.id)"
                       />
                     </el-select>
+                    <p v-if="submitAttempted && isIncompleteRow(item)" class="mt-1 text-xs text-rose-600 dark:text-rose-300">
+                      第 {{ index + 1 }} 行未选择规格
+                    </p>
                   </div>
                   <div class="w-full lg:w-36">
                     <PassiveNumberInput
                       v-model="item.qty"
                       :min="1"
+                      :max="SUPPLIER_DELIVERY_ITEM_QTY_MAX"
                       :step="1"
                       step-strictly
                       class="w-full"
@@ -340,6 +556,7 @@ onMounted(() => {
                       type="danger"
                       link
                       :disabled="items.length === 1"
+                      :aria-label="`删除第 ${index + 1} 行商品`"
                       @click="handleRemoveItem(index)"
                     >
                       <el-icon><Delete /></el-icon>
@@ -373,6 +590,8 @@ onMounted(() => {
                   type="textarea"
                   :rows="2"
                   placeholder="备注信息（选填）"
+                  maxlength="255"
+                  show-word-limit
                   resize="none"
                 />
               </div>
@@ -454,7 +673,9 @@ onMounted(() => {
               <p class="mt-4 text-sm font-medium text-emerald-600 dark:text-emerald-300">已生成送货单</p>
               <h2 class="mt-2 text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">送货单已生成</h2>
               <p class="mt-3 text-sm leading-6 text-slate-500 dark:text-slate-400">
-                单号 <span class="font-semibold text-slate-700 dark:text-slate-200">{{ currentShowNo }}</span> 已生成，交货时出示二维码即可。
+                单号 <span class="font-semibold text-slate-700 dark:text-slate-200">{{ currentShowNo }}</span>
+                <el-button link type="primary" size="small" class="!ml-1 align-baseline" @click="copyShowNo(currentShowNo)">复制</el-button>
+                已生成，交货时出示二维码即可。
               </p>
               <p class="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">
                 若需补充商品、调整数量或取消本单，请前往历史单据处理。
@@ -462,12 +683,15 @@ onMounted(() => {
 
               <div class="mt-6 flex flex-wrap gap-2 text-sm text-slate-500 dark:text-slate-400">
                 <span class="delivery-inline-metric">状态 待入库</span>
-                <span class="delivery-inline-metric">总件数 {{ totalQty }} 件</span>
+                <span class="delivery-inline-metric">总件数 {{ Number(submittedDetail?.order.totalQty ?? totalQty) }} 件</span>
               </div>
 
               <div class="mt-6 flex flex-wrap justify-center gap-3 lg:justify-start">
                 <el-button plain size="large" @click="handleReset" class="delivery-reset-button !rounded-2xl px-8">
                   继续录入下一单
+                </el-button>
+                <el-button size="large" plain :disabled="!submittedDetail" @click="openDeliverySheetDialog" class="delivery-reset-button !rounded-2xl px-8">
+                  打印 / 导出送货单
                 </el-button>
                 <el-button type="primary" size="large" plain @click="goToHistory" class="delivery-reset-button !rounded-2xl px-8">
                   查看历史单据
@@ -505,6 +729,12 @@ onMounted(() => {
         </div>
       </transition>
     </div>
+
+    <InboundDeliverySheetWorkbenchDialog
+      v-if="deliverySheetDialogMounted"
+      v-model="deliverySheetDialogVisible"
+      :detail="submittedDetail"
+    />
   </PageContainer>
 </template>
 

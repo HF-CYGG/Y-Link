@@ -2,7 +2,7 @@
  * 模块说明：src/composables/useClientRestockEntry.ts
  * 文件职责：客户端“申请补货”入口的共享逻辑，供商城卡片补货按钮与商品详情底栏复用。
  * 实现逻辑：
- * - 仅当前启用且 availableStock=0 的规格可申请（口径来自 getRestockSkus，不用限购后的可购量判断缺货）；
+ * - 当前启用规格均可申请，资格不受库存或限购约束；详情是否切换缺货动作由商城按真实库存单独判断；
  * - 单规格或已明确选择规格时，先查询该规格是否已有有效补货申请，有则直接进入原会话，无则进入新建表单；
  * - 多规格且未指定规格时直接进入表单，由用户在表单中明确选择；
  * - 请求通过 useStableRequest 收口，商品/规格/账号变化、页面失活或卸载时取消在途请求，防止旧结果跳转串号。
@@ -49,7 +49,7 @@ export const useClientRestockEntry = (
     return product ? getRestockSkus(product) : []
   })
 
-  /** 当前上下文是否允许申请补货：指定规格时看该规格是否缺货，否则看商品是否存在任一缺货规格。 */
+  /** 补货资格只看当前启用规格；现货数量不作为申请门槛。 */
   const restockAvailable = computed(() => {
     const sku = resolveSku()
     return sku ? candidates.value.some((candidate) => candidate.id === sku.id) : candidates.value.length > 0

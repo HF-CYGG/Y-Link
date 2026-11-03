@@ -9,6 +9,7 @@ import { In, type EntityManager } from 'typeorm'
 import { ClientUser } from '../entities/client-user.entity.js'
 import { SysUser } from '../entities/sys-user.entity.js'
 import { BizError } from '../utils/errors.js'
+import { resolveUserPermissions, type PermissionCode } from '../constants/auth-permissions.js'
 
 type LifecycleState = Pick<SysUser | ClientUser, 'status' | 'deactivatedAt' | 'restoredAt'>
 
@@ -72,4 +73,20 @@ export async function lockActiveSysAccountForBusiness(
   const account = accounts.get(String(userId))
   if (!account) throw new BizError('系统账号不存在，请刷新后重试', 409)
   return account
+}
+
+/** 仅低频系统账号治理使用：事务首次取锁即按主键顺序锁全体账号，普通业务锁范围不变。 */
+export async function lockSysAccountGovernanceSnapshot(manager: EntityManager): Promise<Map<string, SysUser>> {
+  const query = manager.getRepository(SysUser).createQueryBuilder('account').orderBy('account.id', 'ASC')
+  if (manager.connection.options.type === 'mysql') query.setLock('pessimistic_write')
+  const accounts = await query.getMany()
+  return new Map(accounts.map((account) => [String(account.id), account]))
+}
+
+/** 仅供显式治理入口在既有账号锁后调用；权限由服务内路由合同固定，不接受外部授权参数。 */
+export function assertSysAccountGovernancePermission(account: SysUser, requiredPermission: PermissionCode): void {
+  if (account.status !== 'enabled' || isAccountCurrentlyDeactivated(account) || account.role !== 'admin'
+    || !resolveUserPermissions(account).includes(requiredPermission)) {
+    throw new BizError('当前管理员账号已失效或权限不足', 403)
+  }
 }

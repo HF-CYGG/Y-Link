@@ -12,6 +12,17 @@
 
 import type { O2oPreorderDetail, O2oPreorderSummary } from '@/api/modules/o2o'
 
+/** 仅对仍可登记且尚无编号的有效部门订单显示提醒。 */
+export const needsKingdeeRegistration = (
+  order: Pick<O2oPreorderSummary, 'clientOrderType' | 'kingdeeVoucherNo' | 'kingdeeEditable' | 'status' | 'timeoutAt'>,
+  now = Date.now(),
+) => {
+  if (order.clientOrderType !== 'department' || order.kingdeeVoucherNo?.trim() || order.kingdeeEditable !== true) return false
+  if (order.status === 'verified') return true
+  if (order.status !== 'pending') return false
+  return !order.timeoutAt || new Date(order.timeoutAt).getTime() > now
+}
+
 const CLIENT_ORDER_TYPE_KEYWORDS: Record<O2oPreorderSummary['clientOrderType'], string[]> = {
   department: ['部门订', '部门', 'department'],
   walkin: ['散客', 'walkin'],

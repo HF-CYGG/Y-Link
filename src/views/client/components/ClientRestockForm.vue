@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/client/components/ClientRestockForm.vue
- * 文件职责：承载补货商品与缺货规格选择、截止时间校验以及幂等提交。
+ * 文件职责：承载补货商品与当前启用规格选择、截止时间校验以及幂等提交。
  * 实现逻辑：进入时读取实时目录，规格切换先查已有申请；结果未知时冻结原载荷并复用请求键重试。
  * 维护说明：数量不受商城限购限制；时区固定 UTC+8，账号切换后废弃前一账号的候选和请求。
  */
@@ -97,10 +97,10 @@ const loadCatalog = async () => {
       products.value = result.list.filter((item) => getRestockSkus(item).length > 0)
       const productId = queryText(route.query.productId)
       if (!productId) return
-      if (!products.value.some((item) => item.id === productId)) { showAppWarning('该商品当前没有可申请的缺货规格，请重新选择'); return }
+      if (!products.value.some((item) => item.id === productId)) { showAppWarning('该商品当前没有可申请补货的启用规格，请重新选择'); return }
       form.productId = productId
     },
-    onError: (error) => { showAppError(extractErrorMessage(error, '缺货商品加载失败，请重试')) },
+    onError: (error) => { showAppError(extractErrorMessage(error, '商品加载失败，请重试')) },
     onFinally: () => { loading.value = false },
   })
   // 商品 watcher 已完成默认规格处理，再应用商城明确选择的规格。
@@ -118,7 +118,7 @@ const submit = async () => {
   if (creating.value || checking.value || !auth.currentUser?.id) return
   const userId = auth.currentUser.id
   if (!pendingSubmission.value) {
-    if (!selectedSku.value || !product.value) { showAppWarning('请选择当前缺货的商品规格'); return }
+    if (!selectedSku.value || !product.value) { showAppWarning('请选择当前启用的商品规格'); return }
     if (!isValidRestockQuantity(form.quantity)) { showAppWarning('请输入大于 0 的整数数量'); return }
     const latestPickupAt = toRestockIso(form.latestPickupAt)
     if (!latestPickupAt) { showAppWarning('请选择精确到分钟的最晚取货时间'); return }
@@ -162,14 +162,14 @@ onBeforeUnmount(() => { activeRequest.cancel(); catalogRequest.cancel() })
 <template>
   <section class="rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]" aria-label="补货申请表单">
     <p class="text-base font-semibold text-slate-900 dark:text-slate-100">补货需求</p>
-    <p class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">仅可选择当前缺货的启用规格。已有有效需求会直接进入原会话，数量和时间保持原申请内容。</p>
+    <p class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">可选择当前上架商品的当前启用规格，有货也可申请，期望数量不受现货和购物限购限制。已有有效需求会直接进入原会话，数量和时间保持原申请内容。</p>
     <el-form label-position="top" class="mt-4" :disabled="locked">
-      <el-form-item label="缺货商品">
-        <el-select v-model="form.productId" filterable :loading="loading" class="w-full" placeholder="请选择缺货商品">
+      <el-form-item label="商品">
+        <el-select v-model="form.productId" filterable :loading="loading" class="w-full" placeholder="请选择商品">
           <el-option v-for="item in products" :key="item.id" :value="item.id" :label="`${item.productName}（${item.productCode}）`" />
         </el-select>
       </el-form-item>
-      <el-form-item label="缺货规格">
+      <el-form-item label="规格">
         <el-select v-model="form.skuId" class="w-full" :disabled="!product" placeholder="请选择要补货的规格">
           <el-option v-for="sku in skus" :key="sku.id" :value="sku.id" :label="`${sku.specText || '默认规格'} · ${sku.skuCode}`" />
         </el-select>
@@ -186,10 +186,10 @@ onBeforeUnmount(() => { activeRequest.cancel(); catalogRequest.cancel() })
     </el-form>
     <p v-if="pendingSubmission && !creating" class="mb-3 text-sm text-amber-700 dark:text-amber-300">上次提交结果尚未确认。重试将查询同一份申请，请先确认结果再修改内容或离开。</p>
     <div class="flex flex-wrap gap-2">
-      <el-button v-if="!locked" plain :loading="loading" @click="loadCatalog">刷新缺货商品</el-button>
+      <el-button v-if="!locked" plain :loading="loading" @click="loadCatalog">刷新商品</el-button>
       <el-button type="primary" :loading="creating || checking" :disabled="loading || checking || (!pendingSubmission && !selectedSku)" @click="submit">{{ pendingSubmission ? '重试并确认原申请' : '提交补货需求' }}</el-button>
     </div>
-    <p v-if="!loading && !products.length" class="mt-3 text-sm text-slate-500 dark:text-slate-400">当前没有可申请补货的缺货商品。</p>
+    <p v-if="!loading && !products.length" class="mt-3 text-sm text-slate-500 dark:text-slate-400">当前没有可申请补货的商品。</p>
   </section>
 </template>
 
