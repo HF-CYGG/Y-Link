@@ -12,7 +12,7 @@
  * - 若反馈入口文案改为系统配置驱动，优先复用共享 API 返回的门户配置，不在页面层写死提示。
  */
 
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ClientRestockForm from './components/ClientRestockForm.vue'
 
@@ -45,6 +45,10 @@ const clientAuthStore = useClientAuthStore(pinia)
 const FEEDBACK_ATTACHMENT_LIMIT = 9
 const FEEDBACK_ATTACHMENT_MAX_SIZE = 10 * 1024 * 1024
 
+let pageActive = true
+let submitGeneration = 0
+onBeforeUnmount(() => { pageActive = false; submitGeneration += 1 })
+watch(() => clientAuthStore.currentUser?.id, () => { submitGeneration += 1; uploadingAttachments.value = false; createAttachments.value = [] }, { flush: 'sync' })
 const creating = ref(false)
 const uploadingAttachments = ref(false)
 const portalNotice = ref('请尽量描述问题现象、出现时间和影响范围，便于客服持续跟进。')
@@ -158,6 +162,10 @@ const openAttachmentPicker = () => {
  * - 当前反馈首条消息最多 9 个附件，与后端校验口径保持一致。
  */
 const handleCreateAttachmentChange = async (event: Event) => {
+  if (creating.value || uploadingAttachments.value) return
+  const owner = currentClientUser.value?.id
+  const generation = submitGeneration
+  const validUpload = () => pageActive && owner === currentClientUser.value?.id && generation === submitGeneration
   const input = event.target as HTMLInputElement | null
   const files = Array.from(input?.files ?? [])
   if (!files.length) {
@@ -175,6 +183,7 @@ const handleCreateAttachmentChange = async (event: Event) => {
   uploadingAttachments.value = true
   try {
     for (const file of targetFiles) {
+      if (!validUpload()) return
       if (!file.type.startsWith('image/')) {
         showAppWarning(`文件 ${file.name} 不是图片，已跳过`)
         continue
@@ -184,13 +193,16 @@ const handleCreateAttachmentChange = async (event: Event) => {
         continue
       }
       const attachment = await uploadClientFeedbackAttachment(file)
+      if (!validUpload()) return
       createAttachments.value = [...createAttachments.value, attachment]
     }
+    if (!validUpload()) return
     showAppSuccess('附件上传完成，可随反馈单一并提交')
   } catch (error) {
+    if (!validUpload()) return
     showAppError(extractErrorMessage(error, '附件上传失败，请稍后重试'))
   } finally {
-    uploadingAttachments.value = false
+    if (validUpload()) uploadingAttachments.value = false
     if (input) {
       input.value = ''
     }
@@ -198,6 +210,7 @@ const handleCreateAttachmentChange = async (event: Event) => {
 }
 
 const handleRemoveAttachment = (attachmentIndex: number) => {
+  if (creating.value) return
   createAttachments.value = createAttachments.value.filter((_, index) => index !== attachmentIndex)
 }
 
@@ -215,6 +228,7 @@ const handlePreviewAttachment = (attachment: FeedbackConversationMessageAttachme
 }
 
 const handleCreateConversation = async () => {
+  if (creating.value || uploadingAttachments.value) return
   if (!currentClientUser.value) {
     showAppWarning('当前登录状态异常，请重新进入客户端后重试')
     return
@@ -234,6 +248,10 @@ const handleCreateConversation = async () => {
     return
   }
 
+  const generation = ++submitGeneration
+  const userId = currentClientUser.value?.id
+  const isCurrent = () => pageActive && generation === submitGeneration && currentClientUser.value?.id === userId
+  const attachments = [...createAttachments.value]
   creating.value = true
   try {
     const createdRecord = await createClientFeedbackConversation({
@@ -248,14 +266,16 @@ const handleCreateConversation = async () => {
       reproductionSteps: isBugMode.value ? createForm.reproductionSteps : undefined,
       contactPreference: isBugMode.value ? createForm.contactPreference : undefined,
       tags: isBugMode.value ? parseTagText(createForm.tagText) : undefined,
-      attachments: createAttachments.value,
+      attachments,
     })
 
+    if (!isCurrent()) return
     showAppSuccess('反馈已提交，正在跳转到反馈单详情页')
     await router.replace({
       path: `/client/feedback/${createdRecord.id}`,
     })
   } catch (error) {
+    if (!isCurrent()) return
     void showCriticalErrorDialog(error, {
       title: '反馈提交失败',
       fallback: '反馈提交失败，请稍后重试',
@@ -477,7 +497,7 @@ onMounted(async () => {
             <el-button
               type="default"
               plain
-              :disabled="uploadingAttachments || createAttachments.length >= FEEDBACK_ATTACHMENT_LIMIT"
+              :disabled="creating || uploadingAttachments || createAttachments.length >= FEEDBACK_ATTACHMENT_LIMIT"
               @click="openAttachmentPicker"
             >
               {{ uploadingAttachments ? '上传中...' : hasCreateAttachments ? '继续添加图片' : '上传图片附件' }}
@@ -535,7 +555,7 @@ onMounted(async () => {
         class="mt-4 w-full"
         type="primary"
         size="large"
-        :disabled="creating"
+        :disabled="creating || uploadingAttachments"
         @click="handleCreateConversation"
       >
         {{ creating ? '提交中...' : '提交反馈并进入会话' }}
