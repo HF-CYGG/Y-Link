@@ -1493,13 +1493,63 @@ const syncMallViewportAfterRender = async () => {
 
 const cartDrawerVisible = ref(false)
 const checkoutDrawerVisible = ref(false)
+type CartDrawer = 'cart' | 'checkout'
+const drawerHandoff = ref<CartDrawer | null>(null)
+let checkoutFromCart = false
+let drawerHandoffGeneration = 0
+let drawerHandoffOwner: string | undefined
+let cartReturnFocus: HTMLElement | null = null
+const drawerCloseState = { cart: { closed: false, released: false }, checkout: { closed: false, released: false } }
+const beginDrawerHandoff = (target: CartDrawer) => {
+  if (drawerHandoff.value === target) return
+  drawerHandoffGeneration += 1
+  drawerHandoffOwner = clientAuthStore.currentUser?.id
+  drawerHandoff.value = target
+  const source = target === 'cart' ? 'checkout' : 'cart'
+  drawerCloseState[source] = { closed: false, released: false }
+}
+const completeDrawerHandoff = async (source: CartDrawer) => {
+  const target = source === 'cart' ? 'checkout' : 'cart'
+  if (drawerHandoff.value !== target || !drawerCloseState[source].closed || !drawerCloseState[source].released) return
+  const generation = drawerHandoffGeneration
+  // Element Plus 的无参通知发生在焦点恢复之前；等其同步释放完成再开启新焦点陷阱。
+  await nextTick()
+  if (!mallRuntimeActive || generation !== drawerHandoffGeneration || drawerHandoff.value !== target || drawerHandoffOwner !== clientAuthStore.currentUser?.id) return
+  drawerHandoff.value = null
+  if (target === 'cart') cartDrawerVisible.value = true
+  else checkoutDrawerVisible.value = true
+}
+const finishCartClose = () => { drawerCloseState.cart.closed = true; void completeDrawerHandoff('cart') }
+const finishCheckoutClose = () => { drawerCloseState.checkout.closed = true; void completeDrawerHandoff('checkout') }
+const handleDrawerCloseAutoFocus = (source: CartDrawer) => {
+  drawerCloseState[source].released = true
+  void completeDrawerHandoff(source)
+}
+const restoreCartFocus = () => {
+  const target = cartReturnFocus
+  cartReturnFocus = null
+  if (mallRuntimeActive && cartDrawerVisible.value && target?.isConnected && target.getClientRects().length && !target.matches(':disabled')) target.focus({ preventScroll: true })
+}
+const prepareCheckoutReturn = () => {
+  if (checkoutFromCart && mallRuntimeActive) beginDrawerHandoff('cart')
+}
+const closeCheckout = () => {
+  prepareCheckoutReturn()
+  checkoutDrawerVisible.value = false
+}
+watch(() => clientAuthStore.currentUser?.id, () => {
+  drawerHandoffGeneration += 1; drawerHandoff.value = null; cartReturnFocus = null; checkoutFromCart = false
+  cartDrawerVisible.value = false; checkoutDrawerVisible.value = false
+}, { flush: 'sync' })
 
 const openCartDrawer = () => {
+  if (drawerHandoff.value || checkoutDrawerVisible.value) return
   miniCartVisible.value = false
   cartDrawerVisible.value = true
 }
 
 const goToCheckout = () => {
+  if (drawerHandoff.value || checkoutDrawerVisible.value) return
   if (!clientCartStore.selectedItems.length) {
     if (clientCartStore.validItems.length > 0) {
       // 若用户尚未主动勾选，则默认全选有效商品，减少从商城直达结算的操作成本。
@@ -1511,8 +1561,13 @@ const goToCheckout = () => {
   }
 
   miniCartVisible.value = false
-  cartDrawerVisible.value = false
-  checkoutDrawerVisible.value = true
+  checkoutFromCart = cartDrawerVisible.value
+  if (checkoutFromCart) {
+    const focused = globalThis.document?.activeElement
+    cartReturnFocus = focused instanceof HTMLElement && focused.closest('[role="dialog"]') ? focused : null
+    beginDrawerHandoff('checkout'); cartDrawerVisible.value = false
+  }
+  else checkoutDrawerVisible.value = true
 }
 
 // 切离商城路由时立即收拢 mini-cart：
@@ -1554,6 +1609,9 @@ const activateMallRuntime = () => {
 
 const deactivateMallRuntime = () => {
   stopMallFeedback()
+  cartDrawerVisible.value = false
+  checkoutDrawerVisible.value = false
+  drawerHandoffGeneration += 1; drawerHandoff.value = null; cartReturnFocus = null; checkoutFromCart = false
   if (!mallRuntimeActive) {
     return
   }
@@ -1639,15 +1697,6 @@ onBeforeUnmount(() => {
     :style="{ '--mall-floating-occlusion': `${floatingOcclusion}px` }"
   >
     <Teleport v-if="shouldShowMobileSearchEntry" to="body">
-      <button
-        type="button"
-        class="mall-mobile-search-trigger mall-mobile-search-trigger--floating"
-        :class="{ 'is-hidden': mobileSearchVisible }"
-        @click="openMobileSearch"
-      >
-        <el-icon><Search /></el-icon>
-        <span>搜索</span>
-      </button>
       <Transition name="mall-mobile-search">
         <div v-if="mobileSearchVisible" class="mall-mobile-search-overlay" @click.self="closeMobileSearch">
           <section class="mall-mobile-search-sheet">
@@ -1744,6 +1793,18 @@ onBeforeUnmount(() => {
         <p class="mall-announcement-dialog__content">{{ mallAnnouncementText }}</p>
       </section>
     </ElDialog>
+    <div v-if="shouldShowMobileSearchEntry && (loading || blockingRequestError || !products.length || (searchMode && !searchResults.length))" class="mall-sort-row">
+          <el-button
+            v-if="shouldShowMobileSearchEntry"
+            class="mall-mobile-search-trigger"
+            aria-label="搜索商品"
+            :aria-expanded="mobileSearchVisible"
+            @click="openMobileSearch"
+          >
+            <el-icon><Search /></el-icon>
+            <span>搜索</span>
+          </el-button>
+    </div>
     <div v-if="loading" class="grid gap-3 rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
       <div v-for="index in 6" :key="index" class="h-[5.8rem] animate-pulse rounded-2xl bg-slate-100 dark:bg-white/10" />
     </div>
@@ -1774,6 +1835,16 @@ onBeforeUnmount(() => {
 
     <template v-else>
       <div v-if="searchMode" class="mall-sort-row">
+          <el-button
+            v-if="shouldShowMobileSearchEntry"
+            class="mall-mobile-search-trigger"
+            aria-label="搜索商品"
+            :aria-expanded="mobileSearchVisible"
+            @click="openMobileSearch"
+          >
+            <el-icon><Search /></el-icon>
+            <span>搜索</span>
+          </el-button>
         <div class="mall-sort-control" :class="{ 'is-animating': sortModeAnimating }" role="group" aria-label="商品排序">
           <button
             v-for="option in productSortOptions"
@@ -1897,6 +1968,16 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <div class="mall-sort-row mall-sort-row--category">
+          <el-button
+            v-if="shouldShowMobileSearchEntry"
+            class="mall-mobile-search-trigger"
+            aria-label="搜索商品"
+            :aria-expanded="mobileSearchVisible"
+            @click="openMobileSearch"
+          >
+            <el-icon><Search /></el-icon>
+            <span>搜索</span>
+          </el-button>
         <div class="mall-sort-control" :class="{ 'is-animating': sortModeAnimating }" role="group" aria-label="商品排序">
           <button
             v-for="option in productSortOptions"
@@ -2313,13 +2394,15 @@ onBeforeUnmount(() => {
 
     <ElDrawer
       v-model="cartDrawerVisible"
+      @closed="finishCartClose"
+      @opened="restoreCartFocus"
+      @close-auto-focus="handleDrawerCloseAutoFocus('cart')"
       title="购物车"
       direction="btt"
       size="92%"
       append-to-body
       :with-header="false"
       class="client-drawer-responsive"
-      destroy-on-close
     >
       <ClientCartView
         @close="cartDrawerVisible = false"
@@ -2329,6 +2412,9 @@ onBeforeUnmount(() => {
 
     <ElDrawer
       v-model="checkoutDrawerVisible"
+      @closed="finishCheckoutClose"
+      @close="prepareCheckoutReturn"
+      @close-auto-focus="handleDrawerCloseAutoFocus('checkout')"
       title="确认订单"
       direction="btt"
       size="92%"
@@ -2338,7 +2424,8 @@ onBeforeUnmount(() => {
       destroy-on-close
     >
       <ClientCheckoutView
-        @close="checkoutDrawerVisible = false"
+        :active="checkoutDrawerVisible"
+        @close="closeCheckout"
       />
     </ElDrawer>
 
@@ -3350,6 +3437,8 @@ onBeforeUnmount(() => {
   grid-column: 1 / -1;
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  gap: 0.5rem;
   margin-top: -0.1rem;
   margin-bottom: 0.1rem;
 }
@@ -3428,23 +3517,6 @@ onBeforeUnmount(() => {
   box-shadow:
     0 10px 22px rgba(15, 23, 42, 0.14),
     0 0 0 1px rgba(255, 255, 255, 0.9) inset;
-}
-
-.mall-mobile-search-trigger--floating {
-  position: fixed;
-  left: 50%;
-  transform: translateX(-50%);
-  top: calc(env(safe-area-inset-top) + 0.95rem);
-  z-index: 220;
-  transition:
-    opacity var(--ylink-motion-normal) var(--ylink-motion-ease),
-    visibility var(--ylink-motion-normal) var(--ylink-motion-ease);
-}
-
-.mall-mobile-search-trigger--floating.is-hidden {
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
 }
 
 .mall-search-launcher__icon {

@@ -534,7 +534,7 @@ const handleSubmit = async () => {
 </script>
 
 <template>
-  <div class="h-full flex flex-col bg-[var(--ylink-color-bg)]">
+  <div class="client-checkout h-full flex flex-col bg-[var(--ylink-color-bg)]" :class="{ 'client-checkout--standalone': props.standalone }">
     <div class="sticky top-0 z-10 flex items-center gap-3 bg-[var(--ylink-color-surface)] px-4 py-3 shadow-sm">
       <button type="button" class="flex h-8 w-8 items-center justify-center rounded-full hover:bg-slate-100 dark:hover:bg-white/10" @click="handleBack">
         <el-icon :size="20"><ArrowLeft /></el-icon>
@@ -724,6 +724,13 @@ const handleSubmit = async () => {
 </template>
 
 <style scoped>
+/* 独立路由与公共底栏共存；抽屉继续沿用贴底摘要，不继承路由页的导航留白。 */
+.client-checkout--standalone > .client-cart-summary {
+  bottom: calc(var(--client-tab-bar-clearance, 0px) + 0.75rem);
+}
+.client-checkout--standalone > section {
+  padding-bottom: calc(8rem + var(--client-tab-bar-clearance, 0px) + 0.75rem);
+}
 .pb-safe {
   padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
 }

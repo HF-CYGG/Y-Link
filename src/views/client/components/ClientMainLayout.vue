@@ -27,7 +27,7 @@ const clientCartStore = useClientCartStore(pinia)
 const currentRoute = computed(() => router.currentRoute.value)
 
 clientCartStore.initialize(clientAuthStore.currentUser?.id)
-const transitionName = ref<'slide-left' | 'slide-right'>('slide-left')
+const transitionName = ref<'slide-left' | 'slide-right' | 'client-tab-fade'>('slide-left')
 
 const displayName = computed(() => {
   return clientAuthStore.currentUser?.username
@@ -151,7 +151,9 @@ watch(
   (nextPath, previousPath) => {
     const nextDepth = resolvePathDepth(nextPath)
     const previousDepth = resolvePathDepth(previousPath || '/client')
-    transitionName.value = nextDepth >= previousDepth ? 'slide-left' : 'slide-right'
+    const rootPages = ['/client/mall', '/client/orders', '/client/profile']
+    transitionName.value = rootPages.includes(nextPath.split('?')[0] ?? '') && rootPages.includes((previousPath || '').split('?')[0] ?? '')
+      ? 'client-tab-fade' : nextDepth >= previousDepth ? 'slide-left' : 'slide-right'
   },
   { immediate: true },
 )
@@ -425,16 +427,10 @@ const handleLogout = async () => {
 }
 
 .client-main-layout__viewport :deep(.slide-left-enter-from),
-.client-main-layout__viewport :deep(.slide-right-enter-from) {
-  opacity: 0;
-  transform: translate3d(0, 8px, 0);
-}
+.client-main-layout__viewport :deep(.slide-right-leave-to) { opacity: 0; transform: translate3d(12px, 0, 0); }
 
 .client-main-layout__viewport :deep(.slide-left-leave-to),
-.client-main-layout__viewport :deep(.slide-right-leave-to) {
-  opacity: 0;
-  transform: translate3d(0, -6px, 0);
-}
+.client-main-layout__viewport :deep(.slide-right-enter-from) { opacity: 0; transform: translate3d(-12px, 0, 0); }
 
 @media (max-width: 768px) {
   .client-main-layout {
@@ -471,5 +467,18 @@ const handleLogout = async () => {
 .dark .client-main-layout__tab {
   border-color: rgba(255, 255, 255, 0.08);
   background: color-mix(in srgb, var(--ylink-color-surface) 88%, #000000 12%);
+}
+</style>
+
+<style scoped>
+.client-main-layout__viewport :deep(.client-tab-fade-enter-active),
+.client-main-layout__viewport :deep(.client-tab-fade-leave-active) { transition: opacity var(--ylink-motion-fast, 160ms) ease; }
+.client-main-layout__viewport :deep(.client-tab-fade-enter-from),
+.client-main-layout__viewport :deep(.client-tab-fade-leave-to) { opacity: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .client-main-layout__viewport :deep(.client-tab-fade-enter-active),
+  .client-main-layout__viewport :deep(.client-tab-fade-leave-active),
+  .client-main-layout__viewport :deep(.slide-left-enter-active), .client-main-layout__viewport :deep(.slide-left-leave-active),
+  .client-main-layout__viewport :deep(.slide-right-enter-active), .client-main-layout__viewport :deep(.slide-right-leave-active) { transition: none; transform: none; }
 }
 </style>
