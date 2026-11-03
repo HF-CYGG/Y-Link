@@ -61,6 +61,7 @@ const REQUIRED_TABLES = [
 ] as const
 
 const REQUIRED_COLUMNS = [
+  ['sys_user', 'governance_permissions_json'],
   ...['conversation_id', 'client_user_id', 'product_id', 'sku_id', 'product_name_snapshot', 'product_code_snapshot', 'sku_code_snapshot', 'spec_text_snapshot', 'quantity', 'latest_pickup_at', 'remark', 'status', 'handled_at', 'client_request_id', 'payload_digest', 'created_at', 'updated_at'].map((columnName) => ['client_restock_request', columnName]),
   ...['client_user_id', 'client_request_id', 'payload_digest', 'restock_request_id', 'created_at'].map((columnName) => ['client_restock_request_key', columnName]),
   // 050：YZ 通用 SKU 编码体系新增字段，需与 mysql-migration-runner 的 MYSQL_REQUIRED_COLUMNS 保持同一口径。
@@ -200,6 +201,7 @@ interface ColumnFixture {
 }
 
 const REQUIRED_MANUAL_OUTBOUND_COLUMN_DEFINITIONS = new Map<string, ColumnFixture>([
+  ['sys_user.governance_permissions_json', { dataType: 'text', columnType: 'text', isNullable: 'YES', characterMaximumLength: 65535 }],
   ...['client_restock_request', 'client_restock_request_key'].flatMap((tableName): Array<[string, ColumnFixture]> => ['client_request_id', 'payload_digest'].map((columnName) => [`${tableName}.${columnName}`, { dataType: 'varchar', columnType: 'varchar(64)', isNullable: 'NO', characterMaximumLength: 64 }])),
   ['client_restock_request.quantity', { dataType: 'int', columnType: 'int', isNullable: 'NO', characterMaximumLength: null }],
   ['client_restock_request.latest_pickup_at', { dataType: 'datetime', columnType: 'datetime(6)', isNullable: 'NO', characterMaximumLength: null }],
@@ -1341,3 +1343,15 @@ restrictLocationStockSku.foreignKeys.get(objectKey('inv_sku_location_stock', 'fk
 await expectSchemaFailure(restrictLocationStockSku, ['外键 inv_sku_location_stock.sku_id 必须使用 ON DELETE CASCADE', '060_sku_location_stock.sql'])
 
 console.log('[mysql-schema-contract-verify] MySQL 启动结构契约验证通过')
+
+// 治理覆盖必须是可空文本；缺列、错类型或 NOT NULL 均在对外启动前失败。
+const missingGovernanceColumn = createCompleteFixture()
+missingGovernanceColumn.columns.delete(objectKey('sys_user', 'governance_permissions_json'))
+await expectSchemaFailure(missingGovernanceColumn, ['字段 sys_user.governance_permissions_json', '063_sys_user_governance_permissions.sql'])
+const nonNullableGovernance = createCompleteFixture()
+nonNullableGovernance.columnDefinitions.get(objectKey('sys_user', 'governance_permissions_json'))!.isNullable = 'NO'
+await expectSchemaFailure(nonNullableGovernance, ['字段 sys_user.governance_permissions_json 必须允许 NULL'])
+const wrongGovernanceType = createCompleteFixture()
+wrongGovernanceType.columnDefinitions.get(objectKey('sys_user', 'governance_permissions_json'))!.dataType = 'varchar'
+await expectSchemaFailure(wrongGovernanceType, ['字段 sys_user.governance_permissions_json 类型应为 text'])
+console.log('治理权限 MySQL 结构契约通过（只读替身，不代表真实 MySQL 并发验证）')

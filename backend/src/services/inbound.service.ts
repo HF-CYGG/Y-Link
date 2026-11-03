@@ -21,8 +21,8 @@ import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.
 import { MAX_DATABASE_INT, MAX_INBOUND_ORDER_ITEM_COUNT } from '../constants/web-resource-limits.js'
 import { assertPermanentDeletePassword } from '../utils/permanent-delete-password.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
-import { buildSkuLogFields, snapshotSkuStock } from './inventory-ledger.service.js'
-import { formatLocationDeductions, reconcileSkuLocationStocks } from './sku-location-stock.service.js'
+import { buildSkuLogFields, persistLockedInventoryStocks, snapshotSkuStock } from './inventory-ledger.service.js'
+import { formatLocationDeductions, reconcileSkuLocationStockTransitions } from './sku-location-stock.service.js'
 
 export interface SubmitInboundItemInput {
   productId: string
@@ -863,9 +863,7 @@ class InboundService {
           throw new BizError(`送货单“${order.showNo}”的原始入库流水与明细不一致，无法安全冲销`, 409)
         }
 
-        const reversalItems: Array<{ productId: string; skuId: string; qty: number }> = []
-        const productRepository = manager.getRepository(BaseProduct)
-        const skuRepository = manager.getRepository(BaseProductSku)
+        const reversalItems = [...quantitiesBySku.values()]
         const inventoryLogRepository = manager.getRepository(InventoryLog)
         failureReason = 'product_missing'
         const { rows: lockedProducts, map: productMap } = await this.loadAndLockInboundProducts(
@@ -877,7 +875,7 @@ class InboundService {
         const skuQuantities = [...quantitiesBySku.values()]
         const skuIds = skuQuantities.map((item) => item.skuId)
         failureReason = 'sku_missing_or_retired'
-        const { rows: lockedSkus } = await this.loadAndLockInboundSkus(
+        const { rows: lockedSkus, map: skuMap } = await this.loadAndLockInboundSkus(
           manager,
           skuIds,
           `送货单“${order.showNo}”关联的入库 SKU 不存在，无法安全冲销`,
@@ -925,26 +923,26 @@ class InboundService {
           }
         }
 
-        for (const sku of lockedSkus) {
-          const item = quantitiesBySku.get(`${sku.productId}::${sku.id}`)
-          const product = productMap.get(String(sku.productId))
-          if (!item || !product || String(sku.productId) !== item.productId) {
+        const inventoryLogs: InventoryLog[] = []
+        const locationSnapshots: Array<Pick<BaseProductSku, 'id' | 'locationId' | 'currentStock'>> = []
+        for (const item of items) {
+          const sku = skuMap.get(String(item.skuId))
+          const product = productMap.get(String(item.productId))
+          if (!sku || !product || String(sku.productId) !== String(item.productId)) {
             throw new BizError(`送货单“${order.showNo}”的入库 SKU 归属异常，无法安全冲销`, 409)
           }
+          const qty = Number(item.qty)
           const beforeCurrentStock = Number(product.currentStock)
-          const afterCurrentStock = beforeCurrentStock - item.qty
+          const afterCurrentStock = beforeCurrentStock - qty
           const skuBefore = snapshotSkuStock(sku)
-          sku.currentStock = Number(sku.currentStock) - item.qty
+          sku.currentStock = Number(sku.currentStock) - qty
           product.currentStock = afterCurrentStock
-          await skuRepository.save(sku)
-          await productRepository.save(product)
-          // 冲销按“先扣主库位、不够再扣其他库位”规整分库位件数，扣到的其他库位写进流水备注。
-          const locationNote = formatLocationDeductions((await reconcileSkuLocationStocks(manager, [sku])).get(String(sku.id)))
-          await inventoryLogRepository.save(inventoryLogRepository.create({
+          locationSnapshots.push({ id: sku.id, locationId: sku.locationId, currentStock: sku.currentStock })
+          inventoryLogs.push(inventoryLogRepository.create({
             productId: String(product.id),
             ...buildSkuLogFields(sku, skuBefore),
             changeType: 'inbound_reverse',
-            changeQty: -item.qty,
+            changeQty: -qty,
             beforeCurrentStock,
             afterCurrentStock,
             beforePreorderedStock: Number(product.preOrderedStock),
@@ -954,10 +952,17 @@ class InboundService {
             operatorName: actor.displayName || actor.username,
             refType: 'biz_inbound_order',
             refId: order.id,
-            remark: [`冲销已入库送货单 ${order.showNo}；SKU ${item.skuId}；数量 ${item.qty}`, locationNote].filter(Boolean).join('；').slice(0, 255),
+            remark: `冲销已入库送货单 ${order.showNo}；SKU ${item.skuId}；数量 ${qty}`,
           }))
-          reversalItems.push(item)
         }
+
+        await persistLockedInventoryStocks(manager, { products: lockedProducts, skus: lockedSkus, columns: ['currentStock'] })
+        // 一次锁定分库位行，按每条明细的扣减后快照连续规整，保留逐条备注归属。
+        const deductions = await reconcileSkuLocationStockTransitions(manager, locationSnapshots)
+        inventoryLogs.forEach((log, index) => {
+          log.remark = [log.remark, formatLocationDeductions(deductions[index])].filter(Boolean).join('；').slice(0, 255)
+        })
+        await inventoryLogRepository.save(inventoryLogs)
 
         failureReason = 'order_update_failed'
         order.isDeleted = true
@@ -1333,6 +1338,8 @@ class InboundService {
         }
       }
 
+      const inventoryLogRepository = manager.getRepository(InventoryLog)
+      const inventoryLogs: InventoryLog[] = []
       for (const row of items) {
         const product = productMap.get(String(row.productId))
         const sku = row.skuId ? skuMap.get(String(row.skuId)) : null
@@ -1348,11 +1355,8 @@ class InboundService {
 
         product.currentStock = beforeCurrentStock + qty
         sku.currentStock = beforeSkuCurrentStock + qty
-        await manager.getRepository(BaseProductSku).save(sku)
-        await manager.getRepository(BaseProduct).save(product)
-
-        await manager.getRepository(InventoryLog).save(
-          manager.getRepository(InventoryLog).create({
+        inventoryLogs.push(
+          inventoryLogRepository.create({
             productId: product.id,
             ...buildSkuLogFields(sku, skuBefore),
             changeType: 'inbound_sys',
@@ -1369,6 +1373,9 @@ class InboundService {
           })
         )
       }
+
+      await persistLockedInventoryStocks(manager, { products: productMap.values(), skus: skuMap.values(), columns: ['currentStock'] })
+      await inventoryLogRepository.save(inventoryLogs)
 
       order.status = 'verified'
       order.verifiedAt = new Date()

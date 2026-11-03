@@ -230,7 +230,17 @@ try {
   await api.startAdminWebAuthnLogin({})
   await api.startAdminWebAuthnLogin({ captchaId: 'captcha-1', code: '1234' })
   const login = await api.verifyAdminWebAuthnLogin({ challengeId: 'login-1', response: { id: 'key', rawId: 'key', type: 'public-key', response: {}, clientExtensionResults: {} } })
-  assert.ok(login.user.permissions.includes('users:view'), '密钥登录结果须归一化权限，供路由守卫复用')
+  assert.deepEqual(login.user.permissions, [], '服务端显式空权限不得按管理员角色扩权')
+  const loginResponse = responses.get('/auth/webauthn/login/verify')
+  // 旧快照缺失权限时仍须兼容角色默认；显式权限只去重，不补授其他权限。
+  const { permissions: _permissions, ...legacyUser } = loginResponse.user
+  responses.set('/auth/webauthn/login/verify', { ...loginResponse, user: legacyUser })
+  const legacyLogin = await api.verifyAdminWebAuthnLogin({ challengeId: 'login-1', response: { id: 'key', rawId: 'key', type: 'public-key', response: {}, clientExtensionResults: {} } })
+  assert.ok(legacyLogin.user.permissions.includes('users:view'), '密钥登录结果须归一化权限，供路由守卫复用')
+  responses.set('/auth/webauthn/login/verify', { ...loginResponse, user: { ...loginResponse.user, permissions: ['users:view', 'users:view'] } })
+  const scopedLogin = await api.verifyAdminWebAuthnLogin({ challengeId: 'login-1', response: { id: 'key', rawId: 'key', type: 'public-key', response: {}, clientExtensionResults: {} } })
+  assert.deepEqual(scopedLogin.user.permissions, ['users:view'], '显式权限须去重且不得扩权')
+  responses.set('/auth/webauthn/login/verify', loginResponse)
   await api.startAdminWebAuthnRegistration({ name: '新密钥', kind: 'security_key', currentPassword: '仅测试', code: '123456' })
   await api.startAdminWebAuthnRegistration({ name: '第二因素密钥', kind: 'security_key', usage: 'second_factor', currentPassword: '仅测试' })
   await api.startAdminMfaWebAuthnLogin('仅测试票据')

@@ -7,7 +7,7 @@
  */
 
 import { AppDataSource } from '../config/data-source.js'
-import { resolvePermissionsByRole, type PermissionCode } from '../constants/auth-permissions.js'
+import { resolveUserPermissions, type PermissionCode } from '../constants/auth-permissions.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import {
   CLIENT_USER_ACCOUNT_TYPES,
@@ -37,6 +37,7 @@ import { randomBytes } from 'node:crypto'
 import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
 import {
   isAccountCurrentlyDeactivated,
+  assertSysAccountGovernancePermission,
   lockActiveSysAccountForBusiness,
   lockSysAccountsInStableOrder,
 } from './account-business-guard.service.js'
@@ -512,7 +513,7 @@ export class ClientUserManageService {
       || lockedActor.status !== 'enabled'
       || isAccountCurrentlyDeactivated(lockedActor)
       || lockedActor.role !== 'admin'
-      || !resolvePermissionsByRole(lockedActor.role).includes(requiredPermission)
+      || !resolveUserPermissions(lockedActor).includes(requiredPermission)
     ) {
       throw new BizError('当前管理员账号已失效或权限不足', 403)
     }
@@ -607,7 +608,8 @@ export class ClientUserManageService {
 
     try {
       return await runInTransaction(async (manager) => {
-        await lockActiveSysAccountForBusiness(manager, actor.userId)
+        const lockedActor = await lockActiveSysAccountForBusiness(manager, actor.userId)
+        assertSysAccountGovernancePermission(lockedActor, 'users:create')
         const userRepo = manager.getRepository(ClientUser)
         const latestDepartmentConfig = await systemConfigService.getClientDepartmentConfigs(manager, { lockForUpdate: true })
         const normalizedItems = passwordCheckedItems.map((item, index) => {
@@ -791,7 +793,8 @@ export class ClientUserManageService {
 
     try {
       return await runInTransaction(async (manager) => {
-        await lockActiveSysAccountForBusiness(manager, actor.userId)
+        const lockedActor = await lockActiveSysAccountForBusiness(manager, actor.userId)
+        assertSysAccountGovernancePermission(lockedActor, 'users:create')
         const userRepo = manager.getRepository(ClientUser)
 
         if (profileKind === 'personal') {
@@ -983,7 +986,8 @@ export class ClientUserManageService {
     }
 
     const result = await runInTransaction(async (manager) => {
-      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const lockedActor = await lockActiveSysAccountForBusiness(manager, actor.userId)
+      assertSysAccountGovernancePermission(lockedActor, 'users:status')
       const userRepo = manager.getRepository(ClientUser)
       const sessionRepo = manager.getRepository(ClientUserSession)
       const mobileSessionRepo = manager.getRepository(ClientMobileSession)
@@ -1070,7 +1074,8 @@ export class ClientUserManageService {
     const email = this.normalizeEmail(input.email)
 
     const result = await runInTransaction(async (manager) => {
-      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const lockedActor = await lockActiveSysAccountForBusiness(manager, actor.userId)
+      assertSysAccountGovernancePermission(lockedActor, 'users:update')
       const userRepo = manager.getRepository(ClientUser)
       const sessionRepo = manager.getRepository(ClientUserSession)
       const mobileSessionRepo = manager.getRepository(ClientMobileSession)
@@ -1196,7 +1201,8 @@ export class ClientUserManageService {
     // scrypt 在事务外预先计算，避免在锁定账号行期间占用 SQLite 唯一写槽或在并发闸门排队。
     const newPasswordHash = await hashPassword(newPassword)
     const profile = await runInTransaction(async (manager) => {
-      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const lockedActor = await lockActiveSysAccountForBusiness(manager, actor.userId)
+      assertSysAccountGovernancePermission(lockedActor, 'users:reset_password')
       const userRepo = manager.getRepository(ClientUser)
       const sessionRepo = manager.getRepository(ClientUserSession)
       const mobileSessionRepo = manager.getRepository(ClientMobileSession)

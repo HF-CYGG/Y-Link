@@ -36,6 +36,9 @@ export class SysUser {
   @Column({ name: 'role', type: 'varchar', length: 32, default: 'operator', comment: '用户角色：admin/operator/supplier' })
   role!: UserRole
 
+  @Column({ name: 'governance_permissions_json', type: 'text', nullable: true, comment: '治理权限覆盖：NULL 沿用角色默认，JSON 空数组取消治理子集' })
+  governancePermissionsJson!: string | null
+
   @Index('idx_sys_user_status')
   @Column({ name: 'status', type: 'varchar', length: 32, default: 'enabled', comment: '用户状态：enabled/disabled' })
   status!: UserStatus

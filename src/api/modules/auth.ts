@@ -237,6 +237,9 @@ export interface UserSafeProfile extends AccountLifecycleFields {
   email: string | null
   role: UserRole
   permissions: PermissionCode[]
+  /** NULL 沿用角色默认；显式空数组取消治理子集，不影响正常业务权限。 */
+  governancePermissions?: PermissionCode[] | null
+  sessionsRevoked?: boolean
   status: UserStatus
   lastLoginAt: string | null
   createdAt: string
@@ -333,7 +336,7 @@ export interface ChangePasswordPayload {
  * - 若读取到旧版本本地快照，则按 role 自动补齐默认权限。
  */
 export const normalizeUserPermissions = (user: Pick<UserSafeProfile, 'role' | 'permissions'>): PermissionCode[] => {
-  if (Array.isArray(user.permissions) && user.permissions.length > 0) {
+  if (Array.isArray(user.permissions)) {
     return [...new Set(user.permissions)]
   }
 

@@ -9,17 +9,17 @@
  * 4. 金额、库存模式与订单类型在组件内统一格式化，确保表格端与移动端展示口径一致。
  * 维护说明：revision 请求使用订单 ID 与版本号抑制过期响应，不得用当前商品数据覆盖历史快照；合规草稿由父层拥有。
  */
-import { formatOrderKingdeeStatus } from '@/utils/kingdee-status'
+import { formatOrderKingdeeStatus, KINGDEE_STATUS_LABELS } from '@/utils/kingdee-status'
 
 
 
 import KingdeeRegistrationEditor from '@/components/common/KingdeeRegistrationEditor.vue'
 import dayjs from 'dayjs'
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { getOrderRevisions, type OrderDetailResult, type OrderRevisionRecord } from '@/api/modules/order'
+import { revisionActor, revisionSummary, revisionTime } from '../order-revision.helpers'
 import { useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
-import { showCriticalErrorDialog } from '@/utils/error-dialog'
 
 /**
  * 单据详情展示组件：
@@ -35,43 +35,70 @@ const props = defineProps<{
   canEditStandaloneComplianceFlags: boolean
   complianceForm: { hasCustomerOrder: boolean; isSystemApplied: boolean }
   complianceSaving: boolean
+  canEditSystemApplied: boolean
+  complianceRefreshRequired: 'conflict' | 'partial' | 'saved' | null
+  complianceFeedback: string
 }>()
 const emit = defineEmits<{
   navigate: [orderId: string]
   'update:hasCustomerOrder': [value: boolean]
   'update:isSystemApplied': [value: boolean]
   'save-compliance': []
+  'refresh-compliance': []
 }>()
 const authStore = useAuthStore(pinia)
 const canViewSystemNo = () => authStore.currentUser?.role === 'admin'
+const isMultiSourceOrder = computed(() => (props.order.merge.role === 'parent' && props.order.merge.children.length > 0)
+  || (props.order.sourcePreorderRegistrations?.length ?? 0) > 1)
+const singleRegistration = computed(() => {
+  const sources = props.order.sourcePreorderRegistrations ?? []
+  return !isMultiSourceOrder.value && sources.length === 1 && sources[0]?.sourceOrderId === props.order.id ? sources[0] : null
+})
+const canEditRegistration = computed(() => Boolean(authStore.currentUser?.permissions.includes('orders:update')) && !props.complianceSaving)
 
 const revisions = ref<OrderRevisionRecord[]>([])
 const revisionsLoading = ref(false)
+const revisionsError = ref(false)
+const showAllRevisions = ref(false)
+const expandedRevisions = ref<string[]>([])
+const visibleRevisions = computed(() => showAllRevisions.value ? revisions.value : revisions.value.slice(0, 3))
 let revisionRequestVersion = 0
 
-watch(
-  () => [props.order.id, props.order.editVersion] as const,
-  async () => {
+const loadRevisions = async () => {
     revisionRequestVersion += 1
     const requestVersion = revisionRequestVersion
+    const orderId = props.order.id
     revisionsLoading.value = true
+    revisionsError.value = false
     try {
-      const result = await getOrderRevisions(props.order.id)
+      const result = await getOrderRevisions(orderId)
       if (requestVersion === revisionRequestVersion) revisions.value = result
-    } catch (error) {
+    } catch {
       if (requestVersion !== revisionRequestVersion) return
       revisions.value = []
-      void showCriticalErrorDialog(error, {
-        title: '修订记录加载失败',
-        fallback: '订单详情已加载，但暂时无法读取修订时间线',
-        operation: '加载订单修订记录',
-      })
+      revisionsError.value = true
     } finally {
       if (requestVersion === revisionRequestVersion) revisionsLoading.value = false
     }
+}
+
+watch(
+  () => [props.order.id, props.order.editVersion] as const,
+  () => {
+    revisions.value = []
+    showAllRevisions.value = false
+    expandedRevisions.value = []
+    void loadRevisions()
   },
-  { immediate: true },
+  { immediate: true, flush: 'sync' },
 )
+onBeforeUnmount(() => { revisionRequestVersion += 1 })
+
+const toggleRevision = (id: string) => {
+  expandedRevisions.value = expandedRevisions.value.includes(id)
+    ? expandedRevisions.value.filter(item => item !== id)
+    : [...expandedRevisions.value, id]
+}
 
 const formatInventoryMode = (order: OrderDetailResult) => {
   if (order.inventoryMode === 'manual_applied') return '手工单（联动库存）'
@@ -142,16 +169,21 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
         <p class="text-sm font-semibold text-slate-900 dark:text-slate-100">合规状态确认</p>
         <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">仅部门单可编辑“是否有出库单”和“系统申请”。</p>
       </div>
+      <el-button v-if="canEditStandaloneComplianceFlags && complianceRefreshRequired" size="small" :loading="complianceSaving" @click="emit('refresh-compliance')">
+        {{ complianceRefreshRequired === 'saved' ? '刷新已保存状态' : '刷新并确认最新状态（保留输入）' }}
+      </el-button>
       <el-button
         v-if="canEditStandaloneComplianceFlags"
         size="small"
         type="primary"
         :loading="complianceSaving"
+        :disabled="Boolean(complianceRefreshRequired)"
         @click="emit('save-compliance')"
       >
         保存状态
       </el-button>
     </div>
+    <p v-if="complianceFeedback" role="status" class="mt-2 text-sm text-amber-700 dark:text-amber-300">{{ complianceFeedback }}</p>
     <div class="mt-3 grid gap-3 sm:grid-cols-2">
       <div class="rounded-xl bg-white px-3 py-3 dark:bg-[#141415]">
         <p class="text-xs text-slate-500 dark:text-slate-400">是否有出库单</p>
@@ -159,6 +191,7 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
           <el-switch
             v-if="canEditStandaloneComplianceFlags"
             :model-value="complianceForm.hasCustomerOrder"
+            :disabled="complianceSaving || complianceRefreshRequired === 'partial' || complianceRefreshRequired === 'saved'"
             inline-prompt
             active-text="是"
             inactive-text="否"
@@ -173,8 +206,9 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
         <p class="text-xs text-slate-500 dark:text-slate-400">金蝶状态</p>
         <div class="mt-2">
           <el-switch
-            v-if="canEditStandaloneComplianceFlags && order.inventoryMode !== 'o2o_preapplied'"
+            v-if="canEditSystemApplied"
             :model-value="complianceForm.isSystemApplied"
+            :disabled="complianceSaving || complianceRefreshRequired === 'saved'"
             inline-prompt
             active-text="已申请"
             inactive-text="未申请"
@@ -183,17 +217,28 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
           <span v-else class="text-sm font-medium text-slate-700 dark:text-slate-200">
             {{ formatOrderKingdeeStatus(order) }}
           </span>
+          <p v-if="canEditStandaloneComplianceFlags && !canEditSystemApplied" class="mt-1 text-xs text-slate-500 dark:text-slate-400">来源预订单未唯一确认，系统申请仅供查看。</p>
         </div>
       </div>
     </div>
   </div>
 
-  <section v-if="order.sourcePreorderRegistrations?.length" class="mb-5 space-y-3">
-    <p class="font-semibold">各来源金蝶登记</p>
-    <div v-for="source in order.sourcePreorderRegistrations" :key="source.sourceOrderId">
-      <p>{{ source.businessNo }} · {{ source.sourcePreorderNo || '未记录' }}</p>
-      <KingdeeRegistrationEditor v-if="source.sourcePreorderId" :order-id="source.sourcePreorderId" :registration="source" admin :can-edit="Boolean(authStore.currentUser?.permissions.includes('orders:update'))" @saved="emit('navigate', order.id)" />
-      <p v-else>来源预订单未记录</p>
+  <section v-if="isMultiSourceOrder" class="mb-5 rounded-2xl border border-slate-100 bg-slate-50/70 p-3 sm:p-4 dark:border-white/10 dark:bg-white/5">
+    <h3 class="mb-3 flex items-center gap-2 text-base font-semibold text-slate-800 dark:text-slate-100"><span class="inline-block h-2 w-2 rounded-full bg-brand" />各来源金蝶登记</h3>
+    <div class="space-y-3">
+      <p v-if="!order.sourcePreorderRegistrations?.length" class="text-sm text-slate-500 dark:text-slate-400">来源登记未记录，仅供查看。</p>
+      <div v-for="source in order.sourcePreorderRegistrations" :key="source.sourceOrderId" class="rounded-xl bg-white p-3 dark:bg-[#141415]">
+        <div class="flex flex-wrap items-start justify-between gap-2">
+          <p class="min-w-0 break-all text-sm font-semibold">来源出库业务号：{{ source.businessNo }}</p>
+          <el-tag size="small" effect="light">{{ source.kingdeeStatus === null ? '不适用' : KINGDEE_STATUS_LABELS[source.kingdeeStatus ?? 'unknown'] }}</el-tag>
+        </div>
+        <p class="mt-2 break-all text-xs text-slate-500 dark:text-slate-400">线上预订单号：{{ source.sourcePreorderNo || '未记录' }}</p>
+        <div class="mt-3 border-t border-slate-100 pt-3 dark:border-white/10">
+          <p class="mb-2 text-xs text-slate-500 dark:text-slate-400">金蝶单据编号</p>
+          <KingdeeRegistrationEditor v-if="source.sourcePreorderId" :key="source.sourcePreorderId" :order-id="source.sourcePreorderId" :registration="source" admin number-only :can-edit="canEditRegistration" @saved="emit('navigate', order.id)" />
+          <template v-else><p class="break-all text-sm">{{ source.kingdeeVoucherNo || '无' }}</p><p class="mt-1 text-xs text-slate-500 dark:text-slate-400">来源预订单未记录，仅供查看</p></template>
+        </div>
+      </div>
     </div>
   </section>
   <section class="mb-5 rounded-2xl border border-slate-100 bg-slate-50/70 p-3 sm:p-4 dark:border-white/10 dark:bg-white/5">
@@ -220,13 +265,18 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
       <el-descriptions-item label="金蝶状态">
         {{ formatOrderKingdeeStatus(order) }}
       </el-descriptions-item>
+      <el-descriptions-item v-if="!isMultiSourceOrder" label="金蝶单据编号" :span="isPhone ? 1 : 2">
+        <template v-if="order.orderType === 'walkin' || singleRegistration?.kingdeeStatus === null">不适用</template>
+        <KingdeeRegistrationEditor v-else-if="singleRegistration?.sourcePreorderId" :key="singleRegistration.sourcePreorderId" :order-id="singleRegistration.sourcePreorderId" :registration="singleRegistration" admin number-only :can-edit="canEditRegistration" @saved="emit('navigate', order.id)" />
+        <template v-else>
+          <span class="break-all">{{ singleRegistration?.kingdeeVoucherNo || '无' }}</span>
+          <p v-if="order.inventoryMode === 'o2o_preapplied' || order.sourceDocType === 'o2o_preorder'" class="mt-1 text-xs text-slate-500 dark:text-slate-400">来源预订单未记录，仅供查看</p>
+        </template>
+      </el-descriptions-item>
       <el-descriptions-item v-if="order.customerName" :label="order.merge.role === 'parent' ? '父单客户名称' : '客户名称'">{{ order.customerName }}</el-descriptions-item>
       <el-descriptions-item label="出单人">{{ order.issuerName || '-' }}</el-descriptions-item>
       <el-descriptions-item label="开单人">{{ order.creatorDisplayName || order.creatorUsername || '-' }}</el-descriptions-item>
       <el-descriptions-item label="总数量">{{ order.totalQty }}</el-descriptions-item>
-      <el-descriptions-item label="总金额">
-        <span class="text-base font-bold text-red-500">¥{{ formatAmount(order.totalAmount) }}</span>
-      </el-descriptions-item>
       <el-descriptions-item v-if="formatSourceDoc(order)" :label="order.merge.role === 'parent' ? '父单来源单据' : '来源单据'" :span="isPhone ? 1 : 2">{{ formatSourceDoc(order) }}</el-descriptions-item>
       <el-descriptions-item v-if="order.merge.role !== 'parent' && order.sourceDocType === 'o2o_preorder'" label="来源预订单领取人">
         {{ order.sourcePreorderPickupContact || '未记录' }}
@@ -359,19 +409,31 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
       show-icon
     />
     <div v-loading="revisionsLoading" class="min-h-12">
-      <p v-if="!revisionsLoading && revisions.length === 0" class="py-4 text-center text-sm text-slate-400">暂无内容修订记录</p>
+      <p v-if="revisionsLoading" class="py-4 text-center text-sm text-slate-500">正在加载修订记录…</p>
+      <div v-else-if="revisionsError" role="alert" class="rounded-xl bg-white p-3 text-sm text-slate-700 dark:bg-white/5 dark:text-slate-200">
+        <p>修订记录加载失败，请重试。</p>
+        <el-button class="mt-2" size="small" @click="loadRevisions">重试</el-button>
+      </div>
+      <p v-else-if="revisions.length === 0" class="py-4 text-center text-sm text-slate-400">暂无内容修订记录</p>
       <div v-else class="space-y-3 border-l-2 border-slate-200 pl-4 dark:border-white/10">
         <article
-          v-for="revision in revisions"
+          v-for="(revision, index) in visibleRevisions"
           :key="revision.id"
           class="relative rounded-xl bg-white px-3 py-2 text-sm dark:bg-white/5"
         >
           <span class="absolute -left-[1.3rem] top-3 h-2 w-2 rounded-full bg-brand" />
-          <div class="font-medium text-slate-800 dark:text-slate-100">版本 {{ revision.revisionNo }} · {{ revision.reason || '未填写原因' }}</div>
-          <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            {{ dayjs(revision.createdAt).format('YYYY-MM-DD HH:mm:ss') }} · {{ revision.actorDisplayName || revision.actorUsername }}
+          <div class="flex flex-wrap items-center gap-2">
+            <el-tag size="small">版本 V{{ revision.revisionNo }}</el-tag>
+            <span v-if="index === 0" class="text-xs font-medium text-brand">最近修订</span>
           </div>
+          <p class="mt-2 break-all text-xs text-slate-500 dark:text-slate-400">{{ revisionTime(revision.createdAt) }} · 操作者：{{ revisionActor(revision.actorDisplayName, revision.actorUsername) }}</p>
+          <p class="mt-2 break-all text-slate-800 dark:text-slate-100">修订原因：{{ revision.reason?.trim() || '未填写原因' }}</p>
+          <el-button link type="primary" class="mt-2" :aria-expanded="expandedRevisions.includes(revision.id)" @click="toggleRevision(revision.id)">{{ expandedRevisions.includes(revision.id) ? '收起变更' : '查看变更' }}</el-button>
+          <ul v-if="expandedRevisions.includes(revision.id)" class="mt-2 space-y-1 rounded-lg bg-slate-50 p-3 text-slate-700 dark:bg-white/5 dark:text-slate-200">
+            <li v-for="line in revisionSummary(revision.before, revision.after)" :key="line" class="break-all">{{ line }}</li>
+          </ul>
         </article>
+        <el-button v-if="revisions.length > 3" link type="primary" @click="showAllRevisions = !showAllRevisions">{{ showAllRevisions ? '收起' : '展开全部' }}</el-button>
       </div>
     </div>
   </section>

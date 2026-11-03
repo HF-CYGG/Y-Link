@@ -490,7 +490,7 @@ export const FEEDBACK_PRIORITY_META_MAP: Record<FeedbackIssuePriority, FeedbackI
 }
 
 export const FEEDBACK_ISSUE_TYPE_OPTIONS: Array<{ label: string; value: FeedbackIssueType; hint: string }> = [
-  { label: '补货需求', value: 'restock', hint: '选择缺货商品规格，填写期望数量和最晚取货时间。' },
+  { label: '补货需求', value: 'restock', hint: '选择商品规格，填写期望数量和最晚取货时间，有货也可申请。' },
   { label: '普通建议', value: 'suggestion', hint: '适合咨询、建议、体验反馈和一般诉求。' },
   { label: '专业 BUG', value: 'bug', hint: '适合存在明确异常、需要复现与排查的问题。' },
 ]
@@ -760,8 +760,8 @@ export const buildClientFeedbackNextStepPrompt = (
     const prompts: Record<RestockEffectiveStatus, Pick<ClientFeedbackNextStepPrompt, 'stageLabel' | 'recentAction' | 'nextStep'>> = {
       requested: { stageLabel: '等待受理补货需求', recentAction: '补货需求已登记，尚未生成订单或预留库存。', nextStep: '可在截止前等待客服处理；如有补充说明，可在当前会话留言。' },
       accepted: { stageLabel: '补货需求已受理', recentAction: '客服已受理本次需求，补货进度会在当前会话更新。', nextStep: '请在截止前关注公开消息；到货后仍需返回商城按现有流程下单。' },
-      expired: { stageLabel: '补货需求已过期', recentAction: '本次需求已超过最晚取货时间，不再作为活跃补货需求处理。', nextStep: '如仍需商品，可返回商城查看库存；当前规格仍缺货时可重新申请补货。' },
-      cancelled: { stageLabel: '补货需求已撤回', recentAction: '本次补货需求已结束，历史沟通记录仍可查看。', nextStep: '如仍有需要，可返回商城；当前规格仍缺货时可重新申请补货。' },
+      expired: { stageLabel: '补货需求已过期', recentAction: '本次需求已超过最晚取货时间，不再作为活跃补货需求处理。', nextStep: '如仍需商品，可返回商城查看库存；当前上架启用的规格可重新申请补货，有货也可登记需求。' },
+      cancelled: { stageLabel: '补货需求已撤回', recentAction: '本次补货需求已结束，历史沟通记录仍可查看。', nextStep: '如仍有需要，可返回商城；当前上架启用的规格可重新申请补货，有货也可登记需求。' },
       restocked: { stageLabel: '客服已标记补货完成', recentAction: '本次需求已标记为已补货，未自动生成订单或预留库存。', nextStep: '请返回商城查看当前库存，并按现有流程下单。' },
     }
     return { groupKey, groupLabel: groupMeta.label, ...prompts[conversation.restock.effectiveStatus] }
@@ -826,7 +826,7 @@ export const buildClientFeedbackNextStepPrompt = (
   }
 }
 
-/** 已结束的补货需求允许继续聊天；聊天不会恢复需求资格，下一次按商城库存重新申请或下单。 */
+/** 已结束的补货需求允许继续聊天；聊天不会恢复需求资格，下一次可重新申请补货，或按商城库存下单。 */
 export const buildClientFeedbackReplyHint = (conversation: FeedbackConversationRecord | null): string => {
   if (conversation?.restock && ['expired', 'cancelled', 'restocked'].includes(conversation.restock.effectiveStatus)) {
     return `可在当前会话继续交流。${buildClientFeedbackNextStepPrompt(conversation).nextStep}`
