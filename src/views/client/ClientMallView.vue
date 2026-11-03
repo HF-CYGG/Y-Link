@@ -33,7 +33,7 @@ import { resolveProductPlaceholder } from '@/utils/product-placeholder'
 import { resolveProductPreviewImage, resolveProductPreviewSku, resolveProductPreviewSmallImage, resolveSortedActivePreviewSkus } from '@/utils/product-preview'
 import { resolveO2oPriceView } from '@/utils/o2o-price'
 import { htmlToPlainText } from '@/utils/plain-text'
-import { flyToClientCart, triggerClientHaptic } from '@/utils/client-motion'
+import { flyToClientCart, shouldReduceClientMotion, triggerClientHaptic } from '@/utils/client-motion'
 import {
   buildClientSkuSelectionModel,
   resolveClientSkuSelection,
@@ -556,11 +556,34 @@ const isWechatMallScene = computed(() => {
 })
 
 // 结算栏脉冲动效只负责视觉反馈，不参与真实业务状态；通过短暂切换 class 保证重复加购时也能触发。
+const sortAnimations = new Set<Animation>()
+let sortGeneration = 0
+const warmupIdleIds = new Set<number>()
+const mallTimeouts = new Set<number>()
+const mallFrames = new Set<number>()
+let feedbackController = new AbortController()
+const scheduleMallTimeout = (callback: () => void, delay: number) => {
+  const id = window.setTimeout(() => { mallTimeouts.delete(id); callback() }, delay)
+  mallTimeouts.add(id); return id
+}
+const scheduleMallFrame = (callback: FrameRequestCallback) => {
+  const id = window.requestAnimationFrame((time) => { mallFrames.delete(id); callback(time) })
+  mallFrames.add(id); return id
+}
+const stopMallFeedback = () => {
+  feedbackController.abort()
+  sortGeneration += 1; sortModeAnimating.value = false
+  sortAnimations.forEach((animation) => animation.cancel()); sortAnimations.clear()
+  warmupIdleIds.forEach((id) => window.cancelIdleCallback?.(id)); warmupIdleIds.clear()
+  mallTimeouts.forEach((id) => window.clearTimeout(id)); mallTimeouts.clear()
+  mallFrames.forEach((id) => window.cancelAnimationFrame(id)); mallFrames.clear()
+  settlePulsing.value = false; miniCartBadgeBouncing.value = false
+}
 const triggerSettlePulse = () => {
   settlePulsing.value = false
-  globalThis.window.setTimeout(() => {
+  scheduleMallTimeout(() => {
     settlePulsing.value = true
-    globalThis.window.setTimeout(() => {
+    scheduleMallTimeout(() => {
       settlePulsing.value = false
     }, 360)
   }, 12)
@@ -571,9 +594,9 @@ let miniCartBadgeBounceTimer = 0
 const bumpMiniCartBadge = () => {
   miniCartBadgeBouncing.value = false
   globalThis.window.clearTimeout(miniCartBadgeBounceTimer)
-  globalThis.window.requestAnimationFrame(() => {
+  scheduleMallFrame(() => {
     miniCartBadgeBouncing.value = true
-    miniCartBadgeBounceTimer = globalThis.window.setTimeout(() => {
+    miniCartBadgeBounceTimer = scheduleMallTimeout(() => {
       miniCartBadgeBouncing.value = false
     }, 420)
   })
@@ -581,8 +604,11 @@ const bumpMiniCartBadge = () => {
 
 // 加购成功的统一视觉反馈：轻触震动 → 小圆点飞入购物车 → 落点时购物车脉冲与角标弹跳；减少动效时只保留脉冲。
 const celebrateCartAdd = (source?: Element | null) => {
+  if (shouldReduceClientMotion() || !mallRuntimeActive) return
+  const signal = feedbackController.signal
   triggerClientHaptic()
-  void flyToClientCart(source, miniCartIconRef.value).then(() => {
+  void flyToClientCart(source, miniCartIconRef.value, signal).then(() => {
+    if (signal.aborted || !mallRuntimeActive || shouldReduceClientMotion()) return
     triggerSettlePulse()
     bumpMiniCartBadge()
   })
@@ -630,10 +656,11 @@ const warmupProductImages = (items: O2oMallProduct[]) => {
     })
   }
   if (typeof globalThis.window.requestIdleCallback === 'function') {
-    globalThis.window.requestIdleCallback(warmup, { timeout: 800 })
+    const id = globalThis.window.requestIdleCallback(() => { warmupIdleIds.delete(id); if (mallRuntimeActive) warmup() }, { timeout: 800 })
+    warmupIdleIds.add(id)
     return
   }
-  globalThis.window.setTimeout(warmup, DEFAULT_PRODUCT_IMAGE_WARMUP_DELAY_MS)
+  scheduleMallTimeout(warmup, DEFAULT_PRODUCT_IMAGE_WARMUP_DELAY_MS)
 }
 
 const refreshStorefrontConfig = async (force = false) => {
@@ -876,12 +903,15 @@ const animateProductCardReorder = (previousRects: Map<string, DOMRect>) => {
           fill: 'both',
         },
       )
-      animation.addEventListener('finish', () => {
-        element.style.willChange = ''
-      }, { once: true })
-      animation.addEventListener('cancel', () => {
-        element.style.willChange = ''
-      }, { once: true })
+      sortAnimations.add(animation)
+      const releaseAnimation = () => {
+        sortAnimations.delete(animation)
+        const hasNewAnimation = [...sortAnimations].some((active) => (active.effect as KeyframeEffect | null)?.target === element)
+        if (!hasNewAnimation) element.style.willChange = ''
+        // finished 的填充效果仍留在元素上；显式取消后才完全释放。
+        animation.cancel()
+      }
+      void animation.finished.then(releaseAnimation, releaseAnimation)
     })
 
   return movedCards.length > 0 ? duration + Math.min(maxDelay, (movedCards.length - 1) * staggerStep) : 0
@@ -898,24 +928,17 @@ const resetProductListToTopForSortChange = async () => {
 }
 
 const handleSortModeChange = async (nextMode: ProductSortMode) => {
-  if (sortMode.value === nextMode || sortModeAnimating.value) {
-    return
-  }
+  if (sortMode.value === nextMode) return
+  const generation = ++sortGeneration
   const previousRects = captureProductCardRects()
-  sortModeAnimating.value = true
+  sortAnimations.forEach((animation) => animation.cancel()); sortAnimations.clear()
+  sortModeAnimating.value = false
   sortMode.value = nextMode
   await resetProductListToTopForSortChange()
   await nextTick()
-  try {
-    const animationDuration = animateProductCardReorder(previousRects)
-    if (animationDuration > 0) {
-      await new Promise((resolve) => globalThis.window.setTimeout(resolve, animationDuration))
-    }
-  } finally {
-    sortModeAnimating.value = false
-    await nextTick()
-    handleProductListScroll()
-  }
+  if (!mallRuntimeActive || generation !== sortGeneration) return
+  animateProductCardReorder(previousRects)
+  handleProductListScroll()
 }
 
 // 详情数量触顶提示：不限购（limitPerUser=0）时触顶只可能是库存不足，避免误报“限购上限”。
@@ -1196,7 +1219,7 @@ const lockCategoryScrollSession = (categoryKey: string, targetTop: number) => {
   pendingCategoryTargetTop.value = targetTop
   clearCategoryUnlockTimer()
   scheduleCategoryScrollSettleCheck(nextSessionId)
-  categoryScrollUnlockTimer.value = globalThis.window.setTimeout(() => {
+  categoryScrollUnlockTimer.value = scheduleMallTimeout(() => {
     // 兜底：滚动事件迟迟不来或被外部打断时，也要把会话收口到点击目标，不能一直锁着。
     if (currentLockedSessionId.value !== nextSessionId) {
       return
@@ -1212,7 +1235,7 @@ const lockCategoryScrollSession = (categoryKey: string, targetTop: number) => {
  */
 const scheduleCategoryScrollSettleCheck = (sessionId: number) => {
   clearCategoryScrollSettleTimer()
-  categoryScrollSettleTimer.value = globalThis.window.setTimeout(() => {
+  categoryScrollSettleTimer.value = scheduleMallTimeout(() => {
     if (currentLockedSessionId.value !== sessionId) {
       return
     }
@@ -1428,7 +1451,7 @@ const scheduleMallFloatingLayoutSync = () => {
   if (floatingOcclusionFrameId !== null || globalThis.window === undefined) {
     return
   }
-  floatingOcclusionFrameId = globalThis.window.requestAnimationFrame(() => {
+  floatingOcclusionFrameId = scheduleMallFrame(() => {
     floatingOcclusionFrameId = null
     if (!mallRuntimeActive) {
       return
@@ -1508,6 +1531,7 @@ watch(
 )
 
 const activateMallRuntime = () => {
+  if (feedbackController.signal.aborted) feedbackController = new AbortController()
   if (mallRuntimeActive) {
     return
   }
@@ -1529,6 +1553,7 @@ const activateMallRuntime = () => {
 }
 
 const deactivateMallRuntime = () => {
+  stopMallFeedback()
   if (!mallRuntimeActive) {
     return
   }
@@ -2248,39 +2273,40 @@ onBeforeUnmount(() => {
               <div class="client-detail-qty-row">
                 <span>数量</span>
                 <div class="client-detail-qty-control">
-                  <button
-                    type="button"
+                  <ElButton
+                    native-type="button"
                     class="client-qty-button"
                     :class="{ 'is-disabled': detailQty <= 1 }"
                     aria-label="减少数量"
                     :aria-disabled="detailQty <= 1"
                     @click="changeDetailQty(-1)"
-                  >-</button>
+                  >-</ElButton>
                   <ClientQtyInput :model-value="detailQty" aria-label="商品数量" @commit="commitDetailQty" />
-                  <button
-                    type="button"
+                  <ElButton
+                    native-type="button"
                     class="client-qty-button"
                     :class="{ 'is-disabled': detailQty >= detailMaxQty }"
                     aria-label="增加数量"
                     :aria-disabled="detailQty >= detailMaxQty"
                     @click="changeDetailQty(1)"
-                  >+</button>
+                  >+</ElButton>
                 </div>
               </div>
             </div>
           </div>
-          <button
-            type="button"
+          <ElButton
+            native-type="button"
             class="client-detail-cart-button"
             :class="`is-${detailActionMode}`"
             :disabled="detailActionMode === 'unavailable' || detailRestockLoading"
             :aria-busy="detailRestockLoading"
+            :aria-label="detailActionLabel"
             @click="handleDetailPrimaryAction"
           >
-            <Transition name="detail-action-label" mode="out-in">
-              <span :key="detailActionMode" class="client-detail-cart-button__label">{{ detailActionLabel }}</span>
+            <Transition name="detail-action-label">
+              <span :key="detailActionMode" class="client-detail-cart-button__label" aria-hidden="true">{{ detailActionLabel }}</span>
             </Transition>
-          </button>
+          </ElButton>
         </footer>
       </section>
     </ElDrawer>
@@ -3240,9 +3266,14 @@ onBeforeUnmount(() => {
 .detail-action-label-enter-active,
 .detail-action-label-leave-active {
   transition:
-    opacity 150ms ease,
-    transform 150ms ease,
-    filter 150ms ease;
+    opacity calc(var(--ylink-motion-fast, 160ms) / 2) ease,
+    transform calc(var(--ylink-motion-fast, 160ms) / 2) ease,
+    filter calc(var(--ylink-motion-fast, 160ms) / 2) ease;
+}
+
+/* 同时挂载以接收最新规格，但新字等旧字退完才开始显现；业务动作不等待。 */
+.detail-action-label-enter-active {
+  transition-delay: calc(var(--ylink-motion-fast, 160ms) / 2);
 }
 
 .detail-action-label-enter-from {
@@ -5023,4 +5054,8 @@ onBeforeUnmount(() => {
   background: #2a2a2d;
   color: #f1f5f9;
 }
+</style>
+
+<style scoped>
+.detail-action-label-leave-active { position: absolute; pointer-events: none; }
 </style>

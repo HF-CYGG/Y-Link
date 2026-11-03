@@ -6,12 +6,14 @@
  * - 组件只读取购物车 store 中的已加购数量，加购、减购、选规格全部通过事件交给商城页处理，复用页面既有的库存/限购校验与提示；
  * - 展开动画：“+ 加购”胶囊宽度收缩为圆形，同时“−”圆从右侧滑出到左侧、数量淡入，减到 0 时反向收拢；
  * - 根节点宽度固定，展开/收起都不改变卡片第三列宽度，避免商品名与价格在动画中重排抖动；
+ * - 加购整词先淡出再收文字占位，逆向先展开占位再显字，避免文字尚可见时被胶囊或自身裁切；
  * - 当前规格无可购库存且购物车里也没有该商品时不渲染，由同列的补货按钮成为唯一操作。
  * 维护说明：
  * - 动画只使用 transform / opacity / width 的轻量过渡，并统一在 prefers-reduced-motion 下关闭；
  * - 触顶时“+”只做 aria-disabled 弱化而不禁用点击，保证用户仍能收到“已达限购/库存不足”的提示；
  * - 不要在这里直接写购物车，避免与商城页的飞入动画、触感反馈和提示口径分叉。
  */
+import { ElButton } from 'element-plus'
 import { computed } from 'vue'
 
 import type { O2oMallProduct, O2oMallSku } from '@/api/modules/o2o'
@@ -71,42 +73,43 @@ const handleAdd = (event: MouseEvent) => {
     v-if="visible"
     class="client-card-stepper"
     :class="{ 'is-expanded': expanded, 'is-multi': isMultiSku }"
+    @click.stop
   >
     <template v-if="isMultiSku">
-      <button type="button" class="client-card-stepper__pill" aria-label="选择规格后加购" @click.stop="emit('choose')">
+      <ElButton native-type="button" class="client-card-stepper__pill" aria-label="选择规格后加购" @click.stop="emit('choose')">
         选规格
         <Transition name="client-card-stepper-badge">
           <span v-if="cartQty > 0" :key="cartQty" class="client-card-stepper__badge">{{ cartQty }}</span>
         </Transition>
-      </button>
+      </ElButton>
     </template>
     <template v-else>
-      <button
-        type="button"
+      <ElButton
+        native-type="button"
         class="client-card-stepper__minus"
         aria-label="减少一件"
         :tabindex="expanded ? 0 : -1"
         :aria-hidden="!expanded"
         @click.stop="emit('decrease', itemId)"
       >
-        <span aria-hidden="true">−</span>
-      </button>
+        <span class="client-card-stepper__minus-visual" aria-hidden="true">−</span>
+      </ElButton>
       <span class="client-card-stepper__qty" aria-live="polite">
-        <Transition name="client-card-stepper-num" mode="out-in">
-          <span :key="cartQty">{{ cartQty > 0 ? cartQty : '' }}</span>
-        </Transition>
+        <span>{{ cartQty > 0 ? cartQty : '' }}</span>
       </span>
-      <button
-        type="button"
+      <ElButton
+        native-type="button"
         class="client-card-stepper__plus"
         :class="{ 'is-limited': expanded && !canIncrease }"
         :aria-label="expanded ? '增加一件' : '加入购物车'"
         :aria-disabled="expanded && !canIncrease"
         @click.stop="handleAdd"
       >
-        <span class="client-card-stepper__plus-icon" aria-hidden="true">+</span>
-        <span class="client-card-stepper__label">加购</span>
-      </button>
+        <span class="client-card-stepper__plus-visual" aria-hidden="true">
+          <span class="client-card-stepper__plus-icon">+</span>
+          <span class="client-card-stepper__label">加购</span>
+        </span>
+      </ElButton>
     </template>
   </div>
 </template>
@@ -117,6 +120,8 @@ const handleAdd = (event: MouseEvent) => {
   --stepper-width: 5.1rem;
   --stepper-pill-width: 3.85rem;
   --stepper-duration: var(--ylink-motion-normal, 260ms);
+  --stepper-label-fade: var(--ylink-motion-fast, 160ms);
+  --stepper-label-resize: calc(var(--stepper-duration) - var(--stepper-label-fade));
   --stepper-ease: var(--ylink-motion-ease, cubic-bezier(0.22, 1, 0.36, 1));
   position: relative;
   display: block;
@@ -171,12 +176,13 @@ const handleAdd = (event: MouseEvent) => {
 
 .client-card-stepper__label {
   display: inline-block;
+  flex-shrink: 0;
   max-width: 2.2rem;
   overflow: hidden;
   opacity: 1;
   transition:
-    max-width var(--stepper-duration) var(--stepper-ease),
-    opacity 140ms ease;
+    max-width var(--stepper-label-resize) var(--stepper-ease),
+    opacity var(--stepper-label-fade) ease var(--stepper-label-resize);
 }
 
 .client-card-stepper__minus {
@@ -233,6 +239,9 @@ const handleAdd = (event: MouseEvent) => {
 .client-card-stepper.is-expanded .client-card-stepper__label {
   max-width: 0;
   opacity: 0;
+  transition:
+    max-width var(--stepper-label-resize) var(--stepper-ease) var(--stepper-label-fade),
+    opacity var(--stepper-label-fade) ease;
 }
 
 .client-card-stepper.is-expanded .client-card-stepper__minus {
@@ -329,6 +338,24 @@ const handleAdd = (event: MouseEvent) => {
   .client-card-stepper,
   .client-card-stepper * {
     transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
   }
 }
+</style>
+
+<style scoped>
+.client-card-stepper .el-button { margin: 0; }
+</style>
+
+<style scoped>
+/* 命中区域立即到最终位置，只有视觉层移动，避免分裂中两个按钮相互覆盖。 */
+.client-card-stepper__plus { background: transparent; overflow: visible; transition: opacity var(--ylink-motion-fast, 160ms) ease; }
+/* 独立视觉层保留胶囊连续收缩；线性宽度为前160ms的完整文字留足空间，后100ms再收文字占位。 */
+.client-card-stepper__plus-visual { position: absolute; inset: 0 0 0 auto; display: inline-flex; align-items: center; justify-content: center; gap: .12rem; width: var(--stepper-pill-width); height: var(--stepper-size); overflow: hidden; border-radius: 9999px; background: var(--ylink-color-primary-strong); pointer-events: none; transition: width var(--stepper-duration) linear; }
+.client-card-stepper.is-expanded .client-card-stepper__plus-visual { width: var(--stepper-size); }
+.client-card-stepper__minus,
+.client-card-stepper.is-expanded .client-card-stepper__minus { padding: 0; border: 0; background: transparent; transform: none; overflow: visible; }
+.client-card-stepper__minus-visual { display: inline-flex; align-items: center; justify-content: center; width: var(--stepper-size); height: var(--stepper-size); border: 1.5px solid var(--ylink-color-primary-strong); border-radius: 50%; background: var(--ylink-color-surface, #fff); pointer-events: none; transform: translateX(calc(var(--stepper-width) - var(--stepper-size))) scale(.6); transition: transform var(--stepper-duration) var(--stepper-ease); }
+.client-card-stepper.is-expanded .client-card-stepper__minus-visual { transform: none; }
+@media (prefers-reduced-motion: reduce) { .client-card-stepper__plus-visual, .client-card-stepper__minus-visual, .client-card-stepper__label, .client-card-stepper.is-expanded .client-card-stepper__label { transition: none; } }
 </style>

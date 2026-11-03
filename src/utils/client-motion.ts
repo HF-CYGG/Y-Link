@@ -47,8 +47,8 @@ const resolveElementCenter = (element: Element) => {
  * 加购“飞入购物车”动效：从触发元素中心飞向目标元素中心。
  * 返回动画结束的 Promise，调用方可在落点时触发购物车角标弹跳。
  */
-export const flyToClientCart = (source: Element | null | undefined, target: Element | null | undefined): Promise<void> => {
-  if (!source || !target || shouldReduceClientMotion() || flyingDotCount >= MAX_FLYING_DOTS) {
+export const flyToClientCart = (source: Element | null | undefined, target: Element | null | undefined, signal?: AbortSignal): Promise<void> => {
+  if (signal?.aborted || !source || !target || shouldReduceClientMotion() || flyingDotCount >= MAX_FLYING_DOTS) {
     return Promise.resolve()
   }
   const from = resolveElementCenter(source)
@@ -87,7 +87,13 @@ export const flyToClientCart = (source: Element | null | undefined, target: Elem
   ]
 
   return new Promise<void>((resolve) => {
+    let finished = false
+    let animation: Animation | undefined
+    const cancel = () => animation?.cancel()
     const finish = () => {
+      if (finished) return
+      finished = true
+      signal?.removeEventListener('abort', cancel)
       dot.remove()
       flyingDotCount = Math.max(0, flyingDotCount - 1)
       resolve()
@@ -96,7 +102,9 @@ export const flyToClientCart = (source: Element | null | undefined, target: Elem
       finish()
       return
     }
-    const animation = dot.animate(keyframes, { duration: 520, easing: 'cubic-bezier(0.32, 0, 0.67, 1)', fill: 'forwards' })
+    animation = dot.animate(keyframes, { duration: 520, easing: 'cubic-bezier(0.32, 0, 0.67, 1)', fill: 'forwards' })
+    signal?.addEventListener('abort', cancel, { once: true })
+    if (signal?.aborted) animation.cancel()
     animation.onfinish = finish
     animation.oncancel = finish
   })
