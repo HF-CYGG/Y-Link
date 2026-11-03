@@ -40,9 +40,10 @@ import {
   isO2oOrderPending,
   isO2oOrderVerified,
 } from '@/constants/o2o-order-status'
-import { useClientAuthStore, useClientOrderStore } from '@/store'
+import { useClientAuthStore, useClientCatalogStore, useClientOrderStore } from '@/store'
 import pinia from '@/store/pinia'
 import { buildClientOrderSummaryFromDetail } from '@/utils/client-order-summary'
+import { applyConfirmedReturnRequest } from '@/utils/client-order-return'
 import { notifyClientOrderRefresh, subscribeClientOrderRefresh } from '@/utils/client-order-refresh'
 import { formatDateTime } from '@/utils/date-time'
 import { normalizeRequestError } from '@/utils/error'
@@ -104,6 +105,13 @@ const returnDialogVisible = ref(false)
 const returnSubmitting = ref(false)
 const detail = ref<O2oPreorderDetail | null>(null)
 const qrDataUrl = ref('')
+const pickupQrState = ref<'loading' | 'success' | 'error' | 'disabled'>('disabled')
+const returnQrErrors = ref<Record<string, boolean>>({})
+let pickupQrGeneration = 0
+let returnQrGeneration = 0
+let qrScopeActive = true
+let pickupRenderKey = ''
+let returnRenderKey = ''
 const returnQrMap = ref<Record<string, string>>({})
 const mallProducts = ref<O2oMallProduct[]>([])
 const editOrderItems = ref<EditableOrderItem[]>([])
@@ -127,6 +135,9 @@ const deletedOrderRedirecting = ref(false)
 const { runLatest } = useStableRequest()
 const clientAuthStore = useClientAuthStore(pinia)
 const clientOrderStore = useClientOrderStore(pinia)
+// 取货时段与结算页同源：读取门店配置的营业时间文案（商城目录同步时回填），不在详情页写死。
+const clientCatalogStore = useClientCatalogStore(pinia)
+const pickupBusinessHoursText = computed(() => clientCatalogStore.storefront.businessHoursText || '10:00 - 22:00')
 let disposeClientOrderRefresh: () => void = () => {}
 let voucherUiModulePromise: VoucherUiModulePromise | null = null
 let voucherPdfExportModulePromise: ReturnType<typeof loadVoucherPdfExportModule> | null = null
@@ -827,28 +838,51 @@ const handleReturnQtyChange = (
   updateReturnQty(itemKey, value ?? undefined, maxQty)
 }
 
+const pickupContextKey = () => JSON.stringify([route.params.id, clientAuthStore.currentUser?.id, detail.value?.order.id, detail.value?.order.status, detail.value?.qrPayload, canUseQrCode.value])
+const returnContextKey = () => JSON.stringify([route.params.id, clientAuthStore.currentUser?.id, detail.value?.order.id, detail.value?.returnRequests.map((item) => [item.id, item.status, item.qrPayload])])
+/** 二维码错误仅属于局部区域，不传播成整页详情失败；结果严格绑定订单/载荷/状态代次。 */
 const renderQrCode = async () => {
-  // 二维码仅允许待提货订单展示，撤回、超时取消、已核销后立即切换为禁用态。
-  if (!detail.value?.qrPayload || !canUseQrCode.value) {
-    qrDataUrl.value = ''
-    return
+  const key = pickupContextKey(), payload = detail.value?.qrPayload
+  if (key === pickupRenderKey && (pickupQrState.value === 'loading' || pickupQrState.value === 'success')) return
+  const generation = ++pickupQrGeneration
+  pickupRenderKey = key; qrDataUrl.value = ''
+  if (!payload || !canUseQrCode.value || !qrScopeActive) { pickupQrState.value = 'disabled'; return }
+  pickupQrState.value = 'loading'
+  try {
+    const url = await renderQrCodeDataUrl(payload, 260)
+    if (!qrScopeActive || generation !== pickupQrGeneration || key !== pickupContextKey()) return
+    qrDataUrl.value = url; pickupQrState.value = 'success'
+  } catch {
+    if (qrScopeActive && generation === pickupQrGeneration && key === pickupContextKey()) pickupQrState.value = 'error'
   }
-
-  qrDataUrl.value = await renderQrCodeDataUrl(detail.value.qrPayload, 260)
 }
-
-const renderReturnRequestQrs = async () => {
-  // 退货二维码仅在 pending 阶段展示；进入 verified 后仅保留记录，不再展示可用二维码。
-  const nextQrMap: Record<string, string> = {}
-  const returnRequests = detail.value?.returnRequests ?? []
-  for (const request of returnRequests) {
-    if (request.status !== 'pending' || !request.qrPayload) {
-      continue
-    }
-    nextQrMap[request.id] = await renderQrCodeDataUrl(request.qrPayload, 220)
-  }
-  returnQrMap.value = nextQrMap
+const returnQrRuns = new Map<string, symbol>()
+const renderReturnRequestQrs = async (retryId?: string) => {
+  const key = returnContextKey()
+  if (!retryId && key === returnRenderKey) return
+  const changed = key !== returnRenderKey
+  returnRenderKey = key
+  if (changed) { returnQrRuns.clear(); returnQrMap.value = {}; returnQrErrors.value = {} }
+  const requests = (detail.value?.returnRequests ?? []).filter((request) => !retryId || request.id === retryId)
+  await Promise.all(requests.map(async (request) => {
+    if (request.status !== 'pending' || !request.qrPayload) return
+    const token = Symbol(); returnQrRuns.set(request.id, token)
+    const valid = () => qrScopeActive && key === returnContextKey() && returnQrRuns.get(request.id) === token
+    delete returnQrErrors.value[request.id]
+    try {
+      const url = await renderQrCodeDataUrl(request.qrPayload, 220)
+      if (valid()) returnQrMap.value = { ...returnQrMap.value, [request.id]: url }
+    } catch { if (valid()) returnQrErrors.value = { ...returnQrErrors.value, [request.id]: true } }
+  }))
 }
+// 路由或账号先改变时立即撤下旧详情，不能在新订单加载前显示旧载荷。
+watch([() => route.params.id, () => clientAuthStore.currentUser?.id], () => {
+  pickupQrGeneration += 1; returnQrGeneration += 1
+  detail.value = null; qrDataUrl.value = ''; returnQrMap.value = {}; returnQrErrors.value = {}
+  pickupQrState.value = 'disabled'; pickupRenderKey = ''; returnRenderKey = ''
+}, { flush: 'sync' })
+watch(pickupContextKey, () => { void renderQrCode() }, { flush: 'sync' })
+watch(returnContextKey, () => { void renderReturnRequestQrs() }, { flush: 'sync' })
 
 const loadMallProducts = async () => {
   if (mallProducts.value.length || editProductsLoading.value) {
@@ -1157,8 +1191,27 @@ const handleVisibilityChange = () => {
   void triggerSilentDetailRefresh()
 }
 
+type OrderWriteKind = 'recall' | 'edit' | 'return'
+type OrderWriteContext = { targetId: string; valid: () => boolean }
+let orderWriteToken: symbol | null = null
+let orderWriteActive = true
+const invalidateOrderWrite = () => { orderWriteToken = null; recalling.value = false; editSubmitting.value = false; returnSubmitting.value = false }
+watch([() => route.params.id, () => clientAuthStore.currentUser?.id], invalidateOrderWrite, { flush: 'sync' })
+watch(editDialogVisible, (visible) => { if (!visible) invalidateOrderWrite() }, { flush: 'sync' })
+watch(returnDialogVisible, (visible) => { if (!visible) invalidateOrderWrite() }, { flush: 'sync' })
+onBeforeUnmount(() => { orderWriteActive = false; invalidateOrderWrite() })
+const runOrderWrite = async (kind: OrderWriteKind, action: (context: OrderWriteContext) => Promise<void>) => {
+  if (!detail.value || orderWriteToken) return
+  const token = Symbol(), targetId = detail.value.order.id, userId = clientAuthStore.currentUser?.id
+  orderWriteToken = token
+  const valid = () => orderWriteActive && orderWriteToken === token && userId === clientAuthStore.currentUser?.id && String(route.params.id) === String(targetId) && detail.value?.order.id === targetId && (kind === 'edit' ? editDialogVisible.value : kind === 'return' ? returnDialogVisible.value : true)
+  if (kind === 'recall') recalling.value = true
+  else if (kind === 'edit') editSubmitting.value = true
+  else returnSubmitting.value = true
+  try { await action({ targetId, valid }) } finally { if (orderWriteToken === token) invalidateOrderWrite() }
+}
 // 详细注释：撤回订单操作，弹出二次确认，调用接口后刷新本地状态及二维码。
-const handleRecallOrder = async () => {
+const handleRecallOrder = () => runOrderWrite('recall', async (context) => {
   if (!detail.value) {
     return
   }
@@ -1178,7 +1231,9 @@ const handleRecallOrder = async () => {
         closeOnClickModal: false,
       },
     )
+    if (!context.valid()) return
   } catch (error) {
+    if (!context.valid()) return
     if (error === 'cancel' || error === 'close') {
       return
     }
@@ -1188,11 +1243,13 @@ const handleRecallOrder = async () => {
 
   recalling.value = true
   try {
-    const nextDetail = await cancelMyO2oPreorder(detail.value.order.id)
+    const nextDetail = await cancelMyO2oPreorder(context.targetId)
+    if (!context.valid()) return
     detail.value = nextDetail
     syncOrderStoreFromDetail(nextDetail, { preserveFresh: true })
     await renderQrCode()
     await renderReturnRequestQrs()
+    if (!context.valid()) return
     notifyClientOrderRefresh({
       orderId: nextDetail.order.id,
       reason: 'cancelled',
@@ -1200,6 +1257,7 @@ const handleRecallOrder = async () => {
     })
     showAppSuccess('订单已撤回')
   } catch (error) {
+    if (!context.valid()) return
     const normalizedError = normalizeRequestError(error, '撤回订单失败')
     void showCriticalErrorDialog(normalizedError, {
       title: '撤回订单失败',
@@ -1207,9 +1265,9 @@ const handleRecallOrder = async () => {
       operation: '撤回订单',
     })
   } finally {
-    recalling.value = false
+    // 外层操作token统一释放，旧结果不能改变新操作的锁。
   }
-}
+})
 
 const openEditDialog = () => {
   if (!detail.value) {
@@ -1229,7 +1287,7 @@ const handleEditDialogClosed = () => {
   resetEditForm()
 }
 
-const handleSubmitOrderEdit = async () => {
+const handleSubmitOrderEdit = () => runOrderWrite('edit', async (context) => {
   if (!detail.value) {
     return
   }
@@ -1253,6 +1311,7 @@ const handleSubmitOrderEdit = async () => {
     return
   }
 
+  const submittedRemark = editRemark.value.trim() || undefined
   const wasCustomerOrderPrinted = Boolean(detail.value.order.hasCustomerOrder)
   try {
     await ElMessageBox.confirm(
@@ -1265,7 +1324,9 @@ const handleSubmitOrderEdit = async () => {
         closeOnClickModal: false,
       },
     )
+    if (!context.valid()) return
   } catch (error) {
+    if (!context.valid()) return
     if (error === 'cancel' || error === 'close') {
       return
     }
@@ -1275,18 +1336,20 @@ const handleSubmitOrderEdit = async () => {
 
   editSubmitting.value = true
   try {
-    const nextDetail = await updateMyO2oPreorder(detail.value.order.id, {
-      remark: editRemark.value.trim() || undefined,
+    const nextDetail = await updateMyO2oPreorder(context.targetId, {
+      remark: submittedRemark,
       items: normalizedItems.map((item) => ({
         productId: item.productId,
         skuId: item.skuId,
         qty: item.qty,
       })),
     })
+    if (!context.valid()) return
     detail.value = nextDetail
     syncOrderStoreFromDetail(nextDetail, { preserveFresh: true })
     await renderQrCode()
     await renderReturnRequestQrs()
+    if (!context.valid()) return
     editDialogVisible.value = false
     notifyClientOrderRefresh({
       orderId: nextDetail.order.id,
@@ -1299,6 +1362,7 @@ const handleSubmitOrderEdit = async () => {
       showAppSuccess('订单修改成功')
     }
   } catch (error) {
+    if (!context.valid()) return
     const normalizedError = normalizeRequestError(error, '订单修改失败')
     void showCriticalErrorDialog(normalizedError, {
       title: '订单修改失败',
@@ -1306,9 +1370,9 @@ const handleSubmitOrderEdit = async () => {
       operation: '提交订单修改',
     })
   } finally {
-    editSubmitting.value = false
+    // 外层操作token统一释放，旧结果不能改变新操作的锁。
   }
-}
+})
 
 const openReturnDialog = () => {
   if (!canApplyReturn.value) {
@@ -1323,7 +1387,7 @@ const handleReturnDialogClosed = () => {
   resetReturnForm()
 }
 
-const handleSubmitReturnRequest = async () => {
+const handleSubmitReturnRequest = () => runOrderWrite('return', async (context) => {
   if (!detail.value) {
     return
   }
@@ -1341,6 +1405,7 @@ const handleSubmitReturnRequest = async () => {
     return
   }
 
+  const submittedItems = selectedReturnItems.value.map((item) => ({ productId: item.productId, skuId: item.skuId, qty: item.selectedQty }))
   try {
     await ElMessageBox.confirm(
       `确认提交退货申请吗？本次共申请 ${selectedReturnTotalQty.value} 件商品退货，提交后会生成门店核销二维码。`,
@@ -1352,7 +1417,9 @@ const handleSubmitReturnRequest = async () => {
         closeOnClickModal: false,
       },
     )
+    if (!context.valid()) return
   } catch (error) {
+    if (!context.valid()) return
     if (error === 'cancel' || error === 'close') {
       return
     }
@@ -1362,28 +1429,24 @@ const handleSubmitReturnRequest = async () => {
 
   returnSubmitting.value = true
   try {
-    const createdReturnRequest = await submitO2oReturnRequest(detail.value.order.id, {
+    const createdReturnRequest = await submitO2oReturnRequest(context.targetId, {
       reason: normalizedReason,
-      items: selectedReturnItems.value.map((item) => ({
-        productId: item.productId,
-        skuId: item.skuId,
-        qty: item.selectedQty,
-      })),
+      items: submittedItems,
     })
-    detail.value = {
-      ...detail.value,
-      returnRequests: [createdReturnRequest, ...detail.value.returnRequests],
-    }
+    if (!context.valid() || !detail.value) return
+    detail.value = applyConfirmedReturnRequest(detail.value, createdReturnRequest)
     syncOrderStoreFromDetail(detail.value, { preserveFresh: true })
     await renderReturnRequestQrs()
+    if (!context.valid()) return
     returnDialogVisible.value = false
     notifyClientOrderRefresh({
-      orderId: detail.value.order.id,
+      orderId: context.targetId,
       reason: 'return_requested',
       sourceId: clientOrderRefreshSourceId,
     })
     showAppSuccess(`退货申请已提交，退货单号：${createdReturnRequest.returnNo}`)
   } catch (error) {
+    if (!context.valid()) return
     const normalizedError = normalizeRequestError(error, '提交退货申请失败')
     void showCriticalErrorDialog(normalizedError, {
       title: '退货申请提交失败',
@@ -1391,9 +1454,9 @@ const handleSubmitReturnRequest = async () => {
       operation: '提交退货申请',
     })
   } finally {
-    returnSubmitting.value = false
+    // 外层操作token统一释放，旧结果不能改变新操作的锁。
   }
-}
+})
 
 watch(
   () => route.params.id,
@@ -1413,6 +1476,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  qrScopeActive = false; pickupQrGeneration += 1; returnQrGeneration += 1
   voucherDetailUnmounted = true
   disposeClientOrderRefresh()
   globalThis.document?.removeEventListener('visibilitychange', handleVisibilityChange)
@@ -1519,6 +1583,19 @@ onBeforeUnmount(() => {
             alt="预订单二维码"
             class="mx-auto h-64 w-64 rounded-2xl bg-white p-3 shadow-sm"
           />
+          <!-- 二维码库按需懒加载，生成完成前显示占位，避免可用订单短暂闪现“二维码已停用”。 -->
+          <div v-else-if="canUseQrCode && pickupQrState === 'error'" class="mx-auto flex h-64 w-64 flex-col items-center justify-center rounded-2xl bg-white dark:bg-[#141415]" role="alert">
+            <p class="text-sm">二维码生成失败</p>
+            <el-button class="mt-3" @click="renderQrCode()">重新生成</el-button>
+          </div>
+          <div
+            v-else-if="canUseQrCode && pickupQrState === 'loading'"
+            class="client-qr-loading mx-auto flex h-64 w-64 flex-col items-center justify-center rounded-2xl bg-white p-3 shadow-sm dark:bg-[#141415]"
+            role="status"
+          >
+            <span class="client-qr-loading__block" aria-hidden="true"></span>
+            <p class="mt-3 text-xs text-slate-400">二维码生成中…</p>
+          </div>
           <div
             v-else
             class="mx-auto flex h-64 w-64 flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-white px-6 text-center dark:border-white/10 dark:bg-[#141415]"
@@ -1534,7 +1611,7 @@ onBeforeUnmount(() => {
 
         <div class="mt-4 space-y-2 rounded-2xl bg-amber-50 px-4 py-4 text-sm text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
           <p>取货地址：海右书院112房间</p>
-          <p>取货时段：10:00 - 22:00</p>
+          <p>取货时段：{{ pickupBusinessHoursText }}</p>
           <p>联系人：门店值班人员</p>
           <p>温馨提示：请在有效时段内到店核销，过期将自动取消。可截图或打印此二维码前往店铺核销取货。</p>
         </div>
@@ -1787,6 +1864,18 @@ onBeforeUnmount(() => {
                     :alt="`${request.returnNo} 退货二维码`"
                     class="mx-auto h-52 w-52 rounded-2xl bg-white p-3 shadow-sm dark:bg-[#141415]"
                   />
+                  <div v-else-if="request.status === 'pending' && returnQrErrors[request.id]" class="mx-auto flex h-52 w-52 flex-col items-center justify-center rounded-2xl bg-slate-50 dark:bg-white/5" role="alert">
+                    <p class="text-sm">退货二维码生成失败</p>
+                    <el-button class="mt-3" @click="renderReturnRequestQrs(request.id)">重新生成</el-button>
+                  </div>
+                  <div
+                    v-else-if="request.status === 'pending' && request.qrPayload"
+                    class="client-qr-loading mx-auto flex h-52 w-52 flex-col items-center justify-center rounded-2xl bg-slate-50 p-3 dark:bg-white/5"
+                    role="status"
+                  >
+                    <span class="client-qr-loading__block" aria-hidden="true"></span>
+                    <p class="mt-3 text-xs text-slate-400">二维码生成中…</p>
+                  </div>
                   <div
                     v-else
                     class="mx-auto flex h-52 w-52 flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-6 text-center dark:border-white/10 dark:bg-white/5"
@@ -1944,6 +2033,33 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* 二维码生成中占位：浅色骨架块 + 轻量呼吸动画，减少动效时静止。 */
+.client-qr-loading__block {
+  display: block;
+  width: 72%;
+  aspect-ratio: 1;
+  border-radius: 0.9rem;
+  background: linear-gradient(110deg, #f1f5f9 30%, #e2e8f0 50%, #f1f5f9 70%);
+  background-size: 220% 100%;
+  animation: client-qr-shimmer 1.3s ease-in-out infinite;
+}
+
+:global(html.dark) .client-qr-loading__block {
+  background: linear-gradient(110deg, rgba(255, 255, 255, 0.04) 30%, rgba(255, 255, 255, 0.1) 50%, rgba(255, 255, 255, 0.04) 70%);
+  background-size: 220% 100%;
+}
+
+@keyframes client-qr-shimmer {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .client-qr-loading__block {
+    animation: none;
+  }
+}
+
 /* 订单详情页根容器：为固定底部导航与安全区预留空间，避免末尾卡片被遮挡。 */
 .order-detail-page {
   padding-bottom: calc(7.5rem + env(safe-area-inset-bottom));

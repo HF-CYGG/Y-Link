@@ -145,6 +145,7 @@ const registerVerificationCountdown = ref(0)
 let registerVerificationTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let capabilityDeferredTimer: ReturnType<typeof globalThis.setTimeout> | null = null
 let formTransitionFrame: number | null = null
+let successTipFrame: number | null = null
 let formTransitionRunId = 0
 const formWrapperRef = ref<HTMLElement | null>(null)
 const formBlockRef = ref<HTMLElement | null>(null)
@@ -1022,12 +1023,15 @@ watch(shouldPrepareCaptcha, (shouldShowCaptcha) => {
 watch(successTip, async () => {
   await nextTick()
   syncWrapperHeight('measured')
-  requestAnimationFrame(() => {
+  if (successTipFrame !== null) cancelAnimationFrame(successTipFrame)
+  successTipFrame = requestAnimationFrame(() => {
+    successTipFrame = null
     syncWrapperHeight('auto')
   })
 })
 
 onUnmounted(() => {
+  if (successTipFrame !== null) cancelAnimationFrame(successTipFrame)
   // 页面离开时主动清理倒计时，避免重复进入后产生多个定时器。
   cancelCapabilityRequest()
   cancelCaptchaRequest()

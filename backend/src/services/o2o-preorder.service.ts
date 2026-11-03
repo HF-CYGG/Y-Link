@@ -79,6 +79,7 @@ import {
 } from '../utils/discount-price.js'
 import { runExclusive } from '../redis/redis-lease.js'
 import { readSharedCacheRaw, sharedCacheKey, writeSharedCacheRaw } from '../redis/redis-cache.js'
+import { prepareProductThumbnailIndex, resolveProductThumbnailUrl } from '../utils/product-thumbnail.js'
 
 /** 部门单到店取货时间允许的过去容差：覆盖客户端时钟偏差与提交网络耗时。 */
 const O2O_PICKUP_AT_PAST_TOLERANCE_MS = 5 * 60 * 1000
@@ -257,6 +258,8 @@ export interface O2oMallSkuView {
   isCurrent: boolean
   o2oRecommended: boolean
   thumbnail: string | null
+  /** 小尺寸 WebP 缩略图；缩略图尚未生成时为 null，前端回退原图。 */
+  thumbnailSmall: string | null
   sortOrder: number
 }
 
@@ -271,6 +274,8 @@ export interface O2oMallProductView {
   o2oRecommended: boolean
   tags: string[]
   thumbnail: string | null
+  /** 小尺寸 WebP 缩略图；缩略图尚未生成时为 null，前端回退原图。 */
+  thumbnailSmall: string | null
   detailContent: string | null
   limitPerUser: number
   currentStock: number
@@ -2678,6 +2683,8 @@ class O2oPreorderService {
       order: { productId: 'ASC', sortOrder: 'ASC', id: 'ASC' },
     })
     const soldQtyMap = await this.resolveProductSoldQtyMap(productIds)
+    // 一次异步准备供商品和 SKU 共用；冷启动/刷新不把未准备的小图结果写入共享目录缓存。
+    await prepareProductThumbnailIndex()
 
     const productTagMap = new Map<string, string[]>()
     relations.forEach((relation) => {
@@ -2726,6 +2733,7 @@ class O2oPreorderService {
             isCurrent: isDatabaseFlagEnabled(sku.isCurrent),
             o2oRecommended: Boolean(sku.o2oRecommended),
             thumbnail: sku.thumbnail ?? item.thumbnail,
+            thumbnailSmall: resolveProductThumbnailUrl(sku.thumbnail ?? item.thumbnail),
             sortOrder: Number(sku.sortOrder ?? 0),
           }
         })
@@ -2752,6 +2760,7 @@ class O2oPreorderService {
           o2oRecommended: Boolean(item.o2oRecommended),
           tags: productTagMap.get(String(item.id)) ?? [],
           thumbnail: item.thumbnail,
+          thumbnailSmall: resolveProductThumbnailUrl(item.thumbnail),
           detailContent: item.detailContent,
           limitPerUser: Number(item.limitPerUser ?? 5),
           currentStock,

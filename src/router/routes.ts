@@ -747,6 +747,7 @@ export const routes: RouteRecordRaw[] = [
         path: 'cart',
         name: 'client-cart',
         component: routeViewLoaders['client-cart'],
+        props: { standalone: true },
         meta: {
           title: '购物车',
           menu: false,
@@ -760,6 +761,7 @@ export const routes: RouteRecordRaw[] = [
         path: 'checkout',
         name: 'client-checkout',
         component: routeViewLoaders['client-checkout'],
+        props: { standalone: true },
         meta: {
           title: '确认订单',
           menu: false,

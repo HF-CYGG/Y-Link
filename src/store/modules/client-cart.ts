@@ -1,7 +1,12 @@
 /**
  * 模块说明：src/store/modules/client-cart.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：客户端购物车状态真源，负责加购、改数量、勾选、目录同步、结算快照与按账号隔离的本地持久化。
+ * 实现逻辑：
+ * - 购物车行以“规格 ID 优先、商品 ID 兜底”作为行标识，可购量统一由可预订库存与单人限购合并计算；
+ * - qtyByItemId / qtyByProductId 为商城卡片步进器提供 O(1) 的已加购数量查询。
+ * 维护说明：
+ * - 用户主动清空购物车必须走 clearItems（保留账号绑定并持久化），clearAll 仅用于登出与换号清理；
+ * - 目录同步只刷新库存、价格与可购状态，不得静默缩量。
  */
 
 import { computed, ref } from 'vue'
@@ -22,6 +27,7 @@ export interface ClientCartItem {
   skuId: string | null
   productName: string
   thumbnail: string | null
+  thumbnailSmall: string | null
   specText: string | null
   defaultPrice: string
   originalPrice: string
@@ -100,6 +106,7 @@ const createCartItemFromProduct = (product: O2oMallProduct, qty: number, sku: O2
     skuId,
     productName: product.productName,
     thumbnail: resolveCartItemThumbnail(product, sku),
+    thumbnailSmall: (sku?.thumbnail ? sku.thumbnailSmall : product.thumbnailSmall)?.trim() || null,
     specText: skuUnavailable ? null : (sku?.specText ?? null),
     defaultPrice: !skuUnavailable && sku ? sku.discountedPrice : productPrice.unitPrice,
     originalPrice: price.originalPrice,
@@ -122,6 +129,21 @@ export const useClientCartStore = defineStore('client-cart', () => {
 
   // 这些派生状态尽量只从 items 推导，避免同时维护多份可结算/失效/选中列表造成同步偏差。
   const totalQty = computed(() => items.value.reduce((sum, item) => sum + item.qty, 0))
+  // 商城卡片步进器按“规格行 ID / 商品 ID”读取已加购数量；集中在 store 派生，避免每张卡片各自遍历购物车。
+  const qtyByItemId = computed(() => {
+    const qtyMap = new Map<string, number>()
+    items.value.forEach((item) => {
+      qtyMap.set(resolveCartItemId(item.productId, item.skuId), item.qty)
+    })
+    return qtyMap
+  })
+  const qtyByProductId = computed(() => {
+    const qtyMap = new Map<string, number>()
+    items.value.forEach((item) => {
+      qtyMap.set(item.productId, (qtyMap.get(item.productId) ?? 0) + item.qty)
+    })
+    return qtyMap
+  })
   const validItems = computed(() => {
     return items.value.filter((item) => !resolveCartConflict(item))
   })
@@ -156,6 +178,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
       skuId: item.skuId,
       productName: item.productName,
       thumbnail: item.thumbnail,
+      thumbnailSmall: item.thumbnailSmall ?? null,
       specText: item.specText,
       defaultPrice: item.defaultPrice,
       originalPrice: item.originalPrice,
@@ -274,6 +297,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
           specText: latestSku?.specText ?? item.specText,
           productName: latest.productName,
           thumbnail: resolveCartItemThumbnail(latest, latestSku),
+          thumbnailSmall: (latestSku?.thumbnail ? latestSku.thumbnailSmall : latest.thumbnailSmall)?.trim() || null,
           defaultPrice: latestSku ? latestSku.discountedPrice : productPrice.unitPrice,
           originalPrice: latestPrice.originalPrice,
           discountRate: latestPrice.discountRate,
@@ -409,6 +433,13 @@ export const useClientCartStore = defineStore('client-cart', () => {
     persist()
   }
 
+  // 用户主动“清空购物车”只清商品行并照常持久化；不能复用 clearAll（登出/换号专用，会解除账号绑定导致后续加购不再落盘）。
+  const clearItems = () => {
+    ensureInitialized()
+    items.value = []
+    persist()
+  }
+
   const clearAll = () => {
     const currentClientUserId = clientUserId.value
     resetState()
@@ -444,6 +475,8 @@ export const useClientCartStore = defineStore('client-cart', () => {
     items,
     initialized,
     totalQty,
+    qtyByItemId,
+    qtyByProductId,
     validItems,
     invalidItems,
     selectedValidItems,
@@ -461,6 +494,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
     incrementQty,
     removeItem,
     clearSelectedItems,
+    clearItems,
     clearAll,
     toggleItemSelected,
     toggleAllValidSelected,

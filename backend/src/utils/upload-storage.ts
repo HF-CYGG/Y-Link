@@ -10,9 +10,10 @@ import { randomUUID } from 'node:crypto'
 import multer from 'multer'
 import type { Express } from 'express'
 import sharp, { type Metadata } from 'sharp'
-import { PRODUCT_IMAGE_GATE_POLICY } from '../config/load-protection-policy.js'
-import { BoundedConcurrencyGate } from './bounded-concurrency.js'
+import { productImageProcessingGate } from './product-image-gate.js'
 import { BizError } from './errors.js'
+import { generateProductThumbnailForFile, notifyProductOriginalCreated } from './product-thumbnail.js'
+import { toSafeErrorLog } from './safe-error-log.js'
 
 export type UploadCategory = 'products' | 'client-feedback'
 
@@ -334,6 +335,14 @@ export const finalizeUploadedImageFile = async (
     const finalFilePath = path.resolve(ensureUploadCategoryDir(category), finalFileName)
     await fs.promises.writeFile(finalFilePath, reencodedBuffer)
     await cleanupUploadFileIfExists(tempFilePath)
+    if (category === 'products') {
+      await notifyProductOriginalCreated(finalFileName, path.dirname(finalFilePath))
+      // 商品图同步生成小尺寸 WebP 缩略图（仍在商品图处理闸门内）；失败只记日志，不影响原图上传结果，
+      // 商城目录发现缩略图缺失时会自动回退原图，后续可用回填脚本补齐。
+      await generateProductThumbnailForFile(finalFilePath, reencodedBuffer).catch((error) => {
+        console.warn('[upload-storage] 商品缩略图生成失败，已回退使用原图', toSafeErrorLog(error))
+      })
+    }
 
     return {
       fileName: finalFileName,
@@ -360,12 +369,6 @@ export async function finalizeClientFeedbackImageFile(file: Express.Multer.File)
  * 商品图重编码闸门：管理端连续或并发上传大图时，sharp 解码/重编码会占满线程池并短时吃掉大量内存；
  * 满载时快速返回 503（临时文件照常清理），不让请求无限堆积。
  */
-const productImageProcessingGate = new BoundedConcurrencyGate({
-  name: 'product-image-processing',
-  ...PRODUCT_IMAGE_GATE_POLICY,
-  busyMessage: '商品图片处理繁忙，请稍后重试',
-})
-
 export async function finalizeProductImageFile(file: Express.Multer.File) {
   try {
     return await productImageProcessingGate.run(() => finalizeUploadedImageFile('products', file))

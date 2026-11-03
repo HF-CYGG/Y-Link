@@ -145,6 +145,9 @@ function toSafeProfile(user: SysUser): UserSafeProfile {
  * - 统一处理登录、退出、当前用户、默认管理员初始化；
  * - 认证令牌采用数据库会话模式，便于主动退出与服务端失效控制。
  */
+/** 管理端会话活跃时间写回节流间隔（毫秒）。 */
+const ADMIN_SESSION_ACTIVITY_WRITE_INTERVAL_MS = 60_000
+
 export class AuthService {
   private readonly userRepo = AppDataSource.getRepository(SysUser)
   private readonly sessionRepo = AppDataSource.getRepository(SysUserSession)
@@ -838,7 +841,7 @@ export class AuthService {
    * - 普通鉴权先用已加载时间跳过窗口内 SQL，此处条件继续防止并发旧快照重复更新；
    * - 显式在线心跳仍可独立指定 1 秒间隔，不受普通鉴权的 60 秒前置判断影响。
    */
-  async touchSessionActivity(sessionToken: string, minIntervalMs = 60_000): Promise<void> {
+  async touchSessionActivity(sessionToken: string, minIntervalMs = ADMIN_SESSION_ACTIVITY_WRITE_INTERVAL_MS): Promise<void> {
     const now = new Date()
     const threshold = new Date(now.getTime() - Math.max(1_000, minIntervalMs))
     const sessionTokenHash = hashSessionToken(sessionToken)

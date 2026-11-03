@@ -72,6 +72,7 @@ import {
   lockActiveSysAccountsForBusiness,
 } from './account-business-guard.service.js'
 import { runExclusive } from '../redis/redis-lease.js'
+import { buildSqlLikeContains } from '../utils/sql-like.js'
 
 const MYSQL_FEEDBACK_ATTACHMENT_COORDINATION_LOCK = 'ylink:feedback:attachment-quota-cleanup'
 const MYSQL_FEEDBACK_ATTACHMENT_LOCK_TIMEOUT_SECONDS = 5
@@ -619,9 +620,10 @@ class ClientFeedbackService {
     const storageUrl = `/uploads/client-feedback/${input.storageName}`
     const query = manager.getRepository(ClientFeedbackMessage)
       .createQueryBuilder('message')
-      .where('message.attachmentJson LIKE :storageNeedle', { storageNeedle: `%${input.storageName}%` })
+      // 引用检查按存储名/附件 ID 子串匹配，转义通配符后才是真正的“包含”判断。
+      .where("message.attachmentJson LIKE :storageNeedle ESCAPE '!'", { storageNeedle: buildSqlLikeContains(input.storageName) })
     if (input.attachmentId) {
-      query.orWhere('message.attachmentJson LIKE :idNeedle', { idNeedle: `%${input.attachmentId}%` })
+      query.orWhere("message.attachmentJson LIKE :idNeedle ESCAPE '!'", { idNeedle: buildSqlLikeContains(input.attachmentId) })
     }
     const messages = await query.take(CLIENT_FEEDBACK_ATTACHMENT_POLICY.cleanupBatchSize).getMany()
     let uncertain = false

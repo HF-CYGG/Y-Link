@@ -162,6 +162,8 @@ async function verifyFinalizeUploadFlow() {
   } finally {
     if (finalizedFilePath) {
       await cleanupFileIfExists(finalizedFilePath)
+      // 商品图上传会同步生成 .thumb.webp 缩略图，验证结束一并清理。
+      await cleanupFileIfExists(finalizedFilePath.replace(/\.[a-z]+$/i, '.thumb.webp'))
     }
     await cleanupFileIfExists(validTempFilePath)
     await cleanupFileIfExists(invalidTempFilePath)

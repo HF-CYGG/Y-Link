@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ClientProductSmallImage from './components/ClientProductSmallImage.vue'
 /**
  * 模块说明：src/views/client/ClientCartView.vue
  * 文件职责：负责客户端购物车列表、勾选态维护、批量删除与进入结算前的交互反馈。
@@ -169,14 +170,15 @@ const handleBack = () => {
                     class="mt-1 w-4 h-4 rounded text-teal-600 focus:ring-teal-500 cursor-pointer"
                     @change="clientCartStore.toggleItemSelected(resolveCartItemKey(item), ($event.target as HTMLInputElement).checked)"
                   />
-                  <div class="min-w-0">
+                  <ClientProductSmallImage :small="item.thumbnailSmall" :original="item.thumbnail" :source-key="item.skuId || item.productId" :alt="item.productName" />
+                <div class="min-w-0">
                     <p class="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">{{ item.productName }}</p>
                     <p v-if="item.specText" class="mt-0.5 text-xs text-slate-400">{{ item.specText }}</p>
                     <p class="mt-1 text-sm font-bold text-teal-600">¥{{ Number(resolveO2oPriceView(item).discountedPrice).toFixed(2) }}</p>
                     <p v-if="resolveO2oPriceView(item).isDiscounted" class="mt-0.5 text-xs text-slate-400">
                       原价 ¥{{ Number(resolveO2oPriceView(item).originalPrice).toFixed(2) }} · {{ resolveO2oPriceView(item).discountLabel }}
                     </p>
-                    <p class="text-xs text-slate-400 mt-1">可预订 {{ resolveClientCartMaxQty(item) }} · 限购 {{ item.limitPerUser }}</p>
+                    <p class="text-xs text-slate-400 mt-1">可预订 {{ resolveClientCartMaxQty(item) }}<span v-if="item.limitPerUser > 0"> · 限购 {{ item.limitPerUser }}</span></p>
                   </div>
                 </div>
                 <div class="flex items-center justify-end gap-3 sm:w-auto w-full">
@@ -210,6 +212,7 @@ const handleBack = () => {
                   class="mt-0.5"
                   @update:model-value="clientCartStore.toggleItemSelected(resolveCartItemKey(item), Boolean($event))"
                 />
+                <ClientProductSmallImage :small="item.thumbnailSmall" :original="item.thumbnail" :source-key="item.skuId || item.productId" :alt="item.productName" />
                 <div class="min-w-0">
                   <p class="text-sm font-semibold text-rose-700 dark:text-rose-300">{{ item.productName }}</p>
                   <p v-if="item.specText" class="mt-0.5 text-xs text-rose-500">{{ item.specText }}</p>

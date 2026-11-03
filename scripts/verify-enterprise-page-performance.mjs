@@ -90,6 +90,11 @@ const reportPath = path.join(runtimeRoot, 'enterprise-performance-budget-report.
  * +4.06 KB、vendor 块（axios）+5.01 KB、ui-kit 块 -1.81 KB。漏洞修复不能回退，因此总产物上限调整为 4740 KB、
  * 首屏依赖图上限调整为 1195 KB、首屏 JS 上限调整为 870 KB（余量均不足 1%），其余各项预算维持不变。
  *
+ * 客户端商城交互升级（卡片加购步进器、详情底栏有货/缺货合并动画、加购飞入反馈、二维码生成占位）：
+ * 基线实测总产物 4738.38 KB（余量仅 1.62 KB），升级后 4754.78 KB；增量 16.4 KB 全部位于按需加载的商城页
+ * ClientMallView（JS +6.99 KB、CSS +7.43 KB）与订单详情页（+1.35 KB）；首屏 JS 仅 +0.42 KB（购物车 store 的数量映射），
+ * 首屏 CSS 与入口块不变，首屏各项仍在原上限内。
+ * 因此仅将总产物上限调整为 4770 KB（余量约 0.3%），其余预算维持不变；构建期生成的 .gz 副本不计入预算。
  * 2026-11 供货端完善（录入草稿、再来一单、送货单状态提醒、复制单号、打印弹窗）：同一环境下 main@d873b04 基线实测
  * 总产物 4735.82 KB，本分支 4747.59 KB（+11.77 KB）。增量全部落在供货工作台路由分包：工作台主包 68.32 → 67.99 KB，
  * 打印 / PDF 弹窗改为按需异步分包（11.68 KB），首屏依赖图、首屏 JS/CSS 不变。总产物上限调整为 4760 KB，其余预算不变。
@@ -207,7 +212,8 @@ assert(fs.existsSync(distAssetsRoot), `构建产物不存在：${distAssetsRoot}
 
 const assetEntries = fs
   .readdirSync(distAssetsRoot, { withFileTypes: true })
-  .filter((entry) => entry.isFile())
+  // 构建期预压缩生成的 `.gz` 只是同名产物的传输副本，预算按原始文件统计，避免重复计入体积。
+  .filter((entry) => entry.isFile() && !entry.name.endsWith('.gz'))
   .map((entry) => {
     const absolutePath = path.join(distAssetsRoot, entry.name)
     const stat = fs.statSync(absolutePath)

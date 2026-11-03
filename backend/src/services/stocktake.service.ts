@@ -32,6 +32,7 @@ import { applyInventoryDeltas, loadLockedSkuTargets } from './inventory-ledger.s
 import { acquireSequenceMutex, allocateStocktakeNo } from './inventory-sequence.service.js'
 import { loadSkuLocationDistributions, readSkuLocationQty } from './sku-location-stock.service.js'
 import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
+import { buildSqlLikeContains } from '../utils/sql-like.js'
 
 export const STOCKTAKE_REF_TYPE = 'inv_stocktake'
 const MAX_STOCKTAKE_ITEMS = 5000
@@ -209,7 +210,8 @@ export class StocktakeService {
     const qb = AppDataSource.getRepository(InvStocktake).createQueryBuilder('st')
     if (query.status && query.status in STATUS_LABELS) qb.andWhere('st.status = :status', { status: query.status })
     if (query.keyword?.trim()) {
-      qb.andWhere('(st.stocktakeNo LIKE :keyword OR st.scopeLabel LIKE :keyword OR st.remark LIKE :keyword)', { keyword: `%${query.keyword.trim()}%` })
+      // 关键词转义 LIKE 通配符，避免输入 % 或 _ 时匹配到无关盘点单。
+      qb.andWhere("(st.stocktakeNo LIKE :keyword ESCAPE '!' OR st.scopeLabel LIKE :keyword ESCAPE '!' OR st.remark LIKE :keyword ESCAPE '!')", { keyword: buildSqlLikeContains(query.keyword.trim()) })
     }
     qb.orderBy('st.id', 'DESC').skip((page - 1) * pageSize).take(pageSize)
     const [rows, total] = await qb.getManyAndCount()

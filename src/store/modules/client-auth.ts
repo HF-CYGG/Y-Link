@@ -267,11 +267,12 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     currentPassword: string
     mobileVerificationCode?: string
     emailVerificationCode?: string
-  }) => {
+  }, context?: { isCurrent: () => boolean }) => {
     const profile = await clientUpdateProfile(payload)
+    if (context && !context.isCurrent()) return profile
     if (profile.requiresRelogin) {
-      clearAuthState()
-      initialized.value = true
+      // 有页面上下文时由页面在最后一次有效性检查后原子完成清理与跳转。
+      if (!context) { clearAuthState(); initialized.value = true }
       return profile
     }
     currentUser.value = profile
