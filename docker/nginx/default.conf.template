@@ -562,6 +562,8 @@ server {
         proxy_cache ylink_product_images;
         proxy_cache_key "$scheme$request_method$host$uri";
         proxy_cache_methods GET HEAD;
+        # 边缘有效期固定七天；透传浏览器原有缓存头，保留 Set-Cookie 等缓存安全控制。
+        proxy_ignore_headers Cache-Control Expires;
         proxy_cache_valid 200 7d;
         proxy_cache_valid 404 10s;
         proxy_cache_lock on;
