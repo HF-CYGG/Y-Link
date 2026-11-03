@@ -43,6 +43,7 @@ import {
 import { useClientAuthStore, useClientCatalogStore, useClientOrderStore } from '@/store'
 import pinia from '@/store/pinia'
 import { buildClientOrderSummaryFromDetail } from '@/utils/client-order-summary'
+import { applyConfirmedReturnRequest } from '@/utils/client-order-return'
 import { notifyClientOrderRefresh, subscribeClientOrderRefresh } from '@/utils/client-order-refresh'
 import { formatDateTime } from '@/utils/date-time'
 import { normalizeRequestError } from '@/utils/error'
@@ -1280,8 +1281,27 @@ const handleVisibilityChange = () => {
   void triggerSilentDetailRefresh()
 }
 
+type OrderWriteKind = 'recall' | 'edit' | 'return'
+type OrderWriteContext = { targetId: string; valid: () => boolean }
+let orderWriteToken: symbol | null = null
+let orderWriteActive = true
+const invalidateOrderWrite = () => { orderWriteToken = null; recalling.value = false; editSubmitting.value = false; returnSubmitting.value = false }
+watch([() => route.params.id, () => clientAuthStore.currentUser?.id], invalidateOrderWrite, { flush: 'sync' })
+watch(editDialogVisible, (visible) => { if (!visible) invalidateOrderWrite() }, { flush: 'sync' })
+watch(returnDialogVisible, (visible) => { if (!visible) invalidateOrderWrite() }, { flush: 'sync' })
+onBeforeUnmount(() => { orderWriteActive = false; invalidateOrderWrite() })
+const runOrderWrite = async (kind: OrderWriteKind, action: (context: OrderWriteContext) => Promise<void>) => {
+  if (!detail.value || orderWriteToken) return
+  const token = Symbol(), targetId = detail.value.order.id, userId = clientAuthStore.currentUser?.id
+  orderWriteToken = token
+  const valid = () => orderWriteActive && orderWriteToken === token && userId === clientAuthStore.currentUser?.id && String(route.params.id) === String(targetId) && detail.value?.order.id === targetId && (kind === 'edit' ? editDialogVisible.value : kind === 'return' ? returnDialogVisible.value : true)
+  if (kind === 'recall') recalling.value = true
+  else if (kind === 'edit') editSubmitting.value = true
+  else returnSubmitting.value = true
+  try { await action({ targetId, valid }) } finally { if (orderWriteToken === token) invalidateOrderWrite() }
+}
 // 详细注释：撤回订单操作，弹出二次确认，调用接口后刷新本地状态及二维码。
-const handleRecallOrder = async () => {
+const handleRecallOrder = () => runOrderWrite('recall', async (context) => {
   if (!detail.value) {
     return
   }
@@ -1301,7 +1321,9 @@ const handleRecallOrder = async () => {
         closeOnClickModal: false,
       },
     )
+    if (!context.valid()) return
   } catch (error) {
+    if (!context.valid()) return
     if (error === 'cancel' || error === 'close') {
       return
     }
@@ -1311,11 +1333,13 @@ const handleRecallOrder = async () => {
 
   recalling.value = true
   try {
-    const nextDetail = await cancelMyO2oPreorder(detail.value.order.id)
+    const nextDetail = await cancelMyO2oPreorder(context.targetId)
+    if (!context.valid()) return
     detail.value = nextDetail
     syncOrderStoreFromDetail(nextDetail, { preserveFresh: true })
     await renderQrCode()
     await renderReturnRequestQrs()
+    if (!context.valid()) return
     notifyClientOrderRefresh({
       orderId: nextDetail.order.id,
       reason: 'cancelled',
@@ -1323,6 +1347,7 @@ const handleRecallOrder = async () => {
     })
     showAppSuccess('订单已撤回')
   } catch (error) {
+    if (!context.valid()) return
     const normalizedError = normalizeRequestError(error, '撤回订单失败')
     void showCriticalErrorDialog(normalizedError, {
       title: '撤回订单失败',
@@ -1330,9 +1355,9 @@ const handleRecallOrder = async () => {
       operation: '撤回订单',
     })
   } finally {
-    recalling.value = false
+    // 外层操作token统一释放，旧结果不能改变新操作的锁。
   }
-}
+})
 
 const openEditDialog = () => {
   if (!detail.value) {
@@ -1352,7 +1377,7 @@ const handleEditDialogClosed = () => {
   resetEditForm()
 }
 
-const handleSubmitOrderEdit = async () => {
+const handleSubmitOrderEdit = () => runOrderWrite('edit', async (context) => {
   if (!detail.value) {
     return
   }
@@ -1376,6 +1401,7 @@ const handleSubmitOrderEdit = async () => {
     return
   }
 
+  const submittedRemark = editRemark.value.trim() || undefined
   try {
     await ElMessageBox.confirm(
       `确认修改预订单“${displayPreorderNo.value}”吗？保存后将按最新商品和数量重算预订库存。`,
@@ -1387,7 +1413,9 @@ const handleSubmitOrderEdit = async () => {
         closeOnClickModal: false,
       },
     )
+    if (!context.valid()) return
   } catch (error) {
+    if (!context.valid()) return
     if (error === 'cancel' || error === 'close') {
       return
     }
@@ -1397,18 +1425,20 @@ const handleSubmitOrderEdit = async () => {
 
   editSubmitting.value = true
   try {
-    const nextDetail = await updateMyO2oPreorder(detail.value.order.id, {
-      remark: editRemark.value.trim() || undefined,
+    const nextDetail = await updateMyO2oPreorder(context.targetId, {
+      remark: submittedRemark,
       items: normalizedItems.map((item) => ({
         productId: item.productId,
         skuId: item.skuId,
         qty: item.qty,
       })),
     })
+    if (!context.valid()) return
     detail.value = nextDetail
     syncOrderStoreFromDetail(nextDetail, { preserveFresh: true })
     await renderQrCode()
     await renderReturnRequestQrs()
+    if (!context.valid()) return
     editDialogVisible.value = false
     notifyClientOrderRefresh({
       orderId: nextDetail.order.id,
@@ -1417,6 +1447,7 @@ const handleSubmitOrderEdit = async () => {
     })
     showAppSuccess('订单修改成功')
   } catch (error) {
+    if (!context.valid()) return
     const normalizedError = normalizeRequestError(error, '订单修改失败')
     void showCriticalErrorDialog(normalizedError, {
       title: '订单修改失败',
@@ -1424,9 +1455,9 @@ const handleSubmitOrderEdit = async () => {
       operation: '提交订单修改',
     })
   } finally {
-    editSubmitting.value = false
+    // 外层操作token统一释放，旧结果不能改变新操作的锁。
   }
-}
+})
 
 const openReturnDialog = () => {
   if (!canApplyReturn.value) {
@@ -1441,7 +1472,7 @@ const handleReturnDialogClosed = () => {
   resetReturnForm()
 }
 
-const handleSubmitReturnRequest = async () => {
+const handleSubmitReturnRequest = () => runOrderWrite('return', async (context) => {
   if (!detail.value) {
     return
   }
@@ -1459,6 +1490,7 @@ const handleSubmitReturnRequest = async () => {
     return
   }
 
+  const submittedItems = selectedReturnItems.value.map((item) => ({ productId: item.productId, skuId: item.skuId, qty: item.selectedQty }))
   try {
     await ElMessageBox.confirm(
       `确认提交退货申请吗？本次共申请 ${selectedReturnTotalQty.value} 件商品退货，提交后会生成门店核销二维码。`,
@@ -1470,7 +1502,9 @@ const handleSubmitReturnRequest = async () => {
         closeOnClickModal: false,
       },
     )
+    if (!context.valid()) return
   } catch (error) {
+    if (!context.valid()) return
     if (error === 'cancel' || error === 'close') {
       return
     }
@@ -1480,28 +1514,24 @@ const handleSubmitReturnRequest = async () => {
 
   returnSubmitting.value = true
   try {
-    const createdReturnRequest = await submitO2oReturnRequest(detail.value.order.id, {
+    const createdReturnRequest = await submitO2oReturnRequest(context.targetId, {
       reason: normalizedReason,
-      items: selectedReturnItems.value.map((item) => ({
-        productId: item.productId,
-        skuId: item.skuId,
-        qty: item.selectedQty,
-      })),
+      items: submittedItems,
     })
-    detail.value = {
-      ...detail.value,
-      returnRequests: [createdReturnRequest, ...detail.value.returnRequests],
-    }
+    if (!context.valid() || !detail.value) return
+    detail.value = applyConfirmedReturnRequest(detail.value, createdReturnRequest)
     syncOrderStoreFromDetail(detail.value, { preserveFresh: true })
     await renderReturnRequestQrs()
+    if (!context.valid()) return
     returnDialogVisible.value = false
     notifyClientOrderRefresh({
-      orderId: detail.value.order.id,
+      orderId: context.targetId,
       reason: 'return_requested',
       sourceId: clientOrderRefreshSourceId,
     })
     showAppSuccess(`退货申请已提交，退货单号：${createdReturnRequest.returnNo}`)
   } catch (error) {
+    if (!context.valid()) return
     const normalizedError = normalizeRequestError(error, '提交退货申请失败')
     void showCriticalErrorDialog(normalizedError, {
       title: '退货申请提交失败',
@@ -1509,9 +1539,9 @@ const handleSubmitReturnRequest = async () => {
       operation: '提交退货申请',
     })
   } finally {
-    returnSubmitting.value = false
+    // 外层操作token统一释放，旧结果不能改变新操作的锁。
   }
-}
+})
 
 watch(
   () => route.params.id,
