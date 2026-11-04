@@ -52,6 +52,8 @@ export const useClientAuthStore = defineStore('client-auth', () => {
   const expiresAt = ref<string | null>(null)
   const initialized = ref(false)
   const initializing = ref(false)
+  // 会话重建即推进代次，同账号 A → B → A 也不能接收旧会话的异步结果。
+  const sessionGeneration = ref(0)
   let initializePromise: Promise<boolean> | null = null
 
   /**
@@ -99,6 +101,7 @@ export const useClientAuthStore = defineStore('client-auth', () => {
    * - 保证刷新页面后仍能恢复客户端登录态。
    */
   const applyAuthResult = (result: ClientAuthSuccessResult) => {
+    sessionGeneration.value += 1
     const previousClientUserId = currentUser.value?.id ?? null
     if (previousClientUserId && previousClientUserId !== result.user.id) {
       clearClientScopedStores()
@@ -138,6 +141,7 @@ export const useClientAuthStore = defineStore('client-auth', () => {
   }
 
   const clearAuthState = () => {
+    sessionGeneration.value += 1
     clearClientScopedStores()
     currentUser.value = null
     expiresAt.value = null
@@ -161,6 +165,7 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     }
 
     const persisted = readPersistedClientAuthState()
+    sessionGeneration.value += 1
     currentUser.value = normalizePersistedUser(persisted.user)
     expiresAt.value = persisted.expiresAt
 
@@ -287,8 +292,15 @@ export const useClientAuthStore = defineStore('client-auth', () => {
    * 确认当前已保存的联系方式：
    * - 认证不改变身份资料，不会撤销会话，成功后直接刷新本地资料快照中的认证时间。
    */
-  const confirmSavedContact = async (payload: { channel: 'mobile' | 'email'; code: string }) => {
+  const confirmSavedContact = async (
+    payload: { channel: 'mobile' | 'email'; code: string },
+    context?: { isCurrent: () => boolean },
+  ) => {
+    const generation = sessionGeneration.value
+    const userId = currentUser.value?.id
     const profile = await confirmClientSavedContactVerification(payload)
+    if (!userId || generation !== sessionGeneration.value || userId !== currentUser.value?.id
+      || profile.id !== userId || (context && !context.isCurrent())) return null
     currentUser.value = profile
     persistClientAuthState({
       user: toUserSnapshot(profile),
@@ -302,6 +314,7 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     expiresAt,
     initialized,
     initializing,
+    sessionGeneration,
     isAuthenticated,
     initializeAuth,
     register,

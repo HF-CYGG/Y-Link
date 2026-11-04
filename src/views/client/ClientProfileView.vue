@@ -271,23 +271,30 @@ const openPasswordDialog = () => {
   }
 }
 
-type ProfileAction = 'password' | 'profile'
+type ProfileAction = 'password' | 'profile' | 'saved_contact'
 const profileRuns = new Map<ProfileAction, symbol>()
 let profilePageActive = true
 const invalidateProfileAction = (kind: ProfileAction) => {
   profileRuns.delete(kind)
-  if (kind === 'password') submitting.value = false; else profileSubmitting.value = false
+  if (kind === 'password') submitting.value = false
+  else if (kind === 'profile') profileSubmitting.value = false
+  else savedContactConfirming.value = ''
 }
 watch(passwordDialogVisible, () => invalidateProfileAction('password'), { flush: 'sync' })
-watch(profileDialogVisible, () => invalidateProfileAction('profile'), { flush: 'sync' })
-watch(() => clientAuthStore.currentUser?.id, () => { invalidateProfileAction('password'); invalidateProfileAction('profile') }, { flush: 'sync' })
+watch(profileDialogVisible, () => { invalidateProfileAction('profile'); invalidateProfileAction('saved_contact') }, { flush: 'sync' })
+watch(() => clientAuthStore.sessionGeneration, () => {
+  invalidateProfileAction('password'); invalidateProfileAction('profile'); invalidateProfileAction('saved_contact')
+}, { flush: 'sync' })
+watch(() => clientAuthStore.currentUser?.id, () => {
+  invalidateProfileAction('password'); invalidateProfileAction('profile'); invalidateProfileAction('saved_contact')
+}, { flush: 'sync' })
 onBeforeUnmount(() => { profilePageActive = false; profileRuns.clear() })
 const withProfileAction = async (kind: ProfileAction, action: (valid: () => boolean) => Promise<void>) => {
   if (profileRuns.has(kind)) return
-  const token = Symbol(), userId = clientAuthStore.currentUser?.id
+  const token = Symbol(), userId = clientAuthStore.currentUser?.id, generation = clientAuthStore.sessionGeneration
   profileRuns.set(kind, token)
-  const valid = () => profilePageActive && profileRuns.get(kind) === token && userId === clientAuthStore.currentUser?.id && (kind === 'password' ? passwordDialogVisible.value : profileDialogVisible.value)
-  if (kind === 'password') submitting.value = true; else profileSubmitting.value = true
+  const valid = () => profilePageActive && profileRuns.get(kind) === token && generation === clientAuthStore.sessionGeneration && userId === clientAuthStore.currentUser?.id && (kind === 'password' ? passwordDialogVisible.value : profileDialogVisible.value)
+  if (kind === 'password') submitting.value = true; else if (kind === 'profile') profileSubmitting.value = true
   try { await action(valid) } finally { if (profileRuns.get(kind) === token) invalidateProfileAction(kind) }
 }
 const submitChangePassword = () => withProfileAction('password', async (isCurrent) => {
@@ -411,7 +418,7 @@ const sendSavedContactCode = async (channel: ContactChannel) => {
 /**
  * 确认当前已保存的联系方式：独立于“保存”，不需要当前密码，成功后资料卡片标签即时更新。
  */
-const confirmSavedContactCode = async (channel: ContactChannel) => {
+const confirmSavedContactCode = (channel: ContactChannel) => withProfileAction('saved_contact', async (isCurrent) => {
   const code = savedContactCodes[channel].trim()
   if (!code) {
     showAppWarning('请输入验证码')
@@ -419,15 +426,15 @@ const confirmSavedContactCode = async (channel: ContactChannel) => {
   }
   try {
     savedContactConfirming.value = channel
-    await clientAuthStore.confirmSavedContact({ channel, code })
+    const profile = await clientAuthStore.confirmSavedContact({ channel, code }, { isCurrent })
+    if (!profile || !isCurrent()) return
     savedContactCodes[channel] = ''
     showAppSuccess(`${contactLabel(channel)}验证成功`)
   } catch (error: any) {
+    if (!isCurrent()) return
     showAppError(error.message || '验证失败，请稍后重试')
-  } finally {
-    savedContactConfirming.value = ''
   }
-}
+})
 
 </script>
 
