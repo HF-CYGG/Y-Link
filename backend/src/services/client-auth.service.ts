@@ -6,6 +6,7 @@
  * 3. 关键认证动作会结合审计日志、图形验证码和系统配置，兼顾安全性、可维护性与业务扩展空间。
  */
 
+import { createHash } from 'node:crypto'
 import { IsNull, LessThan, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
@@ -51,9 +52,11 @@ import {
 } from '../utils/staff-invite-code.js'
 
 interface ResetTicket {
+  version: 2
   userId: string
   accountKey: string
   expireAt: number
+  passwordState: string
 }
 
 interface ClientLoginSecuritySnapshot {
@@ -73,10 +76,15 @@ interface ClientLoginSecuritySnapshot {
 const RESET_TICKET_TTL_MS = 10 * 60 * 1000
 const CLIENT_SESSION_ACTIVITY_WRITE_INTERVAL_MS = 60 * 1000
 const resetTicketStore = createTicketStore<ResetTicket>({
-  namespace: 'client-password-reset',
+  namespace: 'client-password-reset-v2',
   maxSize: 3000,
   resolveExpiresAt: (ticket) => ticket.expireAt,
 })
+
+/** 绑定用途、规范化 ID 与完整密码状态；票据存储中不保留可供离线验密的原始 passwordHash。 */
+const passwordResetState = (user: Pick<ClientUser, 'id' | 'passwordHash'>) => createHash('sha256')
+  .update(JSON.stringify(['client-password-reset-v2', BigInt(user.id).toString(), user.passwordHash]))
+  .digest('hex')
 
 export interface ClientRegisterInput {
   username?: string
@@ -1053,6 +1061,7 @@ class ClientAuthService {
     }
     const user = await this.userRepo
       .createQueryBuilder('user')
+      .addSelect('user.passwordHash')
       .where(
         account.channel === 'mobile'
           ? 'user.mobile = :account AND user.mobileVerifiedAt IS NOT NULL'
@@ -1068,9 +1077,11 @@ class ClientAuthService {
     await recordForgotVerifyAudit('success', { resetTicketIssued: true }, user.id)
     const resetToken = generateSessionToken()
     await resetTicketStore.set(resetToken, {
+      version: 2,
       userId: user.id,
       accountKey: `${account.channel}:${account.account}`,
       expireAt: Date.now() + RESET_TICKET_TTL_MS,
+      passwordState: passwordResetState(user),
     })
     return {
       resetToken,
@@ -1082,7 +1093,7 @@ class ClientAuthService {
     const account = this.resolveAccount(input.account)
     const newPassword = assertClientPasswordPolicy(input.newPassword, '新密码', { identifiers: [input.account] })
     const ticket = await resetTicketStore.take(input.resetToken)
-    if (!ticket) {
+    if (!ticket || ticket.version !== 2 || typeof ticket.passwordState !== 'string' || !/^[a-f0-9]{64}$/.test(ticket.passwordState)) {
       throw new BizError('重置凭证已失效', 400)
     }
     if (ticket.accountKey !== `${account.channel}:${account.account}`) {
@@ -1092,11 +1103,12 @@ class ClientAuthService {
     await runInTransaction(async (manager) => {
       const userQuery = manager.getRepository(ClientUser)
         .createQueryBuilder('user')
+        .addSelect('user.passwordHash')
         .where('user.id = :userId', { userId: ticket.userId })
         .andWhere('(user.mobile = :account OR user.email = :account)', { account: account.account })
       if (AppDataSource.options.type === 'mysql') userQuery.setLock('pessimistic_write')
       const user = await userQuery.getOne()
-      if (!user) throw new BizError('用户不存在', 404)
+      if (!user || passwordResetState(user) !== ticket.passwordState) throw new BizError('重置凭证已失效', 400)
       await manager.getRepository(ClientUser).update(user.id, { passwordHash })
       const revokedWeb = await manager.getRepository(ClientUserSession).delete({ userId: user.id })
       const revokedMobile = await manager.getRepository(ClientMobileSession).createQueryBuilder()

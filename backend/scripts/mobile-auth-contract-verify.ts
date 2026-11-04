@@ -874,12 +874,17 @@ try {
   }), (error: unknown) => error instanceof BizError && error.statusCode === 400)
   await verificationService.sendCode({ channel: 'email', target: resetUser.email ?? '', scene: 'forgot_password' })
   resetTicket = await mobileAuthService.verifyForgotPassword({ account: resetUser.email ?? '', verificationCode: '123456' })
+  await verificationService.sendCode({ channel: 'email', target: resetUser.email ?? '', scene: 'forgot_password' })
+  const staleResetTicket = await mobileAuthService.verifyForgotPassword({ account: resetUser.email ?? '', verificationCode: '123456' })
   const resetResult = await mobileAuthService.resetPassword({
     account: resetUser.email ?? '',
     resetToken: resetTicket.resetToken,
     newPassword: 'ResetStrong789!',
   })
   assert.deepEqual(resetResult, { ok: true })
+  await assert.rejects(mobileAuthService.resetPassword({
+    account: resetUser.email ?? '', resetToken: staleResetTicket.resetToken, newPassword: 'AnotherReset789!',
+  }), (error: unknown) => error instanceof BizError && error.statusCode === 400 && error.message === '重置凭证已失效')
   await assert.rejects(
     mobileAuthService.resetPassword({
       account: resetUser.email ?? '',

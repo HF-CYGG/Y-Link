@@ -157,6 +157,30 @@ async function runMainScenario() {
     const takes = await Promise.all(Array.from({ length: 100 }, (_, index) => (index % 2 ? instanceA : instanceB).take('race')))
     assert.equal(takes.filter(Boolean).length, 1, '100 个并发 take 只能有一个拿到票据')
 
+    // 旧 namespace 在滚动升级期间可能仍有票据；v2 不能读取或迁移这些未绑定密码状态的凭证。
+    const oldReset = new RedisTicketStore<{ userId: string; accountKey: string; expireAt: number }>(
+      'client-password-reset', (ticket) => ticket.expireAt,
+    )
+    const newReset = new RedisTicketStore<{ version: 2; passwordState: string; expireAt: number }>(
+      'client-password-reset-v2', (ticket) => ticket.expireAt,
+    )
+    await oldReset.set('legacy-reset', { userId: '1', accountKey: 'email:fixture@example.test', expireAt: Date.now() + 60_000 })
+    assert.equal(await newReset.take('legacy-reset'), undefined, 'v2 必须拒绝旧 namespace 票据')
+    const { clientAuthService: resetAuthService } = await import('../src/services/client-auth.service.js')
+    await assert.rejects(resetAuthService.resetPassword({
+      account: 'fixture@example.test', resetToken: 'legacy-reset', newPassword: 'OrchidMountain927!',
+    }), (error: unknown) => error instanceof Error && error.message === '重置凭证已失效')
+    assert.ok(await oldReset.get('legacy-reset'), '业务拒绝不得消费旧 namespace 以外的数据')
+    // 即使把旧结构放入新 namespace，也必须失败关闭。
+    const malformedReset = new RedisTicketStore<{ userId: string; accountKey: string; expireAt: number }>(
+      'client-password-reset-v2', (ticket) => ticket.expireAt,
+    )
+    await malformedReset.set('malformed-reset', { userId: '1', accountKey: 'email:fixture@example.test', expireAt: Date.now() + 60_000 })
+    await assert.rejects(resetAuthService.resetPassword({
+      account: 'fixture@example.test', resetToken: 'malformed-reset', newPassword: 'OrchidMountain927!',
+    }), (error: unknown) => error instanceof Error && error.message === '重置凭证已失效')
+    assert.equal(await malformedReset.take('malformed-reset'), undefined, '畸形票据拒绝后仍然只能消费一次')
+
     // 伪造明文票据不能被接受
     await raw.set(ticketKeys[0], JSON.stringify({ code: '000000', secret: 'forged', expiresAt: Date.now() + 60_000 }))
     assert.equal(await instanceA.get('13800138000:register'), undefined, '未加密（伪造）的票据必须视为不存在')
