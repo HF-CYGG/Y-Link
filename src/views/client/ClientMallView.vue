@@ -528,6 +528,47 @@ const searchResults = computed(() => {
   })
   return sortProductsForDisplay(matchedProducts)
 })
+const searchPageSize = 24
+const searchPage = ref(1)
+const searchHeadingRef = ref<HTMLElement | null>(null)
+const searchGridRef = ref<HTMLElement | null>(null)
+const searchPaginationRef = ref<HTMLElement | null>(null)
+const pagedSearchResults = computed(() => searchResults.value.slice((searchPage.value - 1) * searchPageSize, searchPage.value * searchPageSize))
+watch([keyword, sortMode], () => { searchPage.value = 1 }, { flush: 'sync' })
+watch(searchResults, (results) => {
+  searchPage.value = Math.min(searchPage.value, Math.max(1, Math.ceil(results.length / searchPageSize)))
+}, { flush: 'sync' })
+watch(products, async () => {
+  const focused = globalThis.document?.activeElement
+  if (!(focused instanceof HTMLElement) || !searchGridRef.value?.contains(focused)) return
+  await nextTick()
+  if (!focused.isConnected && globalThis.document.activeElement === globalThis.document.body) {
+    searchHeadingRef.value?.focus({ preventScroll: true })
+  }
+})
+const scrollToSearchHeading = () => {
+  const heading = searchHeadingRef.value
+  if (!heading) return
+  const header = mallPageRef.value?.closest('.client-main-layout')?.querySelector<HTMLElement>('.client-main-layout__header')
+  const offset = header?.getBoundingClientRect().height ?? 0
+  globalThis.window.scrollTo({
+    top: Math.max(0, globalThis.window.scrollY + heading.getBoundingClientRect().top - offset - 12),
+    behavior: shouldReduceClientMotion() ? 'auto' : 'smooth',
+  })
+}
+const goToSearchResults = () => {
+  searchHeadingRef.value?.focus({ preventScroll: true })
+  scrollToSearchHeading()
+}
+const handleSearchPageChange = async () => {
+  const focused = globalThis.document?.activeElement
+  const wasInPagination = focused instanceof HTMLElement && searchPaginationRef.value?.contains(focused)
+  scrollToSearchHeading()
+  await nextTick()
+  if (wasInPagination && focused instanceof HTMLElement && (!focused.isConnected || focused.matches(':disabled'))) {
+    searchPaginationRef.value?.querySelector<HTMLElement>('.el-pager .is-active')?.focus({ preventScroll: true })
+  }
+}
 
 const bottomSelectedQty = computed(() => clientCartStore.totalQty)
 const bottomSelectedTypeCount = computed(() => clientCartStore.items.length)
@@ -1866,22 +1907,14 @@ onBeforeUnmount(() => {
       action-text="重试"
       @retry="loadProducts(true)"
     />
-    <BaseRequestState
-      v-else-if="!products.length"
-      type="empty"
-      title="暂无上架商品"
-      description="请稍后刷新或联系管理员补货"
-      action-text="刷新库存"
-      @retry="loadProducts(true)"
-    />
-    <BaseRequestState
-      v-else-if="searchMode && !searchResults.length"
-      type="empty"
-      title="未找到相关商品"
-      description="请尝试其他关键字"
-      action-text="清空搜索"
-      @retry="keyword = ''"
-    />
+    <div v-else-if="!products.length">
+      <p v-if="searchMode" ref="searchHeadingRef" tabindex="-1">搜索结果 0 条</p>
+      <BaseRequestState type="empty" title="暂无上架商品" description="请稍后刷新或联系管理员补货" action-text="刷新库存" @retry="loadProducts(true)" />
+    </div>
+    <div v-else-if="searchMode && !searchResults.length">
+      <p ref="searchHeadingRef" tabindex="-1">搜索结果 0 条</p>
+      <BaseRequestState type="empty" title="未找到相关商品" description="请尝试其他关键字" action-text="清空搜索" @retry="keyword = ''" />
+    </div>
 
     <template v-else>
       <div v-if="searchMode" class="mall-sort-row">
@@ -1939,11 +1972,11 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <header class="flex items-center justify-between gap-3">
-        <p class="text-sm font-semibold text-slate-700 dark:text-slate-200">搜索结果 {{ searchResults.length }} 条</p>
+        <p ref="searchHeadingRef" tabindex="-1" class="text-sm font-semibold text-slate-700 dark:text-slate-200">搜索结果 {{ searchResults.length }} 条</p>
       </header>
-      <div class="client-product-grid mall-product-grid">
+      <div ref="searchGridRef" class="client-product-grid mall-product-grid">
         <article
-          v-for="product in searchResults"
+          v-for="product in pagedSearchResults"
           :key="product.id"
           :ref="(el) => setProductCardRef(`search:${product.id}`, el, product.id)"
           class="client-product-card"
@@ -1983,6 +2016,10 @@ onBeforeUnmount(() => {
           </button>
           <div class="client-product-card__actions"><ClientCardCartStepper :product="product" @add="quickAdd(product, $event)" @decrease="decreaseCardQty" @choose="openProductDetail(product)" /><ClientRestockButton v-if="isSingleRestockSku(product)" :product="product" /></div>
         </article>
+      </div>
+      <div v-if="searchResults.length > searchPageSize" ref="searchPaginationRef" class="mall-search-pagination">
+        <el-pagination v-model:current-page="searchPage" :page-size="searchPageSize" :total="searchResults.length" :pager-count="5" layout="prev, pager, next" aria-label="搜索结果分页" @current-change="handleSearchPageChange" />
+        <el-button text @click="goToSearchResults">跳到搜索结果</el-button>
       </div>
     </section>
 
@@ -2483,6 +2520,14 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.mall-search-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
 .mall-page {
   /* 商城页仅为底部导航预留页面级安全区，悬浮购物车改为覆盖在内容上方，让商品选择区继续向下延伸。 */
   --mall-mini-cart-height: 4.7rem;
