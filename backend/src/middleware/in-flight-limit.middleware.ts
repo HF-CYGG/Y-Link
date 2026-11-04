@@ -7,6 +7,7 @@
  * 维护说明：路径集合按路由挂载点内的相对路径书写（与 express-rate-limit 的 skip 判断一致），新增匿名入口时同步登记。
  */
 
+import { staticPathKey } from '../utils/static-path-key.js'
 import type { NextFunction, Request, RequestHandler, Response } from 'express'
 import type { BoundedConcurrencyGate } from '../utils/bounded-concurrency.js'
 
@@ -15,7 +16,7 @@ export function createInFlightLimitMiddleware(options: {
   limitedPaths: ReadonlySet<string>
 }): RequestHandler {
   return (req: Request, res: Response, next: NextFunction) => {
-    if (!options.limitedPaths.has(req.path)) {
+    if (!options.limitedPaths.has(staticPathKey(req.path))) {
       next()
       return
     }

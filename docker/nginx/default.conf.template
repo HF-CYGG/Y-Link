@@ -56,10 +56,25 @@ map $request_uri $ylink_attack_class {
 
 # 匿名商城目录是分体/MySQL 部署下的主要公开读热点。短 TTL 微缓存把同一时刻的并发
 # 浏览请求合并为一次后端回源；结算仍由后端事务读取生产库并重新校验库存。
-limit_req_zone $binary_remote_addr zone=ylink_auth_login:10m rate=12r/m;
-limit_req_zone $binary_remote_addr zone=ylink_auth_captcha:10m rate=30r/m;
+# 认证规范路径与别名共用原有每 IP 桶；空键使无关 API 不消耗认证配额。
+# 仅分类 URI，不扩展 /api/ 代理范围，不重写请求路径或参数。
+map $uri $ylink_auth_login_key {
+    default "";
+    ~*^/api/(?:auth/(?:login(?:/mfa(?:/webauthn/(?:options|verify))?)?|webauthn/login/(?:options|verify))|client-auth/login)/?$ $binary_remote_addr;
+}
+map $uri $ylink_auth_captcha_key {
+    default "";
+    ~*^/api/(?:auth|client-auth)/captcha/?$ $binary_remote_addr;
+}
+map $uri $ylink_auth_sensitive_key {
+    default "";
+    ~*^/api/client-auth/(?:register|verification-code/send|forgot-password/(?:verify|reset))/?$ $binary_remote_addr;
+}
+
+limit_req_zone $ylink_auth_login_key zone=ylink_auth_login:10m rate=12r/m;
+limit_req_zone $ylink_auth_captcha_key zone=ylink_auth_captcha:10m rate=30r/m;
 # 敏感匿名入口（注册、发码、找回校验与重置）每 IP 限流；登录第二步（两步验证）与登录共用登录区。
-limit_req_zone $binary_remote_addr zone=ylink_auth_sensitive:10m rate=30r/m;
+limit_req_zone $ylink_auth_sensitive_key zone=ylink_auth_sensitive:10m rate=30r/m;
 # /api/ 通用每 IP 限流：拦截单一来源的高频洪水；校园 NAT 等大量用户共用出口 IP 时按需调大 rate 与 burst。
 limit_req_zone $binary_remote_addr zone=ylink_api_general:20m rate=50r/s;
 # 每 IP 同时处理中的请求上限（空闲长连接不计入）。
@@ -518,6 +533,9 @@ server {
     }
 
     location ^~ /api/ {
+        limit_req zone=ylink_auth_login burst=5 nodelay;
+        limit_req zone=ylink_auth_captcha burst=8 nodelay;
+        limit_req zone=ylink_auth_sensitive burst=10 nodelay;
         limit_req zone=ylink_api_general burst=500 nodelay;
         proxy_pass http://ylink_backend/api/;
         proxy_http_version 1.1;

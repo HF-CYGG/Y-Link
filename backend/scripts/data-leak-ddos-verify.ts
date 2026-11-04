@@ -732,6 +732,16 @@ function verifyOverloadPrimitives() {
   assert.equal(classify('GET', '/api/auth/me', 'critical'), null)
   assert.equal(classify('POST', '/api/orders', 'critical'), null, '写请求永不削峰')
   assert.equal(classify('POST', '/api/v1/mobile-auth/login', 'critical'), null, '移动端不纳入')
+  for (const level of ['elevated', 'critical'] as const) {
+    for (const alias of ['/api/auth/LOGIN', '/api/auth/login/', '/API/AUTH/LOGIN/']) {
+      assert.equal(classify('POST', alias, level), 'anonymousAuth', 'POST 别名须按匿名认证削峰')
+    }
+    assert.equal(classify('GET', '/api/client-auth/CAPTCHA/', level), 'anonymousAuth', '验证码别名不应仅依赖 critical 通用读削峰')
+    assert.equal(classify('GET', '/API/AUTH/ME/', level), null)
+    assert.equal(classify('POST', '/API/V1/MOBILE-AUTH/LOGIN/', level), null)
+    assert.equal(classify('GET', '/API/CUSTOMER-SERVICE/STREAM/', level), 'realtime')
+    assert.equal(classify('POST', '/API/DATA-MAINTENANCE/EXPORT/JSON/', level), 'export')
+  }
   assert.equal(classify('GET', '/health', 'critical'), null)
   assert.equal(classify('GET', '/api/database-rescue/status', 'critical'), null, '救援面不纳入')
 }

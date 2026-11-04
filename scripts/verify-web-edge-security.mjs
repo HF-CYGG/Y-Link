@@ -2,8 +2,11 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
+// Windows checkout 可使用 CRLF；仅统一读取后的行尾，不改变任何配置约束。
+const readSource = (file) => readFileSync(file, 'utf8').replace(/\r\n?/g, '\n')
+
 for (const file of ['docker/nginx/default.conf', 'docker/nginx/default.conf.template', 'docker/nginx/onebox.conf']) {
-  const source = readFileSync(file, 'utf8')
+  const source = readSource(file)
   assert.doesNotMatch(source, /set_real_ip_from\s+(?:10\.0\.0\.0\/8|172\.16\.0\.0\/12|192\.168\.0\.0\/16)/, `${file} 不得默认信任全部私网`)
   assert.doesNotMatch(source, /proxy_add_x_forwarded_for/, `${file} 应覆盖客户端自带的 XFF 链`)
   assert.match(source, /proxy_set_header X-Forwarded-Proto \$ylink_forwarded_proto;/)
@@ -25,7 +28,8 @@ for (const file of ['docker/nginx/default.conf', 'docker/nginx/default.conf.temp
   }
   // 边缘限流、连接上限与请求体上限：三套配置口径一致，超限统一返回 JSON。
   for (const zone of ['ylink_auth_login', 'ylink_auth_captcha', 'ylink_auth_sensitive', 'ylink_api_general']) {
-    assert.match(source, new RegExp(`limit_req_zone \\$binary_remote_addr zone=${zone}:`), `${file} 缺少限流区 ${zone}`)
+    const key = zone === 'ylink_api_general' ? 'binary_remote_addr' : `${zone}_key`
+    assert.match(source, new RegExp(`limit_req_zone \\$${key} zone=${zone}:`), `${file} 缺少限流区 ${zone}`)
   }
   assert.match(source, /limit_conn_zone \$binary_remote_addr zone=ylink_conn_per_ip:/, `${file} 缺少每 IP 连接区`)
   for (const directive of [
@@ -69,6 +73,39 @@ for (const file of ['docker/nginx/default.conf', 'docker/nginx/default.conf.temp
     assert.match(body, /client_max_body_size 11m;/, `${file} ${declaration} 上传/导入入口应放宽到 11m`)
     assert.match(body, /limit_req zone=ylink_api_general /, `${file} ${declaration} 应计入通用限流`)
   }
+  // 从真实配置提取分类正则，覆盖三种认证桶与所有既有 exact 入口，防止别名只走通用区。
+  const authCases = {
+    login: ['/api/auth/login', '/api/client-auth/login', '/api/auth/login/mfa',
+      '/api/auth/login/mfa/webauthn/options', '/api/auth/login/mfa/webauthn/verify',
+      '/api/auth/webauthn/login/options', '/api/auth/webauthn/login/verify'],
+    captcha: ['/api/auth/captcha', '/api/client-auth/captcha'],
+    sensitive: ['/api/client-auth/register', '/api/client-auth/verification-code/send',
+      '/api/client-auth/forgot-password/verify', '/api/client-auth/forgot-password/reset'],
+  }
+  for (const [kind, paths] of Object.entries(authCases)) {
+    const map = source.match(new RegExp(`map \\$uri \\$ylink_auth_${kind}_key \\{([\\s\\S]*?)\\n\\}`))
+    assert.ok(map, `${file} 缺少 ${kind} 条件键`)
+    assert.match(map[1], /default "";/)
+    const expression = map[1].match(/~\*(\S+) \$binary_remote_addr;/)
+    assert.ok(expression, `${file} ${kind} 必须按 URI 忽略大小写并返回原每 IP 键`)
+    const pattern = new RegExp(expression[1], 'i')
+    for (const path of paths) {
+      for (const variant of [path, path.toUpperCase(), `${path}/`, `${path.toUpperCase()}/`]) {
+        assert.ok(pattern.test(variant), `${file} ${kind} 未覆盖 ${variant}`)
+      }
+      assert.ok(!pattern.test(`${path}//`))
+      assert.ok(!pattern.test(`${path}/unknown`))
+      assert.match(blockOf(`location = ${path}`), new RegExp(`limit_req zone=ylink_auth_${kind} `))
+    }
+    for (const path of Object.entries(authCases).filter(([other]) => other !== kind).flatMap(([, paths]) => paths)) {
+      assert.ok(!pattern.test(path), `${file} ${kind} 不得消耗其他认证类配额`)
+    }
+    for (const path of ['/api/users', '/api/v1/mobile-auth/login', '/api/auth/%6cogin', '/api/auth//login']) {
+      assert.ok(!pattern.test(path), `${file} ${kind} 不得扩展路径语义`)
+    }
+    assert.match(blockOf('location ^~ /api/'), new RegExp(`limit_req zone=ylink_auth_${kind} burst=`))
+  }
+  assert.doesNotMatch(source, /location[^\n]*~\*[^\n]*api\//, `${file} 不得扩展大小写 API 代理范围`)
   assert.match(blockOf('location ^~ /api/'), /limit_req zone=ylink_api_general burst=\d+ nodelay;/, `${file} /api/ 缺少通用每 IP 限流`)
   assert.match(blockOf('location ^~ /uploads/'), /limit_req zone=ylink_api_general burst=\d+ nodelay;/, `${file} /uploads/ 缺少通用每 IP 限流`)
   // “变量 + URI”的 proxy_pass 会让 Nginx 用 URI 整体替换请求路径并丢弃查询参数（/api/orders?page=2 被转成 /api/），必须使用具名 upstream 或字面地址。
@@ -100,7 +137,7 @@ for (const file of ['docker/nginx/default.conf', 'docker/nginx/default.conf.temp
   }
 }
 // 分体模板：后端走具名 upstream（运行期解析 + keepalive），商品图边缘缓存不得覆盖私有反馈附件。
-const splitTemplate = readFileSync('docker/nginx/default.conf.template', 'utf8')
+const splitTemplate = readSource('docker/nginx/default.conf.template')
 assert.match(splitTemplate, /upstream ylink_backend \{[\s\S]*?server backend:3001 resolve;[\s\S]*?keepalive \d+;[\s\S]*?\}/, '分体模板需使用带 resolve 与 keepalive 的具名 upstream')
 const productImageBlock = splitTemplate.slice(splitTemplate.indexOf('location ^~ /uploads/products/'), splitTemplate.indexOf('\n    }', splitTemplate.indexOf('location ^~ /uploads/products/')))
 assert.match(productImageBlock, /proxy_cache ylink_product_images;/, '分体模板商品图需启用边缘缓存')
@@ -108,13 +145,13 @@ assert.match(productImageBlock, /proxy_ignore_headers Cache-Control Expires;/, '
 assert.match(productImageBlock, /proxy_cache_valid 200 7d;/, '商品图边缘有效期应为七天')
 assert.doesNotMatch(productImageBlock, /proxy_ignore_headers[^;]*(?:Set-Cookie|Vary)/i, '不得忽略上游缓存安全控制')
 assert.doesNotMatch(splitTemplate, /location \^~ \/uploads\/client-feedback\/[\s\S]*?proxy_cache/, '私有反馈附件不得进入边缘缓存')
-const pageHeaders = readFileSync('docker/nginx/page-security-headers.conf', 'utf8')
+const pageHeaders = readSource('docker/nginx/page-security-headers.conf')
 const connectSources = pageHeaders.match(/connect-src\s+([^;]+);/)
 assert.ok(connectSources, '页面 CSP 必须显式约束网络连接来源')
 assert.deepEqual(connectSources[1].trim().split(/\s+/).sort(), ["'self'", 'https://v1.hitokoto.cn'].sort(),
   '页面只允许同源请求和现有 HTTPS 语录服务，禁止通配放开外部连接')
 for (const file of ['compose.yml', 'compose.mysql.yml', 'compose.cloud.yml']) {
-  const source = readFileSync(file, 'utf8')
+  const source = readSource(file)
   const backend = source.slice(source.indexOf('  backend:'), source.indexOf('  frontend:'))
   assert.doesNotMatch(backend, /^    ports:/m, `${file} 默认不公开后端端口`)
   assert.match(backend, /Y_LINK_TRUST_PROXY/)
