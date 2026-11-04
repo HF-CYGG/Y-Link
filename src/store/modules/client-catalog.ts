@@ -10,7 +10,7 @@
  * - 若库存口径改为以后端聚合字段为准，应优先调整 `applyPreorderSubmission` 的增量计算方式。
  */
 
-import { computed, ref } from 'vue'
+import { computed, onScopeDispose, ref } from 'vue'
 import { defineStore } from 'pinia'
 import type { O2oMallProduct, O2oMallProductsResult, O2oMallStorefrontConfig } from '@/api/modules/o2o'
 import {
@@ -22,6 +22,7 @@ import {
   normalizePickupWindowHours,
   readPersistedClientCatalogSnapshot,
 } from '@/utils/client-catalog-storage'
+import { createClientCatalogPersistenceTimer } from '@/utils/client-catalog-persistence-timer'
 
 // 商品目录缓存时间不宜过长：
 // - 过短会导致用户切页返回时仍频繁请求接口；
@@ -51,19 +52,30 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
   // 保留只读状态供调试面板或模板消费；请求前应调用 isFreshNow()，避免 Date.now() 被 computed 缓存。
   const isFresh = computed(() => isFreshNow())
 
-  const persistCatalogDataSnapshot = () => {
-    if (!clientUserId.value) {
+  const catalogPersistence = createClientCatalogPersistenceTimer((owner) => {
+    if (clientUserId.value !== owner) {
       return
     }
 
     // 商品数据是最大的一块本地缓存，只在真正刷新目录或库存局部回写后落盘，
     // 避免用户每次切分类、改搜索词都重复序列化整份商品数组。
-    persistClientCatalogDataSnapshot(clientUserId.value, {
+    persistClientCatalogDataSnapshot(owner, {
       products: products.value,
       storefront: storefront.value,
       updatedAt: updatedAt.value,
     })
+  })
+  const flushWhenHidden = () => {
+    if (globalThis.document?.visibilityState === 'hidden') catalogPersistence.flush()
   }
+  globalThis.document?.addEventListener?.('visibilitychange', flushWhenHidden)
+  globalThis.window?.addEventListener?.('pagehide', catalogPersistence.flush)
+  onScopeDispose(() => {
+    catalogPersistence.flush()
+    catalogPersistence.cancel()
+    globalThis.document?.removeEventListener?.('visibilitychange', flushWhenHidden)
+    globalThis.window?.removeEventListener?.('pagehide', catalogPersistence.flush)
+  })
 
   const persistBrowseContextSnapshot = () => {
     if (!clientUserId.value) {
@@ -92,7 +104,8 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
     if (options.markComplete) {
       requiresNetworkRefresh.value = false
     }
-    persistCatalogDataSnapshot()
+    persistClientCatalogStorefrontSnapshot(nextStorefront)
+    catalogPersistence.schedule(clientUserId.value)
   }
 
   const resetState = () => {
@@ -121,15 +134,15 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
 
   const initialize = (nextClientUserId: string | number | null | undefined) => {
     const normalizedClientUserId = normalizeClientUserId(nextClientUserId)
+    // 同账号幂等初始化不触碰 dirty、代次或截止时间；真正重建状态时才使旧任务失效。
+    if (normalizedClientUserId && initialized.value && clientUserId.value === normalizedClientUserId) {
+      return
+    }
+    catalogPersistence.cancel()
     if (!normalizedClientUserId) {
       clientUserId.value = ''
       resetState()
       initialized.value = true
-      return
-    }
-
-    const switchedUser = clientUserId.value !== normalizedClientUserId
-    if (initialized.value && !switchedUser) {
       return
     }
 
@@ -263,6 +276,7 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
   }
 
   const clearAll = () => {
+    catalogPersistence.cancel()
     const currentClientUserId = clientUserId.value
     resetState()
     clientUserId.value = ''
