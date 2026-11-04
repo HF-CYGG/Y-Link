@@ -34,6 +34,7 @@ import {
   verifyPasswordForNonexistentAccount,
 } from '../utils/password.js'
 import { hashSessionToken } from '../utils/session-token.js'
+import { isMobileAccessToken, hashMobileToken } from '../utils/mobile-token.js'
 import { maskLoginInputForAudit } from '../utils/audit-subject-mask.js'
 import { generateSessionToken } from '../utils/token.js'
 import { auditService } from './audit.service.js'
@@ -669,6 +670,31 @@ class ClientAuthService {
       query.setLock('pessimistic_write')
     }
     return query.getOne()
+  }
+
+  /** 必须在持有账号行锁后调用，不能根据 Cookie/Bearer 来源判断会话所属表。 */
+  private async assertProfileSessionCurrent(manager: EntityManager, auth: ClientAuthContext) {
+    if (isMobileAccessToken(auth.sessionToken)) {
+      const query = manager.getRepository(ClientMobileSession).createQueryBuilder('session')
+        .where('session.clientUserId = :userId AND session.accessTokenHash = :hash', {
+          userId: auth.userId, hash: hashMobileToken(auth.sessionToken),
+        })
+      if (manager.connection.options.type === 'mysql') query.setLock('pessimistic_write')
+      const session = await query.getOne()
+      const now = new Date()
+      if (!session || session.revokedAt || session.accessExpiresAt <= now || session.absoluteExpiresAt <= now) {
+        throw new BizError('未登录或登录状态已失效', 401)
+      }
+      return
+    }
+    const query = manager.getRepository(ClientUserSession).createQueryBuilder('session')
+      .where('session.userId = :userId AND session.sessionToken = :hash', {
+        userId: auth.userId, hash: hashSessionToken(auth.sessionToken),
+      })
+    if (manager.connection.options.type === 'mysql') query.setLock('pessimistic_write')
+    const session = await query.getOne()
+    const now = new Date()
+    if (!session || session.expiresAt <= now) throw new BizError('未登录或登录状态已失效', 401)
   }
 
   isLoginSecuritySnapshotCurrent(user: ClientUser, snapshot: ClientLoginSecuritySnapshot): boolean {
@@ -1466,10 +1492,10 @@ class ClientAuthService {
       .where('user.id = :id', { id: auth.userId })
     if (manager && AppDataSource.options.type === 'mysql') userQuery.setLock('pessimistic_write')
     const user = await userQuery.getOne()
-    if (!user) {
-      throw new BizError('当前用户不存在', 404)
-    }
+    if (!user || user.status !== 'enabled') throw new BizError('未登录或登录状态已失效', 401)
+    if (manager) await this.assertProfileSessionCurrent(manager, auth)
     if (user.accountType === 'department') throw new BizError('部门账号资料由管理员维护', 403)
+    const securitySnapshot = this.buildLoginSecuritySnapshot(user)
     // Web 入口（无外层事务）把旧密码复核纳入账号失败锁定；Mobile 由外层编排事务调用，不在事务内写风控状态。
     if (!manager) await authSecurityService.assertClientPasswordReauthAllowed(requestMeta, user.id)
     if (!(await verifyPassword(input.currentPassword, user.passwordHash))) {
@@ -1532,6 +1558,13 @@ class ClientAuthService {
     }
 
     const persist = async (transactionManager: EntityManager) => {
+      // 外部验证码可能已消费；冲突不重试、不恢复验证码，也不重复执行 scrypt。
+      const lockedUser = await this.lockUserForSession(transactionManager, user.id)
+      if (!lockedUser || lockedUser.status !== 'enabled') throw new BizError('未登录或登录状态已失效', 401)
+      await this.assertProfileSessionCurrent(transactionManager, auth)
+      if (!this.isLoginSecuritySnapshotCurrent(lockedUser, securitySnapshot)) {
+        throw new BizError('账号资料已变更，请刷新资料并重新获取验证码后重试', 409)
+      }
       const repository = transactionManager.getRepository(ClientUser)
       if (Object.keys(profilePatch).length > 0) {
         await repository.update({ id: user.id }, profilePatch)
