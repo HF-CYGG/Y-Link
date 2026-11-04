@@ -3936,19 +3936,35 @@ class O2oPreorderService {
     const requestedPage = Math.max(1, Math.floor(Number(input.page) || 1))
     const baseQuery = await this.createConsoleOrderFilteredQuery(input, exposeSystemNo)
 
-    const statusRows = await baseQuery
-      .clone()
-      .select('order.status', 'status')
-      .addSelect('COUNT(1)', 'total')
-      .groupBy('order.status')
-      .getRawMany<{ status: string; total: O2oNumericLike }>()
-    const statusCountMap = new Map(statusRows.map((row) => [String(row.status), Number(row.total ?? 0)]))
+    // 同一请求只取一次时钟；先按数值聚合 ID，再由数据库转为字符串，避免 MySQL bigint 经 JS number 丢精度。
+    const nowMs = Date.now()
+    const idTextType = this.preorderRepo.manager.connection.options.type === 'sqlite' ? 'TEXT' : 'CHAR'
+    const aggregateQuery = baseQuery.clone()
+      .select('COUNT(1)', 'allCount')
+      .addSelect("SUM(CASE WHEN order.status = 'pending' THEN 1 ELSE 0 END)", 'pendingCount')
+      .addSelect("SUM(CASE WHEN order.status = 'verified' THEN 1 ELSE 0 END)", 'completedCount')
+      .addSelect("SUM(CASE WHEN order.status = 'cancelled' THEN 1 ELSE 0 END)", 'cancelledCount')
+      .addSelect(`CAST(MAX(order.id) AS ${idTextType})`, 'latestId')
+    if (input.sinceOrderId) {
+      aggregateQuery.addSelect(
+        'SUM(CASE WHEN order.id > :sinceOrderId AND order.status = :newOrderStatus AND order.createdAt >= :newOrderWindowStart THEN 1 ELSE 0 END)',
+        'newCount',
+      ).setParameters({
+        sinceOrderId: input.sinceOrderId,
+        newOrderStatus: 'pending',
+        newOrderWindowStart: new Date(nowMs - O2O_CONSOLE_NEW_ORDER_WINDOW_MS),
+      })
+    }
+    const aggregate = await aggregateQuery.getRawOne<{
+      allCount: O2oNumericLike; pendingCount: O2oNumericLike; completedCount: O2oNumericLike
+      cancelledCount: O2oNumericLike; latestId: string | null; newCount?: O2oNumericLike
+    }>()
     const returnsCount = await this.applyConsoleOrderPoolCondition(baseQuery.clone(), 'returns').getCount()
     const poolCounts: Record<O2oConsoleOrderPoolKey, number> = {
-      all: [...statusCountMap.values()].reduce((sum, value) => sum + value, 0),
-      pending: statusCountMap.get('pending') ?? 0,
-      completed: statusCountMap.get('verified') ?? 0,
-      cancelled: statusCountMap.get('cancelled') ?? 0,
+      all: Number(aggregate?.allCount ?? 0),
+      pending: Number(aggregate?.pendingCount ?? 0),
+      completed: Number(aggregate?.completedCount ?? 0),
+      cancelled: Number(aggregate?.cancelledCount ?? 0),
       returns: returnsCount,
     }
 
@@ -3962,24 +3978,11 @@ class O2oPreorderService {
         .getMany()
       : []
 
-    const latestRow = await baseQuery
-      .clone()
-      .select('MAX(order.id)', 'latestId')
-      .getRawOne<{ latestId: O2oNumericLike | null }>()
-    const latestOrderId = latestRow?.latestId === null || latestRow?.latestId === undefined ? null : String(latestRow.latestId)
-
-    let newOrderCount = 0
-    if (input.sinceOrderId) {
-      newOrderCount = await baseQuery
-        .clone()
-        .andWhere('order.id > :sinceOrderId', { sinceOrderId: input.sinceOrderId })
-        .andWhere('order.status = :newOrderStatus', { newOrderStatus: 'pending' })
-        .andWhere('order.createdAt >= :newOrderWindowStart', { newOrderWindowStart: new Date(Date.now() - O2O_CONSOLE_NEW_ORDER_WINDOW_MS) })
-        .getCount()
-    }
+    const latestOrderId = aggregate?.latestId ?? null
+    const newOrderCount = input.sinceOrderId ? Number(aggregate?.newCount ?? 0) : 0
 
     const list = await this.buildOrderSummaryViews(rows, {
-      nowMs: Date.now(),
+      nowMs,
       matchedKeyword: input.keyword,
       exposeSystemNo,
     })

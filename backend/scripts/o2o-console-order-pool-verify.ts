@@ -111,7 +111,7 @@ const main = async () => {
   assert.ok(verifiedOrders.every((order) => /^PRE-D-\d{6}$/.test(order.preorderNo)), '部门预订单夹具必须使用 PRE-D 编号')
   assert.ok([...pendingOrders, ...cancelledOrders, deletedOrder].every((order) => /^PRE-W-\d{6}$/.test(order.preorderNo)), '散客预订单夹具必须使用 PRE-W 编号')
 
-  for (const [index, order] of [verifiedOrders[0]!, cancelledOrders[0]!].entries()) {
+  for (const [index, order] of [verifiedOrders[0]!, cancelledOrders[0]!, verifiedOrders[0]!].entries()) {
     await returnRepo.save(returnRepo.create({
       returnNo: `POOLRT${index}`,
       orderId: order.id,
@@ -223,6 +223,17 @@ const main = async () => {
   assert.equal(afterNewOrder.latestOrderId, String(newOrder.id))
   assert.equal(afterNewOrder.list.length, 4, '新单提醒不得追加当前分栏以外的订单')
 
+  const filtered = await o2oPreorderService.listConsoleOrderPool({
+    accountType: 'department', departmentName: '订单池验收部门', staffNo: 'T070',
+    startTime: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    endTime: new Date(Date.now() + 60 * 60 * 1000).toISOString(), keyword: verifiedOrders[0]!.preorderNo,
+  })
+  assert.equal(filtered.total, 1, '账号、部门、工号、日期、关键字必须共同筛选')
+  assert.equal(filtered.poolCounts.returns, 1, '重复退货申请不得重复计数')
+  assert.equal(filtered.latestOrderId, String(verifiedOrders[0]!.id))
+  const personal = await o2oPreorderService.listConsoleOrderPool({ accountType: 'personal' })
+  assert.equal(personal.total, 11)
+
   const legacyList = await o2oPreorderService.listConsoleOrders({ limit: 200 })
   assert.ok(Array.isArray(legacyList), '旧订单查询接口必须保持数组契约')
   assert.equal(legacyList.length, 15)
@@ -302,6 +313,56 @@ const main = async () => {
     for (const order of verifiedOrders.slice(2)) {
       await preorderRepo.update(order.id, { status: 'verified', reservedBusinessNo: null })
     }
+  }
+
+  // 只统计订单池的三条基础查询；summary/keyword 依赖的查询有各自覆盖，不混入本预算。
+  const logger = AppDataSource.logger
+  const originalLogQuery = logger.logQuery
+  const statements: string[] = []
+  logger.logQuery = (query) => { statements.push(query) }
+  AppDataSource.setOptions({ logging: ['query'] })
+  const originalNow = Date.now
+  const nowMs = Date.UTC(2026, 10, 4, 12)
+  const windowStart = nowMs - 30 * 60 * 1000
+  try {
+    const marker = String(newOrder.id)
+    const before = await createPreorder('pending', { createdAt: new Date(windowStart - 1) })
+    const at = await createPreorder('pending', { createdAt: new Date(windowStart) })
+    const after = await createPreorder('pending', { createdAt: new Date(windowStart + 1) })
+    await createPreorder('verified', { createdAt: new Date(windowStart + 1) })
+    await createPreorder('pending', { createdAt: new Date(windowStart + 1), isDeleted: true })
+    Date.now = () => nowMs
+    statements.length = 0
+    const boundary = await o2oPreorderService.listConsoleOrderPool({ pool: 'cancelled', sinceOrderId: marker })
+    assert.equal(boundary.newOrderCount, 2, '新单窗口 -1ms 排除，等于和 +1ms 包含；仅 pending 且未删除')
+    assert.equal(boundary.poolCounts.returns, 2, '跨状态退货且重复申请只计一单')
+    const baseQueries = statements.filter((query) => /FROM ["`]o2o_preorder["`] ["`]order["`]/.test(query))
+    assert.equal(baseQueries.length, 3, '非空页基础查询必须合并为聚合、退货 EXISTS、分页三条')
+    assert.ok(baseQueries.some((query) => /CAST\(MAX\(/.test(query)), 'ID 必须先数值 MAX 后转文本')
+    statements.length = 0
+    const empty = await o2oPreorderService.listConsoleOrderPool({ departmentName: '不存在部门', page: 99 })
+    assert.equal(empty.page, 1)
+    assert.equal(empty.latestOrderId, null)
+    assert.equal(empty.newOrderCount, 0)
+    assert.equal(statements.filter((query) => /FROM ["`]o2o_preorder["`] ["`]order["`]/.test(query)).length, 2,
+      '空结果只执行聚合与退货计数，不执行分页')
+    assert.equal((await o2oPreorderService.listConsoleOrderPool({ sinceOrderId: String(at.id) })).newOrderCount, 1,
+      '新单 ID 必须严格大于基准')
+    assert.equal((await o2oPreorderService.listConsoleOrderPool({})).newOrderCount, 0)
+
+    // 使用跨 JS 安全整数边界的两个相邻 MySQL ID，SQLite 保持安全整数。
+    const lowId = mysql ? '9007199254740992' : '9007199254740990'
+    const highId = mysql ? '9007199254740993' : '9007199254740991'
+    await preorderRepo.update(before.id, { id: lowId, createdAt: new Date(windowStart) })
+    await preorderRepo.update(after.id, { id: highId })
+    const precise = await o2oPreorderService.listConsoleOrderPool({ pool: 'cancelled', sinceOrderId: lowId })
+    assert.equal(precise.latestOrderId, highId, 'MAX 转字符串必须保留精确 ID')
+    assert.equal(precise.newOrderCount, 1, '大 ID 基准不得经 Number 舍入')
+    assert.ok(precise.list.every((row) => row.status === 'cancelled'), 'latest/new 与当前分栏独立')
+  } finally {
+    Date.now = originalNow
+    logger.logQuery = originalLogQuery
+    AppDataSource.setOptions({ logging: false })
   }
 
   await AppDataSource.destroy()
