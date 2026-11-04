@@ -10,6 +10,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -20,24 +21,44 @@ const sqlitePath = path.join(runtimeDir, 'order-pool.sqlite')
 
 process.env.NODE_ENV = 'test'
 process.env.APP_PROFILE = `order-pool-${runId}`
-process.env.DB_TYPE = 'sqlite'
+// MySQL 仅允许 QA 显式准备的空隔离库；不得连接业务库，版本门禁保持 8.4。
+const mysql = process.env.ORDER_POOL_TEST_MYSQL === 'true'
+if (mysql && !/^ylink_order_pool_verify_[a-z0-9_]+$/.test(process.env.DB_NAME ?? '')) {
+  throw new Error('MySQL 验收必须使用 ylink_order_pool_verify_ 前缀的独立空库')
+}
+process.env.DB_TYPE = mysql ? 'mysql' : 'sqlite'
+process.env.Y_LINK_SKIP_DATABASE_RUNTIME_OVERRIDE = 'true'
+delete process.env.ENV_FILE
 process.env.DB_SYNC = 'true'
 process.env.SQLITE_DB_PATH = sqlitePath
 process.env.Y_LINK_DATA_DIR = runtimeDir
 
 fs.mkdirSync(runtimeDir, { recursive: true })
+const previousCwd = process.cwd()
+process.chdir(runtimeDir)
+let cleanupDataSource: { isInitialized: boolean; destroy(): Promise<void> } | undefined
 
 const main = async () => {
   const { AppDataSource } = await import('../src/config/data-source.js')
+  cleanupDataSource = AppDataSource
   const { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } = await import('../src/config/database-bootstrap.js')
   const { initializeDatabaseInfrastructure } = await import('../src/database/database-strategy.js')
   const { ClientUser } = await import('../src/entities/client-user.entity.js')
   const { O2oPreorder } = await import('../src/entities/o2o-preorder.entity.js')
   const { O2oReturnRequest } = await import('../src/entities/o2o-return-request.entity.js')
+  const { BizOutboundOrder } = await import('../src/entities/biz-outbound-order.entity.js')
   const { o2oPreorderService } = await import('../src/services/o2o-preorder.service.js')
 
   prepareDatabaseRuntime()
+  if (mysql) AppDataSource.setOptions({ synchronize: false })
   await AppDataSource.initialize()
+  if (mysql) {
+    const version = await AppDataSource.query('SELECT VERSION() AS version')
+    assert.match(String(version[0].version), /^8\.4\./, 'MySQL 验收必须使用 8.4')
+    const tables = await AppDataSource.query('SELECT COUNT(*) AS total FROM information_schema.tables WHERE table_schema = DATABASE()')
+    assert.equal(Number(tables[0].total), 0, 'MySQL 验收库必须为空，禁止覆盖既存数据')
+    await AppDataSource.synchronize()
+  }
   await initializeDatabaseInfrastructure(AppDataSource)
   await initializeDatabaseSchemaIfNeeded(AppDataSource)
 
@@ -145,6 +166,46 @@ const main = async () => {
   const staffNoPage = await o2oPreorderService.listConsoleOrderPool({ pool: 'completed', staffNo: 'T070', pageSize: 3 })
   assert.equal(staffNoPage.total, 4)
   assert.equal(staffNoPage.list.length, 3)
+  // 工号按字面量包含匹配；同时验证分栏、分页、软删除、新单基准与旧数组接口使用相同筛选。
+  const literalStaffCases = [
+    ['POOL%70', 'POOLX70'],
+    ['POOL_70', 'POOLX70'],
+    [`POOL${String.fromCharCode(92)}70`, 'POOL70'],
+    ['POOL!70', 'POOL70'],
+  ] as const
+  try {
+    for (const [literal, decoy] of literalStaffCases) {
+      await preorderRepo.update(verifiedOrders[0]!.id, { staffNoSnapshot: literal })
+      await preorderRepo.update(verifiedOrders[1]!.id, { staffNoSnapshot: decoy })
+      await preorderRepo.update(deletedOrder.id, { staffNoSnapshot: literal })
+      const filters = {
+        accountType: 'department' as const,
+        departmentName: '订单池验收部门',
+        staffNo: literal,
+        startTime: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+        endTime: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }
+      const page = await o2oPreorderService.listConsoleOrderPool({
+        ...filters, pool: 'completed', page: 99, pageSize: 1, sinceOrderId: String(verifiedOrders[0]!.id),
+      })
+      assert.equal(page.total, 1, `工号 ${literal} 必须按字面量匹配，不能命中相似工号`)
+      assert.deepEqual(page.list.map((item) => String(item.id)), [String(verifiedOrders[0]!.id)])
+      assert.deepEqual(page.poolCounts, { all: 1, pending: 0, completed: 1, cancelled: 0, returns: 1 })
+      assert.equal(page.page, 1)
+      assert.equal(page.latestOrderId, String(verifiedOrders[0]!.id))
+      assert.equal(page.newOrderCount, 0)
+      const legacy = await o2oPreorderService.listConsoleOrders({ ...filters, limit: 200 })
+      assert.deepEqual(legacy.map((item) => String(item.id)), [String(verifiedOrders[0]!.id)],
+        '旧数组接口必须沿用字面量工号筛选')
+      const deletedMatch = await o2oPreorderService.listConsoleOrderPool({ staffNo: literal })
+      assert.equal(deletedMatch.total, 1, '工号相同的软删除订单不得计数')
+    }
+  } finally {
+    await preorderRepo.update(verifiedOrders[0]!.id, { staffNoSnapshot: 'T070' })
+    await preorderRepo.update(verifiedOrders[1]!.id, { staffNoSnapshot: 'T070' })
+    await preorderRepo.update(deletedOrder.id, { staffNoSnapshot: null })
+  }
+
   const keywordPage = await o2oPreorderService.listConsoleOrderPool({ keyword: pendingOrders[2]!.preorderNo })
   assert.equal(keywordPage.total, 1, '关键字筛选必须同时作用于总数与列表')
 
@@ -166,6 +227,83 @@ const main = async () => {
   assert.ok(Array.isArray(legacyList), '旧订单查询接口必须保持数组契约')
   assert.equal(legacyList.length, 15)
 
+  // SQLite 与 MySQL 使用同一组字面量断言，不通过 SQL mode 改变搜索语义。
+  const assertKeywordMatches = async (
+    keyword: string,
+    expectedOrders: InstanceType<typeof O2oPreorder>[],
+    admin = false,
+  ) => {
+    const actor = admin ? { role: 'admin' as const } : undefined
+    const expectedIds = expectedOrders.map((order) => String(order.id))
+      .sort((left, right) => Number(right) - Number(left))
+    const page = await o2oPreorderService.listConsoleOrderPool({ keyword, page: 99, pageSize: 1 }, actor)
+    assert.equal(page.total, expectedIds.length, `关键字 ${keyword} 必须只命中字面量匹配的订单`)
+    assert.equal(page.page, Math.max(1, expectedIds.length))
+    assert.deepEqual(page.list.map((item) => String(item.id)), expectedIds.slice(-1))
+    assert.deepEqual(page.poolCounts, {
+      all: expectedIds.length,
+      pending: expectedOrders.filter((order) => order.status === 'pending').length,
+      completed: expectedOrders.filter((order) => order.status === 'verified').length,
+      cancelled: expectedOrders.filter((order) => order.status === 'cancelled').length,
+      returns: expectedIds.filter((id) => [String(verifiedOrders[0]!.id), String(cancelledOrders[0]!.id)].includes(id)).length,
+    })
+    assert.equal(page.latestOrderId, expectedIds[0] ?? null)
+    assert.equal(page.newOrderCount, 0)
+    if (expectedIds.length > 1) {
+      const first = await o2oPreorderService.listConsoleOrderPool({ keyword, pageSize: 1 }, actor)
+      assert.deepEqual(first.list.map((item) => String(item.id)), expectedIds.slice(0, 1),
+        '关键字分页必须不重复、不遗漏')
+    }
+    const legacy = await o2oPreorderService.listConsoleOrders({ keyword, limit: 200 }, actor)
+    assert.deepEqual(legacy.map((item) => String(item.id)), expectedIds, '旧数组接口必须沿用相同关键字范围')
+  }
+  try {
+    for (const [literal, decoy] of literalStaffCases) {
+      await preorderRepo.update(verifiedOrders[0]!.id, { remark: `前文 ${literal} 后文` })
+      await preorderRepo.update(verifiedOrders[2]!.id, { remark: `另一单 ${literal} 后文` })
+      await preorderRepo.update(verifiedOrders[1]!.id, { remark: `前文 ${decoy} 后文` })
+      await assertKeywordMatches(literal, [verifiedOrders[0]!, verifiedOrders[2]!])
+    }
+  } finally {
+    for (const order of verifiedOrders.slice(0, 3)) await preorderRepo.update(order.id, { remark: null })
+  }
+
+  const outboundRepo = AppDataSource.getRepository(BizOutboundOrder)
+  const createOutbound = (order: InstanceType<typeof O2oPreorder>, suffix: string) => outboundRepo.save(outboundRepo.create({
+    orderUuid: randomUUID(), systemNo: `SYS-POOL-${suffix}`, businessNo: `BUS-POOL-${suffix}`,
+    idempotencyKey: `pool-keyword-${runId}-${suffix}`, orderType: 'department',
+    sourceDocType: 'o2o_preorder', sourceDocId: order.id, sourceDocNo: order.preorderNo,
+    inventoryMode: 'legacy_none', status: 'active', totalQty: '0', totalAmount: '0', isDeleted: false,
+  }))
+  const targetOutbound = await createOutbound(verifiedOrders[0]!, 'TARGET')
+  const decoyOutbound = await createOutbound(verifiedOrders[1]!, 'DECOY')
+  try {
+    for (const [literal, decoy] of literalStaffCases) {
+      const businessPrefix = `BUS-${literal}`
+      const systemPrefix = `SYS-${literal}`
+      await outboundRepo.update(targetOutbound.id, { businessNo: `${businessPrefix}-END`, systemNo: `${systemPrefix}-END` })
+      await outboundRepo.update(decoyOutbound.id, { businessNo: `BUS-${decoy}-END`, systemNo: `SYS-${decoy}-END` })
+      await assertKeywordMatches(businessPrefix, [verifiedOrders[0]!])
+      await assertKeywordMatches(`${businessPrefix}-END`, [verifiedOrders[0]!])
+      await assertKeywordMatches(`${literal}-END`, [])
+      await assertKeywordMatches(systemPrefix, [])
+      await assertKeywordMatches(systemPrefix, [verifiedOrders[0]!], true)
+      await assertKeywordMatches(`${systemPrefix}-END`, [])
+      await assertKeywordMatches(`${systemPrefix}-END`, [verifiedOrders[0]!], true)
+
+      // 核销前预留业务号也只按前缀回查，不扩大为包含匹配。
+      await preorderRepo.update(verifiedOrders[2]!.id, { status: 'pending', reservedBusinessNo: `RSV-${literal}-END` })
+      await preorderRepo.update(verifiedOrders[3]!.id, { status: 'pending', reservedBusinessNo: `RSV-${decoy}-END` })
+      await assertKeywordMatches(`RSV-${literal}`, [{ ...verifiedOrders[2]!, status: 'pending' }])
+      await assertKeywordMatches(`RSV-${literal}-END`, [{ ...verifiedOrders[2]!, status: 'pending' }])
+      await assertKeywordMatches(`${literal}-END`, [])
+    }
+  } finally {
+    for (const order of verifiedOrders.slice(2)) {
+      await preorderRepo.update(order.id, { status: 'verified', reservedBusinessNo: null })
+    }
+  }
+
   await AppDataSource.destroy()
   console.log('OK 订单池服务端分页、分栏计数、越界收敛、筛选口径与新单提醒基准验收通过')
 }
@@ -175,6 +313,8 @@ main()
     console.error(error)
     process.exitCode = 1
   })
-  .finally(() => {
+  .finally(async () => {
+    if (cleanupDataSource?.isInitialized) await cleanupDataSource.destroy()
+    process.chdir(previousCwd)
     fs.rmSync(runtimeDir, { recursive: true, force: true })
   })

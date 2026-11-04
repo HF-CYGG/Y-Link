@@ -41,6 +41,7 @@ import { O2oReturnRequestItem } from '../entities/o2o-return-request-item.entity
 import type { AuthUserContext } from '../types/auth.js'
 import type { ClientAuthContext } from '../types/client-auth.js'
 import { BizError } from '../utils/errors.js'
+import { buildSqlLikeContains, buildSqlLikePrefix } from '../utils/sql-like.js'
 import {
   isRetryableMysqlTransactionError,
   isUniqueConstraintError,
@@ -1750,7 +1751,7 @@ class O2oPreorderService {
     if (!normalizedKeyword) {
       return []
     }
-    const escapedKeyword = this.escapeLikeKeyword(normalizedKeyword)
+    const keywordPrefix = buildSqlLikePrefix(normalizedKeyword)
     const rows = await AppDataSource.getRepository(BizOutboundOrder)
       .createQueryBuilder('outboundOrder')
       .select([
@@ -1763,11 +1764,11 @@ class O2oPreorderService {
         new Brackets((numberQb) => {
           numberQb
             .where('outboundOrder.businessNo = :businessNoExact', { businessNoExact: normalizedKeyword })
-            .orWhere(String.raw`outboundOrder.businessNo LIKE :businessNoPrefix ESCAPE '\'`, { businessNoPrefix: `${escapedKeyword}%` })
+            .orWhere(`outboundOrder.businessNo LIKE :businessNoPrefix ESCAPE '!'`, { businessNoPrefix: keywordPrefix })
           if (exposeSystemNo) {
             numberQb
               .orWhere('outboundOrder.systemNo = :showNoExact', { showNoExact: normalizedKeyword })
-              .orWhere(String.raw`outboundOrder.systemNo LIKE :showNoPrefix ESCAPE '\'`, { showNoPrefix: `${escapedKeyword}%` })
+              .orWhere(`outboundOrder.systemNo LIKE :showNoPrefix ESCAPE '!'`, { showNoPrefix: keywordPrefix })
           }
         }),
       )
@@ -1799,7 +1800,7 @@ class O2oPreorderService {
       .createQueryBuilder('preorder')
       .select('preorder.id', 'preorderId')
       .where('preorder.status = :status', { status: 'pending' })
-      .andWhere(String.raw`preorder.reservedBusinessNo LIKE :reservedPrefix ESCAPE '\'`, { reservedPrefix: `${escapedKeyword}%` })
+      .andWhere(`preorder.reservedBusinessNo LIKE :reservedPrefix ESCAPE '!'`, { reservedPrefix: keywordPrefix })
       .getRawMany<{ preorderId: string }>()
     reservedRows.forEach((row) => preorderIdSet.add(String(row.preorderId).trim()))
     return [...preorderIdSet]
@@ -4045,8 +4046,8 @@ class O2oPreorderService {
       queryBuilder.andWhere('order.departmentNameSnapshot = :departmentName', { departmentName: normalizedDepartmentName })
     }
     if (normalizedStaffNo) {
-      const escapedStaffNo = this.escapeLikeKeyword(normalizedStaffNo)
-      queryBuilder.andWhere(String.raw`order.staffNoSnapshot LIKE :staffNo ESCAPE '\'`, { staffNo: `%${escapedStaffNo}%` })
+      // 使用仓库统一的转义字符，避免 MySQL 字符串解析受反斜杠模式影响。
+      queryBuilder.andWhere("order.staffNoSnapshot LIKE :staffNo ESCAPE '!'", { staffNo: buildSqlLikeContains(normalizedStaffNo) })
     }
 
     if (startTime) {
@@ -4061,8 +4062,7 @@ class O2oPreorderService {
         normalizedKeyword,
         exposeSystemNo,
       )
-      const escapedKeyword = this.escapeLikeKeyword(normalizedKeyword)
-      const keyword = `%${escapedKeyword}%`
+      const keyword = buildSqlLikeContains(normalizedKeyword)
       const clientKeywordSubQuery = this.preorderRepo
         .createQueryBuilder('order_keyword_client')
         .subQuery()
@@ -4070,12 +4070,12 @@ class O2oPreorderService {
         .from(ClientUser, 'clientUser')
         .where('clientUser.id = order.clientUserId')
         .andWhere(
-          String.raw`(
-            clientUser.realName LIKE :keyword ESCAPE '\'
-            OR clientUser.mobile LIKE :keyword ESCAPE '\'
-            OR clientUser.email LIKE :keyword ESCAPE '\'
-            OR clientUser.departmentName LIKE :keyword ESCAPE '\'
-            OR clientUser.staffNo LIKE :keyword ESCAPE '\'
+          `(
+            clientUser.realName LIKE :keyword ESCAPE '!'
+            OR clientUser.mobile LIKE :keyword ESCAPE '!'
+            OR clientUser.email LIKE :keyword ESCAPE '!'
+            OR clientUser.departmentName LIKE :keyword ESCAPE '!'
+            OR clientUser.staffNo LIKE :keyword ESCAPE '!'
           )`,
         )
         .getQuery()
@@ -4086,17 +4086,17 @@ class O2oPreorderService {
         .from(O2oPreorderItem, 'item')
         .leftJoin(BaseProduct, 'product', 'product.id = item.productId')
         .where('item.orderId = order.id')
-        .andWhere(String.raw`(product.productName LIKE :keyword ESCAPE '\' OR product.productCode LIKE :keyword ESCAPE '\')`)
+        .andWhere(`(product.productName LIKE :keyword ESCAPE '!' OR product.productCode LIKE :keyword ESCAPE '!')`)
         .getQuery()
       queryBuilder.andWhere(
         new Brackets((keywordQb) => {
           keywordQb
-            .where(String.raw`order.preorderNo LIKE :keyword ESCAPE '\'`, { keyword })
-            .orWhere(String.raw`order.verifyCode LIKE :keyword ESCAPE '\'`, { keyword })
-            .orWhere(String.raw`order.remark LIKE :keyword ESCAPE '\'`, { keyword })
-            .orWhere(String.raw`order.verifiedBy LIKE :keyword ESCAPE '\'`, { keyword })
-            .orWhere(String.raw`order.departmentNameSnapshot LIKE :keyword ESCAPE '\'`, { keyword })
-            .orWhere(String.raw`order.staffNoSnapshot LIKE :keyword ESCAPE '\'`, { keyword })
+            .where(`order.preorderNo LIKE :keyword ESCAPE '!'`, { keyword })
+            .orWhere(`order.verifyCode LIKE :keyword ESCAPE '!'`, { keyword })
+            .orWhere(`order.remark LIKE :keyword ESCAPE '!'`, { keyword })
+            .orWhere(`order.verifiedBy LIKE :keyword ESCAPE '!'`, { keyword })
+            .orWhere(`order.departmentNameSnapshot LIKE :keyword ESCAPE '!'`, { keyword })
+            .orWhere(`order.staffNoSnapshot LIKE :keyword ESCAPE '!'`, { keyword })
             .orWhere(`EXISTS ${clientKeywordSubQuery}`, { keyword })
             .orWhere(`EXISTS ${itemKeywordSubQuery}`, { keyword })
           if (matchedCustomerOrderPreorderIds.length > 0) {
