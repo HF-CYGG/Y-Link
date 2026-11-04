@@ -511,16 +511,26 @@ try {
   assert.equal(rollbackRetry.generation, 1)
   pass('T-71', 'CAS 后强制回滚时 CUR/PREV/grace/generation 全部不变，原 token 可重试')
 
-  const graceResult = await mobileSessionService.refresh(rotationInitial.refreshToken, {
-    deviceId: device(18).deviceId,
-    appVersion: '1.0.1',
-  })
-  assert.equal(graceResult.generation, 2)
-  const graceAudit = await AppDataSource.getRepository(SysAuditLog).findOneOrFail({
-    where: { actionType: 'mobile_refresh', targetId: rotationInitial.session.id },
-    order: { id: 'DESC' },
-  })
-  assert.equal(JSON.parse(graceAudit.detailJson ?? '{}').viaGrace, true)
+  // G-3 到这里之间还有 scrypt、CAS 和回滚场景，不能把这些耗时算进 G-4 的一秒 grace。
+  // 只在本场景将时钟固定于真实已存 grace 截止前 1ms；不扩窗、不改 token/会话状态或生产防护。
+  const NativeDate = globalThis.Date
+  const withinGrace = afterRotation.previousRefreshGraceUntil!.getTime() - 1
+  globalThis.Date = class extends NativeDate {
+    constructor(value?: string | number) { super(value === undefined ? withinGrace : value) }
+    static now() { return withinGrace }
+  } as DateConstructor
+  try {
+    const graceResult = await mobileSessionService.refresh(rotationInitial.refreshToken, {
+      deviceId: device(18).deviceId,
+      appVersion: '1.0.1',
+    })
+    assert.equal(graceResult.generation, 2)
+    const graceAudit = await AppDataSource.getRepository(SysAuditLog).findOneOrFail({
+      where: { actionType: 'mobile_refresh', targetId: rotationInitial.session.id },
+      order: { id: 'DESC' },
+    })
+    assert.equal(JSON.parse(graceAudit.detailJson ?? '{}').viaGrace, true)
+  } finally { globalThis.Date = NativeDate }
   pass('G-4', 'previous refresh 在 grace 窗口内向前 rotation，审计标记 viaGrace=true')
 
   const graceBoundaryUser = await createUser()
