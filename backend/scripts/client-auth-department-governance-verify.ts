@@ -5,7 +5,6 @@ import fs from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { installCaptchaServiceForTesting } from '../src/services/captcha.service.js'
 
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
@@ -23,6 +22,8 @@ process.env.SQLITE_DB_PATH = sqlitePath
 process.env.INIT_ADMIN_PASSWORD = adminPassword
 process.env.INVITE_CODE_PEPPER ||= `governance-pepper-${verifySeed}-minimum-32-bytes`
 
+// captcha 的票据依赖会加载 env，必须在全部测试环境设置完成后再导入，避免提前捕获外部初始化配置。
+const { installCaptchaServiceForTesting } = await import('../src/services/captcha.service.js')
 const TEST_CAPTCHA_CODE = 'ABC123'
 installCaptchaServiceForTesting({ createCode: () => TEST_CAPTCHA_CODE })
 
