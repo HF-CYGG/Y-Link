@@ -1265,7 +1265,7 @@ class ClientAuthService {
   }
 
   /** 会话内旧密码复核失败：计入账号失败锁定并写脱敏失败审计（事务外调用）。 */
-  private async recordCurrentPasswordFailure(
+  async recordCurrentPasswordFailure(
     auth: ClientAuthContext,
     requestMeta: RequestMeta | undefined,
     operation: 'change_password' | 'update_profile',

@@ -8,6 +8,7 @@
 import { runInTransaction } from '../config/transaction-runner.js'
 import { ClientUser } from '../entities/client-user.entity.js'
 import { ClientUserSession } from '../entities/client-user-session.entity.js'
+import type { ClientAuthContext } from '../types/client-auth.js'
 import type { MobileAuthContext, MobileDeviceInput } from '../types/mobile-auth.js'
 import { normalizeClientAccount } from '../utils/client-auth-account.js'
 import { BizError } from '../utils/errors.js'
@@ -41,6 +42,38 @@ interface MobileChangePasswordInput extends ClientChangePasswordInput {
 }
 
 class MobileAuthService {
+  private toClientAuth(auth: MobileAuthContext): ClientAuthContext {
+    return {
+      userId: auth.userId,
+      account: auth.user.realName || auth.user.email || auth.user.mobile || '',
+      mobile: auth.user.mobile ?? '',
+      email: auth.user.email ?? '',
+      realName: auth.user.realName,
+      accountType: auth.user.accountType,
+      staffNo: auth.user.staffNo,
+      sessionToken: auth.accessToken,
+      authSource: 'bearer',
+    }
+  }
+
+  /** 失败桶和审计在外层事务回滚后记录，不能在 SQLite 写事务内另开事务。 */
+  private async withPasswordReauth<T>(
+    auth: MobileAuthContext,
+    operation: 'change_password' | 'update_profile',
+    requestMeta: RequestMeta | undefined,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    await authSecurityService.assertClientPasswordReauthAllowed(requestMeta, auth.userId)
+    try {
+      return await action()
+    } catch (error) {
+      if (error instanceof BizError && (error.data as { reason?: string } | null)?.reason === 'CURRENT_PASSWORD_MISMATCH') {
+        await clientAuthService.recordCurrentPasswordFailure(this.toClientAuth(auth), requestMeta, operation)
+      }
+      throw error
+    }
+  }
+
   async register(input: MobileRegisterInput, requestMeta?: RequestMeta) {
     const registerSourceKey = input.account?.trim()
       ? normalizeClientAccount(input.account, { allowUsername: false, fieldLabel: '账号' }).normalizedValue
@@ -102,18 +135,8 @@ class MobileAuthService {
   }
 
   async updateProfile(auth: MobileAuthContext, input: ClientUpdateProfileInput, requestMeta?: RequestMeta) {
-    const result = await runInTransaction(async (manager) => {
-      const profile = await clientAuthService.updateProfile({
-        userId: auth.userId,
-        account: auth.user.realName || auth.user.email || auth.user.mobile || '',
-        mobile: auth.user.mobile ?? '',
-        email: auth.user.email ?? '',
-        realName: auth.user.realName,
-        accountType: auth.user.accountType,
-        staffNo: auth.user.staffNo,
-        sessionToken: auth.accessToken,
-        authSource: 'bearer',
-      }, input, manager)
+    const result = await this.withPasswordReauth(auth, 'update_profile', requestMeta, () => runInTransaction(async (manager) => {
+      const profile = await clientAuthService.updateProfile(this.toClientAuth(auth), input, manager, requestMeta)
       const changedFields = [
         profile.username !== auth.user.realName ? 'username' : null,
         profile.mobile !== (auth.user.mobile ?? '') ? 'mobile' : null,
@@ -135,7 +158,7 @@ class MobileAuthService {
         }, manager)
       }
       return profile
-    })
+    }))
     if (result.requiresRelogin) customerServiceRealtimeService.disconnectByOwner('client', auth.userId)
     return result
   }
@@ -146,43 +169,45 @@ class MobileAuthService {
     requestMeta?: RequestMeta,
   ) {
     await authSecurityService.guardClientChangePasswordRequest(requestMeta, auth.userId)
-    const passwordHash = await hashPassword(assertClientPasswordPolicy(input.newPassword, '新密码'))
-    const result = await runInTransaction(async (manager) => {
-      const prepared = await clientAuthService.preparePasswordChange(auth.userId, input, passwordHash, manager)
-      await manager.getRepository(ClientUser).update(prepared.user.id, { passwordHash: prepared.passwordHash })
-      prepared.user.passwordHash = prepared.passwordHash
-      const revokedWeb = await manager.getRepository(ClientUserSession).delete({ userId: auth.userId })
-      const revokedMobileCount = await mobileSessionService.revokeSessionsForUser(
-        manager,
-        auth.userId,
-        'password_changed',
-      )
-      const credentials = await mobileSessionService.createForUser(
-        prepared.user,
-        input.device,
-        requestMeta,
-        'password_changed',
-        manager,
-      )
-      await auditService.record({
-        actionType: 'password_changed',
-        actionLabel: '客户端修改密码',
-        targetType: 'client_user',
-        targetId: auth.userId,
-        actor: {
-          userId: prepared.user.id,
-          username: prepared.user.email ?? prepared.user.mobile ?? prepared.user.realName,
-          displayName: prepared.user.realName,
-        },
-        requestMeta,
-        detail: {
-          via: 'change',
-          revokedMobileCount,
-          revokedWebCount: revokedWeb.affected ?? 0,
-          reissuedSessionId: credentials.session.id,
-        },
-      }, manager)
-      return credentials
+    const result = await this.withPasswordReauth(auth, 'change_password', requestMeta, async () => {
+      const passwordHash = await hashPassword(assertClientPasswordPolicy(input.newPassword, '新密码'))
+      return runInTransaction(async (manager) => {
+        const prepared = await clientAuthService.preparePasswordChange(auth.userId, input, passwordHash, manager)
+        await manager.getRepository(ClientUser).update(prepared.user.id, { passwordHash: prepared.passwordHash })
+        prepared.user.passwordHash = prepared.passwordHash
+        const revokedWeb = await manager.getRepository(ClientUserSession).delete({ userId: auth.userId })
+        const revokedMobileCount = await mobileSessionService.revokeSessionsForUser(
+          manager,
+          auth.userId,
+          'password_changed',
+        )
+        const credentials = await mobileSessionService.createForUser(
+          prepared.user,
+          input.device,
+          requestMeta,
+          'password_changed',
+          manager,
+        )
+        await auditService.record({
+          actionType: 'password_changed',
+          actionLabel: '客户端修改密码',
+          targetType: 'client_user',
+          targetId: auth.userId,
+          actor: {
+            userId: prepared.user.id,
+            username: prepared.user.email ?? prepared.user.mobile ?? prepared.user.realName,
+            displayName: prepared.user.realName,
+          },
+          requestMeta,
+          detail: {
+            via: 'change',
+            revokedMobileCount,
+            revokedWebCount: revokedWeb.affected ?? 0,
+            reissuedSessionId: credentials.session.id,
+          },
+        }, manager)
+        return credentials
+      })
     })
     customerServiceRealtimeService.disconnectByOwner('client', auth.userId)
     return result

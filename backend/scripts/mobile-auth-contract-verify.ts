@@ -243,15 +243,18 @@ try {
   // 确定性重现：验密通过后先提交并发改密/身份变更，再恢复原登录签发。
   for (const mutation of ['password', 'identity'] as const) {
     const raceUser = await createUser()
+    const raceToken = `contract-race-${raceUser.id}-${mutation}`
+    await AppDataSource.getRepository(ClientUserSession).save({
+      userId: raceUser.id, sessionToken: hashSessionToken(raceToken),
+      expiresAt: new Date(Date.now() + 60_000), lastAccessAt: new Date(),
+    })
+    const raceWebAuth = await clientAuthService.resolveClientByToken(raceToken)
     const originalAuthenticate = clientAuthService.authenticateCredentials.bind(clientAuthService)
     const beforeSessionCount = await AppDataSource.getRepository(ClientMobileSession).count({ where: { clientUserId: raceUser.id } })
     clientAuthService.authenticateCredentials = async (...args) => {
       const authenticated = await originalAuthenticate(...args)
       if (mutation === 'password') {
-        await clientAuthService.changePassword({
-          userId: raceUser.id, account: raceUser.email ?? '', email: raceUser.email ?? '', mobile: raceUser.mobile ?? '',
-          realName: raceUser.realName, accountType: 'personal', staffNo: null, sessionToken: '', authSource: 'bearer',
-        }, { currentPassword: 'StrongPass123!', newPassword: 'ConcurrentPassword456!' })
+        await clientAuthService.changePassword(raceWebAuth, { currentPassword: 'StrongPass123!', newPassword: 'ConcurrentPassword456!' })
       } else {
         await AppDataSource.getRepository(ClientUser).update(raceUser.id, { realName: '并发变更用户' })
       }

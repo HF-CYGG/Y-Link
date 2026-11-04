@@ -36,11 +36,14 @@ const { initializeDatabaseInfrastructure } = await import('../src/database/datab
 const { initializeDatabaseSchemaIfNeeded } = await import('../src/config/database-bootstrap.js')
 const { getCurrentTransactionManager } = await import('../src/database/transaction-coordinator.js')
 const { ClientUser } = await import('../src/entities/client-user.entity.js')
+const { ClientUserSession } = await import('../src/entities/client-user-session.entity.js')
+const { hashSessionToken } = await import('../src/utils/session-token.js')
 const { clientAuthService } = await import('../src/services/client-auth.service.js')
 const { mobileAuthService } = await import('../src/services/mobile-auth.service.js')
 const { mobileSessionService } = await import('../src/services/mobile-session.service.js')
 const { hashPassword, verifyPassword } = await import('../src/utils/password.js')
 const { BizError } = await import('../src/utils/errors.js')
+const { SysAuditLog } = await import('../src/entities/sys-audit-log.entity.js')
 transactionActive = () => Boolean(getCurrentTransactionManager(AppDataSource))
 const failures: string[] = []
 try {
@@ -58,17 +61,19 @@ try {
       const device = { deviceId: crypto.randomUUID(), platform: 'android' as const }
       const credentials = await mobileSessionService.createForUser(user, device)
       const auth = await mobileSessionService.resolveAccess(credentials.accessToken)
+      const webToken = crypto.randomBytes(32).toString('hex')
+      await AppDataSource.getRepository(ClientUserSession).save({
+        userId: user.id, sessionToken: hashSessionToken(webToken),
+        expiresAt: new Date(Date.now() + 60_000), lastAccessAt: new Date(),
+      })
+      const webAuth = await clientAuthService.resolveClientByToken(webToken)
       observations.length = 0
       observing = true
       try {
         const input = { currentPassword: wrong ? wrongPassword : oldPassword, newPassword, device }
         const action = mobile
           ? mobileAuthService.changePassword(auth, input)
-          : clientAuthService.changePassword({
-            userId: user.id, account: user.email!, email: user.email!, mobile: '',
-            realName: user.realName, accountType: 'personal', staffNo: null,
-            sessionToken: '', authSource: 'bearer',
-          }, input)
+          : clientAuthService.changePassword(webAuth, input)
         if (wrong) await assert.rejects(action, (error: unknown) => error instanceof BizError && error.message === '原密码错误')
         else await action
       } finally { observing = false }
@@ -81,6 +86,12 @@ try {
         assert.equal(await verifyPassword(wrong ? oldPassword : newPassword, saved.passwordHash), true)
         if (wrong) await mobileSessionService.resolveAccess(credentials.accessToken)
         else await assert.rejects(mobileSessionService.resolveAccess(credentials.accessToken))
+        assert.equal(await AppDataSource.getRepository(SysAuditLog).countBy({
+          actionType: 'client.auth.reauth_failed', targetId: user.id,
+        }), wrong ? 1 : 0, '旧密码错误只在回滚后记录一次失败复核审计')
+        assert.equal(await AppDataSource.getRepository(SysAuditLog).countBy({
+          actionType: 'password_changed', targetId: user.id,
+        }), wrong ? 0 : 1, '失败路径不得写入成功改密审计')
         console.log('PASS ' + label)
       } catch (error) { failures.push(label + ': ' + (error instanceof Error ? error.message : '断言失败')) }
     }
