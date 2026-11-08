@@ -14,6 +14,7 @@
 
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { buildFeedbackCreatePayload, createEmptyFeedbackDraft, type ClientFeedbackCreateDraft } from './client-feedback-create-policy'
 import ClientRestockForm from './components/ClientRestockForm.vue'
 
 import {
@@ -25,8 +26,6 @@ import {
   resolveFeedbackAttachmentUrl,
   uploadClientFeedbackAttachment,
   type FeedbackConversationMessageAttachment,
-  type FeedbackIssueCategory,
-  type FeedbackIssuePriority,
   type FeedbackIssueType,
 } from '@/api/modules/customer-service-feedback'
 import { useClientAuthStore } from '@/store'
@@ -48,7 +47,7 @@ const FEEDBACK_ATTACHMENT_MAX_SIZE = 10 * 1024 * 1024
 let pageActive = true
 let submitGeneration = 0
 onBeforeUnmount(() => { pageActive = false; submitGeneration += 1 })
-watch(() => clientAuthStore.currentUser?.id, () => { submitGeneration += 1; uploadingAttachments.value = false; createAttachments.value = [] }, { flush: 'sync' })
+
 const creating = ref(false)
 const uploadingAttachments = ref(false)
 const portalNotice = ref('请尽量描述问题现象、出现时间和影响范围，便于客服持续跟进。')
@@ -58,17 +57,20 @@ const previewImageUrl = ref('')
 
 const createForm = reactive({
   issueType: (route.query.type === 'restock' ? 'restock' : 'suggestion') as FeedbackIssueType,
-  title: '',
-  summary: '',
-  category: 'order' as FeedbackIssueCategory,
-  priority: 'medium' as FeedbackIssuePriority,
-  orderRef: '',
-  expectedResult: '',
-  actualResult: '',
-  reproductionSteps: '',
-  contactPreference: '',
-  tagText: '',
+  ...createEmptyFeedbackDraft(),
 })
+const draftCache = new Map<FeedbackIssueType, { form: ClientFeedbackCreateDraft; attachments: FeedbackConversationMessageAttachment[] }>()
+let activeDraftType = createForm.issueType
+const restockHasMounted = ref(activeDraftType === 'restock')
+watch(() => clientAuthStore.currentUser?.id, () => {
+  submitGeneration += 1
+  creating.value = false
+  uploadingAttachments.value = false
+  createAttachments.value = []
+  draftCache.clear()
+  Object.assign(createForm, createEmptyFeedbackDraft())
+  previewImageUrl.value = ''
+}, { flush: 'sync' })
 
 const currentClientUser = computed(() => clientAuthStore.currentUser)
 const isRestockMode = computed(() => createForm.issueType === 'restock')
@@ -91,15 +93,6 @@ const previewDialogVisible = computed({
   },
 })
 
-const parseTagText = (value: string): string[] => {
-  return [...new Set(
-    value
-      .split(/[，,]/)
-      .map((item) => item.trim())
-      .filter((item) => item.length > 0),
-  )]
-}
-
 const handleNavigateBack = () => {
   if (globalThis.history.length > 1) {
     router.back()
@@ -108,21 +101,16 @@ const handleNavigateBack = () => {
   router.push('/client/feedback')
 }
 
-const resetBugFields = () => {
-  createForm.priority = 'medium'
-  createForm.orderRef = ''
-  createForm.expectedResult = ''
-  createForm.actualResult = ''
-  createForm.reproductionSteps = ''
-  createForm.contactPreference = ''
-  createForm.tagText = ''
-}
-
 const handleChangeIssueType = (issueType: FeedbackIssueType) => {
-  createForm.issueType = issueType
-  if (issueType !== 'bug') {
-    resetBugFields()
-  }
+  if (issueType === activeDraftType) return
+  const { issueType: _issueType, ...draft } = createForm
+  draftCache.set(activeDraftType, { form: { ...draft }, attachments: [...createAttachments.value] })
+  activeDraftType = issueType
+  const restored = draftCache.get(issueType)
+  Object.assign(createForm, restored?.form ?? createEmptyFeedbackDraft(), { issueType })
+  createAttachments.value = [...(restored?.attachments ?? [])]
+  previewImageUrl.value = ''
+  if (issueType === 'restock') restockHasMounted.value = true
 }
 
 const loadPortalConfig = async () => {
@@ -254,20 +242,9 @@ const handleCreateConversation = async () => {
   const attachments = [...createAttachments.value]
   creating.value = true
   try {
-    const createdRecord = await createClientFeedbackConversation({
-      title: normalizedTitle,
-      summary: normalizedSummary,
-      issueType: createForm.issueType,
-      priority: isBugMode.value ? createForm.priority : 'medium',
-      category: createForm.category,
-      orderRef: createForm.orderRef,
-      expectedResult: isBugMode.value ? normalizedExpectedResult : undefined,
-      actualResult: isBugMode.value ? normalizedActualResult : undefined,
-      reproductionSteps: isBugMode.value ? createForm.reproductionSteps : undefined,
-      contactPreference: isBugMode.value ? createForm.contactPreference : undefined,
-      tags: isBugMode.value ? parseTagText(createForm.tagText) : undefined,
-      attachments,
-    })
+    const createdRecord = await createClientFeedbackConversation(
+      buildFeedbackCreatePayload(createForm.issueType, createForm, attachments),
+    )
 
     if (!isCurrent()) return
     showAppSuccess('反馈已提交，正在跳转到反馈单详情页')
@@ -282,7 +259,7 @@ const handleCreateConversation = async () => {
       operation: '提交反馈单',
     })
   } finally {
-    creating.value = false
+    if (isCurrent()) creating.value = false
   }
 }
 
@@ -341,15 +318,15 @@ onMounted(async () => {
             v-model="createForm.issueType"
             class="feedback-type-segmented"
             :options="issueTypeSegmentedOptions"
-            :disabled="restockBusy"
+            :disabled="restockBusy || creating || uploadingAttachments"
             aria-label="反馈类型"
             @change="handleChangeIssueType"
           />
           <p class="text-xs leading-5 text-slate-500 dark:text-slate-400">{{ currentIssueTypeHint }}</p>
         </div>
 
-        <ClientRestockForm v-if="isRestockMode" @busy="restockBusy = $event" />
-        <template v-else>
+        <ClientRestockForm v-if="restockHasMounted" v-show="isRestockMode" :active="isRestockMode" @busy="restockBusy = $event" />
+        <template v-if="!isRestockMode">
         <div class="block">
           <span class="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">问题标题</span>
           <el-input

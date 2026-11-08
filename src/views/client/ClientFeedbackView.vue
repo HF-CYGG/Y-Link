@@ -33,7 +33,7 @@ import RestockRequestSummary from './components/RestockRequestSummary.vue'
 import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { formatDateTime } from '@/utils/date-time'
-import { extractErrorMessage } from '@/utils/error'
+import { extractErrorMessage, normalizeRequestError } from '@/utils/error'
 
 
 import { showAppError } from '@/utils/app-alert'
@@ -43,6 +43,8 @@ const clientAuthStore = useClientAuthStore(pinia)
 const portalConfigRequest = useStableRequest()
 const conversationListRequest = useStableRequest()
 
+const listLoaded = ref(false)
+const listError = ref('')
 const loading = ref(false)
 const conversations = ref<FeedbackConversationRecord[]>([])
 const portalNotice = ref('请尽量描述问题现象、出现时间和影响范围，便于客服持续跟进。')
@@ -144,17 +146,26 @@ const loadConversations = async () => {
     return
   }
 
+  const owner = currentClientUser.value.id
+  const session = clientAuthStore.sessionGeneration
+  const isCurrent = () => owner === currentClientUser.value?.id && session === clientAuthStore.sessionGeneration
   loading.value = true
   await conversationListRequest.runLatest({
     executor: (signal) => listClientFeedbackConversations({ signal }),
     onSuccess: (items) => {
+      if (!isCurrent()) return
+      listLoaded.value = true
+      listError.value = ''
       conversations.value = items
     },
     onError: (error) => {
+      if (!isCurrent()) return
+      const status = normalizeRequestError(error).status
+      listError.value = status === 403 || status === 404 ? '当前账号无法访问会话列表，请重试或重新登录。' : listLoaded.value ? '最新会话同步失败，已保留现有列表。' : '会话列表加载失败，请重试。'
       throw error
     },
     onFinally: () => {
-      loading.value = false
+      if (isCurrent()) loading.value = false
     },
   })
 }
@@ -190,21 +201,23 @@ const connectRealtime = () => {
     return
   }
 
+  const session = clientAuthStore.sessionGeneration
+  const isCurrentRealtime = () => isRealtimeEligible() && session === clientAuthStore.sessionGeneration
   realtimeState.value = 'connecting'
   realtimeConnection = openFeedbackRealtimeStream('client', {
     onOpen: (payload) => {
-      if (!isRealtimeEligible()) {
+      if (!isCurrentRealtime()) {
         return
       }
       availability.value = payload.availability ?? availability.value
       realtimeState.value = payload.availability?.isOnline ? 'online' : 'offline'
       void refreshAuthoritativeFeedbackState().then(() => {
-        if (!isRealtimeEligible()) {
+        if (!isCurrentRealtime()) {
           return
         }
         reconnectTip.value = '已恢复在线连接，并同步了最新会话列表。'
       }).catch((error) => {
-        if (!isRealtimeEligible()) {
+        if (!isCurrentRealtime()) {
           return
         }
         reconnectTip.value = '实时连接已恢复，但最新会话列表同步失败，请稍后重试。'
@@ -212,35 +225,48 @@ const connectRealtime = () => {
       })
     },
     onConversation: async () => {
-      if (!isRealtimeEligible()) {
+      if (!isCurrentRealtime()) {
         return
       }
       try {
         await loadConversations()
-        if (isRealtimeEligible()) {
+        if (isCurrentRealtime()) {
           reconnectTip.value = '检测到会话有新进展，列表已自动刷新。'
         }
       } catch (error) {
-        if (isRealtimeEligible()) {
+        if (isCurrentRealtime()) {
           reconnectTip.value = '检测到会话有新进展，但列表同步失败，请稍后重试。'
           showAppError(extractErrorMessage(error, '反馈会话同步失败，请稍后重试'))
         }
       }
     },
     onError: () => {
-      if (!isRealtimeEligible()) {
+      if (!isCurrentRealtime()) {
         return
       }
       realtimeState.value = 'offline'
       reconnectTip.value = '实时连接已中断，系统正在尝试自动续接...'
       reconnectTimer = setTimeout(() => {
-        if (isRealtimeEligible()) {
+        if (isCurrentRealtime()) {
           connectRealtime()
         }
       }, 3000)
     },
   })
 }
+
+watch(() => currentClientUser.value?.id, () => {
+  conversationListRequest.cancel()
+  portalConfigRequest.cancel()
+  conversations.value = []
+  availability.value = null
+  listLoaded.value = false
+  listError.value = ''
+  loading.value = false
+  stopRealtime()
+}, { flush: 'sync' })
+
+const retryConversations = () => { void loadConversations().catch(() => {}) }
 
 watch(
   () => currentClientUser.value?.id,
@@ -251,7 +277,7 @@ watch(
       return
     }
     try {
-      await loadPortalConfig()
+      await loadPortalConfig().catch(() => {})
       await loadConversations()
       if (isRealtimeEligible()) {
         connectRealtime()
@@ -267,7 +293,7 @@ onMounted(async () => {
     return
   }
   try {
-    await loadPortalConfig()
+    await loadPortalConfig().catch(() => {})
     await loadConversations()
   } catch (error) {
     showAppError(extractErrorMessage(error, '反馈中心加载失败，请稍后重试'))
@@ -441,10 +467,16 @@ onBeforeUnmount(() => {
           <span class="text-xs font-medium text-slate-400">{{ conversations.length }} 条</span>
         </div>
 
-        <div v-if="loading" class="mt-4 rounded-[1rem] bg-slate-50 px-4 py-8 text-center text-sm text-slate-500 dark:bg-white/5 dark:text-slate-400">
+        <div v-if="listError && listLoaded" class="mt-4 rounded-xl bg-amber-50 p-3 text-sm text-amber-800" role="status">
+          {{ listError }} <el-button text @click="retryConversations">重试刷新</el-button>
+        </div>
+        <div v-if="loading && !listLoaded" class="mt-4 rounded-[1rem] bg-slate-50 px-4 py-8 text-center text-sm text-slate-500 dark:bg-white/5 dark:text-slate-400">
           正在加载会话...
         </div>
 
+        <div v-else-if="listError && !listLoaded" class="mt-4 rounded-xl bg-slate-50 p-6 text-center" role="alert">
+          <p>{{ listError }}</p><el-button class="mt-3" @click="retryConversations">重试加载</el-button>
+        </div>
         <div v-else-if="!conversations.length" class="mt-4 rounded-[1rem] bg-slate-50 px-4 py-8 text-center text-sm text-slate-500 dark:bg-white/5 dark:text-slate-400">
           还没有反馈记录，可先提交一条新的问题说明。
         </div>

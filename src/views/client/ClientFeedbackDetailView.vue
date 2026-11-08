@@ -41,12 +41,16 @@ import {
 } from '@/api/modules/customer-service-feedback'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useRestockExpiryRefresh } from '@/composables/useRestockExpiryRefresh'
+import ClientImagePreviewer from './components/ClientImagePreviewer.vue'
 import RestockRequestSummary from './components/RestockRequestSummary.vue'
 import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { formatDateTime } from '@/utils/date-time'
-import { extractErrorMessage } from '@/utils/error'
+import { extractErrorMessage, normalizeRequestError } from '@/utils/error'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
+import { createFeedbackDetailLifecycle } from './client-feedback-detail-lifecycle'
+import { retryFeedbackDetailAndEnsureRealtime } from './client-feedback-retry-policy'
+import { sendFeedbackReplyAndRefresh, resolveReplyDraftAfterSend } from './client-feedback-reply-policy'
 import { normalizeSubmitText } from '@/utils/submit-feedback'
 
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
@@ -58,6 +62,9 @@ const detailRequest = useStableRequest()
 const FEEDBACK_ATTACHMENT_LIMIT = 9
 const FEEDBACK_ATTACHMENT_MAX_SIZE = 10 * 1024 * 1024
 
+const loadError = ref('')
+const refreshWarning = ref('')
+const unavailable = ref(false)
 const loading = ref(false)
 const detailLoading = ref(false)
 const replySubmitting = ref(false)
@@ -79,13 +86,44 @@ const availability = ref<FeedbackPortalAvailability | null>(null)
 const realtimeState = ref<'connecting' | 'online' | 'offline'>('offline')
 const reconnectTip = ref('进入页面后会自动续接当前会话。')
 const previewImageUrl = ref('')
+const previewVisible = computed({ get: () => Boolean(previewImageUrl.value), set: (value: boolean) => { if (!value) previewImageUrl.value = '' } })
 const freshMessageIds = ref<string[]>([])
 let realtimeConnection: FeedbackRealtimeConnection | null = null
+let realtimeConnectionIsCurrent: (() => boolean) | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let freshMessageTimer: ReturnType<typeof setTimeout> | null = null
 let pageRuntimeMounted = false
-let attachmentGeneration = 0
-watch([() => route.params.id, () => clientAuthStore.currentUser?.id], () => { attachmentGeneration += 1; replyAttachments.value = []; uploadingReplyAttachments.value = false }, { flush: 'sync' })
+const detailLifecycle = createFeedbackDetailLifecycle({
+  isMounted: () => pageRuntimeMounted,
+  readContext: () => ({
+    ownerId: clientAuthStore.currentUser?.id,
+    sessionGeneration: clientAuthStore.sessionGeneration,
+    conversationId: typeof route.params.id === 'string' ? route.params.id : '',
+  }),
+})
+watch([() => route.params.id, () => clientAuthStore.currentUser?.id, () => clientAuthStore.sessionGeneration], () => {
+  detailLifecycle.invalidatePage()
+  detailRequest.cancel()
+  stopRealtime()
+  availability.value = null
+  conversation.value = null
+  replyDraft.value = ''
+  replyAttachments.value = []
+  satisfactionComment.value = ''
+  selectedSatisfactionLevel.value = 'satisfied'
+  satisfactionDialogVisible.value = false
+  previewImageUrl.value = ''
+  uploadingReplyAttachments.value = false
+  replySubmitting.value = false
+  confirmingResolved.value = false
+  withdrawingConversation.value = false
+  satisfactionSubmitting.value = false
+  loadError.value = ''
+  refreshWarning.value = ''
+  unavailable.value = false
+  loading.value = false
+  detailLoading.value = false
+}, { flush: 'sync' })
 
 const currentClientUser = computed(() => clientAuthStore.currentUser)
 const currentConversationId = computed(() => {
@@ -351,7 +389,9 @@ const handleNavigateBack = () => {
 }
 
 const loadPortalConfig = async () => {
+  const isCurrent = detailLifecycle.capturePage()
   const config = await getClientFeedbackPortalConfig()
+  if (!isCurrent()) return
   availability.value = config.availability
   realtimeState.value = config.availability.isOnline ? 'online' : 'offline'
   reconnectTip.value = config.availability.isOnline
@@ -374,6 +414,8 @@ const loadConversationDetail = async (
     return
   }
 
+  const isCurrentPage = detailLifecycle.capturePage()
+  const isCurrent = () => isCurrentPage() && currentConversationId.value === conversationId
   const previousConversationId = conversation.value?.id ?? ''
   const shouldPreserveLocalState = Boolean(options.preserveLocalState && previousConversationId === conversationId)
   const previousMessageIds = shouldPreserveLocalState
@@ -388,15 +430,20 @@ const loadConversationDetail = async (
     executor: (signal) => getClientFeedbackConversation(conversationId, { signal }),
     onSuccess: async (detail) => {
       // 即便当前请求仍是“最后一次”，也额外确认路由参数未切走，避免边界场景误回写。
-      if (currentConversationId.value !== conversationId) {
+      if (!isCurrent()) {
         return
       }
       if (!detail) {
-        showAppWarning('未找到对应反馈单，已返回会话列表')
-        router.replace('/client/feedback')
+        unavailable.value = true
+        loadError.value = ''
+        refreshWarning.value = ''
+        conversation.value = null
         return
       }
 
+      loadError.value = ''
+      refreshWarning.value = ''
+      unavailable.value = false
       conversation.value = detail
       if (!shouldPreserveLocalState) {
         satisfactionComment.value = detail.satisfaction?.comment || ''
@@ -415,9 +462,22 @@ const loadConversationDetail = async (
       }
     },
     onError: (error) => {
+      if (!isCurrent()) return
+      const status = normalizeRequestError(error).status
+      if (status === 403 || status === 404) {
+        unavailable.value = true
+        loadError.value = ''
+        refreshWarning.value = ''
+        conversation.value = null
+      } else if (conversation.value) {
+        refreshWarning.value = '最新会话同步失败，已保留当前内容和草稿，请重试。'
+      } else {
+        loadError.value = '反馈单加载失败，请检查网络后重试。'
+      }
       throw error
     },
     onFinally: () => {
+      if (!isCurrent()) return
       detailLoading.value = false
       loading.value = false
     },
@@ -428,6 +488,18 @@ const refreshAuthoritativeConversationDetail = async (conversationId: string) =>
   await loadConversationDetail(conversationId, {
     preserveLocalState: true,
   })
+}
+
+const retryConversationDetail = () => {
+  const conversationId = currentConversationId.value
+  void retryFeedbackDetailAndEnsureRealtime({
+    load: () => loadConversationDetail(conversationId, { preserveLocalState: true }),
+    isCurrent: detailLifecycle.capturePage(),
+    hasDetail: () => conversation.value?.id === conversationId,
+    eligible: isRealtimeEligible,
+    hasConnection: () => Boolean(realtimeConnection && realtimeConnectionIsCurrent?.()),
+    connect: connectRealtime,
+  }).catch(() => {})
 }
 
 const openReplyAttachmentPicker = () => {
@@ -441,9 +513,7 @@ const openReplyAttachmentPicker = () => {
  */
 const handleReplyAttachmentChange = async (event: Event) => {
   if (replySubmitting.value || uploadingReplyAttachments.value) return
-  const generation = ++attachmentGeneration
-  const owner = currentClientUser.value?.id, target = currentConversationId.value
-  const validUpload = () => pageRuntimeMounted && generation === attachmentGeneration && owner === currentClientUser.value?.id && target === currentConversationId.value
+  const validUpload = detailLifecycle.startUpload()
   const input = event.target as HTMLInputElement | null
   const files = Array.from(input?.files ?? [])
   if (!files.length) {
@@ -507,25 +577,28 @@ const handleReply = async () => {
     return
   }
 
+  const isCurrentPage = detailLifecycle.capturePage()
   const submittedRevision = replyDraftRevision
   const submittedConversationId = conversation.value.id
   const submittedUserId = currentClientUser.value?.id
   const attachments = [...replyAttachments.value]
-  const isCurrent = () => pageRuntimeMounted && currentConversationId.value === submittedConversationId && currentClientUser.value?.id === submittedUserId
+  const isCurrent = () => isCurrentPage() && currentConversationId.value === submittedConversationId && currentClientUser.value?.id === submittedUserId
   replySubmitting.value = true
   try {
-    await appendClientFeedbackMessage(submittedConversationId, {
-      body: normalizedReply,
-      attachments,
+    await sendFeedbackReplyAndRefresh({
+      post: () => appendClientFeedbackMessage(submittedConversationId, { body: normalizedReply, attachments }),
+      isCurrent,
+      onSent: () => {
+        replyDraft.value = resolveReplyDraftAfterSend(replyDraft.value, replyDraftRevision, submittedRevision)
+        const sentIds = new Set(attachments.map((item) => item.id))
+        replyAttachments.value = replyAttachments.value.filter((item) => !sentIds.has(item.id))
+        showAppSuccess('补充说明已发送')
+      },
+      refresh: () => loadConversationDetail(submittedConversationId, { preserveLocalState: true }),
+      onRefreshFailed: () => { refreshWarning.value = '补充说明已发送，但最新会话同步失败，请重试刷新。' },
     })
     if (!isCurrent()) return
-    if (submittedRevision === replyDraftRevision) replyDraft.value = ''
-    const sentIds = new Set(attachments.map((item) => item.id))
-    replyAttachments.value = replyAttachments.value.filter((item) => !sentIds.has(item.id))
-    await loadConversationDetail(submittedConversationId, { preserveLocalState: true })
-    if (!isCurrent()) return
-    reconnectTip.value = '已自动续接当前反馈单，你的新补充已提交给客服。'
-    showAppSuccess('补充说明已发送')
+    reconnectTip.value = '你的补充已提交给客服，可刷新查看最新消息。'
   } catch (error) {
     if (!isCurrent()) return
     void showCriticalErrorDialog(error, {
@@ -534,11 +607,12 @@ const handleReply = async () => {
       operation: '发送反馈补充说明',
     })
   } finally {
-    replySubmitting.value = false
+    if (isCurrent()) replySubmitting.value = false
   }
 }
 
 const handleConfirmResolved = async () => {
+  if (confirmingResolved.value) return
   if (!conversation.value) {
     showAppWarning('当前反馈单尚未加载完成')
     return
@@ -548,24 +622,34 @@ const handleConfirmResolved = async () => {
     return
   }
 
+  const targetId = conversation.value.id
+  const isCurrent = detailLifecycle.capturePage()
   confirmingResolved.value = true
   try {
-    await confirmClientFeedbackResolved(conversation.value.id)
-    await loadConversationDetail(conversation.value.id)
-    reconnectTip.value = '你已确认处理完成，当前反馈单已归档保留。'
-    showAppSuccess('已确认问题处理完成')
+    await sendFeedbackReplyAndRefresh({
+      post: () => confirmClientFeedbackResolved(targetId), isCurrent,
+      onSent: () => {
+        if (conversation.value?.id === targetId) conversation.value = { ...conversation.value, status: 'closed' }
+        reconnectTip.value = '你已确认处理完成，当前反馈单已归档保留。'
+        showAppSuccess('已确认问题处理完成')
+      },
+      refresh: () => loadConversationDetail(targetId, { preserveLocalState: true }),
+      onRefreshFailed: () => { refreshWarning.value = '已确认处理完成，但最新会话同步失败，请重试刷新。' },
+    })
   } catch (error) {
+    if (!isCurrent()) return
     void showCriticalErrorDialog(error, {
       title: '确认处理结果失败',
       fallback: '确认处理结果失败，请稍后重试',
       operation: '确认反馈处理结果',
     })
   } finally {
-    confirmingResolved.value = false
+    if (isCurrent()) confirmingResolved.value = false
   }
 }
 
 const handleWithdrawConversation = async () => {
+  if (withdrawingConversation.value) return
   if (!conversation.value) {
     showAppWarning('当前反馈单尚未加载完成')
     return
@@ -575,9 +659,13 @@ const handleWithdrawConversation = async () => {
     return
   }
 
+  const targetId = conversation.value.id
+  const issueNo = conversation.value.issueNo
+  const isCurrent = detailLifecycle.capturePage()
+  withdrawingConversation.value = true
   try {
     await ElMessageBox.confirm(
-      `确认撤回反馈单“${conversation.value.issueNo}”吗？撤回后会话将关闭，后续如需继续反馈需新建反馈单。`,
+      `确认撤回反馈单“${issueNo}”吗？撤回后会话将关闭，后续如需继续反馈需新建反馈单。`,
       '撤回反馈单',
       {
         type: 'warning',
@@ -587,6 +675,8 @@ const handleWithdrawConversation = async () => {
       },
     )
   } catch (error) {
+    if (isCurrent()) withdrawingConversation.value = false
+    if (!isCurrent()) return
     if (error === 'cancel' || error === 'close') {
       return
     }
@@ -594,20 +684,27 @@ const handleWithdrawConversation = async () => {
     return
   }
 
-  withdrawingConversation.value = true
+  if (!isCurrent()) return
   try {
-    await withdrawClientFeedbackConversation(conversation.value.id)
-    await loadConversationDetail(conversation.value.id)
-    reconnectTip.value = '你已主动撤回当前反馈单，会话已关闭并保留历史记录。'
-    showAppSuccess('反馈单已撤回')
+    await sendFeedbackReplyAndRefresh({
+      post: () => withdrawClientFeedbackConversation(targetId), isCurrent,
+      onSent: () => {
+        if (conversation.value?.id === targetId) conversation.value = { ...conversation.value, status: 'closed' }
+        reconnectTip.value = '你已主动撤回当前反馈单，会话已关闭并保留历史记录。'
+        showAppSuccess('反馈单已撤回')
+      },
+      refresh: () => loadConversationDetail(targetId, { preserveLocalState: true }),
+      onRefreshFailed: () => { refreshWarning.value = '反馈单已撤回，但最新会话同步失败，请重试刷新。' },
+    })
   } catch (error) {
+    if (!isCurrent()) return
     void showCriticalErrorDialog(error, {
       title: '撤回反馈单失败',
       fallback: '撤回反馈单失败，请稍后重试',
       operation: '撤回反馈单',
     })
   } finally {
-    withdrawingConversation.value = false
+    if (isCurrent()) withdrawingConversation.value = false
   }
 }
 
@@ -634,6 +731,7 @@ const handleContinueFeedback = async () => {
 }
 
 const handleSubmitSatisfaction = async () => {
+  if (satisfactionSubmitting.value || hasRatedSatisfaction.value) return
   if (!conversation.value) {
     showAppWarning('当前反馈单尚未加载完成')
     return
@@ -643,24 +741,32 @@ const handleSubmitSatisfaction = async () => {
     return
   }
 
+  const targetId = conversation.value.id
+  const payload = { level: selectedSatisfactionLevel.value, comment: normalizeSubmitText(satisfactionComment.value) || undefined }
+  const isCurrent = detailLifecycle.capturePage()
+  let submittedSatisfaction: Awaited<ReturnType<typeof submitClientFeedbackSatisfaction>> = null
   satisfactionSubmitting.value = true
   try {
-    await submitClientFeedbackSatisfaction(conversation.value.id, {
-      level: selectedSatisfactionLevel.value,
-      comment: normalizeSubmitText(satisfactionComment.value) || undefined,
+    await sendFeedbackReplyAndRefresh({
+      post: async () => { submittedSatisfaction = await submitClientFeedbackSatisfaction(targetId, payload) }, isCurrent,
+      onSent: () => {
+        if (conversation.value?.id === targetId && submittedSatisfaction) conversation.value = { ...conversation.value, satisfaction: submittedSatisfaction }
+        satisfactionDialogVisible.value = false
+        reconnectTip.value = '已记录你的满意度评价。'
+        showAppSuccess('满意度评价已提交')
+      },
+      refresh: () => loadConversationDetail(targetId, { preserveLocalState: true }),
+      onRefreshFailed: () => { refreshWarning.value = '满意度评价已提交，但最新会话同步失败，请重试刷新。' },
     })
-    satisfactionDialogVisible.value = false
-    await loadConversationDetail(conversation.value.id)
-    reconnectTip.value = '已记录你的满意度评价，当前反馈单详情已同步更新。'
-    showAppSuccess('满意度评价已提交')
   } catch (error) {
+    if (!isCurrent()) return
     void showCriticalErrorDialog(error, {
       title: '满意度评价提交失败',
       fallback: '满意度评价提交失败，请稍后重试',
       operation: '提交满意度评价',
     })
   } finally {
-    satisfactionSubmitting.value = false
+    if (isCurrent()) satisfactionSubmitting.value = false
   }
 }
 
@@ -671,6 +777,8 @@ const isRealtimeEligible = () => {
 }
 
 const stopRealtime = (tip = '页面暂未显示，已暂停实时连接。') => {
+  detailLifecycle.invalidateRealtime()
+  realtimeConnectionIsCurrent = null
   realtimeConnection?.close()
   realtimeConnection = null
 
@@ -689,22 +797,25 @@ const connectRealtime = () => {
     return
   }
 
+  const isCurrentConnection = detailLifecycle.startRealtime()
+  realtimeConnectionIsCurrent = isCurrentConnection
+  const isCurrentRealtime = () => isRealtimeEligible() && isCurrentConnection()
   realtimeState.value = 'connecting'
   realtimeConnection = openFeedbackRealtimeStream('client', {
     onOpen: (payload) => {
-      if (!isRealtimeEligible()) {
+      if (!isCurrentRealtime()) {
         return
       }
       availability.value = payload.availability ?? availability.value
       realtimeState.value = payload.availability?.isOnline ? 'online' : 'offline'
       const conversationId = currentConversationId.value
       void refreshAuthoritativeConversationDetail(conversationId).then(() => {
-        if (!isRealtimeEligible() || currentConversationId.value !== conversationId) {
+        if (!isCurrentRealtime() || currentConversationId.value !== conversationId) {
           return
         }
         reconnectTip.value = '已恢复在线连接，并同步了当前反馈单的最新状态。'
       }).catch((error) => {
-        if (!isRealtimeEligible() || currentConversationId.value !== conversationId) {
+        if (!isCurrentRealtime() || currentConversationId.value !== conversationId) {
           return
         }
         reconnectTip.value = '实时连接已恢复，但当前反馈单同步失败，请稍后重试。'
@@ -712,7 +823,7 @@ const connectRealtime = () => {
       })
     },
     onConversation: async (payload) => {
-      if (!isRealtimeEligible()) {
+      if (!isCurrentRealtime()) {
         return
       }
       if (payload?.conversationId !== currentConversationId.value) {
@@ -720,24 +831,24 @@ const connectRealtime = () => {
       }
       try {
         await refreshAuthoritativeConversationDetail(currentConversationId.value)
-        if (isRealtimeEligible()) {
+        if (isCurrentRealtime()) {
           reconnectTip.value = '检测到当前反馈单有新进展，已自动刷新详情。'
         }
       } catch (error) {
-        if (isRealtimeEligible()) {
+        if (isCurrentRealtime()) {
           reconnectTip.value = '检测到当前反馈单有新进展，但详情同步失败，请稍后重试。'
           showAppError(extractErrorMessage(error, '反馈单详情同步失败，请稍后重试'))
         }
       }
     },
     onError: () => {
-      if (!isRealtimeEligible()) {
+      if (!isCurrentRealtime()) {
         return
       }
       realtimeState.value = 'offline'
       reconnectTip.value = '实时连接已中断，系统正在尝试自动续接...'
       reconnectTimer = setTimeout(() => {
-        if (isRealtimeEligible()) {
+        if (isCurrentRealtime()) {
           connectRealtime()
         }
       }, 3000)
@@ -753,14 +864,14 @@ const handleOpenSatisfactionDialog = () => {
 }
 
 watch(
-  () => currentClientUser.value?.id,
+  [() => currentClientUser.value?.id, () => clientAuthStore.sessionGeneration],
   async () => {
     if (!currentClientUser.value?.id || !currentConversationId.value) {
       stopRealtime('登录状态已失效，实时连接已释放。')
       return
     }
     try {
-      await loadPortalConfig()
+      await loadPortalConfig().catch(() => {})
       await loadConversationDetail(currentConversationId.value)
       if (isRealtimeEligible()) {
         connectRealtime()
@@ -817,7 +928,7 @@ onMounted(async () => {
     return
   }
   try {
-    await loadPortalConfig()
+    await loadPortalConfig().catch(() => {})
     await loadConversationDetail(currentConversationId.value)
     if (isRealtimeEligible()) {
       connectRealtime()
@@ -829,6 +940,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   pageRuntimeMounted = false
+  detailLifecycle.invalidatePage()
   globalThis.document?.removeEventListener('visibilitychange', handleVisibilityChange)
   stopRealtime('离开反馈详情后已释放实时连接。')
   if (freshMessageTimer) {
@@ -874,11 +986,17 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
+    <div v-if="refreshWarning" class="rounded-xl bg-amber-50 p-4 text-sm text-amber-800" role="status">
+      {{ refreshWarning }} <el-button text @click="retryConversationDetail">重试刷新</el-button>
+    </div>
     <article v-if="loading && !conversation" class="rounded-[1.4rem] bg-white p-8 text-center shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
       <p class="text-base font-semibold text-slate-900 dark:text-slate-100">正在加载反馈单详情...</p>
       <p class="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">请稍候，系统正在同步当前会话记录与处理状态。</p>
     </article>
 
+    <article v-else-if="loadError && !conversation" class="rounded-xl bg-white p-8 text-center dark:bg-[#141415]" role="alert">
+      <p>{{ loadError }}</p><el-button class="mt-4" @click="retryConversationDetail">重试加载</el-button>
+    </article>
     <article v-else-if="conversation" class="space-y-4">
       <article class="rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
         <div v-if="detailLoading" class="mb-4 rounded-[1rem] bg-slate-50 px-4 py-3 text-sm text-slate-500 dark:bg-white/5 dark:text-slate-400">
@@ -1342,7 +1460,7 @@ onBeforeUnmount(() => {
       </article>
     </article>
 
-    <article v-else class="rounded-[1.4rem] bg-white p-8 text-center shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
+    <article v-else-if="unavailable" class="rounded-[1.4rem] bg-white p-8 text-center shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
       <p class="text-base font-semibold text-slate-900 dark:text-slate-100">未找到对应反馈单</p>
       <p class="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">
         该会话可能已失效或当前账号无权访问，请返回会话列表重新选择。
@@ -1354,17 +1472,11 @@ onBeforeUnmount(() => {
       >
         返回我的会话
       </button>
+      <el-button class="mt-4 ml-3" @click="retryConversationDetail">重试加载</el-button>
     </article>
 
 
-    <Teleport to="body">
-      <div v-if="previewImageUrl" class="feedback-preview-overlay" @click.self="previewImageUrl = ''">
-        <div class="feedback-preview-panel">
-          <button type="button" class="feedback-preview-close" @click="previewImageUrl = ''">关闭</button>
-          <img :src="previewImageUrl" alt="附件预览" class="feedback-preview-image" />
-        </div>
-      </div>
-    </Teleport>
+    <ClientImagePreviewer v-model:visible="previewVisible" :src="previewImageUrl" alt="反馈附件预览" />
 
     <el-dialog
       v-model="satisfactionDialogVisible"
@@ -1516,48 +1628,6 @@ onBeforeUnmount(() => {
 
 .client-feedback-message--fresh {
   animation: client-feedback-fresh-highlight 1.6s ease;
-}
-
-.feedback-preview-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 60;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(15, 23, 42, 0.72);
-  padding: 1rem;
-}
-
-.feedback-preview-panel {
-  width: min(100%, 48rem);
-  border-radius: 1.5rem;
-  background: rgba(255, 255, 255, 0.98);
-  padding: 1rem;
-  box-shadow: 0 24px 80px rgba(15, 23, 42, 0.28);
-}
-
-.feedback-preview-close {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  border-radius: 999px;
-  background: rgb(241 245 249);
-  color: rgb(71 85 105);
-  padding: 0.55rem 0.95rem;
-  font-size: 0.8rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.feedback-preview-image {
-  margin-top: 0.9rem;
-  max-height: 72vh;
-  width: 100%;
-  border-radius: 1.25rem;
-  object-fit: contain;
-  background: rgb(248 250 252);
 }
 
 @keyframes client-feedback-fresh-highlight {
@@ -1782,23 +1852,13 @@ onBeforeUnmount(() => {
 }
 
 .dark .reply-attachment-thumb,
-.dark .message-attachment-card__image,
-.dark .feedback-preview-image {
+.dark .message-attachment-card__image {
   background: rgba(255, 255, 255, 0.06);
 }
 
 .dark .message-attachment-card {
   background: rgba(255, 255, 255, 0.04);
   border-color: rgba(255, 255, 255, 0.08);
-}
-
-.dark .feedback-preview-panel {
-  background: rgba(20, 20, 21, 0.98);
-}
-
-.dark .feedback-preview-close {
-  background: rgba(255, 255, 255, 0.08);
-  color: #cbd5e1;
 }
 
 .dark .client-feedback-message--fresh {
