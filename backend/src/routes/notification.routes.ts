@@ -10,6 +10,7 @@ import {
 import { NOTIFICATION_EXTERNAL_TRIGGER_MODES } from '../entities/notification-rule.entity.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
+import { notificationChannelConfigService } from '../services/notification-channel-config.service.js'
 
 const idValueSchema = z.union([z.string(), z.number()])
   .transform((value) => String(value).trim())
@@ -28,12 +29,14 @@ const updateNotificationRuleSchema = z.object({
   emailRecipientSupplierUserIds: z.array(idValueSchema).max(200).optional().default([]),
   emailEnabled: z.boolean().optional().default(false),
   feishuEnabled: z.boolean().optional().default(false),
+  useSharedFeishu: z.boolean().optional(),
   externalTriggerMode: z.enum(NOTIFICATION_EXTERNAL_TRIGGER_MODES).optional().default('all_management_offline'),
   watchedUserIds: z.array(idValueSchema).max(200).optional().default([]),
-  feishuWebhookUrl: looseTextSchema(500),
+  feishuWebhookUrl: looseTextSchema(500).optional(),
   clearFeishuWebhook: z.boolean().optional(),
-  feishuSignSecret: looseTextSchema(256),
-  emailSubjectPrefix: looseTextSchema(128),
+  clearFeishuSignSecret: z.boolean().optional(),
+  feishuSignSecret: looseTextSchema(256).optional(),
+  emailSubjectPrefix: looseTextSchema(128).optional(),
 })
 
 const updateNotificationRulesSchema = z.object({
@@ -49,6 +52,24 @@ const testSendNotificationRuleSchema = z.object({
 })
 
 export const notificationRouter = Router()
+
+notificationRouter.get('/channels', requirePermission('system_configs:view'), asyncHandler(async (_req, res) => {
+  res.json({ code: 0, message: 'ok', data: await notificationChannelConfigService.getChannels() })
+}))
+
+const updateChannelsSchema = z.object({
+  feishuWebhookUrl: z.string().trim().max(500).optional(),
+  feishuSignSecret: z.string().trim().max(256).optional(),
+  clearFeishuWebhook: z.boolean().optional(),
+  clearFeishuSignSecret: z.boolean().optional(),
+  emailSubjectPrefix: z.string().trim().max(128).optional(),
+})
+
+notificationRouter.put('/channels', requirePermission('system_configs:update'), requireRole('admin'), asyncHandler(async (req, res) => {
+  const authReq = req as AuthenticatedRequest
+  const data = await notificationChannelConfigService.updateChannels(updateChannelsSchema.parse(req.body), authReq.auth, extractRequestMeta(req))
+  res.json({ code: 0, message: 'ok', data })
+}))
 
 notificationRouter.get(
   '/rules',

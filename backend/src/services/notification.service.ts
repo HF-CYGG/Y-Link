@@ -37,7 +37,18 @@ import { safeHttpRequest } from '../utils/safe-http-request.js'
 import {
   lockActiveSysAccountForBusiness,
   lockActiveSysAccountsForBusiness,
+  assertSysAccountGovernancePermission,
 } from './account-business-guard.service.js'
+import {
+  notificationChannelConfigService,
+  normalizeFeishuWebhookUrl,
+  normalizeFeishuSignSecretInput,
+  FEISHU_SIGN_SECRET_PLACEHOLDER,
+  FEISHU_WEBHOOK_PLACEHOLDER,
+  type NotificationChannelState,
+  type LegacyFeishuState,
+} from './notification-channel-config.service.js'
+export { FEISHU_SIGN_SECRET_PLACEHOLDER } from './notification-channel-config.service.js'
 
 export const NOTIFICATION_EVENT_TYPES = [
   'o2o_preorder_created',
@@ -65,13 +76,11 @@ const MIN_ONLINE_WINDOW_SECONDS = 30
 const MAX_ONLINE_WINDOW_SECONDS = 3600
 const HEARTBEAT_WRITE_INTERVAL_MS = 60 * 1000
 const FEISHU_WEBHOOK_TIMEOUT_MS = 10 * 1000
-const FEISHU_WEBHOOK_ALLOWED_HOSTS = new Set(['open.feishu.cn', 'open.larksuite.com'])
 const NOTIFICATION_OUTBOX_INTERVAL_MS = 1_000
 const NOTIFICATION_OUTBOX_BATCH_SIZE = 3
 const NOTIFICATION_OUTBOX_MAX_ATTEMPTS = 5
 const NOTIFICATION_OUTBOX_STALE_CLAIM_MS = 10 * 60 * 1000
 const NOTIFICATION_OUTBOX_RETRY_DELAYS_MS = [5_000, 30_000, 2 * 60_000, 5 * 60_000] as const
-export const FEISHU_SIGN_SECRET_PLACEHOLDER = '[已配置签名密钥，保存时保留原值]'
 
 const DEFAULT_RULES: Array<{
   ruleCode: NotificationRuleCode
@@ -120,6 +129,11 @@ export interface NotificationRuleRecord {
   emailRecipientSupplierUserIds: string[]
   emailEnabled: boolean
   feishuEnabled: boolean
+  useSharedFeishu: boolean
+  feishuConfigSource: 'shared' | 'legacy' | 'none'
+  feishuStatusError: string | null
+  legacyFeishuWebhookConfigured: boolean
+  legacyFeishuStatusError: string | null
   externalTriggerMode: NotificationExternalTriggerMode
   watchedUserIds: string[]
   feishuWebhookUrl: string
@@ -137,12 +151,14 @@ export interface UpdateNotificationRuleInput {
   emailRecipientSupplierUserIds: string[]
   emailEnabled: boolean
   feishuEnabled: boolean
+  useSharedFeishu?: boolean
   externalTriggerMode: NotificationExternalTriggerMode
   watchedUserIds: string[]
-  feishuWebhookUrl: string
+  feishuWebhookUrl?: string
   clearFeishuWebhook?: boolean
-  feishuSignSecret: string
-  emailSubjectPrefix: string
+  clearFeishuSignSecret?: boolean
+  feishuSignSecret?: string
+  emailSubjectPrefix?: string
 }
 
 export interface NotificationRuleTestSendInput {
@@ -262,21 +278,6 @@ function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
 }
 
-// 飞书 Webhook 与签名密钥落库加密后长度约为原文 4/3 再加固定前缀，原文上限需保证密文不超过 500/256 列宽。
-const FEISHU_WEBHOOK_URL_MAX_LENGTH = 300
-const FEISHU_SIGN_SECRET_MAX_LENGTH = 128
-
-function normalizeFeishuSignSecretInput(secret: string): string | null {
-  const normalized = secret.trim()
-  if (!normalized || normalized === FEISHU_SIGN_SECRET_PLACEHOLDER) {
-    return null
-  }
-  if (normalized.length > FEISHU_SIGN_SECRET_MAX_LENGTH) {
-    throw new BizError(`飞书签名密钥长度不能超过 ${FEISHU_SIGN_SECRET_MAX_LENGTH} 个字符`, 400)
-  }
-  return normalized
-}
-
 function normalizeId(value: string | number | null | undefined): string {
   return String(value ?? '').trim()
 }
@@ -293,39 +294,6 @@ function buildDispatchDedupeKey(channel: NotificationDispatchChannel, destinatio
 function resolveNotificationRetryDelayMs(attemptCount: number): number {
   const index = Math.max(0, Math.min(NOTIFICATION_OUTBOX_RETRY_DELAYS_MS.length - 1, attemptCount - 1))
   return NOTIFICATION_OUTBOX_RETRY_DELAYS_MS[index] ?? NOTIFICATION_OUTBOX_RETRY_DELAYS_MS.at(-1) ?? 300_000
-}
-
-function normalizeFeishuWebhookUrl(rawValue: string): string {
-  const text = rawValue.trim()
-  if (!text) {
-    return ''
-  }
-  let url: URL
-  try {
-    url = new URL(text)
-  } catch {
-    throw new BizError('飞书 Webhook 地址格式不正确', 400)
-  }
-  if (url.protocol !== 'https:') {
-    throw new BizError('飞书 Webhook 仅支持 HTTPS 地址', 400)
-  }
-  const hostname = url.hostname.toLowerCase()
-  if (!FEISHU_WEBHOOK_ALLOWED_HOSTS.has(hostname)) {
-    throw new BizError('飞书 Webhook 仅允许使用飞书官方机器人地址', 400)
-  }
-  const unsafeReason = detectUnsafeHost(hostname)
-  if (unsafeReason) {
-    throw new BizError(`飞书 Webhook 禁止使用${formatUnsafeHostReason(unsafeReason)}`, 400)
-  }
-  if (!/^\/open-apis\/bot\/v2\/hook\/[^/?#]+\/?$/.test(url.pathname)) {
-    throw new BizError('飞书 Webhook 必须是机器人 hook 地址', 400)
-  }
-  url.hash = ''
-  const normalizedUrl = url.toString()
-  if (normalizedUrl.length > FEISHU_WEBHOOK_URL_MAX_LENGTH) {
-    throw new BizError(`飞书 Webhook 地址长度不能超过 ${FEISHU_WEBHOOK_URL_MAX_LENGTH} 个字符`, 400)
-  }
-  return normalizedUrl
 }
 
 function normalizeExternalHttpUrl(rawValue: string, channelLabel: string): string {
@@ -361,6 +329,11 @@ function toRuleRecord(row: NotificationRule): NotificationRuleRecord {
     emailRecipientSupplierUserIds: parseJsonStringArray(row.emailRecipientSupplierUserIdsJson),
     emailEnabled: row.emailEnabled > 0,
     feishuEnabled: row.feishuEnabled > 0,
+    useSharedFeishu: false,
+    feishuConfigSource: row.feishuWebhookUrl?.trim() ? 'legacy' : 'none',
+    feishuStatusError: null,
+    legacyFeishuWebhookConfigured: Boolean(row.feishuWebhookUrl?.trim()),
+    legacyFeishuStatusError: null,
     externalTriggerMode: row.externalTriggerMode,
     watchedUserIds: parseJsonStringArray(row.watchedUserIdsJson),
     feishuWebhookUrl: '',
@@ -498,7 +471,7 @@ export class NotificationService {
         emailRecipientSupplierUserIdsJson: '[]',
         emailEnabled: 0,
         feishuEnabled: 0,
-        externalTriggerMode: 'all_management_offline',
+        externalTriggerMode: item.eventType === 'inbound_order_submitted' ? 'always' : 'all_management_offline',
         watchedUserIdsJson: '[]',
         feishuWebhookUrl: null,
         feishuSignSecret: null,
@@ -509,6 +482,8 @@ export class NotificationService {
   }
 
   async listRules(): Promise<NotificationRuleRecord[]> {
+    const channelState = await notificationChannelConfigService.load()
+    const legacyStates = await notificationChannelConfigService.legacyStates()
     const rows = await this.ruleRepo.find({
       where: DEFAULT_RULES.map((item) => ({ ruleCode: item.ruleCode })),
       order: { id: 'ASC' },
@@ -516,7 +491,7 @@ export class NotificationService {
     const rowByCode = new Map(rows.map((row) => [row.ruleCode, row]))
     return DEFAULT_RULES.map((defaultRule) => {
       const row = rowByCode.get(defaultRule.ruleCode)
-      if (row) return toRuleRecord(row)
+      if (row) return this.toResolvedRuleRecord(row, channelState, legacyStates.get(normalizeId(row.id)))
       return {
         id: `default:${defaultRule.ruleCode}`,
         ruleCode: defaultRule.ruleCode,
@@ -528,15 +503,50 @@ export class NotificationService {
         emailRecipientSupplierUserIds: [],
         emailEnabled: false,
         feishuEnabled: false,
-        externalTriggerMode: 'all_management_offline',
+        useSharedFeishu: true,
+        feishuConfigSource: channelState.webhook.state !== 'empty' ? 'shared' : 'none',
+        feishuStatusError: channelState.webhook.state === 'unreadable' || channelState.sign.state === 'unreadable' ? '共用飞书连接无法解密，请恢复密钥或重新录入' : null,
+        legacyFeishuWebhookConfigured: false,
+        legacyFeishuStatusError: null,
+        externalTriggerMode: defaultRule.eventType === 'inbound_order_submitted' ? 'always' : 'all_management_offline',
         watchedUserIds: [],
         feishuWebhookUrl: '',
-        feishuWebhookConfigured: false,
-        feishuSignSecretMasked: false,
-        emailSubjectPrefix: '[Y-Link]',
+        feishuWebhookConfigured: channelState.webhook.state !== 'empty',
+        feishuSignSecretMasked: channelState.sign.state !== 'empty',
+        emailSubjectPrefix: channelState.subjectPrefix || '[Y-Link]',
         updatedAt: new Date(0),
       }
     })
+  }
+
+  private toResolvedRuleRecord(row: NotificationRule, state: NotificationChannelState, legacy?: LegacyFeishuState): NotificationRuleRecord {
+    const effective = notificationChannelConfigService.resolveFeishu(row, state, legacy)
+    return {
+      ...toRuleRecord(row),
+      ...this.legacyFeishuMetadata(row, legacy),
+      useSharedFeishu: effective.useSharedFeishu,
+      feishuConfigSource: effective.feishuConfigSource,
+      feishuStatusError: effective.statusError,
+      feishuWebhookConfigured: effective.configured,
+      feishuSignSecretMasked: effective.useSharedFeishu ? state.sign.state !== 'empty' : Boolean(row.feishuSignSecret?.trim() || legacy?.signUnreadable),
+      emailSubjectPrefix: state.subjectPrefix ?? (row.emailSubjectPrefix?.trim() || '[Y-Link]'),
+    }
+  }
+
+  /** 旧连接状态独立于当前选择；不可解密的原列仍表示已存在，不能据此改投共享目标。 */
+  private legacyFeishuMetadata(row: Pick<NotificationRule, 'feishuWebhookUrl'>, legacy?: LegacyFeishuState) {
+    const legacyFeishuWebhookConfigured = Boolean(legacy?.webhookPresent || row.feishuWebhookUrl?.trim())
+    let legacyFeishuStatusError: string | null = null
+    if (legacyFeishuWebhookConfigured) {
+      if (legacy?.webhookUnreadable || legacy?.signUnreadable) {
+        legacyFeishuStatusError = '旧飞书连接无法用当前数据加密密钥解密，请恢复密钥或重新填写旧连接'
+      } else {
+        try { normalizeFeishuWebhookUrl(row.feishuWebhookUrl || '') } catch {
+          legacyFeishuStatusError = '旧飞书 Webhook 地址不符合安全要求，请重新填写旧连接'
+        }
+      }
+    }
+    return { legacyFeishuWebhookConfigured, legacyFeishuStatusError }
   }
 
   private validateRuleUserSelections(
@@ -568,7 +578,7 @@ export class NotificationService {
 
   private normalizeRuleDraft(
     row: UpdateNotificationRuleInput,
-    persistedRule: Pick<NotificationRule, 'ruleCode' | 'ruleName' | 'feishuSignSecret' | 'feishuWebhookUrl'>,
+    persistedRule: Pick<NotificationRule, 'ruleCode' | 'ruleName' | 'feishuSignSecret' | 'feishuWebhookUrl' | 'emailSubjectPrefix'>,
   ): NormalizedNotificationRuleDraft {
     if (!NOTIFICATION_EXTERNAL_TRIGGER_MODES.includes(row.externalTriggerMode)) {
       throw new BizError('外发时机配置不合法', 400)
@@ -580,10 +590,12 @@ export class NotificationService {
     const emailRecipientSupplierUserIds = row.emailRecipientSupplierUserIds.map((item) => normalizeId(item)).filter(Boolean)
     const feishuWebhookUrl = row.clearFeishuWebhook
       ? ''
-      : row.feishuWebhookUrl.trim()
+      : row.feishuWebhookUrl?.trim() && row.feishuWebhookUrl.trim() !== FEISHU_WEBHOOK_PLACEHOLDER
         ? normalizeFeishuWebhookUrl(row.feishuWebhookUrl)
         : (persistedRule.feishuWebhookUrl?.trim() || '')
-    const emailSubjectPrefix = row.emailSubjectPrefix.trim().slice(0, 128) || '[Y-Link]'
+    const emailSubjectPrefix = row.emailSubjectPrefix === undefined
+      ? persistedRule.emailSubjectPrefix?.trim() || '[Y-Link]'
+      : row.emailSubjectPrefix.trim().slice(0, 128) || '[Y-Link]'
 
     if (row.externalTriggerMode === 'watched_accounts_offline' && watchedUserIds.length === 0) {
       throw new BizError('指定账号离线模式至少需要一个监测账号', 400)
@@ -595,10 +607,12 @@ export class NotificationService {
       throw new BizError('启用飞书提醒时必须填写 Webhook 地址', 400)
     }
 
-    const rawFeishuSignSecret = row.feishuSignSecret.trim()
-    const feishuSignSecret = rawFeishuSignSecret === FEISHU_SIGN_SECRET_PLACEHOLDER
-      ? (persistedRule.feishuSignSecret?.trim() || null)
-      : normalizeFeishuSignSecretInput(rawFeishuSignSecret)
+    const rawFeishuSignSecret = row.feishuSignSecret?.trim() || ''
+    const feishuSignSecret = row.clearFeishuSignSecret
+      ? null
+      : !rawFeishuSignSecret || rawFeishuSignSecret === FEISHU_SIGN_SECRET_PLACEHOLDER
+        ? (persistedRule.feishuSignSecret?.trim() || null)
+        : normalizeFeishuSignSecretInput(rawFeishuSignSecret)
 
     return {
       id: normalizeId(row.id),
@@ -654,8 +668,14 @@ export class NotificationService {
         ...payload.emailRecipientSupplierUserIds.map(normalizeId),
         ...payload.watchedUserIds.map(normalizeId),
       ])
-      await lockActiveSysAccountsForBusiness(manager, [actor.userId, ...responsibilityUserIds])
+      const accounts = await lockActiveSysAccountsForBusiness(manager, [actor.userId, ...responsibilityUserIds])
+      const lockedActor = accounts.get(normalizeId(actor.userId))
+      if (!lockedActor) throw new BizError('当前管理员账号不存在', 403)
+      assertSysAccountGovernancePermission(lockedActor, 'system_configs:update')
       await this.ensureDefaultRules(manager)
+      const channelState = await notificationChannelConfigService.lockForWrite(manager)
+      const nextModes = { ...channelState.modes }
+      const legacyStates = await notificationChannelConfigService.legacyStates(manager)
 
       const txRuleRepo = manager.getRepository(NotificationRule)
       const txSystemConfigRepo = manager.getRepository(SystemConfig)
@@ -673,15 +693,34 @@ export class NotificationService {
           throw new BizError('通知规则不存在', 404)
         }
         const unreadable = unreadableSecretsById.get(normalizeId(persistedRule.id))
-        if (unreadable?.webhook && row.feishuEnabled && !row.feishuWebhookUrl.trim()) {
-          throw new BizError('已保存的飞书 Webhook 无法用当前数据加密密钥解密，请检查密钥或重新填写 Webhook 后再启用', 409)
+        const rawSignSecretInput = row.feishuSignSecret?.trim() || ''
+        const webhookInput = row.feishuWebhookUrl?.trim() || ''
+        const explicitWebhook = Boolean(row.clearFeishuWebhook) || Boolean(webhookInput && webhookInput !== FEISHU_WEBHOOK_PLACEHOLDER)
+        const explicitSign = Boolean(row.clearFeishuSignSecret) || Boolean(rawSignSecretInput && rawSignSecretInput !== FEISHU_SIGN_SECRET_PLACEHOLDER)
+        if (row.useSharedFeishu === true && (explicitWebhook || explicitSign)) {
+          throw new BizError('使用统一飞书时不能同时修改旧规则连接，请在共用连接区域设置', 400)
         }
-        const rawSignSecretInput = row.feishuSignSecret.trim()
+        if ((row.clearFeishuWebhook && webhookInput && webhookInput !== FEISHU_WEBHOOK_PLACEHOLDER)
+          || (row.clearFeishuSignSecret && rawSignSecretInput && rawSignSecretInput !== FEISHU_SIGN_SECRET_PLACEHOLDER)) {
+          throw new BizError('清空旧规则连接时不能同时填写新值', 400)
+        }
         explicitSecretInputById.set(normalizeId(persistedRule.id), {
-          webhook: Boolean(row.clearFeishuWebhook) || Boolean(row.feishuWebhookUrl.trim()),
-          signSecret: Boolean(rawSignSecretInput) && rawSignSecretInput !== FEISHU_SIGN_SECRET_PLACEHOLDER,
+          webhook: explicitWebhook,
+          signSecret: explicitSign,
         })
-        const normalized = this.normalizeRuleDraft(row, persistedRule)
+        // legacy 字段始终单独归一化与保存，不能把共用地址写回旧列。
+        const normalized = this.normalizeRuleDraft({ ...row, feishuEnabled: false }, persistedRule)
+        const mode = row.useSharedFeishu ?? ((explicitWebhook || explicitSign) ? false : undefined)
+        const previousLegacy = legacyStates.get(normalizeId(persistedRule.id))
+        const nextLegacy: LegacyFeishuState = {
+          webhookPresent: explicitWebhook ? Boolean(normalized.feishuWebhookUrl) : Boolean(previousLegacy?.webhookPresent),
+          webhookUnreadable: Boolean(unreadable?.webhook) && !explicitWebhook,
+          signUnreadable: Boolean(unreadable?.signSecret) && !explicitSign,
+        }
+        const effective = notificationChannelConfigService.resolveFeishu({ ...persistedRule, feishuWebhookUrl: normalized.feishuWebhookUrl, feishuSignSecret: normalized.feishuSignSecret }, channelState, nextLegacy, mode)
+        if (row.feishuEnabled && effective.statusError) throw new BizError(effective.statusError, 409)
+        if (row.feishuEnabled && !effective.webhookUrl) throw new BizError('启用飞书提醒时必须先配置所选连接', 400)
+        if (mode !== undefined) nextModes[persistedRule.ruleCode] = mode
         normalizedById.set(normalizeId(persistedRule.id), {
           id: normalizeId(persistedRule.id),
           enabled: normalized.enabled,
@@ -689,14 +728,16 @@ export class NotificationService {
           emailRecipientAdminUserIds: normalized.emailRecipientAdminUserIds,
           emailRecipientSupplierUserIds: normalized.emailRecipientSupplierUserIds,
           emailEnabled: normalized.emailEnabled,
-          feishuEnabled: normalized.feishuEnabled,
+          feishuEnabled: row.feishuEnabled,
           externalTriggerMode: normalized.externalTriggerMode,
           watchedUserIds: normalized.watchedUserIds,
           feishuWebhookUrl: normalized.feishuWebhookUrl,
           feishuSignSecret: normalized.feishuSignSecret ?? '',
-          emailSubjectPrefix: normalized.emailSubjectPrefix,
+          emailSubjectPrefix: channelState.subjectPrefix ? persistedRule.emailSubjectPrefix : normalized.emailSubjectPrefix,
         })
       }
+
+      changed = await notificationChannelConfigService.saveModes(manager, channelState, nextModes) || changed
 
       const managementUsers = await manager.getRepository(SysUser).find({
         where: MANAGEMENT_ROLES.map((role) => ({ role, status: 'enabled' })),
@@ -716,13 +757,12 @@ export class NotificationService {
         const nextEmailSupplierRecipientJson = JSON.stringify(payload.emailRecipientSupplierUserIds)
         const nextWatchedJson = JSON.stringify(payload.watchedUserIds)
         const nextFeishuWebhookUrl = payload.feishuWebhookUrl || null
-        const nextFeishuSignSecret = normalizeFeishuSignSecretInput(payload.feishuSignSecret)
+        const nextFeishuSignSecret = normalizeFeishuSignSecretInput(payload.feishuSignSecret ?? '')
         const nextEmailPrefix = payload.emailSubjectPrefix || '[Y-Link]'
         // 库内密文无法用当前密钥解密时读出为空：未显式重录或清空的敏感列不写入，保留原密文，恢复正确密钥后即可继续使用。
-        const unreadable = unreadableSecretsById.get(normalizeId(row.id))
         const explicit = explicitSecretInputById.get(normalizeId(row.id))
-        const preserveWebhookCipher = Boolean(unreadable?.webhook) && !explicit?.webhook
-        const preserveSignSecretCipher = Boolean(unreadable?.signSecret) && !explicit?.signSecret
+        const preserveWebhookCipher = !explicit?.webhook
+        const preserveSignSecretCipher = !explicit?.signSecret
         const isChanged = row.enabled !== (payload.enabled ? 1 : 0)
           || row.emailRecipientAdminUserIdsJson !== nextEmailAdminRecipientJson
           || row.emailRecipientSupplierUserIdsJson !== nextEmailSupplierRecipientJson
@@ -989,6 +1029,7 @@ export class NotificationService {
   }
 
   private async shouldTriggerExternal(rule: NotificationRuleRecord): Promise<boolean> {
+    if (rule.externalTriggerMode === 'always') return true
     const snapshot = await this.getPresenceSnapshot()
     const onlineMap = new Map(snapshot.users.map((item) => [item.userId, item.isOnline]))
     if (rule.externalTriggerMode === 'all_management_offline') {
@@ -1169,21 +1210,42 @@ export class NotificationService {
     if (ruleId !== normalizeId(input.draft.id)) {
       throw new BizError('测试参数中的规则标识不一致', 400)
     }
-    const persistedRule = await this.ruleRepo.findOne({
-      where: { id: ruleId },
-      select: {
-        id: true,
-        ruleCode: true,
-        ruleName: true,
-        feishuSignSecret: true,
-        feishuWebhookUrl: true,
-      },
+    const normalizedDraft = await runInTransaction(async (manager) => {
+      const lockedActor = await lockActiveSysAccountForBusiness(manager, input.actor.userId)
+      assertSysAccountGovernancePermission(lockedActor, 'system_configs:update')
+      const persistedRule = await manager.getRepository(NotificationRule).findOne({ where: { id: ruleId } })
+      if (!persistedRule) throw new BizError('通知规则不存在', 404)
+      const state = await notificationChannelConfigService.load(manager)
+      const legacyStates = await notificationChannelConfigService.legacyStates(manager)
+      const draft = input.draft
+      const webhookText = draft.feishuWebhookUrl?.trim() || ''
+      const signText = draft.feishuSignSecret?.trim() || ''
+      const explicitWebhook = Boolean(draft.clearFeishuWebhook || (webhookText && webhookText !== FEISHU_WEBHOOK_PLACEHOLDER))
+      const explicitSign = Boolean(draft.clearFeishuSignSecret || (signText && signText !== FEISHU_SIGN_SECRET_PLACEHOLDER))
+      if (draft.useSharedFeishu === true && (explicitWebhook || explicitSign)) throw new BizError('使用统一飞书时不能同时修改旧规则连接', 400)
+      if ((draft.clearFeishuWebhook && webhookText && webhookText !== FEISHU_WEBHOOK_PLACEHOLDER)
+        || (draft.clearFeishuSignSecret && signText && signText !== FEISHU_SIGN_SECRET_PLACEHOLDER)) throw new BizError('清空连接信息时不能同时填写新值', 400)
+      const legacy = legacyStates.get(ruleId)
+      const normalized = this.normalizeRuleDraft({ ...draft, feishuEnabled: false }, persistedRule)
+      const effective = notificationChannelConfigService.resolveFeishu({ ...persistedRule, feishuWebhookUrl: normalized.feishuWebhookUrl, feishuSignSecret: normalized.feishuSignSecret }, state, {
+        webhookPresent: explicitWebhook ? Boolean(normalized.feishuWebhookUrl) : Boolean(legacy?.webhookPresent),
+        webhookUnreadable: Boolean(legacy?.webhookUnreadable) && !explicitWebhook,
+        signUnreadable: Boolean(legacy?.signUnreadable) && !explicitSign,
+      }, draft.useSharedFeishu ?? ((explicitWebhook || explicitSign) ? false : undefined))
+      if ((draft.feishuEnabled || input.channel === 'feishu') && effective.statusError) throw new BizError(effective.statusError, 409)
+      if ((draft.feishuEnabled || input.channel === 'feishu') && !effective.webhookUrl) throw new BizError('请先配置所选飞书连接', 400)
+      return {
+        ...normalized,
+        ...this.legacyFeishuMetadata(persistedRule, legacy),
+        feishuEnabled: draft.feishuEnabled,
+        useSharedFeishu: effective.useSharedFeishu,
+        feishuConfigSource: effective.feishuConfigSource,
+        feishuStatusError: effective.statusError,
+        feishuWebhookUrl: effective.webhookUrl,
+        feishuSignSecret: effective.signSecret,
+        emailSubjectPrefix: state.subjectPrefix ?? normalized.emailSubjectPrefix,
+      }
     })
-    if (!persistedRule) {
-      throw new BizError('通知规则不存在', 404)
-    }
-
-    const normalizedDraft = this.normalizeRuleDraft(input.draft, persistedRule)
     const managementUsers = await this.userRepo.find({
       where: MANAGEMENT_ROLES.map((role) => ({ role, status: 'enabled' })),
       select: { id: true, role: true },
@@ -1205,6 +1267,11 @@ export class NotificationService {
         emailRecipientSupplierUserIds: normalizedDraft.emailRecipientSupplierUserIds,
         emailEnabled: normalizedDraft.emailEnabled,
         feishuEnabled: normalizedDraft.feishuEnabled,
+        useSharedFeishu: normalizedDraft.useSharedFeishu,
+        feishuConfigSource: normalizedDraft.feishuConfigSource,
+        feishuStatusError: normalizedDraft.feishuStatusError,
+        legacyFeishuWebhookConfigured: normalizedDraft.legacyFeishuWebhookConfigured,
+        legacyFeishuStatusError: normalizedDraft.legacyFeishuStatusError,
         externalTriggerMode: normalizedDraft.externalTriggerMode,
         watchedUserIds: normalizedDraft.watchedUserIds,
         feishuWebhookUrl: normalizedDraft.feishuWebhookUrl,
@@ -1359,15 +1426,17 @@ export class NotificationService {
       where: { eventType: event.eventType, enabled: 1 },
       order: { id: 'ASC' },
     })
+    const channelState = await notificationChannelConfigService.load()
+    const legacyStates = await notificationChannelConfigService.legacyStates()
     const matchedRules = allRuleRows.map((row) => {
-      const internalFeishuWebhookUrl = row.feishuWebhookUrl?.trim() || ''
+      const effective = notificationChannelConfigService.resolveFeishu(row, channelState, legacyStates.get(normalizeId(row.id)))
       return {
         rule: {
-          ...toRuleRecord(row),
+          ...this.toResolvedRuleRecord(row, channelState, legacyStates.get(normalizeId(row.id))),
           // 公共规则 DTO 始终隐藏 Webhook；真实地址只存在于本次 Worker 内部对象。
-          feishuWebhookUrl: internalFeishuWebhookUrl,
+          feishuWebhookUrl: effective.webhookUrl,
         },
-        feishuSignSecret: row.feishuSignSecret?.trim() || null,
+        feishuSignSecret: effective.signSecret,
       }
     })
 
@@ -1509,9 +1578,22 @@ export class NotificationService {
         }
 
         const feishuWebhookUrl = item.rule.feishuEnabled ? (item.rule.feishuWebhookUrl?.trim() || '') : ''
+        if (item.rule.feishuEnabled && (item.rule.feishuStatusError || !feishuWebhookUrl)) {
+          await this.attemptExternalDispatch({
+            eventId: event.id,
+            channel: 'feishu',
+            destination: `unavailable:${item.rule.useSharedFeishu ? 'shared' : 'legacy'}:${item.rule.id}`,
+            storedTarget: '飞书连接不可用',
+            permanentlyInvalid: true,
+            invalidReason: item.rule.feishuStatusError || '所选飞书连接未配置',
+            send: async () => ({ status: 400, ok: false }),
+          })
+          feishuFailed += 1
+          hasTerminalFailure = true
+        }
         const feishuDispatchKey = feishuWebhookUrl ? `feishu:${buildDispatchDedupeKey('feishu', feishuWebhookUrl)}` : ''
         // 多条规则共用同一飞书 Webhook 时只外发一次；这里用条件包裹而不是 continue，保证本规则的外发审计仍会写入。
-        if (feishuWebhookUrl && !dispatchDedupKeys.has(feishuDispatchKey)) {
+        if (feishuWebhookUrl && !item.rule.feishuStatusError && !dispatchDedupKeys.has(feishuDispatchKey)) {
           dispatchDedupKeys.add(feishuDispatchKey)
           await this.refreshEventClaim(event.id)
           const result = await this.attemptExternalDispatch({

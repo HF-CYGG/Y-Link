@@ -118,6 +118,7 @@
     "supplier:portal:verify": "tsx scripts/supplier-portal-verify.ts",
     "audit:catalog:verify": "tsx scripts/audit-action-catalog-verify.ts",
     "notification:event-log:verify": "tsx scripts/notification-event-log-verify.ts",
+    "notification:channels:verify": "tsx scripts/notification-unified-channels-verify.ts",
     "order-query:baseline:verify": "tsx scripts/order-query-baseline-verify.ts",
     "reports:contract:verify": "tsx scripts/report-center-contract-verify.ts",
     "reports:inventory:verify": "tsx scripts/report-inventory-verify.ts",
