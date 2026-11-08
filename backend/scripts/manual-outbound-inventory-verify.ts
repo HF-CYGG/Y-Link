@@ -62,7 +62,11 @@ async function expectFailure(action: () => Promise<unknown>, message: RegExp, st
 function verifyFrontendContracts() {
   const orderEntrySource = readSource('src/views/order-entry/composables/useOrderEntryForm.ts')
   assert.match(orderEntrySource, /pendingSubmission\.value\?\.fingerprint\s*===\s*fingerprint/, '开单页必须在载荷未变时复用幂等键')
-  assert.match(orderEntrySource, /findStockShortage\(\)/, '开单页必须在提交前按可用库存预检')
+  const preparationSource = readSource('src/views/order-entry/composables/prepare-order-submission.ts')
+  assert.match(orderEntrySource, /load:\s*\(\)\s*=>\s*import\('\.\/prepare-order-submission'\)/, '库存校验必须由真实懒加载提交模块提供')
+  assert.match(preparationSource, /requiredBySku\.set\(row\.skuId,[\s\S]{0,120}\+ qty/, '库存预检必须累计同SKU多行数量')
+  assert.match(preparationSource, /required\.qty\s*>\s*available[\s\S]{0,300}return\s*\{\s*error:/, 'SKU总需求超过可用量必须阻断载荷生成')
+  assert.match(orderEntrySource, /await loadOrderEntrySubmission\(\)[\s\S]{0,180}prepareOrderSubmission\(headerForm, itemRows\.value, products\.value\)[\s\S]{0,100}if\s*\(!prepared\.payload\)\s*\{[\s\S]{0,100}return[\s\S]{0,1000}orderApi\.submitOrder\(/, '开单必须先准备与预检，空payload立即返回后才允许真实API提交')
   assert.match(orderEntrySource, /idempotentReplay/, '开单页必须区分幂等重放提示')
 
   const deleteDialogSource = readSource('src/views/order-list/components/OrderDeleteConfirmDialog.vue')
@@ -72,7 +76,10 @@ function verifyFrontendContracts() {
   assert.match(readSource('src/views/order-list/composables/useOrderListView.ts'), /releaseInventory/, '列表删除必须透传回补选择')
 
   assert.match(readSource('src/views/base-data/components/ProductManager.vue'), /stockBaseline/, '商品管理编辑必须携带库存基线')
-  assert.match(readSource('src/views/o2o/O2oProductMallManageView.vue'), /stockBaseline/, 'O2O 商品编辑必须携带库存基线')
+  const onlineSource = readSource('src/views/o2o/O2oProductMallManageView.vue')
+  assert.match(onlineSource, /updateProductOnlineDisplay\(/, '商城展示管理只走线上展示专用写接口')
+  assert.doesNotMatch(onlineSource, /\bupdateProduct\(/, '只读库存的商城展示页不能调用完整商品编辑接口')
+  assert.doesNotMatch(readSource('src/views/o2o/o2o-online-display.helpers.ts'), /(?:currentStock|preOrderedStock|stockBaseline)\s*:/, '线上展示patch不能携带库存写字段')
   assert.match(readSource('backend/src/routes/order.routes.ts'), /releaseInventory:\s*z\.boolean\(\)\.optional\(\)/)
   assert.match(readSource('backend/src/routes/product.routes.ts'), /stockBaseline:\s*z\.object/)
 }
