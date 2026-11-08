@@ -11,6 +11,7 @@
  */
 
 import { computed, ref, watch } from 'vue'
+import { redactClientPreorderSubmitLocks } from '@/utils/client-preorder-submit-guard'
 import { setKingdeeIdentity } from '@/utils/kingdee-freshness'
 import { defineStore } from 'pinia'
 import {
@@ -62,6 +63,7 @@ export const useClientAuthStore = defineStore('client-auth', () => {
    * - 登出场景也复用该链路，保持状态收口一致。
    */
   const clearClientScopedStores = () => {
+    redactClientPreorderSubmitLocks()
     const clientCartStore = useClientCartStore(pinia)
     const clientCatalogStore = useClientCatalogStore(pinia)
     const clientOrderStore = useClientOrderStore(pinia)

@@ -18,10 +18,10 @@ import { onActivated, onDeactivated, onBeforeUnmount, computed, onMounted, ref, 
 import { useRouter } from 'vue-router'
 
 import { ArrowLeft } from '@element-plus/icons-vue'
-import { submitO2oPreorder } from '@/api/modules/o2o'
+import { submitO2oPreorder, type SubmitO2oPreorderPayload } from '@/api/modules/o2o'
 import { useClientMallSnapshotRefresh } from '@/composables/useClientMallSnapshotRefresh'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
-import { decideClientCheckoutSubmit } from './client-checkout-submit-policy'
+import { decideClientCheckoutSubmit, isClientCheckoutSubmitOutcomeUnknown, settleCurrentClientCheckoutSuccess } from './client-checkout-submit-policy'
 import { useClientAuthStore, useClientCartStore } from '@/store'
 import { useClientCatalogStore } from '@/store/modules/client-catalog'
 import pinia from '@/store/pinia'
@@ -34,7 +34,7 @@ import {
   clearClientPreorderSubmitLock,
   createClientPreorderSubmitLock,
   readActiveClientPreorderSubmitLock,
-  refreshClientPreorderSubmitLock,
+  type ClientPreorderSubmitLockSnapshot,
 } from '@/utils/client-preorder-submit-guard'
 
 const props = defineProps<{
@@ -58,6 +58,18 @@ const pickupContact = ref('')
 const submitting = ref(false)
 const departmentSystemApplyChoice = ref<boolean | null>(null)
 const kingdeeVoucherNo = ref('')
+const pendingSubmit = ref<ClientPreorderSubmitLockSnapshot | null>(null)
+const recoveryError = ref('')
+let pendingClockTimer: ReturnType<typeof setInterval> | null = null
+const restorePendingSubmit = () => {
+  try {
+    pendingSubmit.value = clientAuthStore.currentUser?.id ? readActiveClientPreorderSubmitLock(clientAuthStore.currentUser.id) : null
+    recoveryError.value = ''
+  } catch {
+    recoveryError.value = '无法读取原始提交记录，请恢复浏览器会话存储后刷新；请先查看订单，勿重复下单。'
+  }
+}
+
 
 // 到店取货时间：日期与时段分开选择，避免在手机上使用体积更大的日期时间弹层。
 const pickupDateKey = ref<string | null>(null)
@@ -195,7 +207,6 @@ const resetPickupSelection = () => {
 }
 
 const PICKUP_CONTACT_STORAGE_KEY_PREFIX = 'ylink:client:checkout:pickup-contact:'
-const AMBIGUOUS_PREORDER_SUBMIT_STATUS_SET = new Set<number | undefined>([undefined, 408, 502, 503, 504])
 
 const resolveDefaultPickupContact = () => {
   const currentUser = clientAuthStore.currentUser
@@ -278,16 +289,25 @@ onMounted(() => {
     clientCartStore.toggleAllValidSelected(true)
   }
   restorePickupContactDraft()
+  restorePendingSubmit()
+  pendingClockTimer = setInterval(restorePendingSubmit, 15000)
   void refreshMallSnapshot()
 })
 
 watch(
   () => clientAuthStore.currentUser?.id,
   () => {
+    pendingSubmit.value = null
+    recoveryError.value = ''
+    remark.value = ''
+    kingdeeVoucherNo.value = ''
+    submitting.value = false
     restorePickupContactDraft()
+    restorePendingSubmit()
     departmentSystemApplyChoice.value = null
     resetPickupSelection()
   },
+  { flush: 'sync' },
 )
 
 watch(
@@ -299,7 +319,7 @@ watch(
 const selectedItems = computed(() => clientCartStore.selectedItems)
 const totalQty = computed(() => selectedItems.value.reduce((sum, item) => sum + item.qty, 0))
 const totalAmount = computed(() => selectedItems.value.reduce((sum, item) => sum + Math.max(0, Number(item.defaultPrice || 0)) * item.qty, 0))
-const submitDisabled = computed(() => submitting.value || !selectedItems.value.length)
+const submitDisabled = computed(() => submitting.value || Boolean(recoveryError.value) || (pendingSubmit.value ? !pendingSubmit.value.payload || pendingSubmit.value.expired : !selectedItems.value.length))
 const currentRealName = computed(() => (
   clientAuthStore.currentUser?.realName?.trim()
   || clientAuthStore.currentUser?.username?.trim()
@@ -349,7 +369,7 @@ let checkoutActive = true
 watch(() => props.active, (active) => { if (active === false) invalidateCheckout(); else if (active === true) { checkoutActive = true; checkoutGeneration += 1 } }, { flush: 'sync' })
 let checkoutGeneration = 0
 const invalidateCheckout = () => { checkoutActive = false; checkoutGeneration += 1 }
-onBeforeUnmount(invalidateCheckout)
+onBeforeUnmount(() => { invalidateCheckout(); if (pendingClockTimer) clearInterval(pendingClockTimer) })
 onDeactivated(invalidateCheckout)
 onActivated(() => { checkoutActive = true })
 watch(() => clientAuthStore.currentUser?.id, () => { checkoutGeneration += 1 }, { flush: 'sync' })
@@ -362,11 +382,69 @@ const handleBack = () => {
   }
 }
 
+const sendFrozenSubmission = async (payload: SubmitO2oPreorderPayload, isCurrent: () => boolean, owner: string | number | undefined, recovered = false) => {
+  let result: Awaited<ReturnType<typeof submitO2oPreorder>>
+  try {
+    result = await submitO2oPreorder(payload)
+  } catch (error) {
+    const normalizedError = normalizeRequestError(error, '提交失败，请稍后再试')
+    if (isClientCheckoutSubmitOutcomeUnknown(normalizedError.status)) {
+      if (isCurrent()) {
+        restorePendingSubmit()
+        showAppWarning('提交结果尚未确认，请继续确认原提交或查看订单，勿重复下单。')
+      }
+      return
+    }
+    try { clearClientPreorderSubmitLock(owner, payload.clientRequestId) } catch { /* 清理失败保留查单入口。 */ }
+    if (!isCurrent()) return
+    restorePendingSubmit()
+    void showCriticalErrorDialog(normalizedError, { title: '预订单提交失败', fallback: '提交失败，请稍后再试', operation: '提交预订单' })
+    return
+  }
+  // 页面已失效时不清锁也不回写购物车；再次进入仍只能恢复原 key，不能为原购物车生成新 key。
+  const settled = settleCurrentClientCheckoutSuccess({
+    isCurrent,
+    applyConfirmedItems: () => {
+      clientCartStore.consumeSubmittedItems(payload.items)
+      if (!recovered) {
+        clientCatalogStore.applyPreorderSubmission(payload.items.map((item) => ({ ...item, productId: String(item.productId), skuId: item.skuId == null ? null : String(item.skuId) })))
+        clientCartStore.syncWithCatalog(clientCatalogStore.products)
+      }
+    },
+    clearPending: () => {
+      try { clearClientPreorderSubmitLock(owner, payload.clientRequestId) } catch { /* 保守保留原锁，可再次查单。 */ }
+      pendingSubmit.value = null
+    },
+  })
+  if (!settled) return
+  showAppSuccess('预订单提交成功')
+  if (recovered) {
+    const refreshResult = await refreshMallSnapshot({ isCurrent })
+    if (!isCurrent()) return
+    if (!refreshResult.success) showAppWarning('订单已确认成功，商品目录暂未同步，请刷新后继续选购')
+  }
+  if (!props.standalone) emit('close')
+  await router.replace(`/client/orders/${result.order.id}`)
+}
+
 const handleSubmit = async () => {
   if (!checkoutActive) return
   const initiatingUserId = clientAuthStore.currentUser?.id
   const generation = checkoutGeneration
   const isCurrent = () => checkoutActive && generation === checkoutGeneration && initiatingUserId === clientAuthStore.currentUser?.id
+  restorePendingSubmit()
+  if (recoveryError.value) { showAppWarning(recoveryError.value); return }
+  if (pendingSubmit.value) {
+    const pending = pendingSubmit.value
+    if (!pending.payload || pending.expired) { showAppWarning('原始提交不能安全重试，请先查看订单核实结果。'); return }
+    const payload = JSON.parse(JSON.stringify(pending.payload)) as SubmitO2oPreorderPayload
+    await runWithGate({ actionKey: 'client-checkout-submit', executor: async () => {
+      submitting.value = true
+      try { await sendFrozenSubmission(payload, isCurrent, initiatingUserId, true) }
+      finally { if (isCurrent()) submitting.value = false }
+    } })
+    return
+  }
   const normalizedPickupContact = isDepartmentOrder.value
     ? pickupContact.value.trim()
     : (pickupContact.value.trim() || resolveDefaultPickupContact())
@@ -436,7 +514,7 @@ const handleSubmit = async () => {
     remark: submitRemark,
     items: requestedItemSnapshot,
   })
-  const activeSubmitLock = readActiveClientPreorderSubmitLock(initiatingUserId)
+  const activeSubmitLock = null
   let submitIntentKey = ''
   let submitRequestKey = ''
 
@@ -474,6 +552,7 @@ const handleSubmit = async () => {
         if (submitDecision.type === 'blocked') {
           const messageByReason = {
             refresh_failed: refreshResult.error?.message || '商品目录同步失败，请稍后重试',
+            pending_unrecoverable: '原始提交记录不能安全恢复，请先查看订单核实结果',
             pending_intent_changed: '上一次订单提交结果仍在确认中，请先前往“我的订单”核对，勿修改商品后重复提交',
             selected_conflicts: '已选商品的库存或规格已变化，请先返回购物车调整数量、取消选择或移除后再提交',
             empty_snapshot: '请先选择可结算商品',
@@ -484,48 +563,19 @@ const handleSubmit = async () => {
         }
         const submitItemSnapshot = submitDecision.items
         submitIntentKey = submitDecision.intentKey
-        submitRequestKey = submitDecision.type === 'retry_pending'
-          ? submitDecision.requestKey
-          : createClientPreorderSubmitLock(initiatingUserId, submitIntentKey)
-        const result = await submitO2oPreorder({
-          clientRequestId: submitRequestKey,
-          isSystemApplied: requestedIsSystemApplied,
-          kingdeeVoucherNo: requestedKingdeeVoucherNo,
-          pickupContact: normalizedPickupContact,
-          pickupAt: requestedPickupAt,
-          remark: submitRemark,
-          items: submitItemSnapshot,
-        })
-
-        if (!isCurrent()) return
-        submitItemSnapshot.forEach((item) => {
-          clientCartStore.removeItem(String(item.skuId || item.productId))
-        })
-        clientCatalogStore.applyPreorderSubmission(submitItemSnapshot)
-        clientCartStore.syncWithCatalog(clientCatalogStore.products)
-        clearClientPreorderSubmitLock(initiatingUserId, submitRequestKey)
-
-        showAppSuccess('预订单提交成功')
-        if (!props.standalone) {
-          emit('close')
+        const frozenPayload = {
+          isSystemApplied: requestedIsSystemApplied, kingdeeVoucherNo: requestedKingdeeVoucherNo,
+          pickupContact: normalizedPickupContact, pickupAt: requestedPickupAt,
+          ...(submitRemark === undefined ? {} : { remark: submitRemark }), items: submitItemSnapshot,
         }
-        await router.replace(`/client/orders/${result.order.id}`)
+        // 写入并读回完全一致后才允许首次 POST；存储失败不能发送。
+        submitRequestKey = createClientPreorderSubmitLock(initiatingUserId, submitIntentKey, frozenPayload)
+        restorePendingSubmit()
+        await sendFrozenSubmission({ ...frozenPayload, clientRequestId: submitRequestKey }, isCurrent, initiatingUserId)
       } catch (error) {
-        if (!isCurrent()) return
-        const normalizedError = normalizeRequestError(error, '提交失败，请稍后再试')
-        if (AMBIGUOUS_PREORDER_SUBMIT_STATUS_SET.has(normalizedError.status)) {
-          refreshClientPreorderSubmitLock(initiatingUserId, submitIntentKey, submitRequestKey)
-          showAppWarning('提交结果确认中，请勿重复提交。可前往“我的订单”查询是否已创建成功。')
-          return
-        }
-        clearClientPreorderSubmitLock(initiatingUserId, submitRequestKey)
-        void showCriticalErrorDialog(normalizedError, {
-          title: '预订单提交失败',
-          fallback: '提交失败，请稍后再试',
-          operation: '提交预订单',
-        })
+        if (isCurrent()) showAppWarning(normalizeRequestError(error, '原始提交保存失败，本次未发送').message)
       } finally {
-        submitting.value = false
+        if (isCurrent()) submitting.value = false
       }
     },
   })
@@ -550,6 +600,18 @@ const handleSubmit = async () => {
         </p>
       </div>
 
+      <div v-if="pendingSubmit || recoveryError" class="mb-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900" role="status">
+        <p class="font-semibold">{{ recoveryError || (pendingSubmit?.expired ? '原提交确认期限已到，结果仍需核实' : '有一笔提交结果尚未确认') }}</p>
+        <template v-if="pendingSubmit?.payload">
+          <p class="mt-2">原提货人：{{ pendingSubmit.payload.pickupContact }}；取货时间：{{ pendingSubmit.payload.pickupAt || '无需预约' }}</p>
+          <p>金蝶申请：{{ pendingSubmit.payload.isSystemApplied ? '已申请' : '未申请' }} {{ pendingSubmit.payload.kingdeeVoucherNo }}</p>
+          <p class="whitespace-pre-wrap">原备注：{{ pendingSubmit.payload.remark || '无' }}</p>
+          <ul><li v-for="(item, index) in pendingSubmit.payload.items" :key="index">商品 {{ item.productId }} / 规格 {{ item.skuId || '默认' }} × {{ item.qty }}</li></ul>
+        </template>
+        <p class="mt-2">{{ pendingSubmit?.payload ? '继续确认会原样重试首次提交，不会采用当前购物车或表单。' : '原始载荷已失效或不可恢复，仅能查单；系统不会自动重发，也不代表下单失败。' }}</p>
+        <el-button class="mt-3" @click="router.push('/client/orders')">查看我的订单</el-button>
+      </div>
+      <template v-if="!pendingSubmit && !recoveryError">
       <div class="mb-4 rounded-[1.2rem] border border-slate-100 bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:border-white/5 dark:bg-[#141415]">
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-2">
@@ -702,13 +764,14 @@ const handleSubmit = async () => {
           placeholder="选填：如特殊说明、联系事项等"
         />
       </div>
+      </template>
     </section>
 
     <div class="client-cart-summary absolute bottom-0 left-0 right-0 z-20 border-t border-slate-200 bg-white px-4 py-3 pb-safe shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] dark:border-white/10 dark:bg-[#141415]">
       <div class="mx-auto flex w-full max-w-[1100px] items-center justify-between">
         <div class="flex flex-col">
           <p class="text-sm text-slate-500 dark:text-slate-400">共 <span class="font-bold text-slate-900 dark:text-slate-100">{{ totalQty }}</span> 件，合计 <span class="font-bold text-teal-600">¥{{ totalAmount.toFixed(2) }}</span></p>
-          <p class="mt-0.5 text-xs text-slate-400">提交后进入待提货状态</p>
+          <p class="mt-0.5 text-xs text-slate-400">{{ pendingSubmit ? '确认以原始提交摘要为准' : '提交后进入待提货状态' }}</p>
         </div>
         <button
           type="button"
@@ -716,7 +779,7 @@ const handleSubmit = async () => {
           :disabled="submitDisabled"
           @click="handleSubmit"
         >
-          {{ submitting ? '提交中...' : '提交预订单' }}
+          {{ submitting ? '提交中...' : pendingSubmit ? '继续确认原提交' : '提交预订单' }}
         </button>
       </div>
     </div>

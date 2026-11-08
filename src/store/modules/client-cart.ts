@@ -426,6 +426,18 @@ export const useClientCartStore = defineStore('client-cart', () => {
     persist()
   }
 
+  // 恢复原提交时只消费已经确认的数量，保留后来新增的同规格数量与其它规格。
+  const consumeSubmittedItems = (submitted: Array<{ productId: string | number; skuId?: string | number | null; qty: number }>) => {
+    ensureInitialized()
+    const quantities = new Map<string, number>()
+    for (const item of submitted) {
+      const key = JSON.stringify([String(item.productId), item.skuId == null ? null : String(item.skuId)])
+      quantities.set(key, (quantities.get(key) ?? 0) + Math.max(0, item.qty))
+    }
+    items.value = items.value.map((item) => ({ ...item, qty: Math.max(0,
+      item.qty - (quantities.get(JSON.stringify([item.productId, item.skuId])) ?? 0)) })).filter((item) => item.qty > 0)
+    persist()
+  }
   const clearSelectedItems = () => {
     ensureInitialized()
     // 这里按“勾选状态”而非“有效状态”清理，便于购物车页做批量删除操作。
@@ -493,6 +505,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
     setQtyFromInput,
     incrementQty,
     removeItem,
+    consumeSubmittedItems,
     clearSelectedItems,
     clearItems,
     clearAll,

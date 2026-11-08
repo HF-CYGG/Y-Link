@@ -469,6 +469,26 @@ const run = async () => {
   assert.equal(heldProduct.preOrderedStock, productStateBeforeRegularPreorder.preOrderedStock + 2)
   log('客户端并发幂等下单与单次库存预占通过')
 
+
+  // 模拟事务已经提交、响应详情查询才失败：重放原键只能返回原单，不能再次占库存。
+  const committedReadPayload = { ...idempotentSubmitPayload, clientRequestId: 'o2o-verify-committed-read-error', items: [{ productId: product.id, qty: 1 }] }
+  const detailReader = o2oPreorderService as unknown as { loadOrderDetailById: (...args: unknown[]) => Promise<unknown> }
+  const originalDetailReader = detailReader.loadOrderDetailById
+  const beforeReadFailure = await productRepo.findOneByOrFail({ id: product.id })
+  try {
+    detailReader.loadOrderDetailById = async () => { throw new Error('模拟提交后详情查询失败') }
+    await expectBizError(() => o2oPreorderService.submit(clientAuth, committedReadPayload), '模拟提交后详情查询失败')
+  } finally {
+    detailReader.loadOrderDetailById = originalDetailReader
+  }
+  const committedOrder = await preorderRepo.findOneByOrFail({ clientUserId: clientAuth.userId, clientRequestId: committedReadPayload.clientRequestId })
+  assert.equal(await preorderRepo.count({ where: { clientUserId: clientAuth.userId, clientRequestId: committedReadPayload.clientRequestId } }), 1)
+  assert.equal((await productRepo.findOneByOrFail({ id: product.id })).preOrderedStock, beforeReadFailure.preOrderedStock + 1)
+  assert.equal((await o2oPreorderService.submit(clientAuth, committedReadPayload)).order.id, String(committedOrder.id))
+  assert.equal((await productRepo.findOneByOrFail({ id: product.id })).preOrderedStock, beforeReadFailure.preOrderedStock + 1)
+  await o2oPreorderService.cancelMyOrder(clientAuth, String(committedOrder.id))
+  log('提交已落库但详情回读失败时原键确认只建单与占库存一次')
+
   const otherClientAuth = await registerAndLoginClient(Date.now() + 1)
   await expectBizError(() => o2oPreorderService.cancelMyOrder(otherClientAuth, preorderResult.order.id), '无权撤回他人订单')
 
