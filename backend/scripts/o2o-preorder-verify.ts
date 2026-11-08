@@ -469,6 +469,38 @@ const run = async () => {
   assert.equal(heldProduct.preOrderedStock, productStateBeforeRegularPreorder.preOrderedStock + 2)
   log('客户端并发幂等下单与单次库存预占通过')
 
+  // 默认商家进度只在真正建单时写入，列表、详情与原请求重放均返回当前持久值。
+  const assertBusinessStatusProjections = async (expected: O2oPreorder['businessStatus']) => {
+    const orderId = preorderResult.order.id
+    assert.equal((await preorderRepo.findOneByOrFail({ id: orderId })).businessStatus, expected)
+    assert.equal((await o2oPreorderService.getMyOrderDetail(clientAuth, orderId)).order.businessStatus, expected)
+    assert.equal((await o2oPreorderService.detailById(orderId, scriptAdminActor)).order.businessStatus, expected)
+    const clientList = await o2oPreorderService.listMyOrders(clientAuth, { keyword: preorderResult.order.preorderNo })
+    assert.equal(clientList.list.find((row) => row.id === orderId)?.businessStatus, expected)
+    const consoleList = await o2oPreorderService.listConsoleOrders({ keyword: preorderResult.order.preorderNo })
+    assert.equal(consoleList.find((row) => row.id === orderId)?.businessStatus, expected)
+    const consolePool = await o2oPreorderService.listConsoleOrderPool({ keyword: preorderResult.order.preorderNo, pool: 'all', page: 1, pageSize: 10 })
+    assert.equal(consolePool.list.find((row) => row.id === orderId)?.businessStatus, expected)
+    assert.equal((await o2oPreorderService.submit(clientAuth, idempotentSubmitPayload)).order.businessStatus, expected, '幂等重放不能重置商家进度')
+    assert.equal((await productRepo.findOneByOrFail({ id: product.id })).preOrderedStock, heldProduct.preOrderedStock, '状态编辑与重放不能重复占库存')
+  }
+  assert.ok(idempotentSubmitResults.every((row) => row.order.businessStatus === 'awaiting_shipment'), '并发新单与重放应返回默认等待接单')
+  await assertBusinessStatusProjections('awaiting_shipment')
+  for (const businessStatus of ['preparing', 'ready', 'completed', 'after_sale', null] as const) {
+    const updated = await o2oPreorderService.updateBusinessStatus({ orderId: preorderResult.order.id, businessStatus }, scriptAdminActor)
+    assert.equal(updated.order.businessStatus, businessStatus)
+    assert.equal(updated.order.status, 'pending', '商家进度不能改变主状态')
+    await assertBusinessStatusProjections(businessStatus)
+  }
+  // 直接写入模拟升级前留存的空值与旧状态；读取和同键下单均不得回填或改写它们。
+  for (const businessStatus of [null, 'shipped', 'verify_failed'] as const) {
+    await preorderRepo.update({ id: preorderResult.order.id }, { businessStatus })
+    await assertBusinessStatusProjections(businessStatus)
+  }
+  // API 保持历史合法状态的编辑兼容，四项限制仅属于管理端下拉入口。
+  await o2oPreorderService.updateBusinessStatus({ orderId: preorderResult.order.id, businessStatus: 'shipped' }, scriptAdminActor)
+  await assertBusinessStatusProjections('shipped')
+  log('新单默认商家状态、四项编辑、清空、历史值投影与幂等进度保留通过')
 
   // 模拟事务已经提交、响应详情查询才失败：重放原键只能返回原单，不能再次占库存。
   const committedReadPayload = { ...idempotentSubmitPayload, clientRequestId: 'o2o-verify-committed-read-error', items: [{ productId: product.id, qty: 1 }] }

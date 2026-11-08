@@ -3123,6 +3123,7 @@ class O2oPreorderService {
             clientRequestHash,
             verifyCode: randomUUID(),
             status: 'pending',
+            businessStatus: 'awaiting_shipment',
             clientOrderType: normalizedClientOrderType,
             departmentNameSnapshot,
             staffNoSnapshot,
