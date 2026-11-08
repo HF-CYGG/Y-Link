@@ -184,7 +184,13 @@ export interface OrderListQuery extends PaginationQueryInput {
 export type OrderInventoryMode = 'legacy_none' | 'manual_applied' | 'o2o_preapplied'
 export type OrderMergeStatus = 'active' | 'merged'
 
+export interface OrderSourcePreorderPickupContactRecord {
+  sourceOrderId: string
+  pickupContact: string | null
+}
+
 export interface OrderRecord {
+  sourcePreorderPickupContacts?: OrderSourcePreorderPickupContactRecord[]
   sourcePreorderRegistrations?: OrderSourcePreorderRegistrationRecord[]
   id: string
   /** 正式出库内部追溯编号。 */
@@ -239,6 +245,7 @@ interface OrderListRawResult {
 export type OrderListResult = PaginationResult<OrderRecord>
 
 interface OrderRecordRaw {
+  sourcePreorderPickupContacts?: Array<{ sourceOrderId?: PrimitiveTextValue; pickupContact?: PrimitiveTextValue }>
   sourcePreorderRegistrations?: OrderSourcePreorderRegistrationRecord[]
   id: PrimitiveTextValue
   systemNo?: PrimitiveTextValue
@@ -353,6 +360,12 @@ const normalizeNullableTextField = (value: PrimitiveTextValue): string | null =>
 }
 
 const normalizeOrderRecord = (record: OrderRecordRaw): OrderRecord => ({
+  sourcePreorderPickupContacts: Array.isArray(record.sourcePreorderPickupContacts)
+    ? record.sourcePreorderPickupContacts.filter((item) => item && typeof item === 'object').map((item) => ({
+      sourceOrderId: normalizeTextField(item.sourceOrderId),
+      pickupContact: normalizeNullableTextField(item.pickupContact),
+    }))
+    : [],
   sourcePreorderRegistrations: record.sourcePreorderRegistrations ?? [],
   id: normalizeTextField(record.id),
   systemNo: normalizeTextField(record.systemNo ?? record.showNo),

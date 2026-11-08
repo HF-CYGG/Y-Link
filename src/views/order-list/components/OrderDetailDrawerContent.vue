@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { formatOrderRecipient } from '../order-recipient-display'
 /**
  * 模块说明：`src/views/order-list/components/OrderDetailDrawerContent.vue`
  * 文件职责：负责渲染出库单详情抽屉中的合规状态、主单信息、明细列表与永久修订时间线。
@@ -121,18 +122,8 @@ const formatOrderType = (value: OrderDetailResult['orderType']) => {
   return value === 'department' ? '部门单' : '散客单'
 }
 
-/**
- * 详情主显示名称：
- * - 部门单优先使用客户部门名称；
- * - 散客单回退客户名称；
- * - 兼容历史数据缺失时的兜底展示。
- */
-const getOrderDisplayName = (order: OrderDetailResult) => {
-  if (order.orderType === 'department') {
-    return order.customerDepartmentName || order.customerName || '-'
-  }
-  return order.customerName || order.customerDepartmentName || '-'
-}
+/** 详情优先使用真实来源领取记录，缺失时不推断姓名。 */
+const getOrderDisplayName = formatOrderRecipient
 const hasItemProvenance = () => props.order.items.some((item) => Boolean(item.sourceOrderId))
 const mergedPickupRecords = computed(() => {
   if (props.order.merge.role !== 'parent' || props.order.inventoryMode !== 'o2o_preapplied') return []
@@ -257,7 +248,7 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
       <el-descriptions-item label="库存模式">{{ formatInventoryMode(order) }}</el-descriptions-item>
       <el-descriptions-item label="订单类型">{{ formatOrderType(order.orderType) }}</el-descriptions-item>
       <el-descriptions-item label="开单时间">{{ dayjs(order.createdAt).format('YYYY-MM-DD HH:mm:ss') }}</el-descriptions-item>
-      <el-descriptions-item label="领用对象">{{ getOrderDisplayName(order) }}</el-descriptions-item>
+      <el-descriptions-item label="领用对象"><span class="recipient-text" :title="getOrderDisplayName(order)">{{ getOrderDisplayName(order) }}</span></el-descriptions-item>
       <el-descriptions-item label="客户部门">{{ order.orderType === 'department' ? order.customerDepartmentName || '-' : '不适用' }}</el-descriptions-item>
       <el-descriptions-item label="出库单状态">
         {{ order.orderType === 'department' ? (order.hasCustomerOrder ? '已带单' : '未带单') : '不适用' }}
@@ -438,3 +429,7 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
     </div>
   </section>
 </template>
+
+<style scoped>
+.recipient-text { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+</style>
