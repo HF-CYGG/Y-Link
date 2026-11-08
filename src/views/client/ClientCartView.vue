@@ -118,9 +118,9 @@ const handleBack = () => {
 <template>
   <div class="h-full flex flex-col bg-[var(--ylink-color-bg)]">
     <div class="sticky top-0 z-10 flex items-center gap-3 bg-[var(--ylink-color-surface)] px-4 py-3 shadow-sm">
-      <button type="button" class="flex h-8 w-8 items-center justify-center rounded-full hover:bg-slate-100 dark:hover:bg-white/10" @click="handleBack">
+      <el-button circle aria-label="返回" class="flex h-8 w-8 items-center justify-center rounded-full hover:bg-slate-100 dark:hover:bg-white/10" @click="handleBack">
         <el-icon :size="20"><ArrowLeft /></el-icon>
-      </button>
+      </el-button>
       <p class="text-lg font-semibold text-slate-900 dark:text-slate-100">购物车管理</p>
     </div>
 
@@ -138,22 +138,21 @@ const handleBack = () => {
       >
         购物车为空，去商城挑选商品吧
         <div class="mt-4">
-          <button type="button" @click="handleBack" class="rounded-full bg-slate-900 px-4 py-2 text-xs text-white">去逛逛</button>
+          <el-button @click="handleBack" class="rounded-full bg-slate-900 px-4 py-2 text-xs text-white">去逛逛</el-button>
         </div>
       </div>
 
       <section v-else class="space-y-4">
         <div class="rounded-[1.2rem] bg-[var(--ylink-color-surface)] p-4 shadow-[var(--ylink-shadow-soft)]">
           <div class="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-slate-100 pb-3 dark:border-white/5">
-            <label class="inline-flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
-              <input
-                type="checkbox"
-                :checked="clientCartStore.allValidSelected"
-                @change="clientCartStore.toggleAllValidSelected(($event.target as HTMLInputElement).checked)"
-              />
+            <el-checkbox
+              class="inline-flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300"
+              :model-value="clientCartStore.allValidSelected"
+              @update:model-value="clientCartStore.toggleAllValidSelected(Boolean($event))"
+            >
               全选有效商品
-            </label>
-            <button type="button" class="self-start text-xs text-rose-500 sm:self-auto hover:text-rose-600" @click="removeSelected">批量删除</button>
+            </el-checkbox>
+            <el-button link type="danger" class="self-start text-xs text-rose-500 sm:self-auto hover:text-rose-600" @click="removeSelected">批量删除</el-button>
           </div>
 
           <TransitionGroup name="cart-list-flow" tag="div" class="space-y-3">
@@ -164,11 +163,11 @@ const handleBack = () => {
             >
               <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div class="flex min-w-0 items-start gap-3">
-                  <input
-                    type="checkbox"
-                    :checked="item.selected"
+                  <el-checkbox
+                    :model-value="item.selected"
+                    :aria-label="`选择${item.productName}${item.specText ? `，${item.specText}` : ''}`"
                     class="mt-1 w-4 h-4 rounded text-teal-600 focus:ring-teal-500 cursor-pointer"
-                    @change="clientCartStore.toggleItemSelected(resolveCartItemKey(item), ($event.target as HTMLInputElement).checked)"
+                    @update:model-value="clientCartStore.toggleItemSelected(resolveCartItemKey(item), Boolean($event))"
                   />
                   <ClientProductSmallImage :small="item.thumbnailSmall" :original="item.thumbnail" :source-key="item.skuId || item.productId" :alt="item.productName" />
                 <div class="min-w-0">
@@ -182,13 +181,13 @@ const handleBack = () => {
                   </div>
                 </div>
                 <div class="flex items-center justify-end gap-3 sm:w-auto w-full">
-                  <button type="button" class="client-cart-qty-btn" @click="clientCartStore.incrementQty(resolveCartItemKey(item), -1)">-</button>
+                  <el-button circle class="client-cart-qty-btn" :aria-label="`减少${item.productName}${item.specText ? `，${item.specText}` : ''}数量`" @click="clientCartStore.incrementQty(resolveCartItemKey(item), -1)">-</el-button>
                   <ClientQtyInput
                     :model-value="item.qty"
                     :aria-label="`${item.productName}数量`"
                     @commit="clientCartStore.setQtyFromInput(resolveCartItemKey(item), $event)"
                   />
-                  <button type="button" class="client-cart-qty-btn" @click="clientCartStore.incrementQty(resolveCartItemKey(item), 1)">+</button>
+                  <el-button circle class="client-cart-qty-btn" :aria-label="`增加${item.productName}${item.specText ? `，${item.specText}` : ''}数量`" @click="clientCartStore.incrementQty(resolveCartItemKey(item), 1)">+</el-button>
                 </div>
               </div>
             </article>
@@ -209,6 +208,7 @@ const handleBack = () => {
               <div class="flex min-w-0 items-start gap-3">
                 <el-checkbox
                   :model-value="item.selected"
+                  :aria-label="`选择失效商品${item.productName}${item.specText ? `，${item.specText}` : ''}`"
                   class="mt-0.5"
                   @update:model-value="clientCartStore.toggleItemSelected(resolveCartItemKey(item), Boolean($event))"
                 />
@@ -228,7 +228,7 @@ const handleBack = () => {
                 >
                   调整为 {{ resolveClientCartMaxQty(item) }} 件
                 </el-button>
-                <el-button size="small" @click="clientCartStore.toggleItemSelected(resolveCartItemKey(item), !item.selected)">
+                <el-button size="small" :aria-label="`${item.selected ? '取消选择' : '重新选择'}${item.productName}${item.specText ? `，${item.specText}` : ''}`" @click="clientCartStore.toggleItemSelected(resolveCartItemKey(item), !item.selected)">
                   {{ item.selected ? '取消选择' : '重新选择' }}
                 </el-button>
                 <el-button type="danger" plain size="small" @click="clientCartStore.removeItem(resolveCartItemKey(item))">移除</el-button>
@@ -260,14 +260,13 @@ const handleBack = () => {
             种商品
           </p>
         </div>
-        <button
-          type="button"
+        <el-button
           class="rounded-full bg-slate-900 px-8 py-2.5 text-sm font-semibold text-white transition-transform active:scale-95 shadow-md hover:shadow-lg disabled:cursor-not-allowed disabled:opacity-60"
           :disabled="checkoutPending"
           @click="goCheckout"
         >
           {{ checkoutButtonText }}
-        </button>
+        </el-button>
       </div>
     </div>
   </div>
