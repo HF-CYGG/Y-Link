@@ -11,7 +11,7 @@
 
 
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { ElMessageBox } from 'element-plus'
 import {
@@ -48,6 +48,7 @@ import { notifyClientOrderRefresh, subscribeClientOrderRefresh } from '@/utils/c
 import { formatDateTime } from '@/utils/date-time'
 import { normalizeRequestError } from '@/utils/error'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
+import { snapshotOrderEditDraft, snapshotOrderReturnDraft } from './client-order-draft-policy'
 import ClientOrderEditDialog from '@/views/client/components/ClientOrderEditDialog.vue'
 import ClientOrderReturnDialog from '@/views/client/components/ClientOrderReturnDialog.vue'
 import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
@@ -652,15 +653,47 @@ const buildEditableItemsFromDetail = (nextDetail: O2oPreorderDetail, existingIte
   })
 }
 
+let editDraftBaseline = ''
+let returnDraftBaseline = ''
+const currentEditDraft = () => snapshotOrderEditDraft(editRemark.value, editAddProductId.value, editOrderItems.value)
+const currentReturnDraft = () => snapshotOrderReturnDraft(returnReason.value, returnQtyMap.value)
+let discardConfirmation: Promise<boolean> | null = null
+const confirmDiscardOrderDrafts = () => {
+  if (!clientAuthStore.currentUser?.id) return Promise.resolve(true)
+  if (editSubmitting.value || returnSubmitting.value) return Promise.resolve(false)
+  const dirty = (editDialogVisible.value && currentEditDraft() !== editDraftBaseline)
+    || (returnDialogVisible.value && currentReturnDraft() !== returnDraftBaseline)
+  if (!dirty) return Promise.resolve(true)
+  if (discardConfirmation) return discardConfirmation
+  const owner = clientAuthStore.currentUser.id
+  const session = clientAuthStore.sessionGeneration
+  const orderId = route.params.id
+  discardConfirmation = ElMessageBox.confirm('当前修改尚未保存，确认放弃这些草稿吗？', '放弃未保存内容', {
+    type: 'warning', confirmButtonText: '放弃修改', cancelButtonText: '继续编辑', closeOnClickModal: false,
+  }).then(() => owner === clientAuthStore.currentUser?.id && session === clientAuthStore.sessionGeneration && orderId === route.params.id)
+    .catch(() => false).finally(() => { discardConfirmation = null })
+  return discardConfirmation
+}
+const requestCloseEditDialog = async (visible: boolean) => {
+  if (visible || await confirmDiscardOrderDrafts()) editDialogVisible.value = visible
+}
+const requestCloseReturnDialog = async (visible: boolean) => {
+  if (visible || await confirmDiscardOrderDrafts()) returnDialogVisible.value = visible
+}
+onBeforeRouteLeave(confirmDiscardOrderDrafts)
+onBeforeRouteUpdate((to, from) => to.params.id === from.params.id || confirmDiscardOrderDrafts())
+
 const resetEditForm = () => {
   editRemark.value = detail.value?.order.remark ?? ''
   editAddProductId.value = ''
   editOrderItems.value = detail.value ? buildEditableItemsFromDetail(detail.value) : []
+  editDraftBaseline = currentEditDraft()
 }
 
 const resetReturnForm = () => {
   returnReason.value = ''
   returnQtyMap.value = {}
+  returnDraftBaseline = currentReturnDraft()
 }
 
 // 详细注释：正式出库单的补填字段仅服务于当前弹层会话，关闭或切换订单时都必须回到初始值，
@@ -878,7 +911,12 @@ const renderReturnRequestQrs = async (retryId?: string) => {
 // 路由或账号先改变时立即撤下旧详情，不能在新订单加载前显示旧载荷。
 watch([() => route.params.id, () => clientAuthStore.currentUser?.id], () => {
   pickupQrGeneration += 1; returnQrGeneration += 1
-  detail.value = null; qrDataUrl.value = ''; returnQrMap.value = {}; returnQrErrors.value = {}
+  detail.value = null
+  editDialogVisible.value = false; returnDialogVisible.value = false
+  editRemark.value = ''; editAddProductId.value = ''; editOrderItems.value = []
+  mallProducts.value = []; editProductsLoading.value = false
+  returnReason.value = ''; returnQtyMap.value = {}
+  qrDataUrl.value = ''; returnQrMap.value = {}; returnQrErrors.value = {}
   pickupQrState.value = 'disabled'; pickupRenderKey = ''; returnRenderKey = ''
 }, { flush: 'sync' })
 watch(pickupContextKey, () => { void renderQrCode() }, { flush: 'sync' })
@@ -888,17 +926,26 @@ const loadMallProducts = async () => {
   if (mallProducts.value.length || editProductsLoading.value) {
     return
   }
+  const owner = clientAuthStore.currentUser?.id
+  const session = clientAuthStore.sessionGeneration
+  const orderId = route.params.id
+  const isCurrent = () => owner === clientAuthStore.currentUser?.id && session === clientAuthStore.sessionGeneration && orderId === route.params.id
   editProductsLoading.value = true
   try {
-    mallProducts.value = (await getO2oMallProducts()).list
+    const products = (await getO2oMallProducts()).list
+    if (!isCurrent()) return
+    mallProducts.value = products
     if (detail.value) {
+      const pristine = currentEditDraft() === editDraftBaseline
       editOrderItems.value = buildEditableItemsFromDetail(detail.value, editOrderItems.value)
+      if (pristine) editDraftBaseline = currentEditDraft()
     }
   } catch (error) {
+    if (!isCurrent()) return
     const normalizedError = normalizeRequestError(error, '可修改商品加载失败')
     showAppError(normalizedError.message)
   } finally {
-    editProductsLoading.value = false
+    if (isCurrent()) editProductsLoading.value = false
   }
 }
 
@@ -1965,7 +2012,7 @@ onBeforeUnmount(() => {
       :editable-order-total-qty="editableOrderTotalQty"
       :editable-order-total-amount="editableOrderTotalAmount"
       :can-submit-order-edit="canSubmitOrderEdit"
-      @update:visible="editDialogVisible = $event"
+      @update:visible="requestCloseEditDialog"
       @update:edit-remark="editRemark = $event"
       @update:edit-add-product-id="editAddProductId = $event"
       @update:item-qty="updateEditItemQty($event.itemKey, $event.value)"
@@ -2023,7 +2070,7 @@ onBeforeUnmount(() => {
       :selected-return-item-count="selectedReturnItems.length"
       :selected-return-total-qty="selectedReturnTotalQty"
       :can-submit-return-request="canSubmitReturnRequest"
-      @update:visible="returnDialogVisible = $event"
+      @update:visible="requestCloseReturnDialog"
       @update:return-reason="returnReason = $event"
       @update:return-qty="handleReturnQtyChange($event.itemKey, $event.maxQty, $event.value)"
       @submit="handleSubmitReturnRequest"
