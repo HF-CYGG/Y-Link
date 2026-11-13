@@ -340,7 +340,7 @@ export function createApp(options: CreateAppOptions = {}) {
   // 将 zod 参数校验错误转为业务错误，统一响应格式。
   app.use((err: unknown, _req: express.Request, _res: express.Response, next: express.NextFunction) => {
     if (err instanceof ZodError) {
-      return next(new BizError(err.errors[0]?.message ?? '参数校验失败', 400))
+      return next(new BizError(err.issues[0]?.message ?? '参数校验失败', 400))
     }
     return next(err)
   })

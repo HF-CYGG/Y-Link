@@ -17,7 +17,8 @@ const idValueSchema = z.union([z.string(), z.number()])
   .pipe(z.string().min(1))
 
 const looseTextSchema = (max: number) =>
-  z.union([z.string(), z.number(), z.null(), z.undefined()])
+  // 缺省由外层 optional 处理，避免 Zod 4 把省略字段送入 transform 后变为空字符串。
+  z.union([z.string(), z.number(), z.null()])
     .transform((value) => String(value ?? '').trim())
     .pipe(z.string().max(max))
 

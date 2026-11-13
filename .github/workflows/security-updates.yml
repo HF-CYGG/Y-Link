@@ -3,7 +3,7 @@
 # 实现逻辑：
 # 1. 只读取仓库文件与 lockfile，不安装依赖、不执行 PR 代码以外的脚本，通常十几秒完成；
 # 2. 具体规则在 scripts/verify-security-updates.mjs：Node 版本固定点低于最新安全版本、主版本 EOL、
-#    或生产依赖存在可在现有版本范围内修复的 high/critical 漏洞时失败；需大版本升级或无修复的只告警；
+#    或 Web/后端生产依赖存在 high/critical 漏洞时失败，包括需大版本升级或暂无修复的情况；
 # 3. 定时任务用于发现「代码没变但上游新发布了安全补丁」的情况，失败时 GitHub 会通知仓库维护者。
 # 维护说明：
 # - 状态名为 `security-updates`，若要阻断合入需在 main 的 Ruleset 中把它加为必要检查，改名时同步修改 Ruleset；
