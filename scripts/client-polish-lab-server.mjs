@@ -8,12 +8,14 @@ import vue from '@vitejs/plugin-vue'
 import Components from 'unplugin-vue-components/vite'
 import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 import { code128BarcodePlugin } from './code128-barcode-module.mjs'
+import { startProductionStaticServer } from './production-static-server.mjs'
 
 export function createLabEvidenceDir(prefix = 'ylink-polish-') {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix))
 }
 
 export async function startClientPolishServer({ root = process.cwd(), output, plugins = [], readinessRoutes = ['/__polish/state', '/health', '/client/mall', '/src/main.ts'] }) {
+  if (process.env.Y_LINK_POLISH_PRODUCTION === 'true') return startProductionStaticServer({dist:path.join(root,'dist'),plugins})
   const vite = await createServer({
     root, configFile: false, envDir: false, envPrefix: '__POLISH_UNUSED_',
     cacheDir: path.join(output, 'vite-cache'),
