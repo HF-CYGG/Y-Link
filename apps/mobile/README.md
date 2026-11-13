@@ -4,7 +4,7 @@ Y-Link 的 Expo 移动端工程。当前已建立可运行路由、Provider、Fe
 
 ## 环境与安装
 
-- Node.js：`22.23.4`
+- Node.js：`22.23.5`
 - 包管理器：npm workspace；本目录保留独立 `package.json`，唯一依赖真源为仓库根 `package-lock.json`
 - 依赖源：仓库根 `.npmrc` 固定官方 npm registry；根 lockfile 保留 tarball `resolved` 与 `integrity` 供本地、CI 与 EAS 共用
 - Expo SDK：`~57.0.0`
@@ -52,7 +52,7 @@ Mobile 已通过根 npm workspace 正式依赖 `@ylink/shared-types` 与 `@ylink
 
 当前 `src/contracts/shared-packages.ts` 只用于证明包身份、类型与标准错误可以被 Mobile 解析，不实例化 Native adapter、不发起网络请求。未来网络调用必须统一进入客户端层，页面、Store 和 mock 不直接发起请求；在 Native token/session 方案获批前不得接真实 Auth。
 
-`@ylink/domain`、`@ylink/validation` 与 `@ylink/design-tokens` 已按同一规范纳入根 workspace，但 Mobile 尚未声明依赖或消费。后续接入时只需在本 manifest 添加明确的 workspace dependency，并同步验证/文档；本轮不迁移现有主题、schema 或 Web 业务逻辑。
+`@ylink/validation` 已由注册页和个人中心消费用户名校验规则，并在 Mobile manifest 中声明 workspace 依赖；其 Zod peer 与后端统一为 4.6.7。`@ylink/domain` 与 `@ylink/design-tokens` 尚未由 Mobile 声明依赖或消费。共享包变动需运行实际消费者的类型检查，不因此迁移现有主题或业务逻辑。
 
 ## Expo / EAS 入口
 
@@ -63,7 +63,7 @@ cd apps/mobile
 eas build --platform android --profile preview
 ```
 
-EAS 上传仓库后按根 workspace 与根 `package-lock.json` 安装，`eas.json` 将 Node 固定为 `22.23.4`。当前没有 EAS project ID、Android applicationId、签名或凭据，因此上述命令只是正式构建入口说明，本阶段不执行发布或远端构建。
+EAS 上传仓库后按根 workspace 与根 `package-lock.json` 安装，`eas.json` 将 Node 固定为 `22.23.5`。当前没有 EAS project ID、Android applicationId、签名或凭据，因此上述命令只是正式构建入口说明，本阶段不执行发布或远端构建。
 
 ## 平台能力状态
 

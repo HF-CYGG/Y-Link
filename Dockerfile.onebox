@@ -12,7 +12,7 @@
 # ------------------------------
 # Onebox 默认依赖 sqlite3，Node 主版本必须与其 N-API 发行产物联合验收。
 # 固定到 Node 22 最新安全补丁版本；Node 发布新安全版本后 `npm run verify:security-updates` 会报红，需同步升级全部 Node 版本固定点。
-ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:22.23.4-bookworm-slim
+ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:22.23.5-bookworm-slim
 
 FROM --platform=$BUILDPLATFORM ${Y_LINK_NODE_IMAGE} AS frontend-build
 WORKDIR /app
@@ -74,13 +74,33 @@ RUN npm ci --omit=dev \
 # ------------------------------
 FROM ${Y_LINK_NODE_IMAGE} AS runtime
 
-RUN apt-get update \
-  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nginx ca-certificates tzdata \
-  && mkdir -p /var/cache/nginx/ylink-public \
+ARG Y_LINK_NGINX_VERSION=1.30.6-1~bookworm
+# 独立 signed-by 仅信任核验过指纹的 nginx.org 签名公钥；不扩大系统全局信任。
+RUN set -eu; \
+  apt-get update \
+  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl gnupg ca-certificates tzdata \
+  && arch="$(dpkg --print-architecture)" \
+  && case "$arch" in amd64|arm64) ;; *) exit 1 ;; esac \
+  && export GNUPGHOME="$(mktemp -d)" \
+  && curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 https://nginx.org/keys/nginx_signing.key -o /tmp/nginx-signing.key \
+  && gpg --batch --import /tmp/nginx-signing.key \
+  && nginx_key_fingerprints='573BFD6B3D8FBC641079A6ABABF5BD827BD9BF62 8540A6F18833A80E9C1653A42FD21310B49F6B46 9E9BE90EACBCDE69FE9B204CBCDCD8A38D88A2B3' \
+  && for fingerprint in $nginx_key_fingerprints; do \
+       gpg --batch --with-colons --fingerprint "$fingerprint" | grep -qx "fpr:::::::::$fingerprint:" || exit 1; \
+       printf 'Verified nginx signing fingerprint: %s\n' "$fingerprint"; \
+     done \
+  && gpg --batch --export $nginx_key_fingerprints > /usr/share/keyrings/nginx-archive-keyring.gpg \
+  && chmod 0644 /usr/share/keyrings/nginx-archive-keyring.gpg \
+  && printf 'deb [arch=%s signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] https://nginx.org/packages/debian bookworm nginx\n' "$arch" > /etc/apt/sources.list.d/nginx.list \
+  && apt-get update \
+  && gpgv --status-fd 1 --keyring /usr/share/keyrings/nginx-archive-keyring.gpg /var/lib/apt/lists/nginx.org_packages_debian_dists_bookworm_InRelease \
+  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "nginx=${Y_LINK_NGINX_VERSION}" \
+  && mkdir -p /var/cache/nginx/ylink-public /var/cache/nginx/client_temp /var/cache/nginx/proxy_temp /var/cache/nginx/fastcgi_temp /var/cache/nginx/uwsgi_temp /var/cache/nginx/scgi_temp \
   && chown -R www-data:www-data /var/cache/nginx/ylink-public \
+  && chown -R www-data:www-data /var/cache/nginx/*_temp \
   && rm -f /etc/nginx/sites-enabled/default \
   && rm -f /etc/nginx/conf.d/default.conf \
-  && rm -rf /var/lib/apt/lists/*
+  && rm -rf "$GNUPGHOME" /tmp/nginx-signing.key /var/lib/apt/lists/*
 
 ENV TZ=Asia/Shanghai
 

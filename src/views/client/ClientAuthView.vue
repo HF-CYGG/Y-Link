@@ -733,21 +733,22 @@ const warmupClientPostLoginTargets = (redirectPath: string) => {
   scheduleRouteComponentWarmup(adjacentTargets)
 }
 
+const loginErrors = reactive({ account: '', password: '', captcha: '' })
+const loginAccountInput = ref<{ focus: () => void }>()
+const loginPasswordInput = ref<{ focus: () => void }>()
+const loginCaptchaInput = ref<{ focus: () => void }>()
+
 // 详细注释：提交登录表单。首先进行基础校验，然后调用 auth store 登录，成功后优先跳转，再在空闲时预热高频相邻页面。
 const handleLogin = async () => {
-  if (!validateLoginAccount(loginForm.account)) {
-    showAppWarning('请输入姓名、手机号、邮箱或工号')
+  loginErrors.account = validateLoginAccount(loginForm.account) ? '' : '请输入姓名、手机号、邮箱或工号'
+  loginErrors.password = validateLoginPassword(loginForm.password) ? '' : '请输入密码'
+  loginErrors.captcha = loginCaptchaVisible.value && (!captcha.captchaId || !loginForm.captcha.trim()) ? '请输入图形验证码' : ''
+  if (loginErrors.account || loginErrors.password || loginErrors.captcha) {
+    await nextTick()
+    if (loginErrors.account) loginAccountInput.value?.focus()
+    else if (loginErrors.password) loginPasswordInput.value?.focus()
+    else loginCaptchaInput.value?.focus()
     return
-  }
-  if (!validateLoginPassword(loginForm.password)) {
-    showAppWarning('请输入密码')
-    return
-  }
-  if (loginCaptchaVisible.value) {
-    if (!captcha.captchaId || !loginForm.captcha.trim()) {
-      showAppWarning('请输入图形验证码')
-      return
-    }
   }
 
   const runResult = await runWithGate({
@@ -1213,8 +1214,16 @@ onUnmounted(() => {
                   class="mt-6 space-y-4"
                   :class="{ 'login-form--compact': isCompactLoginLayout }"
                 >
+                  <div>
+                  <label for="client-login-account" class="login-field-label">账号</label>
                   <el-input 
+                    id="client-login-account"
+                    ref="loginAccountInput"
                     v-model="loginForm.account" 
+                    autocomplete="username"
+                    :aria-invalid="Boolean(loginErrors.account)"
+                    :aria-describedby="loginErrors.account ? 'client-login-account-error' : undefined"
+                    @input="loginErrors.account = ''"
                     placeholder="姓名 / 手机号 / 邮箱 / 工号" 
                     class="geo-input" 
                     size="large" 
@@ -1226,9 +1235,19 @@ onUnmounted(() => {
                       <el-icon class="input-icon"><User /></el-icon>
                     </template>
                   </el-input>
+                  <p v-if="loginErrors.account" id="client-login-account-error" class="login-field-error">{{ loginErrors.account }}</p>
+                  </div>
 
+                  <div>
+                  <label for="client-login-password" class="login-field-label">密码</label>
                   <el-input 
+                    id="client-login-password"
+                    ref="loginPasswordInput"
                     v-model="loginForm.password" 
+                    autocomplete="current-password"
+                    :aria-invalid="Boolean(loginErrors.password)"
+                    :aria-describedby="loginErrors.password ? 'client-login-password-error' : undefined"
+                    @input="loginErrors.password = ''"
                     placeholder="密码" 
                     type="password" 
                     class="geo-input" 
@@ -1241,9 +1260,13 @@ onUnmounted(() => {
                       <el-icon class="input-icon"><Lock /></el-icon>
                     </template>
                   </el-input>
+                  <p v-if="loginErrors.password" id="client-login-password-error" class="login-field-error">{{ loginErrors.password }}</p>
+                  </div>
 
+                  <div v-if="loginCaptchaVisible">
+                  <label for="client-login-captcha" class="login-field-label">图形验证码</label>
                   <div v-if="loginCaptchaVisible" class="captcha-row">
-                    <el-input v-model="loginForm.captcha" placeholder="图形验证码" class="geo-input flex-1" size="large" clearable>
+                    <el-input id="client-login-captcha" ref="loginCaptchaInput" v-model="loginForm.captcha" placeholder="图形验证码" class="geo-input flex-1" size="large" clearable :aria-invalid="Boolean(loginErrors.captcha)" :aria-describedby="loginErrors.captcha ? 'client-login-captcha-error' : undefined" @input="loginErrors.captcha = ''">
                       <template #prefix>
                         <el-icon class="input-icon"><Key /></el-icon>
                       </template>
@@ -1259,6 +1282,8 @@ onUnmounted(() => {
                         draggable="false"
                       />
                     </button>
+                  </div>
+                  <p v-if="loginErrors.captcha" id="client-login-captcha-error" class="login-field-error">{{ loginErrors.captcha }}</p>
                   </div>
                   <p v-if="loginCaptchaVisible" class="captcha-hint-text">{{ captchaHintText }}</p>
                   <div
@@ -2699,6 +2724,19 @@ onUnmounted(() => {
 
 .login-form--compact {
   padding-top: 12px;
+}
+
+.login-field-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--ca-muted);
+  font-size: 0.875rem;
+}
+
+.login-field-error {
+  margin-top: 4px;
+  color: var(--el-color-danger);
+  font-size: 0.75rem;
 }
 
 .submit-btn {

@@ -36,11 +36,14 @@ const order = {
   id: 'client-fixture-order',
   businessNo: 'TEST-CLIENT-VOUCHER-112',
   showNo: 'TEST-CLIENT-VOUCHER-112',
+  inventoryMode: 'o2o_preapplied',
+  merge: { role: 'standalone', parent: null, children: [] },
   orderType: 'department',
   customerDepartmentName: '演示部门',
   createdAt: '2026-09-26T08:00:00+08:00',
   sourceDocType: 'o2o_preorder',
   sourceDocNo: 'TEST-PRE-113',
+  sourcePreorderNo: 'TEST-PRE-113',
   sourcePreorderPickupContact: '演示领取人',
   sourcePreorderPickupAt: '2026-09-27T09:00:00+08:00',
   totalQty: String(items.length * 2),
@@ -54,25 +57,29 @@ declare global { interface Window { __clientVoucherReady?: boolean; __clientVouc
 let exportStarted = false
 const exportLoading = ref(false)
 const captureExport = async (sourceElement: HTMLElement | null) => {
+  window.__clientVoucherError = undefined
   if (!(sourceElement instanceof HTMLElement)) { window.__clientVoucherError = '缺少可见预览节点'; return }
   const snapshot = createClientVoucherExportSnapshot(sourceElement)
+  const title = sourceElement.querySelector<HTMLElement>('.voucher-title-row th')!
+  const originalTitle = title.textContent
   exportLoading.value = true
   await nextTick()
   const closeDisabled = document.querySelector<HTMLButtonElement>('.client-order-detail-dialog--voucher .el-dialog__footer button:first-child')?.disabled === true
   const inputDisabledCount = document.querySelectorAll('.client-order-detail-dialog--voucher .voucher-editor-form input:disabled').length
   const headerCloseHidden = !document.querySelector('.client-order-detail-dialog--voucher .el-dialog__headerbtn')
-  sourceElement.querySelector<HTMLElement>('.voucher-title-row th')!.textContent = '异步导出后被修改的预览标题'
+  title.textContent = '异步导出后被修改的预览标题'
   const lockState = document.createElement('pre')
   lockState.id = 'client-voucher-export-lock-state'
   lockState.textContent = JSON.stringify({ closeDisabled, inputDisabledCount, headerCloseHidden, snapshotStable: snapshot.sourceElement.querySelector('.voucher-title-row th')?.textContent === '野辙文创出库单（一式两份）' })
   document.body.appendChild(lockState)
   const originalCreateObjectURL = URL.createObjectURL.bind(URL)
   URL.createObjectURL = (object) => {
-    if (object instanceof Blob) {
+    if (object instanceof Blob && object.type === 'application/pdf') {
       const reader = new FileReader()
       reader.onload = () => {
         const node = document.createElement('pre')
         node.id = 'client-voucher-export-data'
+        node.hidden = true
         node.textContent = String(reader.result ?? '')
         document.body.appendChild(node)
       }
@@ -85,6 +92,7 @@ const captureExport = async (sourceElement: HTMLElement | null) => {
   } catch (error) {
     window.__clientVoucherError = String(error)
   } finally {
+    title.textContent = originalTitle
     snapshot.dispose()
     exportLoading.value = false
   }

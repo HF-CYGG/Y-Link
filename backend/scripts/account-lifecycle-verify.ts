@@ -1366,7 +1366,7 @@ try {
     '旧 SysUser 请求不得改变 SKU 库存',
   )
   assert.equal((await preorderRepo.findOneByOrFail({ id: staleVerifyPreorder.order.id })).status, 'pending')
-  assert.equal((await preorderRepo.findOneByOrFail({ id: staleVerifyPreorder.order.id })).businessStatus, null)
+  assert.equal((await preorderRepo.findOneByOrFail({ id: staleVerifyPreorder.order.id })).businessStatus, 'awaiting_shipment', '旧账号请求不得改变下单默认的待发货状态')
   assert.equal((await preorderRepo.findOneByOrFail({ id: staleVerifyPreorder.order.id })).merchantMessage, null)
   assert.equal((await returnRequestRepo.findOneByOrFail({ id: staleReturnRequest.id })).status, 'pending')
   assert.equal((await inboundRepo.findOneByOrFail({ id: staleInboundOrder.order.id })).status, 'pending')
@@ -1467,7 +1467,7 @@ try {
   await notificationRuleRepo.clear()
   await systemConfigRepo.delete({ configKey: 'notification.online_window_seconds' })
   const defaultRuleViews = await notificationService.listRules()
-  assert.equal(defaultRuleViews.length, 3, '缺少通知规则时 GET 应返回内存默认视图')
+  assert.equal(defaultRuleViews.length, 5, '缺少通知规则时 GET 应返回含送货单通知的五项内存默认视图')
   assert.equal(await notificationRuleRepo.count(), 0, '通知规则 GET 不得惰性写入默认规则')
   assert.equal(
     await systemConfigRepo.count({ where: { configKey: 'notification.online_window_seconds' } }),
@@ -1514,7 +1514,7 @@ try {
     feishuSignSecret: '',
     emailSubjectPrefix: row.emailSubjectPrefix,
   })), 120, actor)
-  assert.equal(fallbackRuleUpdate.list.length, 3, '内存默认规则视图应可在显式写事务中映射到真实规则')
+  assert.equal(fallbackRuleUpdate.list.length, 5, '五项内存默认规则视图应可在显式写事务中映射到真实规则')
 
   const businessFirstClient = await createClientUser('issue74-business-first-client')
   const businessFirstClientAuth = {

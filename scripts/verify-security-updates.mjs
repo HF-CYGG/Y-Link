@@ -3,11 +3,11 @@
  * 文件职责：合入 main 前检查 Node 运行时与生产依赖是否落后于已发布的安全补丁，避免已知漏洞随镜像上线。
  * 实现逻辑：
  * - Node 运行时：收集 Dockerfile、Compose、GitHub 工作流与 Mobile 工程里的 Node 版本固定点，对照 nodejs.org 发行索引；
- *   精确版本低于所在主版本线的最新安全版本即失败，主版本线已 EOL 也失败；浮动主版本（如 `node-version: 22`）
- *   由 setup-node 解析到最新补丁，只检查 EOL；
+ *   精确版本低于所在主版本线的最新安全版本即失败，主版本线已 EOL 也失败；
+ *   本项目 setup-node 步骤必须与 Onebox 固定补丁版本一致，拒绝浮动主版本与间接版本声明；
  * - npm 依赖：对根 Web 与后端执行 `npm audit --omit=dev --package-lock-only`，根 Web 只计入按 lockfile 算出的生产依赖闭包
  *   （排除提升到根目录的 Mobile 依赖）；
- *   high / critical 且存在不跨大版本的修复时失败；需要大版本升级或暂无修复的只告警，留待专项评估；
+ *   high / critical 一律失败，包括需要跨大版本升级或暂无修复的情况；
  * - Mobile workspace 尚未上线，只输出审计摘要，不阻断合入。
  * 维护说明：
  * - Node 报红时必须一起升级全部固定点（Dockerfile 默认镜像、docker-publish 构建参数、Compose、Mobile 的 engines 与 eas.json），
@@ -22,6 +22,7 @@ import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { resolveNpmCommand } from './process-runner-utils.mjs'
+import { validateWorkflowNodePins } from './node-workflow-pins.mjs'
 
 const __filename = fileURLToPath(import.meta.url)
 const projectRoot = path.resolve(path.dirname(__filename), '..')
@@ -126,6 +127,9 @@ const fetchJson = async (url) => {
 
 const verifyNodeRuntime = async () => {
   const pins = collectNodePins()
+  const expectedVersion = pins.find((pin) => pin.file === 'Dockerfile.onebox')?.version
+  const workflows = listWorkflowFiles().map((file) => ({ file, content: readRepoFile(file) }))
+  for (const error of validateWorkflowNodePins(workflows, expectedVersion)) fail(error)
   let releases
   try {
     releases = await fetchJson(NODE_DIST_INDEX_URL)
@@ -210,8 +214,16 @@ const runNpmAudit = (title, cwd, extraArgs) => {
     windowsHide: true,
     maxBuffer: 64 * 1024 * 1024,
   })
+  if (result.error || ![0, 1].includes(result.status)) {
+    throw new Error(`${title} 审计未完成（exitCode=${result.status}）：${result.error?.message ?? 'npm 执行异常'}`)
+  }
   try {
-    return JSON.parse(result.stdout)
+    const report = JSON.parse(result.stdout)
+    if (!report.error && (!report.vulnerabilities || !report.metadata?.vulnerabilities)) {
+      throw new Error('缺少完整漏洞统计，不能视为零漏洞')
+    }
+    info(`${title} npm audit exitCode=${result.status}`)
+    return report
   } catch {
     const detail = result.error?.message ?? (result.stderr || result.stdout || '')
     throw new Error(`${title} 审计输出无法解析（exitCode=${result.status}）：${detail.slice(0, 500)}`)
@@ -329,8 +341,9 @@ const verifyNpmAudit = ({ title, cwd, extraArgs = [], blocking, productionClosur
   for (const vulnerability of inScope) {
     if (!BLOCKING_SEVERITIES.has(vulnerability.severity)) continue
     const fix = describeFix(vulnerability.fixAvailable, hasNoFixedVersion(vulnerability.name))
-    const line = `${vulnerability.name}（${vulnerability.severity}，受影响范围 ${vulnerability.range}）：${fix.text}`
-    if (blocking && fix.fixable) blockingItems.push(line)
+    const dependencyPaths = (vulnerability.nodes ?? []).filter((node) => !productionClosure || productionClosure.has(node))
+    const line = `${vulnerability.name}（${vulnerability.severity}，受影响范围 ${vulnerability.range}）：${fix.text}；依赖路径：${dependencyPaths.join('、') || '审计未提供路径'}`
+    if (blocking) blockingItems.push(line)
     else deferredItems.push(line)
   }
 
@@ -365,7 +378,23 @@ verifyNpmAudit({
   productionClosure: collectProductionClosure(path.join(projectRoot, 'package-lock.json')),
 })
 verifyNpmAudit({ title: '后端', cwd: path.join(projectRoot, 'backend'), blocking: true })
-verifyNpmAudit({ title: 'Mobile workspace', cwd: projectRoot, extraArgs: ['--workspace=y-link-mobile'], blocking: false })
+const mobileManifestPath = path.join(projectRoot, 'apps/mobile/package.json')
+info('Mobile workspace 尚未上线，不作为生产阻断项；仍单独报告真实审计状态与依赖路径')
+if (!fs.existsSync(mobileManifestPath)) {
+  warn('Mobile workspace 审计未执行：实际工作区缺少 apps/mobile/package.json，请在完整隔离副本重跑；不能视为零漏洞')
+} else {
+  let mobileManifest
+  try {
+    mobileManifest = JSON.parse(fs.readFileSync(mobileManifestPath, 'utf8'))
+  } catch {
+    warn('Mobile workspace 审计未执行：实际 package.json 无法解析')
+  }
+  if (mobileManifest && mobileManifest.name !== 'y-link-mobile') {
+    warn('Mobile workspace 审计未执行：workspace 名称变化，必须重新核对审计范围')
+  } else if (mobileManifest) {
+    verifyNpmAudit({ title: 'Mobile workspace', cwd: projectRoot, extraArgs: ['--workspace=y-link-mobile'], blocking: false })
+  }
+}
 writeStepSummary()
 
 if (failures.length > 0) {

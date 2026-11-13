@@ -5,15 +5,18 @@
  */
 
 import { createRequire } from 'node:module'
-import { CheckSmsVerifyCodeRequest, SendSmsVerifyCodeRequest } from '@alicloud/dypnsapi20170525/dist/models/model.js'
+import type { CheckSmsVerifyCodeRequest, SendSmsVerifyCodeRequest } from '@alicloud/dypnsapi20170525/dist/models/model.js'
 import { env } from '../config/env.js'
 import { BizError } from '../utils/errors.js'
+import { createRetryableLazyResource } from '../utils/retryable-lazy-resource.js'
 import type { AliyunDypnsTemplateConfig, VerificationScene } from './system-config.service.js'
 
 const ALIYUN_DYPNS_REGION = 'cn-hangzhou'
 const ALIYUN_DYPNS_ENDPOINT = 'dypnsapi.aliyuncs.com'
 export const DYPNS_CODE_EXPIRE_SECONDS = 300
 const require = createRequire(import.meta.url)
+/** 未使用 PNVS 时不加载庞大的模型表；首次并发共用加载，失败后允许下次重试。 */
+const loadDypnsModels = createRetryableLazyResource(() => import('@alicloud/dypnsapi20170525/dist/models/model.js'))
 
 type DypnsRuntimeOptions = {
   connectTimeout: number
@@ -112,6 +115,7 @@ export class AliyunDypnsSmsProvider implements AliyunDypnsSmsApi {
     if (!signName) {
       throw new BizError('阿里云 PNVS 短信签名未配置，无法发送验证码', 500)
     }
+    const { SendSmsVerifyCodeRequest } = await loadDypnsModels()
     const response = await this.createClient().sendSmsVerifyCodeWithOptions(new SendSmsVerifyCodeRequest({
       phoneNumber: input.phoneNumber,
       countryCode: input.countryCode,
@@ -138,6 +142,7 @@ export class AliyunDypnsSmsProvider implements AliyunDypnsSmsApi {
   }
 
   async check(input: CheckAliyunDypnsSmsInput) {
+    const { CheckSmsVerifyCodeRequest } = await loadDypnsModels()
     const response = await this.createClient().checkSmsVerifyCodeWithOptions(new CheckSmsVerifyCodeRequest({
       phoneNumber: input.phoneNumber,
       countryCode: input.countryCode,

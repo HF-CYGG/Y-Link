@@ -9,6 +9,7 @@
   - 此组件保持异步加载，不能把管理端订单页的高频桌面路由重新拉回移动端专属展示代码。
 -->
 <script setup lang="ts">
+import { formatOrderRecipient } from '../order-recipient-display'
 import { formatOrderKingdeeStatus } from '@/utils/kingdee-status'
 import dayjs from 'dayjs'
 import type { OrderRecord } from '@/api/modules/order'
@@ -40,11 +41,7 @@ const emit = defineEmits<{
 const isSourceOrder = (order: Pick<OrderRecord, 'merge'>) => order.merge.role === 'source'
 const isParentOrder = (order: Pick<OrderRecord, 'merge'>) => order.merge.role === 'parent'
 const getOrderTypeLabel = (value: OrderRecord['orderType']) => value === 'department' ? '部门单' : '散客单'
-const getOrderDisplayName = (order: Pick<OrderRecord, 'orderType' | 'customerDepartmentName' | 'customerName'>) => {
-  return order.orderType === 'department'
-    ? order.customerDepartmentName || order.customerName || '-'
-    : order.customerName || order.customerDepartmentName || '-'
-}
+const getOrderDisplayName = formatOrderRecipient
 const getShipmentStatusMeta = (order: Pick<OrderRecord, 'orderType' | 'hasCustomerOrder'>) => {
   if (order.orderType !== 'department') return { label: '不适用', toneClass: 'is-neutral' }
   return order.hasCustomerOrder ? { label: '已带单', toneClass: 'is-positive' } : { label: '未带单', toneClass: 'is-warning' }
@@ -69,19 +66,20 @@ const getSystemApplyStatusMeta = (order: Pick<OrderRecord, 'orderType' | 'invent
       <div class="min-w-0"><div class="mobile-order-card__business-no">{{ item.businessNo }}</div><div class="mobile-order-card__time">{{ dayjs(item.createdAt).format('YYYY-MM-DD HH:mm') }}</div></div>
       <div class="mobile-order-card__head-tags"><span class="mobile-order-card__chip is-brand">{{ item.isDeleted ? '已删除' : '正常' }}</span><span class="mobile-order-card__chip is-brand-soft">{{ getOrderTypeLabel(item.orderType) }}</span></div>
     </div>
-    <div class="mobile-order-card__primary"><p class="mobile-order-card__primary-label">领用对象</p><p class="mobile-order-card__primary-value">{{ getOrderDisplayName(item) }}</p></div>
-    <div class="mobile-order-card__metrics"><span class="mobile-order-card__metric-qty">数量：{{ Number(item.totalQty).toFixed(2) }}</span><span class="mobile-order-card__metric-amount">¥{{ Number(item.totalAmount).toFixed(2) }}</span></div>
+    <div class="mobile-order-card__primary"><p class="mobile-order-card__primary-label">领用对象</p><p class="mobile-order-card__primary-value" :title="getOrderDisplayName(item)">{{ getOrderDisplayName(item) }}</p></div>
+    <div class="mobile-order-card__metrics"><span class="mobile-order-card__metric-qty">{{ isParentOrder(item) ? '汇总数量' : isSourceOrder(item) ? '来源数量' : '数量' }}：{{ Number(item.totalQty).toFixed(2) }}</span><span class="mobile-order-card__metric-amount">{{ isParentOrder(item) ? '汇总金额 ': isSourceOrder(item) ? '来源金额 ': '' }}¥{{ Number(item.totalAmount).toFixed(2) }}</span></div>
 
     <div v-if="isParentOrder(item)" class="mobile-order-card__merge" @click.stop>
-      <div class="mobile-order-card__merge-head"><span class="mobile-order-card__merge-title">已合并 {{ item.merge.children.length }} 张来源单</span><el-button link type="primary" :aria-expanded="parentExpanded" @click="emit('toggleParent', item.id)">{{ parentExpanded ? '收起来源单' : '展开来源单' }}</el-button></div>
+      <div class="mobile-order-card__merge-head"><span class="mobile-order-card__merge-title">合并父单 · 本单 + {{ item.merge.children.length }} 张来源单</span><el-button link type="primary" :aria-expanded="parentExpanded" @click="emit('toggleParent', item.id)">{{ parentExpanded ? '收起来源单' : '展开来源单' }}</el-button></div>
       <div v-if="parentExpanded" class="mobile-order-card__merge-list">
         <div v-for="child in item.merge.children" :key="child.id" class="mobile-order-card__merge-child">
-          <div class="mobile-order-card__merge-child-head"><span class="mobile-order-card__merge-child-title">{{ child.businessNo }}</span><el-button link type="primary" @click="emit('viewId', child.id)">查看</el-button></div>
-          <p class="mobile-order-card__merge-child-meta">已合并至父单 · {{ child.totalQty }} 件 · ¥{{ Number(child.totalAmount).toFixed(2) }}</p>
+          <div class="mobile-order-card__merge-child-head"><span class="mobile-order-card__merge-child-title">来源子单 · {{ child.businessNo }}</span><el-button link type="primary" @click="emit('viewId', child.id)">查看</el-button></div>
+          <p class="mobile-order-card__merge-child-meta" :title="formatOrderRecipient(item, child)">领用对象：{{ formatOrderRecipient(item, child) }}</p>
+          <p class="mobile-order-card__merge-child-meta">归属父单 {{ item.businessNo }} · 来源数量 {{ child.totalQty }} · 来源金额 ¥{{ Number(child.totalAmount).toFixed(2) }}</p>
         </div>
       </div>
     </div>
-    <div v-else-if="isSourceOrder(item)" class="mobile-order-card__source-notice">已合并至父单，当前仅可查看详情。</div>
+    <div v-else-if="isSourceOrder(item)" class="mobile-order-card__source-notice">来源子单 · 归属父单 {{ item.merge.parent?.businessNo || '-' }}，当前仅可查看详情。</div>
 
     <div class="mobile-order-card__meta" :class="isTablet ? 'is-tablet' : ''">
       <div class="mobile-order-card__meta-item"><span class="mobile-order-card__meta-label">出库单状态</span><span class="mobile-order-card__meta-value" :class="getShipmentStatusMeta(item).toneClass">{{ getShipmentStatusMeta(item).label }}</span></div>
@@ -183,7 +181,9 @@ const getSystemApplyStatusMeta = (order: Pick<OrderRecord, 'orderType' | 'invent
   font-weight: 600;
   color: #0f172a;
   line-height: 1.45;
-  word-break: break-all;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mobile-order-card__metrics {
@@ -231,9 +231,12 @@ const getSystemApplyStatusMeta = (order: Pick<OrderRecord, 'orderType' | 'invent
   display: grid;
   gap: 8px;
   margin-top: 8px;
+  margin-left: 8px;
+  padding-left: 12px;
 }
 
 .mobile-order-card__merge-child {
+  position: relative;
   border-radius: 8px;
   background: #fff;
   padding: 8px 12px;

@@ -41,6 +41,7 @@ import { O2oReturnRequestItem } from '../entities/o2o-return-request-item.entity
 import type { AuthUserContext } from '../types/auth.js'
 import type { ClientAuthContext } from '../types/client-auth.js'
 import { BizError } from '../utils/errors.js'
+import { buildSqlLikeContains, buildSqlLikePrefix } from '../utils/sql-like.js'
 import {
   isRetryableMysqlTransactionError,
   isUniqueConstraintError,
@@ -1750,7 +1751,7 @@ class O2oPreorderService {
     if (!normalizedKeyword) {
       return []
     }
-    const escapedKeyword = this.escapeLikeKeyword(normalizedKeyword)
+    const keywordPrefix = buildSqlLikePrefix(normalizedKeyword)
     const rows = await AppDataSource.getRepository(BizOutboundOrder)
       .createQueryBuilder('outboundOrder')
       .select([
@@ -1763,11 +1764,11 @@ class O2oPreorderService {
         new Brackets((numberQb) => {
           numberQb
             .where('outboundOrder.businessNo = :businessNoExact', { businessNoExact: normalizedKeyword })
-            .orWhere(String.raw`outboundOrder.businessNo LIKE :businessNoPrefix ESCAPE '\'`, { businessNoPrefix: `${escapedKeyword}%` })
+            .orWhere(`outboundOrder.businessNo LIKE :businessNoPrefix ESCAPE '!'`, { businessNoPrefix: keywordPrefix })
           if (exposeSystemNo) {
             numberQb
               .orWhere('outboundOrder.systemNo = :showNoExact', { showNoExact: normalizedKeyword })
-              .orWhere(String.raw`outboundOrder.systemNo LIKE :showNoPrefix ESCAPE '\'`, { showNoPrefix: `${escapedKeyword}%` })
+              .orWhere(`outboundOrder.systemNo LIKE :showNoPrefix ESCAPE '!'`, { showNoPrefix: keywordPrefix })
           }
         }),
       )
@@ -1799,7 +1800,7 @@ class O2oPreorderService {
       .createQueryBuilder('preorder')
       .select('preorder.id', 'preorderId')
       .where('preorder.status = :status', { status: 'pending' })
-      .andWhere(String.raw`preorder.reservedBusinessNo LIKE :reservedPrefix ESCAPE '\'`, { reservedPrefix: `${escapedKeyword}%` })
+      .andWhere(`preorder.reservedBusinessNo LIKE :reservedPrefix ESCAPE '!'`, { reservedPrefix: keywordPrefix })
       .getRawMany<{ preorderId: string }>()
     reservedRows.forEach((row) => preorderIdSet.add(String(row.preorderId).trim()))
     return [...preorderIdSet]
@@ -3122,6 +3123,7 @@ class O2oPreorderService {
             clientRequestHash,
             verifyCode: randomUUID(),
             status: 'pending',
+            businessStatus: 'awaiting_shipment',
             clientOrderType: normalizedClientOrderType,
             departmentNameSnapshot,
             staffNoSnapshot,
@@ -3935,19 +3937,35 @@ class O2oPreorderService {
     const requestedPage = Math.max(1, Math.floor(Number(input.page) || 1))
     const baseQuery = await this.createConsoleOrderFilteredQuery(input, exposeSystemNo)
 
-    const statusRows = await baseQuery
-      .clone()
-      .select('order.status', 'status')
-      .addSelect('COUNT(1)', 'total')
-      .groupBy('order.status')
-      .getRawMany<{ status: string; total: O2oNumericLike }>()
-    const statusCountMap = new Map(statusRows.map((row) => [String(row.status), Number(row.total ?? 0)]))
+    // 同一请求只取一次时钟；先按数值聚合 ID，再由数据库转为字符串，避免 MySQL bigint 经 JS number 丢精度。
+    const nowMs = Date.now()
+    const idTextType = this.preorderRepo.manager.connection.options.type === 'sqlite' ? 'TEXT' : 'CHAR'
+    const aggregateQuery = baseQuery.clone()
+      .select('COUNT(1)', 'allCount')
+      .addSelect("SUM(CASE WHEN order.status = 'pending' THEN 1 ELSE 0 END)", 'pendingCount')
+      .addSelect("SUM(CASE WHEN order.status = 'verified' THEN 1 ELSE 0 END)", 'completedCount')
+      .addSelect("SUM(CASE WHEN order.status = 'cancelled' THEN 1 ELSE 0 END)", 'cancelledCount')
+      .addSelect(`CAST(MAX(order.id) AS ${idTextType})`, 'latestId')
+    if (input.sinceOrderId) {
+      aggregateQuery.addSelect(
+        'SUM(CASE WHEN order.id > :sinceOrderId AND order.status = :newOrderStatus AND order.createdAt >= :newOrderWindowStart THEN 1 ELSE 0 END)',
+        'newCount',
+      ).setParameters({
+        sinceOrderId: input.sinceOrderId,
+        newOrderStatus: 'pending',
+        newOrderWindowStart: new Date(nowMs - O2O_CONSOLE_NEW_ORDER_WINDOW_MS),
+      })
+    }
+    const aggregate = await aggregateQuery.getRawOne<{
+      allCount: O2oNumericLike; pendingCount: O2oNumericLike; completedCount: O2oNumericLike
+      cancelledCount: O2oNumericLike; latestId: string | null; newCount?: O2oNumericLike
+    }>()
     const returnsCount = await this.applyConsoleOrderPoolCondition(baseQuery.clone(), 'returns').getCount()
     const poolCounts: Record<O2oConsoleOrderPoolKey, number> = {
-      all: [...statusCountMap.values()].reduce((sum, value) => sum + value, 0),
-      pending: statusCountMap.get('pending') ?? 0,
-      completed: statusCountMap.get('verified') ?? 0,
-      cancelled: statusCountMap.get('cancelled') ?? 0,
+      all: Number(aggregate?.allCount ?? 0),
+      pending: Number(aggregate?.pendingCount ?? 0),
+      completed: Number(aggregate?.completedCount ?? 0),
+      cancelled: Number(aggregate?.cancelledCount ?? 0),
       returns: returnsCount,
     }
 
@@ -3961,24 +3979,11 @@ class O2oPreorderService {
         .getMany()
       : []
 
-    const latestRow = await baseQuery
-      .clone()
-      .select('MAX(order.id)', 'latestId')
-      .getRawOne<{ latestId: O2oNumericLike | null }>()
-    const latestOrderId = latestRow?.latestId === null || latestRow?.latestId === undefined ? null : String(latestRow.latestId)
-
-    let newOrderCount = 0
-    if (input.sinceOrderId) {
-      newOrderCount = await baseQuery
-        .clone()
-        .andWhere('order.id > :sinceOrderId', { sinceOrderId: input.sinceOrderId })
-        .andWhere('order.status = :newOrderStatus', { newOrderStatus: 'pending' })
-        .andWhere('order.createdAt >= :newOrderWindowStart', { newOrderWindowStart: new Date(Date.now() - O2O_CONSOLE_NEW_ORDER_WINDOW_MS) })
-        .getCount()
-    }
+    const latestOrderId = aggregate?.latestId ?? null
+    const newOrderCount = input.sinceOrderId ? Number(aggregate?.newCount ?? 0) : 0
 
     const list = await this.buildOrderSummaryViews(rows, {
-      nowMs: Date.now(),
+      nowMs,
       matchedKeyword: input.keyword,
       exposeSystemNo,
     })
@@ -4045,8 +4050,8 @@ class O2oPreorderService {
       queryBuilder.andWhere('order.departmentNameSnapshot = :departmentName', { departmentName: normalizedDepartmentName })
     }
     if (normalizedStaffNo) {
-      const escapedStaffNo = this.escapeLikeKeyword(normalizedStaffNo)
-      queryBuilder.andWhere(String.raw`order.staffNoSnapshot LIKE :staffNo ESCAPE '\'`, { staffNo: `%${escapedStaffNo}%` })
+      // 使用仓库统一的转义字符，避免 MySQL 字符串解析受反斜杠模式影响。
+      queryBuilder.andWhere("order.staffNoSnapshot LIKE :staffNo ESCAPE '!'", { staffNo: buildSqlLikeContains(normalizedStaffNo) })
     }
 
     if (startTime) {
@@ -4061,8 +4066,7 @@ class O2oPreorderService {
         normalizedKeyword,
         exposeSystemNo,
       )
-      const escapedKeyword = this.escapeLikeKeyword(normalizedKeyword)
-      const keyword = `%${escapedKeyword}%`
+      const keyword = buildSqlLikeContains(normalizedKeyword)
       const clientKeywordSubQuery = this.preorderRepo
         .createQueryBuilder('order_keyword_client')
         .subQuery()
@@ -4070,12 +4074,12 @@ class O2oPreorderService {
         .from(ClientUser, 'clientUser')
         .where('clientUser.id = order.clientUserId')
         .andWhere(
-          String.raw`(
-            clientUser.realName LIKE :keyword ESCAPE '\'
-            OR clientUser.mobile LIKE :keyword ESCAPE '\'
-            OR clientUser.email LIKE :keyword ESCAPE '\'
-            OR clientUser.departmentName LIKE :keyword ESCAPE '\'
-            OR clientUser.staffNo LIKE :keyword ESCAPE '\'
+          `(
+            clientUser.realName LIKE :keyword ESCAPE '!'
+            OR clientUser.mobile LIKE :keyword ESCAPE '!'
+            OR clientUser.email LIKE :keyword ESCAPE '!'
+            OR clientUser.departmentName LIKE :keyword ESCAPE '!'
+            OR clientUser.staffNo LIKE :keyword ESCAPE '!'
           )`,
         )
         .getQuery()
@@ -4086,17 +4090,17 @@ class O2oPreorderService {
         .from(O2oPreorderItem, 'item')
         .leftJoin(BaseProduct, 'product', 'product.id = item.productId')
         .where('item.orderId = order.id')
-        .andWhere(String.raw`(product.productName LIKE :keyword ESCAPE '\' OR product.productCode LIKE :keyword ESCAPE '\')`)
+        .andWhere(`(product.productName LIKE :keyword ESCAPE '!' OR product.productCode LIKE :keyword ESCAPE '!')`)
         .getQuery()
       queryBuilder.andWhere(
         new Brackets((keywordQb) => {
           keywordQb
-            .where(String.raw`order.preorderNo LIKE :keyword ESCAPE '\'`, { keyword })
-            .orWhere(String.raw`order.verifyCode LIKE :keyword ESCAPE '\'`, { keyword })
-            .orWhere(String.raw`order.remark LIKE :keyword ESCAPE '\'`, { keyword })
-            .orWhere(String.raw`order.verifiedBy LIKE :keyword ESCAPE '\'`, { keyword })
-            .orWhere(String.raw`order.departmentNameSnapshot LIKE :keyword ESCAPE '\'`, { keyword })
-            .orWhere(String.raw`order.staffNoSnapshot LIKE :keyword ESCAPE '\'`, { keyword })
+            .where(`order.preorderNo LIKE :keyword ESCAPE '!'`, { keyword })
+            .orWhere(`order.verifyCode LIKE :keyword ESCAPE '!'`, { keyword })
+            .orWhere(`order.remark LIKE :keyword ESCAPE '!'`, { keyword })
+            .orWhere(`order.verifiedBy LIKE :keyword ESCAPE '!'`, { keyword })
+            .orWhere(`order.departmentNameSnapshot LIKE :keyword ESCAPE '!'`, { keyword })
+            .orWhere(`order.staffNoSnapshot LIKE :keyword ESCAPE '!'`, { keyword })
             .orWhere(`EXISTS ${clientKeywordSubQuery}`, { keyword })
             .orWhere(`EXISTS ${itemKeywordSubQuery}`, { keyword })
           if (matchedCustomerOrderPreorderIds.length > 0) {

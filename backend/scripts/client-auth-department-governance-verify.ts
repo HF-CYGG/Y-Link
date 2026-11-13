@@ -1,10 +1,10 @@
+import * as crypto from 'node:crypto'
 import 'reflect-metadata'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { installCaptchaServiceForTesting } from '../src/services/captcha.service.js'
 
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
@@ -22,6 +22,8 @@ process.env.SQLITE_DB_PATH = sqlitePath
 process.env.INIT_ADMIN_PASSWORD = adminPassword
 process.env.INVITE_CODE_PEPPER ||= `governance-pepper-${verifySeed}-minimum-32-bytes`
 
+// captcha 的票据依赖会加载 env，必须在全部测试环境设置完成后再导入，避免提前捕获外部初始化配置。
+const { installCaptchaServiceForTesting } = await import('../src/services/captcha.service.js')
 const TEST_CAPTCHA_CODE = 'ABC123'
 installCaptchaServiceForTesting({ createCode: () => TEST_CAPTCHA_CODE })
 
@@ -165,6 +167,15 @@ async function main() {
   const { systemConfigService } = await import('../src/services/system-config.service.js')
   const { hashPassword } = await import('../src/utils/password.js')
   const { ClientUserSession } = await import('../src/entities/client-user-session.entity.js')
+  const { hashSessionToken } = await import('../src/utils/session-token.js')
+  const createProfileSession = async (userId: string) => {
+    const token = `profile-fixture-${userId}-${crypto.randomUUID()}`
+    await AppDataSource.getRepository(ClientUserSession).save({
+      userId, sessionToken: hashSessionToken(token),
+      expiresAt: new Date(Date.now() + 60_000), lastAccessAt: new Date(),
+    })
+    return token
+  }
   const { installSqliteTransactionQueue } = await import('../src/utils/sqlite-transaction-queue.js')
 
   prepareDatabaseRuntime()
@@ -804,7 +815,8 @@ async function main() {
         realName: legacyUsername,
         accountType: 'personal',
         staffNo: null,
-        sessionToken: 'client-username-legacy-profile-test',
+        sessionToken: await createProfileSession(legacyUsernameUser.id),
+        authSource: 'bearer' as const,
       },
       {
         username: legacyUsername,
@@ -817,7 +829,7 @@ async function main() {
     assert.equal(legacyProfile.username, legacyUsername, '历史非法用户名仅更新联系方式时必须保持原值')
     assert.equal(legacyProfile.email, legacyEmail, '历史非法用户名仅更新联系方式时仍应允许保存新联系方式')
     await expectBizError(
-      () => clientAuthService.updateProfile(
+      async () => clientAuthService.updateProfile(
         {
           userId: legacyUsernameUser.id,
           mobile: legacyUsernameUser.mobile ?? '',
@@ -826,7 +838,8 @@ async function main() {
           realName: legacyUsername,
           accountType: 'personal',
           staffNo: null,
-          sessionToken: 'client-username-legacy-profile-space-test',
+          sessionToken: await createProfileSession(legacyUsernameUser.id),
+          authSource: 'bearer' as const,
         },
         {
           username: ` ${legacyUsername} `,
@@ -839,7 +852,7 @@ async function main() {
       usernameRuleMessage,
     )
     await expectBizError(
-      () => clientAuthService.updateProfile(
+      async () => clientAuthService.updateProfile(
         {
           userId: legacyUsernameUser.id,
           mobile: legacyUsernameUser.mobile ?? '',
@@ -848,7 +861,8 @@ async function main() {
           realName: legacyUsername,
           accountType: 'personal',
           staffNo: null,
-          sessionToken: 'client-username-legacy-profile-test',
+          sessionToken: await createProfileSession(legacyUsernameUser.id),
+          authSource: 'bearer' as const,
         },
         {
           username: '张_三',
@@ -890,7 +904,8 @@ async function main() {
         realName: legacyUsername,
         accountType: 'personal',
         staffNo: null,
-        sessionToken: 'client-username-legacy-duplicate-profile-test',
+        sessionToken: await createProfileSession(duplicateLegacyUser.id),
+        authSource: 'bearer' as const,
       },
       {
         username: legacyUsername,
@@ -911,7 +926,7 @@ async function main() {
     const clientUserRepository = AppDataSource.getRepository(ClientUser)
     const savedContactRequestMeta = { ipAddress: '127.0.0.1', userAgent: 'client-auth-saved-contact-verify' }
     const latestCapturedCode = (target: string) => [...capturedVerifications].reverse().find((item) => item.target === target)?.code
-    const buildSavedContactAuth = (user: { id: string; mobile: string | null; email: string | null; realName: string; accountType: 'personal' | 'department' }) => ({
+    const buildSavedContactAuth = async (user: { id: string; mobile: string | null; email: string | null; realName: string; accountType: 'personal' | 'department' }) => ({
       userId: user.id,
       mobile: user.mobile ?? '',
       email: user.email ?? '',
@@ -919,7 +934,8 @@ async function main() {
       realName: user.realName,
       accountType: user.accountType,
       staffNo: null,
-      sessionToken: `client-saved-contact-${user.id}`,
+      sessionToken: await createProfileSession(user.id),
+      authSource: 'bearer' as const,
     })
 
     const savedContactMobile = '13800001130'
@@ -933,7 +949,7 @@ async function main() {
       staffVerified: false,
       status: 'enabled',
     }))
-    const savedContactAuth = buildSavedContactAuth(savedContactUser)
+    const savedContactAuth = await buildSavedContactAuth(savedContactUser)
 
     await verificationCodeService.sendCode({ channel: 'email', target: savedContactEmail, scene: 'profile_update' })
     const exhaustedEmailCode = latestCapturedCode(savedContactEmail)
@@ -1035,7 +1051,7 @@ async function main() {
       status: 'enabled',
     }))
     await expectBizError(
-      () => clientAuthService.sendSavedContactCode(buildSavedContactAuth(mobileOnlyUser), 'email', savedContactRequestMeta),
+      async () => clientAuthService.sendSavedContactCode(await buildSavedContactAuth(mobileOnlyUser), 'email', savedContactRequestMeta),
       '未保存邮箱时不能发送补认证验证码',
       '请先保存邮箱',
     )
@@ -1051,7 +1067,7 @@ async function main() {
       status: 'enabled',
     }))
     await expectBizError(
-      () => clientAuthService.sendSavedContactCode(buildSavedContactAuth(departmentContactUser), 'email', savedContactRequestMeta),
+      async () => clientAuthService.sendSavedContactCode(await buildSavedContactAuth(departmentContactUser), 'email', savedContactRequestMeta),
       '部门共享账号不开放补认证',
       '部门账号资料由管理员维护',
     )
@@ -1077,7 +1093,7 @@ async function main() {
     }
     try {
       await expectBizError(
-        () => clientAuthService.confirmSavedContact(buildSavedContactAuth(raceContactUser), { channel: 'email', code: raceEmailCode }),
+        async () => clientAuthService.confirmSavedContact(await buildSavedContactAuth(raceContactUser), { channel: 'email', code: raceEmailCode }),
         '验证期间联系方式被修改',
         '已变更',
       )
@@ -1111,12 +1127,12 @@ async function main() {
     )
     try {
       await expectBizError(
-        () => clientAuthService.sendSavedContactCode(buildSavedContactAuth(raceContactUser), 'email', savedContactRequestMeta),
+        async () => clientAuthService.sendSavedContactCode(await buildSavedContactAuth(raceContactUser), 'email', savedContactRequestMeta),
         '邮箱通道未启用时拒绝发送补认证验证码',
         '通道未启用',
       )
       await expectBizError(
-        () => clientAuthService.confirmSavedContact(buildSavedContactAuth(raceContactUser), { channel: 'email', code: '123456' }),
+        async () => clientAuthService.confirmSavedContact(await buildSavedContactAuth(raceContactUser), { channel: 'email', code: '123456' }),
         '邮箱通道未启用时拒绝确认补认证',
         '通道未启用',
       )
@@ -1167,7 +1183,7 @@ async function main() {
     const longEmailCode = latestCapturedCode(longContactEmail)
     assert.ok(longEmailCode, '应捕获长邮箱补认证验证码')
     const longEmailProfile = await clientAuthService.confirmSavedContact(
-      buildSavedContactAuth(longEmailUser),
+      await buildSavedContactAuth(longEmailUser),
       { channel: 'email', code: longEmailCode },
       savedContactRequestMeta,
     )
@@ -1200,7 +1216,7 @@ async function main() {
     }
     try {
       await clientAuthService.updateProfile(
-        buildSavedContactAuth(staleProfileUser),
+        await buildSavedContactAuth(staleProfileUser),
         {
           username: '资料并发认证改名',
           mobile: '13800001134',
@@ -1402,7 +1418,8 @@ async function main() {
         realName: teacherProfileUser.realName,
         accountType: 'personal',
         staffNo: teacherProfileUser.staffNo,
-        sessionToken: 'client-teacher-profile-update-test',
+        sessionToken: await createProfileSession(teacherProfileUser.id),
+        authSource: 'bearer' as const,
       },
       {
         username: '客户端不应覆盖教师目录姓名',

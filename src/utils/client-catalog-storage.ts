@@ -340,10 +340,6 @@ export const persistClientCatalogDataSnapshot = (
 
   try {
     storage.setItem(CLIENT_CATALOG_PUBLIC_DATA_SNAPSHOT_KEY, JSON.stringify(createCompactCatalogDataSnapshot(snapshot)))
-    storage.setItem(CLIENT_CATALOG_PUBLIC_STOREFRONT_SNAPSHOT_KEY, JSON.stringify({
-      schemaVersion: CLIENT_CATALOG_DATA_SCHEMA_VERSION,
-      storefront: snapshot.storefront,
-    }))
     // 新版公共快照写入成功后删除当前账号的旧全量数据分片；浏览上下文仍保持账号隔离。
     removeScopedKey(storage, scopedKey)
     removeScopedKey(storage, resolveUserScopedStorageKey(LEGACY_CLIENT_CATALOG_SNAPSHOT_KEY_PREFIX, clientUserId))

@@ -43,8 +43,8 @@ export async function runIssueBrowserCases({ browser, origin, ready, evidence, r
     if (required) await reminder(page).waitFor()
     if (await reminder(page).isVisible()) { await reminder(page).locator('.el-dialog__headerbtn').click(); await reminder(page).waitFor({ state: 'hidden' }) }
   }
-  const visitClient = async (id) => {
-    await client.bringToFront(); await bootstrap(clientContext, 'client'); await client.goto(origin + '/client/orders/' + id); await closeReminder(client)
+  const visitClient = async (id, reminderRequired = true) => {
+    await client.bringToFront(); await bootstrap(clientContext, 'client'); await client.goto(origin + '/client/orders/' + id); await closeReminder(client, reminderRequired)
   }
   const save = async (page, editor, no) => {
     await editor.getByRole('button', { name: '填写 / 更正金蝶编号' }).click()
@@ -165,11 +165,35 @@ export async function runIssueBrowserCases({ browser, origin, ready, evidence, r
   }
   try {
     await bootstrap(adminContext, 'admin')
+    await scenario('TABLE', '生产表格异步边界：直达/选择/固定列/滚动/tooltip/排序/暗色/移动/KeepAlive', '生产整页/真实HTTP', async () => {
+      await admin.goto(origin + '/order-list')
+      const table = admin.locator('.order-list-table'); await table.locator('.el-table__body .el-table__row').first().waitFor()
+      const selection = table.locator('.el-table__row .el-checkbox:not(.is-disabled)').first()
+      await selection.click()
+      assert.equal(await selection.locator('input[type="checkbox"]').isChecked(), true)
+      await admin.getByRole('button', { name: '批量修订（1）', exact: true }).waitFor()
+      const fixed = table.locator('td.el-table-fixed-column--right').first(); const initial = await fixed.boundingBox(); assert.ok(initial)
+      const scroll = table.locator('.el-scrollbar__wrap').first()
+      await scroll.evaluate(element => { element.scrollLeft = element.scrollWidth })
+      assert.ok(await scroll.evaluate(element => element.scrollLeft > 0)); const moved = await fixed.boundingBox(); assert.ok(moved); assert.ok(Math.abs(moved.x - initial.x) < 3, '右固定列不能随横向滚动离开视口')
+      await scroll.evaluate(element => { element.scrollLeft = 0 })
+      const cells = table.locator('.el-table__body td .cell'); const overflow = await cells.evaluateAll(elements => elements.findIndex(element => element.scrollWidth > element.clientWidth + 2 && element.textContent.includes('隔离部门')))
+      assert.ok(overflow >= 0, '长部门夹具应触发表格溢出提示'); await cells.nth(overflow).hover(); await admin.locator('.el-popper:visible').filter({ hasText: '隔离部门' }).first().waitFor()
+      if (!(await admin.locator('html').getAttribute('class') ?? '').split(/\s+/).includes('dark')) await admin.locator('.theme-toggle__switch .el-switch__core').click()
+      await admin.locator('html.dark').waitFor(); await shot(admin, 'table-dark')
+      await admin.setViewportSize({ width: 390, height: 844 }); await admin.locator('.mobile-order-card').first().waitFor(); await shot(admin, 'table-mobile')
+      await admin.setViewportSize({ width: 1440, height: 960 })
+      await admin.locator('.el-menu-item').filter({ hasText: '工作台' }).first().click(); await admin.waitForURL('**/dashboard'); await admin.goBack(); await table.locator('.el-table__body .el-table__row').first().waitFor()
+      await admin.goto(origin + '/base-data/products')
+      const productTable = admin.locator('.el-table').filter({ has: admin.locator('th', { hasText: '商品信息' }) }).first(); await productTable.locator('.el-table__row').first().waitFor()
+      const sortable = productTable.locator('th').filter({ hasText: '商品信息' }); await sortable.click(); await sortable.locator('.sort-caret').first().waitFor(); assert.match(await sortable.getAttribute('class') ?? '', /ascending|descending/)
+      await admin.reload(); await productTable.locator('.el-table__row').first().waitFor(); await shot(admin, 'table-direct-refresh-sort')
+    })
     await scenario('KD1', '真实商城→checkout：已申请必填、未申请红字可下单、编号持久保存', '整页/真实HTTP', async () => {
       await bootstrap(clientContext, 'client')
       for (const applied of [true, false]) {
-        await client.goto(origin + '/client/mall'); await closeReminder(client)
-        await client.locator('.client-product-card__body').filter({ hasText: ready.commerceProductName }).first().click()
+        await client.goto(origin + '/client/mall'); await closeReminder(client, false)
+        await client.locator('.client-product-card__name').filter({ hasText: ready.commerceProductName }).first().click()
         await client.locator('.client-detail-panel').getByRole('button', { name: '甲', exact: true }).click()
         await client.getByRole('button', { name: '加入购物车', exact: true }).click()
         await client.locator('.client-detail-panel').waitFor({state:'hidden'})
@@ -177,9 +201,9 @@ export async function runIssueBrowserCases({ browser, origin, ready, evidence, r
         await client.getByPlaceholder('请输入实际领取教师姓名').fill('隔离教师')
         await client.locator('.pickup-date-option').last().click()
         await openSelect(client.getByRole('combobox', { name: '到店时段', exact: true })); await client.getByRole('option').first().click()
-        await client.getByRole('radio', { name: '已申请', exact: true }).check({ force: true })
+        await client.locator('.el-radio-button').filter({ hasText: /^已申请$/ }).click()
         if (process.env.YLINK_ISSUES_KD1_VISUAL_ONLY === 'true') {
-          if (!applied) await client.getByRole('radio', { name: '未申请', exact: true }).check({ force: true })
+          if (!applied) await client.locator('.el-radio-button').filter({ hasText: /^未申请$/ }).click()
           const drawer=client.locator('.el-drawer:visible')
           const target=applied?drawer.getByPlaceholder('请输入金蝶单据编号'):drawer.getByText('请及时在金蝶申请并填写金蝶单据编号',{exact:true})
           await target.waitFor();await target.scrollIntoViewIfNeeded();await settlePage(client)
@@ -195,7 +219,7 @@ export async function runIssueBrowserCases({ browser, origin, ready, evidence, r
           assert.equal(submits, 0, '已申请空编号不能发送下单请求')
           if (applied) await client.getByPlaceholder('请输入金蝶单据编号').fill('KD-CHECKOUT-177')
           else {
-            await client.getByRole('radio', { name: '未申请', exact: true }).check({ force: true })
+            await client.locator('.el-radio-button').filter({ hasText: /^未申请$/ }).click()
             const warning = client.locator('.el-drawer:visible').getByText('请及时在金蝶申请并填写金蝶单据编号', { exact: true })
             await warning.waitFor(); assert.ok(await warning.isVisible())
             const color = await warning.evaluate((node) => getComputedStyle(node).color.match(/\d+/g).map(Number)); assert.ok(color[0] > color[1] && color[0] > color[2], '提示须为红色')
@@ -209,6 +233,47 @@ export async function runIssueBrowserCases({ browser, origin, ready, evidence, r
           await shot(client, applied ? 'checkout-applied' : 'checkout-unapplied')
         } finally { client.off('request', count) }
       }
+    })
+    await scenario('RECOVERY', '多规格购物车刷新与真实订单响应丢失后的原样恢复', '生产整页/真实HTTP/仅传输故障', async () => {
+      await bootstrap(clientContext, 'client')
+      await client.goto(origin + '/client/mall'); await closeReminder(client, false)
+      for (const spec of ['甲', '乙']) {
+        await client.locator('.client-product-card__name').filter({ hasText: ready.commerceProductName }).first().click()
+        await client.locator('.client-detail-panel').getByRole('button', { name: spec, exact: true }).click()
+        await client.getByRole('button', { name: '加入购物车', exact: true }).click()
+        await client.locator('.client-detail-panel').waitFor({ state: 'hidden' })
+      }
+      await client.reload(); await closeReminder(client, false)
+      await client.getByRole('button', { name: '去结算', exact: true }).click()
+      await client.getByPlaceholder('请输入实际领取教师姓名').fill('恢复验证教师')
+      await client.locator('.pickup-date-option').last().click()
+      await openSelect(client.getByRole('combobox', { name: '到店时段', exact: true })); await client.getByRole('option').first().click()
+      await client.locator('.el-radio-button').filter({ hasText: /^未申请$/ }).click()
+      const payloads = []; let committedId = null; let replayedId = null
+      const pattern = '**/api/o2o/mall/preorders'
+      await client.route(pattern, async route => {
+        if (route.request().method() !== 'POST') return route.continue()
+        payloads.push(route.request().postDataJSON())
+        const response = await route.fetch(); const payload = await response.json()
+        assert.equal(response.status(), 200); assert.equal(payload.code, 0)
+        if (!committedId) { committedId = payload.data.order.id; await route.abort('failed') }
+        else { replayedId = payload.data.order.id; await route.fulfill({ response }) }
+      })
+      try {
+        await client.getByRole('button', { name: '提交预订单', exact: true }).click()
+        await until(() => Promise.resolve(committedId), Boolean, '真实首单未提交')
+        assert.equal(payloads[0].items.length, 2, '两个规格应经实际购物车恢复并进入原始载荷')
+        await client.getByRole('button', { name: '继续确认原提交', exact: true }).waitFor()
+        await client.reload(); await closeReminder(client, false)
+        await client.getByRole('button', { name: '去结算', exact: true }).click()
+        const confirm = client.getByRole('button', { name: '继续确认原提交', exact: true }); await confirm.waitFor()
+        assert.equal(payloads.length, 1, '刷新不能自动重发原订单')
+        await confirm.click()
+        await until(() => Promise.resolve(replayedId), Boolean, '原提交未恢复')
+        assert.equal(replayedId, committedId, '重放必须返回原订单')
+        assert.deepEqual(payloads[1], payloads[0], '恢复不得采用变化后的表单或重新生成请求键')
+        await shot(client, 'production-checkout-recovered')
+      } finally { await client.unroute(pattern) }
     })
     await scenario('KD2', 'pending与跨天verified：登记、替换、清空及待办移除/恢复', '整页/真实HTTP', async () => {
       for (const [id, prefix] of [[ready.preorderId, 'KD-PENDING'], [ready.verifiedId, 'KD-VERIFIED']]) {
@@ -319,7 +384,7 @@ export async function runIssueBrowserCases({ browser, origin, ready, evidence, r
       assert.deepEqual(new URL(response.url()).searchParams.get('fields').split(','), report.fields.map((field) => field.key))
     })
     await scenario('PDF', 'E-PDF修复：真实客户端/管理端导出与打印两联，视觉渲染另行核验', '整页/真实PDF/导出测量样式清理', async () => {
-      await visitClient(ready.ownSourceId)
+      await visitClient(ready.ownSourceId, false)
       await voucherPdf(client, 'voucher-client-self', ['KD-SELF-177'], ['KD-OTHER-178'])
       await admin.goto(origin + '/order-list')
       await admin.getByPlaceholder('输入业务单号/客户/部门/出单人关键词').fill(ready.mergeBusinessNo); await admin.getByRole('button', { name: '搜索', exact: true }).click()

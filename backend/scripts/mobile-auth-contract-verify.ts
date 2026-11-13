@@ -243,15 +243,18 @@ try {
   // 确定性重现：验密通过后先提交并发改密/身份变更，再恢复原登录签发。
   for (const mutation of ['password', 'identity'] as const) {
     const raceUser = await createUser()
+    const raceToken = `contract-race-${raceUser.id}-${mutation}`
+    await AppDataSource.getRepository(ClientUserSession).save({
+      userId: raceUser.id, sessionToken: hashSessionToken(raceToken),
+      expiresAt: new Date(Date.now() + 60_000), lastAccessAt: new Date(),
+    })
+    const raceWebAuth = await clientAuthService.resolveClientByToken(raceToken)
     const originalAuthenticate = clientAuthService.authenticateCredentials.bind(clientAuthService)
     const beforeSessionCount = await AppDataSource.getRepository(ClientMobileSession).count({ where: { clientUserId: raceUser.id } })
     clientAuthService.authenticateCredentials = async (...args) => {
       const authenticated = await originalAuthenticate(...args)
       if (mutation === 'password') {
-        await clientAuthService.changePassword({
-          userId: raceUser.id, account: raceUser.email ?? '', email: raceUser.email ?? '', mobile: raceUser.mobile ?? '',
-          realName: raceUser.realName, accountType: 'personal', staffNo: null, sessionToken: '', authSource: 'bearer',
-        }, { currentPassword: 'StrongPass123!', newPassword: 'ConcurrentPassword456!' })
+        await clientAuthService.changePassword(raceWebAuth, { currentPassword: 'StrongPass123!', newPassword: 'ConcurrentPassword456!' })
       } else {
         await AppDataSource.getRepository(ClientUser).update(raceUser.id, { realName: '并发变更用户' })
       }
@@ -508,16 +511,26 @@ try {
   assert.equal(rollbackRetry.generation, 1)
   pass('T-71', 'CAS 后强制回滚时 CUR/PREV/grace/generation 全部不变，原 token 可重试')
 
-  const graceResult = await mobileSessionService.refresh(rotationInitial.refreshToken, {
-    deviceId: device(18).deviceId,
-    appVersion: '1.0.1',
-  })
-  assert.equal(graceResult.generation, 2)
-  const graceAudit = await AppDataSource.getRepository(SysAuditLog).findOneOrFail({
-    where: { actionType: 'mobile_refresh', targetId: rotationInitial.session.id },
-    order: { id: 'DESC' },
-  })
-  assert.equal(JSON.parse(graceAudit.detailJson ?? '{}').viaGrace, true)
+  // G-3 到这里之间还有 scrypt、CAS 和回滚场景，不能把这些耗时算进 G-4 的一秒 grace。
+  // 只在本场景将时钟固定于真实已存 grace 截止前 1ms；不扩窗、不改 token/会话状态或生产防护。
+  const NativeDate = globalThis.Date
+  const withinGrace = afterRotation.previousRefreshGraceUntil!.getTime() - 1
+  globalThis.Date = class extends NativeDate {
+    constructor(value?: string | number) { super(value === undefined ? withinGrace : value) }
+    static now() { return withinGrace }
+  } as DateConstructor
+  try {
+    const graceResult = await mobileSessionService.refresh(rotationInitial.refreshToken, {
+      deviceId: device(18).deviceId,
+      appVersion: '1.0.1',
+    })
+    assert.equal(graceResult.generation, 2)
+    const graceAudit = await AppDataSource.getRepository(SysAuditLog).findOneOrFail({
+      where: { actionType: 'mobile_refresh', targetId: rotationInitial.session.id },
+      order: { id: 'DESC' },
+    })
+    assert.equal(JSON.parse(graceAudit.detailJson ?? '{}').viaGrace, true)
+  } finally { globalThis.Date = NativeDate }
   pass('G-4', 'previous refresh 在 grace 窗口内向前 rotation，审计标记 viaGrace=true')
 
   const graceBoundaryUser = await createUser()
@@ -874,12 +887,17 @@ try {
   }), (error: unknown) => error instanceof BizError && error.statusCode === 400)
   await verificationService.sendCode({ channel: 'email', target: resetUser.email ?? '', scene: 'forgot_password' })
   resetTicket = await mobileAuthService.verifyForgotPassword({ account: resetUser.email ?? '', verificationCode: '123456' })
+  await verificationService.sendCode({ channel: 'email', target: resetUser.email ?? '', scene: 'forgot_password' })
+  const staleResetTicket = await mobileAuthService.verifyForgotPassword({ account: resetUser.email ?? '', verificationCode: '123456' })
   const resetResult = await mobileAuthService.resetPassword({
     account: resetUser.email ?? '',
     resetToken: resetTicket.resetToken,
     newPassword: 'ResetStrong789!',
   })
   assert.deepEqual(resetResult, { ok: true })
+  await assert.rejects(mobileAuthService.resetPassword({
+    account: resetUser.email ?? '', resetToken: staleResetTicket.resetToken, newPassword: 'AnotherReset789!',
+  }), (error: unknown) => error instanceof BizError && error.statusCode === 400 && error.message === '重置凭证已失效')
   await assert.rejects(
     mobileAuthService.resetPassword({
       account: resetUser.email ?? '',

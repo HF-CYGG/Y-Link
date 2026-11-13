@@ -19,6 +19,7 @@ import { clientStaffInviteCodeService } from '../services/client-staff-invite-co
 import { CLIENT_STAFF_DIRECTORY_STATUSES } from '../entities/client-staff-directory.entity.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
+import { boundedArraySchema } from '../utils/bounded-array-schema.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 
 const CLIENT_DEPARTMENT_NODE_LIMIT = 3000
@@ -110,14 +111,14 @@ const clientDepartmentTreeNodeSchema: z.ZodType<{
   z.object({
     id: z.string().trim().max(128).optional(),
     label: z.string().trim().min(1).max(32),
-    children: z.array(clientDepartmentTreeNodeSchema).max(CLIENT_DEPARTMENT_NODE_LIMIT).optional(),
+    children: boundedArraySchema(clientDepartmentTreeNodeSchema, CLIENT_DEPARTMENT_NODE_LIMIT).optional(),
   }),
 )
 
 const updateClientDepartmentConfigsSchema = z
   .object({
-    tree: z.array(clientDepartmentTreeNodeSchema).max(CLIENT_DEPARTMENT_NODE_LIMIT).optional(),
-    options: z.array(z.string().trim().min(1).max(512)).max(CLIENT_DEPARTMENT_NODE_LIMIT).optional(),
+    tree: boundedArraySchema(clientDepartmentTreeNodeSchema, CLIENT_DEPARTMENT_NODE_LIMIT).optional(),
+    options: boundedArraySchema(z.string().trim().min(1).max(512), CLIENT_DEPARTMENT_NODE_LIMIT).optional(),
   })
   .refine((value) => Array.isArray(value.tree) || Array.isArray(value.options), {
     message: '部门配置参数缺失',

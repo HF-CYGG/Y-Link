@@ -1,9 +1,9 @@
 /**
  * 模块说明：src/utils/client-motion.ts
- * 文件职责：客户端商城的轻量交互动效与触感反馈工具，包括“减少动效”判定、轻触震动和加购“飞入购物车”小圆点。
+ * 文件职责：客户端商城的轻量交互动效与触感反馈工具，包括“减少动效”判定、轻触震动和加购“飞入购物车”商品图片。
  * 实现逻辑：
  * - 所有动效先判断 `prefers-reduced-motion`，命中时直接跳过，只保留业务状态变化本身；
- * - 飞入动画使用 Web Animations API 驱动一个 fixed 定位的小圆点，水平匀速、垂直先抬升后下落形成抛物线，结束即移除节点；
+ * - 飞入动画使用 Web Animations API 驱动一个 fixed 定位的商品图片，水平匀速、垂直先抬升后下落形成抛物线，结束即移除节点；
  * - 震动只在支持 `navigator.vibrate` 的设备（主要是 Android）生效，iOS 与桌面静默忽略。
  * 维护说明：
  * - 这里只做视觉反馈，不得承载任何购物车业务判断；调用方必须在加购成功后再触发；
@@ -38,6 +38,15 @@ export const triggerClientHaptic = (durationMs = 10): void => {
   }
 }
 
+export interface ClientCartFlightSource { src: string; x: number; y: number; width: number; height: number }
+export const captureClientCartImage = (element: Element | null | undefined): ClientCartFlightSource | null => {
+  const img = element instanceof HTMLImageElement ? element : element?.querySelector('img')
+  if (!(img instanceof HTMLImageElement)) return null
+  const rect = img.getBoundingClientRect()
+  if (rect.width <= 0 || rect.height <= 0 || rect.bottom <= 0 || rect.right <= 0 || rect.top >= window.innerHeight || rect.left >= window.innerWidth) return null
+  const src = img.currentSrc || img.getAttribute('src') || ''
+  return src ? { src, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, width: rect.width, height: rect.height } : null
+}
 const resolveElementCenter = (element: Element) => {
   const rect = element.getBoundingClientRect()
   return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, visible: rect.width > 0 && rect.height > 0 }
@@ -47,26 +56,30 @@ const resolveElementCenter = (element: Element) => {
  * 加购“飞入购物车”动效：从触发元素中心飞向目标元素中心。
  * 返回动画结束的 Promise，调用方可在落点时触发购物车角标弹跳。
  */
-export const flyToClientCart = (source: Element | null | undefined, target: Element | null | undefined, signal?: AbortSignal): Promise<void> => {
+export const flyToClientCart = (source: Element | ClientCartFlightSource | null | undefined, target: Element | null | undefined, signal?: AbortSignal): Promise<void> => {
   if (signal?.aborted || !source || !target || shouldReduceClientMotion() || flyingDotCount >= MAX_FLYING_DOTS) {
     return Promise.resolve()
   }
-  const from = resolveElementCenter(source)
+  const from = source instanceof Element ? captureClientCartImage(source) : source
+  if (!from) return Promise.resolve()
   const to = resolveElementCenter(target)
-  if (!from.visible || !to.visible) {
+  if (!to.visible) {
     return Promise.resolve()
   }
 
-  const dot = document.createElement('span')
+  const dot = document.createElement('img')
+  dot.src = from.src
+  dot.alt = ''
   dot.className = 'client-fly-dot'
   dot.setAttribute('aria-hidden', 'true')
   Object.assign(dot.style, {
     position: 'fixed',
-    left: `${from.x - 7}px`,
-    top: `${from.y - 7}px`,
-    width: '14px',
-    height: '14px',
-    borderRadius: '9999px',
+    left: `${from.x - Math.min(64, from.width) / 2}px`,
+    top: `${from.y - Math.min(64, from.height) / 2}px`,
+    width: `${Math.min(64, from.width)}px`,
+    height: `${Math.min(64, from.height)}px`,
+    borderRadius: '12px',
+    objectFit: 'contain',
     background: 'var(--ylink-color-primary-strong, #0f766e)',
     boxShadow: '0 4px 12px rgba(15, 118, 110, 0.35)',
     pointerEvents: 'none',
@@ -80,11 +93,14 @@ export const flyToClientCart = (source: Element | null | undefined, target: Elem
   const deltaY = to.y - from.y
   // 抛物线顶点高于起终点，距离越远抬升越高，但设上限避免飞出视口。
   const arcLift = Math.min(160, Math.max(48, Math.abs(deltaX) * 0.35 + 36))
-  const keyframes: Keyframe[] = [
-    { transform: 'translate3d(0, 0, 0) scale(1)', opacity: 1 },
-    { transform: `translate3d(${deltaX * 0.5}px, ${Math.min(0, deltaY) * 0.5 - arcLift}px, 0) scale(0.9)`, opacity: 1, offset: 0.45 },
-    { transform: `translate3d(${deltaX}px, ${deltaY}px, 0) scale(0.45)`, opacity: 0.6 },
-  ]
+  const keyframes: Keyframe[] = Array.from({ length: 9 }, (_, index) => {
+    const progress = index / 8
+    return {
+      transform: `translate3d(${deltaX * progress}px, ${deltaY * progress - 4 * arcLift * progress * (1 - progress)}px, 0) scale(${1 - progress * 0.82})`,
+      opacity: 1 - progress * 0.4,
+      offset: progress,
+    }
+  })
 
   return new Promise<void>((resolve) => {
     let finished = false
@@ -102,10 +118,12 @@ export const flyToClientCart = (source: Element | null | undefined, target: Elem
       finish()
       return
     }
-    animation = dot.animate(keyframes, { duration: 520, easing: 'cubic-bezier(0.32, 0, 0.67, 1)', fill: 'forwards' })
+    try {
+      animation = dot.animate(keyframes, { duration: 520, easing: 'linear', fill: 'forwards' })
+    } catch { finish(); return }
     signal?.addEventListener('abort', cancel, { once: true })
-    if (signal?.aborted) animation.cancel()
     animation.onfinish = finish
     animation.oncancel = finish
+    if (signal?.aborted) { animation.cancel(); finish() }
   })
 }

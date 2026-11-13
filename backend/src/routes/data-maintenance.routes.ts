@@ -37,12 +37,12 @@ const importPayloadSchema = z
     version: z.string().trim().min(1).max(100),
     tables: z
       .object({
-        systemConfigs: z.array(z.record(z.any())).default([]),
-        products: z.array(z.record(z.any())).default([]),
-        clientUsers: z.array(z.record(z.any())).default([]),
-        preorders: z.array(z.record(z.any())).default([]),
-        preorderItems: z.array(z.record(z.any())).default([]),
-        inventoryLogs: z.array(z.record(z.any())).default([]),
+        systemConfigs: z.array(z.record(z.string(), z.any())).default([]),
+        products: z.array(z.record(z.string(), z.any())).default([]),
+        clientUsers: z.array(z.record(z.string(), z.any())).default([]),
+        preorders: z.array(z.record(z.string(), z.any())).default([]),
+        preorderItems: z.array(z.record(z.string(), z.any())).default([]),
+        inventoryLogs: z.array(z.record(z.string(), z.any())).default([]),
       })
       .strict(),
     // 导入会先清空商品、客户端账号、预订单、库存流水与系统配置再写入，属于永久删除类操作，必须校验服务端永久删除口令。

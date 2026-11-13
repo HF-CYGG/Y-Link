@@ -12,7 +12,7 @@
  * - “去入库”只负责把单号交回扫码页，入库动作仍由扫码页的既有核销链路执行，不在本面板直接调用核销接口。
  */
 
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref } from 'vue'
 import dayjs from 'dayjs'
 
 import { BizResponsiveDrawerShell, PagePaginationBar, PassiveSegmentedTabs } from '@/components/common'
@@ -26,13 +26,18 @@ import {
 import { useDevice } from '@/composables/useDevice'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
-import { showAppError, showAppInfo } from '@/utils/app-alert'
+import { showAppError, showAppInfo, showAppWarning } from '@/utils/app-alert'
 
 const emit = defineEmits<{
   (event: 'verify', showNo: string): void
 }>()
 
 const POOL_REFRESH_INTERVAL_MS = 15 * 1000
+const SOUND_STORAGE_KEY = 'ylink:inbound-delivery-pool:sound-notice'
+
+const readSoundPreference = () => {
+  try { return globalThis.localStorage?.getItem(SOUND_STORAGE_KEY) === 'on' } catch { return false }
+}
 
 const { isPhone } = useDevice()
 const listRequest = useStableRequest()
@@ -46,6 +51,7 @@ const total = ref(0)
 const records = ref<InboundOrder[]>([])
 const poolCounts = ref<Record<InboundOrderPoolKey, number>>({ all: 0, pending: 0, verified: 0 })
 const latestOrderId = ref<string | null>(null)
+const soundEnabled = ref(readSoundPreference())
 const listLoading = ref(false)
 const detailLoading = ref(false)
 const activeOrderId = ref('')
@@ -54,6 +60,93 @@ const detailDrawerVisible = ref(false)
 const lastLoadedAt = ref<Date | null>(null)
 
 let refreshTimer: ReturnType<typeof globalThis.setInterval> | null = null
+let runtimeActive = false
+let initialLoadStarted = false
+let hasActivatedOnce = false
+let audioContext: AudioContext | null = null
+let audioGeneration = 0
+let toneNodes: Array<{ oscillator: OscillatorNode; gain: GainNode }> = []
+
+// ID 以十进制字符串比较，避免大整数精度丢失，且历史单撤销后不回退高水位。
+const higherOrderId = (current: string | null, next: string | null) => {
+  if (!next || !/^\d+$/.test(next)) return current
+  const normalized = next.replace(/^0+(?=\d)/, '')
+  if (!current) return normalized
+  const old = current.replace(/^0+(?=\d)/, '')
+  return normalized.length > old.length || (normalized.length === old.length && normalized > old) ? normalized : old
+}
+
+const stopSound = () => {
+  audioGeneration += 1
+  for (const { oscillator, gain } of toneNodes) {
+    try { oscillator.stop() } catch { /* 音调可能已结束 */ }
+    oscillator.disconnect()
+    gain.disconnect()
+  }
+  toneNodes = []
+  if (audioContext && audioContext.state !== 'closed') void audioContext.close().catch(() => undefined)
+  audioContext = null
+}
+
+const isPageHidden = () => globalThis.document?.visibilityState === 'hidden'
+
+const playSound = async (notifyFailure = false) => {
+  if (!runtimeActive || !soundEnabled.value || isPageHidden()) return
+  const generation = audioGeneration
+  try {
+    const Ctor = globalThis.window?.AudioContext || (globalThis.window as any)?.webkitAudioContext
+    if (!Ctor) throw new Error('audio unavailable')
+    const context = audioContext || (audioContext = new Ctor())
+    if (!context) return
+    if (context.state === 'suspended') await context.resume()
+    if (generation !== audioGeneration || !runtimeActive || !soundEnabled.value || isPageHidden() || context.state !== 'running') {
+      if (notifyFailure && generation === audioGeneration) showAppWarning('浏览器暂未允许播放声音，请再次点击声音开关重试')
+      return
+    }
+    if (toneNodes.length) return
+    for (const [index, frequency] of [880, 1320].entries()) {
+      const start = context.currentTime + 0.01 + index * 0.2
+      const oscillator = context.createOscillator()
+      const gain = context.createGain()
+      oscillator.type = 'triangle'
+      oscillator.frequency.value = frequency
+      gain.gain.setValueAtTime(0.0001, start)
+      gain.gain.exponentialRampToValueAtTime(0.35, start + 0.02)
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.18)
+      oscillator.connect(gain)
+      gain.connect(context.destination)
+      const node = { oscillator, gain }
+      toneNodes.push(node)
+      oscillator.onended = () => {
+        oscillator.disconnect()
+        gain.disconnect()
+        toneNodes = toneNodes.filter((item) => item !== node)
+      }
+      oscillator.start(start)
+      oscillator.stop(start + 0.2)
+    }
+  } catch {
+    if (notifyFailure && generation === audioGeneration) showAppWarning('无法播放提示音，请检查浏览器声音权限后重新开启')
+  }
+}
+
+const handleSoundChange = () => {
+  try { globalThis.localStorage?.setItem(SOUND_STORAGE_KEY, soundEnabled.value ? 'on' : 'off') } catch { /* 仅影响下次进入时的偏好 */ }
+  if (soundEnabled.value) void playSound(true)
+  else stopSound()
+}
+
+const unlockSoundOnGesture = () => {
+  if (soundEnabled.value && runtimeActive && globalThis.document?.visibilityState !== 'hidden') {
+    const Ctor = globalThis.window?.AudioContext || (globalThis.window as any)?.webkitAudioContext
+    try {
+      if (Ctor) {
+        const context = audioContext || (audioContext = new Ctor())
+        if (context?.state === 'suspended') void context.resume().catch(() => undefined)
+      }
+    } catch { /* 列表操作不受音频能力影响 */ }
+  }
+}
 
 const poolTabs = computed(() => [
   { label: `全部 ${poolCounts.value.all}`, name: 'all' as const },
@@ -89,10 +182,12 @@ const loadPool = async (options: { silent?: boolean } = {}) => {
       page.value = result.page
       poolCounts.value = result.poolCounts
       lastLoadedAt.value = new Date()
-      if (options.silent && result.newOrderCount > 0) {
+      const nextHighWater = higherOrderId(latestOrderId.value, result.latestOrderId)
+      if (options.silent && latestOrderId.value !== null && nextHighWater !== latestOrderId.value && result.newOrderCount > 0) {
         showAppInfo(`供货方新提交了 ${result.newOrderCount} 张送货单`)
+        void playSound()
       }
-      latestOrderId.value = result.latestOrderId
+      latestOrderId.value = nextHighWater ?? '0'
     },
     onError: (error) => {
       if (!options.silent) {
@@ -164,23 +259,54 @@ const startAutoRefresh = () => {
 
 const handleVisibilityChange = () => {
   if (globalThis.document?.visibilityState === 'hidden') {
+    stopAutoRefresh()
+    listRequest.cancel()
+    listLoading.value = false
+    stopSound()
     return
   }
-  if (!listLoading.value && !detailLoading.value) {
-    void loadPool({ silent: true })
+  if (runtimeActive) {
+    startAutoRefresh()
+    if (!listLoading.value && !detailLoading.value) void loadPool({ silent: latestOrderId.value !== null })
   }
 }
 
 onMounted(() => {
-  void loadPool()
-  startAutoRefresh()
-  globalThis.document?.addEventListener('visibilitychange', handleVisibilityChange)
+  if (!initialLoadStarted) {
+    initialLoadStarted = true
+    void loadPool()
+  }
 })
 
-onBeforeUnmount(() => {
+const activateRuntime = () => {
+  if (runtimeActive) return
+  runtimeActive = true
+  globalThis.document?.addEventListener('visibilitychange', handleVisibilityChange)
+  globalThis.document?.addEventListener('pointerdown', unlockSoundOnGesture)
+  globalThis.document?.addEventListener('keydown', unlockSoundOnGesture)
+  if (globalThis.document?.visibilityState !== 'hidden') startAutoRefresh()
+  if (hasActivatedOnce && globalThis.document?.visibilityState !== 'hidden' && !listLoading.value && !detailLoading.value) {
+    void loadPool({ silent: latestOrderId.value !== null })
+  }
+  hasActivatedOnce = true
+}
+
+const deactivateRuntime = () => {
+  if (!runtimeActive) return
+  runtimeActive = false
   stopAutoRefresh()
+  listRequest.cancel()
+  listLoading.value = false
+  stopSound()
   globalThis.document?.removeEventListener('visibilitychange', handleVisibilityChange)
-})
+  globalThis.document?.removeEventListener('pointerdown', unlockSoundOnGesture)
+  globalThis.document?.removeEventListener('keydown', unlockSoundOnGesture)
+}
+
+onMounted(activateRuntime)
+onActivated(activateRuntime)
+onDeactivated(deactivateRuntime)
+onBeforeUnmount(deactivateRuntime)
 </script>
 
 <template>
@@ -192,9 +318,11 @@ onBeforeUnmount(() => {
         <el-input v-model="keyword" placeholder="按送货单号或供货方搜索" clearable @keyup.enter="handleSearch" @clear="handleSearch" />
         <el-button type="primary" :loading="listLoading" @click="handleSearch">查询</el-button>
       </div>
-      <p class="mt-2 text-xs text-slate-400 dark:text-slate-500">
-        每 15 秒自动刷新{{ lastLoadedAt ? `，最近同步 ${dayjs(lastLoadedAt).format('HH:mm:ss')}` : '' }}
-      </p>
+      <div class="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400 dark:text-slate-500">
+        <span>每 15 秒自动刷新{{ lastLoadedAt ? `，最近同步 ${dayjs(lastLoadedAt).format('HH:mm:ss')}` : '' }}</span>
+        <el-switch v-model="soundEnabled" size="small" inline-prompt :width="64" active-text="声音开" inactive-text="声音关" aria-label="本机新送货单提示音" @change="handleSoundChange" />
+      </div>
+      <p class="mt-1 text-xs text-slate-400 dark:text-slate-500">声音仅作用于本机当前送货单池；邮件和飞书由系统通知规则控制。</p>
 
       <div v-loading="listLoading" class="mt-3 space-y-2">
         <el-button

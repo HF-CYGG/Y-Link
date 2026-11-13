@@ -16,7 +16,8 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { constants as zlibConstants, gzipSync } from 'node:zlib'
 import { fileURLToPath, URL } from 'node:url'
-import { shortenHtml2pdfModuleIds } from './scripts/html2pdf-module-id-shortener.mjs'
+import { html2pdfSourcePlugin } from './scripts/html2pdf-source-guard.mjs'
+import { canvgSourcePlugin } from './scripts/canvg-source-guard.mjs'
 import { configureFeedbackSseProxy } from './scripts/feedback-sse-dev-proxy'
 import { code128BarcodePlugin, CODE128_BARCODE_RESOLVED_ID } from './scripts/code128-barcode-module.mjs'
 
@@ -68,36 +69,6 @@ const precompressAssetsPlugin = (): Plugin => ({
     }
   },
 })
-
-/** 仅在生产构建时压缩已核验供应商包的内部模块 ID；不改变 PDF 实现和外部 html2canvas 导入。 */
-const html2pdfModuleIdPlugin = (): Plugin => {
-  let transformedCount = 0
-  let verifiedOnce = false
-  return {
-    name: 'ylink-html2pdf-module-id-shortener',
-    enforce: 'pre',
-    apply: 'build',
-    // watch 重建可复用已转换模块的缓存：每轮重置重复计数，但保留首次成功验证标记。
-    buildStart() {
-      transformedCount = 0
-    },
-    transform(code, id) {
-      const normalizedId = id.replaceAll('\\', '/').split('?')[0]
-      if (!normalizedId.includes('/node_modules/html2pdf.js/')) return null
-      if (!normalizedId.endsWith('/node_modules/html2pdf.js/dist/html2pdf.js')) {
-        throw new Error(`html2pdf.js 构建入口已变化，拒绝未经复核的模块 ID 转换：${normalizedId}`)
-      }
-      transformedCount += 1
-      if (transformedCount !== 1) throw new Error('html2pdf.js 构建入口重复处理，拒绝转换')
-      const result = shortenHtml2pdfModuleIds(code)
-      verifiedOnce = true
-      return { code: result.code, map: null }
-    },
-    buildEnd(error) {
-      if (!error && !verifiedOnce) throw new Error('构建未发现预期 html2pdf.js 入口，拒绝静默跳过模块 ID 转换')
-    },
-  }
-}
 
 const themeInitScriptPlugin = (): Plugin[] => {
   let publicBase = '/'
@@ -265,7 +236,8 @@ export default defineConfig(({ command, mode }) => {
       code128BarcodePlugin(),
       vue(),
       ...themeInitScriptPlugin(),
-      html2pdfModuleIdPlugin(),
+      html2pdfSourcePlugin(),
+      canvgSourcePlugin(),
       precompressAssetsPlugin(),
       /**
        * Element Plus 编译期按需引入：
@@ -277,6 +249,17 @@ export default defineConfig(({ command, mode }) => {
       Components({
         dts: false,
         resolvers: [
+          // 表格的两个导出共用真实入口，避免根 barrel 将异步表格实现反向带入基础 ui-kit。
+          (name: string) => {
+            if (name !== 'ElTable' && name !== 'ElTableColumn') return
+            return {
+              name,
+              from: 'element-plus/es/components/table/index.mjs',
+              sideEffects: elementPlusImportStyleStrategy
+                ? `element-plus/es/components/${name === 'ElTable' ? 'table' : 'table-column'}/style/css.mjs`
+                : undefined,
+            }
+          },
           ElementPlusResolver({
             importStyle: elementPlusImportStyleStrategy,
           }),
@@ -350,7 +333,19 @@ export default defineConfig(({ command, mode }) => {
           rescue: fileURLToPath(new URL('./rescue.html', import.meta.url)),
         },
         output: {
-          manualChunks(id) {
+          codeSplitting: { groups: [
+            // Rolldown 的普通分组会递归收纳依赖；通用预加载 helper 必须先独立归组，避免首屏反向加载 PDF。
+            { name: 'preload-helper', test: (id: string) => id === '\0vite/preload-helper.js', priority: 100, includeDependenciesRecursively: false },
+            {
+              name: 'table', priority: 90, includeDependenciesRecursively: false,
+              test: (id: string) => {
+                const normalizedId = id.replaceAll('\\', '/').split('?')[0]
+                return normalizedId.includes('/element-plus/es/components/table/')
+                  || normalizedId.includes('/element-plus/es/components/table-column/style/')
+                  || /\/element-plus\/theme-chalk\/el-table(?:-column)?\.css$/.test(normalizedId)
+              },
+            },
+            { debugName: '既有供应商边界', name(id) {
             if (id === CODE128_BARCODE_RESOLVED_ID) return 'barcode'
             const normalizedId = id.replaceAll('\\', '/')
 
@@ -359,7 +354,8 @@ export default defineConfig(({ command, mode }) => {
             }
 
             return resolveVendorChunk(normalizedId)
-          },
+          } },
+          ] },
         },
       },
     },

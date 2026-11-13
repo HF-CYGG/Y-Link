@@ -4,8 +4,9 @@
  * 维护说明：格式错误消息只输出脱敏告警后删除；数据库或网络暂态失败绝不确认删除消息。
  */
 
-import MNSClient from '@alicloud/mns'
-import RPCClient from '@alicloud/pop-core'
+import { createRequire } from 'node:module'
+import type MNSClient from '@alicloud/mns'
+import type RPCClient from '@alicloud/pop-core'
 import { env } from '../config/env.js'
 import { databaseOperationGate } from '../database/operation-gate.js'
 import type { SmsVerificationDeliveryStatus } from '../entities/sms-verification-record.entity.js'
@@ -23,6 +24,10 @@ const STS_REFRESH_EARLY_MS = 2 * 60 * 1000
 const MNS_POLL_WAIT_SECONDS = 5
 const MNS_BATCH_SIZE = 10
 const RETENTION_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000
+const require = createRequire(import.meta.url)
+// Node require 缓存串行合并首次加载，加载失败不缓存；未启用 Worker 不加载 SDK。
+const loadMns = (): typeof MNSClient => require('@alicloud/mns')
+const loadPop = (): typeof RPCClient => require('@alicloud/pop-core')
 
 type UnknownRecord = Record<string, unknown>
 
@@ -269,6 +274,7 @@ function isMnsQueueEmptyError(error: unknown): boolean {
 export class AliyunDypnsMnsWorkerService {
   private client: MnsClientLike | null = null
   private credentials: StsCredentials | null = null
+  private credentialsPromise: Promise<StsCredentials> | null = null
   private loopPromise: Promise<void> | null = null
   private stopping = false
   private lastRetentionCleanupAt = 0
@@ -280,7 +286,7 @@ export class AliyunDypnsMnsWorkerService {
   constructor(
     private readonly recordService: Pick<SmsVerificationRecordService, 'applyReceipt' | 'cleanupExpiredRecords'> = smsVerificationRecordService,
     private readonly sdk: MnsSdkDependencies = {
-      createMnsClient: (input) => new MNSClient(input.accountId, {
+      createMnsClient: (input) => new (loadMns())(input.accountId, {
         accessKeyId: input.accessKeyId,
         accessKeySecret: input.accessKeySecret,
         securityToken: input.securityToken,
@@ -288,7 +294,7 @@ export class AliyunDypnsMnsWorkerService {
         refreshSTSToken: input.refreshSTSToken,
         refreshSTSTokenInterval: 60_000,
       }),
-      createPopClient: (input) => new RPCClient({
+      createPopClient: (input) => new (loadPop())({
         endpoint: DYBASEAPI_ENDPOINT,
         apiVersion: '2017-05-25',
         accessKeyId: input.accessKeyId,
@@ -347,9 +353,18 @@ export class AliyunDypnsMnsWorkerService {
     if (current && current.expiresAt > Date.now() + STS_REFRESH_EARLY_MS) {
       return current
     }
+    if (!this.credentialsPromise) {
+      this.credentialsPromise = this.initializeClient().finally(() => {
+        this.credentialsPromise = null
+      })
+    }
+    return this.credentialsPromise
+  }
+
+  private async initializeClient(): Promise<StsCredentials> {
     const next = await this.requestStsCredentials()
-    this.credentials = next
-    this.client = this.sdk.createMnsClient({
+    // 先构造完整客户端，再一起发布缓存；SDK 初始化失败时不得留下半初始化凭证。
+    const client = this.sdk.createMnsClient({
       accountId: DYPNS_MNS_ACCOUNT_ID,
       endpoint: DYPNS_MNS_ENDPOINT,
       accessKeyId: next.accessKeyId,
@@ -358,6 +373,8 @@ export class AliyunDypnsMnsWorkerService {
       // SDK 在请求前会调用该回调；Worker 另外在每轮提前两分钟自行刷新。
       refreshSTSToken: async () => this.getCredentials(),
     })
+    this.credentials = next
+    this.client = client
     return next
   }
 
@@ -493,6 +510,9 @@ export class AliyunDypnsMnsWorkerService {
     if (this.loopPromise) {
       await this.loopPromise
     }
+    await this.credentialsPromise?.catch(() => undefined)
+    this.client = null
+    this.credentials = null
   }
 
   private pauseWorker(): void {

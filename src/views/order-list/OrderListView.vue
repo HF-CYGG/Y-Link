@@ -5,6 +5,7 @@
   页面边界：当前文件关注“列表与详情”的主交互编排，不直接承载正式出库单的内部打印实现细节。
 -->
 <script setup lang="ts">
+import { formatOrderRecipient } from './order-recipient-display'
 /**
  * 模块说明：`src/views/order-list/OrderListView.vue`
  * 文件职责：装配出库单列表、详情抽屉、手工单内容编辑、合规状态编辑、自动刷新提示、新单高亮动画，以及正式出库单低频入口。
@@ -47,22 +48,8 @@ const getOrderTypeLabel = (value: 'department' | 'walkin') => {
   return value === 'department' ? '部门单' : '散客单'
 }
 
-/**
- * 列表主显示名称：
- * - 部门单优先显示部门名，更符合后台检索与识别习惯；
- * - 散客单或部门缺失时回退客户名；
- * - 最终兜底为短横线，避免表格留空。
- */
-const getOrderDisplayName = (order: {
-  orderType: 'department' | 'walkin'
-  customerDepartmentName?: string | null
-  customerName?: string | null
-}) => {
-  if (order.orderType === 'department') {
-    return order.customerDepartmentName || order.customerName || '-'
-  }
-  return order.customerName || order.customerDepartmentName || '-'
-}
+/** O2O 领取人按真实来源显示，手工单沿用原名称规则。 */
+const getOrderDisplayName = formatOrderRecipient
 
 /**
  * 页面入口只负责装配：
@@ -265,10 +252,11 @@ const emptyDescription = computed(() => {
 const bindListBodyRef = (element: Element | ComponentPublicInstance | null) => {
   listBodyRef.value = element instanceof HTMLElement ? element : null
 }
-const getTableRowClassName = (payload: { row: { id: string } }) => {
+const getTableRowClassName = (payload: { row: OrderRecord }) => {
   return [
     isOrderRecentlyInserted(payload.row.id) ? 'order-list-table-row--new' : '',
     isOrderDetailActive(payload.row.id) ? 'order-list-table-row--active' : '',
+    payload.row.merge.role === 'source' ? 'order-list-table-row--source' : '',
   ]
     .filter(Boolean)
     .join(' ')
@@ -281,16 +269,13 @@ const toggleParentExpanded = (orderId: string) => {
 }
 const isSourceOrder = (order: Pick<OrderRecord, 'merge'>) => order.merge.role === 'source'
 const isParentOrder = (order: Pick<OrderRecord, 'merge'>) => order.merge.role === 'parent'
-const getMergeLabel = (order: Pick<OrderRecord, 'merge'>) => {
-  if (isParentOrder(order)) return `父单 · 已合并 ${order.merge.children.length} 张`
-  return isSourceOrder(order) ? '已合并至父单' : ''
-}
 type OrderTreeRecord = OrderRecord & { children?: OrderTreeRecord[] }
 const orderTreeRows = computed<OrderTreeRecord[]>(() => listState.records.map((order) => ({
   ...order,
   children: order.merge.children.map((child) => ({
     ...order,
     ...child,
+    sourcePreorderPickupContacts: order.sourcePreorderPickupContacts?.filter((source) => source.sourceOrderId === child.id),
     sourcePreorderRegistrations: order.sourcePreorderRegistrations?.filter((source) => source.sourceOrderId === child.id),
     contentEditable: false,
     contentEditBlockers: ['已合并至父单，内容不可编辑'],
@@ -737,23 +722,30 @@ const handleSaveComplianceFlags = async () => {
               <el-table-column
                 v-if="canAmendOrders || canMergeOrders"
                 type="selection"
+                class-name="order-list-table__selection-cell"
                 width="48"
                 reserve-selection
                 :selectable="isOrderAmendable"
               />
-              <el-table-column label="业务单号" prop="businessNo" min-width="220" show-overflow-tooltip>
+              <el-table-column label="业务单号" prop="businessNo" width="280" class-name="order-list-table__business-cell">
                 <template #default="{ row }">
-                  <span>{{ row.businessNo }}</span>
-                  <el-tag v-if="getMergeLabel(row)" class="ml-2" size="small" :type="isSourceOrder(row) ? 'info' : 'success'">{{ getMergeLabel(row) }}</el-tag>
-                  <el-tag v-if="row.matchedIdentifierType && row.matchedIdentifierValue && (row.matchedIdentifierType !== 'systemNo' || isAdmin)" class="ml-2" size="small" effect="plain" type="warning">
-                    命中{{ row.matchedIdentifierType === 'businessNo' ? '业务单号' : row.matchedIdentifierType === 'systemNo' ? '系统编号' : '预订单号' }}：{{ row.matchedIdentifierValue }}
-                  </el-tag>
+                  <div class="order-list-identity" :class="{ 'is-parent': isParentOrder(row), 'is-source': isSourceOrder(row) }">
+                    <div class="order-list-identity__main">
+                      <span class="order-list-identity__number" :title="row.businessNo">{{ row.businessNo }}</span>
+                      <el-tag v-if="isParentOrder(row) || isSourceOrder(row)" size="small" :type="isSourceOrder(row) ? 'info' : 'success'">{{ isSourceOrder(row) ? '来源子单' : '合并父单' }}</el-tag>
+                    </div>
+                    <div v-if="isParentOrder(row)" class="order-list-identity__summary">本单 + {{ row.merge.children.length }} 张来源单 · 数量和金额为汇总</div>
+                    <div v-else-if="isSourceOrder(row)" class="order-list-identity__summary">归属父单 {{ row.merge.parent?.businessNo || '-' }} · 数量和金额为来源口径</div>
+                    <el-tag v-if="row.matchedIdentifierType && row.matchedIdentifierValue && (row.matchedIdentifierType !== 'systemNo' || isAdmin)" size="small" effect="plain" type="warning">
+                      命中{{ row.matchedIdentifierType === 'businessNo' ? '业务单号' : row.matchedIdentifierType === 'systemNo' ? '系统编号' : '预订单号' }}：{{ row.matchedIdentifierValue }}
+                    </el-tag>
+                  </div>
                 </template>
               </el-table-column>
               <el-table-column label="领用对象" min-width="200" show-overflow-tooltip>
                 <template #default="{ row }">{{ getOrderDisplayName(row) }}</template>
               </el-table-column>
-              <el-table-column label="订单类型" min-width="100">
+              <el-table-column label="订单类型" width="100" class-name="order-list-table__type-cell" label-class-name="order-list-table__type-header">
                 <template #default="{ row }">{{ getOrderTypeLabel(row.orderType) }}</template>
               </el-table-column>
               <el-table-column label="出库单状态" width="116" align="center">
@@ -1040,6 +1032,25 @@ const handleSaveComplianceFlags = async () => {
 }
 
 /* 固定操作列自身合成不透明底色，防止横向滚动的单元格内容透出。 */
+.order-list-table :deep(.order-list-table__type-cell .cell),
+.order-list-table :deep(.order-list-table__type-header .cell) {
+  white-space: nowrap;
+}
+
+.order-list-table :deep(.order-list-table-row--source .order-list-table__selection-cell .el-checkbox) { display: none; }
+
+.order-list-table :deep(.order-list-table__business-cell .cell) { display: flex; align-items: center; white-space: normal; overflow: visible; text-overflow: clip; }
+.order-list-table :deep(.order-list-table__business-cell .el-table__indent),
+.order-list-table :deep(.order-list-table__business-cell .el-table__expand-icon),
+.order-list-table :deep(.order-list-table__business-cell .el-table__placeholder) { flex: 0 0 auto; }
+.order-list-identity { flex: 1 1 auto; min-width: 0; max-width: 100%; padding: 5px 0; overflow-wrap: anywhere; }
+.order-list-identity__number { min-width: 0; overflow-wrap: anywhere; }
+.order-list-identity :deep(.el-tag) { max-width: 100%; height: auto; white-space: normal; }
+.order-list-identity :deep(.el-tag__content) { overflow-wrap: anywhere; }
+.order-list-identity.is-source { margin-left: 8px; padding-left: 14px; }
+.order-list-identity__main { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-weight: 600; }
+.order-list-identity__summary { color: var(--el-text-color-secondary); font-size: 12px; line-height: 1.5; white-space: normal; }
+
 .order-list-table :deep(.el-table__body tr > td.order-list-table__actions-cell) {
   --order-fixed-row-bg: var(--el-table-tr-bg-color);
   background-color: var(--order-fixed-row-bg);

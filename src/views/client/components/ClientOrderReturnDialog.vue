@@ -32,7 +32,7 @@ const emit = defineEmits<{
 }>()
 
 const handleDialogVisibleChange = (value: boolean) => {
-  emit('update:visible', value)
+  if (!props.submitting) emit('update:visible', value)
 }
 
 const handleReturnReasonChange = (value: string) => {
@@ -52,6 +52,7 @@ const resolveReturnItemKey = (productId: string, skuId?: string | null) => skuId
     class="client-order-detail-dialog ylink-dialog-height-mode--scroll client-order-detail-dialog--form"
     body-class="client-order-detail-dialog__body client-order-detail-dialog__body--scroll"
     modal-class="client-order-detail-dialog-overlay"
+    :before-close="() => handleDialogVisibleChange(false)"
     :close-on-click-modal="!submitting"
     :close-on-press-escape="!submitting"
     destroy-on-close
@@ -121,7 +122,7 @@ const resolveReturnItemKey = (productId: string, skuId?: string | null) => skuId
 
     <template #footer>
       <div class="flex flex-wrap justify-end gap-3">
-        <el-button @click="emit('update:visible', false)">取消</el-button>
+        <el-button :disabled="submitting" @click="handleDialogVisibleChange(false)">取消</el-button>
         <el-button
           type="primary"
           :loading="submitting"

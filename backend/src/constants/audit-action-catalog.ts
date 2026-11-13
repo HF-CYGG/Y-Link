@@ -209,6 +209,7 @@ export const AUDIT_ACTION_CATALOG: Readonly<Record<string, AuditActionDefinition
 
   // 通知中心
   'notification.rule.update': { label: '更新通知中心规则', category: 'notification' },
+  'notification.channel.update': { label: '更新通知共用连接', category: 'notification' },
   'notification.rule.test_send': { label: '通知规则测试发送', category: 'notification' },
   'notification.rule.matched': { label: '通知规则命中', category: 'notification' },
   'notification.external.dispatch': { label: '通知外发执行', category: 'notification' },

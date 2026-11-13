@@ -43,6 +43,15 @@ export function createClientPolishLab() {
     else if(input.action==='hold'){const key=input.key;if(!holds.has(key)){let resolve;const promise=new Promise(done=>resolve=done);holds.set(key,{promise,resolve})}}
     else if(input.action==='release')release(input.key)
     else if(input.action==='failure')failures.set(input.key,{status:input.status??503,message:input.message??'隔离故障',remaining:input.count??1})
+    // 仅切换内存目录中的既有 SKU，供同名多规格/失效分组验收；不接触生产数据。
+    else if(input.action==='catalog-sku'){
+      const target=products.flatMap(p=>p.skus).find(s=>s.id===input.skuId)
+      if(!target)throw Error('未知隔离SKU')
+      if(input.stock!==undefined&&(!Number.isSafeInteger(input.stock)||input.stock<0))throw Error('库存必须为非负整数')
+      if(input.enabled!==undefined&&typeof input.enabled!=='boolean')throw Error('启用态必须为布尔值')
+      if(input.stock!==undefined){target.availableStock=input.stock;target.currentStock=input.stock;target.preOrderedStock=0}
+      if(input.enabled!==undefined)target.isActive=input.enabled
+    }
     else if(input.action==='images'){imageMode=input.mode;imageVersion++;for(const p of products){p.thumbnail='/__polish/images/original.svg?v='+imageVersion;if(!input.keepSmall)p.thumbnailSmall='/__polish/images/small.svg?v='+imageVersion;for(const s of p.skus){s.thumbnail=p.thumbnail;if(!input.keepSmall)s.thumbnailSmall=p.thumbnailSmall}}}
     else if(input.action==='order-status'){const detail=orders.get(input.id);if(!detail)throw Error('订单不存在');detail.order.status=input.status;detail.order.statusReport=null;detail.order.verifiedAt=input.status==='verified'?now():null}
     else if(input.action==='feedback-status'){const value=conversations.get(input.id);if(!value)throw Error('会话不存在');value.status=input.status;emit(input.id)}

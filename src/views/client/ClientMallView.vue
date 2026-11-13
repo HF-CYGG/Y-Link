@@ -9,6 +9,7 @@ import ClientProductSmallImage from './components/ClientProductSmallImage.vue'
  * 数量输入：迷你购物车与详情弹层的数量均可直接输入，购物车走 store 的 setQtyFromInput，详情弹层走 commitDetailQty，与加减按钮共用同一上限与提示。
  * 补货入口：四套卡片仅在单个当前启用 SKU 时显示补货，补货资格不限库存，操作保持第三列上下堆叠，不改变虚拟行高；详情传递当前明确选择的规格。
  * 加购交互：单规格卡片的“+ 加购”加购后分裂为“− 数量 +”步进器（ClientCardCartStepper），加购成功伴随飞入购物车、角标弹跳与轻触震动，均在减少动效时降级。
+ * 详情切换：单选与多规格同步交接，指示块、摘要、正文与底栏统一 280ms；隐藏面板 inert 隔离交互，高度仅在切换两端测量并在关闭和离页时取消。
  * 详情底栏：按当前规格在“数量 + 加入购物车”与“申请补货”之间切换，数量栏收起、按钮文字先隐去再显现，形成合并/拆分过渡。
  * 目录新鲜度：本地快照有效期内先秒开再后台重新校验；页面激活期间每 30 秒与切回前台时也会静默校验，
  * 新上架商品无需顾客手动刷新即可出现。校验依赖 ETag 条件请求，不要改成带随机参数的绕缓存请求。
@@ -32,8 +33,9 @@ import { useDevice } from '@/composables/useDevice'
 import { resolveProductPlaceholder } from '@/utils/product-placeholder'
 import { resolveProductPreviewImage, resolveProductPreviewSku, resolveProductPreviewSmallImage, resolveSortedActivePreviewSkus } from '@/utils/product-preview'
 import { resolveO2oPriceView } from '@/utils/o2o-price'
+import { buildActiveSkuSearchText, resolveCatalogDetailSelection, resolveExplicitDetailSkuReplacement } from './client-mall-catalog-policy'
 import { htmlToPlainText } from '@/utils/plain-text'
-import { flyToClientCart, shouldReduceClientMotion, triggerClientHaptic } from '@/utils/client-motion'
+import { captureClientCartImage, type ClientCartFlightSource, flyToClientCart, shouldReduceClientMotion, triggerClientHaptic } from '@/utils/client-motion'
 import {
   buildClientSkuSelectionModel,
   resolveClientSkuSelection,
@@ -55,6 +57,9 @@ import ClientCardCartStepper from './components/ClientCardCartStepper.vue'
 import ClientCheckoutView from './ClientCheckoutView.vue'
 import ClientImagePreviewer from './components/ClientImagePreviewer.vue'
 import ClientQtyInput from './components/ClientQtyInput.vue'
+import type { ClientCartBatchResult } from '@/store/modules/client-cart'
+import { buildClientBatchSelections, resolveClientBatchSkuMaxQty, summarizeClientBatch } from './client-multi-sku.helpers'
+import ClientMultiSkuSelector from './components/ClientMultiSkuSelector.vue'
 import ClientRestockButton from './components/ClientRestockButton.vue'
 import { getRestockSkus } from '@/utils/restock'
 
@@ -122,6 +127,62 @@ const detailVisible = ref(false)
 const detailQty = ref(1)
 const detailProduct = ref<O2oMallProduct | null>(null)
 const selectedDetailSku = ref<O2oMallSku | null>(null)
+const detailSelectionSkuId = ref<string | null>(null)
+const detailCatalogUnavailable = ref(false)
+const detailCatalogNotice = ref('')
+const detailMode = ref<'single' | 'multi'>('single')
+const detailBatchDrafts = reactive<Record<string, string>>({})
+const detailBatchConflicts = ref<ClientCartBatchResult['conflicts']>([])
+const detailInitialSkus = ref<O2oMallSku[]>([])
+const detailPanelRef = ref<HTMLElement | null>(null)
+const detailQtyInputRef = ref<InstanceType<typeof ClientQtyInput> | null>(null)
+const detailModeContentRef = ref<HTMLElement | null>(null)
+const detailModeActionsRef = ref<HTMLElement | null>(null)
+const detailModeToggleRef = ref<HTMLElement | null>(null)
+const detailModeTitleRef = ref<HTMLElement | null>(null)
+const detailModeAnimations = new Set<Animation>()
+let detailModeMotionVersion = 0
+let detailMotionMedia: MediaQueryList | null = null
+const stopDetailModeMotion = () => {
+  detailModeMotionVersion += 1
+  detailModeAnimations.forEach((animation) => animation.cancel())
+  detailModeAnimations.clear()
+}
+// 只在切换两端批量测量；快速反转从当前可见高度接续，不积累旧动画或逐帧读取布局。
+watch(detailMode, async () => {
+  const shells = [detailModeContentRef.value, detailModeActionsRef.value, detailModeTitleRef.value].filter((node): node is HTMLElement => !!node)
+  const heights = shells.map((node) => node.getBoundingClientRect().height)
+  const active = globalThis.document?.activeElement
+  if (active instanceof HTMLElement && shells.some((node) => node.contains(active))) {
+    detailModeToggleRef.value?.querySelector<HTMLInputElement>(`input[value="${detailMode.value}"]`)?.focus({ preventScroll: true })
+  }
+  stopDetailModeMotion()
+  const version = detailModeMotionVersion
+  if (!detailVisible.value || shouldReduceClientMotion()) return
+  await nextTick()
+  if (version !== detailModeMotionVersion || !detailVisible.value || shouldReduceClientMotion()) return
+  const targets = shells.map((node) => node.getBoundingClientRect().height)
+  shells.forEach((node, index) => {
+    if (!node.isConnected || !node.animate || heights[index] === targets[index]) return
+    const animation = node.animate([{ height: `${heights[index]}px` }, { height: `${targets[index]}px` }], {
+      duration: 280, easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+    })
+    detailModeAnimations.add(animation)
+    const release = () => { detailModeAnimations.delete(animation) }
+    animation.onfinish = release
+    animation.oncancel = release
+  })
+}, { flush: 'pre' })
+const resetDetailBatch = () => {
+  Object.keys(detailBatchDrafts).forEach((id) => delete detailBatchDrafts[id])
+  detailBatchConflicts.value = []
+  detailInitialSkus.value = []
+  detailMode.value = 'single'
+}
+watch(detailVisible, (visible) => {
+  if (!visible) { stopDetailModeMotion(); resetDetailBatch() }
+}, { flush: 'sync' })
+
 const imagePreviewVisible = ref(false)
 const previewImageUrl = ref('')
 const miniCartVisible = ref(false)
@@ -295,6 +356,7 @@ const normalizeProductCardSearchText = (product: O2oMallProduct, categoryKeys: s
     product.productName,
     product.productCode,
     boundedDetailText,
+    buildActiveSkuSearchText(product),
     ...categoryKeys,
   ].filter(Boolean).join(' ').toLowerCase()
 }
@@ -401,6 +463,10 @@ const resolveDefaultSku = (product: O2oMallProduct | null): O2oMallSku | null =>
 }
 
 const hasDetailSkuChoices = computed(() => resolveActiveSkus(detailProduct.value).length > 1)
+const detailSingleReplacementSku = computed(() => {
+  const currentProduct = products.value.find((product) => product.id === detailProduct.value?.id) ?? null
+  return resolveExplicitDetailSkuReplacement(currentProduct, detailCatalogUnavailable.value)
+})
 
 const detailSkuSpecGroups = computed(() => buildClientSkuSelectionModel(
   resolveActiveSkus(detailProduct.value),
@@ -412,6 +478,7 @@ const isSingleRestockSku = (product: O2oMallProduct) => getRestockSkus(product).
 
 // 只有明确选中的真实启用 SKU 可触发缺货替换；限购触顶不能当作缺货。
 const detailNeedsRestock = computed(() => {
+  if (detailCatalogUnavailable.value) return false
   const sku = selectedDetailSku.value
   return Boolean(sku && getRestockSkus(detailProduct.value).some((item) => item.id === sku.id) && Number(sku.availableStock) === 0)
 })
@@ -427,10 +494,53 @@ const detailMaxQty = computed(() => {
 // - restock：当前启用规格缺货（口径同补货按钮，不用限购后的可购量判断），数量栏收起并合并为“申请补货”；
 // - unavailable：其余不可购情况，展示禁用的“暂不可购”。
 type DetailActionMode = 'purchase' | 'restock' | 'unavailable'
+const batchCurrentProduct = computed(() => products.value.find((product) => product.id === detailProduct.value?.id) ?? null)
+const batchSkuRows = computed(() => {
+  const current = resolveActiveSkus(batchCurrentProduct.value)
+  const known = new Set(current.map((sku) => sku.id))
+  return [...current, ...detailInitialSkus.value.filter((sku) => !known.has(sku.id) && (detailBatchDrafts[sku.id] ?? '0') !== '0')]
+})
+const batchMaxBySku = computed(() => new Map(batchSkuRows.value.map((sku) => {
+  const active = resolveActiveSkus(batchCurrentProduct.value).some((candidate) => candidate.id === sku.id)
+  const cart = clientCartStore.items.filter((item) => item.productId === detailProduct.value?.id)
+  return [sku.id, active ? resolveClientBatchSkuMaxQty(sku.id, Number(sku.availableStock), Number(batchCurrentProduct.value?.limitPerUser ?? 0), cart, detailBatchDrafts) : 0]
+})))
+const batchSummary = computed(() => summarizeClientBatch(detailBatchDrafts, new Map(batchSkuRows.value.map((sku) => [sku.id, sku.discountedPrice]))))
+const changeBatchDraft = (skuId: string, raw: string) => {
+  detailBatchDrafts[skuId] = raw
+  detailBatchConflicts.value = detailBatchConflicts.value.filter((conflict) => conflict.skuId !== skuId)
+}
+const batchRestockSku = ref<O2oMallSku | null>(null)
+const batchRestockEntry = useClientRestockEntry(() => batchCurrentProduct.value, () => batchRestockSku.value, () => detailVisible.value)
+const openBatchRestock = (sku: O2oMallSku) => { batchRestockSku.value = sku; void batchRestockEntry.openRestock() }
+const batchThumbnail = (sku: O2oMallSku) => sku.thumbnailSmall || sku.thumbnail || detailProduct.value?.thumbnailSmall || detailProduct.value?.thumbnail || resolveProductPlaceholder(null)
+const previewBatchSku = (sku: O2oMallSku) => {
+  previewImageUrl.value = sku.thumbnail || detailProduct.value?.thumbnail || batchThumbnail(sku)
+  imagePreviewVisible.value = true
+}
+const submitDetailBatch = () => {
+  const current = batchCurrentProduct.value
+  const selections = buildClientBatchSelections(detailBatchDrafts)
+  if (!current) {
+    detailBatchConflicts.value = selections.filter((selection) => selection.qty !== 0).map((selection) => ({ skuId: selection.skuId, code: 'sku_unavailable', maxQty: 0, message: '商品已下架，当前不能加入购物车' }))
+    showAppWarning('该商品已下架，当前不能加入购物车')
+    return
+  }
+  const sources = new Map<string, ClientCartFlightSource | null>()
+  detailPanelRef.value?.querySelectorAll<HTMLElement>('[data-sku-id]').forEach((row) => sources.set(row.dataset.skuId ?? '', captureClientCartImage(row)))
+  if (!batchSummary.value.valid && selections.every((selection) => Number.isSafeInteger(selection.qty) && selection.qty >= 0)) { showAppWarning('数量或金额超出有效范围，请调整后重试'); return }
+  const result = clientCartStore.addProductsBatch(current, selections)
+  detailBatchConflicts.value = result.conflicts
+  if (!result.ok || result.addedQty <= 0) return
+  result.addedSkus.slice(0, 6).forEach((sku) => celebrateCartAdd(sources.get(sku.skuId)))
+  showAppSuccess(`已加入购物车，共 ${result.addedQty} 件`)
+  detailVisible.value = false
+}
+
 const detailRestockEntry = useClientRestockEntry(() => detailProduct.value, () => selectedDetailSku.value, () => detailVisible.value)
 const detailRestockLoading = detailRestockEntry.loading
 const detailActionMode = computed<DetailActionMode>(() => {
-  if (!detailProduct.value) {
+  if (!detailProduct.value || detailCatalogUnavailable.value || !selectedDetailSku.value) {
     return 'unavailable'
   }
   if (resolveCurrentDetailAvailableStock(detailProduct.value) > 0) {
@@ -458,18 +568,37 @@ const openDetailImagePreview = () => {
   imagePreviewVisible.value = true
 }
 
+const productSearchEntries = computed<ProductSearchEntry[]>(() => products.value.map((product) => ({
+  product, searchText: normalizeProductCardSearchText(product, classifyProduct(product)),
+})))
+
+watch(products, (catalog) => {
+  if (!detailVisible.value || !detailProduct.value) return
+  const previousProduct = detailProduct.value
+  const previousSku = selectedDetailSku.value
+  const next = resolveCatalogDetailSelection(catalog, previousProduct.id, detailSelectionSkuId.value)
+  detailCatalogUnavailable.value = next.unavailable
+  if (next.product) {
+    detailProduct.value = next.product
+    const knownIds = new Set(detailInitialSkus.value.map((sku) => sku.id))
+    detailInitialSkus.value = [...detailInitialSkus.value, ...resolveActiveSkus(next.product).filter((sku) => !knownIds.has(sku.id))]
+  }
+  selectedDetailSku.value = next.sku
+  if (next.unavailable) {
+    detailCatalogNotice.value = next.product ? '所选规格已失效，请重新选择有效规格；当前不能加入购物车。' : '该商品已下架，当前不能加入购物车。'
+  } else if (previousSku && (previousSku.discountedPrice !== next.sku?.discountedPrice
+    || previousSku.availableStock !== next.sku?.availableStock || previousProduct.limitPerUser !== next.product?.limitPerUser)) {
+    detailCatalogNotice.value = '商品价格、库存或限购信息已更新，请核对当前信息和数量后加购。'
+  }
+}, { flush: 'sync' })
+
 const mallBrowseIndex = computed<MallBrowseIndexSnapshot>(() => {
   // 分类分组与搜索索引统一在单次遍历里完成，避免商品数组在多个 computed 中被重复扫描。
   const groupMap = new Map<string, ProductCategoryGroup>()
-  const searchEntries: ProductSearchEntry[] = []
+  const searchEntries = productSearchEntries.value
 
   products.value.forEach((product) => {
     const categoryKeys = classifyProduct(product)
-    searchEntries.push({
-      product,
-      // 搜索索引预先拼好常用字段，减少用户每次输入关键字时的字符串拼接成本。
-      searchText: normalizeProductCardSearchText(product, categoryKeys),
-    })
     categoryKeys.forEach((key) => {
       const grouped = groupMap.get(key)
       if (grouped) {
@@ -528,6 +657,47 @@ const searchResults = computed(() => {
   })
   return sortProductsForDisplay(matchedProducts)
 })
+const searchPageSize = 24
+const searchPage = ref(1)
+const searchHeadingRef = ref<HTMLElement | null>(null)
+const searchGridRef = ref<HTMLElement | null>(null)
+const searchPaginationRef = ref<HTMLElement | null>(null)
+const pagedSearchResults = computed(() => searchResults.value.slice((searchPage.value - 1) * searchPageSize, searchPage.value * searchPageSize))
+watch([keyword, sortMode], () => { searchPage.value = 1 }, { flush: 'sync' })
+watch(searchResults, (results) => {
+  searchPage.value = Math.min(searchPage.value, Math.max(1, Math.ceil(results.length / searchPageSize)))
+}, { flush: 'sync' })
+watch(products, async () => {
+  const focused = globalThis.document?.activeElement
+  if (!(focused instanceof HTMLElement) || !searchGridRef.value?.contains(focused)) return
+  await nextTick()
+  if (!focused.isConnected && globalThis.document.activeElement === globalThis.document.body) {
+    searchHeadingRef.value?.focus({ preventScroll: true })
+  }
+})
+const scrollToSearchHeading = () => {
+  const heading = searchHeadingRef.value
+  if (!heading) return
+  const header = mallPageRef.value?.closest('.client-main-layout')?.querySelector<HTMLElement>('.client-main-layout__header')
+  const offset = header?.getBoundingClientRect().height ?? 0
+  globalThis.window.scrollTo({
+    top: Math.max(0, globalThis.window.scrollY + heading.getBoundingClientRect().top - offset - 12),
+    behavior: shouldReduceClientMotion() ? 'auto' : 'smooth',
+  })
+}
+const goToSearchResults = () => {
+  searchHeadingRef.value?.focus({ preventScroll: true })
+  scrollToSearchHeading()
+}
+const handleSearchPageChange = async () => {
+  const focused = globalThis.document?.activeElement
+  const wasInPagination = focused instanceof HTMLElement && searchPaginationRef.value?.contains(focused)
+  scrollToSearchHeading()
+  await nextTick()
+  if (wasInPagination && focused instanceof HTMLElement && (!focused.isConnected || focused.matches(':disabled'))) {
+    searchPaginationRef.value?.querySelector<HTMLElement>('.el-pager .is-active')?.focus({ preventScroll: true })
+  }
+}
 
 const bottomSelectedQty = computed(() => clientCartStore.totalQty)
 const bottomSelectedTypeCount = computed(() => clientCartStore.items.length)
@@ -612,7 +782,7 @@ const bumpMiniCartBadge = () => {
 }
 
 // 加购成功的统一视觉反馈：轻触震动 → 小圆点飞入购物车 → 落点时购物车脉冲与角标弹跳；减少动效时只保留脉冲。
-const celebrateCartAdd = (source?: Element | null) => {
+const celebrateCartAdd = (source?: Element | ClientCartFlightSource | null) => {
   if (shouldReduceClientMotion() || !mallRuntimeActive) return
   const signal = feedbackController.signal
   triggerClientHaptic()
@@ -796,8 +966,13 @@ const setSectionRef = (key: string, element: unknown) => {
 }
 
 const openProductDetail = (product: O2oMallProduct) => {
+  resetDetailBatch()
+  detailInitialSkus.value = [...resolveActiveSkus(product)]
   detailProduct.value = product
   selectedDetailSku.value = resolveDefaultSku(product)
+  detailSelectionSkuId.value = selectedDetailSku.value?.id ?? null
+  detailCatalogUnavailable.value = !selectedDetailSku.value
+  detailCatalogNotice.value = ''
   detailQty.value = 1
   detailVisible.value = true
 }
@@ -999,7 +1174,13 @@ const commitDetailQty = (value: number | null) => {
 }
 
 const selectDetailSku = (sku: O2oMallSku) => {
-  selectedDetailSku.value = sku
+  const current = resolveCatalogDetailSelection(products.value, detailProduct.value?.id ?? '', sku.id)
+  if (!current.product || !current.sku) return
+  detailProduct.value = current.product
+  selectedDetailSku.value = current.sku
+  detailSelectionSkuId.value = current.sku.id
+  detailCatalogUnavailable.value = false
+  detailCatalogNotice.value = ''
   detailQty.value = Math.min(Math.max(1, detailQty.value), Math.max(1, detailMaxQty.value))
 }
 
@@ -1016,24 +1197,33 @@ const selectDetailSkuOption = (groupName: string, optionValue: string) => {
   }
 }
 
-const addCurrentDetailToCart = (source?: Element | null) => {
+const addCurrentDetailToCart = () => {
   if (!detailProduct.value) {
     return
   }
-  const addedQty = clientCartStore.addProduct(detailProduct.value, detailQty.value, selectedDetailSku.value)
+  const current = resolveCatalogDetailSelection(products.value, detailProduct.value.id, detailSelectionSkuId.value)
+  if (detailCatalogUnavailable.value || !current.product || !current.sku) {
+    showAppWarning('商品或所选规格已失效，请重新选择')
+    return
+  }
+  const enteredQty = detailQtyInputRef.value ? detailQtyInputRef.value.readDraft() : detailQty.value
+  if (enteredQty === null || !Number.isSafeInteger(enteredQty) || enteredQty < 1) { showAppWarning('请输入大于 0 的整数数量'); return }
+  detailQty.value = enteredQty
+  if (detailQty.value > detailMaxQty.value) { showAppWarning('所选数量超过最新库存或限购，请主动调整数量'); return }
+  const addedQty = clientCartStore.addProduct(current.product, detailQty.value, current.sku)
   if (addedQty <= 0) {
     return
   }
   // 详情加购后抽屉关闭、页面上下文切换，保留文字提示让用户确认结果。
   showAppSuccess('已加入购物车')
-  celebrateCartAdd(source)
+  celebrateCartAdd(captureClientCartImage(detailPanelRef.value?.querySelector('.client-detail-header')))
   detailVisible.value = false
 }
 
 // 详情底栏主按钮：按当前状态分派到加购或申请补货，两种动作共用同一个按钮以实现合并过渡。
-const handleDetailPrimaryAction = (event: MouseEvent) => {
+const handleDetailPrimaryAction = () => {
   if (detailActionMode.value === 'purchase') {
-    addCurrentDetailToCart(event.currentTarget instanceof Element ? event.currentTarget : null)
+    addCurrentDetailToCart()
     return
   }
   if (detailActionMode.value === 'restock') {
@@ -1053,7 +1243,9 @@ const quickAdd = (product: O2oMallProduct, source?: Element | null) => {
   if (addedQty <= 0) {
     return
   }
-  celebrateCartAdd(source)
+  const card = source?.closest('.client-product-card')
+  const imageButton = card?.querySelector('[data-product-id].client-product-card__image-button')
+  celebrateCartAdd(imageButton?.getAttribute('data-product-id') === product.id ? captureClientCartImage(imageButton) : null)
 }
 
 // 卡片步进器减一：减到 0 时由购物车 store 移除该行，步进器随之收拢回“+ 加购”。
@@ -1588,6 +1780,10 @@ const closeCheckout = () => {
 watch(() => clientAuthStore.currentUser?.id, () => {
   drawerHandoffGeneration += 1; drawerHandoff.value = null; cartReturnFocus = null; checkoutFromCart = false
   cartDrawerVisible.value = false; checkoutDrawerVisible.value = false
+  detailVisible.value = false
+  resetDetailBatch()
+  stopMallFeedback()
+  feedbackController = new AbortController()
 }, { flush: 'sync' })
 
 const openCartDrawer = () => {
@@ -1625,6 +1821,8 @@ watch(
   () => route.path,
   (nextPath) => {
     if (!nextPath.startsWith('/client/mall')) {
+      stopMallFeedback()
+      detailVisible.value = false
       miniCartVisible.value = false
       imagePreviewVisible.value = false
       mobileSearchVisible.value = false
@@ -1656,6 +1854,7 @@ const activateMallRuntime = () => {
 }
 
 const deactivateMallRuntime = () => {
+  stopDetailModeMotion()
   stopMallFeedback()
   invalidateClearCartConfirm()
   detailVisible.value = false
@@ -1717,6 +1916,8 @@ onDeactivated(() => {
 })
 
 onMounted(async () => {
+  detailMotionMedia = globalThis.window?.matchMedia?.('(prefers-reduced-motion: reduce)') ?? null
+  detailMotionMedia?.addEventListener('change', stopDetailModeMotion)
   const hasHydratedCatalog = products.value.length > 0
   if (hasHydratedCatalog) {
     // 已有缓存时先把现有内容稳定渲染出来，再后台刷新，避免首屏等待被网络重新拉长。
@@ -1737,6 +1938,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   deactivateMallRuntime()
+  detailMotionMedia?.removeEventListener('change', stopDetailModeMotion)
+  detailMotionMedia = null
 })
 </script>
 
@@ -1866,22 +2069,14 @@ onBeforeUnmount(() => {
       action-text="重试"
       @retry="loadProducts(true)"
     />
-    <BaseRequestState
-      v-else-if="!products.length"
-      type="empty"
-      title="暂无上架商品"
-      description="请稍后刷新或联系管理员补货"
-      action-text="刷新库存"
-      @retry="loadProducts(true)"
-    />
-    <BaseRequestState
-      v-else-if="searchMode && !searchResults.length"
-      type="empty"
-      title="未找到相关商品"
-      description="请尝试其他关键字"
-      action-text="清空搜索"
-      @retry="keyword = ''"
-    />
+    <div v-else-if="!products.length">
+      <p v-if="searchMode" ref="searchHeadingRef" tabindex="-1">搜索结果 0 条</p>
+      <BaseRequestState type="empty" title="暂无上架商品" description="请稍后刷新或联系管理员补货" action-text="刷新库存" @retry="loadProducts(true)" />
+    </div>
+    <div v-else-if="searchMode && !searchResults.length">
+      <p ref="searchHeadingRef" tabindex="-1">搜索结果 0 条</p>
+      <BaseRequestState type="empty" title="未找到相关商品" description="请尝试其他关键字" action-text="清空搜索" @retry="keyword = ''" />
+    </div>
 
     <template v-else>
       <div v-if="searchMode" class="mall-sort-row">
@@ -1939,16 +2134,16 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <header class="flex items-center justify-between gap-3">
-        <p class="text-sm font-semibold text-slate-700 dark:text-slate-200">搜索结果 {{ searchResults.length }} 条</p>
+        <p ref="searchHeadingRef" tabindex="-1" class="text-sm font-semibold text-slate-700 dark:text-slate-200">搜索结果 {{ searchResults.length }} 条</p>
       </header>
-      <div class="client-product-grid mall-product-grid">
+      <div ref="searchGridRef" class="client-product-grid mall-product-grid">
         <article
-          v-for="product in searchResults"
+          v-for="product in pagedSearchResults"
           :key="product.id"
           :ref="(el) => setProductCardRef(`search:${product.id}`, el, product.id)"
           class="client-product-card"
         >
-          <button type="button" class="client-product-card__image-button" @click="openProductImagePreview(product)">
+          <button type="button" :data-product-id="product.id" class="client-product-card__image-button" @click="openProductImagePreview(product)">
             <img
               :key="`${product.id}:${resolveProductThumbnail(product)}:${resolveProductCardDisplay(product).previewImage}`"
                   :src="resolveProductThumbnail(product)"
@@ -1970,10 +2165,10 @@ onBeforeUnmount(() => {
               </div>
               <div class="client-product-card__meta">
                 <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">
-                  可预订 {{ product.availableStock }}
+                  可订 {{ product.availableStock }}
                 </span>
                 <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
-                  已预订 {{ product.preOrderedStock }}
+                  已订 {{ product.preOrderedStock }}
                 </span>
                 <span class="rounded-full bg-slate-100 px-2 py-1 text-slate-600 dark:bg-white/10 dark:text-slate-300">
                   已售 {{ resolveSoldQty(product) }}
@@ -1981,8 +2176,12 @@ onBeforeUnmount(() => {
               </div>
             </div>
           </button>
-          <div class="client-product-card__actions"><ClientCardCartStepper :product="product" @add="quickAdd(product, $event)" @decrease="decreaseCardQty" @choose="openProductDetail(product)" /><ClientRestockButton v-if="isSingleRestockSku(product)" :product="product" /></div>
+          <div class="client-product-card__actions"><ClientCardCartStepper :data-product-id="product.id" :product="product" @add="quickAdd(product, $event)" @decrease="decreaseCardQty" @choose="openProductDetail(product)" /><ClientRestockButton v-if="isSingleRestockSku(product)" :product="product" /></div>
         </article>
+      </div>
+      <div v-if="searchResults.length > searchPageSize" ref="searchPaginationRef" class="mall-search-pagination">
+        <el-pagination v-model:current-page="searchPage" :page-size="searchPageSize" :total="searchResults.length" :pager-count="5" layout="prev, pager, next" aria-label="搜索结果分页" @current-change="handleSearchPageChange" />
+        <el-button text @click="goToSearchResults">跳到搜索结果</el-button>
       </div>
     </section>
 
@@ -2057,7 +2256,7 @@ onBeforeUnmount(() => {
             :class="displayCategoryKey === category.key ? 'bg-[var(--ylink-color-primary-strong)] text-white shadow-md' : 'bg-[var(--ylink-color-surface-muted)] text-slate-500 hover:bg-slate-200 dark:text-slate-400'"
             @click="scrollToCategory(category.key)"
           >
-            <p class="truncate text-xs sm:text-sm font-medium">{{ category.label }}</p>
+            <p class="mall-category-name text-xs sm:text-sm font-medium">{{ category.label }}</p>
             <p class="mt-0.5 text-[10px] sm:text-xs opacity-75">{{ category.count }} 款</p>
           </button>
           <div class="mall-category-rail-tail" aria-hidden="true"></div>
@@ -2072,7 +2271,7 @@ onBeforeUnmount(() => {
             :ref="(el) => setProductCardRef(`virtual:${row.data.id}`, el, row.data.id)"
             class="client-product-card mb-2"
           >
-            <button type="button" class="client-product-card__image-button" @click="openProductImagePreview(row.data)">
+            <button type="button" :data-product-id="row.data.id" class="client-product-card__image-button" @click="openProductImagePreview(row.data)">
               <img
                 :key="`${row.data.id}:${resolveProductThumbnail(row.data)}:${resolveProductCardDisplay(row.data).previewImage}`"
                   :src="resolveProductThumbnail(row.data)"
@@ -2093,13 +2292,13 @@ onBeforeUnmount(() => {
                   </p>
                 </div>
                 <div class="client-product-card__meta">
-                  <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ row.data.availableStock }}</span>
-                  <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">已预订 {{ row.data.preOrderedStock }}</span>
+                  <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可订 {{ row.data.availableStock }}</span>
+                  <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">已订 {{ row.data.preOrderedStock }}</span>
                   <span class="rounded-full bg-slate-100 px-2 py-1 text-slate-600 dark:bg-white/10 dark:text-slate-300">已售 {{ resolveSoldQty(row.data) }}</span>
                 </div>
               </div>
             </button>
-            <div class="client-product-card__actions"><ClientCardCartStepper :product="row.data" @add="quickAdd(row.data, $event)" @decrease="decreaseCardQty" @choose="openProductDetail(row.data)" /><ClientRestockButton v-if="isSingleRestockSku(row.data)" :product="row.data" /></div>
+            <div class="client-product-card__actions"><ClientCardCartStepper :data-product-id="row.data.id" :product="row.data" @add="quickAdd(row.data, $event)" @decrease="decreaseCardQty" @choose="openProductDetail(row.data)" /><ClientRestockButton v-if="isSingleRestockSku(row.data)" :product="row.data" /></div>
           </article>
         </div>
         <!-- 尾部只保留底部渐隐遮罩所需空间，保证最后一行完整可读。 -->
@@ -2125,7 +2324,7 @@ onBeforeUnmount(() => {
               :ref="(el) => setProductCardRef(`recommended:${product.id}`, el, product.id)"
               class="client-product-card"
             >
-              <button type="button" class="client-product-card__image-button" @click="openProductImagePreview(product)">
+              <button type="button" :data-product-id="product.id" class="client-product-card__image-button" @click="openProductImagePreview(product)">
                 <img
                   :key="`${product.id}:${resolveProductThumbnail(product)}:${resolveProductCardDisplay(product).previewImage}`"
                   :src="resolveProductThumbnail(product)"
@@ -2146,13 +2345,13 @@ onBeforeUnmount(() => {
                     </p>
                   </div>
                   <div class="client-product-card__meta">
-                    <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ product.availableStock }}</span>
-                    <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">已预订 {{ product.preOrderedStock }}</span>
+                    <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可订 {{ product.availableStock }}</span>
+                    <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">已订 {{ product.preOrderedStock }}</span>
                     <span class="rounded-full bg-slate-100 px-2 py-1 text-slate-600 dark:bg-white/10 dark:text-slate-300">已售 {{ resolveSoldQty(product) }}</span>
                   </div>
                 </div>
               </button>
-              <div class="client-product-card__actions"><ClientCardCartStepper :product="product" @add="quickAdd(product, $event)" @decrease="decreaseCardQty" @choose="openProductDetail(product)" /><ClientRestockButton v-if="isSingleRestockSku(product)" :product="product" /></div>
+              <div class="client-product-card__actions"><ClientCardCartStepper :data-product-id="product.id" :product="product" @add="quickAdd(product, $event)" @decrease="decreaseCardQty" @choose="openProductDetail(product)" /><ClientRestockButton v-if="isSingleRestockSku(product)" :product="product" /></div>
             </article>
           </div>
         </section>
@@ -2173,7 +2372,7 @@ onBeforeUnmount(() => {
                 :ref="(el) => setProductCardRef(`${group.key}:${product.id}`, el, product.id)"
                 class="client-product-card"
               >
-                <button type="button" class="client-product-card__image-button" @click="openProductImagePreview(product)">
+                <button type="button" :data-product-id="product.id" class="client-product-card__image-button" @click="openProductImagePreview(product)">
                   <img
                     :key="`${product.id}:${resolveProductThumbnail(product)}:${resolveProductCardDisplay(product).previewImage}`"
                   :src="resolveProductThumbnail(product)"
@@ -2194,13 +2393,13 @@ onBeforeUnmount(() => {
                       </p>
                     </div>
                     <div class="client-product-card__meta">
-                      <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ product.availableStock }}</span>
-                      <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">已预订 {{ product.preOrderedStock }}</span>
+                      <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可订 {{ product.availableStock }}</span>
+                      <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">已订 {{ product.preOrderedStock }}</span>
                       <span class="rounded-full bg-slate-100 px-2 py-1 text-slate-600 dark:bg-white/10 dark:text-slate-300">已售 {{ resolveSoldQty(product) }}</span>
                     </div>
                   </div>
                 </button>
-                <div class="client-product-card__actions"><ClientCardCartStepper :product="product" @add="quickAdd(product, $event)" @decrease="decreaseCardQty" @choose="openProductDetail(product)" /><ClientRestockButton v-if="isSingleRestockSku(product)" :product="product" /></div>
+                <div class="client-product-card__actions"><ClientCardCartStepper :data-product-id="product.id" :product="product" @add="quickAdd(product, $event)" @decrease="decreaseCardQty" @choose="openProductDetail(product)" /><ClientRestockButton v-if="isSingleRestockSku(product)" :product="product" /></div>
               </article>
             </div>
           </section>
@@ -2294,23 +2493,32 @@ onBeforeUnmount(() => {
     >
       <section
         v-if="detailProduct"
+        ref="detailPanelRef"
         class="client-detail-panel"
-        :class="{ 'client-detail-panel--compact': !hasDetailSkuChoices }"
+        :class="{ 'client-detail-panel--compact': !hasDetailSkuChoices && detailMode !== 'multi' }"
       >
+        <p v-if="detailCatalogNotice" class="mx-4 mt-3 rounded-xl bg-amber-50 p-3 text-sm text-amber-800" role="status">{{ detailCatalogNotice }}</p>
         <div class="client-detail-scroll">
-          <header v-if="hasDetailSkuChoices" class="client-detail-header client-detail-header--split">
+          <header v-if="hasDetailSkuChoices || detailMode === 'multi'" class="client-detail-header client-detail-header--split">
             <div class="client-detail-summary">
-              <p class="client-detail-title">{{ resolveCurrentDetailDisplayName(detailProduct) }}</p>
+              <div ref="detailModeTitleRef" class="client-detail-mode-stage">
+                <p class="client-detail-title client-detail-mode-pane client-detail-mode-pane--single" :class="{ 'is-active': detailMode === 'single' }" :aria-hidden="detailMode !== 'single'">{{ resolveCurrentDetailDisplayName(detailProduct) }}</p>
+                <p class="client-detail-title client-detail-mode-pane client-detail-mode-pane--multi" :class="{ 'is-active': detailMode === 'multi' }" :aria-hidden="detailMode !== 'multi'">{{ detailProduct.productName }}</p>
+              </div>
+              <div class="client-detail-summary-motion" :class="{ 'is-collapsed': detailMode === 'multi' }" :aria-hidden="detailMode === 'multi'">
+                <div class="client-detail-summary-motion__inner">
               <p class="client-detail-price">¥{{ Number(resolveCurrentDetailPriceView(detailProduct).discountedPrice).toFixed(2) }}</p>
               <p v-if="resolveCurrentDetailPriceView(detailProduct).isDiscounted" class="client-product-card__price-extra">
                 原价 ¥{{ Number(resolveCurrentDetailPriceView(detailProduct).originalPrice).toFixed(2) }} · {{ resolveCurrentDetailPriceView(detailProduct).discountLabel }}
               </p>
               <p class="client-detail-desc">{{ resolveCurrentDetailDescription(detailProduct) }}</p>
               <div class="client-detail-tags">
-                <span>可预订 {{ resolveCurrentDetailAvailableStock(detailProduct) }}</span>
-                <span>已预订 {{ resolveCurrentDetailPreOrderedStock(detailProduct) }}</span>
+                <span>可订 {{ resolveCurrentDetailAvailableStock(detailProduct) }}</span>
+                <span>已订 {{ resolveCurrentDetailPreOrderedStock(detailProduct) }}</span>
                 <span>已售 {{ resolveSoldQty(detailProduct) }}</span>
                 <span v-if="detailProduct.limitPerUser > 0">限购 {{ detailProduct.limitPerUser }}</span>
+              </div>
+                </div>
               </div>
             </div>
             <div class="client-detail-side-actions">
@@ -2324,6 +2532,8 @@ onBeforeUnmount(() => {
                   <Close />
                 </ElIcon>
               </button>
+              <div class="client-detail-thumb-motion" :class="{ 'is-collapsed': detailMode === 'multi' }" :inert="detailMode === 'multi'" :aria-hidden="detailMode === 'multi'">
+              <div class="client-detail-thumb-motion__inner">
               <button type="button" class="client-detail-thumb-button" aria-label="预览商品图片" @click="openDetailImagePreview">
                 <img
                   :key="`${detailProduct.id}:${selectedDetailSku?.id}:${resolveDetailProductSmallThumbnail(detailProduct)}:${resolveDetailProductThumbnail(detailProduct)}`"
@@ -2335,6 +2545,8 @@ onBeforeUnmount(() => {
                 />
                 <span>查看大图</span>
               </button>
+              </div>
+              </div>
             </div>
           </header>
           <header v-else class="client-detail-header client-detail-header--hero">
@@ -2367,16 +2579,38 @@ onBeforeUnmount(() => {
               </p>
               <p class="client-detail-desc">{{ resolveCurrentDetailDescription(detailProduct) }}</p>
               <div class="client-detail-tags">
-                <span>可预订 {{ resolveCurrentDetailAvailableStock(detailProduct) }}</span>
-                <span>已预订 {{ resolveCurrentDetailPreOrderedStock(detailProduct) }}</span>
+                <span>可订 {{ resolveCurrentDetailAvailableStock(detailProduct) }}</span>
+                <span>已订 {{ resolveCurrentDetailPreOrderedStock(detailProduct) }}</span>
                 <span>已售 {{ resolveSoldQty(detailProduct) }}</span>
                 <span v-if="detailProduct.limitPerUser > 0">限购 {{ detailProduct.limitPerUser }}</span>
               </div>
             </div>
           </header>
-          <div v-if="hasDetailSkuChoices" class="client-detail-sku-section">
+          <div v-if="detailInitialSkus.length > 1 || hasDetailSkuChoices || detailMode === 'multi'" ref="detailModeToggleRef" class="client-detail-mode-toggle" :class="{ 'is-multi': detailMode === 'multi' }">
+            <el-radio-group v-model="detailMode" aria-label="选购模式">
+              <el-radio-button value="single">单选规格</el-radio-button>
+              <el-radio-button value="multi">多规格选购</el-radio-button>
+            </el-radio-group>
+          </div>
+          <div ref="detailModeContentRef" class="client-detail-mode-stage">
+          <div v-if="detailInitialSkus.length > 1 || hasDetailSkuChoices || detailMode === 'multi'" class="client-detail-mode-pane client-detail-mode-pane--multi" :class="{ 'is-active': detailMode === 'multi' }" :inert="detailMode !== 'multi'" :aria-hidden="detailMode !== 'multi'">
+          <ClientMultiSkuSelector class="client-detail-sku-section"
+            :product="batchCurrentProduct ?? { ...detailProduct, skus: [] }" :skus="batchSkuRows" :drafts="detailBatchDrafts"
+            :max-by-sku="batchMaxBySku" :conflicts="detailBatchConflicts" :thumbnail="batchThumbnail"
+            @change="changeBatchDraft" @restock="openBatchRestock" @preview="previewBatchSku" />
+          </div>
+          <div class="client-detail-mode-pane client-detail-mode-pane--single" :class="{ 'is-active': detailMode === 'single' }" :inert="detailMode !== 'single'" :aria-hidden="detailMode !== 'single'">
+          <div v-if="hasDetailSkuChoices || detailSingleReplacementSku" class="client-detail-sku-section">
             <p class="client-detail-section-title">选择规格</p>
-            <div class="client-detail-sku-groups">
+            <ElButton
+              v-if="detailSingleReplacementSku"
+              class="client-detail-sku-option"
+              plain
+              @click="selectDetailSku(detailSingleReplacementSku)"
+            >
+              选择规格：{{ detailSingleReplacementSku.specText || detailSingleReplacementSku.skuCode || '默认规格' }}
+            </ElButton>
+            <div v-else class="client-detail-sku-groups">
               <div v-for="group in detailSkuSpecGroups" :key="group.name" class="client-detail-sku-group">
                 <p class="client-detail-sku-group-title">{{ group.name }}</p>
                 <div class="client-detail-sku-options">
@@ -2396,9 +2630,16 @@ onBeforeUnmount(() => {
               </div>
             </div>
           </div>
+          </div>
+          </div>
         </div>
         <!-- 底栏按当前规格在“数量 + 加入购物车”与“申请补货”之间合并/拆分：数量栏折叠收起，主按钮换色并先隐去旧文字再显现新文字。 -->
-        <footer class="client-detail-action-bar" :class="`is-${detailActionMode}`">
+        <div ref="detailModeActionsRef" class="client-detail-mode-stage client-detail-mode-actions">
+        <footer class="client-detail-action-bar client-detail-batch-bar client-detail-mode-pane client-detail-mode-pane--multi" :class="{ 'is-active': detailMode === 'multi' }" :inert="detailMode !== 'multi'" :aria-hidden="detailMode !== 'multi'">
+          <span role="status">本次 {{ batchSummary.valid ? batchSummary.qty : '—' }} 件 · ¥{{ batchSummary.valid ? batchSummary.amount.toFixed(2) : '—' }}</span>
+          <ElButton type="primary" :disabled="batchSummary.valid && batchSummary.qty === 0" @click="submitDetailBatch">加入购物车</ElButton>
+        </footer>
+        <footer class="client-detail-action-bar client-detail-mode-pane client-detail-mode-pane--single" :class="[`is-${detailActionMode}`, { 'is-active': detailMode === 'single' }]" :inert="detailMode !== 'single'" :aria-hidden="detailMode !== 'single'">
           <div class="client-detail-qty-collapse" :inert="detailActionMode !== 'purchase'" :aria-hidden="detailActionMode !== 'purchase'">
             <div class="client-detail-qty-collapse__inner">
               <div class="client-detail-qty-row">
@@ -2412,7 +2653,7 @@ onBeforeUnmount(() => {
                     :aria-disabled="detailQty <= 1"
                     @click="changeDetailQty(-1)"
                   >-</ElButton>
-                  <ClientQtyInput :model-value="detailQty" aria-label="商品数量" @commit="commitDetailQty" />
+                  <ClientQtyInput ref="detailQtyInputRef" :model-value="detailQty" aria-label="商品数量" @commit="commitDetailQty" />
                   <ElButton
                     native-type="button"
                     class="client-qty-button"
@@ -2432,6 +2673,7 @@ onBeforeUnmount(() => {
             :disabled="detailActionMode === 'unavailable' || detailRestockLoading"
             :aria-busy="detailRestockLoading"
             :aria-label="detailActionLabel"
+            @pointerdown.prevent
             @click="handleDetailPrimaryAction"
           >
             <Transition name="detail-action-label">
@@ -2439,6 +2681,7 @@ onBeforeUnmount(() => {
             </Transition>
           </ElButton>
         </footer>
+        </div>
       </section>
     </ElDrawer>
 
@@ -2483,6 +2726,14 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.mall-search-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
 .mall-page {
   /* 商城页仅为底部导航预留页面级安全区，悬浮购物车改为覆盖在内容上方，让商品选择区继续向下延伸。 */
   --mall-mini-cart-height: 4.7rem;
@@ -2706,6 +2957,12 @@ onBeforeUnmount(() => {
   grid-row: 2;
 }
 
+.mall-category-name {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+}
+
 .mall-browse-list {
   grid-column: 2;
   grid-row: 2;
@@ -2912,27 +3169,23 @@ onBeforeUnmount(() => {
 .client-product-card__meta {
   margin-top: auto;
   display: grid;
-  grid-template-columns: minmax(0, max-content) minmax(0, max-content);
+  grid-template-columns: max-content max-content;
   min-width: 0;
   align-items: center;
+  justify-content: start;
   gap: 0.26rem 0.32rem;
-  overflow: hidden;
   font-size: 0.72rem;
 }
 
 .client-product-card__meta > span {
-  overflow: hidden;
-  max-width: 5.4rem;
+  justify-self: start;
   padding: 0.2rem 0.42rem !important;
   line-height: 1.12;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .client-product-card__meta > span:first-child {
   grid-column: 1 / -1;
-  justify-self: start;
-  max-width: 100%;
 }
 
 .client-product-card__price-extra {
@@ -3060,6 +3313,13 @@ onBeforeUnmount(() => {
   padding-top: 0.15rem;
 }
 
+.client-detail-summary-motion { display: grid; grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows var(--detail-mode-duration) var(--detail-mode-ease), opacity var(--detail-mode-duration) var(--detail-mode-ease); }
+.client-detail-summary-motion.is-collapsed { grid-template-rows: 0fr; opacity: 0; }
+.client-detail-summary-motion__inner { min-height: 0; overflow: hidden; }
+.client-detail-thumb-motion { display: grid; grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows var(--detail-mode-duration) var(--detail-mode-ease), opacity var(--detail-mode-duration) var(--detail-mode-ease), margin-top var(--detail-mode-duration) var(--detail-mode-ease); }
+.client-detail-thumb-motion.is-collapsed { grid-template-rows: 0fr; opacity: 0; margin-top: -0.5rem; }
+.client-detail-thumb-motion__inner { min-height: 0; overflow: hidden; }
+
 .client-detail-title {
   color: #0f172a;
   font-size: 1.12rem;
@@ -3119,6 +3379,7 @@ onBeforeUnmount(() => {
   gap: 0.5rem;
   flex-shrink: 0;
   padding-top: 0.15rem;
+  width: 5rem;
 }
 
 .client-detail-thumb-button {
@@ -3212,8 +3473,12 @@ onBeforeUnmount(() => {
 
 .client-detail-sku-option.el-button {
   min-width: 3.25rem;
-  min-height: 2.25rem;
+  min-height: 2.5rem;
+  height: auto;
+  max-width: 100%;
   margin: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
   border-color: #dbe4ee;
   border-radius: 0.7rem;
   background: #ffffff;
@@ -3342,7 +3607,7 @@ onBeforeUnmount(() => {
 
 /* 操作列固定最小宽度等于步进器展开宽度，加购展开/收起与缺货切换时卡片中间列不重排。 */
 .client-product-card__actions {
-  min-width: 5.1rem;
+  min-width: 4.5rem;
   justify-self: end;
 }
 
@@ -4537,7 +4802,7 @@ onBeforeUnmount(() => {
   }
 
   .client-product-card__actions {
-    min-width: 4.9rem;
+    min-width: 4.25rem;
   }
 
   .mini-cart-wrapper {
@@ -5253,4 +5518,39 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .detail-action-label-leave-active { position: absolute; pointer-events: none; }
+</style>
+
+<style scoped>
+.client-detail-panel { --detail-mode-duration: 280ms; --detail-mode-ease: cubic-bezier(0.22, 1, 0.36, 1); }
+.client-detail-mode-toggle { padding: 12px 0 0; }
+.client-detail-mode-toggle :deep(.el-radio-group) { position: relative; display: flex; width: 100%; padding: 4px; border-radius: 14px; background: var(--el-fill-color-light); }
+.client-detail-mode-toggle :deep(.el-radio-group)::before { content: ''; position: absolute; top: 4px; bottom: 4px; left: 4px; width: calc((100% - 8px) / 2); border-radius: 10px; background: var(--ylink-color-primary-strong); transition: transform var(--detail-mode-duration) var(--detail-mode-ease); }
+.client-detail-mode-toggle.is-multi :deep(.el-radio-group)::before { transform: translateX(100%); }
+.client-detail-mode-toggle :deep(.el-radio-button) { flex: 1; min-width: 0; }
+.client-detail-mode-toggle :deep(.el-radio-button__inner) { width: 100%; padding: 10px 6px; border: 0; border-radius: 10px !important; background: transparent !important; box-shadow: none !important; font-weight: 700; transition: color var(--detail-mode-duration) var(--detail-mode-ease); }
+.client-detail-mode-toggle :deep(.el-radio-button.is-active .el-radio-button__inner) { color: #fff; }
+.client-detail-batch-bar > span { min-width: 0; font-weight: 700; }
+.client-detail-batch-bar { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.client-detail-batch-bar > span { font-size: 13px; }
+/* 非当前模式脱离流，壳层仅在两端高度间过渡，静止时不保留另一模式的空白。 */
+.client-detail-mode-stage { position: relative; display: flow-root; overflow: clip; }
+.client-detail-mode-actions { flex-shrink: 0; }
+.client-detail-mode-pane { position: absolute; top: 0; left: 0; width: 100%; display: flow-root; opacity: 0; visibility: hidden; pointer-events: none; transition: opacity var(--detail-mode-duration) var(--detail-mode-ease), transform var(--detail-mode-duration) var(--detail-mode-ease), visibility 0s var(--detail-mode-duration); }
+.client-detail-mode-pane--single { transform: translateX(-10px); }
+.client-detail-mode-pane--multi { transform: translateX(10px); }
+.client-detail-mode-pane.is-active { position: relative; opacity: 1; visibility: visible; pointer-events: auto; transform: translateX(0); transition-delay: 0s; }
+.client-detail-batch-bar { display: flex; }
+@media (prefers-reduced-motion: reduce) {
+  .client-detail-summary-motion, .client-detail-thumb-motion, .client-detail-mode-pane,
+  .client-detail-mode-toggle :deep(.el-radio-group)::before, .client-detail-mode-toggle :deep(.el-radio-button__inner) { transition: none; }
+}
+/* 极窄分类内容区：价格和完整库存标签跨图片列，操作独占右列，避免挤入仅约 42px 的中列。 */
+@media (max-width: 360px) {
+  .client-product-card { grid-template-columns: 2rem minmax(0, 1fr) auto; padding: 0.35rem 0.4rem; row-gap: 0.1rem; }
+  .client-product-card__image-button { grid-row: 1; }
+  .client-product-card__cover { width: 1.6rem; height: 1.6rem; border-radius: 0.35rem; }
+  .client-product-card__body { grid-column: 1 / 3; }
+  .client-product-card__price-wrap { min-height: 0; }
+  .client-product-card__meta { gap: 0.18rem; margin-top: 0.2rem; }
+}
 </style>

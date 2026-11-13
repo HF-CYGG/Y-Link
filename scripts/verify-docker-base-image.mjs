@@ -7,8 +7,25 @@ const dockerfiles = [
   'backend/Dockerfile',
   'backend/Dockerfile.mysql',
 ]
-const publicEcrNodeImage = 'public.ecr.aws/docker/library/node:22.23.4-bookworm-slim'
-const dockerHubNodeImage = 'docker.io/library/node:22.23.4-bookworm-slim'
+const publicEcrNodeImage = 'public.ecr.aws/docker/library/node:22.23.5-bookworm-slim'
+const dockerHubNodeImage = 'docker.io/library/node:22.23.5-bookworm-slim'
+const oneboxSource = readFileSync('Dockerfile.onebox', 'utf8')
+const nginxSigningFingerprints = [
+  '573BFD6B3D8FBC641079A6ABABF5BD827BD9BF62',
+  '8540A6F18833A80E9C1653A42FD21310B49F6B46',
+  '9E9BE90EACBCDE69FE9B204CBCDCD8A38D88A2B3',
+]
+assert.deepEqual(
+  oneboxSource.match(/nginx_key_fingerprints='([^']+)'/)?.[1].split(' '),
+  nginxSigningFingerprints,
+  'Onebox 仅允许官方固定的三把完整签名指纹',
+)
+assert.ok(oneboxSource.includes('grep -qx "fpr:::::::::$fingerprint:" || exit 1'), '每把允许的指纹核验失败都必须中止')
+assert.ok(oneboxSource.includes('gpg --batch --export $nginx_key_fingerprints > /usr/share/keyrings/nginx-archive-keyring.gpg'), '独立 keyring 不得导出下载文件中的未知 key')
+assert.ok(oneboxSource.includes('signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] https://nginx.org/packages/debian bookworm nginx'), '保留 bookworm 官方 stable 源和独立 signed-by')
+assert.ok(oneboxSource.includes('ARG Y_LINK_NGINX_VERSION=1.30.6-1~bookworm'), 'Onebox Nginx 必须固定批准的 bookworm 补丁版本')
+assert.ok(oneboxSource.includes('gpgv --status-fd 1 --keyring /usr/share/keyrings/nginx-archive-keyring.gpg /var/lib/apt/lists/nginx.org_packages_debian_dists_bookworm_InRelease'), '构建必须记录 APT 实际 InRelease 的有效完整签名者')
+assert.ok(readFileSync('Dockerfile', 'utf8').includes('FROM nginx:1.30.6-alpine AS runtime'), '独立前端 Nginx 必须固定批准的补丁版本')
 
 for (const filePath of dockerfiles) {
   const source = readFileSync(filePath, 'utf8')

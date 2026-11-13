@@ -12,7 +12,7 @@
 # ------------------------------
 # sqlite3@5 的 N-API 预编译产物在 Node 22 LTS 上稳定可用；升级 Node 主版本前必须先通过 Onebox SQLite 冒烟。
 # 固定到 Node 22 最新安全补丁版本；Node 发布新安全版本后 `npm run verify:security-updates` 会报红，需同步升级全部 Node 版本固定点。
-ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:22.23.4-bookworm-slim
+ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:22.23.5-bookworm-slim
 
 FROM --platform=$BUILDPLATFORM ${Y_LINK_NODE_IMAGE} AS build
 
@@ -45,7 +45,7 @@ RUN npm run build
 # 运行阶段：使用 Nginx 托管静态资源并代理后端 API
 # ------------------------------
 # nginx 跟随官方 stable 分支（1.30.x）；1.27 主线分支已停止维护，不再获得安全修复。
-FROM nginx:1.30-alpine AS runtime
+FROM nginx:1.30.6-alpine AS runtime
 
 ENV TZ=Asia/Shanghai
 

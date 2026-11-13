@@ -732,6 +732,16 @@ function verifyOverloadPrimitives() {
   assert.equal(classify('GET', '/api/auth/me', 'critical'), null)
   assert.equal(classify('POST', '/api/orders', 'critical'), null, '写请求永不削峰')
   assert.equal(classify('POST', '/api/v1/mobile-auth/login', 'critical'), null, '移动端不纳入')
+  for (const level of ['elevated', 'critical'] as const) {
+    for (const alias of ['/api/auth/LOGIN', '/api/auth/login/', '/API/AUTH/LOGIN/']) {
+      assert.equal(classify('POST', alias, level), 'anonymousAuth', 'POST 别名须按匿名认证削峰')
+    }
+    assert.equal(classify('GET', '/api/client-auth/CAPTCHA/', level), 'anonymousAuth', '验证码别名不应仅依赖 critical 通用读削峰')
+    assert.equal(classify('GET', '/API/AUTH/ME/', level), null)
+    assert.equal(classify('POST', '/API/V1/MOBILE-AUTH/LOGIN/', level), null)
+    assert.equal(classify('GET', '/API/CUSTOMER-SERVICE/STREAM/', level), 'realtime')
+    assert.equal(classify('POST', '/API/DATA-MAINTENANCE/EXPORT/JSON/', level), 'export')
+  }
   assert.equal(classify('GET', '/health', 'critical'), null)
   assert.equal(classify('GET', '/api/database-rescue/status', 'critical'), null, '救援面不纳入')
 }
@@ -1936,11 +1946,34 @@ async function verifyProductImageGate() {
   const busy = responses.find((response) => response.status === 503)!
   assert.equal(busy.headers.get('retry-after'), '2')
   assert.match(((await busy.json()) as { message: string }).message, /商品图片处理繁忙/)
-  await responses.find((response) => response.status === 200)!.arrayBuffer()
+  const uploaded = await responses.find((response) => response.status === 200)!.json() as {
+    code?: number; data?: { url?: unknown }
+  }
+  assert.equal(uploaded.code, 0, '成功上传必须返回业务成功码')
+  assert.equal(typeof uploaded.data?.url, 'string', '成功上传必须返回原图 URL')
+  const originalMatch = /^\/uploads\/products\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.png)$/i.exec(uploaded.data!.url as string)
+  assert.ok(originalMatch, 'PNG 夹具应返回 UUID 命名、无额外路径或参数的原图 URL')
+  const originalFileName = originalMatch[1]!
+  const thumbnailFileName = originalFileName.replace(/\.png$/i, '.thumb.webp')
   const uploadsRoot = path.join(process.cwd(), 'uploads')
   const tmpDir = path.join(uploadsRoot, '.tmp')
   assert.deepEqual(fs.existsSync(tmpDir) ? fs.readdirSync(tmpDir) : [], [], '被拒绝的上传必须清理临时文件')
-  assert.equal(fs.readdirSync(path.join(uploadsRoot, 'products')).length, 1)
+  const productDir = path.join(uploadsRoot, 'products')
+  const entries = fs.readdirSync(productDir, { withFileTypes: true })
+  assert.deepEqual(entries.map((entry) => entry.name).sort(), [originalFileName, thumbnailFileName].sort(),
+    '只允许响应 URL 对应的一张原图及其同目录缩略图，不得遗留额外文件或目录')
+  assert.ok(entries.every((entry) => entry.isFile()), '原图和缩略图均须为普通文件')
+  // 先由 Node 读入并关闭文件，再让 sharp 只接触 Buffer，避免 libvips 文件缓存阻塞 Windows 清理。
+  const originalImage = await fs.promises.readFile(path.join(productDir, originalFileName))
+  const originalMetadata = await sharp(originalImage).metadata()
+  assert.equal(originalMetadata.format, 'png')
+  assert.equal(originalMetadata.width, width)
+  assert.equal(originalMetadata.height, height)
+  const thumbnailImage = await fs.promises.readFile(path.join(productDir, thumbnailFileName))
+  const thumbnailMetadata = await sharp(thumbnailImage).metadata()
+  assert.equal(thumbnailMetadata.format, 'webp')
+  assert.equal(thumbnailMetadata.width, 480, '1800px 正方形夹具应生成长边 480px 的缩略图')
+  assert.equal(thumbnailMetadata.height, 480)
 }
 
 /** 第 21 项：同一会话突发后 429，其他会话不受影响，等待补充后恢复；客户端会话同样生效。 */

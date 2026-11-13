@@ -10,6 +10,7 @@
  * - 若前端托管层也有安全头策略，需与本文件保持不冲突、不过度收紧。
  */
 
+import { staticPathKey } from './utils/static-path-key.js'
 import express from 'express'
 import { rateLimit } from 'express-rate-limit'
 import path from 'node:path'
@@ -160,7 +161,7 @@ export function createApp(options: CreateAppOptions = {}) {
       limit,
       standardHeaders: 'draft-8',
       legacyHeaders: false,
-      skip: (req) => !limitedPaths.has(req.path),
+      skip: (req) => !limitedPaths.has(staticPathKey(req.path)),
       ...(sharedStore ? { store: sharedStore } : {}),
       handler: (req, res) => {
         if (errorCode === 42900) {
@@ -339,7 +340,7 @@ export function createApp(options: CreateAppOptions = {}) {
   // 将 zod 参数校验错误转为业务错误，统一响应格式。
   app.use((err: unknown, _req: express.Request, _res: express.Response, next: express.NextFunction) => {
     if (err instanceof ZodError) {
-      return next(new BizError(err.errors[0]?.message ?? '参数校验失败', 400))
+      return next(new BizError(err.issues[0]?.message ?? '参数校验失败', 400))
     }
     return next(err)
   })

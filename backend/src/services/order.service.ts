@@ -143,6 +143,7 @@ export interface OrderDetailItemView {
 }
 
 export interface OrderSummaryView {
+  sourcePreorderPickupContacts?: Array<{ sourceOrderId: string; pickupContact: string | null }>
   sourcePreorderRegistrations?: OrderDetailSummaryView['sourcePreorderRegistrations']
   id: string
   /** 仅管理员技术追溯可见。 */
@@ -543,9 +544,28 @@ export class OrderService {
 
     const sourceIds = [...new Set(list.flatMap((order) => [String(order.id), ...(metadataMap.get(String(order.id))?.children.map((child) => child.id) ?? [])]))]
     const sourceOrders = sourceIds.length ? await AppDataSource.getRepository(BizOutboundOrder).find({ where: { id: In(sourceIds) } }) : []
-    const preorderIds = sourceOrders.flatMap((order) => order.sourceDocType === 'o2o_preorder' && order.sourceDocId ? [String(order.sourceDocId)] : [])
+    const sourceOrderMap = new Map(sourceOrders.map((order) => [String(order.id), order]))
+    const preorderIds = [...new Set(sourceOrders.flatMap((order) => {
+      const id = this.resolveLinkedO2oPreorderId(order) ?? this.resolveLegacyPickupPreorderId(order)
+      return id ? [id] : []
+    }))]
     const sourcePreorders = preorderIds.length ? await AppDataSource.getRepository(O2oPreorder).find({ where: { id: In(preorderIds) } }) : []
     const sourcePreorderMap = new Map(sourcePreorders.map((preorder) => [String(preorder.id), preorder]))
+    // 按自身原单、合并成员顺序保留来源；缺失关联也保留 null，不从客户或部门名称推断。
+    const pickupContactsFor = (order: BizOutboundOrder) => {
+      const metadata = metadataMap.get(String(order.id))
+      const ids = [String(order.id), ...(metadata?.role === 'parent' ? metadata.children.map((child) => child.id) : [])]
+      return ids.flatMap((sourceOrderId) => {
+        const source = sourceOrderMap.get(sourceOrderId)
+        if (!source) return [{ sourceOrderId, pickupContact: null }]
+        if (source.sourceDocType !== 'o2o_preorder' && source.inventoryMode !== 'o2o_preapplied') return []
+        const structuredId = this.resolveLinkedO2oPreorderId(source)
+        const id = structuredId ?? this.resolveLegacyPickupPreorderId(source)
+        const candidate = id ? sourcePreorderMap.get(id) : undefined
+        const preorder = structuredId || candidate?.preorderNo === source.sourceDocNo ? candidate : undefined
+        return [{ sourceOrderId, pickupContact: preorder?.pickupContact?.trim() || null }]
+      })
+    }
     const registrationsFor = (order: BizOutboundOrder) => {
       const ids = new Set([String(order.id), ...(metadataMap.get(String(order.id))?.children.map((child) => child.id) ?? [])])
       return sourceOrders.filter((source) => ids.has(String(source.id)) && source.sourceDocType === 'o2o_preorder').map((source) => {
@@ -561,6 +581,7 @@ export class OrderService {
       pageSize: query.pageSize,
       total,
       list: list.map((order) => ({
+        sourcePreorderPickupContacts: pickupContactsFor(order),
         sourcePreorderRegistrations: registrationsFor(order),
         ...this.buildOrderSummaryView(
           order,

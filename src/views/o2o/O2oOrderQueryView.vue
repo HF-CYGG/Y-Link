@@ -415,9 +415,8 @@ const getCancellationSourceLabel = (source: O2oOrderStatusReport['cancellationSo
   return '历史记录'
 }
 
-// 管理端状态选择保留门店当前对外使用的核心业务状态，并新增“已完结（交易结束）”。
-// 这样门店既能表达待接单/备货/售后，也能在不改动主状态的前提下补充交易收尾完成。
-const BUSINESS_STATUS_PICKER_ORDER: O2oOrderBusinessStatus[] = ['awaiting_shipment', 'preparing', 'ready', 'completed', 'after_sale']
+// 新单默认等待接单；手动编辑只开放接单后的四项进度，历史状态仍沿用共享中文元数据回显。
+const BUSINESS_STATUS_PICKER_ORDER: O2oOrderBusinessStatus[] = ['preparing', 'ready', 'completed', 'after_sale']
 
 const businessStatusOptions = BUSINESS_STATUS_PICKER_ORDER.map((value) => {
   const meta = O2O_ORDER_BUSINESS_STATUS_META[value]
@@ -430,6 +429,15 @@ const businessStatusOptions = BUSINESS_STATUS_PICKER_ORDER.map((value) => {
 
 const activeBusinessStatus = computed(() => activeOrderDetail.value?.order.businessStatus ?? null)
 const draftBusinessStatus = ref<O2oOrderBusinessStatus | null>(null)
+const businessStatusSaving = ref(false)
+let businessStatusOwnerGeneration = 0
+let businessStatusOperation = 0
+let businessStatusPageActive = true
+watch([() => activeOrderId.value, () => activeOrderDetail.value?.order.id ?? '', () => authStore.currentUser?.id], () => {
+  businessStatusOwnerGeneration += 1
+  businessStatusSaving.value = false
+  draftBusinessStatus.value = activeBusinessStatus.value
+}, { flush: 'sync' })
 const draftMerchantMessage = ref('')
 const complianceSaving = ref(false)
 const complianceForm = ref({
@@ -1217,18 +1225,23 @@ const handleDeleteCurrentOrder = async () => {
 }
 
 const handleBusinessStatusChange = async (value: O2oOrderBusinessStatus | null) => {
-  if (!activeOrderDetail.value?.order.id) {
+  const target = activeOrderDetail.value?.order
+  if (!target?.id || !businessStatusPageActive || businessStatusSaving.value) {
     return
   }
   const previousValue = activeBusinessStatus.value
   if (value === previousValue) {
     return
   }
+  const generation = businessStatusOwnerGeneration
+  const operation = ++businessStatusOperation
+  const isCurrent = () => businessStatusPageActive && generation === businessStatusOwnerGeneration
+    && operation === businessStatusOperation && activeOrderId.value === target.id && activeOrderDetail.value?.order.id === target.id
 
   const nextMeta = getO2oOrderBusinessStatusMeta(value)
   const confirmMessage = value
-    ? `确认将预订单“${activeOrderDetail.value.order.preorderNo}”的商家特殊状态更新为“${nextMeta?.label ?? value}”吗？`
-    : `确认清除预订单“${activeOrderDetail.value.order.preorderNo}”的商家特殊状态吗？`
+    ? `确认将预订单“${target.preorderNo}”的商家特殊状态更新为“${nextMeta?.label ?? value}”吗？`
+    : `确认清除预订单“${target.preorderNo}”的商家特殊状态吗？`
 
   try {
     await ElMessageBox.confirm(confirmMessage, '确认更新特殊状态', {
@@ -1238,22 +1251,25 @@ const handleBusinessStatusChange = async (value: O2oOrderBusinessStatus | null) 
       closeOnClickModal: false,
     })
   } catch {
-    draftBusinessStatus.value = previousValue
+    if (isCurrent()) draftBusinessStatus.value = previousValue
     return
   }
 
-  detailLoading.value = true
+  if (!isCurrent()) return
+  businessStatusSaving.value = true
   try {
-    const latestDetail = await updateO2oOrderBusinessStatus(activeOrderDetail.value.order.id, value)
+    const latestDetail = await updateO2oOrderBusinessStatus(target.id, value)
+    if (!isCurrent()) return
     activeOrderDetail.value = latestDetail
     mergeOrderSummaryFromDetail(latestDetail)
     draftBusinessStatus.value = latestDetail.order.businessStatus
     showAppSuccess(value ? '商家特殊状态已更新' : '商家特殊状态已清除')
   } catch (error) {
+    if (!isCurrent()) return
     draftBusinessStatus.value = previousValue
     showAppError(error instanceof Error ? error.message : '更新商家状态失败，请稍后重试')
   } finally {
-    detailLoading.value = false
+    if (isCurrent()) businessStatusSaving.value = false
   }
 }
 
@@ -1416,6 +1432,7 @@ const handleVisibilityChange = () => {
 }
 
 const activatePageRuntime = () => {
+  businessStatusPageActive = true
   if (pageRuntimeActive) {
     return
   }
@@ -1430,6 +1447,10 @@ const activatePageRuntime = () => {
 }
 
 const deactivatePageRuntime = () => {
+  businessStatusPageActive = false
+  businessStatusOwnerGeneration += 1
+  businessStatusSaving.value = false
+  draftBusinessStatus.value = activeBusinessStatus.value
   if (!pageRuntimeActive) {
     return
   }
@@ -1807,11 +1828,15 @@ onBeforeUnmount(() => {
                     <el-select
                       v-model="draftBusinessStatus"
                       clearable
+                      :value-on-clear="null"
                       placeholder="选择特殊状态"
                       class="w-full lg:w-72"
-                      :disabled="detailLoading"
+                      :disabled="detailLoading || businessStatusSaving"
                       @change="handleBusinessStatusChange"
                     >
+                      <template #label>
+                        {{ getO2oOrderBusinessStatusMeta(draftBusinessStatus)?.label ?? '状态待确认' }}
+                      </template>
                       <el-option
                         v-for="option in businessStatusOptions"
                         :key="option.value"

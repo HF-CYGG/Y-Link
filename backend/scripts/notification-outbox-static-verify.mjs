@@ -13,6 +13,7 @@ const inboxEntity = read('src/entities/notification-inbox.entity.ts')
 const dispatchEntity = read('src/entities/notification-dispatch.entity.ts')
 const bootstrap = read('src/config/database-bootstrap.ts')
 const index = read('src/index.ts')
+const businessRuntime = read('src/runtime/business-runtime.ts')
 const o2oService = read('src/services/o2o-preorder.service.ts')
 const feedbackService = read('src/services/client-feedback.service.ts')
 const mysqlMigration = read('sql/036_notification_outbox.sql')
@@ -29,8 +30,18 @@ assert.match(
   /inventoryLogRepo\.save\(inventoryLogs\)[\s\S]{0,800}notificationService\.emitEvent\([\s\S]{0,600},\s*manager\)[\s\S]{0,200}created:\s*true/,
   '新订单与 outbox 事件必须在同一幂等事务提交',
 )
-const feedbackTransactionalEmits = feedbackService.match(/notificationService\.emitEvent\([\s\S]{0,700},\s*manager\)/g) ?? []
-assert.equal(feedbackTransactionalEmits.length, 2, '新反馈会话与客户端追加消息必须各自在业务事务内写 outbox')
+for (const [start, end, label] of [
+  ['  async createRestockRequest(', '  private async cancelActiveRestock(', '补货请求'],
+  ['  async createConversation(', '  async listMyConversations(', '新反馈会话'],
+  ['  async appendClientMessage(', '  async confirmConversationResolvedByClient(', '客户端追加消息'],
+]) {
+  const startIndex = feedbackService.indexOf(start)
+  const endIndex = feedbackService.indexOf(end, startIndex)
+  assert.ok(startIndex >= 0 && endIndex > startIndex, `${label}真实入口必须存在`)
+  const body = feedbackService.slice(startIndex, endIndex)
+  assert.match(body, /runInTransaction\(/, `${label}必须保留业务事务`)
+  assert.equal((body.match(/notificationService\.emitEvent\([\s\S]{0,700},\s*manager\)/g) ?? []).length, 1, `${label}必须在自身事务内复用manager写入outbox`)
+}
 
 assert.match(eventEntity, /'pending',\s*'processing',\s*'processed',\s*'failed'/, '事件必须包含 processing 租约状态')
 for (const field of ['attempt_count', 'next_attempt_at', 'processing_started_at', 'processing_owner', 'processed_at']) {
@@ -47,7 +58,9 @@ assert.match(service, /claim\.affected\s*!==\s*1/, '事件领取必须检查 CAS
 assert.match(service, /NOTIFICATION_OUTBOX_MAX_ATTEMPTS\s*=\s*5/, '必须配置有限重试上限')
 assert.match(service, /NOTIFICATION_OUTBOX_RETRY_DELAYS_MS/, '必须配置退避而非立即热循环')
 assert.match(service, /processingStartedAt:\s*new Date\(\)/, '长外发前必须刷新处理租约')
-assert.match(index, /notificationService\.startOutboxWorker\(\)/, '启动入口必须装配通知 Worker')
+assert.match(index, /import\('\.\/runtime\/business-runtime\.js'\)/, '薄入口必须加载真实业务运行时')
+assert.match(index, /businessRuntime\.startBusinessRuntime\(startup\)/, '薄入口必须调用业务运行时启动')
+assert.match(businessRuntime, /notificationService\.startOutboxWorker\(\)/, '实际业务运行时必须装配通知 Worker')
 
 assert.match(inboxEntity, /uk_notification_inbox_event_user[\s\S]*unique:\s*true/, '收件箱必须以事件+账号唯一')
 assert.match(dispatchEntity, /uk_notification_dispatch_event_channel_target[\s\S]*unique:\s*true/, '外发记录必须以事件+渠道+目标摘要唯一')
