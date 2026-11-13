@@ -682,8 +682,9 @@ class ClientAuthService {
       if (manager.connection.options.type === 'mysql') query.setLock('pessimistic_write')
       const session = await query.getOne()
       const now = new Date()
-      if (!session || session.revokedAt || session.accessExpiresAt <= now || session.absoluteExpiresAt <= now) {
-        throw new BizError('未登录或登录状态已失效', 401)
+      if (!session || session.revokedAt) throw new BizError('Access Token 无效或已撤销', 401, { code: 40101 })
+      if (session.accessExpiresAt <= now || session.absoluteExpiresAt <= now) {
+        throw new BizError('Access Token 已过期', 401, { code: 40102 })
       }
       return
     }
@@ -1223,7 +1224,7 @@ class ClientAuthService {
   }
 
   async preparePasswordChange(
-    userId: string,
+    auth: ClientAuthContext,
     input: ClientChangePasswordInput,
     passwordHash: string,
     manager: EntityManager,
@@ -1231,13 +1232,16 @@ class ClientAuthService {
     const repository = manager?.getRepository(ClientUser) ?? this.userRepo
     const query = repository.createQueryBuilder('user')
       .addSelect('user.passwordHash')
-      .where('user.id = :userId', { userId })
+      .where('user.id = :userId', { userId: auth.userId })
     if (manager && AppDataSource.options.type === 'mysql') query.setLock('pessimistic_write')
     const user = await query.getOne()
     if (!user) {
       throw new BizError('当前用户不存在', 404)
     }
     if (user.status !== 'enabled') throw new BizError('当前账号已停用', 403)
+
+    // 中间件校验后会话仍可能被注销或轮换；持有账号锁后再锁定并复核会话。
+    await this.assertProfileSessionCurrent(manager, auth)
 
     const matched = await verifyPassword(input.currentPassword, user.passwordHash)
     if (!matched) {
@@ -1294,7 +1298,7 @@ class ClientAuthService {
     requestMeta?: RequestMeta,
   ) {
     await runInTransaction(async (manager) => {
-      const prepared = await this.preparePasswordChange(auth.userId, input, passwordHash, manager)
+      const prepared = await this.preparePasswordChange(auth, input, passwordHash, manager)
       await manager.getRepository(ClientUser).update(prepared.user.id, { passwordHash: prepared.passwordHash })
       const revokedWeb = await manager.getRepository(ClientUserSession).delete({ userId: prepared.user.id })
       const revokedMobile = await manager.getRepository(ClientMobileSession).createQueryBuilder()

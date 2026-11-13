@@ -10,10 +10,13 @@ import os from 'node:os'
 import path from 'node:path'
 
 const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ylink-password-transaction-'))
+const emptyEnvFile = path.join(temporaryRoot, 'empty.env')
+fs.writeFileSync(emptyEnvFile, '')
 Object.assign(process.env, {
   NODE_ENV: 'test', DB_TYPE: 'sqlite', DB_SYNC: 'true',
   APP_PROFILE: 'password-transaction-verify', Y_LINK_SKIP_DATABASE_RUNTIME_OVERRIDE: 'true',
   SQLITE_DB_PATH: path.join(temporaryRoot, 'verification.sqlite'),
+  ENV_FILE: emptyEnvFile, Y_LINK_DATA_DIR: temporaryRoot,
 })
 const oldPassword = 'VerifyOld123!'
 const newPassword = 'VerifyNew456!'
@@ -37,6 +40,7 @@ const { initializeDatabaseSchemaIfNeeded } = await import('../src/config/databas
 const { getCurrentTransactionManager } = await import('../src/database/transaction-coordinator.js')
 const { ClientUser } = await import('../src/entities/client-user.entity.js')
 const { ClientUserSession } = await import('../src/entities/client-user-session.entity.js')
+const { ClientMobileSession } = await import('../src/entities/client-mobile-session.entity.js')
 const { hashSessionToken } = await import('../src/utils/session-token.js')
 const { clientAuthService } = await import('../src/services/client-auth.service.js')
 const { mobileAuthService } = await import('../src/services/mobile-auth.service.js')
@@ -44,12 +48,96 @@ const { mobileSessionService } = await import('../src/services/mobile-session.se
 const { hashPassword, verifyPassword } = await import('../src/utils/password.js')
 const { BizError } = await import('../src/utils/errors.js')
 const { SysAuditLog } = await import('../src/entities/sys-audit-log.entity.js')
+const { auditService } = await import('../src/services/audit.service.js')
 transactionActive = () => Boolean(getCurrentTransactionManager(AppDataSource))
 const failures: string[] = []
 try {
   await AppDataSource.initialize()
   await initializeDatabaseInfrastructure(AppDataSource)
   await initializeDatabaseSchemaIfNeeded(AppDataSource)
+  // 在密码更新、撤销、重签之后让事务内审计失败，所有业务写入必须一起回滚。
+  for (const mobile of [false, true]) {
+    const user = await AppDataSource.getRepository(ClientUser).save({
+      realName: '改密回滚验证', email: `rollback-${crypto.randomUUID()}@example.test`,
+      passwordHash: await hashPassword(oldPassword), accountType: 'personal' as const,
+      departmentName: '', status: 'enabled' as const, staffVerified: false,
+    })
+    const device = { deviceId: crypto.randomUUID(), platform: 'android' as const }
+    const credentials = await mobileSessionService.createForUser(user, device)
+    const mobileAuth = await mobileSessionService.resolveAccess(credentials.accessToken)
+    const webToken = crypto.randomBytes(32).toString('hex')
+    await AppDataSource.getRepository(ClientUserSession).save({
+      userId: user.id, sessionToken: hashSessionToken(webToken),
+      expiresAt: new Date(Date.now() + 60_000), lastAccessAt: new Date(),
+    })
+    const webAuth = await clientAuthService.resolveClientByToken(webToken)
+    const originalRecord = auditService.record
+    auditService.record = async function (...args: Parameters<typeof originalRecord>) {
+      await originalRecord.apply(this, args)
+      if (args[0].actionType === 'password_changed') throw new Error('fixture-audit-rollback')
+    }
+    try {
+      await assert.rejects(mobile
+        ? mobileAuthService.changePassword(mobileAuth, { currentPassword: oldPassword, newPassword, device })
+        : clientAuthService.changePassword(webAuth, { currentPassword: oldPassword, newPassword }), /fixture-audit-rollback/)
+    } finally { auditService.record = originalRecord }
+    const saved = await AppDataSource.getRepository(ClientUser).createQueryBuilder('user')
+      .addSelect('user.passwordHash').where('user.id = :id', { id: user.id }).getOneOrFail()
+    assert.equal(await verifyPassword(oldPassword, saved.passwordHash), true)
+    await mobileSessionService.resolveAccess(credentials.accessToken)
+    await clientAuthService.resolveClientByToken(webToken)
+    assert.equal(await AppDataSource.getRepository(ClientMobileSession).countBy({ clientUserId: user.id }), 1, '重签必须随事务回滚')
+    assert.equal(await AppDataSource.getRepository(SysAuditLog).countBy({ actionType: 'password_changed', targetId: user.id }), 0)
+    assert.equal(await AppDataSource.getRepository(SysAuditLog).countBy({ actionType: 'client.auth.reauth_failed', targetId: user.id }), 0)
+  }
+  // 先取得中间件等价认证快照，再改变会话，模拟路由进入事务前发生注销/刷新/过期。
+  for (const mobile of [false, true]) {
+    for (const state of ['revoked', 'expired', 'rotated', 'concurrent'] as const) {
+      if (!mobile && state === 'rotated') continue
+      const user = await AppDataSource.getRepository(ClientUser).save({
+        realName: '会话屏障验证', email: `barrier-${crypto.randomUUID()}@example.test`,
+        passwordHash: await hashPassword(oldPassword), accountType: 'personal' as const,
+        departmentName: '', status: 'enabled' as const, staffVerified: false,
+      })
+      const device = { deviceId: crypto.randomUUID(), platform: 'android' as const }
+      const credentials = await mobileSessionService.createForUser(user, device)
+      const mobileAuth = await mobileSessionService.resolveAccess(credentials.accessToken)
+      const webToken = crypto.randomBytes(32).toString('hex')
+      const webSession = await AppDataSource.getRepository(ClientUserSession).save({
+        userId: user.id, sessionToken: hashSessionToken(webToken),
+        expiresAt: new Date(Date.now() + 60_000), lastAccessAt: new Date(),
+      })
+      const webAuth = await clientAuthService.resolveClientByToken(webToken)
+      const action = () => mobile
+        ? mobileAuthService.changePassword(mobileAuth, { currentPassword: oldPassword, newPassword, device })
+        : clientAuthService.changePassword(webAuth, { currentPassword: oldPassword, newPassword })
+      if (state === 'concurrent') {
+        const results = await Promise.allSettled([action(), action()])
+        assert.equal(results.filter(item => item.status === 'fulfilled').length, 1, '同一会话并发改密只允许一次提交')
+        const rejected = results.find(item => item.status === 'rejected') as PromiseRejectedResult
+        assert.ok(rejected.reason instanceof BizError && rejected.reason.statusCode === 401)
+      } else {
+        if (mobile) {
+          if (state === 'rotated') await mobileSessionService.refresh(credentials.refreshToken, device)
+          else if (state === 'revoked') await mobileSessionService.revokeCurrent(mobileAuth)
+          else await AppDataSource.getRepository(ClientMobileSession).update(credentials.session.id, { accessExpiresAt: new Date(0) })
+        } else if (state === 'expired') {
+          await AppDataSource.getRepository(ClientUserSession).update(webSession.id, { expiresAt: new Date(0) })
+        } else await clientAuthService.logout(webAuth)
+        await assert.rejects(action(), (error: unknown) => error instanceof BizError
+          && error.statusCode === 401 && (!mobile || error.code === (state === 'expired' ? 40102 : 40101)))
+        const saved = await AppDataSource.getRepository(ClientUser).createQueryBuilder('user')
+          .addSelect('user.passwordHash').where('user.id = :id', { id: user.id }).getOneOrFail()
+        assert.equal(await verifyPassword(oldPassword, saved.passwordHash), true, '失效会话不得改写密码')
+        assert.equal(await AppDataSource.getRepository(SysAuditLog).countBy({
+          actionType: 'client.auth.reauth_failed', targetId: user.id,
+        }), 0, '会话失效不得误记为旧密码错误')
+      }
+      assert.equal(await AppDataSource.getRepository(SysAuditLog).countBy({
+        actionType: 'password_changed', targetId: user.id,
+      }), state === 'concurrent' ? 1 : 0, '改密审计必须与事务一起提交或回滚')
+    }
+  }
   for (const mobile of [false, true]) {
     for (const wrong of [false, true]) {
       const label = (mobile ? 'Mobile' : 'Web') + (wrong ? '错误旧密码' : '成功改密')

@@ -172,7 +172,7 @@ class MobileAuthService {
     const result = await this.withPasswordReauth(auth, 'change_password', requestMeta, async () => {
       const passwordHash = await hashPassword(assertClientPasswordPolicy(input.newPassword, '新密码'))
       return runInTransaction(async (manager) => {
-        const prepared = await clientAuthService.preparePasswordChange(auth.userId, input, passwordHash, manager)
+        const prepared = await clientAuthService.preparePasswordChange(this.toClientAuth(auth), input, passwordHash, manager)
         await manager.getRepository(ClientUser).update(prepared.user.id, { passwordHash: prepared.passwordHash })
         prepared.user.passwordHash = prepared.passwordHash
         const revokedWeb = await manager.getRepository(ClientUserSession).delete({ userId: auth.userId })

@@ -1,6 +1,6 @@
 /**
  * 模块说明：backend/scripts/o2o-stock-consistency-verify.ts
- * 文件职责：以隔离 SQLite 和真实服务层验证 O2O 下单库存的全有或全无语义。
+ * 文件职责：以隔离 SQLite 服务层及独占 MySQL 真实 HTTP 验证 O2O 下单库存的全有或全无语义。
  * 实现逻辑：
  * - 每次运行创建唯一临时 SQLite，动态加载数据源、初始化 Schema 与默认系统配置，避免污染本地开发库；
  * - 在隔离库创建账号夹具，通过真实登录和商品服务调用下单，覆盖同账号旧页面、跨账号和混合商品请求；
@@ -8,7 +8,7 @@
  * - 所有拒绝路径同时校验 HTTP 409 业务错误、订单数量及商品/SKU 预占库存不变。
  * 维护说明：
  * - 若 O2O 下单库存字段、请求幂等键或默认 SKU 规则调整，需要同步更新本脚本的快照断言；
- * - 本脚本只验证服务端一致性，不替代客户端购物车刷新或结算页提示的 UI 回归。
+ * - 默认验证 SQLite；MySQL 仅接受本批容器所有权核对后的参数。两者均不替代客户端购物车或结算 UI 回归。
  */
 
 import { resolveIssueVerificationRoot } from './issue-verification-paths.js'
@@ -25,17 +25,22 @@ const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
 const sqliteRoot = resolveIssueVerificationRoot(path.resolve(backendRoot, 'data', 'local-dev'))
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqlitePath = path.resolve(sqliteRoot, `o2o-stock-consistency-${verifySeed}.sqlite`)
+const mysqlMode = process.env.Y_LINK_STOCK_MYSQL_VERIFY === 'true'
+if (mysqlMode) {
+  const { readOwnedMysqlContext } = await import('./owned-mysql-fixture.mjs')
+  readOwnedMysqlContext() // 连接前核对本批容器标签、回环随机端口和专属库名。
+}
 
 process.env.APP_PROFILE = `o2o-stock-consistency-${verifySeed}`
-process.env.DB_TYPE = 'sqlite'
-process.env.DB_SYNC = 'false'
+process.env.DB_TYPE = mysqlMode ? 'mysql' : 'sqlite'
+process.env.DB_SYNC = mysqlMode ? 'true' : 'false'
 process.env.SQLITE_DB_PATH = sqlitePath
 
 const pass = (message: string) => {
   console.log(`OK ${message}`)
 }
 
-const readCaptchaCode = (captchaSvg: string) => captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6)
+const captchaCode = 'ABC234'
 const toChineseDigits = (value: string) => value.replaceAll(/\d/g, (digit) => '零一二三四五六七八九'[Number(digit)] ?? '')
 
 const cleanupSqliteFile = () => {
@@ -65,6 +70,13 @@ async function main() {
   const { o2oPreorderService } = await import('../src/services/o2o-preorder.service.js')
   const { productService } = await import('../src/services/product.service.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
+  const { initializeDatabaseInfrastructure } = await import('../src/database/database-strategy.js')
+  const { installCaptchaServiceForTesting } = await import('../src/services/captcha.service.js')
+  // 答案由已有测试接口注入；仍走真实PNG渲染、HTTP发票据与一次性验证码校验。
+  const restoreCaptcha = installCaptchaServiceForTesting({ createCode: () => captchaCode })
+  let httpServer: import('node:http').Server | undefined
+  let origin = ''
+  const httpSessions = new Map<string, { cookie: string; csrf: string }>()
 
   const preorderRepo = AppDataSource.getRepository(O2oPreorder)
   const productRepo = AppDataSource.getRepository(BaseProduct)
@@ -83,12 +95,30 @@ async function main() {
       passwordHash: await hashPassword(password),
       status: 'enabled',
     }))
-    const loginCaptcha = await clientAuthService.createCaptcha()
+    const loginCaptcha = mysqlMode
+      ? (await (await fetch(origin + '/api/client-auth/captcha')).json()).data
+      : await clientAuthService.createCaptcha()
+    if (mysqlMode) {
+      const response = await fetch(origin + '/api/client-auth/login', { method: 'POST',
+        headers: { 'Content-Type': 'application/json', Origin: origin },
+        body: JSON.stringify({ account, password, captchaId: loginCaptcha.captchaId, captchaCode }),
+      })
+      const payload = await response.json()
+      assert.equal(response.status, 200); assert.equal(payload.code, 0)
+      const cookies = new Map(response.headers.getSetCookie().map(value => { const first = value.split(';')[0]!; const index = first.indexOf('='); return [first.slice(0, index), first.slice(index + 1)] }))
+      const token = decodeURIComponent(cookies.get('y_link_client_session') ?? '')
+      const auth = await clientAuthService.resolveClientByToken(token)
+      const session = { cookie: [...cookies].map(([key, value]) => key + '=' + value).join('; '), csrf: decodeURIComponent(cookies.get('y_link_client_csrf') ?? '') }
+      assert.ok(session.csrf); httpSessions.set(auth.userId, session)
+      const me = await fetch(origin + '/api/client-auth/me', { headers: { Cookie: session.cookie } })
+      assert.equal(me.status, 200); assert.equal((await me.json()).code, 0)
+      return auth
+    }
     const loginResult = await clientAuthService.login({
       account,
       password,
       captchaId: loginCaptcha.captchaId,
-      captchaCode: readCaptchaCode(loginCaptcha.captchaSvg),
+      captchaCode,
     })
     return clientAuthService.resolveClientByToken(loginResult.token)
   }
@@ -110,8 +140,19 @@ async function main() {
     return { product, sku }
   }
 
+  const submitInput = async (auth: ClientAuthContext, input: Parameters<typeof o2oPreorderService.submit>[1]) => {
+    if (!mysqlMode) return o2oPreorderService.submit(auth, input)
+    const session = httpSessions.get(auth.userId); assert.ok(session)
+    const response = await fetch(origin + '/api/o2o/mall/preorders', { method: 'POST', headers: {
+      'Content-Type': 'application/json', Cookie: session.cookie, Origin: origin, 'x-client-csrf-token': session.csrf,
+    }, body: JSON.stringify(input) })
+    const payload = await response.json()
+    if (!response.ok) throw new BizError(payload.message, response.status, payload.data)
+    assert.equal(payload.code, 0)
+    return payload.data as Awaited<ReturnType<typeof o2oPreorderService.submit>>
+  }
   const submit = (auth: ClientAuthContext, productId: string, skuId: string, qty: number, clientRequestId: string) => (
-    o2oPreorderService.submit(auth, {
+    submitInput(auth, {
       clientRequestId,
       items: [{ productId, skuId, qty }],
       pickupContact: '库存验证提货人',
@@ -143,8 +184,16 @@ async function main() {
   await AppDataSource.initialize()
 
   try {
+    await initializeDatabaseInfrastructure(AppDataSource)
     await initializeDatabaseSchemaIfNeeded(AppDataSource)
     await systemConfigService.ensureDefaultConfigs()
+    if (mysqlMode) {
+      const { createApp } = await import('../src/app.js')
+      httpServer = createApp().listen(0, '127.0.0.1')
+      await new Promise<void>((resolve, reject) => { httpServer!.once('listening', resolve); httpServer!.once('error', reject) })
+      const address = httpServer.address(); assert.ok(address && typeof address !== 'string')
+      origin = 'http://127.0.0.1:' + address.port
+    }
     const userRepo = AppDataSource.getRepository(SysUser)
     const admin = await userRepo.save(userRepo.create({
       username: `stock-admin-${verifySeed}`,
@@ -199,7 +248,7 @@ async function main() {
     const mixedAvailable = await createListedProduct('混合订单可用商品', 2)
     const mixedInsufficient = await createListedProduct('混合订单不足商品', 1)
     await expectStockConflict(
-      () => o2oPreorderService.submit(mixedAccount, {
+      () => submitInput(mixedAccount, {
         clientRequestId: 'stock-mixed-atomic-000001',
         items: [
           { productId: mixedAvailable.product.id, skuId: mixedAvailable.sku.id, qty: 1 },
@@ -265,7 +314,12 @@ async function main() {
     assert.deepEqual(await stockSnapshot(retryProduct.product.id, retryProduct.sku.id), retryBefore.stock)
     assert.deepEqual(retryBefore.stock, { productPreOrderedStock: 2, skuPreOrderedStock: 2 })
     pass('同一请求键重试复用订单，数量和预占库存保持不变')
+    await assert.rejects(() => submit(sameAccount, retryProduct.product.id, retryProduct.sku.id, 1, retryRequestId),
+      (error: unknown) => error instanceof BizError && error.statusCode === 409, '同幂等键不同内容必须冲突')
+    assert.deepEqual(await stockSnapshot(retryProduct.product.id, retryProduct.sku.id), retryBefore.stock)
   } finally {
+    restoreCaptcha()
+    if (httpServer) { httpServer.closeAllConnections(); await new Promise<void>(resolve => httpServer!.close(() => resolve())) }
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()
     }
