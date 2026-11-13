@@ -61,7 +61,7 @@ export interface ClientCartCheckoutConflict {
 }
 
 // 购物车单项最大可购买数量由“可预订库存”和“单人限购”共同决定。
-// 统一用于主动增减和冲突提示，不得用它在缓存恢复或目录刷新时静默缩量。
+// 用于主动增量和冲突提示；减量可逐步处理超限，缓存恢复或目录刷新不得静默缩量。
 export const resolveClientCartMaxQty = (item: Pick<ClientCartItem, 'availableStock' | 'limitPerUser'>, otherProductQty = 0) => {
   const stock = Math.max(0, item.availableStock)
   const limit = Math.max(0, item.limitPerUser)
@@ -457,6 +457,10 @@ export const useClientCartStore = defineStore('client-cart', () => {
 
   const updateQty = (productId: string, qty: number) => {
     ensureInitialized()
+    if (!Number.isFinite(qty) || qty < 0) {
+      showAppWarning('请输入有效的商品数量')
+      return
+    }
     const itemIndex = items.value.findIndex((item) => resolveCartItemId(item.productId, item.skuId) === productId || item.productId === productId)
     if (itemIndex === -1) {
       return
@@ -464,16 +468,19 @@ export const useClientCartStore = defineStore('client-cart', () => {
 
     const item = items.value[itemIndex]
     const maxQty = resolveClientCartMaxQty(item, otherProductQty(item.productId, item.skuId))
-    const nextQty = Math.min(Math.max(0, Math.floor(qty)), maxQty)
+    const requestedQty = Math.floor(qty)
+    // 目录降低限购/库存后仍允许逐步减量；保持用户目标，剩余超限继续由结算冲突拦截。
+    const isReduction = requestedQty < item.qty
+    const nextQty = isReduction ? requestedQty : Math.min(requestedQty, maxQty)
 
-    if (qty > maxQty) {
+    if (!isReduction && qty > maxQty) {
       showAppWarning(maxQty > 0 ? `当前最多可购 ${maxQty} 件，已按可购数量调整` : '该商品库存不足或已达单人限购上限')
       if (maxQty <= 0) {
         return
       }
     }
 
-    if (qty > item.qty && item.qty >= maxQty) {
+    if (!isReduction && qty > item.qty && item.qty >= maxQty) {
       showAppWarning('购物车内已达单人限购上限或最大库存')
       return
     }
@@ -493,7 +500,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
 
   // 手动输入数量：空值、非数字、小数或小于 1 的输入不写入购物车，避免 NaN 落入缓存或输入 0 被当成删除；
   // 小数一律拒绝而不是向下取整：提示文案要求“大于 0 的整数”，静默取整会让用户以为 2.7 这类输入被原样接受。
-  // 合法值统一交给 updateQty，复用“可预订库存 + 单人限购”上限与超限提示，不另立一套校验口径。
+  // 合法值统一交给 updateQty：减量保留用户目标，增量复用库存/限购上限，不另立校验口径。
   const setQtyFromInput = (productId: string, qty: number | null) => {
     if (qty === null || !Number.isInteger(qty) || qty < 1) {
       showAppWarning('请输入大于 0 的整数数量')

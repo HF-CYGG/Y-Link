@@ -2,7 +2,7 @@
  * 文件说明：Issue #52 客户端购物车目录对账回归验证。
  * 文件职责：以真实 Pinia Store 与浏览器存储替身覆盖库存刷新、缓存恢复和多标签页隔离语义；不访问业务数据库或网络。
  * 维护说明：本脚本只验证购物车本地状态不能在后台目录刷新时静默减量或取消勾选，结算提交拦截由结算页守卫单独覆盖；
- * Issue #97 追加手动输入数量断言：合法值按可购上限收口，非法值（空、非数字、小于 1）不得写入 NaN 或删除商品。
+ * 手动输入合法增量按可购上限收口、减量保留目标；非法值（空、非数字、小于 1）不得写入 NaN 或删除商品。
  */
 
 import assert from 'node:assert/strict'
@@ -126,7 +126,9 @@ assert.equal(firstTabCart.selectedCheckoutConflicts.length, 1, '超出可购量�
 assert.equal(firstTabCart.createSelectedCheckoutSnapshot(), null, '含超库存选中行时不得生成部分提交载荷')
 
 firstTabCart.updateQty('sku-1', 4)
-assert.equal(firstTabCart.items[0]?.qty, 1, '用户主动改数量时仍应按当前可购量收口，而不是由后台刷新静默改写')
+assert.equal(firstTabCart.items[0]?.qty, 4, '用户主动减量保留目标，即使仍超库存也不能静默截到上限')
+assert.equal(firstTabCart.createSelectedCheckoutSnapshot(), null, '逐步减量后仍超库存时必须继续拦截结算')
+firstTabCart.updateQty('sku-1', 1)
 assert.deepEqual(
   firstTabCart.createSelectedCheckoutSnapshot(),
   [{ productId: 'product-1', skuId: 'sku-1', qty: 1 }],
@@ -519,6 +521,58 @@ assert.equal(staleLimitCart.totalQty, 6, '目录限购变化不能静默缩量')
 assert.equal(staleLimitCart.selectedCheckoutConflicts.length, 2, '已选多规格合计超限必须拦截结算')
 staleLimitCart.toggleItemSelected('batch-b', false)
 assert.equal(staleLimitCart.selectedCheckoutConflicts.length, 0, '取消其它规格选择后只校验本次结算总量')
+
+// PR197 P2：两种页面入口均须允许从既有超限数量逐步减少，不影响其它SKU、选择和持久化。
+for (const entry of ['stepper', 'input'] as const) {
+  const owner = `lowered-limit-${entry}`
+  const cart = createCart(owner)
+  const otherProduct = createProduct({ id: `other-${entry}`, skuId: `other-sku-${entry}`, availableStock: 2 })
+  assert.equal(cart.addProductsBatch({ ...batchProduct, limitPerUser: 0 }, [
+    { skuId: 'batch-a', qty: 4 }, { skuId: 'batch-b', qty: 4 },
+  ]).ok, true)
+  cart.addProduct(otherProduct, 1, otherProduct.skus![0])
+  cart.toggleItemSelected(otherProduct.skus![0]!.id, false)
+  cart.syncWithCatalog([{ ...batchProduct, limitPerUser: 3 }, otherProduct])
+  const state = () => cart.items.map(({ skuId, qty, selected }) => [skuId, qty, selected])
+  const change = (skuId: string, qty: number) => {
+    if (entry === 'input') cart.setQtyFromInput(skuId, qty)
+    else cart.incrementQty(skuId, qty - cart.items.find(item => item.skuId === skuId)!.qty)
+  }
+  change('batch-a', 3)
+  const expectedReduced = [['batch-a', 3, true], ['batch-b', 4, true], [otherProduct.skus![0]!.id, 1, false]]
+  assert.deepEqual(state(), expectedReduced, `${entry}:4+4限购降3后，A4→3必须按目标落地且其它行不变`)
+  assert.deepEqual(createCart(owner).items.map(({ skuId, qty, selected }) => [skuId, qty, selected]), expectedReduced,
+    `${entry}:刷新恢复必须保留本次减量、其它SKU和选择`)
+  assert.ok(cart.selectedCheckoutConflicts.length > 0, `${entry}:3+4仍超限，结算冲突必须保持`)
+  assert.equal(cart.createSelectedCheckoutSnapshot(), null)
+  change('batch-a', 4)
+  assert.deepEqual(state(), expectedReduced, `${entry}:仍超限时继续加量必须拒绝，不得截量或误改其它行`)
+  for (const [skuId, qty] of [['batch-b', 3], ['batch-a', 2], ['batch-b', 2], ['batch-b', 1]] as const) {
+    change(skuId, qty)
+    assert.equal(cart.items.find(item => item.skuId === skuId)?.qty, qty, `${entry}:每一步减量必须按目标执行`)
+    if (cart.qtyByProductId.get(batchProduct.id)! > 3) assert.equal(cart.createSelectedCheckoutSnapshot(), null)
+  }
+  assert.deepEqual(cart.createSelectedCheckoutSnapshot(), [
+    { productId: batchProduct.id, skuId: 'batch-a', qty: 2 }, { productId: batchProduct.id, skuId: 'batch-b', qty: 1 },
+  ], `${entry}:合计恢复3后才允许结算，未选行仍不提交`)
+  change('batch-b', 2)
+  assert.equal(cart.items.find(item => item.skuId === 'batch-b')?.qty, 1, `${entry}:合法合计触顶后不得增加`)
+  change('batch-a', 1)
+  change('batch-b', 2)
+  assert.equal(cart.items.find(item => item.skuId === 'batch-b')?.qty, 2, `${entry}:限购和库存允许时仍可正常增加`)
+  const beforeInvalid = JSON.stringify(state())
+  for (const invalid of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -1]) {
+    cart.updateQty('batch-a', invalid)
+    cart.setQtyFromInput('batch-a', invalid)
+    assert.equal(JSON.stringify(state()), beforeInvalid, `${entry}:非法数量不能写入或删除既有行`)
+  }
+  cart.setQtyFromInput('batch-a', 0)
+  assert.equal(JSON.stringify(state()), beforeInvalid, `${entry}:手输0仍不视为删除`)
+  cart.incrementQty('batch-a', -1)
+  assert.deepEqual(state(), [['batch-b', 2, true], [otherProduct.skus![0]!.id, 1, false]],
+    `${entry}:合法减至0只移除目标SKU，保留其它SKU和选择`)
+  assert.deepEqual(createCart(owner).items.map(({ skuId, qty, selected }) => [skuId, qty, selected]), state())
+}
 
 const recoveryCart = createCart('confirmed-recovery-quantity')
 recoveryCart.addProductsBatch({ ...batchProduct, limitPerUser: 0 }, [{ skuId: 'batch-a', qty: 5 }, { skuId: 'batch-b', qty: 3 }])
