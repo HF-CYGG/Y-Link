@@ -12,7 +12,8 @@ export async function startProductionStaticServer({dist,backend,plugins=[]}){
  middlewares.push((request,response)=>{
   const url=new URL(request.url,'http://127.0.0.1')
   if(target&&/^\/(?:api|health|uploads|__issues_verify)(?:\/|$)/.test(url.pathname)){
-   const upstream=http.request(new URL(request.url,target),{method:request.method,headers:request.headers},remote=>{response.writeHead(remote.statusCode,remote.headers);remote.pipe(response)})
+   // 上游地址只取启动时核验的回环配置，请求只能提供路径和查询，不能重新解释为另一个 origin。
+   const upstream=http.request({protocol:target.protocol,hostname:target.hostname,port:target.port,path:url.pathname+url.search,method:request.method,headers:request.headers},remote=>{response.writeHead(remote.statusCode,remote.headers);remote.pipe(response)})
    upstream.on('error',()=>{if(!response.headersSent)response.writeHead(502);response.end('isolated backend unavailable')});request.pipe(upstream);return
   }
   let candidate
@@ -28,7 +29,12 @@ export async function startProductionStaticServer({dist,backend,plugins=[]}){
   if(realRelative.startsWith('..')||path.isAbsolute(realRelative)){response.writeHead(403);response.end();return}
   response.setHeader('Content-Type',({'.html':'text/html; charset=utf-8','.js':'application/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.woff2':'font/woff2','.pdf':'application/pdf'})[path.extname(real)]??'application/octet-stream');fs.createReadStream(real).pipe(response)
  })
- const server=http.createServer((req,res)=>{const record={path:req.url,status:null};requests.push(record);res.once('finish',()=>{record.status=res.statusCode});const dispatch=index=>Promise.resolve(middlewares[index](req,res,()=>dispatch(index+1))).catch(()=>{if(!res.headersSent)res.writeHead(500);res.end('isolated fixture failure')});void dispatch(0)})
+ const server=http.createServer((req,res)=>{
+  const record={path:req.url,status:null};requests.push(record);res.once('finish',()=>{record.status=res.statusCode})
+  // 在插件分发前拒绝绝对/网络路径及反斜杠，始终只接受 HTTP origin-form 请求目标。
+  if(typeof req.url!=='string'||!req.url.startsWith('/')||req.url.startsWith('//')||req.url.includes('\\')){res.writeHead(400);res.end('invalid isolated request target');return}
+  const dispatch=index=>Promise.resolve(middlewares[index](req,res,()=>dispatch(index+1))).catch(()=>{if(!res.headersSent)res.writeHead(500);res.end('isolated fixture failure')});void dispatch(0)
+ })
  await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve)})
  return {origin:'http://127.0.0.1:'+server.address().port,requests,config:{production:true,realBackend:Boolean(target)},close:async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve))}}
 }
