@@ -9,7 +9,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { format as formatMysqlQuery } from 'mysql2'
+import { createRequire } from 'node:module'
+import type { format as MysqlFormat } from 'mysql2'
 import { DataSource, type DataSourceOptions, type EntityMetadata } from 'typeorm'
 import { appDataPaths } from '../config/app-data-paths.js'
 import { resolveSqliteDatabasePath } from '../config/database-bootstrap.js'
@@ -64,6 +65,14 @@ import { appendControlAudit, writeControlFile } from '../runtime/durable-control
 import { bindDatabaseRescueSnapshot, issueDatabaseRescueCredential, inspectRecoveryIntent, databaseRescueStatus, prepareAutomaticDatabaseRescueRollback } from '../runtime/database-rescue-control.js'
 import { normalizeStaticCheckClause } from '../utils/mysql-check-clause.js'
 import { dropMysqlRequiredTriggers, ensureMysqlRequiredTriggers } from '../config/mysql-migration-runner.js'
+
+const require = createRequire(import.meta.url)
+let mysqlFormatter: typeof MysqlFormat | undefined
+/** 仅迁移 MySQL 数据时加载官方格式化器；保留官方转义与实际 packet 字节口径。 */
+const formatMysqlQuery: typeof MysqlFormat = (...args) => {
+  mysqlFormatter ??= (require('mysql2') as typeof import('mysql2')).format
+  return mysqlFormatter(...args)
+}
 
 type MigrationIssueLevel = 'info' | 'warning' | 'error'
 type MigrationTaskStatus =
