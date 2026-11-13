@@ -3,8 +3,8 @@
  * 文件职责：合入 main 前检查 Node 运行时与生产依赖是否落后于已发布的安全补丁，避免已知漏洞随镜像上线。
  * 实现逻辑：
  * - Node 运行时：收集 Dockerfile、Compose、GitHub 工作流与 Mobile 工程里的 Node 版本固定点，对照 nodejs.org 发行索引；
- *   精确版本低于所在主版本线的最新安全版本即失败，主版本线已 EOL 也失败；浮动主版本（如 `node-version: 22`）
- *   由 setup-node 解析到最新补丁，只检查 EOL；
+ *   精确版本低于所在主版本线的最新安全版本即失败，主版本线已 EOL 也失败；
+ *   本项目 setup-node 步骤必须与 Onebox 固定补丁版本一致，拒绝浮动主版本与间接版本声明；
  * - npm 依赖：对根 Web 与后端执行 `npm audit --omit=dev --package-lock-only`，根 Web 只计入按 lockfile 算出的生产依赖闭包
  *   （排除提升到根目录的 Mobile 依赖）；
  *   high / critical 一律失败，包括需要跨大版本升级或暂无修复的情况；
@@ -22,6 +22,7 @@ import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { resolveNpmCommand } from './process-runner-utils.mjs'
+import { validateWorkflowNodePins } from './node-workflow-pins.mjs'
 
 const __filename = fileURLToPath(import.meta.url)
 const projectRoot = path.resolve(path.dirname(__filename), '..')
@@ -126,6 +127,9 @@ const fetchJson = async (url) => {
 
 const verifyNodeRuntime = async () => {
   const pins = collectNodePins()
+  const expectedVersion = pins.find((pin) => pin.file === 'Dockerfile.onebox')?.version
+  const workflows = listWorkflowFiles().map((file) => ({ file, content: readRepoFile(file) }))
+  for (const error of validateWorkflowNodePins(workflows, expectedVersion)) fail(error)
   let releases
   try {
     releases = await fetchJson(NODE_DIST_INDEX_URL)
