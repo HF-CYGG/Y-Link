@@ -8,6 +8,7 @@
  * - 宽屏（≥1536px）三栏并排、各自独立滚动；较窄时退化为“队列 + 详情”或单列，详情内用两枚标签切换
  *   “会话 / 工单与协同”，属性栏模板只写一份，通过 v-show 在不同布局间复用；
  * - 页面通过真实后端接口与 SSE 订阅同步在线状态、续接提示和会话变化，保证客服视角与客户端视角一致。
+ * - 回复在首个异步边界前固定会话和载荷，使用会话、操作与草稿代次隔离迟到结果，避免跨会话误发或清空新输入。
  * 维护说明：
  * - 若后续继续扩展附件、快捷回复或 SLA 指标，优先在属性栏新增分段，不再拆分独立子页或新增顶部卡片；
  * - 自动刷新会快照草稿与三栏滚动位置，新增可编辑区域时需同步纳入快照与脏检查，避免刷新覆盖输入；
@@ -156,6 +157,10 @@ let refreshTimer: ReturnType<typeof setTimeout> | null = null
 let freshConversationTimer: ReturnType<typeof setTimeout> | null = null
 let freshMessageTimer: ReturnType<typeof setTimeout> | null = null
 let lifecycleToken = 0
+let conversationGeneration = 0
+let replyOperationGeneration = 0
+let replyDraftGeneration = 0
+let detailUiGeneration = 0
 let refreshInFlight = false
 let pendingRefresh = false
 let workbenchComponentActive = false
@@ -566,8 +571,8 @@ const captureWorkbenchDetailUiSnapshot = (): WorkbenchDetailUiSnapshot => {
   }
 }
 
-const restoreWorkbenchDetailUiSnapshot = async (snapshot: WorkbenchDetailUiSnapshot | null) => {
-  if (!snapshot) {
+const restoreWorkbenchDetailUiSnapshot = async (snapshot: WorkbenchDetailUiSnapshot | null, mayApply?: () => boolean) => {
+  if (!snapshot || mayApply?.() === false) {
     return
   }
   runWithSuspendedDraftTracking(() => {
@@ -578,6 +583,7 @@ const restoreWorkbenchDetailUiSnapshot = async (snapshot: WorkbenchDetailUiSnaps
     Object.assign(issueForm, snapshot.issueForm)
   })
   await nextTick()
+  if (mayApply?.() === false) return
   if (conversationListPanelRef.value) {
     conversationListPanelRef.value.scrollTop = snapshot.listScrollTop
   }
@@ -825,7 +831,12 @@ const patchConversationListItem = (conversationId: string, patch: Partial<Feedba
  * - 若当前选中项仍在视图内，只保留原详情；
  * - 若已被筛掉，则自动切到该视图下第一条，保证“左侧列表”和“右侧详情”始终一致。
  */
-const syncVisibleConversationSelection = async (options: { forceReloadDetail?: boolean } = {}) => {
+const syncVisibleConversationSelection = async (options: {
+  forceReloadDetail?: boolean
+  mayApply?: () => boolean
+  captureContinuationGuard?: () => () => boolean
+} = {}) => {
+  if (options.mayApply?.() === false) return
   const visibleConversations = getQuickViewFilteredConversations()
   if (!visibleConversations.length) {
     selectedConversationId.value = ''
@@ -849,10 +860,14 @@ const syncVisibleConversationSelection = async (options: { forceReloadDetail?: b
     && nextConversationId === selectedConversation.value?.id
     && Boolean(options.forceReloadDetail)
 
+  const selectionChanged = selectedConversationId.value !== nextConversationId
   selectedConversationId.value = nextConversationId
+  // 回复后的队列刷新自行切到下一单时，先移除旧单详情，避免新单加载中仍可编辑旧单内容。
+  if (selectionChanged && options.captureContinuationGuard) selectedConversation.value = null
   if (shouldLoadDetail) {
     await loadConversationDetail(nextConversationId, {
       preserveDetailUiState: shouldPreserveDetailUiState,
+      mayApply: options.captureContinuationGuard?.() ?? options.mayApply,
     })
   }
 }
@@ -861,6 +876,7 @@ const loadConversationDetail = async (
   conversationId: string,
   options: {
     preserveDetailUiState?: boolean
+    mayApply?: () => boolean
   } = {},
 ) => {
   if (!conversationId) {
@@ -885,7 +901,7 @@ const loadConversationDetail = async (
   await detailRequest.runLatest({
     executor: (signal) => getSupportFeedbackConversation(conversationId, { signal }),
     onSuccess: async (detail) => {
-      if (selectedConversationId.value !== conversationId) {
+      if (selectedConversationId.value !== conversationId || options.mayApply?.() === false) {
         return
       }
 
@@ -903,7 +919,7 @@ const loadConversationDetail = async (
           .filter((message) => !previousMessageIds?.has(message.id))
           .map((message) => message.id) ?? []
         markFreshMessageIds(nextFreshMessageIds)
-        await restoreWorkbenchDetailUiSnapshot(detailUiSnapshot)
+        await restoreWorkbenchDetailUiSnapshot(detailUiSnapshot, options.mayApply)
       }
       syncLocalDraftFlags()
     },
@@ -917,6 +933,8 @@ const loadConversations = async (
   options: {
     refreshSelectedDetail?: boolean
     preserveUiState?: boolean
+    mayApply?: () => boolean
+    captureContinuationGuard?: () => () => boolean
   } = {},
 ) => {
   const shouldRefreshSelectedDetail = options.refreshSelectedDetail ?? true
@@ -937,6 +955,7 @@ const loadConversations = async (
       dateRange: searchForm.dateRange,
     }, { signal }),
     onSuccess: async (nextConversations) => {
+      if (options.mayApply?.() === false) return
       conversations.value = nextConversations
       if (previousConversationIds) {
         markFreshConversationIds(
@@ -947,10 +966,12 @@ const loadConversations = async (
       }
       await syncVisibleConversationSelection({
         forceReloadDetail: shouldRefreshSelectedDetail,
+        mayApply: options.mayApply,
+        captureContinuationGuard: options.captureContinuationGuard,
       })
-      if (listScrollTop !== null) {
+      if (listScrollTop !== null && options.mayApply?.() !== false) {
         await nextTick()
-        if (conversationListPanelRef.value) {
+        if (conversationListPanelRef.value && options.mayApply?.() !== false) {
           conversationListPanelRef.value.scrollTop = listScrollTop
         }
       }
@@ -1369,6 +1390,7 @@ const handleSaveInternalRemark = async () => {
 }
 
 const handleReply = async () => {
+  if (replying.value) return
   if (!selectedConversation.value) {
     showAppWarning('请先选择一条会话')
     return
@@ -1380,32 +1402,51 @@ const handleReply = async () => {
     return
   }
 
+  const conversationId = selectedConversation.value.id
+  const isRestock = Boolean(selectedConversation.value.restock)
+  const issueInput = {
+    title: issueForm.title,
+    status: issueForm.status,
+    priority: issueForm.priority,
+    issueType: isRestock ? undefined : issueForm.issueType,
+    category: issueForm.category,
+    orderRef: issueForm.orderRef,
+    expectedResult: issueForm.expectedResult,
+    actualResult: issueForm.actualResult,
+    reproductionSteps: issueForm.reproductionSteps,
+    contactPreference: issueForm.contactPreference,
+    tags: parseTagText(issueForm.tagText),
+  }
+  const operation = ++replyOperationGeneration
+  const session = conversationGeneration
+  const lifecycle = lifecycleToken
+  const draft = replyDraftGeneration
+  const ui = detailUiGeneration
+  const isCurrentReply = () => operation === replyOperationGeneration
+    && lifecycle === lifecycleToken && session === conversationGeneration
+    && selectedConversationId.value === conversationId && selectedConversation.value?.id === conversationId
+  const captureContinuationGuard = () => {
+    const selection = conversationGeneration, currentId = selectedConversationId.value, revision = detailUiGeneration
+    return () => operation === replyOperationGeneration && lifecycle === lifecycleToken
+      && selection === conversationGeneration && currentId === selectedConversationId.value && revision === detailUiGeneration
+  }
   replying.value = true
   try {
-    if (!selectedConversation.value.restock) await updateFeedbackIssue(selectedConversation.value.id, {
-      title: issueForm.title,
-      status: issueForm.status,
-      priority: issueForm.priority,
-      issueType: selectedConversation.value.restock ? undefined : issueForm.issueType,
-      category: issueForm.category,
-      orderRef: issueForm.orderRef,
-      expectedResult: issueForm.expectedResult,
-      actualResult: issueForm.actualResult,
-      reproductionSteps: issueForm.reproductionSteps,
-      contactPreference: issueForm.contactPreference,
-      tags: parseTagText(issueForm.tagText),
-    })
+    if (!isRestock) await updateFeedbackIssue(conversationId, issueInput)
 
-    await appendStaffFeedbackMessage(selectedConversation.value.id, {
+    await appendStaffFeedbackMessage(conversationId, {
       body: normalizedReply,
     })
-    replyDraft.value = ''
-    hasUnsavedReplyDraft.value = false
-    await loadConversations({
-      preserveUiState: true,
-    })
-    reconnectTip.value = '已续接当前客服会话，最新回复已同步发送给客户端。'
-    void scrollConversationToBottom()
+    if (isCurrentReply() && draft === replyDraftGeneration && ui === detailUiGeneration) {
+      replyDraft.value = ''
+      hasUnsavedReplyDraft.value = false
+      const mayApply = captureContinuationGuard()
+      await loadConversations({ preserveUiState: true, mayApply, captureContinuationGuard })
+      if (isCurrentReply() && mayApply()) {
+        reconnectTip.value = '已续接当前客服会话，最新回复已同步发送给客户端。'
+        void scrollConversationToBottom()
+      }
+    }
     showAppSuccess('客服回复已发送')
   } catch (error) {
     void showCriticalErrorDialog(error, {
@@ -1414,7 +1455,7 @@ const handleReply = async () => {
       operation: '发送客服回复',
     })
   } finally {
-    replying.value = false
+    if (operation === replyOperationGeneration) replying.value = false
   }
 }
 
@@ -1762,9 +1803,15 @@ watch(workbenchLayout, (layout) => {
   }
 })
 
+watch(selectedConversationId, () => { conversationGeneration += 1 }, { flush: 'sync' })
+
 watch(replyDraft, () => {
+  if (!draftTrackingSuspended.value) {
+    replyDraftGeneration += 1
+    detailUiGeneration += 1
+  }
   syncLocalDraftFlags()
-})
+}, { flush: 'sync' })
 
 watch(
   () => [
@@ -1781,16 +1828,24 @@ watch(
     issueForm.tagText,
   ],
   () => {
+    if (!draftTrackingSuspended.value) detailUiGeneration += 1
     syncLocalDraftFlags()
   },
+  { flush: 'sync' },
 )
 
 watch(
   () => issueForm.internalRemark,
   () => {
+    if (!draftTrackingSuspended.value) detailUiGeneration += 1
     syncLocalDraftFlags()
   },
+  { flush: 'sync' },
 )
+
+watch([selectedQuickReplyKey, transferAssigneeUserId, activeDetailTab], () => {
+  if (!draftTrackingSuspended.value) detailUiGeneration += 1
+}, { flush: 'sync' })
 
 watch(
   currentUserId,
