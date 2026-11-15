@@ -5,6 +5,7 @@
  */
 
 import { z } from 'zod'
+import { readOutboundRedirectPolicy } from '../utils/safe-http-request.js'
 // 静态依赖先求值，确保保存基础配置后才执行本模块的 override 注入。
 import { baseDatabaseConfig } from './base-database-config.js'
 export { baseDatabaseConfig }
@@ -133,6 +134,8 @@ const envSchema = z.object({
   // JSON 全量导入导出（含全部客户个人信息、密码哈希与系统配置）默认关闭，仅在迁移或运维窗口显式设为 true。
   Y_LINK_JSON_DATA_TRANSFER_ENABLED: z.enum(['true', 'false']).optional().transform((value) => value === 'true'),
   VERIFICATION_CODE_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
+  Y_LINK_OUTBOUND_REDIRECT_POLICY: z.enum(['compat', 'strict']).default('compat'),
+  Y_LINK_OUTBOUND_REDIRECT_ALLOWED_ORIGINS: z.string().default('[]'),
   // 阿里云 PNVS 使用服务器端凭证；任何接口或日志都不得回显这三项敏感值。
   ALIBABA_CLOUD_ACCESS_KEY_ID: z.string().optional().transform(normalizeOptionalString),
   ALIBABA_CLOUD_ACCESS_KEY_SECRET: z.string().optional().transform(normalizeOptionalString),
@@ -164,6 +167,12 @@ if (!parsed.success) {
   // 启动期直接抛错，避免错误配置导致后续数据写入不一致。
   throw new Error(`环境变量校验失败: ${parsed.error.message}`)
 }
+
+// 启动时即核验完整 Origin 白名单；共享 HTTP helper 使用同一校验，不等到首次外发才失败。
+readOutboundRedirectPolicy({
+  Y_LINK_OUTBOUND_REDIRECT_POLICY: parsed.data.Y_LINK_OUTBOUND_REDIRECT_POLICY,
+  Y_LINK_OUTBOUND_REDIRECT_ALLOWED_ORIGINS: parsed.data.Y_LINK_OUTBOUND_REDIRECT_ALLOWED_ORIGINS,
+})
 
 const defaultSqliteDbPath =
   parsed.data.APP_PROFILE === 'default'
