@@ -4165,6 +4165,7 @@ class O2oPreorderService {
 
   async markCustomerOrderPrintedByClient(auth: ClientAuthContext, orderId: string) {
     return runInTransaction(async (manager) => {
+      await lockActiveClientAccountForBusiness(manager, auth.userId)
       await this.lockLinkedOutboundOrderGroupInManager(manager, orderId)
       const orderRepo = manager.getRepository(O2oPreorder)
       const order = await orderRepo.findOne({
@@ -4499,6 +4500,7 @@ class O2oPreorderService {
 
   async cancelMyOrder(auth: ClientAuthContext, id: string, requestMeta?: RequestMeta) {
     const result = await runInTransaction(async (manager) => {
+      await lockActiveClientAccountForBusiness(manager, auth.userId)
       const order = await manager.getRepository(O2oPreorder).findOne({
         where: { id, isDeleted: false },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },

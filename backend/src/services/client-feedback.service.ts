@@ -2135,6 +2135,7 @@ class ClientFeedbackService {
     )
 
     const result = await runInTransaction(async (manager) => {
+      await lockActiveClientAccountForBusiness(manager, clientAuth.userId)
       const conversation = await this.requireOwnedConversation(id, clientAuth, manager)
       if (conversation.status !== 'resolved' && conversation.status !== 'closed') {
         throw new BizError('当前反馈单尚未进入可评价阶段', 400)
