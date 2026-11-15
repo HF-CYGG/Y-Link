@@ -7,6 +7,7 @@
  * - 驱动真实 InboundService 提交、核销、现场改单，再手动执行通知 Outbox，确认新送货单只进后台账号收件箱、
  *   状态变更只进该单所属供货方收件箱，其它供货方收不到；
  * - 校验未指定接收人的既有规则（新预订单）不再默认投递给供货方，以及收件箱按事件类型过滤与标记已读。
+ * - 以启用但未上架、两种库存非零的 SKU，验证供货方提交及两种详情均脱敏，管理端和真实核验保留库存。
  * 维护说明：
  * - 期望值必须手工给出，不能从被测方法自身反推；
  * - 脚本只能连接本次唯一临时 SQLite，禁止读取或修改业务数据库。
@@ -15,16 +16,27 @@
 import 'reflect-metadata'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { randomBytes } from 'node:crypto'
 import type { AuthUserContext } from '../src/types/auth.js'
 
-const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
+const temporaryParent = fs.realpathSync(os.tmpdir())
+const fixtureRoot = fs.mkdtempSync(path.join(temporaryParent, 'ylink-supplier-portal-'))
+const sqliteRoot = path.join(fixtureRoot, 'data')
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqlitePath = path.resolve(sqliteRoot, `supplier-portal-${verifySeed}.sqlite`)
+const envFile = path.join(fixtureRoot, 'fixture.env')
+fs.writeFileSync(envFile, '')
 
+process.env.ENV_FILE = envFile
+process.env.NODE_ENV = 'test'
 process.env.APP_PROFILE = `supplier-portal-${verifySeed}`
+process.env.Y_LINK_DATA_DIR = sqliteRoot
+process.env.Y_LINK_SKIP_DATABASE_RUNTIME_OVERRIDE = 'true'
+process.env.Y_LINK_DATA_ENCRYPTION_KEY = randomBytes(32).toString('base64')
+process.env.Y_LINK_MULTI_INSTANCE = 'false'
+process.env.REDIS_URL = ''
 process.env.DB_TYPE = 'sqlite'
 process.env.DB_SYNC = 'false'
 process.env.SQLITE_DB_PATH = sqlitePath
@@ -32,6 +44,13 @@ process.env.INIT_ADMIN_PASSWORD = `Admin_${verifySeed}_Aa1!`
 
 type JsonPayload = { code?: number; message?: string; data?: unknown }
 type CookieSession = { cookie: string; csrfToken: string }
+type InboundDetailPayload = {
+  order: { id: string; showNo: string; verifyCode: string }
+  items: Array<{ productId: string; skuId: string | null; sku?: {
+    id: string; skuCode: string; specText: string; specValuesJson: string; thumbnail: string | null
+    currentStock: number; preOrderedStock: number; costPrice?: string | null
+  } }>
+}
 type ProductPayload = {
   id: string
   isActive: boolean
@@ -45,9 +64,11 @@ type ProductPayload = {
 const hoursLater = (hours: number) => new Date(Date.now() + hours * 60 * 60 * 1000).toISOString()
 
 function cleanup() {
-  for (const filePath of [sqlitePath, `${sqlitePath}-wal`, `${sqlitePath}-shm`]) {
-    if (fs.existsSync(filePath)) fs.rmSync(filePath, { force: true })
-  }
+  if (!fs.existsSync(fixtureRoot)) return
+  const target = fs.realpathSync(fixtureRoot)
+  assert.equal(path.dirname(target), temporaryParent, '只允许清理本次独占临时目录')
+  assert.ok(path.basename(target).startsWith('ylink-supplier-portal-'), '临时目录前缀必须匹配')
+  fs.rmSync(target, { recursive: true, force: true })
 }
 
 async function readJson(response: Response): Promise<JsonPayload> {
@@ -382,11 +403,91 @@ async function main() {
         operatorPreorderUnreadBefore,
         '批量已读不得影响其它账号的其它事件',
       )
+
+      // 在既有通知计数断言结束后新增送货单，避免额外事件改变原专项的期望值。
+      const privateProduct = await productService.create({
+        productCode: `PORTAL-PRIVATE-${verifySeed}`,
+        productName: `未上架库存隔离商品-${verifySeed}`,
+        isActive: true,
+        o2oStatus: 'unlisted',
+        specGroups: [{ name: '颜色', values: ['蓝色'] }],
+        skus: [{ specValues: { 颜色: '蓝色' }, currentStock: 43, preOrderedStock: 11,
+          costPrice: 17.23, thumbnail: '/uploads/products/supplier-stock-fixture.webp' }],
+      }, adminActor)
+      assert.equal(privateProduct.isActive, true)
+      assert.equal(privateProduct.o2oStatus, 'unlisted', '库存夹具必须是供货方可选但商城未上架商品')
+      const privateSku = privateProduct.skus[0]!
+      assert.equal(privateSku.currentStock, 43)
+      assert.equal(privateSku.preOrderedStock, 11)
+      const deliveryInput = (qty: number) => ({
+        expectedArrivalAt: hoursLater(24),
+        items: [{ productId: String(privateProduct.id), skuId: String(privateSku.id), qty }],
+      })
+      const assertSupplierDetail = (detail: InboundDetailPayload, scene: string) => {
+        assert.ok(detail.order.id && detail.order.showNo && detail.order.verifyCode, `${scene}：保留外层单据结构`)
+        assert.equal(detail.items.length, 1, `${scene}：保留送货明细`)
+        const item = detail.items[0]!
+        const sku = item.sku
+        assert.ok(sku, `${scene}：保留送货所需 SKU`)
+        assert.equal(String(item.productId), String(privateProduct.id))
+        assert.equal(String(item.skuId), String(privateSku.id))
+        assert.equal(String(sku.id), String(privateSku.id))
+        assert.equal(sku.skuCode, privateSku.skuCode)
+        assert.equal(sku.specText, privateSku.specText)
+        assert.deepEqual(JSON.parse(sku.specValuesJson), { 颜色: '蓝色' })
+        assert.equal(sku.thumbnail, '/uploads/products/supplier-stock-fixture.webp')
+        assert.equal(sku.currentStock, 0, `${scene}：不得泄露物理库存`)
+        assert.equal(sku.preOrderedStock, 0, `${scene}：不得泄露预占库存`)
+        assert.ok(sku.costPrice === null || !Object.hasOwn(sku, 'costPrice'), `${scene}：成本保护继续生效`)
+      }
+      const assertManagementDetail = (detail: InboundDetailPayload, stock: number, scene: string) => {
+        assert.equal(detail.items[0]?.sku?.currentStock, stock, `${scene}：保留真实物理库存`)
+        assert.equal(detail.items[0]?.sku?.preOrderedStock, 11, `${scene}：保留真实预占库存`)
+      }
+      const directSubmit = await inboundService.submitSupplierDelivery(supplierActor, deliveryInput(2))
+      assertSupplierDetail(directSubmit, '服务层提交响应')
+      assert.equal(directSubmit.items[0]!.sku!.costPrice, null, '服务响应也不得带原成本')
+      assertSupplierDetail(JSON.parse(JSON.stringify(directSubmit)) as InboundDetailPayload, '服务层提交序列化')
+      const httpSubmit = await expectStatus(() => fetch(`${baseUrl}/api/inbound/supplier/submit`, {
+        method: 'POST', headers: writeHeaders(supplierSession), body: JSON.stringify(deliveryInput(3)),
+      }), 200, '供货方提交含未上架 SKU 的送货单')
+      const httpDetail = httpSubmit.data as InboundDetailPayload
+      assertSupplierDetail(httpDetail, 'HTTP 提交响应')
+      assert.equal(Object.hasOwn(httpDetail.items[0]!.sku!, 'costPrice'), false, 'HTTP 继续沿用实体成本序列化保护')
+      const adminSession = await loginCookieSession(baseUrl, bootstrapAdminUser.username, process.env.INIT_ADMIN_PASSWORD!)
+      const operatorActor = toActor(operator, 'operator')
+      const otherActor = toActor(otherSupplier, 'supplier')
+      for (const delivery of [directSubmit, httpDetail]) {
+        const { showNo, verifyCode } = delivery.order
+        assertSupplierDetail(await inboundService.detailByVerifyCode(verifyCode, supplierActor), '服务层核销码详情')
+        assertSupplierDetail(await inboundService.detailByShowNo(showNo, supplierActor), '服务层单号详情')
+        await assert.rejects(() => inboundService.detailByVerifyCode(verifyCode, otherActor), { statusCode: 404 })
+        await assert.rejects(() => inboundService.detailByShowNo(showNo, otherActor), { statusCode: 404 })
+        for (const suffix of [`detail/${encodeURIComponent(verifyCode)}`, `detail/show-no/${encodeURIComponent(showNo)}`]) {
+          const url = `${baseUrl}/api/inbound/${suffix}`
+          const own = await expectStatus(() => fetch(url, { headers: readHeaders(supplierSession) }), 200, '供货方读取本人详情')
+          assertSupplierDetail(own.data as InboundDetailPayload, 'HTTP 本人详情')
+          await expectStatus(() => fetch(url, { headers: readHeaders(otherSession) }), 404, '另一供货方不可读取该单')
+          for (const session of [adminSession, operatorSession]) {
+            const management = await expectStatus(() => fetch(url, { headers: readHeaders(session) }), 200, '管理端读取详情')
+            assertManagementDetail(management.data as InboundDetailPayload, 43, 'HTTP 管理端详情')
+            assert.equal(Object.hasOwn((management.data as InboundDetailPayload).items[0]!.sku!, 'costPrice'), false)
+          }
+        }
+        assertManagementDetail(await inboundService.detailByVerifyCode(verifyCode, adminActor), 43, '服务层管理员详情')
+        assertManagementDetail(await inboundService.detailByShowNo(showNo, operatorActor), 43, '服务层库管详情')
+        const raw = await inboundService.detailById(delivery.order.id)
+        assertManagementDetail(raw, 43, '原始数据未被响应投影修改')
+        assert.equal(Number(raw.items[0]!.sku!.costPrice), 17.23, '脱敏不得改写实体成本')
+      }
+      await inboundService.verifyInbound(directSubmit.order.verifyCode, adminActor)
+      assertManagementDetail(await inboundService.detailById(directSubmit.order.id), 45, '核验仍按真实库存增加送货数量')
+      assertSupplierDetail(await inboundService.detailByVerifyCode(directSubmit.order.verifyCode, supplierActor), '核验后供货方详情')
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()))
     }
 
-    console.log('供货端专项验证通过：商品目录对供货方脱敏、停用商品可过滤、导出拒绝供货方、标签仅主库位投影、送货单通知按角色定向投递、收件箱过滤、单条与按事件类型批量已读均符合预期')
+    console.log('供货端专项验证通过：商品目录与送货单 SKU 库存对供货方脱敏、管理端库存与核验保真、他人送货单 404、停用过滤、导出拒绝、标签投影、通知定向及收件箱已读均符合预期')
   } finally {
     await notificationService.stopOutboxWorker().catch(() => undefined)
     if (AppDataSource.isInitialized) await AppDataSource.destroy()

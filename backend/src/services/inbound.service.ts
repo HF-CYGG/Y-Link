@@ -25,6 +25,17 @@ import { lockActiveSysAccountForBusiness } from './account-business-guard.servic
 import { buildSkuLogFields, persistLockedInventoryStocks, snapshotSkuStock } from './inventory-ledger.service.js'
 import { formatLocationDeductions, reconcileSkuLocationStockTransitions } from './sku-location-stock.service.js'
 
+/** 仅供货方响应隐藏 SKU 库存；保留实体序列化的成本保护，不改动查询实体或管理端视图。 */
+function presentInboundDetail(detail: { order: BizInboundOrder; items: BizInboundOrderItem[] }, actor: AuthUserContext) {
+  if (actor.role !== 'supplier') return detail
+  return {
+    ...detail,
+    items: detail.items.map((item) => item.sku ? Object.assign(new BizInboundOrderItem(), item, {
+      sku: Object.assign(new BaseProductSku(), item.sku, { currentStock: 0, preOrderedStock: 0, costPrice: null }),
+    }) : item),
+  }
+}
+
 export interface SubmitInboundItemInput {
   productId: string
   skuId?: string | null
@@ -495,7 +506,7 @@ class InboundService {
       }, manager)
       await this.emitInboundNotification(manager, savedOrder, { type: 'submitted' })
 
-      return this.detailById(savedOrder.id, manager)
+      return presentInboundDetail(await this.detailById(savedOrder.id, manager), actor)
     })
   }
 
@@ -1248,7 +1259,7 @@ class InboundService {
       throw new BizError('核销码无效或送货单不存在', 404)
     }
     const items = await this.inboundItemRepo.find({ where: { orderId: order.id }, relations: { sku: true } })
-    return { order, items }
+    return presentInboundDetail({ order, items }, actor)
   }
 
   // 供货方/管理端：通过 showNo 查看详情（兼容人工输入单号查询）
@@ -1269,7 +1280,7 @@ class InboundService {
       throw new BizError('送货单号无效或送货单不存在', 404)
     }
     const items = await this.inboundItemRepo.find({ where: { orderId: order.id }, relations: { sku: true } })
-    return { order, items }
+    return presentInboundDetail({ order, items }, actor)
   }
 
   // 库管员核销入库
