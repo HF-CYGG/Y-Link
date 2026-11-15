@@ -120,6 +120,10 @@ COPY backend/package.json /app/backend/package.json
 COPY backend/sql /app/backend/sql
 
 COPY docker/onebox/entrypoint.sh /entrypoint.sh
+COPY docker/onebox/backend-launcher.mjs /usr/local/bin/ylink-backend-launcher.mjs
+# 只准备镜像内的新目录；已有挂载卷不会被启动脚本 chown/chmod。
+RUN install -d -o node -g node -m 0700 /app/data \
+  && install -d -o node -g node -m 0755 /app/uploads
 RUN chmod +x /entrypoint.sh
 
 EXPOSE 80

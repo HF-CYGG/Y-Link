@@ -136,6 +136,7 @@ const envSchema = z.object({
   VERIFICATION_CODE_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
   Y_LINK_OUTBOUND_REDIRECT_POLICY: z.enum(['compat', 'strict']).default('compat'),
   Y_LINK_OUTBOUND_REDIRECT_ALLOWED_ORIGINS: z.string().default('[]'),
+  Y_LINK_ONEBOX_NON_ROOT: z.enum(['true', 'false']).default('false'),
   // 阿里云 PNVS 使用服务器端凭证；任何接口或日志都不得回显这三项敏感值。
   ALIBABA_CLOUD_ACCESS_KEY_ID: z.string().optional().transform(normalizeOptionalString),
   ALIBABA_CLOUD_ACCESS_KEY_SECRET: z.string().optional().transform(normalizeOptionalString),

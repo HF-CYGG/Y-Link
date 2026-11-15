@@ -10,11 +10,24 @@ const cookiesOf=response=>new Map(response.headers.getSetCookie().map(value=>{co
 const headerOf=cookies=>[...cookies].map(([key,value])=>key+'='+value).join('; ')
 let ready=false
 for(let i=0;i<300;i++){try{const {response,payload}=await json('/health');if(response.ok&&payload.status==='UP'){ready=true;break}}catch{}await new Promise(resolve=>setTimeout(resolve,100))}assert.ok(ready,'实际业务health不得为rescue')
+const expectedIdentity=fs.readFileSync('/etc/passwd','utf8').split('\n').find(line=>line.startsWith('node:')).split(':')
+const expectedUid=process.env.Y_LINK_ONEBOX_NON_ROOT==='true'?Number(expectedIdentity[2]):0
+const expectedGid=process.env.Y_LINK_ONEBOX_NON_ROOT==='true'?Number(expectedIdentity[3]):0
+const processes=fs.readdirSync('/proc').filter(name=>/^\d+$/.test(name)).flatMap(pid=>{try{return [{pid,command:fs.readFileSync('/proc/'+pid+'/cmdline','utf8'),status:fs.readFileSync('/proc/'+pid+'/status','utf8')}]}catch{return []}})
+const backend=processes.find(item=>item.command.includes('/usr/local/bin/ylink-backend-launcher.mjs'));assert.ok(backend,'必须找到真实后端PID')
+assert.deepEqual(/^Uid:\s+(.+)$/m.exec(backend.status)[1].trim().split(/\s+/).map(Number),[expectedUid,expectedUid,expectedUid,expectedUid])
+assert.deepEqual(/^Gid:\s+(.+)$/m.exec(backend.status)[1].trim().split(/\s+/).map(Number),[expectedGid,expectedGid,expectedGid,expectedGid])
+if(expectedUid!==0){assert.ok((/^Groups:[ \t]*(.*)$/m.exec(backend.status)?.[1]??'').trim().split(/\s+/).filter(Boolean).map(Number).every(group=>group===expectedGid));const key=fs.statSync('/app/data/secrets/data-encryption.key');assert.equal(key.uid,expectedUid);assert.equal(key.mode&0o777,0o600)}
+assert.match(fs.readFileSync('/proc/1/status','utf8'),/^Uid:\s+0\s+0\s+0\s+0$/m,'supervisor 保持 root')
+const master=processes.find(item=>item.command.includes('nginx: master process'));assert.ok(master);assert.match(master.status,/^Uid:\s+0\s+0\s+0\s+0$/m,'Nginx master 保持原权限')
+results.push('实际后端UID/GID/补充组与supervisor/Nginx master身份')
 const login=await json('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json',Origin:base,'X-Forwarded-Proto':'https','X-Forwarded-For':'198.51.100.77'},body:JSON.stringify({username:'admin',password:process.env.INIT_ADMIN_PASSWORD})});assert.equal(login.response.status,200);assert.equal(login.payload.code,0);assert.ok(login.response.headers.getSetCookie().every(value=>!/(?:^|;)\s*Secure(?:;|$)/i.test(value)),'未授权转发头不能把HTTP伪装为HTTPS')
 const admin=cookiesOf(login.response),adminHeaders={Cookie:headerOf(admin),Origin:base,'x-csrf-token':decodeURIComponent(admin.get('y_link_admin_csrf')??'')};assert.ok(adminHeaders['x-csrf-token']);assert.equal((await json('/api/auth/me',{headers:adminHeaders})).response.status,200);results.push('实际管理员Cookie/CSRF与转发协议边界')
 const config=await json('/api/system-configs/customer-service',{headers:adminHeaders});assert.equal(config.response.status,200);const updated=await json('/api/system-configs/customer-service',{method:'PUT',headers:{...adminHeaders,'Content-Type':'application/json'},body:JSON.stringify({...config.payload.data,enabled:true,realtimeEnabled:true,sseKeepaliveSeconds:5})});assert.equal(updated.response.status,200)
 const {AppDataSource}=await import('/app/backend/dist/config/data-source.js');const {initializeDatabaseInfrastructure}=await import('/app/backend/dist/database/database-strategy.js');const {ClientUser}=await import('/app/backend/dist/entities/client-user.entity.js');const {hashPassword}=await import('/app/backend/dist/utils/password.js')
 await AppDataSource.initialize();await initializeDatabaseInfrastructure(AppDataSource)
+assert.equal(String(Object.values((await AppDataSource.query('PRAGMA journal_mode'))[0])[0]).toLowerCase(),'wal','实际隔离SQLite必须使用WAL')
+if(expectedUid!==0){assert.equal(fs.statSync('/app/data/verify.sqlite').uid,expectedUid);assert.equal(fs.statSync('/app/data/verify.sqlite-wal').uid,expectedUid)}
 let clientSession
 try{
  await AppDataSource.getRepository(ClientUser).save({realName:'容器验证用户',username:'runtime-user',mobile:'13800001001',passwordHash:await hashPassword('RuntimeClient_Aa1!'),accountType:'personal',departmentName:'',status:'enabled',staffVerified:false})

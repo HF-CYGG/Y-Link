@@ -7,9 +7,15 @@ let reason = 'DATABASE_STARTUP_FAILED'
 try {
   const { inspectDatabaseStartup } = await import('./runtime/database-startup-preflight.js')
   const startup = await inspectDatabaseStartup()
+  if (process.env.Y_LINK_ONEBOX_NON_ROOT === 'true') {
+    const { assertEffectiveOneboxSqlitePermissions } = await import('./runtime/onebox-permission-preflight.js')
+    await assertEffectiveOneboxSqlitePermissions()
+  }
   businessRuntime = await import('./runtime/business-runtime.js')
   await businessRuntime.startBusinessRuntime(startup)
 } catch (error) {
+  // 权限问题必须让 Onebox 引导失败即停；控制文件语义损坏仍沿下方原有独立救援路径处理。
+  if (error instanceof Error && ['ONEBOX_VOLUME_PERMISSION_DENIED', 'ONEBOX_NON_ROOT_REQUIRED'].includes(error.message)) throw error
   // 救援控制面只暴露稳定码，数据库驱动异常可能包含内部路径、账号或连接参数。
   if (error instanceof Error && /^[A-Z][A-Z0-9_]{1,79}$/.test(error.message)) reason = error.message
   // 进程日志另记一份脱敏原因：驱动/系统异常只留错误码，自检与迁移等自有异常保留消息，否则只能看到笼统的稳定码。

@@ -9,7 +9,11 @@ set -e
 
 # onebox 模式下商品图片会写入 `/app/uploads`，
 # 这里启动前先确保目录存在，避免首次上传时依赖运行期隐式创建。
-mkdir -p /app/data /app/uploads /run/nginx
+export Y_LINK_ONEBOX_NON_ROOT="${Y_LINK_ONEBOX_NON_ROOT:-false}"
+if [ "$Y_LINK_ONEBOX_NON_ROOT" = "false" ]; then
+  mkdir -p /app/data /app/uploads
+fi
+mkdir -p /run/nginx
 
 # 让 nginx 日志文件指向容器标准输出；站点配置会保留异常、关键业务与采样健康检查日志。
 mkdir -p /var/log/nginx
@@ -71,7 +75,7 @@ sh /usr/local/bin/ylink-proxy-boundary
 nginx -t
 
 echo "[onebox] starting backend on 127.0.0.1:${PORT}"
-node /app/backend/dist/index.js &
+node /usr/local/bin/ylink-backend-launcher.mjs &
 BACKEND_PID=$!
 
 echo "[onebox] starting nginx on 0.0.0.0:80"
