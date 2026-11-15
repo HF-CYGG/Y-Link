@@ -15,6 +15,9 @@
 ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:22.23.5-bookworm-slim
 
 FROM --platform=$BUILDPLATFORM ${Y_LINK_NODE_IMAGE} AS build
+# 固定既有npm工具；官方包完整性失败即停，不改变Node/Nginx或应用锁。
+COPY backend/scripts/install-pinned-npm.mjs /tmp/ylink-install-pinned-npm.mjs
+RUN node /tmp/ylink-install-pinned-npm.mjs --context=image
 
 WORKDIR /app
 

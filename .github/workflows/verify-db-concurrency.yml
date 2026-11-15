@@ -31,11 +31,13 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - name: 检出代码
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: 安装 Node.js
         id: setup-node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22.23.5"
           cache: npm
@@ -46,12 +48,15 @@ jobs:
 
       # sqlite3 等原生模块与 Node ABI 绑定，缓存键必须包含 setup-node 实际解析出的完整版本号。
       # main 分支 push 也会运行本工作流并写入缓存，PR 分支可直接复用 main 的缓存。
+      - name: 固定官方 npm 11.21.2（校验包完整性）
+        run: node backend/scripts/install-pinned-npm.mjs --context=ci
+
       - name: 恢复后端依赖目录缓存
         id: backend-deps-cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: backend/node_modules
-          key: backend-node-modules-${{ runner.os }}-${{ runner.arch }}-node${{ steps.setup-node.outputs.node-version }}-${{ hashFiles('backend/package-lock.json') }}
+          key: backend-node-modules-npm11.21.2-${{ runner.os }}-${{ runner.arch }}-node${{ steps.setup-node.outputs.node-version }}-${{ hashFiles('backend/package-lock.json') }}
 
       - name: 安装根 Web 依赖
         run: npm ci --workspaces=false --no-audit --no-fund
@@ -62,6 +67,9 @@ jobs:
 
       - name: 检查文本编码
         run: npm run verify:text-encoding
+
+      - name: 验证工作流权限、依赖闭包与后端身份契约
+        run: node --test scripts/verify-action-workflow-pins.test.mjs scripts/verify-node-workflow-pins.test.mjs scripts/verify-dependency-audit-scope.test.mjs scripts/verify-onebox-identity.test.mjs
 
       - name: 构建 Web
         run: npm run build

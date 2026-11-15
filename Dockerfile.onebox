@@ -15,6 +15,9 @@
 ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:22.23.5-bookworm-slim
 
 FROM --platform=$BUILDPLATFORM ${Y_LINK_NODE_IMAGE} AS frontend-build
+# 固定既有npm工具；官方包完整性失败即停，不改变Node/Nginx或应用锁。
+COPY backend/scripts/install-pinned-npm.mjs /tmp/ylink-install-pinned-npm.mjs
+RUN node /tmp/ylink-install-pinned-npm.mjs --context=image
 WORKDIR /app
 COPY package*.json ./
 COPY .npmrc ./
@@ -42,6 +45,9 @@ RUN npm run build
 # `--ignore-scripts` 跳过 sqlite3 / sharp 的原生编译，本阶段只需要它们的类型定义；
 # 真正与架构绑定的原生产物由下方 backend-prod-deps 阶段在目标平台安装。
 FROM --platform=$BUILDPLATFORM ${Y_LINK_NODE_IMAGE} AS backend-build
+# 固定既有npm工具；官方包完整性失败即停，不改变Node/Nginx或应用锁。
+COPY backend/scripts/install-pinned-npm.mjs /tmp/ylink-install-pinned-npm.mjs
+RUN node /tmp/ylink-install-pinned-npm.mjs --context=image
 WORKDIR /backend
 COPY backend/package*.json ./
 COPY backend/.npmrc ./.npmrc
@@ -54,6 +60,9 @@ RUN npm run build
 # 后端运行时依赖阶段：仅保留生产依赖，减小最终镜像体积。
 # ------------------------------
 FROM ${Y_LINK_NODE_IMAGE} AS backend-prod-deps
+# 固定既有npm工具；官方包完整性失败即停，不改变Node/Nginx或应用锁。
+COPY backend/scripts/install-pinned-npm.mjs /tmp/ylink-install-pinned-npm.mjs
+RUN node /tmp/ylink-install-pinned-npm.mjs --context=image
 WORKDIR /backend
 # 官方 Node 镜像已内置 /usr/local/include/node；显式复用本地头文件，
 # 避免 sqlite3 回退 node-gyp 时还需外网下载与运行时完全匹配的 Node headers。
@@ -73,6 +82,9 @@ RUN npm ci --omit=dev \
 # onebox 运行阶段：在同一容器中组合 Node 后端与 Nginx。
 # ------------------------------
 FROM ${Y_LINK_NODE_IMAGE} AS runtime
+# 固定既有npm工具；官方包完整性失败即停，不改变Node/Nginx或应用锁。
+COPY backend/scripts/install-pinned-npm.mjs /tmp/ylink-install-pinned-npm.mjs
+RUN node /tmp/ylink-install-pinned-npm.mjs --context=image
 
 ARG Y_LINK_NGINX_VERSION=1.30.6-1~bookworm
 # 独立 signed-by 仅信任核验过指纹的 nginx.org 签名公钥；不扩大系统全局信任。

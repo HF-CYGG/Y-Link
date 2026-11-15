@@ -5,9 +5,9 @@
  * - Node 运行时：收集 Dockerfile、Compose、GitHub 工作流与 Mobile 工程里的 Node 版本固定点，对照 nodejs.org 发行索引；
  *   精确版本低于所在主版本线的最新安全版本即失败，主版本线已 EOL 也失败；
  *   本项目 setup-node 步骤必须与 Onebox 固定补丁版本一致，拒绝浮动主版本与间接版本声明；
- * - npm 依赖：对根 Web 与后端执行 `npm audit --omit=dev --package-lock-only`，根 Web 只计入按 lockfile 算出的生产依赖闭包
- *   （排除提升到根目录的 Mobile 依赖）；
- *   high / critical 一律失败，包括需要跨大版本升级或暂无修复的情况；
+ * - npm 依赖：根 Web 与后端分别执行一次包含 dev 的 lockfile-only 官方审计，按生产闭包与非 Mobile 构建增量投影；
+ *   不按 hoist 位置误计 Mobile 专属依赖，生产 high / critical 一律失败，包括需跨大版本或暂无修复的情况；
+ *   构建工具漏洞单独报告，根 Web/后端审计执行或响应不完整仍失败；
  * - Mobile workspace 尚未上线，只输出审计摘要，不阻断合入。
  * 维护说明：
  * - Node 报红时必须一起升级全部固定点（Dockerfile 默认镜像、docker-publish 构建参数、Compose、Mobile 的 engines 与 eas.json），
@@ -23,6 +23,9 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { resolveNpmCommand } from './process-runner-utils.mjs'
 import { validateWorkflowNodePins } from './node-workflow-pins.mjs'
+import { validateActionWorkflowPins } from './action-workflow-pins.mjs'
+import { validatePinnedNpmToolchain } from './pinned-npm-contract.mjs'
+import { collectDependencyClosure, selectAuditScope, assertCompleteAuditReport, loadNpmSemver } from './dependency-audit-scope.mjs'
 
 const __filename = fileURLToPath(import.meta.url)
 const projectRoot = path.resolve(path.dirname(__filename), '..')
@@ -130,6 +133,8 @@ const verifyNodeRuntime = async () => {
   const expectedVersion = pins.find((pin) => pin.file === 'Dockerfile.onebox')?.version
   const workflows = listWorkflowFiles().map((file) => ({ file, content: readRepoFile(file) }))
   for (const error of validateWorkflowNodePins(workflows, expectedVersion)) fail(error)
+  for (const error of validateActionWorkflowPins(workflows)) fail(error)
+  for (const error of validatePinnedNpmToolchain(projectRoot)) fail(error)
   let releases
   try {
     releases = await fetchJson(NODE_DIST_INDEX_URL)
@@ -197,13 +202,14 @@ const resolveNpmForSpawn = () => {
   return npm
 }
 
-const runNpmAudit = (title, cwd, extraArgs) => {
+const runNpmAudit = (title, cwd, extraArgs, includeDev = false) => {
   const npm = resolveNpmForSpawn()
   const args = [
     ...npm.prefixArgs,
     'audit',
-    '--omit=dev',
+    ...(includeDev ? ['--include=dev', '--include=optional', '--include=peer'] : ['--omit=dev']),
     '--package-lock-only',
+    '--ignore-scripts',
     '--json',
     `--registry=${NPM_AUDIT_REGISTRY}`,
     ...extraArgs,
@@ -213,66 +219,18 @@ const runNpmAudit = (title, cwd, extraArgs) => {
     encoding: 'utf8',
     windowsHide: true,
     maxBuffer: 64 * 1024 * 1024,
+    timeout: 120_000,
   })
   if (result.error || ![0, 1].includes(result.status)) {
     throw new Error(`${title} 审计未完成（exitCode=${result.status}）：${result.error?.message ?? 'npm 执行异常'}`)
   }
   try {
-    const report = JSON.parse(result.stdout)
-    if (!report.error && (!report.vulnerabilities || !report.metadata?.vulnerabilities)) {
-      throw new Error('缺少完整漏洞统计，不能视为零漏洞')
-    }
+    const report = assertCompleteAuditReport(JSON.parse(result.stdout))
     info(`${title} npm audit exitCode=${result.status}`)
     return report
-  } catch {
-    const detail = result.error?.message ?? (result.stderr || result.stdout || '')
-    throw new Error(`${title} 审计输出无法解析（exitCode=${result.status}）：${detail.slice(0, 500)}`)
+  } catch (error) {
+    throw new Error(`${title} 审计输出无效（exitCode=${result.status}）：${error instanceof Error ? error.message : '未知响应错误'}`)
   }
-}
-
-/**
- * 按 lockfile 计算某个包的生产依赖闭包（安装路径集合）。
- * 根 lockfile 含 Mobile workspace，其依赖会被提升到根 node_modules，`npm audit --workspaces=false` 仍会把它们算进来；
- * 这里沿 Node 模块解析规则从根包的 dependencies / optionalDependencies 出发（并计入非可选 peer），
- * 只保留 Web 真正会安装进生产的包。
- */
-const collectProductionClosure = (lockfilePath) => {
-  const packages = JSON.parse(fs.readFileSync(lockfilePath, 'utf8')).packages ?? {}
-  const resolveInstallPath = (fromPath, name) => {
-    let base = fromPath
-    while (true) {
-      const candidate = base ? `${base}/node_modules/${name}` : `node_modules/${name}`
-      if (packages[candidate]) return candidate
-      if (!base) return null
-      const index = base.lastIndexOf('/node_modules/')
-      base = index === -1 ? '' : base.slice(0, index)
-    }
-  }
-  const visited = new Set()
-  const queue = ['']
-  while (queue.length > 0) {
-    const current = queue.shift()
-    const entry = packages[current]
-    if (!entry || visited.has(current)) continue
-    visited.add(current)
-    if (entry.link && entry.resolved) {
-      queue.push(entry.resolved)
-      continue
-    }
-    // npm 的 `--omit=dev` 仍会审计必需 peer（如 @vitejs/plugin-basic-ssl 要求的 vite），闭包必须同样计入，
-    // 只排除 peerDependenciesMeta 标记为 optional 的 peer。
-    const requiredPeers = Object.keys(entry.peerDependencies ?? {}).filter(
-      (name) => !entry.peerDependenciesMeta?.[name]?.optional,
-    )
-    for (const name of new Set([
-      ...Object.keys({ ...entry.dependencies, ...entry.optionalDependencies }),
-      ...requiredPeers,
-    ])) {
-      const installPath = resolveInstallPath(current, name)
-      if (installPath) queue.push(installPath)
-    }
-  }
-  return visited
 }
 
 /**
@@ -309,38 +267,43 @@ const describeFix = (fixAvailable, noFixedVersion) => {
   return { fixable: false, text: '暂无修复版本' }
 }
 
-const verifyNpmAudit = ({ title, cwd, extraArgs = [], blocking, productionClosure = null }) => {
-  let report
+const verifyNpmAudit = ({ title, cwd, extraArgs = [], blocking, failureBlocking = blocking, productionClosure = null, auditReport = null, packages = null, semver = null }) => {
+  let report = auditReport
   try {
-    report = runNpmAudit(title, cwd, extraArgs)
+    report ??= runNpmAudit(title, cwd, extraArgs)
   } catch (error) {
-    if (blocking) fail(error.message)
+    if (failureBlocking) fail(error.message)
     else warn(error.message)
     return
   }
   if (report.error) {
     const message = `${title} 审计失败：${report.error.summary ?? JSON.stringify(report.error)}`
-    if (blocking) fail(message)
+    if (failureBlocking) fail(message)
     else warn(message)
     return
   }
 
   const vulnerabilities = report.vulnerabilities ?? {}
-  const inScope = Object.values(vulnerabilities).filter(
-    (vulnerability) => !productionClosure || vulnerability.nodes.some((node) => productionClosure.has(node)),
-  )
+  const inScope = selectAuditScope(vulnerabilities, productionClosure, packages, semver)
   const counts = { critical: 0, high: 0, moderate: 0, low: 0 }
   for (const vulnerability of inScope) {
     counts[vulnerability.severity] = (counts[vulnerability.severity] ?? 0) + 1
   }
-  info(`${title} 生产依赖审计：critical=${counts.critical} high=${counts.high} moderate=${counts.moderate} low=${counts.low}`)
+  info(`${title} 依赖审计：critical=${counts.critical} high=${counts.high} moderate=${counts.moderate} low=${counts.low}`)
+  for (const item of inScope) {
+    const paths = item.nodes.filter(node => !productionClosure || productionClosure.has(node))
+    const advisories = item.via.filter(value => typeof value === 'object').map(value => `${value.title} ${value.url}`).join('；')
+    info(`${title} ${item.name}${item.scopeVersion ? `@${item.scopeVersion}` : ''}（${item.severity}，${item.range}）；路径：${paths.join('、')}；公告：${advisories || '传递依赖风险，见下游公告'}`)
+  }
 
   const hasNoFixedVersion = createFixabilityResolver(vulnerabilities)
   const blockingItems = []
   const deferredItems = []
   for (const vulnerability of inScope) {
     if (!BLOCKING_SEVERITIES.has(vulnerability.severity)) continue
-    const fix = describeFix(vulnerability.fixAvailable, hasNoFixedVersion(vulnerability.name))
+    const fix = vulnerability.fixNeedsVersionReview
+      ? { text: '按该安装版本匹配的公告核实修复版本，不复用包名聚合升级建议' }
+      : describeFix(vulnerability.fixAvailable, hasNoFixedVersion(vulnerability.name))
     const dependencyPaths = (vulnerability.nodes ?? []).filter((node) => !productionClosure || productionClosure.has(node))
     const line = `${vulnerability.name}（${vulnerability.severity}，受影响范围 ${vulnerability.range}）：${fix.text}；依赖路径：${dependencyPaths.join('、') || '审计未提供路径'}`
     if (blocking) blockingItems.push(line)
@@ -370,14 +333,30 @@ const writeStepSummary = () => {
 }
 
 await verifyNodeRuntime()
-verifyNpmAudit({
-  title: '根 Web',
-  cwd: projectRoot,
-  extraArgs: ['--workspaces=false'],
-  blocking: true,
-  productionClosure: collectProductionClosure(path.join(projectRoot, 'package-lock.json')),
-})
-verifyNpmAudit({ title: '后端', cwd: path.join(projectRoot, 'backend'), blocking: true })
+try {
+  const packages = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package-lock.json'), 'utf8')).packages ?? {}
+  const semver = loadNpmSemver(resolveNpmForSpawn())
+  const production = collectDependencyClosure(packages)
+  const build = collectDependencyClosure(packages, { includeRootDev: true, workspaceRoots: ['packages/shared-types'] })
+  const buildOnly = new Set([...build].filter(node => !production.has(node)))
+  // 同一次包含 dev 的根审计分别投影到两个闭包，避免重复请求，也不按 hoist 位置误计 Mobile 专属依赖。
+  const report = runNpmAudit('根 Web（生产与构建）', projectRoot, ['--workspaces=false'], true)
+  info(`Web 安装路径：生产=${production.size}，非 Mobile 构建增量=${buildOnly.size}；不代表最终浏览器包的可达性`)
+  verifyNpmAudit({ title: '根 Web 生产', cwd: projectRoot, blocking: true, productionClosure: production, auditReport: report, packages, semver })
+  verifyNpmAudit({ title: '根 Web 构建工具', cwd: projectRoot, blocking: false, failureBlocking: true, productionClosure: buildOnly, auditReport: report, packages, semver })
+} catch (error) { fail(`根 Web 生产/构建审计未完成：${error.message}`) }
+try {
+  const backendRoot = path.join(projectRoot, 'backend')
+  const packages = JSON.parse(fs.readFileSync(path.join(backendRoot, 'package-lock.json'), 'utf8')).packages ?? {}
+  const semver = loadNpmSemver(resolveNpmForSpawn())
+  const production = collectDependencyClosure(packages)
+  const build = collectDependencyClosure(packages, { includeRootDev: true })
+  const buildOnly = new Set([...build].filter(node => !production.has(node)))
+  const report = runNpmAudit('后端（生产与构建）', backendRoot, [], true)
+  info(`后端安装路径：生产=${production.size}，构建增量=${buildOnly.size}`)
+  verifyNpmAudit({ title: '后端生产', cwd: backendRoot, blocking: true, productionClosure: production, auditReport: report, packages, semver })
+  verifyNpmAudit({ title: '后端构建工具', cwd: backendRoot, blocking: false, failureBlocking: true, productionClosure: buildOnly, auditReport: report, packages, semver })
+} catch (error) { fail(`后端生产/构建审计未完成：${error.message}`) }
 const mobileManifestPath = path.join(projectRoot, 'apps/mobile/package.json')
 info('Mobile workspace 尚未上线，不作为生产阻断项；仍单独报告真实审计状态与依赖路径')
 if (!fs.existsSync(mobileManifestPath)) {

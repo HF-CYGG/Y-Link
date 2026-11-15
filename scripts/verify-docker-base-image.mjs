@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
+import { validateActionWorkflowPins } from './action-workflow-pins.mjs'
+import { validatePinnedNpmToolchain } from './pinned-npm-contract.mjs'
+
+assert.deepEqual(validatePinnedNpmToolchain(), [], '全部非Mobile镜像/CI的固定npm完整性契约')
 
 const dockerfiles = [
   'Dockerfile',
@@ -48,13 +52,15 @@ for (const filePath of dockerfiles) {
 }
 
 const workflowSource = readFileSync('.github/workflows/docker-publish.yml', 'utf8')
+assert.deepEqual(validateActionWorkflowPins(readdirSync('.github/workflows').filter(file => /\.ya?ml$/.test(file))
+  .map(file => ({ file: `.github/workflows/${file}`, content: readFileSync(`.github/workflows/${file}`, 'utf8') }))), [], '非 Mobile Action 固定点与最小权限契约')
 const buildJobSource = workflowSource.split('\n  build:\n')[1]?.split('\n  merge:\n')[0]
 assert.ok(buildJobSource, '镜像发布工作流应包含 build 作业')
 const buildStepSource = buildJobSource.split('\n      - name: 构建并按 digest 推送\n')[1]?.split('\n      - name: 导出 digest\n')[0]
 assert.ok(buildStepSource, 'build 作业应包含按 digest 推送步骤')
 assert.match(
   buildJobSource,
-  /- name: 登录 Docker Hub\s+if: \$\{\{ needs\.prepare\.outputs\.dockerhub_enabled == 'true' \}\}\s+uses: docker\/login-action@v4\s+with:\s+username: \$\{\{ secrets\.DOCKERHUB_USERNAME \}\}\s+password: \$\{\{ secrets\.DOCKERHUB_TOKEN \}\}/,
+  /- name: 登录 Docker Hub\s+if: \$\{\{ needs\.prepare\.outputs\.dockerhub_enabled == 'true' \}\}\s+uses: docker\/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4\.8\.0\s+with:\s+username: \$\{\{ secrets\.DOCKERHUB_USERNAME \}\}\s+password: \$\{\{ secrets\.DOCKERHUB_TOKEN \}\}/,
   'build 作业应只在 Docker Hub 凭据齐备时登录，供基础镜像拉取使用',
 )
 assert.ok(

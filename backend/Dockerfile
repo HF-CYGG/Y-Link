@@ -16,6 +16,9 @@ ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:22.23.5-bookworm-slim
 # 配合 `--ignore-scripts` 可跳过 sqlite3 / sharp 的原生编译，它们在此阶段只被当作类型使用。
 # ------------------------------
 FROM --platform=$BUILDPLATFORM ${Y_LINK_NODE_IMAGE} AS build
+# 固定既有npm工具；官方包完整性失败即停，不改变Node/Nginx或应用锁。
+COPY scripts/install-pinned-npm.mjs /tmp/ylink-install-pinned-npm.mjs
+RUN node /tmp/ylink-install-pinned-npm.mjs --context=image
 
 WORKDIR /app
 
@@ -38,6 +41,9 @@ RUN npm run build
 #   缺失这些工具会让 optional sqlite3 被 npm 静默跳过，直到启动时才报 DriverPackageNotInstalled。
 # ------------------------------
 FROM ${Y_LINK_NODE_IMAGE} AS prod-deps
+# 固定既有npm工具；官方包完整性失败即停，不改变Node/Nginx或应用锁。
+COPY scripts/install-pinned-npm.mjs /tmp/ylink-install-pinned-npm.mjs
+RUN node /tmp/ylink-install-pinned-npm.mjs --context=image
 
 WORKDIR /app
 
@@ -59,6 +65,9 @@ RUN npm ci --omit=dev \
 # - 默认将 SQLite 数据落到 /app/data、上传图片落到 /app/uploads，便于通过 volume 持久化。
 # ------------------------------
 FROM ${Y_LINK_NODE_IMAGE} AS runtime
+# 固定既有npm工具；官方包完整性失败即停，不改变Node/Nginx或应用锁。
+COPY scripts/install-pinned-npm.mjs /tmp/ylink-install-pinned-npm.mjs
+RUN node /tmp/ylink-install-pinned-npm.mjs --context=image
 
 WORKDIR /app
 
