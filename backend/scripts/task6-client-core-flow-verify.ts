@@ -14,7 +14,7 @@
  * - 若后端 O2O 规则新增字段，优先补齐“订单编辑专项断言”，确保返回详情、库存与修改次数仍可复验。
  */
 
-import { resolveIssueVerificationRoot } from './issue-verification-paths.js'
+import { createVerificationIsolation } from './verification-isolation.js'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -45,7 +45,8 @@ const backendRoot = path.resolve(scriptsRoot, '..')
 const projectRoot = path.resolve(backendRoot, '..')
 const runtimeRoot = path.resolve(projectRoot, '.local-dev')
 const reportPath = path.resolve(runtimeRoot, 'client-core-flow-task6.report.json')
-const sqliteRoot = resolveIssueVerificationRoot(path.resolve(backendRoot, 'data', 'local-dev'))
+const verificationIsolation = createVerificationIsolation('task6-client-core-flow-verify')
+const sqliteRoot = verificationIsolation.rootDir
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqlitePath = path.resolve(sqliteRoot, `task6-client-core-flow-${verifySeed}.sqlite`)
 const adminPassword = `Task6Admin_${verifySeed}_Aa1!`
@@ -53,6 +54,7 @@ const adminPassword = `Task6Admin_${verifySeed}_Aa1!`
 // 必须先于后端运行时模块加载：env.ts 在模块初始化时固化数据库配置。
 process.env.APP_PROFILE = `task6-client-core-flow-${verifySeed}`
 process.env.DB_TYPE = 'sqlite'
+verificationIsolation.seal({ type: 'sqlite', database: sqlitePath })
 process.env.DB_SYNC = 'false'
 process.env.SQLITE_DB_PATH = sqlitePath
 process.env.INIT_ADMIN_PASSWORD = adminPassword
@@ -206,8 +208,10 @@ const readOptionalJson = <T>(filePath: string): T | null => {
 let scriptAdminActor: AuthUserContext
 
 const ensureReady = async () => {
+  await verificationIsolation.assertTarget(AppDataSource)
   prepareDatabaseRuntime()
   if (!AppDataSource.isInitialized) {
+    await verificationIsolation.assertTarget(AppDataSource)
     await AppDataSource.initialize()
   }
   await initializeDatabaseSchemaIfNeeded(AppDataSource)

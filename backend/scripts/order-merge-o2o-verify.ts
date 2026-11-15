@@ -4,7 +4,7 @@
  * 实现逻辑：直接构造已核销预订单及其正式出库单，避免重复测试核销建单本身，聚焦合并后的身份与数据边界。
  */
 
-import { resolveIssueVerificationRoot } from './issue-verification-paths.js'
+import { createVerificationIsolation } from './verification-isolation.js'
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
@@ -13,10 +13,12 @@ import type { AuthUserContext } from '../src/types/auth.js'
 import type { ClientAuthContext } from '../src/types/client-auth.js'
 
 const seed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
-const sqliteRoot = resolveIssueVerificationRoot(path.resolve(process.cwd(), 'data', 'local-dev'))
+const verificationIsolation = createVerificationIsolation('order-merge-o2o-verify')
+const sqliteRoot = verificationIsolation.rootDir
 const sqlitePath = path.resolve(sqliteRoot, `order-merge-o2o-${seed}.sqlite`)
 process.env.APP_PROFILE = `order-merge-o2o-${seed}`
 process.env.DB_TYPE = 'sqlite'
+verificationIsolation.seal({ type: 'sqlite', database: sqlitePath })
 process.env.DB_SYNC = 'true'
 process.env.SQLITE_DB_PATH = sqlitePath
 
@@ -58,8 +60,10 @@ async function main() {
     import('../src/utils/errors.js'),
   ])
 
+  await verificationIsolation.assertTarget(AppDataSource)
   await AppDataSource.initialize()
   try {
+    await verificationIsolation.assertTarget(AppDataSource)
     await AppDataSource.synchronize()
     await systemConfigService.ensureDefaultConfigs()
     const sysUserRepo = AppDataSource.getRepository(SysUser)

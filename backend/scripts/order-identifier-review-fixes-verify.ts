@@ -3,10 +3,10 @@
  * 文件职责：覆盖删除尾号回收、业务号游标、保留幂等键、旧配置停写、重启回灌与合并搜索命中元数据。
  */
 
+import { createVerificationIsolation } from './verification-isolation.js'
 import 'reflect-metadata'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
@@ -20,9 +20,11 @@ const sliceMethodSource = (source: string, startMarker: string, endMarker: strin
   return source.slice(start, end)
 }
 
-const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ylink-identifier-review-'))
+const verificationIsolation = createVerificationIsolation('order-identifier-review-fixes-verify')
+const runtimeDir = verificationIsolation.rootDir
 process.env.APP_PROFILE = 'identifier-review-verify'
 process.env.DB_TYPE = 'sqlite'
+verificationIsolation.seal({ type: 'sqlite', database: path.join(runtimeDir, 'verification.sqlite') })
 process.env.DB_SYNC = 'false'
 process.env.SQLITE_DB_PATH = path.join(runtimeDir, 'verification.sqlite')
 process.env.Y_LINK_DATA_DIR = runtimeDir
@@ -72,7 +74,9 @@ const expectBizError = async (action: () => Promise<unknown>, statusCode: number
 }
 
 try {
+  await verificationIsolation.assertTarget(AppDataSource)
   prepareDatabaseRuntime()
+  await verificationIsolation.assertTarget(AppDataSource)
   await AppDataSource.initialize()
   await initializeDatabaseSchemaIfNeeded(AppDataSource)
   await systemConfigService.ensureDefaultConfigs()
@@ -194,7 +198,7 @@ try {
     '多 namespace canonical 更新必须固定使用 walkin→department、system→preorder→business 锁序',
   )
   assert.match(canonicalUpdateSource, /const lockedActor = await lockActiveSysAccountForBusiness/, 'canonical 更新必须在事务内锁后重验管理员账号')
-  assert.match(canonicalUpdateSource, /lockedActor\.role !== 'admin'[\s\S]*actor\.permissions\.includes\('system_configs:update'\)/, 'canonical 更新必须在锁后重验角色与配置写权限')
+  assert.match(canonicalUpdateSource, /lockedActor\.role !== 'admin'\s*\|\|\s*actor\.role !== 'admin'\s*\|\|\s*!resolveUserPermissions\(lockedActor\)\.includes\('system_configs:update'\)/, 'canonical 更新必须在锁后重验角色与锁定账号的配置写权限')
   const canonicalSequenceLockIndex = canonicalUpdateSource.indexOf('const lockedSequences')
   const canonicalDefaultRepairIndex = canonicalUpdateSource.indexOf('ensureOrderIdentifierDefaultsForUpdate')
   const canonicalConfigLockIndex = canonicalUpdateSource.indexOf('const configQuery')
@@ -261,14 +265,14 @@ try {
   ) as Record<'system' | 'preorder' | 'business', Record<OrderType, { start: number; current: number; width: number }>>
 
   const permissionRecheckInput = toCanonicalInput(await readCanonicalConfigs())
+  // 权限以事务内锁定的账号为准，不能只删旧 actor 快照中的权限来模拟真实撤权。
+  await AppDataSource.getRepository(SysUser).update({ id: actor.userId }, { governancePermissionsJson: '[]' })
   await expectBizError(
-    () => canonicalConfigApi.updateOrderIdentifierConfigs!(permissionRecheckInput, {
-      ...actor,
-      permissions: actor.permissions.filter((permission) => permission !== 'system_configs:update'),
-    }),
+    () => canonicalConfigApi.updateOrderIdentifierConfigs!(permissionRecheckInput, actor),
     403,
     /无权/,
   )
+  await AppDataSource.getRepository(SysUser).update({ id: actor.userId }, { governancePermissionsJson: null })
   await AppDataSource.getRepository(SysUser).update({ id: actor.userId }, { role: 'operator' })
   await expectBizError(
     () => canonicalConfigApi.updateOrderIdentifierConfigs!(permissionRecheckInput, actor),
@@ -994,14 +998,14 @@ try {
   assert.equal('customerOrderShowNo' in clientDetail.order, false, '客户端 O2O 详情不得返回关联正式单旧 showNo 别名')
   assert.equal('showNo' in clientDetail.order, false, '客户端 O2O 详情不得返回旧 preorderNo 别名 showNo')
 
-  const orderRouteSource = fs.readFileSync(path.resolve(process.cwd(), 'src/routes/order.routes.ts'), 'utf8')
+  const orderRouteSource = fs.readFileSync(path.join(backendRoot, 'src/routes/order.routes.ts'), 'utf8')
   assert.match(
     orderRouteSource,
     /'\/system-no\/:systemNo',[\s\S]*?requirePermission\('orders:view'\),[\s\S]*?requireRole\('admin'\)/,
     'canonical systemNo 详情路由必须同时要求 orders:view 与 admin',
   )
 
-  const dashboardRouteSource = fs.readFileSync(path.resolve(process.cwd(), 'src/routes/dashboard.routes.ts'), 'utf8')
+  const dashboardRouteSource = fs.readFileSync(path.join(backendRoot, 'src/routes/dashboard.routes.ts'), 'utf8')
   for (const dashboardMethod of [
     'getStats',
     'getAnalytics',
@@ -1017,7 +1021,7 @@ try {
     )
   }
 
-  const o2oRouteSource = fs.readFileSync(path.resolve(process.cwd(), 'src/routes/o2o.routes.ts'), 'utf8')
+  const o2oRouteSource = fs.readFileSync(path.join(backendRoot, 'src/routes/o2o.routes.ts'), 'utf8')
   const verifyRouteStart = o2oRouteSource.indexOf("  '/verify',")
   const verifyRouteEnd = o2oRouteSource.indexOf("  '/inbound',", verifyRouteStart)
   const verifyRouteSource = o2oRouteSource.slice(verifyRouteStart, verifyRouteEnd)
@@ -1034,11 +1038,11 @@ try {
     'legacy /show-no 注释必须明确它是旧 systemNo 别名且已废弃',
   )
 
-  const routeSource = fs.readFileSync(path.resolve(process.cwd(), 'src/routes/system-config.routes.ts'), 'utf8')
+  const routeSource = fs.readFileSync(path.join(backendRoot, 'src/routes/system-config.routes.ts'), 'utf8')
   assert.match(routeSource, /\/order-identifiers/, 'system-config 路由缺少 canonical 三套编号读写契约')
 
   console.log('OK Issue #110 审查修复专项验证通过')
 } finally {
   if (AppDataSource.isInitialized) await AppDataSource.destroy()
-  fs.rmSync(runtimeDir, { recursive: true, force: true })
+  verificationIsolation.cleanup()
 }

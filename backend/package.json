@@ -40,6 +40,7 @@
     "security:data-leak-ddos:verify": "node --import tsx scripts/data-leak-ddos-verify.ts",
     "captcha:rendering:verify": "node --import tsx scripts/captcha-rendering-verify.ts",
     "security:auth-sse-final:verify": "node --import tsx scripts/auth-sse-final-regression-verify.ts",
+    "security:verification-isolation:verify": "node --import tsx scripts/verification-isolation-verify.ts",
     "security:http-boundary:verify": "node --import tsx scripts/http-security-verify.ts",
     "security:business-boundary:verify": "node --import tsx scripts/security-business-contract-verify.ts",
     "security:findings:verify": "tsx scripts/security-findings-remediation-verify.ts",

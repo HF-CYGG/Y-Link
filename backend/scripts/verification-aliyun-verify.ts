@@ -5,14 +5,15 @@
  * - 外部 SDK 均通过依赖注入替身驱动，避免专项验证产生真实发送。
  */
 
+import { createVerificationIsolation } from './verification-isolation.js'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const runId = `${process.pid}-${Date.now()}`
-const runtimeDir = path.join(os.tmpdir(), `ylink-aliyun-pnvs-${runId}`)
+const verificationIsolation = createVerificationIsolation('verification-aliyun-verify')
+const runtimeDir = verificationIsolation.rootDir
 const sqlitePath = path.join(runtimeDir, 'verification.sqlite')
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -49,6 +50,7 @@ for (const envTemplatePath of ['.env.docker.cloud.example', '.env.docker.mysql.e
 process.env.NODE_ENV = 'test'
 process.env.APP_PROFILE = `aliyun-pnvs-${runId}`
 process.env.DB_TYPE = 'sqlite'
+verificationIsolation.seal({ type: 'sqlite', database: sqlitePath })
 process.env.DB_SYNC = 'true'
 process.env.SQLITE_DB_PATH = sqlitePath
 process.env.Y_LINK_DATA_DIR = runtimeDir
@@ -66,7 +68,9 @@ async function main() {
   const { systemConfigService } = await import('../src/services/system-config.service.js')
 
   try {
+    await verificationIsolation.assertTarget(AppDataSource)
     prepareDatabaseRuntime()
+    await verificationIsolation.assertTarget(AppDataSource)
     await AppDataSource.initialize()
     await initializeDatabaseSchemaIfNeeded(AppDataSource)
     await systemConfigService.ensureDefaultConfigs()
@@ -773,12 +777,17 @@ async function main() {
   }
 }
 
-main()
-  .then(() => console.log('OK 阿里云 PNVS 短信验证码专项验证通过'))
-  .catch((error) => {
-    console.error('[verification-aliyun] 验证失败:', error)
-    process.exitCode = 1
-  })
-  .finally(() => {
-    fs.rmSync(runtimeDir, { recursive: true, force: true })
-  })
+let verificationError: unknown
+try { await main() } catch (error) { verificationError = error }
+try {
+  // 清理前只记录资源种类和可执行文件名，不记录 SDK 参数、环境或凭证。
+  const handles = (process as unknown as { _getActiveHandles(): Array<{ constructor?: { name: string }; spawnfile?: string; exitCode?: number | null }> })._getActiveHandles()
+  console.log(JSON.stringify({ cleanupDiagnostic: { cwd: process.cwd(), rootDir: runtimeDir,
+    resources: process.getActiveResourcesInfo(), handles: handles.map(handle => ({ type: handle.constructor?.name,
+      executable: handle.spawnfile ? path.basename(handle.spawnfile) : undefined, exitCode: handle.exitCode })) } }))
+  verificationIsolation.cleanup()
+} catch (error) {
+  verificationError = verificationError ? new AggregateError([verificationError, error], '专项主异常与所属资源清理失败均保留') : error
+}
+if (verificationError) { console.error('[verification-aliyun] 验证失败:', verificationError); process.exitCode = 1 }
+else console.log('OK 阿里云 PNVS 短信验证码专项验证通过（含所属资源清理）')

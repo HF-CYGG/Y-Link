@@ -11,15 +11,18 @@ import { spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import sharp from 'sharp'
-import { installCaptchaServiceForTesting } from '../src/services/captcha.service.js'
+import { createVerificationIsolation } from './verification-isolation.js'
+import { createOwnedVerificationDatabase } from './owned-verification-database.js'
 
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
+const verificationIsolation = createVerificationIsolation('release-full-regression')
+let ownedDatabase: Awaited<ReturnType<typeof createOwnedVerificationDatabase>> | undefined
 const runtimeRoot = path.resolve(backendRoot, '.local-dev')
-const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
-const uploadsRoot = path.resolve(backendRoot, 'uploads')
+const sqliteRoot = verificationIsolation.rootDir
+const uploadsRoot = verificationIsolation.uploadsDir
 
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqlitePath = path.resolve(sqliteRoot, `release-full-regression-${verifySeed}.sqlite`)
@@ -61,6 +64,9 @@ if (mysqlMode) {
   process.env.DB_TYPE = 'sqlite'
   process.env.SQLITE_DB_PATH = sqlitePath
 }
+verificationIsolation.seal(mysqlMode
+  ? { type: 'mysql', ...mysqlTarget }
+  : { type: 'sqlite', database: sqlitePath })
 
 /** 与自动迁移的 runMysqlSchemaWorker 同口径：独立 DB_TYPE=mysql 子进程按实体建表或核验，不经命令行传递密码。 */
 function runMysqlSchemaWorker(mode: 'initialize' | 'verify') {
@@ -69,12 +75,13 @@ function runMysqlSchemaWorker(mode: 'initialize' | 'verify') {
     Y_LINK_SKIP_DATABASE_RUNTIME_OVERRIDE: 'true',
     Y_LINK_MYSQL_SCHEMA_WORKER: 'true',
     Y_LINK_MYSQL_SCHEMA_WORKER_MODE: mode,
+    TSX_TSCONFIG_PATH: path.join(backendRoot, 'tsconfig.json'),
     DB_SYNC: 'false',
   }
-  delete workerEnv.APP_PROFILE
-  delete workerEnv.ENV_FILE
-  const result = spawnSync(process.execPath, ['--import', 'tsx', 'src/commands/prepare-mysql-migration-schema.ts'], {
-    cwd: backendRoot,
+  // 保留父进程的独占空ENV_FILE、随机profile和所有权证明，worker连接前再核对最终配置。
+  const result = spawnSync(process.execPath, ['--import', pathToFileURL(path.join(backendRoot, 'node_modules/tsx/dist/loader.mjs')).href,
+    path.join(backendRoot, 'scripts/verification-schema-worker.ts')], {
+    cwd: verificationIsolation.rootDir,
     env: workerEnv,
     encoding: 'utf8',
     windowsHide: true,
@@ -94,7 +101,6 @@ async function withMysqlAdmin<T>(action: (connection: import('mysql2/promise').C
 }
 
 const TEST_CAPTCHA_CODE = 'ABC123'
-installCaptchaServiceForTesting({ createCode: () => TEST_CAPTCHA_CODE })
 
 const uploadedFilePaths = new Set<string>()
 
@@ -104,7 +110,10 @@ function pass(message: string) {
 
 function toAbsoluteUploadPath(uploadUrl: string) {
   const normalizedRelativePath = uploadUrl.replace(/^\//, '').split('/').join(path.sep)
-  return path.resolve(backendRoot, normalizedRelativePath)
+  const result = path.resolve(verificationIsolation.rootDir, normalizedRelativePath)
+  const relative = path.relative(uploadsRoot, result)
+  assert.ok(relative && !path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`), '上传清理路径必须属于本轮上传目录')
+  return result
 }
 
 const readCaptchaCode = (_captchaSvg: string) => TEST_CAPTCHA_CODE
@@ -222,23 +231,29 @@ async function main() {
   fs.mkdirSync(uploadsRoot, { recursive: true })
 
   if (mysqlMode) {
+    ownedDatabase = await createOwnedVerificationDatabase({ ...mysqlTarget, collation: 'utf8mb4_0900_ai_ci' }, mysqlTarget.database)
     await withMysqlAdmin(async (connection) => {
       const [rows] = await connection.query('SELECT VERSION() AS version')
       console.log(`MySQL 隔离实例版本：${(rows as Array<{ version: string }>)[0]?.version}`)
-      await connection.query(`CREATE DATABASE \`${mysqlTarget.database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci`)
     })
     runMysqlSchemaWorker('initialize')
     pass('MySQL 随机库已按自动迁移建表子进程初始化')
   }
 
-  const { createApp } = await import('../src/app.js')
   const { AppDataSource } = await import('../src/config/data-source.js')
+  await verificationIsolation.assertTarget(AppDataSource)
+  // 不能静态导入captcha：它经ticket/Redis提前缓存业务env，必须在隔离与实际目标核对之后装载。
+  const { installCaptchaServiceForTesting } = await import('../src/services/captcha.service.js')
+  installCaptchaServiceForTesting({ createCode: () => TEST_CAPTCHA_CODE })
+  const { createApp } = await import('../src/app.js')
   const { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } = await import('../src/config/database-bootstrap.js')
   const { authService } = await import('../src/services/auth.service.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
   const { VerificationCodeService } = await import('../src/services/verification-code.service.js')
 
+  await verificationIsolation.assertTarget(AppDataSource)
   prepareDatabaseRuntime()
+  await verificationIsolation.assertTarget(AppDataSource)
   await AppDataSource.initialize()
   if (mysqlMode) {
     // 迁移导入后补建实体同步不表达的追加型保护触发器，再由子进程核验，与自动迁移成功前的最后两步一致。
@@ -1586,13 +1601,14 @@ try {
   console.error(error)
   process.exitCode = 1
 } finally {
-  // 建库在服务启动前完成，失败也可能已建库，因此统一在最外层删除随机库并回查。
-  if (mysqlMode) {
+  // 只有本轮成功创建且服务器/持久所有权仍匹配的库才允许删除。
+  if (ownedDatabase) {
+    await ownedDatabase.cleanup()
     await withMysqlAdmin(async (connection) => {
-      await connection.query(`DROP DATABASE IF EXISTS \`${mysqlTarget.database}\``)
       const [rows] = await connection.query('SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?', [mysqlTarget.database])
       assert.equal((rows as unknown[]).length, 0, 'MySQL 随机回归库删除后仍存在')
     })
   }
+  verificationIsolation.cleanup()
 }
 process.exit(process.exitCode ?? 0)

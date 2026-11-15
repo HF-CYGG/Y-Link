@@ -12,6 +12,7 @@
  * - 脚本只能连接本次唯一临时 SQLite，禁止读取或修改业务数据库。
  */
 
+import { createVerificationIsolation } from './verification-isolation.js'
 import 'reflect-metadata'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -24,12 +25,14 @@ import type { ClientAuthContext } from '../src/types/client-auth.js'
 import type { ReportQueryInput, ReportType } from '../src/services/report.service.js'
 
 const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
+const verificationIsolation = createVerificationIsolation('report-inventory-verify')
+const sqliteRoot = verificationIsolation.rootDir
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqlitePath = path.resolve(sqliteRoot, `report-inventory-${verifySeed}.sqlite`)
 
 process.env.APP_PROFILE = `report-inventory-${verifySeed}`
 process.env.DB_TYPE = 'sqlite'
+verificationIsolation.seal({ type: 'sqlite', database: sqlitePath })
 process.env.DB_SYNC = 'false'
 process.env.SQLITE_DB_PATH = sqlitePath
 process.env.INIT_ADMIN_PASSWORD = `Admin_${verifySeed}_Aa1!`
@@ -250,7 +253,9 @@ async function main() {
     '存在当前 SKU 但全部以兼容假值停用时库存必须为零，不能回退主表',
   )
 
+  await verificationIsolation.assertTarget(AppDataSource)
   prepareDatabaseRuntime()
+  await verificationIsolation.assertTarget(AppDataSource)
   await AppDataSource.initialize()
   try {
     await initializeDatabaseSchemaIfNeeded(AppDataSource)

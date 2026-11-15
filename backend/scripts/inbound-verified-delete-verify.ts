@@ -7,6 +7,7 @@
  * - 所有数据库、端口和账号均为本脚本临时资源，不连接本地业务数据库。
  */
 
+import { createVerificationIsolation } from './verification-isolation.js'
 import 'reflect-metadata'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -15,7 +16,8 @@ import { fileURLToPath } from 'node:url'
 import type { AuthUserContext } from '../src/types/auth.js'
 
 const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
+const verificationIsolation = createVerificationIsolation('inbound-verified-delete-verify')
+const sqliteRoot = verificationIsolation.rootDir
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqlitePath = path.resolve(sqliteRoot, `inbound-verified-delete-${verifySeed}.sqlite`)
 const adminPassword = `Admin_${verifySeed}_Aa1!`
@@ -23,6 +25,7 @@ const permanentDeletePassword = `Purge_${verifySeed}_Aa1!`
 
 process.env.APP_PROFILE = `inbound-verified-delete-${verifySeed}`
 process.env.DB_TYPE = 'sqlite'
+verificationIsolation.seal({ type: 'sqlite', database: sqlitePath })
 process.env.DB_SYNC = 'false'
 process.env.SQLITE_DB_PATH = sqlitePath
 process.env.INIT_ADMIN_PASSWORD = adminPassword
@@ -148,7 +151,9 @@ async function main() {
     import('../src/services/mall-catalog-revision.service.js'),
   ])
 
+  await verificationIsolation.assertTarget(AppDataSource)
   prepareDatabaseRuntime()
+  await verificationIsolation.assertTarget(AppDataSource)
   await AppDataSource.initialize()
   await initializeDatabaseSchemaIfNeeded(AppDataSource)
   const bootstrapAdmin = await authService.ensureDefaultAdmin()

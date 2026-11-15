@@ -4,6 +4,7 @@
  * 实现逻辑：使用真实实体、事务和服务层验证行为，仅在注入审计失败时替换写入点以证明全事务回滚。
  */
 
+import { createVerificationIsolation } from './verification-isolation.js'
 import 'reflect-metadata'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -13,13 +14,15 @@ import type { AuthUserContext } from '../src/types/auth.js'
 
 const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const repositoryRoot = path.resolve(backendRoot, '..')
-const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
+const verificationIsolation = createVerificationIsolation('order-content-edit-verify')
+const sqliteRoot = verificationIsolation.rootDir
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqlitePath = path.resolve(sqliteRoot, `order-content-edit-${verifySeed}.sqlite`)
 const readSource = (relativePath: string) => fs.readFileSync(path.resolve(repositoryRoot, relativePath), 'utf8')
 
 process.env.APP_PROFILE = `order-content-edit-${verifySeed}`
 process.env.DB_TYPE = 'sqlite'
+verificationIsolation.seal({ type: 'sqlite', database: sqlitePath })
 process.env.DB_SYNC = 'true'
 process.env.SQLITE_DB_PATH = sqlitePath
 process.env.PERMANENT_DELETE_PASSWORD = `Purge_${verifySeed}_Aa1!`
@@ -130,8 +133,10 @@ async function main() {
   assert.equal(typeof contentApi.updateContent, 'function', '基线缺少订单内容编辑服务')
   assert.equal(typeof contentApi.listRevisions, 'function', '基线缺少订单修订时间线服务')
 
+  await verificationIsolation.assertTarget(AppDataSource)
   await AppDataSource.initialize()
   try {
+    await verificationIsolation.assertTarget(AppDataSource)
     await AppDataSource.synchronize()
     await systemConfigService.ensureDefaultConfigs()
     const productRepo = AppDataSource.getRepository(BaseProduct)

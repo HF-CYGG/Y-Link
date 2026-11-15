@@ -5,6 +5,8 @@
  * - 该脚本会临时启动一套后端进程内应用并注入独立数据库环境，请优先保持环境隔离与清理逻辑稳定；
  * - 若后续继续扩展验收场景，优先复用现有统计、样本记录与临时数据种子能力，避免各段脚本重复维护。
  */
+import { createVerificationIsolation } from './verification-isolation.js'
+import { createOwnedVerificationDatabase, verificationDatabaseName } from './owned-verification-database.js'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import type { Server } from 'node:http'
@@ -13,7 +15,7 @@ import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
 
 type TargetName = 'sqlite' | 'mysql'
-type TargetStatus = 'passed' | 'failed' | 'environment_blocked'
+type TargetStatus = 'passed' | 'failed'
 
 interface RequestSample {
   label: string
@@ -60,11 +62,13 @@ interface TargetReport {
 
 const __filename = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(__filename), '..')
+const verificationIsolation = createVerificationIsolation('database-concurrency-target')
 const projectRoot = path.resolve(backendRoot, '..')
 const runtimeRoot = path.resolve(projectRoot, '.local-dev')
 const concurrencyRoot = path.resolve(runtimeRoot, 'db-concurrency')
 
 const runId = process.env.Y_LINK_DB_CONCURRENCY_RUN_ID?.trim() || `${Date.now()}`
+assert.match(runId, /^[a-zA-Z0-9_.-]{1,100}$/, '验收runId不能含路径分隔符')
 const target = (process.env.Y_LINK_DB_CONCURRENCY_TARGET?.trim() || 'sqlite') as TargetName
 const reportPath =
   process.env.Y_LINK_DB_CONCURRENCY_REPORT_PATH?.trim()
@@ -136,9 +140,6 @@ function summarizeSamples(samples: RequestSample[]): ScenarioSummary {
   }
 }
 
-function normalizeSqlIdentifier(value: string) {
-  return value.replaceAll(/\W/g, '_').slice(0, 60)
-}
 
 async function prepareTargetEnvironment() {
   fs.mkdirSync(concurrencyRoot, { recursive: true })
@@ -155,7 +156,7 @@ async function prepareTargetEnvironment() {
     const sourcePath = configuredSourcePath ? path.resolve(configuredSourcePath) : null
     const sqlitePath = configuredTargetPath
       ? path.resolve(configuredTargetPath)
-      : path.resolve(concurrencyRoot, `sqlite-${runId}.sqlite`)
+      : path.resolve(verificationIsolation.rootDir, `sqlite-${runId}.sqlite`)
     fs.mkdirSync(path.dirname(sqlitePath), { recursive: true })
     if (sourcePath && !fs.existsSync(sourcePath)) {
       throw new Error(`SQLite 并发验收源快照不存在：${sourcePath}`)
@@ -166,13 +167,11 @@ async function prepareTargetEnvironment() {
     if (configuredTargetPath && fs.existsSync(sqlitePath)) {
       throw new Error('显式指定的 SQLite 并发验收目标已存在；为避免覆盖数据，请改用新的临时路径')
     }
+    if (['-wal', '-shm'].some(suffix => fs.existsSync(sqlitePath + suffix))) throw new Error('验收SQLite目标存在sidecar，拒绝复用')
     if (sourcePath) {
-      fs.copyFileSync(sourcePath, sqlitePath)
+      fs.copyFileSync(sourcePath, sqlitePath, fs.constants.COPYFILE_EXCL)
     } else {
-      // 默认永远创建全新隔离库，禁止静默复制 backend/data/y-link.sqlite 这类真实试运行数据。
-      for (const suffix of ['', '-wal', '-shm']) {
-        fs.rmSync(`${sqlitePath}${suffix}`, { force: true })
-      }
+      fs.writeFileSync(sqlitePath, '', { flag: 'wx', mode: 0o600 })
     }
     process.env.DB_TYPE = 'sqlite'
     process.env.DB_SYNC = sourcePath ? 'false' : 'true'
@@ -184,6 +183,7 @@ async function prepareTargetEnvironment() {
       sourceCopied: Boolean(sourcePath),
       freshSchema: !sourcePath,
     }
+    verificationIsolation.seal({ type: 'sqlite', database: sqlitePath })
     return null
   }
 
@@ -192,65 +192,12 @@ async function prepareTargetEnvironment() {
   const mysqlUser = process.env.Y_LINK_DB_CONCURRENCY_MYSQL_USER || process.env.DB_USER || 'root'
   const mysqlPassword = process.env.Y_LINK_DB_CONCURRENCY_MYSQL_PASSWORD ?? process.env.DB_PASSWORD ?? ''
   const mysqlBaseName = process.env.Y_LINK_DB_CONCURRENCY_MYSQL_BASE_DB || process.env.DB_NAME || 'y_link'
-  const tempDatabaseName = normalizeSqlIdentifier(`${mysqlBaseName}_concurrency_${runId}`)
-
-  try {
-    const mysql = await import('mysql2/promise')
-    const connection = await mysql.createConnection({
-      host: mysqlHost,
-      port: mysqlPort,
-      user: mysqlUser,
-      password: mysqlPassword,
-      connectTimeout: 3000,
-      multipleStatements: false,
-    })
-    await connection.query(`CREATE DATABASE IF NOT EXISTS \`${tempDatabaseName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`)
-    await connection.end()
-  } catch (error) {
-    report.status = 'environment_blocked'
-    report.errorMessage = `MySQL environment unavailable: ${error instanceof Error ? error.message : String(error)}`
-    report.database = {
-      type: 'mysql',
-      host: mysqlHost,
-      port: mysqlPort,
-      user: mysqlUser,
-      database: tempDatabaseName,
-      environmentBlocked: true,
-    }
-    writeReport()
-    process.exit(0)
-  }
-
-  process.env.DB_TYPE = 'mysql'
-  process.env.DB_HOST = mysqlHost
-  process.env.DB_PORT = String(mysqlPort)
-  process.env.DB_USER = mysqlUser
-  process.env.DB_PASSWORD = mysqlPassword
-  process.env.DB_NAME = tempDatabaseName
+  const tempDatabaseName = verificationDatabaseName(mysqlBaseName)
+  const owned = await createOwnedVerificationDatabase({ host: mysqlHost, port: mysqlPort, user: mysqlUser, password: mysqlPassword }, tempDatabaseName)
   process.env.DB_SYNC = 'true'
-  report.database = {
-    type: 'mysql',
-    host: mysqlHost,
-    port: mysqlPort,
-    user: mysqlUser,
-    database: tempDatabaseName,
-    temporarySchema: true,
-  }
-
-  return async () => {
-    if (process.env.Y_LINK_DB_CONCURRENCY_KEEP_MYSQL === '1') return
-    const mysql = await import('mysql2/promise')
-    const connection = await mysql.createConnection({
-      host: mysqlHost,
-      port: mysqlPort,
-      user: mysqlUser,
-      password: mysqlPassword,
-      connectTimeout: 3000,
-      multipleStatements: false,
-    })
-    await connection.query(`DROP DATABASE IF EXISTS \`${tempDatabaseName}\``)
-    await connection.end()
-  }
+  verificationIsolation.seal({ type: 'mysql', host: mysqlHost, port: mysqlPort, user: mysqlUser, password: mysqlPassword, database: tempDatabaseName })
+  report.database = { type: 'mysql', host: mysqlHost, port: mysqlPort, user: mysqlUser, database: tempDatabaseName, temporarySchema: true }
+  return async () => { if (process.env.Y_LINK_DB_CONCURRENCY_KEEP_MYSQL !== '1') await owned.cleanup() }
 }
 
 async function ensureKnownAdmin(dataSource: { getRepository: Function }) {
@@ -625,10 +572,11 @@ async function runScenarios(
     token: fixtures.supplierToken,
     body: {
       remark: 'concurrency inbound',
+      expectedArrivalAt: new Date(Date.now() + 24 * 3600_000).toISOString(),
       items: [{ productId: inboundProduct.id, qty: 7 }],
     },
   })
-  assert.equal(supplierInbound.response.status, 200, 'supplier inbound submit failed')
+  assert.equal(supplierInbound.response.status, 200, `supplier inbound submit failed: ${JSON.stringify(supplierInbound.sample)}`)
   const inboundResults = await runBatch(
     Array.from({ length: thresholds.mixedScenarioUsers }, (_, index) => () =>
       requestJson({
@@ -877,11 +825,12 @@ async function main() {
     throw new Error(`unsupported target: ${target}`)
   }
 
-  const cleanupTarget = await prepareTargetEnvironment()
+  let cleanupTarget: Awaited<ReturnType<typeof prepareTargetEnvironment>> = null
   let server: Server | null = null
   let dataSource: Awaited<typeof import('../src/config/data-source.js')>['AppDataSource'] | null = null
 
   try {
+    cleanupTarget = await prepareTargetEnvironment()
     const { createApp } = await import('../src/app.js')
     const { AppDataSource } = await import('../src/config/data-source.js')
     const { env } = await import('../src/config/env.js')
@@ -893,7 +842,9 @@ async function main() {
     const { systemConfigService } = await import('../src/services/system-config.service.js')
 
     dataSource = AppDataSource
+    await verificationIsolation.assertTarget(AppDataSource)
     prepareDatabaseRuntime()
+    await verificationIsolation.assertTarget(AppDataSource)
     await AppDataSource.initialize()
     await initializeDatabaseInfrastructure(AppDataSource)
 

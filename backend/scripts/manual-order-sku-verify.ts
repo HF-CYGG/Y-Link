@@ -8,6 +8,7 @@
  * - 将一张隔离单据改造成历史无 SKU 数据，确认仍可读取，并校验打印/PDF 共用聚合逻辑。
  */
 
+import { createVerificationIsolation } from './verification-isolation.js'
 import 'reflect-metadata'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -18,12 +19,14 @@ import type { AuthUserContext } from '../src/types/auth.js'
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
 const repositoryRoot = path.resolve(backendRoot, '..')
-const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
+const verificationIsolation = createVerificationIsolation('manual-order-sku-verify')
+const sqliteRoot = verificationIsolation.rootDir
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqlitePath = path.resolve(sqliteRoot, `manual-order-sku-${verifySeed}.sqlite`)
 
 process.env.APP_PROFILE = `manual-order-sku-${verifySeed}`
 process.env.DB_TYPE = 'sqlite'
+verificationIsolation.seal({ type: 'sqlite', database: sqlitePath })
 process.env.DB_SYNC = 'false'
 process.env.SQLITE_DB_PATH = sqlitePath
 process.env.INIT_ADMIN_PASSWORD = `Admin_${verifySeed}_Aa1!`
@@ -155,7 +158,9 @@ async function main() {
   const { reportService } = await import('../src/services/report.service.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
 
+  await verificationIsolation.assertTarget(AppDataSource)
   prepareDatabaseRuntime()
+  await verificationIsolation.assertTarget(AppDataSource)
   await AppDataSource.initialize()
   try {
     await initializeDatabaseSchemaIfNeeded(AppDataSource)
@@ -183,23 +188,34 @@ async function main() {
 
     const initialOrderEntryEditorSource = readSource('src/views/order-entry/components/OrderEntryItemsEditor.vue')
     assert.match(initialOrderEntryEditorSource, /v-model="row\.qty"[\s\S]*?:min="1"[\s\S]*?:precision="0"/, '桌面手工开单数量控件必须限制为正整数')
-    assert.match(initialOrderEntryEditorSource, /v-model="drawerForm\.qty"[\s\S]*?:min="1"[\s\S]*?:precision="0"/, '移动端手工开单数量控件必须限制为正整数')
+    assert.match(initialOrderEntryEditorSource, /<PassiveNumberInput\b[^>]*v-model="drawerQtyModel"[^>]*:min="1"[^>]*:precision="0"[^>]*:step="1"[^>]*\/>/, '响应式Web抽屉数量控件必须限制为正整数')
+    assert.match(initialOrderEntryEditorSource, /const drawerQtyModel = computed\(\{\s*get:\s*\(\)\s*=>\s*props\.drawerForm\.qty,\s*set:\s*\(value:\s*number\s*\|\s*null\)\s*=>\s*emit\('update:drawerQty', value\),?\s*\}\)/, 'Web抽屉必须由真实数量getter和更新事件setter保持受控绑定')
     assert.doesNotMatch(initialOrderEntryEditorSource, /\ballow-create\b/, '桌面与移动端手工开单只能选择已建档商品')
     const initialOrderEntryFormSource = readSource('src/views/order-entry/composables/useOrderEntryForm.ts')
+    const preparationSource = readSource('src/views/order-entry/composables/prepare-order-submission.ts')
     assert.match(initialOrderEntryFormSource, /Number\.isSafeInteger\([^)]+\.qty[^)]*\)/, '手工开单提交前必须拒绝非整数数量')
-    assert.doesNotMatch(initialOrderEntryFormSource, /productApi\.createProduct\(/, '手工开单不得在提交过程中独立创建零库存商品')
+    assert.doesNotMatch(initialOrderEntryFormSource + preparationSource, /productApi\.createProduct\(/, '手工开单不得在提交过程中独立创建零库存商品')
     assert.match(
       initialOrderEntryFormSource,
       /loadedProducts\.filter\(\(product\) => getSelectableProductSkus\(product\)\.length > 0\)/,
       '商品候选必须排除没有当前启用 SKU 的记录',
     )
-    const unknownProductGuardIndex = initialOrderEntryFormSource.indexOf('const invalidProductRow = itemRows.value.find')
-    const savingStartIndex = initialOrderEntryFormSource.indexOf('isSaving.value = true')
+    // 当前校验由真实按需模块同步执行；按钮在下载期间锁定不等于已经发起业务写请求。
+    assert.match(initialOrderEntryFormSource, /load:\s*\(\)\s*=>\s*import\('\.\/prepare-order-submission'\)/, '开单页必须实际装配被校验的准备模块')
+    const prepareCallIndex = initialOrderEntryFormSource.indexOf('const prepared = prepareOrderSubmission(headerForm, itemRows.value, products.value)')
+    const rejectPreparedIndex = initialOrderEntryFormSource.indexOf('if (!prepared.payload)', prepareCallIndex)
+    const submitWriteIndex = initialOrderEntryFormSource.indexOf('const result = await orderApi.submitOrder(')
+    assert.ok(prepareCallIndex >= 0 && prepareCallIndex < rejectPreparedIndex && rejectPreparedIndex < submitWriteIndex, '实际提交链必须先准备、拒绝非法载荷，再调用写接口')
+    assert.match(initialOrderEntryFormSource, /const \{ prepareOrderSubmission \} = await loadOrderEntrySubmission\(\)/, '不能以未使用模块的源码存在替代真实加载')
+    assert.match(initialOrderEntryFormSource, /if \(!prepared\.payload\) \{\s*showAppWarning\(prepared\.error\)\s*return\s*\}/, '非法商品准备结果必须终止真实提交')
+    const unknownProductGuardIndex = preparationSource.indexOf('if (rows.some((row) => !productMap.has(normalizeTextValue(row.productId))))')
+    const payloadBuildIndex = preparationSource.indexOf('const items:')
     assert.ok(unknownProductGuardIndex >= 0, '手工开单必须识别旧草稿或未知商品值')
     assert.ok(
-      unknownProductGuardIndex < savingStartIndex,
-      '未知商品必须在任何提交写请求开始前被业务化拒绝',
+      payloadBuildIndex > unknownProductGuardIndex,
+      '未知商品必须在构造可提交明细及任何写请求前被业务化拒绝',
     )
+    assert.match(preparationSource.slice(unknownProductGuardIndex, payloadBuildIndex), /^if \([^{]+\) \{\s*return \{ error: '存在未建档、已停用或暂无可用规格的商品，请重新选择' \}/, '已精确定位的未知商品判断必须立即返回业务拒绝')
     assert.match(
       initialOrderEntryFormSource,
       /const reconcileRestoredDraftProducts = \(\) =>/,
