@@ -284,6 +284,13 @@ export function createApp(options: CreateAppOptions = {}) {
    */
   // 救援身份独立于业务数据库和维护准入，不允许借用普通管理员会话。
   app.use('/api/database-rescue', databaseRescueRouter)
+  // 只有同任务手动switch需在维护写屏障前读取taskId；保留原受保护JSON上限，后续鉴权/CSRF/权限仍完整执行。
+  const parseManualSwitch = express.json({ limit: PROTECTED_JSON_BODY_LIMIT })
+  app.use('/api/data-maintenance/db-migration/switch', (req, res, next) => {
+    // 这是同一受保护路由的准入前置解析，不注册第二个看似匿名的POST端点，也不处理子路径/其它方法。
+    if (req.method === 'POST' && req.path === '/') parseManualSwitch(req, res, next)
+    else next()
+  })
   app.use(databaseMaintenanceWriteBarrier)
 
   app.get('/health', (_req, res) => {

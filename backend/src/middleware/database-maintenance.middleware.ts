@@ -21,7 +21,8 @@ import {
 } from '../services/database-maintenance-mode.service.js'
 
 export function databaseMaintenanceWriteBarrier(req: Request, res: Response, next: NextFunction): void {
-  const allowedDuringMaintenance = shouldAllowWriteDuringDatabaseMaintenance(req.method, req.originalUrl)
+  const allowedDuringMaintenance = shouldAllowWriteDuringDatabaseMaintenance(req.method, req.originalUrl,
+    { taskId: req.body?.taskId, activeTaskId: databaseMaintenanceModeService.getActiveTaskId() })
   if (databaseMaintenanceModeService.isReadOnly() && !allowedDuringMaintenance) {
     res.setHeader('Cache-Control', 'no-store')
     res.setHeader('Retry-After', '5')

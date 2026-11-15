@@ -59,7 +59,8 @@ function normalizeRequestPath(requestPath: string): string {
   return requestPath.split('?')[0]?.replace(/\/+$/, '') || '/'
 }
 
-export function shouldAllowWriteDuringDatabaseMaintenance(method: string, requestPath: string): boolean {
+export function shouldAllowWriteDuringDatabaseMaintenance(method: string, requestPath: string,
+  control?: { taskId?: unknown; activeTaskId?: string | null }): boolean {
   const normalizedMethod = method.toUpperCase()
   const normalizedPath = normalizeRequestPath(requestPath)
   if (SAFE_METHODS.has(normalizedMethod)) {
@@ -70,6 +71,9 @@ export function shouldAllowWriteDuringDatabaseMaintenance(method: string, reques
 
   if (normalizedPath === '/api/data-maintenance/db-migration/rollback' && normalizedMethod === 'POST') {
     return true
+  }
+  if (normalizedPath === '/api/data-maintenance/db-migration/switch' && normalizedMethod === 'POST') {
+    return typeof control?.taskId === 'string' && !!control.activeTaskId && control.taskId === control.activeTaskId
   }
   return normalizedPath === '/api/data-maintenance/db-migration/runtime-override' && normalizedMethod === 'DELETE'
 }

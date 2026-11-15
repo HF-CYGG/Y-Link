@@ -9,7 +9,7 @@ import { writeControlFile } from '../src/runtime/durable-control-file.js'
 
 const step = process.argv[2]
 if (!step) {
-  for (const scenario of ['PREPARED', 'TASK_CANCELLED', 'SQLITE_OVERRIDE', 'ROLLBACK_MARKER', 'RESTART_READY', 'cancel_write', 'normal', 'finalization']) {
+  for (const scenario of ['PREPARED', 'TASK_CANCELLED', 'SQLITE_OVERRIDE', 'ROLLBACK_MARKER', 'RESTART_READY', 'cancel_write', 'normal', 'finalization', 'drain_boundary', 'drain_failure', 'accept_write_failure']) {
     const result = spawnSync(process.execPath, ['--import', 'tsx', fileURLToPath(import.meta.url), scenario], { encoding: 'utf8', windowsHide: true, timeout: 30_000 })
     assert.equal(result.status, 0, `${scenario}: ${result.stderr || result.stdout}`)
   }
@@ -72,9 +72,47 @@ if (!step) {
   fs.writeFileSync(appDataPaths.migrationLockFile, validLock)
   const { nonce } = control.prepareDatabaseRescueRollback(taskId)
   await assert.rejects(control.beginDatabaseRescueRollback(taskId, 'wrong', 'operation_test_123456'))
-  if (!['normal', 'finalization'].includes(step)) process.env.Y_LINK_RESCUE_TEST_INTERRUPT_AFTER = step
-  if (['normal', 'finalization'].includes(step)) await control.beginDatabaseRescueRollback(taskId, nonce, 'operation_test_123456')
-  else await assert.rejects(control.beginDatabaseRescueRollback(taskId, nonce, 'operation_test_123456'))
+  if (['drain_boundary', 'drain_failure', 'accept_write_failure'].includes(step)) {
+    let quiesced = false, replayBoundaryEntered = false
+    control.registerDatabaseRescueQuiesce(async id => { assert.equal(id, taskId); assert.equal(control.inspectRecoveryIntent().value?.phase, 'PREPARED'); quiesced = true })
+    const originalTask = fs.readFileSync(path.join(appDataPaths.migrationTaskDir, taskId + '.json'))
+    if (step === 'accept_write_failure') {
+      const rename = fs.renameSync
+      fs.renameSync = function (from, to) { if (String(to) === path.join(appDataPaths.runtimeDir, 'database-recovery-intent.json')) throw new Error('PREPARED_ACCEPT_WRITE_FAILURE'); return rename(from, to) }
+      try { await assert.rejects(control.beginDatabaseRescueRollback(taskId, nonce, 'operation_test_123456', async () => { replayBoundaryEntered = true }), /PREPARED_ACCEPT_WRITE_FAILURE/) }
+      finally { fs.renameSync = rename }
+      assert.equal(quiesced, false); assert.equal(replayBoundaryEntered, false)
+      assert.equal(control.inspectRecoveryIntent().state, 'absent')
+      assert.equal(inspectDatabaseRuntimeOverride().state, 'absent')
+      assert.equal(JSON.parse(fs.readFileSync(appDataPaths.maintenanceStateFile, 'utf8')).readOnly, true)
+      assert.deepEqual(fs.readFileSync(path.join(appDataPaths.migrationTaskDir, taskId + '.json')), originalTask)
+      await control.beginDatabaseRescueRollback(taskId, nonce, 'operation_test_123456')
+    } else if (step === 'drain_failure') {
+      await assert.rejects(control.beginDatabaseRescueRollback(taskId, nonce, 'operation_test_123456', async () => {
+        assert.equal(quiesced, true); replayBoundaryEntered = true; throw new Error('FULL_DRAIN_FAILURE')
+      }), /FULL_DRAIN_FAILURE/)
+      assert.equal(replayBoundaryEntered, true)
+      assert.equal(control.inspectRecoveryIntent().value?.phase, 'PREPARED')
+      assert.equal(inspectDatabaseRuntimeOverride().state, 'absent', '排空失败不能开始恢复覆盖写入')
+      assert.deepEqual(fs.readFileSync(path.join(appDataPaths.migrationTaskDir, taskId + '.json')), originalTask)
+      assert.equal(JSON.parse(fs.readFileSync(appDataPaths.maintenanceStateFile, 'utf8')).readOnly, true)
+    } else {
+      let release!: () => void, entered!: () => void
+      const barrier = new Promise<void>(resolve => { release = resolve }), ready = new Promise<void>(resolve => { entered = resolve })
+      const pending = control.beginDatabaseRescueRollback(taskId, nonce, 'operation_test_123456', async () => { assert.equal(quiesced, true); entered(); await barrier })
+      void pending.catch(() => undefined)
+      try {
+        await ready
+        assert.equal(control.inspectRecoveryIntent().value?.phase, 'PREPARED')
+        assert.equal(inspectDatabaseRuntimeOverride().state, 'absent', '完整drain未结束不能执行恢复')
+        assert.deepEqual(fs.readFileSync(path.join(appDataPaths.migrationTaskDir, taskId + '.json')), originalTask)
+      } finally { release(); await pending }
+    }
+  } else {
+    if (!['normal', 'finalization'].includes(step)) process.env.Y_LINK_RESCUE_TEST_INTERRUPT_AFTER = step
+    if (['normal', 'finalization'].includes(step)) await control.beginDatabaseRescueRollback(taskId, nonce, 'operation_test_123456')
+    else await assert.rejects(control.beginDatabaseRescueRollback(taskId, nonce, 'operation_test_123456'))
+  }
   assert.equal(control.hasPendingRecoveryIntent(), true)
   delete process.env.Y_LINK_RESCUE_TEST_INTERRUPT_AFTER
   await control.replayDatabaseRecoveryIntent()

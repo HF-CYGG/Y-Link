@@ -180,7 +180,7 @@ export type DatabaseMigrationTaskReadState = 'healthy' | 'corrupted'
 export type DatabaseMigrationStage = 'freeze' | 'precheck' | 'snapshot' | 'import' | 'validate' | 'cutover'
 
 /** 后端针对当前任务显式开放的救援动作，前端不得自行推断。 */
-export type DatabaseMigrationAllowedAction = 'prepare_rollback' | 'resume_rollback'
+export type DatabaseMigrationAllowedAction = 'prepare_rollback' | 'resume_rollback' | 'manual_switch' | 'cancel'
 
 /** 自动恢复过程的最小公开状态，不包含数据库路径、凭据或其他拓扑细节。 */
 export interface DatabaseMigrationRecoveryState {
@@ -507,6 +507,10 @@ export const runSQLiteToMySqlMigrationTask = (taskId: string) =>
     method: 'POST',
     url: `/data-maintenance/db-migration/tasks/${taskId}/run`,
   })
+
+/** 复用既有独立签发接口，在手动冻结开始前将救援凭证保存在当前标签页。 */
+export const issueDatabaseMigrationRescueCredential = (taskId: string) =>
+  request<DatabaseRescueCredential>({ method: 'POST', url: `/data-maintenance/db-migration/tasks/${taskId}/rescue-credential` })
 
 /**
  * 获取数据库运行时覆盖状态：

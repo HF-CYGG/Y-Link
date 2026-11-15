@@ -296,6 +296,7 @@ dataMaintenanceRouter.post(
   asyncHandler(async (req, res) => {
     if (!isSecureOrDirectLoopback(req)) throw new BizError('救援凭证需通过可信 HTTPS 或容器本地工具签发', 403)
     await databaseMigrationService.getSQLiteToMySqlTask(req.params.taskId)
+    await databaseMigrationService.prepareManualMigrationCredential(req.params.taskId)
     const data = issueDatabaseRescueCredential(req.params.taskId)
     await recordRescueCredentialIssued(req as AuthenticatedRequest, data.taskId, data.expiresAt, 'manual_issue')
     res.setHeader('Cache-Control', 'no-store')

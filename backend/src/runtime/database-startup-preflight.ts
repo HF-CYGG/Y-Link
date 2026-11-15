@@ -3,8 +3,9 @@ import path from 'node:path'
 import { appDataPaths } from '../config/app-data-paths.js'
 import { inspectDatabaseRuntimeOverride, type DatabaseRuntimeOverrideConfig } from '../config/database-runtime-override.js'
 import { inspectControlFile, writeControlFile } from './durable-control-file.js'
-import { inspectRecoveryIntent, prepareRecoveryStartup } from './database-rescue-control.js'
+import { inspectRecoveryIntent, prepareRecoveryStartup, resumeManualFailureCleanupBeforeStartup } from './database-rescue-control.js'
 import { validateCutoverControl, validateMigrationLock, validateMaintenanceControl } from './database-control-validation.js'
+import { isManagedMigration, isControlledManualMigration } from './database-migration-protocol.js'
 
 const object = (value: unknown) => value && typeof value === 'object' ? value as Record<string, unknown> : null
 function mysqlTargetMatches(task: Record<string, unknown>, config: DatabaseRuntimeOverrideConfig): boolean {
@@ -32,10 +33,15 @@ export async function inspectDatabaseStartup(): Promise<{ mode: 'normal' | 'cuto
     if (!/^[a-zA-Z0-9_-]{1,100}$/.test(taskId)) throw new Error('DATABASE_TASK_INVALID')
     const task = inspectControlFile(path.join(appDataPaths.migrationTaskDir, `${taskId}.json`), (value) => {
       const item = object(value)
-      return item?.id === taskId && item.mode === 'automatic'
+      return item?.id === taskId && isManagedMigration(item)
         && ['queued', 'running', 'restart_pending', 'verifying', 'succeeded', 'failed', 'rolled_back'].includes(String(item.status)) ? item : null
     })
     if (task.state !== 'healthy') throw new Error('DATABASE_TASK_UNAVAILABLE')
+    if (isControlledManualMigration(task.value) && task.value.status === 'failed'
+      && ['failed_cleanup', 'failed_recovered'].includes(String(task.value.controlPhase))) {
+      await resumeManualFailureCleanupBeforeStartup(taskId)
+      return { mode: 'normal' }
+    }
     if (marker.state === 'healthy') {
       if (override.state !== 'healthy' || override.value.sourceTaskId !== taskId) throw new Error('DATABASE_CONTROL_MISMATCH')
       const source = object(task.value.source)
@@ -69,8 +75,20 @@ export async function inspectDatabaseStartup(): Promise<{ mode: 'normal' | 'cuto
       })
       return { mode: 'cutover', taskId }
     }
-    if (['queued', 'running'].includes(String(task.value.status)) && lock.state === 'healthy'
-      && override.state === 'absent') return { mode: 'resume', taskId }
+    const manualSource = object(task.value.source)
+    const originalSqliteOverride = isControlledManualMigration(task.value) && override.state === 'healthy'
+      && override.value.config.DB_TYPE === 'sqlite' && typeof manualSource?.sqlitePath === 'string'
+      && path.resolve(override.value.config.SQLITE_DB_PATH ?? '') === path.resolve(manualSource.sqlitePath)
+    if ((['queued', 'running'].includes(String(task.value.status))
+      || (isControlledManualMigration(task.value) && ['awaiting_switch', 'failed', 'cancelled'].includes(String(task.value.controlPhase))))
+      && (lock.state === 'healthy' || (isControlledManualMigration(task.value) && task.value.controlPhase === 'cancelled' && maintenance.state === 'healthy'))
+      && (override.state === 'absent' || originalSqliteOverride)) {
+      if (isControlledManualMigration(task.value) && maintenance.state === 'absent') {
+        writeControlFile(appDataPaths.maintenanceStateFile, { version: 1, taskId, readOnly: true, phase: 'manual_interrupted',
+          message: '手动迁移持续只读，等待同任务切换或取消', startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
+      }
+      return { mode: 'resume', taskId }
+    }
     throw new Error('DATABASE_RECOVERY_REQUIRED')
   }
   // 完成日志保留为后续启动证据；正常 MySQL override 不要求旧 marker 永久存在。

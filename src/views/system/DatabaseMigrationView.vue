@@ -8,6 +8,7 @@
  * - 一键入口先执行真实预检，任务响应中的一次性救援凭证会在入列表前剥离并仅暂存当前标签页；
  * - 自动任务采用无重叠递归轮询，跨越 onebox 重启断线持续静默刷新，进入终态后自动停止；
  * - 六阶段与救援动作严格按后端 stage/allowedActions/recovery 渲染，避免从旧状态推测可回退性；
+ * - 手动执行前保存当前任务救援凭证，开始后持续只读至切换验收完成或安全取消，复制完成不代表恢复营业；
  * - 原预检、任务执行、手动切换和回退流程完整保留，并统一收进高级/应急折叠区。
  * - 主卡片单独提供连接测试，原位展示问题；连接参数变化会清除旧测试结果。
  * - 任务成功、校验通过且实际运行 MySQL 后显示完成态，收起连接表单，防止重复发起迁移。
@@ -45,6 +46,7 @@ import {
   precheckSQLiteToMySqlMigration,
   rollbackDatabaseMigrationSwitch,
   runSQLiteToMySqlMigrationTask,
+  issueDatabaseMigrationRescueCredential,
   type CreateSQLiteToMySqlTaskPayload,
   type DatabaseMigrationIssue,
   type DatabaseMigrationTableStat,
@@ -944,13 +946,17 @@ const handleRunTask = async (task: SQLiteToMySqlTaskRecord) => {
     return
   }
 
+  const remoteRescueCredential = window.location.protocol === 'https:'
+  const localRescuePreparation = remoteRescueCredential ? ''
+    : ` 当前为 HTTP，不会远程传输明文救援凭证。请先在后端本地（容器内执行）运行 node dist/runtime/database-rescue-cli.js prepare-manual-credential ${task.id}，私下保存输出；故障时可在独立救援页手动输入。确认已准备本地救援后再执行。`
+
   try {
     await ElMessageBox.confirm(
-      `确认执行迁移任务“${task.id}”吗？执行过程中将按任务配置连接目标 MySQL，并可能创建 SQLite 备份。`,
+      `确认执行迁移任务“${task.id}”吗？开始后系统持续只读，直到切换完成或主动取消。复制完成不会恢复营业；切换后仍需重启并通过目标启动验收。${localRescuePreparation}`,
       '执行迁移任务',
       {
         type: 'warning',
-        confirmButtonText: '立即执行',
+        confirmButtonText: remoteRescueCredential ? '立即执行' : '已在本地准备，执行',
         cancelButtonText: '取消',
       },
     )
@@ -962,11 +968,17 @@ const handleRunTask = async (task: SQLiteToMySqlTaskRecord) => {
 
   taskRunningId.value = task.id
   try {
+    if (remoteRescueCredential) {
+      const credential = await issueDatabaseMigrationRescueCredential(task.id)
+      // HTTPS签发失败（包括403/鉴权失败）或暂存失败必须停止，不能回退绕过安全门禁。
+      storeRescueCredential(window.sessionStorage, credential)
+      currentTabRescueCredentialTaskId.value = credential.taskId
+    }
     const latestTask = await runSQLiteToMySqlMigrationTask(task.id)
     upsertTaskRecord(latestTask)
     selectedTaskId.value = latestTask.id
     enterStepFlow(latestTask.status === 'succeeded' ? 'switch' : 'run')
-    showAppSuccess(latestTask.status === 'succeeded' ? '迁移任务执行完成' : '迁移任务已执行，请查看结果')
+    showAppSuccess(latestTask.status === 'succeeded' ? '复制与强校验完成，系统持续只读，直到切换完成或主动取消' : '迁移任务已执行，请查看结果')
     await loadOverview()
   } catch (error) {
     void showCriticalErrorDialog(error, {
@@ -1037,15 +1049,18 @@ const handleSwitchToTask = async (task: SQLiteToMySqlTaskRecord) => {
  * - 若存在选中任务，则把 taskId 一并传给后端，方便后端优先回退到该任务源 SQLite；
  * - 若无选中任务，后端会使用当前覆盖配置中的 rollbackConfig 或默认 SQLite 路径。
  */
-const handleRollbackToSqlite = async () => {
+const handleRollbackToSqlite = async (task?: SQLiteToMySqlTaskRecord) => {
   if (!ensurePermission('db_migration:operate', '数据库迁移操作')) {
     return
   }
 
+  const operationTask = task ?? selectedTask.value
+  const operationTaskId = operationTask?.id
+  const cancellingManual = operationTask?.mode === 'manual' && operationTask.allowedActions?.includes('cancel')
   try {
     const promptResult = await ElMessageBox.prompt(
-      `请输入本次回退原因。${DATABASE_MIGRATION_RESTART_EFFECT_TEXT}`,
-      '回退到 SQLite',
+      cancellingManual ? '请输入取消手动迁移的原因。系统会等待复制停止并撤销副本切换资格；已经准备切换时仍须完成受控重启验收。' : `请输入本次回退原因。${DATABASE_MIGRATION_RESTART_EFFECT_TEXT}`,
+      cancellingManual ? '取消当前手动迁移' : '回退到 SQLite',
       {
         inputValue: DATABASE_MIGRATION_ROLLBACK_REASON_DEFAULT,
         inputPlaceholder: '例如：目标库校验异常，回退到 SQLite',
@@ -1055,7 +1070,7 @@ const handleRollbackToSqlite = async () => {
     )
     rollbackLoading.value = true
     const result = await rollbackDatabaseMigrationSwitch({
-      taskId: selectedTask.value?.id,
+      taskId: operationTaskId,
       reason: promptResult.value.trim() || undefined,
     })
     if (runtimeState.value) {
@@ -1065,7 +1080,9 @@ const handleRollbackToSqlite = async () => {
       }
     }
     enterStepFlow('switch')
-    showAppSuccess(`已写入 SQLite 运行时覆盖。${DATABASE_MIGRATION_RESTART_EFFECT_TEXT}`)
+    const cancelledTask = cancellingManual && operationTaskId ? await getSQLiteToMySqlMigrationTaskDetail(operationTaskId) : null
+    if (cancelledTask) upsertTaskRecord(cancelledTask)
+    showAppSuccess(cancelledTask?.status === 'rolled_back' ? '手动迁移已取消，副本切换资格已撤销，原 SQLite 继续服务' : `已准备受控回退，系统保持只读至重启验收完成。${DATABASE_MIGRATION_RESTART_EFFECT_TEXT}`)
     await loadOverview()
   } catch (error) {
     if (error === 'cancel' || error === 'close') {
@@ -1120,7 +1137,7 @@ const handleClearRuntimeOverride = async () => {
     showAppSuccess(
       result.cleared
         ? DATABASE_MIGRATION_CLEAR_OVERRIDE_SUCCESS
-        : `当前未检测到数据库运行时覆盖文件。${DATABASE_MIGRATION_RESTART_EFFECT_TEXT}`,
+        : `当前覆盖未清空；若处于迁移只读窗口，请查看任务取消或恢复状态。${DATABASE_MIGRATION_RESTART_EFFECT_TEXT}`,
     )
     await loadOverview()
   } catch (error) {
@@ -1639,6 +1656,8 @@ onBeforeUnmount(stopAutomaticTaskPolling)
                 :get-task-read-state-tag-type="getTaskReadStateTagType"
                 @select-task="handleSelectTask"
                 @run-task="handleRunTask"
+                @cancel-task="handleRollbackToSqlite($event)"
+                @open-rescue="openDatabaseRescue"
               />
 
               <DatabaseMigrationSwitchSection

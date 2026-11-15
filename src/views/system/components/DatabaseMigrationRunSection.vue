@@ -4,7 +4,7 @@
  * 文件职责：承载数据库迁移助手中的“执行迁移并核验结果”步骤区。
  * 实现逻辑：
  * - 父页面保留任务执行、详情刷新和权限控制；
- * - 本组件只负责展示任务表格、进度和详情信息。
+ * - 本组件展示任务表格、进度和详情，并将同任务安全取消动作交回父页面与服务端归属校验。
  * 维护说明：任务详情字段若扩展，优先在此补齐渲染，不要把表格和详情块重新塞回父页面。
  */
 
@@ -29,6 +29,8 @@ defineProps<{
 const emit = defineEmits<{
   (event: 'select-task', task: SQLiteToMySqlTaskRecord): void
   (event: 'run-task', task: SQLiteToMySqlTaskRecord): void
+  (event: 'cancel-task', task: SQLiteToMySqlTaskRecord): void
+  (event: 'open-rescue'): void
 }>()
 </script>
 
@@ -38,7 +40,7 @@ const emit = defineEmits<{
       <div>
         <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">第 3 步：执行迁移并核验结果</h2>
         <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
-          先执行任务，再确认进度、导入行数和迁后校验结果。只有成功任务才会解锁最后一步的切换动作。
+          开始执行后持续只读，直到切换完成或主动取消。手动任务“复制完成”仍未恢复营业，可继续同任务切换或取消。
         </p>
       </div>
       <div class="text-sm text-slate-500 dark:text-slate-400">
@@ -64,7 +66,7 @@ const emit = defineEmits<{
           <el-table-column label="状态" width="100" align="center">
             <template #default="{ row }">
               <el-tag :type="getTaskStatusTagType(row.status)" effect="light">
-                {{ getTaskStatusLabel(row.status) }}
+                {{ row.mode === 'manual' && row.status === 'succeeded' ? '复制完成' : getTaskStatusLabel(row.status) }}
               </el-tag>
             </template>
           </el-table-column>
@@ -104,6 +106,10 @@ const emit = defineEmits<{
                   执行
                 </el-button>
                 <el-button size="small" @click.stop="emit('select-task', row)">详情</el-button>
+                <el-button v-if="row.mode === 'manual' && row.allowedActions?.includes('cancel')" size="small" type="warning"
+                  :disabled="!canOperateMigration" @click.stop="emit('cancel-task', row)">取消当前迁移</el-button>
+                <el-button v-if="row.mode === 'manual' && row.allowedActions?.includes('prepare_rollback')" size="small"
+                  :disabled="!canOperateMigration" @click.stop="emit('open-rescue')">独立救援</el-button>
               </div>
             </template>
           </el-table-column>
@@ -119,7 +125,7 @@ const emit = defineEmits<{
                 <div class="mt-1 font-mono text-xs text-slate-500 dark:text-slate-400">{{ selectedTask.id }}</div>
               </div>
               <el-tag :type="getTaskStatusTagType(selectedTask.status)" effect="light">
-                {{ getTaskStatusLabel(selectedTask.status) }}
+                {{ selectedTask.mode === 'manual' && selectedTask.status === 'succeeded' ? '复制完成' : getTaskStatusLabel(selectedTask.status) }}
               </el-tag>
             </div>
           </div>

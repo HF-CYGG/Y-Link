@@ -531,13 +531,13 @@ export async function startBusinessRuntime(startup: { mode: 'normal' | 'cutover'
     )
   ) {
     // 不可变数据验收和最终审计已完成，才允许启动补数；恢复日志先记完成，维护状态最后解除。
-    await databaseMaintenanceModeService.runGovernance(cutoverStartupResult.taskId, async () => {
+    await databaseMaintenanceModeService.runGovernance(cutoverStartupResult.taskId, () => databaseMigrationService.runManualMigrationStartupBootstrap(cutoverStartupResult.taskId, async () => {
       if (cutoverStartupResult.action === 'rollback_finalized') markRecoveryFinalizing(cutoverStartupResult.taskId)
       const schemaInitResult = await initializeDatabaseSchemaIfNeeded(AppDataSource)
       logLine('SCHEMA', `action=${schemaInitResult.action} reason=${schemaInitResult.reason}`)
       mutableStartupBootstrapResult = await runMutableStartupBootstrap()
       logMutableStartupBootstrapResult(mutableStartupBootstrapResult)
-    })
+    }))
     await completeDatabaseMigrationCutoverStartup(cutoverStartupResult.taskId)
   }
 

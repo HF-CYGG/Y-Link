@@ -15,6 +15,19 @@ assert.equal(createApp().get('trust proxy'), false, '直接运行 Node 默认不
 const { configureHttpSecurity, readHttpSecurityConfig, resolveSecureCookieFlag, isSecureOrDirectLoopback } =
   await import('../src/utils/http-security.js')
 
+// 实际app挂载链：switch的前置JSON解析不能成为绕过认证/跨站策略的响应端点。
+const guardedServer = createApp().listen(0, '127.0.0.1')
+await once(guardedServer, 'listening')
+const guardedAddress = guardedServer.address()
+assert.ok(guardedAddress && typeof guardedAddress === 'object')
+try {
+  const url = `http://127.0.0.1:${guardedAddress.port}/api/data-maintenance/db-migration/switch`
+  const unauthorized = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ taskId: 'fixture-only' }) })
+  assert.equal(unauthorized.status, 401, '解析taskId之后仍必须经过真实管理员认证')
+  const crossSite = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Sec-Fetch-Site': 'cross-site' }, body: '{}' })
+  assert.equal(crossSite.status, 403, '维护切换路径仍受全局跨站保护')
+} finally { await new Promise<void>((resolve, reject) => guardedServer.close(error => error ? reject(error) : resolve())) }
+
 async function probe(trusted: string) {
   const app = express()
   configureHttpSecurity(app, readHttpSecurityConfig({
