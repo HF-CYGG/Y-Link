@@ -9,7 +9,8 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import multer from 'multer'
 import type { Express } from 'express'
-import sharp, { type Metadata } from 'sharp'
+import type { Metadata } from 'sharp'
+import { loadSharp } from './image-module-loader.js'
 import { productImageProcessingGate } from './product-image-gate.js'
 import { BizError } from './errors.js'
 import { generateProductThumbnailForFile, notifyProductOriginalCreated } from './product-thumbnail.js'
@@ -201,7 +202,11 @@ async function runClientFeedbackImageProcessing<T>(operation: () => Promise<T>):
   }
 }
 
-const createSharpInput = (buffer: Buffer, mimeType: DetectedImageContent['mimeType']) => {
+const createSharpInput = (
+  sharp: Awaited<ReturnType<typeof loadSharp>>,
+  buffer: Buffer,
+  mimeType: DetectedImageContent['mimeType'],
+) => {
   return sharp(buffer, {
     animated: SHARP_ANIMATED_MIME_TYPES.has(mimeType),
     failOn: 'error',
@@ -219,9 +224,11 @@ const validateImageDimensions = async (
   buffer: Buffer,
   detectedContent: DetectedImageContent,
 ): Promise<ValidatedImageDimensions> => {
+  // 依赖暂不可用是可重试的 503；只有真实解码失败才归为图片内容错误。
+  const sharp = await loadSharp()
   let metadata: Metadata
   try {
-    metadata = await createSharpInput(buffer, detectedContent.mimeType).metadata()
+    metadata = await createSharpInput(sharp, buffer, detectedContent.mimeType).metadata()
   } catch {
     throw new BizError('上传图片已损坏或内容异常，请重新选择图片', 400)
   }
@@ -255,7 +262,8 @@ const reencodeValidatedImage = async (
   buffer: Buffer,
   detectedContent: DetectedImageContent,
 ): Promise<Buffer> => {
-  const pipeline = createSharpInput(buffer, detectedContent.mimeType).rotate()
+  const sharp = await loadSharp()
+  const pipeline = createSharpInput(sharp, buffer, detectedContent.mimeType).rotate()
 
   try {
     if (detectedContent.mimeType === 'image/jpeg') {
