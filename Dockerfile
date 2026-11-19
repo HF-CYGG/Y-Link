@@ -12,7 +12,7 @@
 # ------------------------------
 # sqlite3@5 的 N-API 预编译产物在 Node 22 LTS 上稳定可用；升级 Node 主版本前必须先通过 Onebox SQLite 冒烟。
 # 固定到 Node 22 最新安全补丁版本；Node 发布新安全版本后 `npm run verify:security-updates` 会报红，需同步升级全部 Node 版本固定点。
-ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:22.23.4-bookworm-slim
+ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:22.23.5-bookworm-slim
 
 FROM --platform=$BUILDPLATFORM ${Y_LINK_NODE_IMAGE} AS build
 
