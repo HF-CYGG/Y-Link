@@ -4,6 +4,10 @@
  */
 let businessRuntime: typeof import('./runtime/business-runtime.js') | undefined
 let reason = 'DATABASE_STARTUP_FAILED'
+const exitIfBusinessRuntimeRequested = () => {
+  const exitCode = businessRuntime?.getRequestedRuntimeExitCode()
+  if (exitCode !== undefined && exitCode !== null) process.exit(exitCode)
+}
 try {
   const { inspectDatabaseStartup } = await import('./runtime/database-startup-preflight.js')
   const startup = await inspectDatabaseStartup()
@@ -24,6 +28,7 @@ try {
     console.error('[y-link-backend] 启动失败原因', toSafeStartupErrorLog(error))
   } catch { /* 诊断日志失败不影响进入救援。 */ }
   if (businessRuntime) await businessRuntime.stopFailedBusinessRuntime().catch(() => undefined)
+  exitIfBusinessRuntimeRequested()
   try {
     const { inspectRecoveryIntent } = await import('./runtime/database-rescue-control.js')
     const recovery = inspectRecoveryIntent()
@@ -38,5 +43,6 @@ try {
     }
   } catch { /* 无法证明恢复状态时保持救援，不猜测目标。 */ }
   const { startDatabaseRescueServer } = await import('./runtime/rescue-app.js')
+  exitIfBusinessRuntimeRequested()
   await startDatabaseRescueServer(reason)
 }

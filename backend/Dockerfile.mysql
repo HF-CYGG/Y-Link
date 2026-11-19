@@ -13,24 +13,38 @@ ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:22.23.5-bookworm-slim
 FROM ${Y_LINK_NODE_IMAGE} AS build
 # 固定既有npm工具；官方包完整性失败即停，不改变Node/Nginx或应用锁。
 COPY scripts/install-pinned-npm.mjs /tmp/ylink-install-pinned-npm.mjs
-RUN node /tmp/ylink-install-pinned-npm.mjs --context=image
+COPY scripts/build-pinned-npm.mjs /tmp/build-pinned-npm.mjs
+COPY npm-toolchain /tmp/ylink-npm-toolchain
+RUN node /tmp/ylink-install-pinned-npm.mjs --context=image --data-dir=/tmp/ylink-npm-toolchain
 
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci
+# 只编译/类型与MySQL-only路径显式跳过安装hook，不构建最终不会携带的SQLite。
+# sharp的原生平台包仍从原锁安装并真实加载；不运行仓库postinstall或改变应用锁。
+COPY scripts/pinned-sqlite-source.mjs scripts/build-pinned-sqlite.mjs scripts/verify-pinned-sqlite.mjs scripts/install-pinned-sqlite.mjs ./scripts/
+COPY src/database/pinned-sqlite-source.json ./src/database/pinned-sqlite-source.json
+RUN npm ci --ignore-scripts \
+  && node -e "require('sharp')"
 
 COPY tsconfig.json ./
 COPY src ./src
 COPY sql ./sql
 RUN npm run build \
-  && npm prune --omit=dev \
-  && npm uninstall sqlite3
+  && npm prune --omit=dev --ignore-scripts \
+  && npm uninstall sqlite3 --ignore-scripts \
+  && test ! -e node_modules/sqlite3
+
+FROM build AS native-security-build
+COPY native-security /ylink-native-security
+RUN Y_LINK_NATIVE_SECURITY_BUILD=image sh /ylink-native-security/build-stage.sh
 
 FROM ${Y_LINK_NODE_IMAGE} AS runtime
 # 固定既有npm工具；官方包完整性失败即停，不改变Node/Nginx或应用锁。
 COPY scripts/install-pinned-npm.mjs /tmp/ylink-install-pinned-npm.mjs
-RUN node /tmp/ylink-install-pinned-npm.mjs --context=image
+COPY scripts/build-pinned-npm.mjs /tmp/build-pinned-npm.mjs
+COPY npm-toolchain /tmp/ylink-npm-toolchain
+RUN node /tmp/ylink-install-pinned-npm.mjs --context=image --data-dir=/tmp/ylink-npm-toolchain
 
 WORKDIR /app
 
@@ -43,9 +57,12 @@ ENV NODE_ENV=production \
   UV_THREADPOOL_SIZE=8
 
 # 预建 /app/data：挂载命名卷时 Docker 会沿用镜像目录的属主，node 用户才能写入维护状态与数据加密密钥文件。
+COPY --from=native-security-build /native-out /tmp/ylink-native-security
+COPY native-security/install-backports.mjs native-security/source-pins.json /tmp/ylink-native-security-installer/
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata \
-  && rm -rf /var/lib/apt/lists/* \
+  && node /tmp/ylink-native-security-installer/install-backports.mjs --input=/tmp/ylink-native-security \
+  && rm -rf /tmp/ylink-native-security /tmp/ylink-native-security-installer /var/lib/apt/lists/* \
   && mkdir -p /app/data /app/uploads \
   && chown -R node:node /app
 
@@ -53,9 +70,12 @@ COPY --from=build --chown=node:node /app/package*.json ./
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/sql ./sql
+COPY --from=build --chown=node:node /app/scripts ./scripts
+COPY --from=build --chown=node:node /app/src/database/pinned-sqlite-source.json ./src/database/pinned-sqlite-source.json
 
 USER node
 
 EXPOSE 3001
 
-CMD ["npm", "run", "start"]
+# 直接使用与 npm start 相同的 Node 入口，使业务进程接收容器信号并保留退出 75。
+CMD ["node", "dist/index.js"]

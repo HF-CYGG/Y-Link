@@ -5,6 +5,7 @@ import path from 'node:path'
 import { createRequire } from 'node:module'
 import test from 'node:test'
 import { auditInstalledPinnedNpm } from './audit-pinned-npm.mjs'
+import { PINNED_NPM } from './install-pinned-npm.mjs'
 const require = createRequire(import.meta.url)
 
 function fixture() {
@@ -16,7 +17,7 @@ function fixture() {
     for (const dependency of Object.keys(manifest.dependencies ?? {})) materialize(dependency, path.join(destination, 'node_modules', dependency), createRequire(path.join(source, 'package.json')))
   }
   materialize('semver', path.join(root, 'node_modules/semver'))
-  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'npm', version: '11.21.2', dependencies: { semver: '*' } }))
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'npm', version: PINNED_NPM, dependencies: { semver: '*' } }))
   for (const [location, name, version] of [['node_modules/glob', 'glob', '1.0.0'], ['node_modules/parent', 'parent', '1.0.0'], ['node_modules/parent/node_modules/glob', 'glob', '2.0.0']]) {
     fs.mkdirSync(path.join(root, location), { recursive: true }); fs.writeFileSync(path.join(root, location, 'package.json'), JSON.stringify({ name, version }))
   }

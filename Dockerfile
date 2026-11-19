@@ -17,7 +17,9 @@ ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:22.23.5-bookworm-slim
 FROM --platform=$BUILDPLATFORM ${Y_LINK_NODE_IMAGE} AS build
 # 固定既有npm工具；官方包完整性失败即停，不改变Node/Nginx或应用锁。
 COPY backend/scripts/install-pinned-npm.mjs /tmp/ylink-install-pinned-npm.mjs
-RUN node /tmp/ylink-install-pinned-npm.mjs --context=image
+COPY backend/scripts/build-pinned-npm.mjs /tmp/build-pinned-npm.mjs
+COPY backend/npm-toolchain /tmp/ylink-npm-toolchain
+RUN node /tmp/ylink-install-pinned-npm.mjs --context=image --data-dir=/tmp/ylink-npm-toolchain
 
 WORKDIR /app
 
@@ -55,6 +57,20 @@ ENV TZ=Asia/Shanghai
 RUN apk add --no-cache tzdata \
   && mkdir -p /var/cache/nginx/ylink-public \
   && chown -R nginx:nginx /var/cache/nginx/ylink-public
+
+# 仅定向更新基座中已安装的两个运行库；保留Alpine分支、Nginx及全部现有模块。
+# 仍由既有官方源和可信key验签；新增、删除或改变其它包时停止构建。
+RUN set -eu; \
+  grep -Eq '^3\.24\.' /etc/alpine-release; \
+  apk info -e zlib libxslt >/dev/null; \
+  before_packages="$(apk info -v)"; \
+  before_other="$(printf '%s\n' "$before_packages" | grep -Ev '^(zlib|libxslt)-[0-9]' | sort)"; \
+  apk add --no-cache --upgrade zlib=1.4-r0 libxslt=1.1.43-r4; \
+  after_packages="$(apk info -v)"; \
+  after_other="$(printf '%s\n' "$after_packages" | grep -Ev '^(zlib|libxslt)-[0-9]' | sort)"; \
+  test "$before_other" = "$after_other"; \
+  printf '%s\n' "$after_packages" | grep -Fqx 'zlib-1.4-r0'; \
+  printf '%s\n' "$after_packages" | grep -Fqx 'libxslt-1.1.43-r4'
 
 # 使用可模板化站点配置：
 # - 处理 Vue Router history 路由回退；

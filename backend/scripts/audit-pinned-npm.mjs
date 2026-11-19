@@ -4,6 +4,7 @@ import path from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { PINNED_NPM, PINNED_NODE } from './install-pinned-npm.mjs'
+import { BASE_SOURCE, SOURCE_POLICY_SHA256 } from './build-pinned-npm.mjs'
 
 export async function auditInstalledPinnedNpm(npmRoot = path.resolve(path.dirname(process.execPath), '../lib/node_modules/npm'), fetcher = fetch) {
   const semver = createRequire(path.join(npmRoot, 'package.json'))('semver')
@@ -52,7 +53,8 @@ export async function auditInstalledPinnedNpm(npmRoot = path.resolve(path.dirnam
   }
   const counts = Object.fromEntries([...severities].map(severity => [severity, findings.filter(item => item.severity === severity).length]))
   return { status: 'complete', checkedAt: new Date().toISOString(), scope: '实际global npm目录及其全部物化嵌套包，不是应用闭包或整个OS',
-    node: process.versions.node, npm: packages[0].version, root, packageCount: packages.length, counts, findings,
+    node: process.versions.node, npm: packages[0].version, officialBase: BASE_SOURCE.version, derivedRevision: true, sourcePolicySha256: SOURCE_POLICY_SHA256,
+    root, packageCount: packages.length, counts, findings,
     blocking: findings.some(item => item.severity === 'high' || item.severity === 'critical') }
 }
 

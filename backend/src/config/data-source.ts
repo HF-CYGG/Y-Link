@@ -7,7 +7,8 @@
 import 'reflect-metadata'
 import fs from 'node:fs'
 import path from 'node:path'
-import { DataSource, type DataSourceOptions } from 'typeorm'
+import type { DataSourceOptions } from 'typeorm'
+import { VerifiedDataSource } from '../database/verified-data-source.js'
 import { resolveSqliteDatabasePath } from './database-bootstrap.js'
 import { env } from './env.js'
 import type { DatabaseRuntimeOverrideConfig } from './database-runtime-override.js'
@@ -230,7 +231,7 @@ export function createDataSourceOptions(runtimeOverride?: DatabaseRuntimeOverrid
 
 // TypeORM 数据源统一管理，避免在各业务模块重复创建连接。
 // 主应用启动时需要先执行 SQLite 旧库兼容补列，再决定是否同步结构，因此这里显式关闭 initialize 阶段的隐式同步。
-export const AppDataSource = new DataSource({
+export const AppDataSource = new VerifiedDataSource({
   ...createDataSourceOptions(),
   synchronize: false,
 })

@@ -5,6 +5,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "postinstall": "node scripts/install-pinned-sqlite.mjs",
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
@@ -40,6 +41,7 @@
     "auth:webauthn:compat:verify": "node --import tsx scripts/admin-webauthn-verify.ts --enabled --compat",
     "security:data-leak-ddos:verify": "node --import tsx scripts/data-leak-ddos-verify.ts",
     "captcha:rendering:verify": "node --import tsx scripts/captcha-rendering-verify.ts",
+    "image:lazy:verify": "node --import tsx scripts/image-module-lazy-verify.ts",
     "security:auth-sse-final:verify": "node --import tsx scripts/auth-sse-final-regression-verify.ts",
     "security:verification-isolation:verify": "node --import tsx scripts/verification-isolation-verify.ts",
     "security:client-account-write:verify": "node --import tsx scripts/client-account-write-boundary-verify.ts",

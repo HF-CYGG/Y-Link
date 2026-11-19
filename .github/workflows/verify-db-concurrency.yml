@@ -48,7 +48,7 @@ jobs:
 
       # sqlite3 等原生模块与 Node ABI 绑定，缓存键必须包含 setup-node 实际解析出的完整版本号。
       # main 分支 push 也会运行本工作流并写入缓存，PR 分支可直接复用 main 的缓存。
-      - name: 固定官方 npm 11.21.2（校验包完整性）
+      - name: 固定派生 npm 11.21.2-ylink.1（官方源/本地修订校验）
         run: node backend/scripts/install-pinned-npm.mjs --context=ci
 
       - name: 恢复后端依赖目录缓存
@@ -56,7 +56,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: backend/node_modules
-          key: backend-node-modules-npm11.21.2-${{ runner.os }}-${{ runner.arch }}-node${{ steps.setup-node.outputs.node-version }}-${{ hashFiles('backend/package-lock.json') }}
+          key: backend-node-modules-controlled-sqlite3541-npm11.21.2-ylink.1-${{ runner.os }}-${{ runner.arch }}-node${{ steps.setup-node.outputs.node-version }}-${{ hashFiles('backend/package-lock.json', 'backend/package.json', 'backend/src/database/pinned-sqlite-source.json', 'backend/scripts/*pinned-sqlite*.mjs', 'backend/npm-toolchain/*.json', 'backend/scripts/*pinned-npm*.mjs') }}
 
       - name: 安装根 Web 依赖
         run: npm ci --workspaces=false --no-audit --no-fund
@@ -65,11 +65,14 @@ jobs:
         if: steps.backend-deps-cache.outputs.cache-hit != 'true'
         run: npm --prefix ./backend ci --no-audit --no-fund
 
+      - name: 校验实际 SQLite 绑定（缓存命中也执行）
+        run: node backend/scripts/verify-pinned-sqlite.mjs --project=backend --static
+
       - name: 检查文本编码
         run: npm run verify:text-encoding
 
       - name: 验证工作流权限、依赖闭包与后端身份契约
-        run: node --test scripts/verify-action-workflow-pins.test.mjs scripts/verify-node-workflow-pins.test.mjs scripts/verify-dependency-audit-scope.test.mjs scripts/verify-onebox-identity.test.mjs
+        run: node --test scripts/verify-action-workflow-pins.test.mjs scripts/verify-node-workflow-pins.test.mjs scripts/verify-dependency-audit-scope.test.mjs scripts/verify-onebox-identity.test.mjs scripts/verify-pinned-npm.test.mjs backend/scripts/pinned-npm-source.test.mjs backend/scripts/audit-pinned-npm.test.mjs
 
       - name: 构建 Web
         run: npm run build

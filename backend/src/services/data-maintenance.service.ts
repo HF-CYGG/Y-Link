@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { DataSource, type EntityManager } from 'typeorm'
+import { VerifiedDataSource } from '../database/verified-data-source.js'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { runDatabaseExclusive } from '../database/transaction-coordinator.js'
@@ -91,7 +92,7 @@ class DataMaintenanceService {
         await AppDataSource.query(`VACUUM INTO ${quotedTargetPath}`)
       })
 
-      const backupDataSource = new DataSource({
+      const backupDataSource = new VerifiedDataSource({
         type: 'sqlite',
         database: targetPath,
         entities: [],

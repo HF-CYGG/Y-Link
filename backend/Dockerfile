@@ -18,7 +18,9 @@ ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:22.23.5-bookworm-slim
 FROM --platform=$BUILDPLATFORM ${Y_LINK_NODE_IMAGE} AS build
 # 固定既有npm工具；官方包完整性失败即停，不改变Node/Nginx或应用锁。
 COPY scripts/install-pinned-npm.mjs /tmp/ylink-install-pinned-npm.mjs
-RUN node /tmp/ylink-install-pinned-npm.mjs --context=image
+COPY scripts/build-pinned-npm.mjs /tmp/build-pinned-npm.mjs
+COPY npm-toolchain /tmp/ylink-npm-toolchain
+RUN node /tmp/ylink-install-pinned-npm.mjs --context=image --data-dir=/tmp/ylink-npm-toolchain
 
 WORKDIR /app
 
@@ -36,27 +38,30 @@ RUN npm run build
 # 生产依赖阶段：在目标架构上安装运行期依赖。
 # 说明：
 # - 官方 Node 镜像已内置 /usr/local/include/node，显式复用本地头文件，
-#   避免 sqlite3 回退 node-gyp 时还需外网下载与运行时完全匹配的 Node headers；
+#   固定源码重建不再外网下载与运行时完全匹配的 Node headers；
 # - 编译工具只存在于该中间层，最终运行镜像不会携带编译器；
-#   缺失这些工具会让 optional sqlite3 被 npm 静默跳过，直到启动时才报 DriverPackageNotInstalled。
+#   optional包缺失、重建失败或实际版本不匹配均立即阻断，不回退旧预编译绑定。
 # ------------------------------
 FROM ${Y_LINK_NODE_IMAGE} AS prod-deps
 # 固定既有npm工具；官方包完整性失败即停，不改变Node/Nginx或应用锁。
 COPY scripts/install-pinned-npm.mjs /tmp/ylink-install-pinned-npm.mjs
-RUN node /tmp/ylink-install-pinned-npm.mjs --context=image
+COPY scripts/build-pinned-npm.mjs /tmp/build-pinned-npm.mjs
+COPY npm-toolchain /tmp/ylink-npm-toolchain
+RUN node /tmp/ylink-install-pinned-npm.mjs --context=image --data-dir=/tmp/ylink-npm-toolchain
 
 WORKDIR /app
 
 ENV npm_config_nodedir=/usr/local
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends python3 make g++ \
+  && apt-get install -y --no-install-recommends python3 make g++ binutils \
   && rm -rf /var/lib/apt/lists/*
 
 COPY package*.json ./
 COPY .npmrc ./
-RUN npm ci --omit=dev \
-  && node -e "require('sqlite3')"
+COPY scripts/pinned-sqlite-source.mjs scripts/build-pinned-sqlite.mjs scripts/verify-pinned-sqlite.mjs scripts/install-pinned-sqlite.mjs ./scripts/
+COPY src/database/pinned-sqlite-source.json ./src/database/pinned-sqlite-source.json
+RUN npm ci --omit=dev
 
 # ------------------------------
 # 运行阶段：仅保留生产依赖与编译产物
@@ -64,10 +69,16 @@ RUN npm ci --omit=dev \
 # - 继续使用相同发行版，避免 sqlite3 二进制兼容问题；
 # - 默认将 SQLite 数据落到 /app/data、上传图片落到 /app/uploads，便于通过 volume 持久化。
 # ------------------------------
+FROM prod-deps AS native-security-build
+COPY native-security /ylink-native-security
+RUN Y_LINK_NATIVE_SECURITY_BUILD=image sh /ylink-native-security/build-stage.sh
+
 FROM ${Y_LINK_NODE_IMAGE} AS runtime
 # 固定既有npm工具；官方包完整性失败即停，不改变Node/Nginx或应用锁。
 COPY scripts/install-pinned-npm.mjs /tmp/ylink-install-pinned-npm.mjs
-RUN node /tmp/ylink-install-pinned-npm.mjs --context=image
+COPY scripts/build-pinned-npm.mjs /tmp/build-pinned-npm.mjs
+COPY npm-toolchain /tmp/ylink-npm-toolchain
+RUN node /tmp/ylink-install-pinned-npm.mjs --context=image --data-dir=/tmp/ylink-npm-toolchain
 
 WORKDIR /app
 
@@ -78,9 +89,12 @@ ENV NODE_ENV=production \
   TZ=Asia/Shanghai \
   UV_THREADPOOL_SIZE=8
 
+COPY --from=native-security-build /native-out /tmp/ylink-native-security
+COPY native-security/install-backports.mjs native-security/source-pins.json /tmp/ylink-native-security-installer/
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata \
-  && rm -rf /var/lib/apt/lists/*
+  && node /tmp/ylink-native-security-installer/install-backports.mjs --input=/tmp/ylink-native-security \
+  && rm -rf /tmp/ylink-native-security /tmp/ylink-native-security-installer /var/lib/apt/lists/*
 
 # 创建运行目录并提前授权给 node 用户，降低容器默认 root 运行风险。
 # 这里同时预创建 uploads 目录，确保首次上传前容器内就具备稳定的落盘路径。
@@ -90,6 +104,9 @@ RUN mkdir -p /app/data /app/uploads \
 # 复制运行所需文件：package 信息、生产依赖、编译产物、SQL 模板。
 COPY --from=prod-deps --chown=node:node /app/package*.json ./
 COPY --from=prod-deps --chown=node:node /app/node_modules ./node_modules
+COPY --from=prod-deps /app/scripts ./scripts
+COPY --from=prod-deps /app/src/database/pinned-sqlite-source.json ./src/database/pinned-sqlite-source.json
+COPY --from=prod-deps /app/node_modules/.ylink-native-sqlite /usr/local/share/ylink-native-sqlite/
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --chown=node:node sql ./sql
 
@@ -97,5 +114,5 @@ USER node
 
 EXPOSE 3001
 
-# 启动编译后的后端服务。
-CMD ["npm", "run", "start"]
+# 直接使用与 npm start 相同的 Node 入口，使业务进程接收容器信号并保留退出 75。
+CMD ["node", "dist/index.js"]

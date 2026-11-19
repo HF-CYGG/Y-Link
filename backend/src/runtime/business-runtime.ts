@@ -147,12 +147,12 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 let activeHttpServer: Server | null = null
 let shutdownPromise: Promise<void> | null = null
+// 普通启动失败只清理；随后显式信号/重启请求必须升级为退出，不能被首个exit=false捕获。
+let requestedShutdownExitCode: number | null = null
 
 const shutdownRuntime = (reason: string, exitCode: number, exit = true): Promise<void> => {
-  if (shutdownPromise) {
-    return shutdownPromise
-  }
-  shutdownPromise = (async () => {
+  if (exit && requestedShutdownExitCode === null) requestedShutdownExitCode = exitCode
+  if (!shutdownPromise) shutdownPromise = (async () => {
     logLine('SHUTDOWN', `reason=${reason}，停止接收新请求并等待后台事务完成`, 'warn')
     const server = activeHttpServer
     const serverClosed = server
@@ -180,9 +180,11 @@ const shutdownRuntime = (reason: string, exitCode: number, exit = true): Promise
       })
     }
     activeHttpServer = null
-    if (exit) process.exit(exitCode)
   })()
-  return shutdownPromise
+  // 每个等待者都在清理后读取最新意图；清理本体仍仅执行一次，首个显式75/信号退出码保留。
+  return shutdownPromise.then(() => {
+    if (requestedShutdownExitCode !== null) process.exit(requestedShutdownExitCode)
+  })
 }
 
 registerRuntimeShutdownHandler(shutdownRuntime)
@@ -570,4 +572,8 @@ export async function startBusinessRuntime(startup: { mode: 'normal' | 'cutover'
 
 export async function stopFailedBusinessRuntime(): Promise<void> {
   await shutdownRuntime('bootstrap_failure', 1, false)
+}
+
+export function getRequestedRuntimeExitCode(): number | null {
+  return requestedShutdownExitCode
 }

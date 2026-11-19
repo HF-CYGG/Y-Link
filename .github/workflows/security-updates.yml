@@ -48,7 +48,7 @@ jobs:
         with:
           node-version: "22.23.5"
 
-      - name: 固定官方 npm 11.21.2（校验包完整性）
+      - name: 固定派生 npm 11.21.2-ylink.1（官方源/本地修订校验）
         run: node backend/scripts/install-pinned-npm.mjs --context=ci
 
       - name: 检查 Node 运行时与生产依赖安全补丁

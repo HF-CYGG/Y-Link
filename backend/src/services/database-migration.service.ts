@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import type { format as MysqlFormat } from 'mysql2'
 import { DataSource, type DataSourceOptions, type EntityMetadata } from 'typeorm'
+import { VerifiedDataSource } from '../database/verified-data-source.js'
 import { appDataPaths } from '../config/app-data-paths.js'
 import { resolveSqliteDatabasePath } from '../config/database-bootstrap.js'
 import {
@@ -1702,7 +1703,7 @@ export class DatabaseMigrationService {
   }
 
   private createSqliteSnapshotDataSource(snapshotFilePath: string, includeEntities = true): DataSource {
-    return new DataSource({
+    return new VerifiedDataSource({
       type: 'sqlite',
       database: snapshotFilePath,
       entities: includeEntities ? appEntities : [],

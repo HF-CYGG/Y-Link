@@ -1,6 +1,6 @@
 /** 只读 SQLite 验收，不加载实体、业务配置或 bootstrap；逐行摘要避免把全库装入内存。 */
 import { createHash } from 'node:crypto'
-import { createRequire } from 'node:module'
+import { loadVerifiedSqliteDriver } from '../database/verified-sqlite-driver.js'
 
 // sqlite3 是可选原生驱动；MySQL 构建阶段可能不安装它，救援 HTTP 也不能静态加载它。
 interface ReadonlySqliteDatabase {
@@ -12,7 +12,6 @@ interface SqliteDriver {
   OPEN_READONLY: number
   Database: new (filePath: string, flags: number, ready: (error: Error | null) => void) => ReadonlySqliteDatabase
 }
-const require = createRequire(import.meta.url)
 
 export interface SqliteRescueDigest {
   tables: Array<{ name: string; count: number; sha256: string }>
@@ -23,7 +22,7 @@ export interface SqliteRescueDigest {
 const quote = (name: string) => `"${name.replaceAll('"', '""')}"`
 
 export async function inspectSqliteForRescue(filePath: string, recovery?: { taskId: string; baseline: SqliteRescueDigest }): Promise<SqliteRescueDigest> {
-  const sqlite3 = require('sqlite3') as SqliteDriver
+  const sqlite3 = await loadVerifiedSqliteDriver() as SqliteDriver
   const db = await new Promise<ReadonlySqliteDatabase>((resolve, reject) => {
     const connection = new sqlite3.Database(filePath, sqlite3.OPEN_READONLY, (error) => error ? reject(error) : resolve(connection))
   })
