@@ -18,7 +18,7 @@ import type { BaseProductSku } from '../entities/base-product-sku.entity.js'
 import type { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { InventoryLog } from '../entities/inventory-log.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
-import { applyInventoryDeltas, skuContributesToProductAggregate, type InventoryStockDelta } from './inventory-ledger.service.js'
+import { applyInventoryDeltas, planInventoryDeltas, skuContributesToProductAggregate, type InventoryStockDelta } from './inventory-ledger.service.js'
 
 export const MANUAL_OUTBOUND_REF_TYPE = 'biz_outbound_order'
 
@@ -64,6 +64,18 @@ const normalizeId = (value: unknown): string => String(value ?? '').trim()
 
 export { skuContributesToProductAggregate }
 
+/** 预检与实际记账共用方向转换，避免手工出库正数扣减的口径分叉。 */
+const toLedgerDelta = (delta: ManualOutboundInventoryDelta): InventoryStockDelta => ({
+  product: delta.product,
+  sku: delta.sku,
+  stockDelta: -delta.deltaQty,
+})
+
+/** 只校验当前事务已锁定的商品/SKU，不申请新锁、不改库存或写流水。 */
+export function assertManualOutboundInventoryAvailable(deltas: readonly ManualOutboundInventoryDelta[]): void {
+  planInventoryDeltas(deltas.map(toLedgerDelta))
+}
+
 /**
  * 在当前事务内应用手工出库库存变动：委托 `applyInventoryDeltas` 统一校验与记账，
  * 流水 `changeQty` 保持出库方向（扣减为正）的历史口径，已有对账与回补判定依赖该口径。
@@ -74,7 +86,7 @@ export async function applyManualOutboundInventoryDeltas(
 ): Promise<ManualOutboundInventoryLineView[]> {
   const deltaByLedger = new Map<InventoryStockDelta, ManualOutboundInventoryDelta>()
   const ledgerDeltas = input.deltas.map((delta) => {
-    const ledgerDelta: InventoryStockDelta = { product: delta.product, sku: delta.sku, stockDelta: -delta.deltaQty }
+    const ledgerDelta = toLedgerDelta(delta)
     deltaByLedger.set(ledgerDelta, delta)
     return ledgerDelta
   })

@@ -99,6 +99,13 @@ async function main() {
     { orderService },
     { productService },
     { systemConfigService },
+    { orderSerialService },
+    { orderBusinessNoService },
+    { auditService },
+    { SysAuditLog },
+    { planInventoryDeltas, applyInventoryDeltas },
+    { assertManualOutboundInventoryAvailable, applyManualOutboundInventoryDeltas },
+    { MAX_DATABASE_INT },
   ] = await Promise.all([
     import('../src/config/data-source.js'),
     import('../src/entities/base-product.entity.js'),
@@ -110,6 +117,13 @@ async function main() {
     import('../src/services/order.service.js'),
     import('../src/services/product.service.js'),
     import('../src/services/system-config.service.js'),
+    import('../src/services/order-serial.service.js'),
+    import('../src/services/order-business-no.service.js'),
+    import('../src/services/audit.service.js'),
+    import('../src/entities/sys-audit-log.entity.js'),
+    import('../src/services/inventory-ledger.service.js'),
+    import('../src/services/manual-outbound-inventory.js'),
+    import('../src/constants/web-resource-limits.js'),
   ])
 
   await AppDataSource.initialize()
@@ -193,6 +207,86 @@ async function main() {
     }, actor)
     const createLogCount = (orderId: string, changeType: string) => logRepo.countBy({ refType: 'biz_outbound_order', refId: orderId, changeType })
 
+    /** 数据库回滚后的零行不足以证明提前拒绝：同时拦看真实编号调用和订单/明细写入尝试。 */
+    const withoutAllocationOrOrderWrites = async <T>(action: () => Promise<T>): Promise<T> => {
+      const generateSystemNo = orderSerialService.generateSystemNo.bind(orderSerialService)
+      const allocateBusinessNo = orderBusinessNoService.allocate.bind(orderBusinessNoService)
+      const createQueryRunner = AppDataSource.createQueryRunner.bind(AppDataSource)
+      let allocationCalls = 0
+      let orderWriteAttempts = 0
+      orderSerialService.generateSystemNo = (...args) => { allocationCalls += 1; return generateSystemNo(...args) }
+      orderBusinessNoService.allocate = (...args) => { allocationCalls += 1; return allocateBusinessNo(...args) }
+      AppDataSource.createQueryRunner = (...args) => {
+        const runner = createQueryRunner(...args)
+        const query = runner.query.bind(runner)
+        runner.query = (...queryArgs: Parameters<typeof runner.query>) => {
+          if (/^\s*(?:INSERT(?: OR \w+)? INTO|UPDATE)\s+["`]?biz_outbound_order(?:_item)?["`]?(?:\s|\()/i.test(queryArgs[0])) orderWriteAttempts += 1
+          return query(...queryArgs)
+        }
+        return runner
+      }
+      try {
+        const result = await action()
+        assert.equal(allocationCalls, 0, '提前拒绝或幂等回放不得调用任一编号分配入口')
+        assert.equal(orderWriteAttempts, 0, '不得先尝试写订单/明细再依赖回滚掩盖副作用')
+        return result
+      } finally {
+        orderSerialService.generateSystemNo = generateSystemNo
+        orderBusinessNoService.allocate = allocateBusinessNo
+        AppDataSource.createQueryRunner = createQueryRunner
+      }
+    }
+
+    // 纯计划保留重复 SKU 的净变化、预订占用、启用/当前版本汇总与上限口径，且不能改动输入实体。
+    {
+      const product = productRepo.create({ id: 'plan-product', productName: '纯校验商品', currentStock: 10, preOrderedStock: 2 })
+      const sku = skuRepo.create({ id: 'plan-sku', productId: product.id, skuCode: 'PLAN-SKU', currentStock: 6, preOrderedStock: 2, isActive: true, isCurrent: true })
+      const snapshot = () => [product.currentStock, product.preOrderedStock, sku.currentStock, sku.preOrderedStock]
+      const before = snapshot()
+      assertManualOutboundInventoryAvailable([{ product, sku, deltaQty: 5 }, { product, sku, deltaQty: -2 }])
+      assert.deepEqual(snapshot(), before, '净扣3可用，但纯计划不得修改库存或预订量')
+      assert.throws(() => assertManualOutboundInventoryAvailable([{ product, sku, deltaQty: 3 }, { product, sku, deltaQty: 2 }]), /SKU .*可用库存不足.*需要 5/)
+      assert.throws(() => planInventoryDeltas([{ product, sku, stockDelta: 0.5 }]), /库存变动数量必须为整数/)
+      assert.throws(() => planInventoryDeltas([{ product, sku: { ...sku, productId: 'other-product' }, stockDelta: 1 }]), /不属于商品/)
+      assert.deepEqual(snapshot(), before, '失败校验也不得修改实体')
+      const inactive = skuRepo.create({ ...sku, id: 'plan-inactive', isActive: false, currentStock: 2, preOrderedStock: 0 })
+      const retired = skuRepo.create({ ...sku, id: 'plan-retired', isCurrent: false, currentStock: 2, preOrderedStock: 0 })
+      const fullProduct = productRepo.create({ ...product, currentStock: MAX_DATABASE_INT, preOrderedStock: MAX_DATABASE_INT })
+      // 停用/退役规格回补不增加商品汇总，商品满额或无可用量均不能误阻断。
+      assertManualOutboundInventoryAvailable([{ product: fullProduct, sku: inactive, deltaQty: -1 }, { product: fullProduct, sku: retired, deltaQty: -1 }])
+      assert.equal(fullProduct.currentStock, MAX_DATABASE_INT)
+      assert.throws(() => planInventoryDeltas([{ product, sku: { ...sku, currentStock: MAX_DATABASE_INT }, stockDelta: 1 }]), /SKU .*库存超过系统可处理上限/)
+      assert.throws(() => planInventoryDeltas([{ product: fullProduct, sku, stockDelta: 1 }]), /商品 .*库存超过系统可处理上限/)
+    }
+
+    // 实际记账仍独立调用同一校验；重复正负增量按净扣减处理，不能退化为逐条毛需求校验。
+    {
+      const fixture = await createFixture([{ stock: 6, reserved: 2 }])
+      await AppDataSource.transaction(async (manager) => {
+        const product = await manager.getRepository(BaseProduct).findOneByOrFail({ id: fixture.product.id })
+        const sku = await manager.getRepository(BaseProductSku).findOneByOrFail({ id: fixture.skus[0].id })
+        await applyInventoryDeltas(manager, {
+          refType: 'base_product', refId: String(product.id), changeType: 'manual_stock_adjust',
+          operator: { type: 'admin', id: actor.userId, name: actor.displayName },
+          deltas: [{ product, sku, stockDelta: -5 }, { product, sku, stockDelta: 2 }], buildRemark: () => '净变化回归',
+        })
+      })
+      const after = await stockOf(fixture.product.id, [fixture.skus[0].id])
+      assert.deepEqual([after.product.currentStock, after.skus[0].currentStock, after.product.preOrderedStock, after.skus[0].preOrderedStock], [3, 3, 2, 2])
+      const fallback = await createFixture([{ stock: 4 }])
+      const logBefore = await logRepo.count()
+      await expectFailure(() => AppDataSource.transaction(async (manager) => {
+        const product = await manager.getRepository(BaseProduct).findOneByOrFail({ id: fallback.product.id })
+        const sku = await manager.getRepository(BaseProductSku).findOneByOrFail({ id: fallback.skus[0].id })
+        const deltas = [{ product, sku, deltaQty: 2 }]
+        assertManualOutboundInventoryAvailable(deltas)
+        sku.preOrderedStock = 4 // 只改事务内夹具，证明实际入口不能信任先前通过的缓存计划。
+        await applyManualOutboundInventoryDeltas(manager, { order: { id: 'fallback-check', businessNo: 'fallback-check' }, actor, changeType: 'manual_outbound_create', deltas, buildRemark: () => '不得写入' })
+      }), /SKU .*可用库存不足/)
+      assert.equal(await logRepo.count(), logBefore)
+      assert.equal((await stockOf(fallback.product.id, [fallback.skus[0].id])).skus[0].currentStock, 4)
+    }
+
     // 1. 单 SKU：商品与 SKU 同步扣减，预订量不变，流水字段完整。
     {
       const fixture = await createFixture([{ stock: 20, reserved: 3 }])
@@ -242,7 +336,7 @@ async function main() {
       const fixture = await createFixture([{ stock: 5, reserved: 2 }])
       const key = nextKey('sku-short')
       const [orderBefore, itemBefore, logBefore] = await Promise.all([orderRepo.count(), itemRepo.count(), logRepo.count()])
-      await expectFailure(() => submit(key, [{ productId: fixture.product.id, skuId: fixture.skus[0].id, qty: 4 }]), /SKU .*可用库存不足/)
+      await withoutAllocationOrOrderWrites(() => expectFailure(() => submit(key, [{ productId: fixture.product.id, skuId: fixture.skus[0].id, qty: 4 }]), /SKU .*可用库存不足/))
       assert.equal(await orderRepo.countBy({ idempotencyKey: key }), 0)
       assert.deepEqual([await orderRepo.count(), await itemRepo.count(), await logRepo.count()], [orderBefore, itemBefore, logBefore])
       assert.equal((await stockOf(fixture.product.id, [fixture.skus[0].id])).skus[0].currentStock, 5)
@@ -252,24 +346,71 @@ async function main() {
     {
       const fixture = await createFixture([{ stock: 10 }], { stock: 10, reserved: 8 })
       const key = nextKey('product-short')
-      await expectFailure(() => submit(key, [{ productId: fixture.product.id, skuId: fixture.skus[0].id, qty: 5 }]), /商品 .*可用库存不足/)
+      await withoutAllocationOrOrderWrites(() => expectFailure(() => submit(key, [{ productId: fixture.product.id, skuId: fixture.skus[0].id, qty: 5 }]), /商品 .*可用库存不足/))
       assert.equal(await orderRepo.countBy({ idempotencyKey: key }), 0)
       const after = await stockOf(fixture.product.id, [fixture.skus[0].id])
       assert.deepEqual([after.product.currentStock, after.skus[0].currentStock], [10, 10])
     }
 
+    // 4b. 各SKU可用但合计超过商品预订后的可用量：两级共用净变化规则，拒绝必须早于编号和写单。
+    {
+      const fixture = await createFixture([{ stock: 6, reserved: 1 }, { stock: 6, reserved: 1 }], { stock: 12, reserved: 7 })
+      const key = nextKey('multi-reserved-short')
+      await withoutAllocationOrOrderWrites(() => expectFailure(() => submit(key, fixture.skus.map(sku => ({ productId: fixture.product.id, skuId: sku.id, qty: 3 }))), /商品 .*可用库存不足.*需要 6/))
+      const after = await stockOf(fixture.product.id, fixture.skus.map(sku => sku.id))
+      assert.deepEqual([after.product.currentStock, after.product.preOrderedStock, ...after.skus.map(sku => sku.currentStock)], [12, 7, 6, 6])
+    }
+
+    // 4c. 账号停用仍先于库存判断；新预检不能让失效账号越过既有事务首锁。
+    {
+      const fixture = await createFixture([{ stock: 5 }])
+      await AppDataSource.getRepository(SysUser).update({ id: actor.userId }, { status: 'disabled' })
+      try {
+        await withoutAllocationOrOrderWrites(() => expectFailure(() => submit(nextKey('disabled-actor'), [{ productId: fixture.product.id, skuId: fixture.skus[0].id, qty: 1 }]), /账号已停用或已注销/))
+      } finally {
+        await AppDataSource.getRepository(SysUser).update({ id: actor.userId }, { status: 'enabled' })
+      }
+      assert.equal((await stockOf(fixture.product.id, [fixture.skus[0].id])).skus[0].currentStock, 5)
+    }
+
+    // 4d. 通过前置检查后的真实事务失败，库存/订单/流水/审计仍整体回滚。
+    {
+      const fixture = await createFixture([{ stock: 5, reserved: 1 }])
+      const auditRepo = AppDataSource.getRepository(SysAuditLog)
+      const counts = () => Promise.all([orderRepo.count(), itemRepo.count(), logRepo.count(), auditRepo.count()])
+      const before = await counts()
+      const record = auditService.record.bind(auditService)
+      let failedAfterLedger = false
+      auditService.record = async (...args) => {
+        if (args[0].actionType === 'order.create') {
+          assert.ok(args[1], '故障注入必须仍在原事务内')
+          assert.ok(await args[1].getRepository(InventoryLog).countBy({ refType: 'biz_outbound_order', refId: String(args[0].targetId) }) > 0, '必须先完成真实库存流水写入再注入失败')
+          failedAfterLedger = true
+          throw new Error('early-stock-check-after-ledger-failure')
+        }
+        return record(...args)
+      }
+      try {
+        await assert.rejects(() => submit(nextKey('rollback-after-check'), [{ productId: fixture.product.id, skuId: fixture.skus[0].id, qty: 2 }]), /early-stock-check-after-ledger-failure/)
+      } finally { auditService.record = record }
+      assert.equal(failedAfterLedger, true)
+      assert.deepEqual(await counts(), before)
+      const after = await stockOf(fixture.product.id, [fixture.skus[0].id])
+      assert.deepEqual([after.product.currentStock, after.skus[0].currentStock, after.product.preOrderedStock, after.skus[0].preOrderedStock], [5, 5, 1, 1])
+    }
+
     // 5. 同一幂等键顺序重复提交：只生成一张单、一组流水、只扣一次。
     {
-      const fixture = await createFixture([{ stock: 12 }])
+      const fixture = await createFixture([{ stock: 2 }])
       const key = nextKey('idem-seq')
       const first = await submit(key, [{ productId: fixture.product.id, skuId: fixture.skus[0].id, qty: 2 }])
-      const second = await submit(key, [{ productId: fixture.product.id, skuId: fixture.skus[0].id, qty: 2 }])
+      const second = await withoutAllocationOrOrderWrites(() => submit(key, [{ productId: fixture.product.id, skuId: fixture.skus[0].id, qty: 2 }]))
       assert.equal(second.order.id, first.order.id)
       assert.equal(second.idempotentReplay, true)
       assert.equal(second.inventory.deductedQty, 0)
       assert.equal(await orderRepo.countBy({ idempotencyKey: key }), 1)
       assert.equal(await createLogCount(first.order.id, 'manual_outbound_create'), 1)
-      assert.equal((await stockOf(fixture.product.id, [fixture.skus[0].id])).skus[0].currentStock, 10)
+      assert.equal((await stockOf(fixture.product.id, [fixture.skus[0].id])).skus[0].currentStock, 0, '库存耗尽后幂等回放仍成功且不重复扣减')
     }
 
     // 6. 同一幂等键并发提交：仍只落一张单、只扣一次。

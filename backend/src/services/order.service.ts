@@ -46,6 +46,7 @@ import { lockActiveSysAccountForBusiness } from './account-business-guard.servic
 import { systemConfigService, type ClientDepartmentTreeNode } from './system-config.service.js'
 import {
   applyManualOutboundInventoryDeltas,
+  assertManualOutboundInventoryAvailable,
   MANUAL_OUTBOUND_CHANGE_TYPES,
   resolveManualOutboundReleasedOrderIds,
   type ManualOutboundInventoryDelta,
@@ -1122,6 +1123,7 @@ export class OrderService {
 
     let lastError: unknown
     for (let attempt = 1; attempt <= ORDER_SUBMIT_MAX_RETRY; attempt += 1) {
+      let inventoryPrecheckFailure: BizError | undefined
       try {
         const result = await runInTransaction(async (manager) => {
           await lockActiveSysAccountForBusiness(manager, actor.userId)
@@ -1164,10 +1166,22 @@ export class OrderService {
             throw new BizError('存在无效或停用产品，无法提交')
           }
           const resolvedItems = await this.resolveSubmitItemsWithSku(normalizedItems, productMap, manager)
+          const preparedItems = this.prepareSubmitItems(resolvedItems, productMap, itemRepo)
+          const inventoryDeltas = resolvedItems.map((item) => {
+            const product = productMap.get(item.productId)
+            if (!product) throw new BizError(`商品 ${item.productId} 不存在`, 409)
+            return { product, sku: item.sku, deltaQty: item.qty }
+          })
+          // 保持账号→商品→SKU锁序与幂等优先；锁内纯校验不足库存，避免先分配编号/写单再回滚。
+          try {
+            assertManualOutboundInventoryAvailable(inventoryDeltas)
+          } catch (error) {
+            if (error instanceof BizError && error.statusCode === 409) inventoryPrecheckFailure = error
+            throw error
+          }
           const orderUuid = generateOrderUuid()
           const systemNo = await orderSerialService.generateSystemNo(submitContext.normalizedOrderType, manager)
           const businessNo = await orderBusinessNoService.allocate(submitContext.normalizedOrderType, orderUuid, manager)
-          const preparedItems = this.prepareSubmitItems(resolvedItems, productMap, itemRepo)
 
           const order = orderRepo.create({
             orderUuid,
@@ -1200,11 +1214,7 @@ export class OrderService {
             order: savedOrder,
             actor,
             changeType: MANUAL_OUTBOUND_CHANGE_TYPES.create,
-            deltas: resolvedItems.map((item) => {
-              const product = productMap.get(item.productId)
-              if (!product) throw new BizError(`商品 ${item.productId} 不存在`, 409)
-              return { product, sku: item.sku, deltaQty: item.qty }
-            }),
+            deltas: inventoryDeltas,
             buildRemark: (delta) => `创建手工出库单 ${savedOrder.businessNo}，扣减库存 ${delta.deltaQty}`,
           })
 
@@ -1254,6 +1264,11 @@ export class OrderService {
         // 并发下若另一请求已成功落库同一幂等键，则直接回查既有单据返回。
         if (isUniqueConstraintError(error, IDEMPOTENCY_CONSTRAINT_MATCHER)) {
           return this.loadOrderByIdempotencyKey(submitContext.normalizedIdempotencyKey, canViewSystemNo(actor))
+        }
+        // RR 下最初的普通查询可能未见另一账号刚提交的同键订单。事务已回滚并释放连接后再回查，
+        // 避免锁内申请第二连接；没有已提交同键单时仍抛原库存错误，不分配编号或尝试写单。
+        if (inventoryPrecheckFailure && error === inventoryPrecheckFailure) {
+          return this.loadOrderByIdempotencyKey(submitContext.normalizedIdempotencyKey, canViewSystemNo(actor), inventoryPrecheckFailure)
         }
 
         if (this.shouldRetrySubmitError(error, attempt)) {
@@ -1544,10 +1559,11 @@ export class OrderService {
   private async loadOrderByIdempotencyKey(
     idempotencyKey: string,
     exposeSystemNo = true,
+    missingOrderError?: BizError,
   ): Promise<SubmitOrderResult> {
     const order = await this.orderRepo.findOne({ where: { idempotencyKey } })
     if (!order) {
-      throw new BizError('订单处理中，请稍后重试', 409)
+      throw missingOrderError ?? new BizError('订单处理中，请稍后重试', 409)
     }
 
     const items = await this.itemRepo.find({
