@@ -3,14 +3,15 @@
  * 模块说明：src/views/client/components/ClientMainLayout.vue
  * 文件职责：客户端主布局，负责页面切换动画、底部导航与统一退出登录行为。
  * 实现逻辑：
- * - 页面切换通过路径深度推导过渡方向，保持移动端浏览路径直觉；
+ * - 底部主页面按菜单顺序滑过可见窗口，两侧使用随窗口固定的渐隐，其他页面沿用按路径深度的轻位移；
+ * - 商城购物车挂在独立的固定层，页面平移时仍以视口定位；
  * - 主壳层直接读取全局路由实例的当前路由，避免开发态依赖重优化时 `useRoute()` 注入短暂缺失导致白屏；
  * - 退出时先清理登录态与按账号隔离的订单缓存，再清空购物车并硬跳转回登录页。
  * 维护说明：若客户端新增更多持久化模块，需要评估是否也应接入退出清理链路。
  */
 
 
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, provide, ref, watch } from 'vue'
 import type { RouteLocationNormalizedLoaded } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 import { APP_META } from '@/constants/app-meta'
@@ -19,6 +20,7 @@ import { useClientAuthStore, useClientCartStore } from '@/store'
 import router from '@/router'
 import { buildClientNavigationItems } from '@/router/routes'
 import { redirectToClientLogin } from '@/utils/client-auth-navigation'
+import { shouldReduceClientMotion } from '@/utils/client-motion'
 import pinia from '@/store/pinia'
 
 const clientAuthStore = useClientAuthStore(pinia)
@@ -26,7 +28,36 @@ const clientCartStore = useClientCartStore(pinia)
 const currentRoute = computed(() => router.currentRoute.value)
 
 clientCartStore.initialize(clientAuthStore.currentUser?.id)
-const transitionName = ref<'slide-left' | 'slide-right' | 'client-tab-fade'>('slide-left')
+const transitionName = ref('slide-left')
+const isTabSlide = computed(() => transitionName.value.startsWith('client-tab-slide-'))
+const pageViewport = ref<HTMLElement | null>(null)
+let tabSlideResizeObserver: ResizeObserver | undefined
+let interruptedTabFrames = new WeakMap<HTMLElement, { transform: string; opacity: string }>()
+let pendingTab: { path: string } | undefined
+let clientLayoutMounted = false
+provide('hasMountedClientMainLayout', () => clientLayoutMounted)
+const updateTabSlideBounds = () => {
+  const stage = pageViewport.value
+  if (!stage) return
+  const rect = stage.getBoundingClientRect()
+  const viewportWidth = document.documentElement.clientWidth
+  stage.style.setProperty('--client-tab-left-edge', `${-rect.right}px`)
+  stage.style.setProperty('--client-tab-right-edge', `${viewportWidth - rect.left}px`)
+}
+onMounted(() => {
+  clientLayoutMounted = true
+  updateTabSlideBounds()
+  window.addEventListener('resize', updateTabSlideBounds, { passive: true })
+  if ('ResizeObserver' in window) {
+    // 经典滚动条的出现和消失也会改变可见宽度，但不一定触发窗口 resize。
+    tabSlideResizeObserver = new ResizeObserver(updateTabSlideBounds)
+    tabSlideResizeObserver.observe(document.documentElement)
+  }
+})
+onBeforeUnmount(() => {
+  tabSlideResizeObserver?.disconnect()
+  window.removeEventListener('resize', updateTabSlideBounds)
+})
 
 const displayName = computed(() => {
   return clientAuthStore.currentUser?.username
@@ -111,48 +142,93 @@ const resolvePathDepth = (path: string) => {
   return 1
 }
 
-/**
- * 客户端主页面切页前回顶：
- * - 仅用于底部导航触发的主页面切换；
- * - 在路由切换前同步把窗口级滚动复位到顶部，避免新页面先带着旧 scrollY 进入视口再跳回顶部；
- * - 不触碰页面内部局部滚动容器，因此不会误伤商品分类面板、抽屉或弹层的滚动状态。
- */
-const resetClientPageScrollBeforeTabSwitch = () => {
-  const scrollingElement = document.scrollingElement
-  if (scrollingElement) {
-    scrollingElement.scrollTop = 0
-    scrollingElement.scrollLeft = 0
-  }
-
-  window.scrollTo({
-    top: 0,
-    left: 0,
-    behavior: 'auto',
-  })
-}
-
-/**
- * 底部导航切页：
- * - 仅在目标路由与当前路由不一致时执行，避免重复点击当前主页面时打断用户阅读；
- * - 先回顶再跳路由，让目标页面首帧直接以顶部状态进入。
- */
 const handleTabNavigation = async (targetPath: string) => {
-  if ((currentRoute.value.path || '/client') === targetPath) {
+  const isCurrentTab = currentRoute.value.path === targetPath
+  if (isCurrentTab && !pendingTab) {
     return
   }
 
-  resetClientPageScrollBeforeTabSwitch()
-  await router.push(targetPath)
+  const navigation = { path: targetPath }
+  pendingTab = navigation
+  try {
+    // 已有切页在等待路由时，点回当前页可以撤销这次切页意图，同时保留当前查询参数。
+    await router.push(isCurrentTab ? currentRoute.value.fullPath : targetPath)
+  } finally {
+    if (pendingTab === navigation) pendingTab = undefined
+  }
+}
+
+const applyInterruptedTabFrame = (page: HTMLElement) => {
+  const frame = interruptedTabFrames.get(page)
+  interruptedTabFrames.delete(page)
+  if (frame && isTabSlide.value) {
+    page.style.setProperty('--client-tab-start-transform', frame.transform)
+    page.style.setProperty('--client-tab-start-opacity', frame.opacity)
+  } else {
+    page.style.removeProperty('--client-tab-start-transform')
+    page.style.removeProperty('--client-tab-start-opacity')
+  }
+}
+
+const prepareClientPageEnter = (page: Element) => {
+  if (!(page instanceof HTMLElement)) return
+  if (isTabSlide.value) updateTabSlideBounds()
+  page.toggleAttribute('data-client-page-entering', !shouldReduceClientMotion())
+  page.inert = false
+  page.style.removeProperty('--client-tab-scroll-offset')
+  applyInterruptedTabFrame(page)
+}
+
+const prepareClientPageLeave = (page: Element) => {
+  if (!(page instanceof HTMLElement)) return
+  page.inert = true
+  applyInterruptedTabFrame(page)
+}
+
+const clearClientPageMotion = (page: Element) => {
+  if (!(page instanceof HTMLElement)) return
+  page.removeAttribute('data-client-page-entering')
+  page.style.removeProperty('--client-tab-start-transform')
+  page.style.removeProperty('--client-tab-start-opacity')
+  page.style.removeProperty('--client-tab-scroll-offset')
+}
+
+const finishClientPageEnter = (page: Element) => {
+  // 子页先准备自己的动效起点，再撤掉整页入场的遮蔽状态。
+  page.dispatchEvent(new Event('client-page-entered'))
+  clearClientPageMotion(page)
 }
 
 watch(
-  () => currentRoute.value.fullPath || '/client',
-  (nextPath, previousPath) => {
-    const nextDepth = resolvePathDepth(nextPath)
-    const previousDepth = resolvePathDepth(previousPath || '/client')
-    const rootPages = ['/client/mall', '/client/orders', '/client/profile']
-    transitionName.value = rootPages.includes(nextPath.split('?')[0] ?? '') && rootPages.includes((previousPath || '').split('?')[0] ?? '')
-      ? 'client-tab-fade' : nextDepth >= previousDepth ? 'slide-left' : 'slide-right'
+  currentRoute,
+  (nextRoute, previousRoute) => {
+    const nextIndex = tabs.value.findIndex(({ path }) => path === nextRoute.path)
+    const previousIndex = tabs.value.findIndex(({ path }) => path === previousRoute?.path)
+    const tabChanged = nextIndex >= 0 && previousIndex >= 0 && nextIndex !== previousIndex
+    const direction = tabChanged
+      ? nextIndex > previousIndex
+      : resolvePathDepth(nextRoute.path) >= resolvePathDepth(previousRoute?.path || '/client')
+    transitionName.value = `${tabChanged ? 'client-tab-slide' : 'slide'}-${direction ? 'left' : 'right'}`
+    if (tabChanged) updateTabSlideBounds()
+
+    const resetScroll = pendingTab?.path === nextRoute.path && nextRoute.path !== previousRoute?.path
+    interruptedTabFrames = new WeakMap()
+    if (tabChanged && !shouldReduceClientMotion()) {
+      for (const page of Array.from(pageViewport.value?.children ?? [])) {
+        if (!(page instanceof HTMLElement)) continue
+        // 读取进行中的真实画面，让连续切页从当前水平位置和透明度接续。
+        if (page.matches('.client-tab-slide-left-enter-active, .client-tab-slide-right-enter-active, .client-tab-slide-left-leave-active, .client-tab-slide-right-leave-active')) {
+          const { transform, opacity } = getComputedStyle(page)
+          interruptedTabFrames.set(page, { transform, opacity })
+        }
+        if (resetScroll && !page.inert && window.scrollY !== 0) {
+          // 回顶时补偿旧页位置，让原来正在阅读的区域直接滑走。
+          page.style.setProperty('--client-tab-scroll-offset', `${window.scrollY}px`)
+        }
+      }
+    }
+    // 等底部导航提交成功再回顶，保留拒绝、重复导航和浏览器历史原有的滚动行为。
+    if (resetScroll) window.scrollTo({ top: 0, left: 0, behavior: 'instant' })
   },
   { immediate: true },
 )
@@ -193,7 +269,7 @@ const handleLogout = async () => {
     :class="{ 'client-main-layout--without-tab': !shouldShowBottomNav }"
   >
     <header class="client-main-layout__header sticky top-0 z-30">
-      <div class="client-main-layout__container flex items-center justify-between gap-3 px-4 py-3 sm:px-5">
+      <div class="client-main-layout__container client-main-layout__header-inner flex items-center justify-between gap-3 px-4 py-3 sm:px-5">
         <div>
           <p class="text-xs font-semibold tracking-[0.16em] text-slate-400">Y-LINK CLIENT</p>
           <p class="text-base font-semibold text-slate-900 dark:text-slate-100">{{ displayName }}</p>
@@ -225,26 +301,39 @@ const handleLogout = async () => {
       </div>
     </header>
 
-    <main class="client-main-layout__container min-w-0 px-4 pt-4 sm:px-5">
-      <div class="client-main-layout__viewport">
-        <router-view v-slot="{ Component, route: viewRoute }">
-          <!-- 统一使用单一 transition：保证 keepAlive 与非 keepAlive 走同一动画上下文，避免双过渡叠加。 -->
-          <transition :name="transitionName" mode="out-in">
-            <KeepAlive v-if="Component && viewRoute.meta.keepAlive" :max="3">
+    <div id="client-main-layout-mall-cart-layer" class="client-main-layout__mall-cart-layer"></div>
+
+    <main class="client-main-layout__slide-window">
+      <div class="client-main-layout__container min-w-0 px-4 pt-4 sm:px-5">
+        <div ref="pageViewport" class="client-main-layout__viewport">
+          <router-view v-slot="{ Component, route: viewRoute }">
+            <!-- 统一使用单一 transition：保证 keepAlive 与非 keepAlive 走同一动画上下文，避免双过渡叠加。 -->
+            <transition
+              :name="transitionName"
+              :mode="isTabSlide ? undefined : 'out-in'"
+              :css="!shouldReduceClientMotion()"
+              @before-enter="prepareClientPageEnter"
+              @after-enter="finishClientPageEnter"
+              @before-leave="prepareClientPageLeave"
+              @after-leave="clearClientPageMotion"
+              @leave-cancelled="clearClientPageMotion"
+            >
+              <KeepAlive v-if="Component && viewRoute.meta.keepAlive" :max="3">
+                <component
+                  :is="Component"
+                  :key="resolveViewKey(viewRoute)"
+                  class="client-page-absolute"
+                />
+              </KeepAlive>
               <component
                 :is="Component"
+                v-else-if="Component"
                 :key="resolveViewKey(viewRoute)"
                 class="client-page-absolute"
               />
-            </KeepAlive>
-            <component
-              :is="Component"
-              v-else-if="Component"
-              :key="resolveViewKey(viewRoute)"
-              class="client-page-absolute"
-            />
-          </transition>
-        </router-view>
+            </transition>
+          </router-view>
+        </div>
       </div>
     </main>
 
@@ -359,6 +448,11 @@ const handleLogout = async () => {
   padding-bottom: calc(1rem + var(--client-tab-bar-safe-area));
 }
 
+.client-main-layout__mall-cart-layer {
+  position: relative;
+  z-index: 20;
+}
+
 .client-main-layout__tab {
   width: min(var(--client-shell-max), calc(100vw - var(--client-shell-inline) * 2));
   bottom: calc(var(--client-tab-bar-bottom-offset) + var(--client-tab-bar-safe-area));
@@ -430,6 +524,62 @@ const handleLogout = async () => {
 .client-main-layout__viewport :deep(.slide-left-leave-to),
 .client-main-layout__viewport :deep(.slide-right-enter-from) { opacity: 0; transform: translate3d(-12px, 0, 0); }
 
+@media (prefers-reduced-motion: no-preference) {
+  .client-main-layout__slide-window:has(
+    .client-tab-slide-left-enter-active, .client-tab-slide-right-enter-active,
+    .client-tab-slide-left-leave-active, .client-tab-slide-right-leave-active
+  ) {
+    --client-tab-edge-fade: clamp(1.25rem, 4vw, 3.5rem);
+    /* 遮罩固定在窗口两缘，纵向重复以保留超出舞台高度的页面内容。 */
+    overflow-x: clip;
+    mask-image: linear-gradient(to right,
+      transparent, #000 var(--client-tab-edge-fade),
+      #000 calc(100% - var(--client-tab-edge-fade)), transparent);
+    mask-size: 100% 1px;
+    mask-repeat: repeat-y;
+    mask-clip: no-clip;
+  }
+}
+
+.client-main-layout__viewport :deep(:is(
+  .client-tab-slide-left-enter-active, .client-tab-slide-right-enter-active,
+  .client-tab-slide-left-leave-active, .client-tab-slide-right-leave-active
+)) {
+  transition:
+    transform var(--ylink-motion-normal) var(--ylink-motion-ease),
+    opacity var(--ylink-motion-normal) var(--ylink-motion-ease);
+}
+
+.client-main-layout__viewport :deep(:is(.client-tab-slide-left-leave-active, .client-tab-slide-right-leave-active)) {
+  top: calc(0px - var(--client-tab-scroll-offset, 0px));
+  pointer-events: none;
+}
+
+.client-main-layout__viewport :deep(:is(.client-tab-slide-left-leave-from, .client-tab-slide-right-leave-from)) {
+  transform: var(--client-tab-start-transform, none);
+  opacity: var(--client-tab-start-opacity, 1);
+}
+
+.client-main-layout__viewport :deep(.client-tab-slide-left-enter-from) {
+  transform: var(--client-tab-start-transform, translateX(var(--client-tab-right-edge)));
+  opacity: var(--client-tab-start-opacity, 0.88);
+}
+
+.client-main-layout__viewport :deep(.client-tab-slide-right-enter-from) {
+  transform: var(--client-tab-start-transform, translateX(var(--client-tab-left-edge)));
+  opacity: var(--client-tab-start-opacity, 0.88);
+}
+
+.client-main-layout__viewport :deep(.client-tab-slide-left-leave-to) {
+  transform: translateX(var(--client-tab-left-edge));
+  opacity: 0.88;
+}
+
+.client-main-layout__viewport :deep(.client-tab-slide-right-leave-to) {
+  transform: translateX(var(--client-tab-right-edge));
+  opacity: 0.88;
+}
+
 @media (max-width: 768px) {
   .client-main-layout {
     --client-shell-inline: 0.75rem;
@@ -457,6 +607,38 @@ const handleLogout = async () => {
   }
 }
 
+.client-main-layout__header-inner {
+  --client-header-padding-top: 0.75rem;
+  --client-header-padding-inline: 1rem;
+  padding-top: var(--client-header-padding-top);
+}
+
+@media (min-width: 640px) {
+  .client-main-layout__header-inner {
+    --client-header-padding-inline: 1.25rem;
+  }
+}
+
+@media (max-width: 639px) {
+  .client-main-layout__header-inner {
+    --client-header-padding-top: 1rem;
+  }
+}
+
+/* 手机横屏也可能进入桌面宽度，有安全区时按浏览器值给页头内容避让。 */
+@supports (padding-top: env(safe-area-inset-top, 0px)) {
+  .client-main-layout__header-inner {
+    padding-top: calc(var(--client-header-padding-top) + env(safe-area-inset-top, 0px));
+  }
+}
+
+@supports (padding-left: max(1rem, env(safe-area-inset-left, 0px))) {
+  .client-main-layout__header-inner {
+    padding-left: max(var(--client-header-padding-inline), env(safe-area-inset-left, 0px));
+    padding-right: max(var(--client-header-padding-inline), env(safe-area-inset-right, 0px));
+  }
+}
+
 /* 暗色：版本号文字与底部悬浮标签栏（亮色混入白色提亮，暗色改为混入黑色压暗）。 */
 .dark .client-main-layout__build-version {
   color: #94a3b8;
@@ -466,17 +648,23 @@ const handleLogout = async () => {
   border-color: rgba(255, 255, 255, 0.08);
   background: color-mix(in srgb, var(--ylink-color-surface) 88%, #000000 12%);
 }
-</style>
-
-<style scoped>
-.client-main-layout__viewport :deep(.client-tab-fade-enter-active),
-.client-main-layout__viewport :deep(.client-tab-fade-leave-active) { transition: opacity var(--ylink-motion-fast, 160ms) ease; }
-.client-main-layout__viewport :deep(.client-tab-fade-enter-from),
-.client-main-layout__viewport :deep(.client-tab-fade-leave-to) { opacity: 0; }
 @media (prefers-reduced-motion: reduce) {
-  .client-main-layout__viewport :deep(.client-tab-fade-enter-active),
-  .client-main-layout__viewport :deep(.client-tab-fade-leave-active),
-  .client-main-layout__viewport :deep(.slide-left-enter-active), .client-main-layout__viewport :deep(.slide-left-leave-active),
-  .client-main-layout__viewport :deep(.slide-right-enter-active), .client-main-layout__viewport :deep(.slide-right-leave-active) { transition: none; transform: none; }
+  .client-main-layout__tab-item,
+  .client-main-layout__tab-indicator,
+  .client-main-layout__viewport :deep(:is(
+    .slide-left-enter-active, .slide-left-leave-active, .slide-right-enter-active, .slide-right-leave-active,
+    .client-tab-slide-left-enter-active, .client-tab-slide-right-enter-active,
+    .client-tab-slide-left-leave-active, .client-tab-slide-right-leave-active
+  )) {
+    transition: none;
+  }
+
+  .client-main-layout__viewport :deep(:is(
+    .client-tab-slide-left-enter-active, .client-tab-slide-right-enter-active,
+    .client-tab-slide-left-leave-active, .client-tab-slide-right-leave-active
+  )) {
+    transform: none;
+    opacity: 1;
+  }
 }
 </style>

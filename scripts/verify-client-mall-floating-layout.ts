@@ -6,6 +6,7 @@
 
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { parse, type Declaration } from 'postcss'
 
 import {
   resolveFloatingOcclusion,
@@ -85,17 +86,33 @@ assert.equal(
 )
 
 // ---------- #83 静态契约：旧浏览器降级与尾部留白 ----------
-const mallLines = mallSource.split(/\r?\n/)
-const dvhClampLineIndexes = mallLines
-  .map((line, index) => (line.includes('clamp(') && line.includes('100dvh') ? index : -1))
-  .filter((index) => index >= 0)
-assert.ok(dvhClampLineIndexes.length >= 4, '商品列表与分类栏的 dvh 高度约束应保留')
-dvhClampLineIndexes.forEach((index) => {
-  assert.ok(
-    mallLines[index - 1]?.includes('100vh'),
-    `第 ${index + 1} 行的 100dvh 高度约束前必须先写 100vh 回退，避免旧浏览器整条声明失效`,
-  )
-})
+const browseSelectors = ['.mall-browse-list', '.mall-browse-categories']
+const baseViewportSelectors = new Set<string>()
+const phoneViewportSelectors = new Set<string>()
+for (const [, style] of mallSource.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/g)) {
+  parse(style).walkRules((rule) => {
+    const selectors = rule.selectors.filter((selector) => browseSelectors.includes(selector))
+    const heights = rule.nodes.filter((node): node is Declaration => node.type === 'decl' && node.prop === 'max-height')
+    for (const [index, height] of heights.entries()) {
+      if (!/\b100dvh\b/.test(height.value) || (!selectors.length && !height.value.startsWith('clamp('))) continue
+      const fallback = heights[index - 1]
+      const expectedFallback = height.value.replace(/\b100dvh\b/g, '100vh')
+      const message = `${rule.selector} 的 100dvh 前必须在同一规则中保留等效的 max-height: 100vh 回退`
+      assert.equal(fallback?.value.replace(/\s+/g, ''), expectedFallback.replace(/\s+/g, ''), message)
+      assert.equal(Boolean(fallback?.important), Boolean(height.important), message)
+
+      const parent = rule.parent
+      if (parent?.type === 'root') selectors.forEach((selector) => baseViewportSelectors.add(selector))
+      if (parent?.type === 'atrule' && parent.name === 'media' && /^\(\s*max-width:\s*767px\s*\)$/.test(parent.params)) {
+        selectors.forEach((selector) => phoneViewportSelectors.add(selector))
+      }
+    }
+  })
+}
+for (const selector of browseSelectors) {
+  assert.ok(baseViewportSelectors.has(selector), `${selector} 缺少基础视口高度回退`)
+  assert.ok(phoneViewportSelectors.has(selector), `${selector} 缺少手机版视口高度回退`)
+}
 assert.ok(
   !mallSource.includes("getPropertyValue('--mall-floating-bottom-clearance')"),
   '不得回退到读取未解析 calc 字符串的遮挡常量写法',

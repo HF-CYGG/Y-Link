@@ -48,9 +48,15 @@ assert.match(badge, /white-space:\s*nowrap\s*;/, '库存标签文字应保持单
 assert.doesNotMatch(badgeContainer + badge, /(?:text-overflow:\s*ellipsis|overflow(?:-x)?:\s*(?:hidden|clip))\s*;/, '库存标签及其容器不得省略或裁切内容')
 assert.equal((source.match(/可订 \{\{ (?:product|row\.data)\.availableStock \}\}/g) || []).length, 4, '四套商品卡统一显示可订短标签')
 assert.equal((source.match(/已订 \{\{ (?:product|row\.data)\.preOrderedStock \}\}/g) || []).length, 4, '四套商品卡统一显示已订短标签')
-const narrowStyles = source.slice(source.lastIndexOf('@media (max-width: 360px)'))
-assert.match(narrowStyles, /\.client-product-card__body\s*\{\s*grid-column:\s*1\s*\/\s*3/, '极窄卡片的库存与价格应跨前两列，避开操作列')
-assert.match(narrowStyles, /\.client-product-card__price-wrap\s*\{\s*min-height:\s*0/, '极窄卡片应释放旧价格留白，容纳两行库存')
+const phoneCardStart = source.indexOf('--mall-card-thumb-size:')
+assert.notEqual(phoneCardStart, -1, '手机卡片应有独立的缩略图尺寸')
+const phoneCardStyles = source.slice(phoneCardStart, source.indexOf('.mini-cart-wrapper {', phoneCardStart))
+assert.match(phoneCardStyles, /grid-template-columns:\s*var\(--mall-card-thumb-size\)\s+minmax\(0,\s*1fr\)\s*;/, '手机卡片的价格和库存属于缩略图右侧的同一个内容列')
+assert.doesNotMatch(phoneCardStyles, /\.client-product-card__body\s*\{[^}]*grid-column:\s*1\s*\//, '手机库存不得跨入图片下方')
+const phoneBadgeContainer = phoneCardStyles.match(/\.client-product-card__meta\s*\{([^}]+)\}/)?.[1] ?? ''
+assert.match(phoneBadgeContainer, /display:\s*flex\s*;[^}]*flex-wrap:\s*nowrap\s*;/, '手机三项库存使用同一行')
+assert.match(phoneBadgeContainer, /overflow-x:\s*auto\s*;/, '手机库存超出时保留原值并允许横向查看')
+assert.match(source, /const VIRTUAL_PRODUCT_ITEM_HEIGHT = 98\b/, '手机虚拟列表保留 98px 步长')
 assertIncludes('class="mall-category-name text-xs sm:text-sm font-medium"', '分类名称使用完整换行样式')
 const categoryNameRule = source.match(/\.mall-category-name\s*\{([^}]+)\}/)?.[1] ?? ''
 assert.match(categoryNameRule, /white-space:\s*normal/)

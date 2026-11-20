@@ -7,8 +7,8 @@ import ClientProductSmallImage from './components/ClientProductSmallImage.vue'
  * 维护说明：重点维护“左侧标签高亮 <-> 右侧分组定位”一致性；规格选择不得虚构未配置组合，也不能绕过现有 SKU 库存与购物车校验。
  * 悬浮购物车遮挡：页面尾部留白、分类浏览列表高度与 scroll-padding 统一由摘要栏实测遮挡高度 `--mall-floating-occlusion` 驱动，不要改回固定常量估算。
  * 数量输入：迷你购物车与详情弹层的数量均可直接输入，购物车走 store 的 setQtyFromInput，详情弹层走 commitDetailQty，与加减按钮共用同一上限与提示。
- * 补货入口：四套卡片仅在单个当前启用 SKU 时显示补货，补货资格不限库存，操作保持第三列上下堆叠，不改变虚拟行高；详情传递当前明确选择的规格。
- * 加购交互：单规格卡片的“+ 加购”加购后分裂为“− 数量 +”步进器（ClientCardCartStepper），加购成功伴随飞入购物车、角标弹跳与轻触震动，均在减少动效时降级。
+ * 补货入口：四套卡片仅在单个当前启用 SKU 时显示补货，补货资格不限库存；手机窄卡的操作位于信息下方，虚拟行高保持 98px。
+ * 加购交互：单规格卡片的“+ 加购”加购后分裂为“− 数量 +”步进器（ClientCardCartStepper），每次手机加购成功触发一次轻震，视觉反馈与触感独立。
  * 详情切换：单选与多规格同步交接，指示块、摘要、正文与底栏统一 280ms；隐藏面板 inert 隔离交互，高度仅在切换两端测量并在关闭和离页时取消。
  * 详情底栏：按当前规格在“数量 + 加入购物车”与“申请补货”之间切换，数量栏收起、按钮文字先隐去再显现，形成合并/拆分过渡。
  * 目录新鲜度：本地快照有效期内先秒开再后台重新校验；页面激活期间每 30 秒与切回前台时也会静默校验，
@@ -17,12 +17,12 @@ import ClientProductSmallImage from './components/ClientProductSmallImage.vue'
 
 
 import { useVirtualList } from '@vueuse/core'
-import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
+import { onBeforeRouteLeave, useRoute } from 'vue-router'
 
 import { ArrowDown, ArrowRight, Close, Search, ShoppingCart } from '@element-plus/icons-vue'
 import { ElMessageBox } from 'element-plus'
-import { getO2oMallProducts, getO2oMallStorefront, type O2oMallProduct, type O2oMallSku } from '@/api/modules/o2o'
+import { getO2oCheckoutStorefront, getO2oMallProducts, getO2oMallStorefront, type O2oMallProduct, type O2oMallSku } from '@/api/modules/o2o'
 import { BaseRequestState } from '@/components/common'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useClientRestockEntry } from '@/composables/useClientRestockEntry'
@@ -30,6 +30,7 @@ import { useClientAuthStore, useClientCartStore, useClientCatalogStore } from '@
 import pinia from '@/store/pinia'
 import { normalizeRequestError } from '@/utils/error'
 import { useDevice } from '@/composables/useDevice'
+import { normalizeStorefront } from '@/utils/client-catalog-storage'
 import { resolveProductPlaceholder } from '@/utils/product-placeholder'
 import { resolveProductPreviewImage, resolveProductPreviewSku, resolveProductPreviewSmallImage, resolveSortedActivePreviewSkus } from '@/utils/product-preview'
 import { resolveO2oPriceView } from '@/utils/o2o-price'
@@ -104,8 +105,11 @@ const clientCartStore = useClientCartStore(pinia)
 const clientCatalogStore = useClientCatalogStore(pinia)
 const clientAuthStore = useClientAuthStore(pinia)
 const { runLatest } = useStableRequest()
+const { runLatest: runLatestEntryStorefront, cancel: cancelEntryStorefront } = useStableRequest()
+onBeforeRouteLeave(cancelEntryStorefront)
 const { isPhone } = useDevice()
 const route = useRoute()
+const animateMiniCartOnAppear = inject('hasMountedClientMainLayout', () => false)()
 
 const loading = ref(false)
 const refreshing = ref(false)
@@ -206,6 +210,7 @@ const miniCartIconRef = ref<HTMLElement | null>(null)
 const searchInputFocused = ref(false)
 const mobileSearchVisible = ref(false)
 const mobileSearchInputRef = ref<HTMLInputElement | null>(null)
+const compactAnnouncementCollapsed = ref(false)
 const compactAnnouncementTextRef = ref<HTMLElement | null>(null)
 const compactAnnouncementOverflowing = ref(false)
 const announcementDialogVisible = ref(false)
@@ -238,7 +243,17 @@ const displayCategoryKey = computed(() => requestedCategoryKey.value ?? activeCa
 // 分类浏览列表与分类栏共用的实测高度（px），0 表示尚未测量、沿用样式里的兜底高度。
 const browseListHeight = ref(0)
 const mallPageRef = ref<HTMLElement | null>(null)
+const mallHeroCardRef = ref<HTMLElement | null>(null)
+const phoneToolbarRef = ref<HTMLElement | null>(null)
+const mallContentWindowRef = ref<HTMLElement | null>(null)
+const mallContentRef = ref<HTMLElement | null>(null)
 const browsePanelRef = ref<HTMLElement | null>(null)
+const phonePaneHeight = ref<number | null>(null)
+const phoneStorefrontShift = ref(0)
+const phoneToolbarTop = ref(0)
+const getMallLayoutHeader = () => mallPageRef.value?.closest('.client-main-layout')?.querySelector<HTMLElement>('.client-main-layout__header')
+let storefrontMotion: Animation | null = null
+let storefrontMotionVersion = 0
 // 悬浮购物车对内容区的实测遮挡高度（含安全距离），驱动页面尾部留白、分类浏览列表高度与焦点滚动留白。
 const floatingOcclusion = ref(PHONE_FLOATING_OCCLUSION_FALLBACK + MALL_FLOATING_OCCLUSION_GAP)
 const miniCartWrapperRef = ref<HTMLElement | null>(null)
@@ -258,6 +273,10 @@ const CATEGORY_BOTTOM_VISIBLE_PADDING = 56
 const CATEGORY_ACTIVATE_HYSTERESIS = 14
 // 分类栏跟随滚动后，激活项与分类栏上下边缘保留的间距，与按钮间距 mb-2 对齐。
 const CATEGORY_RAIL_VISIBLE_PADDING = 8
+const VIRTUAL_PRODUCT_ITEM_HEIGHT = 98
+const PHONE_PANE_CART_GAP = 8
+const MALL_SCROLL_LOCK_CLASS = 'client-mall-scroll-locked'
+const MALL_SHORT_VIEWPORT_CLASS = 'client-mall-short-viewport'
 const DEFAULT_PRODUCT_IMAGE_WARMUP_BATCH = 12
 const DEFAULT_PRODUCT_IMAGE_WARMUP_DELAY_MS = 180
 const PRODUCT_CARD_SEARCH_DETAIL_MAX_LENGTH = 80
@@ -275,7 +294,13 @@ clientCartStore.initialize(clientAuthStore.currentUser?.id)
 clientCatalogStore.initialize(clientAuthStore.currentUser?.id)
 
 const products = computed(() => clientCatalogStore.products)
-const mallAnnouncementText = computed(() => clientCatalogStore.storefront.mallAnnouncementText?.trim() ?? '')
+const confirmedMallStorefront = ref<ReturnType<typeof normalizeStorefront> | null>(null)
+const mallStorefront = computed(() => confirmedMallStorefront.value ?? clientCatalogStore.storefront)
+const mallAnnouncementText = computed(() => mallStorefront.value.mallAnnouncementText)
+const phonePaneTooShort = computed(() => isPhone.value && phonePaneHeight.value !== null
+  && phonePaneHeight.value < VIRTUAL_PRODUCT_ITEM_HEIGHT)
+const phoneStorefrontCollapsed = computed(() => isPhone.value && !phonePaneTooShort.value && compactAnnouncementCollapsed.value)
+let acknowledgedAnnouncementText = ''
 const normalizedKeyword = computed(() => keyword.value.trim().toLowerCase())
 const hasKeyword = computed(() => normalizedKeyword.value.length > 0)
 const hasRenderableProducts = computed(() => products.value.length > 0)
@@ -543,6 +568,7 @@ const submitDetailBatch = () => {
   const result = clientCartStore.addProductsBatch(current, selections)
   detailBatchConflicts.value = result.conflicts
   if (!result.ok || result.addedQty <= 0) return
+  confirmCartAddHaptic()
   result.addedSkus.slice(0, 6).forEach((sku) => celebrateCartAdd(sources.get(sku.skuId)))
   showAppSuccess(`已加入购物车，共 ${result.addedQty} 件`)
   detailVisible.value = false
@@ -652,6 +678,7 @@ const categoryOptions = computed(() => mallBrowseIndex.value.categoryOptions)
 const searchMode = computed(() => hasKeyword.value)
 const largeDatasetMode = computed(() => products.value.length > 100)
 const isRecommendedSortMode = computed(() => sortMode.value === 'recommended')
+const showCategoryRail = computed(() => !isRecommendedSortMode.value && categoryGroups.value.length > 0)
 const useRecommendedAllProductFlow = computed(() => isRecommendedSortMode.value && !largeDatasetMode.value)
 const recommendedAllProducts = computed(() => sortProductsForDisplay(products.value))
 
@@ -671,9 +698,12 @@ const searchResults = computed(() => {
 const searchPageSize = 24
 const searchPage = ref(1)
 const searchHeadingRef = ref<HTMLElement | null>(null)
+const searchResultsScrollerRef = ref<HTMLElement | null>(null)
 const searchGridRef = ref<HTMLElement | null>(null)
 const searchPaginationRef = ref<HTMLElement | null>(null)
 const pagedSearchResults = computed(() => searchResults.value.slice((searchPage.value - 1) * searchPageSize, searchPage.value * searchPageSize))
+const showProductSort = computed(() => !loading.value && !blockingRequestError.value
+  && hasRenderableProducts.value && (!searchMode.value || searchResults.value.length > 0))
 watch([keyword, sortMode], () => { searchPage.value = 1 }, { flush: 'sync' })
 watch(searchResults, (results) => {
   searchPage.value = Math.min(searchPage.value, Math.max(1, Math.ceil(results.length / searchPageSize)))
@@ -689,11 +719,19 @@ watch(products, async () => {
 const scrollToSearchHeading = () => {
   const heading = searchHeadingRef.value
   if (!heading) return
-  const header = mallPageRef.value?.closest('.client-main-layout')?.querySelector<HTMLElement>('.client-main-layout__header')
-  const offset = header?.getBoundingClientRect().height ?? 0
+  const behavior = shouldReduceClientMotion() ? 'auto' : 'smooth'
+  const scroller = searchResultsScrollerRef.value
+  if (isPhone.value && scroller && !phonePaneTooShort.value) {
+    scroller.scrollTo({
+      top: Math.max(0, scroller.scrollTop + heading.getBoundingClientRect().top - scroller.getBoundingClientRect().top - 12),
+      behavior,
+    })
+    return
+  }
+  const offset = phonePaneTooShort.value ? 0 : (getMallLayoutHeader()?.getBoundingClientRect().height ?? 0)
   globalThis.window.scrollTo({
     top: Math.max(0, globalThis.window.scrollY + heading.getBoundingClientRect().top - offset - 12),
-    behavior: shouldReduceClientMotion() ? 'auto' : 'smooth',
+    behavior,
   })
 }
 const goToSearchResults = () => {
@@ -733,8 +771,8 @@ const virtualSource = computed(() => {
   }
   return [] as O2oMallProduct[]
 })
-const { list: virtualRows, containerProps: virtualContainerProps, wrapperProps: virtualWrapperProps } = useVirtualList(virtualSource, {
-  itemHeight: 98,
+const { list: virtualRows, containerProps: virtualContainerProps, wrapperProps: virtualWrapperProps, scrollTo: scrollVirtualListTo } = useVirtualList(virtualSource, {
+  itemHeight: VIRTUAL_PRODUCT_ITEM_HEIGHT,
   overscan: 6,
 })
 
@@ -792,11 +830,14 @@ const bumpMiniCartBadge = () => {
   })
 }
 
-// 加购成功的统一视觉反馈：轻触震动 → 小圆点飞入购物车 → 落点时购物车脉冲与角标弹跳；减少动效时只保留脉冲。
+const confirmCartAddHaptic = () => {
+  if (isPhone.value) triggerClientHaptic(18)
+}
+
+// 每件商品独立飞入，触感由实际加购动作统一确认。
 const celebrateCartAdd = (source?: Element | ClientCartFlightSource | null) => {
   if (shouldReduceClientMotion() || !mallRuntimeActive) return
   const signal = feedbackController.signal
-  triggerClientHaptic()
   void flyToClientCart(source, miniCartIconRef.value, signal).then(() => {
     if (signal.aborted || !mallRuntimeActive || shouldReduceClientMotion()) return
     triggerSettlePulse()
@@ -868,17 +909,51 @@ const openFullAnnouncement = () => {
   announcementDialogVisible.value = true
 }
 
+const refreshEntryStorefront = () => {
+  const owner = clientAuthStore.currentUser?.id
+  if (!owner || !mallRuntimeActive || !isMallRoute.value) return
+  const session = clientAuthStore.sessionGeneration
+  // 只更新本页。公开缓存可能晚到，结算仍独立读取自己的当前门店规则。
+  return runLatestEntryStorefront({
+    executor: (signal) => getO2oCheckoutStorefront({ signal }),
+    onSuccess: (result) => {
+      if (!result?.businessHoursText?.trim() || !mallRuntimeActive || !isMallRoute.value
+        || clientAuthStore.sessionGeneration !== session || clientAuthStore.currentUser?.id !== owner) return
+      const storefront = normalizeStorefront(result)
+      confirmedMallStorefront.value = storefront
+      if (storefront.mallAnnouncementText === acknowledgedAnnouncementText) return
+      acknowledgedAnnouncementText = storefront.mallAnnouncementText
+      compactAnnouncementCollapsed.value = false
+    },
+  })
+}
+
+const togglePhoneStorefront = () => {
+  if (phonePaneTooShort.value) return
+  acknowledgedAnnouncementText = mallAnnouncementText.value
+  compactAnnouncementCollapsed.value = Boolean(mallAnnouncementText.value) && !compactAnnouncementCollapsed.value
+}
+
+const announcementSessionSources = [() => clientAuthStore.sessionGeneration, () => clientAuthStore.currentUser?.id] as const
+watch(announcementSessionSources, () => {
+  cancelEntryStorefront()
+  confirmedMallStorefront.value = null
+}, { flush: 'sync' })
 watch(
-  () => clientAuthStore.currentUser?.id,
-  (nextClientUserId) => {
+  announcementSessionSources,
+  ([, nextClientUserId]) => {
+    acknowledgedAnnouncementText = ''
+    announcementDialogVisible.value = false
+    compactAnnouncementCollapsed.value = false
     clientCartStore.initialize(nextClientUserId)
     clientCatalogStore.initialize(nextClientUserId)
-    if (nextClientUserId && mallRuntimeActive) void clientCatalogStore.refreshStorefront(getO2oMallStorefront)
+    void refreshEntryStorefront()
   },
 )
 
-watch([mallAnnouncementText, isPhone], () => {
+watch([mallAnnouncementText, isPhone, compactAnnouncementCollapsed], () => {
   void updateCompactAnnouncementOverflow()
+  if (mallRuntimeActive) scheduleMallFloatingLayoutSync()
 })
 
 const applyCatalogResult = async (result: Awaited<ReturnType<typeof getO2oMallProducts>>) => {
@@ -1215,6 +1290,7 @@ const addCurrentDetailToCart = () => {
   if (addedQty <= 0) {
     return
   }
+  confirmCartAddHaptic()
   // 详情加购后抽屉关闭、页面上下文切换，保留文字提示让用户确认结果。
   showAppSuccess('已加入购物车')
   celebrateCartAdd(captureClientCartImage(detailPanelRef.value?.querySelector('.client-detail-header')))
@@ -1244,9 +1320,15 @@ const quickAdd = (product: O2oMallProduct, source?: Element | null) => {
   if (addedQty <= 0) {
     return
   }
+  confirmCartAddHaptic()
   const card = source?.closest('.client-product-card')
   const imageButton = card?.querySelector('[data-product-id].client-product-card__image-button')
   celebrateCartAdd(imageButton?.getAttribute('data-product-id') === product.id ? captureClientCartImage(imageButton) : null)
+}
+
+const keepStockSwipeLocal = (event: MouseEvent) => {
+  const strip = event.currentTarget
+  if (isPhone.value && strip instanceof HTMLElement && strip.scrollWidth > strip.clientWidth) event.stopPropagation()
 }
 
 // 卡片步进器减一：减到 0 时由购物车 store 移除该行，步进器随之收拢回“+ 加购”。
@@ -1374,6 +1456,10 @@ const settleCategoryScrollSession = () => {
 }
 
 const syncBrowseListHeight = () => {
+  if (isPhone.value) {
+    browseListHeight.value = 0
+    return
+  }
   const panel = browsePanelRef.value
   const list = panel?.querySelector<HTMLElement>('.mall-browse-list') ?? null
   if (!panel || !list || globalThis.window === undefined) {
@@ -1396,6 +1482,71 @@ const syncBrowseListHeight = () => {
     minimum: MALL_BROWSE_LIST_MIN_HEIGHT,
   })
 }
+
+const syncPhonePaneGeometry = () => {
+  const stage = mallContentWindowRef.value
+  const content = mallContentRef.value
+  const hero = mallHeroCardRef.value
+  if (!mallRuntimeActive || !shouldShowMobileSearchEntry.value || !stage || !content || !hero || !stage.offsetWidth) return
+
+  const win = globalThis.window
+  const viewportHeight = resolveMallViewportHeight()
+  const visualViewport = win.visualViewport
+  const visibleBottom = visualViewport?.height ? visualViewport.offsetTop + visualViewport.height : viewportHeight
+  const cartTop = viewportHeight - floatingOcclusion.value + MALL_FLOATING_OCCLUSION_GAP
+  const stageTop = stage.getBoundingClientRect().top + win.scrollY
+  const collapsedTop = stageTop
+    + (Number.parseFloat(win.getComputedStyle(stage).paddingTop) || 0)
+  const contentGap = Number.parseFloat(win.getComputedStyle(content).rowGap) || 0
+
+  // 公告只挪动整块内容，商品区在展开和收起时保持相同尺寸。
+  phonePaneHeight.value = Math.max(0, Math.floor(Math.min(visibleBottom, cartTop) - collapsedTop - PHONE_PANE_CART_GAP))
+  phoneStorefrontShift.value = hero.offsetHeight + contentGap
+  // 工具栏固定在其常态位置，展开页已滚动时点击收起也不会让工具栏跳动。
+  phoneToolbarTop.value = Math.max(0, stageTop - (phoneToolbarRef.value?.offsetHeight ?? 0))
+}
+
+const syncMallDocumentScrollLock = () => {
+  const root = globalThis.document?.documentElement
+  if (!root) return
+  const active = mallRuntimeActive && isMallRoute.value
+  const locked = active && phoneStorefrontCollapsed.value
+  root.classList.toggle(MALL_SHORT_VIEWPORT_CLASS, active && phonePaneTooShort.value)
+  const changed = root.classList.contains(MALL_SCROLL_LOCK_CLASS) !== locked
+  root.classList.toggle(MALL_SCROLL_LOCK_CLASS, locked)
+  if (changed && locked) globalThis.window.scrollTo({ top: 0, behavior: 'instant' })
+}
+
+const stopStorefrontMotion = () => {
+  storefrontMotionVersion += 1
+  storefrontMotion?.cancel()
+  storefrontMotion = null
+}
+
+watch(compactAnnouncementCollapsed, async () => {
+  const content = mallContentRef.value
+  const first = content?.getBoundingClientRect().top
+  stopStorefrontMotion()
+  const version = storefrontMotionVersion
+  syncMallDocumentScrollLock()
+  if (first === undefined || !content?.animate || !mallRuntimeActive || !shouldShowMobileSearchEntry.value || shouldReduceClientMotion()) return
+
+  await nextTick()
+  if (version !== storefrontMotionVersion || !content.isConnected || shouldReduceClientMotion()) return
+  const offset = first - content.getBoundingClientRect().top
+  if (Math.abs(offset) < 0.5) return
+  const animation = content.animate(
+    [{ transform: `translateY(${offset}px)` }, { transform: 'translateY(0)' }],
+    { duration: 240, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' },
+  )
+  storefrontMotion = animation
+  animation.onfinish = () => { if (storefrontMotion === animation) storefrontMotion = null }
+}, { flush: 'pre' })
+
+watch(phonePaneTooShort, () => {
+  stopStorefrontMotion()
+  syncMallDocumentScrollLock()
+})
 
 const resolveSectionTopWithinScroller = (section: HTMLElement, scroller: HTMLElement) => {
   const sectionRect = section.getBoundingClientRect()
@@ -1473,6 +1624,7 @@ const scrollToCategory = async (categoryKey: string) => {
   if (largeDatasetMode.value) {
     // 大数据模式下列表按当前分类单独渲染，没有平滑滚动过程，直接落到目标分类。
     activeCategoryKey.value = categoryKey
+    if (isPhone.value) scrollVirtualListTo(0)
     return
   }
   // 先只登记点击目标：高亮由 displayCategoryKey 立即跟上，
@@ -1524,6 +1676,8 @@ const setCategoryButtonRef = (categoryKey: string, element: unknown) => {
  * - 否则取分类栏底边越过“购物车实测遮挡线”的那一段，供跟随计算扣掉。
  */
 const measureCategoryRailBottomInset = (scroller: HTMLElement) => {
+  // 极短视口由外页滚动露出整块分类区，外层暂时遮住的高度不应变为侧栏内部垫块。
+  if (phonePaneTooShort.value) return 0
   const viewportHeight = resolveMallViewportHeight()
   if (viewportHeight <= 0) {
     return 0
@@ -1534,7 +1688,7 @@ const measureCategoryRailBottomInset = (scroller: HTMLElement) => {
 
 /**
  * 左侧分类栏跟随可见：
- * - 只滚动分类栏自身容器，侧栏使用 scrollTop，窄屏横排使用 scrollLeft，不带动页面或商品列表；
+ * - 只滚动左侧分类栏自身容器，不带动页面或商品列表；
  * - 激活项已完整可见时不动，越界时按最小位移滚入；减少动画偏好下直接跳转；
  * - 可视区底部扣掉悬浮购物车遮挡，并同步补齐尾部占位，末尾分类才能被抬到购物车上方。
  */
@@ -1548,23 +1702,7 @@ const ensureActiveCategoryVisible = (behavior: ScrollBehavior = 'smooth') => {
     // 分类栏展开/收起过渡中高度仍在变化，交给过渡结束回调再对齐。
     return
   }
-  const horizontal = globalThis.window.getComputedStyle(scroller).display === 'flex'
   const prefersReducedMotion = globalThis.window?.matchMedia?.('(prefers-reduced-motion: reduce)').matches
-  if (horizontal) {
-    const scrollerRect = scroller.getBoundingClientRect()
-    const buttonRect = button.getBoundingClientRect()
-    // 几何算法与纵向一致，仅映射当前轴；不改分类选择或商品列表滚动规则。
-    const nextScrollLeft = resolveKeepVisibleScrollTop({
-      scrollTop: scroller.scrollLeft,
-      viewportHeight: scroller.clientWidth,
-      contentHeight: scroller.scrollWidth,
-      itemTop: buttonRect.left - scrollerRect.left - scroller.clientLeft + scroller.scrollLeft,
-      itemHeight: buttonRect.width,
-      padding: CATEGORY_RAIL_VISIBLE_PADDING,
-    })
-    if (nextScrollLeft !== null) scroller.scrollTo({ left: nextScrollLeft, behavior: prefersReducedMotion ? 'auto' : behavior })
-    return
-  }
   const bottomInset = measureCategoryRailBottomInset(scroller)
   // 尾部占位与遮挡等高，直接写在容器上即时生效，随后读取的 scrollHeight 才包含这段可滚动空间。
   scroller.style.setProperty('--mall-category-rail-tail-space', `${bottomInset}px`)
@@ -1682,8 +1820,10 @@ const hasReachedRequestedCategory = (scroller: HTMLElement): boolean => {
 
 const handleMallViewportResize = () => {
   syncMallFloatingOcclusion()
+  syncPhonePaneGeometry()
   syncBrowseListHeight()
   handleProductListScroll()
+  if (isPhone.value) void nextTick(() => ensureActiveCategoryVisible('auto'))
   void updateCompactAnnouncementOverflow()
 }
 
@@ -1710,7 +1850,8 @@ const bindFloatingLayoutObserver = () => {
     return
   }
   floatingLayoutResizeObserver = new win.ResizeObserver(() => scheduleMallFloatingLayoutSync())
-  const observedElements = [miniCartSummaryBarRef.value, browsePanelRef.value]
+  // 门店说明异步换行时，列表顶边会移动，浏览面板的尺寸可能尚未变化。
+  const observedElements = [miniCartSummaryBarRef.value, mallHeroCardRef.value, browsePanelRef.value, phoneToolbarRef.value, getMallLayoutHeader()]
   observedElements.forEach((element) => {
     if (element) {
       floatingLayoutResizeObserver?.observe(element)
@@ -1721,6 +1862,7 @@ const bindFloatingLayoutObserver = () => {
 const syncMallViewportAfterRender = async () => {
   await nextTick()
   syncMallFloatingOcclusion()
+  syncPhonePaneGeometry()
   syncBrowseListHeight()
   handleProductListScroll()
   // KeepAlive 返回、列表重建或尺寸变化后分类栏滚动位置可能丢失，直接对齐到激活分类。
@@ -1819,10 +1961,14 @@ const goToCheckout = () => {
 // 1. 防止 fixed 全屏遮罩在切页过渡阶段覆盖下一页；
 // 2. 避免用户返回商城时误看到“上一次展开状态”。
 watch(
-  () => route.path,
-  (nextPath) => {
-    if (!nextPath.startsWith('/client/mall')) {
+  isMallRoute,
+  (isActive) => {
+    syncMallDocumentScrollLock()
+    if (!isActive) {
+      cancelEntryStorefront()
+      stopStorefrontMotion()
       stopMallFeedback()
+      announcementDialogVisible.value = false
       detailVisible.value = false
       miniCartVisible.value = false
       imagePreviewVisible.value = false
@@ -1832,12 +1978,19 @@ watch(
   },
 )
 
+watch(isPhone, () => {
+  stopStorefrontMotion()
+  syncMallDocumentScrollLock()
+  if (mallRuntimeActive) void syncMallViewportAfterRender()
+})
+
 const activateMallRuntime = () => {
   if (feedbackController.signal.aborted) feedbackController = new AbortController()
   if (mallRuntimeActive) {
     return
   }
   mallRuntimeActive = true
+  syncMallDocumentScrollLock()
   globalThis.window.addEventListener('resize', scheduleMallFloatingLayoutSync, { passive: true })
   globalThis.window.addEventListener('orientationchange', scheduleMallFloatingLayoutSync)
   // 移动端地址栏收起/展开只改变可视视口，不一定触发 window resize。
@@ -1847,9 +2000,10 @@ const activateMallRuntime = () => {
     void revalidateCatalogInBackground()
   }, CATALOG_BACKGROUND_REVALIDATE_MS)
   void syncMallViewportAfterRender()
-  if (hasActivatedOnce && globalThis.document?.visibilityState !== 'hidden') {
-    // KeepAlive 返回时只在 TTL 过期或轻量快照尚未补全时重拉，避免每次切页都请求完整目录。
-    void loadProducts().then(syncMallViewportAfterRender)
+  if (hasActivatedOnce) {
+    void refreshEntryStorefront()
+    // 目录仍沿用原缓存策略，后台标签页不发目录请求。
+    if (globalThis.document?.visibilityState !== 'hidden') void loadProducts().then(syncMallViewportAfterRender)
   }
   hasActivatedOnce = true
 }
@@ -1866,6 +2020,9 @@ const deactivateMallRuntime = () => {
     return
   }
   mallRuntimeActive = false
+  cancelEntryStorefront()
+  stopStorefrontMotion()
+  syncMallDocumentScrollLock()
   clearCategoryUnlockTimer()
   globalThis.window.removeEventListener('resize', scheduleMallFloatingLayoutSync)
   globalThis.window.removeEventListener('orientationchange', scheduleMallFloatingLayoutSync)
@@ -1917,14 +2074,17 @@ onDeactivated(() => {
 })
 
 onMounted(async () => {
+  activateMallRuntime()
   detailMotionMedia = globalThis.window?.matchMedia?.('(prefers-reduced-motion: reduce)') ?? null
   detailMotionMedia?.addEventListener('change', stopDetailModeMotion)
+  detailMotionMedia?.addEventListener('change', stopStorefrontMotion)
   const hasHydratedCatalog = products.value.length > 0
   if (hasHydratedCatalog) {
     // 已有缓存时先把现有内容稳定渲染出来，再后台刷新，避免首屏等待被网络重新拉长。
     warmupProductImages(products.value)
   }
 
+  void refreshEntryStorefront()
   const loadPromise = loadProducts()
   if (hasHydratedCatalog) {
     await syncMallViewportAfterRender()
@@ -1940,6 +2100,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   deactivateMallRuntime()
   detailMotionMedia?.removeEventListener('change', stopDetailModeMotion)
+  detailMotionMedia?.removeEventListener('change', stopStorefrontMotion)
   detailMotionMedia = null
 })
 </script>
@@ -1947,8 +2108,18 @@ onBeforeUnmount(() => {
 <template>
   <section
     ref="mallPageRef"
-    class="mall-page is-floating-occlusion-tail space-y-4"
-    :style="{ '--mall-floating-occlusion': `${floatingOcclusion}px` }"
+    class="mall-page is-floating-occlusion-tail"
+    :class="{
+      'is-storefront-collapsed': phoneStorefrontCollapsed,
+      'has-phone-pane-height': isPhone && phonePaneHeight !== null && !phonePaneTooShort,
+    }"
+    :style="{
+      '--mall-floating-occlusion': `${floatingOcclusion}px`,
+      '--mall-virtual-item-height': `${VIRTUAL_PRODUCT_ITEM_HEIGHT}px`,
+      '--mall-phone-pane-height': phonePaneHeight === null ? undefined : `${phonePaneHeight}px`,
+      '--mall-storefront-shift': `${phoneStorefrontShift}px`,
+      '--mall-phone-toolbar-top': `${phoneToolbarTop}px`,
+    }"
   >
     <Teleport v-if="shouldShowMobileSearchEntry" to="body">
       <Transition name="mall-mobile-search">
@@ -1989,11 +2160,57 @@ onBeforeUnmount(() => {
     <!-- 商品原图预览：初始完整适配，提供放大 / 缩小 / 适配按钮与键盘操作，放大后用舞台原生滚动平移。 -->
     <ClientImagePreviewer v-model:visible="imagePreviewVisible" :src="previewImageUrl" alt="商品原图" />
 
+    <div v-if="isPhone" ref="phoneToolbarRef" class="mall-sort-row mall-phone-toolbar">
+      <div v-if="showProductSort" class="mall-sort-control" :class="{ 'is-animating': sortModeAnimating }" role="group" aria-label="商品排序">
+        <button
+          v-for="option in productSortOptions"
+          :key="option.value"
+          type="button"
+          class="mall-sort-control__button"
+          :class="{ 'is-active': sortMode === option.value }"
+          :aria-pressed="sortMode === option.value"
+          :disabled="sortModeAnimating"
+          @click="handleSortModeChange(option.value)"
+        >
+          {{ option.label }}
+        </button>
+      </div>
+      <el-button
+        class="mall-mobile-search-trigger"
+        aria-label="搜索商品"
+        :aria-expanded="mobileSearchVisible"
+        @click="openMobileSearch"
+      >
+        <el-icon aria-hidden="true"><Search /></el-icon>
+        <span>搜索</span>
+      </el-button>
+      <el-button
+        v-if="mallAnnouncementText || phoneStorefrontCollapsed"
+        class="mall-mobile-announcement-toggle"
+        :aria-expanded="!phoneStorefrontCollapsed"
+        :aria-disabled="phonePaneTooShort || undefined"
+        aria-controls="client-mall-storefront"
+        @click="togglePhoneStorefront"
+      >
+        {{ mallAnnouncementText ? (phoneStorefrontCollapsed ? '展开公告' : '收起公告') : '展开门店信息' }}
+        <el-icon aria-hidden="true" :class="{ 'is-expanded': !phoneStorefrontCollapsed }"><ArrowDown /></el-icon>
+      </el-button>
+    </div>
+
+    <div ref="mallContentWindowRef" class="mall-content-window">
+    <div ref="mallContentRef" class="mall-content" :class="{ 'space-y-4': !isPhone }">
     <div
+      ref="mallHeroCardRef"
+      :id="isPhone ? 'client-mall-storefront' : undefined"
+      :inert="phoneStorefrontCollapsed"
+      :aria-hidden="phoneStorefrontCollapsed || undefined"
       class="mall-hero-card overflow-hidden rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-4 shadow-[var(--ylink-shadow-soft)]"
-      :class="isPhone ? 'mall-hero-card--compact-mobile' : ''"
+      :class="{
+        'mall-hero-card--compact-mobile': isPhone,
+        'has-expanded-announcement': isPhone && mallAnnouncementText,
+      }"
     >
-      <div class="flex flex-wrap items-center justify-between gap-3">
+      <div class="mall-hero-card__top-row flex flex-wrap items-center justify-between gap-3">
         <div v-if="!isPhone" class="mall-hero-card__heading">
           <p class="text-xs font-semibold tracking-[0.16em] text-slate-400">CLIENT MALL</p>
           <p class="mall-hero-card__title mt-1 text-xl font-semibold text-slate-900 dark:text-slate-100">商城</p>
@@ -2012,30 +2229,32 @@ onBeforeUnmount(() => {
           <span class="mall-hero-card__compact-badge">公告</span>
           <p ref="compactAnnouncementTextRef" class="mall-hero-card__compact-text">{{ mallAnnouncementText }}</p>
         </button>
-        <button
-          type="button"
-          class="mall-hero-card__refresh rounded-full border border-[var(--ylink-color-border)] bg-[var(--ylink-color-surface-soft)] px-4 py-2 text-sm text-slate-600 dark:text-slate-300"
-          :disabled="refreshing"
-          @click="loadProducts(true)"
-        >
-          {{ refreshing ? '刷新中...' : '刷新库存' }}
-        </button>
+        <div class="mall-hero-card__actions">
+          <button
+            type="button"
+            class="mall-hero-card__refresh rounded-full border border-[var(--ylink-color-border)] bg-[var(--ylink-color-surface-soft)] px-4 py-2 text-sm text-slate-600 dark:text-slate-300"
+            :disabled="refreshing"
+            @click="loadProducts(true)"
+          >
+            {{ refreshing ? '刷新中...' : '刷新库存' }}
+          </button>
+        </div>
       </div>
       <div v-if="!isPhone" class="mall-hero-card__meta-grid mt-4 grid gap-3 sm:grid-cols-3">
-        <div class="mall-hero-card__meta-item break-words rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700 dark:text-slate-200">营业时间：{{ clientCatalogStore.storefront.businessHoursText }}</div>
+        <div class="mall-hero-card__meta-item break-words rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700 dark:text-slate-200">营业时间：{{ mallStorefront.businessHoursText }}</div>
         <div class="mall-hero-card__meta-item break-words rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700 dark:text-slate-200">
-          <p>取货地址：{{ clientCatalogStore.storefront.pickupAddress }}</p>
+          <p>取货地址：{{ mallStorefront.pickupAddress }}</p>
           <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">请在订单有效期内到店核销</p>
         </div>
         <div v-if="mallAnnouncementText" class="mall-hero-card__meta-item mall-hero-card__meta-item--notice rounded-2xl bg-amber-50 px-3 py-3 text-sm text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">公告：{{ mallAnnouncementText }}</div>
       </div>
-      <div v-else class="mt-2 space-y-0.5 break-words text-xs leading-5 text-slate-600 dark:text-slate-300">
-        <p>营业时间：{{ clientCatalogStore.storefront.businessHoursText }}</p>
-        <p>取货地址：{{ clientCatalogStore.storefront.pickupAddress }}</p>
+      <div v-else class="mall-hero-card__compact-meta mt-2 space-y-0.5 break-words text-xs leading-5 text-slate-600 dark:text-slate-300">
+        <p>营业时间：{{ mallStorefront.businessHoursText }}</p>
+        <p>取货地址：{{ mallStorefront.pickupAddress }}</p>
       </div>
       <div
         v-if="passiveRefreshErrorMessage"
-        class="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-700 dark:border-amber-900/60 dark:bg-amber-500/10 dark:text-amber-300"
+        class="mall-hero-card__refresh-error mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-700 dark:border-amber-900/60 dark:bg-amber-500/10 dark:text-amber-300"
       >
         当前先展示本地缓存，后台刷新失败：{{ passiveRefreshErrorMessage }}
       </div>
@@ -2054,18 +2273,6 @@ onBeforeUnmount(() => {
         <p class="mall-announcement-dialog__content">{{ mallAnnouncementText }}</p>
       </section>
     </ElDialog>
-    <div v-if="shouldShowMobileSearchEntry && (loading || blockingRequestError || !products.length || (searchMode && !searchResults.length))" class="mall-sort-row">
-          <el-button
-            v-if="shouldShowMobileSearchEntry"
-            class="mall-mobile-search-trigger"
-            aria-label="搜索商品"
-            :aria-expanded="mobileSearchVisible"
-            @click="openMobileSearch"
-          >
-            <el-icon><Search /></el-icon>
-            <span>搜索</span>
-          </el-button>
-    </div>
     <div v-if="loading" class="grid gap-3 rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
       <div v-for="index in 6" :key="index" class="h-[5.8rem] animate-pulse rounded-2xl bg-slate-100 dark:bg-white/10" />
     </div>
@@ -2087,17 +2294,7 @@ onBeforeUnmount(() => {
     </div>
 
     <template v-else>
-      <div v-if="searchMode" class="mall-sort-row">
-          <el-button
-            v-if="shouldShowMobileSearchEntry"
-            class="mall-mobile-search-trigger"
-            aria-label="搜索商品"
-            :aria-expanded="mobileSearchVisible"
-            @click="openMobileSearch"
-          >
-            <el-icon><Search /></el-icon>
-            <span>搜索</span>
-          </el-button>
+      <div v-if="searchMode && !isPhone" class="mall-sort-row">
         <div class="mall-sort-control" :class="{ 'is-animating': sortModeAnimating }" role="group" aria-label="商品排序">
           <button
             v-for="option in productSortOptions"
@@ -2105,6 +2302,7 @@ onBeforeUnmount(() => {
             type="button"
             class="mall-sort-control__button"
             :class="{ 'is-active': sortMode === option.value }"
+            :aria-pressed="sortMode === option.value"
             :disabled="sortModeAnimating"
             @click="handleSortModeChange(option.value)"
           >
@@ -2115,6 +2313,7 @@ onBeforeUnmount(() => {
 
       <section
         v-if="searchMode"
+        ref="searchResultsScrollerRef"
         class="mall-search-results space-y-3 rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-4 shadow-[var(--ylink-shadow-soft)]"
       >
       <div class="mall-search-launcher-wrap mall-search-launcher-wrap--inside">
@@ -2171,7 +2370,7 @@ onBeforeUnmount(() => {
                   原价 ¥{{ Number(resolveProductPriceView(product).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(product).discountLabel }}
                 </p>
               </div>
-              <div class="client-product-card__meta">
+              <div class="client-product-card__meta" @click="keepStockSwipeLocal">
                 <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">
                   可订 {{ product.availableStock }}
                 </span>
@@ -2197,7 +2396,7 @@ onBeforeUnmount(() => {
       v-else
       class="mall-browse-panel grid rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-3 sm:p-4 shadow-[var(--ylink-shadow-soft)]"
       ref="browsePanelRef"
-      :class="{ 'is-recommended-flow': isRecommendedSortMode, 'has-category-navigation': !isRecommendedSortMode, 'has-measured-height': browseListHeight > 0 }"
+      :class="{ 'is-recommended-flow': isRecommendedSortMode, 'has-category-navigation': showCategoryRail, 'has-measured-height': browseListHeight > 0 }"
       :style="browseListHeight > 0 ? { '--mall-browse-list-height': `${browseListHeight}px` } : undefined"
     >
       <div class="mall-search-launcher-wrap mall-search-launcher-wrap--inside mall-search-launcher-wrap--browse">
@@ -2224,17 +2423,7 @@ onBeforeUnmount(() => {
           </button>
         </div>
       </div>
-      <div class="mall-sort-row mall-sort-row--category">
-          <el-button
-            v-if="shouldShowMobileSearchEntry"
-            class="mall-mobile-search-trigger"
-            aria-label="搜索商品"
-            :aria-expanded="mobileSearchVisible"
-            @click="openMobileSearch"
-          >
-            <el-icon><Search /></el-icon>
-            <span>搜索</span>
-          </el-button>
+      <div v-if="!isPhone" class="mall-sort-row mall-sort-row--category">
         <div class="mall-sort-control" :class="{ 'is-animating': sortModeAnimating }" role="group" aria-label="商品排序">
           <button
             v-for="option in productSortOptions"
@@ -2242,6 +2431,7 @@ onBeforeUnmount(() => {
             type="button"
             class="mall-sort-control__button"
             :class="{ 'is-active': sortMode === option.value }"
+            :aria-pressed="sortMode === option.value"
             :disabled="sortModeAnimating"
             @click="handleSortModeChange(option.value)"
           >
@@ -2251,7 +2441,7 @@ onBeforeUnmount(() => {
       </div>
       <Transition name="mall-category-panel" @after-enter="ensureActiveCategoryVisible('auto')">
         <aside
-          v-if="!isRecommendedSortMode"
+          v-if="showCategoryRail"
           ref="categoryScrollerRef"
           class="mall-browse-categories overflow-y-auto pr-1 sm:pr-2 hide-scrollbar"
         >
@@ -2262,6 +2452,7 @@ onBeforeUnmount(() => {
             type="button"
             class="mall-category-button mb-2 w-full rounded-xl px-2 py-2 sm:px-3 sm:py-3 text-left transition-colors duration-200"
             :class="displayCategoryKey === category.key ? 'bg-[var(--ylink-color-primary-strong)] text-white shadow-md' : 'bg-[var(--ylink-color-surface-muted)] text-slate-500 hover:bg-slate-200 dark:text-slate-400'"
+            :aria-pressed="displayCategoryKey === category.key"
             @click="scrollToCategory(category.key)"
           >
             <p class="mall-category-name text-xs sm:text-sm font-medium">{{ category.label }}</p>
@@ -2299,7 +2490,7 @@ onBeforeUnmount(() => {
                     原价 ¥{{ Number(resolveProductPriceView(row.data).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(row.data).discountLabel }}
                   </p>
                 </div>
-                <div class="client-product-card__meta">
+                <div class="client-product-card__meta" @click="keepStockSwipeLocal">
                   <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可订 {{ row.data.availableStock }}</span>
                   <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">已订 {{ row.data.preOrderedStock }}</span>
                   <span class="rounded-full bg-slate-100 px-2 py-1 text-slate-600 dark:bg-white/10 dark:text-slate-300">已售 {{ resolveSoldQty(row.data) }}</span>
@@ -2352,7 +2543,7 @@ onBeforeUnmount(() => {
                       原价 ¥{{ Number(resolveProductPriceView(product).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(product).discountLabel }}
                     </p>
                   </div>
-                  <div class="client-product-card__meta">
+                  <div class="client-product-card__meta" @click="keepStockSwipeLocal">
                     <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可订 {{ product.availableStock }}</span>
                     <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">已订 {{ product.preOrderedStock }}</span>
                     <span class="rounded-full bg-slate-100 px-2 py-1 text-slate-600 dark:bg-white/10 dark:text-slate-300">已售 {{ resolveSoldQty(product) }}</span>
@@ -2400,7 +2591,7 @@ onBeforeUnmount(() => {
                         原价 ¥{{ Number(resolveProductPriceView(product).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(product).discountLabel }}
                       </p>
                     </div>
-                    <div class="client-product-card__meta">
+                    <div class="client-product-card__meta" @click="keepStockSwipeLocal">
                       <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可订 {{ product.availableStock }}</span>
                       <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">已订 {{ product.preOrderedStock }}</span>
                       <span class="rounded-full bg-slate-100 px-2 py-1 text-slate-600 dark:bg-white/10 dark:text-slate-300">已售 {{ resolveSoldQty(product) }}</span>
@@ -2416,79 +2607,86 @@ onBeforeUnmount(() => {
       </div>
     </section>
     </template>
+    </div>
+    </div>
 
-    <div class="mini-cart-backdrop" :class="{ 'is-expanded': miniCartVisible }" @click="miniCartVisible = false"></div>
-    <div ref="miniCartWrapperRef" class="mini-cart-wrapper" :class="{ 'is-expanded': miniCartVisible }">
-      <section ref="miniCartCardRef" class="mini-cart-card" :class="{ 'is-pulse': settlePulsing }">
-        <div ref="miniCartSummaryBarRef" class="cart-summary-bar" @click="miniCartVisible = !miniCartVisible">
-          <div class="summary-info">
-            <div ref="miniCartIconRef" class="cart-icon-wrapper" :class="{ 'is-bouncing': miniCartBadgeBouncing }">
-              <el-icon><ShoppingCart /></el-icon>
-              <Transition name="qty-pop" mode="out-in">
-                <span v-if="bottomSelectedQty > 0" :key="`mini-badge-${bottomSelectedQty}`" class="badge">{{ bottomSelectedQty }}</span>
-              </Transition>
+    <!-- 固定外层提供遮挡测量坐标，内层独立上下过渡，不随商城内容横向平移。 -->
+    <Teleport defer to="#client-main-layout-mall-cart-layer">
+      <div v-show="isMallRoute" class="mini-cart-backdrop" :class="{ 'is-expanded': miniCartVisible }" @click="miniCartVisible = false"></div>
+      <div ref="miniCartWrapperRef" class="mini-cart-wrapper" :class="{ 'is-expanded': miniCartVisible }" :inert="!isMallRoute">
+        <Transition name="mini-cart-route" :appear="animateMiniCartOnAppear" :css="!shouldReduceClientMotion()">
+          <section v-show="isMallRoute" ref="miniCartCardRef" class="mini-cart-card" :class="{ 'is-pulse': settlePulsing }">
+            <div ref="miniCartSummaryBarRef" class="cart-summary-bar" @click="miniCartVisible = !miniCartVisible">
+              <div class="summary-info">
+                <div ref="miniCartIconRef" class="cart-icon-wrapper" :class="{ 'is-bouncing': miniCartBadgeBouncing }">
+                  <el-icon><ShoppingCart /></el-icon>
+                  <Transition name="qty-pop" mode="out-in">
+                    <span v-if="bottomSelectedQty > 0" :key="`mini-badge-${bottomSelectedQty}`" class="badge">{{ bottomSelectedQty }}</span>
+                  </Transition>
+                </div>
+                <div class="text-group">
+                  <p class="main-text">购物车 {{ bottomSelectedTypeCount }} 种商品</p>
+                  <p class="sub-text">{{ miniCartVisible ? '点击收起明细' : '点击展开明细' }}</p>
+                </div>
+              </div>
+              <div class="summary-actions">
+                <button class="btn-checkout" @click.stop="goToCheckout">
+                  去结算
+                  <el-icon class="ml-1"><ArrowRight /></el-icon>
+                </button>
+                <button type="button" class="cart-expand-trigger" @click.stop="miniCartVisible = !miniCartVisible">
+                  <el-icon :class="miniCartVisible ? 'is-expanded' : ''"><ArrowDown /></el-icon>
+                </button>
+              </div>
             </div>
-            <div class="text-group">
-              <p class="main-text">购物车 {{ bottomSelectedTypeCount }} 种商品</p>
-              <p class="sub-text">{{ miniCartVisible ? '点击收起明细' : '点击展开明细' }}</p>
-            </div>
-          </div>
-          <div class="summary-actions">
-            <button class="btn-checkout" @click.stop="goToCheckout">
-              去结算
-              <el-icon class="ml-1"><ArrowRight /></el-icon>
-            </button>
-            <button type="button" class="cart-expand-trigger" @click.stop="miniCartVisible = !miniCartVisible">
-              <el-icon :class="miniCartVisible ? 'is-expanded' : ''"><ArrowDown /></el-icon>
-            </button>
-          </div>
-        </div>
 
-        <div class="cart-expand-content">
-          <div class="expand-inner">
-            <header class="expand-header">
-              <span class="title">已选商品</span>
-              <ElButton native-type="button" class="expand-clear-btn" :disabled="clearCartConfirming || clientCartStore.items.length === 0" @click="confirmClearMiniCart">清空</ElButton>
-            </header>
+            <div class="cart-expand-content">
+              <div class="expand-inner">
+                <header class="expand-header">
+                  <span class="title">已选商品</span>
+                  <ElButton native-type="button" class="expand-clear-btn" :disabled="clearCartConfirming || clientCartStore.items.length === 0" @click="confirmClearMiniCart">清空</ElButton>
+                </header>
 
-            <TransitionGroup name="cart-item-flow" tag="div" class="item-list">
-              <div v-if="clientCartStore.items.length === 0" key="mini-empty" class="empty-state">购物车还是空的，去挑挑好物吧</div>
-              <article v-for="item in clientCartStore.items" :key="`mini-${item.skuId || item.productId}`" class="cart-item">
-                <ClientProductSmallImage :small="item.thumbnailSmall" :original="item.thumbnail" :source-key="item.skuId || item.productId" :alt="item.productName" />
-                <div class="item-main">
-                  <p class="item-name">{{ item.productName }}</p>
-                  <p class="item-price">¥{{ Number(resolveO2oPriceView(item).discountedPrice).toFixed(2) }}</p>
-                  <p v-if="resolveO2oPriceView(item).isDiscounted" class="client-product-card__price-extra">
-                    原价 ¥{{ Number(resolveO2oPriceView(item).originalPrice).toFixed(2) }} · {{ resolveO2oPriceView(item).discountLabel }}
+                <TransitionGroup name="cart-item-flow" tag="div" class="item-list">
+                  <div v-if="clientCartStore.items.length === 0" key="mini-empty" class="empty-state">购物车还是空的，去挑挑好物吧</div>
+                  <article v-for="item in clientCartStore.items" :key="`mini-${item.skuId || item.productId}`" class="cart-item">
+                    <ClientProductSmallImage :small="item.thumbnailSmall" :original="item.thumbnail" :source-key="item.skuId || item.productId" :alt="item.productName" />
+                    <div class="item-main">
+                      <p class="item-name">{{ item.productName }}</p>
+                      <p class="item-price">¥{{ Number(resolveO2oPriceView(item).discountedPrice).toFixed(2) }}</p>
+                      <p v-if="resolveO2oPriceView(item).isDiscounted" class="client-product-card__price-extra">
+                        原价 ¥{{ Number(resolveO2oPriceView(item).originalPrice).toFixed(2) }} · {{ resolveO2oPriceView(item).discountLabel }}
+                      </p>
+                    </div>
+                    <div class="item-stepper">
+                      <p v-if="item.specText" class="text-xs text-slate-500 dark:text-slate-400">{{ item.specText }}</p>
+                      <button type="button" class="step-btn" aria-label="减少数量" @click="clientCartStore.incrementQty(item.skuId || item.productId, -1)">-</button>
+                      <ClientQtyInput
+                        size="compact"
+                        :model-value="item.qty"
+                        :aria-label="`${item.productName}数量`"
+                        @commit="clientCartStore.setQtyFromInput(item.skuId || item.productId, $event)"
+                      />
+                      <button type="button" class="step-btn" aria-label="增加数量" @click="clientCartStore.incrementQty(item.skuId || item.productId, 1)">+</button>
+                    </div>
+                  </article>
+                </TransitionGroup>
+
+                <div class="expand-footer">
+                  <button type="button" class="expand-link-btn" @click="openCartDrawer">进入购物车</button>
+                  <p class="total-price">
+                    合计：
+                    <Transition name="qty-pop" mode="out-in">
+                      <span :key="`mini-total-${miniCartTotalAmount.toFixed(2)}`" class="price-num">¥{{ miniCartTotalAmount.toFixed(2) }}</span>
+                    </Transition>
                   </p>
                 </div>
-                <div class="item-stepper">
-                  <p v-if="item.specText" class="text-xs text-slate-500 dark:text-slate-400">{{ item.specText }}</p>
-                  <button type="button" class="step-btn" aria-label="减少数量" @click="clientCartStore.incrementQty(item.skuId || item.productId, -1)">-</button>
-                  <ClientQtyInput
-                    size="compact"
-                    :model-value="item.qty"
-                    :aria-label="`${item.productName}数量`"
-                    @commit="clientCartStore.setQtyFromInput(item.skuId || item.productId, $event)"
-                  />
-                  <button type="button" class="step-btn" aria-label="增加数量" @click="clientCartStore.incrementQty(item.skuId || item.productId, 1)">+</button>
-                </div>
-              </article>
-            </TransitionGroup>
-
-            <div class="expand-footer">
-              <button type="button" class="expand-link-btn" @click="openCartDrawer">进入购物车</button>
-              <p class="total-price">
-                合计：
-                <Transition name="qty-pop" mode="out-in">
-                  <span :key="`mini-total-${miniCartTotalAmount.toFixed(2)}`" class="price-num">¥{{ miniCartTotalAmount.toFixed(2) }}</span>
-                </Transition>
-              </p>
+              </div>
             </div>
-          </div>
-        </div>
-      </section>
-    </div>
+          </section>
+        </Transition>
+      </div>
+    </Teleport>
 
     <ElDrawer
       v-model="detailVisible"
@@ -2765,6 +2963,18 @@ onBeforeUnmount(() => {
 
 .mall-hero-card {
   position: relative;
+}
+
+.mall-hero-card__actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.mall-content-window,
+.mall-content {
+  display: contents;
 }
 
 .mall-hero-card__compact-banner {
@@ -4026,31 +4236,15 @@ onBeforeUnmount(() => {
   width: min(var(--client-shell-max, 1100px), calc(100vw - var(--client-shell-inline, 1.25rem) * 2));
   transform: translateX(-50%);
   pointer-events: none;
-  transition:
-    opacity var(--ylink-motion-normal) var(--ylink-motion-ease),
-    transform var(--ylink-motion-normal) var(--ylink-motion-ease);
-}
-
-/* 当整个页面正在发生进入/离开过渡动画时，强制隐藏固定定位的购物车，避免重叠闪跳 */
-.slide-left-enter-active .mini-cart-wrapper,
-.slide-left-leave-active .mini-cart-wrapper,
-.slide-right-enter-active .mini-cart-wrapper,
-.slide-right-leave-active .mini-cart-wrapper {
-  opacity: 0 !important;
-  pointer-events: none !important;
-}
-
-/* 与购物车卡片同策略：切页中禁用 backdrop，避免遮罩拦截下一页点击。 */
-.slide-left-enter-active .mini-cart-backdrop,
-.slide-left-leave-active .mini-cart-backdrop,
-.slide-right-enter-active .mini-cart-backdrop,
-.slide-right-leave-active .mini-cart-backdrop {
-  opacity: 0 !important;
-  pointer-events: none !important;
 }
 
 .mini-cart-wrapper.is-expanded {
   pointer-events: auto;
+}
+
+.mini-cart-wrapper[inert],
+.mini-cart-wrapper[inert] .mini-cart-card {
+  pointer-events: none;
 }
 
 .mini-cart-backdrop {
@@ -4089,8 +4283,24 @@ onBeforeUnmount(() => {
     inset 0 1px 0 rgba(255, 255, 255, 0.72);
   pointer-events: auto;
   transition:
+    translate var(--ylink-motion-normal) var(--ylink-motion-ease),
+    opacity var(--ylink-motion-normal) var(--ylink-motion-ease),
     transform var(--ylink-motion-normal) var(--ylink-motion-ease),
     box-shadow var(--ylink-motion-normal) var(--ylink-motion-ease);
+}
+
+.mini-cart-route-enter-from,
+.mini-cart-route-leave-to {
+  translate: 0 3rem;
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mini-cart-route-enter-from,
+  .mini-cart-route-leave-to {
+    translate: none;
+    opacity: 1;
+  }
 }
 
 .mini-cart-card::before {
@@ -4534,10 +4744,16 @@ onBeforeUnmount(() => {
 
   .mall-browse-panel {
     --mall-reorder-layout-duration: 280ms;
-    --mall-browse-gap: 0.7rem;
-    --mall-category-rail-width: 76px;
-    grid-template-columns: minmax(0, var(--mall-category-rail-width)) minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);
+    --mall-browse-gap: 0.4rem;
+    --mall-browse-panel-block-padding: 0.5rem;
+    --mall-browse-panel-inline-padding: 0.45rem;
+    --mall-category-rail-width: clamp(3.625rem, 16vw, 6.5rem);
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .mall-browse-panel:not(.has-category-navigation) {
+    --mall-category-rail-width: 0px;
+    --mall-browse-gap: 0px;
   }
 
   .mall-search-launcher-wrap {
@@ -4549,65 +4765,69 @@ onBeforeUnmount(() => {
   }
 
   .mall-search-launcher-wrap--browse {
-    margin-bottom: 0.05rem;
+    display: none;
   }
 
-  .mall-sort-row {
-    grid-column: 1 / -1;
-    grid-row: 1;
+  .mall-phone-toolbar {
+    --mall-phone-toolbar-height: 2.25rem;
+    position: sticky;
+    top: var(--mall-phone-toolbar-top, 0px);
+    z-index: 15;
     justify-content: flex-start;
-    margin-bottom: 0.05rem;
+    margin: 0;
+    background: transparent;
   }
 
-  .mall-sort-control {
-    padding: 0.16rem;
+  .mall-phone-toolbar .mall-sort-control {
+    height: var(--mall-phone-toolbar-height);
   }
 
-  .mall-sort-row--category .mall-sort-control {
-    width: auto;
-    flex-direction: row;
-    border-radius: 9999px;
-  }
-
-  .mall-sort-control__button {
-    height: 1.72rem;
-    min-width: 2.85rem;
+  .mall-phone-toolbar .mall-sort-control__button {
+    flex: 0 0 2.85rem;
+    height: 100%;
+    min-width: 0;
     font-size: 0.68rem;
     padding: 0 0.58rem;
   }
 
-  .mall-sort-row--category .mall-sort-control__button {
-    width: auto;
-    min-width: 2.85rem;
-  }
-
-  .mall-browse-panel.is-recommended-flow {
-    --mall-category-rail-width: 0px;
-    grid-template-rows: auto minmax(0, 1fr);
-  }
-
-  .mall-browse-panel.is-recommended-flow .mall-sort-row--category {
-    grid-column: 1 / -1;
-    grid-row: 1;
-  }
-
-  .mall-browse-panel.is-recommended-flow .mall-browse-list {
-    grid-column: 1 / -1;
-    grid-row: 2;
-    justify-self: stretch;
-    width: 100%;
+  .mall-phone-toolbar > :deep(.el-button + .el-button) {
+    margin-inline-start: 0;
   }
 
   .mall-search-toolbar {
     display: none;
   }
 
-  .mall-mobile-search-trigger {
-    display: inline-flex;
+  .mall-phone-toolbar .mall-mobile-search-trigger {
     min-width: 4.2rem;
-    height: 1.9rem;
+    height: var(--mall-phone-toolbar-height);
+    margin-inline-start: auto;
     font-size: 0.68rem;
     padding-inline: 0.58rem;
+  }
+
+  .mall-phone-toolbar .mall-mobile-announcement-toggle {
+    height: var(--mall-phone-toolbar-height);
+    border: 1px solid var(--ylink-color-border);
+    border-radius: 9999px;
+    background: var(--ylink-color-surface-soft);
+    color: var(--ylink-color-primary-strong);
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding-inline: 0.55rem;
+  }
+
+  .mall-mobile-announcement-toggle .el-icon {
+    margin-inline-start: 0.15rem;
+  }
+
+  .mall-mobile-announcement-toggle .el-icon.is-expanded {
+    rotate: 180deg;
+  }
+
+  .mall-mobile-announcement-toggle:focus-visible {
+    outline: 2px solid var(--ylink-color-primary-strong);
+    outline-offset: 2px;
   }
 
   .mall-mobile-search-trigger--floating {
@@ -4615,10 +4835,73 @@ onBeforeUnmount(() => {
   }
 
   .mall-page {
+    --mall-stage-inline-padding: 1rem;
     --mall-mini-cart-height: 4.95rem;
     --mall-floating-bottom-clearance: calc(var(--client-tab-bar-clearance, 5.5rem) + var(--mall-mini-cart-height) + 0.85rem);
+    padding-top: 0.375rem;
     padding-bottom: calc(var(--client-tab-bar-clearance, 5.5rem) + 0.35rem);
-    gap: 0.7rem;
+  }
+
+  .mall-content-window {
+    display: block;
+    padding-block-start: 0.55rem;
+    /* 只裁掉公告向上滑出的部分，保留商品面板两侧越过内边距的空间。 */
+    clip-path: inset(0 -2rem -1rem);
+    overflow-anchor: none;
+  }
+
+  .mall-content {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+  }
+
+  .mall-page.is-storefront-collapsed {
+    padding-bottom: 0;
+  }
+
+  .is-storefront-collapsed .mall-content {
+    margin-block-start: calc(0px - var(--mall-storefront-shift));
+  }
+
+  .is-storefront-collapsed :is(.mall-browse-categories, .mall-browse-list, .mall-search-results) {
+    overscroll-behavior-y: contain;
+  }
+
+  :global(html.client-mall-scroll-locked) {
+    overflow: hidden;
+    overscroll-behavior-y: none;
+  }
+
+  :global(html.client-mall-scroll-locked body) {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+  }
+
+  :global(html.client-mall-short-viewport .client-main-layout__header),
+  :global(html.client-mall-short-viewport .mall-phone-toolbar) {
+    position: relative;
+    top: auto;
+  }
+
+  /* 展宽商品区，仍保留圆角屏与横屏的左右安全区。 */
+  .mall-content > :is(.mall-browse-panel, .mall-search-results) {
+    margin-left: calc(max(0.5rem, env(safe-area-inset-left, 0px)) - var(--mall-stage-inline-padding));
+    margin-right: calc(max(0.5rem, env(safe-area-inset-right, 0px)) - var(--mall-stage-inline-padding));
+  }
+
+  .mall-search-results {
+    padding-inline: 0.65rem;
+  }
+
+  .has-phone-pane-height :is(.mall-browse-panel, .mall-search-results) {
+    height: var(--mall-phone-pane-height);
+  }
+
+  .has-phone-pane-height .mall-search-results {
+    overflow: hidden auto;
+    scroll-padding-block: 0.5rem;
   }
 
   .mall-hero-card {
@@ -4627,8 +4910,40 @@ onBeforeUnmount(() => {
   }
 
   .mall-hero-card--compact-mobile {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.16rem 0.55rem;
     border-radius: 1rem;
-    padding: 0.68rem 0.78rem;
+    padding: 0.5rem 0.78rem;
+  }
+
+  .mall-hero-card--compact-mobile .mall-hero-card__top-row {
+    display: contents;
+  }
+
+  .mall-hero-card__compact-banner,
+  .mall-hero-card__compact-meta {
+    grid-column: 1;
+  }
+
+  .mall-hero-card__compact-meta {
+    margin-top: 0;
+    line-height: 1.5;
+  }
+
+  .mall-hero-card--compact-mobile .mall-hero-card__actions {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .mall-hero-card--compact-mobile.has-expanded-announcement .mall-hero-card__actions {
+    grid-row: 1 / span 2;
+  }
+
+  .mall-hero-card--compact-mobile .mall-hero-card__refresh-error {
+    grid-column: 1 / -1;
+    margin-top: 0.25rem;
   }
 
   .mall-hero-card__heading {
@@ -4655,6 +4970,7 @@ onBeforeUnmount(() => {
 
   .mall-hero-card--compact-mobile .mall-hero-card__refresh {
     flex-shrink: 0;
+    min-height: 40px;
     padding: 0.42rem 0.72rem;
     font-size: 0.74rem;
   }
@@ -4675,17 +4991,10 @@ onBeforeUnmount(() => {
     display: none;
   }
 
-  .mall-browse-panel {
-    gap: 0.65rem;
-    padding: 0.7rem;
-  }
-
   .mall-browse-categories {
     grid-column: 1;
-    grid-row: 2;
-    display: block;
-    max-height: clamp(28rem, calc(100vh - var(--client-tab-bar-clearance, 5.5rem) - 5.1rem), 48rem);
-    max-height: clamp(28rem, calc(100dvh - var(--client-tab-bar-clearance, 5.5rem) - 5.1rem), 48rem);
+    grid-row: 1;
+    min-width: 0;
     overflow-x: hidden;
     overflow-y: auto;
     padding: 0 0.12rem 0 0;
@@ -4716,7 +5025,14 @@ onBeforeUnmount(() => {
 
   .mall-browse-list {
     grid-column: 2;
-    grid-row: 2;
+    grid-row: 1;
+    justify-self: stretch;
+    width: 100%;
+    padding-inline-end: 0;
+  }
+
+  .mall-browse-panel.is-recommended-flow .mall-browse-list {
+    grid-row: 1;
     justify-self: stretch;
     width: 100%;
   }
@@ -4731,6 +5047,13 @@ onBeforeUnmount(() => {
      */
     max-height: clamp(28rem, calc(100vh - var(--client-tab-bar-clearance, 5.5rem) - 5.1rem), 48rem);
     max-height: clamp(28rem, calc(100dvh - var(--client-tab-bar-clearance, 5.5rem) - 5.1rem), 48rem);
+  }
+
+  .has-phone-pane-height .mall-browse-list,
+  .has-phone-pane-height .mall-browse-categories:not(.mall-category-panel-enter-active):not(.mall-category-panel-leave-active) {
+    align-self: stretch;
+    min-height: 0;
+    max-height: none;
   }
 
   .mall-browse-categories.mall-category-panel-enter-from,
@@ -4748,9 +5071,10 @@ onBeforeUnmount(() => {
   }
 
   .mall-category-button {
+    min-height: 44px;
     margin-bottom: 0.45rem;
     border-radius: 0.95rem;
-    padding: 0.65rem 0.45rem;
+    padding: 0.65rem 0.2rem;
     text-align: center;
   }
 
@@ -4765,8 +5089,8 @@ onBeforeUnmount(() => {
   }
 
   .mall-category-section__header {
-    margin-bottom: 0.45rem;
-    padding: 0.32rem 0.45rem;
+    --mall-category-heading-block-padding: 0.32rem;
+    --mall-category-heading-margin: 0.38rem;
     font-size: 0.78rem;
   }
 
@@ -4774,26 +5098,51 @@ onBeforeUnmount(() => {
     gap: 0.5rem;
   }
 
-  .mall-virtual-wrapper {
-    padding-bottom: 0.2rem;
+  .mall-browse-list--virtual {
+    --mall-scroll-mask-top-color: #000;
+  }
+
+  .mall-virtual-wrapper.client-product-grid {
+    row-gap: 0;
+  }
+
+  /* 虚拟列表按 98px 定位每一条；卡片和条目间距一起占满这段高度。 */
+  .mall-virtual-wrapper .client-product-card {
+    --mall-virtual-row-gap: 0.25rem;
+    height: calc(var(--mall-virtual-item-height) - var(--mall-virtual-row-gap));
+    min-height: 0;
+    margin-bottom: var(--mall-virtual-row-gap);
+    padding-block: 0.1875rem;
   }
 
   .client-product-card {
-    grid-template-columns: 3.45rem minmax(0, 1fr) auto;
+    --mall-card-thumb-size: clamp(2.75rem, calc(25vw - 2.25rem), 4.25rem);
+    grid-template-columns: var(--mall-card-thumb-size) minmax(0, 1fr) auto;
+    grid-template-rows: auto 1fr;
     min-height: 6.25rem;
-    column-gap: 0.5rem;
+    column-gap: 0.35rem;
     border-radius: 0.85rem;
-    padding: 0.58rem 0.56rem;
+    padding: 0.5rem 0.45rem;
+  }
+
+  .client-product-card__image-button {
+    grid-row: 1 / -1;
+    align-self: center;
   }
 
   .client-product-card__cover {
-    height: 3.45rem;
-    width: 3.45rem;
+    width: var(--mall-card-thumb-size);
+    height: var(--mall-card-thumb-size);
     border-radius: 0.68rem;
   }
 
   .client-product-card__name.el-button {
+    grid-column: 2 / 4;
     font-size: 0.94rem;
+  }
+
+  .client-product-card__price-wrap {
+    min-height: 0;
   }
 
   .client-product-card__price {
@@ -4801,17 +5150,51 @@ onBeforeUnmount(() => {
   }
 
   .client-product-card__meta {
-    margin-top: 0.34rem;
-    gap: 0.22rem;
+    display: grid;
+    grid-template-columns: max-content max-content;
+    margin-top: auto;
+    gap: 0.2rem;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scrollbar-width: thin;
   }
 
   .client-product-card__meta > span {
-    padding: 0.18rem 0.38rem !important;
+    padding: 0.1rem 0.2rem !important;
     font-size: 0.68rem;
   }
 
+  .client-product-card__meta > span:first-child {
+    grid-column: auto;
+  }
+
+  :is(.mall-search-results, .mall-browse-list--group) .client-product-card__price-extra {
+    overflow: visible;
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+
+  /* 虚拟卡片预留完整折扣行、库存行和操作命中区。 */
+  .mall-virtual-wrapper .client-product-card__name.el-button {
+    line-height: 1.04;
+  }
+
+  .mall-virtual-wrapper .client-product-card__price-wrap {
+    flex-shrink: 0;
+  }
+
+  .mall-virtual-wrapper :is(.client-product-card__price, .client-product-card__price-extra) {
+    margin-top: 0;
+    line-height: 1.08;
+  }
+
   .client-product-card__actions {
-    min-width: 4.25rem;
+    grid-column: 3;
+    grid-row: 2;
+    min-width: 4.5rem;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0.25rem;
   }
 
   .mini-cart-wrapper {
@@ -4890,55 +5273,9 @@ onBeforeUnmount(() => {
   }
 }
 
-/* 窄屏普通与虚拟分类导航横排，释放商品正文与动作宽度；推荐、搜索和虚拟行高保持原规则。 */
-@media (max-width: 639px) {
-  .mall-browse-panel.has-category-navigation {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto auto minmax(0, 1fr);
-  }
-
-  .mall-browse-panel.has-category-navigation .mall-browse-categories {
-    grid-column: 1;
-    grid-row: 2;
-    display: flex;
-    gap: 0.4rem;
-    min-width: 0;
-    width: 100%;
-    height: auto;
-    /* 横向分类条不继承侧栏与商品列表等高的约束。 */
-    max-height: none !important;
-    overflow-x: auto;
-    overflow-y: hidden;
-    padding-right: 0;
-  }
-
-  .mall-browse-panel.has-category-navigation .mall-category-button {
-    flex: 0 0 auto;
-    width: auto;
-    max-width: 10rem;
-    margin-bottom: 0;
-    padding: 0.45rem 0.65rem;
-  }
-
-  .mall-browse-panel.has-category-navigation .mall-category-rail-tail {
-    display: none;
-  }
-
-  .mall-browse-panel.has-category-navigation .mall-browse-list {
-    grid-column: 1;
-    grid-row: 3;
-  }
-}
-
 @media (min-width: 640px) and (max-width: 767px) {
-  .mall-browse-panel {
-    --mall-category-rail-width: 105px;
-    grid-template-columns: minmax(0, var(--mall-category-rail-width)) minmax(0, 1fr);
-  }
-
-  .mall-browse-panel.is-recommended-flow {
-    --mall-category-rail-width: 0px;
-    grid-template-columns: minmax(0, 1fr);
+  .mall-page {
+    --mall-stage-inline-padding: 1.25rem;
   }
 }
 
@@ -4959,7 +5296,7 @@ onBeforeUnmount(() => {
 
 /* 大托盘底座：适度外扩四周内边距，给边缘留白 */ 
 .mall-browse-panel { 
-  padding: 1rem !important; 
+  padding: var(--mall-browse-panel-block-padding, 1rem) var(--mall-browse-panel-inline-padding, 1rem) !important;
   background: rgba(255, 255, 255, 0.45) !important; 
   backdrop-filter: blur(24px) saturate(150%) !important; 
   -webkit-backdrop-filter: blur(24px) saturate(150%) !important; 
@@ -4990,7 +5327,7 @@ onBeforeUnmount(() => {
   /* 启用双向线性渐变遮罩：上下两端羽化淡出 */ 
   -webkit-mask-image: linear-gradient( 
     to bottom, 
-    transparent 0%,           /* 顶部透明起点 */
+    var(--mall-scroll-mask-top-color, transparent) 0%,
     #000 1.5rem,              /* 顶部 24px 范围渐变淡入 */ 
     #000 calc(100% - 1.5rem), /* 中间部分保持完全显示 */ 
     transparent 100%          /* 底部 24px 范围渐变淡出 */ 
@@ -4998,7 +5335,7 @@ onBeforeUnmount(() => {
   
   mask-image: linear-gradient( 
     to bottom, 
-    transparent 0%, 
+    var(--mall-scroll-mask-top-color, transparent) 0%,
     #000 1.5rem, 
     #000 calc(100% - 1.5rem), 
     transparent 100% 
@@ -5031,8 +5368,8 @@ onBeforeUnmount(() => {
   position: sticky; 
   top: 0; 
   z-index: 10; 
-  margin-bottom: 0.65rem !important; /* 配合网格收缩，减少标题下方空白 */ 
-  padding: 0.5rem 0.75rem !important; /* 增加小幅留白 */ 
+  margin-bottom: var(--mall-category-heading-margin, 0.65rem) !important;
+  padding: var(--mall-category-heading-block-padding, 0.5rem) 0.75rem !important;
   border-radius: 0.75rem; 
   
   /* 恢复为完全透明背景，放弃磨砂吸顶，配合外层的双向渐变遮罩 */ 
@@ -5123,7 +5460,6 @@ onBeforeUnmount(() => {
   color: #334155 !important; 
   font-weight: 500;
   border-radius: 0.75rem !important; 
-  margin-bottom: 0.35rem !important; 
   transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1) !important; 
 } 
 
@@ -5132,7 +5468,6 @@ onBeforeUnmount(() => {
   background: #ffffff !important; 
   border-color: rgba(13, 148, 136, 0.15) !important; /* 悬浮时透出极淡品牌色边界 */
   color: #0f172a !important; 
-  transform: translateY(-1px) translateX(2px); 
   box-shadow: 
     0 1px 3px rgba(0, 0, 0, 0.02), 
     0 12px 24px -8px rgba(15, 23, 42, 0.06) !important; 
@@ -5147,8 +5482,22 @@ onBeforeUnmount(() => {
   box-shadow: 
     0 8px 16px -3px rgba(13, 148, 136, 0.22), 
     0 2px 6px -2px rgba(13, 148, 136, 0.1) !important; 
-  transform: scale(1.02) translateX(2px); 
 } 
+
+/* 手机侧栏选中与未选中时使用相同宽度与间距。 */
+@media (min-width: 768px) {
+  .mall-browse-categories .mall-category-button:not(.bg-\[var\(--ylink-color-primary-strong\)\]) {
+    margin-bottom: 0.35rem !important;
+  }
+
+  .mall-browse-categories .mall-category-button:not(.bg-\[var\(--ylink-color-primary-strong\)\]):hover {
+    transform: translateY(-1px) translateX(2px);
+  }
+
+  .mall-browse-categories .mall-category-button.bg-\[var\(--ylink-color-primary-strong\)\] {
+    transform: scale(1.02) translateX(2px);
+  }
+}
 
 /* ---------------------------------------------------------
    4. 检索、排序组件白净化（配合半透托盘）
@@ -5555,13 +5904,47 @@ onBeforeUnmount(() => {
   .client-detail-summary-motion, .client-detail-thumb-motion, .client-detail-mode-pane,
   .client-detail-mode-toggle :deep(.el-radio-group)::before, .client-detail-mode-toggle :deep(.el-radio-button__inner) { transition: none; }
 }
-/* 极窄分类内容区：价格和完整库存标签跨图片列，操作独占右列，避免挤入仅约 42px 的中列。 */
-@media (max-width: 360px) {
-  .client-product-card { grid-template-columns: 2rem minmax(0, 1fr) auto; padding: 0.35rem 0.4rem; row-gap: 0.1rem; }
-  .client-product-card__image-button { grid-row: 1; }
-  .client-product-card__cover { width: 1.6rem; height: 1.6rem; border-radius: 0.35rem; }
-  .client-product-card__body { grid-column: 1 / 3; }
-  .client-product-card__price-wrap { min-height: 0; }
-  .client-product-card__meta { gap: 0.18rem; margin-top: 0.2rem; }
+
+@media (max-width: 519px) {
+  .mall-virtual-wrapper .client-product-card {
+    /* 从卡间距和内边距各借少量空间，保留 98px 步长和价格行原高度。 */
+    --mall-virtual-row-gap: 2px;
+    padding-block: 1.5px;
+  }
+}
+
+@media (max-width: 359px) {
+  .client-product-card {
+    column-gap: 0.25rem;
+    padding-inline: 0.25rem;
+  }
+
+  .client-product-card__meta {
+    gap: 0.12rem;
+  }
+
+  .client-product-card__meta > span {
+    padding-inline: 0.06rem !important;
+    font-size: 0.625rem;
+  }
+}
+
+@media (min-width: 520px) and (max-width: 767px) {
+  .client-product-card {
+    grid-template-columns: var(--mall-card-thumb-size) minmax(0, 1fr) auto;
+    grid-template-rows: auto 1fr;
+  }
+
+  .client-product-card__name.el-button {
+    grid-column: 2 / 4;
+  }
+
+  .client-product-card__actions {
+    grid-column: 3;
+    grid-row: 2;
+    min-width: 4.9rem;
+    flex-direction: column;
+    align-items: flex-end;
+  }
 }
 </style>
