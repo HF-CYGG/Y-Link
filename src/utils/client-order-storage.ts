@@ -10,7 +10,7 @@
  * - 若后端新增订单摘要字段或前端新增列表查询条件，需要同步补齐恢复逻辑，避免刷新后退化成旧口径。
  */
 
-import type { O2oMyOrderSearchMode } from '@ylink/shared-types'
+import type { O2oMyOrderSearchMode } from '../../packages/shared-types/src/orders'
 import type { O2oPreorderSummary } from '@/api/modules/o2o'
 import {
   getClientOrderReportScenario,

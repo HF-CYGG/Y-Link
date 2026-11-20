@@ -13,7 +13,7 @@
 import { synchronizeKingdeeResponse } from '@/utils/kingdee-freshness'
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import type { O2oMyOrderSearchMode } from '@ylink/shared-types'
+import type { O2oMyOrderSearchMode } from '../../../packages/shared-types/src/orders'
 import type { O2oPreorderSummary } from '@/api/modules/o2o'
 import {
   buildClientOrderQueryKey,
