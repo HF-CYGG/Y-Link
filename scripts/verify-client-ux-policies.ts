@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import type { O2oMallProduct } from '../src/api/modules/o2o'
 import {
   buildClientPreorderSubmitIntentKey, createClientPreorderSubmitLock, readActiveClientPreorderSubmitLock,
-  refreshClientPreorderSubmitLock, clearClientPreorderSubmitLock, redactClientPreorderSubmitLocks,
+  refreshClientPreorderSubmitLock, clearClientPreorderSubmitLock, dismissClientPreorderSubmitMarker, redactClientPreorderSubmitLocks,
 } from '../src/utils/client-preorder-submit-guard'
 import { decideClientCheckoutSubmit, isClientCheckoutSubmitOutcomeUnknown } from '../src/views/client/client-checkout-submit-policy'
 import { buildActiveSkuSearchText, resolveCatalogDetailSelection } from '../src/views/client/client-mall-catalog-policy'
@@ -24,10 +24,11 @@ const storage = {} as Storage
 let denyRead = false
 let denyWrite = false
 let ignoreWrite = false
+let ignoreRemove = false
 Object.defineProperties(storage, {
   getItem: { value: (key: string) => { if (denyRead) throw new Error('读取被拒绝'); return Object.hasOwn(storage, key) ? storage[key] : null } },
   setItem: { value: (key: string, value: string) => { if (denyWrite) throw new Error('写入被拒绝'); if (!ignoreWrite) storage[key] = String(value) } },
-  removeItem: { value: (key: string) => { delete storage[key] } },
+  removeItem: { value: (key: string) => { if (!ignoreRemove) delete storage[key] } },
   clear: { value: () => { for (const key of Object.keys(storage)) delete storage[key] } },
   key: { value: (index: number) => Object.keys(storage)[index] ?? null },
   length: { get: () => Object.keys(storage).length },
@@ -51,6 +52,8 @@ try {
   const restored = readActiveClientPreorderSubmitLock('A')!
   assert.equal(restored.version, 2)
   assert.equal(restored.owner, 'A')
+  assert.equal(restored.dismissibleMarker, null, '尚可幂等重试的锁不能通过查单解除')
+  assert.equal(dismissClientPreorderSubmitMarker('A', storage.getItem(prefix + 'A')!), false, '不得直接删除完整载荷')
   assert.deepEqual(restored.payload, { ...originalCopy, clientRequestId: key }, '刷新必须恢复首次原始载荷，空白、姓名、时间和金蝶编号不能经指纹重造')
   assert.equal(restored.expiresAt - restored.createdAt, 30 * 60 * 1000)
   assert.equal(readActiveClientPreorderSubmitLock('B'), null, '不同账号不能读取原提交')
@@ -79,15 +82,38 @@ try {
   assert.equal(redacted.includes('KD-AbC'), false)
   assert.equal(redacted.includes('intentKey'), false, '退出必须清除含业务明文的旧意图指纹')
   assert.equal(readActiveClientPreorderSubmitLock('A')!.payload, null)
+  assert.ok(readActiveClientPreorderSubmitLock('A')!.dismissibleMarker, '有效载荷经登出脱敏后仍能确认解除')
   assert.equal(readActiveClientPreorderSubmitLock('A')!.expiresAt, restored.expiresAt)
   assert.throws(() => createClientPreorderSubmitLock('A', 'new', original), /未确认/, '重登不能绕过原 pending 标记')
 
-  storage.setItem(prefix + 'legacy', JSON.stringify({ createdAt: now, requestKey: 'legacy-key', intentKey: intent }))
-  assert.equal(readActiveClientPreorderSubmitLock('legacy')!.payload, null)
+  const legacyIntent = buildClientPreorderSubmitIntentKey({ ...original, clientUserId: 'legacy', clientOrderType: 'department' })
+  storage.setItem(prefix + 'legacy', JSON.stringify({ createdAt: now, requestKey: 'legacy-key', intentKey: legacyIntent }))
+  const legacy = readActiveClientPreorderSubmitLock('legacy')!
+  assert.equal(legacy.payload, null)
+  assert.ok(legacy.dismissibleMarker)
   assert.equal(storage.getItem(prefix + 'legacy')!.includes('intentKey'), false)
+  assert.equal(dismissClientPreorderSubmitMarker('A', legacy.dismissibleMarker), false, '旧标记只能在所属账号解除')
+  assert.equal(dismissClientPreorderSubmitMarker('legacy', legacy.dismissibleMarker), true)
+  assert.equal(readActiveClientPreorderSubmitLock('legacy'), null)
+
+  const earlyLegacyIntent = { clientUserId: 'early-legacy', clientOrderType: 'walkin', isSystemApplied: false,
+    pickupContact: '旧版取货人', remark: '', items: [{ productId: 'p1', qty: 1 }] }
+  storage.setItem(prefix + 'early-legacy', JSON.stringify({ createdAt: now, requestKey: 'early-key', intentKey: JSON.stringify(earlyLegacyIntent) }))
+  const earlyLegacy = readActiveClientPreorderSubmitLock('early-legacy')!
+  assert.equal(earlyLegacy.payload, null)
+  assert.ok(earlyLegacy.dismissibleMarker, '早期完整旧记录可以没有 skuId')
+  assert.equal(dismissClientPreorderSubmitMarker('early-legacy', earlyLegacy.dismissibleMarker), true)
+
+  const damagedLegacyKey = prefix + 'damaged-legacy'
+  storage.setItem(damagedLegacyKey, JSON.stringify({ createdAt: now, requestKey: 'damaged-key', intentKey: JSON.stringify({ clientUserId: 'damaged-legacy' }) }))
+  assert.equal(readActiveClientPreorderSubmitLock('damaged-legacy')!.dismissibleMarker, null, '同账号残缺旧指纹仍不能解除')
+  assert.equal(dismissClientPreorderSubmitMarker('damaged-legacy', storage.getItem(damagedLegacyKey)!), false)
+  assert.throws(() => createClientPreorderSubmitLock('damaged-legacy', 'new', original), /未确认/)
+
   storage.setItem(prefix + 'bad', '{broken-json')
   const malformed = readActiveClientPreorderSubmitLock('bad')!
   assert.equal(malformed.payload, null)
+  assert.equal(malformed.dismissibleMarker, null)
   now += 100
   assert.equal(readActiveClientPreorderSubmitLock('bad')!.expiresAt, malformed.expiresAt, '损坏记录的保守期限必须固定，不能每读一次重新计时')
   assert.throws(() => createClientPreorderSubmitLock('bad', 'new', original), /未确认/)
@@ -97,6 +123,11 @@ try {
   assert.equal(readActiveClientPreorderSubmitLock('invalid-time')!.payload, null, '不完整信封不能恢复载荷')
   storage.setItem(prefix + 'wrong-owner', JSON.stringify({ ...restored, owner: 'someone-else' }))
   assert.equal(readActiveClientPreorderSubmitLock('wrong-owner')!.payload, null)
+  const wrongOwner = readActiveClientPreorderSubmitLock('wrong-owner')!
+  assert.equal(wrongOwner.dismissibleMarker, null, '归属错误的记录脱敏后仍不能解除')
+  assert.equal(dismissClientPreorderSubmitMarker('wrong-owner', storage.getItem(prefix + 'wrong-owner')!), false)
+  const expiredIntent = buildClientPreorderSubmitIntentKey({ ...originalCopy, clientUserId: 'expired', clientOrderType: 'department' })
+  const expiredKey = createClientPreorderSubmitLock('expired', expiredIntent, originalCopy)
   now = restored.expiresAt
   const expired = readActiveClientPreorderSubmitLock('A')!
   assert.equal(expired.expired, true)
@@ -104,6 +135,24 @@ try {
   assert.throws(() => createClientPreorderSubmitLock('A', 'new', original), /未确认/, '到期不能自动创建新请求')
   clearClientPreorderSubmitLock('A', key)
   assert.equal(readActiveClientPreorderSubmitLock('A'), null)
+
+  now += 60_000 // 此时 expired 的原载荷也已到期。
+  const expiredMarker = readActiveClientPreorderSubmitLock('expired')!
+  assert.equal(expiredMarker.expired, true)
+  assert.ok(expiredMarker.dismissibleMarker)
+  assert.throws(() => createClientPreorderSubmitLock('expired', expiredIntent, originalCopy), /未确认/, '查单确认前仍禁止提交')
+  ignoreRemove = true
+  assert.throws(() => dismissClientPreorderSubmitMarker('expired', expiredMarker.dismissibleMarker!), /清理失败/)
+  ignoreRemove = false
+  denyRead = true
+  assert.throws(() => dismissClientPreorderSubmitMarker('expired', expiredMarker.dismissibleMarker!), /读取被拒绝/)
+  denyRead = false
+  assert.equal(dismissClientPreorderSubmitMarker('expired', expiredMarker.dismissibleMarker), true)
+  assert.equal(readActiveClientPreorderSubmitLock('expired'), null, '解除只清标记，不生成提交快照')
+  const afterDismissKey = createClientPreorderSubmitLock('expired', expiredIntent, originalCopy)
+  assert.notEqual(afterDismissKey, expiredKey, '另行提交相同内容仍是一次明确的新请求')
+  assert.equal(dismissClientPreorderSubmitMarker('expired', expiredMarker.dismissibleMarker), false, '迟到的确认不能删除新有效载荷')
+  assert.equal(readActiveClientPreorderSubmitLock('expired')!.requestKey, afterDismissKey)
 
   denyRead = true
   assert.throws(() => readActiveClientPreorderSubmitLock('read-error'), /读取被拒绝/)

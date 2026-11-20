@@ -1,7 +1,7 @@
 /**
  * 模块说明：src/utils/client-preorder-submit-guard.ts
  * 文件职责：保存客户端预订单原请求快照，支持刷新后的同键原载荷确认与账号隔离。
- * 实现逻辑：首次 POST 前写入并读回带版本和 owner 的 30 分钟快照；未知结果保持原有效期。
+ * 实现逻辑：首次 POST 前写入并读回带版本和 owner 的 30 分钟快照；核实订单后可解除同账号的无载荷标记。
  * 维护说明：intentKey 是有损指纹，不能重建载荷；登出/换号只保留不含业务明文的 pending 标记。
  */
 import type { O2oClientOrderType, SubmitO2oPreorderPayload } from '@/api/modules/o2o'
@@ -33,6 +33,7 @@ export interface ClientPreorderSubmitLockSnapshot {
   intentKey: string
   requestKey: string
   createdAt: number
+  dismissibleMarker: string | null
 }
 
 const CLIENT_PREORDER_SUBMIT_LOCK_KEY_PREFIX = 'ylink:client:preorder:submit-lock:'
@@ -107,16 +108,43 @@ const isPayload = (value: unknown, requestKey: string): value is SubmitO2oPreord
       && Number.isSafeInteger(item.qty) && item.qty > 0)
 }
 
+const parseSubmitLockRecord = (raw: string): Record<string, unknown> => {
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>
+  } catch { /* 损坏记录仍按未决处理。 */ }
+  return {}
+}
+
+const matchesLegacySubmitIntent = (raw: string, owner: string) => {
+  const intent = parseSubmitLockRecord(raw)
+  return intent.clientUserId === owner && (intent.clientOrderType === 'walkin' || intent.clientOrderType === 'department')
+    && typeof intent.isSystemApplied === 'boolean' && typeof intent.remark === 'string'
+    && typeof intent.pickupContact === 'string' && intent.pickupContact.trim() !== ''
+    && (intent.kingdeeVoucherNo === undefined || typeof intent.kingdeeVoucherNo === 'string')
+    && (intent.pickupAt === undefined || typeof intent.pickupAt === 'string')
+    && Array.isArray(intent.items) && intent.items.length > 0 && intent.items.every((item) => item
+      && typeof item.productId === 'string' && item.productId.trim() !== ''
+      && (item.skuId === undefined || typeof item.skuId === 'string')
+      && Number.isSafeInteger(item.qty) && item.qty > 0)
+}
+
+const isValidCreatedAt = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0
+
+const isOwnedSubmitLock = (p: Record<string, unknown>, owner: string) => p.version === 2 && p.owner === owner
+  && isValidCreatedAt(p.createdAt) && typeof p.expiresAt === 'number' && Number.isFinite(p.expiresAt)
+  && p.expiresAt > p.createdAt && p.expiresAt <= p.createdAt + CLIENT_PREORDER_SUBMIT_LOCK_TTL_MS
+
+const isDismissibleSubmitMarker = (p: Record<string, unknown>, owner: string) => isOwnedSubmitLock(p, owner)
+  && p.payload === null && typeof p.requestKey === 'string' && p.requestKey.trim() !== '' && p.dismissalBlocked === undefined
+
 export const readActiveClientPreorderSubmitLock = (clientUserId: ClientPreorderSubmitUserId): ClientPreorderSubmitLockSnapshot | null => {
   const storage = getSubmitLockStorage()
   if (!storage) throw new Error('无法访问会话存储，请恢复浏览器存储后再提交')
-  const raw = storage.getItem(resolveSubmitLockStorageKey(clientUserId))
+  const key = resolveSubmitLockStorageKey(clientUserId)
+  const raw = storage.getItem(key)
   if (raw === null) return null
-  let p: Record<string, unknown> = {}
-  try {
-    const parsed: unknown = JSON.parse(raw)
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) p = parsed as Record<string, unknown>
-  } catch { /* 损坏记录仍按未决处理。 */ }
+  const p = parseSubmitLockRecord(raw)
   const createdAt = typeof p.createdAt === 'number' && Number.isFinite(p.createdAt) ? p.createdAt : Date.now()
   const expiresAt = typeof p.expiresAt === 'number' && Number.isFinite(p.expiresAt)
     ? Math.min(p.expiresAt, createdAt + CLIENT_PREORDER_SUBMIT_LOCK_TTL_MS)
@@ -124,18 +152,41 @@ export const readActiveClientPreorderSubmitLock = (clientUserId: ClientPreorderS
   const requestKey = typeof p.requestKey === 'string' ? p.requestKey : ''
   const owner = normalizeClientUserId(clientUserId)
   const expired = Date.now() >= expiresAt
-  const validEnvelope = p.version === 2 && p.owner === owner && typeof p.intentKey === 'string'
-    && typeof p.createdAt === 'number' && Number.isFinite(p.createdAt) && p.createdAt >= 0
-    && typeof p.expiresAt === 'number' && Number.isFinite(p.expiresAt)
-    && p.expiresAt > p.createdAt && p.expiresAt <= p.createdAt + CLIENT_PREORDER_SUBMIT_LOCK_TTL_MS
-  const payload = !expired && validEnvelope && requestKey && isPayload(p.payload, requestKey) ? p.payload : null
+  const originalPayload = isOwnedSubmitLock(p, owner) && p.dismissalBlocked === undefined
+    && typeof p.intentKey === 'string' && requestKey.trim() !== '' && isPayload(p.payload, requestKey)
+    ? p.payload : null
+  const payload = expired ? null : originalPayload
+  let dismissibleMarker: string | null = null
   if (!payload) {
-    // 旧版/损坏/过期记录固定为不含业务明文的标记。写入失败必须向调用方报错并阻断新提交。
-    storage.setItem(resolveSubmitLockStorageKey(clientUserId), JSON.stringify({ version: 2, owner,
-      createdAt, expiresAt, requestKey, payload: null }))
+    // 旧版账号由其存储键与原指纹共同确定，仅脱敏迁移完整且同账号的旧记录。
+    const ownedLegacy = p.version === undefined && p.owner === undefined && p.payload === undefined
+      && p.expiresAt === undefined && p.dismissalBlocked === undefined
+      && isValidCreatedAt(p.createdAt) && requestKey.trim() !== ''
+      && typeof p.intentKey === 'string' && matchesLegacySubmitIntent(p.intentKey, owner)
+    const canDismiss = Boolean(originalPayload) || ownedLegacy || isDismissibleSubmitMarker(p, owner)
+    const marker = JSON.stringify({ version: 2, owner, createdAt, expiresAt, requestKey, payload: null,
+      ...(canDismiss ? {} : { dismissalBlocked: true }) })
+    if (raw !== marker) {
+      storage.setItem(key, marker)
+      if (storage.getItem(key) !== marker) throw new Error('无法保存脱敏后的原始提交记录')
+    }
+    if (canDismiss) dismissibleMarker = marker
   }
-  return { version: 2, owner, createdAt, expiresAt, expired, requestKey, payload,
+  return { version: 2, owner, createdAt, expiresAt, expired, requestKey, payload, dismissibleMarker,
     intentKey: payload && typeof p.intentKey === 'string' ? p.intentKey : '' }
+}
+
+/** 只解除用户已核实且仍为同一条的无载荷标记；结算页负责校验确认操作的会话归属。 */
+export const dismissClientPreorderSubmitMarker = (clientUserId: ClientPreorderSubmitUserId, marker: string) => {
+  const storage = getSubmitLockStorage()
+  if (!storage) throw new Error('无法访问会话存储，请恢复浏览器存储后再提交')
+  const key = resolveSubmitLockStorageKey(clientUserId)
+  const current = storage.getItem(key)
+  if (current !== marker) return false
+  if (!isDismissibleSubmitMarker(parseSubmitLockRecord(current), normalizeClientUserId(clientUserId))) return false
+  storage.removeItem(key)
+  if (storage.getItem(key) !== null) throw new Error('原始提交记录清理失败')
+  return true
 }
 
 export const createClientPreorderSubmitLock = (
@@ -181,9 +232,9 @@ export const redactClientPreorderSubmitLocks = () => {
       if (!key.startsWith(CLIENT_PREORDER_SUBMIT_LOCK_KEY_PREFIX)) continue
       const owner = key.slice(CLIENT_PREORDER_SUBMIT_LOCK_KEY_PREFIX.length)
       const snapshot = readActiveClientPreorderSubmitLock(owner)
-      if (!snapshot) continue
-      storage.setItem(key, JSON.stringify({ version: 2, owner, requestKey: snapshot.requestKey,
-        createdAt: snapshot.createdAt, expiresAt: snapshot.expiresAt, payload: null }))
+      if (!snapshot?.payload) continue // 读锁时已将不可重试的记录脱敏并保留原有解除资格。
+      storage.setItem(key, JSON.stringify({ version: 2, owner,
+        createdAt: snapshot.createdAt, expiresAt: snapshot.expiresAt, requestKey: snapshot.requestKey, payload: null }))
     }
   } catch {
     // 浏览器禁止存储访问时无法清理；页面仍必须立即释放内存中的业务字段。

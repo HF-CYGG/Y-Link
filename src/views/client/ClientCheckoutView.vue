@@ -9,6 +9,7 @@ import ClientProductSmallImage from './components/ClientProductSmallImage.vue'
  * - 部门账号下单前强制校验所属部门、教职工号与金蝶申请状态，避免订单归属与实名链路脱节；
  * - 部门单必须选择到店取货时间：日期按钮（el-button）+ 半小时时段下拉，日期范围受店铺自动取消时长（pickupWindowHours）约束，
  *   各营业时段分别生成半小时档位，店铺配置刷新后复核新单草稿。
+ * - 原提交不能重试时，用户核实订单后可解除同账号的有效标记，重新填写并单独提交新单。
  * 维护说明：
  * - 若后端继续扩展实名字段或工号核验状态，请优先同步本页的实名信息展示区与 `handleSubmit()` 前置校验；
  * - 若调整下单归属说明文案，请保持“前端只展示，服务端强制判定”的口径不变；
@@ -18,10 +19,11 @@ import { onActivated, onDeactivated, onBeforeUnmount, computed, onMounted, ref, 
 import { useRouter } from 'vue-router'
 
 import { ArrowLeft } from '@element-plus/icons-vue'
+import { ElMessageBox } from 'element-plus'
 import { getO2oCheckoutStorefront, getO2oMallStorefront, submitO2oPreorder, type SubmitO2oPreorderPayload } from '@/api/modules/o2o'
 import { useClientMallSnapshotRefresh } from '@/composables/useClientMallSnapshotRefresh'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
-import { decideClientCheckoutSubmit, isClientCheckoutSubmitOutcomeUnknown, settleCurrentClientCheckoutSuccess } from './client-checkout-submit-policy'
+import { getClientCheckoutNewSubmitBlockReason, isClientCheckoutSubmitOutcomeUnknown, settleCurrentClientCheckoutSuccess } from './client-checkout-submit-policy'
 import { useClientAuthStore, useClientCartStore } from '@/store'
 import { useClientCatalogStore } from '@/store/modules/client-catalog'
 import pinia from '@/store/pinia'
@@ -34,6 +36,7 @@ import {
   buildClientPreorderSubmitIntentKey,
   clearClientPreorderSubmitLock,
   createClientPreorderSubmitLock,
+  dismissClientPreorderSubmitMarker,
   readActiveClientPreorderSubmitLock,
   type ClientPreorderSubmitLockSnapshot,
 } from '@/utils/client-preorder-submit-guard'
@@ -61,12 +64,14 @@ const departmentSystemApplyChoice = ref<boolean | null>(null)
 const kingdeeVoucherNo = ref('')
 const pendingSubmit = ref<ClientPreorderSubmitLockSnapshot | null>(null)
 const recoveryError = ref('')
+const confirmingRecovery = ref(false)
 let pendingClockTimer: ReturnType<typeof setInterval> | null = null
 const restorePendingSubmit = () => {
   try {
     pendingSubmit.value = clientAuthStore.currentUser?.id ? readActiveClientPreorderSubmitLock(clientAuthStore.currentUser.id) : null
     recoveryError.value = ''
   } catch {
+    pendingSubmit.value = null
     recoveryError.value = '无法读取原始提交记录，请恢复浏览器会话存储后刷新；请先查看订单，勿重复下单。'
   }
 }
@@ -311,7 +316,8 @@ watch(
 const selectedItems = computed(() => clientCartStore.selectedItems)
 const totalQty = computed(() => selectedItems.value.reduce((sum, item) => sum + item.qty, 0))
 const totalAmount = computed(() => selectedItems.value.reduce((sum, item) => sum + Math.max(0, Number(item.defaultPrice || 0)) * item.qty, 0))
-const submitDisabled = computed(() => submitting.value || Boolean(recoveryError.value) || (pendingSubmit.value ? !pendingSubmit.value.payload || pendingSubmit.value.expired : !selectedItems.value.length))
+const submitDisabled = computed(() => submitting.value || confirmingRecovery.value || Boolean(recoveryError.value)
+  || (pendingSubmit.value ? !pendingSubmit.value.payload || pendingSubmit.value.expired : !selectedItems.value.length))
 const currentRealName = computed(() => (
   clientAuthStore.currentUser?.realName?.trim()
   || clientAuthStore.currentUser?.username?.trim()
@@ -394,6 +400,54 @@ const handleBack = () => {
   }
 }
 
+const handleDismissPendingSubmit = async () => {
+  const owner = clientAuthStore.currentUser?.id
+  const session = clientAuthStore.sessionGeneration
+  const generation = checkoutGeneration
+  const route = router.currentRoute.value
+  const isCurrent = () => checkoutActive && props.active !== false && generation === checkoutGeneration
+    && owner === clientAuthStore.currentUser?.id && session === clientAuthStore.sessionGeneration
+    && route === router.currentRoute.value
+  const marker = pendingSubmit.value?.dismissibleMarker
+  if (!owner || !marker || !isCurrent() || recoveryError.value || submitting.value || confirmingRecovery.value) return
+
+  const matchesMarker = () => pendingSubmit.value?.dismissibleMarker === marker && !recoveryError.value
+  const warnMarkerChanged = () => showAppWarning(recoveryError.value || '原提交记录已变化，请重新核对订单。')
+  restorePendingSubmit()
+  if (!matchesMarker()) {
+    warnMarkerChanged()
+    return
+  }
+
+  confirmingRecovery.value = true
+  try {
+    await ElMessageBox.confirm(
+      '请先到“我的订单”核实原结果，避免重复下单。恢复填写后，如需下新单，请再次提交。',
+      '确认已核对订单',
+      { type: 'warning', confirmButtonText: '已核对，恢复结算', cancelButtonText: '取消', closeOnClickModal: false },
+    )
+    if (!isCurrent() || submitting.value) return
+    if (!matchesMarker()) {
+      warnMarkerChanged()
+      return
+    }
+    const dismissed = dismissClientPreorderSubmitMarker(owner, marker)
+    restorePendingSubmit()
+    if (!dismissed) {
+      warnMarkerChanged()
+      return
+    }
+    pickupClock.value = Date.now()
+    recheckPickupDraft()
+  } catch (error) {
+    if (!isCurrent() || error === 'cancel' || error === 'close') return
+    restorePendingSubmit()
+    showAppWarning(recoveryError.value || '未能恢复结算，请稍后重试。')
+  } finally {
+    confirmingRecovery.value = false
+  }
+}
+
 const sendFrozenSubmission = async (payload: SubmitO2oPreorderPayload, isCurrent: () => boolean, owner: string | number | undefined, recovered = false) => {
   let result: Awaited<ReturnType<typeof submitO2oPreorder>>
   try {
@@ -440,7 +494,7 @@ const sendFrozenSubmission = async (payload: SubmitO2oPreorderPayload, isCurrent
 }
 
 const handleSubmit = async () => {
-  if (!checkoutActive) return
+  if (!checkoutActive || confirmingRecovery.value) return
   const initiatingUserId = clientAuthStore.currentUser?.id
   const generation = checkoutGeneration
   const isCurrent = () => checkoutActive && generation === checkoutGeneration && initiatingUserId === clientAuthStore.currentUser?.id
@@ -510,29 +564,24 @@ const handleSubmit = async () => {
   if (isDepartmentOrder.value && departmentSystemApplyChoice.value && !requestedKingdeeVoucherNo) { showAppWarning('请填写金蝶单据编号'); return }
   const submitRemark = remark.value.trim() || undefined
   const requestedClientOrderType = enforcedClientOrderType.value
-  const requestedIsSystemApplied = isDepartmentOrder.value ? Boolean(departmentSystemApplyChoice.value) : false
-  // 必须在提交前刷新前冻结用户点击时的完整意图。若上一次响应丢失，刷新会反映出
-  // 服务端已占库存；此时只有完全相同的意图才能复用原 requestKey 查询原订单。
-  const requestedItemSnapshot = selectedItems.value.map((item) => ({
-    productId: item.productId,
-    skuId: item.skuId,
-    qty: item.qty,
-  }))
-  const requestedIntentKey = buildClientPreorderSubmitIntentKey({
-    clientUserId: initiatingUserId,
-    clientOrderType: requestedClientOrderType,
-    isSystemApplied: requestedIsSystemApplied,
-          kingdeeVoucherNo: requestedKingdeeVoucherNo,
+  // 刷新目录之前冻结新单原始载荷。刷新后的商品只用于校验提交意图。
+  const frozenPayload = {
+    isSystemApplied: isDepartmentOrder.value && Boolean(departmentSystemApplyChoice.value),
+    kingdeeVoucherNo: requestedKingdeeVoucherNo,
     pickupContact: normalizedPickupContact,
     pickupAt: requestedPickupAt,
-    remark: submitRemark,
-    items: requestedItemSnapshot,
+    ...(submitRemark === undefined ? {} : { remark: submitRemark }),
+    items: selectedItems.value.map(({ productId, skuId, qty }) => ({ productId, skuId, qty })),
+  }
+  const buildSubmitIntent = (items: typeof frozenPayload.items) => buildClientPreorderSubmitIntentKey({
+    ...frozenPayload,
+    clientUserId: initiatingUserId,
+    clientOrderType: requestedClientOrderType,
+    items,
   })
-  const activeSubmitLock = null
-  let submitIntentKey = ''
-  let submitRequestKey = ''
+  const requestedIntentKey = buildSubmitIntent(frozenPayload.items)
 
-  const runResult = await runWithGate({
+  await runWithGate({
     actionKey: 'client-checkout-submit',
     onDuplicated: () => {
       showAppInfo('订单提交中，请勿重复点击')
@@ -564,46 +613,25 @@ const handleSubmit = async () => {
           }
         }
         const freshItemSnapshot = clientCartStore.createSelectedCheckoutSnapshot()
-        const freshIntentKey = freshItemSnapshot ? buildClientPreorderSubmitIntentKey({
-          clientUserId: initiatingUserId,
-          clientOrderType: requestedClientOrderType,
-          isSystemApplied: requestedIsSystemApplied,
-          kingdeeVoucherNo: requestedKingdeeVoucherNo,
-          pickupContact: normalizedPickupContact,
-          pickupAt: requestedPickupAt,
-          remark: submitRemark,
-          items: freshItemSnapshot,
-        }) : null
-        const submitDecision = decideClientCheckoutSubmit({
+        const reason = getClientCheckoutNewSubmitBlockReason({
           refreshSucceeded: refreshResult.success,
-          requestedItems: requestedItemSnapshot,
           requestedIntentKey,
-          activeSubmitLock,
           selectedConflictCount: clientCartStore.selectedCheckoutConflicts.length,
           freshItems: freshItemSnapshot,
-          freshIntentKey,
+          freshIntentKey: freshItemSnapshot ? buildSubmitIntent(freshItemSnapshot) : null,
         })
-        if (submitDecision.type === 'blocked') {
+        if (reason) {
           const messageByReason = {
             refresh_failed: refreshResult.error?.message || '商品目录同步失败，请稍后重试',
-            pending_unrecoverable: '原始提交记录不能安全恢复，请先查看订单核实结果',
-            pending_intent_changed: '上一次订单提交结果仍在确认中，请先前往“我的订单”核对，勿修改商品后重复提交',
             selected_conflicts: '已选商品的库存或规格已变化，请先返回购物车调整数量、取消选择或移除后再提交',
             empty_snapshot: '请先选择可结算商品',
             selection_changed_after_refresh: '商品选择在同步期间已变化，请确认购物车后重新提交',
-          } satisfies Record<typeof submitDecision.reason, string>
-          showAppWarning(messageByReason[submitDecision.reason])
+          } satisfies Record<typeof reason, string>
+          showAppWarning(messageByReason[reason])
           return
         }
-        const submitItemSnapshot = submitDecision.items
-        submitIntentKey = submitDecision.intentKey
-        const frozenPayload = {
-          isSystemApplied: requestedIsSystemApplied, kingdeeVoucherNo: requestedKingdeeVoucherNo,
-          pickupContact: normalizedPickupContact, pickupAt: requestedPickupAt,
-          ...(submitRemark === undefined ? {} : { remark: submitRemark }), items: submitItemSnapshot,
-        }
         // 写入并读回完全一致后才允许首次 POST；存储失败不能发送。
-        submitRequestKey = createClientPreorderSubmitLock(initiatingUserId, submitIntentKey, frozenPayload)
+        const submitRequestKey = createClientPreorderSubmitLock(initiatingUserId, requestedIntentKey, frozenPayload)
         restorePendingSubmit()
         await sendFrozenSubmission({ ...frozenPayload, clientRequestId: submitRequestKey }, isCurrent, initiatingUserId)
       } catch (error) {
@@ -613,7 +641,6 @@ const handleSubmit = async () => {
       }
     },
   })
-  if (runResult === null) return
 }
 </script>
 
@@ -644,8 +671,16 @@ const handleSubmit = async () => {
           <p class="whitespace-pre-wrap">原备注：{{ pendingSubmit.payload.remark || '无' }}</p>
           <ul><li v-for="(item, index) in pendingSubmit.payload.items" :key="index">商品 {{ item.productId }} / 规格 {{ item.skuId || '默认' }} × {{ item.qty }}</li></ul>
         </template>
-        <p class="mt-2">{{ pendingSubmit?.payload ? '继续确认会原样重试首次提交，不会采用当前购物车或表单。' : '原始载荷已失效或不可恢复，仅能查单；系统不会自动重发，也不代表下单失败。' }}</p>
-        <el-button class="mt-3" @click="router.push('/client/orders')">查看我的订单</el-button>
+        <p v-if="pendingSubmit" class="mt-2">{{ pendingSubmit.payload ? '继续确认会原样重试首次提交。' : '原提交无法重试，结果仍需在“我的订单”核实。' }}</p>
+        <div class="mt-3 flex flex-wrap gap-2">
+          <el-button @click="router.push('/client/orders')">查看我的订单</el-button>
+          <el-button
+            v-if="pendingSubmit?.dismissibleMarker && !recoveryError"
+            class="!ml-0"
+            :disabled="submitting || confirmingRecovery"
+            @click="handleDismissPendingSubmit"
+          >已核对订单，恢复结算</el-button>
+        </div>
       </div>
       <template v-if="!pendingSubmit && !recoveryError">
       <div class="mb-4 rounded-[1.2rem] border border-slate-100 bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:border-white/5 dark:bg-[#141415]">
@@ -808,7 +843,7 @@ const handleSubmit = async () => {
       <div class="mx-auto flex w-full max-w-[1100px] items-center justify-between">
         <div class="flex flex-col">
           <p class="text-sm text-slate-500 dark:text-slate-400">共 <span class="font-bold text-slate-900 dark:text-slate-100">{{ totalQty }}</span> 件，合计 <span class="font-bold text-teal-600">¥{{ totalAmount.toFixed(2) }}</span></p>
-          <p class="mt-0.5 text-xs text-slate-400">{{ pendingSubmit ? '确认以原始提交摘要为准' : '提交后进入待提货状态' }}</p>
+          <p class="mt-0.5 text-xs text-slate-400">{{ pendingSubmit?.payload ? '确认以原始提交摘要为准' : pendingSubmit || recoveryError ? '原提交结果待核实' : '提交后进入待提货状态' }}</p>
         </div>
         <button
           type="button"
@@ -816,7 +851,7 @@ const handleSubmit = async () => {
           :disabled="submitDisabled"
           @click="handleSubmit"
         >
-          {{ submitting ? '提交中...' : pendingSubmit ? '继续确认原提交' : '提交预订单' }}
+          {{ submitting ? '提交中...' : pendingSubmit?.payload ? '继续确认原提交' : pendingSubmit || recoveryError ? '待核实原提交' : '提交预订单' }}
         </button>
       </div>
     </div>

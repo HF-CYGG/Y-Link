@@ -76,6 +76,71 @@ for(const refreshSuccess of [true,false]) {
   assert.equal(h.calls.clear.length,0);assert.equal(h.calls.consume.length,0);assert.equal(h.calls.navigate.length,0)
 }
 
+const checkoutRecoveryNames = [
+  'remark', 'pendingSubmit', 'recoveryError', 'confirmingRecovery', 'restorePendingSubmit', 'checkoutActive',
+  'checkoutGeneration', 'invalidateCheckout', 'handleDismissPendingSubmit',
+]
+const checkoutRecoverySource = declarations(checkoutAst, checkoutRecoveryNames)
+const checkoutGuard = helper('src/utils/client-preorder-submit-guard.ts')
+const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
+try {
+  for (const change of ['cancel', 'switch-account', 'new-session', 'close-page', 'change-route', 'replace-marker', 'deny-read', 'confirm']) {
+    const owner = 'checkout-owner'
+    const storageKey = `ylink:client:preorder:submit-lock:${owner}`
+    const marker = JSON.stringify({ version: 2, owner, createdAt: 100, expiresAt: 200, requestKey: 'original', payload: null })
+    const records = new Map([[storageKey, marker]])
+    let denyRead = false
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: { sessionStorage: {
+      getItem(key) { if (denyRead) throw new Error('无法读取'); return records.get(key) ?? null },
+      setItem: (key, value) => records.set(key, value),
+      removeItem: (key) => records.delete(key),
+    } } })
+    const clientAuthStore = reactive({ currentUser: { id: owner }, sessionGeneration: 1 })
+    const currentRoute = ref({ name: 'client-checkout' })
+    const confirmation = deferred()
+    const warnings = []
+    let confirmCount = 0
+    let submitCount = 0
+    let pickupChecks = 0
+    const subject = execute(checkoutRecoverySource, {
+      ...checkoutGuard, clientAuthStore, props: {}, router: { currentRoute }, submitting: ref(false), pickupClock: ref(0),
+      ElMessageBox: { confirm: () => { confirmCount++; return confirmation.promise } },
+      showAppWarning: (value) => warnings.push(value), recheckPickupDraft: () => { pickupChecks++ },
+      handleSubmit: () => { submitCount++ }, submitO2oPreorder: () => { submitCount++ },
+    }, checkoutRecoveryNames)
+    subject.remark.value = '用户另填的备注'
+    subject.restorePendingSubmit()
+    const running = subject.handleDismissPendingSubmit()
+    await subject.handleDismissPendingSubmit()
+    assert.equal(confirmCount, 1, '同一时刻只打开一个恢复确认框')
+    if (change === 'switch-account') clientAuthStore.currentUser = { id: 'other-account' }
+    if (change === 'new-session') clientAuthStore.sessionGeneration += 2 // 同账号重登或 A → B → A。
+    if (change === 'close-page') subject.invalidateCheckout()
+    if (change === 'change-route') currentRoute.value = { name: 'client-orders' }
+    const replacement = marker.replace('original', 'different-order')
+    if (change === 'replace-marker') records.set(storageKey, replacement)
+    if (change === 'deny-read') denyRead = true
+    if (change === 'cancel') confirmation.reject('cancel')
+    else confirmation.resolve('confirm')
+    await running
+    assert.equal(subject.confirmingRecovery.value, false)
+    assert.equal(subject.remark.value, '用户另填的备注', `${change} 不应修改当前草稿`)
+    assert.equal(submitCount, 0, `${change} 不应触发订单提交`)
+    assert.equal(pickupChecks, change === 'confirm' ? 1 : 0)
+    if (change === 'confirm') {
+      assert.equal(records.has(storageKey), false)
+      assert.equal(subject.pendingSubmit.value, null)
+    } else {
+      assert.equal(records.get(storageKey), change === 'replace-marker' ? replacement : marker, `${change} 不应清除未决标记`)
+      if (change === 'deny-read') assert.match(subject.recoveryError.value, /无法读取原始提交记录/)
+      if (change === 'replace-marker') assert.match(warnings[0], /原提交记录已变化/)
+    }
+  }
+} finally {
+  if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow)
+  else Reflect.deleteProperty(globalThis, 'window')
+}
+
 const progressAst=pageAst('src/views/o2o/O2oOrderQueryView.vue')
 const progressNames=['activeBusinessStatus','draftBusinessStatus','businessStatusSaving','businessStatusOwnerGeneration','businessStatusOperation','businessStatusPageActive','handleBusinessStatusChange','deactivatePageRuntime']
 const progressWatcher=progressAst.statements.find((statement)=>ts.isExpressionStatement(statement)&&statement.getText(progressAst).startsWith('watch(')&&statement.getText(progressAst).includes('businessStatusOwnerGeneration'))
