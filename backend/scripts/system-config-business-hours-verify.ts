@@ -1,6 +1,6 @@
 /**
  * 文件说明：backend/scripts/system-config-business-hours-verify.ts
- * 文件职责：验证“商城营业时间”和“客服在线时间”可通过系统配置维护，并能正确透传到客户端消费接口。
+ * 文件职责：验证商城营业时间、自提地址和客服在线时间可由系统配置维护，并透传到客户端消费接口。
  * 实现逻辑：
  * - 使用独立 SQLite 数据库启动真实后端服务，避免污染本地开发库；
  * - 通过管理端系统配置接口更新 O2O 与客服中心时间配置，再读取客户端商城接口与反馈入口配置接口回查；
@@ -44,6 +44,7 @@ type O2oRulesPayload = {
   limitQty: number
   clientPreorderUpdateLimit: number
   storeBusinessHoursText: string
+  storePickupAddress: string
   mallAnnouncementText: string
 }
 
@@ -69,13 +70,16 @@ type MallProductsPayload = {
   }>
   storefront: {
     businessHoursText: string
+    pickupAddress: string
     mallAnnouncementText: string
   }
 }
 
 type MallStorefrontPayload = {
   businessHoursText: string
+  pickupAddress: string
   mallAnnouncementText: string
+  pickupWindowHours: number | null
 }
 
 function pass(message: string) {
@@ -157,7 +161,12 @@ async function main() {
   const { AppDataSource } = await import('../src/config/data-source.js')
   const { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } = await import('../src/config/database-bootstrap.js')
   const { authService } = await import('../src/services/auth.service.js')
+  const { invalidateMallCatalogReadCache } = await import('../src/services/mall-catalog-revision.service.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
+  const { ClientUser } = await import('../src/entities/client-user.entity.js')
+  const { SystemConfig } = await import('../src/entities/system-config.entity.js')
+  const { SysAuditLog } = await import('../src/entities/sys-audit-log.entity.js')
+  const { hashPassword } = await import('../src/utils/password.js')
 
   prepareDatabaseRuntime()
   await AppDataSource.initialize()
@@ -192,7 +201,84 @@ async function main() {
       '读取初始 O2O 规则配置',
     )
     assert.equal(initialO2oRules.storeBusinessHoursText, '10:00 - 22:00', '默认店铺营业时间应为 10:00 - 22:00')
+    assert.equal(initialO2oRules.storePickupAddress, '海右书院112房间')
+    const storefrontUrl = `${baseUrl}/api/o2o/mall/storefront`
+    const checkoutStorefrontUrl = `${storefrontUrl}/checkout`
+    const productsUrl = `${baseUrl}/api/o2o/mall/products`
+    const initialStorefrontResponse = await fetch(storefrontUrl)
+    const initialStorefrontEtag = initialStorefrontResponse.headers.get('etag')
+    assert.ok(initialStorefrontEtag)
+    const initialStorefront = await expectJsonOkResponse<MallStorefrontPayload>(initialStorefrontResponse, '初始门店配置')
+    assert.equal(initialStorefront.pickupAddress, '海右书院112房间')
+    assert.equal((await expectJsonOkResponse<MallProductsPayload>(await fetch(productsUrl), '初始目录配置')).storefront.pickupAddress, '海右书院112房间')
     pass('初始 O2O 店铺营业时间配置正确')
+
+    assert.equal((await fetch(checkoutStorefrontUrl)).status, 401, '结算重读必须使用客户端会话')
+    assert.equal((await fetch(checkoutStorefrontUrl, { headers: { Authorization: `Bearer ${adminLogin.token}` } })).status, 401)
+    const account = '13900000031'
+    const password = `Client_${verifySeed}_Aa1!`
+    await AppDataSource.getRepository(ClientUser).save({
+      accountType: 'personal', mobile: account, mobileVerifiedAt: new Date(),
+      realName: '结算专项', passwordHash: await hashPassword(password), status: 'enabled',
+    })
+    const clientLogin = await fetch(`${baseUrl}/api/client-auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: baseUrl },
+      body: JSON.stringify({ account, password }),
+    })
+    await expectJsonOkResponse(clientLogin, '客户端密码登录')
+    const clientToken = readCookieValueFromResponse(clientLogin, 'y_link_client_session')
+    assert.ok(clientToken)
+    const readCheckoutStorefront = async () => {
+      const response = await fetch(checkoutStorefrontUrl, { headers: { Cookie: `y_link_client_session=${encodeURIComponent(clientToken)}` } })
+      assert.equal(response.headers.get('cache-control'), 'private, no-store')
+      return expectJsonOkResponse<MallStorefrontPayload>(response, '读取结算专用最新门店规则')
+    }
+    assert.deepEqual(await readCheckoutStorefront(), initialStorefront)
+
+    const rulesRepo = AppDataSource.getRepository(SystemConfig)
+    const pickupAddressKey = { configKey: 'o2o.store_pickup_address' }
+    const verifyDelayedRulesRead = async <T>(change: () => Promise<T>, expectedAddress: string) => {
+      systemConfigService.handleRemoteCacheInvalidation('o2o-rule')
+      const find = rulesRepo.find
+      let capture!: () => void
+      let release!: () => void
+      const captured = new Promise<void>((resolve) => { capture = resolve })
+      const barrier = new Promise<void>((resolve) => { release = resolve })
+      rulesRepo.find = async function (...args) {
+        const rows = await find.apply(this, args)
+        rulesRepo.find = find
+        capture()
+        await barrier
+        return rows
+      }
+      const read = systemConfigService.getO2oRuleConfigs()
+      try {
+        await Promise.race([captured, read.then(() => { throw new Error('没有观察到规则数据库查询') })])
+        const result = await change()
+        release()
+        assert.equal((await read).storePickupAddress, expectedAddress, '失效前查到的旧结果不能先完成后倒灌')
+        assert.equal((await systemConfigService.getO2oRuleConfigs()).storePickupAddress, expectedAddress)
+        return result
+      } finally {
+        rulesRepo.find = find
+        release()
+        await read.catch(() => undefined)
+      }
+    }
+    const remoteAddress = '另一实例已提交的自提地址'
+    await verifyDelayedRulesRead(async () => {
+      // 在本实例尚未收到规则失效事件时模拟另一实例已提交，且原公共快照仍有效。
+      await rulesRepo.update(pickupAddressKey, { configValue: remoteAddress })
+      assert.deepEqual(await readCheckoutStorefront(), { ...initialStorefront, pickupAddress: remoteAddress })
+      invalidateMallCatalogReadCache()
+      const newCatalog = await expectJsonOkResponse<MallProductsPayload>(await fetch(productsUrl), '新修订目录回源')
+      assert.equal(newCatalog.storefront.pickupAddress, remoteAddress)
+      systemConfigService.handleRemoteCacheInvalidation('o2o-rule')
+    }, remoteAddress)
+    await rulesRepo.update(pickupAddressKey, { configValue: initialStorefront.pickupAddress })
+    systemConfigService.handleRemoteCacheInvalidation('o2o-rule')
+    invalidateMallCatalogReadCache()
 
     const initialPortalConfig = await expectJsonOkResponse<CustomerServicePayload>(
       await fetch(`${baseUrl}/api/client-feedback/portal-config`),
@@ -201,7 +287,7 @@ async function main() {
     assert.ok(initialPortalConfig.availability.workHoursText.includes('10:00-20:00'), '初始客服在线时段应包含 10:00-20:00')
     pass('初始客服在线时间已透传到客户端反馈入口配置')
 
-    const updatedO2oRules = await expectJsonOkResponse<{ config: O2oRulesPayload; changed: boolean }>(
+    const updatedO2oRules = await verifyDelayedRulesRead(async () => expectJsonOkResponse<{ config: O2oRulesPayload; changed: boolean }>(
       await fetch(`${baseUrl}/api/system-configs/o2o-rules`, {
         method: 'PUT',
         headers: {
@@ -215,12 +301,14 @@ async function main() {
           limitQty: initialO2oRules.limitQty,
           clientPreorderUpdateLimit: initialO2oRules.clientPreorderUpdateLimit,
           storeBusinessHoursText: '09:30 - 21:30',
+          storePickupAddress: '  自提服务台  ',
           mallAnnouncementText: '配置联动验证公告',
         }),
       }),
       '更新 O2O 店铺营业时间配置',
-    )
+    ), '自提服务台')
     assert.equal(updatedO2oRules.config.storeBusinessHoursText, '09:30 - 21:30', '更新后店铺营业时间应立即返回新值')
+    assert.equal(updatedO2oRules.config.storePickupAddress, '自提服务台')
     pass('管理员可更新 O2O 店铺营业时间配置')
 
     assert.equal(updatedO2oRules.config.mallAnnouncementText, '配置联动验证公告', '更新后商城公告应立即返回新值')
@@ -230,17 +318,58 @@ async function main() {
       '读取客户端商城商品与门店信息',
     )
     assert.equal(updatedMallConfig.storefront.businessHoursText, '09:30 - 21:30', '客户端商城应返回最新店铺营业时间')
+    assert.equal(updatedMallConfig.storefront.pickupAddress, '自提服务台')
     pass('客户端商城接口可透出最新店铺营业时间')
 
     assert.equal(updatedMallConfig.storefront.mallAnnouncementText, '配置联动验证公告', '客户端商城商品接口应返回最新商城公告')
 
+    const updatedStorefrontResponse = await fetch(storefrontUrl, { headers: { 'If-None-Match': initialStorefrontEtag } })
+    assert.notEqual(updatedStorefrontResponse.headers.get('etag'), initialStorefrontEtag)
     const updatedStorefrontConfig = await expectJsonOkResponse<MallStorefrontPayload>(
-      await fetch(`${baseUrl}/api/o2o/mall/storefront`),
+      updatedStorefrontResponse,
       '读取客户端商城门店展示配置',
     )
     assert.equal(updatedStorefrontConfig.businessHoursText, '09:30 - 21:30', '客户端商城门店配置接口应返回最新店铺营业时间')
     assert.equal(updatedStorefrontConfig.mallAnnouncementText, '配置联动验证公告', '客户端商城门店配置接口应返回最新商城公告')
+    assert.equal(updatedStorefrontConfig.pickupAddress, '自提服务台')
+    assert.deepEqual(await readCheckoutStorefront(), updatedStorefrontConfig)
     pass('客户端商城门店配置接口可轻量透出最新公告')
+
+    const { storePickupAddress, ...legacyRulesPayload } = updatedO2oRules.config
+    assert.equal(storePickupAddress, '自提服务台')
+    const putRules = (data: typeof legacyRulesPayload & { storePickupAddress?: string }) =>
+      fetch(`${baseUrl}/api/system-configs/o2o-rules`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${adminLogin.token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      })
+    const legacyRequest = { ...legacyRulesPayload, storeBusinessHoursText: '节假日请查看门店公告' }
+    const legacy = await expectJsonOkResponse<{ config: O2oRulesPayload }>(
+      await putRules(legacyRequest), '旧版请求省略自提地址',
+    )
+    assert.equal(legacy.config.storePickupAddress, '自提服务台')
+    assert.equal(legacy.config.storeBusinessHoursText, '节假日请查看门店公告')
+    assert.equal((await putRules({ ...legacyRequest, storePickupAddress: '长'.repeat(101) })).status, 400)
+    const beforeReset = await fetch(storefrontUrl)
+    const beforeResetEtag = beforeReset.headers.get('etag')
+    assert.ok(beforeResetEtag)
+    assert.equal((await expectJsonOkResponse<MallStorefrontPayload>(beforeReset, '清空前门店配置')).pickupAddress, '自提服务台')
+    const reset = await expectJsonOkResponse<{ config: O2oRulesPayload }>(
+      await putRules({ ...legacyRequest, storePickupAddress: '   ' }), '仅清空自提地址',
+    )
+    assert.equal(reset.config.storePickupAddress, '海右书院112房间')
+    const resetStorefrontResponse = await fetch(storefrontUrl, { headers: { 'If-None-Match': beforeResetEtag } })
+    assert.notEqual(resetStorefrontResponse.headers.get('etag'), beforeResetEtag)
+    assert.equal((await expectJsonOkResponse<MallStorefrontPayload>(resetStorefrontResponse, '恢复后的公开门店配置')).pickupAddress, '海右书院112房间')
+    assert.equal((await expectJsonOkResponse<MallProductsPayload>(await fetch(productsUrl), '恢复后的公开目录配置')).storefront.pickupAddress, '海右书院112房间')
+    const auditRows = await AppDataSource.getRepository(SysAuditLog).find({
+      where: { actionType: 'system_config.update_o2o_rules', targetCode: 'o2o_rules' }, order: { id: 'ASC' },
+    })
+    assert.deepEqual(auditRows.map(({ detailJson }) => {
+      const detail = JSON.parse(detailJson ?? '{}') as { before: O2oRulesPayload; after: O2oRulesPayload }
+      return [detail.before.storePickupAddress, detail.after.storePickupAddress]
+    }), [['海右书院112房间', '自提服务台'], ['自提服务台', '自提服务台'], ['自提服务台', '海右书院112房间']])
+    pass('自提地址支持默认、去空格、旧请求保留、清空恢复及公开缓存刷新')
 
     const currentCustomerService = await expectJsonOkResponse<CustomerServicePayload>(
       await fetch(`${baseUrl}/api/system-configs/customer-service`, {

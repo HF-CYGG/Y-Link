@@ -60,6 +60,14 @@ import { extractErrorMessage } from '@/utils/error'
 import SystemConfigDepartmentSection from '@/views/system/components/SystemConfigDepartmentSection.vue'
 import SystemConfigCustomerServiceSection from '@/views/system/components/SystemConfigCustomerServiceSection.vue'
 import SystemConfigO2oRulesSection from '@/views/system/components/SystemConfigO2oRulesSection.vue'
+import {
+  DEFAULT_STORE_BUSINESS_HOURS,
+  DEFAULT_STORE_PICKUP_ADDRESS,
+  STORE_BUSINESS_HOURS_MAX_LENGTH,
+  formatStoreBusinessHours,
+  parseEditableStoreBusinessHours,
+  type StoreBusinessPeriod,
+} from '@/utils/store-business-hours'
 import SystemConfigNotificationSection from '@/views/system/components/SystemConfigNotificationSection.vue'
 import SystemConfigSerialSection from '@/views/system/components/SystemConfigSerialSection.vue'
 import SystemConfigVerificationSection from '@/views/system/components/SystemConfigVerificationSection.vue'
@@ -193,6 +201,8 @@ const serialForm = reactive<{
     limitQty: number
     clientPreorderUpdateLimit: number
     storeBusinessHoursText: string
+    businessPeriods: StoreBusinessPeriod[] | null
+    storePickupAddress: string
     mallAnnouncementText: string
   }
   customerService: {
@@ -213,7 +223,9 @@ const serialForm = reactive<{
     limitQty: 5,
     // 客户端改单次数上限默认值，与后端默认配置保持一致，避免页面首屏空值。
     clientPreorderUpdateLimit: 3,
-    storeBusinessHoursText: '10:00 - 22:00',
+    storeBusinessHoursText: DEFAULT_STORE_BUSINESS_HOURS,
+    businessPeriods: parseEditableStoreBusinessHours(DEFAULT_STORE_BUSINESS_HOURS),
+    storePickupAddress: DEFAULT_STORE_PICKUP_ADDRESS,
     mallAnnouncementText: '库存实时刷新，请以下单结果为准',
   },
   customerService: {
@@ -421,6 +433,8 @@ const snapshotForm = () =>
       limitQty: Number(serialForm.o2o.limitQty),
       clientPreorderUpdateLimit: Number(serialForm.o2o.clientPreorderUpdateLimit),
       storeBusinessHoursText: serialForm.o2o.storeBusinessHoursText.trim(),
+      businessPeriods: serialForm.o2o.businessPeriods,
+      storePickupAddress: serialForm.o2o.storePickupAddress.trim(),
       mallAnnouncementText: serialForm.o2o.mallAnnouncementText.trim(),
     },
     customerService: {
@@ -491,6 +505,8 @@ const applyO2oRules = (config: O2oRuleConfigRecord) => {
   serialForm.o2o.limitQty = config.limitQty
   serialForm.o2o.clientPreorderUpdateLimit = config.clientPreorderUpdateLimit
   serialForm.o2o.storeBusinessHoursText = config.storeBusinessHoursText
+  serialForm.o2o.businessPeriods = parseEditableStoreBusinessHours(config.storeBusinessHoursText)
+  serialForm.o2o.storePickupAddress = config.storePickupAddress?.trim() || DEFAULT_STORE_PICKUP_ADDRESS
   serialForm.o2o.mallAnnouncementText = config.mallAnnouncementText
 }
 
@@ -1313,6 +1329,18 @@ const handleSubmit = async () => {
   if (!validateNotificationRules()) {
     return
   }
+  const { businessPeriods, storeBusinessHoursText: savedHours } = serialForm.o2o
+  const businessHoursChanged = JSON.stringify(businessPeriods) !== JSON.stringify(parseEditableStoreBusinessHours(savedHours))
+  const storeBusinessHoursText = businessHoursChanged && businessPeriods ? formatStoreBusinessHours(businessPeriods) : savedHours
+  if (!storeBusinessHoursText || storeBusinessHoursText.length > STORE_BUSINESS_HOURS_MAX_LENGTH) {
+    showTopWarning('请完整填写营业时段。每段至少 30 分钟，须在同一天且互不重叠，总长度不超过 100 字符。')
+    return
+  }
+  const storePickupAddress = serialForm.o2o.storePickupAddress.trim()
+  if (storePickupAddress.length > 100) {
+    showTopWarning('取货地址不能超过 100 字符')
+    return
+  }
   let normalizedDepartmentTree: DepartmentTreeNode[] = []
   try {
     normalizedDepartmentTree = normalizeDepartmentTreeForSubmit(cloneDepartmentTree(serialForm.clientDepartmentTree))
@@ -1355,7 +1383,8 @@ const handleSubmit = async () => {
       limitEnabled: serialForm.o2o.limitEnabled,
       limitQty: Number(serialForm.o2o.limitQty),
       clientPreorderUpdateLimit: Number(serialForm.o2o.clientPreorderUpdateLimit),
-      storeBusinessHoursText: serialForm.o2o.storeBusinessHoursText.trim(),
+      storeBusinessHoursText,
+      ...(storePickupAddress !== (o2oRuleConfig.value?.storePickupAddress?.trim() || DEFAULT_STORE_PICKUP_ADDRESS) ? { storePickupAddress } : {}),
       mallAnnouncementText: serialForm.o2o.mallAnnouncementText.trim(),
     })
     savedSteps += 1

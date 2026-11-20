@@ -273,6 +273,13 @@ export const getO2oMallStorefront = (config?: RequestConfig) =>
     ...config,
   })
 
+export const getO2oCheckoutStorefront = (config?: RequestConfig) =>
+  request<O2oMallStorefrontConfig>({
+    method: 'GET',
+    url: '/o2o/mall/storefront/checkout',
+    ...config,
+  })
+
 export const getMyKingdeeTodos = (params: { page?: number; pageSize?: number } = {}, config?: RequestConfig) =>
   request<O2oMyOrderListResult>({ ...config, method: 'GET', url: '/o2o/mall/preorders/kingdee-todos', params })
 export const updateMyKingdeeRegistration = (id: string, data: UpdateKingdeeRegistrationPayload, config?: RequestConfig) =>

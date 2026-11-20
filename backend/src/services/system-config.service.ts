@@ -48,6 +48,8 @@ type VerificationConfigMapEntry = Pick<SystemConfig, 'configValue' | 'updatedAt'
 }
 
 const CLIENT_DEPARTMENT_NODE_LIMIT = 3000
+const O2O_STORE_PICKUP_ADDRESS_KEY = 'o2o.store_pickup_address'
+const O2O_DEFAULT_PICKUP_ADDRESS = '海右书院112房间'
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const DEFAULT_SYSTEM_CONFIGS = [
@@ -161,6 +163,12 @@ const DEFAULT_SYSTEM_CONFIGS = [
     configValue: '10:00 - 22:00',
     configGroup: 'o2o',
     remark: '客户端商城展示的店铺营业时间文案',
+  },
+  {
+    configKey: O2O_STORE_PICKUP_ADDRESS_KEY,
+    configValue: O2O_DEFAULT_PICKUP_ADDRESS,
+    configGroup: 'o2o',
+    remark: '客户端展示的门店自提地址',
   },
   {
     configKey: 'o2o.mall_announcement_text',
@@ -460,6 +468,7 @@ export interface O2oRuleConfigRecord {
   limitQty: number
   clientPreorderUpdateLimit: number
   storeBusinessHoursText: string
+  storePickupAddress: string
   mallAnnouncementText: string
   updatedAt: Date
 }
@@ -471,6 +480,7 @@ export interface UpdateO2oRuleConfigsInput {
   limitQty: number
   clientPreorderUpdateLimit?: number
   storeBusinessHoursText: string
+  storePickupAddress?: string
   mallAnnouncementText: string
 }
 
@@ -615,6 +625,7 @@ class SystemConfigService {
     'o2o.limit_qty',
     'o2o.client_preorder_update_limit',
     'o2o.store_business_hours_text',
+    O2O_STORE_PICKUP_ADDRESS_KEY,
     'o2o.mall_announcement_text',
   ] as const
   private readonly clientDepartmentConfigKey = 'client.department.options'
@@ -658,6 +669,7 @@ class SystemConfigService {
   private defaultConfigsEnsured = false
   private static readonly CONFIG_CACHE_TTL_MS = 5_000
   private o2oRuleConfigCache: { value: O2oRuleConfigRecord; expiresAtMs: number } | null = null
+  private o2oRuleConfigGeneration = 0
   // 只缓存客服配置中来自数据库的静态部分；availability 依赖实时在线人数，每次都要重新计算，不能一并缓存。
   private customerServiceBaseConfigCache: { value: Omit<CustomerServiceConfigRecord, 'availability'>; expiresAtMs: number } | null = null
   /**
@@ -1852,29 +1864,24 @@ class SystemConfigService {
     return { configs: await this.getOrderIdentifierConfigs(), changed }
   }
 
-  /**
-   * 写时失效 + 短 TTL 兜底的配置读取：
-   * - buildOrderDetail 等热路径在同一次调用里会读两次、且常发生在库存行已被 pessimistic_write
-   *   锁定的事务内，逐次回源查询会不必要地拉长锁持有时间；
-   * - 配置变更走 updateO2oRuleConfigs，其内部会在写入后立即调用 invalidateO2oRuleConfigCache
-   *   保证“改完立刻读到新值”；TTL 只是兜底，防止遗漏的写路径导致缓存长期陈旧。
-   *
-   * 传入事务 manager 时（isTransactionalManager 为真）一律绕过缓存，读与写都不经过它：
-   * - 绕过读：事务内的调用方通常已经用 FOR UPDATE 锁定了这些行，要的就是“锁定行的真实当前值”。
-   *   多实例部署下，本实例的缓存可能是其它实例更新配置之前的旧值，若此时返回缓存，
-   *   updateO2oRuleConfigs 写入审计的 before 快照就会与实际被覆盖的配置不一致。
-   * - 绕过写：事务尚未提交，把未提交值放进进程级缓存后，一旦事务回滚，
-   *   缓存会在 TTL 窗口内向其它调用方返回从未真正落库的值。
-   *   缓存改由调用方在事务成功提交后，用确认落库的结果显式发布（见 updateO2oRuleConfigs 末尾）。
-   */
+  /** 事务内直接读取。普通读取使用短 TTL，跨过提交或远程失效的在途查询必须按新代际重读。 */
   async getO2oRuleConfigs(manager: EntityManager = AppDataSource.manager): Promise<O2oRuleConfigRecord> {
-    const isTransactional = this.isTransactionalManager(manager)
-    if (!isTransactional) {
+    if (this.isTransactionalManager(manager)) return this.readCurrentO2oRuleConfigs(manager)
+    for (;;) {
       const cached = this.o2oRuleConfigCache
       if (cached && cached.expiresAtMs > Date.now()) {
         return cached.value
       }
+      const generation = this.o2oRuleConfigGeneration
+      const record = await this.readCurrentO2oRuleConfigs(manager)
+      if (generation !== this.o2oRuleConfigGeneration) continue
+      this.o2oRuleConfigCache = { value: record, expiresAtMs: Date.now() + SystemConfigService.CONFIG_CACHE_TTL_MS }
+      return record
     }
+  }
+
+  /** 结算和商城目录构建直接读取数据库，不使用或刷新进程内规则缓存。 */
+  async readCurrentO2oRuleConfigs(manager: EntityManager = AppDataSource.manager): Promise<O2oRuleConfigRecord> {
     const rows = await manager.getRepository(SystemConfig).find({
       where: this.o2oConfigKeys.map((key) => ({ configKey: key })),
       select: {
@@ -1884,11 +1891,11 @@ class SystemConfigService {
       },
     })
 
-    if (rows.length !== this.o2oConfigKeys.length) {
+    const map = new Map(rows.map((row) => [row.configKey, row]))
+    if (this.o2oConfigKeys.some((key) => key !== O2O_STORE_PICKUP_ADDRESS_KEY && !map.has(key))) {
       throw new BizError('线上预订配置缺失，请联系管理员补齐配置', 500)
     }
 
-    const map = new Map(rows.map((row) => [row.configKey, row]))
     // 统一从已加载配置中读取必填项，避免散落的非空断言掩盖真实缺配置问题。
     const getRequiredConfigValue = (configKey: string) => {
       const row = map.get(configKey)
@@ -1909,23 +1916,21 @@ class SystemConfigService {
     if (!storeBusinessHoursText) {
       throw new BizError('线上预订配置缺失：o2o.store_business_hours_text', 500)
     }
+    const storePickupAddress = map.get(O2O_STORE_PICKUP_ADDRESS_KEY)?.configValue.trim() || O2O_DEFAULT_PICKUP_ADDRESS
     const mallAnnouncementText = getRequiredConfigValue('o2o.mall_announcement_text').trim()
     const updatedAt = rows.map((row) => row.updatedAt).sort((a, b) => b.getTime() - a.getTime())[0]
 
-    const record: O2oRuleConfigRecord = {
+    return {
       autoCancelEnabled,
       autoCancelHours,
       limitEnabled,
       limitQty,
       clientPreorderUpdateLimit,
       storeBusinessHoursText,
+      storePickupAddress,
       mallAnnouncementText,
       updatedAt,
     }
-    if (!isTransactional) {
-      this.publishO2oRuleConfigCache(record)
-    }
-    return record
   }
 
   /**
@@ -1945,11 +1950,8 @@ class SystemConfigService {
   }
 
   private invalidateO2oRuleConfigCache(): void {
+    this.o2oRuleConfigGeneration += 1
     this.o2oRuleConfigCache = null
-  }
-
-  private publishO2oRuleConfigCache(record: O2oRuleConfigRecord): void {
-    this.o2oRuleConfigCache = { value: record, expiresAtMs: Date.now() + SystemConfigService.CONFIG_CACHE_TTL_MS }
   }
 
   async updateO2oRuleConfigs(
@@ -1980,6 +1982,10 @@ class SystemConfigService {
     }
     if (storeBusinessHoursText.length > 100) {
       throw new BizError('店铺营业时间长度不能超过 100 个字符', 400)
+    }
+    const storePickupAddress = input.storePickupAddress?.trim()
+    if (storePickupAddress !== undefined && storePickupAddress.length > 100) {
+      throw new BizError('门店自提地址长度不能超过 100 个字符', 400)
     }
 
     const result = await runInTransaction(async (manager) => {
@@ -2018,6 +2024,9 @@ class SystemConfigService {
       if (input.clientPreorderUpdateLimit !== undefined) {
         targetMap.set('o2o.client_preorder_update_limit', String(input.clientPreorderUpdateLimit))
       }
+      if (storePickupAddress !== undefined) {
+        targetMap.set(O2O_STORE_PICKUP_ADDRESS_KEY, storePickupAddress || O2O_DEFAULT_PICKUP_ADDRESS)
+      }
 
       const before = await this.getO2oRuleConfigs(manager)
       let changed = false
@@ -2031,11 +2040,6 @@ class SystemConfigService {
         changed = true
       }
 
-      // 传入事务 manager 的读取会自动绕过缓存（读与写都不经过），因此这里拿到的一定是
-      // 本事务锁定行的真实值，也不会把未提交的写入泄露进共享缓存；
-      // 仍然显式失效一次，是为了让"本次更新已发生"立刻对其它请求可见，
-      // 避免它们在事务提交前继续命中写入前的旧缓存。缓存在事务提交后统一发布（见方法末尾）。
-      this.invalidateO2oRuleConfigCache()
       const config = await this.getO2oRuleConfigs(manager)
 
       if (changed) {
@@ -2059,12 +2063,11 @@ class SystemConfigService {
       return { config, changed }
     })
     if (result.changed) {
+      // 只使已提交的变更生效。事务完成的顺序可能与响应顺序不同，下一次读统一回源数据库。
+      this.invalidateO2oRuleConfigCache()
+      void publishRedisBus(SYSTEM_CONFIG_CACHE_BUS_TOPIC, { cache: 'o2o-rule' })
       invalidateMallCatalogReadCache()
     }
-
-    // 事务已成功提交，此时 result.config 才是确认落库的值，可以安全发布进共享缓存。
-    this.publishO2oRuleConfigCache(result.config)
-    void publishRedisBus(SYSTEM_CONFIG_CACHE_BUS_TOPIC, { cache: 'o2o-rule' })
     return result
   }
 

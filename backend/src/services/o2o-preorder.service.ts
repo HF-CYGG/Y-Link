@@ -50,7 +50,7 @@ import { generateOrderUuid } from '../utils/id-generator.js'
 import { orderBusinessNoService } from './order-business-no.service.js'
 import { orderSerialService } from './order-serial.service.js'
 import { orderMergeService, type OrderMergeMetadata } from './order-merge.service.js'
-import { systemConfigService } from './system-config.service.js'
+import { systemConfigService, type O2oRuleConfigRecord } from './system-config.service.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { notificationService } from './notification.service.js'
 import { auditService } from './audit.service.js'
@@ -288,10 +288,18 @@ export interface O2oMallProductView {
 
 export interface O2oMallStorefrontView {
   businessHoursText: string
+  pickupAddress: string
   mallAnnouncementText: string
   /** 部门单到店取货时间可选窗口（小时）：开启自动取消时等于自动取消时长，未开启为 null。 */
   pickupWindowHours: number | null
 }
+
+const buildMallStorefront = (rules: O2oRuleConfigRecord): O2oMallStorefrontView => ({
+  businessHoursText: rules.storeBusinessHoursText,
+  pickupAddress: rules.storePickupAddress,
+  mallAnnouncementText: rules.mallAnnouncementText,
+  pickupWindowHours: rules.autoCancelEnabled ? rules.autoCancelHours : null,
+})
 
 export interface O2oMallProductsView {
   list: O2oMallProductView[]
@@ -459,11 +467,7 @@ export interface O2oPreorderDetailView {
     totalQty: number
     totalItemCount: number
   }
-  storefront: {
-    businessHoursText: string
-    mallAnnouncementText: string
-    pickupWindowHours: number | null
-  }
+  storefront: O2oMallStorefrontView
   qrPayload: string
 }
 
@@ -2252,11 +2256,7 @@ class O2oPreorderService {
         totalQty: order.totalQty,
         totalItemCount: normalizedItems.length,
       },
-      storefront: {
-        businessHoursText: o2oRules.storeBusinessHoursText,
-        mallAnnouncementText: o2oRules.mallAnnouncementText,
-        pickupWindowHours: o2oRules.autoCancelEnabled ? o2oRules.autoCancelHours : null,
-      },
+      storefront: buildMallStorefront(o2oRules),
       qrPayload: `y-link://o2o/verify/${order.verifyCode}`,
     }
   }
@@ -2628,7 +2628,7 @@ class O2oPreorderService {
   private async buildMallProductsUncached(): Promise<O2oMallProductsView> {
     // 商城端只暴露“可售且已上架”的商品，并把库存口径统一换算成前端直接可用的 availableStock。
     // 同时把允许对客户端公开的门店展示配置一并返回，避免客户端误调后台系统配置接口。
-    const o2oRules = await systemConfigService.getO2oRuleConfigs()
+    const o2oRules = await systemConfigService.readCurrentO2oRuleConfigs()
     const products = await this.productRepo.find({
       select: {
         id: true,
@@ -2650,11 +2650,7 @@ class O2oPreorderService {
     if (!products.length) {
       return {
         list: [],
-        storefront: {
-          businessHoursText: o2oRules.storeBusinessHoursText,
-          mallAnnouncementText: o2oRules.mallAnnouncementText,
-          pickupWindowHours: o2oRules.autoCancelEnabled ? o2oRules.autoCancelHours : null,
-        },
+        storefront: buildMallStorefront(o2oRules),
       }
     }
 
@@ -2771,21 +2767,13 @@ class O2oPreorderService {
           skus: skuViews,
         }
       }),
-      storefront: {
-        businessHoursText: o2oRules.storeBusinessHoursText,
-        mallAnnouncementText: o2oRules.mallAnnouncementText,
-        pickupWindowHours: o2oRules.autoCancelEnabled ? o2oRules.autoCancelHours : null,
-      },
+      storefront: buildMallStorefront(o2oRules),
     }
   }
 
-  private async loadMallStorefrontConfig(): Promise<O2oMallStorefrontView> {
-    const o2oRules = await systemConfigService.getO2oRuleConfigs()
-    return {
-      businessHoursText: o2oRules.storeBusinessHoursText,
-      mallAnnouncementText: o2oRules.mallAnnouncementText,
-      pickupWindowHours: o2oRules.autoCancelEnabled ? o2oRules.autoCancelHours : null,
-    }
+  async readCurrentMallStorefrontConfig(): Promise<O2oMallStorefrontView> {
+    const o2oRules = await systemConfigService.readCurrentO2oRuleConfigs()
+    return buildMallStorefront(o2oRules)
   }
 
   async getMallProductsPublicSnapshot(): Promise<O2oPublicJsonSnapshot<O2oMallProductsView>> {
@@ -2808,7 +2796,8 @@ class O2oPreorderService {
       const refresh = (async () => {
         try {
           const snapshot = await this.loadSharedPublicSnapshot(
-            'mall-products',
+            // 共享快照新增自提地址后单独版本化，滚动升级期间也不会命中旧结构。
+            'mall-products-v2',
             O2O_MALL_CATALOG_FRESH_TTL_MS,
             () => this.buildMallProductsUncached(),
           )
@@ -2858,9 +2847,9 @@ class O2oPreorderService {
       const refresh = (async () => {
         try {
           const snapshot = await this.loadSharedPublicSnapshot(
-            'mall-storefront',
+            'mall-storefront-v2',
             O2O_MALL_STOREFRONT_FRESH_TTL_MS,
-            () => this.loadMallStorefrontConfig(),
+            () => this.readCurrentMallStorefrontConfig(),
           )
           this.mallStorefrontCache = {
             revision: refreshRevision,

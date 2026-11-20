@@ -139,8 +139,9 @@ const detailQtyInputRef = ref<InstanceType<typeof ClientQtyInput> | null>(null)
 const detailModeContentRef = ref<HTMLElement | null>(null)
 const detailModeActionsRef = ref<HTMLElement | null>(null)
 const detailModeToggleRef = ref<HTMLElement | null>(null)
-const detailModeTitleRef = ref<HTMLElement | null>(null)
-const detailModeAnimations = new Set<Animation>()
+const detailSplitHeaderRef = ref<HTMLElement | null>(null)
+const detailSkuMotionRevision = ref(0)
+const detailModeAnimations = new Map<HTMLElement, Animation>()
 let detailModeMotionVersion = 0
 let detailMotionMedia: MediaQueryList | null = null
 const stopDetailModeMotion = () => {
@@ -148,16 +149,27 @@ const stopDetailModeMotion = () => {
   detailModeAnimations.forEach((animation) => animation.cancel())
   detailModeAnimations.clear()
 }
-// 只在切换两端批量测量；快速反转从当前可见高度接续，不积累旧动画或逐帧读取布局。
-watch(detailMode, async () => {
-  const shells = [detailModeContentRef.value, detailModeActionsRef.value, detailModeTitleRef.value].filter((node): node is HTMLElement => !!node)
+// 两种切换共用同一个头部高度；选规格时只过渡头部，正文和底栏各由原有交互接管。
+watch([detailMode, detailSkuMotionRevision], async ([mode], [previousMode]) => {
+  const modeChanged = mode !== previousMode
+  const header = detailSplitHeaderRef.value
+  const nodes = modeChanged ? [header, detailModeContentRef.value, detailModeActionsRef.value] : [header]
+  const shells = nodes.filter((node): node is HTMLElement => !!node)
+  // 读取屏幕上的高度后再取消旧动画，快速切换从仍在显示的高度接续。
   const heights = shells.map((node) => node.getBoundingClientRect().height)
-  const active = globalThis.document?.activeElement
-  if (active instanceof HTMLElement && shells.some((node) => node.contains(active))) {
-    detailModeToggleRef.value?.querySelector<HTMLInputElement>(`input[value="${detailMode.value}"]`)?.focus({ preventScroll: true })
+  if (modeChanged) {
+    const active = globalThis.document?.activeElement
+    if (active instanceof HTMLElement && (detailModeContentRef.value?.contains(active)
+      || detailModeActionsRef.value?.contains(active)
+      || (mode === 'multi' && header?.contains(active) && active.closest('.client-detail-thumb-motion')))) {
+      detailModeToggleRef.value?.querySelector<HTMLInputElement>(`input[value="${mode}"]`)?.focus({ preventScroll: true })
+    }
   }
-  stopDetailModeMotion()
-  const version = detailModeMotionVersion
+  const version = ++detailModeMotionVersion
+  shells.forEach((node) => {
+    detailModeAnimations.get(node)?.cancel()
+    detailModeAnimations.delete(node)
+  })
   if (!detailVisible.value || shouldReduceClientMotion()) return
   await nextTick()
   if (version !== detailModeMotionVersion || !detailVisible.value || shouldReduceClientMotion()) return
@@ -167,8 +179,10 @@ watch(detailMode, async () => {
     const animation = node.animate([{ height: `${heights[index]}px` }, { height: `${targets[index]}px` }], {
       duration: 280, easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
     })
-    detailModeAnimations.add(animation)
-    const release = () => { detailModeAnimations.delete(animation) }
+    detailModeAnimations.set(node, animation)
+    const release = () => {
+      if (detailModeAnimations.get(node) === animation) detailModeAnimations.delete(node)
+    }
     animation.onfinish = release
     animation.oncancel = release
   })
@@ -247,14 +261,12 @@ const CATEGORY_RAIL_VISIBLE_PADDING = 8
 const DEFAULT_PRODUCT_IMAGE_WARMUP_BATCH = 12
 const DEFAULT_PRODUCT_IMAGE_WARMUP_DELAY_MS = 180
 const PRODUCT_CARD_SEARCH_DETAIL_MAX_LENGTH = 80
-const STOREFRONT_REFRESH_MIN_INTERVAL_MS = 60_000
 /** 停留在商城页时后台重新校验目录的周期；请求命中 Nginx 微缓存或 304，开销很小。 */
 const CATALOG_BACKGROUND_REVALIDATE_MS = 30_000
 /** 两次后台校验的最小间隔，避免页面切换、可见性变化与定时器同时触发重复请求。 */
 const CATALOG_REVALIDATE_MIN_GAP_MS = 10_000
 let lastCatalogRevalidateAt = 0
 let catalogRevalidateTimer: number | null = null
-let lastStorefrontRefreshAt = 0
 let mallRuntimeActive = false
 let hasActivatedOnce = false
 
@@ -263,7 +275,6 @@ clientCartStore.initialize(clientAuthStore.currentUser?.id)
 clientCatalogStore.initialize(clientAuthStore.currentUser?.id)
 
 const products = computed(() => clientCatalogStore.products)
-const storeBusinessHoursText = computed(() => clientCatalogStore.storefront.businessHoursText || '10:00 - 22:00')
 const mallAnnouncementText = computed(() => clientCatalogStore.storefront.mallAnnouncementText?.trim() ?? '')
 const normalizedKeyword = computed(() => keyword.value.trim().toLowerCase())
 const hasKeyword = computed(() => normalizedKeyword.value.length > 0)
@@ -842,19 +853,6 @@ const warmupProductImages = (items: O2oMallProduct[]) => {
   scheduleMallTimeout(warmup, DEFAULT_PRODUCT_IMAGE_WARMUP_DELAY_MS)
 }
 
-const refreshStorefrontConfig = async (force = false) => {
-  if (!force && lastStorefrontRefreshAt && Date.now() - lastStorefrontRefreshAt < STOREFRONT_REFRESH_MIN_INTERVAL_MS) {
-    return
-  }
-  try {
-    const storefront = await getO2oMallStorefront()
-    clientCatalogStore.setStorefront(storefront)
-    lastStorefrontRefreshAt = Date.now()
-  } catch (error) {
-    console.warn('刷新客户端商城公告配置失败，继续使用本地缓存', error)
-  }
-}
-
 const updateCompactAnnouncementOverflow = async () => {
   await nextTick()
   const textElement = compactAnnouncementTextRef.value
@@ -875,6 +873,7 @@ watch(
   (nextClientUserId) => {
     clientCartStore.initialize(nextClientUserId)
     clientCatalogStore.initialize(nextClientUserId)
+    if (nextClientUserId && mallRuntimeActive) void clientCatalogStore.refreshStorefront(getO2oMallStorefront)
   },
 )
 
@@ -888,7 +887,6 @@ const applyCatalogResult = async (result: Awaited<ReturnType<typeof getO2oMallPr
   // 2. 购物车 Store 负责把已选商品映射到最新库存/限购规则。
   lastCatalogRevalidateAt = Date.now()
   clientCatalogStore.setProducts(result)
-  lastStorefrontRefreshAt = Date.now()
   clientCartStore.syncWithCatalog(result.list)
   warmupProductImages(result.list)
   const activeExists = categoryOptions.value.some((option) => option.key === activeCategoryKey.value)
@@ -912,6 +910,7 @@ const revalidateCatalogInBackground = async () => {
   if (refreshing.value || globalThis.document?.visibilityState === 'hidden') {
     return
   }
+  void clientCatalogStore.refreshStorefront(getO2oMallStorefront)
   if (Date.now() - lastCatalogRevalidateAt < CATALOG_REVALIDATE_MIN_GAP_MS) {
     return
   }
@@ -930,11 +929,11 @@ const handleMallVisibilityChange = () => {
 }
 
 const loadProducts = async (force = false) => {
+  void clientCatalogStore.refreshStorefront(getO2oMallStorefront, force ? 'manual' : 'background')
   // 如果缓存仍在有效期内，则先直接复用本地目录快照“秒开”，再在后台重新校验，
   // 既不拉长首屏等待，又能让新上架商品与库存变化及时出现。
   if (!force && clientCatalogStore.products.length > 0 && clientCatalogStore.isFreshNow()) {
     requestError.value = null
-    await refreshStorefrontConfig()
     clientCartStore.syncWithCatalog(clientCatalogStore.products)
     warmupProductImages(clientCatalogStore.products)
     void revalidateCatalogInBackground()
@@ -966,6 +965,7 @@ const setSectionRef = (key: string, element: unknown) => {
 }
 
 const openProductDetail = (product: O2oMallProduct) => {
+  stopDetailModeMotion()
   resetDetailBatch()
   detailInitialSkus.value = [...resolveActiveSkus(product)]
   detailProduct.value = product
@@ -1176,6 +1176,7 @@ const commitDetailQty = (value: number | null) => {
 const selectDetailSku = (sku: O2oMallSku) => {
   const current = resolveCatalogDetailSelection(products.value, detailProduct.value?.id ?? '', sku.id)
   if (!current.product || !current.sku) return
+  if (detailMode.value === 'single' && selectedDetailSku.value?.id !== current.sku.id) detailSkuMotionRevision.value += 1
   detailProduct.value = current.product
   selectedDetailSku.value = current.sku
   detailSelectionSkuId.value = current.sku.id
@@ -2021,9 +2022,16 @@ onBeforeUnmount(() => {
         </button>
       </div>
       <div v-if="!isPhone" class="mall-hero-card__meta-grid mt-4 grid gap-3 sm:grid-cols-3">
-        <div class="mall-hero-card__meta-item rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700 dark:text-slate-200">营业时间：{{ storeBusinessHoursText }}</div>
-        <div class="mall-hero-card__meta-item rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700 dark:text-slate-200">提货须知：请在订单有效期内到店核销</div>
+        <div class="mall-hero-card__meta-item break-words rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700 dark:text-slate-200">营业时间：{{ clientCatalogStore.storefront.businessHoursText }}</div>
+        <div class="mall-hero-card__meta-item break-words rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700 dark:text-slate-200">
+          <p>取货地址：{{ clientCatalogStore.storefront.pickupAddress }}</p>
+          <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">请在订单有效期内到店核销</p>
+        </div>
         <div v-if="mallAnnouncementText" class="mall-hero-card__meta-item mall-hero-card__meta-item--notice rounded-2xl bg-amber-50 px-3 py-3 text-sm text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">公告：{{ mallAnnouncementText }}</div>
+      </div>
+      <div v-else class="mt-2 space-y-0.5 break-words text-xs leading-5 text-slate-600 dark:text-slate-300">
+        <p>营业时间：{{ clientCatalogStore.storefront.businessHoursText }}</p>
+        <p>取货地址：{{ clientCatalogStore.storefront.pickupAddress }}</p>
       </div>
       <div
         v-if="passiveRefreshErrorMessage"
@@ -2499,9 +2507,9 @@ onBeforeUnmount(() => {
       >
         <p v-if="detailCatalogNotice" class="mx-4 mt-3 rounded-xl bg-amber-50 p-3 text-sm text-amber-800" role="status">{{ detailCatalogNotice }}</p>
         <div class="client-detail-scroll">
-          <header v-if="hasDetailSkuChoices || detailMode === 'multi'" class="client-detail-header client-detail-header--split">
+          <header v-if="hasDetailSkuChoices || detailMode === 'multi'" ref="detailSplitHeaderRef" class="client-detail-header client-detail-header--split">
             <div class="client-detail-summary">
-              <div ref="detailModeTitleRef" class="client-detail-mode-stage">
+              <div class="client-detail-mode-stage">
                 <p class="client-detail-title client-detail-mode-pane client-detail-mode-pane--single" :class="{ 'is-active': detailMode === 'single' }" :aria-hidden="detailMode !== 'single'">{{ resolveCurrentDetailDisplayName(detailProduct) }}</p>
                 <p class="client-detail-title client-detail-mode-pane client-detail-mode-pane--multi" :class="{ 'is-active': detailMode === 'multi' }" :aria-hidden="detailMode !== 'multi'">{{ detailProduct.productName }}</p>
               </div>
@@ -3251,6 +3259,8 @@ onBeforeUnmount(() => {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 0.85rem;
   align-items: start;
+  overflow: clip;
+  overflow-clip-margin: 3px;
 }
 
 .client-detail-hero {
@@ -3309,16 +3319,14 @@ onBeforeUnmount(() => {
 }
 
 .client-detail-summary {
+  position: relative;
   min-width: 0;
   padding-top: 0.15rem;
 }
 
-.client-detail-summary-motion { display: grid; grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows var(--detail-mode-duration) var(--detail-mode-ease), opacity var(--detail-mode-duration) var(--detail-mode-ease); }
-.client-detail-summary-motion.is-collapsed { grid-template-rows: 0fr; opacity: 0; }
-.client-detail-summary-motion__inner { min-height: 0; overflow: hidden; }
-.client-detail-thumb-motion { display: grid; grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows var(--detail-mode-duration) var(--detail-mode-ease), opacity var(--detail-mode-duration) var(--detail-mode-ease), margin-top var(--detail-mode-duration) var(--detail-mode-ease); }
-.client-detail-thumb-motion.is-collapsed { grid-template-rows: 0fr; opacity: 0; margin-top: -0.5rem; }
-.client-detail-thumb-motion__inner { min-height: 0; overflow: hidden; }
+.client-detail-summary-motion, .client-detail-thumb-motion { display: flow-root; opacity: 1; transition: opacity var(--detail-mode-duration) var(--detail-mode-ease); }
+.client-detail-summary-motion.is-collapsed, .client-detail-thumb-motion.is-collapsed { position: absolute; top: 100%; inset-inline: 0; opacity: 0; pointer-events: none; }
+.client-detail-thumb-motion.is-collapsed { margin-top: 0.5rem; }
 
 .client-detail-title {
   color: #0f172a;
@@ -3373,6 +3381,7 @@ onBeforeUnmount(() => {
 }
 
 .client-detail-side-actions {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: flex-end;
@@ -5528,6 +5537,8 @@ onBeforeUnmount(() => {
 .client-detail-mode-toggle.is-multi :deep(.el-radio-group)::before { transform: translateX(100%); }
 .client-detail-mode-toggle :deep(.el-radio-button) { flex: 1; min-width: 0; }
 .client-detail-mode-toggle :deep(.el-radio-button__inner) { width: 100%; padding: 10px 6px; border: 0; border-radius: 10px !important; background: transparent !important; box-shadow: none !important; font-weight: 700; transition: color var(--detail-mode-duration) var(--detail-mode-ease); }
+.client-detail-mode-toggle :deep(.el-radio-button__original-radio:not(:focus-visible) + .el-radio-button__inner) { outline: none; }
+.client-detail-mode-toggle :deep(.el-radio-button:first-child .el-radio-button__original-radio:not(:focus-visible) + .el-radio-button__inner) { border-left: 0; }
 .client-detail-mode-toggle :deep(.el-radio-button.is-active .el-radio-button__inner) { color: #fff; }
 .client-detail-batch-bar > span { min-width: 0; font-weight: 700; }
 .client-detail-batch-bar { display: flex; justify-content: space-between; align-items: center; gap: 8px; }

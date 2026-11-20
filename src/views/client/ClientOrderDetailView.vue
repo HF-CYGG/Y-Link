@@ -17,6 +17,7 @@ import { ElMessageBox } from 'element-plus'
 import {
   cancelMyO2oPreorder,
   getO2oMallProducts,
+  getO2oMallStorefront,
   getO2oPreorderDetail,
   markMyO2oPreorderCustomerOrderPrinted,
   submitO2oReturnRequest,
@@ -136,9 +137,12 @@ const deletedOrderRedirecting = ref(false)
 const { runLatest } = useStableRequest()
 const clientAuthStore = useClientAuthStore(pinia)
 const clientOrderStore = useClientOrderStore(pinia)
-// 取货时段与结算页同源：读取门店配置的营业时间文案（商城目录同步时回填），不在详情页写死。
+// 直接打开订单详情时也拉取门店配置；订单中原有的预约取货时间单独显示。
 const clientCatalogStore = useClientCatalogStore(pinia)
-const pickupBusinessHoursText = computed(() => clientCatalogStore.storefront.businessHoursText || '10:00 - 22:00')
+const refreshPickupStorefront = () => {
+  clientCatalogStore.initialize(clientAuthStore.currentUser?.id)
+  return clientCatalogStore.refreshStorefront(getO2oMallStorefront)
+}
 let disposeClientOrderRefresh: () => void = () => {}
 let voucherUiModulePromise: VoucherUiModulePromise | null = null
 let voucherPdfExportModulePromise: ReturnType<typeof loadVoucherPdfExportModule> | null = null
@@ -1125,6 +1129,7 @@ const loadDetail = async (options?: { silent?: boolean }) => {
   if (!orderId) {
     return
   }
+  void refreshPickupStorefront()
 
   const silent = options?.silent === true
   if (!silent) {
@@ -1657,8 +1662,8 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="mt-4 space-y-2 rounded-2xl bg-amber-50 px-4 py-4 text-sm text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
-          <p>取货地址：海右书院112房间</p>
-          <p>取货时段：{{ pickupBusinessHoursText }}</p>
+          <p class="break-words">取货地址：{{ clientCatalogStore.storefront.pickupAddress }}</p>
+          <p class="break-words">取货时段：{{ clientCatalogStore.storefront.businessHoursText }}</p>
           <p>联系人：门店值班人员</p>
           <p>温馨提示：请在有效时段内到店核销，过期将自动取消。可截图或打印此二维码前往店铺核销取货。</p>
         </div>

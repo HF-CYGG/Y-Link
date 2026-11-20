@@ -1,6 +1,7 @@
 /** 使用隔离内存存储和受控时钟验证目录 Store 的延迟写入与账号代次。 */
 import assert from 'node:assert/strict'
 import { createPinia, setActivePinia } from 'pinia'
+import type { O2oMallStorefrontConfig } from '../src/api/modules/o2o'
 import { useClientCatalogStore } from '../src/store/modules/client-catalog'
 
 let now = 0
@@ -155,6 +156,69 @@ try {
     assert.equal(dataWrites(), before + (transition === 'empty' ? 0 : 1))
     owner.$dispose()
   }
+
+  // 订单详情可能从未加载商品目录，独立门店快照也应能恢复，并在兼容旧响应时补齐取货地址。
+  const storefrontKey = 'y-link.client-catalog.public-storefront.v2'
+  storage.values.clear()
+  storage.values.set(storefrontKey, JSON.stringify({ storefront: { businessHoursText: '09:00 - 11:30', mallAnnouncementText: '' } }))
+  setActivePinia(createPinia())
+  const pickupStore = useClientCatalogStore()
+  pickupStore.initialize('A')
+  assert.equal(pickupStore.storefront.businessHoursText, '09:00 - 11:30')
+  assert.equal(pickupStore.storefront.pickupAddress, '海右书院112房间')
+
+  const oldStorefront = { businessHoursText: '10:00 - 22:00', mallAnnouncementText: '' }
+  const newStorefront = { businessHoursText: '09:00 - 11:30；14:00 - 20:00', mallAnnouncementText: '新公告', pickupAddress: '  北区窗口  ' }
+  storage.values.set(storefrontKey, JSON.stringify({ storefront: { ...newStorefront, pickupAddress: '上次取货点' } }))
+  pickupStore.initialize('B')
+  pickupStore.setProducts({ list: [], storefront: oldStorefront })
+  assert.equal(await pickupStore.refreshStorefront(async () => { throw new Error('刷新失败') }), null)
+  assert.equal(pickupStore.storefront.pickupAddress, '上次取货点', '先到的旧目录和独立刷新失败都不能回滚已恢复快照')
+  assert.equal(pickupStore.storefront.businessHoursText, newStorefront.businessHoursText)
+
+  const holdStorefront = () => {
+    let finish!: (value: O2oMallStorefrontConfig) => void
+    const pending = new Promise<O2oMallStorefrontConfig>((resolve) => { finish = resolve })
+    return { pending, finish }
+  }
+  let requests = 0
+  const oldResponse = holdStorefront()
+  const loadOldStorefront = () => { requests += 1; return oldResponse.pending }
+  const firstRefresh = pickupStore.refreshStorefront(loadOldStorefront)
+  const duplicateRefresh = pickupStore.refreshStorefront(loadOldStorefront, 'manual')
+  await Promise.resolve()
+  assert.equal(requests, 1, '普通展示刷新共用同一门店请求')
+  const fresh = await pickupStore.refreshStorefront(async () => newStorefront, 'checkout')
+  assert.equal(fresh?.pickupAddress, '北区窗口', '新单独立回源，不等待正在进行的普通请求')
+  oldResponse.finish(oldStorefront)
+  assert.deepEqual(await Promise.all([firstRefresh, duplicateRefresh]), [null, null], '同账号的旧展示请求不可覆盖新单回源')
+  pickupStore.setProducts({ list: [], storefront: oldStorefront })
+  assert.equal(pickupStore.storefront.pickupAddress, '北区窗口', '迟到目录应答不得回滚独立门店配置')
+  assert.equal(pickupStore.storefront.businessHoursText, newStorefront.businessHoursText)
+
+  const staleDisplay = holdStorefront()
+  const privateResponse = holdStorefront()
+  const staleDisplayRefresh = pickupStore.refreshStorefront(() => staleDisplay.pending, 'manual')
+  const checkoutRefresh = pickupStore.refreshStorefront(() => privateResponse.pending, 'checkout')
+  staleDisplay.finish(oldStorefront)
+  assert.equal(await staleDisplayRefresh, null)
+  const joiningDisplay = pickupStore.refreshStorefront(loadOldStorefront, 'manual')
+  privateResponse.finish(newStorefront)
+  assert.equal((await checkoutRefresh)?.pickupAddress, '北区窗口')
+  assert.equal((await joiningDisplay)?.pickupAddress, '北区窗口', '旧 finally 不能清除仍在进行的私有回源')
+  assert.equal(requests, 1)
+
+  const oldOwnerResponse = holdStorefront()
+  const oldOwnerRefresh = pickupStore.refreshStorefront(() => oldOwnerResponse.pending, 'manual')
+  pickupStore.initialize('A')
+  pickupStore.initialize('B')
+  assert.equal((await pickupStore.refreshStorefront(async () => newStorefront))?.pickupAddress, '北区窗口')
+  oldOwnerResponse.finish(oldStorefront)
+  assert.equal(await oldOwnerRefresh, null, '换号切回仍丢弃旧请求')
+  assert.equal(await pickupStore.refreshStorefront(async () => { throw new Error('强刷失败') }, 'checkout'), null)
+  assert.equal(pickupStore.storefront.pickupAddress, '北区窗口', '失败保留可信快照')
+  assert.equal(JSON.parse(storage.getItem(storefrontKey) ?? '{}').storefront?.pickupAddress, '北区窗口')
+  pickupStore.$dispose()
 } finally {
   globalThis.setTimeout = originalSet
   globalThis.clearTimeout = originalClear

@@ -510,16 +510,21 @@ async function runRecoveredScenario() {
     assert.ok(cacheClient)
     const revisionBefore = await readMallCatalogClusterRevision()
     assert.ok(revisionBefore !== null, 'Redis 就绪时应能读到集群修订号')
+    const oldSnapshot = JSON.stringify({ code: 0, message: 'ok', data: { list: [], storefront: {
+      businessHoursText: '10:00 - 22:00', mallAnnouncementText: '', pickupWindowHours: 24,
+    } } })
+    await cacheClient.set(redisClient.redisKey('cache', 'mall-products', revisionBefore), oldSnapshot, 'EX', 10)
     const firstSnapshot = await o2oPreorderService.getMallProductsPublicSnapshot()
+    assert.equal(firstSnapshot.data.storefront.pickupAddress, '海右书院112房间', '共享缓存不能返回滚动升级前缺少地址的快照')
     await delay(50)
-    const sharedKey = redisClient.redisKey('cache', 'mall-products', revisionBefore)
+    const sharedKey = redisClient.redisKey('cache', 'mall-products-v2', revisionBefore)
     assert.equal(await cacheClient.get(sharedKey), firstSnapshot.responseBody, '目录快照应按集群修订号写入 Redis')
     invalidateMallCatalogReadCache()
     const revisionAfter = await readMallCatalogClusterRevision()
     assert.equal(Number(revisionAfter), Number(revisionBefore) + 1, '目录失效必须递增集群修订号')
     const secondSnapshot = await o2oPreorderService.getMallProductsPublicSnapshot()
     await delay(50)
-    assert.equal(await cacheClient.get(redisClient.redisKey('cache', 'mall-products', revisionAfter as string)), secondSnapshot.responseBody, '失效后应按新修订号重建并写入')
+    assert.equal(await cacheClient.get(redisClient.redisKey('cache', 'mall-products-v2', revisionAfter as string)), secondSnapshot.responseBody, '失效后应按新修订号重建并写入')
     assert.equal(secondSnapshot.etag, firstSnapshot.etag, '内容未变时各实例生成的 ETag 一致')
     console.log('[redis-verify] 恢复场景：登录锁定双向兜底、商城目录二级缓存与集群修订号 通过')
   } finally {

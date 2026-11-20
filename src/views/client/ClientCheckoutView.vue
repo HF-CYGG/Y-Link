@@ -8,7 +8,7 @@ import ClientProductSmallImage from './components/ClientProductSmallImage.vue'
  * - 下单归属完全由当前登录账号类型决定，页面只负责展示部门/工号/实名信息，不允许手动篡改归属；
  * - 部门账号下单前强制校验所属部门、教职工号与金蝶申请状态，避免订单归属与实名链路脱节；
  * - 部门单必须选择到店取货时间：日期按钮（el-button）+ 半小时时段下拉，日期范围受店铺自动取消时长（pickupWindowHours）约束，
- *   时段范围按店铺营业时间文案解析并在闭店前半小时截止，解析失败时回退默认营业时间。
+ *   各营业时段分别生成半小时档位，店铺配置刷新后复核新单草稿。
  * 维护说明：
  * - 若后端继续扩展实名字段或工号核验状态，请优先同步本页的实名信息展示区与 `handleSubmit()` 前置校验；
  * - 若调整下单归属说明文案，请保持“前端只展示，服务端强制判定”的口径不变；
@@ -18,7 +18,7 @@ import { onActivated, onDeactivated, onBeforeUnmount, computed, onMounted, ref, 
 import { useRouter } from 'vue-router'
 
 import { ArrowLeft } from '@element-plus/icons-vue'
-import { submitO2oPreorder, type SubmitO2oPreorderPayload } from '@/api/modules/o2o'
+import { getO2oCheckoutStorefront, getO2oMallStorefront, submitO2oPreorder, type SubmitO2oPreorderPayload } from '@/api/modules/o2o'
 import { useClientMallSnapshotRefresh } from '@/composables/useClientMallSnapshotRefresh'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
 import { decideClientCheckoutSubmit, isClientCheckoutSubmitOutcomeUnknown, settleCurrentClientCheckoutSuccess } from './client-checkout-submit-policy'
@@ -29,6 +29,7 @@ import { normalizeRequestError } from '@/utils/error'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 import { resolveO2oPriceView } from '@/utils/o2o-price'
+import { resolvePickupSlotMinutes } from '@/utils/store-business-hours'
 import {
   buildClientPreorderSubmitIntentKey,
   clearClientPreorderSubmitLock,
@@ -74,12 +75,9 @@ const restorePendingSubmit = () => {
 // 到店取货时间：日期与时段分开选择，避免在手机上使用体积更大的日期时间弹层。
 const pickupDateKey = ref<string | null>(null)
 const pickupTimeSlot = ref<string | null>(null)
+const pickupSelectionNotice = ref('')
 /** 取货可选范围依赖“当前时间”，用一次性时钟快照驱动 computed，避免每次渲染都读 Date.now() 造成结果抖动。 */
 const pickupClock = ref(Date.now())
-/** 营业时间文案解析失败时的兜底范围，与系统配置 o2o.store_business_hours_text 的默认值 10:00 - 22:00 一致。 */
-const PICKUP_FALLBACK_OPEN_MINUTES = 10 * 60
-const PICKUP_FALLBACK_CLOSE_MINUTES = 22 * 60
-const PICKUP_SLOT_STEP_MINUTES = 30
 const PICKUP_LEAD_MINUTES = 15
 const PICKUP_MAX_DATE_OPTIONS = 8
 const PICKUP_DEFAULT_WINDOW_HOURS = 7 * 24
@@ -92,56 +90,28 @@ const buildPickupDate = (dateKey: string, minutesOfDay: number) => {
   return new Date(year, (month ?? 1) - 1, day ?? 1, Math.floor(minutesOfDay / 60), minutesOfDay % 60, 0, 0)
 }
 
-/**
- * 取货时段范围跟随店铺营业时间，闭店前半小时为最后一档。
- * 营业时间是管理员可改的自由文案，这里只解析其中的「HH:MM - HH:MM」，解析不出或范围非法时回退默认值；
- * 不能写死起始时间：服务端只校验当前时间与超时窗口，闭店时段照样会被接受。
- */
-const pickupSlotRange = computed(() => {
-  const fallback = {
-    startMinutes: PICKUP_FALLBACK_OPEN_MINUTES,
-    endMinutes: PICKUP_FALLBACK_CLOSE_MINUTES - PICKUP_SLOT_STEP_MINUTES,
-  }
-  const matched = /(\d{1,2}):(\d{2})\s*[-~～—–至]\s*(\d{1,2}):(\d{2})/.exec(clientCatalogStore.storefront.businessHoursText || '')
-  if (!matched) {
-    return fallback
-  }
-  const openMinutes = Number(matched[1]) * 60 + Number(matched[2])
-  const closeMinutes = Number(matched[3]) * 60 + Number(matched[4])
-  const withinDay = openMinutes >= 0 && closeMinutes <= 24 * 60
-  // 跨零点营业（如 18:00 - 02:00）无法用单日时段表达，按兜底范围处理，避免生成颠倒的空列表。
-  if (!withinDay || closeMinutes - openMinutes < PICKUP_SLOT_STEP_MINUTES) {
-    return fallback
-  }
-  return { startMinutes: openMinutes, endMinutes: closeMinutes - PICKUP_SLOT_STEP_MINUTES }
-})
-
-const pickupSlotRangeText = computed(() => {
-  const toText = (minutes: number) => `${pad2(Math.floor(minutes / 60))}:${pad2(minutes % 60)}`
-  return `${toText(pickupSlotRange.value.startMinutes)} - ${toText(pickupSlotRange.value.endMinutes + PICKUP_SLOT_STEP_MINUTES)}`
-})
+const pickupSlotMinutes = computed(() => resolvePickupSlotMinutes(clientCatalogStore.storefront.businessHoursText))
 
 const pickupWindowHours = computed(() => {
   const configuredHours = clientCatalogStore.storefront.pickupWindowHours
   return typeof configuredHours === 'number' && configuredHours > 0 ? configuredHours : null
 })
-const pickupWindowEndMs = computed(() => (
-  pickupClock.value + (pickupWindowHours.value ?? PICKUP_DEFAULT_WINDOW_HOURS) * 60 * 60 * 1000
-))
-const pickupWindowHint = computed(() => {
-  const windowText = pickupWindowHours.value
+const resolvePickupWindowEndMs = (windowHours: number | null) =>
+  pickupClock.value + (windowHours ?? PICKUP_DEFAULT_WINDOW_HOURS) * 60 * 60 * 1000
+const pickupWindowEndMs = computed(() => resolvePickupWindowEndMs(pickupWindowHours.value))
+const pickupWindowHint = computed(() => (
+  pickupWindowHours.value
     ? `请在下单后 ${pickupWindowHours.value} 小时内到店取货，超时未取将自动取消`
     : '可选择未来 7 天内的到店时间'
-  return `${windowText}；可选时段为营业时间 ${pickupSlotRangeText.value}`
-})
+))
 
-const buildPickupSlots = (dateKey: string) => {
+const buildPickupSlots = (dateKey: string, slotMinutes = pickupSlotMinutes.value, windowEndMs = pickupWindowEndMs.value) => {
   const earliestMs = pickupClock.value + PICKUP_LEAD_MINUTES * 60 * 1000
   const slots: Array<{ value: string; label: string }> = []
-  for (let minutes = pickupSlotRange.value.startMinutes; minutes <= pickupSlotRange.value.endMinutes; minutes += PICKUP_SLOT_STEP_MINUTES) {
+  for (const minutes of slotMinutes) {
     const slotDate = buildPickupDate(dateKey, minutes)
     const slotMs = slotDate.getTime()
-    if (slotMs < earliestMs || slotMs > pickupWindowEndMs.value) {
+    if (slotMs < earliestMs || slotMs > windowEndMs) {
       continue
     }
     const slotText = `${pad2(slotDate.getHours())}:${pad2(slotDate.getMinutes())}`
@@ -184,6 +154,7 @@ const pickupAtIso = computed(() => {
 
 const pickupAtStatusText = computed(() => {
   if (!isDepartmentOrder.value) return '散客单无需选择到店取货时间'
+  if (pickupSelectionNotice.value) return pickupSelectionNotice.value
   if (!pickupDateOptions.value.length) return '当前暂无可选到店时间，请稍后重试或联系门店'
   if (!pickupDateKey.value) return '必填：请先选择到店取货日期'
   if (!pickupTimeSlot.value) return '必填：请选择到店取货时段'
@@ -194,6 +165,7 @@ const pickupAtStatusText = computed(() => {
 /** 选择日期时同步刷新时钟，确保“今天”的过期时段被及时剔除；原时段不在新范围内时清空重选。 */
 const selectPickupDate = (dateKey: string) => {
   pickupClock.value = Date.now()
+  pickupSelectionNotice.value = ''
   pickupDateKey.value = dateKey
   if (pickupTimeSlot.value && !buildPickupSlots(dateKey).some((slot) => slot.value === pickupTimeSlot.value)) {
     pickupTimeSlot.value = null
@@ -204,6 +176,24 @@ const resetPickupSelection = () => {
   pickupClock.value = Date.now()
   pickupDateKey.value = null
   pickupTimeSlot.value = null
+  pickupSelectionNotice.value = ''
+}
+
+const PICKUP_RESELECT_NOTICE = '所选到店取货时间已不可选，请重新选择'
+const recheckPickupDraft = (slotsForDate = buildPickupSlots) => {
+  const dateKey = pickupDateKey.value
+  if (!dateKey) return
+  const options = slotsForDate(dateKey)
+  if (!options.length) pickupDateKey.value = null
+  if (!options.length || (pickupTimeSlot.value && !options.some((slot) => slot.value === pickupTimeSlot.value))) {
+    pickupTimeSlot.value = null
+    pickupSelectionNotice.value = PICKUP_RESELECT_NOTICE
+  }
+}
+
+const refreshPickupStorefront = () => {
+  clientCatalogStore.initialize(clientAuthStore.currentUser?.id)
+  return clientCatalogStore.refreshStorefront(getO2oMallStorefront)
 }
 
 const PICKUP_CONTACT_STORAGE_KEY_PREFIX = 'ylink:client:checkout:pickup-contact:'
@@ -291,6 +281,7 @@ onMounted(() => {
   restorePickupContactDraft()
   restorePendingSubmit()
   pendingClockTimer = setInterval(restorePendingSubmit, 15000)
+  void refreshPickupStorefront()
   void refreshMallSnapshot()
 })
 
@@ -306,6 +297,7 @@ watch(
     restorePendingSubmit()
     departmentSystemApplyChoice.value = null
     resetPickupSelection()
+    if (checkoutActive && clientAuthStore.currentUser?.id) void refreshPickupStorefront()
   },
   { flush: 'sync' },
 )
@@ -366,13 +358,33 @@ const orderTypeDescription = computed(() => {
 })
 
 let checkoutActive = true
-watch(() => props.active, (active) => { if (active === false) invalidateCheckout(); else if (active === true) { checkoutActive = true; checkoutGeneration += 1 } }, { flush: 'sync' })
+watch(() => props.active, (active) => {
+  if (active === false) invalidateCheckout()
+  else if (active === true) {
+    checkoutActive = true
+    checkoutGeneration += 1
+    void refreshPickupStorefront()
+  }
+}, { flush: 'sync' })
 let checkoutGeneration = 0
 const invalidateCheckout = () => { checkoutActive = false; checkoutGeneration += 1 }
-onBeforeUnmount(() => { invalidateCheckout(); if (pendingClockTimer) clearInterval(pendingClockTimer) })
+const refreshVisiblePickupStorefront = () => {
+  if (checkoutActive && globalThis.document.visibilityState === 'visible') void refreshPickupStorefront()
+}
+onMounted(() => globalThis.document?.addEventListener('visibilitychange', refreshVisiblePickupStorefront))
+onBeforeUnmount(() => {
+  invalidateCheckout()
+  if (pendingClockTimer) clearInterval(pendingClockTimer)
+  globalThis.document?.removeEventListener('visibilitychange', refreshVisiblePickupStorefront)
+})
 onDeactivated(invalidateCheckout)
-onActivated(() => { checkoutActive = true })
+onActivated(() => { checkoutActive = true; void refreshPickupStorefront() })
 watch(() => clientAuthStore.currentUser?.id, () => { checkoutGeneration += 1 }, { flush: 'sync' })
+watch([() => clientCatalogStore.storefront.businessHoursText, pickupWindowHours], () => {
+  if (!checkoutActive || pendingSubmit.value || recoveryError.value) return
+  pickupClock.value = Date.now()
+  recheckPickupDraft()
+})
 const handleBack = () => {
   invalidateCheckout()
   if (props.standalone) {
@@ -478,6 +490,7 @@ const handleSubmit = async () => {
 
   // 到店取货时间只对部门单必填；提交前刷新时钟复核所选时段是否仍在可选范围内，避免页面停留过久后提交已过期时间。
   let requestedPickupAt: string | null = null
+  let requestedPickupSlot: { dateKey: string; timeSlot: string } | null = null
   if (isDepartmentOrder.value) {
     pickupClock.value = Date.now()
     if (!pickupDateKey.value || !pickupTimeSlot.value) {
@@ -485,11 +498,12 @@ const handleSubmit = async () => {
       return
     }
     if (!pickupTimeOptions.value.some((slot) => slot.value === pickupTimeSlot.value)) {
-      pickupTimeSlot.value = null
-      showAppWarning('所选到店取货时间已不可选，请重新选择')
+      recheckPickupDraft()
+      showAppWarning(PICKUP_RESELECT_NOTICE)
       return
     }
     requestedPickupAt = pickupAtIso.value
+    requestedPickupSlot = { dateKey: pickupDateKey.value, timeSlot: pickupTimeSlot.value }
   }
 
   const requestedKingdeeVoucherNo = isDepartmentOrder.value && departmentSystemApplyChoice.value ? kingdeeVoucherNo.value.trim() || null : null
@@ -527,8 +541,28 @@ const handleSubmit = async () => {
       submitting.value = true
       try {
         // 提交前必须等待一次成功的最新目录刷新；失败或被取消时绝不能沿用旧快照提交。
-        const refreshResult = await refreshMallSnapshot({ isCurrent })
+        const [refreshResult, checkoutStorefront] = await Promise.all([
+          refreshMallSnapshot({ isCurrent }),
+          requestedPickupSlot ? clientCatalogStore.refreshStorefront(getO2oCheckoutStorefront, 'checkout') : null,
+        ])
         if (!isCurrent()) return
+        if (requestedPickupSlot) {
+          if (!checkoutStorefront) {
+            showAppWarning('门店取货时间同步失败，请稍后重试')
+            return
+          }
+          pickupClock.value = Date.now()
+          // 取本次私有读取的快照，目录与其他页面的回包不参与新单时段复核。
+          const slotMinutes = resolvePickupSlotMinutes(checkoutStorefront.businessHoursText)
+          const windowEndMs = resolvePickupWindowEndMs(checkoutStorefront.pickupWindowHours)
+          const slotsForDate = (key: string) => buildPickupSlots(key, slotMinutes, windowEndMs)
+          const { dateKey, timeSlot } = requestedPickupSlot
+          if (!slotsForDate(dateKey).some((slot) => slot.value === timeSlot)) {
+            recheckPickupDraft(slotsForDate)
+            showAppWarning(PICKUP_RESELECT_NOTICE)
+            return
+          }
+        }
         const freshItemSnapshot = clientCartStore.createSelectedCheckoutSnapshot()
         const freshIntentKey = freshItemSnapshot ? buildClientPreorderSubmitIntentKey({
           clientUserId: initiatingUserId,
@@ -594,6 +628,8 @@ const handleSubmit = async () => {
 
     <section class="flex-1 overflow-y-auto px-4 py-4 pb-32 sm:px-5">
       <div class="mb-4 rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
+        <p class="break-words text-sm text-slate-700 dark:text-slate-200">取货地址：{{ clientCatalogStore.storefront.pickupAddress }}</p>
+        <p class="mb-2 break-words text-sm text-slate-700 dark:text-slate-200">营业时间：{{ clientCatalogStore.storefront.businessHoursText }}</p>
         <p class="text-sm text-slate-500 dark:text-slate-400">提交前将以服务端库存与限购规则为准</p>
         <p class="mt-2 text-xs text-slate-400">
           {{ catalogSyncing ? '正在后台同步最新库存；提交时会再次校验全部已选商品' : '进入页面后会自动同步最新库存与限购信息' }}
@@ -708,11 +744,12 @@ const handleSubmit = async () => {
               placeholder="请选择到店时段"
               aria-label="到店时段"
               :disabled="!pickupDateKey"
+              @change="pickupSelectionNotice = ''"
             >
               <el-option v-for="slot in pickupTimeOptions" :key="slot.value" :label="slot.label" :value="slot.value" />
             </el-select>
 
-            <p class="mt-2 text-xs" :class="!pickupAtIso ? 'text-rose-600 dark:text-rose-400' : 'text-slate-500 dark:text-slate-400'">
+            <p class="mt-2 text-xs" :class="!pickupAtIso ? 'text-rose-600 dark:text-rose-400' : 'text-slate-500 dark:text-slate-400'" role="status">
               {{ pickupAtStatusText }}
             </p>
           </div>

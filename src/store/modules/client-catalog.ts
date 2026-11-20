@@ -19,7 +19,7 @@ import {
   persistClientCatalogBrowseContextSnapshot,
   persistClientCatalogDataSnapshot,
   persistClientCatalogStorefrontSnapshot,
-  normalizePickupWindowHours,
+  normalizeStorefront,
   readPersistedClientCatalogSnapshot,
 } from '@/utils/client-catalog-storage'
 import { createClientCatalogPersistenceTimer } from '@/utils/client-catalog-persistence-timer'
@@ -28,15 +28,20 @@ import { createClientCatalogPersistenceTimer } from '@/utils/client-catalog-pers
 // - 过短会导致用户切页返回时仍频繁请求接口；
 // - 过长则容易让库存、上下架状态过旧。
 const CLIENT_CATALOG_CACHE_TTL_MS = 5 * 60 * 1000
+const STOREFRONT_REFRESH_MIN_INTERVAL_MS = 5_000
 
 export const useClientCatalogStore = defineStore('client-catalog', () => {
   const clientUserId = ref('')
   const products = ref<O2oMallProduct[]>([])
-  const storefront = ref<O2oMallStorefrontConfig>({
-    businessHoursText: '10:00 - 22:00',
-    mallAnnouncementText: '',
-    pickupWindowHours: null,
-  })
+  const storefront = ref(normalizeStorefront(null))
+  let hasIndependentStorefront = false
+  let storefrontRequest: Promise<Required<O2oMallStorefrontConfig> | null> | null = null
+  let lastStorefrontRefreshAt: number | null = null
+  const invalidateStorefrontRefresh = () => {
+    hasIndependentStorefront = false
+    storefrontRequest = null
+    lastStorefrontRefreshAt = null
+  }
   const activeCategoryKey = ref('all')
   const keyword = ref('')
   const sortMode = ref<ClientCatalogSortMode>('default')
@@ -71,6 +76,7 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
   globalThis.document?.addEventListener?.('visibilitychange', flushWhenHidden)
   globalThis.window?.addEventListener?.('pagehide', catalogPersistence.flush)
   onScopeDispose(() => {
+    invalidateStorefrontRefresh()
     catalogPersistence.flush()
     catalogPersistence.cancel()
     globalThis.document?.removeEventListener?.('visibilitychange', flushWhenHidden)
@@ -92,11 +98,9 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
 
   const replaceCatalogData = (
     nextProducts: O2oMallProduct[],
-    nextStorefront: O2oMallStorefrontConfig,
     options: { touchUpdatedAt: boolean; markComplete?: boolean },
   ) => {
     products.value = nextProducts
-    storefront.value = nextStorefront
     if (options.touchUpdatedAt) {
       // 只要商品列表发生真实刷新，就更新时间戳，让页面层能判断当前缓存是否仍可复用。
       updatedAt.value = Date.now()
@@ -104,17 +108,13 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
     if (options.markComplete) {
       requiresNetworkRefresh.value = false
     }
-    persistClientCatalogStorefrontSnapshot(nextStorefront)
     catalogPersistence.schedule(clientUserId.value)
   }
 
   const resetState = () => {
+    invalidateStorefrontRefresh()
     products.value = []
-    storefront.value = {
-      businessHoursText: '10:00 - 22:00',
-      mallAnnouncementText: '',
-      pickupWindowHours: null,
-    }
+    storefront.value = normalizeStorefront(null)
     activeCategoryKey.value = 'all'
     keyword.value = ''
     sortMode.value = 'default'
@@ -154,6 +154,7 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
       // 是否需要重新拉取接口由页面层结合 isFresh 决定，职责更清晰。
       products.value = snapshot.products
       storefront.value = snapshot.storefront
+      hasIndependentStorefront = snapshot.hasIndependentStorefront
       activeCategoryKey.value = snapshot.activeCategoryKey
       keyword.value = snapshot.keyword
       sortMode.value = snapshot.sortMode
@@ -164,38 +165,40 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
   }
 
   const setProducts = (nextCatalog: O2oMallProduct[] | O2oMallProductsResult) => {
-    if (Array.isArray(nextCatalog)) {
-      replaceCatalogData(
-        nextCatalog,
-        {
-          businessHoursText: storefront.value.businessHoursText || '10:00 - 22:00',
-          mallAnnouncementText: storefront.value.mallAnnouncementText || '',
-          pickupWindowHours: normalizePickupWindowHours(storefront.value.pickupWindowHours),
-        },
-        { touchUpdatedAt: true, markComplete: true },
-      )
-      return
+    if (!Array.isArray(nextCatalog) && !hasIndependentStorefront && nextCatalog.storefront) {
+      storefront.value = normalizeStorefront(nextCatalog.storefront)
     }
     replaceCatalogData(
-      nextCatalog.list,
-      {
-        businessHoursText: nextCatalog.storefront.businessHoursText || '10:00 - 22:00',
-        mallAnnouncementText: nextCatalog.storefront.mallAnnouncementText || '',
-        pickupWindowHours: normalizePickupWindowHours(nextCatalog.storefront.pickupWindowHours),
-      },
+      Array.isArray(nextCatalog) ? nextCatalog : nextCatalog.list,
       { touchUpdatedAt: true, markComplete: true },
     )
   }
 
-  const setStorefront = (nextStorefront: O2oMallStorefrontConfig) => {
-    const normalizedStorefront = {
-      businessHoursText: nextStorefront.businessHoursText || '10:00 - 22:00',
-      mallAnnouncementText: nextStorefront.mallAnnouncementText || '',
-      pickupWindowHours: normalizePickupWindowHours(nextStorefront.pickupWindowHours),
+  const refreshStorefront = (
+    loadStorefront: () => Promise<O2oMallStorefrontConfig>,
+    mode: 'background' | 'manual' | 'checkout' = 'background',
+  ): Promise<Required<O2oMallStorefrontConfig> | null> => {
+    // 新单一定发起一次私有回源。展示请求可以共用正在进行的读请求。
+    if (mode !== 'checkout' && storefrontRequest) return storefrontRequest
+    if (mode === 'background' && lastStorefrontRefreshAt !== null && Date.now() - lastStorefrontRefreshAt < STOREFRONT_REFRESH_MIN_INTERVAL_MS) {
+      return Promise.resolve(storefront.value)
     }
-    storefront.value = normalizedStorefront
-    // 公告刷新只写独立小快照，避免重新序列化整份商品/SKU 目录。
-    persistClientCatalogStorefrontSnapshot(normalizedStorefront)
+    const request: Promise<Required<O2oMallStorefrontConfig> | null> = Promise.resolve().then(loadStorefront)
+      .then((result) => {
+        if (storefrontRequest !== request || !result?.businessHoursText?.trim()) return null
+        const freshStorefront = normalizeStorefront(result)
+        hasIndependentStorefront = true
+        lastStorefrontRefreshAt = Date.now()
+        storefront.value = freshStorefront
+        persistClientCatalogStorefrontSnapshot(freshStorefront)
+        return freshStorefront
+      })
+      .catch(() => null)
+      .finally(() => {
+        if (storefrontRequest === request) storefrontRequest = null
+      })
+    storefrontRequest = request
+    return request
   }
 
   const applyPreorderSubmission = (submittedItems: Array<{ productId: string | number; skuId?: string | number | null; qty: number }>) => {
@@ -257,7 +260,7 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
       return
     }
     // 局部刷新不应把目录误判为“刚刚完成整量同步”，因此保留原始更新时间戳。
-    replaceCatalogData(nextProducts, storefront.value, { touchUpdatedAt: false })
+    replaceCatalogData(nextProducts, { touchUpdatedAt: false })
   }
 
   const setActiveCategoryKey = (key: string) => {
@@ -297,7 +300,7 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
     isFreshNow,
     initialize,
     setProducts,
-    setStorefront,
+    refreshStorefront,
     applyPreorderSubmission,
     setActiveCategoryKey,
     setKeyword,

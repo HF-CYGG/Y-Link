@@ -12,6 +12,7 @@
 
 import type { O2oMallProduct, O2oMallSku, O2oMallStorefrontConfig } from '@/api/modules/o2o'
 import { calculateDiscountedPriceText, normalizeDiscountRateText } from '@/utils/o2o-price'
+import { DEFAULT_STORE_BUSINESS_HOURS, DEFAULT_STORE_PICKUP_ADDRESS } from '@/utils/store-business-hours'
 import {
   clearLegacyScopedStorageKey,
   getBrowserStorage,
@@ -20,7 +21,8 @@ import {
 
 export interface ClientCatalogSnapshot {
   products: O2oMallProduct[]
-  storefront: O2oMallStorefrontConfig
+  storefront: Required<O2oMallStorefrontConfig>
+  hasIndependentStorefront: boolean
   activeCategoryKey: string
   keyword: string
   sortMode: ClientCatalogSortMode
@@ -206,20 +208,13 @@ export const normalizePickupWindowHours = (value: unknown): number | null => {
   return Number.isInteger(hours) && hours > 0 ? hours : null
 }
 
-const normalizeStorefront = (value: unknown): O2oMallStorefrontConfig => {
-  if (!value || typeof value !== 'object') {
-    return {
-      businessHoursText: '10:00 - 22:00',
-      mallAnnouncementText: '',
-      pickupWindowHours: null,
-    }
-  }
-  const row = value as Record<string, unknown>
-  const businessHoursText = typeof row.businessHoursText === 'string' && row.businessHoursText.trim()
-    ? row.businessHoursText.trim()
-    : '10:00 - 22:00'
+export const normalizeStorefront = (value: unknown): Required<O2oMallStorefrontConfig> => {
+  const row = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  const businessHoursText = typeof row.businessHoursText === 'string' ? row.businessHoursText.trim() : ''
+  const pickupAddress = typeof row.pickupAddress === 'string' ? row.pickupAddress.trim() : ''
   return {
-    businessHoursText,
+    businessHoursText: businessHoursText || DEFAULT_STORE_BUSINESS_HOURS,
+    pickupAddress: pickupAddress || DEFAULT_STORE_PICKUP_ADDRESS,
     mallAnnouncementText: typeof row.mallAnnouncementText === 'string' ? row.mallAnnouncementText.trim() : '',
     pickupWindowHours: normalizePickupWindowHours(row.pickupWindowHours),
   }
@@ -276,14 +271,20 @@ export const readPersistedClientCatalogSnapshot = (
 
     const sourceData = parsedPublicData ?? parsedData ?? parsedLegacy
     const sourceContext = parsedContext ?? parsedLegacy
-    if (!sourceData && !sourceContext) {
+    if (!sourceData && !sourceContext && !parsedPublicStorefront) {
       clearLegacyScopedStorageKey(storage, LEGACY_CLIENT_CATALOG_SNAPSHOT_KEY)
       return null
     }
 
     clearLegacyScopedStorageKey(storage, LEGACY_CLIENT_CATALOG_SNAPSHOT_KEY)
     const products = normalizeProducts(sourceData?.products)
-    const storefront = normalizeStorefront(parsedPublicStorefront?.storefront ?? sourceData?.storefront)
+    const independentStorefront = parsedPublicStorefront?.storefront
+    const hasIndependentStorefront = Boolean(independentStorefront
+      && typeof independentStorefront === 'object'
+      && 'businessHoursText' in independentStorefront
+      && typeof independentStorefront.businessHoursText === 'string'
+      && independentStorefront.businessHoursText.trim())
+    const storefront = normalizeStorefront(hasIndependentStorefront ? independentStorefront : sourceData?.storefront)
     const updatedAt = normalizeUpdatedAt(sourceData?.updatedAt)
 
     // 首次读取旧版全量按账号快照时立即收敛为一份公共轻量数据，避免继续复制长描述。
@@ -304,6 +305,7 @@ export const readPersistedClientCatalogSnapshot = (
     return {
       products,
       storefront,
+      hasIndependentStorefront,
       activeCategoryKey: normalizeActiveCategoryKey(sourceContext?.activeCategoryKey),
       keyword: normalizeKeyword(sourceContext?.keyword),
       sortMode: normalizeSortMode(sourceContext?.sortMode),

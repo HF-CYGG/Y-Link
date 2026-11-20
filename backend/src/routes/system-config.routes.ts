@@ -57,6 +57,7 @@ const updateO2oRuleConfigsSchema = z.object({
   limitQty: z.number().int().min(1).max(999),
   clientPreorderUpdateLimit: z.number().int().min(1).max(999).optional(),
   storeBusinessHoursText: z.string().trim().min(1).max(100),
+  storePickupAddress: z.string().trim().max(100).optional(),
   mallAnnouncementText: z.string().trim().max(500),
 })
 

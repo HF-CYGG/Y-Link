@@ -274,6 +274,17 @@ o2oRouter.get(
   }),
 )
 
+// 新部门单提交前重新读取门店规则，绕过公开展示缓存。
+o2oRouter.get(
+  '/mall/storefront/checkout',
+  requireClientAuth,
+  asyncHandler(async (_req, res) => {
+    res.setHeader('Cache-Control', 'private, no-store')
+    const data = await o2oPreorderService.readCurrentMallStorefrontConfig()
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
 // 提交预订单：必须走客户端独立鉴权，避免与后台管理鉴权体系混用。
 o2oRouter.post(
   '/mall/preorders',

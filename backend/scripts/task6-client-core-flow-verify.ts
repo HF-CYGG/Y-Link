@@ -65,7 +65,6 @@ const [
   { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime },
   { BaseProduct },
   { O2oPreorder },
-  { SystemConfig },
   { SysUser },
   { authService },
   { clientAuthService },
@@ -79,7 +78,6 @@ const [
   import('../src/config/database-bootstrap.js'),
   import('../src/entities/base-product.entity.js'),
   import('../src/entities/o2o-preorder.entity.js'),
-  import('../src/entities/system-config.entity.js'),
   import('../src/entities/sys-user.entity.js'),
   import('../src/services/auth.service.js'),
   import('../src/services/client-auth.service.js'),
@@ -247,6 +245,16 @@ const configureVerificationProviderForTesting = async () => {
     },
     scriptAdminActor,
   )
+}
+
+const setPreorderLimitQtyForTesting = async (limitQty: number): Promise<number> => {
+  const { autoCancelEnabled, autoCancelHours, limitEnabled, storeBusinessHoursText, mallAnnouncementText, limitQty: previous } =
+    await systemConfigService.getO2oRuleConfigs()
+  // 与真实配置更新共用提交后失效；场景切换后，预订必须读取该场景的限购。
+  await systemConfigService.updateO2oRuleConfigs({
+    autoCancelEnabled, autoCancelHours, limitEnabled, storeBusinessHoursText, mallAnnouncementText, limitQty,
+  }, scriptAdminActor)
+  return previous
 }
 
 const registerAndLoginClient = async (seed: number): Promise<ClientAuthContext> => {
@@ -449,10 +457,7 @@ const measurePreorderScenario = async (clientAuth: ClientAuthContext) => {
   const product = await createListedProduct(`preorder-${Date.now()}`, 400)
   const submitSamples: number[] = []
   const orderIds: string[] = []
-  const configRepo = AppDataSource.getRepository(SystemConfig)
-  const limitConfig = await configRepo.findOneByOrFail({ configKey: 'o2o.limit_qty' })
-  const originalLimitQty = limitConfig.configValue
-  await configRepo.update({ id: limitConfig.id }, { configValue: '20' })
+  const originalLimitQty = await setPreorderLimitQtyForTesting(20)
 
   try {
     for (let index = 0; index < 5; index += 1) {
@@ -469,7 +474,7 @@ const measurePreorderScenario = async (clientAuth: ClientAuthContext) => {
       assert.equal(detail.order.status, 'pending')
     }
   } finally {
-    await configRepo.update({ id: limitConfig.id }, { configValue: originalLimitQty })
+    await setPreorderLimitQtyForTesting(originalLimitQty)
   }
 
   const refreshedProduct = await AppDataSource.getRepository(BaseProduct).findOneByOrFail({ id: product.id })
@@ -733,10 +738,7 @@ const writeReport = (status: 'passed' | 'failed', errorMessage: string | null = 
 const main = async () => {
   await ensureReady()
   await configureVerificationProviderForTesting()
-  const configRepo = AppDataSource.getRepository(SystemConfig)
-  const limitConfig = await configRepo.findOneByOrFail({ configKey: 'o2o.limit_qty' })
-  const originalLimitQty = limitConfig.configValue
-  await configRepo.update({ id: limitConfig.id }, { configValue: '999' })
+  const originalLimitQty = await setPreorderLimitQtyForTesting(999)
   try {
     const clientAuth = await measureRegistrationScenario()
     await measureMallScenario()
@@ -744,7 +746,7 @@ const main = async () => {
     await measureOrderQueryScenario(clientAuth)
     await measureOrderEditScenario(clientAuth)
   } finally {
-    await configRepo.update({ id: limitConfig.id }, { configValue: originalLimitQty })
+    await setPreorderLimitQtyForTesting(originalLimitQty)
   }
 }
 
