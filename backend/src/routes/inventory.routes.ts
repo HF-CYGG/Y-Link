@@ -162,6 +162,12 @@ inventoryRouter.put('/locations/:id', requirePermission('products:manage'), asyn
   ok(res, await inventoryMasterDataService.updateLocation(req.params.id, locationSchema.parse(req.body), authReq.auth, extractRequestMeta(req)))
 }))
 
+inventoryRouter.delete('/locations/:id', requirePermission('products:manage'), asyncHandler(async (req, res) => {
+  const authReq = req as AuthenticatedRequest
+  const id = String(idSchema.parse(req.params.id))
+  ok(res, await inventoryMasterDataService.deleteLocation(id, authReq.auth, extractRequestMeta(req)))
+}))
+
 inventoryRouter.get('/locations/:id/skus', requirePermission('products:manage'), asyncHandler(async (req, res) => {
   ok(res, await inventoryMasterDataService.listLocationSkus(req.params.id, locationSkuQuerySchema.parse(req.query)))
 }))

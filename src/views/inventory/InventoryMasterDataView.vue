@@ -4,19 +4,21 @@
  * 文件职责：维护商品分类（两位编码，用于 WC SKU 编码）与库位（如 A-01-01）两类库存主数据。
  * 实现逻辑：
  * - 页签、刷新和新增集中在同一列表工作区，桌面表格与手机数据卡复用同一组数据；两类主数据共用编辑弹窗；
- * - 主数据只停用不删除，库位可直接管理当前 SKU 的默认库位关联；已关联商品的分类编码输入框直接禁用；
- * - 无 products:manage 权限时只读，不渲染新增、编辑与启停入口。
+ * - 分类只停用不删除，库位可管理关联规格或删除无引用库位；已关联商品的分类编码输入框直接禁用；
+ * - 无 products:manage 权限时只读，不渲染新增、编辑、启停与删除入口。
  * 维护说明：
  * - 分类编码一经被 SKU 编码使用就不能再改，服务端同样会拦截，前端禁用只是体验优化；
  * - 保存失败必须弹出服务端原因（例如编码重复），不能静默关闭弹窗。
  */
 
 import { computed, onMounted, reactive, ref } from 'vue'
+import { ElMessageBox } from 'element-plus'
 import { useDataChangeRefresh } from '@/composables/useDataChangeRefresh'
 import { BizCrudDialogShell, BizResponsiveDataCollectionShell, PageContainer, PassiveNumberInput, PassiveSegmentedTabs } from '@/components/common'
 import {
   createCategory,
   createLocation,
+  deleteLocation,
   getCategories,
   getLocations,
   updateCategory,
@@ -42,6 +44,7 @@ const tabs = [
 const loading = ref(false)
 const categories = ref<CategoryRecord[]>([])
 const locations = ref<LocationRecord[]>([])
+const deletingLocationId = ref<string | null>(null)
 const skuDialogVisible = ref(false)
 const managingLocation = ref<LocationRecord | null>(null)
 
@@ -172,6 +175,27 @@ const toggleLocation = async (row: LocationRecord) => {
   }
 }
 
+const handleDeleteLocation = async (row: LocationRecord) => {
+  if (deletingLocationId.value || row.skuCount > 0) return
+  deletingLocationId.value = row.id
+  try {
+    try {
+      await ElMessageBox.confirm(`确定删除库位「${row.locationCode}」？删除后无法恢复。`, '删除库位', {
+        type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger',
+      })
+    } catch {
+      return
+    }
+    await deleteLocation(row.id)
+    showAppSuccess('库位已删除')
+    await loadData()
+  } catch (error) {
+    showAppError(error, '删除库位失败')
+  } finally {
+    deletingLocationId.value = null
+  }
+}
+
 // 分类、库位也可在产品中心等页面维护，切回时若有变更则重新加载。
 useDataChangeRefresh(['products'], loadData)
 
@@ -248,13 +272,16 @@ onMounted(loadData)
                 <el-tag :type="row.isActive ? 'success' : 'info'" size="small">{{ row.isActive ? '启用' : '停用' }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column v-if="canManage" label="操作" width="220" fixed="right">
+            <el-table-column v-if="canManage" label="操作" width="260" fixed="right">
               <template #default="{ row }">
                 <el-button link type="primary" @click="openManageSkus(row)">管理规格</el-button>
                 <el-button link type="primary" @click="openEditLocation(row)">编辑</el-button>
                 <el-button link :type="row.isActive ? 'warning' : 'success'" @click="toggleLocation(row)">
                   {{ row.isActive ? '停用' : '启用' }}
                 </el-button>
+                <span :title="row.skuCount > 0 ? '有关联规格，不能删除' : ''">
+                  <el-button link type="danger" :loading="deletingLocationId === row.id" :disabled="row.skuCount > 0 || !!deletingLocationId" @click="handleDeleteLocation(row)">删除</el-button>
+                </span>
               </template>
             </el-table-column>
           </el-table>
@@ -293,6 +320,9 @@ onMounted(loadData)
               <el-button type="primary" plain class="!ml-0 w-full" @click="openManageSkus(item)">管理规格</el-button>
               <el-button class="!ml-0 flex-1" @click="openEditLocation(item)">编辑</el-button>
               <el-button class="!ml-0 flex-1" :type="item.isActive ? 'warning' : 'success'" plain @click="toggleLocation(item)">{{ item.isActive ? '停用' : '启用' }}</el-button>
+              <span class="w-full" :title="item.skuCount > 0 ? '有关联规格，不能删除' : ''">
+                <el-button class="w-full" type="danger" plain :loading="deletingLocationId === item.id" :disabled="item.skuCount > 0 || !!deletingLocationId" @click="handleDeleteLocation(item)">删除库位</el-button>
+              </span>
             </div>
           </article>
         </template>

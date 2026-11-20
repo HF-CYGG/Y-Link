@@ -31,6 +31,13 @@ import { auditService } from './audit.service.js'
 import { applyInventoryDeltas, loadLockedSkuTargets } from './inventory-ledger.service.js'
 import { acquireSequenceMutex, allocateStocktakeNo } from './inventory-sequence.service.js'
 import { loadSkuLocationDistributions, readSkuLocationQty } from './sku-location-stock.service.js'
+import {
+  isCanonicalStocktakeLocationId,
+  isInStocktakeLocationIdRange,
+  normalizeStocktakeLocationId,
+  readStocktakeLocationIds,
+  STOCKTAKE_SCOPE_MUTEX_KEY,
+} from './stocktake-scope.js'
 import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
 import { buildSqlLikeContains } from '../utils/sql-like.js'
 
@@ -38,8 +45,6 @@ export const STOCKTAKE_REF_TYPE = 'inv_stocktake'
 const MAX_STOCKTAKE_ITEMS = 5000
 const MAX_COUNT_QTY = 999999
 const OPEN_STATUSES = ['counting', 'reviewing']
-/** 盘点范围互斥：建单与追加范围外规格都要先拿这把锁，再检查“同一 SKU 不能进两张未完成盘点单”。 */
-const STOCKTAKE_SCOPE_MUTEX_KEY = 'inv_stocktake.scope_mutex'
 
 export type StocktakeStatus = 'counting' | 'reviewing' | 'completed' | 'cancelled'
 export type StocktakeScopeType = 'all' | 'category' | 'location' | 'sku'
@@ -352,8 +357,8 @@ export class StocktakeService {
     requestedLocationId: string | number | null | undefined,
   ): Promise<string> {
     if (stocktake.scopeType !== 'location') return WHOLE_SKU_SCOPE
-    const scopeLocationIds = this.readScopeLocationIds(stocktake)
-    const requested = normalizeId(requestedLocationId)
+    const scopeLocationIds = readStocktakeLocationIds(stocktake.scopeJson)
+    const requested = normalizeStocktakeLocationId(normalizeId(requestedLocationId))
     if (requested) {
       if (!scopeLocationIds.includes(requested)) throw new BizError('所选库位不在本盘点单的盘点范围内', 400)
       return requested
@@ -374,16 +379,7 @@ export class StocktakeService {
   }
 
   private readScopeLocationIdsOf(stocktake: InvStocktake): string[] {
-    return stocktake.scopeType === 'location' ? this.readScopeLocationIds(stocktake) : []
-  }
-
-  private readScopeLocationIds(stocktake: InvStocktake): string[] {
-    try {
-      const parsed = JSON.parse(stocktake.scopeJson || '{}') as { locationIds?: Array<string | number> }
-      return uniqueIds(parsed.locationIds)
-    } catch {
-      return []
-    }
+    return stocktake.scopeType === 'location' ? readStocktakeLocationIds(stocktake.scopeJson) : []
   }
 
   /** 明细展示需要的库位：按库位盘点取该行库位，按总量盘点取规格主库位。 */
@@ -680,10 +676,25 @@ export class StocktakeService {
       }
     }
     if (input.scopeType === 'location') {
-      const locationIds = uniqueIds(input.locationIds)
-      if (!locationIds.length) throw new BizError('请选择要盘点的库位', 400)
-      const locations = await manager.getRepository(BaseStorageLocation).find({ where: { id: In(locationIds) } })
-      if (locations.length !== locationIds.length) throw new BizError('存在无效的库位', 400)
+      const requestedIds = [...new Set(uniqueIds(input.locationIds).map(normalizeStocktakeLocationId))]
+      if (!requestedIds.length) throw new BizError('请选择要盘点的库位', 400)
+      const mysql = manager.connection.options.type === 'mysql'
+      const idType = mysql ? 'UNSIGNED' : 'INTEGER'
+      const textType = mysql ? 'CHAR' : 'TEXT'
+      const predicates = requestedIds.map((id, index) => {
+        if (!isCanonicalStocktakeLocationId(id)) return `:scopeId${index}`
+        if (!isInStocktakeLocationIdRange(id, mysql)) throw new BizError('存在无效的库位', 400)
+        return `CAST(:scopeId${index} AS ${idType})`
+      })
+      const locationQuery = manager.getRepository(BaseStorageLocation).createQueryBuilder('location')
+        .select(`CAST(location.id AS ${textType})`, 'id')
+        .addSelect('location.locationCode', 'locationCode')
+        .where(`location.id IN (${predicates.join(', ')})`, Object.fromEntries(requestedIds.map((id, index) => [`scopeId${index}`, id])))
+      // 拿到范围互斥后必须当前读，否则 MySQL RR 会沿用等锁前建立的快照，看见已删除库位。
+      if (mysql) locationQuery.setLock('pessimistic_read')
+      const locations = await locationQuery.getRawMany<{ id: string; locationCode: string }>()
+      const locationIds = locations.map((location) => location.id)
+      if (locationIds.length !== requestedIds.length) throw new BizError('存在无效的库位', 400)
       // 库位内的规格 = 主库位在该库位的规格 + 在该库位拆有件数的规格，每个“规格 × 库位”一行。
       const stockedSubQuery = qb.subQuery()
         .select('1')

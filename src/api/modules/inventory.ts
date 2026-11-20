@@ -482,6 +482,8 @@ export const createLocation = (data: LocationPayload) =>
   request<LocationRecord>({ method: 'POST', url: '/inventory/locations', data })
 export const updateLocation = (id: string, data: LocationPayload) =>
   request<LocationRecord>({ method: 'PUT', url: `/inventory/locations/${id}`, data })
+export const deleteLocation = (id: string) =>
+  request<{ id: string }>({ method: 'DELETE', url: `/inventory/locations/${id}` })
 export const getLocationSkus = (
   id: string,
   params: {

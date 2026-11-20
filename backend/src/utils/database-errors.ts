@@ -78,6 +78,18 @@ export function isUniqueConstraintError(error: unknown, matcher?: UniqueConstrai
   return false
 }
 
+/** 判断删除父记录时是否被现存外键引用阻止，供服务层按业务关联返回 409。 */
+export function isForeignKeyReferenceError(error: unknown): boolean {
+  if (!isQueryFailedError(error)) return false
+  const driverError = getDriverError(error)
+  return driverError.code === 'ER_ROW_IS_REFERENCED_2'
+    || driverError.code === 'ER_ROW_IS_REFERENCED'
+    || driverError.errno === 1451
+    || driverError.errno === 1217
+    || driverError.code === 'SQLITE_CONSTRAINT_FOREIGNKEY'
+    || (driverError.code === 'SQLITE_CONSTRAINT' && /FOREIGN KEY constraint failed/i.test(driverError.message ?? ''))
+}
+
 export function isRetryableSqliteLockError(error: unknown): boolean {
   if (!isQueryFailedError(error)) {
     return false
