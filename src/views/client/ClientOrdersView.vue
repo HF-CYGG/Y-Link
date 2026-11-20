@@ -33,7 +33,6 @@ let stopTrackingOrderReturn: (() => void) | undefined
 
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRouter, type RouteLocationNormalized } from 'vue-router'
-import type { O2oMyOrderSearchMode } from '@ylink/shared-types'
 import { ElMessageBox } from 'element-plus'
 import { RefreshRight } from '@element-plus/icons-vue'
 import {
@@ -61,7 +60,7 @@ import {
   subscribeClientOrderRefresh,
 } from '@/utils/client-order-refresh'
 import { buildClientOrderSummaryFromDetail, needsKingdeeRegistration } from '@/utils/client-order-summary'
-import { normalizeClientOrderKeyword, normalizeClientOrderSearchMode, type PersistedO2oPreorderSummary } from '@/utils/client-order-storage'
+import { normalizeClientOrderKeyword, type PersistedO2oPreorderSummary } from '@/utils/client-order-storage'
 import { shouldReduceClientMotion } from '@/utils/client-motion'
 import { formatDateTime } from '@/utils/date-time'
 import { normalizeRequestError } from '@/utils/error'
@@ -73,16 +72,6 @@ const ORDER_TYPE_LABEL_MAP = {
   department: '部门订',
   walkin: '散客',
 } as const
-const ORDER_SEARCH_MODES = [
-  { value: 'contains', label: '模糊' },
-  { value: 'prefix', label: '前缀' },
-  { value: 'exact', label: '精确' },
-]
-const ORDER_SEARCH_HINTS: Record<O2oMyOrderSearchMode, string> = {
-  contains: '多个词用空格分隔',
-  prefix: '匹配字段开头',
-  exact: '匹配完整字段',
-}
 type LatestReturnRequestMeta = (typeof RETURN_REQUEST_STATUS_META)[keyof typeof RETURN_REQUEST_STATUS_META]
 type ClientOrderStatusReportConfig = ReturnType<typeof getClientOrderStatusReportConfig>
 
@@ -150,6 +139,7 @@ const clientAuthStore = useClientAuthStore(pinia)
 const clientOrderStore = useClientOrderStore(pinia)
 const { runLatest } = useStableRequest()
 clientOrderStore.initialize(clientAuthStore.currentUser?.id)
+clientOrderStore.setSearch(clientOrderStore.keyword, 'contains')
 let disposeClientOrderRefresh: () => void = () => {}
 let refreshMarkCleanupTimer: ReturnType<typeof globalThis.setTimeout> | null = null
 let autoRefreshTimer: ReturnType<typeof globalThis.setInterval> | null = null
@@ -169,7 +159,6 @@ const total = computed(() => clientOrderStore.total)
 const hasMoreOrders = computed(() => clientOrderStore.hasCurrentResults && orders.value.length < total.value)
 const keywordInput = ref(clientOrderStore.keyword)
 const effectiveKeyword = computed(() => clientOrderStore.keyword)
-const searchMode = computed(() => clientOrderStore.searchMode)
 const keywordDebounceTimer = ref<ReturnType<typeof globalThis.setTimeout> | null>(null)
 const keywordDebouncing = ref(false)
 const activeStatus = computed({
@@ -266,14 +255,14 @@ const stopKeywordDebounce = () => {
   keywordDebouncing.value = false
 }
 
-const applySearch = (nextKeyword: string, nextMode: O2oMyOrderSearchMode) => {
+const applySearch = (nextKeyword: string) => {
   stopKeywordDebounce()
   const previousQuery = clientOrderStore.queryKey
-  clientOrderStore.setSearch(nextKeyword, nextMode)
+  clientOrderStore.setSearch(nextKeyword, 'contains')
   if (clientOrderStore.queryKey !== previousQuery) void loadOrders(true)
 }
 
-// 打字只更新草稿；模式切换时提交同一份可见输入，避免先查旧词再查新词。
+// 打字只更新草稿，防抖后提交关键词。
 watch(
   () => keywordInput.value,
   (nextKeyword) => {
@@ -281,13 +270,10 @@ watch(
     if (normalizeClientOrderKeyword(nextKeyword) === effectiveKeyword.value) return
     keywordDebouncing.value = true
     keywordDebounceTimer.value = globalThis.setTimeout(() => {
-      applySearch(nextKeyword, searchMode.value)
+      applySearch(nextKeyword)
     }, KEYWORD_DEBOUNCE_MS)
   },
 )
-
-const handleSearchModeChange = (value: unknown) =>
-  applySearch(keywordInput.value, normalizeClientOrderSearchMode(value))
 
 watch(() => clientOrderStore.queryKey, () => {
   listQueryGeneration += 1
@@ -329,7 +315,7 @@ const handleStatusChange = (value: 'all' | O2oPreorderSummary['status']) => {
     return
   }
   stopKeywordDebounce()
-  clientOrderStore.setSearch(keywordInput.value, searchMode.value)
+  clientOrderStore.setSearch(keywordInput.value, 'contains')
   activeStatus.value = value
   void loadOrders(true)
 }
@@ -565,13 +551,14 @@ const buildListQuery = (targetPage: number): O2oMyOrderListQuery => {
     pageSize: clientOrderStore.pageSize || DEFAULT_ORDER_PAGE_SIZE,
     status: activeStatus.value === 'all' ? undefined : activeStatus.value,
     keyword: effectiveKeyword.value || undefined,
-    searchMode: searchMode.value,
+    searchMode: 'contains',
   }
 }
 
 const syncStoreWithCurrentUser = () => {
   stopKeywordDebounce()
   clientOrderStore.initialize(clientAuthStore.currentUser?.id)
+  clientOrderStore.setSearch(clientOrderStore.keyword, 'contains')
   keywordInput.value = clientOrderStore.keyword
 }
 
@@ -816,7 +803,7 @@ const activatePageRuntime = () => {
   startClientOrderRefreshSubscription()
   scheduleAutoRefresh()
   if (hasActivatedOnce && globalThis.document?.visibilityState !== 'hidden') {
-    if (normalizeClientOrderKeyword(keywordInput.value) !== effectiveKeyword.value) applySearch(keywordInput.value, searchMode.value)
+    if (normalizeClientOrderKeyword(keywordInput.value) !== effectiveKeyword.value) applySearch(keywordInput.value)
     else void triggerSilentOrderRefresh()
   }
   hasActivatedOnce = true
@@ -945,7 +932,7 @@ const loadOrders = async (force = false, options?: { append?: boolean; silent?: 
 
 const clearKeyword = () => {
   keywordInput.value = ''
-  applySearch('', searchMode.value)
+  applySearch('')
 }
 
 // 详细注释：执行撤回订单，二次确认后请求撤回，并更新 Store 中的订单状态。
@@ -1079,16 +1066,6 @@ onBeforeUnmount(() => {
         >
           {{ tab.label }}
         </button>
-      </div>
-      <div class="mt-3 flex flex-wrap items-center gap-2">
-        <el-segmented
-          :model-value="searchMode"
-          :options="ORDER_SEARCH_MODES"
-          size="small"
-          aria-label="订单搜索模式"
-          @change="handleSearchModeChange"
-        />
-        <span class="text-xs text-slate-500 dark:text-slate-400">{{ ORDER_SEARCH_HINTS[searchMode] }}</span>
       </div>
       <div class="mt-2 flex items-center gap-2">
         <input
