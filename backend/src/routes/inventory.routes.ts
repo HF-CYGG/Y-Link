@@ -15,6 +15,7 @@ import { inventoryQueryService } from '../services/inventory-query.service.js'
 import { stocktakeService } from '../services/stocktake.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
+import { assertPermanentDeletePasswordForRequest, createPermanentDeleteLimiter } from '../utils/permanent-delete-guard.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { dataExportLeasePool, runExportHoldingLease } from '../utils/export-lease-pool.js'
 import { auditService } from '../services/audit.service.js'
@@ -35,6 +36,20 @@ const locationSchema = z.object({
   locationName: optionalText(64),
   remark: optionalText(255),
   isActive: z.boolean().optional(),
+})
+
+const deleteLocationSchema = z.object({
+  permanentDeletePassword: z.string().optional(),
+})
+
+const LOCATION_DELETE_AUDIT_TARGET = {
+  actionType: 'product.location.delete',
+  actionLabel: '删除库位',
+  targetType: 'base_storage_location',
+} as const
+const locationDeleteLimiter = createPermanentDeleteLimiter({
+  ...LOCATION_DELETE_AUDIT_TARGET,
+  storePrefix: 'express-inventory-location-delete',
 })
 
 const locationSkuQuerySchema = z.object({
@@ -162,11 +177,18 @@ inventoryRouter.put('/locations/:id', requirePermission('products:manage'), asyn
   ok(res, await inventoryMasterDataService.updateLocation(req.params.id, locationSchema.parse(req.body), authReq.auth, extractRequestMeta(req)))
 }))
 
-inventoryRouter.delete('/locations/:id', requirePermission('products:manage'), asyncHandler(async (req, res) => {
-  const authReq = req as AuthenticatedRequest
-  const id = String(idSchema.parse(req.params.id))
-  ok(res, await inventoryMasterDataService.deleteLocation(id, authReq.auth, extractRequestMeta(req)))
-}))
+inventoryRouter.delete(
+  '/locations/:id',
+  requirePermission('products:manage'),
+  locationDeleteLimiter,
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const id = String(idSchema.parse(req.params.id))
+    const { permanentDeletePassword } = deleteLocationSchema.parse(req.body ?? {})
+    await assertPermanentDeletePasswordForRequest(req, permanentDeletePassword, LOCATION_DELETE_AUDIT_TARGET)
+    ok(res, await inventoryMasterDataService.deleteLocation(id, authReq.auth, extractRequestMeta(req)))
+  }),
+)
 
 inventoryRouter.get('/locations/:id/skus', requirePermission('products:manage'), asyncHandler(async (req, res) => {
   ok(res, await inventoryMasterDataService.listLocationSkus(req.params.id, locationSkuQuerySchema.parse(req.query)))

@@ -4,7 +4,7 @@
  * 文件职责：维护商品分类（两位编码，用于 WC SKU 编码）与库位（如 A-01-01）两类库存主数据。
  * 实现逻辑：
  * - 页签、刷新和新增集中在同一列表工作区，桌面表格与手机数据卡复用同一组数据；两类主数据共用编辑弹窗；
- * - 分类只停用不删除，库位可管理关联规格或删除无引用库位；已关联商品的分类编码输入框直接禁用；
+ * - 分类可停用，库位可管理关联规格或输入永久删除密码后删除无引用库位；已关联商品的分类编码输入框直接禁用；
  * - 无 products:manage 权限时只读，不渲染新增、编辑、启停与删除入口。
  * 维护说明：
  * - 分类编码一经被 SKU 编码使用就不能再改，服务端同样会拦截，前端禁用只是体验优化；
@@ -179,17 +179,21 @@ const handleDeleteLocation = async (row: LocationRecord) => {
   if (deletingLocationId.value || row.skuCount > 0) return
   deletingLocationId.value = row.id
   try {
-    try {
-      await ElMessageBox.confirm(`确定删除库位「${row.locationCode}」？删除后无法恢复。`, '删除库位', {
-        type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger',
-      })
-    } catch {
-      return
-    }
-    await deleteLocation(row.id)
+    const { value } = await ElMessageBox.prompt(`删除库位「${row.locationCode}」后无法恢复。请输入永久删除密码。`, '删除库位', {
+      type: 'warning',
+      inputType: 'password',
+      inputPlaceholder: '请输入永久删除密码',
+      inputValidator: (value) => value?.trim() ? true : '请输入永久删除密码',
+      closeOnClickModal: false,
+      confirmButtonText: '永久删除',
+      cancelButtonText: '取消',
+      confirmButtonClass: 'el-button--danger',
+    })
+    await deleteLocation(row.id, value.trim())
     showAppSuccess('库位已删除')
     await loadData()
   } catch (error) {
+    if (error === 'cancel' || error === 'close') return
     showAppError(error, '删除库位失败')
   } finally {
     deletingLocationId.value = null
