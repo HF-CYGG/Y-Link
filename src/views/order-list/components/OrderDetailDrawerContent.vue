@@ -10,7 +10,7 @@ import { formatOrderRecipient } from '../order-recipient-display'
  * 4. 金额、库存模式与订单类型在组件内统一格式化，确保表格端与移动端展示口径一致。
  * 维护说明：revision 请求使用订单 ID 与版本号抑制过期响应，不得用当前商品数据覆盖历史快照；合规草稿由父层拥有。
  */
-import { formatOrderKingdeeStatus, KINGDEE_STATUS_LABELS } from '@/utils/kingdee-status'
+import { getOrderKingdeeStatusLines, KINGDEE_STATUS_LABELS } from '@/utils/kingdee-status'
 
 
 
@@ -206,7 +206,7 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
             @update:model-value="emit('update:isSystemApplied', $event)"
           />
           <span v-else class="text-sm font-medium text-slate-700 dark:text-slate-200">
-            {{ formatOrderKingdeeStatus(order) }}
+            <span v-for="(line, index) in getOrderKingdeeStatusLines(order)" :key="index" class="block break-all">{{ line }}</span>
           </span>
           <p v-if="canEditStandaloneComplianceFlags && !canEditSystemApplied" class="mt-1 text-xs text-slate-500 dark:text-slate-400">来源预订单未唯一确认，系统申请仅供查看。</p>
         </div>
@@ -254,7 +254,7 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
         {{ order.orderType === 'department' ? (order.hasCustomerOrder ? '已带单' : '未带单') : '不适用' }}
       </el-descriptions-item>
       <el-descriptions-item label="金蝶状态">
-        {{ formatOrderKingdeeStatus(order) }}
+        <span v-for="(line, index) in getOrderKingdeeStatusLines(order)" :key="index" class="block break-all">{{ line }}</span>
       </el-descriptions-item>
       <el-descriptions-item v-if="!isMultiSourceOrder" label="金蝶单据编号" :span="isPhone ? 1 : 2">
         <template v-if="order.orderType === 'walkin' || singleRegistration?.kingdeeStatus === null">不适用</template>

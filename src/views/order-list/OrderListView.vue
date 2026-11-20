@@ -18,7 +18,7 @@ import { formatOrderRecipient } from './order-recipient-display'
  * 6. 清理早期设备调试文案，避免把“手机卡片 / 平板卡片”等开发态信息暴露给最终用户。
  * 7. 内容编辑只在服务端判定可编辑且当前用户具有 `orders:edit` 时开放，成功后同步刷新列表与详情。
  */
-import { formatOrderKingdeeStatus } from '@/utils/kingdee-status'
+import { getOrderKingdeeStatusLines } from '@/utils/kingdee-status'
 
 
 import dayjs from 'dayjs'
@@ -734,8 +734,7 @@ const handleSaveComplianceFlags = async () => {
                       <span class="order-list-identity__number" :title="row.businessNo">{{ row.businessNo }}</span>
                       <el-tag v-if="isParentOrder(row) || isSourceOrder(row)" size="small" :type="isSourceOrder(row) ? 'info' : 'success'">{{ isSourceOrder(row) ? '来源子单' : '合并父单' }}</el-tag>
                     </div>
-                    <div v-if="isParentOrder(row)" class="order-list-identity__summary">本单 + {{ row.merge.children.length }} 张来源单 · 数量和金额为汇总</div>
-                    <div v-else-if="isSourceOrder(row)" class="order-list-identity__summary">归属父单 {{ row.merge.parent?.businessNo || '-' }} · 数量和金额为来源口径</div>
+                    <div v-if="isParentOrder(row)" class="order-list-identity__summary">+ {{ row.merge.children.length }} 张子单</div>
                     <el-tag v-if="row.matchedIdentifierType && row.matchedIdentifierValue && (row.matchedIdentifierType !== 'systemNo' || isAdmin)" size="small" effect="plain" type="warning">
                       命中{{ row.matchedIdentifierType === 'businessNo' ? '业务单号' : row.matchedIdentifierType === 'systemNo' ? '系统编号' : '预订单号' }}：{{ row.matchedIdentifierValue }}
                     </el-tag>
@@ -755,11 +754,13 @@ const handleSaveComplianceFlags = async () => {
                   </el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="金蝶状态" width="96" align="center">
+              <el-table-column label="金蝶状态" min-width="200" align="center">
                 <template #default="{ row }">
-                  <el-tag :type="row.orderType === 'department' && row.isSystemApplied ? 'warning' : 'info'" effect="light">
-                    {{ formatOrderKingdeeStatus(row) }}
-                  </el-tag>
+                  <div class="flex flex-col items-center gap-1">
+                    <el-tag v-for="(line, index) in getOrderKingdeeStatusLines(row)" :key="index" :type="getOrderKingdeeStatusLines(row).length === 1 && row.orderType === 'department' && row.isSystemApplied ? 'warning' : 'info'" effect="light" class="!h-auto max-w-full whitespace-normal break-all">
+                      {{ line }}
+                    </el-tag>
+                  </div>
                 </template>
               </el-table-column>
               <el-table-column label="出单人" min-width="140" show-overflow-tooltip>

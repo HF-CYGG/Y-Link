@@ -1921,7 +1921,7 @@ onActivated(() => {
       card-container-class="pb-4 xl:grid-cols-3"
     >
       <template #table>
-        <el-table native-scrollbar
+        <el-table
           ref="productTableRef"
           :data="displayProducts"
           class="h-full w-full"

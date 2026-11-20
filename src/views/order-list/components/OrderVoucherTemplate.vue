@@ -27,11 +27,13 @@ const props = withDefaults(defineProps<{
   pages?: VoucherRenderRow[][]
   pageFillerCounts?: number[]
   measurePages?: boolean
+  showProductSubtotals?: boolean
 }>(), {
   editableFields: () => ({ departmentOperator: '', kingdeeVoucherNo: '', receiverSignature: '', completionDate: '' }),
   copyLabels: () => ['第一联（部门留存）', '第二联（书院留存）'],
   orientation: 'landscape',
   measurePages: true,
+  showProductSubtotals: true,
 })
 const emit = defineEmits<{ 'pages-change': [pages: VoucherRenderRow[][], fillerCounts: number[]] }>()
 const resolvedEditableFields = computed(() => props.editableFields)
@@ -41,7 +43,10 @@ const voucherKingdeeNo = computed(() => !isO2oVoucher.value ? props.editableFiel
   : props.order.merge.role === 'parent' ? '各来源编号见明细' : props.order.sourcePreorderRegistrations?.[0]?.kingdeeVoucherNo || '未登记')
 const registrationForRow = (row: VoucherRenderRow) => registrationMap.value.get(row.detail?.sourceOrderId || props.order.id)
 const groups = computed(() => aggregateOrderVoucherItems(props.order.items))
-const rows = computed(() => buildVoucherRows(groups.value))
+const rows = computed(() => {
+  const productRows = buildVoucherRows(groups.value)
+  return props.showProductSubtotals ? productRows : productRows.filter((row) => row.kind === 'detail')
+})
 const ownPages = ref<VoucherRenderRow[][]>([[]])
 const renderedPages = computed(() => props.pages ?? ownPages.value)
 const fillerCounts = ref<number[]>([])
@@ -111,7 +116,7 @@ const measureAndPaginate = async () => {
   emit('pages-change', pages, fillerCounts.value)
 }
 
-watch(() => [props.order, props.orientation, props.editableFields], measureAndPaginate, { immediate: true, deep: true, flush: 'post' })
+watch(() => [props.order, props.orientation, props.editableFields, props.showProductSubtotals], measureAndPaginate, { immediate: true, deep: true, flush: 'post' })
 onBeforeUnmount(() => { measurementRevision += 1 })
 </script>
 
