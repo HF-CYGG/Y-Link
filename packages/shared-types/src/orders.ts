@@ -170,9 +170,12 @@ export interface O2oPreorderSummary extends KingdeeRegistration {
   createdAt: string
 }
 
+export type O2oMyOrderSearchMode = 'contains' | 'prefix' | 'exact'
+
 export interface O2oMyOrderListQuery extends PaginationQueryInput {
   status?: O2oOrderStatus
   keyword?: string
+  searchMode?: O2oMyOrderSearchMode
 }
 
 export type O2oMyOrderListResult = PaginationListResult<O2oPreorderSummary>

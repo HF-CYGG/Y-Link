@@ -41,7 +41,7 @@ import { O2oReturnRequestItem } from '../entities/o2o-return-request-item.entity
 import type { AuthUserContext } from '../types/auth.js'
 import type { ClientAuthContext } from '../types/client-auth.js'
 import { BizError } from '../utils/errors.js'
-import { buildSqlLikeContains, buildSqlLikePrefix } from '../utils/sql-like.js'
+import { buildSqlLikeContains, buildSqlLikePrefix, escapeSqlLikePattern } from '../utils/sql-like.js'
 import {
   isRetryableMysqlTransactionError,
   isUniqueConstraintError,
@@ -325,9 +325,30 @@ const isDatabaseFlagEnabled = (value: unknown): boolean => {
   return value !== false && value !== 0 && value !== '0' && value !== 'false'
 }
 
+export const CLIENT_ORDER_SEARCH_MODES = ['contains', 'prefix', 'exact'] as const
+type ClientOrderSearchMode = (typeof CLIENT_ORDER_SEARCH_MODES)[number]
+type ClientOrderIdentifierSearch = { mode: ClientOrderSearchMode; terms: readonly string[] }
+
+const CLIENT_ORDER_TYPE_SEARCH_TERMS = {
+  department: ['部门订', '部门', 'department'],
+  walkin: ['散客', 'walkin', 'walk in'],
+} as const
+
+const buildClientOrderSearchPattern = (keyword: string, mode: ClientOrderSearchMode) => {
+  if (mode === 'exact') return escapeSqlLikePattern(keyword)
+  return mode === 'prefix' ? buildSqlLikePrefix(keyword) : buildSqlLikeContains(keyword)
+}
+
+const matchesClientOrderSearchTerm = (value: string, term: string, mode: ClientOrderSearchMode) => {
+  const text = value.trim().toLowerCase()
+  if (mode === 'exact') return text === term
+  return mode === 'prefix' ? text.startsWith(term) : text.includes(term)
+}
+
 export interface MyOrderListQuery {
   status?: 'pending' | 'verified' | 'cancelled'
   keyword?: string
+  searchMode?: ClientOrderSearchMode
   page: number
   pageSize: number
 }
@@ -515,8 +536,6 @@ export const O2O_RETURN_REASON_MAX_LENGTH = 500
 export const O2O_RETURN_REJECT_REASON_MAX_LENGTH = 500
 export const O2O_PICKUP_CONTACT_MAX_LENGTH = 32
 
-const LIKE_ESCAPE_CHAR = String.raw`\\`
-const LIKE_SPECIAL_CHAR_PATTERN = /[%_\\]/g
 const O2O_TIMEOUT_RECYCLE_RECENT_WINDOW_MS = 15 * 1000
 const O2O_TIMEOUT_BACKGROUND_RECYCLE_INTERVAL_MS = 60 * 1000
 const O2O_TIMEOUT_RECYCLE_BATCH_SIZE = 20
@@ -1830,14 +1849,6 @@ class O2oPreorderService {
     return parsed
   }
 
-  /**
-   * 对 LIKE 条件中的关键字做转义，避免把用户输入的 % / _ 误解为通配符。
-   * 这里使用 ESCAPE '\'，可同时兼容 MySQL 与 SQLite。
-   */
-  private escapeLikeKeyword(value: string) {
-    return value.replaceAll(LIKE_SPECIAL_CHAR_PATTERN, `${LIKE_ESCAPE_CHAR}$&`)
-  }
-
   // 详细注释：客户端订单列表的“归属关键词”允许用户输入中文或英文习惯称呼。
   // 这里统一把关键词映射为订单归属枚举，保证“部门订 / 散客 / department / walkin”等输入都能命中服务端查询。
   private resolveClientOrderTypeByKeyword(keyword: string): O2oClientOrderType | null {
@@ -2531,6 +2542,7 @@ class O2oPreorderService {
       nowMs?: number
       matchedKeyword?: string
       exposeSystemNo?: boolean
+      clientIdentifierSearch?: ClientOrderIdentifierSearch
     },
   ): Promise<O2oPreorderSummaryView[]> {
     if (!orders.length) {
@@ -2550,6 +2562,7 @@ class O2oPreorderService {
         customerOrderNumbers,
         options?.matchedKeyword,
         exposeSystemNo,
+        options?.clientIdentifierSearch,
       )
       return {
       statusReport: this.resolveOrderStatusReport(item, nowMs),
@@ -2593,9 +2606,10 @@ class O2oPreorderService {
     customerOrderNumbers: CustomerOrderIdentifiers | null,
     keyword?: string,
     exposeSystemNo = true,
+    clientSearch?: ClientOrderIdentifierSearch,
   ): Pick<O2oPreorderSummaryView, 'matchedIdentifierType' | 'matchedIdentifierValue'> {
     const normalizedKeyword = keyword?.trim().toLowerCase() ?? ''
-    if (!normalizedKeyword) return { matchedIdentifierType: null, matchedIdentifierValue: null }
+    if (!normalizedKeyword && !clientSearch?.terms.length) return { matchedIdentifierType: null, matchedIdentifierValue: null }
     const candidates = [
       ['preorderNo', preorder.preorderNo],
       ['businessNo', customerOrderNumbers?.businessNo ?? null],
@@ -2603,7 +2617,11 @@ class O2oPreorderService {
       ['businessNo', customerOrderNumbers?.originalBusinessNo ?? null],
       ...(exposeSystemNo ? [['systemNo', customerOrderNumbers?.originalSystemNo ?? null] as const] : []),
     ] as const
-    const matched = candidates.find(([, value]) => value?.toLowerCase().includes(normalizedKeyword))
+    const matched = candidates.find(([, value]) => value && (
+      clientSearch
+        ? clientSearch.terms.some((term) => matchesClientOrderSearchTerm(value, term, clientSearch.mode))
+        : value.toLowerCase().includes(normalizedKeyword)
+    ))
     return matched
       ? { matchedIdentifierType: matched[0], matchedIdentifierValue: matched[1] }
       : { matchedIdentifierType: null, matchedIdentifierValue: null }
@@ -3708,6 +3726,96 @@ class O2oPreorderService {
     return result.detail
   }
 
+  private applyMyOrderKeyword(
+    queryBuilder: SelectQueryBuilder<O2oPreorder>,
+    keyword: string,
+    searchMode?: ClientOrderSearchMode,
+  ): ClientOrderIdentifierSearch {
+    const identifierMode = searchMode ?? 'prefix'
+    const textMode = searchMode ?? 'contains'
+    const words = searchMode === 'contains' ? [...new Set(keyword.split(/\s+/))] : [keyword]
+    const isMysql = AppDataSource.options.type === 'mysql'
+    const lowerCaseCollation = isMysql ? ' COLLATE utf8mb4_bin' : ''
+    const like = (column: string, parameter: string) => {
+      const field = searchMode ? `LOWER(${column})${lowerCaseCollation}` : column
+      // 字段与搜索词都由数据库处理大小写，保留 SQLite 无法折叠的 Unicode 原字。
+      const pattern = searchMode ? `LOWER(:${parameter})` : `:${parameter}`
+      return `${field} LIKE ${pattern} ESCAPE '!'`
+    }
+
+    // 同一来源预订单可见自己的原始业务号和有效父单的业务号，不搜索技术单号。
+    const visibleOutbound = queryBuilder.subQuery().select('1')
+      .from(BizOutboundOrder, 'sourceOrder')
+      .leftJoin(OrderMergeRelation, 'mergeLink', 'mergeLink.sourceOrderId = sourceOrder.id')
+      .leftJoin(BizOutboundOrder, 'parentOrder', 'parentOrder.id = mergeLink.parentOrderId AND parentOrder.isDeleted = :isDeleted')
+      .where("sourceOrder.sourceDocType = 'o2o_preorder' AND sourceOrder.sourceDocId = order.id")
+      .andWhere('sourceOrder.isDeleted = :isDeleted')
+      .andWhere("TRIM(sourceOrder.systemNo) <> ''")
+      .andWhere('(mergeLink.id IS NULL OR parentOrder.id IS NOT NULL)')
+
+    const visibleItem = queryBuilder.subQuery().select('1')
+      .from(O2oPreorderItem, 'searchItem')
+      .leftJoin(BaseProduct, 'searchProduct', 'searchProduct.id = searchItem.productId')
+      .where('searchItem.orderId = order.id')
+    const hasItem = queryBuilder.subQuery().select('1')
+      .from(O2oPreorderItem, 'existingItem')
+      .where('existingItem.orderId = order.id')
+    // 与详情一致，只在无明细且有数量的历史订单上走按预订单编号索引的流水兜底。
+    // MySQL 将数字主键转换成 ASCII 文本，由 ref_id 列决定比较的 Unicode 排序规则。
+    const orderIdText = isMysql ? 'CAST(order.id AS CHAR CHARACTER SET ascii)' : 'CAST(order.id AS CHAR)'
+    const legacyProduct = queryBuilder.subQuery().select('1')
+      .from(InventoryLog, 'holdLog')
+      .innerJoin(BaseProduct, 'heldProduct', 'heldProduct.id = holdLog.productId')
+      .where(`holdLog.refType = 'o2o_preorder' AND holdLog.refId = ${orderIdText} AND holdLog.changeType = 'preorder_hold'`)
+
+    words.forEach((word, index) => {
+      const idPattern = `clientOrderIdPattern${index}`
+      const textPattern = `clientOrderTextPattern${index}`
+      const verifyPattern = `clientOrderVerifyPattern${index}`
+      const compactVerifyPattern = `clientOrderCompactVerifyPattern${index}`
+      const typePattern = `clientOrderTypeValues${index}`
+      const matchingOutbound = visibleOutbound.clone().andWhere(
+        `(${like('TRIM(sourceOrder.businessNo)', idPattern)} OR ${like('TRIM(parentOrder.businessNo)', idPattern)})`,
+      ).getQuery()
+      const matchedTypes = searchMode
+        ? O2O_CLIENT_ORDER_TYPES.filter((type) =>
+          CLIENT_ORDER_TYPE_SEARCH_TERMS[type].some((label) => matchesClientOrderSearchTerm(label, word.toLowerCase(), searchMode)))
+        : [this.resolveClientOrderTypeByKeyword(word)].filter(Boolean)
+      queryBuilder.andWhere(new Brackets((wordQuery) => {
+        wordQuery
+          .where(like('order.preorderNo', idPattern), { [idPattern]: buildClientOrderSearchPattern(word, identifierMode) })
+          .orWhere(like('order.verifyCode', verifyPattern), {
+            [verifyPattern]: buildClientOrderSearchPattern(searchMode ? word : this.normalizeVerifyCode(word), identifierMode),
+          })
+          .orWhere(like('TRIM(order.departmentNameSnapshot)', textPattern), { [textPattern]: buildClientOrderSearchPattern(word, textMode) })
+          .orWhere(like('TRIM(order.staffNoSnapshot)', textPattern))
+          .orWhere(`EXISTS ${matchingOutbound}`)
+          .orWhere(`(order.status = 'pending' AND ${like('TRIM(order.reservedBusinessNo)', idPattern)} AND NOT EXISTS ${visibleOutbound.getQuery()})`)
+        if (matchedTypes.length) {
+          wordQuery.orWhere(`order.clientOrderType IN (:...${typePattern})`, { [typePattern]: matchedTypes })
+        }
+        if (!searchMode) return
+
+        // 核销码可按详情中的分组或无连字符输入，其他符号按字面含义处理。
+        if (/^[a-f\d]+(?:[-\s]+[a-f\d]+)*$/i.test(word)) {
+          wordQuery.orWhere(like("REPLACE(order.verifyCode, '-', '')", compactVerifyPattern), {
+            [compactVerifyPattern]: buildClientOrderSearchPattern(word.replace(/[-\s]/g, ''), searchMode),
+          })
+        }
+        const matchingItem = visibleItem.clone().andWhere(
+          `(${like('searchProduct.productName', textPattern)}
+            OR (TRIM(searchItem.specTextSnapshot) <> '默认规格' AND ${like('TRIM(searchItem.specTextSnapshot)', textPattern)})
+            OR (COALESCE(TRIM(searchItem.specTextSnapshot), '') = '' AND ${like('TRIM(searchItem.skuCodeSnapshot)', textPattern)}))`,
+        ).getQuery()
+        const matchingLegacyProduct = legacyProduct.clone()
+          .andWhere(like('heldProduct.productName', textPattern)).getQuery()
+        wordQuery.orWhere(`EXISTS ${matchingItem}`)
+          .orWhere(`(order.totalQty > 0 AND NOT EXISTS ${hasItem.getQuery()} AND EXISTS ${matchingLegacyProduct})`)
+      }))
+    })
+    return { mode: identifierMode, terms: words.map((word) => word.toLowerCase()) }
+  }
+
   async listMyOrders(auth: ClientAuthContext, query?: Partial<MyOrderListQuery>): Promise<PaginationResult<O2oPreorderSummaryView>> {
     // Timeout recycling runs in the background and on write paths; this read path stays query-only.
     const normalizedPage = Math.max(1, Number(query?.page) || 1)
@@ -3730,47 +3838,9 @@ class O2oPreorderService {
       queryBuilder.andWhere('order.status = :status', { status: normalizedStatus })
     }
 
-    if (normalizedKeyword) {
-      const escapedKeyword = this.escapeLikeKeyword(normalizedKeyword)
-      const keywordPrefix = `${escapedKeyword}%`
-      const normalizedVerifyCodeKeyword = this.normalizeVerifyCode(normalizedKeyword)
-      const escapedVerifyKeyword = this.escapeLikeKeyword(normalizedVerifyCodeKeyword)
-      const matchedClientOrderType = this.resolveClientOrderTypeByKeyword(normalizedKeyword)
-      const matchedCustomerOrderPreorderIds = await this.resolveMatchedPreorderIdsByCustomerOrderKeyword(normalizedKeyword, false)
-      const keywordContains = `%${escapedKeyword}%`
-
-      queryBuilder.andWhere(
-        new Brackets((keywordQb) => {
-          keywordQb
-            // 等值匹配优先命中 show_no / verify_code 唯一索引。
-            .where('order.preorderNo = :showNoExact', { showNoExact: normalizedKeyword })
-            .orWhere('order.verifyCode = :verifyCodeExact', { verifyCodeExact: normalizedVerifyCodeKeyword })
-            // 前缀匹配在输入单号前几位时仍可利用 B-Tree 索引。
-            .orWhere(String.raw`order.preorderNo LIKE :showNoPrefix ESCAPE '\'`, { showNoPrefix: keywordPrefix })
-            .orWhere(String.raw`order.verifyCode LIKE :verifyCodePrefix ESCAPE '\'`, {
-              verifyCodePrefix: `${escapedVerifyKeyword}%`,
-            })
-            // 部门名称是用户端“归属”常见搜索入口，允许做包含匹配覆盖历史使用习惯。
-            .orWhere(String.raw`order.departmentNameSnapshot LIKE :departmentKeyword ESCAPE '\'`, {
-              departmentKeyword: keywordContains,
-            })
-            // 工号快照已在列表卡片展示，这里必须同步纳入关键词命中，避免出现“看得到但搜不到”。
-            .orWhere(String.raw`order.staffNoSnapshot LIKE :staffNoKeyword ESCAPE '\'`, {
-              staffNoKeyword: keywordContains,
-            })
-          if (matchedCustomerOrderPreorderIds.length) {
-            keywordQb.orWhere('order.id IN (:...matchedCustomerOrderPreorderIds)', {
-              matchedCustomerOrderPreorderIds,
-            })
-          }
-          if (matchedClientOrderType) {
-            keywordQb.orWhere('order.clientOrderType = :clientOrderType', {
-              clientOrderType: matchedClientOrderType,
-            })
-          }
-        }),
-      )
-    }
+    const clientIdentifierSearch = normalizedKeyword
+      ? this.applyMyOrderKeyword(queryBuilder, normalizedKeyword, query?.searchMode)
+      : undefined
 
     const [rows, total] = await queryBuilder.getManyAndCount()
     const nowMs = Date.now()
@@ -3780,7 +3850,7 @@ class O2oPreorderService {
       total,
       list: await this.buildOrderSummaryViews(rows, {
         nowMs,
-        matchedKeyword: normalizedKeyword,
+        clientIdentifierSearch,
         exposeSystemNo: false,
       }),
     }

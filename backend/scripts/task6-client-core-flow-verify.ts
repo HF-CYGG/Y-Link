@@ -348,20 +348,32 @@ const verifyOrderEditStaticRegression = () => {
     /location\.reload\(|router\.go\(\s*0\s*\)|router\.replace\(route\.fullPath\)/,
     '订单编辑成功路径疑似退化为依赖整页刷新',
   )
+  const summaryRefreshSource = /const refreshSingleOrderSummary = async[\s\S]*?(?=\nconst startClientOrderRefreshSubscription)/.exec(ordersSource)?.[0] ?? ''
+  assert.match(
+    summaryRefreshSource,
+    /if \(effectiveKeyword\.value\)\s*\{\s*await triggerSilentOrderRefresh\(true\)\s*return\s*\}[\s\S]*?await getMyO2oPreorderSummary\(orderId\)[\s\S]*?clientOrderStore\.syncOrderSummary\(result, \{ preserveFresh: true \}\)/,
+    '关键词搜索应重新校验整份查询，无关键词时才请求并更新单条摘要',
+  )
   assert.match(
     ordersSource,
-    /const refreshSingleOrderSummary = async[\s\S]*clientOrderStore\.syncOrderSummary\(result, \{ preserveFresh: true \}\)/,
-    '订单列表页缺少单条摘要增量刷新逻辑',
+    /const triggerSilentOrderRefresh = async[\s\S]*?await loadOrders\(true, \{ silent: true, preserveScroll: true \}\)/,
+    '搜索结果重新校验应调用整份列表的静默刷新并保留滚动位置',
   )
   assert.match(
     ordersSource,
     /subscribeClientOrderRefresh\(async \(event\) => \{[\s\S]*refreshSingleOrderSummary\(event\.orderId, \{ silent: true \}\)/,
     '订单列表页缺少订单刷新广播订阅逻辑',
   )
+  const summarySyncSource = /const syncOrderSummary = \(nextOrder: O2oPreorderSummary[\s\S]*?(?=\n  const clearAll)/.exec(storeSource)?.[0] ?? ''
   assert.match(
-    storeSource,
-    /const syncOrderSummary = \(nextOrder: O2oPreorderSummary[\s\S]*matchesClientOrderQuery[\s\S]*removeOrder[\s\S]*upsertOrder/,
-    '客户端订单 Store 缺少按当前筛选条件执行局部同步的核心逻辑',
+    summarySyncSource,
+    /if \(!hasCurrentResults\.value && orders\.value\.length > 0\) return\s+if \(keyword\.value && !orders\.value\.some\(\(item\) => item\.id === nextOrder\.id\)\) \{\s*markStale\(\)\s*return\s*\}/,
+    '摘要只可回写当前查询已确认的搜索命中订单，无关键词时仍可按状态同步',
+  )
+  assert.match(
+    summarySyncSource,
+    /if \(!matchesClientOrderStatus\(nextOrder, activeStatus\.value\)\) \{\s*removeOrder\(nextOrder\.id, freshness\)\s*return\s*\}[\s\S]*?upsertOrder\(nextOrder, freshness\)/,
+    '当前查询的摘要回写仍需剔除状态不符的订单',
   )
   assert.match(
     summarySource,

@@ -179,6 +179,7 @@ test('orders module 保留服务端分页原始结构且不自动生成幂等请
   }
 
   await api.listMyOrders({ page: 2, pageSize: 20, status: 'pending', keyword: 'YL' })
+  await api.listMyOrders({ page: 2, pageSize: 20, status: 'pending', keyword: 'YL', searchMode: 'prefix' })
   await api.submitPreorder(payload)
   await api.submitPreorder(payload, { idempotencyKey: 'caller-owned-key' })
   await api.getPreorderDetail('order/1')
@@ -188,6 +189,11 @@ test('orders module 保留服务端分页原始结构且不自动生成幂等请
       method: 'GET',
       url: '/o2o/mall/preorders',
       params: { page: 2, pageSize: 20, status: 'pending', keyword: 'YL' },
+    },
+    {
+      method: 'GET',
+      url: '/o2o/mall/preorders',
+      params: { page: 2, pageSize: 20, status: 'pending', keyword: 'YL', searchMode: 'prefix' },
     },
     { method: 'POST', url: '/o2o/mall/preorders', data: payload },
     {

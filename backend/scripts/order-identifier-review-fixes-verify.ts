@@ -190,7 +190,7 @@ try {
   const canonicalUpdateSource = sliceMethodSource(
     systemConfigServiceSource,
     '  async updateOrderIdentifierConfigs(',
-    '  /**\n   * 写时失效',
+    '  async getO2oRuleConfigs(',
   )
   assert.match(
     systemConfigServiceSource,
@@ -816,12 +816,14 @@ try {
   assert.doesNotMatch(purgeAudit.detailJson ?? '', new RegExp(auditPreorder.preorderNo, 'i'))
   assert.doesNotMatch(purgeAudit.detailJson ?? '', new RegExp(auditOutbound.businessNo, 'i'))
 
+  const unicodeDepartmentName = 'Édition A_%!\\'
   const sourcePreorder = await AppDataSource.getRepository(O2oPreorder).save({
     preorderNo: 'PRE-D-880001',
     clientUserId: client.id,
     verifyCode: randomUUID(),
     status: 'verified',
     clientOrderType: 'department',
+    departmentNameSnapshot: unicodeDepartmentName,
   })
   const orderRepo = AppDataSource.getRepository(BizOutboundOrder)
   const parent = await orderRepo.save({
@@ -942,6 +944,20 @@ try {
     sessionToken: 'identifier-review-session',
     authSource: 'bearer' as const,
   }
+  for (const [searchMode, keyword] of [
+    ['exact', unicodeDepartmentName],
+    ['prefix', 'ÉDITION A_%!'],
+    ['contains', 'ÉDITION A_%!\\'],
+  ] as const) {
+    const result = await o2oPreorderService.listMyOrders(clientAuth, { searchMode, keyword })
+    assert.deepEqual(result.list.map(({ id }) => id), [String(sourcePreorder.id)], '原样保留 Unicode 字面量并忽略 ASCII 大小写')
+  }
+  const differentAccentCase = await o2oPreorderService.listMyOrders(clientAuth, {
+    searchMode: 'exact',
+    keyword: unicodeDepartmentName.toLowerCase(),
+  })
+  assert.equal(differentAccentCase.total, 0, 'SQLite 内建 LOWER 不折叠重音字母大小写')
+
   for (const [keyword, expectedType] of [
     [child.businessNo, 'businessNo'],
     [child.systemNo, 'systemNo'],
@@ -975,6 +991,48 @@ try {
       assert.equal(operatorRows.length, 0, '普通管理账号不得按正式单 systemNo 搜索 O2O 订单')
     }
   }
+
+  for (const businessNo of [parent.businessNo, child.businessNo]) {
+    const keyword = businessNo.slice(2)
+    const contains = await o2oPreorderService.listMyOrders(clientAuth, { keyword, searchMode: 'contains', pageSize: 1 })
+    assert.deepEqual(contains.list.map(({ id }) => id), [String(sourcePreorder.id)], '当前与原始业务号均支持字面包含命中')
+    assert.equal(contains.total, 1, '关联匹配不重复计算来源预订单')
+    assert.equal(contains.list[0]?.matchedIdentifierType, 'businessNo')
+    assert.equal(contains.list[0]?.matchedIdentifierValue, businessNo)
+    const legacy = await o2oPreorderService.listMyOrders(clientAuth, { keyword })
+    assert.equal(legacy.total, 0, '省略模式仍只按关联业务号前缀查询')
+  }
+  const exactPrefix = await o2oPreorderService.listMyOrders(clientAuth, { keyword: parent.businessNo.slice(0, -1), searchMode: 'exact' })
+  assert.equal(exactPrefix.total, 0, '精确匹配拒绝业务号前缀')
+  for (const keyword of [parent.systemNo, child.systemNo]) {
+    const result = await o2oPreorderService.listMyOrders(clientAuth, { keyword, searchMode: 'contains' })
+    assert.equal(result.total, 0, '显式包含搜索不能探测被隐藏的系统单号')
+  }
+
+  const reservedPreorder = await AppDataSource.getRepository(O2oPreorder).save({
+    preorderNo: 'PRE-D-880004',
+    clientUserId: client.id,
+    verifyCode: randomUUID(),
+    status: 'pending',
+    clientOrderType: 'department',
+    reservedBusinessNo: 'hyyzjd880004',
+  })
+  const reserved = await o2oPreorderService.listMyOrders(clientAuth, {
+    keyword: 'yzjd880004 部门',
+    searchMode: 'contains',
+    status: 'pending',
+  })
+  assert.equal(reserved.total, 1, '待核销预留号可以与可见归属一起命中')
+  assert.equal(reserved.list[0]?.id, String(reservedPreorder.id))
+  assert.equal(reserved.list[0]?.matchedIdentifierType, 'businessNo')
+  assert.equal(reserved.list[0]?.matchedIdentifierValue, reservedPreorder.reservedBusinessNo)
+  const verified = await o2oPreorderService.listMyOrders(clientAuth, {
+    keyword: 'hyyzjd880004',
+    searchMode: 'exact',
+    status: 'verified',
+  })
+  assert.equal(verified.total, 0, '搜索不能跨越已选订单状态')
+
   const standaloneManualRows = await o2oPreorderService.listConsoleOrders({
     keyword: standaloneManualOrder.businessNo,
     limit: 20,

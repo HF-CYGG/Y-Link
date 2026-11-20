@@ -19,6 +19,7 @@ import {
   O2O_RETURN_REASON_MAX_LENGTH,
   O2O_RETURN_REJECT_REASON_MAX_LENGTH,
   O2O_CONSOLE_ORDER_POOL_KEYS,
+  CLIENT_ORDER_SEARCH_MODES,
   o2oPreorderService,
   type O2oPublicJsonSnapshot,
 } from '../services/o2o-preorder.service.js'
@@ -79,6 +80,7 @@ const verifySchema = z.object({
 const myOrderQuerySchema = z.object({
   status: z.enum(['pending', 'verified', 'cancelled']).optional(),
   keyword: z.string().trim().max(64).optional(),
+  searchMode: z.enum(CLIENT_ORDER_SEARCH_MODES).optional(),
   page: z.coerce.number().int().min(1).optional(),
   pageSize: z.coerce.number().int().min(1).max(50).optional(),
 })

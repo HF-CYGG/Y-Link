@@ -29,6 +29,7 @@ export const createOrdersApi = (http: HttpAdapter) => ({
         pageSize: query.pageSize,
         status: query.status,
         keyword: query.keyword,
+        ...(query.searchMode !== undefined ? { searchMode: query.searchMode } : {}),
       },
     })
   },

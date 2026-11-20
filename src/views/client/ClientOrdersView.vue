@@ -5,8 +5,7 @@ interface OrderListReturnScroll {
   userId: string | number
   session: number
   position: number
-  status: string
-  keyword: string
+  queryKey: string
   top: number
   anchor: OrderRefreshAnchorSnapshot | null
 }
@@ -34,12 +33,14 @@ let stopTrackingOrderReturn: (() => void) | undefined
 
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRouter, type RouteLocationNormalized } from 'vue-router'
+import type { O2oMyOrderSearchMode } from '@ylink/shared-types'
 import { ElMessageBox } from 'element-plus'
 import { RefreshRight } from '@element-plus/icons-vue'
 import {
   cancelMyO2oPreorder,
   getMyO2oPreorderSummary,
   getMyO2oPreorders,
+  type O2oMyOrderListQuery,
   type O2oPreorderSummary,
 } from '@/api/modules/o2o'
 import { BaseRequestState } from '@/components/common'
@@ -60,7 +61,7 @@ import {
   subscribeClientOrderRefresh,
 } from '@/utils/client-order-refresh'
 import { buildClientOrderSummaryFromDetail, needsKingdeeRegistration } from '@/utils/client-order-summary'
-import type { PersistedO2oPreorderSummary } from '@/utils/client-order-storage'
+import { normalizeClientOrderKeyword, normalizeClientOrderSearchMode, type PersistedO2oPreorderSummary } from '@/utils/client-order-storage'
 import { shouldReduceClientMotion } from '@/utils/client-motion'
 import { formatDateTime } from '@/utils/date-time'
 import { normalizeRequestError } from '@/utils/error'
@@ -72,6 +73,16 @@ const ORDER_TYPE_LABEL_MAP = {
   department: '部门订',
   walkin: '散客',
 } as const
+const ORDER_SEARCH_MODES = [
+  { value: 'contains', label: '模糊' },
+  { value: 'prefix', label: '前缀' },
+  { value: 'exact', label: '精确' },
+]
+const ORDER_SEARCH_HINTS: Record<O2oMyOrderSearchMode, string> = {
+  contains: '多个词用空格分隔',
+  prefix: '匹配字段开头',
+  exact: '匹配完整字段',
+}
 type LatestReturnRequestMeta = (typeof RETURN_REQUEST_STATUS_META)[keyof typeof RETURN_REQUEST_STATUS_META]
 type ClientOrderStatusReportConfig = ReturnType<typeof getClientOrderStatusReportConfig>
 
@@ -122,6 +133,12 @@ const firstScreenLoading = ref(false)
 const refreshing = ref(false)
 const silentRefreshing = ref(false)
 const loadingMore = ref(false)
+const resetOrderLoading = () => {
+  firstScreenLoading.value = false
+  refreshing.value = false
+  silentRefreshing.value = false
+  loadingMore.value = false
+}
 const recallingOrderId = ref('')
 const requestError = ref<{ type: 'offline' | 'error'; message: string } | null>(null)
 const orderListBodyRef = ref<HTMLElement | null>(null)
@@ -137,6 +154,8 @@ let disposeClientOrderRefresh: () => void = () => {}
 let refreshMarkCleanupTimer: ReturnType<typeof globalThis.setTimeout> | null = null
 let autoRefreshTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let pageRuntimeActive = false
+let pendingSearchRefresh = false
+let listQueryGeneration = 0
 let hasActivatedOnce = false
 let orderCardObserver: IntersectionObserver | null = null
 let orderCardMotionGeneration = 0
@@ -147,9 +166,10 @@ const runLatestListRequest = runLatest
 
 const orders = computed(() => clientOrderStore.orders)
 const total = computed(() => clientOrderStore.total)
-const hasMoreOrders = computed(() => orders.value.length < total.value)
+const hasMoreOrders = computed(() => clientOrderStore.hasCurrentResults && orders.value.length < total.value)
 const keywordInput = ref(clientOrderStore.keyword)
-const effectiveKeyword = ref(clientOrderStore.keyword)
+const effectiveKeyword = computed(() => clientOrderStore.keyword)
+const searchMode = computed(() => clientOrderStore.searchMode)
 const keywordDebounceTimer = ref<ReturnType<typeof globalThis.setTimeout> | null>(null)
 const keywordDebouncing = ref(false)
 const activeStatus = computed({
@@ -165,7 +185,7 @@ onBeforeRouteLeave((to, from) => {
   const userId = clientAuthStore.currentUser?.id
   const history = router.options.history
   const position = history.location === from.fullPath ? history.state.position : orderListHistoryPosition
-  if (to.name !== 'client-order-detail' || userId == null || typeof position !== 'number') return
+  if (to.name !== 'client-order-detail' || userId == null || typeof position !== 'number' || !clientOrderStore.hasCurrentResults) return
 
   orderDetailDeparture = {
     route: to,
@@ -173,8 +193,7 @@ onBeforeRouteLeave((to, from) => {
       userId,
       session: clientAuthStore.sessionGeneration,
       position,
-      status: activeStatus.value,
-      keyword: effectiveKeyword.value,
+      queryKey: clientOrderStore.queryKey,
       top: window.scrollY,
       anchor: captureOrderRefreshAnchor({
         listRoot: orderListBodyRef.value,
@@ -210,7 +229,7 @@ const getOrderListReturnScroll = () => {
   if (scroll.position !== router.options.history.state.position ||
       scroll.userId !== clientAuthStore.currentUser?.id ||
       scroll.session !== clientAuthStore.sessionGeneration ||
-      scroll.status !== activeStatus.value || scroll.keyword !== effectiveKeyword.value) {
+      scroll.queryKey !== clientOrderStore.queryKey) {
     orderListReturnScroll = null
     return null
   }
@@ -239,35 +258,48 @@ const autoRefreshStatusText = computed(() => {
   return `最近同步 ${formatOrderDateTime(new Date(lastAutoRefreshAt.value).toISOString())}`
 })
 
-// 关键词采用“输入词 + 生效词”双状态：
-// - 输入词实时绑定输入框，保证打字流畅；
-// - 生效词由防抖定时器更新，避免短时间重复计算导致列表抖动。
-watch(
-  () => keywordInput.value,
-  (nextKeyword) => {
-    if (keywordDebounceTimer.value !== null) {
-      globalThis.clearTimeout(keywordDebounceTimer.value)
-      keywordDebounceTimer.value = null
-    }
-    if (nextKeyword.trim() === effectiveKeyword.value.trim()) {
-      keywordDebouncing.value = false
-      return
-    }
-    keywordDebouncing.value = true
-    keywordDebounceTimer.value = globalThis.setTimeout(() => {
-      effectiveKeyword.value = nextKeyword.trim()
-      keywordDebouncing.value = false
-      keywordDebounceTimer.value = null
-    }, KEYWORD_DEBOUNCE_MS)
-  },
-)
-
-onBeforeUnmount(() => {
+const stopKeywordDebounce = () => {
   if (keywordDebounceTimer.value !== null) {
     globalThis.clearTimeout(keywordDebounceTimer.value)
     keywordDebounceTimer.value = null
   }
-})
+  keywordDebouncing.value = false
+}
+
+const applySearch = (nextKeyword: string, nextMode: O2oMyOrderSearchMode) => {
+  stopKeywordDebounce()
+  const previousQuery = clientOrderStore.queryKey
+  clientOrderStore.setSearch(nextKeyword, nextMode)
+  if (clientOrderStore.queryKey !== previousQuery) void loadOrders(true)
+}
+
+// 打字只更新草稿；模式切换时提交同一份可见输入，避免先查旧词再查新词。
+watch(
+  () => keywordInput.value,
+  (nextKeyword) => {
+    stopKeywordDebounce()
+    if (normalizeClientOrderKeyword(nextKeyword) === effectiveKeyword.value) return
+    keywordDebouncing.value = true
+    keywordDebounceTimer.value = globalThis.setTimeout(() => {
+      applySearch(nextKeyword, searchMode.value)
+    }, KEYWORD_DEBOUNCE_MS)
+  },
+)
+
+const handleSearchModeChange = (value: unknown) =>
+  applySearch(keywordInput.value, normalizeClientOrderSearchMode(value))
+
+watch(() => clientOrderStore.queryKey, () => {
+  listQueryGeneration += 1
+  pendingSearchRefresh = false
+}, { flush: 'sync' })
+const captureListQuery = () => {
+  const generation = listQueryGeneration
+  const session = clientAuthStore.sessionGeneration
+  const owner = clientAuthStore.currentUser?.id
+  return () => generation === listQueryGeneration && session === clientAuthStore.sessionGeneration
+    && owner === clientAuthStore.currentUser?.id && router.currentRoute.value.name === 'client-orders'
+}
 
 const getClientOrderTypeLabel = (order: Pick<O2oPreorderSummary, 'clientOrderType'>) => {
   return ORDER_TYPE_LABEL_MAP[order.clientOrderType]
@@ -296,6 +328,8 @@ const handleStatusChange = (value: 'all' | O2oPreorderSummary['status']) => {
   if (activeStatus.value === value) {
     return
   }
+  stopKeywordDebounce()
+  clientOrderStore.setSearch(keywordInput.value, searchMode.value)
   activeStatus.value = value
   void loadOrders(true)
 }
@@ -525,31 +559,32 @@ const orderCardList = computed<OrderCardPresentation[]>(() => {
 })
 
 // 详细注释：统一根据当前页面状态拼出服务端查询条件，保证刷新、筛选、加载更多共用同一口径。
-const buildListQuery = (targetPage: number) => {
+const buildListQuery = (targetPage: number): O2oMyOrderListQuery => {
   return {
     page: targetPage,
     pageSize: clientOrderStore.pageSize || DEFAULT_ORDER_PAGE_SIZE,
     status: activeStatus.value === 'all' ? undefined : activeStatus.value,
     keyword: effectiveKeyword.value || undefined,
+    searchMode: searchMode.value,
   }
 }
 
 const syncStoreWithCurrentUser = () => {
+  stopKeywordDebounce()
   clientOrderStore.initialize(clientAuthStore.currentUser?.id)
   keywordInput.value = clientOrderStore.keyword
-  effectiveKeyword.value = clientOrderStore.keyword
 }
 
 // 详细注释：静默轮询需要覆盖当前已加载范围并额外保留一页缓冲；
 // 超过接口单页上限时按页读取，避免 pageSize > 50 被后端拒绝后静默刷新永久失效。
-const fetchSilentRefreshOrders = async (signal: AbortSignal) => {
-  const logicalPageSize = clientOrderStore.pageSize || DEFAULT_ORDER_PAGE_SIZE
+const fetchSilentRefreshOrders = async (query: O2oMyOrderListQuery, signal: AbortSignal) => {
+  const logicalPageSize = query.pageSize || DEFAULT_ORDER_PAGE_SIZE
   const plan = buildClientOrderSilentRefreshPlan({
-    loadedCount: clientOrderStore.orders.length,
+    loadedCount: clientOrderStore.hasCurrentResults ? clientOrderStore.orders.length : 0,
     logicalPageSize,
   })
   const buildQuery = (page: number) => ({
-    ...buildListQuery(1),
+    ...query,
     page,
     pageSize: plan.requestPageSize,
   })
@@ -572,6 +607,7 @@ const fetchSilentRefreshOrders = async (signal: AbortSignal) => {
 }
 
 const resolveSilentRefreshRecords = (latestRecords: O2oPreorderSummary[]) => {
+  if (!clientOrderStore.hasCurrentResults) return latestRecords
   const currentOrders = clientOrderStore.orders
   const currentLoadedCount = currentOrders.length
   if (!currentLoadedCount) {
@@ -584,7 +620,7 @@ const resolveSilentRefreshRecords = (latestRecords: O2oPreorderSummary[]) => {
 }
 
 const canRunAutoRefresh = () => {
-  if (!clientAuthStore.currentUser?.id) {
+  if (!pageRuntimeActive || !clientAuthStore.currentUser?.id) {
     return false
   }
   if (globalThis.document?.visibilityState === 'hidden') {
@@ -593,19 +629,28 @@ const canRunAutoRefresh = () => {
   return !firstScreenLoading.value && !refreshing.value && !loadingMore.value && !recallingOrderId.value
 }
 
-const triggerSilentOrderRefresh = async () => {
+const triggerSilentOrderRefresh = async (fromSearchChangeEvent = false) => {
   if (!canRunAutoRefresh()) {
+    if (fromSearchChangeEvent) pendingSearchRefresh = true
     return
   }
+  pendingSearchRefresh = false
   await loadOrders(true, { silent: true, preserveScroll: true })
 }
 
 const refreshSingleOrderSummary = async (orderId: string, options?: { silent?: boolean }) => {
+  if (effectiveKeyword.value) {
+    await triggerSilentOrderRefresh(true)
+    return
+  }
+  const isCurrent = captureListQuery()
   try {
     const result = normalizeSummaryIdentifiers(await getMyO2oPreorderSummary(orderId))
+    if (!isCurrent()) return
     clientOrderStore.syncOrderSummary(result, { preserveFresh: true })
     markRefreshedOrders([result.id])
   } catch (error) {
+    if (!isCurrent()) return
     const normalizedError = normalizeRequestError(error, '订单摘要刷新失败')
     if (normalizedError.status === 404) {
       clientOrderStore.removeOrder(orderId, { preserveFresh: true })
@@ -771,7 +816,8 @@ const activatePageRuntime = () => {
   startClientOrderRefreshSubscription()
   scheduleAutoRefresh()
   if (hasActivatedOnce && globalThis.document?.visibilityState !== 'hidden') {
-    void triggerSilentOrderRefresh()
+    if (normalizeClientOrderKeyword(keywordInput.value) !== effectiveKeyword.value) applySearch(keywordInput.value, searchMode.value)
+    else void triggerSilentOrderRefresh()
   }
   hasActivatedOnce = true
 }
@@ -786,6 +832,10 @@ const deactivatePageRuntime = () => {
     return
   }
   pageRuntimeActive = false
+  listQueryGeneration += 1
+  pendingSearchRefresh = false
+  stopKeywordDebounce()
+  resetOrderLoading()
   stopOrderCardMotion()
   globalThis.document?.removeEventListener('visibilitychange', handleVisibilityChange)
   scheduleAutoRefresh()
@@ -795,13 +845,17 @@ const deactivatePageRuntime = () => {
 
 const loadOrders = async (force = false, options?: { append?: boolean; silent?: boolean; preserveScroll?: boolean }) => {
   const append = options?.append === true
-  const silent = options?.silent === true
+  const hasCurrentResults = clientOrderStore.hasCurrentResults
+  const silent = options?.silent === true && hasCurrentResults
+  if (append && !hasMoreOrders.value) return
   if (!append && !force && clientOrderStore.orders.length > 0 && clientOrderStore.isFresh) {
     requestError.value = null
     return
   }
-  const hasCachedOrders = clientOrderStore.orders.length > 0
+  const hasCachedOrders = hasCurrentResults && clientOrderStore.orders.length > 0
   const targetPage = append ? clientOrderStore.page + 1 : 1
+  const query = buildListQuery(targetPage)
+  const isCurrent = captureListQuery()
   const preserveScroll = options?.preserveScroll === true && !append && hasCachedOrders && !getOrderListReturnScroll()
   const scrollAnchor = preserveScroll
     ? captureOrderRefreshAnchor({
@@ -823,9 +877,10 @@ const loadOrders = async (force = false, options?: { append?: boolean; silent?: 
   await runLatestListRequest({
     executor: (signal) =>
       silent && !append
-        ? fetchSilentRefreshOrders(signal)
-        : getMyO2oPreorders(buildListQuery(targetPage), { signal }),
+        ? fetchSilentRefreshOrders(query, signal)
+        : getMyO2oPreorders(query, { signal }),
     onSuccess: async (result) => {
+      if (!isCurrent()) return
       if (append) {
         clientOrderStore.appendOrders(result.records.map(normalizeSummaryIdentifiers), {
           page: result.page,
@@ -839,7 +894,8 @@ const loadOrders = async (force = false, options?: { append?: boolean; silent?: 
       const nextRecords = silent ? resolveSilentRefreshRecords(normalizedRecords) : normalizedRecords
       const logicalPageSize = clientOrderStore.pageSize || DEFAULT_ORDER_PAGE_SIZE
       clientOrderStore.setOrders(nextRecords, {
-        page: silent ? Math.max(1, Math.ceil(nextRecords.length / logicalPageSize)) : result.page,
+        // 只跨过已完整保留的页；下一次加载会重读部分页并按订单 ID 去重。
+        page: silent ? Math.floor(nextRecords.length / logicalPageSize) : result.page,
         pageSize: silent ? logicalPageSize : result.pageSize,
         total: result.total,
       })
@@ -852,7 +908,7 @@ const loadOrders = async (force = false, options?: { append?: boolean; silent?: 
       }
       if (scrollAnchor) {
         await nextTick()
-        if (pageRuntimeActive && router.currentRoute.value.name === 'client-orders') {
+        if (pageRuntimeActive && isCurrent()) {
           restoreOrderRefreshAnchor(scrollAnchor, {
             listRoot: orderListBodyRef.value,
             itemAttributeName: 'data-order-card-id',
@@ -861,6 +917,7 @@ const loadOrders = async (force = false, options?: { append?: boolean; silent?: 
       }
     },
     onError: (error) => {
+      if (!isCurrent()) return
       const normalizedError = normalizeRequestError(error, '订单加载失败')
       if (silent) {
         return
@@ -880,27 +937,15 @@ const loadOrders = async (force = false, options?: { append?: boolean; silent?: 
       }
     },
     onFinally: () => {
-      firstScreenLoading.value = false
-      refreshing.value = false
-      silentRefreshing.value = false
-      loadingMore.value = false
+      resetOrderLoading()
+      if (pendingSearchRefresh) void triggerSilentOrderRefresh()
     },
   })
 }
 
 const clearKeyword = () => {
-  const hadKeyword = Boolean(keywordInput.value.trim() || effectiveKeyword.value.trim())
-  if (keywordDebounceTimer.value !== null) {
-    globalThis.clearTimeout(keywordDebounceTimer.value)
-    keywordDebounceTimer.value = null
-  }
   keywordInput.value = ''
-  effectiveKeyword.value = ''
-  keywordDebouncing.value = false
-  clientOrderStore.setKeyword('')
-  if (hadKeyword) {
-    void loadOrders(true)
-  }
+  applySearch('', searchMode.value)
 }
 
 // 详细注释：执行撤回订单，二次确认后请求撤回，并更新 Store 中的订单状态。
@@ -909,6 +954,9 @@ const handleRecallOrder = async (order: PersistedO2oPreorderSummary) => {
     showAppWarning('当前订单状态不可撤回')
     return
   }
+  const owner = clientAuthStore.currentUser?.id
+  const session = clientAuthStore.sessionGeneration
+  const isCurrentSession = () => owner === clientAuthStore.currentUser?.id && session === clientAuthStore.sessionGeneration
 
   try {
     await ElMessageBox.confirm(
@@ -929,10 +977,13 @@ const handleRecallOrder = async (order: PersistedO2oPreorderSummary) => {
     return
   }
 
+  if (!isCurrentSession()) return
   recallingOrderId.value = order.id
   try {
     const detail = await cancelMyO2oPreorder(order.id)
+    if (!isCurrentSession()) return
     clientOrderStore.syncOrderSummary(buildClientOrderSummaryFromDetail(detail), { preserveFresh: true })
+    if (effectiveKeyword.value) pendingSearchRefresh = true
     notifyClientOrderRefresh({
       orderId: detail.order.id,
       reason: 'cancelled',
@@ -940,32 +991,24 @@ const handleRecallOrder = async (order: PersistedO2oPreorderSummary) => {
     })
     showAppSuccess('订单已撤回')
   } catch (error) {
+    if (!isCurrentSession()) return
     const normalizedError = normalizeRequestError(error, '撤回订单失败')
     showAppError(normalizedError.message)
   } finally {
-    recallingOrderId.value = ''
+    if (isCurrentSession()) {
+      recallingOrderId.value = ''
+      if (pendingSearchRefresh) void triggerSilentOrderRefresh()
+    }
   }
 }
 
 watch(
-  () => effectiveKeyword.value,
-  (nextKeyword, previousKeyword) => {
-    if (nextKeyword === previousKeyword) {
-      return
-    }
-    clientOrderStore.setKeyword(nextKeyword)
-    void loadOrders(true)
-  },
-)
-
-watch(
-  () => clientAuthStore.currentUser?.id ?? '',
-  (nextUserId, previousUserId) => {
-    if (nextUserId === previousUserId) {
-      return
-    }
+  [() => clientAuthStore.currentUser?.id, () => clientAuthStore.sessionGeneration],
+  ([nextUserId]) => {
+    pendingSearchRefresh = false
+    recallingOrderId.value = ''
     syncStoreWithCurrentUser()
-    if (nextUserId) {
+    if (nextUserId && pageRuntimeActive) {
       void loadOrders(true)
     }
   },
@@ -974,6 +1017,7 @@ watch(
 onMounted(async () => {
   syncStoreWithCurrentUser()
   const hadCachedOrders = clientOrderStore.orders.length > 0
+  const hadFreshCache = hadCachedOrders && clientOrderStore.isFresh
   if (hadCachedOrders && getOrderListReturnScroll()) {
     await nextTick()
     restoreOrderListReturnScroll()
@@ -983,7 +1027,7 @@ onMounted(async () => {
     return
   }
   await loadOrders()
-  if (hadCachedOrders && pageRuntimeActive && router.currentRoute.value.name === 'client-orders') {
+  if (hadFreshCache && pageRuntimeActive && router.currentRoute.value.name === 'client-orders') {
     void loadOrders(true, { silent: true, preserveScroll: true })
   }
 })
@@ -997,10 +1041,7 @@ onDeactivated(() => {
 })
 
 onBeforeUnmount(() => {
-  if (keywordDebounceTimer.value !== null) {
-    globalThis.clearTimeout(keywordDebounceTimer.value)
-    keywordDebounceTimer.value = null
-  }
+  stopKeywordDebounce()
   if (refreshMarkCleanupTimer !== null) {
     globalThis.clearTimeout(refreshMarkCleanupTimer)
     refreshMarkCleanupTimer = null
@@ -1039,13 +1080,25 @@ onBeforeUnmount(() => {
           {{ tab.label }}
         </button>
       </div>
-      <div class="mt-3 flex items-center gap-2">
+      <div class="mt-3 flex flex-wrap items-center gap-2">
+        <el-segmented
+          :model-value="searchMode"
+          :options="ORDER_SEARCH_MODES"
+          size="small"
+          aria-label="订单搜索模式"
+          @change="handleSearchModeChange"
+        />
+        <span class="text-xs text-slate-500 dark:text-slate-400">{{ ORDER_SEARCH_HINTS[searchMode] }}</span>
+      </div>
+      <div class="mt-2 flex items-center gap-2">
         <input
           v-model="keywordInput"
-          class="h-10 flex-1 rounded-full border border-slate-200 bg-slate-50 px-4 text-sm outline-none focus:border-slate-300 dark:border-white/10 dark:bg-white/5"
-          placeholder="搜索订单号、核销码、部门、工号或归属"
+          class="h-10 min-w-0 flex-1 rounded-full border border-slate-200 bg-slate-50 px-4 text-sm outline-none focus:border-slate-300 dark:border-white/10 dark:bg-white/5"
+          maxlength="64"
+          placeholder="订单号、商品名或规格"
+          aria-label="搜索订单号、核销码、部门工号、归属、商品名或规格"
         />
-        <button type="button" class="h-10 rounded-full border border-slate-200 px-4 text-sm text-slate-600 dark:border-white/10 dark:text-slate-300" @click="clearKeyword">清空</button>
+        <button type="button" class="h-10 shrink-0 rounded-full border border-slate-200 px-4 text-sm text-slate-600 dark:border-white/10 dark:text-slate-300" @click="clearKeyword">清空</button>
       </div>
       <p v-if="keywordDebouncing || refreshing || loadingMore" class="mt-2 text-xs text-slate-400">
         {{
@@ -1056,11 +1109,11 @@ onBeforeUnmount(() => {
               : '正在刷新订单，当前列表可继续浏览'
         }}
       </p>
-      <p v-if="orders.length" class="mt-2 text-xs text-slate-400">
+      <p v-if="orders.length && clientOrderStore.hasCurrentResults" class="mt-2 text-xs text-slate-400">
         已加载 {{ orders.length }} 条，服务端共命中 {{ total }} 条订单
       </p>
       <p
-        v-if="orders.length"
+        v-if="orders.length && clientOrderStore.hasCurrentResults"
         class="mt-1 truncate text-xs leading-4"
         :class="showSilentSyncStatus ? 'text-teal-600 dark:text-teal-300' : 'text-slate-400'"
         role="status"
@@ -1081,7 +1134,7 @@ onBeforeUnmount(() => {
       @retry="loadOrders(true)"
     />
     <BaseRequestState
-      v-else-if="!orders.length"
+      v-else-if="clientOrderStore.hasCurrentResults && !orders.length"
       type="empty"
       title="暂无订单"
       :description="effectiveKeyword ? '未匹配到符合关键词的订单，请调整关键词后重试' : '当前筛选下没有订单记录'"
@@ -1089,7 +1142,7 @@ onBeforeUnmount(() => {
       @retry="loadOrders(true)"
     />
 
-    <div v-else>
+    <div v-else-if="clientOrderStore.hasCurrentResults">
       <div ref="orderListBodyRef">
         <TransitionGroup name="order-list-refresh" tag="div" class="space-y-3" @before-leave="prepareOrderCardLeave">
           <div
@@ -1197,7 +1250,7 @@ onBeforeUnmount(() => {
         >
           {{ loadingMore ? '加载中...' : '加载更多' }}
         </button>
-        <p v-else class="text-xs text-slate-400">已加载全部符合条件的订单</p>
+        <p v-else-if="clientOrderStore.hasCurrentResults" class="text-xs text-slate-400">已加载全部符合条件的订单</p>
       </div>
     </div>
   </section>
