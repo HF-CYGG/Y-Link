@@ -5,14 +5,16 @@
  */
 
 import fs from 'node:fs/promises'
+import { constants, createReadStream } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
 import type { format as MysqlFormat } from 'mysql2'
 import { DataSource, type DataSourceOptions, type EntityMetadata } from 'typeorm'
 import { VerifiedDataSource } from '../database/verified-data-source.js'
+import { loadVerifiedSqliteDriver } from '../database/verified-sqlite-driver.js'
 import { appDataPaths } from '../config/app-data-paths.js'
 import { resolveSqliteDatabasePath } from '../config/database-bootstrap.js'
 import {
@@ -63,7 +65,7 @@ import { auditService } from './audit.service.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { o2oPreorderService } from './o2o-preorder.service.js'
 import { requestRuntimeShutdown } from '../runtime/runtime-shutdown.js'
-import { appendControlAudit, writeControlFile } from '../runtime/durable-control-file.js'
+import { appendControlAudit, syncDirectory, writeControlFile } from '../runtime/durable-control-file.js'
 import { bindDatabaseRescueSnapshot, issueDatabaseRescueCredential, inspectRecoveryIntent, databaseRescueStatus, prepareAutomaticDatabaseRescueRollback } from '../runtime/database-rescue-control.js'
 import { normalizeStaticCheckClause } from '../utils/mysql-check-clause.js'
 import { dropMysqlRequiredTriggers, ensureMysqlRequiredTriggers } from '../config/mysql-migration-runner.js'
@@ -327,6 +329,7 @@ type InternalMigrationTaskRecord = Omit<
   controlProtocol?: typeof CONTINUOUS_MIGRATION_PROTOCOL
   controlPhase?: ManualMigrationControlPhase
   controlPreviousOverride?: DatabaseRuntimeOverrideFile | null
+  manualSnapshotSha256?: string
 }
 
 type TaskRecordReadResult =
@@ -750,7 +753,7 @@ function isDeterministicMigrationDataError(error: unknown): boolean {
 }
 
 export class DatabaseMigrationService {
-  private migrationExecutionOwner: string | null = null
+  private migrationExecution: Promise<unknown> | null = null
   private readonly cancelledAutomaticTaskIds = new Set<string>()
   private readonly automaticWorkerTaskIds = new Set<string>()
   private readonly automaticFinalizingTaskIds = new Set<string>()
@@ -760,11 +763,20 @@ export class DatabaseMigrationService {
   >()
   private readonly taskWriteQueues = new Map<string, Promise<void>>()
 
-  /** 同步抢占而非排队；HTTP请求不能带着operation租约等待另一个迁移去drain自己。 */
-  private async runExclusiveMigration<T>(taskId: string, work: () => Promise<T>): Promise<T> {
-    if (this.migrationExecutionOwner) throw new BizError('已有迁移控制操作正在执行，请稍后重试', 409)
-    this.migrationExecutionOwner = taskId
-    try { return await work() } finally { this.migrationExecutionOwner = null }
+  /** HTTP 请求不能带着 operation 租约等待另一个迁移排空自己，争用时立即拒绝。 */
+  private async runExclusiveMigration<T>(work: () => Promise<T>): Promise<T> {
+    if (this.migrationExecution) throw new BizError('已有迁移控制操作正在执行，请稍后重试', 409)
+    return this.holdMigrationExecution(work)
+  }
+
+  private async holdMigrationExecution<T>(work: () => Promise<T>): Promise<T> {
+    const execution = Promise.resolve().then(work)
+    this.migrationExecution = execution
+    try {
+      return await execution
+    } finally {
+      if (this.migrationExecution === execution) this.migrationExecution = null
+    }
   }
 
   private async assertFrozenMigrationAdmin(actor: AuthUserContext): Promise<AuthUserContext> {
@@ -1418,7 +1430,7 @@ export class DatabaseMigrationService {
 
   private sanitizeTaskRecord(task: InternalMigrationTaskRecord): SQLiteToMySqlTaskRecord {
     const rescue = isManagedMigration(task) ? databaseRescueStatus(task.id) : null
-    const { controlProtocol: _protocol, controlPhase: _phase, controlPreviousOverride: _previous, ...publicTask } = task
+    const { controlProtocol: _protocol, controlPhase: _phase, controlPreviousOverride: _previous, manualSnapshotSha256: _snapshotHash, ...publicTask } = task
     return {
       ...publicTask,
       stage: task.stage ?? (task.status === 'queued' ? 'freeze' : ['restart_pending', 'verifying', 'succeeded', 'rolled_back'].includes(task.status) ? 'cutover' : undefined),
@@ -1677,12 +1689,12 @@ export class DatabaseMigrationService {
     }
   }
 
-  private async createConsistentSqliteSnapshot(taskId: string): Promise<DatabaseMigrationBackupFile> {
+  private async createConsistentSqliteSnapshot(taskId: string, preserveOriginal = false): Promise<DatabaseMigrationBackupFile> {
     this.assertCurrentSourceIsSqlite()
     await this.ensureMigrationDirectories()
-    const fileName = `${taskId}.sqlite`
+    const fileName = preserveOriginal ? `${taskId}-original-${randomUUID()}.sqlite` : `${taskId}.sqlite`
     const filePath = path.resolve(sqliteSnapshotDir, fileName)
-    await fs.rm(filePath, { force: true })
+    if (!preserveOriginal) await fs.rm(filePath, { force: true })
     await AppDataSource.query(`VACUUM INTO ${quoteSqliteStringLiteral(filePath)}`)
     const integrityRows = this.toQueryRows(await AppDataSource.query('PRAGMA integrity_check'))
     const integrityValue = String(Object.values(integrityRows[0] ?? {})[0] ?? '').toLowerCase()
@@ -1710,6 +1722,63 @@ export class DatabaseMigrationService {
       synchronize: false,
       logging: false,
     })
+  }
+
+  private async createReadOnlyManualSnapshotDataSource(filePath: string, includeEntities = true): Promise<DataSource> {
+    const driver = await loadVerifiedSqliteDriver() as { OPEN_READONLY: number; OPEN_URI: number }
+    return new VerifiedDataSource({
+      type: 'sqlite',
+      database: `${pathToFileURL(filePath).href}?mode=ro&immutable=1`,
+      driver,
+      flags: driver.OPEN_READONLY | driver.OPEN_URI,
+      entities: includeEntities ? appEntities : [],
+      synchronize: false,
+      logging: false,
+    })
+  }
+
+  private async assertNoSqliteSnapshotSidecars(filePath: string): Promise<void> {
+    // 封存检查不能把日志当成快照的一部分，也不能删除它来继续切换。
+    for (const suffix of ['-wal', '-journal', '-shm']) {
+      try {
+        await fs.lstat(filePath + suffix)
+      } catch (error) {
+        if (isFileNotFoundError(error)) continue
+        throw error
+      }
+      throw new BizError('手动迁移工作快照存在未封存的 SQLite 副文件', 409)
+    }
+  }
+
+  private async syncManualSnapshotFile(filePath: string): Promise<void> {
+    if (process.platform !== 'win32') await fs.chmod(filePath, 0o600)
+    const file = await fs.open(filePath, 'r+')
+    try { await file.sync() } finally { await file.close() }
+    syncDirectory(path.dirname(filePath))
+  }
+
+  private async calculateSnapshotSha256(filePath: string): Promise<string> {
+    const hash = createHash('sha256')
+    for await (const chunk of createReadStream(filePath)) hash.update(chunk)
+    return hash.digest('hex')
+  }
+
+  private async assertMigrationSnapshot(task: InternalMigrationTaskRecord): Promise<string> {
+    const filePath = task.immutableSnapshotFile?.filePath
+    if (!filePath) throw new BizError('迁移任务缺少不可变 SQLite 快照，禁止切换', 409)
+    assertPathInsideDirectory(filePath, sqliteSnapshotDir, 'SQLite 不可变快照')
+    if (isControlledManualMigration(task)) {
+      await this.assertNoSqliteSnapshotSidecars(filePath)
+      if (await fs.realpath(filePath) !== path.resolve(filePath)) throw new BizError('手动迁移工作快照路径已改变，禁止切换', 409)
+      // 旧的受控手动任务使用同一快照作为备份，已有救援绑定与源摘要保护它。
+      const legacySnapshot = !task.manualSnapshotSha256 && filePath === path.join(sqliteSnapshotDir, `${task.id}.sqlite`)
+        && task.backupFile?.filePath === filePath
+      if (!legacySnapshot && (!task.manualSnapshotSha256 || task.backupFile?.filePath === filePath
+        || await this.calculateSnapshotSha256(filePath) !== task.manualSnapshotSha256)) {
+        throw new BizError('手动迁移工作快照已改变，禁止切换', 409)
+      }
+    }
+    return filePath
   }
 
   private async listTableColumnNames(dataSource: DataSource, tableName: string): Promise<string[]> {
@@ -3206,7 +3275,7 @@ export class DatabaseMigrationService {
     }
   }
 
-  private async buildPrecheck(input: SQLiteToMySqlPrecheckInput): Promise<SQLiteToMySqlPrecheckResult> {
+  private async buildPrecheck(input: SQLiteToMySqlPrecheckInput, checkTarget = true): Promise<SQLiteToMySqlPrecheckResult> {
     this.assertCurrentSourceIsSqlite()
 
     const sourceSummary = await this.buildSourcePrecheckSummary()
@@ -3221,11 +3290,16 @@ export class DatabaseMigrationService {
       })
     }
 
-    const targetSummary = await this.buildTargetPrecheckSummary(input, sourceSummary.expectedTableNames)
+    const targetSummary: TargetPrecheckSummary = checkTarget
+      ? await this.buildTargetPrecheckSummary(input, sourceSummary.expectedTableNames)
+      : {
+          targetReachable: false, targetVersion: null, targetDatabaseExists: false, targetExistingAppTables: [],
+          targetMissingAppTables: [], targetSchemaReady: false, targetNeedsSchemaInitialization: false, issues: [],
+        }
     issues.push(...targetSummary.issues)
 
     const targetTotalRows = targetSummary.targetExistingAppTables.reduce((sum, item) => sum + item.rowCount, 0)
-    const canProceed = issues.every((issue) => issue.level !== 'error')
+    const canProceed = checkTarget && issues.every((issue) => issue.level !== 'error')
 
     return {
       canProceed,
@@ -3478,7 +3552,13 @@ export class DatabaseMigrationService {
     actor?: AuthUserContext,
     requestMeta?: RequestMeta,
   ): Promise<void> {
-    return this.runExclusiveMigration(taskId, () => this.runAutomaticSQLiteToMySqlTaskOwned(taskId, actor, requestMeta))
+    // 仅由 202 响应后或启动恢复时的 setImmediate 调用。后台可等待在途控制操作，
+    // 同步接续门禁，避免新的 HTTP 控制操作插队；前一操作的失败不影响已受理任务。
+    const previous = this.migrationExecution
+    return this.holdMigrationExecution(async () => {
+      await previous?.catch(() => undefined)
+      await this.runAutomaticSQLiteToMySqlTaskOwned(taskId, actor, requestMeta)
+    })
   }
 
   private async runAutomaticSQLiteToMySqlTaskOwned(
@@ -3493,7 +3573,7 @@ export class DatabaseMigrationService {
       '执行一键自动数据库迁移任务',
     )
     const task = await this.readTaskRecord(taskId, '执行一键自动迁移任务')
-    if (await this.readAutomaticMigrationLockTaskId() !== task.id) throw new BizError('自动迁移没有同任务持久所有权', 409)
+    if (task.id !== taskId || await this.readAutomaticMigrationLockTaskId() !== taskId) throw new BizError('自动迁移没有同任务持久所有权', 409)
     if (task.mode !== 'automatic' || !['queued', 'running'].includes(task.status)) {
       throw new BizError('自动迁移任务状态不允许执行', 409)
     }
@@ -3985,7 +4065,9 @@ export class DatabaseMigrationService {
     task.updatedAt = task.startedAt
     task.errorMessage = undefined
     task.result = undefined
+    task.backupFile = undefined
     task.immutableSnapshotFile = undefined
+    task.manualSnapshotSha256 = undefined
     task.jsonSnapshotFile = undefined
     await this.writeTaskRecord(task)
     ensureDatabaseRescueBinding(task.id) // 绑定本轮源身份，但不能轮换调用方预先取得的凭证。
@@ -4003,12 +4085,27 @@ export class DatabaseMigrationService {
 
   private async snapshotManualMigration(task: InternalMigrationTaskRecord): Promise<DataSource> {
     this.assertAutomaticTaskNotCancelled(task.id)
-    await this.repairAndAssertSourceDataCompatibility(AppDataSource)
-    task.immutableSnapshotFile = await this.createConsistentSqliteSnapshot(task.id)
-    task.backupFile = task.immutableSnapshotFile
+    const backup = await this.createConsistentSqliteSnapshot(task.id, true)
+    await this.syncManualSnapshotFile(backup.filePath)
+    task.backupFile = backup
     await this.writeTaskRecord(task)
-    await bindDatabaseRescueSnapshot(task.id, task.immutableSnapshotFile.filePath)
-    const snapshot = this.createSqliteSnapshotDataSource(task.immutableSnapshotFile.filePath)
+    await bindDatabaseRescueSnapshot(task.id, backup.filePath)
+    this.assertAutomaticTaskNotCancelled(task.id)
+
+    const fileName = `${task.id}-import-${randomUUID()}.sqlite`
+    const filePath = path.join(sqliteSnapshotDir, fileName)
+    await fs.copyFile(backup.filePath, filePath, constants.COPYFILE_EXCL)
+    const writableCopy = this.createSqliteSnapshotDataSource(filePath)
+    try {
+      await writableCopy.initialize()
+      await this.repairAndAssertSourceDataCompatibility(writableCopy)
+    } finally { if (writableCopy.isInitialized) await writableCopy.destroy() }
+    await this.assertNoSqliteSnapshotSidecars(filePath)
+    await this.syncManualSnapshotFile(filePath)
+    task.manualSnapshotSha256 = await this.calculateSnapshotSha256(filePath)
+    task.immutableSnapshotFile = { fileName, filePath, fileSizeBytes: await this.statFileSize(filePath) }
+
+    const snapshot = await this.createReadOnlyManualSnapshotDataSource(filePath)
     try {
       await snapshot.initialize()
       await this.assertStrictSourceSchema(snapshot)
@@ -4095,7 +4192,7 @@ export class DatabaseMigrationService {
   }
 
   async runSQLiteToMySqlTask(taskId: string, actor?: AuthUserContext, requestMeta?: RequestMeta): Promise<SQLiteToMySqlTaskRecord> {
-    return this.runExclusiveMigration(taskId, async () => {
+    return this.runExclusiveMigration(async () => {
       const admin = await this.assertAdminActor(actor, requestMeta, 'database_migration.run_task', '执行手动迁移')
       await this.acquireAutomaticMigrationLock(taskId)
       let task: InternalMigrationTaskRecord | undefined
@@ -4110,9 +4207,9 @@ export class DatabaseMigrationService {
         sessionStarted = true
         await this.freezeManualMigration(task, admin)
         return await databaseMaintenanceModeService.runGovernance(task.id, async () => {
+          snapshot = await this.snapshotManualMigration(task!)
           task!.precheck = await this.buildPrecheck({ target: task!.target, ...task!.options })
           if (!task!.precheck.canProceed) throw new BizError(task!.precheck.issues.filter(item => item.level === 'error').map(item => item.message).join('；'), 409)
-          snapshot = await this.snapshotManualMigration(task!)
           target = this.createMysqlDataSource(task!.target)
           await target.initialize()
           if ((await this.listExistingTableNames(target)).includes('_y_link_migration_owner')) throw new BizError('目标由其他迁移控制，禁止导入', 409)
@@ -4166,11 +4263,8 @@ export class DatabaseMigrationService {
     if (path.resolve(task.source.sqlitePath) !== path.resolve(input.sourceSqlitePath)) {
       throw new Error('自动迁移切换标记中的 SQLite 回退路径与任务记录不一致')
     }
-    if (!task.immutableSnapshotFile?.filePath) {
-      throw new Error('自动迁移任务缺少不可变 SQLite 快照，禁止确认切换成功')
-    }
-    assertPathInsideDirectory(task.immutableSnapshotFile.filePath, sqliteSnapshotDir, 'SQLite 不可变快照')
     if (manual) await assertDatabaseRescueSourceUnchanged(task.id, task.source.sqlitePath)
+    const snapshotFilePath = await this.assertMigrationSnapshot(task)
 
     if (task.cancelRequestedAt) {
       return this.prepareCancelledAutomaticMigrationRollback(task, input)
@@ -4203,7 +4297,9 @@ export class DatabaseMigrationService {
     await databaseMaintenanceModeService.updatePhase('verifying')
     await this.writeTaskRecord(task)
 
-    const snapshotDataSource = this.createSqliteSnapshotDataSource(task.immutableSnapshotFile.filePath, false)
+    const snapshotDataSource = manual
+      ? await this.createReadOnlyManualSnapshotDataSource(snapshotFilePath, false)
+      : this.createSqliteSnapshotDataSource(snapshotFilePath, false)
     try {
       await snapshotDataSource.initialize()
       await this.maybeDelayAutomaticMigrationFinalizerE2E(task.id)
@@ -4929,7 +5025,7 @@ export class DatabaseMigrationService {
   async applyDatabaseSwitch(input: ApplyDatabaseSwitchInput, actor?: AuthUserContext, requestMeta?: RequestMeta): Promise<{
     restartRequired: true; activeOverride: ReturnType<typeof maskDatabaseRuntimeOverride>; sourceTaskId?: string
   }> {
-    return this.runExclusiveMigration(input.taskId ?? 'manual-legacy-switch', async () => {
+    return this.runExclusiveMigration(async () => {
       const admin = await this.assertAdminActor(actor, requestMeta, 'database_migration.apply_switch', '切换数据库')
       this.assertCurrentSourceIsSqlite()
       let task = input.taskId ? await this.readTaskRecord(input.taskId, '切换到目标MySQL') : null
@@ -4945,7 +5041,7 @@ export class DatabaseMigrationService {
         try {
         // 历史任务/无taskId不能沿用旧行数校验；新建受控会话，不审计写入源库、不改目标数据。
         if (input.taskId) task = await this.readTaskRecord(input.taskId, '冻结历史切换会话')
-        const precheck = await this.buildPrecheck({ target, allowTargetWithData: true, initializeSchema: false, clearTargetBeforeImport: false })
+        const precheck = task?.precheck ?? await this.buildPrecheck({ target, allowTargetWithData: true, initializeSchema: false, clearTargetBeforeImport: false }, false)
         task = { ...(task ?? {}), id, mode: 'manual', status: 'running', createdAt: task?.createdAt ?? new Date().toISOString(),
           updatedAt: new Date().toISOString(), source: { sqlitePath: String(AppDataSource.options.database) }, target,
           precheck, options: task?.options ?? { allowTargetWithData: true, initializeSchema: false, clearTargetBeforeImport: false, switchAfterSuccess: false, createSqliteBackup: true },
@@ -4961,11 +5057,12 @@ export class DatabaseMigrationService {
           await this.assertFrozenMigrationAdmin(admin)
           if (continuing) {
             await assertDatabaseRescueSourceUnchanged(task!.id, task!.source.sqlitePath)
-            if (!task!.immutableSnapshotFile) throw new BizError('任务缺少本次不可变快照', 409)
-            assertPathInsideDirectory(task!.immutableSnapshotFile.filePath, sqliteSnapshotDir, 'SQLite不可变快照')
-            snapshot = this.createSqliteSnapshotDataSource(task!.immutableSnapshotFile.filePath)
+            snapshot = await this.createReadOnlyManualSnapshotDataSource(await this.assertMigrationSnapshot(task!))
             await snapshot.initialize()
-          } else snapshot = await this.snapshotManualMigration(task!)
+          } else {
+            snapshot = await this.snapshotManualMigration(task!)
+            task!.precheck = await this.buildPrecheck({ target, allowTargetWithData: true, initializeSchema: false, clearTargetBeforeImport: false })
+          }
           destination = this.createMysqlDataSource(task!.target)
           await destination.initialize()
           const validation = await this.validateManualTarget(task!, snapshot, destination)
@@ -5012,7 +5109,7 @@ export class DatabaseMigrationService {
     // 请求可能在冻结前已准入、直到现在才走到取消；重新取得同任务freeze会排除自身租约，不能让worker drain等自己。
     await databaseMaintenanceModeService.beginReadOnly({ taskId: task.id, phase: 'manual_cancelling' })
     await this.quiesceForDatabaseRescue(task.id) // 等真实执行体和schema worker退出，禁止迟到override。
-    return this.runExclusiveMigration(task.id, async () => {
+    return this.runExclusiveMigration(async () => {
       const latest = await this.readTaskRecord(task.id, '取消手动迁移')
       await this.assertManualControlOwner(latest)
       if (cutover.inspectDatabaseMigrationCutoverMarker().state !== 'absent') return false

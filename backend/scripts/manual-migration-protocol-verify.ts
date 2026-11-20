@@ -26,7 +26,8 @@ const timeout = async <T>(promise: Promise<T>, ms = 120_000) => {
   try { return await Promise.race([promise, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('手动迁移回归超时')), ms) })]) }
   finally { if (timer) clearTimeout(timer) }
 }
-const cases = ['manual-switch', 'prepared-switch', 'request-worker-drain', 'actor-disabled', 'session-revoked',
+const cases = ['manual-switch', 'prepared-switch', 'diagnostic-backup-target-unavailable', 'diagnostic-snapshot-tampered',
+  'diagnostic-snapshot-sidecar-on-seal', 'diagnostic-snapshot-sidecar-on-switch', 'request-worker-drain', 'actor-disabled', 'session-revoked',
   'run-switch-cancel', 'preadmitted-cancel', 'marker-write-failure', 'override-write-failure', 'task-write-failure', 'compensation-failure',
   'startup-terminal-failure', 'legacy-stale', 'legacy-account-stale', 'legacy-session-stale', 'no-id-stale', 'no-id-equal', 'preserve-target',
   'failed-cleanup-crash', 'failed-cleanup-unlink-failure', 'http-proxy-run', 'https-proxy-run', 'copy-completed-before-cancel', 'cancel-accept-write-failure',
@@ -210,10 +211,100 @@ if (!selected) {
     const actor = { userId: user.id, username: user.username, displayName: user.displayName, role: 'admin' as const,
       permissions: [] as never[], status: 'enabled' as const, sessionToken: token, authSource: 'bearer' as const }
     const product = await source.getRepository(BaseProduct).save({ productCode: 'MANUAL-FIXTURE', productName: '手动一致性夹具', isActive: true, currentStock: 7, preOrderedStock: 0 })
+    const diagnosticCase = selected === 'manual-switch' || selected.startsWith('diagnostic-')
+    const fixtureUa = '诊🧪'.repeat(150)
+    const projectedUa = Array.from(fixtureUa).slice(0, 255).join('')
+    const readUa = async (database: typeof source): Promise<string> => {
+      const rows = await database.query("SELECT user_agent FROM sys_audit_log WHERE action_type = 'manual.diagnostic-fixture'") as Array<{ user_agent: string }>
+      assert.equal(rows.length, 1)
+      return rows[0]!.user_agent
+    }
+    if (diagnosticCase) {
+      await source.query("INSERT INTO sys_audit_log (action_type, action_label, target_type, user_agent) VALUES ('manual.diagnostic-fixture', '迁移兼容测试', 'database_migration', ?)", [fixtureUa])
+    }
     const create = (options: Record<string, boolean> = {}) => migration.createSQLiteToMySqlTask({ target,
       initializeSchema: true, clearTargetBeforeImport: true, switchAfterSuccess: selected === 'prepared-switch', ...options }, actor)
     let task = await create()
-    if (selected === 'http-proxy-run' || selected === 'https-proxy-run') {
+    const sourceDigestBeforeRun = diagnosticCase ? (await inspectSqliteForRescue(sqlite)).sha256 : undefined
+    const verifyDiagnosticArtifacts = async () => {
+      assert.ok(task.backupFile && task.immutableSnapshotFile && task.jsonSnapshotFile)
+      assert.notEqual(task.backupFile.filePath, task.immutableSnapshotFile.filePath)
+      assert.equal(await readUa(source), fixtureUa)
+      assert.equal((await inspectSqliteForRescue(sqlite)).sha256, sourceDigestBeforeRun)
+      assert.equal((await inspectSqliteForRescue(task.backupFile.filePath)).sha256, sourceDigestBeforeRun)
+      assert.notEqual((await inspectSqliteForRescue(task.immutableSnapshotFile.filePath)).sha256, sourceDigestBeforeRun)
+      const snapshot = await internal.createReadOnlyManualSnapshotDataSource!(task.immutableSnapshotFile.filePath) as typeof source
+      await snapshot.initialize()
+      try {
+        assert.equal(await readUa(snapshot), projectedUa)
+        await assert.rejects(snapshot.query('UPDATE sys_audit_log SET user_agent = user_agent'), /readonly/i)
+      } finally { await snapshot.destroy() }
+      const missingPath = `${task.immutableSnapshotFile.filePath}.missing`
+      const missing = await internal.createReadOnlyManualSnapshotDataSource!(missingPath) as typeof source
+      await assert.rejects(missing.initialize(), /SQLITE_CANTOPEN/)
+      assert.equal(fs.existsSync(missingPath), false)
+      const exported = JSON.parse(fs.readFileSync(task.jsonSnapshotFile.filePath, 'utf8'))
+      assert.equal(exported.tables.sys_audit_log.find((row: { action_type: string }) => row.action_type === 'manual.diagnostic-fixture').user_agent, projectedUa)
+    }
+    if (selected === 'diagnostic-backup-target-unavailable') {
+      const factory = migration as unknown as { createMysqlDataSource: (target: unknown) => typeof source }
+      const openTarget = factory.createMysqlDataSource
+      factory.createMysqlDataSource = () => { throw new Error('隔离目标在执行前复检时不可用') }
+      try {
+        await assert.rejects(migration.runSQLiteToMySqlTask(task.id, actor), /MySQL|目标/)
+      } finally { factory.createMysqlDataSource = openTarget }
+      task = await migration.getSQLiteToMySqlTask(task.id)
+      assert.equal(task.status, 'failed')
+      assert.equal(maintenance.isReadOnly(), false)
+      await verifyDiagnosticArtifacts()
+      const firstBackup = task.backupFile!.filePath
+      task = await migration.runSQLiteToMySqlTask(task.id, actor)
+      assert.equal(task.status, 'succeeded')
+      await verifyDiagnosticArtifacts()
+      assert.notEqual(task.backupFile!.filePath, firstBackup, '重新执行必须保留上一轮原始备份')
+      assert.equal((await inspectSqliteForRescue(firstBackup)).sha256, sourceDigestBeforeRun)
+      await migration.rollbackDatabaseSwitch({ taskId: task.id }, actor)
+      assert.equal(maintenance.isReadOnly(), false)
+      assert.equal((await inspectSqliteForRescue(task.backupFile!.filePath)).sha256, sourceDigestBeforeRun)
+    } else if (selected === 'diagnostic-snapshot-sidecar-on-seal') {
+      const sealCheck = internal.assertNoSqliteSnapshotSidecars!
+      let sentinel: string | undefined
+      internal.assertNoSqliteSnapshotSidecars = async function (filePath: string) {
+        sentinel = `${filePath}-journal`
+        fs.writeFileSync(sentinel, '', { flag: 'wx' })
+        return sealCheck.call(this, filePath)
+      }
+      try {
+        await assert.rejects(migration.runSQLiteToMySqlTask(task.id, actor), /未封存的 SQLite 副文件/)
+      } finally { internal.assertNoSqliteSnapshotSidecars = sealCheck }
+      task = await migration.getSQLiteToMySqlTask(task.id)
+      assert.equal(task.status, 'failed')
+      assert.equal(task.immutableSnapshotFile, undefined)
+      assert.ok(task.backupFile && sentinel && fs.existsSync(sentinel))
+      assert.equal(maintenance.isReadOnly(), false)
+      assert.equal((await inspectSqliteForRescue(sqlite)).sha256, sourceDigestBeforeRun)
+      assert.equal((await inspectSqliteForRescue(task.backupFile.filePath)).sha256, sourceDigestBeforeRun)
+    } else if (selected === 'diagnostic-snapshot-tampered' || selected === 'diagnostic-snapshot-sidecar-on-switch') {
+      task = await migration.runSQLiteToMySqlTask(task.id, actor)
+      await verifyDiagnosticArtifacts()
+      const filePath = task.immutableSnapshotFile!.filePath
+      if (selected === 'diagnostic-snapshot-sidecar-on-switch') {
+        const sentinel = `${filePath}-wal`
+        fs.writeFileSync(sentinel, '', { flag: 'wx' })
+        await assert.rejects(migration.applyDatabaseSwitch({ taskId: task.id }, actor), /未封存的 SQLite 副文件/)
+        assert.equal(fs.statSync(sentinel).size, 0, '切换失败必须原样保留副文件')
+      } else {
+        const snapshot = await internal.createSqliteSnapshotDataSource!(filePath) as typeof source
+        await snapshot.initialize()
+        try {
+          await snapshot.query("UPDATE sys_audit_log SET user_agent = 'tampered' WHERE action_type = 'manual.diagnostic-fixture'")
+        } finally { await snapshot.destroy() }
+        await assert.rejects(migration.applyDatabaseSwitch({ taskId: task.id }, actor), /工作快照已改变/)
+      }
+      assert.equal(maintenance.isReadOnly(), false)
+      assert.equal((await inspectSqliteForRescue(sqlite)).sha256, sourceDigestBeforeRun)
+      assert.equal((await inspectSqliteForRescue(task.backupFile!.filePath)).sha256, sourceDigestBeforeRun)
+    } else if (selected === 'http-proxy-run' || selected === 'https-proxy-run') {
       const http = await import('node:http')
       process.env.Y_LINK_TRUST_PROXY = '127.0.0.1/32'
       const app = (await import('../src/app.js')).createApp()
@@ -380,10 +471,16 @@ if (!selected) {
         fs.writeFileSync(path.join(traceDir, task.id + '-cancel.json'), JSON.stringify({ taskId: task.id, timeline }, null, 2) + '\n')
       }
       cleanupDiagnostic = trace
-      for (const name of ['createSqliteSnapshotDataSource', 'createMysqlDataSource']) {
+      for (const name of ['createSqliteSnapshotDataSource', 'createReadOnlyManualSnapshotDataSource', 'createMysqlDataSource']) {
         const factory = factories[name]!
         originals.set(name, factory)
-        factories[name] = function (...args) { const resource = factory.apply(this, args); resources.push({ kind: name, resource }); trace('resource-created'); return resource }
+        factories[name] = function (...args) {
+          const track = (resource: { isInitialized: boolean }) => {
+            resources.push({ kind: name, resource }); trace('resource-created'); return resource
+          }
+          const result = factory.apply(this, args)
+          return result instanceof Promise ? result.then(track) : track(result)
+        }
       }
       const begin = maintenance.beginReadOnly
       maintenance.beginReadOnly = async function (input) {
@@ -487,11 +584,17 @@ if (!selected) {
       const running = migration.runSQLiteToMySqlTask(task.id, actor); void running.catch(() => undefined)
       if (selected === 'request-worker-drain') {
         await waitFor(() => maintenance.isReadOnly())
-        assert.equal(fs.existsSync(path.join(isolation.rootDir, 'database-migration/snapshots', `${task.id}.sqlite`)), false)
+        assert.ok(fs.readdirSync(path.join(isolation.rootDir, 'database-migration/snapshots')).every(name => !name.startsWith(task.id)))
         release.resolve()
       }
       try { task = await timeout(running) } finally { unregisterWorker?.(); await closeHttp?.() }
       assert.equal(task.status, 'succeeded'); assert.equal(maintenance.isReadOnly(), true)
+      if (diagnosticCase) {
+        await verifyDiagnosticArtifacts()
+        const destination = await internal.createMysqlDataSource!(target) as typeof source
+        await destination.initialize()
+        try { assert.equal(await readUa(destination), projectedUa) } finally { await destination.destroy() }
+      }
       await assert.rejects(gate.runOperation(() => source.getRepository(BaseProduct).update(product.id, { currentStock: 999 })), /只读/)
       if (selected === 'request-worker-drain') assert.equal((await source.getRepository(BaseProduct).findOneByOrFail({ id: product.id })).currentStock, 9)
       if (selected === 'copy-completed-before-cancel') {
