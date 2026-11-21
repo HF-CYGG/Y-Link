@@ -388,12 +388,15 @@ const createHttpClient = (baseUrl) => {
   const request = async (pathname, options = {}) => {
     const {
       method = 'GET',
-      body,
+      body: submittedBody,
       expectedStatuses = [200],
       authenticated = true,
       includeCsrf = !['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase()),
       timeoutMs = 10_000,
     } = options
+    const migrationControl = (method === 'POST' && /^\/api\/data-maintenance\/db-migration\/(?:automatic-tasks|tasks(?:\/[^/]+\/(?:run|rescue-credential))?|switch|rollback)$/.test(pathname))
+      || (method === 'DELETE' && pathname === '/api/data-maintenance/db-migration/runtime-override')
+    const body = migrationControl ? { currentPassword: adminPassword, ...submittedBody } : submittedBody
     const headers = {
       Accept: 'application/json',
       'User-Agent': 'Y-Link-Isolated-Migration-Verify',

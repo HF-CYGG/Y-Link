@@ -56,6 +56,16 @@ const stepUpPasswordSchema = z.object({
   currentPassword: z.string().max(EXISTING_PASSWORD_INPUT_MAX_LENGTH).optional(),
 })
 
+function requireMigrationPassword(purpose: string) {
+  return asyncHandler(async (req, _res, next) => {
+    const { currentPassword } = stepUpPasswordSchema.parse(req.body ?? {})
+    await authService.verifyStepUpPassword((req as AuthenticatedRequest).auth, currentPassword ?? '', extractRequestMeta(req), purpose, true)
+    // 严格任务 schema 及业务层只接收迁移参数，复核密码留在当前请求。
+    if (req.body) delete req.body.currentPassword
+    next()
+  })
+}
+
 const JSON_IMPORT_AUDIT_TARGET = {
   actionType: 'data_maintenance.import_json',
   actionLabel: '导入 JSON 数据',
@@ -262,6 +272,7 @@ dataMaintenanceRouter.post(
   '/db-migration/automatic-tasks',
   requirePermission('db_migration:operate'),
   requireRole('admin'),
+  requireMigrationPassword('database_migration.create_automatic_task'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = createAutomaticSqliteToMysqlTaskSchema.parse(req.body)
@@ -297,8 +308,12 @@ dataMaintenanceRouter.post(
   '/db-migration/tasks/:taskId/rescue-credential',
   requirePermission('db_migration:operate'),
   requireRole('admin'),
-  asyncHandler(async (req, res) => {
+  asyncHandler(async (req, _res, next) => {
     if (!isSecureOrDirectLoopback(req)) throw new BizError('救援凭证需通过可信 HTTPS 或容器本地工具签发', 403)
+    next()
+  }),
+  requireMigrationPassword('database_migration.issue_rescue_credential'),
+  asyncHandler(async (req, res) => {
     await databaseMigrationService.getSQLiteToMySqlTask(req.params.taskId)
     await databaseMigrationService.prepareManualMigrationCredential(req.params.taskId)
     const data = issueDatabaseRescueCredential(req.params.taskId)
@@ -361,6 +376,7 @@ dataMaintenanceRouter.post(
   '/db-migration/tasks',
   requirePermission('db_migration:operate'),
   requireRole('admin'),
+  requireMigrationPassword('database_migration.create_task'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = createSqliteToMysqlTaskSchema.parse(req.body)
@@ -377,6 +393,7 @@ dataMaintenanceRouter.post(
   '/db-migration/tasks/:taskId/run',
   requirePermission('db_migration:operate'),
   requireRole('admin'),
+  requireMigrationPassword('database_migration.run_task'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const data = await databaseMigrationService.runSQLiteToMySqlTask(
@@ -401,6 +418,7 @@ dataMaintenanceRouter.post(
   '/db-migration/switch',
   requirePermission('db_migration:operate'),
   requireRole('admin'),
+  requireMigrationPassword('database_migration.apply_switch'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = applyDatabaseSwitchSchema.parse(req.body)
@@ -413,6 +431,7 @@ dataMaintenanceRouter.post(
   '/db-migration/rollback',
   requirePermission('db_migration:operate'),
   requireRole('admin'),
+  requireMigrationPassword('database_migration.rollback_switch'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = rollbackDatabaseSwitchSchema.parse(req.body)
@@ -425,6 +444,7 @@ dataMaintenanceRouter.delete(
   '/db-migration/runtime-override',
   requirePermission('db_migration:operate'),
   requireRole('admin'),
+  requireMigrationPassword('database_migration.clear_override'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const data = await databaseMigrationService.clearRuntimeOverride(authReq.auth, extractRequestMeta(req))

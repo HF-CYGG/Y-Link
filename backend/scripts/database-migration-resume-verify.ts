@@ -158,7 +158,9 @@ try {
   await source.initialize()
   await (await import('../src/database/database-strategy.js')).initializeDatabaseInfrastructure(source)
   await source.synchronize()
-  const admin = await source.getRepository(SysUser).save({ username: 'resume_admin', displayName: '隔离迁移管理员', role: 'admin', status: 'enabled', passwordHash: 'fixture-only' })
+  const currentPassword = randomBytes(18).toString('base64url')
+  const { hashPassword } = await import('../src/utils/password.js')
+  const admin = await source.getRepository(SysUser).save({ username: 'resume_admin', displayName: '隔离迁移管理员', role: 'admin', status: 'enabled', passwordHash: await hashPassword(currentPassword) })
   const token = randomBytes(32).toString('hex')
   await source.getRepository(SysUserSession).save({ userId: admin.id, sessionToken: hashSessionToken(token), expiresAt: new Date(Date.now() + 3600_000), lastAccessAt: new Date() })
   const actor = { userId: admin.id, username: admin.username, displayName: admin.displayName, role: 'admin' as const,
@@ -198,11 +200,13 @@ try {
   server = createApp().listen(0, '127.0.0.1')
   await once(server, 'listening')
   const address = server.address(); assert.ok(address && typeof address === 'object')
-  const post = (suffix: string, body: unknown = {}) => fetch(`http://127.0.0.1:${address.port}/api/data-maintenance/db-migration/${suffix}`, {
+  const post = (suffix: string, body: Record<string, unknown> = {}) => fetch(`http://127.0.0.1:${address.port}/api/data-maintenance/db-migration/${suffix}`, {
     method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body), signal: AbortSignal.timeout(20_000),
+    body: JSON.stringify({ currentPassword, ...body }), signal: AbortSignal.timeout(20_000),
   })
   const target = { host: '127.0.0.1', port: 1, user: 'fixture', password: randomBytes(24).toString('hex'), database: 'queued_fixture' }
+  assert.equal((await post('automatic-tasks', { target, currentPassword: undefined })).status, 400)
+  assert.equal(fs.existsSync(appDataPaths.migrationLockFile), false, '缺少本人密码不能受理任务或占用锁')
   const accepted = await post('automatic-tasks', { target })
   assert.equal(accepted.status, 202)
   const result = await accepted.json() as { data: { id: string; status: string } }
@@ -247,6 +251,37 @@ try {
   assert.equal(fs.existsSync(appDataPaths.migrationLockFile), false)
   assert.equal(maintenance.isReadOnly(), false)
   assert.equal(gate.snapshot().activeOperations, 0)
+
+  const brokenQueued = await migration.createAutomaticSQLiteToMySqlTask({ target }, actor)
+  const brokenCredential = path.join(appDataPaths.migrationSecretDir, `${brokenQueued.id}.json`)
+  fs.writeFileSync(brokenCredential, '{}')
+  assert.equal(brokenQueued.status, 'queued')
+  assert.equal(JSON.parse(fs.readFileSync(appDataPaths.migrationLockFile, 'utf8')).taskId, brokenQueued.id)
+  for (const file of [appDataPaths.migrationCutoverFile, appDataPaths.runtimeOverrideFile, appDataPaths.maintenanceStateFile]) {
+    assert.equal(fs.existsSync(file), false, '损坏凭据夹具只持有排队任务锁')
+  }
+  scheduledRun = undefined
+  assert.equal(await migration.resumeInterruptedAutomaticMigrationAfterStartup(), null)
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(scheduledRun, undefined, '无法验证目标凭据时不应调度续跑')
+  assert.equal(fs.existsSync(appDataPaths.migrationLockFile), false, '无活动控制状态时回收排队锁')
+  assert.equal(fs.existsSync(brokenCredential), false)
+  assert.equal(maintenance.isReadOnly(), false)
+
+  const cancelling = await migration.createAutomaticSQLiteToMySqlTask({ target }, actor)
+  const credentialFile = path.join(appDataPaths.migrationSecretDir, `${cancelling.id}.json`)
+  fs.writeFileSync(credentialFile, '{}')
+  const { stopAutomaticMigrationForEmergencyAction } = migration as unknown as {
+    stopAutomaticMigrationForEmergencyAction(taskId: string): Promise<{ taskId: string; sourceSqlitePath: string } | null>
+  }
+  const cancelled = await stopAutomaticMigrationForEmergencyAction.call(migration, cancelling.id)
+  assert.ok(cancelled && cancelled.taskId === cancelling.id, '待执行任务回退无需读取损坏的目标凭据')
+  const { inspectDatabaseStartup } = await import('../src/runtime/database-startup-preflight.js')
+  assert.deepEqual(await inspectDatabaseStartup(), { mode: 'cutover', taskId: cancelling.id })
+  const rollback = await migration.finalizeAutomaticMigrationRollbackAfterStartup({ ...cancelled, attempts: 0, createdAt: new Date().toISOString() })
+  assert.equal(rollback.status, 'rolled_back')
+  assert.equal(fs.existsSync(credentialFile), false)
+  assert.equal(fs.existsSync(appDataPaths.migrationLockFile), false)
   console.log('[migration-resume] 202 后任务接续、手动争用、旧任务隔离、启动调度及故障清理通过')
 } finally {
   startAutomatic.resolve(); releaseManual.resolve()

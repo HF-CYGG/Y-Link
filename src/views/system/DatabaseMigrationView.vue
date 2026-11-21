@@ -776,6 +776,20 @@ const handlePrecheck = async () => {
  * - 若预检尚未执行，允许继续创建，因为后端会再次预检；
  * - 若预检已有阻断错误，则先拦截，避免把明显无法执行的任务落盘。
  */
+const promptMigrationPassword = async (message = '请输入当前登录密码。', title = '身份复核') => {
+  const { value } = await ElMessageBox.prompt(message, title, {
+    inputType: 'password',
+    inputPlaceholder: '当前登录密码',
+    inputValidator: (password: string) => !!password?.trim(),
+  })
+  return value
+}
+
+const showMigrationActionError = (error: unknown, title: string, operation: string) => {
+  if (error === 'cancel' || error === 'close') return
+  void showCriticalErrorDialog(error, { title, fallback: title, operation })
+}
+
 const handleCreateTask = async () => {
   if (!ensurePermission('db_migration:operate', '数据库迁移操作')) {
     return
@@ -790,18 +804,14 @@ const handleCreateTask = async () => {
 
   taskCreating.value = true
   try {
-    const task = await createSQLiteToMySqlMigrationTask(buildTaskPayload())
+    const task = await createSQLiteToMySqlMigrationTask(buildTaskPayload(), await promptMigrationPassword())
     upsertTaskRecord(task)
     selectedTaskId.value = task.id
     enterStepFlow('run')
     showAppSuccess('迁移任务已创建，可在下方任务列表中执行')
     await loadOverview()
   } catch (error) {
-    void showCriticalErrorDialog(error, {
-      title: '创建迁移任务失败',
-      fallback: '创建迁移任务失败',
-      operation: '创建数据库迁移任务',
-    })
+    showMigrationActionError(error, '创建迁移任务失败', '创建数据库迁移任务')
   } finally {
     taskCreating.value = false
   }
@@ -838,31 +848,18 @@ const handleCreateAutomaticTask = async () => {
       }
     }
     if (!precheck.canProceed || precheck.issues.some((issue) => issue.level === 'error')) {
-      showAppWarning('自动迁移预检未通过，请先处理阻断问题；目标库应为专用空库。')
+      showAppWarning('预检未通过。请处理阻断项，并使用专用空库。')
       return
     }
 
-    try {
-      await ElMessageBox.confirm(
-        `预检已通过。确认把当前 SQLite 自动迁移到 ${target.host}:${target.port}/${target.database} 吗？系统将进入全局只读维护，自动完成备份、迁移、重启衔接与校验。`,
-        '确认一键自动迁移',
-        {
-          type: 'warning',
-          confirmButtonText: '确认并开始',
-          cancelButtonText: '取消',
-        },
-      )
-    } catch (error) {
-      if (error === 'cancel' || error === 'close') {
-        return
-      }
-      throw error
-    }
-
+    const currentPassword = await promptMigrationPassword(
+      `迁移到 ${target.host}:${target.port}/${target.database} 并进入只读维护。请输入当前登录密码。`,
+      '确认一键自动迁移',
+    )
     const createdTask = await createAutomaticSQLiteToMySqlMigrationTask({
       target,
       note: migrationForm.note.trim() || undefined,
-    })
+    }, currentPassword)
     // rescueCredential 属于一次性敏感响应字段，入任务列表前必须剥离，不能跟随任务对象进入响应式状态。
     const { rescueCredential, ...task } = createdTask
     if (rescueCredential) {
@@ -870,19 +867,15 @@ const handleCreateAutomaticTask = async () => {
         storeRescueCredential(window.sessionStorage, rescueCredential)
         currentTabRescueCredentialTaskId.value = rescueCredential.taskId
       } catch {
-        showAppWarning('自动迁移已提交；当前浏览器无法暂存救援凭证，请在可信 HTTPS 环境下按需重新签发。')
+        showAppWarning('任务已提交。浏览器无法暂存救援凭证，请通过可信 HTTPS 重新签发。')
       }
     }
     upsertTaskRecord(task)
     selectedTaskId.value = task.id
     startAutomaticTaskPolling(task.id)
-    showAppSuccess('自动迁移任务已提交，系统进入只读维护后会在全局横幅中持续提示')
+    showAppSuccess('自动迁移已提交，只读状态见全局横幅')
   } catch (error) {
-    void showCriticalErrorDialog(error, {
-      title: '启动一键自动迁移失败',
-      fallback: '启动一键自动迁移失败',
-      operation: '创建自动数据库迁移任务',
-    })
+    showMigrationActionError(error, '启动一键自动迁移失败', '创建自动数据库迁移任务')
   } finally {
     automaticTaskCreating.value = false
   }
@@ -948,44 +941,28 @@ const handleRunTask = async (task: SQLiteToMySqlTaskRecord) => {
 
   const remoteRescueCredential = window.location.protocol === 'https:'
   const localRescuePreparation = remoteRescueCredential ? ''
-    : ` 当前为 HTTP，不会远程传输明文救援凭证。请先在后端本地（容器内执行）运行 node dist/runtime/database-rescue-cli.js prepare-manual-credential ${task.id}，私下保存输出；故障时可在独立救援页手动输入。确认已准备本地救援后再执行。`
-
-  try {
-    await ElMessageBox.confirm(
-      `确认执行迁移任务“${task.id}”吗？开始后系统持续只读，直到切换完成或主动取消。复制完成不会恢复营业；切换后仍需重启并通过目标启动验收。${localRescuePreparation}`,
-      '执行迁移任务',
-      {
-        type: 'warning',
-        confirmButtonText: remoteRescueCredential ? '立即执行' : '已在本地准备，执行',
-        cancelButtonText: '取消',
-      },
-    )
-  } catch (error) {
-    if (error === 'cancel' || error === 'close') {
-      return
-    }
-  }
+    : ` HTTP 不会远程传输明文救援凭证。请先在后端本地（容器内）运行 node dist/runtime/database-rescue-cli.js prepare-manual-credential ${task.id}，私下保存凭证，故障时在独立救援页输入。`
 
   taskRunningId.value = task.id
   try {
+    const currentPassword = await promptMigrationPassword(
+      `开始后系统持续只读，直到切换完成或取消。${localRescuePreparation}`,
+      '执行迁移任务',
+    )
     if (remoteRescueCredential) {
-      const credential = await issueDatabaseMigrationRescueCredential(task.id)
+      const credential = await issueDatabaseMigrationRescueCredential(task.id, currentPassword)
       // HTTPS签发失败（包括403/鉴权失败）或暂存失败必须停止，不能回退绕过安全门禁。
       storeRescueCredential(window.sessionStorage, credential)
       currentTabRescueCredentialTaskId.value = credential.taskId
     }
-    const latestTask = await runSQLiteToMySqlMigrationTask(task.id)
+    const latestTask = await runSQLiteToMySqlMigrationTask(task.id, currentPassword)
     upsertTaskRecord(latestTask)
     selectedTaskId.value = latestTask.id
     enterStepFlow(latestTask.status === 'succeeded' ? 'switch' : 'run')
     showAppSuccess(latestTask.status === 'succeeded' ? '复制与强校验完成，系统持续只读，直到切换完成或主动取消' : '迁移任务已执行，请查看结果')
     await loadOverview()
   } catch (error) {
-    void showCriticalErrorDialog(error, {
-      title: '执行迁移任务失败',
-      fallback: '执行迁移任务失败',
-      operation: '执行数据库迁移任务',
-    })
+    showMigrationActionError(error, '执行迁移任务失败', '执行数据库迁移任务')
   } finally {
     taskRunningId.value = ''
   }
@@ -1011,7 +988,7 @@ const handleSwitchToTask = async (task: SQLiteToMySqlTaskRecord) => {
       '切换到 MySQL',
       {
         inputValue: DATABASE_MIGRATION_SWITCH_REASON_DEFAULT,
-        inputPlaceholder: '例如：验证通过，切换到生产 MySQL',
+        inputPlaceholder: '例如：验证已通过',
         confirmButtonText: '确认切换',
         cancelButtonText: '取消',
       },
@@ -1020,7 +997,7 @@ const handleSwitchToTask = async (task: SQLiteToMySqlTaskRecord) => {
     const result = await applyDatabaseMigrationSwitch({
       taskId: task.id,
       reason: promptResult.value.trim() || undefined,
-    })
+    }, await promptMigrationPassword())
     if (runtimeState.value) {
       runtimeState.value = {
         ...runtimeState.value,
@@ -1031,14 +1008,7 @@ const handleSwitchToTask = async (task: SQLiteToMySqlTaskRecord) => {
     showAppSuccess(`已写入 MySQL 运行时覆盖。${DATABASE_MIGRATION_RESTART_EFFECT_TEXT}`)
     await loadOverview()
   } catch (error) {
-    if (error === 'cancel' || error === 'close') {
-      return
-    }
-    void showCriticalErrorDialog(error, {
-      title: '切换到 MySQL 失败',
-      fallback: '切换到 MySQL 失败',
-      operation: '切换数据库到 MySQL',
-    })
+    showMigrationActionError(error, '切换到 MySQL 失败', '切换数据库到 MySQL')
   } finally {
     switchingTaskId.value = ''
   }
@@ -1059,11 +1029,11 @@ const handleRollbackToSqlite = async (task?: SQLiteToMySqlTaskRecord) => {
   const cancellingManual = operationTask?.mode === 'manual' && operationTask.allowedActions?.includes('cancel')
   try {
     const promptResult = await ElMessageBox.prompt(
-      cancellingManual ? '请输入取消手动迁移的原因。系统会等待复制停止并撤销副本切换资格；已经准备切换时仍须完成受控重启验收。' : `请输入本次回退原因。${DATABASE_MIGRATION_RESTART_EFFECT_TEXT}`,
+      cancellingManual ? '请填写取消原因。复制停止后撤销副本切换资格，已准备切换时仍须受控重启验收。' : `请输入本次回退原因。${DATABASE_MIGRATION_RESTART_EFFECT_TEXT}`,
       cancellingManual ? '取消当前手动迁移' : '回退到 SQLite',
       {
         inputValue: DATABASE_MIGRATION_ROLLBACK_REASON_DEFAULT,
-        inputPlaceholder: '例如：目标库校验异常，回退到 SQLite',
+        inputPlaceholder: '例如：目标库校验异常',
         confirmButtonText: '确认回退',
         cancelButtonText: '取消',
       },
@@ -1072,7 +1042,7 @@ const handleRollbackToSqlite = async (task?: SQLiteToMySqlTaskRecord) => {
     const result = await rollbackDatabaseMigrationSwitch({
       taskId: operationTaskId,
       reason: promptResult.value.trim() || undefined,
-    })
+    }, await promptMigrationPassword())
     if (runtimeState.value) {
       runtimeState.value = {
         ...runtimeState.value,
@@ -1085,14 +1055,7 @@ const handleRollbackToSqlite = async (task?: SQLiteToMySqlTaskRecord) => {
     showAppSuccess(cancelledTask?.status === 'rolled_back' ? '手动迁移已取消，副本切换资格已撤销，原 SQLite 继续服务' : `已准备受控回退，系统保持只读至重启验收完成。${DATABASE_MIGRATION_RESTART_EFFECT_TEXT}`)
     await loadOverview()
   } catch (error) {
-    if (error === 'cancel' || error === 'close') {
-      return
-    }
-    void showCriticalErrorDialog(error, {
-      title: '回退到 SQLite 失败',
-      fallback: '回退到 SQLite 失败',
-      operation: '回退数据库到 SQLite',
-    })
+    showMigrationActionError(error, '回退到 SQLite 失败', '回退数据库到 SQLite')
   } finally {
     rollbackLoading.value = false
   }
@@ -1108,25 +1071,11 @@ const handleClearRuntimeOverride = async () => {
     return
   }
 
-  try {
-    await ElMessageBox.confirm(
-      `确认清空当前数据库运行时覆盖吗？清空后应用会回到默认环境变量配置。${DATABASE_MIGRATION_RESTART_EFFECT_TEXT}`,
-      '清空运行时覆盖',
-      {
-        type: 'warning',
-        confirmButtonText: '确认清空',
-        cancelButtonText: '取消',
-      },
-    )
-  } catch (error) {
-    if (error === 'cancel' || error === 'close') {
-      return
-    }
-  }
-
   clearOverrideLoading.value = true
   try {
-    const result = await clearDatabaseMigrationRuntimeOverride()
+    const result = await clearDatabaseMigrationRuntimeOverride(await promptMigrationPassword(
+      `清空后应用回到默认环境变量配置。${DATABASE_MIGRATION_RESTART_EFFECT_TEXT}`, '清空运行时覆盖',
+    ))
     if (runtimeState.value) {
       runtimeState.value = {
         ...runtimeState.value,
@@ -1141,11 +1090,7 @@ const handleClearRuntimeOverride = async () => {
     )
     await loadOverview()
   } catch (error) {
-    void showCriticalErrorDialog(error, {
-      title: '清空运行时覆盖失败',
-      fallback: '清空运行时覆盖失败',
-      operation: '清空数据库运行时覆盖',
-    })
+    showMigrationActionError(error, '清空运行时覆盖失败', '清空数据库运行时覆盖')
   } finally {
     clearOverrideLoading.value = false
   }

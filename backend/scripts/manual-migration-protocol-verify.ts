@@ -60,11 +60,16 @@ if (!selected) {
   await assertInheritedVerificationTarget(source)
   const { databaseMigrationService: migration } = await import('../src/services/database-migration.service.js')
   const { databaseMaintenanceModeService: maintenance } = await import('../src/services/database-maintenance-mode.service.js')
+  const { appDataPaths } = await import('../src/config/app-data-paths.js')
+  const { inspectSqliteForRescue } = await import('../src/runtime/sqlite-rescue-inspection.js')
   try {
     await source.initialize()
+    const before = await inspectSqliteForRescue(context.target.database)
     const actor = JSON.parse(process.env.Y_LINK_LEGACY_VERIFY_ACTOR!)
     await assert.rejects(migration.applyDatabaseSwitch({ taskId: process.env.Y_LINK_LEGACY_VERIFY_TASK }, actor), /校验未通过/)
     assert.equal(maintenance.isReadOnly(), false)
+    assert.equal(fs.existsSync(appDataPaths.migrationLockFile), false, '历史任务校验拒绝后必须释放迁移锁')
+    assert.equal((await inspectSqliteForRescue(context.target.database)).sha256, before.sha256, '历史任务校验不得改变源 SQLite')
     assert.equal(fs.existsSync(path.join(context.rootDir, 'runtime/database-runtime-override.json')), false)
     assert.equal(fs.existsSync(path.join(context.rootDir, 'runtime/database-migration-cutover.json')), false)
   } finally { if (source.isInitialized) await source.destroy() }
@@ -165,7 +170,8 @@ if (!selected) {
   const isolation = createVerificationIsolation('manual-migration-protocol')
   const sqlite = path.join(isolation.rootDir, 'source.sqlite')
   isolation.seal({ type: 'sqlite', database: sqlite })
-  Object.assign(process.env, { DB_SYNC: 'false', DB_AUTO_MIGRATE: 'false', INIT_ADMIN_USERNAME: 'manual_admin', INIT_ADMIN_PASSWORD: randomBytes(18).toString('base64url') })
+  const currentPassword = randomBytes(18).toString('base64url')
+  Object.assign(process.env, { DB_SYNC: 'false', DB_AUTO_MIGRATE: 'false', INIT_ADMIN_USERNAME: 'manual_admin', INIT_ADMIN_PASSWORD: currentPassword })
   const [{ AppDataSource: source }, { databaseMigrationService: migration }, { databaseMaintenanceModeService: maintenance },
     { databaseOperationGate: gate }, { SysUser }, { SysUserSession }, { BaseProduct }, { hashSessionToken }, { inspectSqliteForRescue }] = await Promise.all([
     import('../src/config/data-source.js'), import('../src/services/database-migration.service.js'), import('../src/services/database-maintenance-mode.service.js'),
@@ -203,7 +209,8 @@ if (!selected) {
     await source.initialize()
     await (await import('../src/database/database-strategy.js')).initializeDatabaseInfrastructure(source)
     await source.synchronize()
-    const user = await source.getRepository(SysUser).save({ username: 'manual_admin', displayName: '隔离迁移管理员', role: 'admin', status: 'enabled', passwordHash: 'fixture-only' })
+    const { hashPassword } = await import('../src/utils/password.js')
+    const user = await source.getRepository(SysUser).save({ username: 'manual_admin', displayName: '隔离迁移管理员', role: 'admin', status: 'enabled', passwordHash: await hashPassword(currentPassword) })
     const token = randomBytes(32).toString('hex')
     await source.getRepository(SysUserSession).save({ userId: user.id, sessionToken: hashSessionToken(token), expiresAt: new Date(Date.now() + 3600_000), lastAccessAt: new Date() })
     const otherUser = await source.getRepository(SysUser).save({ username: 'manual_other', displayName: '隔离账号状态夹具', role: 'operator', status: 'enabled', passwordHash: 'fixture-only' })
@@ -322,7 +329,7 @@ if (!selected) {
       await new Promise<void>((resolve, reject) => { proxy.once('listening', resolve); proxy.once('error', reject) })
       const proxyAddress = proxy.address(); assert.ok(proxyAddress && typeof proxyAddress === 'object')
       const post = (suffix: string) => fetch(`http://127.0.0.1:${proxyAddress.port}/api/data-maintenance/db-migration/tasks/${task.id}/${suffix}`,
-        { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: '{}' })
+        { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ currentPassword }) })
       try {
         const credentialResponse = await post('rescue-credential')
         assert.equal(credentialResponse.status, secure ? 200 : 403)
@@ -367,7 +374,8 @@ if (!selected) {
       const address = server.address(); assert.ok(address && typeof address === 'object')
       const remove = async () => {
         const response = await fetch(`http://127.0.0.1:${address.port}/api/data-maintenance/db-migration/runtime-override`, {
-          method: 'DELETE', headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(20_000),
+          method: 'DELETE', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ currentPassword }), signal: AbortSignal.timeout(20_000),
         })
         return { status: response.status, body: await response.json() as { code: number; data?: { cleared: boolean; restartRequired: boolean } } }
       }
@@ -675,6 +683,8 @@ if (!selected) {
           assert.equal(fs.existsSync(path.join(isolation.rootDir, 'runtime/database-migration-cutover.json')), false)
         }
       } else if (['legacy-stale', 'legacy-account-stale', 'legacy-session-stale', 'no-id-stale', 'no-id-equal', 'preserve-target'].includes(selected)) {
+        const credentialFile = path.join(isolation.rootDir, 'database-migration/secrets', `${task.id}.json`)
+        const historicalCredential = selected.startsWith('legacy-') ? fs.readFileSync(credentialFile) : null
         await migration.rollbackDatabaseSwitch({ taskId: task.id }, actor)
         assert.equal(maintenance.isReadOnly(), false)
         if (selected === 'legacy-account-stale') await source.getRepository(SysUser).update(otherUser.id, { status: 'disabled' })
@@ -682,7 +692,10 @@ if (!selected) {
           await source.getRepository(SysUserSession).delete(otherSession.id)
           await source.getRepository(SysUserSession).save({ userId: otherUser.id, sessionToken: hashSessionToken(randomBytes(32).toString('hex')), expiresAt: new Date(Date.now() + 3600_000), lastAccessAt: new Date() })
         } else if (selected.endsWith('stale')) await source.getRepository(BaseProduct).update(product.id, { currentStock: 8 }) // 行数不变
-        if (selected.startsWith('legacy-')) {
+        if (historicalCredential) {
+          assert.equal(fs.existsSync(credentialFile), false, '真实取消后必须移除目标凭据')
+          // 重建从未取消的历史成功任务时，也恢复该任务先前的密封凭据，保持父子进程共用的隔离密钥。
+          fs.writeFileSync(credentialFile, historicalCredential, { flag: 'wx', mode: 0o600 })
           const filename = path.join(isolation.rootDir, 'database-migration/tasks', `${task.id}.json`)
           const legacy = JSON.parse(fs.readFileSync(filename, 'utf8'))
           delete legacy.controlProtocol; delete legacy.controlPhase; delete legacy.cancelRequestedAt
