@@ -1,6 +1,6 @@
 /**
  * 模块说明：实际页面异步操作归属回归。
- * 文件职责：执行生产 SFC 的下单收尾、商家进度及反馈三个动作，验证未知结果、恢复确认与跨上下文迟到响应。
+ * 文件职责：执行生产 SFC 的商城刷新、下单收尾、商家进度及反馈动作，验证刷新与跨上下文迟到响应。
  * 实现逻辑：只抽取生产声明，使用真实 Vue ref/watch 和反馈生命周期；网络、确认框与界面提示是可控边界。
  * 维护说明：不复制 handler、不访问真实 API/账号/数据库；购物车数量与后端事务另由对应专项覆盖。
  */
@@ -30,6 +30,248 @@ const helper = (file) => {
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no }); return { promise, resolve, reject } }
 const flush = async () => { for (let index=0; index<12; index++) await Promise.resolve(); await nextTick() }
 const plain = (value) => JSON.parse(JSON.stringify(value))
+
+const mallAst = pageAst('src/views/client/ClientMallView.vue')
+const mallActions = ['togglePhoneStorefront', 'refreshMallStorefront', 'revalidateCatalogInBackground',
+  'handleMallVisibilityChange', 'loadProducts', 'activateMallRuntime', 'deactivateMallRuntime']
+const mallNames = ['mallStorefront', 'compactAnnouncementCollapsed', 'loading', 'refreshing', ...mallActions]
+const mallHooks = mallAst.statements.filter((statement) => ts.isExpressionStatement(statement)
+  && /^(?:on(?:Mounted|Activated|Deactivated|BeforeRouteLeave)\(|watch\(\s*announcementSessionSources,)/.test(statement.getText(mallAst)))
+assert.equal(mallHooks.length, 6, '必须执行商城挂载、激活、失活、离页和两段归属监听')
+const mallSource = declarations(mallAst, [
+  'CATALOG_BACKGROUND_REVALIDATE_MS', 'CATALOG_REVALIDATE_MIN_GAP_MS', 'lastCatalogRevalidateAt',
+  'catalogRevalidateTimer', 'mallRuntimeActive', 'hasActivatedOnce', 'storefrontRequest', 'cancelStorefrontRefresh',
+  'confirmedMallStorefront', 'mallStorefront', 'mallAnnouncementText', 'compactAnnouncementCollapsed', 'loading',
+  'refreshing', 'finishProductRefresh', 'acknowledgedAnnouncementText', ...mallActions, 'announcementSessionSources',
+]) + '\n' + mallHooks.map((statement) => statement.getText(mallAst)).join('\n')
+const stableRequestFile = 'src/composables/useStableRequest.ts'
+const stableRequestAst = ts.createSourceFile(stableRequestFile, read(stableRequestFile), ts.ScriptTarget.Latest, true)
+const stableRequestSource = declarations(stableRequestAst, ['useStableRequest'])
+const storefront = (mallAnnouncementText, businessHoursText = '09:00-18:00', pickupAddress = '东门') => ({
+  mallAnnouncementText, businessHoursText, pickupAddress, pickupWindowHours: null,
+})
+const cachedStorefront = storefront('缓存公告')
+const mall = () => {
+  const noop = () => {}
+  const deactivated = []
+  const onDeactivated = (callback) => deactivated.push(callback)
+  const { useStableRequest } = execute(stableRequestSource, {
+    AbortController, onDeactivated, onBeforeUnmount: noop, isRequestCanceled: () => false,
+  }, ['useStableRequest'])
+  const clientAuthStore = reactive({ currentUser: { id: 'A' }, sessionGeneration: 1 })
+  // 模拟共享 Store 已恢复独立快照，商品回包不能替换它。
+  const clientCatalogStore = reactive({
+    products: [{ id: 'p' }], storefront: cachedStorefront, initialize: noop, isFreshNow: () => true,
+    async refreshStorefront(load) { this.storefront = await load() },
+  })
+  const document = { visibilityState: 'visible', addEventListener: noop, removeEventListener: noop }
+  let interval
+  const window = {
+    addEventListener: noop, removeEventListener: noop,
+    setInterval: (callback, delay) => { assert.equal(delay, 30_000); interval = callback; return 1 },
+    clearInterval: () => { interval = undefined },
+  }
+  const isMallRoute = ref(true)
+  const requestError = ref(null)
+  const reads = [], publicReads = [], productSignals = []
+  let clock = 10_000
+  let productFailure = false
+  let nextProductsRead
+  let mount, activate, routeLeave
+  const subject = execute(mallSource, {
+    clientAuthStore, clientCatalogStore, isMallRoute, document, window, requestError, useStableRequest,
+    Date: { now: () => clock }, navigator: { onLine: true }, runLatest: useStableRequest().runLatest,
+    pendingStorefrontRefresh: undefined, phonePaneTooShort: ref(false), products: computed(() => clientCatalogStore.products),
+    announcementDialogVisible: ref(false), detailMotionMedia: null, feedbackController: new AbortController(),
+    detailVisible: ref(false), cartDrawerVisible: ref(false), checkoutDrawerVisible: ref(false),
+    imagePreviewVisible: ref(false), mobileSearchVisible: ref(false), searchInputFocused: ref(false),
+    drawerHandoffGeneration: 0, drawerHandoff: ref(null), cartReturnFocus: null, checkoutFromCart: false,
+    floatingLayoutResizeObserver: null, floatingOcclusionFrameId: null,
+    onMounted: (callback) => { mount = callback }, onActivated: (callback) => { activate = callback },
+    onDeactivated, onBeforeRouteLeave: (guard) => { routeLeave = guard },
+    stopDetailModeMotion: noop, stopStorefrontMotion: noop, stopMallFeedback: noop, invalidateClearCartConfirm: noop,
+    syncMallDocumentScrollLock: noop, scheduleMallFloatingLayoutSync: noop, clearCategoryUnlockTimer: noop,
+    syncMallViewportAfterRender: noop, warmupProductImages: noop,
+    clientCartStore: { syncWithCatalog: noop, initialize: noop },
+    getO2oCheckoutStorefront: ({ signal }) => {
+      const response = deferred()
+      reads.push({ signal, ...response })
+      return response.promise
+    },
+    getO2oMallStorefront: () => {
+      const response = deferred()
+      publicReads.push(response)
+      return response.promise
+    },
+    normalizeStorefront: (value) => value,
+    getO2oMallProducts: async ({ signal }) => {
+      productSignals.push(signal)
+      if (nextProductsRead) {
+        const response = nextProductsRead
+        nextProductsRead = undefined
+        return response.promise
+      }
+      if (productFailure) throw new Error('商品暂不可用')
+      return { storefront: storefront('公开目录内门店') }
+    },
+    applyCatalogResult: noop,
+    normalizeRequestError: (error) => error,
+  }, mallNames)
+  return { subject, clientAuthStore, clientCatalogStore, document, requestError, reads, publicReads, productSignals, mount,
+    advance: (ms) => { clock += ms },
+    poll: () => interval(),
+    failProducts: () => { productFailure = true },
+    holdProducts: () => { nextProductsRead = deferred(); return nextProductsRead },
+    leave: () => { routeLeave(); isMallRoute.value = false; deactivated.forEach((callback) => callback()) },
+    enter: () => { isMallRoute.value = true; activate() },
+    displayed: () => plain(subject.mallStorefront.value),
+  }
+}
+{
+  const h = mall()
+  await h.mount()
+  assert.deepEqual(h.displayed(), cachedStorefront, '等待私有请求期间继续展示目录缓存')
+  assert.equal(h.reads.length, 1, '缓存首入的后台目录校验不得发第二个私有请求')
+  h.subject.togglePhoneStorefront()
+  await h.subject.loadProducts(true)
+  assert.equal(h.reads.length, 1, '手动刷新与在途入场请求合并')
+  const initial = storefront('入场公告')
+  h.reads[0].resolve(initial)
+  await flush()
+  assert.deepEqual(h.displayed(), initial)
+  assert.equal(h.subject.compactAnnouncementCollapsed.value, false, '合并刷新仍执行入场公告确认')
+
+  h.subject.togglePhoneStorefront()
+  h.advance(30_000)
+  h.poll()
+  const background = storefront('后台新公告', '10:00-20:00', '北门')
+  h.reads[1].resolve(background)
+  await flush()
+  assert.deepEqual(h.displayed(), background, '后台校验更新门店三字段')
+  assert.equal(h.subject.compactAnnouncementCollapsed.value, true, '后台新公告保留折叠选择')
+  h.clientCatalogStore.storefront = storefront('迟到的公开缓存')
+  assert.deepEqual(h.displayed(), background, '迟到的公开缓存不能覆盖已确认门店')
+  h.leave()
+  h.enter()
+  h.reads[2].resolve(background)
+  await flush()
+  assert.equal(h.subject.compactAnnouncementCollapsed.value, false, '后台更新不消耗新公告的入场确认')
+  h.subject.togglePhoneStorefront()
+  h.leave()
+  h.enter()
+  h.reads[3].resolve(background)
+  await flush()
+  assert.equal(h.subject.compactAnnouncementCollapsed.value, true, '重进时同公告保留收起状态')
+
+  h.advance(9_999)
+  h.subject.handleMallVisibilityChange()
+  assert.equal(h.reads.length, 4, '可见性刷新遵守后台最短间隔')
+  h.advance(1)
+  h.document.visibilityState = 'hidden'
+  await h.subject.revalidateCatalogInBackground()
+  assert.equal(h.reads.length, 4, '隐藏时跳过后台刷新')
+  h.document.visibilityState = 'visible'
+  h.subject.handleMallVisibilityChange()
+  h.reads[4].reject(new Error('门店暂不可用'))
+  await flush()
+  assert.deepEqual(h.displayed(), background, '门店刷新失败保留最后确认展示')
+
+  h.failProducts()
+  await h.subject.loadProducts(true)
+  assert.equal(h.reads.length, 6, '手动刷新门店不受后台最短间隔限制')
+  assert.match(h.requestError.value.message, /商品暂不可用/)
+  const manual = storefront('手动新公告', '11:00-21:00', '西门')
+  h.reads[5].resolve(manual)
+  await flush()
+  assert.deepEqual(h.displayed(), manual, '商品失败不影响门店私有展示')
+  assert.equal(h.subject.compactAnnouncementCollapsed.value, true, '手动刷新也保留折叠选择')
+  assert.equal(h.publicReads.length, 0, '健康读取及已有确认时的失败都不重复发公开请求')
+}
+for (const mode of ['5xx', 'empty']) {
+  const h = mall()
+  await h.mount()
+  assert.deepEqual(h.displayed(), cachedStorefront)
+  if (mode === '5xx') h.reads[0].reject({ status: 503 })
+  else h.reads[0].resolve({ businessHoursText: '  ' })
+  await flush()
+  assert.equal(h.publicReads.length, 1, `${mode} 私有读取失败时通过独立的公开接口更新旧缓存`)
+  const fallback = storefront('公开回退公告', '12:00-21:00', '南门')
+  h.publicReads[0].resolve(fallback)
+  await flush()
+  assert.deepEqual(h.displayed(), fallback, '商品目录无法替换旧独立快照时仍能刷新展示')
+}
+{
+  const h = mall()
+  await h.mount()
+  h.reads[0].reject({ status: 503 })
+  await flush()
+  await h.subject.loadProducts(true)
+  const confirmed = storefront('私有确认先于已在途的公开回退')
+  h.reads[1].resolve(confirmed)
+  await flush()
+  h.publicReads[0].resolve(storefront('公开回退晚到'))
+  await flush()
+  assert.deepEqual(h.displayed(), confirmed, '在途公开回退不能覆盖后来确认的私有展示')
+}
+{
+  const h = mall()
+  await h.mount()
+  h.reads[0].resolve(storefront('入场门店'))
+  await flush()
+  const held = h.holdProducts()
+  const manual = h.subject.loadProducts(true)
+  assert.equal(h.subject.refreshing.value, true, '手动商品请求在途')
+  h.leave()
+  assert.equal(h.productSignals[1].aborted, true, 'KeepAlive 失活中止商品请求')
+  assert.equal(h.subject.refreshing.value, false, '取消商品请求后恢复刷新按钮')
+  assert.equal(h.subject.loading.value, false)
+  h.advance(30_000)
+  h.enter()
+  await flush()
+  assert.equal(h.productSignals.length, 3, '缓存命中重入也能后台校验商品')
+  assert.equal(h.reads.length, 3, '缓存重入与后台校验合并门店请求')
+  held.resolve({ storefront: cachedStorefront })
+  await manual
+  h.reads[2].resolve(storefront('重入门店'))
+  await flush()
+  h.advance(30_000)
+  h.poll()
+  assert.equal(h.productSignals.length, 4, '重入后的定时校验正常')
+  assert.equal(h.reads.length, 4, '重入后的定时校验刷新门店')
+}
+for (const mode of ['route', 'account', 'session', 'ABA']) {
+  const h = mall()
+  await h.mount()
+  if (mode === 'route') {
+    h.leave()
+    await h.subject.loadProducts(true)
+    assert.equal(h.reads.length, 1, '离开商城后不能发私有门店请求')
+    h.enter()
+  } else {
+    h.clientAuthStore.sessionGeneration++
+    if (mode === 'account' || mode === 'ABA') h.clientAuthStore.currentUser = { id: 'B' }
+    if (mode === 'ABA') {
+      h.clientAuthStore.sessionGeneration++
+      h.clientAuthStore.currentUser = { id: 'A' }
+    }
+    await flush()
+  }
+  assert.equal(h.reads.length, 2, `${mode} 取消后可重新发起私有请求`)
+  assert.equal(h.reads[0].signal.aborted, true, `${mode} 中止旧请求`)
+  if (mode === 'route') h.reads[0].resolve({ businessHoursText: '' })
+  else if (mode === 'account') h.reads[0].reject({ status: 503 })
+  else h.reads[0].resolve(storefront('旧请求迟到回复'))
+  await flush()
+  assert.deepEqual(h.displayed(), cachedStorefront, `${mode} 拒绝旧请求回写`)
+  assert.equal(h.publicReads.length, 0, `${mode} 失效请求不得发起公开回退`)
+  await h.subject.loadProducts(true)
+  assert.equal(h.reads.length, 2, `${mode} 旧请求不得清掉新请求的合并状态`)
+  const current = storefront('当前会话公告')
+  h.reads[1].resolve(current)
+  await flush()
+  assert.deepEqual(h.displayed(), current)
+}
+
 const checkoutPolicy = helper('src/views/client/client-checkout-submit-policy.ts')
 const checkoutAst = pageAst('src/views/client/ClientCheckoutView.vue')
 const checkoutSource = declarations(checkoutAst, ['sendFrozenSubmission'])
@@ -264,4 +506,4 @@ for(const [kind,name] of Object.entries(handlers))for(const mode of ['conversati
   assert.equal(h.conversation.value.status,'resolved','迟到回读不能改新会话状态')
   assert.equal(h.fields.refreshWarning.value,'','迟到回读不能写新上下文警告');assert.equal(h.errors.length,0)
 }
-console.log('[verify:async-action-ownership] 真实下单收尾、商家状态与反馈动作的未知结果/归属/迟到回读回归通过')
+console.log('[verify:async-action-ownership] 真实商城刷新、下单收尾、商家状态与反馈动作的归属和迟到回读回归通过')

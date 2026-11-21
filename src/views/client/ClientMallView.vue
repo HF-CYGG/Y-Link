@@ -105,14 +105,23 @@ const clientCartStore = useClientCartStore(pinia)
 const clientCatalogStore = useClientCatalogStore(pinia)
 const clientAuthStore = useClientAuthStore(pinia)
 const { runLatest } = useStableRequest()
-const { runLatest: runLatestEntryStorefront, cancel: cancelEntryStorefront } = useStableRequest()
-onBeforeRouteLeave(cancelEntryStorefront)
+const storefrontRequest = useStableRequest()
+let pendingStorefrontRefresh: Promise<void> | undefined
+const cancelStorefrontRefresh = () => {
+  storefrontRequest.cancel()
+  pendingStorefrontRefresh = undefined
+}
+onBeforeRouteLeave(cancelStorefrontRefresh)
 const { isPhone } = useDevice()
 const route = useRoute()
 const animateMiniCartOnAppear = inject('hasMountedClientMainLayout', () => false)()
 
 const loading = ref(false)
 const refreshing = ref(false)
+const finishProductRefresh = () => {
+  loading.value = false
+  refreshing.value = false
+}
 const requestError = ref<{ type: 'offline' | 'error'; message: string } | null>(null)
 // 搜索词与激活分类直接映射到 Store，保证页面切走后仍能恢复到用户上次浏览上下文。
 const keyword = computed({
@@ -909,22 +918,28 @@ const openFullAnnouncement = () => {
   announcementDialogVisible.value = true
 }
 
-const refreshEntryStorefront = () => {
+const refreshMallStorefront = (onEntry = false) => {
   const owner = clientAuthStore.currentUser?.id
   if (!owner || !mallRuntimeActive || !isMallRoute.value) return
   const session = clientAuthStore.sessionGeneration
-  // 只更新本页。公开缓存可能晚到，结算仍独立读取自己的当前门店规则。
-  return runLatestEntryStorefront({
-    executor: (signal) => getO2oCheckoutStorefront({ signal }),
+  // 私有结果只用于本页。公开缓存可能晚到，结算仍独立读取当前门店规则。
+  // 合并在途刷新，保留入场请求对新公告的确认。
+  return pendingStorefrontRefresh ??= storefrontRequest.runLatest({
+    executor: (signal) => getO2oCheckoutStorefront({ signal }).catch(() => null),
     onSuccess: (result) => {
-      if (!result?.businessHoursText?.trim() || !mallRuntimeActive || !isMallRoute.value
+      if (!mallRuntimeActive || !isMallRoute.value
         || clientAuthStore.sessionGeneration !== session || clientAuthStore.currentUser?.id !== owner) return
+      if (!result?.businessHoursText?.trim()) {
+        if (!confirmedMallStorefront.value) void clientCatalogStore.refreshStorefront(getO2oMallStorefront)
+        return
+      }
       const storefront = normalizeStorefront(result)
       confirmedMallStorefront.value = storefront
-      if (storefront.mallAnnouncementText === acknowledgedAnnouncementText) return
+      if (!onEntry || storefront.mallAnnouncementText === acknowledgedAnnouncementText) return
       acknowledgedAnnouncementText = storefront.mallAnnouncementText
       compactAnnouncementCollapsed.value = false
     },
+    onFinally: () => { pendingStorefrontRefresh = undefined },
   })
 }
 
@@ -936,7 +951,7 @@ const togglePhoneStorefront = () => {
 
 const announcementSessionSources = [() => clientAuthStore.sessionGeneration, () => clientAuthStore.currentUser?.id] as const
 watch(announcementSessionSources, () => {
-  cancelEntryStorefront()
+  cancelStorefrontRefresh()
   confirmedMallStorefront.value = null
 }, { flush: 'sync' })
 watch(
@@ -947,7 +962,7 @@ watch(
     compactAnnouncementCollapsed.value = false
     clientCartStore.initialize(nextClientUserId)
     clientCatalogStore.initialize(nextClientUserId)
-    void refreshEntryStorefront()
+    void refreshMallStorefront(true)
   },
 )
 
@@ -981,19 +996,15 @@ const applyCatalogResult = async (result: Awaited<ReturnType<typeof getO2oMallPr
  * 后台静默重新校验目录：新商品上架、下架或库存变化后，停留在商城页或从其他页面返回的顾客无需手动刷新。
  * 浏览器按 ETag 发起条件请求，目录未变化时只得到 304，开销很小；失败时保留当前目录，不打扰顾客。
  */
-const revalidateCatalogInBackground = async () => {
-  if (refreshing.value || globalThis.document?.visibilityState === 'hidden') {
-    return
-  }
-  void clientCatalogStore.refreshStorefront(getO2oMallStorefront)
-  if (Date.now() - lastCatalogRevalidateAt < CATALOG_REVALIDATE_MIN_GAP_MS) {
-    return
-  }
-  lastCatalogRevalidateAt = Date.now()
-  await runLatest({
+const revalidateCatalogInBackground = () => {
+  const now = Date.now()
+  if (refreshing.value || globalThis.document?.visibilityState === 'hidden'
+    || now - lastCatalogRevalidateAt < CATALOG_REVALIDATE_MIN_GAP_MS) return
+  lastCatalogRevalidateAt = now
+  void refreshMallStorefront()
+  return runLatest({
     executor: (signal) => getO2oMallProducts({ signal }),
     onSuccess: applyCatalogResult,
-    onError: () => undefined,
   })
 }
 
@@ -1004,7 +1015,7 @@ const handleMallVisibilityChange = () => {
 }
 
 const loadProducts = async (force = false) => {
-  void clientCatalogStore.refreshStorefront(getO2oMallStorefront, force ? 'manual' : 'background')
+  if (force) void refreshMallStorefront()
   // 如果缓存仍在有效期内，则先直接复用本地目录快照“秒开”，再在后台重新校验，
   // 既不拉长首屏等待，又能让新上架商品与库存变化及时出现。
   if (!force && clientCatalogStore.products.length > 0 && clientCatalogStore.isFreshNow()) {
@@ -1028,10 +1039,7 @@ const loadProducts = async (force = false) => {
         message: normalizedError.message,
       }
     },
-    onFinally: () => {
-      loading.value = false
-      refreshing.value = false
-    },
+    onFinally: finishProductRefresh,
   })
 }
 
@@ -1965,7 +1973,7 @@ watch(
   (isActive) => {
     syncMallDocumentScrollLock()
     if (!isActive) {
-      cancelEntryStorefront()
+      cancelStorefrontRefresh()
       stopStorefrontMotion()
       stopMallFeedback()
       announcementDialogVisible.value = false
@@ -2001,7 +2009,7 @@ const activateMallRuntime = () => {
   }, CATALOG_BACKGROUND_REVALIDATE_MS)
   void syncMallViewportAfterRender()
   if (hasActivatedOnce) {
-    void refreshEntryStorefront()
+    void refreshMallStorefront(true)
     // 目录仍沿用原缓存策略，后台标签页不发目录请求。
     if (globalThis.document?.visibilityState !== 'hidden') void loadProducts().then(syncMallViewportAfterRender)
   }
@@ -2020,7 +2028,8 @@ const deactivateMallRuntime = () => {
     return
   }
   mallRuntimeActive = false
-  cancelEntryStorefront()
+  finishProductRefresh()
+  cancelStorefrontRefresh()
   stopStorefrontMotion()
   syncMallDocumentScrollLock()
   clearCategoryUnlockTimer()
@@ -2084,13 +2093,10 @@ onMounted(async () => {
     warmupProductImages(products.value)
   }
 
-  void refreshEntryStorefront()
+  void refreshMallStorefront(true)
   const loadPromise = loadProducts()
   if (hasHydratedCatalog) {
     await syncMallViewportAfterRender()
-    await loadPromise
-    await syncMallViewportAfterRender()
-    return
   }
 
   await loadPromise
