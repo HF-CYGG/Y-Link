@@ -28,6 +28,25 @@ export Y_LINK_FORCE_SECURE_COOKIES="${Y_LINK_FORCE_SECURE_COOKIES:-false}"
 export TZ="${TZ:-Asia/Shanghai}"
 # libuv 线程池由 scrypt、sharp、SQLite 驱动与文件读写共用，默认 4 线程在登录洪水时会饿死数据库查询。
 export UV_THREADPOOL_SIZE="${UV_THREADPOOL_SIZE:-8}"
+# 收敛常驻堆和 glibc arena。保留部署者显式配置的 V8 老生代上限及其余 Node 选项。
+export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
+case " ${NODE_OPTIONS:-} " in
+  *[[:space:]\"]--max[-_]old[-_]space[-_]size[=[:space:]\"]*) ;;
+  *)
+    node_max_old_space_mb="${Y_LINK_NODE_MAX_OLD_SPACE_MB:-256}"
+    case "$node_max_old_space_mb" in
+      *[!0-9]*)
+        echo "[onebox] Y_LINK_NODE_MAX_OLD_SPACE_MB 必须是正整数。" >&2
+        exit 1
+        ;;
+    esac
+    if ! [ "$node_max_old_space_mb" -gt 0 ] 2>/dev/null; then
+      echo "[onebox] Y_LINK_NODE_MAX_OLD_SPACE_MB 必须是正整数。" >&2
+      exit 1
+    fi
+    export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=$node_max_old_space_mb"
+    ;;
+esac
 export LOG_COLOR="${LOG_COLOR:-true}"
 export FORCE_COLOR="${FORCE_COLOR:-1}"
 export DB_TYPE="${DB_TYPE:-sqlite}"
@@ -83,11 +102,16 @@ nginx -g "daemon off;" &
 NGINX_PID=$!
 
 # 容器收到停止信号时，优先优雅停止两个进程，避免残留僵尸进程。
+SLEEP_PID=
 cleanup() {
-  trap - INT TERM
+  trap '' INT TERM
   echo "[onebox] received stop signal, shutting down..."
   kill -TERM "$NGINX_PID" 2>/dev/null || true
   kill -TERM "$BACKEND_PID" 2>/dev/null || true
+  if [ -n "$SLEEP_PID" ]; then
+    kill -TERM "$SLEEP_PID" 2>/dev/null || true
+    wait "$SLEEP_PID" 2>/dev/null || true
+  fi
   wait "$NGINX_PID" 2>/dev/null || true
   wait "$BACKEND_PID" 2>/dev/null || true
   exit 0
@@ -98,10 +122,8 @@ trap cleanup INT TERM
 # 进程守护：任一关键进程退出，都让容器退出并交给平台自动重启。
 while :; do
   if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
-    set +e
-    wait "$BACKEND_PID"
-    BACKEND_STATUS=$?
-    set -e
+    BACKEND_STATUS=0
+    wait "$BACKEND_PID" || BACKEND_STATUS=$?
     kill -TERM "$NGINX_PID" 2>/dev/null || true
     wait "$NGINX_PID" 2>/dev/null || true
     if [ "$BACKEND_STATUS" -eq 75 ]; then
@@ -119,5 +141,9 @@ while :; do
     exit 1
   fi
 
-  sleep 1
+  # 后台等待可由 trap 打断，收到停止信号时无需等满 5 秒。
+  sleep 5 &
+  SLEEP_PID=$!
+  wait "$SLEEP_PID"
+  SLEEP_PID=
 done

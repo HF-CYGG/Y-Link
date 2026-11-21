@@ -34,7 +34,24 @@ const oneboxRuntime = oneboxSource.split('FROM ${Y_LINK_NODE_IMAGE} AS runtime')
 assert.ok(signingStage?.includes('gpg --batch --export $nginx_key_fingerprints'), '完整验钥只能在专门构建阶段完成')
 assert.ok(oneboxRuntime?.includes('COPY --from=nginx-keyring /usr/share/keyrings/nginx-archive-keyring.gpg'), '最终层只使用已经完整指纹核验的keyring')
 assert.doesNotMatch(oneboxRuntime, /apt-get install[^\n]*(?:\bcurl\b|\bgnupg\b)/, '下载/验钥工具不得留在最终运行闭包')
-assert.ok(oneboxRuntime.includes('CMD node -e'), '工具分层必须保留Node内置健康检查')
+const imageHealthcheck = oneboxRuntime.match(/^HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3[ \t]+\\\r?\n[ \t]+CMD (\[[^\r\n]+\])[ \t]*$/m)
+assert.ok(imageHealthcheck, 'Onebox 运行镜像必须定义带启动宽限期的可执行健康检查')
+const imageHealthCommand = JSON.parse(imageHealthcheck[1])
+assert.deepEqual(imageHealthCommand, [
+  'node',
+  '-e',
+  "require('node:http').get('http://127.0.0.1/health', (res) => process.exit(res.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))",
+], '健康检查必须用 Node 内置 HTTP 检查容器回环的 /health，并以响应状态或连接失败设置退出码')
+
+const oneboxService = readFileSync('compose.onebox.yml', 'utf8').split(/^  ylink:[ \t]*\r?\n/m)[1]?.split(/^(?:\S| {2}\S)/m)[0] ?? ''
+const composeHealthcheck = oneboxService.match(/^    healthcheck:[ \t]*\r?\n((?: {6}[^\r\n]*\r?\n)+)/m)?.[1] ?? ''
+const composeHealthTest = composeHealthcheck.match(/^      test:[ \t]*\r?\n((?:        - [^\r\n]+\r?\n)+)/m)?.[1] ?? ''
+const composeHealthCommand = [...composeHealthTest.matchAll(/^        - (.+)$/gm)].map(([, argument]) =>
+  argument.startsWith('"') ? JSON.parse(argument) : argument)
+assert.deepEqual(composeHealthCommand, ['CMD', ...imageHealthCommand], 'Onebox Compose 必须使用和运行镜像一致的 Node 健康检查命令')
+for (const [key, value] of [['interval', '30s'], ['timeout', '5s'], ['start_period', '20s'], ['retries', '3']]) {
+  assert.match(composeHealthcheck, new RegExp('^      ' + key + ':[ \\t]+' + value + '[ \\t]*$', 'm'), 'Onebox Compose 健康检查的 ' + key + ' 必须与镜像一致')
+}
 for (const file of ['Dockerfile.onebox', 'backend/Dockerfile']) {
   const source = readFileSync(file, 'utf8')
   assert.ok(source.includes('scripts/install-pinned-sqlite.mjs ./scripts/'), `${file}必须在原生npm ci之前提供受控安装入口`)

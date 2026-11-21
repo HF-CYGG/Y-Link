@@ -123,6 +123,7 @@ ENV NODE_ENV=production \
   PORT=3001 \
   SQLITE_DB_PATH=/app/data/y-link.sqlite \
   TZ=Asia/Shanghai \
+  MALLOC_ARENA_MAX=2 \
   UV_THREADPOOL_SIZE=8
 
 RUN apt-get update \

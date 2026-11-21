@@ -13,6 +13,14 @@ services:
       dockerfile: Dockerfile.onebox
     environment:
       NODE_ENV: production
+      NODE_OPTIONS: ${NODE_OPTIONS:-}
+      Y_LINK_NODE_MAX_OLD_SPACE_MB: ${Y_LINK_NODE_MAX_OLD_SPACE_MB:-256}
+      MALLOC_ARENA_MAX: ${MALLOC_ARENA_MAX:-2}
+      UV_THREADPOOL_SIZE: ${UV_THREADPOOL_SIZE:-8}
+      YLINK_PASSWORD_HASH_CONCURRENCY: ${YLINK_PASSWORD_HASH_CONCURRENCY:-}
+      YLINK_CAPTCHA_RENDER_CONCURRENCY: ${YLINK_CAPTCHA_RENDER_CONCURRENCY:-}
+      YLINK_PRODUCT_IMAGE_CONCURRENCY: ${YLINK_PRODUCT_IMAGE_CONCURRENCY:-}
+      Y_LINK_MAX_CONCURRENT_EXPORTS: ${Y_LINK_MAX_CONCURRENT_EXPORTS:-2}
       TZ: ${TZ:-Asia/Shanghai}
       PORT: 3001
       Y_LINK_TRUST_PROXY: "127.0.0.1,::1"
@@ -85,10 +93,10 @@ services:
         - CMD
         - node
         - -e
-        - fetch('http://127.0.0.1/health').then((response)=>process.exit(response.ok?0:1)).catch(()=>process.exit(1))
-      interval: 15s
+        - "require('node:http').get('http://127.0.0.1/health', (res) => process.exit(res.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
+      interval: 30s
       timeout: 5s
-      retries: 6
+      retries: 3
       start_period: 20s
     restart: unless-stopped
     stop_grace_period: 30s
