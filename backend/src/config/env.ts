@@ -86,6 +86,7 @@ const envSchema = z.object({
   DB_NAME: z.string().min(1).default('y_link'),
   SQLITE_DB_PATH: z.string().optional().transform(normalizeOptionalString),
   DB_SYNC: z.string().optional().transform(parseBoolean),
+  Y_LINK_MANUAL_DB_MIGRATION_ENABLED: z.enum(['true', 'false']).default('true').transform(value => value === 'true'),
   DB_POOL_SIZE: z.coerce.number().int().min(1).max(128).default(20),
   DB_CONNECT_TIMEOUT_MS: z.coerce.number().int().min(250).max(60_000).default(5000),
   DB_ACQUIRE_TIMEOUT_MS: z.coerce.number().int().min(250).max(60_000).default(3000),

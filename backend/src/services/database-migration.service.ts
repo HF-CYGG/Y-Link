@@ -3351,6 +3351,7 @@ export class DatabaseMigrationService {
     requestMeta?: RequestMeta,
   ): Promise<SQLiteToMySqlTaskRecord> {
     const adminActor = await this.assertAdminActor(actor, requestMeta, 'database_migration.create_task', '创建 SQLite 转 MySQL 迁移任务')
+    if (!env.Y_LINK_MANUAL_DB_MIGRATION_ENABLED) throw new BizError('当前部署已禁用创建手动数据库迁移任务', 409)
     const precheck = await this.buildPrecheck({
       target: input.target,
       allowTargetWithData: input.allowTargetWithData ?? false,

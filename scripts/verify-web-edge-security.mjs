@@ -181,9 +181,11 @@ for (const file of ['compose.yml', 'compose.mysql.yml', 'compose.cloud.yml']) {
   assert.match(backend, /PERMANENT_DELETE_PASSWORD:-\}/)
   assert.match(backend, /AUTH_WEBAUTHN_ENABLED:-false/)
   assert.match(backend, /Y_LINK_DATA_ENCRYPTION_KEY:-\}/)
+  assert.match(backend, /Y_LINK_MANUAL_DB_MIGRATION_ENABLED:-true/)
   assert.match(source, /ipv4_address: \$\{Y_LINK_FRONTEND_PROXY_IP/)
 }
 const oneboxCompose = readSource('compose.onebox.yml')
+assert.match(oneboxCompose, /Y_LINK_MANUAL_DB_MIGRATION_ENABLED:-true/)
 for (const file of ['compose.yml', 'compose.mysql.yml', 'compose.cloud.yml', 'compose.onebox.yml']) {
   const source = readSource(file)
   const service = file === 'compose.onebox.yml' ? oneboxCompose : source.slice(source.indexOf('  backend:'), source.indexOf('  frontend:'))
