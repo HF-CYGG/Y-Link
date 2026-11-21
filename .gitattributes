@@ -17,3 +17,8 @@
 *.sqlite binary
 *.woff binary
 *.woff2 binary
+
+# 原生来源清单由候选manifest按原字节摘要绑定，Git不得转换其CRLF。
+/backend/native-security/baseline-v7/source-pins.json -text
+/backend/native-security/source-pins.json -text
+/docker/alpine-native-security/source-pins.json -text
