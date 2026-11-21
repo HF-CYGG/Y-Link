@@ -9,6 +9,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 import { spawnSync } from 'node:child_process'
+import { mock } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { randomBytes } from 'node:crypto'
 import type { Express } from 'express'
@@ -224,6 +225,9 @@ if (!mode) {
       const sharp = await firstSharp
       assert.equal(await loadSharp(), sharp)
       assert.equal(sharp, (await import('sharp')).default, '不能替换真实图像工厂')
+      const cache = sharp.cache()
+      assert.deepEqual([cache.memory.max, cache.files.max, cache.items.max], [0, 0, 0])
+      assert.equal(sharp.concurrency(), 1)
       const firstSvg = loadSvgCaptcha()
       assert.equal(loadSvgCaptcha(), firstSvg)
       assert.equal(await firstSvg, (await import('svg-captcha')).default, '必须使用原字体生成器')
@@ -268,6 +272,41 @@ if (!mode) {
         const file = makeUpload(name, buffer)
         await assert.rejects(upload.finalizeProductImageFile(file))
         assert.equal(fs.existsSync(file.path), false, '非法或超尺寸图片必须清理临时文件')
+      }
+      const open = fs.promises.open
+      for (const [stem, sizeChange] of [['bounded', 0], ['grown', 1], ['shortened', -1]] as const) {
+        const source = path.join(productDir, `${stem}.png`)
+        const target = path.join(productDir, `${stem}.thumb.webp`)
+        fs.writeFileSync(source, valid)
+        const openMock = mock.method(fs.promises, 'open', async (...args: Parameters<typeof open>) => {
+          const handle = await open(...args)
+          if (args[0] !== source) return handle
+          if (sizeChange !== 0) {
+            const stat = handle.stat.bind(handle)
+            mock.method(handle, 'stat', async () => {
+              const originalStat = await stat()
+              await fs.promises.truncate(source, originalStat.size + sizeChange)
+              return originalStat
+            })
+          }
+          const read = handle.read.bind(handle)
+          mock.method(handle, 'read', (buffer: Buffer, offset: number, length: number, position: number | null) => {
+            assert.equal(buffer.length, valid.length + 1, '按原图大小加一个哨兵字节分配')
+            return read(buffer, offset, Math.min(length, 8), position)
+          })
+          return handle
+        })
+        try {
+          if (sizeChange === 0) {
+            assert.equal(await thumbnail.generateProductThumbnailForFile(source), `${stem}.thumb.webp`)
+            assert.equal((await sharp(fs.readFileSync(target)).metadata()).format, 'webp')
+          } else {
+            await assert.rejects(thumbnail.generateProductThumbnailForFile(source), /原图大小已变化/)
+            assert.equal(fs.existsSync(target), false, '原图大小变化时禁止发布缩略图')
+          }
+        } finally {
+          openMock.mock.restore()
+        }
       }
       const rejectedPublication = path.join(productDir, 'cancelled.thumb.webp')
       assert.equal(await thumbnail.generateProductThumbnail(valid, rejectedPublication, async () => false), false)

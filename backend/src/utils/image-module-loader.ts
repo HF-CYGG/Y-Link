@@ -13,7 +13,10 @@ export class ImageDependencyUnavailableError extends BizError {
 
 export const loadSharp = createRetryableLazyResource(async () => {
   try {
-    return (await import('sharp')).default
+    const sharp = (await import('sharp')).default
+    sharp.cache(false)
+    sharp.concurrency(1)
+    return sharp
   } catch {
     throw new ImageDependencyUnavailableError('图像处理服务暂时不可用，请稍后重试')
   }

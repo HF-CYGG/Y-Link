@@ -318,7 +318,7 @@ const reencodeValidatedImage = async (
     if (detectedContent.mimeType === 'image/png') {
       return await pipeline
         .png({
-          compressionLevel: 9,
+          compressionLevel: 6,
           adaptiveFiltering: true,
           palette: false,
         })
@@ -363,7 +363,7 @@ export const finalizeUploadedImageFile = async (
   }
 
   try {
-    const fileBuffer = await fs.promises.readFile(tempFilePath)
+    let fileBuffer: Buffer | undefined = await fs.promises.readFile(tempFilePath)
     const detectedContent = detectImageContentFromBuffer(fileBuffer)
     if (!detectedContent) {
       throw new BizError('上传文件不是受支持的真实图片内容，请重新选择图片', 400)
@@ -377,6 +377,7 @@ export const finalizeUploadedImageFile = async (
 
     await validateImageDimensions(fileBuffer, detectedContent)
     const reencodedBuffer = await reencodeValidatedImage(fileBuffer, detectedContent)
+    fileBuffer = undefined
 
     const finalExtension = IMAGE_MIME_TO_FINAL_EXTENSION[detectedContent.mimeType]
     const finalFileName = `${randomUUID()}${finalExtension}`

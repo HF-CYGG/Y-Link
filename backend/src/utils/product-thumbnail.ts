@@ -28,6 +28,7 @@ export const PRODUCT_THUMBNAIL_QUALITY = 78
 export const PRODUCT_THUMBNAIL_SUFFIX = '.thumb.webp'
 
 const PRODUCT_UPLOAD_DIR = path.resolve(process.cwd(), 'uploads', 'products')
+const MAX_ORIGINAL_IMAGE_BYTES = 10 * 1024 * 1024
 const ORIGINAL_FILE_NAME_MATCHER = /^([A-Za-z0-9][A-Za-z0-9_-]{0,127})\.(?:jpg|jpeg|png|webp|gif)$/i
 const PRODUCT_IMAGE_URL_MATCHER = /^\/uploads\/(?:products\/)?([^/?#]+)$/
 const INDEX_TTL_MS = 60_000
@@ -169,18 +170,20 @@ export const generateProductThumbnailForFile = async (originalFilePath: string, 
   if (siblings.some(Boolean)) return null
   const handle = imageBuffer ? null : await fs.promises.open(originalFilePath, 'r')
   try {
-    // 与上传相同的 10MB 上限，在分配原图 buffer 前检查；读入时再限定长度，防止文件增长绕过。
-    if (handle && (await handle.stat()).size > 10 * 1024 * 1024) throw new Error('原图超过 10MB，已跳过')
     let sourceBuffer = imageBuffer
     if (!sourceBuffer && handle) {
-      const buffer = Buffer.alloc(10 * 1024 * 1024 + 1)
+      const { size: expectedSize } = await handle.stat()
+      if (expectedSize > MAX_ORIGINAL_IMAGE_BYTES) throw new Error('原图超过 10MB，已跳过')
+      // 多读一个字节检测文件增长，循环处理单次读取不足的情况。
+      const buffer = Buffer.alloc(Math.min(expectedSize + 1, MAX_ORIGINAL_IMAGE_BYTES + 1))
       let size = 0
       while (size < buffer.length) {
         const result = await handle.read(buffer, size, buffer.length - size, null)
         if (!result.bytesRead) break
         size += result.bytesRead
       }
-      if (size > 10 * 1024 * 1024) throw new Error('原图超过 10MB，已跳过')
+      if (size > MAX_ORIGINAL_IMAGE_BYTES) throw new Error('原图超过 10MB，已跳过')
+      if (size !== expectedSize) throw new Error('读取时原图大小已变化，已跳过')
       sourceBuffer = buffer.subarray(0, size)
     }
     if (!sourceBuffer) return null
