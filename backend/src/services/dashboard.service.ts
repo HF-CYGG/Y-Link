@@ -551,6 +551,7 @@ export const dashboardService = {
         .where('order.createdAt >= :monthStart', { monthStart })
         .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
         .andWhere('order.status = :activeOrderStatus', { activeOrderStatus: 'active' })
+        .andWhere("(order.inventoryMode <> 'o2o_preapplied' OR order.totalQty > 0)")
         .setParameter('today', today)
         .getRawOne<DashboardStatsAggregateRaw>(),
       // 产品总数（仅统计启用产品）。
@@ -1045,6 +1046,7 @@ export const dashboardService = {
   applyOrderFilter(queryBuilder: { andWhere: (sql: string, parameters?: Record<string, unknown>) => unknown }, filter: DashboardResolvedFilter): void {
     queryBuilder.andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
     queryBuilder.andWhere('order.status = :activeOrderStatus', { activeOrderStatus: 'active' })
+    queryBuilder.andWhere("(order.inventoryMode <> 'o2o_preapplied' OR order.totalQty > 0)")
     if (filter.startAt) {
       queryBuilder.andWhere('order.createdAt >= :startAt', { startAt: filter.startAt })
     }

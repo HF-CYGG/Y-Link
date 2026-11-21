@@ -478,6 +478,24 @@ async function main() {
     }
     const returnVerifyResult = await o2oPreorderService.verifyByCode(returnRequest.verifyCode, actor)
     assert.equal(returnVerifyResult?.verifyTargetType, 'return_request', '合并后退货核销应正常完成')
+    const reducedSource = await outboundRepo.findOneByOrFail({ id: source.outbound.id })
+    const reducedParent = await outboundRepo.findOneByOrFail({ id: target.outbound.id })
+    assert.equal(Number(reducedSource.totalQty), 1)
+    assert.equal(Number(reducedSource.totalAmount), 10)
+    assert.equal(Number(reducedParent.totalQty), 2)
+    assert.equal(Number(reducedParent.totalAmount), 20)
+    assert.equal(reducedParent.businessNo, target.outbound.businessNo)
+    const reducedParentLines = await outboundItemRepo.findBy({ orderId: target.outbound.id })
+    const originalLine = await outboundItemRepo.findOneByOrFail({ orderId: source.outbound.id })
+    const copiedLine = reducedParentLines.find((item) => String(item.sourceOrderId) === String(source.outbound.id))
+    assert.equal(String(copiedLine?.sourceOrderItemId), String(originalLine.id))
+    assert.equal(Number(copiedLine?.qty), 1)
+    assert.equal(Number(reducedParentLines.find((item) => item.sourceOrderId == null)?.qty), 1)
+    const returnRevision = await AppDataSource.getRepository(OrderRevision).findOneByOrFail({
+      orderUuid: target.outbound.orderUuid, revisionNo: reducedParent.editVersion,
+    })
+    assert.equal(JSON.parse(returnRevision.beforeSnapshotJson).totalAmount, '30.00')
+    assert.equal(JSON.parse(returnRevision.afterSnapshotJson).totalAmount, '20.00')
 
     await AppDataSource.getRepository(O2oReturnRequest).save(AppDataSource.getRepository(O2oReturnRequest).create({
       returnNo: `TH-ISSUE71-${seed}`,
@@ -556,6 +574,17 @@ async function main() {
     assert.equal(Boolean((await preorderRepo.findOneByOrFail({ id: deleteSource.preorder.id })).isDeleted), false)
     const deleteGuardVerify = await o2oPreorderService.verifyByCode(deleteGuardReturn.verifyCode, actor)
     assert.equal(deleteGuardVerify?.verifyTargetType, 'return_request', '软删被阻断后原退货申请必须仍可正常核销')
+    assert.equal(await outboundItemRepo.countBy({ orderId: deleteSource.outbound.id }), 0)
+    assert.equal(await outboundItemRepo.countBy({ orderId: deleteTarget.outbound.id }), 1)
+    const parentOwnReturn = await o2oPreorderService.createReturnRequest(deleteTarget.client.auth, String(deleteTarget.preorder.id), {
+      reason: '退回合并父单原有明细',
+      items: [{ productId: String(product.id), skuId: String(sku.id), qty: 1 }],
+    })
+    await o2oPreorderService.verifyByCode(parentOwnReturn.verifyCode, actor)
+    assert.equal(await outboundItemRepo.countBy({ orderId: deleteTarget.outbound.id }), 0)
+    assert.equal(Number((await outboundRepo.findOneByOrFail({ id: deleteTarget.outbound.id })).totalAmount), 0)
+    const fullReturnMetadata = await orderMergeService.getMetadataMap([String(deleteTarget.outbound.id)])
+    assert.equal(fullReturnMetadata.get(String(deleteTarget.outbound.id))?.children[0]?.id, String(deleteSource.outbound.id))
 
     await outboundRepo.update({ id: source.outbound.id }, { sourceDocId: null })
     try {
@@ -632,16 +661,22 @@ async function main() {
     )
 
     const appendTarget = await createVerifiedPair(0, 1)
-    const appendFirst = await createVerifiedPair(1, 1)
+    const appendFirst = await createVerifiedPair(1, 2)
     const appendSecond = await createVerifiedPair(2, 1)
     const appendMembers = [appendTarget, appendFirst, appendSecond]
     const appendCreatedAt = localDateTime(2020, 3, 4, 10, 0)
     await Promise.all(appendMembers.map((member) => outboundRepo.update({ id: member.outbound.id }, { createdAt: appendCreatedAt })))
     const appendPickupAt = new Date('2020-03-04T11:00:00.000Z')
     await preorderRepo.update({ id: appendSecond.preorder.id }, { pickupAt: appendPickupAt })
+    const preMergeReturn = await o2oPreorderService.createReturnRequest(appendFirst.client.auth, String(appendFirst.preorder.id), {
+      reason: '先部分退货再合并',
+      items: [{ productId: String(product.id), skuId: String(sku.id), qty: 1 }],
+    })
+    await o2oPreorderService.verifyByCode(preMergeReturn.verifyCode, actor)
+    const firstAfterReturn = await outboundRepo.findOneByOrFail({ id: appendFirst.outbound.id })
     const firstAppend = await orderService.commitMerge({
       target: { orderId: String(appendTarget.outbound.id), editVersion: 1 },
-      sources: [{ orderId: String(appendFirst.outbound.id), editVersion: 1 }],
+      sources: [{ orderId: String(appendFirst.outbound.id), editVersion: firstAfterReturn.editVersion }],
       reason: 'O2O 父单首次合并后继续追加领取记录验证',
       idempotencyKey: `issue71-o2o-pickup-first-${seed}`,
     }, actor)
@@ -652,6 +687,7 @@ async function main() {
       idempotencyKey: `issue71-o2o-pickup-second-${seed}`,
     }, actor)
     const appendedDetail = await orderService.detailById(String(appendTarget.outbound.id))
+    assert.equal(Number(appendedDetail.order.totalQty), 3, '合并只能复制先前部分退货后的剩余件数')
     assert.deepEqual(
       appendedDetail.order.sourcePreorderPickups.map((pickup) => [pickup.sourceOrderId, pickup.pickupContact, pickup.pickupAt]),
       [

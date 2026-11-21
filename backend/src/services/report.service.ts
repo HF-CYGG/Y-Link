@@ -762,6 +762,7 @@ export class ReportService {
       .addSelect('order.isDeleted', 'isDeleted')
       .where('1=1')
       .andWhere('order.status = :activeOrderStatus', { activeOrderStatus: 'active' })
+      .andWhere("(order.inventoryMode <> 'o2o_preapplied' OR order.totalQty > 0)")
 
     if (query.startAt) {
       qb.andWhere('order.createdAt >= :startAt', { startAt: query.startAt })

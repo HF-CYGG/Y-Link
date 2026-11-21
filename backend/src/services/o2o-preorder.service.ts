@@ -82,6 +82,7 @@ import { runExclusive } from '../redis/redis-lease.js'
 import { readSharedCacheRaw, sharedCacheKey, writeSharedCacheRaw } from '../redis/redis-cache.js'
 import { prepareProductThumbnailIndex, resolveProductThumbnailUrl } from '../utils/product-thumbnail.js'
 import { allocateUtcDailyDeliveryNo } from './inventory-sequence.service.js'
+import { applyReturnToOutboundOrders, lockReturnOutboundOrders } from './o2o-return-outbound.service.js'
 
 /** 部门单到店取货时间允许的过去容差：覆盖客户端时钟偏差与提交网络耗时。 */
 const O2O_PICKUP_AT_PAST_TOLERANCE_MS = 5 * 60 * 1000
@@ -701,9 +702,12 @@ class O2oPreorderService {
       this.hasPreorderItemSnapshotValue(item.unitPrice)
         ? this.normalizeDecimalText(item.unitPrice)
         : calculateDiscountedPrice(originalPrice, discountRate)
-    const fallbackLineAmount = formatMoneyFromCents(parseMoneyToCents(unitPrice) * Math.max(0, Number(item.qty ?? 0)))
+    const remainingQty = Math.max(0, Number(item.qty ?? 0))
+    const unitPriceCents = parseMoneyToCents(unitPrice)
+    const fallbackLineAmount = formatMoneyFromCents(unitPriceCents * remainingQty)
+    // 历史退货可能已减数量但未写回行金额；有单价快照时按当前件数展示。
     const lineAmount =
-      this.hasPreorderItemSnapshotValue(item.lineAmount)
+      remainingQty > 0 && parseMoneyToCents(item.unitPrice) === 0 && this.hasPreorderItemSnapshotValue(item.lineAmount)
         ? this.normalizeDecimalText(item.lineAmount)
         : fallbackLineAmount
     return {
@@ -2315,7 +2319,12 @@ class O2oPreorderService {
       .createQueryBuilder('item')
       .leftJoin('item.product', 'product')
       .select('item.orderId', 'orderId')
-      .addSelect('SUM(CASE WHEN COALESCE(item.lineAmount, 0) > 0 THEN item.lineAmount ELSE item.qty * COALESCE(item.unitPrice, product.defaultPrice, 0) END)', 'totalAmount')
+      .addSelect(`SUM(CASE
+        WHEN item.qty <= 0 THEN 0
+        WHEN item.unitPrice > 0 THEN (item.qty * item.unitPrice)
+        WHEN item.lineAmount > 0 THEN (item.lineAmount)
+        ELSE item.qty * COALESCE(item.unitPrice, product.defaultPrice, 0)
+      END)`, 'totalAmount')
       .where('item.orderId IN (:...orderIds)', { orderIds })
       .groupBy('item.orderId')
       .getRawMany<{ orderId: string; totalAmount: O2oNumericLike }>()
@@ -4826,9 +4835,9 @@ class O2oPreorderService {
       // nullable/SET NULL 只保留旧单读取能力，退货写库存必须能定位原商品下的真实 SKU。
       throw new BizError('退货明细的商品或 SKU 已失效或归属不一致，无法核销退货', 409)
     }
-    const requestQty = Math.max(0, Number(requestItem.qty ?? 0))
+    const requestQty = Number(requestItem.qty)
     const currentOrderQty = Math.max(0, Number(orderItem.qty ?? 0))
-    if (currentOrderQty < requestQty) {
+    if (!Number.isSafeInteger(requestQty) || requestQty <= 0 || currentOrderQty < requestQty) {
       throw new BizError(`商品「${product.productName}」可退数量不足，无法核销`, 409)
     }
 
@@ -4885,7 +4894,9 @@ class O2oPreorderService {
     }
 
     orderItem.qty = currentOrderQty - requestQty
+    orderItem.lineAmount = formatMoneyFromCents(orderItem.qty * parseMoneyToCents(orderItem.unitPrice))
     await manager.getRepository(O2oPreorderItem).save(orderItem)
+    return { orderItem, currentOrderQty }
   }
 
   private async verifyReturnRequestInManager(
@@ -4893,6 +4904,8 @@ class O2oPreorderService {
     returnRequest: O2oReturnRequest,
     order: O2oPreorder,
     actor: AuthUserContext,
+    outboundOrders: Awaited<ReturnType<typeof lockReturnOutboundOrders>>,
+    requestMeta?: RequestMeta,
   ): Promise<O2oVerifyResultView | null> {
     if (returnRequest.status !== 'pending') {
       if (returnRequest.status === 'rejected') {
@@ -4916,8 +4929,9 @@ class O2oPreorderService {
       returnRequest,
       order,
     )
+    const outboundChanges = new Map<O2oPreorderItem, number>()
     for (const requestItem of requestItems) {
-      await this.applyReturnVerificationForItem(
+      const { orderItem, currentOrderQty } = await this.applyReturnVerificationForItem(
         manager,
         returnRequest,
         actor,
@@ -4926,6 +4940,12 @@ class O2oPreorderService {
         productMap,
         skuMap,
       )
+      if (outboundOrders && !outboundChanges.has(orderItem)) {
+        outboundChanges.set(orderItem, currentOrderQty)
+      }
+    }
+    if (outboundOrders) {
+      await applyReturnToOutboundOrders(manager, outboundOrders, outboundChanges, returnRequest.returnNo, actor, requestMeta)
     }
 
     order.totalQty = Math.max(0, Number(order.totalQty ?? 0) - Number(returnRequest.totalQty ?? 0))
@@ -5010,10 +5030,12 @@ class O2oPreorderService {
     if (pendingReturnCount > 0) {
       throw new BizError('该订单存在待处理退货申请，请先完成退货核销后再执行取货核销', 409)
     }
-    const items = await manager.getRepository(O2oPreorderItem).find({
+    const allItems = await manager.getRepository(O2oPreorderItem).find({
       where: { orderId: String(order.id) }, order: { id: 'ASC' },
     })
-    if (!items.length || items.every((item) => Number(item.qty ?? 0) <= 0)) {
+    // 历史待取货退货保留原规格零数量行，取货和出库只处理实际剩余明细。
+    const items = allItems.filter((item) => Number(item.qty) > 0)
+    if (!items.length) {
       throw new BizError('当前订单已无可核销商品', 409)
     }
     const productIds = [...new Set(items.map((item) => String(item.productId)))]
@@ -5039,10 +5061,7 @@ class O2oPreorderService {
     const transitionLogIndexes: number[] = []
     const logRepo = manager.getRepository(InventoryLog)
     for (const row of items) {
-      const verifyQty = Math.max(0, Number(row.qty ?? 0))
-      if (verifyQty <= 0) {
-        continue
-      }
+      const verifyQty = Number(row.qty)
       const product = productMap.get(String(row.productId))
       if (!product) {
         throw new BizError('商品不存在，无法核销', 409)
@@ -5121,6 +5140,9 @@ class O2oPreorderService {
         where: { verifyCode: normalizedVerifyCode },
       })
       if (returnRequestCandidate) {
+        const outboundOrders = returnRequestCandidate.sourceOrderStatus === 'verified' && returnRequestCandidate.status === 'pending'
+          ? await lockReturnOutboundOrders(manager, String(returnRequestCandidate.orderId))
+          : null
         const order = await manager.getRepository(O2oPreorder).findOne({
           where: { id: String(returnRequestCandidate.orderId) },
           lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
@@ -5135,7 +5157,7 @@ class O2oPreorderService {
         if (!returnRequest || String(returnRequest.orderId) !== String(order.id)) {
           throw new BizError('退货申请不存在', 404)
         }
-        const detail = await this.verifyReturnRequestInManager(manager, returnRequest, order, actor)
+        const detail = await this.verifyReturnRequestInManager(manager, returnRequest, order, actor, outboundOrders, requestMeta)
         if (detail) {
           await auditService.record({
             actionType: 'o2o.return_request.verify',
@@ -5190,7 +5212,7 @@ class O2oPreorderService {
         },
       }, manager)
       return { timedOut: null, detail }
-    })
+    }, { mysqlIsolationLevel: 'READ COMMITTED' })
     this.invalidateMallReadCache({ soldQtyChanged: result.timedOut === null })
     if (result.timedOut === 'return_request') {
       throw new BizError('原订单已超时取消，退货申请无需再核销', 409)
