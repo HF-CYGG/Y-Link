@@ -12,6 +12,9 @@
 - `src/store/modules/client-cart.ts`
 - `src/store/modules/client-catalog.ts`
 - `src/store/modules/client-order.ts`
+- `src/utils/client-session-cleanup.ts`
+- `src/utils/data-change-signal.ts`
+- `src/composables/useAdminProductOptionsCache.ts`
 - `src/composables/useStableRequest.ts`
 - `src/composables/usePermissionAction.ts`
 - `src/components/common/*`
@@ -26,6 +29,7 @@
 - 管理端鉴权真源：`src/store/modules/auth.ts`
 - 客户端鉴权真源：`src/store/modules/client-auth.ts`
 - 客户端购物车真源：`src/store/modules/client-cart.ts`
+- 管理端商品选项：`src/composables/useAdminProductOptionsCache.ts`
 - 请求稳定器：`src/composables/useStableRequest.ts`
 - 权限动作收口：`src/composables/usePermissionAction.ts`
 - 明暗主题真源：`src/store/modules/theme.ts`；首帧主题：`src/theme-init.js`；切换开关：`src/layout/components/ThemeToggle.vue`
@@ -33,10 +37,11 @@
 ## 前端链路
 
 - 管理端 `auth.ts` 只维护用户快照、权限集、初始化状态和登录过渡态，不保存真实 token。
-- 客户端 `client-auth.ts` 负责登录、注册、找回密码、会话恢复，并在退出或账号切换时清理购物车、目录和订单缓存。
+- 客户端 `client-auth.ts` 负责登录、注册、找回密码和会话恢复。退出、切号或 `/me` 恢复为不同账号时，`client-session-cleanup.ts` 先通知当前 Pinia 中已初始化的业务 Store 取消待落盘写入并重置内存，再删除旧账号和历史通用键。即使 Store 尚未加载，持久化键仍会清理。公开目录和门店快照保留，未决预订单提交只保留防重复所需标记。会话代次禁止迟到的 `/me` 覆盖新登录。
 - `client-cart.ts` 以“现有库存 + 单人限购”为统一约束，并在目录刷新后尽量重映射商品和 SKU，而不是直接清空。
 - `useStableRequest.ts` 通过“只保留最后一次请求结果 + 自动中止旧请求”解决高频筛选和详情切换的竞态问题。
-- 基础数据变更刷新：管理端 31 个路由开启 KeepAlive，缓存页只在首次挂载时加载的下拉选项会过期。`src/utils/data-change-signal.ts` 由 `http.ts` 响应拦截器在写请求成功（`code === 0`）后按 URL 前缀递增数据域版本：`products`（`/products`、`/tags`、`/inventory/categories|locations|docs|stocktakes`）、`departments`（`/system-configs/client-departments`、`/client-users/department-accounts`），预览/查询类 POST 不计。页面用 `useDataChangeRefresh(domains, refresh)` 订阅：停用期间的变更在激活时静默刷新，激活期间收到的变更立即静默刷新（信号不带来源，其他页面的慢写请求可能在切回后才返回，不能当作本页自身操作跳过）；刷新严格串行，完成后若期间又出现新版本就继续补刷，避免并发刷新的旧响应覆盖新数据；只有刷新成功（不抛错且不返回 `false`）才推进已同步版本，失败时停止补刷，后续变更或下次激活继续重试。已接入出库开单（商品、部门）、订单池与客户端用户管理（部门）、线上展示与报表中心（标签）、库存查询与库存主数据（分类、库位）、入库扫码、供方送货、O2O 入库（商品）。仅当前标签页内生效，不跨浏览器标签页。新增共享基础数据写接口或新的缓存页选项时，同步核对规则与接入点。
+- `http.ts` 在写请求成功（`code === 0`）后按 `data-change-signal.ts` 的规则递增 `products`、`inventory`、`tags`、`departments` 数据域版本，排除预览、查询、标签预取和测试发送。版本只在当前浏览器标签页内生效。订阅方 `useDataChangeRefresh(domains, refresh)` 在激活期间串行静默刷新，失活期间积累的变更返回时补刷。刷新期间出现新版本会继续补刷，只有成功结果推进已同步版本，失败则等待下次变更或激活重试。
+- `getAdminProductOptions()` 供出库开单、出库明细编辑、入库扫码、供货录入、供货历史、O2O 入库、核销台和线上展示八处复用。共享键按管理会话、等价查询参数及商品/库存版本区分，供货方的库存投影始终脱敏为零，仅随商品版本变动。同键并发合并，成功快照有效 20 秒、最多 6 个查询。换号或权限变化时清空快照并中止旧请求，版本变更中返回的旧响应不会写回。调用方取消只结束自己的等待，页面需要修改展示数据时应替换对象或数组。
 - `usePermissionAction.ts` 统一处理显隐、点击前权限拦截和越权提示。
 - 共享页面结构组件主要分三类：
   - 页面容器：`PageContainer`、`PageToolbarCard`、`PagePaginationBar`
@@ -72,7 +77,7 @@
 ## 常见异常与排查顺序
 
 1. 高频筛选结果乱序：查页面是否接入 `useStableRequest.ts`。
-2. 客户端换号后购物车串号：查 `client-auth.ts` 的 `clearClientScopedStores()` 和 `client-cart.ts` 初始化逻辑。
+2. 客户端换号后购物车串号：查 `client-session-cleanup.ts` 的按 Pinia 注册、旧账号持久化键和 `client-cart.ts` 初始化逻辑。
 3. 弹层双滚动或高度异常：查页面是否绕过共享壳层自己再包一层主滚动容器。
 4. 按钮显示/禁用异常：查 `usePermissionAction.ts`、Store 权限集和页面 computed。
 5. 新增商品、部门、标签后其他页面不刷新：查写接口 URL 是否被 `data-change-signal.ts` 规则命中、消费页是否接入 `useDataChangeRefresh` 且 refresh 拉取的正是该选项。
