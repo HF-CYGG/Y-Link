@@ -109,6 +109,10 @@ RUN set -eu; \
 # ------------------------------
 # onebox 运行阶段：在同一容器中组合 Node 后端与 Nginx。
 # ------------------------------
+# 仅显式--target package-security-candidate产出未验收DEB；普通runtime不依赖此stage。
+FROM ${Y_LINK_NODE_IMAGE} AS package-security-candidate
+COPY backend/native-security /ylink-native-security
+RUN Y_LINK_PACKAGE_SECURITY_BUILD=image sh /ylink-native-security/build-package-stage.sh --candidate-only --sources=coreutils,openssl,perl
 FROM ${Y_LINK_NODE_IMAGE} AS runtime
 # 保留既有合法运行基线；本批未验收native候选仅由独立target产出，尚未接入runtime。
 COPY --from=native-security-build /native-out /tmp/ylink-native-security

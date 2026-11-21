@@ -1,0 +1,42 @@
+Description: openssl30-pem-preserve-stack，固定旧版生产目标的本地回补候选
+Origin: https://github.com/openssl/openssl/commit/7174737196dfc563c14719f51f7187dfda90dbe3
+Comment: 上游完整补丁另存upstream.patch；不应用或执行其中测试；本候选未构建、未验收。
+
+diff --git a/crypto/pem/pem_info.c b/crypto/pem/pem_info.c
+index 281dfd69ed269..67c963c8ee595 100644
+--- a/crypto/pem/pem_info.c
++++ b/crypto/pem/pem_info.c
+@@ -68,7 +68,7 @@ STACK_OF(X509_INFO) *PEM_X509_INFO_read_bio_ex(BIO *bp, STACK_OF(X509_INFO) *sk,
+     unsigned char *data = NULL;
+     const unsigned char *p;
+     long len, error = 0;
+-    int ok = 0;
++    int ok = 0, preserve_cnt = 0;
+     STACK_OF(X509_INFO) *ret = NULL;
+     unsigned int i, raw, ptype;
+     d2i_of_void *d2i = 0;
+@@ -78,8 +78,10 @@ STACK_OF(X509_INFO) *PEM_X509_INFO_read_bio_ex(BIO *bp, STACK_OF(X509_INFO) *sk,
+             ERR_raise(ERR_LIB_PEM, ERR_R_MALLOC_FAILURE);
+             goto err;
+         }
+-    } else
++    } else {
+         ret = sk;
++        preserve_cnt = sk_X509_INFO_num(sk);
++    }
+ 
+     if ((xi = X509_INFO_new()) == NULL)
+         goto err;
+@@ -229,10 +231,8 @@ STACK_OF(X509_INFO) *PEM_X509_INFO_read_bio_ex(BIO *bp, STACK_OF(X509_INFO) *sk,
+ err:
+     X509_INFO_free(xi);
+     if (!ok) {
+-        for (i = 0; ((int)i) < sk_X509_INFO_num(ret); i++) {
+-            xi = sk_X509_INFO_value(ret, i);
+-            X509_INFO_free(xi);
+-        }
++        while (sk_X509_INFO_num(ret) > preserve_cnt)
++            X509_INFO_free(sk_X509_INFO_pop(ret));
+         if (ret != sk)
+             sk_X509_INFO_free(ret);
+         ret = NULL;

@@ -1,0 +1,359 @@
+{
+  "schema": 1,
+  "status": "candidate-only-complete-deb-preparation",
+  "distro": "bookworm",
+  "architectures": {
+    "amd64": "x86_64-linux-gnu",
+    "arm64": "aarch64-linux-gnu"
+  },
+  "localMaintainer": "Y-Link 本地安全构建 <security-build@localhost.invalid>",
+  "sourceDateEpoch": 1794873600,
+  "keyringSha256": "506b815cbb32d9b6066b4a2aa524071e071761e7e7f68c3ac74f3061ba852017",
+  "packages": [
+    {
+      "source": "coreutils",
+      "version": "9.1-1",
+      "revision": "9.1-1+ylink1",
+      "runtimePackages": [
+        "coreutils"
+      ],
+      "files": [
+        {
+          "name": "coreutils_9.1-1.dsc",
+          "bytes": 1848,
+          "sha256": "2f2fca0a07a1a3f38e3ebeb4cbd97e97e675e77bed84f3e9d0b7e5da4cde75fc"
+        },
+        {
+          "name": "coreutils_9.1.orig.tar.xz",
+          "bytes": 5712104,
+          "sha256": "61a1f410d78ba7e7f37a5a4f50e6d1320aca33375484a3255eddf17a38580423"
+        },
+        {
+          "name": "coreutils_9.1-1.debian.tar.xz",
+          "bytes": 30624,
+          "sha256": "45d4ae88d933a7d713ef038943e818a2488e759b6196a409788744cbc6df1832"
+        }
+      ],
+      "originAuthentication": {
+        "receipt": "hardening/20261117-source-inputs/static-system-006/static-system-report-006.md",
+        "inReleaseSha256": "77737fa4b34f2693e982cc9ee35736816c35a7778fc2d326cc1bbf5b301fe1aa",
+        "sourcesSha256": "92d11a035571df011f06f28c61cb9825130ef1d92abb2f2e0525e8674dc44af8"
+      },
+      "patches": [
+        {
+          "file": "patches/coreutils-sort-field-bounds.diff",
+          "sha256": "2d3d799e3141c51d96743ecc4781b66e41d80f913c931ccaa83762245e331af3",
+          "upstreamFile": "patches/coreutils-sort-field-bounds.upstream.patch",
+          "upstreamSha256": "382956d973e753726fd02f2f2e1e124a893bb8f6004cf68b976b27ee37fd0ae6",
+          "commit": "8c9602e3a145e9596dc1a63c6ed67865814b6633",
+          "scope": [
+            "CVE-2025-5278"
+          ]
+        }
+      ],
+      "targets": {
+        "src/sort.c": {
+          "beforeSha256": "8ebb33a1f0258c4654a0b2d49da8cc9a0080166e93ef781ccb93e7471975d2a2",
+          "afterSha256": "9a84c780edbed90fbc01c93f5a83d967b2a3b274c715c770bacdfe1cf9225ad2"
+        }
+      },
+      "packagingInputs": [
+        {
+          "path": "debian/rules",
+          "bytes": 2022,
+          "sha256": "cd33e1a7c0ea334c980ffd4a772d46da999bce7f09f70eae7814fa89cf789fbe"
+        },
+        {
+          "path": "debian/control",
+          "bytes": 1274,
+          "sha256": "42296c00e34804dc32a1623f7eebbe4286c9d1cc7b0dbce8eac1fc29a45eecc0"
+        },
+        {
+          "path": "debian/patches/series",
+          "bytes": 66,
+          "sha256": "09970bf5efa482f2f8396b91bf5d0046d718a8a85550b2a74a41d5aed209df46"
+        }
+      ],
+      "consumerInputs": [],
+      "originalMaintainer": "Michael Stone <mstone@debian.org>"
+    },
+    {
+      "source": "openssl",
+      "version": "3.0.22-1~deb12u2",
+      "revision": "3.0.22-1~deb12u2+ylink1",
+      "runtimePackages": [
+        "libssl3",
+        "openssl"
+      ],
+      "files": [
+        {
+          "name": "openssl_3.0.22-1~deb12u2.dsc",
+          "bytes": 2742,
+          "sha256": "7c45299a4363febec120676393d4314841c7c50da244a6e6a256f072d632d337",
+          "url": "https://security.debian.org/debian-security/pool/updates/main/o/openssl/openssl_3.0.22-1~deb12u2.dsc"
+        },
+        {
+          "name": "openssl_3.0.22.orig.tar.gz",
+          "bytes": 15330396,
+          "sha256": "67ebca7e50d17383028045486653492195b83db95f8558709701bb47b5c1ef81",
+          "url": "https://mirrors.ustc.edu.cn/debian-security/pool/updates/main/o/openssl/openssl_3.0.22.orig.tar.gz"
+        },
+        {
+          "name": "openssl_3.0.22.orig.tar.gz.asc",
+          "bytes": 931,
+          "sha256": "b0cc4a379a7731c3a74c349f6756d85253d83099fd63352cf12407bce4395d19",
+          "url": "https://security.debian.org/debian-security/pool/updates/main/o/openssl/openssl_3.0.22.orig.tar.gz.asc"
+        },
+        {
+          "name": "openssl_3.0.22-1~deb12u2.debian.tar.xz",
+          "bytes": 72104,
+          "sha256": "48971306c5df8124daea7f2bd0de2be7d711e18f2f53711c11327293732e42aa",
+          "url": "https://security.debian.org/debian-security/pool/updates/main/o/openssl/openssl_3.0.22-1~deb12u2.debian.tar.xz"
+        }
+      ],
+      "originAuthentication": {
+        "receipt": "hardening/20261117-source-inputs/stage008/source-auth-static-report-008.md",
+        "inReleaseSha256": "d5876b12101ba0847a00f4fb1a27562eaa04c94f6cc489ffbfdad47badee91ef",
+        "sourcesSha256": "30dbb2b083c4446882a009c0bd2cac37b83de5bfa61889ac86d458d0af03a1f8",
+        "exactEntrySha256": "bc5a54c55019331b683b5e1937bce5898795165e9001e521fc5df26423afa7aa"
+      },
+      "patches": [
+        {
+          "file": "patches/openssl30-ec-order.diff",
+          "sha256": "389eb093d43e275b9e93497786bf9548d7725d0a8acdc3b9ee4dbc696e561d82",
+          "upstreamFile": "patches/openssl30-ec-order.upstream.patch",
+          "upstreamSha256": "6a1df1152e7a1bc3becfcdd90a757b401b7a7a739ad214bd61c74d603a498f28",
+          "commit": "a957a4bfc0b9691b20c9036b6ecc110f89f8d15c",
+          "scope": [
+            "CVE-2026-107496"
+          ]
+        },
+        {
+          "file": "patches/openssl30-pem-preserve-stack.diff",
+          "sha256": "9e357f5bcad66b6b5658e405e01fcc2104fcbe24b92d911d315e5349c315867f",
+          "upstreamFile": "patches/openssl30-pem-preserve-stack.upstream.patch",
+          "upstreamSha256": "c30ea0476ca9cd36b31a6e552d8c06b85dbe9a52d832907d2799ddbe54a14abf",
+          "commit": "7174737196dfc563c14719f51f7187dfda90dbe3",
+          "scope": [
+            "CVE-2026-107493"
+          ]
+        }
+      ],
+      "targets": {
+        "crypto/ec/ec_key.c": {
+          "beforeSha256": "fb0196d8c09a74bdd0308c3ad3bfb84b880463d60eb69e6676cea90f9c18d83b",
+          "afterSha256": "17dc5d9fdd05e7488074ff84884f348e5346dda3a6661e03e2ece102b77a6102"
+        },
+        "crypto/pem/pem_info.c": {
+          "beforeSha256": "938557f60d803cfb617708108ffb8b128bbca9268bb79857bbdf331441a93334",
+          "afterSha256": "18dac6be24ffbb88069c8e6cb2df7e2f6bc09daa188fd836ccb6ab56ce73e7f4"
+        }
+      },
+      "packagingInputs": [
+        {
+          "path": "debian/rules",
+          "bytes": 5603,
+          "sha256": "10a9dc11a05896cce59e354bd4e1806bf7d59068eaa04c624b76016001a345de"
+        },
+        {
+          "path": "debian/control",
+          "bytes": 3285,
+          "sha256": "88820395c8c49061ce6543458bc145bc0b0c5c0992d89ff53d35b9eb93842bb1"
+        },
+        {
+          "path": "debian/patches/series",
+          "bytes": 638,
+          "sha256": "179dedabac90e47bb36528aaacf8b0e4c4a1bb05f1c43675ee50d9d988b9b5e6"
+        }
+      ],
+      "consumerInputs": [],
+      "originalMaintainer": "Debian OpenSSL Team <pkg-openssl-devel@alioth-lists.debian.net>"
+    },
+    {
+      "source": "perl",
+      "version": "5.36.0-7+deb12u4",
+      "revision": "5.36.0-7+deb12u4+ylink1",
+      "runtimePackages": [
+        "perl-base"
+      ],
+      "files": [
+        {
+          "name": "perl_5.36.0-7+deb12u4.dsc",
+          "bytes": 2922,
+          "sha256": "6f71e571ae69894ad2115013bbc3207e77dc796581e30a62be0297e7d90ee7b9",
+          "url": "https://security.debian.org/debian-security/pool/updates/main/p/perl/perl_5.36.0-7+deb12u4.dsc"
+        },
+        {
+          "name": "perl_5.36.0.orig-regen-configure.tar.xz",
+          "bytes": 417784,
+          "sha256": "10ac353bc5a933403afe60ed1817e7a456f99bdbcaf80c1cdb0eb3a08ea56d4e",
+          "url": "https://mirrors.ustc.edu.cn/debian/pool/main/p/perl/perl_5.36.0.orig-regen-configure.tar.xz"
+        },
+        {
+          "name": "perl_5.36.0.orig.tar.xz",
+          "bytes": 13051500,
+          "sha256": "0f386dccbee8e26286404b2cca144e1005be65477979beb9b1ba272d4819bcf0",
+          "url": "https://mirrors.ustc.edu.cn/debian/pool/main/p/perl/perl_5.36.0.orig.tar.xz"
+        },
+        {
+          "name": "perl_5.36.0-7+deb12u4.debian.tar.xz",
+          "bytes": 190620,
+          "sha256": "f49d224fa9a6a356e1140f95fb5c864864b5423c9aece94cc68b4d348a3694b6",
+          "url": "https://security.debian.org/debian-security/pool/updates/main/p/perl/perl_5.36.0-7+deb12u4.debian.tar.xz"
+        }
+      ],
+      "originAuthentication": {
+        "receipt": "hardening/20261117-source-inputs/stage008/source-auth-static-report-008.md",
+        "inReleaseSha256": "d5876b12101ba0847a00f4fb1a27562eaa04c94f6cc489ffbfdad47badee91ef",
+        "sourcesSha256": "30dbb2b083c4446882a009c0bd2cac37b83de5bfa61889ac86d458d0af03a1f8",
+        "exactEntrySha256": "ffffde6e3b8b52e89bf0526a209703b8b7cbb2f45bb629f644079ec6bbe5abd2"
+      },
+      "patches": [
+        {
+          "file": "patches/perl536-poscache-countdown.diff",
+          "sha256": "978b738bd6430f4162aebd739fa0b3ef459a7c8c812757435df5ad8b391571ec",
+          "upstreamFile": "patches/perl536-poscache-countdown.upstream.patch",
+          "upstreamSha256": "b763455236629383cf720ae6e60cfa42ce01e23728693a779abb8275f90a9e40",
+          "commit": "568e6fd238867bb9e99fa3f47cba3169009239e0",
+          "scope": [
+            "CVE-2026-15534前置"
+          ]
+        },
+        {
+          "file": "patches/perl536-poscache-width.diff",
+          "sha256": "f7a28be72b054de1e5a569cd7e22bc3580359442ca2b9c2091359eb93455359d",
+          "upstreamFile": "patches/perl536-poscache-width.upstream.patch",
+          "upstreamSha256": "c7cc877ae64338c3a91398116d34ae9bb76c8835632f3259aa205eb70ded920a",
+          "commit": "54cf3d44cbbedd17d774e9a37921963e8fd5d0cb",
+          "scope": [
+            "CVE-2026-15534"
+          ]
+        }
+      ],
+      "targets": {
+        "regexec.c": {
+          "beforeSha256": "74ea33ae058c040cf948c3e75d97e8032e3d59faa0f5eab5021b918605397b4f",
+          "afterSha256": "1d6c4b0b03c71a8182149151269c99fb971cbbf36f8e127628081f86475e3dfe"
+        },
+        "regexp.h": {
+          "beforeSha256": "1443bf0b86b7104ab7f3c61e77132d8e0a3316a08d2c3e84502b5821d7a0812c",
+          "afterSha256": "4208851913cbe325977e68a55c418d3cd5c525d699097a10487afd8fbe65627a"
+        }
+      },
+      "packagingInputs": [
+        {
+          "path": "debian/rules",
+          "bytes": 11224,
+          "sha256": "42c3077b838616e136507c617a454dc7ea3d911c957d95987c0fe7ad58e7d947"
+        },
+        {
+          "path": "debian/control",
+          "bytes": 13160,
+          "sha256": "61c7a58887be73b21b8dc97090686e47949005f66c58d16ad8994d28796c17bb"
+        },
+        {
+          "path": "debian/config.debian",
+          "bytes": 8243,
+          "sha256": "17ebcbd69c463b9fd2de350cf7277f2882d9b155e75bff97e7a70e381d80f1f8"
+        },
+        {
+          "path": "debian/config.over",
+          "bytes": 3530,
+          "sha256": "0eb62ed12f56d5c64c1c8eade4ef0c2cfff9d6be486076f4c2782a906dde0bde"
+        },
+        {
+          "path": "debian/perl-base.install",
+          "bytes": 1915,
+          "sha256": "001de70bbb92078ecf96fac6e1f68c0181799c3630a2b7eafc05e00bb0e0a6ab"
+        },
+        {
+          "path": "debian/libperl5.36.symbols",
+          "bytes": 58632,
+          "sha256": "9aec2dcb1085c9047210a517f7560eaa7fb3e977c7a7451bddc9c6187d3b06ef"
+        },
+        {
+          "path": "debian/patches/series",
+          "bytes": 2443,
+          "sha256": "8b7fbd9f52fbb1f43ff665d792e6d914bd3c38702fb41ec1a46a5192f32aad59"
+        }
+      ],
+      "consumerInputs": [
+        {
+          "path": "Configure",
+          "bytes": 602259,
+          "sha256": "465827693286e3fc546a45a0ad685c6d034f1a82b3f435f2df5a63ccf0433ccc"
+        },
+        {
+          "path": "ext/re/Makefile.PL",
+          "bytes": 1797,
+          "sha256": "f057c714d9fb96503caca6cd6ba4df0b64598e6cf422e92ecec973c6013f079d"
+        },
+        {
+          "path": "ext/re/re.xs",
+          "bytes": 7501,
+          "sha256": "2589a586cc42841cfc4a8d8c37c86cdc878934a0d8a8bd4dfa08aea7a25f5a35"
+        },
+        {
+          "path": "ext/re/re_top.h",
+          "bytes": 1530,
+          "sha256": "16b0f7e7eaff254635ce6c93fe082109b5fceba74bfc4457436fd3d0a84d447b"
+        },
+        {
+          "path": "proto.h",
+          "bytes": 284472,
+          "sha256": "d4a0c6292812bcb416ea2f91ebd3b864178f8d4f4139750b0c7ce54148f69f77"
+        },
+        {
+          "path": "embed.fnc",
+          "bytes": 164506,
+          "sha256": "8685bf0760fcc585bcad745cacef6eb6dc58beae300a088513422efcae24bcd7"
+        }
+      ],
+      "originalMaintainer": "Niko Tyni <ntyni@debian.org>",
+      "perlConsumerContract": {
+        "evidence": "hardening/20261118-perl-consumer-map-017/consumer-map-017.md",
+        "evidenceSha256": "7f1247731957d2c40a67f9b5dd6ca906ccd751c52ea324c8351e32f439f6063b",
+        "flavours": [
+          "static",
+          "shared",
+          "debug"
+        ],
+        "runtimePerlFrom": "build-static/perl",
+        "runtimeXsFrom": "same-source build-shared install tree",
+        "xsRelativePaths": [
+          "auto/Cwd/Cwd.so",
+          "auto/Fcntl/Fcntl.so",
+          "auto/File/Glob/Glob.so",
+          "auto/Hash/Util/Util.so",
+          "auto/IO/IO.so",
+          "auto/List/Util/Util.so",
+          "auto/POSIX/POSIX.so",
+          "auto/Socket/Socket.so",
+          "auto/attributes/attributes.so",
+          "auto/re/re.so"
+        ],
+        "nativeCoreDebugging": false,
+        "reDebugging": true,
+        "publicHeaderLayoutChanged": true,
+        "sourceRegpropLinkBoundary": "PERL_CALLCONV导出形式，proto/embed限定core；非DEBUGGING不读取该结构字段；re.so内部my_*同源副本必须重建",
+        "unresolved": [
+          "超长STRLEN守卫失败分支仍未决，不增造算法",
+          "实际ELF/DSO依赖、配置、跨ELF消费者与运行加载需验收，不宣称ABI完全不变"
+        ]
+      }
+    }
+  ],
+  "candidatePolicy": {
+    "explicitOption": "--candidate-only",
+    "defaultBuildAction": "stop-before-source-build",
+    "defaultInstallerAction": "reject-candidate",
+    "upstreamTestsPreserved": true,
+    "nativeTestsExecuted": false,
+    "securityVerificationBlocked": true,
+    "reasons": {
+      "candidateBuild": "显式候选模式使用原生nocheck，不作为已验收发布物",
+      "upstreamSuites": "OpenSSL/Perl原suite与先前受限触发范围的对应尚未逐项核定，当前未执行；coreutils原Debian测试override为空",
+      "knownTriggerBoundary": "先前已明确阻断的旧zlib原生触发及native边界继续保留，不重写或绕过；不泛称所有畸形输入或全部上游suite已被平台否决"
+    }
+  }
+}
