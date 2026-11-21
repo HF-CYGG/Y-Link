@@ -1,11 +1,12 @@
 /**
- * 文件职责：在 owned MySQL 8.4 中，以两个真实事务验证不同账号的全局幂等键回放及库存提前拒绝。
- * 实现逻辑：真实首查均 miss 后暂停 B，待 A 耗尽库存并提交再继续 B；不替换数据库查询结果。
+ * 文件职责：在独占 MySQL 8.4 中，以两个真实事务验证不同账号的幂等冲突与库存提前拒绝。
+ * 实现逻辑：两边都首次查不到订单时暂停 B，待 A 提交后继续 B，覆盖库存不足及唯一键竞争。
  * 维护说明：仅由既有 owned MySQL fixture 派生，应用导入前固化随机空库和全部持久路径；不运行容量测试。
  */
 import assert from 'node:assert/strict'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { randomBytes } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import type { AuthUserContext } from '../src/types/auth.js'
 import type { QueryRunner } from 'typeorm'
 import { createVerificationIsolation } from './verification-isolation.js'
@@ -66,14 +67,18 @@ try {
     } finally { clearTimeout(timer) }
   }
 
-  for (const sharedKey of [true, false]) {
-    const suffix = sharedKey ? 'same' : 'different'
+  const cases = [
+    { suffix: 'same', sharedKey: true, stock: 1, uniqueKeyRace: false },
+    { suffix: 'different', sharedKey: false, stock: 1, uniqueKeyRace: false },
+    { suffix: 'unique', sharedKey: true, stock: 2, uniqueKeyRace: true },
+  ]
+  for (const { suffix, sharedKey, stock, uniqueKeyRace } of cases) {
     const product = await db.getRepository(BaseProduct).save({ productCode: `REPLAY-${suffix}-${seed}`,
       productName: `回放库存${suffix}`, pinyinAbbr: 'REPLAY', defaultPrice: '10.00', discountRate: '10.0',
-      currentStock: 1, preOrderedStock: 0, isActive: true })
+      currentStock: stock, preOrderedStock: 0, isActive: true })
     const sku = await db.getRepository(BaseProductSku).save({ productId: product.id, skuCode: `REPLAY-SKU-${suffix}-${seed}`,
       specValuesJson: '{}', specText: '默认规格', defaultPrice: '10.00', discountRate: '10.0',
-      currentStock: 1, preOrderedStock: 0, isActive: true, isCurrent: true, sortOrder: 0 })
+      currentStock: stock, preOrderedStock: 0, isActive: true, isCurrent: true, sortOrder: 0 })
     const key = `stock-replay-${suffix}-${seed}`
     const bothMissed = deferred(), releaseB = deferred()
     const initial = new Map<string, QueryRunner>(), connectionIds = new Map<string, number>()
@@ -132,32 +137,32 @@ try {
       assert.equal(first.status, 'fulfilled')
       if (first.status !== 'fulfilled') throw first.reason
       assert.equal(first.value.idempotentReplay, false)
+      assert.equal(second.status, 'rejected', '其他账号不能回读原单，也不能绕过库存限制')
+      if (second.status !== 'rejected') throw new Error('竞争方不应返回订单')
+      assert.ok(second.reason instanceof BizError)
+      assert.equal(second.reason.statusCode, 409)
       if (sharedKey) {
-        assert.equal(second.status, 'fulfilled')
-        if (second.status !== 'fulfilled') throw second.reason
-        assert.equal(second.value.idempotentReplay, true)
-        assert.equal(second.value.order.id, first.value.order.id)
-        assert.equal(second.value.inventory.deductedQty, 0)
+        assert.equal(second.reason.message, '订单处理中，请稍后重试')
+        const replay = await submit(actors[0]!, key)
+        assert.equal(replay.idempotentReplay, true)
+        assert.equal(replay.order.id, first.value.order.id)
+        assert.equal(replay.inventory.deductedQty, 0)
       } else {
-        assert.equal(second.status, 'rejected')
-        if (second.status !== 'rejected') throw new Error('不同键库存不足不得成功')
-        assert.ok(second.reason instanceof BizError)
-        assert.equal(second.reason.statusCode, 409)
         assert.match(second.reason.message, /SKU .*可用库存不足/)
         assert.doesNotMatch(second.reason.message, /订单处理中/)
         assert.equal(await db.getRepository(BizOutboundOrder).countBy({ idempotencyKey: `${key}-b` }), 0)
       }
       assert.equal(freshReplayRead, true)
-      assert.equal(bAllocations, 0)
-      assert.equal(bOrderWrites, 0)
+      assert.equal(bAllocations, uniqueKeyRace ? 2 : 0)
+      assert.equal(bOrderWrites, uniqueKeyRace ? 1 : 0, '有库存时必须真实尝试主单插入并在唯一键处回滚')
       assert.equal(await db.getRepository(BizOutboundOrder).countBy({ idempotencyKey: key }), 1)
       assert.equal(await db.getRepository(BizOutboundOrderItem).countBy({ orderId: first.value.order.id }), 1)
       const logs = await db.getRepository(InventoryLog).findBy({ refType: 'biz_outbound_order', refId: first.value.order.id })
       assert.equal(logs.length, 1)
       assert.equal(String(logs[0]!.operatorId), String(actors[0]!.userId))
-      assert.equal((await db.getRepository(BaseProduct).findOneByOrFail({ id: product.id })).currentStock, 0)
-      assert.equal((await db.getRepository(BaseProductSku).findOneByOrFail({ id: sku.id })).currentStock, 0)
-      console.log(`PASS real MySQL RR two-account ${suffix}-key: initial miss, transaction released, no extra allocation/write`)
+      assert.equal((await db.getRepository(BaseProduct).findOneByOrFail({ id: product.id })).currentStock, stock - 1)
+      assert.equal((await db.getRepository(BaseProductSku).findOneByOrFail({ id: sku.id })).currentStock, stock - 1)
+      console.log(`PASS real MySQL RR two-account ${suffix}-key: initial miss, transaction released, no extra committed order or stock change`)
     } finally {
       bothMissed.resolve(); releaseB.resolve(); await settled
       db.createQueryRunner = createRunner
@@ -165,6 +170,24 @@ try {
       orderBusinessNoService.allocate = allocateNumber
     }
   }
+  const orderRepo = db.getRepository(BizOutboundOrder)
+  const originalOrderIds = (await orderRepo.find({ order: { id: 'ASC' } })).map(({ id }) => id)
+  assert.equal(originalOrderIds.length, cases.length)
+  const { splitSqlStatements } = await import('../src/config/mysql-migration-runner.js')
+  const migration = new URL('../sql/064_manual_outbound_submit_request_hash.sql', import.meta.url)
+  const statements = splitSqlStatements(await readFile(migration, 'utf8'))
+  const migrationRunner = db.createQueryRunner()
+  try {
+    await migrationRunner.query('ALTER TABLE `biz_outbound_order` DROP COLUMN `submit_request_hash`')
+    for (let pass = 0; pass < 2; pass += 1) {
+      for (const statement of statements) await migrationRunner.query(statement)
+    }
+  } finally {
+    await migrationRunner.release()
+  }
+  const upgradedOrders = await orderRepo.find({ order: { id: 'ASC' } })
+  assert.deepEqual(upgradedOrders.map(({ id }) => id), originalOrderIds)
+  assert.ok(upgradedOrders.every(({ submitRequestHash }) => submitRequestHash === null), '升级保留历史订单且不推算请求摘要')
 } catch (error) { failures.push(error) }
 finally {
   try { if (source?.isInitialized) await source.destroy() } catch (error) { failures.push(error) }

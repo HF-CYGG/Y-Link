@@ -199,12 +199,12 @@ async function main() {
 
     let keySequence = 0
     const nextKey = (label: string) => `issue82-${label}-${verifySeed}-${++keySequence}`
-    const submit = (idempotencyKey: string, items: Array<{ productId: string; skuId: string; qty: number }>) => orderService.submit({
+    const submit = (idempotencyKey: string, items: Array<{ productId: string; skuId: string; qty: number }>, operator = actor) => orderService.submit({
       idempotencyKey,
       orderType: 'walkin',
       customerName: 'Issue82客户',
       items: items.map((item) => ({ ...item, unitPrice: 10 })),
-    }, actor)
+    }, operator)
     const createLogCount = (orderId: string, changeType: string) => logRepo.countBy({ refType: 'biz_outbound_order', refId: orderId, changeType })
 
     /** 数据库回滚后的零行不足以证明提前拒绝：同时拦看真实编号调用和订单/明细写入尝试。 */
@@ -403,14 +403,29 @@ async function main() {
     {
       const fixture = await createFixture([{ stock: 2 }])
       const key = nextKey('idem-seq')
-      const first = await submit(key, [{ productId: fixture.product.id, skuId: fixture.skus[0].id, qty: 2 }])
-      const second = await withoutAllocationOrOrderWrites(() => submit(key, [{ productId: fixture.product.id, skuId: fixture.skus[0].id, qty: 2 }]))
+      const items = [{ productId: fixture.product.id, skuId: fixture.skus[0].id, qty: 2 }]
+      const first = await submit(key, items)
+      const second = await withoutAllocationOrOrderWrites(() => submit(key, items))
       assert.equal(second.order.id, first.order.id)
       assert.equal(second.idempotentReplay, true)
       assert.equal(second.inventory.deductedQty, 0)
       assert.equal(await orderRepo.countBy({ idempotencyKey: key }), 1)
       assert.equal(await createLogCount(first.order.id, 'manual_outbound_create'), 1)
       assert.equal((await stockOf(fixture.product.id, [fixture.skus[0].id])).skus[0].currentStock, 0, '库存耗尽后幂等回放仍成功且不重复扣减')
+
+      const other = await AppDataSource.getRepository(SysUser).save({
+        username: `idem_other_${verifySeed}`, displayName: '只具备开单权限的隔离操作者', passwordHash: 'test-only-password-hash', role: 'operator', status: 'enabled',
+      })
+      const otherActor: AuthUserContext = { ...actor, userId: other.id, username: other.username, displayName: other.displayName, role: 'operator', permissions: ['orders:create'] }
+      const expectConflict = (work: () => Promise<unknown>) => assert.rejects(() => withoutAllocationOrOrderWrites(work), {
+        statusCode: 409, message: '订单处理中，请稍后重试',
+      })
+      await expectConflict(() => submit(key, items, otherActor))
+      await expectConflict(() => submit(key, [{ ...items[0], qty: 1 }]))
+      await orderRepo.update({ id: first.order.id }, { isDeleted: true })
+      try { await expectConflict(() => submit(key, items)) }
+      finally { await orderRepo.update({ id: first.order.id }, { isDeleted: false }) }
+      assert.equal(await createLogCount(first.order.id, 'manual_outbound_create'), 1)
     }
 
     // 6. 同一幂等键并发提交：仍只落一张单、只扣一次。

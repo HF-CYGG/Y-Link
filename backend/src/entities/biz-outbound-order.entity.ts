@@ -85,6 +85,9 @@ export class BizOutboundOrder {
   @Column({ name: 'idempotency_key', type: 'varchar', length: 128, comment: '幂等键' })
   idempotencyKey!: string
 
+  @Column({ name: 'submit_request_hash', type: 'varchar', length: 64, nullable: true, comment: '手工出库首次提交摘要' })
+  submitRequestHash!: string | null
+
   // 来源单据快照：与人工备注分离，详情、打印与追溯统一读取结构化字段，不再解析备注或幂等键文本。
   // 注意与明细表 source_order_* 区分：后者表示订单合并时复制来源的出库单明细。
   @Column({ name: 'source_doc_type', type: 'varchar', length: 32, nullable: true, comment: '来源单据类型' })

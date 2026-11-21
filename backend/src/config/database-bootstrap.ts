@@ -222,6 +222,7 @@ const SQLITE_REQUIRED_ORDER_COLUMNS = [
   'is_system_applied',
   'issuer_name',
   'customer_department_name',
+  'submit_request_hash',
   'business_no',
   'edit_version',
   'inventory_mode',
@@ -575,10 +576,10 @@ async function ensureSqliteIndex(
 }
 
 /**
- * TypeORM 无法在含历史行的 SQLite 表上直接添加“非空 + 唯一”的 business_no。
- * 同步前先以可空列完成 show_no 原值回填，随后 synchronize 只负责收紧列和索引形状。
+ * 先补齐出库单编号、版本及提交摘要列。摘要只认首次提交，历史单保留 NULL。
+ * business_no 先以可空列回填 show_no，再由 synchronize 收紧列和索引形状。
  */
-async function prepareSqliteOrderAmendmentColumns(dataSource: DataSource): Promise<void> {
+async function prepareSqliteOutboundOrderIdentityColumns(dataSource: DataSource): Promise<void> {
   const orderColumns = await listSqliteTableColumns(dataSource, 'biz_outbound_order')
   if (orderColumns.size === 0) return
   if (!orderColumns.has('business_no')) {
@@ -586,6 +587,9 @@ async function prepareSqliteOrderAmendmentColumns(dataSource: DataSource): Promi
   }
   if (!orderColumns.has('edit_version')) {
     await dataSource.query('ALTER TABLE "biz_outbound_order" ADD COLUMN "edit_version" integer NOT NULL DEFAULT (1)')
+  }
+  if (!orderColumns.has('submit_request_hash')) {
+    await dataSource.query('ALTER TABLE "biz_outbound_order" ADD COLUMN "submit_request_hash" varchar(64) NULL')
   }
   await dataSource.query(`
     UPDATE "biz_outbound_order"
@@ -2282,7 +2286,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
       await dataSource.query('ALTER TABLE "sys_user" ADD COLUMN "governance_permissions_json" text NULL')
     }
     await prepareSqliteAdminMfaCompatibility(dataSource)
-    await prepareSqliteOrderAmendmentColumns(dataSource)
+    await prepareSqliteOutboundOrderIdentityColumns(dataSource)
     await prepareSqliteOrderContentInventoryColumns(dataSource)
     await prepareSqliteOrderSourceDocColumns(dataSource)
     const kingdeeColumns = await listSqliteTableColumns(dataSource, 'o2o_preorder')

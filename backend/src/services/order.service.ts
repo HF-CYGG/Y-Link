@@ -5,9 +5,10 @@
  * 1. 服务层统一处理分页筛选、详情字段归一化与金额文本格式化；
  * 2. 提交流程在事务内完成主单、明细、编号与审计日志写入，保证整单原子性；
  * 3. 删除、恢复和创建时同步写入订单相关快照，供工作台近期动态与审计追溯复用；
- * 4. 兼容幂等重试、编号冲突与 SQLite 锁冲突，减少并发下的重复单与失败单。
+ * 4. 本人以相同请求重试时可复用原单，兼顾编号冲突和 SQLite 锁冲突。
  */
 
+import { createHash } from 'node:crypto'
 import { kingdeeRegistrationView, type KingdeeStatus } from '../utils/kingdee-registration.js'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
@@ -263,6 +264,7 @@ interface SubmitOrderContext {
   normalizedOrderType: OrderType
   normalizedIssuerName: string
   normalizedCustomerDepartmentName: string | null
+  customerDepartmentNodeId: string | null
 }
 
 interface PreparedSubmitItemsResult {
@@ -337,7 +339,6 @@ const ORDER_FIELD_LIMITS = {
 
 export class OrderService {
   private readonly orderRepo = AppDataSource.getRepository(BizOutboundOrder)
-  private readonly itemRepo = AppDataSource.getRepository(BizOutboundOrderItem)
 
   private resolveLinkedO2oPreorderId(
     order: Pick<BizOutboundOrder, 'sourceDocType' | 'sourceDocId'>,
@@ -1062,12 +1063,11 @@ export class OrderService {
    * - 必须在提交事务内、幂等命中检查之后调用，并复用同一事务管理器读取配置。
    */
   private async resolveSubmitCustomerDepartment(
-    input: SubmitOrderInput,
     context: SubmitOrderContext,
     manager: EntityManager,
   ): Promise<{ customerDepartmentName: string | null; source: 'config' | 'manual' }> {
-    const nodeId = input.customerDepartmentNodeId?.trim() ?? ''
-    if (!nodeId || context.normalizedOrderType !== 'department') {
+    const nodeId = context.customerDepartmentNodeId
+    if (!nodeId) {
       return { customerDepartmentName: context.normalizedCustomerDepartmentName, source: 'manual' }
     }
     let departmentName: string
@@ -1092,7 +1092,7 @@ export class OrderService {
 
   /**
    * 整单提交逻辑：
-   * 1) 幂等键查重（命中直接返回）
+   * 1) 幂等键查重，校验作者、单据可见状态及原请求摘要
    * 2) 生成 order_uuid + show_no
    * 3) 先写主表再批量写入子表
    * 4) 任意步骤异常则回滚，保证主子表原子性
@@ -1118,6 +1118,19 @@ export class OrderService {
       ORDER_FIELD_LIMITS.orderRemark,
     )
     const submitContext = this.buildSubmitOrderContext(input, actor)
+    // 摘要记录客户端意图。部门节点、默认出单人和自动规格均不读取可能已变更的配置或明细快照。
+    const submitRequestHash = createHash('sha256').update(JSON.stringify({
+      orderType: submitContext.normalizedOrderType,
+      hasCustomerOrder: Boolean(input.hasCustomerOrder),
+      isSystemApplied: Boolean(input.isSystemApplied),
+      issuerName: input.issuerName == null ? null : submitContext.normalizedIssuerName,
+      department: submitContext.customerDepartmentNodeId
+        ? { nodeId: submitContext.customerDepartmentNodeId }
+        : { name: submitContext.normalizedCustomerDepartmentName },
+      customerName: normalizedCustomerName,
+      remark: normalizedRemark,
+      items: normalizedItems,
+    })).digest('hex')
 
     let lastError: unknown
     for (let attempt = 1; attempt <= ORDER_SUBMIT_MAX_RETRY; attempt += 1) {
@@ -1129,25 +1142,11 @@ export class OrderService {
           const itemRepo = manager.getRepository(BizOutboundOrderItem)
           const productRepo = manager.getRepository(BaseProduct)
 
-          // 使用幂等键实现重复提交防重，客户端重试会返回同一单据。
-          const existed = await orderRepo.findOne({
-            where: { idempotencyKey: submitContext.normalizedIdempotencyKey },
-          })
-          if (existed) {
-            const existedItems = await itemRepo.find({
-              where: { orderId: existed.id },
-              order: { lineNo: 'ASC' },
-            })
-            return {
-              order: this.buildSubmittedOrderView(existed, canViewSystemNo(actor)),
-              items: existedItems.map((item) => this.buildSubmittedOrderItemView(item)),
-              inventory: { deductedQty: 0, lines: [] },
-              idempotentReplay: true,
-            }
-          }
+          const replay = await this.loadOrderByIdempotencyKey(submitContext.normalizedIdempotencyKey, submitRequestHash, actor, manager)
+          if (replay) return replay
 
           // 部门节点须在确认不是幂等重试后再解析：重试命中既有订单时，不应因部门配置此后变更而失败。
-          const resolvedDepartment = await this.resolveSubmitCustomerDepartment(input, submitContext, manager)
+          const resolvedDepartment = await this.resolveSubmitCustomerDepartment(submitContext, manager)
 
           const normalizedProductIds = [...new Set(normalizedItems.map((item) => item.productId))]
             .sort((left, right) => left.localeCompare(right))
@@ -1193,6 +1192,7 @@ export class OrderService {
             issuerName: submitContext.normalizedIssuerName,
             customerDepartmentName: resolvedDepartment.customerDepartmentName,
             idempotencyKey: submitContext.normalizedIdempotencyKey,
+            submitRequestHash,
             customerName: normalizedCustomerName,
             remark: normalizedRemark,
             totalQty: preparedItems.totalQty.toFixed(2),
@@ -1251,14 +1251,12 @@ export class OrderService {
       } catch (error) {
         lastError = error
 
-        // 并发下若另一请求已成功落库同一幂等键，则直接回查既有单据返回。
-        if (isUniqueConstraintError(error, IDEMPOTENCY_CONSTRAINT_MATCHER)) {
-          return this.loadOrderByIdempotencyKey(submitContext.normalizedIdempotencyKey, canViewSystemNo(actor))
-        }
         // RR 下最初的普通查询可能未见另一账号刚提交的同键订单。事务已回滚并释放连接后再回查，
         // 避免锁内申请第二连接；没有已提交同键单时仍抛原库存错误，不分配编号或尝试写单。
-        if (inventoryPrecheckFailure && error === inventoryPrecheckFailure) {
-          return this.loadOrderByIdempotencyKey(submitContext.normalizedIdempotencyKey, canViewSystemNo(actor), inventoryPrecheckFailure)
+        if (isUniqueConstraintError(error, IDEMPOTENCY_CONSTRAINT_MATCHER) || (inventoryPrecheckFailure && error === inventoryPrecheckFailure)) {
+          const replay = await this.loadOrderByIdempotencyKey(submitContext.normalizedIdempotencyKey, submitRequestHash, actor)
+          if (replay) return replay
+          throw inventoryPrecheckFailure ?? new BizError('订单处理中，请稍后重试', 409)
         }
 
         if (this.shouldRetrySubmitError(error, attempt)) {
@@ -1460,8 +1458,9 @@ export class OrderService {
       '客户部门名称',
       ORDER_FIELD_LIMITS.customerDepartmentName,
     )
+    const customerDepartmentNodeId = normalizedOrderType === 'department' ? input.customerDepartmentNodeId?.trim() || null : null
     // 携带部门节点时名称以事务内解析出的规范路径为准，此处只校验手动录入的部门单。
-    if (normalizedOrderType === 'department' && !normalizedCustomerDepartmentName && !input.customerDepartmentNodeId?.trim()) {
+    if (normalizedOrderType === 'department' && !normalizedCustomerDepartmentName && !customerDepartmentNodeId) {
       throw new BizError('部门订单必须填写客户部门名称', 400)
     }
     return {
@@ -1469,6 +1468,7 @@ export class OrderService {
       normalizedOrderType,
       normalizedIssuerName: normalizedIssuerName as string,
       normalizedCustomerDepartmentName,
+      customerDepartmentNodeId,
     }
   }
 
@@ -1536,23 +1536,30 @@ export class OrderService {
 
   private async loadOrderByIdempotencyKey(
     idempotencyKey: string,
-    exposeSystemNo = true,
-    missingOrderError?: BizError,
-  ): Promise<SubmitOrderResult> {
-    const order = await this.orderRepo.findOne({ where: { idempotencyKey } })
-    if (!order) {
-      throw missingOrderError ?? new BizError('订单处理中，请稍后重试', 409)
+    submitRequestHash: string,
+    actor: AuthUserContext,
+    manager: EntityManager = AppDataSource.manager,
+  ): Promise<SubmitOrderResult | null> {
+    const actorId = normalizeEntityId(actor.userId)
+    // 同一读视图内检查主单并只关联可重放的明细，避免并发删除、编辑造成主单与明细跨版本。
+    const order = await manager.getRepository(BizOutboundOrder).createQueryBuilder('outbound')
+      .leftJoinAndSelect('outbound.items', 'item',
+        'outbound.creatorUserId = :actorId AND outbound.isDeleted = :isDeleted AND outbound.submitRequestHash = :submitRequestHash',
+        { actorId, isDeleted: false, submitRequestHash })
+      .where('outbound.idempotencyKey = :idempotencyKey', { idempotencyKey })
+      .orderBy('item.lineNo', 'ASC')
+      .getOne()
+    if (!order) return null
+    if (normalizeNullableEntityId(order.creatorUserId) !== actorId || this.isDatabaseFlagEnabled(order.isDeleted)
+      || order.submitRequestHash !== submitRequestHash) {
+      // 历史单只有可变快照，缺少原始请求证明。冲突统一使用相同错误，不暴露命中详情。
+      throw new BizError('订单处理中，请稍后重试', 409)
     }
-
-    const items = await this.itemRepo.find({
-      where: { orderId: order.id },
-      order: { lineNo: 'ASC' },
-    })
 
     // 并发下另一请求已落库同一幂等键：本请求事务已回滚，不会重复扣减库存。
     return {
-      order: this.buildSubmittedOrderView(order, exposeSystemNo),
-      items: items.map((item) => this.buildSubmittedOrderItemView(item)),
+      order: this.buildSubmittedOrderView(order, canViewSystemNo(actor)),
+      items: (order.items ?? []).map((item) => this.buildSubmittedOrderItemView(item)),
       inventory: { deductedQty: 0, lines: [] },
       idempotentReplay: true,
     }

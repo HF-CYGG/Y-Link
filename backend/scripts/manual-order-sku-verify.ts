@@ -324,12 +324,13 @@ async function main() {
       ) => Promise<{ order: { id: string }; items: Array<Record<string, unknown>> }>
     )(payload, actor)
 
-    const singleResult = await submit({
+    const singlePayload = {
       idempotencyKey: `manual-single-${verifySeed}`,
       orderType: 'walkin',
       customerName: '单规格验证',
       items: [{ productId: singleProduct.id, qty: 2, unitPrice: 12.34 }],
-    })
+    }
+    const singleResult = await submit(singlePayload)
     const singleDetail = await orderService.detailById(singleResult.order.id)
     const singleDetailItem = singleDetail.items[0] as unknown as Record<string, unknown>
     assert.equal(singleDetailItem.skuId, singleSku.id, '单规格商品省略 skuId 时必须唯一自动选择')
@@ -344,6 +345,16 @@ async function main() {
     )
     const singleSkuAfterSubmit = await AppDataSource.getRepository(BaseProductSku).findOneByOrFail({ id: singleSku.id })
     assert.equal(Number(singleSkuAfterSubmit.defaultPrice).toFixed(2), '11.00')
+    const replay = await orderService.submit({
+      ...singlePayload,
+      idempotencyKey: ` ${singlePayload.idempotencyKey} `,
+      customerName: ' 单规格验证 ',
+      hasCustomerOrder: false,
+      items: [{ ...singlePayload.items[0], skuId: null, unitPrice: 12.3401, remark: ' ' }],
+    }, { ...actor, displayName: '修改显示名后的开单人' })
+    assert.equal(replay.order.id, singleResult.order.id)
+    assert.equal(replay.idempotentReplay, true, '默认姓名变更和等价输入归一不影响原请求重放')
+    await expectBizError(() => submit({ ...singlePayload, items: [{ ...singlePayload.items[0], skuId: singleSku.id }] }), /订单处理中/, 409)
 
     const invalidPriceIdempotencyKey = `manual-invalid-price-${verifySeed}`
     const invalidPriceProductBefore = await AppDataSource.getRepository(BaseProduct).findOneByOrFail({ id: singleProduct.id })
@@ -409,6 +420,8 @@ async function main() {
     assert.equal((await AppDataSource.getRepository(BaseProductSku).findOneByOrFail({ id: roundedPriceSku.id })).currentStock, 1)
 
     const outboundItemCountBeforeLegacyUpgrade = await AppDataSource.getRepository(BizOutboundOrderItem).count()
+    const outboundOrderCountBeforeLegacyUpgrade = await AppDataSource.getRepository(BizOutboundOrder).count()
+    await AppDataSource.query('ALTER TABLE "biz_outbound_order" DROP COLUMN "submit_request_hash"')
     await rebuildOutboundItemsWithoutSkuForeignKey(AppDataSource)
     const foreignKeysBeforeLegacyUpgrade = await AppDataSource.query(
       'PRAGMA foreign_key_list("biz_outbound_order_item")',
@@ -419,6 +432,10 @@ async function main() {
       '测试夹具必须真实模拟缺少 SKU 外键的存量 SQLite',
     )
     await initializeDatabaseSchemaIfNeeded(AppDataSource)
+    const upgradedOrders = AppDataSource.getRepository(BizOutboundOrder)
+    assert.equal(await upgradedOrders.count(), outboundOrderCountBeforeLegacyUpgrade)
+    assert.equal((await upgradedOrders.findOneByOrFail({ id: singleResult.order.id })).submitRequestHash, null, 'SQLite 补列保持历史请求摘要为空')
+    await expectBizError(() => submit(singlePayload), /订单处理中/, 409)
     const foreignKeysAfterLegacyUpgrade = await AppDataSource.query(
       'PRAGMA foreign_key_list("biz_outbound_order_item")',
     ) as Array<{ table: string; from: string; to: string; on_delete: string }>
@@ -504,7 +521,7 @@ async function main() {
     const beforeProduct = await AppDataSource.getRepository(BaseProduct).findOneByOrFail({ id: multiProduct.id })
     const beforeSkuRows = await skuRepo.find({ where: { productId: multiProduct.id }, order: { id: 'ASC' } })
     const beforeInventoryLogCount = await AppDataSource.getRepository(InventoryLog).count()
-    const multiResult = await submit({
+    const multiPayload = {
       idempotencyKey: `manual-multi-${verifySeed}`,
       orderType: 'walkin',
       customerName: '多规格验证',
@@ -512,7 +529,8 @@ async function main() {
         { productId: multiProduct.id, skuId: redSku.id, qty: 2, unitPrice: 18.8, remark: '红色人工价' },
         { productId: multiProduct.id, skuId: blueSku.id, qty: 3, unitPrice: 20.6, remark: '蓝色人工价' },
       ],
-    })
+    }
+    const multiResult = await submit(multiPayload)
     assert.equal(multiResult.items.length, 2, '同一商品不同 SKU 必须允许分行保存')
 
     const storedItems = await AppDataSource.getRepository(BizOutboundOrderItem).find({
@@ -528,14 +546,17 @@ async function main() {
     assert.deepEqual(storedItems.map((item) => Number(item.unitPrice).toFixed(2)), ['18.80', '20.60'])
 
     const afterForwardProduct = await AppDataSource.getRepository(BaseProduct).findOneByOrFail({ id: multiProduct.id })
+    const reversedItems = [...multiPayload.items].reverse()
+    await expectBizError(
+      () => submit({ ...multiPayload, items: reversedItems }),
+      /订单处理中/,
+      409,
+    )
     await submit({
       idempotencyKey: `manual-multi-reversed-${verifySeed}`,
       orderType: 'walkin',
       customerName: '多规格反序验证',
-      items: [
-        { productId: multiProduct.id, skuId: blueSku.id, qty: 3, unitPrice: 20.6, remark: '蓝色人工价' },
-        { productId: multiProduct.id, skuId: redSku.id, qty: 2, unitPrice: 18.8, remark: '红色人工价' },
-      ],
+      items: reversedItems,
     })
     const afterReversedProduct = await AppDataSource.getRepository(BaseProduct).findOneByOrFail({ id: multiProduct.id })
     const afterSkuRows = await skuRepo.find({ where: { productId: multiProduct.id }, order: { id: 'ASC' } })

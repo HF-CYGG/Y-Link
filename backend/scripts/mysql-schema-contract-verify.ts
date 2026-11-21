@@ -61,6 +61,7 @@ const REQUIRED_TABLES = [
 ] as const
 
 const REQUIRED_COLUMNS = [
+  ['biz_outbound_order', 'submit_request_hash'],
   ['sys_user', 'governance_permissions_json'],
   ...['conversation_id', 'client_user_id', 'product_id', 'sku_id', 'product_name_snapshot', 'product_code_snapshot', 'sku_code_snapshot', 'spec_text_snapshot', 'quantity', 'latest_pickup_at', 'remark', 'status', 'handled_at', 'client_request_id', 'payload_digest', 'created_at', 'updated_at'].map((columnName) => ['client_restock_request', columnName]),
   ...['client_user_id', 'client_request_id', 'payload_digest', 'restock_request_id', 'created_at'].map((columnName) => ['client_restock_request_key', columnName]),
@@ -201,6 +202,7 @@ interface ColumnFixture {
 }
 
 const REQUIRED_MANUAL_OUTBOUND_COLUMN_DEFINITIONS = new Map<string, ColumnFixture>([
+  ['biz_outbound_order.submit_request_hash', { dataType: 'varchar', columnType: 'varchar(64)', isNullable: 'YES', characterMaximumLength: 64 }],
   ['sys_user.governance_permissions_json', { dataType: 'text', columnType: 'text', isNullable: 'YES', characterMaximumLength: 65535 }],
   ...['client_restock_request', 'client_restock_request_key'].flatMap((tableName): Array<[string, ColumnFixture]> => ['client_request_id', 'payload_digest'].map((columnName) => [`${tableName}.${columnName}`, { dataType: 'varchar', columnType: 'varchar(64)', isNullable: 'NO', characterMaximumLength: 64 }])),
   ['client_restock_request.quantity', { dataType: 'int', columnType: 'int', isNullable: 'NO', characterMaximumLength: null }],
@@ -834,6 +836,19 @@ async function expectSchemaFailure(
 }
 
 await assert.doesNotReject(() => assertMysqlRequiredSchemaExists(createDataSource(createCompleteFixture())))
+
+const missingSubmitRequestHash = createCompleteFixture()
+missingSubmitRequestHash.columns.delete(objectKey('biz_outbound_order', 'submit_request_hash'))
+await expectSchemaFailure(missingSubmitRequestHash, ['字段 biz_outbound_order.submit_request_hash', '064_manual_outbound_submit_request_hash.sql'])
+const invalidSubmitRequestHash = createCompleteFixture()
+Object.assign(invalidSubmitRequestHash.columnDefinitions.get(objectKey('biz_outbound_order', 'submit_request_hash'))!, {
+  isNullable: 'NO', characterMaximumLength: 32, columnType: 'varchar(32)',
+})
+await expectSchemaFailure(invalidSubmitRequestHash, [
+  '字段 biz_outbound_order.submit_request_hash 必须允许 NULL',
+  '字段 biz_outbound_order.submit_request_hash 长度应为 64',
+  '064_manual_outbound_submit_request_hash.sql',
+])
 
 for (const tableName of ['client_restock_request', 'client_restock_request_key']) {
   const fixture = createCompleteFixture()
