@@ -27,7 +27,7 @@ import { isSealedSensitiveValue, openSensitiveValue, sealSensitiveValue } from '
 import type { RequestMeta } from '../utils/request-meta.js'
 import { detectUnsafeHost, formatUnsafeHostReason } from '../utils/safe-network.js'
 import { hashSessionToken } from '../utils/session-token.js'
-import { maskFeishuWebhookTarget } from '../utils/notification-target-mask.js'
+import { maskEmailTarget, maskFeishuWebhookTarget, sanitizeNotificationErrorMessage } from '../utils/notification-target-mask.js'
 import { renderProviderTemplate, resolveProviderBodyFormat } from '../utils/provider-template.js'
 import { toSafeErrorLog } from '../utils/safe-error-log.js'
 import { auditService } from './audit.service.js'
@@ -1289,7 +1289,7 @@ export class NotificationService {
         attempted += 1
         if (!email || !isValidEmail(email)) {
           failures.push({
-            target: user.username,
+            target: maskEmailTarget(user.username),
             reason: '接收账号未配置有效邮箱',
           })
           continue
@@ -1299,8 +1299,8 @@ export class NotificationService {
           succeeded += 1
         } else {
           failures.push({
-            target: email,
-            reason: result.errorMessage ?? '邮件发送失败',
+            target: maskEmailTarget(email),
+            reason: sanitizeNotificationErrorMessage(result.errorMessage) ?? '邮件发送失败',
           })
         }
       }
@@ -1350,10 +1350,11 @@ export class NotificationService {
       content,
       normalizedDraft.feishuSignSecret,
     )
+    const failureReason = sanitizeNotificationErrorMessage(feishuResult.errorMessage) ?? '飞书测试发送失败'
     const output: NotificationRuleTestSendResult = {
       channel: 'feishu',
       success: feishuResult.ok,
-      message: feishuResult.ok ? '飞书测试发送成功' : (feishuResult.errorMessage ?? '飞书测试发送失败'),
+      message: feishuResult.ok ? '飞书测试发送成功' : failureReason,
       summary: {
         attempted: 1,
         succeeded: feishuResult.ok ? 1 : 0,
@@ -1364,7 +1365,7 @@ export class NotificationService {
         : [
             {
               target: maskFeishuWebhookTarget(normalizedDraft.feishuWebhookUrl),
-              reason: feishuResult.errorMessage ?? '飞书测试发送失败',
+              reason: failureReason,
             },
           ],
     }
@@ -1556,12 +1557,13 @@ export class NotificationService {
             }
             dispatchDedupKeys.add(emailDispatchKey)
             await this.refreshEventClaim(event.id)
+            const validEmail = isValidEmail(email)
             const result = await this.attemptExternalDispatch({
               eventId: event.id,
               channel: 'email',
               destination,
-              storedTarget: destination,
-              permanentlyInvalid: !email || !isValidEmail(email),
+              storedTarget: maskEmailTarget(validEmail ? email : user.username),
+              permanentlyInvalid: !validEmail,
               invalidReason: '接收账号未配置有效邮箱',
               send: () => this.sendEmailByVerificationProvider(
                 email,
@@ -1949,6 +1951,7 @@ export class NotificationService {
       { id: dispatch.id, attemptCount: dispatch.attemptCount, status: dispatch.status },
       {
         status: 'processing',
+        target: input.storedTarget,
         attemptCount: completedFailureCount,
         lastAttemptAt: now,
         errorMessage: null,
@@ -1990,7 +1993,7 @@ export class NotificationService {
       {
         status: 'failed',
         attemptCount: input.permanentlyInvalid ? NOTIFICATION_OUTBOX_MAX_ATTEMPTS : nextAttemptCount,
-        errorMessage: (sendResult.errorMessage ?? '通知外发失败').slice(0, 500),
+        errorMessage: sanitizeNotificationErrorMessage(sendResult.errorMessage)?.slice(0, 500) ?? '通知外发失败',
         responseCode: sendResult.status,
         sentAt: null,
       },
@@ -2010,7 +2013,7 @@ export class NotificationService {
     const retryDelayMs = status === 'pending'
       ? resolveNotificationRetryDelayMs(completedFailureCount)
       : 0
-    const finalErrorMessage = errorMessage?.slice(0, 500) ?? null
+    const finalErrorMessage = sanitizeNotificationErrorMessage(errorMessage)?.slice(0, 500) ?? null
     await this.eventRepo.update(
       {
         id: event.id,

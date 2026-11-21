@@ -47,6 +47,9 @@ const main = async () => {
   const { NotificationInbox } = await import('../src/entities/notification-inbox.entity.js')
   const { NotificationRule } = await import('../src/entities/notification-rule.entity.js')
   const { NotificationDispatch } = await import('../src/entities/notification-dispatch.entity.js')
+  const { SysUser } = await import('../src/entities/sys-user.entity.js')
+  const { SysAuditLog } = await import('../src/entities/sys-audit-log.entity.js')
+  const { resolvePermissionsByRole } = await import('../src/constants/auth-permissions.js')
   const { authService } = await import('../src/services/auth.service.js')
   const { databaseMaintenanceModeService } = await import('../src/services/database-maintenance-mode.service.js')
   const { notificationService } = await import('../src/services/notification.service.js')
@@ -193,9 +196,86 @@ const main = async () => {
     workerScope.emitDestroy()
   }
 
+  const email = 'private-recipient@example.test'
+  const webhook = 'https://open.feishu.cn/open-apis/bot/v2/hook/private-path-example'
+  const errorText = '网关拒绝 ' + email + ' ' + webhook + '?key=fixture-query-value'
+  const assertRedacted = (value: unknown) => {
+    const stored = JSON.stringify(value)
+    assert.ok(!stored.includes(email))
+    assert.ok(!stored.includes(webhook))
+    assert.ok(!stored.includes('fixture-query-value'))
+  }
+  const userRepo = AppDataSource.getRepository(SysUser)
+  const admin = await userRepo.findOneByOrFail({ username: 'outbox_admin' })
+  await userRepo.update(admin.id, { email })
+  const actor = {
+    ...admin, role: 'admin' as const, sessionToken: '', authSource: 'bearer' as const,
+    userId: String(admin.id), permissions: resolvePermissionsByRole('admin'),
+  }
+  const draft = {
+    id: rule.id, enabled: true, recipientUserIds: [], emailRecipientAdminUserIds: [String(admin.id)],
+    emailRecipientSupplierUserIds: [], emailEnabled: true, feishuEnabled: false, externalTriggerMode: 'always' as const,
+    watchedUserIds: [], feishuWebhookUrl: '', feishuSignSecret: '', emailSubjectPrefix: '[回归]',
+  }
+  await ruleRepo.update(rule.id, {
+    feishuEnabled: 0, emailEnabled: 1, emailRecipientAdminUserIdsJson: JSON.stringify(draft.emailRecipientAdminUserIds),
+    externalTriggerMode: 'always',
+  })
+  const transport = notificationService as unknown as {
+    sendEmailByVerificationProvider: (target: string) => Promise<{ status: number; ok: boolean; errorMessage?: string }>
+    sendFeishuWebhook: () => Promise<{ status: number; ok: boolean; errorMessage?: string }>
+  }
+  const originalEmail = transport.sendEmailByVerificationProvider
+  const originalFeishu = transport.sendFeishuWebhook
+  try {
+    transport.sendEmailByVerificationProvider = async (target) => {
+      assert.equal(target, email, '外发仍使用完整收件地址')
+      return { status: 502, ok: false, errorMessage: errorText }
+    }
+    transport.sendFeishuWebhook = async () => ({ status: 502, ok: false, errorMessage: errorText })
+    for (const channel of ['email', 'feishu'] as const) {
+      const output = await notificationService.testSendByRule({
+        ruleId: rule.id, actor, channel, draft: channel === 'email'
+          ? draft : { ...draft, feishuEnabled: true, feishuWebhookUrl: webhook, useSharedFeishu: false },
+      })
+      assert.equal(output.success, false)
+      assert.equal(output.failures.length, 1)
+      assertRedacted(output)
+    }
+    const auditRepo = AppDataSource.getRepository(SysAuditLog)
+    const testAudits = await auditRepo.findBy({ actionType: 'notification.rule.test_send' })
+    assert.equal(testAudits.length, 2)
+    for (const audit of testAudits) assertRedacted(audit.detailJson)
+    const sourceId = 'notification-privacy-fixture'
+    await notificationService.emitEvent({ eventType: 'o2o_preorder_created', sourceType: 'o2o_preorder', sourceId, payload: {} })
+    await notificationService.runOutboxOnce()
+    const pendingFailure = await eventRepo.findOneByOrFail({ sourceId })
+    assert.equal(pendingFailure.status, 'pending')
+    const dispatchRepo = AppDataSource.getRepository(NotificationDispatch)
+    const failedDispatch = await dispatchRepo.findOneByOrFail({ eventId: pendingFailure.id, channel: 'email' })
+    assert.equal(failedDispatch.responseCode, 502)
+    assert.equal(failedDispatch.target, 'pr***@example.test')
+    assertRedacted(failedDispatch.errorMessage)
+
+    // 领取已接近上限的事件时抛出明确的外发错误，覆盖终结落库及审计边界。
+    await eventRepo.update(pendingFailure.id, { attemptCount: 4, nextAttemptAt: null })
+    transport.sendEmailByVerificationProvider = async () => { throw new Error(errorText) }
+    await notificationService.runOutboxOnce()
+    const terminal = await eventRepo.findOneByOrFail({ sourceId })
+    assert.equal(terminal.status, 'failed')
+    assert.match(terminal.errorMessage ?? '', /网关拒绝/)
+    assertRedacted(terminal.errorMessage)
+    const terminalAudit = await auditRepo.findOneByOrFail({ actionType: 'notification.event.process', targetId: terminal.id })
+    assertRedacted(terminalAudit.detailJson)
+    assert.equal(await dispatchRepo.countBy({ eventId: terminal.id, channel: 'email' }), 1, '脱敏不改变外发重试的去重身份')
+  } finally {
+    transport.sendEmailByVerificationProvider = originalEmail
+    transport.sendFeishuWebhook = originalFeishu
+  }
+
   await notificationService.stopOutboxWorker()
   await AppDataSource.destroy()
-  console.log('OK 通知 Outbox 热路径解耦、崩溃恢复、幂等、维护期暂停与外发超时租约释放验收通过')
+  console.log('OK 通知 Outbox 热路径解耦、崩溃恢复、幂等、外发脱敏、维护期暂停与外发超时租约释放验收通过')
 }
 
 main()
