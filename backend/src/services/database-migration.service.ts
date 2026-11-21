@@ -21,13 +21,15 @@ import {
   clearDatabaseRuntimeOverride,
   maskDatabaseRuntimeOverride,
   inspectDatabaseRuntimeOverride,
+  openDatabaseControlPassword,
   readDatabaseRuntimeOverride,
+  sealDatabaseControlPassword,
   writeDatabaseRuntimeOverride,
   type DatabaseRuntimeOverrideConfig,
   type DatabaseRuntimeOverrideFile,
 } from '../config/database-runtime-override.js'
 import { AppDataSource, appEntities, createDataSourceOptions } from '../config/data-source.js'
-import { env } from '../config/env.js'
+import { baseDatabaseConfig, env } from '../config/env.js'
 import {
   DATABASE_MIGRATION_ROLLBACK_REASON_DEFAULT,
   DATABASE_MIGRATION_SUCCESS_STAGE_PENDING_SWITCH,
@@ -65,7 +67,8 @@ import { auditService } from './audit.service.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { o2oPreorderService } from './o2o-preorder.service.js'
 import { requestRuntimeShutdown } from '../runtime/runtime-shutdown.js'
-import { appendControlAudit, syncDirectory, writeControlFile } from '../runtime/durable-control-file.js'
+import { appendControlAudit, inspectControlFile, removeControlFile, syncDirectory, writeControlFile } from '../runtime/durable-control-file.js'
+import { validateMigrationLock } from '../runtime/database-control-validation.js'
 import { bindDatabaseRescueSnapshot, issueDatabaseRescueCredential, inspectRecoveryIntent, databaseRescueStatus, prepareAutomaticDatabaseRescueRollback } from '../runtime/database-rescue-control.js'
 import { normalizeStaticCheckClause } from '../utils/mysql-check-clause.js'
 import { dropMysqlRequiredTriggers, ensureMysqlRequiredTriggers } from '../config/mysql-migration-runner.js'
@@ -552,13 +555,13 @@ function canonicalizeDatabaseValue(
   return JSON.stringify(value)
 }
 
+function isPathInsideDirectory(filePath: string, directoryPath: string): boolean {
+  const relative = path.relative(directoryPath, filePath)
+  return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
+}
+
 function assertPathInsideDirectory(filePath: string, directoryPath: string, label: string): void {
-  const resolvedFilePath = path.resolve(filePath)
-  const resolvedDirectoryPath = path.resolve(directoryPath)
-  if (
-    resolvedFilePath !== resolvedDirectoryPath
-    && !resolvedFilePath.startsWith(`${resolvedDirectoryPath}${path.sep}`)
-  ) {
+  if (!isPathInsideDirectory(filePath, directoryPath)) {
     throw new Error(`${label}不在迁移持久化目录内，已拒绝访问`)
   }
 }
@@ -949,31 +952,35 @@ export class DatabaseMigrationService {
   }
 
   private async readTaskPassword(taskId: string): Promise<string> {
-    try {
-      const raw = JSON.parse(await fs.readFile(this.getTaskSecretFilePath(taskId), 'utf8')) as {
-        version?: unknown
-        taskId?: unknown
-        password?: unknown
+    const inspected = inspectControlFile(this.getTaskSecretFilePath(taskId), (input) => {
+      const raw = input as Record<string, unknown> | null
+      if (!raw || raw.taskId !== taskId) return null
+      if (raw.version === 1 && typeof raw.password === 'string' && raw.password.length <= 500) return raw.password
+      if (raw.version === 2 && !('password' in raw)) {
+        return openDatabaseControlPassword(`database-migration:target-password:${taskId}`, raw.passwordSealed)
       }
-      if (raw.version !== 1 || raw.taskId !== taskId || typeof raw.password !== 'string') {
-        throw new Error('迁移凭据文件结构不合法')
-      }
-      return raw.password
-    } catch (error) {
-      if (isFileNotFoundError(error)) {
-        return ''
-      }
-      throw error
-    }
+      return null
+    })
+    if (inspected.state === 'corrupted') throw new Error('迁移凭据文件或配套加密密钥不可用')
+    return inspected.state === 'healthy' ? inspected.value : ''
   }
 
   private async writeTaskPassword(taskId: string, password: string): Promise<void> {
     await this.writeJsonAtomically(this.getTaskSecretFilePath(taskId), {
-      version: 1,
+      version: 2,
       taskId,
-      password,
+      passwordSealed: sealDatabaseControlPassword(`database-migration:target-password:${taskId}`, password),
       updatedAt: new Date().toISOString(),
     })
+  }
+
+  async upgradeLegacyActiveTaskPassword(taskId: string): Promise<void> {
+    const legacy = inspectControlFile(this.getTaskSecretFilePath(taskId), value => {
+      const record = value as Record<string, unknown> | null
+      return record?.version === 1 && record.taskId === taskId && typeof record.password === 'string' && record.password.length <= 500
+        ? record.password : null
+    })
+    if (legacy.state === 'healthy') await this.writeTaskPassword(taskId, legacy.value)
   }
 
   /**
@@ -1558,7 +1565,7 @@ export class DatabaseMigrationService {
    * - 不存在时抛 404，明确告诉调用方“任务不存在”；
    * - 内容损坏时返回占位记录，由列表/详情接口继续容错展示。
    */
-  private async readTaskRecordResult(taskId: string): Promise<TaskRecordReadResult> {
+  private async readTaskRecordResult(taskId: string, withPassword = true): Promise<TaskRecordReadResult> {
     const filePath = await this.getTaskFilePath(taskId)
     let raw = ''
     try {
@@ -1572,8 +1579,8 @@ export class DatabaseMigrationService {
 
     try {
       const parsed = JSON.parse(raw) as InternalMigrationTaskRecord
-      const secretPassword = await this.readTaskPassword(taskId)
-      if (secretPassword) {
+      const secretPassword = withPassword ? await this.readTaskPassword(taskId) : ''
+      if (secretPassword || !withPassword) {
         parsed.target = {
           ...parsed.target,
           password: secretPassword,
@@ -1599,8 +1606,8 @@ export class DatabaseMigrationService {
    * - 列表/详情可以消费损坏占位记录；
    * - 执行、切换、回退等写操作必须阻断损坏任务，避免风险扩大。
    */
-  private async readTaskRecord(taskId: string, actionLabel: string): Promise<InternalMigrationTaskRecord> {
-    const result = await this.readTaskRecordResult(taskId)
+  private async readTaskRecord(taskId: string, actionLabel: string, withPassword = true): Promise<InternalMigrationTaskRecord> {
+    const result = await this.readTaskRecordResult(taskId, withPassword)
     if (result.readState === 'corrupted') {
       const filePath = result.responseTask.recordFilePath ?? path.resolve(migrationTaskDir, `${taskId}.json`)
       throw new BizError(
@@ -1647,7 +1654,7 @@ export class DatabaseMigrationService {
         // 新任务尚无文件，或旧文件已损坏；由后续原子写入/调用方校验处理。
       }
     }
-    if (task.target.password && task.target.password !== '***') {
+    if (task.target.password) {
       await this.writeTaskPassword(task.id, task.target.password)
     }
     if (this.isAutomaticMigrationE2EEnabled() && process.env.Y_LINK_DB_MIGRATION_E2E_FAIL_INITIAL_TASK_WRITE === 'true') {
@@ -2315,35 +2322,27 @@ export class DatabaseMigrationService {
     }
   }
 
-  private async acquireAutomaticMigrationLock(taskId: string): Promise<void> {
+  private async acquireAutomaticMigrationLock(taskId: string, purpose?: 'direct_override'): Promise<void> {
     await this.ensureMigrationDirectories()
-    let handle: Awaited<ReturnType<typeof fs.open>>
+    const directory = path.dirname(migrationLockFile)
+    const prepared = path.join(directory, `.migration-lock-${randomUUID()}.tmp`)
+    let published = false
     try {
-      handle = await fs.open(migrationLockFile, 'wx', 0o600)
+      writeControlFile(prepared, { version: 1, taskId, acquiredAt: new Date().toISOString(), pid: process.pid, purpose })
+      await fs.link(prepared, migrationLockFile)
+      published = true
+      removeControlFile(prepared) // 同步目录项，持久化锁名和临时名删除。
     } catch (error) {
-      if (
-        error
-        && typeof error === 'object'
-        && 'code' in error
-        && (error as { code?: unknown }).code === 'EEXIST'
-      ) {
+      try {
+        if (published) removeControlFile(migrationLockFile)
+        removeControlFile(prepared)
+      } catch (cleanupError) {
+        throw new AggregateError([error, cleanupError], '迁移锁获取失败且未能确认清理完成')
+      }
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
         throw new BizError('已有自动数据库迁移任务正在执行或等待重启验收', 409)
       }
       throw error
-    }
-    try {
-      await handle.writeFile(JSON.stringify({
-        version: 1,
-        taskId,
-        acquiredAt: new Date().toISOString(),
-        pid: process.pid,
-      }, null, 2))
-      await handle.sync()
-    } catch (error) {
-      await fs.rm(migrationLockFile, { force: true }).catch(() => undefined)
-      throw error
-    } finally {
-      await handle.close()
     }
   }
 
@@ -2367,16 +2366,7 @@ export class DatabaseMigrationService {
     if (lockTaskId !== taskId) {
       throw new BizError('自动迁移锁属于其他任务，已禁止释放', 409)
     }
-    await fs.rm(migrationLockFile, { force: true })
-    const lockStillExists = await fs.access(migrationLockFile).then(() => true).catch((error) => {
-      if (isFileNotFoundError(error)) {
-        return false
-      }
-      throw error
-    })
-    if (lockStillExists) {
-      throw new Error('自动迁移锁删除后仍然存在，系统将保持只读')
-    }
+    removeControlFile(migrationLockFile)
   }
 
   private async readAutomaticMigrationLockTaskId(): Promise<string | null> {
@@ -2392,6 +2382,22 @@ export class DatabaseMigrationService {
       }
       throw new Error(`自动迁移锁文件无法读取：${formatUnknownErrorMessage(error)}`)
     }
+  }
+
+  private async withDirectOverrideReservation<T>(work: () => Promise<T>): Promise<T> {
+    return this.runExclusiveMigration(async () => {
+      const owner = createTaskId()
+      await this.acquireAutomaticMigrationLock(owner, 'direct_override')
+      try {
+        const cutover = await import('./database-migration-cutover.service.js')
+        if (databaseMaintenanceModeService.isReadOnly() || cutover.inspectDatabaseMigrationCutoverMarker().state !== 'absent') {
+          throw new BizError('数据库已有活动迁移控制状态，请使用同任务回退', 409)
+        }
+        return await work()
+      } finally {
+        await this.releaseAutomaticMigrationLock(owner)
+      }
+    })
   }
 
   private async assertAutomaticFailureControlPlaneCleared(taskId: string): Promise<void> {
@@ -3418,13 +3424,16 @@ export class DatabaseMigrationService {
     )
     this.assertAutomaticMigrationEnabled()
     this.assertCurrentSourceIsSqlite()
-    if (readDatabaseRuntimeOverride()) {
-      throw new BizError('检测到已有数据库运行时覆盖配置，请先完成回退或清理后再执行一键迁移', 409)
+    const assertNoPendingOverride = () => {
+      if (readDatabaseRuntimeOverride()) {
+        throw new BizError('检测到已有数据库运行时覆盖配置，请先完成回退或清理后再执行一键迁移', 409)
+      }
     }
-
+    assertNoPendingOverride()
     const taskId = createTaskId()
     await this.acquireAutomaticMigrationLock(taskId)
     try {
+      assertNoPendingOverride()
       const target: MySqlMigrationTargetInput = {
         ...input.target,
         dbSync: false,
@@ -4379,7 +4388,7 @@ export class DatabaseMigrationService {
     if (path.resolve(String(AppDataSource.options.database)) !== path.resolve(input.sourceSqlitePath)) {
       throw new Error('RESCUE_CONNECTED_SOURCE_MISMATCH')
     }
-    const task = await this.readTaskRecord(input.taskId, '确认 SQLite 自动回退')
+    const task = await this.readTaskRecord(input.taskId, '确认 SQLite 自动回退', false)
     if (!isManagedMigration(task) || path.resolve(task.source.sqlitePath) !== path.resolve(input.sourceSqlitePath)) {
       throw new Error('自动迁移回退标记与任务记录不一致')
     }
@@ -4403,8 +4412,8 @@ export class DatabaseMigrationService {
     // 终态无法落盘时保留锁和维护状态，由恢复日志重放，不能提前宣告恢复成功。
     await this.writeTaskRecord(task)
     const taskStatePersisted = true
+    removeControlFile(this.getTaskSecretFilePath(task.id))
     await this.releaseAutomaticMigrationLock(task.id)
-    await fs.rm(this.getTaskSecretFilePath(task.id), { force: true })
     if (!input.deferMaintenanceFinish) {
       await databaseMaintenanceModeService.finishReadOnly(task.id)
       if (databaseMaintenanceModeService.isReadOnly()) {
@@ -4538,9 +4547,12 @@ export class DatabaseMigrationService {
   private async verifyAutomaticSqliteRollbackPrepared(
     task: InternalMigrationTaskRecord,
   ): Promise<boolean> {
-    const taskResult = await this.readTaskRecordResult(task.id)
+    const taskResult = await this.readTaskRecordResult(task.id, false)
     if (
       taskResult.readState !== 'healthy'
+      || taskResult.task.id !== task.id
+      || taskResult.task.mode !== 'automatic'
+      || path.relative(task.source.sqlitePath, taskResult.task.source.sqlitePath)
       || !taskResult.task.cancelRequestedAt
       || !['restart_pending', 'rolled_back'].includes(taskResult.task.status)
     ) {
@@ -4726,7 +4738,11 @@ export class DatabaseMigrationService {
     const cutoverModule = await import('./database-migration-cutover.service.js')
     let task: InternalMigrationTaskRecord
     try {
-      task = await this.readTaskRecord(taskId, '恢复意外中断的自动迁移任务')
+      task = await this.readTaskRecord(taskId, '恢复意外中断的自动迁移任务', false)
+      if (task.mode === 'automatic' && !task.cancelRequestedAt && ['queued', 'running'].includes(task.status)) {
+        // 续跑会重新连接 MySQL。先在冷恢复的安全清理边界内验证凭据，回退及终态无需解密。
+        await this.readTaskPassword(taskId)
+      }
     } catch (error) {
       const marker = cutoverModule.readDatabaseMigrationCutoverMarker()
       const runtimeOverride = readDatabaseRuntimeOverride()
@@ -4882,7 +4898,12 @@ export class DatabaseMigrationService {
       throw new BizError('数据库切换标记已损坏，系统将保持只读，禁止自动清理控制文件', 409)
     }
     const maintenanceTaskId = databaseMaintenanceModeService.getActiveTaskId()
-    const lockTaskId = await this.readAutomaticMigrationLockTaskId()
+    const lock = inspectControlFile(migrationLockFile, validateMigrationLock)
+    if (lock.state === 'corrupted') throw new BizError('迁移持久锁无法确认，已拒绝回退', 409)
+    if (lock.state === 'healthy' && lock.value.purpose === 'direct_override') {
+      throw new BizError('已有 SQLite 回退或清理覆盖正在执行，请稍后重试', 409)
+    }
+    const lockTaskId = lock.state === 'healthy' ? String(lock.value.taskId) : null
     const activeOwnerIds = new Set(
       [marker?.taskId, maintenanceTaskId, lockTaskId].filter((value): value is string => Boolean(value)),
     )
@@ -4898,7 +4919,7 @@ export class DatabaseMigrationService {
       throw new BizError(`当前活动自动迁移任务为 ${activeTaskId}，禁止回退其他任务`, 409)
     }
 
-    const task = await this.readTaskRecord(activeTaskId, '执行自动迁移紧急回退')
+    const task = await this.readTaskRecord(activeTaskId, '执行自动迁移紧急回退', false)
     if (task.mode !== 'automatic') {
       throw new BizError('活动数据库迁移任务不是一键自动任务，禁止使用紧急自动回退', 409)
     }
@@ -4964,6 +4985,56 @@ export class DatabaseMigrationService {
       'MySQL 已正式接管业务写入，旧 SQLite 已不再同步。为避免丢失迁移后的订单，禁止直接回退；请从 MySQL 备份恢复，或在停止写入后执行受控反向迁移。',
       409,
     )
+  }
+
+  private async resolveDirectSqliteRollbackPath(
+    input: RollbackDatabaseSwitchInput,
+    currentOverride: DatabaseRuntimeOverrideFile | null,
+  ): Promise<string> {
+    const basePath = path.resolve(resolveSqliteDatabasePath(baseDatabaseConfig.SQLITE_DB_PATH))
+    const task = input.taskId ? await this.readTaskRecord(input.taskId, '回退到指定 SQLite', false) : null
+    const sourcePath = task ? path.resolve(task.source.sqlitePath) : undefined
+    const candidate = path.resolve(input.sqlitePath?.trim() || sourcePath || currentOverride?.rollbackConfig?.SQLITE_DB_PATH || basePath)
+    const backupRoots = [
+      { directory: sqliteBackupDir, parent: appDataPaths.rootDir, name: /^y-link-backup-before-mysql-migration-.+\.sqlite$/ },
+      { directory: path.resolve('data', 'backup'), parent: path.resolve('data'), name: /^y-link-backup-.+\.sqlite$/ },
+      { directory: sqliteSnapshotDir, parent: appDataPaths.rootDir, name: /^[\w-]+-original-[\da-f-]{36}\.sqlite$/ },
+    ]
+    const managedBackup = backupRoots.find(({ directory, name }) => !path.relative(directory, path.dirname(candidate)) && name.test(path.basename(candidate)))
+    if (path.relative(basePath, candidate) && (!sourcePath || path.relative(sourcePath, candidate)) && !managedBackup) {
+      throw new BizError('仅允许回退到基准 SQLite、指定任务的原 SQLite 或服务生成的物理备份', 409)
+    }
+
+    try {
+      const stat = await fs.lstat(candidate)
+      if (!stat.isFile() || stat.nlink !== 1) throw new Error('INVALID_BACKUP_FILE')
+      const realPath = await fs.realpath(candidate)
+      if (managedBackup) {
+        const realParent = await fs.realpath(managedBackup.parent)
+        const expectedPath = path.resolve(realParent, path.relative(managedBackup.parent, candidate))
+        if (path.relative(expectedPath, realPath)) throw new Error('INVALID_BACKUP_DIRECTORY')
+      }
+      for (const directory of [path.resolve('uploads'), path.resolve('uploads', 'products'), '/usr/share/nginx/html']) {
+        const realDirectory = await fs.realpath(directory).catch((error) => {
+          if (isFileNotFoundError(error)) return directory
+          throw error
+        })
+        if (isPathInsideDirectory(candidate, directory) || isPathInsideDirectory(realPath, realDirectory)) throw new Error('PUBLIC_BACKUP_PATH')
+      }
+      const file = await fs.open(realPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0))
+      try {
+        const opened = await file.stat()
+        const header = Buffer.alloc(16)
+        if (!opened.isFile() || stat.dev !== opened.dev || stat.ino !== opened.ino || opened.nlink !== 1
+          || (await file.read(header, 0, header.length, 0)).bytesRead !== header.length
+          || !header.equals(Buffer.from('SQLite format 3\0'))) throw new Error('INVALID_SQLITE_HEADER')
+      } finally {
+        await file.close()
+      }
+      return realPath
+    } catch {
+      throw new BizError('回退目标必须是可读取的私有 SQLite 数据库文件', 409)
+    }
   }
 
   private async writeMysqlRuntimeOverride(
@@ -5086,7 +5157,7 @@ export class DatabaseMigrationService {
     const cutover = await import('./database-migration-cutover.service.js')
     if (cutover.inspectDatabaseMigrationCutoverMarker().state !== 'absent' || AppDataSource.options.type !== 'sqlite') return false
     await this.assertManualControlOwner(task)
-    task = await this.readTaskRecord(task.id, '持久接受手动取消')
+    task = await this.readTaskRecord(task.id, '持久接受手动取消', false)
     await this.assertManualControlOwner(task)
     if (actor) await this.assertFrozenMigrationAdmin(actor)
     else if (!task.cancelRequestedAt) throw new BizError('启动续接只能处理已持久接受的取消', 409)
@@ -5103,14 +5174,14 @@ export class DatabaseMigrationService {
     this.cancelledAutomaticTaskIds.add(task.id)
     await this.writeTaskRecord(task)
     await this.assertManualControlOwner(task)
-    const accepted = await this.readTaskRecord(task.id, '确认手动取消意图已持久化')
+    const accepted = await this.readTaskRecord(task.id, '确认手动取消意图已持久化', false)
     if (!accepted.cancelRequestedAt) throw new Error('手动取消意图未持久化，保持只读')
     await this.assertManualControlOwner(accepted)
     // 请求可能在冻结前已准入、直到现在才走到取消；重新取得同任务freeze会排除自身租约，不能让worker drain等自己。
     await databaseMaintenanceModeService.beginReadOnly({ taskId: task.id, phase: 'manual_cancelling' })
     await this.quiesceForDatabaseRescue(task.id) // 等真实执行体和schema worker退出，禁止迟到override。
     return this.runExclusiveMigration(async () => {
-      const latest = await this.readTaskRecord(task.id, '取消手动迁移')
+      const latest = await this.readTaskRecord(task.id, '取消手动迁移', false)
       await this.assertManualControlOwner(latest)
       if (cutover.inspectDatabaseMigrationCutoverMarker().state !== 'absent') return false
       const active = databaseMaintenanceModeService.getActiveTaskId()
@@ -5125,6 +5196,7 @@ export class DatabaseMigrationService {
       latest.progress.currentStage = '已取消手动迁移并撤销副本切换资格，原SQLite继续服务'
       if (latest.result) latest.result.runtimeOverrideApplied = false
       await this.writeTaskRecord(latest)
+      removeControlFile(this.getTaskSecretFilePath(task.id))
       await this.releaseAutomaticMigrationLock(task.id)
       if (active) await databaseMaintenanceModeService.finishReadOnly(task.id)
       appendControlAudit(path.join(appDataPaths.runtimeDir, 'database-rescue/events.jsonl'), { taskId: task.id, event: 'manual_cancelled_before_cutover' })
@@ -5162,7 +5234,7 @@ export class DatabaseMigrationService {
     const activeTaskId = databaseMaintenanceModeService.getActiveTaskId()
     if (activeTaskId) {
       if (input.taskId && input.taskId !== activeTaskId) throw new BizError('指定任务不拥有当前维护状态', 409)
-      const task = await this.readTaskRecord(activeTaskId, '准备受控救援回退')
+      const task = await this.readTaskRecord(activeTaskId, '准备受控救援回退', false)
       if (input.sqlitePath && path.resolve(input.sqlitePath) !== path.resolve(task.source.sqlitePath)) throw new BizError('回退目标必须是当前任务的原始 SQLite', 409)
       if (isControlledManualMigration(task) && await this.cancelManualBeforeCutover(task, adminActor)) {
         const activeOverride = maskDatabaseRuntimeOverride(readDatabaseRuntimeOverride())
@@ -5172,7 +5244,6 @@ export class DatabaseMigrationService {
       if (task.mode === 'automatic') await this.schedulePlannedAutomaticMigrationRestart()
       return { restartRequired: true, rollbackMode: 'sqlite_override', activeOverride: maskDatabaseRuntimeOverride(readDatabaseRuntimeOverride()) }
     }
-    const currentOverride = readDatabaseRuntimeOverride()
     const stoppedAutomaticTask = await this.stopAutomaticMigrationForEmergencyAction(
       input.taskId,
       input.sqlitePath,
@@ -5203,13 +5274,15 @@ export class DatabaseMigrationService {
           activeOverride: maskDatabaseRuntimeOverride(readDatabaseRuntimeOverride()),
         }
       }
-      if (input.taskId) {
-        const requestedTask = await this.readTaskRecord(input.taskId, '清理数据库切换覆盖配置')
-        if (currentOverride?.sourceTaskId !== requestedTask.id) {
-          throw new BizError('指定任务不拥有当前数据库运行时覆盖，禁止清理', 409)
+      const cleared = await this.withDirectOverrideReservation(async () => {
+        if (input.taskId) {
+          const requestedTask = await this.readTaskRecord(input.taskId, '清理数据库切换覆盖配置', false)
+          if (readDatabaseRuntimeOverride()?.sourceTaskId !== requestedTask.id) {
+            throw new BizError('指定任务不拥有当前数据库运行时覆盖，禁止清理', 409)
+          }
         }
-      }
-      const cleared = await clearDatabaseRuntimeOverride()
+        return clearDatabaseRuntimeOverride()
+      })
 
       await auditService.safeRecord({
         actionType: 'database_migration.rollback_switch',
@@ -5234,42 +5307,21 @@ export class DatabaseMigrationService {
       }
     }
 
-    let sqlitePath = stoppedAutomaticTask?.sourceSqlitePath ?? input.sqlitePath?.trim()
-    if (!sqlitePath && input.taskId) {
-      const task = await this.readTaskRecord(input.taskId, '回退到指定 SQLite')
-      sqlitePath = task.source.sqlitePath
-    }
-    if (!sqlitePath) {
-      sqlitePath = currentOverride?.rollbackConfig?.SQLITE_DB_PATH ?? resolveSqliteDatabasePath()
-    }
-
-    const payload: DatabaseRuntimeOverrideFile = {
-      version: 1,
-      updatedAt: new Date().toISOString(),
-      reason: input.reason?.trim() || DATABASE_MIGRATION_ROLLBACK_REASON_DEFAULT,
-      sourceTaskId: stoppedAutomaticTask?.taskId ?? input.taskId,
-      updatedBy: actor
-        ? {
-            userId: actor.userId,
-            username: actor.username,
-            displayName: actor.displayName,
-          }
-        : null,
-      config: {
-        DB_TYPE: 'sqlite',
-        SQLITE_DB_PATH: sqlitePath,
-        DB_SYNC: stoppedAutomaticTask ? false : env.DB_SYNC,
-      },
-      rollbackConfig: {
-        DB_TYPE: 'sqlite',
-        SQLITE_DB_PATH: sqlitePath,
-        DB_SYNC: stoppedAutomaticTask ? false : env.DB_SYNC,
-      },
-    }
-
     const persisted = stoppedAutomaticTask
       ? readDatabaseRuntimeOverride()
-      : await writeDatabaseRuntimeOverride(payload)
+      : await this.withDirectOverrideReservation(async () => {
+        const sqlitePath = await this.resolveDirectSqliteRollbackPath(input, readDatabaseRuntimeOverride())
+        const config = { DB_TYPE: 'sqlite' as const, SQLITE_DB_PATH: sqlitePath, DB_SYNC: env.DB_SYNC }
+        return writeDatabaseRuntimeOverride({
+          version: 1,
+          updatedAt: new Date().toISOString(),
+          reason: input.reason?.trim() || DATABASE_MIGRATION_ROLLBACK_REASON_DEFAULT,
+          sourceTaskId: input.taskId,
+          updatedBy: { userId: adminActor.userId, username: adminActor.username, displayName: adminActor.displayName },
+          config,
+          rollbackConfig: config,
+        })
+      })
     if (
       !persisted
       || (
@@ -5278,7 +5330,7 @@ export class DatabaseMigrationService {
           persisted.sourceTaskId !== stoppedAutomaticTask.taskId
           || persisted.config.DB_TYPE !== 'sqlite'
           || persisted.config.DB_SYNC !== false
-          || path.resolve(persisted.config.SQLITE_DB_PATH ?? '') !== path.resolve(sqlitePath)
+          || path.resolve(persisted.config.SQLITE_DB_PATH ?? '') !== path.resolve(stoppedAutomaticTask.sourceSqlitePath)
         )
       )
     ) {
@@ -5293,7 +5345,7 @@ export class DatabaseMigrationService {
       actor: adminActor,
       requestMeta,
       detail: {
-        sqlitePath,
+        sqlitePath: persisted.config.SQLITE_DB_PATH,
         sourceTaskId: stoppedAutomaticTask?.taskId ?? input.taskId,
         emergencyAutomaticRollback: Boolean(stoppedAutomaticTask),
       },
@@ -5318,7 +5370,7 @@ export class DatabaseMigrationService {
     const adminActor = await this.assertAdminActor(actor, requestMeta, 'database_migration.clear_override', '清理数据库运行时覆盖配置')
     const activeTaskId = databaseMaintenanceModeService.getActiveTaskId()
     if (activeTaskId) {
-      const task = await this.readTaskRecord(activeTaskId, '取消当前迁移覆盖')
+      const task = await this.readTaskRecord(activeTaskId, '取消当前迁移覆盖', false)
       if (isControlledManualMigration(task) && await this.cancelManualBeforeCutover(task, adminActor)) return { cleared: false, restartRequired: true }
       await this.recoverActiveMigrationAfterCancellation(activeTaskId, adminActor)
       if (task.mode === 'automatic') await this.schedulePlannedAutomaticMigrationRestart()
@@ -5347,7 +5399,7 @@ export class DatabaseMigrationService {
         restartRequired: true,
       }
     }
-    const cleared = await clearDatabaseRuntimeOverride()
+    const cleared = await this.withDirectOverrideReservation(clearDatabaseRuntimeOverride)
 
     await auditService.safeRecord({
       actionType: 'database_migration.clear_override',

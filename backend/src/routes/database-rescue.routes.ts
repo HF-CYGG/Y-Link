@@ -9,7 +9,32 @@ import { isSecureOrDirectLoopback } from '../utils/http-security.js'
 import { toRiskSourceKey } from '../utils/ip-subnet.js'
 import { requestRuntimeShutdown } from '../runtime/runtime-shutdown.js'
 
+const RESCUE_ATTEMPT_WINDOW_MS = 60_000
+const RESCUE_MAX_ATTEMPT_SOURCES = 1024
 const attempts = new Map<string, { count: number; resetsAt: number }>()
+
+export function recordDatabaseRescueAttempt(source: string, now: number): number {
+  // 固定窗口按首次进入的时间排队。满容量时淘汰最旧桶，新来源仍有自己的额度。
+  for (const [key, state] of attempts) {
+    if (state.resetsAt > now) break
+    attempts.delete(key)
+  }
+  let state = attempts.get(source)
+  if (!state) {
+    if (attempts.size >= RESCUE_MAX_ATTEMPT_SOURCES) {
+      const oldest = attempts.keys().next().value
+      if (oldest !== undefined) attempts.delete(oldest)
+    }
+    state = { count: 0, resetsAt: now + RESCUE_ATTEMPT_WINDOW_MS }
+    attempts.set(source, state)
+  }
+  if (state.count < 120) {
+    state.count += 1
+    return 0
+  }
+  return Math.max(1, Math.ceil((state.resetsAt - now) / 1000))
+}
+
 export function requireDatabaseRescueCredential(req: Request, res: Response, next: NextFunction): void {
   res.setHeader('Cache-Control', 'no-store')
   if (!isSecureOrDirectLoopback(req)) {
@@ -17,16 +42,9 @@ export function requireDatabaseRescueCredential(req: Request, res: Response, nex
     return
   }
   const key = toRiskSourceKey(req.ip || req.socket.remoteAddress) ?? 'unknown'
-  const time = Date.now()
-  for (const [entry, state] of attempts) if (state.resetsAt <= time) attempts.delete(entry)
-  if (!attempts.has(key) && attempts.size >= 1024) {
-    res.status(429).json({ code: 429, message: '请求过于频繁', data: null }); return
-  }
-  const state = attempts.get(key) ?? { count: 0, resetsAt: time + 60_000 }
-  state.count += 1
-  attempts.set(key, state)
-  if (state.count > 120) {
-    res.setHeader('Retry-After', '60')
+  const retryAfter = recordDatabaseRescueAttempt(key, Date.now())
+  if (retryAfter) {
+    res.setHeader('Retry-After', String(retryAfter))
     res.status(429).json({ code: 429, message: '请求过于频繁', data: null }); return
   }
   try {

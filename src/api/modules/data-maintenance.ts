@@ -542,7 +542,7 @@ export const applyDatabaseMigrationSwitch = (payload: ApplyDatabaseSwitchPayload
 
 /**
  * 回退数据库切换：
- * - 可根据任务来源回退，也可显式指定 SQLite 路径；
+ * - 可按任务来源回退，显式路径须为可信源文件或受管物理备份；
  * - clearOnly 为 true 时仅清除覆盖文件，不强制写入 SQLite 配置。
  */
 export const rollbackDatabaseMigrationSwitch = (payload: RollbackDatabaseSwitchPayload) =>

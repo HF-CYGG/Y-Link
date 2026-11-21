@@ -8,7 +8,7 @@ import { createApp } from '../app.js'
 import type { Server } from 'node:http'
 import { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } from '../config/database-bootstrap.js'
 import { AppDataSource } from '../config/data-source.js'
-import { maskDatabaseRuntimeOverride, readDatabaseRuntimeOverride } from '../config/database-runtime-override.js'
+import { maskDatabaseRuntimeOverride, readDatabaseRuntimeOverride, upgradeLegacyDatabaseRuntimeOverride } from '../config/database-runtime-override.js'
 import { env, envLoadContext } from '../config/env.js'
 import { initializeDatabaseInfrastructure } from '../database/database-strategy.js'
 import { authService } from '../services/auth.service.js'
@@ -414,6 +414,15 @@ export async function startBusinessRuntime(startup: { mode: 'normal' | 'cutover'
         + '请恢复与该数据库配套的 secrets/data-encryption.key；在此之前这些配置按“需重新录入”处理。',
       'warn',
     )
+  } else if (dataEncryptionPreflight && process.env.Y_LINK_SKIP_DATABASE_RUNTIME_OVERRIDE !== 'true') {
+    try {
+      upgradeLegacyDatabaseRuntimeOverride()
+      if (startup.taskId && (startup.mode === 'resume' || env.DB_TYPE === 'mysql')) {
+        await databaseMigrationService.upgradeLegacyActiveTaskPassword(startup.taskId)
+      }
+    } catch {
+      logLine('DATA ENCRYPTION', '旧迁移凭据的加密升级未完成，保留原配置供本次启动使用。', 'warn')
+    }
   }
   const cutoverMarkerInspection = inspectDatabaseMigrationCutoverMarker()
   if (cutoverMarkerInspection.state === 'corrupted') {

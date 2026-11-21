@@ -2,7 +2,7 @@
 import path from 'node:path'
 import { appDataPaths } from '../config/app-data-paths.js'
 import { inspectDatabaseRuntimeOverride, type DatabaseRuntimeOverrideConfig } from '../config/database-runtime-override.js'
-import { inspectControlFile, writeControlFile } from './durable-control-file.js'
+import { inspectControlFile, removeControlFile, writeControlFile } from './durable-control-file.js'
 import { inspectRecoveryIntent, prepareRecoveryStartup, resumeManualFailureCleanupBeforeStartup } from './database-rescue-control.js'
 import { validateCutoverControl, validateMigrationLock, validateMaintenanceControl } from './database-control-validation.js'
 import { isManagedMigration, isControlledManualMigration } from './database-migration-protocol.js'
@@ -26,6 +26,12 @@ export async function inspectDatabaseStartup(): Promise<{ mode: 'normal' | 'cuto
   const lock = inspectControlFile(appDataPaths.migrationLockFile, validateMigrationLock)
   const maintenance = inspectControlFile(appDataPaths.maintenanceStateFile, validateMaintenanceControl)
   if ([marker, lock, maintenance].some((item) => item.state === 'corrupted')) throw new Error('DATABASE_CONTROL_CORRUPTED')
+  if (lock.state === 'healthy' && lock.value.purpose === 'direct_override') {
+    // 直接回退只原子修改 SQLite 覆盖。中断后旧值或新值均完整，不存在迁移任务可续接。
+    if (marker.state !== 'absent' || maintenance.state !== 'absent') throw new Error('DATABASE_CONTROL_MISMATCH')
+    removeControlFile(appDataPaths.migrationLockFile)
+    return { mode: 'normal' }
+  }
   const activeTaskIds = [marker, lock, maintenance].flatMap((item) => item.state === 'healthy' ? [String(item.value.taskId)] : [])
   if (new Set(activeTaskIds).size > 1) throw new Error('DATABASE_CONTROL_MISMATCH')
   const taskId = activeTaskIds[0]

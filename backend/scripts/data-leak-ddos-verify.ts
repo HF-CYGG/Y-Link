@@ -1149,11 +1149,15 @@ async function verifyEncryptionKeyPreflightAndBackup() {
     .map((file) => path.relative(backendRoot, file).replaceAll('\\', '/'))
     .sort()
   assert.deepEqual(sealingFiles, [
+    // 运行时控制文件由数据库治理专项验证，不属于下面的数据库列。
+    'src/config/database-runtime-override.ts',
     'src/entities/notification-rule.entity.ts',
     'src/services/admin-mfa.service.ts',
+    // 通知通道密文写入已登记的 system_configs.config_value。
+    'src/services/notification-channel-config.service.ts',
     'src/services/notification.service.ts',
     'src/services/system-config.service.ts',
-  ], '出现新的加密落库位置，须登记到 data-encryption-preflight.ts 的 SEALED_COLUMNS')
+  ], '出现新的密封调用位置，须核对对应的密文启动预检')
   assert.deepEqual(SEALED_COLUMNS.map((item) => `${item.table}.${item.column}`).sort(), [
     'notification_rule.feishu_sign_secret',
     'notification_rule.feishu_webhook_url',

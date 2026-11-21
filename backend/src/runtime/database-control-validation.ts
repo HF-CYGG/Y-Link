@@ -14,7 +14,8 @@ export function validateCutoverControl(value: unknown): Record<string, unknown> 
 export function validateMigrationLock(value: unknown): Record<string, unknown> | null {
   const item = object(value)
   return item?.version === 1 && taskIdValid(item.taskId) && dateValid(item.acquiredAt)
-    && Number.isSafeInteger(item.pid) && Number(item.pid) > 0 ? item : null
+    && Number.isSafeInteger(item.pid) && Number(item.pid) > 0
+    && (item.purpose === undefined || item.purpose === 'direct_override') ? item : null
 }
 export function validateMaintenanceControl(value: unknown): Record<string, unknown> | null {
   const item = object(value)

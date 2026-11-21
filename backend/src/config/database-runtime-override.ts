@@ -7,6 +7,7 @@
 import fs from 'node:fs'
 import { appDataPaths } from './app-data-paths.js'
 import { inspectControlFile, removeControlFile, writeControlFile } from '../runtime/durable-control-file.js'
+import { openSensitiveValue, peekDataEncryptionKey, sealSensitiveValue } from '../utils/data-encryption.js'
 
 export type DatabaseOverrideMode = 'sqlite' | 'mysql'
 
@@ -47,6 +48,21 @@ export interface DatabaseRuntimeOverrideFile {
  * - 不依赖当前 shell 工作目录，避免从 monorepo 根目录启动时路径错位。
  */
 const runtimeOverrideFilePath = appDataPaths.runtimeOverrideFile
+const runtimePasswordContext = 'database-runtime-override:mysql-password'
+
+// 包裹为 JSON 字符串，保留恰好以密文前缀开头的数据库密码及所有原始字符。
+export function sealDatabaseControlPassword(context: string, password: string): string {
+  return sealSensitiveValue(context, JSON.stringify(password))
+}
+
+export function openDatabaseControlPassword(context: string, ciphertext: unknown): string {
+  if (typeof ciphertext !== 'string' || !peekDataEncryptionKey().keyId) throw new Error('DATABASE_CONTROL_PASSWORD_UNAVAILABLE')
+  const opened = openSensitiveValue(context, ciphertext)
+  if (opened.state !== 'sealed') throw new Error('DATABASE_CONTROL_PASSWORD_UNAVAILABLE')
+  const password: unknown = JSON.parse(opened.value)
+  if (typeof password !== 'string' || password.length > 500) throw new Error('DATABASE_CONTROL_PASSWORD_UNAVAILABLE')
+  return password
+}
 
 /**
  * 运行时覆盖文件字段边界：
@@ -264,7 +280,7 @@ function normalizeRuntimeOverrideFilePayload(input: unknown): DatabaseRuntimeOve
   }
 
   const rawVersion = rawPayload.version
-  if (rawVersion !== 1 && rawVersion !== '1') {
+  if (rawVersion !== 1 && rawVersion !== '1' && rawVersion !== 2) {
     return null
   }
 
@@ -286,17 +302,49 @@ export function readDatabaseRuntimeOverride(): DatabaseRuntimeOverrideFile | nul
 }
 
 export function inspectDatabaseRuntimeOverride() {
-  return inspectControlFile(runtimeOverrideFilePath, normalizeRuntimeOverrideFilePayload)
+  const inspection = inspectStoredRuntimeOverride()
+  return inspection.state === 'healthy'
+    ? { state: 'healthy' as const, value: inspection.value.payload }
+    : inspection
+}
+
+function inspectStoredRuntimeOverride() {
+  return inspectControlFile(runtimeOverrideFilePath, (input) => {
+    const payload = normalizeRuntimeOverrideFilePayload(input)
+    if (!payload) return null
+    const stored = input as Record<string, unknown>
+    if (stored.version === 2 && payload.config.DB_TYPE === 'mysql') {
+      const config = stored.config as Record<string, unknown>
+      if ('DB_PASSWORD' in config) return null
+      payload.config.DB_PASSWORD = openDatabaseControlPassword(runtimePasswordContext, config.DB_PASSWORD_SEALED)
+    }
+    return { payload, legacyMysql: stored.version !== 2 && payload.config.DB_TYPE === 'mysql' }
+  })
+}
+
+function persistRuntimeOverride(payload: DatabaseRuntimeOverrideFile): void {
+  if (payload.config.DB_TYPE === 'sqlite') {
+    writeControlFile(runtimeOverrideFilePath, payload)
+    return
+  }
+  const { DB_PASSWORD, ...config } = payload.config
+  writeControlFile(runtimeOverrideFilePath, {
+    ...payload,
+    version: 2,
+    config: { ...config, DB_PASSWORD_SEALED: sealDatabaseControlPassword(runtimePasswordContext, DB_PASSWORD ?? '') },
+  })
 }
 
 /**
  * 启动期只接受字符串环境变量，因此这里把 JSON 覆盖配置映射为字符串字典。
  */
 export function loadDatabaseRuntimeOverrideEnvValues(): Record<string, string> | null {
-  const runtimeOverride = readDatabaseRuntimeOverride()
-  if (!runtimeOverride) {
+  const inspection = inspectStoredRuntimeOverride()
+  if (inspection.state === 'corrupted') throw new Error('DATABASE_OVERRIDE_CORRUPTED')
+  if (inspection.state === 'absent') {
     return null
   }
+  const runtimeOverride = inspection.value.payload
 
   const envMap: Record<string, string> = {
     DB_TYPE: runtimeOverride.config.DB_TYPE,
@@ -327,13 +375,19 @@ export function loadDatabaseRuntimeOverrideEnvValues(): Record<string, string> |
   return envMap
 }
 
+/** 旧覆盖须先用以连接，再在数据库加密密钥预检通过后原子换成密文。 */
+export function upgradeLegacyDatabaseRuntimeOverride(): void {
+  const inspection = inspectStoredRuntimeOverride()
+  if (inspection.state === 'healthy' && inspection.value.legacyMysql) persistRuntimeOverride(inspection.value.payload)
+}
+
 export async function writeDatabaseRuntimeOverride(payload: DatabaseRuntimeOverrideFile): Promise<DatabaseRuntimeOverrideFile> {
   const normalizedPayload = normalizeRuntimeOverrideFilePayload(payload)
   if (!normalizedPayload) {
     throw new Error('数据库运行时覆盖配置不合法，已拒绝写入磁盘')
   }
 
-  writeControlFile(runtimeOverrideFilePath, normalizedPayload)
+  persistRuntimeOverride(normalizedPayload)
   return normalizedPayload
 }
 
