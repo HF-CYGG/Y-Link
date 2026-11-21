@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "source": "node-v22.23.5.tar.xz",
+  "sourceSha256": "6cce7c58bf058700c643944903d60a325e8c9ceede1f5c2c088b435f2ada091a",
+  "generationSupplement": {
+    "file": "openssl-3.5.9.tar.gz", "bytes": 53279637,
+    "sha256": "603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a",
+    "sha512": "c4c8136fd2c98d13bb85a57bfb0def25c906f47f1fe97675cd114594944eab957b5b81a3e0f48826e1a0f093afff5e83766b539d49768f6db68310fd678d7de6",
+    "archiveRoot": "openssl-3.5.9", "directories": ["doc", "test"],
+    "memberCount": 3078, "memberBytes": 96034620,
+    "membersSha256": "c3313e65f33256507e591a116ce9416df7650335e5bd5957c08cf119baf4351f",
+    "authentication": "复用039已认证同版官方上游原件；073逐路径证明为Node发布归档裁掉的doc/test输入，生成scratch独占且不覆盖任何Node路径"
+  },
+  "packages": [
+    { "package": "nasm", "version": "2.16.01-1", "architecture": "amd64", "file": "nasm_2.16.01-1_amd64.deb", "bytes": 405156, "sha256": "0180693ad5d2da8b36e7d73b9b596dc3e9f900238e3de699976c0576875b878f", "missing": false },
+    { "package": "libtext-template-perl", "version": "1.61-1", "architecture": "all", "file": "libtext-template-perl_1.61-1_all.deb", "bytes": 54400, "sha256": "b418681a0c0a925e029851e504c3bee5720bdcd6687c131555fd84bdb24001d6", "missing": false }
+  ],
+  "authenticationReceipt": "hardening/20261118-gcc-runtime-reference-021/manifest-021.json",
+  "authenticationReceiptSha256": "c0d7ceed3d33fa7d233ed3189db00976802110a5779c7771c1070a7ba832b696"
+}

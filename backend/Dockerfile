@@ -93,6 +93,19 @@ FROM ${Y_LINK_NODE_IMAGE} AS gcc-security-candidate
 COPY native-security /ylink-native-security
 COPY native-security/candidate-inputs/gcc /ylink-gcc-inputs
 RUN --network=none Y_LINK_GCC_SECURITY_BUILD=image sh /ylink-native-security/build-gcc-stage.sh --candidate-only
+
+FROM ${Y_LINK_NODE_IMAGE} AS node-security-candidate
+COPY native-security /ylink-native-security
+COPY native-security/candidate-inputs/gcc/debs /ylink-gcc-inputs/debs
+COPY native-security/candidate-inputs/gcc/reference/libgcc-s1_12.2.0-14+deb12u1_amd64.deb /ylink-gcc-inputs/reference/libgcc-s1_12.2.0-14+deb12u1_amd64.deb
+COPY native-security/candidate-inputs/node /ylink-node-inputs
+COPY --from=gcc-security-candidate /native-gcc-out /tmp/ylink-gcc-candidate
+COPY scripts/install-pinned-npm.mjs /tmp/ylink-install-pinned-npm.mjs
+COPY scripts/build-pinned-npm.mjs /tmp/build-pinned-npm.mjs
+COPY npm-toolchain /tmp/ylink-npm-toolchain
+RUN node /tmp/ylink-install-pinned-npm.mjs --context=image --data-dir=/tmp/ylink-npm-toolchain
+RUN --network=none Y_LINK_NODE_SECURITY_BUILD=image sh /ylink-native-security/build-node-stage.sh --candidate-only
+
 FROM ${Y_LINK_NODE_IMAGE} AS runtime
 # 保留既有合法运行基线；本批未验收native候选仅由独立target产出，尚未接入runtime。
 COPY --from=native-security-build /native-out /tmp/ylink-native-security

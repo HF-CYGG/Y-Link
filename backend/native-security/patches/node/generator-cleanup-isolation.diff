@@ -1,0 +1,13 @@
+diff --git a/deps/openssl/config/generate_gypi.pl b/deps/openssl/config/generate_gypi.pl
+--- a/deps/openssl/config/generate_gypi.pl
++++ b/deps/openssl/config/generate_gypi.pl
+@@ -372,8 +372,7 @@
+ close(CLGYPI);
+ 
+ # Clean Up
+-my $cmd2 ="cd $src_dir; make -f $makefile clean; make -f $makefile distclean;" .
+-    "git clean -f $src_dir";
++my $cmd2 ="cd $src_dir && make -f $makefile clean && make -f $makefile distclean";
+ system($cmd2) == 0 or die "Error in system($cmd2)";
+ 
+ 
