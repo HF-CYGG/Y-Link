@@ -62,6 +62,7 @@ interface PendingEnrollment {
   mfaId: string | null
   mfaRevision: number | null
   expiresAt: number
+  /** 旧版实例读取此阈值。新版核验统一使用 ENROLLMENT_MAX_ATTEMPTS。 */
   attemptsLeft: number
 }
 
@@ -295,36 +296,17 @@ export class AdminMfaService {
 
   /** 确认绑定：动态码正确才落库；错误次数用尽后作废待确认秘钥，需重新发起。 */
   async confirmEnrollment(auth: AuthUserContext, code: string, requestMeta?: RequestMeta): Promise<{ recoveryCodes: string[] }> {
-    const ticketKey = String(auth.userId)
-    const pending = await pendingEnrollmentStore.get(ticketKey)
-    if (!pending) {
-      throw new BizError('绑定已过期，请重新发起绑定', 409)
-    }
-    const matchedStep = matchTotpStep(pending.secret, code)
-    if (matchedStep === null) {
-      // 错误次数由票据存储原子计数：多实例并发提交错误动态码也无法突破上限，用尽即作废。
-      const failedAttempts = await pendingEnrollmentStore.recordFailedAttempt(ticketKey, pending.attemptsLeft)
-      const attemptsLeft = failedAttempts === null ? 0 : Math.max(0, pending.attemptsLeft - failedAttempts)
-      await auditService.safeRecord({
-        actionType: 'auth.mfa.enable',
-        actionLabel: '开启两步验证',
-        targetType: 'user',
-        targetId: auth.userId,
-        targetCode: auth.username,
-        actor: actorOf(auth),
-        resultStatus: 'failed',
-        requestMeta,
-        detail: { reason: 'code_mismatch', attemptsLeft },
+    // 准入失败不会接触票据。核验放在账号锁之前，避免持有行锁等待 Redis。
+    const outcome = await runInTransaction(async (manager) => {
+      const attempt = await pendingEnrollmentStore.verifyAndConsume(String(auth.userId), ENROLLMENT_MAX_ATTEMPTS, (pending) => {
+        const matchedStep = matchTotpStep(pending.secret, code)
+        return matchedStep === null ? null : { pending, matchedStep }
       })
-      throw new BizError(
-        attemptsLeft > 0 ? '动态码不正确，请确认手机时间准确后输入最新的 6 位动态码' : '动态码错误次数过多，请重新发起绑定',
-        400,
-      )
-    }
+      if (attempt.status !== 'verified') return attempt
 
-    const { codes, digests } = this.generateRecoveryCodes(auth.userId)
-    const sealedSecret = sealSensitiveValue(secretContext(auth.userId), pending.secret)
-    await runInTransaction(async (manager) => {
+      const { pending, matchedStep } = attempt.value
+      const { codes, digests } = pending.mfaId ? { codes: [], digests: [] } : this.generateRecoveryCodes(auth.userId)
+      const sealedSecret = sealSensitiveValue(secretContext(auth.userId), pending.secret)
       await lockActiveSysAccountForBusiness(manager, auth.userId)
       const repo = manager.getRepository(SysUserMfa)
       const user = await manager.getRepository(SysUser).createQueryBuilder('user')
@@ -365,15 +347,30 @@ export class AdminMfaService {
         },
         manager,
       )
+      return { status: 'verified' as const, recoveryCodes: codes }
     })
-    // 绑定已提交，恢复码明文只在本次响应中出现：票据清理失败（Redis 抖动）不能吞掉这次唯一的展示。
-    // 残留票据无法再次确认（上面的 totpSecretSealed 检查会拒绝），到期后自动失效；降级已由票据存储记录。
-    try {
-      await pendingEnrollmentStore.delete(ticketKey)
-    } catch {
-      console.warn('[admin-mfa] 两步验证已绑定，待确认票据清理失败，将在有效期后自动失效')
+
+    if (outcome.status === 'unavailable') throw new BizError('绑定已过期，请重新发起绑定', 409)
+    if (outcome.status === 'mismatch') {
+      const { attemptsLeft } = outcome
+      await auditService.safeRecord({
+        actionType: 'auth.mfa.enable',
+        actionLabel: '开启两步验证',
+        targetType: 'user',
+        targetId: auth.userId,
+        targetCode: auth.username,
+        actor: actorOf(auth),
+        resultStatus: 'failed',
+        requestMeta,
+        detail: { reason: 'code_mismatch', attemptsLeft },
+      })
+      throw new BizError(
+        attemptsLeft > 0 ? '动态码不正确，请确认手机时间准确后输入最新的 6 位动态码' : '动态码错误次数过多，请重新发起绑定',
+        400,
+      )
     }
-    return { recoveryCodes: pending.mfaId ? [] : codes }
+
+    return { recoveryCodes: outcome.recoveryCodes }
   }
 
   /**

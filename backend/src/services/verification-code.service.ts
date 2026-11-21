@@ -21,7 +21,7 @@ import {
   type VerificationProviderConfigRecord,
 } from './system-config.service.js'
 import { auditService } from './audit.service.js'
-import { createTicketStore, type TicketStore } from '../utils/ephemeral-ticket-store.js'
+import { createTicketStore, type VerifiableTicketStore } from '../utils/ephemeral-ticket-store.js'
 import { safeHttpRequest } from '../utils/safe-http-request.js'
 import { renderProviderTemplate, resolveProviderBodyFormat } from '../utils/provider-template.js'
 import { maskMobileVerificationTarget, smsVerificationRecordService, type SmsVerificationRecordService } from './sms-verification-record.service.js'
@@ -48,11 +48,11 @@ const verificationTicketStore = createTicketStore<VerificationCodeTicket>({
 const buildTicketKey = (channel: VerificationChannelType, target: string, scene: VerificationScene) => `${channel}:${scene}:${target}`
 
 /**
- * 通用验证码的本地尝试次数治理：连续五次错误后销毁票据，防止有效期内持续撞库。
+ * 通用验证码的尝试次数治理：连续五次错误后票据作废，有效期内不能继续核验。
  * 该类接受显式 store，测试可在进程内注入固定票据而不暴露任何 HTTP 答案通道。
  */
 export class VerificationCodeAttemptStore {
-  constructor(private readonly store: TicketStore<VerificationCodeTicket>) {}
+  constructor(private readonly store: VerifiableTicketStore<VerificationCodeTicket>) {}
 
   async set(key: string, ticket: VerificationCodeTicket): Promise<void> {
     await this.store.set(key, ticket)
@@ -64,20 +64,10 @@ export class VerificationCodeAttemptStore {
 
   /** 返回 true=核验通过并已作废，false=答案错误，null=票据不存在、已过期或已因错误次数用尽作废。 */
   async consume(key: string, code: string): Promise<boolean | null> {
-    const ticket = await this.store.get(key)
-    if (!ticket) {
-      return null
-    }
-    if (!isSameCode(ticket.code, code.trim())) {
-      await this.store.recordFailedAttempt(key, VERIFICATION_CODE_MAX_FAILED_ATTEMPTS)
-      return false
-    }
-    // 读到正确答案后以原子 take 消费：并发提交同一正确答案时只有一个请求能拿到票据。
-    const consumed = await this.store.take(key)
-    if (!consumed) {
-      return null
-    }
-    return isSameCode(consumed.code, code.trim())
+    const normalizedCode = code.trim()
+    const attempt = await this.store.verifyAndConsume(key, VERIFICATION_CODE_MAX_FAILED_ATTEMPTS,
+      (ticket) => isSameCode(ticket.code, normalizedCode) ? true : null)
+    return attempt.status === 'unavailable' ? null : attempt.status === 'verified'
   }
 }
 

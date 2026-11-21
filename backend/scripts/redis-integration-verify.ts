@@ -190,7 +190,8 @@ async function runMainScenario() {
     const codeTicket = { channel: 'mobile' as const, target: '13800138001', scene: 'register' as const, code: '123456', expiresAt: Date.now() + 60_000, failedAttempts: 0 }
     await codeStore.set('k1', codeTicket)
     const wrongResults = await Promise.all(Array.from({ length: 20 }, () => codeStore.consume('k1', '000000')))
-    assert.ok(wrongResults.filter((item) => item === false).length >= 5, '错误答案至少前五次返回 false')
+    assert.equal(wrongResults.filter((item) => item === false).length, 5, '共享额度仅允许五次错码核验')
+    assert.equal(wrongResults.filter((item) => item === null).length, 15, '超额请求不得再读取答案')
     assert.equal(await codeStore.consume('k1', '123456'), null, '并发错误五次后票据必须作废')
     await codeStore.set('k2', codeTicket)
     const rightResults = await Promise.all(Array.from({ length: 20 }, () => codeStore.consume('k2', '123456')))
@@ -200,6 +201,39 @@ async function runMainScenario() {
     await codeStore.set('k3', codeTicket)
     for (let index = 0; index < 4; index += 1) assert.equal(await codeStore.consume('k3', '999999'), false)
     assert.equal(await codeStore.consume('k3', '123456'), true, '重新发送验证码后错误次数必须清零')
+
+    const fixture = { code: 'fixture', secret: 'ticket-fixture', expiresAt: Date.now() + 60_000 }
+    await instanceA.set('admitted', fixture)
+    let laterAttempts: Promise<unknown[]> | undefined
+    let comparisons = 0
+    const admitted = await instanceA.verifyAndConsume('admitted', 5, (ticket) => {
+      // 两个实例对象复用测试连接。先把其余预占命令送入 Redis，再发当前票据的消费命令。
+      laterAttempts = Promise.all(Array.from({ length: 5 }, () => instanceB.verifyAndConsume('admitted', 5, () => {
+        comparisons += 1
+        return null
+      })))
+      return ticket.code
+    })
+    assert.deepEqual(await laterAttempts, [
+      { status: 'mismatch', attemptsLeft: 3 },
+      { status: 'mismatch', attemptsLeft: 2 },
+      { status: 'mismatch', attemptsLeft: 1 },
+      { status: 'mismatch', attemptsLeft: 0 },
+      { status: 'unavailable' },
+    ])
+    assert.equal(comparisons, 4, '跨实例额度耗尽时不得再执行比对回调')
+    assert.deepEqual(admitted, { status: 'verified', value: fixture.code }, '额度耗尽不影响已获准的正确请求')
+
+    await instanceA.set('replacement', fixture)
+    let reissued: Promise<void> | undefined
+    const replaced = await instanceA.verifyAndConsume('replacement', 5, (ticket) => {
+      reissued = instanceB.set('replacement', { ...ticket, code: 'replacement-fixture' })
+      return true
+    })
+    await reissued
+    assert.equal(replaced.status, 'unavailable', '旧票据不能核验通过或消费改发后的新票据')
+    assert.deepEqual(await instanceB.verifyAndConsume('replacement', 5, (ticket) => ticket.code),
+      { status: 'verified', value: 'replacement-fixture' })
 
     // 2b. 全站撞库态势的近似滑动窗口计数不得在 1000 处封顶（阈值可配置到十万级以上）
     const counterWindowMs = 60_000
@@ -438,6 +472,9 @@ async function runDegradedScenario() {
     const store = createTicketStore<{ expiresAt: number }>({ namespace: 'degraded', maxSize: 10, resolveExpiresAt: (ticket) => ticket.expiresAt })
     await assert.rejects(async () => store.set('k', { expiresAt: Date.now() + 60_000 }), (error: unknown) => error instanceof BizError && error.statusCode === 503, 'Redis 不可用时票据必须返回 503')
     await assert.rejects(async () => store.take('k'), (error: unknown) => error instanceof BizError && error.statusCode === 503)
+    await assert.rejects(async () => store.verifyAndConsume('k', 5, () => {
+      assert.fail('Redis 不可用时不得执行票据比对')
+    }), (error: unknown) => error instanceof BizError && error.statusCode === 503)
 
     const now = Date.now()
     for (let index = 0; index < 3; index += 1) await persistentRiskStateService.consumeWindow('degraded-window', 60_000, now + index, 3)
