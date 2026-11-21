@@ -70,10 +70,13 @@ RUN npm ci --omit=dev
 # - 默认将 SQLite 数据落到 /app/data、上传图片落到 /app/uploads，便于通过 volume 持久化。
 # ------------------------------
 FROM prod-deps AS native-security-build
-COPY native-security /ylink-native-security
+COPY native-security/baseline-v7 /ylink-native-security
 RUN Y_LINK_NATIVE_SECURITY_BUILD=image sh /ylink-native-security/build-stage.sh
 
 FROM ${Y_LINK_NODE_IMAGE} AS runtime
+# 保留既有合法运行基线；本批未验收native候选仅由独立target产出，尚未接入runtime。
+COPY --from=native-security-build /native-out /tmp/ylink-native-security
+COPY native-security/baseline-v7/install-backports.mjs native-security/baseline-v7/source-pins.json /tmp/ylink-native-security-installer/
 # 固定既有npm工具；官方包完整性失败即停，不改变Node/Nginx或应用锁。
 COPY scripts/install-pinned-npm.mjs /tmp/ylink-install-pinned-npm.mjs
 COPY scripts/build-pinned-npm.mjs /tmp/build-pinned-npm.mjs
@@ -89,12 +92,10 @@ ENV NODE_ENV=production \
   TZ=Asia/Shanghai \
   UV_THREADPOOL_SIZE=8
 
-COPY --from=native-security-build /native-out /tmp/ylink-native-security
-COPY native-security/install-backports.mjs native-security/source-pins.json /tmp/ylink-native-security-installer/
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata \
   && node /tmp/ylink-native-security-installer/install-backports.mjs --input=/tmp/ylink-native-security \
-  && rm -rf /tmp/ylink-native-security /tmp/ylink-native-security-installer /var/lib/apt/lists/*
+  && rm -rf /tmp/ylink-native-security /tmp/ylink-native-security-installer /tmp/ylink-pam-security /tmp/ylink-pam-security-installer /tmp/ylink-glibc-security /tmp/ylink-glibc-security-installer /var/lib/apt/lists/*
 
 # 创建运行目录并提前授权给 node 用户，降低容器默认 root 运行风险。
 # 这里同时预创建 uploads 目录，确保首次上传前容器内就具备稳定的落盘路径。

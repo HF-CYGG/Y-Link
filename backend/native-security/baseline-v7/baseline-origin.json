@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "sourceSnapshot": "770eb9915b3f9766d58651d0ed37a52b0a6c53b6239e1d9c25b77fde3a851e14",
+  "overlaySnapshot": "e4b25a4a672d965e9af98156841f57cf4addd2f5ab9dbf66141eed39ef11bb6a",
+  "sourceManifestSha256": "89b8612b65f40949e652718348fffa16b7cfe622d9ca97830a47bdfc3bacc88f",
+  "files": [
+    {
+      "path": "build-stage.sh",
+      "bytes": 1012,
+      "sha256": "8e248cb7f6330f44bfce85b33f488d7330e7d023a24b6fdf2985a022cab955e5"
+    },
+    {
+      "path": "build-backports.mjs",
+      "bytes": 7702,
+      "sha256": "144620aa8fdf443a7c516e526e31594c3eac8f61fc70861ef958b20fad007c9d"
+    },
+    {
+      "path": "install-backports.mjs",
+      "bytes": 4049,
+      "sha256": "0f5b76b829b2dcb38170fb529274bac1f1cd1a11bd4d5cfe3e1f1c2dadd18287"
+    },
+    {
+      "path": "source-pins.json",
+      "bytes": 4984,
+      "sha256": "e105057995927994409bf53811a747a8ea357609333b9d9f93a26d788ff5aad8"
+    },
+    {
+      "path": "patches/libblkid-ebr-bounds.patch",
+      "bytes": 4036,
+      "sha256": "e4c7ba8005409a6991d82f8725ed032d67c96fc9ae7f3c8b3847d68d5c9d66f7"
+    },
+    {
+      "path": "patches/zlib-borrowed-input.patch",
+      "bytes": 1165,
+      "sha256": "1d60bdb1b7fbe24a15f3b5ae5578454bfc8f683750e3db5c4b406d41ce75a9e4"
+    }
+  ],
+  "scope": "only frozen v7 baseline byte-identical assets; no old test copies; no new CVE closure",
+  "nativeSecurityTriggerResult": "not claimed"
+}
