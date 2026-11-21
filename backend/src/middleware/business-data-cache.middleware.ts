@@ -14,6 +14,7 @@
 import type { NextFunction, Request, Response } from 'express'
 import { bumpSharedCacheGeneration } from '../redis/redis-cache.js'
 import { isRedisEnabled } from '../redis/redis-client.js'
+import { staticPathKey } from '../utils/static-path-key.js'
 
 /** 报表、工作台等业务统计缓存共用的代际名。 */
 export const BUSINESS_DATA_CACHE_GENERATION = 'business-data'
@@ -24,7 +25,12 @@ const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 const EXCLUDED_PATH_PREFIXES = ['/api/auth/', '/api/client-auth/', '/api/v1/mobile-auth/']
 
 export function businessDataCacheInvalidation(req: Request, res: Response, next: NextFunction): void {
-  if (!isRedisEnabled() || !MUTATING_METHODS.has(req.method) || EXCLUDED_PATH_PREFIXES.some((prefix) => req.path.startsWith(prefix))) {
+  if (!isRedisEnabled() || !MUTATING_METHODS.has(req.method)) {
+    next()
+    return
+  }
+  const path = staticPathKey(req.path)
+  if (EXCLUDED_PATH_PREFIXES.some((prefix) => path.startsWith(prefix))) {
     next()
     return
   }

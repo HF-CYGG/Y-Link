@@ -279,7 +279,7 @@ async function runMainScenario() {
       app.use(businessDataCacheInvalidation)
       app.post('/api/orders', (_req, res) => { res.json({ code: 0 }) })
       app.post('/api/orders/invalid', (_req, res) => { res.status(400).json({ code: 400 }) })
-      app.post('/api/auth/login', (_req, res) => { res.json({ code: 0 }) })
+      app.post(['/api/auth/login', '/api/client-auth/login', '/api/v1/mobile-auth/refresh'], (_req, res) => { res.json({ code: 0 }) })
       const server = app.listen(0)
       await new Promise((resolve) => server.once('listening', resolve))
       const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`
@@ -295,7 +295,11 @@ async function runMainScenario() {
         assert.equal(reportLoads, 1, '代际未变时命中缓存')
         const before = Number(await readSharedCacheGeneration(BUSINESS_DATA_CACHE_GENERATION))
         await fetch(`${base}/api/orders/invalid`, { method: 'POST' })
-        await fetch(`${base}/api/auth/login`, { method: 'POST' })
+        for (const route of ['/api/auth/login', '/api/Client-Auth/Login/', '/api/v1/Mobile-Auth/Refresh/']) {
+          const authResponse = await fetch(base + route, { method: 'POST' })
+          assert.equal(authResponse.status, 200)
+          await authResponse.json()
+        }
         assert.equal(Number(await readSharedCacheGeneration(BUSINESS_DATA_CACHE_GENERATION)), before, '失败的写请求与认证接口不递增代际')
         const response = await fetch(`${base}/api/orders`, { method: 'POST' })
         assert.equal(response.status, 200)

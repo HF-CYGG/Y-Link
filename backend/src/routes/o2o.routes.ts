@@ -28,6 +28,7 @@ import { CLIENT_USER_ACCOUNT_TYPES } from '../entities/client-user.entity.js'
 import { assertPermanentDeletePasswordForRequest, createPermanentDeleteLimiter } from '../utils/permanent-delete-guard.js'
 import { resolveCompatibleIdentifierInput } from '../services/order-serial.service.js'
 import { projectSystemIdentifiersForRole } from '../utils/system-identifier-visibility.js'
+import { staticPathKey } from '../utils/static-path-key.js'
 
 import { MAX_DATABASE_INT, MAX_O2O_ORDER_ITEM_COUNT } from '../constants/web-resource-limits.js'
 
@@ -233,7 +234,7 @@ const o2oAdminRouter = Router()
 // 公共、客户端与管理端共用同一响应边界；执行 res.json 时管理端鉴权上下文已完成注入。
 o2oRouter.use((req, res, next) => {
   // 商品目录/门店配置等高频公共响应不含订单标识，避免对大对象做无意义深复制。
-  if (!/^\/(?:mall\/preorders(?:\/|$)|orders(?:\/|$)|verify(?:\/|$))/.test(req.path)) {
+  if (!/^\/(?:mall\/preorders(?:\/|$)|orders(?:\/|$)|verify(?:\/|$))/.test(staticPathKey(req.path))) {
     next()
     return
   }

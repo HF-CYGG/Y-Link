@@ -13,6 +13,7 @@
  */
 
 import type { NextFunction, Request, Response } from 'express'
+import { staticPathKey } from '../utils/static-path-key.js'
 import {
   databaseMaintenanceModeService,
   MAINTENANCE_READ_ONLY_CODE,
@@ -21,7 +22,7 @@ import {
 } from '../services/database-maintenance-mode.service.js'
 
 export function databaseMaintenanceWriteBarrier(req: Request, res: Response, next: NextFunction): void {
-  const allowedDuringMaintenance = shouldAllowWriteDuringDatabaseMaintenance(req.method, req.originalUrl,
+  const allowedDuringMaintenance = shouldAllowWriteDuringDatabaseMaintenance(req.method, req.path,
     { taskId: req.body?.taskId, activeTaskId: databaseMaintenanceModeService.getActiveTaskId() })
   if (databaseMaintenanceModeService.isReadOnly() && !allowedDuringMaintenance) {
     res.setHeader('Cache-Control', 'no-store')
@@ -35,8 +36,9 @@ export function databaseMaintenanceWriteBarrier(req: Request, res: Response, nex
   }
 
   const normalizedMethod = req.method.toUpperCase()
-  const normalizedPath = req.path.replace(/\/+$/, '')
-  const isLongLivedSseRequest = normalizedMethod === 'GET' && (
+  const normalizedPath = staticPathKey(req.path)
+  // Express 会用 GET 路由处理未显式注册的 HEAD 请求。
+  const isLongLivedSseRequest = (normalizedMethod === 'GET' || normalizedMethod === 'HEAD') && (
     normalizedPath === '/api/client-feedback/stream'
     || normalizedPath === '/api/customer-service/stream'
   )
