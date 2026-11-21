@@ -205,6 +205,16 @@ const RATE_LIMIT_RULES = {
     windowMs: 10 * 60 * 1000,
     blockMessage: '消息发送过于频繁，请稍后再试',
   },
+  clientRestockRequestCreateByUser: {
+    maxRequests: 30,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '补货申请提交过于频繁，请稍后再试',
+  },
+  clientFeedbackConversationStateByUser: {
+    maxRequests: 30,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '反馈状态操作过于频繁，请稍后再试',
+  },
   clientPreorderSubmitByUser: {
     maxRequests: 20,
     windowMs: 10 * 60 * 1000,
@@ -214,6 +224,16 @@ const RATE_LIMIT_RULES = {
     maxRequests: 20,
     windowMs: 10 * 60 * 1000,
     blockMessage: '撤单过于频繁，请稍后再试',
+  },
+  clientPreorderUpdateByUser: {
+    maxRequests: 20,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '修改订单过于频繁，请稍后再试',
+  },
+  clientPreorderDocumentByUser: {
+    maxRequests: 30,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '订单单据操作过于频繁，请稍后再试',
   },
   // 退货可按 1 件拆成多张申请，每张都会写审计并通知员工，需按账号封顶。
   clientReturnRequestCreateByUser: {
@@ -973,13 +993,26 @@ export class AuthSecurityService {
   async guardClientBusinessWrite(
     requestMeta: RequestMeta | undefined,
     userId: string,
-    kind: 'feedback_conversation_create' | 'feedback_message' | 'preorder_submit' | 'preorder_cancel' | 'return_request_create',
+    kind:
+      | 'feedback_conversation_create'
+      | 'feedback_message'
+      | 'feedback_conversation_state'
+      | 'restock_request_create'
+      | 'preorder_submit'
+      | 'preorder_cancel'
+      | 'preorder_update'
+      | 'preorder_document'
+      | 'return_request_create',
   ) {
     const ruleMap = {
       feedback_conversation_create: RATE_LIMIT_RULES.clientFeedbackConversationCreateByUser,
       feedback_message: RATE_LIMIT_RULES.clientFeedbackMessageByUser,
+      feedback_conversation_state: RATE_LIMIT_RULES.clientFeedbackConversationStateByUser,
+      restock_request_create: RATE_LIMIT_RULES.clientRestockRequestCreateByUser,
       preorder_submit: RATE_LIMIT_RULES.clientPreorderSubmitByUser,
       preorder_cancel: RATE_LIMIT_RULES.clientPreorderCancelByUser,
+      preorder_update: RATE_LIMIT_RULES.clientPreorderUpdateByUser,
+      preorder_document: RATE_LIMIT_RULES.clientPreorderDocumentByUser,
       return_request_create: RATE_LIMIT_RULES.clientReturnRequestCreateByUser,
     } as const
     await this.consumeRateLimit(`client-business-write:${kind}:user:${userId}`, ruleMap[kind], {

@@ -319,7 +319,11 @@ o2oRouter.get('/mall/preorders/kingdee-todos', requireClientAuth, asyncHandler(a
   res.json({ code: 0, message: 'ok', data })
 }))
 o2oRouter.patch('/mall/preorders/:id/kingdee-registration', requireClientAuth, asyncHandler(async (req, res) => {
-  const data = await o2oPreorderService.updateKingdeeRegistration(req.params.id, kingdeeRegistrationSchema.parse(req.body), { client: (req as ClientAuthenticatedRequest).clientAuth }, extractRequestMeta(req))
+  const authReq = req as ClientAuthenticatedRequest
+  const payload = kingdeeRegistrationSchema.parse(req.body)
+  const requestMeta = extractRequestMeta(req)
+  await authSecurityService.guardClientBusinessWrite(requestMeta, authReq.clientAuth.userId, 'preorder_document')
+  const data = await o2oPreorderService.updateKingdeeRegistration(req.params.id, payload, { client: authReq.clientAuth }, requestMeta)
   res.json({ code: 0, message: 'ok', data })
 }))
 o2oAdminRouter.patch('/orders/:id/kingdee-registration', requirePermission('orders:update'), asyncHandler(async (req, res) => {
@@ -355,6 +359,8 @@ o2oRouter.post(
   requireClientAuth,
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
+    const requestMeta = extractRequestMeta(req)
+    await authSecurityService.guardClientBusinessWrite(requestMeta, authReq.clientAuth.userId, 'preorder_document')
     const result = await o2oPreorderService.markCustomerOrderPrintedByClient(authReq.clientAuth, req.params.id)
     if (result.printedNow) {
       await auditService.record({
@@ -368,7 +374,7 @@ o2oRouter.post(
           username: authReq.clientAuth.account || authReq.clientAuth.mobile,
           displayName: authReq.clientAuth.realName || authReq.clientAuth.account || authReq.clientAuth.mobile,
         },
-        requestMeta: extractRequestMeta(req),
+        requestMeta,
         detail: { clientOrderType: result.detail.order.clientOrderType },
       })
     }
@@ -395,6 +401,8 @@ o2oRouter.patch(
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const payload = updateMyPreorderSchema.parse(req.body)
+    const requestMeta = extractRequestMeta(req)
+    await authSecurityService.guardClientBusinessWrite(requestMeta, authReq.clientAuth.userId, 'preorder_update')
     const previous = await o2oPreorderService.getMyOrderDetail(authReq.clientAuth, req.params.id)
     const data = await o2oPreorderService.updateMyOrder(authReq.clientAuth, req.params.id, payload)
 
@@ -409,7 +417,7 @@ o2oRouter.patch(
         username: authReq.clientAuth.account,
         displayName: authReq.clientAuth.realName || authReq.clientAuth.mobile,
       },
-      requestMeta: extractRequestMeta(req),
+      requestMeta,
       detail: {
         previousRemark: previous.order.remark,
         nextRemark: data.order.remark,

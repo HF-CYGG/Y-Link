@@ -93,11 +93,20 @@ try {
 
 // 使用真实路由、投影和频控，在隔离夹具中代替会话、持久窗口和业务写入。
 const { o2oRouter } = await import('../src/routes/o2o.routes.js')
+const { clientFeedbackRouter } = await import('../src/routes/client-feedback.routes.js')
+const { errorHandler } = await import('../src/middleware/error-handler.js')
+const { auditService } = await import('../src/services/audit.service.js')
+const { authSecurityService } = await import('../src/services/auth-security.service.js')
+const { clientFeedbackService } = await import('../src/services/client-feedback.service.js')
+const { persistentRiskStateService } = await import('../src/services/persistent-risk-state.service.js')
 const { o2oPreorderService } = await import('../src/services/o2o-preorder.service.js')
 const { authService } = await import('../src/services/auth.service.js')
 const { clientAuthService } = await import('../src/services/client-auth.service.js')
 const o2oApp = express()
+o2oApp.use(express.json())
 o2oApp.use('/api/o2o', o2oRouter)
+o2oApp.use('/api/client-feedback', clientFeedbackRouter)
+o2oApp.use(errorHandler)
 const o2oServer = o2oApp.listen(0, '127.0.0.1')
 await once(o2oServer, 'listening')
 const o2oAddress = o2oServer.address()
@@ -105,7 +114,45 @@ assert.ok(o2oAddress && typeof o2oAddress === 'object')
 const orderFixture = {
   records: [{ id: 'fixture', systemNo: 'SYS-FIXTURE', customerOrderShowNo: 'SYS-FIXTURE', businessNo: 'BUS-FIXTURE' }],
 }
+const orderDetailFixture = {
+  order: { id: '1', preorderNo: 'PRE-FIXTURE', remark: '', updateCount: 0, remainingUpdateCount: 1, totalQty: 1 },
+  items: [],
+}
+const feedbackFixture = { conversation: { id: '1' } }
+const writeCases = [
+  { path: '/client-feedback/restock-requests', method: 'POST', kind: 'restock_request_create', limit: 30,
+    payload: { productId: '1', skuId: '1', quantity: 2, latestPickupAt: '2030-01-01T09:00:00+08:00', clientRequestId: 'restock-fixture' },
+    write: mock.method(clientFeedbackService, 'createRestockRequest', async () => feedbackFixture), data: feedbackFixture },
+  { path: '/client-feedback/conversations/1/confirm-resolved', method: 'PATCH', kind: 'feedback_conversation_state', limit: 30,
+    write: mock.method(clientFeedbackService, 'confirmConversationResolvedByClient', async () => feedbackFixture), data: feedbackFixture },
+  { path: '/client-feedback/conversations/1/withdraw', method: 'PATCH', kind: 'feedback_conversation_state', limit: 30,
+    write: mock.method(clientFeedbackService, 'withdrawConversationByClient', async () => feedbackFixture), data: feedbackFixture },
+  { path: '/client-feedback/conversations/1/satisfaction', method: 'POST', kind: 'feedback_conversation_state', limit: 30,
+    payload: { level: 'satisfied' },
+    write: mock.method(clientFeedbackService, 'submitConversationSatisfactionByClient', async () => feedbackFixture), data: feedbackFixture },
+  { path: '/o2o/mall/preorders/1/kingdee-registration', method: 'PATCH', kind: 'preorder_document', limit: 30,
+    payload: { kingdeeVoucherNo: 'KD-FIXTURE', expectedKingdeeVersion: 0 },
+    write: mock.method(o2oPreorderService, 'updateKingdeeRegistration', async () => orderDetailFixture), data: orderDetailFixture },
+  { path: '/o2o/mall/preorders/1/customer-order-print', method: 'POST', kind: 'preorder_document', limit: 30,
+    write: mock.method(o2oPreorderService, 'markCustomerOrderPrintedByClient', async () => ({
+      printedNow: false, detail: orderDetailFixture,
+    })), data: orderDetailFixture },
+  { path: '/o2o/mall/preorders/1', method: 'PATCH', kind: 'preorder_update', limit: 20,
+    payload: { items: [{ productId: '1', qty: 1 }] },
+    write: mock.method(o2oPreorderService, 'updateMyOrder', async () => orderDetailFixture), data: orderDetailFixture },
+]
+const fullWindows = new Set(writeCases.map(({ kind }) => `client-business-write:${kind}:user:client-full-fixture`))
+const consumeWindow = mock.method(persistentRiskStateService, 'consumeWindow',
+  async (key: string, _windowMs: number, nowMs: number, limit: number) => ({
+    totalHits: fullWindows.has(key) ? limit + 1 : limit,
+    resetTime: new Date(nowMs + 5_000),
+  }),
+)
 const stubs = [
+  ...writeCases.map(({ write }) => write),
+  consumeWindow,
+  mock.method(auditService, 'safeRecord', async () => undefined),
+  mock.method(o2oPreorderService, 'getMyOrderDetail', async () => orderDetailFixture),
   mock.method(authService, 'resolveAuthUserByToken', async (token: string) => ({
     role: token === 'admin-fixture' ? 'admin' : 'operator', permissions: ['orders:view'], sessionToken: token,
   })),
@@ -130,6 +177,36 @@ try {
   }
   assert.equal(orderFixture.records[0].systemNo, 'SYS-FIXTURE', '投影不得修改原有快照')
 
+  for (const { path, method, kind, limit, payload, write, data } of writeCases) {
+    const writeRequest = (token: string) => fetch(baseUrl + '/api' + path, {
+      method,
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: payload === undefined ? undefined : JSON.stringify(payload),
+      signal: AbortSignal.timeout(3000),
+    })
+    const denied = await writeRequest('client-full-fixture')
+    assert.equal(denied.status, 429, path)
+    assert.equal(denied.headers.get('Retry-After'), '5', path)
+    await denied.text()
+    assert.equal(write.mock.callCount(), 0, '超限后不能进入业务写入 ' + path)
+    const deniedWindow = consumeWindow.mock.calls.at(-1)?.arguments
+    assert.equal(deniedWindow?.[0], `client-business-write:${kind}:user:client-full-fixture`)
+    assert.equal(deniedWindow?.[1], 600_000)
+    assert.equal(deniedWindow?.[3], limit)
+
+    const allowed = await writeRequest('client-fixture')
+    assert.equal(allowed.status, 200, path)
+    assert.deepEqual(await allowed.json(), { code: 0, message: 'ok', data })
+    assert.equal(write.mock.callCount(), 1, path)
+    assert.equal(consumeWindow.mock.calls.at(-1)?.arguments[0], `client-business-write:${kind}:user:client-fixture`)
+  }
+  // 新增写桶耗尽时，同账号仍能使用已有消息和下单额度。
+  for (const [kind, limit] of [['feedback_message', 30], ['preorder_submit', 20]] as const) {
+    await authSecurityService.guardClientBusinessWrite(undefined, 'client-full-fixture', kind)
+    const window = consumeWindow.mock.calls.at(-1)?.arguments
+    assert.equal(window?.[0], `client-business-write:${kind}:user:client-full-fixture`)
+    assert.equal(window?.[3], limit)
+  }
 } finally {
   for (const stub of stubs) stub.mock.restore()
   await new Promise<void>((resolve, reject) => o2oServer.close(error => error ? reject(error) : resolve()))
