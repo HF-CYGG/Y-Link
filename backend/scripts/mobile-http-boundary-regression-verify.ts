@@ -5,6 +5,7 @@
 import 'reflect-metadata'
 import assert from 'node:assert/strict'
 import http from 'node:http'
+import { mock } from 'node:test'
 import express, { type Express } from 'express'
 import { errorHandler } from '../src/middleware/error-handler.js'
 import { mobileAuthRouter } from '../src/routes/mobile-auth.routes.js'
@@ -12,6 +13,7 @@ import { authSecurityService } from '../src/services/auth-security.service.js'
 import { mobileSessionService } from '../src/services/mobile-session.service.js'
 import { persistentRiskStateService } from '../src/services/persistent-risk-state.service.js'
 import { clientAuthService } from '../src/services/client-auth.service.js'
+import { mobileAuthService } from '../src/services/mobile-auth.service.js'
 import { BizError } from '../src/utils/errors.js'
 
 type HttpResult = { status: number; headers: Headers; body: unknown }
@@ -131,7 +133,52 @@ async function verifyLogoutRemainsIdempotentForExpiredAccess() {
   }
 }
 
+async function verifyMobileAuthInputBounds() {
+  const account = 'http-contract@example.test'
+  const device = { deviceId: 'a'.repeat(32), platform: 'android' }
+  const historicalPassword = 'h'.repeat(256)
+  const passwordCalls: string[] = []
+  const acceptHistoricalPassword = async (input: { password?: string; currentPassword?: string }) => {
+    passwordCalls.push(input.password ?? input.currentPassword ?? '')
+    return { ok: true }
+  }
+  try {
+    mock.method(mobileSessionService, 'resolveAccess', async () => ({ userId: 'fixture-user' }))
+    mock.method(authSecurityService, 'guardClientProfileUpdateRequest', async () => {})
+    mock.method(mobileAuthService, 'login', acceptHistoricalPassword)
+    mock.method(mobileAuthService, 'updateProfile', async (_auth, input) => acceptHistoricalPassword(input))
+    mock.method(mobileAuthService, 'changePassword', async (_auth, input) => acceptHistoricalPassword(input))
+    const { createApp } = await import('../src/app.js')
+    await withServer(createApp(), async (origin) => {
+      const post = (path: string, body: unknown, method = 'POST') => request(origin, '/api/v1/mobile-auth' + path, {
+        method, body, headers: { authorization: 'Bearer fixture-access-token' },
+      })
+      const loginBody = { account, password: historicalPassword, device }
+      const changeBody = { device, currentPassword: historicalPassword, newPassword: 'NewFixture789!' }
+      assert.equal((await post('/login', loginBody)).status, 200)
+      assert.equal((await post('/change-password', changeBody)).status, 200)
+      assert.equal((await post('/profile', { username: 'fixture', currentPassword: historicalPassword }, 'PATCH')).status, 200)
+      for (const [route, body, method] of [
+        ['/login', { ...loginBody, password: 'p'.repeat(257) }],
+        ['/login', { ...loginBody, captchaId: 'i'.repeat(65) }],
+        ['/login', { ...loginBody, captchaCode: 'c'.repeat(17) }],
+        ['/register', { accountType: 'personal', device, password: 'StrongFixture123!', captchaId: 'i'.repeat(65) }],
+        ['/forgot-password/verify', { account: 'a'.repeat(129) }],
+        ['/forgot-password/verify', { account, captchaCode: 'c'.repeat(17) }],
+        ['/forgot-password/reset', { account, resetToken: 'x'.repeat(257), newPassword: 'ResetFixture789!' }],
+        ['/verification-code', { channel: 'email', target: account, scene: 'register', captchaId: 'i'.repeat(65), captchaCode: 'AB2345' }],
+        ['/change-password', { ...changeBody, currentPassword: 'p'.repeat(257) }],
+        ['/profile', { username: 'fixture', currentPassword: 'p'.repeat(257) }, 'PATCH'],
+      ] as const) assert.equal((await post(route, body, method)).status, 400, route)
+      assert.deepEqual(passwordCalls, [historicalPassword, historicalPassword, historicalPassword])
+    })
+  } finally {
+    mock.restoreAll()
+  }
+}
+
 async function main() {
+  await verifyMobileAuthInputBounds()
   await verifyWeb429RemainsUnchanged()
   await verifyMobileLoginRateLimitUsesNativeContract()
   await verifyMobileNon429PassesToGlobalHandler()

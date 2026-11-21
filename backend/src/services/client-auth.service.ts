@@ -28,6 +28,7 @@ import {
 import type { RequestMeta } from '../utils/request-meta.js'
 import {
   assertClientPasswordPolicy,
+  assertPasswordAvoidsAccountIdentifiers,
   hashPassword,
   verifyPassword,
   verifyPasswordDetailed,
@@ -1116,26 +1117,54 @@ class ClientAuthService {
     }
   }
 
+  private async requirePasswordResetAccount(
+    ticket: ResetTicket,
+    account: { channel: 'mobile' | 'email'; account: string },
+    newPassword: string,
+    manager?: EntityManager,
+  ) {
+    const userQuery = (manager?.getRepository(ClientUser) ?? this.userRepo)
+      .createQueryBuilder('user')
+      .addSelect('user.passwordHash')
+      .where('user.id = :userId', { userId: ticket.userId })
+      .andWhere(
+        account.channel === 'mobile'
+          ? 'user.mobile = :account AND user.mobileVerifiedAt IS NOT NULL'
+          : 'user.email = :account AND user.emailVerifiedAt IS NOT NULL',
+        { account: account.account },
+      )
+    if (manager && AppDataSource.options.type === 'mysql') userQuery.setLock('pessimistic_write')
+    const user = await userQuery.getOne()
+    if (!user || passwordResetState(user) !== ticket.passwordState || ticket.expireAt <= Date.now()) {
+      throw new BizError('重置凭证已失效', 400)
+    }
+    assertPasswordAvoidsAccountIdentifiers(newPassword, '新密码', [user.realName, user.mobile, user.email, user.staffNo])
+    return user
+  }
+
   async resetPassword(input: ClientResetPasswordInput, _requestMeta?: RequestMeta) {
     const account = this.resolveAccount(input.account)
     const newPassword = assertClientPasswordPolicy(input.newPassword, '新密码', { identifiers: [input.account] })
-    const ticket = await resetTicketStore.take(input.resetToken)
-    if (!ticket || ticket.version !== 2 || typeof ticket.passwordState !== 'string' || !/^[a-f0-9]{64}$/.test(ticket.passwordState)) {
+    const ticket = await resetTicketStore.get(input.resetToken)
+    if (!ticket) throw new BizError('重置凭证已失效', 400)
+    if (ticket.version !== 2 || typeof ticket.passwordState !== 'string' || !/^[a-f0-9]{64}$/.test(ticket.passwordState)
+      || !Number.isFinite(ticket.expireAt) || ticket.accountKey !== `${account.channel}:${account.account}`) {
+      // 沿用错账号或错误票据格式即作废的语义。
+      await resetTicketStore.take(input.resetToken)
       throw new BizError('重置凭证已失效', 400)
     }
-    if (ticket.accountKey !== `${account.channel}:${account.account}`) {
-      throw new BizError('重置凭证已失效', 400)
-    }
+    // 路由已限制账号与来源。先用快照拒绝不合格密码，避免它们占用派生额度。
+    await this.requirePasswordResetAccount(ticket, account, newPassword)
     const passwordHash = await hashPassword(newPassword)
     await runInTransaction(async (manager) => {
-      const userQuery = manager.getRepository(ClientUser)
-        .createQueryBuilder('user')
-        .addSelect('user.passwordHash')
-        .where('user.id = :userId', { userId: ticket.userId })
-        .andWhere('(user.mobile = :account OR user.email = :account)', { account: account.account })
-      if (AppDataSource.options.type === 'mysql') userQuery.setLock('pessimistic_write')
-      const user = await userQuery.getOne()
-      if (!user || passwordResetState(user) !== ticket.passwordState) throw new BizError('重置凭证已失效', 400)
+      const user = await this.requirePasswordResetAccount(ticket, account, newPassword, manager)
+      // 锁内仅做一次有超时的原子消费，按实际取到的票据复核，失败即回滚。
+      const consumed = await resetTicketStore.take(input.resetToken)
+      if (!consumed || consumed.version !== ticket.version || consumed.userId !== ticket.userId
+        || consumed.accountKey !== ticket.accountKey || consumed.passwordState !== ticket.passwordState
+        || consumed.expireAt !== ticket.expireAt) {
+        throw new BizError('重置凭证已失效', 400)
+      }
       await manager.getRepository(ClientUser).update(user.id, { passwordHash })
       const revokedWeb = await manager.getRepository(ClientUserSession).delete({ userId: user.id })
       const revokedMobile = await manager.getRepository(ClientMobileSession).createQueryBuilder()
@@ -1248,6 +1277,7 @@ class ClientAuthService {
       throw new BizError('原密码错误', 400, { reason: 'CURRENT_PASSWORD_MISMATCH' })
     }
 
+    assertPasswordAvoidsAccountIdentifiers(input.newPassword, '新密码', [user.realName, user.mobile, user.email, user.staffNo])
     return { user, passwordHash }
   }
 

@@ -11,7 +11,7 @@
  */
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import net from 'node:net'
 import path from 'node:path'
@@ -180,6 +180,76 @@ async function runMainScenario() {
       account: 'fixture@example.test', resetToken: 'malformed-reset', newPassword: 'OrchidMountain927!',
     }), (error: unknown) => error instanceof Error && error.message === '重置凭证已失效')
     assert.equal(await malformedReset.take('malformed-reset'), undefined, '畸形票据拒绝后仍然只能消费一次')
+
+    // 使用真实 Redis 与临时 SQLite 验证纠正、失败关门及并发只有一笔提交。
+    const { AppDataSource } = await import('../src/config/data-source.js')
+    const { initializeDatabaseInfrastructure } = await import('../src/database/database-strategy.js')
+    const { initializeDatabaseSchemaIfNeeded } = await import('../src/config/database-bootstrap.js')
+    const { getCurrentTransactionManager } = await import('../src/database/transaction-coordinator.js')
+    const { ClientUser } = await import('../src/entities/client-user.entity.js')
+    const { SysAuditLog } = await import('../src/entities/sys-audit-log.entity.js')
+    const { hashPassword, verifyPassword } = await import('../src/utils/password.js')
+    const { BizError } = await import('../src/utils/errors.js')
+    try {
+      await AppDataSource.initialize()
+      await initializeDatabaseInfrastructure(AppDataSource)
+      await initializeDatabaseSchemaIfNeeded(AppDataSource)
+      const email = 'reset-redis@example.test', mobile = '13800138009'
+      const originalHash = await hashPassword('PineCloud504!')
+      const users = AppDataSource.getRepository(ClientUser)
+      const audits = AppDataSource.getRepository(SysAuditLog)
+      const user = await users.save({
+        realName: '票据校验用户', email, emailVerifiedAt: new Date(), mobile,
+        passwordHash: originalHash, accountType: 'personal', status: 'enabled', departmentName: '', staffVerified: false,
+      })
+      const resetToken = 'redis-reset-fixture'
+      const reset = { account: email, resetToken, newPassword: 'OrchidMountain927!' }
+      const ticket = {
+        version: 2 as const, userId: user.id, accountKey: 'email:' + email, expireAt: Date.now() + 60_000,
+        passwordState: createHash('sha256')
+          .update(JSON.stringify(['client-password-reset-v2', BigInt(user.id).toString(), originalHash])).digest('hex'),
+      }
+      await newReset.set(resetToken, ticket)
+      const key = prefix + 'ticket:client-password-reset-v2:' + createHash('sha256').update(resetToken).digest('hex')
+      const originalCiphertext = await raw.get(key)
+      const originalTtl = await raw.pttl(key)
+      await assert.rejects(resetAuthService.resetPassword({ ...reset, newPassword: 'Alternate' + mobile + '!' }),
+        (error: unknown) => error instanceof BizError && error.statusCode === 400 && /账号信息/.test(error.message))
+      assert.ok(originalCiphertext && originalTtl > 0)
+      assert.equal(await raw.get(key), originalCiphertext, '纠正前不得重新签发票据')
+      assert.ok(await raw.pttl(key) <= originalTtl, '纠正前不得延长票据寿命')
+
+      const commandClient = redisClient.getRedisClient()
+      assert.ok(commandClient)
+      const originalMulti = commandClient.multi
+      let consumedInsideTransaction = false
+      commandClient.multi = () => {
+        consumedInsideTransaction = Boolean(getCurrentTransactionManager(AppDataSource))
+        throw new Error('隔离夹具模拟消费命令未完成')
+      }
+      try {
+        await assert.rejects(resetAuthService.resetPassword(reset),
+          (error: unknown) => error instanceof BizError && error.statusCode === 503)
+      } finally {
+        commandClient.multi = originalMulti
+      }
+      assert.equal(consumedInsideTransaction, true, '原子消费必须在写事务中进行')
+      assert.equal(await audits.countBy({ actionType: 'password_changed', targetId: user.id }), 0)
+      const readPassword = async () => (await users.createQueryBuilder('user').addSelect('user.passwordHash')
+        .where('user.id = :id', { id: user.id }).getOneOrFail()).passwordHash
+      assert.equal(await readPassword(), originalHash)
+      assert.equal(await raw.get(key), originalCiphertext)
+
+      const settled = await Promise.allSettled([resetAuthService.resetPassword(reset), resetAuthService.resetPassword(reset)])
+      assert.equal(settled.filter(result => result.status === 'fulfilled').length, 1)
+      assert.ok(settled.some(result => result.status === 'rejected' && result.reason instanceof BizError
+        && result.reason.statusCode === 400 && result.reason.message === '重置凭证已失效'))
+      assert.equal(await raw.get(key), null, '成功消费后 Redis 中不再保留凭证')
+      assert.equal(await audits.countBy({ actionType: 'password_changed', targetId: user.id }), 1)
+      assert.equal(await verifyPassword(reset.newPassword, await readPassword()), true)
+    } finally {
+      if (AppDataSource.isInitialized) await AppDataSource.destroy()
+    }
 
     // 伪造明文票据不能被接受
     await raw.set(ticketKeys[0], JSON.stringify({ code: '000000', secret: 'forged', expiresAt: Date.now() + 60_000 }))

@@ -32,7 +32,6 @@ import { EventEmitter } from 'node:events'
 import { fileURLToPath } from 'node:url'
 import type { AuthUserContext } from '../src/types/auth.js'
 import { buildMySqlTargetConnectionIssue } from '../src/utils/mysql-target-issue.js'
-import type { ClientAuthContext } from '../src/types/client-auth.js'
 import type { RequestMeta } from '../src/utils/request-meta.js'
 import { toSafeStartupErrorLog } from '../src/utils/safe-error-log.js'
 
@@ -1502,18 +1501,9 @@ async function verifyHashOutsideTransactions() {
     await m.authService.changeOwnPassword(await contextOf('tx-operator'), { currentPassword: 'Tq7mZ2vR9pLm-c', newPassword: 'Tq7mZ2vR9pLm-d' })
     assertChangeSplit(operatorHash, '管理端本人改密')
 
+    const clientLogin = await m.clientAuthService.login({ account: '13900001111', password: 'Cli9-Tx#Reset2026' })
+    const clientAuth = await m.clientAuthService.resolveClientByToken(clientLogin.token)
     const clientHash = await readClientUserHash(client.id)
-    const clientAuth: ClientAuthContext = {
-      userId: String(client.id),
-      account: '',
-      mobile: '13900001111',
-      email: '',
-      realName: '事务外客户',
-      accountType: 'personal',
-      staffNo: null,
-      sessionToken: 'verify-client-session',
-      authSource: 'bearer',
-    }
     calls.length = 0
     await m.clientAuthService.changePassword(clientAuth, { currentPassword: 'Cli9-Tx#Reset2026', newPassword: 'Cli9-Tx#Mine2026' })
     assertChangeSplit(clientHash, '客户端 Web 改密')

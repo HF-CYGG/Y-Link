@@ -775,6 +775,13 @@ try {
     lastAccessAt: new Date(),
   })
   const passwordAuth = await mobileSessionService.resolveAccess(passwordInitial.accessToken, 'change-password')
+  // 已进入服务的旧会话快照不能代替账号锁下读取的最新身份。
+  await AppDataSource.getRepository(ClientUser).update(passwordUser.id, { email: 'freshidentifier@example.test' })
+  await assert.rejects(mobileAuthService.changePassword(passwordAuth, {
+    currentPassword: 'StrongPass123!', newPassword: 'freshidentifier967!', device: device(4),
+  }), (error: unknown) => error instanceof BizError && error.statusCode === 400 && /账号信息/.test(error.message))
+  assert.equal(await AppDataSource.getRepository(ClientUserSession).countBy({ userId: passwordUser.id }), 1)
+  await mobileSessionService.resolveAccess(passwordInitial.accessToken, 'after-policy-rejection')
   const reissued = await mobileAuthService.changePassword(passwordAuth, {
     currentPassword: 'StrongPass123!',
     newPassword: 'NewStrongPass456!',
@@ -870,23 +877,28 @@ try {
     target: resetUser.email ?? '',
     scene: 'forgot_password',
   })
-  let resetTicket = await mobileAuthService.verifyForgotPassword({
+  const wrongAccountTicket = await mobileAuthService.verifyForgotPassword({
     account: resetUser.email ?? '',
     verificationCode: '123456',
   })
   await assert.rejects(
     mobileAuthService.resetPassword({
       account: 'wrong-account@example.com',
-      resetToken: resetTicket.resetToken,
+      resetToken: wrongAccountTicket.resetToken,
       newPassword: 'ResetStrong789!',
     }),
     (error: unknown) => error instanceof BizError && error.statusCode === 400,
   )
   await assert.rejects(mobileAuthService.resetPassword({
-    account: resetUser.email ?? '', resetToken: resetTicket.resetToken, newPassword: 'ResetStrong789!',
+    account: resetUser.email ?? '', resetToken: wrongAccountTicket.resetToken, newPassword: 'ResetStrong789!',
   }), (error: unknown) => error instanceof BizError && error.statusCode === 400)
   await verificationService.sendCode({ channel: 'email', target: resetUser.email ?? '', scene: 'forgot_password' })
-  resetTicket = await mobileAuthService.verifyForgotPassword({ account: resetUser.email ?? '', verificationCode: '123456' })
+  const resetTicket = await mobileAuthService.verifyForgotPassword({ account: resetUser.email ?? '', verificationCode: '123456' })
+  assert.ok(resetUser.mobile)
+  await assert.rejects(clientAuthService.resetPassword({
+    account: resetUser.email ?? '', resetToken: resetTicket.resetToken, newPassword: 'Alternate' + resetUser.mobile + '!',
+  }), (error: unknown) => error instanceof BizError && error.statusCode === 400 && /账号信息/.test(error.message))
+  await mobileSessionService.resolveAccess(resetMobile.accessToken, 'after-reset-policy-rejection')
   await verificationService.sendCode({ channel: 'email', target: resetUser.email ?? '', scene: 'forgot_password' })
   const staleResetTicket = await mobileAuthService.verifyForgotPassword({ account: resetUser.email ?? '', verificationCode: '123456' })
   const resetResult = await mobileAuthService.resetPassword({
@@ -915,7 +927,7 @@ try {
   assert.equal(await AppDataSource.getRepository(ClientUserSession).count({ where: { userId: resetUser.id } }), 0)
   assert.equal((await loadSessionWithSecrets(resetMobile.session.id)).revokeReason, 'password_reset')
   await assert.rejects(mobileSessionService.resolveAccess(resetMobile.accessToken), expectBizErrorCode(40101))
-  pass('Reset', 'forgot/reset 完整票据路径撤销全部 Web/Mobile 会话且不自动重签')
+  pass('Reset', '关联身份密码策略拒绝后原票据可纠正，成功仅消费一次并撤销全部 Web/Mobile 会话')
 
   const disabledUser = await createUser()
   const disabledSession = await mobileSessionService.createForUser(disabledUser, device(5))

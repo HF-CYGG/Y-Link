@@ -94,7 +94,12 @@ async function main() {
       assert.ok(result.headers.get('retry-after'))
       if (p.endsWith('/captcha')) assert.equal((await call(alias + query, 'GET')).status, 503)
     }
-    assert.notEqual((await call('/api/v1/mobile-auth/login')).status, 503, 'Mobile 保持无 Web 在途闸门')
+    for (const p of mobile) for (const alias of variants(p)) {
+      const result = await call(alias + '?probe=1')
+      assert.equal(result.status, 503, 'Mobile 匿名入口与 Web 共用在途闸门')
+      assert.ok(result.headers.get('retry-after'))
+    }
+    assert.notEqual((await call('/api/v1/mobile-auth/refresh')).status, 503, '会话续期保持独立')
     for (const p of ['/api/auth/unknown', '/api/auth/login//', '/api/auth/%6cogin', '/api/auth/login/extra']) {
       assert.notEqual((await call(p)).status, 503, `未知路径不应占用闸门 ${p}`)
     }
@@ -113,8 +118,8 @@ async function main() {
     for (const p of web) for (const alias of variants(p)) for (const query of ['', '?probe=1']) {
       assert.equal((await call(alias + query)).status, 429, `同桶限流 ${alias}${query}`)
     }
-    // Mobile 仍采用生产 180 次阈值；先前合法控制已消耗一次。
-    for (let index = 1; index < 180; index += 1) assert.equal((await call('/api/v1/mobile-auth/login')).status, 400)
+    // Mobile 保留独立入口桶；在途闸门拒绝不得预先消耗入口额度。
+    for (let index = 0; index < 180; index += 1) assert.equal((await call('/api/v1/mobile-auth/login')).status, 400)
     for (const p of mobile) for (const alias of variants(p)) for (const query of ['', '?probe=1']) {
       const result = await call(alias + query)
       assert.equal(result.status, 429, `Mobile 同桶 ${alias}${query}`)

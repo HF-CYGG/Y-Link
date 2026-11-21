@@ -207,7 +207,7 @@ export function createApp(options: CreateAppOptions = {}) {
   // 在途上限挂在限流之前：被拦下的请求不再消耗限流存储（MySQL 模式下为数据库读写）。
   const adminAnonymousAuthInFlight = createInFlightLimitMiddleware({ gate: anonymousAuthInFlightGate, limitedPaths: adminAnonymousAuthPaths })
   const clientAnonymousAuthInFlight = createInFlightLimitMiddleware({ gate: anonymousAuthInFlightGate, limitedPaths: clientAnonymousAuthPaths })
-  const mobileAuthLimiter = createPublicAuthLimiter('express-mobile-auth', 180, new Set([
+  const mobileAnonymousAuthPaths = new Set([
     '/captcha',
     '/capabilities',
     '/verification-code',
@@ -215,7 +215,9 @@ export function createApp(options: CreateAppOptions = {}) {
     '/login',
     '/forgot-password/verify',
     '/forgot-password/reset',
-  ]), 42900)
+  ])
+  const mobileAnonymousAuthInFlight = createInFlightLimitMiddleware({ gate: anonymousAuthInFlightGate, limitedPaths: mobileAnonymousAuthPaths })
+  const mobileAuthLimiter = createPublicAuthLimiter('express-mobile-auth', 180, mobileAnonymousAuthPaths, 42900)
 
   // 确保 uploads 目录存在
   const uploadsDir = path.resolve(process.cwd(), 'uploads')
@@ -311,7 +313,7 @@ export function createApp(options: CreateAppOptions = {}) {
   const publicJsonParser = express.json({ limit: PUBLIC_JSON_BODY_LIMIT })
   app.use('/api/auth', adminAnonymousAuthInFlight, adminAuthLimiter, publicJsonParser, authRouter)
   app.use('/api/client-auth', clientAnonymousAuthInFlight, clientAuthLimiter, publicJsonParser, clientAuthRouter)
-  app.use('/api/v1/mobile-auth', mobileAuthLimiter, publicJsonParser, mobileAuthRouter)
+  app.use('/api/v1/mobile-auth', mobileAnonymousAuthInFlight, mobileAuthLimiter, publicJsonParser, mobileAuthRouter)
   app.use('/api/client-feedback', publicJsonParser, clientFeedbackRouter)
   app.use('/api/o2o', publicJsonParser, o2oRouter)
 
