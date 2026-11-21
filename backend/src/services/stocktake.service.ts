@@ -25,6 +25,7 @@ import { InvStocktakeItem } from '../entities/inv-stocktake-item.entity.js'
 import type { PaginationResult } from '../types/api.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
+import { prepareProductThumbnailIndex, resolveProductThumbnailUrl } from '../utils/product-thumbnail.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 import { auditService } from './audit.service.js'
@@ -103,6 +104,7 @@ export interface StocktakeItemView {
   productId: string
   productName: string
   thumbnail: string | null
+  thumbnailSmall: string | null
   /** 按库位盘点时为该行盘的库位；按总量盘点时为规格主库位。 */
   locationCode: string | null
   /** 按库位盘点时为该行盘的库位 ID；按总量盘点时为 null。 */
@@ -262,8 +264,11 @@ export class StocktakeService {
     }
     qb.orderBy('item.countedAt', 'DESC').addOrderBy('item.id', 'ASC').skip((page - 1) * pageSize).take(pageSize)
     const [rows, total] = await qb.getManyAndCount()
-    const locationCodes = await this.loadLocationCodes(this.itemLocationIds(rows))
-    const bookFallback = await this.loadLocationBookFallback(rows)
+    const [locationCodes, bookFallback] = await Promise.all([
+      this.loadLocationCodes(this.itemLocationIds(rows)),
+      this.loadLocationBookFallback(rows),
+      rows.some((row) => row.sku?.thumbnail || row.product?.thumbnail) ? prepareProductThumbnailIndex() : undefined,
+    ])
     return {
       page,
       pageSize,
@@ -876,6 +881,7 @@ export class StocktakeService {
   private buildItemView(row: InvStocktakeItem, showBook: boolean, locationCodes: Map<string, string>, bookFallback?: Map<string, number>): StocktakeItemView {
     const diff = this.diffOf(row)
     const book = row.bookQtySnapshot ?? bookFallback?.get(String(row.id)) ?? (row.sku ? Number(row.sku.currentStock ?? 0) : null)
+    const thumbnail = row.sku?.thumbnail || row.product?.thumbnail || null
     return {
       id: String(row.id),
       skuId: String(row.skuId),
@@ -884,7 +890,8 @@ export class StocktakeService {
       specText: row.sku?.specText || '默认规格',
       productId: String(row.productId),
       productName: row.product?.productName ?? '',
-      thumbnail: row.sku?.thumbnail || row.product?.thumbnail || null,
+      thumbnail,
+      thumbnailSmall: resolveProductThumbnailUrl(thumbnail),
       locationCode: (() => {
         const locationId = isWholeSkuScope(row.locationScopeId) ? row.sku?.locationId : row.locationScopeId
         return locationId ? locationCodes.get(String(locationId)) ?? null : null

@@ -79,12 +79,14 @@ type SupplierMaskableSku = {
 const maskSkuForSupplier = <T extends SupplierMaskableSku>(sku: T): T => ({
   ...sku,
   ...supplierSkuFieldMask,
+  thumbnailSmall: null,
   originalPrice: '0.00',
   discountedPrice: '0.00',
   availableStock: 0,
 })
 const maskProductForSupplier = (product: ProductView): ProductView => ({
   ...product,
+  thumbnailSmall: null,
   defaultPrice: '0.00',
   discountRate: '10.0',
   discountedPrice: '0.00',
@@ -301,6 +303,7 @@ productRouter.get(
       tagId: typeof req.query.tagId === 'string' ? req.query.tagId : undefined,
       categoryId: typeof req.query.categoryId === 'string' && req.query.categoryId ? req.query.categoryId : undefined,
       isActive,
+      includeDetail: req.query.includeDetail === 'true',
       o2oStatus:
         req.query.o2oStatus === 'listed' || req.query.o2oStatus === 'unlisted'
           ? req.query.o2oStatus
@@ -332,6 +335,7 @@ productRouter.get(
       tagId: typeof req.query.tagId === 'string' ? req.query.tagId : undefined,
       categoryId: typeof req.query.categoryId === 'string' && req.query.categoryId ? req.query.categoryId : undefined,
       isActive,
+      includeDetail: req.query.includeDetail === 'true',
       o2oStatus:
         req.query.o2oStatus === 'listed' || req.query.o2oStatus === 'unlisted'
           ? req.query.o2oStatus

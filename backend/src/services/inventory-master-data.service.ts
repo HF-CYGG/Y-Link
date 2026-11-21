@@ -613,7 +613,7 @@ export class InventoryMasterDataService {
       }, manager)
       return this.buildCategoryView(saved, 0)
     })
-    invalidateMallCatalogReadCache()
+    invalidateMallCatalogReadCache({ affectsBusinessData: false })
     return result
   }
 
@@ -648,7 +648,7 @@ export class InventoryMasterDataService {
       }, manager)
       return this.buildCategoryView(saved, productCount)
     })
-    invalidateMallCatalogReadCache()
+    invalidateMallCatalogReadCache({ affectsBusinessData: false })
     return result
   }
 

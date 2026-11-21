@@ -1,6 +1,8 @@
 import 'reflect-metadata'
 import assert from 'node:assert/strict'
+import { once } from 'node:events'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { AuthUserContext } from '../src/types/auth.js'
@@ -24,6 +26,8 @@ type ProductSkuViewLike = {
   currentStock: number
   isActive: boolean
   isCurrent?: boolean
+  thumbnail?: string | null
+  thumbnailSmall?: string | null
 }
 
 type RawSkuRow = {
@@ -113,8 +117,12 @@ async function main() {
       sessionToken: 'product-sku-current-verify', authSource: 'bearer',
     }
 
+    const blueThumbnail = '/uploads/products/sku-current-blue.png'
+    const blueSmallThumbnail = '/uploads/products/sku-current-blue.thumb.webp'
+    const redThumbnail = '/uploads/products/sku-current-red.png'
     const stockProduct = await productService.create({
       productName: `current-stock-${verifySeed}`,
+      detailContent: '只在明确需要时提供的商品详情',
       pinyinAbbr: 'CS',
       defaultPrice: 10,
       discountRate: 10,
@@ -131,6 +139,7 @@ async function main() {
           currentStock: 7,
           isActive: true,
           o2oRecommended: true,
+          thumbnail: blueThumbnail,
           sortOrder: 0,
         },
         {
@@ -140,6 +149,7 @@ async function main() {
           currentStock: 90,
           isActive: true,
           o2oRecommended: true,
+          thumbnail: redThumbnail,
           sortOrder: 1,
         },
       ],
@@ -147,6 +157,12 @@ async function main() {
 
     const blueSku = findSkuByText(stockProduct.skus, 'Blue')
     const redSku = findSkuByText(stockProduct.skus, 'Red')
+    const bothThumbnails = await productService.detail(stockProduct.id)
+    assert.equal(bothThumbnails.thumbnail, null, '商品无原图时也应检查 SKU 的小图')
+    assert.equal(findSkuByText(bothThumbnails.skus, 'Blue').thumbnail, blueThumbnail)
+    assert.equal(findSkuByText(bothThumbnails.skus, 'Blue').thumbnailSmall, blueSmallThumbnail)
+    assert.equal(findSkuByText(bothThumbnails.skus, 'Red').thumbnail, redThumbnail)
+    assert.equal(findSkuByText(bothThumbnails.skus, 'Red').thumbnailSmall, null, '缩略文件缺失时只返回原图')
     const stockProductAfterRemove = await productService.update(stockProduct.id, {
       specGroups: [{ name: 'Color', values: ['Blue'] }],
       skus: [
@@ -158,6 +174,7 @@ async function main() {
           currentStock: 7,
           isActive: true,
           o2oRecommended: true,
+          thumbnail: blueThumbnail,
           sortOrder: 0,
         },
       ],
@@ -172,6 +189,45 @@ async function main() {
     assert.equal(stockRows.find((sku) => String(sku.id) === redSku.id)?.isCurrent, 0)
     assert.equal(stockRows.find((sku) => String(sku.id) === redSku.id)?.isActive, 0)
     assert.equal(stockRows.find((sku) => String(sku.id) === redSku.id)?.o2oRecommended, 0)
+    {
+      const { authService } = await import('../src/services/auth.service.js')
+      const { createApp } = await import('../src/app.js')
+      const defaultAdmin = await authService.ensureDefaultAdmin()
+      const login = await authService.login({ username: defaultAdmin.username, password: process.env.INIT_ADMIN_PASSWORD! })
+      assert.ok(!login.mfaRequired)
+      const server = createApp().listen(0, '127.0.0.1')
+      try {
+        await once(server, 'listening')
+        const address = server.address()
+        assert.ok(address && typeof address !== 'string')
+        const request = async <T>(pathname: string): Promise<T> => {
+          const response = await fetch(`http://127.0.0.1:${address.port}${pathname}`, {
+            headers: { Authorization: `Bearer ${login.token}` },
+          })
+          assert.equal(response.status, 200)
+          return (await response.json() as { data: T }).data
+        }
+        type Product = { id: string; detailContent: string | null; skus: ProductSkuViewLike[] }
+        const keyword = encodeURIComponent(stockProduct.productName)
+        for (const paged of [false, true]) {
+          const listUrl = `/api/products${paged ? '/paged' : ''}?keyword=${keyword}`
+          for (const includeDetail of [false, true]) {
+            const data = await request<Product[] | { list: Product[] }>(`${listUrl}${includeDetail ? '&includeDetail=true' : ''}`)
+            const row = (Array.isArray(data) ? data : data.list).find((item) => item.id === stockProduct.id)
+            assert.equal(row?.detailContent, includeDetail ? '只在明确需要时提供的商品详情' : null)
+            assert.deepEqual(row?.skus.map((sku) => sku.id), [blueSku.id])
+            assert.equal(row?.skus[0]?.thumbnail, blueThumbnail)
+            assert.equal(row?.skus[0]?.thumbnailSmall, blueSmallThumbnail)
+          }
+        }
+        const detail = await request<Product>(`/api/products/${stockProduct.id}`)
+        assert.equal(detail.detailContent, '只在明确需要时提供的商品详情')
+        assert.equal(detail.skus[0]?.thumbnailSmall, blueSmallThumbnail)
+      } finally {
+        server.closeAllConnections()
+        await new Promise<void>((resolve) => server.close(() => resolve()))
+      }
+    }
     const stockMallProduct = (await o2oPreorderService.listMallProducts()).list.find((item) => item.id === stockProduct.id)
     assert.ok(stockMallProduct)
     assert.equal(stockMallProduct.currentStock, 7)
@@ -302,7 +358,24 @@ async function main() {
   }
 }
 
-main().catch((error) => {
+async function runWithIsolatedThumbnails() {
+  const previousCwd = process.cwd()
+  const imageRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ylink-current-sku-thumbnails-'))
+  try {
+    process.chdir(imageRoot)
+    const products = path.join(imageRoot, 'uploads', 'products')
+    await fs.promises.mkdir(products, { recursive: true })
+    // 投影仅校验文件存在性，解码与缩略图生成由对应独立专项验证。
+    await Promise.all(['sku-current-blue.png', 'sku-current-blue.thumb.webp', 'sku-current-red.png']
+      .map((filename) => fs.promises.writeFile(path.join(products, filename), '')))
+    await main()
+  } finally {
+    process.chdir(previousCwd)
+    await fs.promises.rm(imageRoot, { recursive: true, force: true })
+  }
+}
+
+runWithIsolatedThumbnails().catch((error) => {
   console.error(`[product-sku-current-verify] verification failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
   process.exitCode = 1
 })
