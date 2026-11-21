@@ -14,6 +14,7 @@ import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 import { createHash } from 'node:crypto'
 import { readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
+import { parse as parseCss } from 'postcss'
 import { constants as zlibConstants, gzipSync } from 'node:zlib'
 import { fileURLToPath, URL } from 'node:url'
 import { html2pdfSourcePlugin } from './scripts/html2pdf-source-guard.mjs'
@@ -176,6 +177,76 @@ const resolveVendorChunk = (normalizedId: string) => {
   return undefined
 }
 
+const ELEMENT_PLUS_ASYNC_GROUPS = [
+  { name: 'table', components: ['table', 'table-column'] },
+  { name: 'ui-date-picker', components: ['date-picker', 'date-picker-panel', 'time-picker', 'calendar'] },
+  { name: 'ui-tree', components: ['tree', 'tree-select', 'tree-v2'] },
+  { name: 'ui-upload', components: ['upload'] },
+  { name: 'ui-color-picker', components: ['color-picker', 'color-picker-panel'] },
+  { name: 'ui-menu', components: ['menu', 'menu-item', 'menu-item-group', 'sub-menu'] },
+  { name: 'ui-pagination-desc', components: ['pagination', 'descriptions', 'descriptions-item'] },
+] as const
+
+const ELEMENT_PLUS_SHARED_ENTRIES: Record<string, string> = {
+  'table-column': 'table',
+  'menu-item': 'menu',
+  'menu-item-group': 'menu',
+  'sub-menu': 'menu',
+  'descriptions-item': 'descriptions',
+}
+const ELEMENT_PLUS_COMPONENT_PATH = 'element-plus/es/components'
+const ELEMENT_PLUS_ENTRY_COMPONENTS = [
+  'alert', 'button', 'config-provider', 'icon', 'input', 'loading', 'message', 'message-box',
+  ...ELEMENT_PLUS_ASYNC_GROUPS.flatMap(({ components }) => components),
+]
+const ELEMENT_PLUS_COMPONENT_NAMES = new Set(ELEMENT_PLUS_ENTRY_COMPONENTS)
+const resolveElementPlusEntry = (component: string) =>
+  `${ELEMENT_PLUS_COMPONENT_PATH}/${ELEMENT_PLUS_SHARED_ENTRIES[component] ?? component}/index.mjs`
+
+const elementPlusChunkGroups = ELEMENT_PLUS_ASYNC_GROUPS.map(({ name, components }) => ({
+  name,
+  priority: 90,
+  includeDependenciesRecursively: false,
+  test(id: string) {
+    const normalized = id.replaceAll('\\', '/').split('?')[0]
+    return components.some((component) => normalized.includes(`/${ELEMENT_PLUS_COMPONENT_PATH}/${component}/`)
+      || normalized.endsWith(`/element-plus/theme-chalk/el-${component}.css`))
+  },
+}))
+
+const elementPlusTransitionStylesPlugin = (): Plugin => {
+  const duplicateStyleFiles = new Set(['el-date-picker-panel.css', 'el-time-picker.css', 'el-menu.css', 'el-tree.css'])
+  let baseRules: Set<string> | undefined
+  return {
+    name: 'ylink-element-plus-shared-transition-styles',
+    apply: 'build',
+    enforce: 'pre',
+    buildStart() {
+      baseRules = undefined
+    },
+    transform(code, id) {
+      const sourcePath = id.split('?')[0].replaceAll('\\', '/')
+      if (!sourcePath.includes('/element-plus/theme-chalk/') || !duplicateStyleFiles.has(path.posix.basename(sourcePath))) return
+
+      // 这四个样式入口均先引入 base.css，只移除与其字面完全一致的通用过渡规则。
+      if (!baseRules) {
+        const basePath = path.posix.join(path.posix.dirname(sourcePath), 'base.css')
+        this.addWatchFile(basePath)
+        const baseCss = parseCss(readFileSync(basePath, 'utf8'), { from: basePath })
+        baseRules = new Set(baseCss.nodes
+          .filter((node) => node.type === 'rule' && /(?:transition|enter-|leave-)/.test(node.selector))
+          .map((node) => node.toString()))
+      }
+      const root = parseCss(code, { from: sourcePath })
+      const sharedRules = baseRules
+      root.each((node) => {
+        if (node.type === 'rule' && sharedRules.has(node.toString())) node.remove()
+      })
+      return root.toString()
+    },
+  }
+}
+
 /**
  * 开发态 Element Plus 预构建白名单：
  * - 路由级懒加载页面会在首次进入时才暴露模板里实际使用到的组件样式深导入；
@@ -184,6 +255,7 @@ const resolveVendorChunk = (normalizedId: string) => {
  */
 const DEV_OPTIMIZE_DEPS_INCLUDE = [
   'element-plus/es',
+  ...new Set(ELEMENT_PLUS_ENTRY_COMPONENTS.map(resolveElementPlusEntry)),
   'element-plus/es/components/base/style/css',
   'element-plus/es/components/config-provider/style/css',
   'element-plus/es/components/alert/style/css',
@@ -238,6 +310,7 @@ export default defineConfig(({ command, mode }) => {
       ...themeInitScriptPlugin(),
       html2pdfSourcePlugin(),
       canvgSourcePlugin(),
+      elementPlusTransitionStylesPlugin(),
       precompressAssetsPlugin(),
       /**
        * Element Plus 编译期按需引入：
@@ -249,14 +322,17 @@ export default defineConfig(({ command, mode }) => {
       Components({
         dts: false,
         resolvers: [
-          // 表格的两个导出共用真实入口，避免根 barrel 将异步表格实现反向带入基础 ui-kit。
+          // 异步组件族及入口共用组件的静态依赖直接指向真实模块，避免通过根 barrel 形成分包回边。
           (name: string) => {
-            if (name !== 'ElTable' && name !== 'ElTableColumn') return
+            if (!name.startsWith('El')) return
+            const component = name.slice(2).replace(/[A-Z]/g, (letter, offset: number) =>
+              `${offset === 0 ? '' : '-'}${letter.toLowerCase()}`)
+            if (!ELEMENT_PLUS_COMPONENT_NAMES.has(component)) return
             return {
               name,
-              from: 'element-plus/es/components/table/index.mjs',
+              from: resolveElementPlusEntry(component),
               sideEffects: elementPlusImportStyleStrategy
-                ? `element-plus/es/components/${name === 'ElTable' ? 'table' : 'table-column'}/style/css.mjs`
+                ? `${ELEMENT_PLUS_COMPONENT_PATH}/${component}/style/css.mjs`
                 : undefined,
             }
           },
@@ -336,15 +412,8 @@ export default defineConfig(({ command, mode }) => {
           codeSplitting: { groups: [
             // Rolldown 的普通分组会递归收纳依赖；通用预加载 helper 必须先独立归组，避免首屏反向加载 PDF。
             { name: 'preload-helper', test: (id: string) => id === '\0vite/preload-helper.js', priority: 100, includeDependenciesRecursively: false },
-            {
-              name: 'table', priority: 90, includeDependenciesRecursively: false,
-              test: (id: string) => {
-                const normalizedId = id.replaceAll('\\', '/').split('?')[0]
-                return normalizedId.includes('/element-plus/es/components/table/')
-                  || normalizedId.includes('/element-plus/es/components/table-column/style/')
-                  || /\/element-plus\/theme-chalk\/el-table(?:-column)?\.css$/.test(normalizedId)
-              },
-            },
+            // 通用 Popper、表单等依赖留在公共块，各组件族只收纳自己的实现和样式。
+            ...elementPlusChunkGroups,
             { debugName: '既有供应商边界', name(id) {
             if (id === CODE128_BARCODE_RESOLVED_ID) return 'barcode'
             const normalizedId = id.replaceAll('\\', '/')
