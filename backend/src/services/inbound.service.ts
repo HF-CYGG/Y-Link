@@ -24,15 +24,16 @@ import { assertPermanentDeletePassword } from '../utils/permanent-delete-passwor
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 import { buildSkuLogFields, persistLockedInventoryStocks, snapshotSkuStock } from './inventory-ledger.service.js'
 import { formatLocationDeductions, reconcileSkuLocationStockTransitions } from './sku-location-stock.service.js'
+import { supplierSkuFieldMask } from '../utils/supplier-product-visibility.js'
 import { allocateUtcDailyDeliveryNo } from './inventory-sequence.service.js'
 
-/** 仅供货方响应隐藏 SKU 库存；保留实体序列化的成本保护，不改动查询实体或管理端视图。 */
+/** 供货方只读取 SKU 基础资料，保留实体序列化时的成本保护。 */
 function presentInboundDetail(detail: { order: BizInboundOrder; items: BizInboundOrderItem[] }, actor: AuthUserContext) {
   if (actor.role !== 'supplier') return detail
   return {
     ...detail,
     items: detail.items.map((item) => item.sku ? Object.assign(new BizInboundOrderItem(), item, {
-      sku: Object.assign(new BaseProductSku(), item.sku, { currentStock: 0, preOrderedStock: 0, costPrice: null }),
+      sku: Object.assign(new BaseProductSku(), item.sku, supplierSkuFieldMask),
     }) : item),
   }
 }

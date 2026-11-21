@@ -19,6 +19,7 @@ import { extractRequestMeta } from '../utils/request-meta.js'
 import { dataExportLeasePool, runExportHoldingLease } from '../utils/export-lease-pool.js'
 import { auditService } from '../services/audit.service.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
+import { supplierSkuFieldMask } from '../utils/supplier-product-visibility.js'
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
@@ -73,13 +74,9 @@ type SupplierMaskableSku = {
 }
 const maskSkuForSupplier = <T extends SupplierMaskableSku>(sku: T): T => ({
   ...sku,
-  costPrice: null,
-  defaultPrice: '0.00',
+  ...supplierSkuFieldMask,
   originalPrice: '0.00',
-  discountRate: '10.0',
   discountedPrice: '0.00',
-  currentStock: 0,
-  preOrderedStock: 0,
   availableStock: 0,
 })
 const maskProductForSupplier = (product: ProductView): ProductView => ({

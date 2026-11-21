@@ -77,8 +77,8 @@ async function main() {
       productCode: `INBOUND-POOL-${verifySeed}`,
       productName: `送货单池验证商品-${verifySeed}`,
       pinyinAbbr: 'SHDCYZ',
-      defaultPrice: 10,
-      discountRate: 10,
+      defaultPrice: 12.34,
+      discountRate: 8.5,
       isActive: true,
       o2oStatus: 'unlisted',
       currentStock: 0,
@@ -127,6 +127,21 @@ async function main() {
     // 三张待入库 + 一张已入库 + 一张已撤销，撤销单不应出现在送货单池。
     const laterDelivery = await submitDelivery(hoursLater(48), 2)
     assert.equal(laterDelivery.order.showNo, todayPrefix + '10001', '已有五位流水时按数字后缀续编')
+    for (const detail of [
+      laterDelivery,
+      await inboundService.detailByShowNo(laterDelivery.order.showNo, supplierActor),
+      await inboundService.detailByVerifyCode(laterDelivery.order.verifyCode, supplierActor),
+    ]) {
+      const skuJson = JSON.parse(JSON.stringify(detail.items[0]?.sku))
+      assert.equal(Number(skuJson.defaultPrice), 0)
+      assert.equal(Number(skuJson.discountRate), 10)
+      assert.equal(Number(skuJson.currentStock), 0)
+      assert.equal(Number(skuJson.preOrderedStock), 0)
+      assert.equal(Object.hasOwn(skuJson, 'costPrice'), false)
+    }
+    const adminSku = (await inboundService.detailByShowNo(laterDelivery.order.showNo, adminActor)).items[0]?.sku
+    assert.equal(Number(adminSku?.defaultPrice), 12.34, '管理员仍可读取售价')
+    assert.equal(Number(adminSku?.discountRate), 8.5, '管理员仍可读取真实折扣')
     const soonerDelivery = await submitDelivery(hoursLater(6), 3)
     const middleDelivery = await submitDelivery(hoursLater(24), 4)
     const verifiedDelivery = await submitDelivery(hoursLater(12), 5)
