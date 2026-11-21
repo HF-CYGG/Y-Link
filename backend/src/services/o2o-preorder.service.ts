@@ -81,6 +81,7 @@ import {
 import { runExclusive } from '../redis/redis-lease.js'
 import { readSharedCacheRaw, sharedCacheKey, writeSharedCacheRaw } from '../redis/redis-cache.js'
 import { prepareProductThumbnailIndex, resolveProductThumbnailUrl } from '../utils/product-thumbnail.js'
+import { allocateUtcDailyDeliveryNo } from './inventory-sequence.service.js'
 
 /** 部门单到店取货时间允许的过去容差：覆盖客户端时钟偏差与提交网络耗时。 */
 const O2O_PICKUP_AT_PAST_TOLERANCE_MS = 5 * 60 * 1000
@@ -1193,21 +1194,6 @@ class O2oPreorderService {
     const candidateSkus = recommendedPreviewSkus.length ? recommendedPreviewSkus : sortedActiveSkus
     const stockPreferredSkus = candidateSkus.filter((sku) => sku.availableStock > 0)
     return stockPreferredSkus[0] ?? candidateSkus[0] ?? sortedActiveSkus[0] ?? null
-  }
-
-  private async generateReturnRequestNo(manager = AppDataSource.manager): Promise<string> {
-    // 退货申请单号采用独立前缀，便于核销台与线下门店快速区分“取货码 / 退货码”。
-    const dateText = new Date().toISOString().slice(0, 10).replaceAll('-', '')
-    const prefix = `RO${dateText}`
-    const raw = await manager
-      .getRepository(O2oReturnRequest)
-      .createQueryBuilder('returnRequest')
-      .select('returnRequest.returnNo', 'returnNo')
-      .where('returnRequest.returnNo LIKE :prefix', { prefix: `${prefix}%` })
-      .orderBy('returnRequest.returnNo', 'DESC')
-      .getRawOne<{ returnNo?: string }>()
-    const current = raw?.returnNo ? Number.parseInt(raw.returnNo.slice(prefix.length), 10) || 0 : 0
-    return `${prefix}${String(current + 1).padStart(4, '0')}`
   }
 
   private resolveCancelledOrderReason(
@@ -3922,7 +3908,7 @@ class O2oPreorderService {
       const returnRequestItemRepo = manager.getRepository(O2oReturnRequestItem)
       const savedRequest = await returnRequestRepo.save(
         returnRequestRepo.create({
-          returnNo: await this.generateReturnRequestNo(manager),
+          returnNo: await allocateUtcDailyDeliveryNo(manager, 'return'),
           orderId: String(order.id),
           clientUserId: String(auth.userId),
           verifyCode: randomUUID(),

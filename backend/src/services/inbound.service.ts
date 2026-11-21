@@ -24,6 +24,7 @@ import { assertPermanentDeletePassword } from '../utils/permanent-delete-passwor
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 import { buildSkuLogFields, persistLockedInventoryStocks, snapshotSkuStock } from './inventory-ledger.service.js'
 import { formatLocationDeductions, reconcileSkuLocationStockTransitions } from './sku-location-stock.service.js'
+import { allocateUtcDailyDeliveryNo } from './inventory-sequence.service.js'
 
 /** 仅供货方响应隐藏 SKU 库存；保留实体序列化的成本保护，不改动查询实体或管理端视图。 */
 function presentInboundDetail(detail: { order: BizInboundOrder; items: BizInboundOrderItem[] }, actor: AuthUserContext) {
@@ -403,20 +404,6 @@ class InboundService {
     return order
   }
 
-  private async generateShowNo(manager = AppDataSource.manager): Promise<string> {
-    const dateText = new Date().toISOString().slice(0, 10).replaceAll('-', '')
-    const prefix = `IN${dateText}`
-    const raw = await manager
-      .getRepository(BizInboundOrder)
-      .createQueryBuilder('order')
-      .select('order.showNo', 'showNo')
-      .where('order.showNo LIKE :prefix', { prefix: `${prefix}%` })
-      .orderBy('order.showNo', 'DESC')
-      .getRawOne<{ showNo?: string }>()
-    const current = raw?.showNo ? Number.parseInt(raw.showNo.slice(prefix.length), 10) || 0 : 0
-    return `${prefix}${String(current + 1).padStart(4, '0')}`
-  }
-
   /**
    * 送货单通知与业务写入同一事务落库：
    * - 新单提醒发给后台库管，状态变更（核验入库、现场改单）只发该单所属供货方；
@@ -457,7 +444,7 @@ class InboundService {
       
       const totalQty = this.assertInboundQuantityBounds(resolvedItems)
 
-      const showNo = await this.generateShowNo(manager)
+      const showNo = await allocateUtcDailyDeliveryNo(manager, 'inbound')
       const savedOrder = await manager.getRepository(BizInboundOrder).save(
         manager.getRepository(BizInboundOrder).create({
           showNo,
