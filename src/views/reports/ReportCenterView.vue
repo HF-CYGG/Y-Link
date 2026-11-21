@@ -42,6 +42,8 @@ import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 import { extractErrorMessage } from '@/utils/error'
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
+defineOptions({ name: 'ReportCenterView' })
+
 // 规格明细属于低频查看，异步拆包避免把抽屉与表格依赖打进报表中心首屏分包。
 const InventorySkuDetailDrawer = defineAsyncComponent(() => import('./components/InventorySkuDetailDrawer.vue'))
 

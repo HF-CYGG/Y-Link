@@ -48,19 +48,13 @@ const HEAVY_IMPORT_RULES = [
   },
   {
     packageName: 'qrcode',
-    runtimeStaticAllowedFiles: new Set([
-      path.join(srcRoot, 'views', 'inbound', 'SupplierDeliveryView.vue'),
-      path.join(srcRoot, 'views', 'inbound', 'SupplierHistoryView.vue'),
-    ]),
-    description: '二维码库仅允许在当前稳定入口静态引入，其余低频页面应保持按需加载',
+    runtimeStaticAllowedFiles: new Set(),
+    description: '二维码库只在打开二维码功能时动态加载',
   },
   {
     packageName: 'browser-image-compression',
-    runtimeStaticAllowedFiles: new Set([
-      path.join(srcRoot, 'utils', 'image-upload.ts'),
-      path.join(srcRoot, 'views', 'o2o', 'O2oProductMallManageView.vue'),
-    ]),
-    description: '图片压缩库仅允许出现在图片上传主链路，避免无关页面顺带拉起',
+    runtimeStaticAllowedFiles: new Set(),
+    description: '图片压缩库只在图片需要客户端压缩时动态加载',
   },
 ]
 
@@ -133,6 +127,17 @@ const assertContains = (filePath, source, pattern, message) => {
   }
 
   assert.ok(source.includes(pattern), `${path.relative(projectRoot, filePath)}：${message}`)
+}
+
+const assertAsyncComponents = (filePath, specifiers, wrapper = 'defineAsyncComponent') => {
+  const source = readUtf8(filePath)
+  const staticImports = extractStaticImports(source)
+  for (const specifier of specifiers) {
+    const componentName = path.basename(specifier, '.vue')
+    assertContains(filePath, source, `${wrapper}(() => import('${specifier}'))`, `${componentName} 必须按访问动态加载`)
+    assert.ok(!staticImports.some((item) => !item.isTypeOnly && item.specifier.endsWith(`/${componentName}.vue`)),
+      `${path.relative(projectRoot, filePath)} 同时静态引入了 ${componentName}`)
+  }
 }
 
 const main = () => {
@@ -258,6 +263,37 @@ const main = () => {
     "'system-configs': () => import('@/views/system/SystemConfigViewLoader')",
     '系统配置路由必须继续经过独立异步入口，避免治理页同步回流到主路由分包',
   )
+
+  assertAsyncComponents(path.join(srcRoot, 'views', 'system', 'SystemConfigView.vue'), [
+    './components/SystemConfigSerialSection.vue',
+    './components/SystemConfigO2oRulesSection.vue',
+    './components/SystemConfigCustomerServiceSection.vue',
+    './components/SystemConfigVerificationSection.vue',
+    './components/SystemConfigDepartmentSection.vue',
+    './components/SystemConfigNotificationSection.vue',
+  ], 'defineRetryablePanel')
+  const inboundViews = path.join(srcRoot, 'views', 'inbound')
+  assertAsyncComponents(path.join(inboundViews, 'SupplierWorkbenchView.vue'), [
+    './SupplierDeliveryView.vue',
+    './SupplierHistoryView.vue',
+  ], 'defineRetryablePanel')
+  const panelHelperPath = path.join(srcRoot, 'utils', 'define-retryable-panel.ts')
+  assertContains(panelHelperPath, readUtf8(panelHelperPath), 'defineAsyncComponent({', '页签加载器必须继续使用异步组件边界')
+  for (const filename of ['SupplierDeliveryView.vue', 'SupplierHistoryView.vue']) {
+    const filePath = path.join(inboundViews, filename)
+    assertContains(filePath, readUtf8(filePath), "import('qrcode')", '供货二维码必须在使用时加载')
+  }
+
+  const imageUploadPath = path.join(srcRoot, 'utils', 'image-upload.ts')
+  assertContains(imageUploadPath, readUtf8(imageUploadPath), "import('browser-image-compression')", '客户端压缩逻辑必须动态加载')
+  assertAsyncComponents(path.join(srcRoot, 'views', 'client', 'ClientMallView.vue'), [
+    './ClientCartView.vue',
+    './ClientCheckoutView.vue',
+    './components/ClientImagePreviewer.vue',
+    './components/ClientMultiSkuSelector.vue',
+  ])
+  const restockEntryPath = path.join(srcRoot, 'composables', 'useClientRestockEntry.ts')
+  assertContains(restockEntryPath, readUtf8(restockEntryPath), "from '@/api/modules/client-restock-query'", '商城补货入口必须复用轻量查询模块')
 
   const baseEChartPath = path.join(srcRoot, 'components', 'charts', 'BaseEChart.vue')
   const baseEChartSource = readUtf8(baseEChartPath)

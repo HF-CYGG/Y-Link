@@ -419,6 +419,15 @@ const routeChunkChecks = Object.entries(performanceBudget.routeChunkMaxKB).map((
 })
 
 const lowFrequencyInitialLeaks = lowFrequencyChunks.filter((entry) => initialAssetNames.has(entry.name))
+const elementPlusAsyncChunkPrefixes = [
+  'table', 'ui-date-picker', 'ui-tree', 'ui-upload', 'ui-color-picker', 'ui-menu', 'ui-pagination-desc',
+]
+const elementPlusAsyncChunks = elementPlusAsyncChunkPrefixes.map((prefix) => ({
+  prefix,
+  names: assetEntries
+    .filter(({ name }) => name.startsWith(`${prefix}-`) && /\.(?:js|css)$/.test(name))
+    .map(({ name }) => name),
+}))
 
 const routesSource = readText(routesFilePath)
 const routerIndexSource = readText(routerIndexFilePath)
@@ -465,6 +474,13 @@ const failedChecks = [
     .filter((item) => !item.pass)
     .map((item) => `高频路由分包 ${item.prefix} 超预算：${item.actualKB} KB > ${item.maxKB} KB (${item.assetName})`),
   ...lowFrequencyInitialLeaks.map((item) => `低频重包 ${item.prefix} 不应出现在 index.html 首屏依赖图：${item.name}`),
+  ...elementPlusAsyncChunks.flatMap(({ prefix, names }) => [
+    ...['.js', '.css']
+      .filter((extension) => !names.some((name) => name.endsWith(extension)))
+      .map((extension) => `缺少 Element Plus 异步资源 ${prefix}-*${extension}`),
+    ...names.filter((name) => initialAssetNames.has(name))
+      .map((name) => `Element Plus 异步资源不应出现在 index.html 首屏依赖图：${name}`),
+  ]),
 ]
 
 const report = {
@@ -542,6 +558,7 @@ const report = {
     },
   },
   lowFrequencyChunks,
+  elementPlusAsyncChunks,
   routeChunkChecks,
   lowFrequencyChunkReport: lowFrequencyChunks.map((entry) => `${entry.prefix}: ${entry.sizeKB} KB`),
   routeChunkReport: routeChunkChecks.map((entry) => `${entry.prefix}: ${entry.actualKB} KB`),

@@ -23,6 +23,8 @@ import { useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { showAppError, showAppSuccess } from '@/utils/app-alert'
 
+defineOptions({ name: 'InventoryDocListView' })
+
 const authStore = useAuthStore(pinia)
 const canVoid = computed(() => authStore.hasPermission('inventory:void'))
 

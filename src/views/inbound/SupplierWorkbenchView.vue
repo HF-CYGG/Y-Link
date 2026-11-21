@@ -12,8 +12,12 @@
  */
 import { TabbedWorkbenchPage } from '@/components/common'
 import { useRouteBoundWorkbenchTab } from '@/composables/useRouteBoundWorkbenchTab'
-import SupplierDeliveryView from '@/views/inbound/SupplierDeliveryView.vue'
-import SupplierHistoryView from '@/views/inbound/SupplierHistoryView.vue'
+import { defineRetryablePanel } from '@/utils/define-retryable-panel'
+
+defineOptions({ name: 'SupplierWorkbenchView' })
+
+const SupplierDeliveryView = defineRetryablePanel(() => import('./SupplierDeliveryView.vue'))
+const SupplierHistoryView = defineRetryablePanel(() => import('./SupplierHistoryView.vue'))
 
 type SupplierWorkbenchTab = 'delivery' | 'history'
 

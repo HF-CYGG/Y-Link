@@ -13,6 +13,8 @@ import {
   type ProductCenterTabKey,
 } from '@/views/product-center/product-center-performance'
 
+defineOptions({ name: 'ProductCenterView' })
+
 type ProductCenterTab = ProductCenterTabKey
 
 // 定义工作台顶部标签，名称需要与下方映射配置中的标签键保持一致。

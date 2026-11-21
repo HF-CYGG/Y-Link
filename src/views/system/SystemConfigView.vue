@@ -15,7 +15,8 @@
 
 import dayjs from 'dayjs'
 import { computed, nextTick, onActivated, onMounted, reactive, ref, toRaw } from 'vue'
-import { ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+import type { FormInstance, FormRules } from 'element-plus'
+import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 import { PageContainer, PageToolbarCard } from '@/components/common'
 import {
   getNotificationPresenceSnapshot,
@@ -57,9 +58,7 @@ import {
   showAppWarning as showTopWarning,
 } from '@/utils/app-alert'
 import { extractErrorMessage } from '@/utils/error'
-import SystemConfigDepartmentSection from '@/views/system/components/SystemConfigDepartmentSection.vue'
-import SystemConfigCustomerServiceSection from '@/views/system/components/SystemConfigCustomerServiceSection.vue'
-import SystemConfigO2oRulesSection from '@/views/system/components/SystemConfigO2oRulesSection.vue'
+import { defineRetryablePanel } from '@/utils/define-retryable-panel'
 import {
   DEFAULT_STORE_BUSINESS_HOURS,
   DEFAULT_STORE_PICKUP_ADDRESS,
@@ -68,13 +67,19 @@ import {
   parseEditableStoreBusinessHours,
   type StoreBusinessPeriod,
 } from '@/utils/store-business-hours'
-import SystemConfigNotificationSection from '@/views/system/components/SystemConfigNotificationSection.vue'
-import SystemConfigSerialSection from '@/views/system/components/SystemConfigSerialSection.vue'
-import SystemConfigVerificationSection from '@/views/system/components/SystemConfigVerificationSection.vue'
 import {
   DATABASE_MIGRATION_ASSISTANT_NAME,
   DATABASE_MIGRATION_RECOMMENDED_FLOW_TEXT,
 } from './database-migration-copy'
+
+defineOptions({ name: 'SystemConfigView' })
+
+const SystemConfigDepartmentSection = defineRetryablePanel(() => import('./components/SystemConfigDepartmentSection.vue'))
+const SystemConfigCustomerServiceSection = defineRetryablePanel(() => import('./components/SystemConfigCustomerServiceSection.vue'))
+const SystemConfigO2oRulesSection = defineRetryablePanel(() => import('./components/SystemConfigO2oRulesSection.vue'))
+const SystemConfigNotificationSection = defineRetryablePanel(() => import('./components/SystemConfigNotificationSection.vue'))
+const SystemConfigSerialSection = defineRetryablePanel(() => import('./components/SystemConfigSerialSection.vue'))
+const SystemConfigVerificationSection = defineRetryablePanel(() => import('./components/SystemConfigVerificationSection.vue'))
 
 type VerificationFormValue = {
   enabled: boolean
@@ -125,6 +130,11 @@ const hasCompletedInitialLoad = ref(false)
 const loadError = ref('')
 const testSendingChannel = ref<'mobile' | 'email' | ''>('')
 const activeSection = ref<ConfigSectionKey>('order_serial')
+// 分区表单项完成挂载后才允许校验，避免异步组件下载期间提交未渲染的表单。
+const mountedSection = ref<ConfigSectionKey>()
+const markSectionMounted = (section: ConfigSectionKey) => {
+  if (activeSection.value === section) mountedSection.value = section
+}
 const selectedDepartmentNodeId = ref('')
 const identifierConfigs = ref<OrderIdentifierConfigs | null>(null)
 const identifierForm = reactive<{
@@ -1304,7 +1314,8 @@ const handleSubmit = async () => {
   if (!ensurePermission('system_configs:update')) {
     return
   }
-  if (saving.value || formInteractionLoading.value || hasDeferredSectionFailure.value || !notificationChannels.value) {
+  if (saving.value || formInteractionLoading.value || mountedSection.value !== activeSection.value
+    || hasDeferredSectionFailure.value || !notificationChannels.value) {
     showTopWarning('配置尚未完整加载或正在保存，请稍后重试')
     return
   }
@@ -1541,7 +1552,7 @@ onActivated(() => {
             v-if="canUpdateConfigs"
             type="primary"
             :loading="saving"
-            :disabled="formInteractionLoading || hasDeferredSectionFailure || !isDirty"
+            :disabled="formInteractionLoading || mountedSection !== activeSection || hasDeferredSectionFailure || !isDirty"
             @click="handleSubmit"
           >
             保存配置
@@ -1618,6 +1629,7 @@ onActivated(() => {
                   :can-update-configs="canUpdateConfigs"
                   :loading="activeSectionInteractionLoading"
                   :get-updated-at-label="getIdentifierUpdatedAtLabel"
+                  @panel-mounted="markSectionMounted('order_serial')"
                 />
 
                 <SystemConfigO2oRulesSection
@@ -1626,6 +1638,7 @@ onActivated(() => {
                   :can-update-configs="canUpdateConfigs"
                   :loading="activeSectionInteractionLoading"
                   :o2o-updated-at-label="o2oUpdatedAtLabel"
+                  @panel-mounted="markSectionMounted('o2o_rules')"
                 />
 
                 <SystemConfigCustomerServiceSection
@@ -1634,6 +1647,7 @@ onActivated(() => {
                   :can-update-configs="canUpdateConfigs"
                   :loading="activeSectionInteractionLoading"
                   :customer-service-updated-at-label="customerServiceUpdatedAtLabel"
+                  @panel-mounted="markSectionMounted('customer_service')"
                 />
 
                 <SystemConfigVerificationSection
@@ -1646,6 +1660,7 @@ onActivated(() => {
                   :saving="saving"
                   :test-sending-channel="testSendingChannel"
                   :get-verification-updated-at-label="getVerificationUpdatedAtLabel"
+                  @panel-mounted="markSectionMounted('verification')"
                   @test-send="handleTestVerificationSend"
                 />
 
@@ -1661,6 +1676,7 @@ onActivated(() => {
                   :get-department-path-label="getDepartmentPathLabel"
                   :handle-allow-department-drop="handleAllowDepartmentDrop"
                   :handle-department-node-drop="handleDepartmentNodeDrop"
+                  @panel-mounted="markSectionMounted('department')"
                   @add-root="handleAddRootDepartment"
                   @add-child="handleAddChildDepartment"
                   @edit="handleEditDepartment"
@@ -1684,6 +1700,7 @@ onActivated(() => {
                 :saving="saving"
                 :can-update-configs="canUpdateConfigs"
                 :presence-loading="notificationPresenceLoading"
+                @panel-mounted="markSectionMounted('notification')"
                 @refresh-presence="refreshNotificationPresenceSnapshot"
                 @configure-email="handleSectionChange('verification')"
                 @external-channel-change="handleNotificationExternalChannelChange"

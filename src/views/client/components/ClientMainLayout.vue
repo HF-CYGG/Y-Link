@@ -13,12 +13,13 @@
 
 import { computed, onBeforeUnmount, onMounted, provide, ref, watch } from 'vue'
 import type { RouteLocationNormalizedLoaded } from 'vue-router'
-import { ElMessageBox } from 'element-plus'
+import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 import { APP_META } from '@/constants/app-meta'
 import ThemeToggle from '@/layout/components/ThemeToggle.vue'
-import { useClientAuthStore, useClientCartStore } from '@/store'
+import { useClientAuthStore } from '@/store/modules/client-auth'
+import { useClientCartStore } from '@/store/modules/client-cart'
 import router from '@/router'
-import { buildClientNavigationItems } from '@/router/routes'
+import { buildClientNavigationItems, clientKeepAliveViewNames } from '@/router/routes'
 import { redirectToClientLogin } from '@/utils/client-auth-navigation'
 import { shouldReduceClientMotion } from '@/utils/client-motion'
 import pinia from '@/store/pinia'
@@ -257,7 +258,6 @@ const handleLogout = async () => {
   }
 
   await clientAuthStore.logout()
-  clientCartStore.clearAll()
   // 退出后改为硬跳转登录页，避免旧客户端布局残留导致偶发白屏。
   redirectToClientLogin()
 }
@@ -318,19 +318,14 @@ const handleLogout = async () => {
               @after-leave="clearClientPageMotion"
               @leave-cancelled="clearClientPageMotion"
             >
-              <KeepAlive v-if="Component && viewRoute.meta.keepAlive" :max="3">
+              <KeepAlive :max="3" :include="clientKeepAliveViewNames">
                 <component
                   :is="Component"
+                  v-if="Component"
                   :key="resolveViewKey(viewRoute)"
                   class="client-page-absolute"
                 />
               </KeepAlive>
-              <component
-                :is="Component"
-                v-else-if="Component"
-                :key="resolveViewKey(viewRoute)"
-                class="client-page-absolute"
-              />
             </transition>
           </router-view>
         </div>

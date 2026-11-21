@@ -18,6 +18,8 @@ import OrderEntryItemsEditor from './components/OrderEntryItemsEditor.vue'
 import OrderEntrySummaryCard from './components/OrderEntrySummaryCard.vue'
 import { useOrderEntryForm } from './composables/useOrderEntryForm'
 
+defineOptions({ name: 'OrderEntryView' })
+
 const OrderEntryScanPanel = defineAsyncComponent(() => import('./components/OrderEntryScanPanel.vue'))
 
 /**

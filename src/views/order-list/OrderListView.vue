@@ -44,6 +44,8 @@ import { useOrderListView } from './composables/useOrderListView'
 
 import { showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
+defineOptions({ name: 'OrderListView' })
+
 const getOrderTypeLabel = (value: 'department' | 'walkin') => {
   return value === 'department' ? '部门单' : '散客单'
 }

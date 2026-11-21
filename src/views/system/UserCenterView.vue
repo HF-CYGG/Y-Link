@@ -10,6 +10,8 @@ import { TabbedWorkbenchPage } from '@/components/common'
 import { useRouteBoundWorkbenchTab } from '@/composables/useRouteBoundWorkbenchTab'
 import { userCenterTabLoaders } from '@/views/system/user-center-performance'
 
+defineOptions({ name: 'UserCenterView' })
+
 type UserCenterTab = 'management' | 'client'
 
 const UserManageView = defineAsyncComponent(userCenterTabLoaders.management)

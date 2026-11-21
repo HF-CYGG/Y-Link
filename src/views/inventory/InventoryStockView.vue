@@ -24,6 +24,8 @@ import { useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { showAppError, showAppWarning } from '@/utils/app-alert'
 
+defineOptions({ name: 'InventoryStockView' })
+
 const BarcodeLabelPrintDialog = defineAsyncComponent(() => import('./components/BarcodeLabelPrintDialog.vue'))
 const SkuLocationTransferDialog = defineAsyncComponent(() => import('./components/SkuLocationTransferDialog.vue'))
 

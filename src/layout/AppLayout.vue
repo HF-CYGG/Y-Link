@@ -20,8 +20,9 @@ import AppHeader from '@/layout/components/AppHeader.vue'
 import AppSidebar from '@/layout/components/AppSidebar.vue'
 import BaseRouteErrorState from '@/components/common/base-display/BaseRouteErrorState.vue'
 import { useDevice } from '@/composables/useDevice'
-import { buildAppMenuItems } from '@/router/routes'
-import { useAppStore, useAuthStore } from '@/store'
+import { buildAppMenuItems, managementKeepAliveViewNames } from '@/router/routes'
+import { useAppStore } from '@/store/modules/app'
+import { useAuthStore } from '@/store/modules/auth'
 import pinia from '@/store/pinia'
 import { clearRouteError, runtimeErrorState } from '@/utils/runtime-error-state'
 
@@ -239,10 +240,9 @@ const retryRouteRender = () => {
             <template #default>
               <div :class="['route-stage min-h-full', { 'route-stage--pending': routeStagePending }]">
                 <transition name="fade-slide">
-                  <KeepAlive v-if="route.meta.keepAlive" :max="8">
+                  <KeepAlive :max="8" :include="managementKeepAliveViewNames">
                     <component :is="Component" v-if="Component" :key="resolveViewKey(route)" class="route-panel" />
                   </KeepAlive>
-                  <component :is="Component" v-else-if="Component" :key="resolveViewKey(route)" class="route-panel" />
                 </transition>
               </div>
             </template>
@@ -308,15 +308,13 @@ const retryRouteRender = () => {
 .route-panel {
   width: 100%;
   min-height: 100%;
-  backface-visibility: hidden;
-  transform: translateZ(0);
-  will-change: transform, opacity;
 }
 
 /* 路由切页稳定舞台：离场页绝对定位，避免新旧页面同时占位造成瞬间布局抖动。 */
 .route-stage :deep(.fade-slide-enter-active) {
   position: relative;
   z-index: 2;
+  will-change: transform, opacity;
   transition:
     transform var(--ylink-motion-normal) var(--ylink-motion-ease),
     opacity var(--ylink-motion-normal) var(--ylink-motion-ease);
@@ -327,6 +325,8 @@ const retryRouteRender = () => {
   inset: 0;
   z-index: 1;
   pointer-events: none;
+  transform: translateZ(0);
+  will-change: opacity;
   transition: opacity var(--motion-duration-fast) var(--ylink-motion-ease);
 }
 
@@ -347,12 +347,10 @@ const retryRouteRender = () => {
 
 .route-stage :deep(.fade-slide-leave-from) {
   opacity: 1;
-  transform: none;
 }
 
 .route-stage :deep(.fade-slide-leave-to) {
   opacity: 0;
-  transform: none;
 }
 
 .route-loading-shell {

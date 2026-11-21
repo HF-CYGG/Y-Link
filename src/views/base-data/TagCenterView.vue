@@ -20,6 +20,8 @@ import { useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import TagManager from './components/TagManager.vue'
 
+defineOptions({ name: 'TagCenterView' })
+
 const authStore = useAuthStore(pinia)
 
 type TagCenterTabKey = 'tags' | 'masterData'

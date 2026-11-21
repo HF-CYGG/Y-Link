@@ -42,6 +42,8 @@ import {
   getCategoryTagType,
 } from './category-importance'
 
+defineOptions({ name: 'AuditLogView' })
+
 // 通知事件面板按需异步加载：只有进入“通知事件”页签才下载对应分包，保持审计日志路由首包在性能预算内。
 const NotificationEventLogPanel = defineAsyncComponent(() => import('./components/NotificationEventLogPanel.vue'))
 

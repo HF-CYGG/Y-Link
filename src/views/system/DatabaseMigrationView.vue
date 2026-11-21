@@ -73,6 +73,8 @@ import {
   DATABASE_MIGRATION_SWITCH_REASON_DEFAULT,
 } from './database-migration-copy'
 
+defineOptions({ name: 'DatabaseMigrationView' })
+
 /**
  * 页面表单状态：
  * - target 维护目标 MySQL 连接信息；
