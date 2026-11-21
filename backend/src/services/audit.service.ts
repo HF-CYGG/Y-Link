@@ -194,9 +194,8 @@ export class AuditService {
     return qb
   }
 
-  async record(input: CreateAuditLogInput, manager?: EntityManager): Promise<SysAuditLog> {
-    const repository = (manager ?? AppDataSource.manager).getRepository(SysAuditLog)
-    const entity = repository.create({
+  private buildAuditLogValues(input: CreateAuditLogInput) {
+    return {
       actionType: input.actionType,
       actionLabel: input.actionLabel,
       actorUserId: input.actor?.userId ?? null,
@@ -211,9 +210,18 @@ export class AuditService {
       detailJson: input.detail ? JSON.stringify(input.detail) : null,
       ipAddress: truncateAuditTextByCodePoint(input.requestMeta?.ipAddress, 64),
       userAgent: truncateAuditTextByCodePoint(input.requestMeta?.userAgent, 255),
-    })
+    }
+  }
 
-    return repository.save(entity)
+  async record(input: CreateAuditLogInput, manager?: EntityManager): Promise<SysAuditLog> {
+    const repository = (manager ?? AppDataSource.manager).getRepository(SysAuditLog)
+    return repository.save(repository.create(this.buildAuditLogValues(input)))
+  }
+
+  /** 业务批处理使用同一个事务写入逐条审计，任一错误由事务统一回滚。 */
+  async recordBatch(inputs: CreateAuditLogInput[], manager: EntityManager): Promise<void> {
+    if (!inputs.length) return
+    await manager.getRepository(SysAuditLog).insert(inputs.map((input) => this.buildAuditLogValues(input)))
   }
 
   private shouldPauseSafeRecord(input: CreateAuditLogInput, options: SafeAuditRecordOptions): boolean {

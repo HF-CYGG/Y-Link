@@ -1215,18 +1215,36 @@ async function verifyOrderSerialConcurrency(mysqlConfig: VerifyMysqlRuntimeConfi
     const replayedAfterAdoption = await runMysqlSchemaMigrations(AppDataSource)
     assert.deepEqual(replayedAfterAdoption, { appliedFiles: [], baselinedFiles: [] }, '接管后再次启动必须零执行')
 
-    // 人工执行 060 在删除旧索引前中断：新索引已在、契约通过，但基线不得登记 060，必须重放其幂等收尾删除旧索引。
+    // 人工执行 060/065 在删除旧索引前中断，首次接管必须重放幂等收尾。
     await AppDataSource.query('DELETE FROM schema_migrations')
     await AppDataSource.query('CREATE INDEX uk_inv_stocktake_item_sku ON inv_stocktake_item (stocktake_id, sku_id)')
+    await AppDataSource.query('CREATE INDEX idx_o2o_preorder_item_product_order ON o2o_preorder_item (product_id, order_id)')
     const adoptedWithLeftoverIndex = await runMysqlSchemaMigrations(AppDataSource)
     assert.ok(adoptedWithLeftoverIndex.appliedFiles.includes('060_sku_location_stock.sql'), '旧索引残留时必须重放 060 收尾')
     assert.ok(!adoptedWithLeftoverIndex.baselinedFiles.includes('060_sku_location_stock.sql'), '旧索引残留时 060 不得登记为基线')
+    assert.ok(adoptedWithLeftoverIndex.appliedFiles.includes('065_performance_composite_indexes.sql'), '旧索引残留时必须重放 065 收尾')
+    assert.ok(!adoptedWithLeftoverIndex.baselinedFiles.includes('065_performance_composite_indexes.sql'), '旧索引残留时 065 不得登记为基线')
     const leftoverIndexRows = await AppDataSource.query(
       `SELECT INDEX_NAME FROM information_schema.STATISTICS
        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'inv_stocktake_item' AND INDEX_NAME = 'uk_inv_stocktake_item_sku'`,
     ) as unknown[]
     assert.equal(leftoverIndexRows.length, 0, '重放 060 后旧索引必须已删除')
+    const leftoverPerformanceIndexRows = await AppDataSource.query(
+      `SELECT INDEX_NAME FROM information_schema.STATISTICS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'o2o_preorder_item' AND INDEX_NAME = 'idx_o2o_preorder_item_product_order'`,
+    ) as unknown[]
+    assert.equal(leftoverPerformanceIndexRows.length, 0, '重放 065 后旧索引必须已删除')
+    const supplierForeignKeyIndex = await AppDataSource.query(
+      `SELECT COLUMN_NAME AS columnName FROM information_schema.STATISTICS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_inbound_order' AND INDEX_NAME = 'idx_biz_inbound_supplier_id'
+       ORDER BY SEQ_IN_INDEX`,
+    ) as Array<{ columnName: string }>
+    assert.deepEqual(supplierForeignKeyIndex.map(({ columnName }) => columnName), ['supplier_id'],
+      'MySQL 同步可能暂时移除复合索引，065 必须保留供应方独立索引')
+    // 完整结构契约同时验证 065 的新索引列序，以及供应方外键仍然是 RESTRICT。
     await assertMysqlRequiredSchemaExists(AppDataSource)
+    assert.deepEqual(await runMysqlSchemaMigrations(AppDataSource), { appliedFiles: [], baselinedFiles: [] })
 
     // 人工执行 043 在数据回填前中断：结构全部就位，但存在未规范化的 inventory_mode，基线不得登记 043，必须重放回填。
     // 检查约束已限定取值，因此模拟 043 回填前的另一种存量形态：O2O 核销出库单仍是 legacy_none。

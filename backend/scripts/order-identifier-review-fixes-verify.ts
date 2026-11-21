@@ -81,15 +81,20 @@ try {
   await initializeDatabaseSchemaIfNeeded(AppDataSource)
   await systemConfigService.ensureDefaultConfigs()
 
-  const cachedProjectionSource = {
-    order: {
+  const sharedOrderItems = Object.freeze([{ productName: '普通订单条目', quantity: 2 }])
+  const cachedProjectionSource = Object.freeze({
+    order: Object.freeze({
       systemNo: 'OUT-W-009999',
       showNo: 'OUT-W-009999',
       businessNo: 'hyyz009999',
-      matchedIdentifierType: 'systemNo',
       matchedIdentifierValue: 'OUT-W-009999',
-    },
-  }
+      matchedIdentifierType: 'systemNo',
+      items: sharedOrderItems,
+      createdAt: new Date('2026-01-01T01:02:03Z'),
+      remark: null,
+    }),
+    summary: Object.freeze({ count: 1 }),
+  })
   const operatorProjection = projectSystemIdentifiersForRole(cachedProjectionSource, 'operator') as {
     order: Record<string, unknown>
   }
@@ -97,8 +102,37 @@ try {
   assert.equal('showNo' in operatorProjection.order, false, '普通账号统一响应投影不得保留旧 showNo 别名')
   assert.equal(operatorProjection.order.matchedIdentifierType, null, '普通账号统一响应投影不得保留 systemNo 命中类型')
   assert.equal(operatorProjection.order.matchedIdentifierValue, null, '普通账号统一响应投影不得保留 systemNo 命中值')
+  assert.equal(operatorProjection.order.items, sharedOrderItems, '普通订单条目数组可沿用缓存引用')
+  assert.equal(operatorProjection.order.createdAt, cachedProjectionSource.order.createdAt)
+  assert.equal(operatorProjection.order.remark, null)
+  assert.equal(projectSystemIdentifiersForRole(cachedProjectionSource, 'operator').summary, cachedProjectionSource.summary)
   assert.equal(cachedProjectionSource.order.systemNo, 'OUT-W-009999', '响应投影不得原地污染服务缓存或复用对象')
-  assert.deepEqual(projectSystemIdentifiersForRole(cachedProjectionSource, 'admin'), cachedProjectionSource, '管理员必须保留 canonical 与兼容字段')
+  assert.equal(projectSystemIdentifiersForRole(cachedProjectionSource, 'admin'), cachedProjectionSource, '管理员可直接复用完整缓存')
+
+  const spoofedSystemNumber = 'OUT-W-SERIAL-HOOK'
+  const revealSystemNo = () => ({ systemNo: spoofedSystemNumber })
+  const hookedRecord = Object.assign(Object.create({ toJSON: revealSystemNo }), { businessNo: 'hyyz009999' })
+  const hookedArray = [{ systemNo: spoofedSystemNumber, businessNo: 'hyyz009999' }]
+  Object.defineProperty(hookedArray, 'toJSON', { value: revealSystemNo })
+  const hookedDate = new Date('2026-01-01T01:02:03Z')
+  Object.defineProperty(hookedDate, 'toJSON', { value: revealSystemNo })
+  const accessorRecord = Object.defineProperty({ businessNo: 'hyyz009999' }, 'toJSON', {
+    enumerable: true,
+    get: () => { throw new Error('投影不得执行访问器') },
+  })
+  const legacyRecord = JSON.parse('{"__proto__":{"systemNo":"OUT-W-SERIAL-HOOK","businessNo":"hyyz009999"}}')
+  const serializedProjection = JSON.stringify(projectSystemIdentifiersForRole({
+    hookedRecord, hookedArray, hookedDate, accessorRecord, legacyRecord, missing: undefined,
+    callable: Object.assign(() => undefined, { toJSON: revealSystemNo }),
+  }, 'operator'))
+  assert.equal(serializedProjection.includes(spoofedSystemNumber), false, '原型、数组及 toJSON 不能重新引入系统号')
+  assert.deepEqual(JSON.parse(serializedProjection), {
+    hookedRecord: { businessNo: 'hyyz009999' },
+    hookedArray: [{ businessNo: 'hyyz009999' }],
+    hookedDate: '2026-01-01T01:02:03.000Z',
+    accessorRecord: { businessNo: 'hyyz009999' },
+    legacyRecord: JSON.parse('{"__proto__":{"businessNo":"hyyz009999"}}'),
+  })
 
   const configRepo = AppDataSource.getRepository(SystemConfig)
   const sequenceRepo = AppDataSource.getRepository(BusinessSequence)

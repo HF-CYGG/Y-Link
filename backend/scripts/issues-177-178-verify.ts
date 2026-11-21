@@ -131,6 +131,47 @@ try {
   assert.notEqual(changed!.printLocations.capability === 'full' && changed!.printLocations.distributionKey, full!.printLocations.distributionKey)
   const [sameLimited] = await productService.listLabels([sku.id], 'main_only')
   assert.deepEqual(sameLimited, limited, '其他分布变化不能影响 main_only')
+  if (!mysqlMode) {
+    const { runInTransaction } = await import('../src/config/transaction-runner.js')
+    const updateDistribution = (currentStock: number, qty: number) => runInTransaction(async (manager) => {
+      await manager.getRepository(BaseProductSku).update(sku.id, { currentStock })
+      await manager.getRepository(InvSkuLocationStock).update({ skuId: sku.id, locationId: String(extra.id) }, { qty })
+    })
+    const labelSelects: string[] = []
+    let changedAfterRead = false
+    const originalRunner = db.createQueryRunner
+    db.createQueryRunner = (...args) => {
+      const runner = originalRunner.apply(db, args)
+      const query = runner.query.bind(runner)
+      runner.query = async (...queryArgs: Parameters<typeof query>) => {
+        const result = await query(...queryArgs)
+        const [sql] = queryArgs
+        if (/^SELECT\b.*\bFROM\s+"base_product_sku"/is.test(sql)) {
+          labelSelects.push(sql)
+          if (!changedAfterRead) {
+            changedAfterRead = true
+            await updateDistribution(13, 5)
+          }
+        }
+        return result
+      }
+      return runner
+    }
+    try {
+      assert.deepEqual(await productService.listLabels([sku.id], 'full'), [changed], '拨转在读取后提交时须返回同一语句的库存和分布')
+      assert.equal(labelSelects.length, 1)
+      assert.match(labelSelects[0]!, /JOIN\s+"inv_sku_location_stock"/i)
+      const [afterTransfer] = await productService.listLabels([sku.id], 'full')
+      assert.equal(afterTransfer?.printLocations.capability === 'full' && afterTransfer.printLocations.options.find((option) => option.isMain)?.qty, 2)
+      labelSelects.length = 0
+      assert.deepEqual(await productService.listLabels([sku.id], 'main_only'), [limited])
+      assert.equal(labelSelects.length, 1)
+      assert.doesNotMatch(labelSelects[0]!, /inv_sku_location_stock|current_stock/i)
+    } finally {
+      db.createQueryRunner = originalRunner
+      if (changedAfterRead) await updateDistribution(10, 3)
+    }
+  }
   try {
     await locationRepo.update(main.id, { isActive: false })
     for (const capability of ['full', 'main_only'] as const) {

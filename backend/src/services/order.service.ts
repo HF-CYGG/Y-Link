@@ -532,7 +532,8 @@ export class OrderService {
       .take(query.pageSize)
       .getManyAndCount()
 
-    const metadataMap = await orderMergeService.getMetadataMap(list.map((order) => normalizeEntityId(order.id)))
+    const sourceOrderMap = new Map(list.map((order) => [normalizeEntityId(order.id), order]))
+    const metadataMap = await orderMergeService.getMetadataMap([...sourceOrderMap.keys()], AppDataSource.manager, sourceOrderMap)
     const childIdentifierMatches = await this.resolveMergedChildIdentifierMatches(
       list.map((order) => normalizeEntityId(order.id)),
       normalizedKeyword,
@@ -545,8 +546,10 @@ export class OrderService {
     )
 
     const sourceIds = [...new Set(list.flatMap((order) => [String(order.id), ...(metadataMap.get(String(order.id))?.children.map((child) => child.id) ?? [])]))]
-    const sourceOrders = sourceIds.length ? await AppDataSource.getRepository(BizOutboundOrder).find({ where: { id: In(sourceIds) } }) : []
-    const sourceOrderMap = new Map(sourceOrders.map((order) => [String(order.id), order]))
+    const sourceOrders = sourceIds.flatMap((id) => {
+      const source = sourceOrderMap.get(id)
+      return source ? [source] : []
+    })
     const preorderIds = [...new Set(sourceOrders.flatMap((order) => {
       const id = this.resolveLinkedO2oPreorderId(order) ?? this.resolveLegacyPickupPreorderId(order)
       return id ? [id] : []

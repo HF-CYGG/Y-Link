@@ -290,44 +290,51 @@ export class OrderMergeService {
     if (count > 0) throw new BizError(message, 409)
   }
 
+  /** 可复用已加载的完整订单。查询到的缺失成员会写入该映射，供调用方继续读取来源。 */
   async getMetadataMap(
     orderIds: string[],
     manager: EntityManager = AppDataSource.manager,
+    ordersById: Map<string, BizOutboundOrder> = new Map(),
   ): Promise<Map<string, OrderMergeMetadata>> {
     const normalizedIds = [...new Set(orderIds.map(normalizeId).filter(Boolean))]
     const result = new Map<string, OrderMergeMetadata>()
     normalizedIds.forEach((id) => result.set(id, { role: 'standalone', parent: null, children: [] }))
-    if (!normalizedIds.length) return result
+    const ids = normalizedIds.filter((id) => /^\d+$/.test(id))
+    if (!ids.length) return result
+    const idType = manager.connection.options.type === 'sqlite' ? 'TEXT' : 'CHAR'
+    const { values, parameters } = this.bindOrderIds(ids, manager)
 
     const relations = await manager.getRepository(OrderMergeRelation)
       .createQueryBuilder('relation')
+      .select(`CAST(relation.parentOrderId AS ${idType})`, 'parentOrderId')
+      .addSelect(`CAST(relation.sourceOrderId AS ${idType})`, 'sourceOrderId')
       .where(new Brackets((qb) => {
-        qb.where('relation.parentOrderId IN (:...orderIds)', { orderIds: normalizedIds })
-          .orWhere('relation.sourceOrderId IN (:...orderIds)', { orderIds: normalizedIds })
+        qb.where(`relation.parentOrderId IN (${values})`, parameters)
+          .orWhere(`relation.sourceOrderId IN (${values})`, parameters)
       }))
       .orderBy('relation.id', 'ASC')
-      .getMany()
+      .getRawMany<{ parentOrderId: string; sourceOrderId: string }>()
     if (!relations.length) return result
 
     const relatedIds = [...new Set(relations.flatMap((relation) => [
       normalizeId(relation.parentOrderId),
       normalizeId(relation.sourceOrderId),
-    ]))]
-    const orders = await manager.getRepository(BizOutboundOrder).find({ where: { id: In(relatedIds) } })
-    const orderMap = new Map(orders.map((order) => [normalizeId(order.id), order]))
+    ]))].filter((id) => !ordersById.has(id))
+    const related = await this.loadOrdersByExactId(relatedIds, manager)
+    for (const [id, order] of related) ordersById.set(id, order)
     for (const relation of relations) {
       const parentId = normalizeId(relation.parentOrderId)
       const sourceId = normalizeId(relation.sourceOrderId)
-      const parent = orderMap.get(parentId)
-      const source = orderMap.get(sourceId)
+      const parent = ordersById.get(parentId)
+      const source = ordersById.get(sourceId)
       if (!parent || !source) continue
-      if (normalizedIds.includes(parentId)) {
+      if (result.has(parentId)) {
         const metadata = result.get(parentId) ?? { role: 'parent' as const, parent: null, children: [] }
         metadata.role = 'parent'
         metadata.children.push(this.toReference(source))
         result.set(parentId, metadata)
       }
-      if (normalizedIds.includes(sourceId)) {
+      if (result.has(sourceId)) {
         result.set(sourceId, {
           role: 'source',
           parent: this.toReference(parent),
@@ -336,6 +343,46 @@ export class OrderMergeService {
       }
     }
     return result
+  }
+
+  private bindOrderIds(ids: string[], manager: EntityManager) {
+    const parameterType = manager.connection.options.type === 'sqlite' ? 'INTEGER' : 'UNSIGNED'
+    const parameters = Object.fromEntries(ids.map((id, index) => [`orderId${index}`, id]))
+    const values = Object.keys(parameters).map((key) => `CAST(:${key} AS ${parameterType})`).join(', ')
+    return { values, parameters }
+  }
+
+  /** 取完整订单供合并引用及改单用，SQLite 的大整数主键在 SQL 层先转文本。 */
+  async loadOrdersByExactId(ids: string[], manager: EntityManager, lock = false): Promise<Map<string, BizOutboundOrder>> {
+    if (!ids.length) return new Map()
+    const repo = manager.getRepository(BizOutboundOrder)
+    const sqlite = manager.connection.options.type === 'sqlite'
+    const idType = sqlite ? 'TEXT' : 'CHAR'
+    const { values, parameters } = this.bindOrderIds(ids, manager)
+    const fields = repo.metadata.columns.filter((column) => column.isSelect)
+    const query = repo.createQueryBuilder('order').select([])
+      .where(`order.id IN (${values})`, parameters)
+      .orderBy('order.id', 'ASC')
+    for (const field of fields) {
+      const expression = field.propertyName === 'id' ? `CAST(order.id AS ${idType})` : `order.${field.propertyPath}`
+      query.addSelect(expression, field.propertyName)
+    }
+    if (lock && !sqlite) query.setLock('pessimistic_write')
+    const rows = await query.getRawMany<Record<string, unknown> & { id: string }>()
+    const requestedIds = new Set(ids)
+    const orders = new Map<string, BizOutboundOrder>()
+    for (const row of rows) {
+      if (!requestedIds.has(row.id)) continue
+      const order = new BizOutboundOrder()
+      for (const field of fields) {
+        const value = field.propertyName === 'id'
+          ? row.id
+          : manager.connection.driver.prepareHydratedValue(row[field.propertyName], field)
+        field.setEntityValue(order, value)
+      }
+      orders.set(row.id, order)
+    }
+    return orders
   }
 
   private normalizeInput(input: OrderMergeInput): NormalizedMergeInput {

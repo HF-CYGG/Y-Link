@@ -1058,22 +1058,73 @@ const SQLITE_ORDER_IDENTIFIER_NAMESPACE_LOCK_ORDER = [
   'order.business.department',
 ] as const
 
-export async function backfillSqliteOrderIdentifierNamespaces(manager: EntityManager): Promise<void> {
-  const outboundRows = await manager.query(
-    'SELECT "show_no" AS "showNo", "business_no" AS "businessNo", "order_type" AS "orderType" FROM "biz_outbound_order"',
-  ) as Array<{ showNo: string; businessNo: string; orderType: string }>
-  const preorderRows = await manager.query(
-    'SELECT "show_no" AS "showNo", "client_order_type" AS "orderType" FROM "o2o_preorder"',
-  ) as Array<{ showNo: string; orderType: string }>
-  const physicalMaximum = (
-    rows: Array<{ showNo: string; orderType: string }>,
-    orderType: 'department' | 'walkin',
-    pattern: RegExp,
-  ) => rows.reduce((maximum, row) => {
-    if (row.orderType !== orderType) return maximum
-    const match = pattern.exec(String(row.showNo ?? '').trim())
-    return match ? Math.max(maximum, Number.parseInt(match[1], 10)) : maximum
-  }, 0)
+const SQLITE_IDENTIFIER_SCAN_BATCH_SIZE = 500
+const SQLITE_BUSINESS_NO_PATTERNS = {
+  walkin: /^hyyz(\d+)$/i,
+  department: /^hyyzjd(\d+)$/i,
+}
+
+async function scanSqliteOrderIdentifierRows<Row>(
+  manager: EntityManager,
+  table: 'biz_outbound_order' | 'o2o_preorder',
+  columns: string,
+  visit: (row: Row) => void,
+): Promise<void> {
+  let cursor: string | undefined
+  while (true) {
+    // 游标保留数据库整数的文本表示，避免超过 JavaScript 安全整数范围后漏行。
+    const rows = await manager.query(
+      `SELECT CAST("id" AS TEXT) AS "cursor", ${columns} FROM "${table}"
+       ${cursor === undefined ? '' : 'WHERE "id" < CAST(? AS INTEGER)'}
+       ORDER BY "id" DESC LIMIT ${SQLITE_IDENTIFIER_SCAN_BATCH_SIZE}`,
+      cursor === undefined ? [] : [cursor],
+    ) as Array<Row & { cursor: string }>
+    for (const row of rows) visit(row)
+    if (rows.length < SQLITE_IDENTIFIER_SCAN_BATCH_SIZE) return
+    cursor = rows.at(-1)!.cursor
+  }
+}
+
+export async function backfillSqliteOrderIdentifierNamespaces(manager: EntityManager, validateOutbound = false): Promise<void> {
+  const maxima = {
+    walkin: { system: 0, preorder: 0, business: 0 },
+    department: { system: 0, preorder: 0, business: 0 },
+  }
+  await scanSqliteOrderIdentifierRows<{ orderUuid: string; showNo: string; businessNo: string; orderType: string }>(
+    manager, 'biz_outbound_order',
+    '"order_uuid" AS "orderUuid", "show_no" AS "showNo", "business_no" AS "businessNo", "order_type" AS "orderType"',
+    (row) => {
+      const orderType = row.orderType === 'walkin' || row.orderType === 'department' ? row.orderType : null
+      const businessMatch = orderType && SQLITE_BUSINESS_NO_PATTERNS[orderType].exec(String(row.businessNo ?? '').trim())
+      if (validateOutbound && !businessMatch) {
+        throw new BizError(`历史出库单 ${row.orderUuid} 的订单类型或业务号不符合 #72 命名空间规则`, 409)
+      }
+      if (!orderType) return
+      if (businessMatch) {
+        const value = Number.parseInt(businessMatch[1], 10)
+        if (validateOutbound && (!Number.isSafeInteger(value) || value <= 0)) {
+          throw new BizError(`历史出库单 ${row.orderUuid} 的业务号流水非法`, 409)
+        }
+        maxima[orderType].business = Math.max(maxima[orderType].business, value)
+      }
+      const pattern = orderType === 'walkin' ? /^OUT-W-(\d{6})$/ : /^OUT-D-(\d{6})$/
+      const systemMatch = pattern.exec(String(row.showNo ?? '').trim())
+      if (systemMatch) maxima[orderType].system = Math.max(maxima[orderType].system, Number(systemMatch[1]))
+    },
+  )
+  await scanSqliteOrderIdentifierRows<{ showNo: string; orderType: string; reservedBusinessNo: string | null }>(
+    manager, 'o2o_preorder',
+    '"show_no" AS "showNo", "client_order_type" AS "orderType", "reserved_business_no" AS "reservedBusinessNo"',
+    (row) => {
+      if (row.orderType !== 'walkin' && row.orderType !== 'department') return
+      const maximum = maxima[row.orderType]
+      const pattern = row.orderType === 'walkin' ? /^PRE-W-(\d{6})$/ : /^PRE-D-(\d{6})$/
+      const preorderMatch = pattern.exec(String(row.showNo ?? '').trim())
+      if (preorderMatch) maximum.preorder = Math.max(maximum.preorder, Number(preorderMatch[1]))
+      const reservedMatch = SQLITE_BUSINESS_NO_PATTERNS[row.orderType].exec(String(row.reservedBusinessNo ?? '').trim())
+      if (reservedMatch) maximum.business = Math.max(maximum.business, Number(reservedMatch[1]))
+    },
+  )
   const readInteger = async (sql: string, parameters: unknown[]) => {
     const rows = await manager.query(sql, parameters) as Array<{ value: number | string | null }>
     const value = Number.parseInt(String(rows[0]?.value ?? '0'), 10)
@@ -1097,14 +1148,13 @@ export async function backfillSqliteOrderIdentifierNamespaces(manager: EntityMan
     overwriteShape?: boolean
     migrationMarkerKey?: string
   }> = [
-    { key: 'order.system.walkin', current: physicalMaximum(outboundRows, 'walkin', /^OUT-W-(\d{6})$/) },
-    { key: 'o2o.preorder.walkin', current: physicalMaximum(preorderRows, 'walkin', /^PRE-W-(\d{6})$/) },
-    { key: 'order.system.department', current: physicalMaximum(outboundRows, 'department', /^OUT-D-(\d{6})$/) },
-    { key: 'o2o.preorder.department', current: physicalMaximum(preorderRows, 'department', /^PRE-D-(\d{6})$/) },
+    { key: 'order.system.walkin', current: maxima.walkin.system },
+    { key: 'o2o.preorder.walkin', current: maxima.walkin.preorder },
+    { key: 'order.system.department', current: maxima.department.system },
+    { key: 'o2o.preorder.department', current: maxima.department.preorder },
   ]
   for (const orderType of ['walkin', 'department'] as const) {
     const sequenceKey = `order.business.${orderType}`
-    const namespace = orderType === 'department' ? 'hyyzjd' : 'hyyz'
     const migrationMarkerKey = `${sequenceKey}.migration.055`
     const [migrationMarkerCount, newConfigStartValue, newConfigWidthValue, newConfigCurrent, sequenceCurrent] = await Promise.all([
       readInteger(
@@ -1141,11 +1191,6 @@ export async function backfillSqliteOrderIdentifierNamespaces(manager: EntityMan
       : null
     const start = absorbLegacyHistory ? legacyStart ?? newConfigStart ?? 1 : newConfigStart ?? 1
     const width = absorbLegacyHistory ? legacyWidth ?? newConfigWidth ?? 6 : newConfigWidth ?? 6
-    const physicalCurrent = physicalMaximum(
-      outboundRows.map((row) => ({ showNo: row.businessNo, orderType: row.orderType })),
-      orderType,
-      namespace === 'hyyzjd' ? /^hyyzjd(\d+)$/i : /^hyyz(\d+)$/i,
-    )
     identifierNamespaces.push({
       key: sequenceKey,
       current: Math.max(
@@ -1154,7 +1199,7 @@ export async function backfillSqliteOrderIdentifierNamespaces(manager: EntityMan
         legacySequenceCurrent,
         newConfigCurrent,
         sequenceCurrent,
-        physicalCurrent,
+        maxima[orderType].business,
       ),
       start,
       width,
@@ -1240,33 +1285,52 @@ export async function backfillSqliteOrderIdentifierNamespaces(manager: EntityMan
   }
 }
 
-/**
- * 幂等领养历史订单：businessNo 初始值固定等于 showNo，双命名空间游标只在缺失时补齐。
- * 已存在的游标绝不按历史最大值重写，避免覆盖管理员手工重编后确认的游标位置。
- */
-export async function backfillSqliteOrderAmendmentData(dataSource: DataSource): Promise<void> {
+async function areSqliteOrderIdentifierNamespacesReady(manager: EntityManager): Promise<boolean> {
+  const namespaceKeys = SQLITE_ORDER_IDENTIFIER_NAMESPACE_LOCK_ORDER
+  const markerKeys = ['order.business.walkin.migration.055', 'order.business.department.migration.055']
+  const configKeys = [
+    ...namespaceKeys.flatMap((key) => [`${key}.start`, `${key}.current`, `${key}.width`]),
+    ...markerKeys,
+  ]
+  const configRows = await manager.query(
+    `SELECT "config_key" AS "key", "config_value" AS "value"
+     FROM "system_configs" WHERE "config_key" IN (${configKeys.map(() => '?').join(', ')})`,
+    configKeys,
+  ) as Array<{ key: string; value: string }>
+  const configs = new Map(configRows.map(({ key, value }) => [key, value]))
+  if (!markerKeys.every((key) => configs.get(key) === '1')) return false
+
+  const sequenceRows = await manager.query(
+    `SELECT "sequence_key" AS "key", CAST("current_value" AS TEXT) AS "value"
+     FROM "business_sequence" WHERE "sequence_key" IN (${namespaceKeys.map(() => '?').join(', ')})`,
+    [...namespaceKeys],
+  ) as Array<{ key: string; value: string }>
+  const sequences = new Map(sequenceRows.map(({ key, value }) => [key, value]))
+  const parseInteger = (value: string | undefined) => /^\d+$/.test(value ?? '') ? Number(value) : NaN
+  return namespaceKeys.every((key) => {
+    const start = parseInteger(configs.get(`${key}.start`))
+    const width = parseInteger(configs.get(`${key}.width`))
+    const current = parseInteger(configs.get(`${key}.current`))
+    const sequence = parseInteger(sequences.get(key))
+    if (!Number.isSafeInteger(start) || start < 1 || !Number.isInteger(width) || width < 1 || width > 12) return false
+    if (!key.startsWith('order.business.') && (start !== 1 || width !== 6)) return false
+    const maxSerial = 10 ** width - 1
+    return start <= maxSerial && Number.isSafeInteger(current) && current >= start - 1
+      && current <= maxSerial && sequence === current
+  })
+}
+
+/** 启动可复用完备游标。显式历史修复仍逐单校验并领养物理编号。 */
+export async function backfillSqliteOrderAmendmentData(
+  dataSource: DataSource,
+  { startup = false }: { startup?: boolean } = {},
+): Promise<void> {
   // 专项升级脚本会把隔离 DataSource 直接传入本函数；先幂等安装协调器，确保随后开启的
   // SQLite 事务同样受单写者队列保护，而不是依赖主应用已经完成的启动顺序。
   await initializeDatabaseInfrastructure(dataSource)
   await dataSource.transaction(async (manager) => {
-    const orders = await manager.query(`
-      SELECT "order_uuid" AS "orderUuid", "business_no" AS "businessNo", "order_type" AS "orderType"
-      FROM "biz_outbound_order"
-    `) as Array<{ orderUuid: string; businessNo: string; orderType: string }>
-    for (const order of orders) {
-      const namespace = order.orderType === 'department' ? 'hyyzjd' : order.orderType === 'walkin' ? 'hyyz' : null
-      const pattern = namespace === 'hyyzjd' ? /^hyyzjd(\d+)$/ : /^hyyz(\d+)$/
-      const match = namespace ? pattern.exec(String(order.businessNo ?? '').trim().toLowerCase()) : null
-      if (!namespace || !match) {
-        throw new BizError(`历史出库单 ${order.orderUuid} 的订单类型或业务号不符合 #72 命名空间规则`, 409)
-      }
-      const serialValue = Number.parseInt(match[1], 10)
-      if (!Number.isSafeInteger(serialValue) || serialValue <= 0) {
-        throw new BizError(`历史出库单 ${order.orderUuid} 的业务号流水非法`, 409)
-      }
-    }
-
-    await backfillSqliteOrderIdentifierNamespaces(manager)
+    if (startup && await areSqliteOrderIdentifierNamespacesReady(manager)) return
+    await backfillSqliteOrderIdentifierNamespaces(manager, true)
   })
 }
 
@@ -2376,7 +2440,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
       await normalizeSqliteInboundSkuColumn(dataSource)
       // 索引可能依赖本次 synchronize 才补齐的列，必须在结构升级后创建。
       await ensureSqliteStartupIndexes(dataSource)
-      await backfillSqliteOrderAmendmentData(dataSource)
+      await backfillSqliteOrderAmendmentData(dataSource, { startup: true })
       await prepareSqliteOrderContentInventoryColumns(dataSource)
       await backfillSqliteOrderSourceDocs(dataSource)
     }
@@ -2418,7 +2482,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   const needSynchronize = await shouldSynchronizeSqliteSchema(dataSource)
   if (!needSynchronize) {
     await ensureSqliteStartupIndexes(dataSource)
-    await backfillSqliteOrderAmendmentData(dataSource)
+    await backfillSqliteOrderAmendmentData(dataSource, { startup: true })
     await prepareSqliteOrderContentInventoryColumns(dataSource)
     await backfillSqliteOrderSourceDocs(dataSource)
     await migrateClientUserDepartmentGovernance(dataSource)
@@ -2435,7 +2499,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   await normalizeSqliteO2oDiscountColumns(dataSource)
   await normalizeSqliteInboundSkuColumn(dataSource)
   await ensureSqliteStartupIndexes(dataSource)
-  await backfillSqliteOrderAmendmentData(dataSource)
+  await backfillSqliteOrderAmendmentData(dataSource, { startup: true })
   await prepareSqliteOrderContentInventoryColumns(dataSource)
   await backfillSqliteOrderSourceDocs(dataSource)
   await migrateClientUserDepartmentGovernance(dataSource)

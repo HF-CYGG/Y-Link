@@ -7,6 +7,7 @@
 import { resolveIssueVerificationRoot } from './issue-verification-paths.js'
 import 'reflect-metadata'
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import type { AuthUserContext } from '../src/types/auth.js'
@@ -207,6 +208,56 @@ async function main() {
     assert.equal(Boolean(switched.isSystemApplied), false)
     assert.equal(switched.systemNo, originalDepartmentSystemNo, '类型切换也不得改变 systemNo')
 
+    const batchOrders = [(await submit('walkin')).order, (await submit('walkin')).order]
+    const swapInput = batchOrders.map((row, index) => ({
+      orderId: String(row.id), editVersion: Number(row.editVersion), businessNo: batchOrders[1 - index]!.businessNo,
+      reason: '验证同批互换仍按原占用规则阻断',
+    }))
+    const swapPreview = await orderService.previewAmendments({ amendments: swapInput }, actor)
+    assert.equal(swapPreview.ready, false)
+    assert.ok(swapPreview.items.every((item) => item.blockingReasons.some((reason) => /当前已被其他订单使用/.test(reason))))
+    await assert.rejects(() => orderService.commitAmendments({ amendments: swapInput }, actor), /当前已被其他订单使用/)
+
+    const batchSuggestions = await orderBusinessNoService.suggestForAmendment('walkin', 2, [], AppDataSource.manager)
+    const batchInput = batchOrders.map((row, index) => ({
+      orderId: String(row.id), editVersion: Number(row.editVersion), businessNo: batchSuggestions.businessNos[index],
+      remark: `批次变更 ${index + 1}`, reason: '验证原子提交两张订单',
+    }))
+    const { auditService } = await import('../src/services/audit.service.js')
+    const { SysAuditLog } = await import('../src/entities/sys-audit-log.entity.js')
+    const auditRepo = AppDataSource.getRepository(SysAuditLog)
+    const sequenceRepo = AppDataSource.getRepository(BusinessSequence)
+    const latestCursor = () => sequenceRepo.findOneByOrFail({ sequenceKey: 'order.business.walkin' })
+    const [beforeAudit, beforeRevision, beforeCursor] = await Promise.all([auditRepo.count(), revisionRepo.count(), latestCursor()])
+    const originalRecordBatch = auditService.recordBatch
+    auditService.recordBatch = async (...args) => {
+      await originalRecordBatch.apply(auditService, args)
+      throw new Error('验证批审计写入后整单回滚')
+    }
+    try {
+      await assert.rejects(() => orderService.commitAmendments({ amendments: batchInput }, actor), /验证批审计写入后整单回滚/)
+    } finally {
+      auditService.recordBatch = originalRecordBatch
+    }
+    assert.equal(await auditRepo.count(), beforeAudit)
+    assert.equal(await revisionRepo.count(), beforeRevision)
+    assert.equal((await latestCursor()).currentValue, beforeCursor.currentValue)
+    for (const order of batchOrders) {
+      const stored = await orderRepo.findOneByOrFail({ id: String(order.id) })
+      assert.equal(stored.businessNo, order.businessNo)
+      assert.equal(Number(stored.editVersion), Number(order.editVersion))
+    }
+    const committedBatch = await orderService.commitAmendments({ amendments: [...batchInput].reverse() }, actor)
+    assert.ok(committedBatch.ready)
+    assert.equal(await auditRepo.count(), beforeAudit + 2)
+    assert.equal(await revisionRepo.count(), beforeRevision + 2)
+    for (const item of batchInput) {
+      const stored = await orderRepo.findOneByOrFail({ id: item.orderId })
+      assert.equal(stored.businessNo, item.businessNo)
+      assert.equal(stored.remark, item.remark)
+      assert.equal(Number(stored.editVersion), item.editVersion + 1)
+    }
+
     const deleted = await submit('department')
     const deletedEntity = await orderRepo.findOneByOrFail({ id: String(deleted.order.id) })
     await orderService.softDeleteById(String(deletedEntity.id), actor, deletedEntity.businessNo)
@@ -240,6 +291,48 @@ async function main() {
       '提交时必须锁定并重验后台账号状态',
     )
     assert.equal((await orderRepo.findOneByOrFail({ id: String(disabledActorEntity.id) })).remark, null)
+
+    await AppDataSource.getRepository(SysUser).update(persistedActor.id, { status: 'enabled' })
+    const parentId = '9007199254740993'
+    const sourceId = '9007199254740995'
+    const parentUuid = randomUUID()
+    const sourceUuid = randomUUID()
+    const parentNumber = 'hyyz987654'
+    const sourceNumber = 'hyyz987655'
+    await AppDataSource.query(`
+      INSERT INTO biz_outbound_order (id, order_uuid, show_no, business_no, idempotency_key, status, customer_name)
+      VALUES (9007199254740992, ?, 'HIGH-DECOY', 'hyyz987653', 'high-decoy', 'active', '无关相邻订单'),
+             (9007199254740993, ?, 'HIGH-PARENT', ?, 'high-parent', 'active', '合并目标客户'),
+             (9007199254740995, ?, 'HIGH-SOURCE', ?, 'high-source', 'merged', '合并来源客户')
+    `, [randomUUID(), parentUuid, parentNumber, sourceUuid, sourceNumber])
+    await AppDataSource.query(`
+      INSERT INTO order_merge_operation (
+        id, operation_uuid, idempotency_key, request_hash, target_order_id, target_order_uuid,
+        target_edit_version, merged_source_order_ids_json, result_json, reason, actor_username, actor_display_name
+      ) VALUES (9007199254740993, ?, 'high-merge', 'test-only', 9007199254740993, ?, 1, ?, '{}', '高位主键验收', ?, ?)
+    `, [randomUUID(), parentUuid, JSON.stringify([sourceId]), actor.username, actor.displayName])
+    await AppDataSource.query(`
+      INSERT INTO order_merge_relation (
+        id, operation_id, parent_order_id, parent_order_uuid, parent_business_no_snapshot,
+        source_order_id, source_order_uuid, source_business_no_snapshot
+      ) VALUES (9007199254740993, 9007199254740993, 9007199254740993, ?, ?, 9007199254740995, ?, ?)
+    `, [parentUuid, parentNumber, sourceUuid, sourceNumber])
+    const { orderMergeService } = await import('../src/services/order-merge.service.js')
+    const parent = (await orderMergeService.getMetadataMap([parentId])).get(parentId)
+    assert.equal(parent?.role, 'parent')
+    assert.deepEqual(parent?.children.map((item) => item.id), [sourceId])
+    const source = (await orderMergeService.getMetadataMap([sourceId])).get(sourceId)
+    assert.equal(source?.role, 'source')
+    assert.equal(source?.parent?.id, parentId)
+    const highAmendment = { amendments: [{
+      orderId: parentId, editVersion: 1, customerName: '不允许结构修改', reason: '验证高位父单门禁',
+    }] }
+    const highPreview = await orderService.previewAmendments(highAmendment, actor)
+    assert.equal(highPreview.ready, false)
+    assert.match(highPreview.items[0]?.blockingReasons.join('；') ?? '', /合并目标父单禁止结构/)
+    await assert.rejects(() => orderService.commitAmendments(highAmendment, actor), /合并目标父单禁止结构/)
+    const [highStored] = await AppDataSource.query('SELECT customer_name AS customerName FROM biz_outbound_order WHERE id = 9007199254740993')
+    assert.equal(highStored.customerName, '合并目标客户')
   } finally {
     if (AppDataSource.isInitialized) await AppDataSource.destroy()
     cleanup()
