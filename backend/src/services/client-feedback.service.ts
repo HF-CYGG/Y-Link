@@ -13,7 +13,7 @@
 import { randomInt } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import { In, IsNull, LessThanOrEqual, MoreThan, type EntityManager } from 'typeorm'
+import { And, In, IsNull, LessThanOrEqual, MoreThan, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { initializeDatabaseInfrastructure } from '../database/database-strategy.js'
@@ -46,7 +46,10 @@ import { isRetryableMysqlTransactionError, isUniqueConstraintError } from '../ut
 import { BizError } from '../utils/errors.js'
 import { toSafeErrorLog } from '../utils/safe-error-log.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
-import { ensureUploadCategoryDir, IMAGE_UPLOAD_MAX_FILE_SIZE, isUploadPublicUrlForCategory, removeClientFeedbackUploadFile, UPLOAD_PUBLIC_FILE_NAME_MATCHER } from '../utils/upload-storage.js'
+import {
+  cleanupExpiredUploadTempFiles, ensureUploadCategoryDir, IMAGE_UPLOAD_MAX_FILE_SIZE,
+  isRecoverableUploadFileCleanupError, isUploadPublicUrlForCategory, UPLOAD_PUBLIC_FILE_NAME_MATCHER,
+} from '../utils/upload-storage.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
 import {
@@ -86,14 +89,18 @@ export interface ClientFeedbackAttachmentCleanupResult {
   scannedFiles: number
   removedExpiredDrafts: number
   removedOrphanFiles: number
+  removedTempFiles: number
   retainedReferencedFiles: number
   anomalies: ClientFeedbackAttachmentCleanupAnomaly[]
 }
 
-interface AttachmentTransactionResult<T> {
-  value: T
-  afterCommit?: () => Promise<void>
+interface AttachmentCleanupCandidate {
+  storageName: string
+  draft?: ClientFeedbackAttachment
 }
+
+const ATTACHMENT_CLEANUP_TRANSACTION_SIZE = 64
+const ATTACHMENT_CLEANUP_READ_SIZE = 500
 
 export const CLIENT_FEEDBACK_SUBJECT_MAX_LENGTH = 128
 export const CLIENT_FEEDBACK_CATEGORY_MAX_LENGTH = 32
@@ -352,6 +359,9 @@ class ClientFeedbackService {
   private attachmentCleanupTimer: ReturnType<typeof globalThis.setInterval> | null = null
 
   private attachmentCleanupInFlight: Promise<ClientFeedbackAttachmentCleanupResult> | null = null
+  private attachmentCleanupFileCursor = ''
+  private attachmentCleanupDraftCursor = ''
+  private attachmentCleanupTempCursor = ''
 
   private attachmentCleanupWorkerDesired = false
 
@@ -369,17 +379,14 @@ class ClientFeedbackService {
   }
 
   /**
-   * MySQL 用命名锁把全局容量检查、草稿建档与清理串到同一数据库协调域；锁保持到事务提交和
-   * 文件后处理结束。SQLite 则复用统一事务协调器，不再叠加无界进程 Promise 锁。
+   * MySQL 用命名锁协调容量检查、草稿建档与回收。SQLite 复用统一写事务队列。
    */
   private async runAttachmentCoordinatedTransaction<T>(
-    operation: (manager: EntityManager, isMysql: boolean) => Promise<AttachmentTransactionResult<T>>,
+    operation: (manager: EntityManager, isMysql: boolean) => Promise<T>,
   ): Promise<T> {
     const isMysql = AppDataSource.options.type === 'mysql'
     if (!isMysql) {
-      const result = await runInTransaction((manager) => operation(manager, false))
-      if (result.afterCommit) await result.afterCommit()
-      return result.value
+      return runInTransaction((manager) => operation(manager, false))
     }
 
     await initializeDatabaseInfrastructure(AppDataSource)
@@ -398,8 +405,7 @@ class ClientFeedbackService {
       }
       const result = await operation(queryRunner.manager, true)
       await queryRunner.commitTransaction()
-      if (result.afterCommit) await result.afterCommit()
-      return result.value
+      return result
     } catch (error) {
       if (queryRunner.isTransactionActive) await queryRunner.rollbackTransaction()
       throw error
@@ -534,14 +540,9 @@ class ClientFeedbackService {
         expiresAt: new Date(now.getTime() + CLIENT_FEEDBACK_ATTACHMENT_POLICY.draftTtlMs),
       }))
       return {
-        value: {
-          id: String(attachment.id),
-          name: attachment.originalName,
-          url: `/api/client-feedback/attachments/${attachment.id}`,
-          mimeType: attachment.mimeType,
-          size: attachment.sizeBytes,
-          expiresAt: attachment.expiresAt,
-        },
+        ...this.buildAttachmentReference(attachment),
+        id: String(attachment.id),
+        expiresAt: attachment.expiresAt,
       }
     })
   }
@@ -553,6 +554,15 @@ class ClientFeedbackService {
     }
     if (normalizedIds.some((id) => id.length > 64)) throw new BizError('反馈附件标识非法', 400)
     return normalizedIds
+  }
+
+  private buildAttachmentReference(row: ClientFeedbackAttachment) {
+    return {
+      name: row.originalName,
+      url: `/api/client-feedback/attachments/${row.id}`,
+      mimeType: row.mimeType,
+      size: row.sizeBytes,
+    }
   }
 
   private async resolveOwnedAttachmentReferencesInTransaction(
@@ -612,233 +622,250 @@ class ClientFeedbackService {
     }
   }
 
-  private async findMessageAttachmentReference(
-    manager: EntityManager,
-    input: { attachmentId?: string; storageName: string },
-  ): Promise<'referenced' | 'none' | 'uncertain'> {
-    const apiUrl = input.attachmentId ? `/api/client-feedback/attachments/${input.attachmentId}` : null
-    const storageUrl = `/uploads/client-feedback/${input.storageName}`
-    const query = manager.getRepository(ClientFeedbackMessage)
-      .createQueryBuilder('message')
-      // 引用检查按存储名/附件 ID 子串匹配，转义通配符后才是真正的“包含”判断。
-      .where("message.attachmentJson LIKE :storageNeedle ESCAPE '!'", { storageNeedle: buildSqlLikeContains(input.storageName) })
-    if (input.attachmentId) {
-      query.orWhere("message.attachmentJson LIKE :idNeedle ESCAPE '!'", { idNeedle: buildSqlLikeContains(input.attachmentId) })
-    }
-    const messages = await query.take(CLIENT_FEEDBACK_ATTACHMENT_POLICY.cleanupBatchSize).getMany()
-    let uncertain = false
-    for (const message of messages) {
-      let parsed: unknown
-      try {
-        parsed = JSON.parse(message.attachmentJson)
-      } catch {
-        uncertain = true
-        continue
+  private async groupAttachmentStorageRows(names: string[], manager: EntityManager = AppDataSource.manager) {
+    const result = new Map<string, ClientFeedbackAttachment[]>()
+    const repo = manager.getRepository(ClientFeedbackAttachment)
+    for (let start = 0; start < names.length; start += ATTACHMENT_CLEANUP_READ_SIZE) {
+      const rows = await repo.findBy({ storageName: In(names.slice(start, start + ATTACHMENT_CLEANUP_READ_SIZE)) })
+      for (const row of rows) {
+        const key = row.storageName.toLowerCase()
+        const matches = result.get(key) ?? []
+        matches.push(row)
+        result.set(key, matches)
       }
-      if (!Array.isArray(parsed)) {
-        uncertain = true
-        continue
-      }
-      const referenced = parsed.some((item) => {
-        if (!item || typeof item !== 'object') return false
-        const url = 'url' in item && typeof item.url === 'string' ? item.url.trim() : ''
-        return url === storageUrl
-          || url.includes(input.storageName)
-          || (apiUrl !== null && (url === apiUrl || url.includes(`/attachments/${input.attachmentId}`)))
-      })
-      if (referenced) return 'referenced'
     }
-    if (messages.length >= CLIENT_FEEDBACK_ATTACHMENT_POLICY.cleanupBatchSize) return 'uncertain'
-    return uncertain ? 'uncertain' : 'none'
+    return result
   }
 
-  private async removeOldOrphanFileIfStillEligible(storageName: string, cutoffTime: number): Promise<boolean> {
-    if (!UPLOAD_PUBLIC_FILE_NAME_MATCHER.test(storageName)) return false
-    const filePath = path.resolve(ensureUploadCategoryDir('client-feedback'), storageName)
-    if (path.dirname(filePath) !== ensureUploadCategoryDir('client-feedback')) return false
-    try {
-      const stats = await fs.promises.lstat(filePath)
-      if (!stats.isFile() || stats.mtimeMs > cutoffTime) return false
-      await removeClientFeedbackUploadFile(storageName)
-      return true
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
-      throw error
+  /** 批量定位候选文件的历史快照，所有消息读取和解析均在写锁之外。 */
+  private async collectHistoricalAttachmentReferences(candidates: AttachmentCleanupCandidate[]) {
+    const storageNames = new Map(candidates.map(({ storageName }) => [storageName.toLowerCase(), storageName]))
+    const draftNamesById = new Map(candidates.flatMap(({ storageName, draft }) => draft ? [[String(draft.id), storageName] as const] : []))
+    const references = new Map<string, 'referenced' | 'uncertain'>()
+    if (!candidates.length) return references
+
+    const repo = AppDataSource.getRepository(ClientFeedbackMessage)
+    const [lastMessage] = await repo.find({ select: ['id'], order: { id: 'DESC' }, take: 1 })
+    if (!lastMessage) return references
+    const uploadNamePattern = new RegExp(UPLOAD_PUBLIC_FILE_NAME_MATCHER.source.slice(1, -1), 'gi')
+    const record = (storageName: string | undefined, evidence: 'referenced' | 'uncertain') => {
+      if (storageName && references.get(storageName) !== 'referenced') references.set(storageName, evidence)
     }
+    const inspect = (text: string, evidence: 'referenced' | 'uncertain') => {
+      for (const match of text.matchAll(uploadNamePattern)) record(storageNames.get(match[0].toLowerCase()), evidence)
+      for (const match of text.matchAll(/\/attachments\/(\d+)/g)) record(draftNamesById.get(match[1]!), evidence)
+    }
+
+    // 消息只追加。新的合法引用只能绑定有效草稿或引用同会话已绑定附件，最终会二次校验登记行。
+    let after = '0'
+    while (true) {
+      const page = await repo.find({
+        select: ['id', 'attachmentJson'],
+        where: { id: And(MoreThan(after), LessThanOrEqual(String(lastMessage.id))) },
+        order: { id: 'ASC' },
+        take: ATTACHMENT_CLEANUP_READ_SIZE,
+      })
+      for (const { attachmentJson } of page) {
+        if (!attachmentJson || attachmentJson === '[]') continue
+        const items = this.parseJsonArray<unknown>(attachmentJson, [])
+        if (items.length > 0) {
+          for (const item of items) {
+            if (item && typeof item === 'object' && 'url' in item && typeof item.url === 'string') {
+              inspect(item.url, 'referenced')
+            }
+          }
+        } else {
+          inspect(attachmentJson.replaceAll('\\/', '/'), 'uncertain')
+          for (const match of attachmentJson.matchAll(/"attachmentId"\s*:\s*"?(\d+)/g)) {
+            record(draftNamesById.get(match[1]!), 'uncertain')
+          }
+        }
+      }
+      if (page.length < ATTACHMENT_CLEANUP_READ_SIZE || references.size === candidates.length) return references
+      after = String(page.at(-1)!.id)
+    }
+  }
+
+  private async removeExpiredAttachmentDrafts(
+    candidates: ClientFeedbackAttachment[],
+    now: Date,
+    anomalies: ClientFeedbackAttachmentCleanupAnomaly[],
+  ) {
+    if (!candidates.length) return []
+    return this.runAttachmentCoordinatedTransaction(async (manager, isMysql) => {
+      const owners = await manager.getRepository(ClientUser).find({
+        select: ['id'],
+        where: { id: In([...new Set(candidates.map((item) => item.ownerClientUserId))]) },
+        order: { id: 'ASC' },
+        lock: isMysql ? { mode: 'pessimistic_write' } : undefined,
+      })
+      const ownerIds = new Set(owners.map(({ id }) => String(id)))
+      const stored = await this.groupAttachmentStorageRows(candidates.map((item) => item.storageName), manager)
+      const removable: ClientFeedbackAttachment[] = []
+      for (const previous of candidates) {
+        const matches = stored.get(previous.storageName.toLowerCase()) ?? []
+        if (matches.length > 1) {
+          anomalies.push({ storageName: previous.storageName, reason: '同一存储名存在多条附件记录，保留待人工核查' })
+          continue
+        }
+        const current = matches[0]
+        if (!current || String(previous.id) !== String(current.id) || current.storageName !== previous.storageName
+          || current.ownerClientUserId !== previous.ownerClientUserId || current.messageId || current.conversationId
+          || !current.expiresAt || current.expiresAt > now) continue
+        if (!ownerIds.has(String(current.ownerClientUserId))) {
+          anomalies.push({ storageName: current.storageName, reason: '草稿所属用户不存在，保留记录与文件待人工核查' })
+          continue
+        }
+        removable.push(current)
+      }
+      if (removable.length) await manager.getRepository(ClientFeedbackAttachment).delete(removable.map(({ id }) => id))
+      return removable.map(({ storageName }) => storageName)
+    })
+  }
+
+  private async removeUnregisteredAttachmentFiles(
+    directory: string,
+    expirationByName: ReadonlyMap<string, number>,
+    anomalies: ClientFeedbackAttachmentCleanupAnomaly[],
+  ) {
+    if (!expirationByName.size || !(await fs.promises.lstat(directory)).isDirectory()) return new Set<string>()
+    return this.runAttachmentCoordinatedTransaction(async (manager) => {
+      const rows = await this.groupAttachmentStorageRows([...expirationByName.keys()], manager)
+      const removed = new Set<string>()
+      for (const [storageName, cutoff] of expirationByName) {
+        if (rows.has(storageName.toLowerCase())) continue
+        const file = path.join(directory, storageName)
+        try {
+          const info = await fs.promises.lstat(file)
+          if (!info.isFile() || info.mtimeMs > cutoff) continue
+          await fs.promises.unlink(file)
+          removed.add(storageName)
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+          if (!isRecoverableUploadFileCleanupError(error)) throw error
+          anomalies.push({ storageName, reason: '附件文件无法访问或正在使用，保留待下次核查' })
+        }
+      }
+      return removed
+    })
   }
 
   private async performAttachmentCleanup(): Promise<ClientFeedbackAttachmentCleanupResult> {
     const now = new Date()
-    const orphanCutoffTime = now.getTime() - CLIENT_FEEDBACK_ATTACHMENT_POLICY.orphanGraceMs
-    const uploadDirectory = ensureUploadCategoryDir('client-feedback')
-    const directoryEntries = await fs.promises.readdir(uploadDirectory, { withFileTypes: true })
+    const { orphanGraceMs, cleanupBatchSize, tempFileGraceMs } = CLIENT_FEEDBACK_ATTACHMENT_POLICY
+    const orphanCutoffTime = now.getTime() - orphanGraceMs
+    const directory = ensureUploadCategoryDir('client-feedback')
     const anomalies: ClientFeedbackAttachmentCleanupAnomaly[] = []
-    const oldUuidStorageNames: string[] = []
+    const directoryIsSafe = (await fs.promises.lstat(directory)).isDirectory()
+    const entries = directoryIsSafe
+      ? await fs.promises.readdir(directory, { withFileTypes: true })
+      : []
+    const names = entries.flatMap((entry) => {
+      if (entry.isFile() && UPLOAD_PUBLIC_FILE_NAME_MATCHER.test(entry.name)) return [entry.name]
+      if (anomalies.length < cleanupBatchSize) {
+        anomalies.push({ storageName: entry.name, reason: '目录项不是受控 UUID 普通文件，保留待人工核查' })
+      }
+      return []
+    }).sort()
+    const scanLimit = Math.max(1_000, cleanupBatchSize * 2)
+    const scanPage = names.filter((name) => name > this.attachmentCleanupFileCursor).slice(0, scanLimit)
+    const drafts = !directoryIsSafe ? [] : await this.attachmentRepo.find({
+      where: {
+        id: MoreThan(this.attachmentCleanupDraftCursor || '0'),
+        expiresAt: LessThanOrEqual(now), conversationId: IsNull(), messageId: IsNull(),
+      },
+      order: { id: 'ASC' },
+      take: cleanupBatchSize,
+    })
+    const stored = await this.groupAttachmentStorageRows([...new Set([...scanPage, ...drafts.map(({ storageName }) => storageName)])])
+    const candidates: AttachmentCleanupCandidate[] = []
+    for (const draft of drafts) {
+      if (!UPLOAD_PUBLIC_FILE_NAME_MATCHER.test(draft.storageName)) {
+        anomalies.push({ storageName: draft.storageName, reason: '草稿存储名不符合受控 UUID 规则，保留待人工核查' })
+      } else if (stored.get(draft.storageName.toLowerCase())?.length !== 1) {
+        anomalies.push({ storageName: draft.storageName, reason: '草稿存储名对应的登记记录不一致，保留待人工核查' })
+      } else {
+        candidates.push({ storageName: draft.storageName, draft })
+      }
+    }
 
-    for (const entry of directoryEntries) {
-      if (!UPLOAD_PUBLIC_FILE_NAME_MATCHER.test(entry.name)) {
-        anomalies.push({ storageName: entry.name, reason: '文件名不符合受控 UUID 规则，保留待人工核查' })
+    let retainedReferencedFiles = 0
+    let orphanCount = 0
+    const observedBindings: ClientFeedbackAttachment[] = []
+    let visitedName = ''
+    for (const storageName of scanPage) {
+      visitedName = storageName
+      const matches = stored.get(storageName.toLowerCase()) ?? []
+      const attachment = matches[0]
+      if (attachment) {
+        retainedReferencedFiles += 1
+        if (matches.length > 1 || Boolean(attachment.conversationId) !== Boolean(attachment.messageId)) {
+          anomalies.push({ storageName, reason: '附件登记或绑定关系不一致，保留待人工核查' })
+        } else if (attachment.messageId && attachment.conversationId) {
+          observedBindings.push(attachment)
+        }
         continue
       }
-      if (!entry.isFile()) {
-        anomalies.push({ storageName: entry.name, reason: '目录项不是普通文件，保留待人工核查' })
-        continue
-      }
-      if (oldUuidStorageNames.length >= CLIENT_FEEDBACK_ATTACHMENT_POLICY.cleanupBatchSize) continue
       try {
-        const stats = await fs.promises.lstat(path.resolve(uploadDirectory, entry.name))
-        if (stats.isFile() && stats.mtimeMs <= orphanCutoffTime) oldUuidStorageNames.push(entry.name)
+        const info = await fs.promises.lstat(path.join(directory, storageName))
+        if (info.isFile() && info.mtimeMs <= orphanCutoffTime) {
+          candidates.push({ storageName })
+          orphanCount += 1
+          if (orphanCount >= cleanupBatchSize) break
+        }
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-          anomalies.push({ storageName: entry.name, reason: '读取文件状态失败，保留待下次核查' })
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+        if (!isRecoverableUploadFileCleanupError(error)) throw error
+        anomalies.push({ storageName, reason: '附件文件无法访问或正在使用，保留待下次核查' })
+      }
+    }
+
+    for (let start = 0; start < observedBindings.length; start += ATTACHMENT_CLEANUP_READ_SIZE) {
+      const watched = observedBindings.slice(start, start + ATTACHMENT_CLEANUP_READ_SIZE)
+      const messages = await AppDataSource.getRepository(ClientFeedbackMessage).findBy({ id: In(watched.map(({ messageId }) => messageId!)) })
+      const byId = new Map(messages.map((message) => [String(message.id), message]))
+      for (const attachment of watched) {
+        const message = byId.get(attachment.messageId!)
+        if (!message || String(message.conversationId) !== String(attachment.conversationId)
+          || !this.messageReferencesBoundAttachment(message, attachment)) {
+          anomalies.push({ storageName: attachment.storageName, reason: '附件登记与绑定消息快照不一致，保留待人工核查' })
         }
       }
     }
 
-    return this.runAttachmentCoordinatedTransaction(async (manager, isMysql) => {
-      const attachmentRepo = manager.getRepository(ClientFeedbackAttachment)
-      const expiredDraftCandidates = await attachmentRepo.find({
-        where: {
-          expiresAt: LessThanOrEqual(now),
-          conversationId: IsNull(),
-          messageId: IsNull(),
-        },
-        order: { ownerClientUserId: 'ASC', expiresAt: 'ASC', id: 'ASC' },
-        take: CLIENT_FEEDBACK_ATTACHMENT_POLICY.cleanupBatchSize,
+    const references = await this.collectHistoricalAttachmentReferences(candidates)
+    const eligible = candidates.filter(({ storageName, draft }) => {
+      const evidence = references.get(storageName)
+      if (!evidence) return true
+      if (!draft) retainedReferencedFiles += 1
+      anomalies.push({
+        storageName,
+        reason: evidence === 'uncertain' ? '消息附件历史格式无法确认，保留待人工核查' : '文件仍被历史消息引用，保留待人工核查',
       })
-      const ownerIds = [...new Set(expiredDraftCandidates.map((item) => item.ownerClientUserId))].sort()
-      const expiredFilesAfterCommit: string[] = []
-
-      for (const ownerId of ownerIds) {
-        const owner = await this.lockAttachmentOwner(manager, ownerId, false)
-        if (!owner) {
-          for (const item of expiredDraftCandidates.filter((candidate) => candidate.ownerClientUserId === ownerId)) {
-            anomalies.push({ storageName: item.storageName, reason: '草稿所属用户不存在，保留记录与文件待人工核查' })
-          }
-          continue
-        }
-        const currentExpiredDrafts = await attachmentRepo.find({
-          where: {
-            ownerClientUserId: ownerId,
-            expiresAt: LessThanOrEqual(now),
-            conversationId: IsNull(),
-            messageId: IsNull(),
-          },
-          order: { expiresAt: 'ASC', id: 'ASC' },
-          take: CLIENT_FEEDBACK_ATTACHMENT_POLICY.cleanupBatchSize,
-        })
-        const removableIds: string[] = []
-        for (const attachment of currentExpiredDrafts) {
-          if (!UPLOAD_PUBLIC_FILE_NAME_MATCHER.test(attachment.storageName)) {
-            anomalies.push({ storageName: attachment.storageName, reason: '草稿存储名不符合受控 UUID 规则，保留待人工核查' })
-            continue
-          }
-          const sameStorageRows = await attachmentRepo.find({
-            where: { storageName: attachment.storageName },
-            take: 2,
-          })
-          if (sameStorageRows.length > 1) {
-            anomalies.push({ storageName: attachment.storageName, reason: '同一存储名存在多条附件记录，保留待人工核查' })
-            continue
-          }
-          const reference = await this.findMessageAttachmentReference(manager, {
-            attachmentId: attachment.id,
-            storageName: attachment.storageName,
-          })
-          if (reference !== 'none') {
-            anomalies.push({
-              storageName: attachment.storageName,
-              reason: reference === 'referenced'
-                ? '过期草稿仍被消息历史引用，保留待人工核查'
-                : '消息附件历史格式无法确认，保留待人工核查',
-            })
-            continue
-          }
-          removableIds.push(attachment.id)
-          expiredFilesAfterCommit.push(attachment.storageName)
-        }
-        if (removableIds.length) await attachmentRepo.delete(removableIds)
-      }
-
-      const expiredFileSet = new Set(expiredFilesAfterCommit)
-      const orphanFiles: string[] = []
-      let retainedReferencedFiles = 0
-      for (const storageName of oldUuidStorageNames) {
-        if (expiredFileSet.has(storageName)) continue
-        const rows = await attachmentRepo.find({ where: { storageName }, take: 2 })
-        if (rows.length > 1) {
-          anomalies.push({ storageName, reason: '同一存储名存在多条附件记录，保留待人工核查' })
-          continue
-        }
-        const attachment = rows[0]
-        if (attachment) {
-          if (Boolean(attachment.conversationId) !== Boolean(attachment.messageId)) {
-            anomalies.push({ storageName, reason: '附件会话与消息关系不完整，保留待人工核查' })
-            continue
-          }
-          if (attachment.conversationId && attachment.messageId) {
-            const message = await manager.getRepository(ClientFeedbackMessage).findOne({
-              where: { id: attachment.messageId, conversationId: attachment.conversationId },
-            })
-            if (!message) {
-              anomalies.push({ storageName, reason: '附件指向的消息关系不存在，保留待人工核查' })
-              continue
-            }
-            const reference = await this.findMessageAttachmentReference(manager, {
-              attachmentId: attachment.id,
-              storageName,
-            })
-            if (reference !== 'referenced') {
-              anomalies.push({ storageName, reason: '附件记录与消息附件快照不一致，保留待人工核查' })
-              continue
-            }
-          }
-          retainedReferencedFiles += 1
-          continue
-        }
-
-        const historicalReference = await this.findMessageAttachmentReference(manager, { storageName })
-        if (historicalReference !== 'none') {
-          retainedReferencedFiles += 1
-          anomalies.push({
-            storageName,
-            reason: historicalReference === 'referenced'
-              ? '文件仅被历史消息快照引用，缺少附件记录，保留待人工核查'
-              : '消息附件历史格式无法确认，保留待人工核查',
-          })
-          continue
-        }
-        orphanFiles.push(storageName)
-      }
-
-      let removedOrphanFiles = 0
-      if (!isMysql) {
-        for (const storageName of orphanFiles) {
-          if (await this.removeOldOrphanFileIfStillEligible(storageName, orphanCutoffTime)) removedOrphanFiles += 1
-        }
-      }
-
-      const cleanupResult: ClientFeedbackAttachmentCleanupResult = {
-        scannedFiles: directoryEntries.length,
-        removedExpiredDrafts: expiredFilesAfterCommit.length,
-        removedOrphanFiles,
-        retainedReferencedFiles,
-        anomalies,
-      }
-      return {
-        value: cleanupResult,
-        afterCommit: async () => {
-          for (const storageName of expiredFilesAfterCommit) await removeClientFeedbackUploadFile(storageName)
-          if (isMysql) {
-            for (const storageName of orphanFiles) {
-              if (await this.removeOldOrphanFileIfStillEligible(storageName, orphanCutoffTime)) {
-                cleanupResult.removedOrphanFiles += 1
-              }
-            }
-          }
-        },
-      }
+      return false
     })
+
+    let removedExpiredDrafts = 0
+    let removedOrphanFiles = 0
+    for (let start = 0; start < eligible.length; start += ATTACHMENT_CLEANUP_TRANSACTION_SIZE) {
+      const batch = eligible.slice(start, start + ATTACHMENT_CLEANUP_TRANSACTION_SIZE)
+      const expired = await this.removeExpiredAttachmentDrafts(batch.flatMap(({ draft }) => draft ? [draft] : []), now, anomalies)
+      removedExpiredDrafts += expired.length
+      const cutoffByName = new Map(batch.filter(({ draft }) => !draft).map(({ storageName }) => [storageName, orphanCutoffTime]))
+      for (const storageName of expired) cutoffByName.set(storageName, now.getTime())
+      // 全部文件在删除前重新确认未登记。过期草稿必须先提交数据库删除，不能在回滚后遗留错误记录。
+      const removed = await this.removeUnregisteredAttachmentFiles(directory, cutoffByName, anomalies)
+      removedOrphanFiles += batch.filter(({ draft, storageName }) => !draft && removed.has(storageName)).length
+    }
+
+    const temp = await cleanupExpiredUploadTempFiles(now.getTime() - tempFileGraceMs, cleanupBatchSize, this.attachmentCleanupTempCursor)
+    for (const storageName of temp.failed) {
+      anomalies.push({ storageName, reason: '临时文件无法访问或正在使用，保留待下次核查' })
+    }
+    this.attachmentCleanupTempCursor = temp.cursor
+    this.attachmentCleanupDraftCursor = drafts.length === cleanupBatchSize ? String(drafts.at(-1)!.id) : ''
+    this.attachmentCleanupFileCursor = visitedName && visitedName !== names.at(-1) ? visitedName : ''
+    return { scannedFiles: entries.length, removedExpiredDrafts, removedOrphanFiles, removedTempFiles: temp.removed, retainedReferencedFiles, anomalies }
   }
 
   async runAttachmentCleanupOnce(): Promise<ClientFeedbackAttachmentCleanupResult> {
@@ -893,8 +920,13 @@ class ClientFeedbackService {
       where: { id: attachment.messageId, conversationId: attachment.conversationId },
     })
     if (!message) return false
+    return this.messageReferencesBoundAttachment(message, attachment)
+  }
+
+  private messageReferencesBoundAttachment(message: ClientFeedbackMessage, attachment: ClientFeedbackAttachment) {
+    const { url } = this.buildAttachmentReference(attachment)
     return this.parseJsonArray<ClientFeedbackMessageAttachment>(message.attachmentJson, [])
-      .some((item) => item.url === `/api/client-feedback/attachments/${attachment.id}`)
+      .some((item) => item?.url === url)
   }
 
   async getAttachmentForClient(id: string, clientAuth: ClientAuthContext) {

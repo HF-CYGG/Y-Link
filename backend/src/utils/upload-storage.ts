@@ -88,6 +88,46 @@ export const buildUploadPublicUrl = (category: UploadCategory, fileName: string)
 
 export const UPLOAD_PUBLIC_FILE_NAME_MATCHER =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(?:jpg|jpeg|png|webp|gif)$/i
+const UPLOAD_TEMP_FILE_NAME_MATCHER = new RegExp(
+  `^(?:products|client-feedback)-${UPLOAD_PUBLIC_FILE_NAME_MATCHER.source.slice(1)}`,
+)
+
+/** 文件权限或占用可在后续轮次恢复。目录不可读、设备故障等错误由调用方报告。 */
+export function isRecoverableUploadFileCleanupError(error: unknown) {
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  return code === 'EACCES' || code === 'EPERM' || code === 'EBUSY' || code === 'ETXTBSY'
+}
+
+/** 仅回收当前上传器产生的超时临时文件，按名称推进以遍历共享目录。 */
+export async function cleanupExpiredUploadTempFiles(cutoffTime: number, limit: number, after: string) {
+  const failed: string[] = []
+  try {
+    if (!(await fs.promises.lstat(UPLOAD_TEMP_DIR)).isDirectory()) return { removed: 0, cursor: '', failed }
+    const entries = await fs.promises.readdir(UPLOAD_TEMP_DIR, { withFileTypes: true })
+    const names = entries.filter((entry) => entry.isFile() && UPLOAD_TEMP_FILE_NAME_MATCHER.test(entry.name))
+      .map(({ name }) => name).sort()
+    const page = names.filter((name) => name > after).slice(0, limit)
+    let removed = 0
+    for (const name of page) {
+      const file = path.join(UPLOAD_TEMP_DIR, name)
+      try {
+        const info = await fs.promises.lstat(file)
+        if (info.isFile() && info.mtimeMs <= cutoffTime) {
+          await fs.promises.unlink(file)
+          removed += 1
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+        if (!isRecoverableUploadFileCleanupError(error)) throw error
+        failed.push(name)
+      }
+    }
+    return { removed, cursor: page.length === limit ? page.at(-1)! : '', failed }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { removed: 0, cursor: '', failed }
+    throw error
+  }
+}
 
 export const isUploadPublicUrlForCategory = (category: UploadCategory, value: string) => {
   const normalizedValue = value.trim()
