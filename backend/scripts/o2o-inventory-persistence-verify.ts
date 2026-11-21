@@ -12,6 +12,7 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { QueryFailedError } from 'typeorm'
 import type { Connection } from 'mysql2/promise'
 import type { AuthUserContext } from '../src/types/auth.js'
 import type { ClientAuthContext } from '../src/types/client-auth.js'
@@ -67,6 +68,8 @@ try {
   const { AppDataSource } = await import('../src/config/data-source.js')
   const { initializeDatabaseInfrastructure } = await import('../src/database/database-strategy.js')
   const { runInTransaction } = await import('../src/config/transaction-runner.js')
+  const { databaseOperationGate } = await import('../src/database/operation-gate.js')
+  const { readMallCatalogRevision } = await import('../src/services/mall-catalog-revision.service.js')
   const { BaseProduct } = await import('../src/entities/base-product.entity.js')
   const { BaseProductSku } = await import('../src/entities/base-product-sku.entity.js')
   const { BaseStorageLocation } = await import('../src/entities/base-storage-location.entity.js')
@@ -438,6 +441,55 @@ try {
   assert.equal(await audits.count(), beforeFailure.audits)
   assert.equal((await preorders.findOneByOrFail({ id: failedOrder.order.id })).status, 'pending')
   await verify(failedOrder)
+
+  // 一个到期单失败不回滚其余单；已进入事务的单完成后，冻结阻止本轮开启下一笔。
+  const timeouts = [await createProduct(), await createProduct(), await createProduct()]
+  const due = []
+  const cutoff = Date.now() - 60_000
+  for (const [index, fixture] of timeouts.entries()) {
+    const order = await place(fixture)
+    await preorders.update(order.order.id, { timeoutAt: new Date(cutoff + index * 1000) })
+    due.push(order.order.id)
+  }
+  const [failingId, committingId, frozenId] = due as [string, string, string]
+  const beforeRecycleRevision = readMallCatalogRevision()
+  let freeze: ReturnType<typeof databaseOperationGate.freeze> | undefined
+  let committingAttempts = 0
+  auditService.record = async (...args: Parameters<typeof originalAudit>) => {
+    if (args[0].actionType !== 'o2o.preorder.cancel_by_system') return originalAudit.apply(auditService, args)
+    if (args[0].targetId === failingId) throw new Error('O2O_TIMEOUT_AUDIT_FAILURE')
+    if (args[0].targetId === committingId) {
+      committingAttempts += 1
+      if (mode === 'mysql' && committingAttempts === 1) {
+        throw new QueryFailedError('超时事务短重试夹具', [], Object.assign(new Error('受控锁冲突'), {
+          code: 'ER_LOCK_DEADLOCK', errno: 1213,
+        }))
+      }
+      const saved = await originalAudit.apply(auditService, args)
+      freeze = databaseOperationGate.freeze()
+      return saved
+    }
+    return originalAudit.apply(auditService, args)
+  }
+  try {
+    assert.equal((await service.cancelTimeoutOrders()).cancelledCount, 1)
+    assert.ok(freeze?.active, '首笔已提交的回收触发冻结')
+    assert.equal(readMallCatalogRevision(), beforeRecycleRevision + 1, '冻结不吞掉本批已提交释放的目录失效')
+  } finally {
+    auditService.record = originalAudit
+    freeze?.release()
+  }
+  assert.equal(committingAttempts, mode === 'mysql' ? 2 : 1)
+  assert.equal((await preorders.findOneByOrFail({ id: failingId })).status, 'pending')
+  assert.equal((await preorders.findOneByOrFail({ id: committingId })).status, 'cancelled')
+  assert.equal((await preorders.findOneByOrFail({ id: frozenId })).status, 'pending')
+  assert.deepEqual(await Promise.all(timeouts.map(async (fixture) => (await stock(fixture)).held)), [1, 0, 1])
+  assert.equal((await service.cancelTimeoutOrders()).cancelledCount, 2)
+  assert.equal((await service.cancelTimeoutOrders()).cancelledCount, 0)
+  for (const id of due) {
+    assert.equal(await logs.countBy({ refId: id, changeType: 'preorder_release' }), 1, '每单只释放一次预占')
+    assert.equal(await audits.countBy({ actionType: 'o2o.preorder.cancel_by_system', targetId: id }), 1, '回滚与重试不得重复审计')
+  }
 
   // 两商品逆序输入并发下单、不同操作者并发核销，不扩大到全仓压力测试。
   const left = await createProduct()

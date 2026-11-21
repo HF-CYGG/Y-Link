@@ -111,13 +111,19 @@ const main = async () => {
   assert.ok(verifiedOrders.every((order) => /^PRE-D-\d{6}$/.test(order.preorderNo)), '部门预订单夹具必须使用 PRE-D 编号')
   assert.ok([...pendingOrders, ...cancelledOrders, deletedOrder].every((order) => /^PRE-W-\d{6}$/.test(order.preorderNo)), '散客预订单夹具必须使用 PRE-W 编号')
 
-  for (const [index, order] of [verifiedOrders[0]!, cancelledOrders[0]!, verifiedOrders[0]!].entries()) {
+  const returnOrders = [
+    [verifiedOrders[0]!, 'pending'],
+    [cancelledOrders[0]!, 'rejected'],
+    [verifiedOrders[0]!, 'verified'],
+    [deletedOrder, 'pending'],
+  ] as const
+  for (const [index, [order, status]] of returnOrders.entries()) {
     await returnRepo.save(returnRepo.create({
       returnNo: `POOLRT${index}`,
       orderId: order.id,
       clientUserId: client.id,
       verifyCode: `pool-return-${runId}-${index}`,
-      status: 'pending',
+      status,
       sourceOrderStatus: order.status,
       reason: '订单池退货分栏验收',
       totalQty: 1,
@@ -153,7 +159,7 @@ const main = async () => {
   assert.deepEqual(
     returnsPage.list.map((item) => String(item.id)).sort(),
     [String(verifiedOrders[0]!.id), String(cancelledOrders[0]!.id)].sort(),
-    '退货分栏必须按是否存在退货申请筛选',
+    '退货分栏须包含各退货状态、按预订单去重并排除软删除订单',
   )
 
   const cancelledPage = await o2oPreorderService.listConsoleOrderPool({ pool: 'cancelled' })
@@ -337,7 +343,9 @@ const main = async () => {
     assert.equal(boundary.newOrderCount, 2, '新单窗口 -1ms 排除，等于和 +1ms 包含；仅 pending 且未删除')
     assert.equal(boundary.poolCounts.returns, 2, '跨状态退货且重复申请只计一单')
     const baseQueries = statements.filter((query) => /FROM ["`]o2o_preorder["`] ["`]order["`]/.test(query))
-    assert.equal(baseQueries.length, 3, '非空页基础查询必须合并为聚合、退货 EXISTS、分页三条')
+    assert.equal(baseQueries.length, 3, '非空页基础查询必须合并为聚合、退货计数、分页三条')
+    const returnCountQuery = baseQueries.find((query) => /FROM ["`]o2o_return_request["`] ["`]rr["`]/.test(query)) ?? ''
+    assert.match(returnCountQuery, /COUNT\(DISTINCT [^)]*order_id[^)]*\).*INNER JOIN/is, '退货计数从申请侧按预订单去重')
     assert.ok(baseQueries.some((query) => /CAST\(MAX\(/.test(query)), 'ID 必须先数值 MAX 后转文本')
     statements.length = 0
     const empty = await o2oPreorderService.listConsoleOrderPool({ departmentName: '不存在部门', page: 99 })

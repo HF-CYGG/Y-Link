@@ -23,6 +23,8 @@ import { O2oReturnRequest } from '../src/entities/o2o-return-request.entity.js'
 import { OrderRevision } from '../src/entities/order-revision.entity.js'
 import { SysAuditLog } from '../src/entities/sys-audit-log.entity.js'
 import { SysUser } from '../src/entities/sys-user.entity.js'
+import { BUSINESS_DATA_CACHE_GENERATION } from '../src/middleware/business-data-cache.middleware.js'
+import { getOrLoadSharedVersioned } from '../src/redis/redis-cache.js'
 import { authService } from '../src/services/auth.service.js'
 import { clientAuthService } from '../src/services/client-auth.service.js'
 import { installCaptchaServiceForTesting } from '../src/services/captcha.service.js'
@@ -32,6 +34,7 @@ import { orderService } from '../src/services/order.service.js'
 import { orderBusinessNoService } from '../src/services/order-business-no.service.js'
 import { auditService } from '../src/services/audit.service.js'
 import { productService } from '../src/services/product.service.js'
+import { reportService } from '../src/services/report.service.js'
 import { systemConfigService } from '../src/services/system-config.service.js'
 import type { AuthUserContext } from '../src/types/auth.js'
 import type { ClientAuthContext } from '../src/types/client-auth.js'
@@ -878,9 +881,24 @@ const run = async () => {
     null,
     '正式单继承后必须清空预留，避免一个号占用两处',
   )
+  let reportLoads = 0
+  const readCustomerOrderReportFlag = () => getOrLoadSharedVersioned(
+    BUSINESS_DATA_CACHE_GENERATION,
+    `verify-customer-order-print:${reservedBusinessNo}`,
+    30_000,
+    async () => {
+      reportLoads += 1
+      const report = await reportService.query('outbound-flow', { pageSize: 100, fields: ['businessNo', 'hasCustomerOrder'] })
+      return report.list.find((row) => row.businessNo === reservedBusinessNo)?.hasCustomerOrder ?? null
+    },
+  )
+  assert.equal(await readCustomerOrderReportFlag(), '否')
   const printedDepartmentOrder = await o2oPreorderService.markCustomerOrderPrintedByClient(clientAuth, departmentSnapshotPreorder.order.id)
   assert.equal(printedDepartmentOrder.detail.order.hasCustomerOrder, true, '已核销的有效部门订单仍应支持补打出库单')
+  assert.equal(await readCustomerOrderReportFlag(), '是', '首次打印提交后必须立即淘汰旧的出库流水报表')
   assert.equal((await o2oPreorderService.markCustomerOrderPrintedByClient(clientAuth, departmentSnapshotPreorder.order.id)).printedNow, false, '重复打印上报必须幂等')
+  assert.equal(await readCustomerOrderReportFlag(), '是')
+  assert.equal(reportLoads, 2, '重复打印不得再次淘汰出库流水报表')
   await expectBizError(() => o2oPreorderService.markCustomerOrderPrintedByClient(clientAuth, departmentOwnedResult.order.id), '已取消订单不可标记已打印')
   const departmentSnapshotDetail = assertPreorderVerifyDetail(departmentSnapshotVerified)
   assert.equal(departmentSnapshotDetail.order.clientOrderType, 'department')

@@ -7,11 +7,12 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto'
+import { setTimeout as delay } from 'node:timers/promises'
 import { kingdeeRegistrationView, normalizeKingdeeVoucherNo, type KingdeeStatus } from '../utils/kingdee-registration.js'
 import { Brackets, type EntityManager, In, IsNull, Not, type SelectQueryBuilder } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
-import { databaseOperationGate } from '../database/operation-gate.js'
+import { DatabaseWriteFrozenError, databaseOperationGate } from '../database/operation-gate.js'
 import { MAX_DATABASE_INT, MAX_O2O_ORDER_ITEM_COUNT } from '../constants/web-resource-limits.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { BaseProductSku } from '../entities/base-product-sku.entity.js'
@@ -41,6 +42,7 @@ import { O2oReturnRequestItem } from '../entities/o2o-return-request-item.entity
 import type { AuthUserContext } from '../types/auth.js'
 import type { ClientAuthContext } from '../types/client-auth.js'
 import { BizError } from '../utils/errors.js'
+import { toSafeErrorLog } from '../utils/safe-error-log.js'
 import { buildSqlLikeContains, buildSqlLikePrefix, escapeSqlLikePattern } from '../utils/sql-like.js'
 import {
   isRetryableMysqlTransactionError,
@@ -63,6 +65,7 @@ import {
   invalidateMallCatalogReadCache,
   readMallCatalogClusterRevision,
   readMallCatalogRevision,
+  subscribeMallCatalogRemoteInvalidation,
 } from './mall-catalog-revision.service.js'
 import { buildSkuLogFields, persistLockedInventoryStocks, skuContributesToProductAggregate, snapshotSkuStock } from './inventory-ledger.service.js'
 import { formatLocationDeductions, reconcileSkuLocationStockTransitions } from './sku-location-stock.service.js'
@@ -543,6 +546,7 @@ const O2O_TIMEOUT_RECYCLE_RECENT_WINDOW_MS = 15 * 1000
 const O2O_TIMEOUT_BACKGROUND_RECYCLE_INTERVAL_MS = 60 * 1000
 const O2O_TIMEOUT_RECYCLE_BATCH_SIZE = 20
 const O2O_TIMEOUT_RECYCLE_MAX_BATCHES = 5
+const O2O_TIMEOUT_RECYCLE_MYSQL_ATTEMPTS = 3
 // L1 只保留“目录 + 门店配置”两个固定槽位，因此内存占用有明确上界。
 const O2O_MALL_CATALOG_FRESH_TTL_MS = 2_000
 const O2O_MALL_CATALOG_STALE_TTL_MS = 30_000
@@ -550,9 +554,11 @@ const O2O_MALL_STOREFRONT_FRESH_TTL_MS = 5_000
 const O2O_MALL_STOREFRONT_STALE_TTL_MS = 60_000
 // 销量是展示统计，不参与下单正确性；单独缓存以避免反复扫描全部历史核销明细。
 const O2O_MALL_SOLD_QTY_TTL_MS = 60_000
+const O2O_MALL_REFRESH_ATTEMPTS = 2
 
 const canViewSystemNo = (actor?: Pick<AuthUserContext, 'role'>): boolean => actor?.role === 'admin'
 const MYSQL_IDEMPOTENT_TRANSACTION_MAX_ATTEMPTS = 3
+const waitForMysqlTransactionRetry = (attempt: number) => delay(25 * (2 ** (attempt - 1)) + Math.floor(Math.random() * 25))
 
 class O2oPreorderService {
   private readonly productRepo = AppDataSource.getRepository(BaseProduct)
@@ -578,6 +584,7 @@ class O2oPreorderService {
   private mallSoldQtyRefreshInFlight: Promise<{ key: string; revision: number; data: Map<string, number> }> | null = null
 
   constructor() {
+    subscribeMallCatalogRemoteInvalidation(() => this.invalidateMallSoldQtyCache())
     databaseOperationGate.registerWorker({
       name: 'o2o-timeout-recycle',
       pause: () => this.pauseTimeoutRecycleLoop(),
@@ -607,11 +614,7 @@ class O2oPreorderService {
         if (attempt >= maxAttempts || !isRetryableMysqlTransactionError(error)) {
           throw error
         }
-        const baseDelayMs = 25 * (2 ** (attempt - 1))
-        const jitterMs = Math.floor(Math.random() * 25)
-        await new Promise<void>((resolve) => {
-          setTimeout(resolve, baseDelayMs + jitterMs)
-        })
+        await waitForMysqlTransactionRetry(attempt)
       }
     }
     throw new Error('下单事务重试次数已耗尽')
@@ -1697,12 +1700,13 @@ class O2oPreorderService {
   // - 已撤单、超时的预订单不再对外展示预留号，但号本身继续占用；
   // - 命中后以预订单 ID 为键，便于前端页面继续保留原订单实体，同时替换展示单号。
   private async resolveCustomerOrderIdentifierMap(
-    preorderIds: string[],
+    orders: Pick<O2oPreorder, 'id' | 'status' | 'reservedBusinessNo'>[],
     manager: EntityManager = AppDataSource.manager,
   ) {
-    if (!preorderIds.length) {
+    if (!orders.length) {
       return new Map<string, CustomerOrderIdentifiers>()
     }
+    const preorderIds = orders.map((order) => String(order.id))
     const outboundOrders = await manager.getRepository(BizOutboundOrder).find({
       select: ['id', 'sourceDocId', 'systemNo', 'businessNo'],
       where: {
@@ -1744,11 +1748,8 @@ class O2oPreorderService {
         originalBusinessNo: outboundOrder.businessNo?.trim() || '',
       })
     })
-    const reservedPreorders = await manager.getRepository(O2oPreorder).find({
-      select: ['id', 'reservedBusinessNo'],
-      where: { id: In(preorderIds), status: 'pending', reservedBusinessNo: Not(IsNull()) },
-    })
-    reservedPreorders.forEach((preorder) => {
+    orders.forEach((preorder) => {
+      if (preorder.status !== 'pending') return
       const reservedBusinessNo = preorder.reservedBusinessNo?.trim()
       if (!reservedBusinessNo || customerOrderIdentifierMap.has(String(preorder.id))) return
       customerOrderIdentifierMap.set(String(preorder.id), {
@@ -2127,7 +2128,7 @@ class O2oPreorderService {
   ): Promise<O2oPreorderDetailView> {
     const id = String(order.id)
     const clientPreorderUpdateLimit = await this.getClientPreorderUpdateLimit(manager)
-    const customerOrderIdentifierMap = await this.resolveCustomerOrderIdentifierMap([id], manager)
+    const customerOrderIdentifierMap = await this.resolveCustomerOrderIdentifierMap([order], manager)
     const customerOrderNumbers = customerOrderIdentifierMap.get(id) ?? null
     const customerOrderSystemNo = customerOrderNumbers?.systemNo ?? null
     const customerOrderBusinessNo = customerOrderNumbers?.businessNo ?? null
@@ -2437,6 +2438,7 @@ class O2oPreorderService {
     name: string,
     ttlMs: number,
     build: () => Promise<T>,
+    canPublish: () => boolean = () => true,
   ): Promise<O2oPublicJsonSnapshot<T>> {
     const clusterRevision = await readMallCatalogClusterRevision()
     if (clusterRevision === null) return this.createPublicJsonSnapshot(await build())
@@ -2453,7 +2455,7 @@ class O2oPreorderService {
       }
     }
     const snapshot = this.createPublicJsonSnapshot(await build())
-    void writeSharedCacheRaw(key, snapshot.responseBody, ttlMs)
+    if (canPublish()) void writeSharedCacheRaw(key, snapshot.responseBody, ttlMs)
     return snapshot
   }
 
@@ -2466,9 +2468,13 @@ class O2oPreorderService {
     this.mallProductsCache = null
     this.mallStorefrontCache = null
     if (options?.soldQtyChanged) {
-      this.mallSoldQtyRevision = this.mallSoldQtyRevision >= Number.MAX_SAFE_INTEGER ? 1 : this.mallSoldQtyRevision + 1
-      this.mallSoldQtyCache = null
+      this.invalidateMallSoldQtyCache()
     }
+  }
+
+  private invalidateMallSoldQtyCache(): void {
+    this.mallSoldQtyRevision = this.mallSoldQtyRevision >= Number.MAX_SAFE_INTEGER ? 1 : this.mallSoldQtyRevision + 1
+    this.mallSoldQtyCache = null
   }
 
   private async resolveProductSoldQtyMap(productIds: string[]): Promise<Map<string, number>> {
@@ -2477,57 +2483,46 @@ class O2oPreorderService {
     }
 
     const cacheKey = [...productIds].map(String).sort().join(',')
-    const revision = this.mallSoldQtyRevision
-    const now = Date.now()
-    if (
-      this.mallSoldQtyCache?.key === cacheKey
-      && this.mallSoldQtyCache.revision === revision
-      && this.mallSoldQtyCache.expiresAt > now
-    ) {
-      return this.mallSoldQtyCache.data
-    }
-    if (this.mallSoldQtyRefreshInFlight) {
-      const activeResult = await this.mallSoldQtyRefreshInFlight
-      if (activeResult.key === cacheKey && activeResult.revision === revision) {
-        return activeResult.data
+    for (let attempt = 0; attempt < O2O_MALL_REFRESH_ATTEMPTS; attempt += 1) {
+      const revision = this.mallSoldQtyRevision
+      const cached = this.mallSoldQtyCache
+      if (cached?.key === cacheKey && cached.revision === revision && cached.expiresAt > Date.now()) {
+        return cached.data
       }
-      return this.resolveProductSoldQtyMap(productIds)
-    }
 
-    const refresh = (async () => {
-      const soldRows = await this.preorderItemRepo
-        .createQueryBuilder('item')
-        .leftJoin('item.order', 'preorder')
-        .select('item.productId', 'productId')
-        .addSelect('SUM(item.qty)', 'soldQty')
-        .where('item.productId IN (:...productIds)', { productIds })
-        .andWhere('preorder.status = :status', { status: 'verified' })
-        .groupBy('item.productId')
-        .getRawMany<{ productId: string; soldQty: O2oNumericLike }>()
-
-      // 退货核销会同步扣减原预订单明细 qty，因此已核销订单明细本身就是净销量。
-      const data = new Map(
-        soldRows.map((item) => [
-          String(item.productId),
-          Math.max(0, Number(item.soldQty ?? 0)),
-        ]),
-      )
-      this.mallSoldQtyCache = {
-        key: cacheKey,
-        revision,
-        expiresAt: Date.now() + O2O_MALL_SOLD_QTY_TTL_MS,
-        data,
+      if (!this.mallSoldQtyRefreshInFlight) {
+        const refresh = this.queryProductSoldQty(productIds)
+          .then((data) => {
+            if (this.mallSoldQtyRevision === revision) {
+              this.mallSoldQtyCache = { key: cacheKey, revision, expiresAt: Date.now() + O2O_MALL_SOLD_QTY_TTL_MS, data }
+            }
+            return { key: cacheKey, revision, data }
+          })
+          .finally(() => {
+            if (this.mallSoldQtyRefreshInFlight === refresh) this.mallSoldQtyRefreshInFlight = null
+          })
+        this.mallSoldQtyRefreshInFlight = refresh
       }
-      return { key: cacheKey, revision, data }
-    })()
-    this.mallSoldQtyRefreshInFlight = refresh
-    try {
-      return (await refresh).data
-    } finally {
-      if (this.mallSoldQtyRefreshInFlight === refresh) {
-        this.mallSoldQtyRefreshInFlight = null
-      }
+      const result = await this.mallSoldQtyRefreshInFlight
+      if (result.key === cacheKey && result.revision === this.mallSoldQtyRevision) return result.data
     }
+    // 连续换代时不让一次请求长期持有回源资源，也不把旧销量写入新目录。
+    throw new BizError('商城销量更新中，请稍后重试', 503)
+  }
+
+  private async queryProductSoldQty(productIds: string[]): Promise<Map<string, number>> {
+    const soldRows = await this.preorderItemRepo
+      .createQueryBuilder('item')
+      .leftJoin('item.order', 'preorder')
+      .select('item.productId', 'productId')
+      .addSelect('SUM(item.qty)', 'soldQty')
+      .where('item.productId IN (:...productIds)', { productIds })
+      .andWhere('preorder.status = :status', { status: 'verified' })
+      .groupBy('item.productId')
+      .getRawMany<{ productId: string; soldQty: O2oNumericLike }>()
+
+    // 退货核销会扣减原预订单明细 qty，已核销明细表示净销量。
+    return new Map(soldRows.map((item) => [String(item.productId), Math.max(0, Number(item.soldQty ?? 0))]))
   }
 
   /**
@@ -2550,7 +2545,7 @@ class O2oPreorderService {
     const orderIds = orders.map((item) => String(item.id))
     const nowMs = options?.nowMs ?? Date.now()
     const exposeSystemNo = options?.exposeSystemNo !== false
-    const customerOrderIdentifierMap = await this.resolveCustomerOrderIdentifierMap(orderIds)
+    const customerOrderIdentifierMap = await this.resolveCustomerOrderIdentifierMap(orders)
     const totalAmountMap = await this.resolveOrderTotalAmountMap(orderIds)
     const returnRequestCountMap = await this.resolveOrderReturnRequestCountMap(orderIds)
     const latestReturnRequestMap = await this.resolveLatestReturnRequestSummaryMap(orderIds)
@@ -2794,51 +2789,56 @@ class O2oPreorderService {
   }
 
   async getMallProductsPublicSnapshot(): Promise<O2oPublicJsonSnapshot<O2oMallProductsView>> {
-    const now = Date.now()
-    const revision = readMallCatalogRevision()
-    const cached = this.mallProductsCache
-    if (cached?.revision === revision && cached.freshUntil > now) {
-      return cached.snapshot
-    }
+    for (let attempt = 0; attempt < O2O_MALL_REFRESH_ATTEMPTS; attempt += 1) {
+      const now = Date.now()
+      const revision = readMallCatalogRevision()
+      const cached = this.mallProductsCache
+      if (cached?.revision === revision && cached.freshUntil > now) {
+        return cached.snapshot
+      }
 
-    if (this.mallProductsRefreshInFlight && this.mallProductsRefreshRevision !== revision) {
-      // 写事务可能在旧刷新进行中提交；先等待旧查询退出，再按新修订号重建，绝不把旧快照当作提交后结果返回。
-      await this.mallProductsRefreshInFlight.catch(() => undefined)
-      return this.getMallProductsPublicSnapshot()
-    }
+      if (this.mallProductsRefreshInFlight && this.mallProductsRefreshRevision !== revision) {
+        // 写事务提交后等待旧查询退出，再按新修订号共用一次刷新。
+        await this.mallProductsRefreshInFlight.catch(() => undefined)
+        continue
+      }
 
-    if (!this.mallProductsRefreshInFlight) {
-      const refreshRevision = revision
-      this.mallProductsRefreshRevision = refreshRevision
-      const refresh = (async () => {
-        try {
-          const snapshot = await this.loadSharedPublicSnapshot(
-            // 共享快照新增自提地址后单独版本化，滚动升级期间也不会命中旧结构。
-            'mall-products-v2',
-            O2O_MALL_CATALOG_FRESH_TTL_MS,
-            () => this.buildMallProductsUncached(),
-          )
-          this.mallProductsCache = {
-            revision: refreshRevision,
-            freshUntil: Date.now() + O2O_MALL_CATALOG_FRESH_TTL_MS,
-            staleUntil: Date.now() + O2O_MALL_CATALOG_STALE_TTL_MS,
-            snapshot,
+      if (!this.mallProductsRefreshInFlight) {
+        this.mallProductsRefreshRevision = revision
+        const isCurrent = () => readMallCatalogRevision() === revision
+        this.mallProductsRefreshInFlight = (async () => {
+          try {
+            const snapshot = await this.loadSharedPublicSnapshot(
+              // 共享快照新增自提地址后单独版本化，滚动升级期间也不会命中旧结构。
+              'mall-products-v2',
+              O2O_MALL_CATALOG_FRESH_TTL_MS,
+              () => this.buildMallProductsUncached(),
+              isCurrent,
+            )
+            if (isCurrent()) {
+              this.mallProductsCache = {
+                revision,
+                freshUntil: Date.now() + O2O_MALL_CATALOG_FRESH_TTL_MS,
+                staleUntil: Date.now() + O2O_MALL_CATALOG_STALE_TTL_MS,
+                snapshot,
+              }
+            }
+            return snapshot
+          } finally {
+            this.mallProductsRefreshInFlight = null
+            this.mallProductsRefreshRevision = null
           }
-          return snapshot
-        } finally {
-          this.mallProductsRefreshInFlight = null
-          this.mallProductsRefreshRevision = null
-        }
-      })()
-      this.mallProductsRefreshInFlight = refresh
-    }
+        })()
+      }
 
-    // 同一修订号的旧快照可在后台刷新期间短暂复用，避免 TTL 边界瞬间击穿数据库。
-    if (cached?.revision === revision && cached.staleUntil > now) {
-      void this.mallProductsRefreshInFlight.catch(() => undefined)
-      return cached.snapshot
+      // 同一修订号的旧快照可在后台刷新期间短暂复用，避免 TTL 边界瞬间击穿数据库。
+      if (cached?.revision === revision && cached.staleUntil > now) {
+        void this.mallProductsRefreshInFlight.catch(() => undefined)
+        return cached.snapshot
+      }
+      return this.mallProductsRefreshInFlight
     }
-    return this.mallProductsRefreshInFlight
+    throw new BizError('商城目录更新中，请稍后重试', 503)
   }
 
   async listMallProducts(): Promise<O2oMallProductsView> {
@@ -4018,13 +4018,19 @@ class O2oPreorderService {
       allCount: O2oNumericLike; pendingCount: O2oNumericLike; completedCount: O2oNumericLike
       cancelledCount: O2oNumericLike; latestId: string | null; newCount?: O2oNumericLike
     }>()
-    const returnsCount = await this.applyConsoleOrderPoolCondition(baseQuery.clone(), 'returns').getCount()
+    const filteredOrders = baseQuery.clone().select('order.id', 'id')
+    const returnsAggregate = await this.returnRequestRepo
+      .createQueryBuilder('rr')
+      .innerJoin(`(${filteredOrders.getQuery()})`, 'filteredOrder', 'filteredOrder.id = rr.orderId')
+      .setParameters(filteredOrders.getParameters())
+      .select('COUNT(DISTINCT rr.orderId)', 'count')
+      .getRawOne<{ count: O2oNumericLike }>()
     const poolCounts: Record<O2oConsoleOrderPoolKey, number> = {
       all: Number(aggregate?.allCount ?? 0),
       pending: Number(aggregate?.pendingCount ?? 0),
       completed: Number(aggregate?.completedCount ?? 0),
       cancelled: Number(aggregate?.cancelledCount ?? 0),
-      returns: returnsCount,
+      returns: Number(returnsAggregate?.count ?? 0),
     }
 
     const total = poolCounts[pool]
@@ -5413,7 +5419,38 @@ class O2oPreorderService {
     }
   }
 
+  /** 候选名单不占行锁；每次试图处理一笔订单时重新取当前状态。 */
+  private async cancelTimedOutOrderById(orderId: string, cutoffMs: number): Promise<boolean> {
+    const sqlite = AppDataSource.options.type === 'sqlite'
+    const idType = sqlite ? 'INTEGER' : 'UNSIGNED'
+    const maxAttempts = sqlite ? 1 : O2O_TIMEOUT_RECYCLE_MYSQL_ATTEMPTS
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      if (databaseOperationGate.isFrozen()) return false
+      try {
+        return await runInTransaction(async (manager) => {
+          // 进入 SQLite 写队列后，维护或停机可能先于本单拿到写槽。
+          if (databaseOperationGate.isFrozen()) return false
+          const query = manager.getRepository(O2oPreorder)
+            .createQueryBuilder('order')
+            .where(`order.id = CAST(:orderId AS ${idType})`, { orderId })
+          if (!sqlite) query.setLock('pessimistic_write')
+          const order = await query.getOne()
+          if (!order || order.isDeleted || order.status !== 'pending' || !this.isOrderTimeoutReached(order, cutoffMs)) return false
+          // SQLite 实体水合可能把 64 位主键舍入，后续写入和审计沿用候选查询中的精确值。
+          order.id = orderId
+          return this.cancelTimedOutOrderInManager(manager, order)
+        })
+      } catch (error) {
+        if (attempt >= maxAttempts || !isRetryableMysqlTransactionError(error)) throw error
+        if (databaseOperationGate.isFrozen()) return false
+        await waitForMysqlTransactionRetry(attempt)
+      }
+    }
+    return false
+  }
+
   async cancelTimeoutOrders(options?: { skipRecentMs?: number }) {
+    if (databaseOperationGate.isFrozen()) return this.lastCancelTimeoutOrdersResult
     const releaseMaintenanceLease = databaseMaintenanceModeService.registerInFlightWrite()
     if (!releaseMaintenanceLease) {
       return this.lastCancelTimeoutOrdersResult
@@ -5440,43 +5477,49 @@ class O2oPreorderService {
 
       const recyclePromise = (async () => {
         let cancelledCount = 0
-        // 每批都在事务内重新读取并锁定最新状态：
-        // - MySQL 用 SKIP LOCKED 允许多个 Worker 安全分摊；
-        // - SQLite 由单写事务串行处理；
-        // - 单次最多处理 5 个小批次，避免后台任务长期占住 SQLite 写队列或 MySQL 行锁。
-        for (let batchIndex = 0; batchIndex < O2O_TIMEOUT_RECYCLE_MAX_BATCHES; batchIndex += 1) {
-          const batchResult = await runInTransaction(async (manager) => {
-            const timeoutQuery = manager.getRepository(O2oPreorder)
+        const sqlite = AppDataSource.options.type === 'sqlite'
+        const idTextType = sqlite ? 'TEXT' : 'CHAR'
+        const idParameterType = sqlite ? 'INTEGER' : 'UNSIGNED'
+        const attemptedIds: string[] = []
+        try {
+          for (let batchIndex = 0; batchIndex < O2O_TIMEOUT_RECYCLE_MAX_BATCHES; batchIndex += 1) {
+            if (databaseOperationGate.isFrozen()) break
+            const timeoutQuery = this.preorderRepo
               .createQueryBuilder('order')
+              .select(`CAST(order.id AS ${idTextType})`, 'id')
               .where('order.status = :status', { status: 'pending' })
               .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
               .andWhere('order.timeoutAt IS NOT NULL')
-              .andWhere('order.timeoutAt <= :now', { now: new Date() })
+              .andWhere('order.timeoutAt <= :now', { now: new Date(nowMs) })
               .orderBy('order.timeoutAt', 'ASC')
               .addOrderBy('order.id', 'ASC')
-              .take(O2O_TIMEOUT_RECYCLE_BATCH_SIZE)
-            if (manager.connection.options.type !== 'sqlite') {
-              timeoutQuery.setLock('pessimistic_write').setOnLocked('skip_locked')
+              .limit(O2O_TIMEOUT_RECYCLE_BATCH_SIZE)
+            if (attemptedIds.length) {
+              // 失败或状态已改变的候选本轮不重扫，避免一直占用靠前的候选名额。
+              const parameters = Object.fromEntries(attemptedIds.map((id, index) => [`attempted${index}`, id]))
+              const values = Object.keys(parameters).map((name) => `CAST(:${name} AS ${idParameterType})`).join(', ')
+              timeoutQuery.andWhere(`order.id NOT IN (${values})`, parameters)
             }
-            const lockedOrders = await timeoutQuery.getMany()
-            let batchCancelledCount = 0
-            for (const order of lockedOrders) {
-              const cancelled = await this.cancelTimedOutOrderInManager(manager, order)
-              if (cancelled) {
-                batchCancelledCount += 1
+            const candidates = await timeoutQuery.getRawMany<{ id: string }>()
+            for (const candidate of candidates) {
+              if (databaseOperationGate.isFrozen()) return { cancelledCount }
+              attemptedIds.push(candidate.id)
+              try {
+                if (await this.cancelTimedOutOrderById(candidate.id, nowMs)) cancelledCount += 1
+              } catch (error) {
+                if (error instanceof DatabaseWriteFrozenError) return { cancelledCount }
+                console.warn('[y-link-backend] 系统超时取消预订单失败', { orderId: candidate.id, ...toSafeErrorLog(error) })
               }
             }
-            return {
-              selectedCount: lockedOrders.length,
-              cancelledCount: batchCancelledCount,
-            }
-          })
-          cancelledCount += batchResult.cancelledCount
-          if (batchResult.selectedCount < O2O_TIMEOUT_RECYCLE_BATCH_SIZE) {
-            break
+            if (candidates.length < O2O_TIMEOUT_RECYCLE_BATCH_SIZE) break
+          }
+          return { cancelledCount }
+        } finally {
+          // 后续候选查询失败或冻结都不能吞掉已经独立提交的预占释放。
+          if (cancelledCount > 0) {
+            this.invalidateMallReadCache()
           }
         }
-        return { cancelledCount }
       })()
 
       this.cancelTimeoutOrdersInFlight = recyclePromise
@@ -5484,9 +5527,6 @@ class O2oPreorderService {
         const result = await recyclePromise
         this.lastCancelTimeoutOrdersAt = Date.now()
         this.lastCancelTimeoutOrdersResult = result
-        if (result.cancelledCount > 0) {
-          this.invalidateMallReadCache()
-        }
         return result
       } finally {
         if (this.cancelTimeoutOrdersInFlight === recyclePromise) {

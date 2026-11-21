@@ -1137,31 +1137,30 @@ class InboundService {
   }
 
   private async buildSupplierDeliverySummary(supplierId: string): Promise<SupplierDeliverySummaryResult> {
-    const [rows, deleted] = await Promise.all([
-      this.inboundRepo
-        .createQueryBuilder('order')
-        .select('order.status', 'status')
-        .addSelect('COUNT(1)', 'count')
-        .where('order.supplierId = :supplierId', { supplierId })
-        .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
-        .groupBy('order.status')
-        .getRawMany<{ status: BizInboundOrder['status']; count: string }>(),
-      this.inboundRepo
-        .createQueryBuilder('order')
-        .where('order.supplierId = :supplierId', { supplierId })
-        .andWhere('order.isDeleted = :isDeleted', { isDeleted: true })
-        .getCount(),
-    ])
+    const rows = await this.inboundRepo
+      .createQueryBuilder('order')
+      .select('order.isDeleted', 'isDeleted')
+      .addSelect('order.status', 'status')
+      .addSelect('COUNT(1)', 'count')
+      .where('order.supplierId = :supplierId', { supplierId })
+      .andWhere('order.isDeleted IN (:...deletionFlags)', { deletionFlags: [false, true] })
+      .groupBy('order.isDeleted')
+      .addGroupBy('order.status')
+      .getRawMany<{ isDeleted: number | boolean | string; status: BizInboundOrder['status']; count: string }>()
 
     const summary: SupplierDeliverySummaryResult = {
       total: 0,
       pending: 0,
       verified: 0,
       cancelled: 0,
-      deleted,
+      deleted: 0,
     }
     rows.forEach((row) => {
       const count = Number(row.count || 0)
+      if (Number(row.isDeleted) === 1) {
+        summary.deleted += count
+        return
+      }
       summary.total += count
       if (row.status in summary) {
         summary[row.status] = count
