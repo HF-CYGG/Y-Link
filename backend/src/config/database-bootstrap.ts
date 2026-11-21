@@ -1358,7 +1358,69 @@ async function normalizeSqliteNotificationOutbox(dataSource: DataSource): Promis
   }
 }
 
-async function ensureSqliteMallCatalogIndexes(dataSource: DataSource): Promise<void> {
+const SQLITE_PERFORMANCE_INDEXES = [
+  ['biz_outbound_order', [
+    ['idx_biz_outbound_active_created_id', ['is_deleted', 'status', 'created_at', 'id']],
+    ['idx_biz_outbound_active_type_created', ['is_deleted', 'status', 'order_type', 'created_at']],
+  ], ['idx_biz_outbound_order_type', 'idx_biz_outbound_is_deleted']],
+  ['biz_inbound_order', [
+    ['idx_biz_inbound_supplier_id', ['supplier_id']],
+    ['idx_biz_inbound_deleted_status_arrival_id', ['is_deleted', 'status', 'expected_arrival_at', 'id']],
+    ['idx_biz_inbound_supplier_deleted_status_id', ['supplier_id', 'is_deleted', 'status', 'id']],
+  ], ['idx_biz_inbound_is_deleted']],
+  ['o2o_preorder', [
+    ['idx_o2o_preorder_deleted_status_id', ['is_deleted', 'status', 'id']],
+  ], []],
+  ['o2o_preorder_item', [
+    ['idx_o2o_preorder_item_product_order_qty', ['product_id', 'order_id', 'qty']],
+  ], ['idx_o2o_preorder_item_product_order']],
+  ['client_user', [
+    ['idx_client_user_real_name', ['real_name']],
+  ], []],
+  ['inv_stocktake_item', [
+    ['idx_inv_stocktake_item_counted', ['stocktake_id', 'counted_at', 'id']],
+  ], []],
+  ['client_feedback_conversation', [
+    ['idx_feedback_conv_client_last_msg', ['client_user_id', 'last_message_at', 'id']],
+    ['idx_feedback_conv_status_last_msg', ['status', 'last_message_at', 'id']],
+    ['idx_feedback_conv_assigned_status_last_msg', ['assigned_user_id', 'status', 'last_message_at', 'id']],
+  ], []],
+  ['notification_event', [
+    ['idx_notification_event_pending_claim', ['status', 'next_attempt_at', 'id']],
+    ['idx_notification_event_processing_recovery', ['status', 'processing_started_at', 'id']],
+  ], []],
+] as const
+
+/** 结构已就绪后按索引定义校准存量库，无需为索引变更重建整表。 */
+async function ensureSqlitePerformanceIndexes(dataSource: DataSource): Promise<void> {
+  const obsoleteIndexes: string[] = []
+  for (const [table, definitions, obsoleteNames] of SQLITE_PERFORMANCE_INDEXES) {
+    const indexes = await dataSource.query(`PRAGMA index_list("${table}")`) as Array<{
+      name: string
+      unique: number
+      partial: number
+    }>
+    for (const [name, columns] of definitions) {
+      const existing = indexes.find((index) => index.name === name)
+      if (existing) {
+        const actualColumns = await dataSource.query(`PRAGMA index_info("${name}")`) as Array<{ seqno: number; name: string }>
+        if (Number(existing.unique) === 0 && Number(existing.partial) === 0
+          && actualColumns.length === columns.length
+          && actualColumns.every((column) => columns[column.seqno] === column.name)) continue
+        await dataSource.query(`DROP INDEX "${name}"`)
+      }
+      const columnSql = columns.map((column) => `"${column}"`).join(', ')
+      await dataSource.query(`CREATE INDEX IF NOT EXISTS "${name}" ON "${table}" (${columnSql})`)
+    }
+    obsoleteIndexes.push(...obsoleteNames.filter((name) => indexes.some((index) => index.name === name)))
+  }
+  // TypeORM 重建表时不能还原表达式索引，等同步完成后再补齐供 LOWER 登录匹配。
+  await dataSource.query('CREATE INDEX IF NOT EXISTS "idx_client_user_real_name_lower" ON "client_user" (LOWER("real_name"))')
+  for (const name of obsoleteIndexes) await dataSource.query(`DROP INDEX IF EXISTS "${name}"`)
+}
+
+async function ensureSqliteStartupIndexes(dataSource: DataSource): Promise<void> {
+  await ensureSqlitePerformanceIndexes(dataSource)
   await ensureSqliteIndex(
     dataSource,
     'base_product',
@@ -1376,12 +1438,6 @@ async function ensureSqliteMallCatalogIndexes(dataSource: DataSource): Promise<v
     'base_product_sku',
     'idx_base_product_sku_current_mall_list',
     `CREATE INDEX IF NOT EXISTS "idx_base_product_sku_current_mall_list" ON "base_product_sku" ("product_id", "is_current", "is_active", "sort_order", "id")`,
-  )
-  await ensureSqliteIndex(
-    dataSource,
-    'o2o_preorder_item',
-    'idx_o2o_preorder_item_product_order',
-    `CREATE INDEX IF NOT EXISTS "idx_o2o_preorder_item_product_order" ON "o2o_preorder_item" ("product_id", "order_id")`,
   )
   await ensureSqliteIndex(
     dataSource,
@@ -2319,7 +2375,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
       await normalizeSqliteO2oDiscountColumns(dataSource)
       await normalizeSqliteInboundSkuColumn(dataSource)
       // 索引可能依赖本次 synchronize 才补齐的列，必须在结构升级后创建。
-      await ensureSqliteMallCatalogIndexes(dataSource)
+      await ensureSqliteStartupIndexes(dataSource)
       await backfillSqliteOrderAmendmentData(dataSource)
       await prepareSqliteOrderContentInventoryColumns(dataSource)
       await backfillSqliteOrderSourceDocs(dataSource)
@@ -2361,7 +2417,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
 
   const needSynchronize = await shouldSynchronizeSqliteSchema(dataSource)
   if (!needSynchronize) {
-    await ensureSqliteMallCatalogIndexes(dataSource)
+    await ensureSqliteStartupIndexes(dataSource)
     await backfillSqliteOrderAmendmentData(dataSource)
     await prepareSqliteOrderContentInventoryColumns(dataSource)
     await backfillSqliteOrderSourceDocs(dataSource)
@@ -2378,7 +2434,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   await dataSource.synchronize()
   await normalizeSqliteO2oDiscountColumns(dataSource)
   await normalizeSqliteInboundSkuColumn(dataSource)
-  await ensureSqliteMallCatalogIndexes(dataSource)
+  await ensureSqliteStartupIndexes(dataSource)
   await backfillSqliteOrderAmendmentData(dataSource)
   await prepareSqliteOrderContentInventoryColumns(dataSource)
   await backfillSqliteOrderSourceDocs(dataSource)

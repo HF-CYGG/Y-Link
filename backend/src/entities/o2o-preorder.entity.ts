@@ -48,6 +48,7 @@ export type O2oClientOrderType = (typeof O2O_CLIENT_ORDER_TYPES)[number]
 @Index('idx_o2o_preorder_client_status_id', ['clientUserId', 'status', 'id'])
 @Index('idx_o2o_preorder_due_claim', ['status', 'isDeleted', 'timeoutAt', 'id'])
 @Index('idx_o2o_preorder_is_deleted', ['isDeleted'])
+@Index('idx_o2o_preorder_deleted_status_id', ['isDeleted', 'status', 'id'])
 @Index('uk_o2o_preorder_client_request', ['clientUserId', 'clientRequestId'], { unique: true })
 export class O2oPreorder {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })

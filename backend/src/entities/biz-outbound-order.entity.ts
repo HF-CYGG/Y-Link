@@ -30,6 +30,8 @@ export type OrderSourceDocType = (typeof ORDER_SOURCE_DOC_TYPES)[number]
 @Index('idx_biz_outbound_source_doc', ['sourceDocType', 'sourceDocId'])
 @Index('uk_biz_outbound_business_no', ['businessNo'], { unique: true })
 @Index('idx_biz_outbound_order_type_created_at', ['orderType', 'createdAt'])
+@Index('idx_biz_outbound_active_created_id', ['isDeleted', 'status', 'createdAt', 'id'])
+@Index('idx_biz_outbound_active_type_created', ['isDeleted', 'status', 'orderType', 'createdAt'])
 @Entity({ name: 'biz_outbound_order' })
 @Check('ck_biz_outbound_order_amounts', "`total_qty` >= 0 AND `total_amount` >= 0 AND LENGTH(TRIM(COALESCE(`idempotency_key`, ''))) > 0")
 @Check('ck_biz_outbound_inventory_mode', "`inventory_mode` IN ('legacy_none', 'manual_applied', 'o2o_preapplied')")
@@ -59,7 +61,6 @@ export class BizOutboundOrder {
   @Column({ name: 'inventory_mode', type: 'varchar', length: 24, default: 'legacy_none', comment: '订单库存处理模式' })
   inventoryMode!: OrderInventoryMode
 
-  @Index('idx_biz_outbound_order_type')
   @Column({ name: 'order_type', type: 'varchar', length: 32, default: 'walkin', comment: '订单类型' })
   orderType!: string
 
@@ -111,7 +112,6 @@ export class BizOutboundOrder {
   @Column({ name: 'total_amount', type: 'decimal', precision: 14, scale: 2, default: 0, comment: '总金额' })
   totalAmount!: string
 
-  @Index('idx_biz_outbound_is_deleted')
   @Column({ name: 'is_deleted', type: 'tinyint', width: 1, default: 0, comment: '是否已删除（软删除）' })
   isDeleted!: boolean
 

@@ -584,6 +584,17 @@ const REQUIRED_INDEXES: readonly IndexFixture[] = [
     unique: false,
   },
   { tableName: 'biz_outbound_order', indexName: 'idx_biz_outbound_status', columns: ['status'], unique: false },
+  { tableName: 'biz_outbound_order', indexName: 'idx_biz_outbound_active_created_id', columns: ['is_deleted', 'status', 'created_at', 'id'], unique: false },
+  { tableName: 'biz_outbound_order', indexName: 'idx_biz_outbound_active_type_created', columns: ['is_deleted', 'status', 'order_type', 'created_at'], unique: false },
+  { tableName: 'biz_inbound_order', indexName: 'idx_biz_inbound_deleted_status_arrival_id', columns: ['is_deleted', 'status', 'expected_arrival_at', 'id'], unique: false },
+  { tableName: 'biz_inbound_order', indexName: 'idx_biz_inbound_supplier_deleted_status_id', columns: ['supplier_id', 'is_deleted', 'status', 'id'], unique: false },
+  { tableName: 'o2o_preorder', indexName: 'idx_o2o_preorder_deleted_status_id', columns: ['is_deleted', 'status', 'id'], unique: false },
+  { tableName: 'o2o_preorder_item', indexName: 'idx_o2o_preorder_item_product_order_qty', columns: ['product_id', 'order_id', 'qty'], unique: false },
+  { tableName: 'client_user', indexName: 'idx_client_user_real_name', columns: ['real_name'], unique: false },
+  { tableName: 'inv_stocktake_item', indexName: 'idx_inv_stocktake_item_counted', columns: ['stocktake_id', 'counted_at', 'id'], unique: false },
+  { tableName: 'client_feedback_conversation', indexName: 'idx_feedback_conv_client_last_msg', columns: ['client_user_id', 'last_message_at', 'id'], unique: false },
+  { tableName: 'client_feedback_conversation', indexName: 'idx_feedback_conv_status_last_msg', columns: ['status', 'last_message_at', 'id'], unique: false },
+  { tableName: 'client_feedback_conversation', indexName: 'idx_feedback_conv_assigned_status_last_msg', columns: ['assigned_user_id', 'status', 'last_message_at', 'id'], unique: false },
   { tableName: 'biz_outbound_order', indexName: 'idx_biz_outbound_source_doc', columns: ['source_doc_type', 'source_doc_id'], unique: false },
   { tableName: 'biz_outbound_order_item', indexName: 'idx_biz_outbound_item_source_order_id', columns: ['source_order_id'], unique: false },
   { tableName: 'biz_outbound_order_item', indexName: 'idx_biz_outbound_item_source_item_id', columns: ['source_order_item_id'], unique: false },
@@ -836,6 +847,15 @@ async function expectSchemaFailure(
 }
 
 await assert.doesNotReject(() => assertMysqlRequiredSchemaExists(createDataSource(createCompleteFixture())))
+
+const missingSupplierPerformanceIndex = createCompleteFixture()
+missingSupplierPerformanceIndex.indexes.delete(objectKey('biz_inbound_order', 'idx_biz_inbound_supplier_deleted_status_id'))
+await expectSchemaFailure(missingSupplierPerformanceIndex, ['idx_biz_inbound_supplier_deleted_status_id', '065_performance_composite_indexes.sql'])
+
+const invalidSupplierPerformanceIndex = createCompleteFixture()
+const supplierPerformanceIndex = invalidSupplierPerformanceIndex.indexes.get(objectKey('biz_inbound_order', 'idx_biz_inbound_supplier_deleted_status_id'))!
+supplierPerformanceIndex.columns = ['is_deleted', 'supplier_id', 'status', 'id']
+await expectSchemaFailure(invalidSupplierPerformanceIndex, ['idx_biz_inbound_supplier_deleted_status_id', '065_performance_composite_indexes.sql'])
 
 const missingSubmitRequestHash = createCompleteFixture()
 missingSubmitRequestHash.columns.delete(objectKey('biz_outbound_order', 'submit_request_hash'))
