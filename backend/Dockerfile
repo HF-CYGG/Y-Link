@@ -87,6 +87,12 @@ RUN Y_LINK_GLIBC_SECURITY_BUILD=image sh /ylink-native-security/build-glibc-stag
 FROM ${Y_LINK_NODE_IMAGE} AS package-security-candidate
 COPY native-security /ylink-native-security
 RUN Y_LINK_PACKAGE_SECURITY_BUILD=image sh /ylink-native-security/build-package-stage.sh --candidate-only --sources=coreutils,perl
+
+# GCC/Node候选独立于runtime，缺原架构基线/完整闭包即停止；不在本阶段执行。
+FROM ${Y_LINK_NODE_IMAGE} AS gcc-security-candidate
+COPY native-security /ylink-native-security
+COPY native-security/candidate-inputs/gcc /ylink-gcc-inputs
+RUN --network=none Y_LINK_GCC_SECURITY_BUILD=image sh /ylink-native-security/build-gcc-stage.sh --candidate-only
 FROM ${Y_LINK_NODE_IMAGE} AS runtime
 # 保留既有合法运行基线；本批未验收native候选仅由独立target产出，尚未接入runtime。
 COPY --from=native-security-build /native-out /tmp/ylink-native-security

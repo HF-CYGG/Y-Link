@@ -1,0 +1,417 @@
+{
+  "schema": 1,
+  "source": "gcc-12",
+  "version": "12.2.0-14+deb12u1",
+  "revision": "12.2.0-14+deb12u1+ylink1",
+  "sourcePinsSha256": "942c8b452fa6fcd03bcd9a9cc1a03810109deff80f8feada35ceac099c0bfa0d",
+  "runtimePackages": [
+    "gcc-12-base",
+    "libgcc-s1",
+    "libstdc++6"
+  ],
+  "buildStagePackages": [
+    {
+      "name": "cpp-12",
+      "version": "12.2.0-14+deb12u1",
+      "source": "gcc-12",
+      "depends": "gcc-12-base (= 12.2.0-14+deb12u1), libc6 (>= 2.36), libgmp10 (>= 2:6.2.1+dfsg1), libisl23 (>= 0.15), libmpc3 (>= 1.1.0), libmpfr6 (>= 3.1.3), libzstd1 (>= 1.5.2), zlib1g (>= 1:1.1.4)",
+      "preDepends": ""
+    },
+    {
+      "name": "g++-12",
+      "version": "12.2.0-14+deb12u1",
+      "source": "gcc-12",
+      "depends": "gcc-12-base (= 12.2.0-14+deb12u1), gcc-12 (= 12.2.0-14+deb12u1), libstdc++-12-dev (= 12.2.0-14+deb12u1), libc6 (>= 2.36), libgmp10 (>= 2:6.2.1+dfsg1), libisl23 (>= 0.15), libmpc3 (>= 1.1.0), libmpfr6 (>= 3.1.3), libzstd1 (>= 1.5.2), zlib1g (>= 1:1.1.4)",
+      "preDepends": ""
+    },
+    {
+      "name": "gcc-12",
+      "version": "12.2.0-14+deb12u1",
+      "source": "gcc-12",
+      "depends": "cpp-12 (= 12.2.0-14+deb12u1), gcc-12-base (= 12.2.0-14+deb12u1), libcc1-0 (>= 12.2.0-14+deb12u1), binutils (>= 2.40), libgcc-12-dev (= 12.2.0-14+deb12u1), libc6 (>= 2.36), libgcc-s1 (>= 3.0), libgmp10 (>= 2:6.2.1+dfsg1), libisl23 (>= 0.15), libmpc3 (>= 1.1.0), libmpfr6 (>= 3.1.3), libstdc++6 (>= 5), libzstd1 (>= 1.5.2), zlib1g (>= 1:1.1.4)",
+      "preDepends": ""
+    },
+    {
+      "name": "gcc-12-base:amd64",
+      "version": "12.2.0-14+deb12u1",
+      "source": "gcc-12",
+      "depends": "",
+      "preDepends": ""
+    },
+    {
+      "name": "libasan8:amd64",
+      "version": "12.2.0-14+deb12u1",
+      "source": "gcc-12",
+      "depends": "gcc-12-base (= 12.2.0-14+deb12u1), libc6 (>= 2.34), libgcc-s1 (>= 3.3)",
+      "preDepends": ""
+    },
+    {
+      "name": "libatomic1:amd64",
+      "version": "12.2.0-14+deb12u1",
+      "source": "gcc-12",
+      "depends": "gcc-12-base (= 12.2.0-14+deb12u1), libc6 (>= 2.14)",
+      "preDepends": ""
+    },
+    {
+      "name": "libcc1-0:amd64",
+      "version": "12.2.0-14+deb12u1",
+      "source": "gcc-12",
+      "depends": "gcc-12-base (= 12.2.0-14+deb12u1), libc6 (>= 2.14), libgcc-s1 (>= 3.0), libstdc++6 (>= 5.2)",
+      "preDepends": ""
+    },
+    {
+      "name": "libgcc-12-dev:amd64",
+      "version": "12.2.0-14+deb12u1",
+      "source": "gcc-12",
+      "depends": "gcc-12-base (= 12.2.0-14+deb12u1), libgcc-s1 (>= 12.2.0-14+deb12u1), libgomp1 (>= 12.2.0-14+deb12u1), libitm1 (>= 12.2.0-14+deb12u1), libatomic1 (>= 12.2.0-14+deb12u1), libasan8 (>= 12.2.0-14+deb12u1), liblsan0 (>= 12.2.0-14+deb12u1), libtsan2 (>= 12.2.0-14+deb12u1), libubsan1 (>= 12.2.0-14+deb12u1), libquadmath0 (>= 12.2.0-14+deb12u1)",
+      "preDepends": ""
+    },
+    {
+      "name": "libgcc-s1:amd64",
+      "version": "12.2.0-14+deb12u1",
+      "source": "gcc-12",
+      "depends": "gcc-12-base (= 12.2.0-14+deb12u1), libc6 (>= 2.35)",
+      "preDepends": ""
+    },
+    {
+      "name": "libgomp1:amd64",
+      "version": "12.2.0-14+deb12u1",
+      "source": "gcc-12",
+      "depends": "gcc-12-base (= 12.2.0-14+deb12u1), libc6 (>= 2.34)",
+      "preDepends": ""
+    },
+    {
+      "name": "libitm1:amd64",
+      "version": "12.2.0-14+deb12u1",
+      "source": "gcc-12",
+      "depends": "gcc-12-base (= 12.2.0-14+deb12u1), libc6 (>= 2.34)",
+      "preDepends": ""
+    },
+    {
+      "name": "liblsan0:amd64",
+      "version": "12.2.0-14+deb12u1",
+      "source": "gcc-12",
+      "depends": "gcc-12-base (= 12.2.0-14+deb12u1), libc6 (>= 2.34), libgcc-s1 (>= 3.3)",
+      "preDepends": ""
+    },
+    {
+      "name": "libquadmath0:amd64",
+      "version": "12.2.0-14+deb12u1",
+      "source": "gcc-12",
+      "depends": "gcc-12-base (= 12.2.0-14+deb12u1), libc6 (>= 2.23)",
+      "preDepends": ""
+    },
+    {
+      "name": "libstdc++-12-dev:amd64",
+      "version": "12.2.0-14+deb12u1",
+      "source": "gcc-12",
+      "depends": "gcc-12-base (= 12.2.0-14+deb12u1), libgcc-12-dev (= 12.2.0-14+deb12u1), libstdc++6 (>= 12.2.0-14+deb12u1), libc6-dev (>= 2.23-1~)",
+      "preDepends": ""
+    },
+    {
+      "name": "libstdc++6:amd64",
+      "version": "12.2.0-14+deb12u1",
+      "source": "gcc-12",
+      "depends": "gcc-12-base (= 12.2.0-14+deb12u1), libc6 (>= 2.36), libgcc-s1 (>= 4.2)",
+      "preDepends": ""
+    },
+    {
+      "name": "libtsan2:amd64",
+      "version": "12.2.0-14+deb12u1",
+      "source": "gcc-12",
+      "depends": "gcc-12-base (= 12.2.0-14+deb12u1), libc6 (>= 2.34), libgcc-s1 (>= 3.3)",
+      "preDepends": ""
+    },
+    {
+      "name": "libubsan1:amd64",
+      "version": "12.2.0-14+deb12u1",
+      "source": "gcc-12",
+      "depends": "gcc-12-base (= 12.2.0-14+deb12u1), libc6 (>= 2.34), libgcc-s1 (>= 3.3), libstdc++6 (>= 4.1.1)",
+      "preDepends": ""
+    }
+  ],
+  "dependencyEdges": [
+    {
+      "from": "cpp-12",
+      "field": "depends",
+      "to": "gcc-12-base",
+      "constraint": "= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "g++-12",
+      "field": "depends",
+      "to": "gcc-12-base",
+      "constraint": "= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "g++-12",
+      "field": "depends",
+      "to": "gcc-12",
+      "constraint": "= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "g++-12",
+      "field": "depends",
+      "to": "libstdc++-12-dev",
+      "constraint": "= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "gcc-12",
+      "field": "depends",
+      "to": "cpp-12",
+      "constraint": "= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "gcc-12",
+      "field": "depends",
+      "to": "gcc-12-base",
+      "constraint": "= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "gcc-12",
+      "field": "depends",
+      "to": "libcc1-0",
+      "constraint": ">= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "gcc-12",
+      "field": "depends",
+      "to": "libgcc-12-dev",
+      "constraint": "= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "gcc-12",
+      "field": "depends",
+      "to": "libgcc-s1",
+      "constraint": ">= 3.0"
+    },
+    {
+      "from": "gcc-12",
+      "field": "depends",
+      "to": "libstdc++6",
+      "constraint": ">= 5"
+    },
+    {
+      "from": "libasan8:amd64",
+      "field": "depends",
+      "to": "gcc-12-base",
+      "constraint": "= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "libasan8:amd64",
+      "field": "depends",
+      "to": "libgcc-s1",
+      "constraint": ">= 3.3"
+    },
+    {
+      "from": "libatomic1:amd64",
+      "field": "depends",
+      "to": "gcc-12-base",
+      "constraint": "= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "libcc1-0:amd64",
+      "field": "depends",
+      "to": "gcc-12-base",
+      "constraint": "= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "libcc1-0:amd64",
+      "field": "depends",
+      "to": "libgcc-s1",
+      "constraint": ">= 3.0"
+    },
+    {
+      "from": "libcc1-0:amd64",
+      "field": "depends",
+      "to": "libstdc++6",
+      "constraint": ">= 5.2"
+    },
+    {
+      "from": "libgcc-12-dev:amd64",
+      "field": "depends",
+      "to": "gcc-12-base",
+      "constraint": "= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "libgcc-12-dev:amd64",
+      "field": "depends",
+      "to": "libgcc-s1",
+      "constraint": ">= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "libgcc-12-dev:amd64",
+      "field": "depends",
+      "to": "libgomp1",
+      "constraint": ">= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "libgcc-12-dev:amd64",
+      "field": "depends",
+      "to": "libitm1",
+      "constraint": ">= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "libgcc-12-dev:amd64",
+      "field": "depends",
+      "to": "libatomic1",
+      "constraint": ">= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "libgcc-12-dev:amd64",
+      "field": "depends",
+      "to": "libasan8",
+      "constraint": ">= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "libgcc-12-dev:amd64",
+      "field": "depends",
+      "to": "liblsan0",
+      "constraint": ">= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "libgcc-12-dev:amd64",
+      "field": "depends",
+      "to": "libtsan2",
+      "constraint": ">= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "libgcc-12-dev:amd64",
+      "field": "depends",
+      "to": "libubsan1",
+      "constraint": ">= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "libgcc-12-dev:amd64",
+      "field": "depends",
+      "to": "libquadmath0",
+      "constraint": ">= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "libgcc-s1:amd64",
+      "field": "depends",
+      "to": "gcc-12-base",
+      "constraint": "= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "libgomp1:amd64",
+      "field": "depends",
+      "to": "gcc-12-base",
+      "constraint": "= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "libitm1:amd64",
+      "field": "depends",
+      "to": "gcc-12-base",
+      "constraint": "= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "liblsan0:amd64",
+      "field": "depends",
+      "to": "gcc-12-base",
+      "constraint": "= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "liblsan0:amd64",
+      "field": "depends",
+      "to": "libgcc-s1",
+      "constraint": ">= 3.3"
+    },
+    {
+      "from": "libquadmath0:amd64",
+      "field": "depends",
+      "to": "gcc-12-base",
+      "constraint": "= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "libstdc++-12-dev:amd64",
+      "field": "depends",
+      "to": "gcc-12-base",
+      "constraint": "= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "libstdc++-12-dev:amd64",
+      "field": "depends",
+      "to": "libgcc-12-dev",
+      "constraint": "= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "libstdc++-12-dev:amd64",
+      "field": "depends",
+      "to": "libstdc++6",
+      "constraint": ">= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "libstdc++6:amd64",
+      "field": "depends",
+      "to": "gcc-12-base",
+      "constraint": "= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "libstdc++6:amd64",
+      "field": "depends",
+      "to": "libgcc-s1",
+      "constraint": ">= 4.2"
+    },
+    {
+      "from": "libtsan2:amd64",
+      "field": "depends",
+      "to": "gcc-12-base",
+      "constraint": "= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "libtsan2:amd64",
+      "field": "depends",
+      "to": "libgcc-s1",
+      "constraint": ">= 3.3"
+    },
+    {
+      "from": "libubsan1:amd64",
+      "field": "depends",
+      "to": "gcc-12-base",
+      "constraint": "= 12.2.0-14+deb12u1"
+    },
+    {
+      "from": "libubsan1:amd64",
+      "field": "depends",
+      "to": "libgcc-s1",
+      "constraint": ">= 3.3"
+    },
+    {
+      "from": "libubsan1:amd64",
+      "field": "depends",
+      "to": "libstdc++6",
+      "constraint": ">= 4.1.1"
+    }
+  ],
+  "configuration": {
+    "languages": [
+      "c",
+      "c++",
+      "fortran"
+    ],
+    "buildOptions": "parallel=2 nostrap nobiarch nolang=ada,go,d,objc,obj-c++,m2,jit,nvptx,gcn,biarch,hppa64",
+    "candidateBuildOptionsSuffix": " nocheck",
+    "profiles": [
+      "nobiarch"
+    ],
+    "bootstrap": false,
+    "multilib": false,
+    "hppa64": false,
+    "deviceOffloadBuild": false,
+    "preserveDriverOffloadTargets": true,
+    "requireQuadmath": true,
+    "requireCxxDebug": true,
+    "libstdcxxAbi": "new",
+    "newConfigurationVerified": false
+  },
+  "fortranGeneratedPackages": "build-stage-only; never automatically add to runtime allowlist",
+  "configurationEvidence008": "old C/C++ configure and target graph only; not evidence for this new configuration",
+  "buildReady": false,
+  "unresolved": [
+    "new C/C++/Fortran effective graph not run",
+    "full DEB and paired development closure not built or verified",
+    "ARM64 actual config/payload not verified",
+    "original native security evidence not completed"
+  ]
+}
