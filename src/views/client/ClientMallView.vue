@@ -2162,10 +2162,9 @@ onBeforeUnmount(() => {
 
     <div v-if="isPhone" ref="phoneToolbarRef" class="mall-sort-row mall-phone-toolbar">
       <div v-if="showProductSort" class="mall-sort-control" :class="{ 'is-animating': sortModeAnimating }" role="group" aria-label="商品排序">
-        <button
+        <el-button
           v-for="option in productSortOptions"
           :key="option.value"
-          type="button"
           class="mall-sort-control__button"
           :class="{ 'is-active': sortMode === option.value }"
           :aria-pressed="sortMode === option.value"
@@ -2173,7 +2172,7 @@ onBeforeUnmount(() => {
           @click="handleSortModeChange(option.value)"
         >
           {{ option.label }}
-        </button>
+        </el-button>
       </div>
       <el-button
         class="mall-mobile-search-trigger"
@@ -4790,7 +4789,15 @@ onBeforeUnmount(() => {
     padding: 0 0.58rem;
   }
 
-  .mall-phone-toolbar > :deep(.el-button + .el-button) {
+  .mall-phone-toolbar .mall-sort-control__button:not(.is-active) {
+    background: transparent;
+  }
+
+  .mall-phone-toolbar .mall-sort-control__button:disabled {
+    cursor: wait;
+  }
+
+  .mall-phone-toolbar :deep(.el-button + .el-button) {
     margin-inline-start: 0;
   }
 
