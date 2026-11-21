@@ -26,6 +26,7 @@ import { STAFF_INVITE_CONFIG_KEY } from '../utils/staff-invite-code.js'
 import { isSealedSensitiveValue, openSensitiveValue, sealSensitiveValue } from '../utils/data-encryption.js'
 import { assertSysAccountGovernancePermission, lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 import { publishRedisBus, subscribeRedisBus } from '../redis/redis-bus.js'
+import { getCurrentTransactionManager } from '../database/transaction-coordinator.js'
 
 /**
  * 验证码网关中可能携带密钥的配置项（API 地址可能带签名参数，请求头/请求体模板常含 API Key）：
@@ -614,7 +615,8 @@ export interface UpdateCustomerServiceConfigsInput {
 }
 
 /** 系统配置缓存跨实例失效主题：只携带缓存类别，不携带配置内容。 */
-const SYSTEM_CONFIG_CACHE_BUS_TOPIC = 'cache:system-config'
+export const SYSTEM_CONFIG_CACHE_BUS_TOPIC = 'cache:system-config'
+export const SYSTEM_CONFIG_CACHE_TTL_MS = 5_000
 
 class SystemConfigService {
   private readonly configRepo = AppDataSource.getRepository(SystemConfig)
@@ -667,9 +669,11 @@ class SystemConfigService {
    * - 确认过一次后，后续调用不再需要每次都发起一条含数十个 OR 分支的存在性校验查询。
    */
   private defaultConfigsEnsured = false
-  private static readonly CONFIG_CACHE_TTL_MS = 5_000
   private o2oRuleConfigCache: { value: O2oRuleConfigRecord; expiresAtMs: number } | null = null
   private o2oRuleConfigGeneration = 0
+  // 保存数据库原始值；每次读取按当前可用密钥解密并按调用者要求脱敏。
+  private verificationConfigCache: { rows: Array<Pick<SystemConfig, 'configKey' | 'configValue' | 'updatedAt'>>; expiresAtMs: number } | null = null
+  private verificationConfigGeneration = 0
   // 只缓存客服配置中来自数据库的静态部分；availability 依赖实时在线人数，每次都要重新计算，不能一并缓存。
   private customerServiceBaseConfigCache: { value: Omit<CustomerServiceConfigRecord, 'availability'>; expiresAtMs: number } | null = null
   /**
@@ -955,10 +959,10 @@ class SystemConfigService {
   ): Map<string, VerificationConfigMapEntry> {
     return new Map(rows.map((row): [string, VerificationConfigMapEntry] => {
       if (!SENSITIVE_VERIFICATION_CONFIG_KEYS.has(row.configKey)) {
-        return [row.configKey, { configValue: row.configValue, updatedAt: row.updatedAt }]
+        return [row.configKey, { configValue: row.configValue, updatedAt: new Date(row.updatedAt) }]
       }
       const opened = openSensitiveValue(resolveSensitiveConfigContext(row.configKey), row.configValue)
-      return [row.configKey, { configValue: opened.value, updatedAt: row.updatedAt, unreadable: opened.state === 'unreadable' }]
+      return [row.configKey, { configValue: opened.value, updatedAt: new Date(row.updatedAt), unreadable: opened.state === 'unreadable' }]
     }))
   }
 
@@ -967,7 +971,7 @@ class SystemConfigService {
    * 返回本次补加密的条目数，供启动日志回显。
    */
   async sealLegacySensitiveVerificationConfigs(): Promise<number> {
-    return runInTransaction(async (manager) => {
+    const count = await runInTransaction(async (manager) => {
       const repository = manager.getRepository(SystemConfig)
       const rows = await repository.find({
         where: [...SENSITIVE_VERIFICATION_CONFIG_KEYS].map((configKey) => ({ configKey })),
@@ -985,9 +989,11 @@ class SystemConfigService {
       }
       return sealedCount
     })
+    if (count > 0) this.invalidateVerificationProviderCacheAfterCommit()
+    return count
   }
 
-  private async loadVerificationConfigMap(manager: EntityManager = AppDataSource.manager) {
+  private async readVerificationConfigRows(manager: EntityManager) {
     const rows = await manager.getRepository(SystemConfig).find({
       where: this.verificationConfigKeys.map((key) => ({ configKey: key })),
       select: {
@@ -999,7 +1005,20 @@ class SystemConfigService {
     if (rows.length !== this.verificationConfigKeys.length) {
       throw new BizError('验证码平台配置缺失，请联系管理员补齐配置', 500)
     }
-    return this.buildVerificationConfigMap(rows)
+    return rows
+  }
+
+  private async loadVerificationConfigMap(manager: EntityManager) {
+    if (this.isTransactionalManager(manager)) return this.buildVerificationConfigMap(await this.readVerificationConfigRows(manager))
+    for (;;) {
+      const cached = this.verificationConfigCache
+      if (cached && cached.expiresAtMs > Date.now()) return this.buildVerificationConfigMap(cached.rows)
+      const generation = this.verificationConfigGeneration
+      const rows = await this.readVerificationConfigRows(manager)
+      if (generation !== this.verificationConfigGeneration) continue
+      this.verificationConfigCache = { rows, expiresAtMs: Date.now() + SYSTEM_CONFIG_CACHE_TTL_MS }
+      return this.buildVerificationConfigMap(rows)
+    }
   }
 
   private resolveSensitiveVerificationFieldValue(
@@ -1875,7 +1894,7 @@ class SystemConfigService {
       const generation = this.o2oRuleConfigGeneration
       const record = await this.readCurrentO2oRuleConfigs(manager)
       if (generation !== this.o2oRuleConfigGeneration) continue
-      this.o2oRuleConfigCache = { value: record, expiresAtMs: Date.now() + SystemConfigService.CONFIG_CACHE_TTL_MS }
+      this.o2oRuleConfigCache = { value: record, expiresAtMs: Date.now() + SYSTEM_CONFIG_CACHE_TTL_MS }
       return record
     }
   }
@@ -1947,11 +1966,20 @@ class SystemConfigService {
   handleRemoteCacheInvalidation(cache: unknown): void {
     if (cache === 'o2o-rule') this.invalidateO2oRuleConfigCache()
     else if (cache === 'customer-service') this.invalidateCustomerServiceConfigCache()
+    else if (cache === 'verification-providers') {
+      this.verificationConfigGeneration += 1
+      this.verificationConfigCache = null
+    }
   }
 
   private invalidateO2oRuleConfigCache(): void {
     this.o2oRuleConfigGeneration += 1
     this.o2oRuleConfigCache = null
+  }
+
+  invalidateVerificationProviderCacheAfterCommit(): void {
+    this.handleRemoteCacheInvalidation('verification-providers')
+    void publishRedisBus(SYSTEM_CONFIG_CACHE_BUS_TOPIC, { cache: 'verification-providers' })
   }
 
   async updateO2oRuleConfigs(
@@ -2066,7 +2094,7 @@ class SystemConfigService {
       // 只使已提交的变更生效。事务完成的顺序可能与响应顺序不同，下一次读统一回源数据库。
       this.invalidateO2oRuleConfigCache()
       void publishRedisBus(SYSTEM_CONFIG_CACHE_BUS_TOPIC, { cache: 'o2o-rule' })
-      invalidateMallCatalogReadCache()
+      invalidateMallCatalogReadCache({ affectsBusinessData: false })
     }
     return result
   }
@@ -2087,7 +2115,7 @@ class SystemConfigService {
   }
 
   private publishCustomerServiceConfigCache(value: Omit<CustomerServiceConfigRecord, 'availability'>): void {
-    this.customerServiceBaseConfigCache = { value, expiresAtMs: Date.now() + SystemConfigService.CONFIG_CACHE_TTL_MS }
+    this.customerServiceBaseConfigCache = { value, expiresAtMs: Date.now() + SYSTEM_CONFIG_CACHE_TTL_MS }
   }
 
   /**
@@ -2284,7 +2312,7 @@ class SystemConfigService {
 
   async getVerificationProviderConfigs(
     options: { maskSensitiveValues?: boolean } = { maskSensitiveValues: true },
-    manager: EntityManager = AppDataSource.manager,
+    manager: EntityManager = getCurrentTransactionManager(AppDataSource) ?? AppDataSource.manager,
   ): Promise<VerificationProviderConfigsResult> {
     const map = await this.loadVerificationConfigMap(manager)
     return {
@@ -2718,7 +2746,7 @@ class SystemConfigService {
     requestMeta?: RequestMeta,
   ): Promise<{ config: VerificationProviderConfigsResult; changed: boolean }> {
     await this.assertAdminActor(actor, requestMeta, 'system_config.update_verification_providers', '更新验证码平台配置')
-    return runInTransaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const lockedActor = await lockActiveSysAccountForBusiness(manager, actor.userId)
       assertSysAccountGovernancePermission(lockedActor, 'system_configs:update')
       await this.ensureDefaultConfigs(manager)
@@ -2846,6 +2874,8 @@ class SystemConfigService {
 
       return { config, changed }
     })
+    if (result.changed) this.invalidateVerificationProviderCacheAfterCommit()
+    return result
   }
 }
 

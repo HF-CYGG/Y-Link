@@ -1,6 +1,7 @@
+import { AsyncResource } from 'node:async_hooks'
 import { createHash, createHmac, randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
-import { In, MoreThan, type EntityManager } from 'typeorm'
+import { In, MoreThan, type EntityManager, type EntitySubscriberInterface, type QueryRunner } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { databaseOperationGate } from '../database/operation-gate.js'
@@ -76,7 +77,7 @@ const MIN_ONLINE_WINDOW_SECONDS = 30
 const MAX_ONLINE_WINDOW_SECONDS = 3600
 const HEARTBEAT_WRITE_INTERVAL_MS = 60 * 1000
 const FEISHU_WEBHOOK_TIMEOUT_MS = 10 * 1000
-const NOTIFICATION_OUTBOX_INTERVAL_MS = 1_000
+const NOTIFICATION_OUTBOX_IDLE_DELAYS_MS = [1_000, 3_000, 5_000] as const
 const NOTIFICATION_OUTBOX_BATCH_SIZE = 3
 const NOTIFICATION_OUTBOX_MAX_ATTEMPTS = 5
 const NOTIFICATION_OUTBOX_STALE_CLAIM_MS = 10 * 60 * 1000
@@ -353,9 +354,18 @@ export class NotificationService {
   private readonly sessionRepo = AppDataSource.getRepository(SysUserSession)
   private readonly systemConfigRepo = AppDataSource.getRepository(SystemConfig)
   private readonly outboxWorkerId = `${hostname()}:${process.pid}:${randomUUID()}`.slice(0, 128)
-  private outboxTimer: ReturnType<typeof globalThis.setInterval> | null = null
+  private readonly outboxScheduleScope = new AsyncResource('notification-outbox-scheduler')
+  private outboxTimer: ReturnType<typeof globalThis.setTimeout> | null = null
   private outboxRunInFlight: Promise<number> | null = null
   private outboxWorkerDesired = false
+  private outboxWakeRequested = false
+  private outboxIdleCycles = 0
+  private outboxLegacyRepaired = false
+  private readonly outboxTransactionDepths = new WeakMap<QueryRunner, Set<number>>()
+  private readonly outboxTransactionSubscriber: EntitySubscriberInterface = {
+    afterTransactionCommit: ({ queryRunner }) => this.settleOutboxTransaction(queryRunner, true),
+    afterTransactionRollback: ({ queryRunner }) => this.settleOutboxTransaction(queryRunner, false),
+  }
 
   constructor() {
     databaseOperationGate.registerWorker({
@@ -661,6 +671,7 @@ export class NotificationService {
   ): Promise<{ changed: boolean; list: NotificationRuleRecord[] }> {
     const normalizedOnlineWindowSeconds = this.normalizeOnlineWindowSeconds(offlineWindowSeconds)
     let changed = false
+    let modesChanged = false
     await runInTransaction(async (manager) => {
       const responsibilityUserIds = input.flatMap((payload) => [
         ...payload.recipientUserIds.map(normalizeId),
@@ -737,7 +748,8 @@ export class NotificationService {
         })
       }
 
-      changed = await notificationChannelConfigService.saveModes(manager, channelState, nextModes) || changed
+      modesChanged = await notificationChannelConfigService.saveModes(manager, channelState, nextModes)
+      changed ||= modesChanged
 
       const managementUsers = await manager.getRepository(SysUser).find({
         where: MANAGEMENT_ROLES.map((role) => ({ role, status: 'enabled' })),
@@ -825,30 +837,36 @@ export class NotificationService {
       }
     })
 
+    if (modesChanged) notificationChannelConfigService.invalidateAfterCommit()
     return {
       changed,
       list: await this.listRules(),
     }
   }
 
-  async getPresenceSnapshot(): Promise<NotificationPresenceSnapshot> {
-    const now = new Date()
-    const onlineWindowSeconds = await this.getOnlineWindowSeconds()
-    const onlineWindowMs = onlineWindowSeconds * 1000
-    const onlineAfter = new Date(now.getTime() - onlineWindowMs)
-    const users = await this.userRepo.find({
+  private loadEnabledManagementUsers(): Promise<SysUser[]> {
+    return this.userRepo.find({
       where: MANAGEMENT_ROLES.map((role) => ({ role, status: 'enabled' })),
       select: {
         id: true,
         username: true,
         displayName: true,
         role: true,
+        email: true,
       },
       order: {
         role: 'ASC',
         id: 'ASC',
       },
     })
+  }
+
+  async getPresenceSnapshot(managementUsers?: readonly SysUser[]): Promise<NotificationPresenceSnapshot> {
+    const now = new Date()
+    const onlineWindowSeconds = await this.getOnlineWindowSeconds()
+    const onlineWindowMs = onlineWindowSeconds * 1000
+    const onlineAfter = new Date(now.getTime() - onlineWindowMs)
+    const users = managementUsers ?? await this.loadEnabledManagementUsers()
     const userIds = users.map((item) => item.id)
     const sessions = userIds.length
       ? await this.sessionRepo.find({
@@ -962,18 +980,7 @@ export class NotificationService {
     }
   }
 
-  private async resolveRuleRecipients(rule: NotificationRuleRecord, payload: NotificationEventPayload): Promise<SysUser[]> {
-    const whereConditions = MANAGEMENT_ROLES.map((role) => ({ role, status: 'enabled' as const }))
-    const allManagementUsers = await this.userRepo.find({
-      where: whereConditions,
-      select: {
-        id: true,
-        username: true,
-        displayName: true,
-        role: true,
-        email: true,
-      },
-    })
+  private resolveRuleRecipients(rule: NotificationRuleRecord, payload: NotificationEventPayload, allManagementUsers: readonly SysUser[]): SysUser[] {
     if (INBOUND_SUPPLIER_TARGETED_EVENT_TYPES.has(rule.eventType)) {
       const targetSupplierId = normalizeId(payload.supplierUserId ?? '')
       return allManagementUsers.filter((item) => item.role === SUPPLIER_ROLE && normalizeId(item.id) === targetSupplierId)
@@ -989,19 +996,7 @@ export class NotificationService {
     )
   }
 
-  private async resolveRuleEmailRecipients(rule: NotificationRuleRecord, payload: NotificationEventPayload): Promise<SysUser[]> {
-    const whereConditions = MANAGEMENT_ROLES.map((role) => ({ role, status: 'enabled' as const }))
-    const allManagementUsers = await this.userRepo.find({
-      where: whereConditions,
-      select: {
-        id: true,
-        username: true,
-        displayName: true,
-        role: true,
-        email: true,
-      },
-    })
-
+  private resolveRuleEmailRecipients(rule: NotificationRuleRecord, payload: NotificationEventPayload, allManagementUsers: readonly SysUser[]): SysUser[] {
     const adminRecipients = rule.emailRecipientAdminUserIds.length
       ? allManagementUsers.filter((item) =>
         rule.emailRecipientAdminUserIds.includes(normalizeId(item.id)) && ADMIN_MANAGEMENT_ROLES.includes(item.role),
@@ -1028,9 +1023,9 @@ export class NotificationService {
     return [...deduped.values()]
   }
 
-  private async shouldTriggerExternal(rule: NotificationRuleRecord): Promise<boolean> {
+  private async shouldTriggerExternal(rule: NotificationRuleRecord, loadPresence: () => Promise<NotificationPresenceSnapshot>): Promise<boolean> {
     if (rule.externalTriggerMode === 'always') return true
-    const snapshot = await this.getPresenceSnapshot()
+    const snapshot = await loadPresence()
     const onlineMap = new Map(snapshot.users.map((item) => [item.userId, item.isOnline]))
     if (rule.externalTriggerMode === 'all_management_offline') {
       return snapshot.users.every((item) => item.isOnline === false)
@@ -1246,17 +1241,14 @@ export class NotificationService {
         emailSubjectPrefix: state.subjectPrefix ?? normalized.emailSubjectPrefix,
       }
     })
-    const managementUsers = await this.userRepo.find({
-      where: MANAGEMENT_ROLES.map((role) => ({ role, status: 'enabled' })),
-      select: { id: true, role: true },
-    })
+    const managementUsers = await this.loadEnabledManagementUsers()
     this.validateRuleUserSelections(normalizedDraft, managementUsers)
 
     const subject = `${normalizedDraft.emailSubjectPrefix || '[Y-Link]'} 通知中心测试消息`
     const content = `规则：${normalizedDraft.ruleName}（${normalizedDraft.ruleCode}）\n渠道：${input.channel}\n时间：${new Date().toISOString()}`
 
     if (input.channel === 'email') {
-      const emailUsers = await this.resolveRuleEmailRecipients({
+      const emailUsers = this.resolveRuleEmailRecipients({
         id: normalizedDraft.id,
         ruleCode: normalizedDraft.ruleCode,
         ruleName: normalizedDraft.ruleName,
@@ -1279,7 +1271,7 @@ export class NotificationService {
         feishuSignSecretMasked: Boolean(normalizedDraft.feishuSignSecret),
         emailSubjectPrefix: normalizedDraft.emailSubjectPrefix,
         updatedAt: new Date(),
-      }, {})
+      }, {}, managementUsers)
 
       const failures: NotificationRuleTestSendResult['failures'] = []
       let attempted = 0
@@ -1407,6 +1399,33 @@ export class NotificationService {
       processedAt: null,
       errorMessage: null,
     }))
+    if (!this.outboxWorkerDesired) return
+    const queryRunner = manager?.queryRunner
+    if (!queryRunner?.isTransactionActive) {
+      this.wakeOutboxWorker()
+      return
+    }
+    const depths = this.outboxTransactionDepths.get(queryRunner) ?? new Set<number>()
+    depths.add(this.getOutboxTransactionDepth(queryRunner))
+    this.outboxTransactionDepths.set(queryRunner, depths)
+  }
+
+  private getOutboxTransactionDepth(queryRunner: QueryRunner): number {
+    // 固定的 TypeORM MySQL/SQLite 驱动均维护该深度；提交事件触发时该层深度已减一。
+    return (queryRunner as QueryRunner & { transactionDepth: number }).transactionDepth
+  }
+
+  private settleOutboxTransaction(queryRunner: QueryRunner, committed: boolean): void {
+    const depths = this.outboxTransactionDepths.get(queryRunner)
+    if (!depths) return
+    if (!queryRunner.isTransactionActive) {
+      this.outboxTransactionDepths.delete(queryRunner)
+      if (committed && depths.size > 0) this.wakeOutboxWorker()
+      return
+    }
+    const parentDepth = this.getOutboxTransactionDepth(queryRunner)
+    const emittedHere = depths.delete(parentDepth + 1)
+    if (committed && emittedHere) depths.add(parentDepth)
   }
 
   private async processClaimedOutboxEvent(event: ClaimedNotificationEvent): Promise<void> {
@@ -1444,13 +1463,14 @@ export class NotificationService {
     const message = this.buildNotificationMessage(input.eventType, input.payload)
 
     try {
-      const ruleRecipients = await Promise.all(
-        matchedRules.map(async (item) => ({
-          ...item,
-          inboxUsers: await this.resolveRuleRecipients(item.rule, input.payload),
-          emailUsers: await this.resolveRuleEmailRecipients(item.rule, input.payload),
-        })),
-      )
+      const enabledManagementUsers = matchedRules.length ? await this.loadEnabledManagementUsers() : []
+      const ruleRecipients = matchedRules.map((item) => ({
+        ...item,
+        inboxUsers: this.resolveRuleRecipients(item.rule, input.payload, enabledManagementUsers),
+        emailUsers: this.resolveRuleEmailRecipients(item.rule, input.payload, enabledManagementUsers),
+      }))
+      let presence: Promise<NotificationPresenceSnapshot> | undefined
+      const loadPresence = () => presence ??= this.getPresenceSnapshot(enabledManagementUsers)
 
       const inboxRows: NotificationInbox[] = []
       const inboxDedupUserIds = new Set<string>()
@@ -1488,7 +1508,7 @@ export class NotificationService {
       // 本轮处理序号（从 1 开始）：写入命中与外发审计，供通知事件详情按处理轮次分组展示。
       const attemptNo = event.attemptCount + 1
       for (const item of ruleRecipients) {
-        const allowExternal = await this.shouldTriggerExternal(item.rule)
+        const allowExternal = await this.shouldTriggerExternal(item.rule, loadPresence)
         // 外发计数口径：sent 仅统计本轮实际发送成功；alreadySent 为此前轮次已成功、本轮跳过的目标，避免重试时重复计为发送。
         let emailSent = 0
         let emailAlreadySent = 0
@@ -1657,31 +1677,41 @@ export class NotificationService {
   }
 
   startOutboxWorker(): void {
+    if (this.outboxWorkerDesired) return
     this.outboxWorkerDesired = true
+    if (!AppDataSource.subscribers.includes(this.outboxTransactionSubscriber)) {
+      AppDataSource.subscribers.push(this.outboxTransactionSubscriber)
+    }
     this.startOutboxTimer()
   }
 
-  private startOutboxTimer(): void {
-    if (databaseOperationGate.isFrozen()) {
-      return
-    }
-    if (this.outboxTimer !== null) {
-      return
-    }
-    const trigger = () => {
+  private wakeOutboxWorker(): void {
+    if (!this.outboxWorkerDesired || databaseOperationGate.isFrozen()) return
+    this.outboxWakeRequested = true
+    if (!this.outboxRunInFlight) this.startOutboxTimer()
+  }
+
+  private startOutboxTimer(delayMs = 0): void {
+    if (!this.outboxWorkerDesired || databaseOperationGate.isFrozen()) return
+    this.pauseOutboxWorker()
+    // 唤醒来自业务请求，不让后台批次继承该请求或提交事务的 operation 身份。
+    this.outboxTimer = this.outboxScheduleScope.runInAsyncScope(() => globalThis.setTimeout(() => {
+      this.outboxTimer = null
+      if (this.outboxRunInFlight) return
+      this.outboxWakeRequested = false
       void this.runOutboxOnce().catch((error) => {
         // 数据库错误的 SQL 参数可能带通知正文（客户姓名、消息摘要），只记录脱敏摘要。
         console.error('[notification-outbox] 后台处理周期失败', toSafeErrorLog(error))
       })
-    }
-    this.outboxTimer = globalThis.setInterval(trigger, NOTIFICATION_OUTBOX_INTERVAL_MS)
+    }, delayMs))
     this.outboxTimer.unref?.()
-    queueMicrotask(trigger)
   }
 
   async stopOutboxWorker(): Promise<void> {
     this.outboxWorkerDesired = false
     this.pauseOutboxWorker()
+    const index = AppDataSource.subscribers.indexOf(this.outboxTransactionSubscriber)
+    if (index !== -1) AppDataSource.subscribers.splice(index, 1)
     if (this.outboxRunInFlight) {
       await this.outboxRunInFlight
     }
@@ -1689,7 +1719,7 @@ export class NotificationService {
 
   private pauseOutboxWorker(): void {
     if (this.outboxTimer !== null) {
-      globalThis.clearInterval(this.outboxTimer)
+      globalThis.clearTimeout(this.outboxTimer)
       this.outboxTimer = null
     }
   }
@@ -1712,17 +1742,23 @@ export class NotificationService {
 
     const work = this.processOutboxBatch()
     this.outboxRunInFlight = work
+    let processed = 0
     try {
-      return await work
+      processed = await work
+      return processed
     } finally {
       if (this.outboxRunInFlight === work) {
         this.outboxRunInFlight = null
       }
       releaseMaintenanceLease()
+      if (processed > 0) this.outboxIdleCycles = 0
+      const delayMs = NOTIFICATION_OUTBOX_IDLE_DELAYS_MS[this.outboxIdleCycles]
+      if (processed === 0) this.outboxIdleCycles = Math.min(this.outboxIdleCycles + 1, NOTIFICATION_OUTBOX_IDLE_DELAYS_MS.length - 1)
+      this.startOutboxTimer(this.outboxWakeRequested ? 0 : delayMs)
     }
   }
 
-  private async processOutboxBatch(): Promise<number> {
+  private async repairLegacyOutboxClaims(): Promise<void> {
     const staleBefore = new Date(Date.now() - NOTIFICATION_OUTBOX_STALE_CLAIM_MS)
     // 旧版本曾在“领取”时先增加 attempt_count。若第 5 次领取后进程崩溃，
     // 该次数并不代表一次已经完成的失败，不能直接把尚未展开收件箱的事件判死。
@@ -1752,7 +1788,13 @@ export class NotificationService {
         .andWhere('processing_started_at <= :staleBefore', { staleBefore })
         .execute()
     }
+  }
 
+  private async processOutboxBatch(): Promise<number> {
+    if (!this.outboxLegacyRepaired) {
+      await this.repairLegacyOutboxClaims()
+      this.outboxLegacyRepaired = true
+    }
     // 先只读探测，命中后才执行 UPDATE，避免空闲 Onebox 每秒制造一次 SQLite WAL 写事务。
     // pending 且达到上限表示这些失败均已完整记录，可以安全转入终态。
     const exhaustedRows: Array<{ id: string | number }> = await this.eventRepo.createQueryBuilder('event')
@@ -1817,7 +1859,7 @@ export class NotificationService {
         { pending: 'pending', maxAttempts: NOTIFICATION_OUTBOX_MAX_ATTEMPTS, now },
       )
       .orWhere(
-        '(event.status = :processing AND event.attemptCount < :maxAttempts AND event.processingStartedAt <= :staleBefore)',
+        '(event.status = :processing AND event.processingStartedAt <= :staleBefore)',
         { processing: 'processing', staleBefore },
       )
       .orderBy('event.id', 'ASC')
@@ -1834,6 +1876,8 @@ export class NotificationService {
         .update(NotificationEvent)
         .set({
           status: 'processing',
+          // 启动时尚未过期的旧租约也能安全重领；旧版第 5 次领取本身不算已完成失败。
+          attemptCount: () => 'CASE WHEN attempt_count >= :maxAttempts THEN :legacyAttemptCount ELSE attempt_count END',
           processingOwner: this.outboxWorkerId,
           processingStartedAt: now,
           nextAttemptAt: null,
@@ -1841,9 +1885,9 @@ export class NotificationService {
           errorMessage: null,
         })
         .where('id = :eventId', { eventId })
-        .andWhere('attempt_count < :maxAttempts', { maxAttempts: NOTIFICATION_OUTBOX_MAX_ATTEMPTS })
+        .setParameters({ maxAttempts: NOTIFICATION_OUTBOX_MAX_ATTEMPTS, legacyAttemptCount: NOTIFICATION_OUTBOX_MAX_ATTEMPTS - 1 })
         .andWhere(
-          '((status = :pending AND (next_attempt_at IS NULL OR next_attempt_at <= :now)) OR (status = :processing AND processing_started_at <= :staleBefore))',
+          '((status = :pending AND attempt_count < :maxAttempts AND (next_attempt_at IS NULL OR next_attempt_at <= :now)) OR (status = :processing AND processing_started_at <= :staleBefore))',
           { pending: 'pending', processing: 'processing', now, staleBefore },
         )
         .execute()

@@ -90,10 +90,13 @@ async function main() {
     const { databaseMaintenanceModeService } = await import('../src/services/database-maintenance-mode.service.js')
     const configRepo = AppDataSource.getRepository(SystemConfig)
     const recordRepo = AppDataSource.getRepository(SmsVerificationRecord)
+    // 直接插入历史或不完整配置夹具会绕过真实治理入口，持久化后显式发出同一组失效。
+    const invalidateProviderFixtures = () => systemConfigService.invalidateVerificationProviderCacheAfterCommit()
     await configRepo.createQueryBuilder().update(SystemConfig)
       .set({ configValue: 'https://example.com/legacy-sms-provider' })
       .where('config_key = :key', { key: 'verification.mobile.api_url' })
       .execute()
+    invalidateProviderFixtures()
     const switchedConfig = await systemConfigService.resolveVerificationProviderConfigInput('mobile', {
       enabled: false,
       httpMethod: 'POST',
@@ -168,6 +171,7 @@ async function main() {
 
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: '1' }).where('config_key = :key', { key: 'verification.mobile.enabled' }).execute()
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'aliyun_dypns' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
+    invalidateProviderFixtures()
     const unavailableCapabilities = await clientAuthService.getCapabilities()
     assert.equal(unavailableCapabilities.channels.mobile, false, '配置不完整的短信通道不得声明为可发送')
     assert.equal(
@@ -194,17 +198,20 @@ async function main() {
       ['verification.mobile.aliyun_template_test', 'SMS_TEST'],
     ].map(([key, value]) => configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: value }).where('config_key = :key', { key }).execute()))
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'scheme-before-switch' }).where('config_key = :key', { key: 'verification.mobile.aliyun_scheme_name' }).execute()
+    invalidateProviderFixtures()
     const readyConfigs = await systemConfigService.getVerificationProviderConfigs()
     assert.equal(readyConfigs.mobile.ready, true, '阿里云短信只有启用、签名、模板、AK 和 HMAC 均就绪时才可用')
     assert.equal((await clientAuthService.getCapabilities()).channels.mobile, true, '客户端能力必须基于 provider ready 而不是单独 enabled')
 
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: '0' }).where('config_key = :key', { key: 'verification.mobile.enabled' }).execute()
+    invalidateProviderFixtures()
     await assert.rejects(
       () => verificationService.sendCode({ channel: 'mobile', target: '13800001111', scene: 'register' }),
       /未就绪/,
       '公共发送必须拒绝已关闭的阿里云短信通道',
     )
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: '1' }).where('config_key = :key', { key: 'verification.mobile.enabled' }).execute()
+    invalidateProviderFixtures()
 
     const superseded = await verificationService.sendCode({ channel: 'mobile', target: '13800001111', scene: 'register' })
     const sent = await verificationService.sendCode({ channel: 'mobile', target: '13800001111', scene: 'register' })
@@ -231,6 +238,7 @@ async function main() {
 
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'generic_http' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'scheme-after-switch' }).where('config_key = :key', { key: 'verification.mobile.aliyun_scheme_name' }).execute()
+    invalidateProviderFixtures()
     await verificationService.verifyCode({ channel: 'mobile', target: '13800001111', scene: 'register', code: '123456' })
     assert.deepEqual(checkedRequests[0], {
       phoneNumber: '13800001111', countryCode: '86', outId: sent.outId, verifyCode: '123456', schemeName: 'scheme-before-switch',
@@ -246,6 +254,7 @@ async function main() {
     assert.equal((await recordRepo.findOneByOrFail({ outId: superseded.outId })).verificationStatus, 'pending', '更早记录不得被回退消费')
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'aliyun_dypns' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: '' }).where('config_key = :key', { key: 'verification.mobile.aliyun_scheme_name' }).execute()
+    invalidateProviderFixtures()
 
     const receiptWorker = new AliyunDypnsMnsWorkerService(recordService)
     const officialReportTime = '2026-09-04 10:20:30'
@@ -731,18 +740,22 @@ async function main() {
 
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'generic_http' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'https://example.com/verification' }).where('config_key = :key', { key: 'verification.mobile.api_url' }).execute()
+    invalidateProviderFixtures()
     const genericResult = await verificationService.sendCode({ channel: 'mobile', target: '13800002222', scene: 'register' })
     assert.equal(genericResult.provider, 'generic_http', 'generic_http 既有发送逻辑必须保持可用')
     assert.equal(genericCodes.length, 1, 'generic_http 仍应使用内存票据生成验证码')
     const checkedBeforeGenericVerify = checkedRequests.length
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'aliyun_dypns' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
+    invalidateProviderFixtures()
     await verificationService.verifyCode({ channel: 'mobile', target: '13800002222', scene: 'register', code: genericCodes[0] ?? '' })
     assert.equal(checkedRequests.length, checkedBeforeGenericVerify, 'HTTP 验证码必须按发送时 Provider 本地核验，不能受配置切换影响')
 
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'generic_http' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
+    invalidateProviderFixtures()
     await verificationService.sendCode({ channel: 'mobile', target: '13800008888', scene: 'profile_update' })
     const obsoleteGenericCode = genericCodes.at(-1) ?? ''
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'aliyun_dypns' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
+    invalidateProviderFixtures()
     const latestDypnsResult = await verificationService.sendCode({ channel: 'mobile', target: '13800008888', scene: 'profile_update' })
     verifyResult = 'UNKNOWN'
     await assert.rejects(
@@ -756,6 +769,7 @@ async function main() {
 
     const obsoleteDypnsResult = await verificationService.sendCode({ channel: 'mobile', target: '13800009998', scene: 'forgot_password' })
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'generic_http' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
+    invalidateProviderFixtures()
     await verificationService.sendCode({ channel: 'mobile', target: '13800009998', scene: 'forgot_password' })
     const latestGenericCode = genericCodes.at(-1) ?? ''
     const checkedBeforeLatestGenericVerify = checkedRequests.length

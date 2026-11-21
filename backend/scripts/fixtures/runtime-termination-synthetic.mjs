@@ -1,4 +1,5 @@
 /** 在独占子进程执行真实shutdown/薄index片段；业务模块、数据库、HTTP均为stub。 */
+import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import vm from 'node:vm'
@@ -17,7 +18,13 @@ const reached = new Promise(resolve => { entered = resolve })
 const rescueBlocked = new Promise(resolve => { resumeRescue = resolve })
 const rescueReached = new Promise(resolve => { enteredRescue = resolve })
 const handlers = new Map()
-const report = code => console.log(JSON.stringify({ scenario, events, code, realApp: false, realDatabase: false, realHttp: false }))
+const report = code => {
+  const shutdownEvents = events.filter(value => ['drain', 'outbox-stopped', 'web-sessions-stopped', 'datasource-closed'].includes(value))
+  assert.deepEqual(shutdownEvents, scenario === 'cleanup-failure-signal'
+    ? []
+    : ['drain', 'outbox-stopped', 'web-sessions-stopped', 'datasource-closed'])
+  console.log(JSON.stringify({ scenario, events, code, realApp: false, realDatabase: false, realHttp: false }))
+}
 const fakeProcess = { env: {}, once(name, handler) { handlers.set(name, handler) },
   exit(code) { events.push('exit:' + code); report(code); process.exit(code) } }
 const noop = () => {}
@@ -28,7 +35,9 @@ const context = vm.createContext({ globalThis: null, process: fakeProcess, conso
     if (scenario === 'cleanup-failure-signal') throw new Error('SYNTHETIC_CLEANUP_FAILED')
   },
   databaseMaintenanceModeService: { shutdownAndDrain: async () => events.push('drain') },
+  notificationService: { stopOutboxWorker: async () => events.push('outbox-stopped') },
   mobileSessionService: { stopCleanupLoop: async () => {} },
+  stopWebSessionCleanup: async () => events.push('web-sessions-stopped'),
   customerServiceRealtimeService: { stopClusterPresenceSync: async () => {} },
   stopRedisBus: noop, closeRedis: async () => {},
   AppDataSource: { isInitialized: true, destroy: async () => events.push('datasource-closed') },

@@ -7,6 +7,7 @@
 import { type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
+import { getCurrentTransactionManager } from '../database/transaction-coordinator.js'
 import { SystemConfig } from '../entities/system-config.entity.js'
 import { NotificationRule, FEISHU_WEBHOOK_SEAL_CONTEXT, FEISHU_SIGN_SECRET_SEAL_CONTEXT } from '../entities/notification-rule.entity.js'
 import { openSensitiveValue, sealSensitiveValue } from '../utils/data-encryption.js'
@@ -16,6 +17,8 @@ import type { RequestMeta } from '../utils/request-meta.js'
 import { detectUnsafeHost, formatUnsafeHostReason } from '../utils/safe-network.js'
 import { lockActiveSysAccountForBusiness, assertSysAccountGovernancePermission } from './account-business-guard.service.js'
 import { auditService } from './audit.service.js'
+import { publishRedisBus, subscribeRedisBus } from '../redis/redis-bus.js'
+import { SYSTEM_CONFIG_CACHE_BUS_TOPIC, SYSTEM_CONFIG_CACHE_TTL_MS } from './system-config.service.js'
 
 export const FEISHU_SIGN_SECRET_PLACEHOLDER = '[已配置签名密钥，保存时保留原值]'
 export const FEISHU_WEBHOOK_PLACEHOLDER = '[已配置 Webhook，保存时保留原值]'
@@ -79,13 +82,38 @@ export interface NotificationChannelState {
 export interface LegacyFeishuState { webhookPresent: boolean; webhookUnreadable: boolean; signUnreadable: boolean }
 
 class NotificationChannelConfigService {
-  async load(manager: EntityManager = AppDataSource.manager): Promise<NotificationChannelState> {
-    const rows = await manager.getRepository(SystemConfig).find({ where: CONFIG_KEYS.map((configKey) => ({ configKey })) })
-    return this.toState(rows)
+  private cache: { rows: SystemConfig[]; expiresAtMs: number } | null = null
+  private generation = 0
+
+  private readRows(manager: EntityManager): Promise<SystemConfig[]> {
+    return manager.getRepository(SystemConfig).find({ where: CONFIG_KEYS.map((configKey) => ({ configKey })) })
+  }
+
+  async load(manager: EntityManager = getCurrentTransactionManager(AppDataSource) ?? AppDataSource.manager): Promise<NotificationChannelState> {
+    if (manager !== AppDataSource.manager) return this.toState(await this.readRows(manager))
+    for (;;) {
+      const cached = this.cache
+      if (cached && cached.expiresAtMs > Date.now()) return this.toState(cached.rows)
+      const generation = this.generation
+      const rows = await this.readRows(manager)
+      if (generation !== this.generation) continue
+      this.cache = { rows, expiresAtMs: Date.now() + SYSTEM_CONFIG_CACHE_TTL_MS }
+      return this.toState(rows)
+    }
+  }
+
+  invalidateCache(): void {
+    this.generation += 1
+    this.cache = null
+  }
+
+  invalidateAfterCommit(): void {
+    this.invalidateCache()
+    void publishRedisBus(SYSTEM_CONFIG_CACHE_BUS_TOPIC, { cache: 'notification-channels' })
   }
 
   private toState(rows: SystemConfig[]): NotificationChannelState {
-    const byKey = new Map(rows.map((row) => [row.configKey, row]))
+    const byKey = new Map(rows.map((row) => [row.configKey, { ...row, updatedAt: new Date(row.updatedAt) }]))
     const rawModes = byKey.get(MODES_KEY)?.configValue || '{}'
     let modes: Record<string, boolean>
     try {
@@ -153,8 +181,9 @@ class NotificationChannelConfigService {
     }
   }
 
-  async getChannels(manager: EntityManager = AppDataSource.manager): Promise<NotificationChannelsRecord> {
-    const state = await this.load(manager)
+  async getChannels(manager: EntityManager = getCurrentTransactionManager(AppDataSource) ?? AppDataSource.manager): Promise<NotificationChannelsRecord> {
+    // 管理页直接确认当前密文能否解密，通知 worker 和规则列表才使用短缓存。
+    const state = this.toState(await this.readRows(manager))
     const emailRows = await manager.getRepository(SystemConfig).find({ where: [
       'verification.email.enabled', 'verification.email.api_url', 'verification.email.headers_template', 'verification.email.body_template',
     ].map((configKey) => ({ configKey })) })
@@ -219,8 +248,15 @@ class NotificationChannelConfigService {
       changed = updatedKeys.length > 0
       if (changed) await auditService.record({ actionType: 'notification.channel.update', actionLabel: '更新通知共用连接', targetType: 'system_config', targetCode: 'notification_channels', actor, requestMeta, detail: { updatedKeys } }, manager)
     })
+    if (changed) this.invalidateAfterCommit()
     return { changed, config: await this.getChannels() }
   }
 }
 
 export const notificationChannelConfigService = new NotificationChannelConfigService()
+
+subscribeRedisBus(SYSTEM_CONFIG_CACHE_BUS_TOPIC, (message) => {
+  if (message && typeof message === 'object' && (message as { cache?: unknown }).cache === 'notification-channels') {
+    notificationChannelConfigService.invalidateCache()
+  }
+})

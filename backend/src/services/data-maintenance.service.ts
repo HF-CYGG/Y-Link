@@ -43,6 +43,8 @@ import {
 } from './data-maintenance-identifier-reconcile.js'
 import { assertDataMaintenanceImportBoundary } from './data-maintenance-import-boundary.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
+import { systemConfigService } from './system-config.service.js'
+import { notificationChannelConfigService } from './notification-channel-config.service.js'
 
 class DataMaintenanceService {
   /**
@@ -234,7 +236,7 @@ class DataMaintenanceService {
     const adminActor = await this.assertAdminActor(actor, requestMeta, 'data_maintenance.import_json', '导入 JSON 数据')
     const normalizedPayload = validateExportPayload(payload)
     const importSummary: ImportSummary = buildImportSummary(normalizedPayload)
-    return runInTransaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
       const previousIdentifierConfigs = await captureOrderIdentifierConfigsBeforeImport(manager)
       await assertDataMaintenanceImportBoundary(manager)
@@ -288,6 +290,9 @@ class DataMaintenanceService {
         imported: importSummary,
       }
     }, { mysqlIsolationLevel: 'REPEATABLE READ' })
+    systemConfigService.invalidateVerificationProviderCacheAfterCommit()
+    notificationChannelConfigService.invalidateAfterCommit()
+    return result
   }
 }
 

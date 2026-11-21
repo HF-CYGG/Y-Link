@@ -167,6 +167,7 @@ const shutdownRuntime = (reason: string, exitCode: number, exit = true): Promise
     await stopProductThumbnailBackfill()
     // HTTP 断开不代表业务 Promise 完成；先关闭新准入，排空所有操作和 worker 才销毁连接。
     await databaseMaintenanceModeService.shutdownAndDrain()
+    await notificationService.stopOutboxWorker()
     await mobileSessionService.stopCleanupLoop()
     await stopWebSessionCleanup()
     server?.closeAllConnections?.()
@@ -565,7 +566,7 @@ export async function startBusinessRuntime(startup: { mode: 'normal' | 'cutover'
     // 迁移错误对象可能携带目标库连接参数与 SQL，只输出名称、消息与堆栈。
     console.error(paint('[y-link-backend] resume automatic database migration failed:', 'red'), toSafeErrorLog(error))
   }).finally(() => {
-    // 通知 outbox 定时器在维护期只空转检查，不领取新任务；维护 drain 会等待已领取批次释放。
+    // 维护期暂停通知调度，排空时等待已领取的批次释放。
     notificationService.startOutboxWorker()
     // start 仅登记恢复意图；gate 冻结时不会启动计时器，解除维护才自动恢复。
     o2oPreorderService.startTimeoutRecycleLoop()

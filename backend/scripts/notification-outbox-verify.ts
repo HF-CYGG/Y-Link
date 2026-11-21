@@ -152,6 +152,58 @@ const main = async () => {
   assert.equal(await notificationService.runOutboxOnce(), 1)
   assert.equal((await eventRepo.findOneByOrFail({ id: maintenanceEvent.id })).status, 'processed')
 
+  // 真实 SQLite 提交/回滚广播：保存点提交不是外层提交，回滚的事件不得触发唤醒。
+  const worker = notificationService as unknown as { wakeOutboxWorker: () => void }
+  const originalWake = worker.wakeOutboxWorker
+  let wakes = 0
+  worker.wakeOutboxWorker = () => {
+    wakes += 1
+    originalWake.call(worker)
+  }
+  notificationService.startOutboxWorker()
+  const runner = AppDataSource.createQueryRunner()
+  const emitNested = (sourceId: string) => notificationService.emitEvent({
+    eventType: 'customer_service_client_message_created',
+    sourceType: 'client_feedback_conversation',
+    sourceId,
+    payload: { conversationNo: sourceId },
+  }, runner.manager)
+  try {
+    await runner.startTransaction()
+    await runner.startTransaction()
+    await emitNested('outbox-savepoint-outer-rollback')
+    await runner.commitTransaction()
+    assert.equal(wakes, 0, '保存点提交不得提前唤醒')
+    await runner.rollbackTransaction()
+    assert.equal(wakes, 0, '外层回滚不得唤醒')
+    assert.equal(await eventRepo.existsBy({ sourceId: 'outbox-savepoint-outer-rollback' }), false)
+
+    await runner.startTransaction()
+    await runner.startTransaction()
+    await emitNested('outbox-savepoint-inner-rollback')
+    await runner.rollbackTransaction()
+    await runner.commitTransaction()
+    assert.equal(wakes, 0, '只有已回滚保存点写过事件时，外层提交也不得唤醒')
+    assert.equal(await eventRepo.existsBy({ sourceId: 'outbox-savepoint-inner-rollback' }), false)
+
+    await runner.startTransaction()
+    await runner.startTransaction()
+    await emitNested('outbox-savepoint-committed')
+    await runner.commitTransaction()
+    assert.equal(wakes, 0)
+    await runner.commitTransaction()
+    assert.equal(wakes, 1, '外层实际提交后立即唤醒一次')
+  } finally {
+    while (runner.isTransactionActive) await runner.rollbackTransaction()
+    await runner.release()
+    await notificationService.stopOutboxWorker()
+    worker.wakeOutboxWorker = originalWake
+  }
+  if ((await eventRepo.findOneByOrFail({ sourceId: 'outbox-savepoint-committed' })).status === 'pending') {
+    await notificationService.runOutboxOnce()
+  }
+  assert.equal((await eventRepo.findOneByOrFail({ sourceId: 'outbox-savepoint-committed' })).status, 'processed')
+
   // 真实 outbox + 真实安全 HTTP，仅把 DNS 边界停住：总 deadline 必须释放维护租约和投递领取状态。
   const ruleRepo = AppDataSource.getRepository(NotificationRule)
   const rule = await ruleRepo.findOneByOrFail({ eventType: 'o2o_preorder_created' })
