@@ -90,6 +90,10 @@ FROM backend-prod-deps AS native-security-build
 COPY backend/native-security/baseline-v7 /ylink-native-security
 RUN Y_LINK_NATIVE_SECURITY_BUILD=image sh /ylink-native-security/build-stage.sh
 
+# 新增补丁及PAM为独立未验收候选，不混用v7 pins/安装器。
+FROM backend-prod-deps AS native-security-candidate
+COPY backend/native-security /ylink-native-security
+RUN Y_LINK_NATIVE_SECURITY_BUILD=image sh /ylink-native-security/build-stage.sh --candidate-only
 FROM backend-prod-deps AS nginx-keyring
 RUN set -eu; \
   apt-get update \

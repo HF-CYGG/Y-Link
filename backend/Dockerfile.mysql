@@ -39,6 +39,10 @@ FROM build AS native-security-build
 COPY native-security/baseline-v7 /ylink-native-security
 RUN Y_LINK_NATIVE_SECURITY_BUILD=image sh /ylink-native-security/build-stage.sh
 
+# 新增补丁及PAM为独立未验收候选，不混用v7 pins/安装器。
+FROM build AS native-security-candidate
+COPY native-security /ylink-native-security
+RUN Y_LINK_NATIVE_SECURITY_BUILD=image sh /ylink-native-security/build-stage.sh --candidate-only
 
 # 仅显式--target package-security-candidate产出未验收DEB；普通runtime不依赖此stage。
 FROM ${Y_LINK_NODE_IMAGE} AS package-security-candidate

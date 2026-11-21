@@ -1,0 +1,107 @@
+{
+  "schema": 1,
+  "localMaintainer": "Y-Link 本地安全构建 <security-build@localhost.invalid>",
+  "originalMaintainer": "Sam Hartman <hartmans@debian.org>",
+  "controlWithMaintainerSha256": "c330d8664d11cfbdca1021d004c740dadf092dc45f0f85b2a1f0b6fb1ffc7d06",
+  "source": "pam",
+  "distro": "bookworm",
+  "version": "1.5.2-6+deb12u2",
+  "revision": "1.5.2-6+deb12u2+ylink2",
+  "sourceDateEpoch": 1794873600,
+  "fixScope": [
+    "CVE-2025-6020"
+  ],
+  "runtimePackages": [
+    "libpam-modules-bin",
+    "libpam-modules"
+  ],
+  "architectures": {
+    "amd64": "x86_64-linux-gnu",
+    "arm64": "aarch64-linux-gnu"
+  },
+  "originAuthentication": {
+    "authenticationReceipt": "F:\\Y-Link\\.tmp-security-hardening-20261115\\all-fixes-001\\debian-source-auth-001\\authentication-result.json",
+    "sourcesSha256": "92d11a035571df011f06f28c61cb9825130ef1d92abb2f2e0525e8674dc44af8",
+    "inReleaseSha256": "77737fa4b34f2693e982cc9ee35736816c35a7778fc2d326cc1bbf5b301fe1aa",
+    "historicalFixedSourceNotCurrentRepositoryFreshness": true,
+    "method": "既有已验签InRelease -> Sources SHA256 -> 精确PAM dsc和归档；历史固定源，不声称当前仓库freshness",
+    "sourcesUrl": "https://deb.debian.org/debian/dists/bookworm/main/source/Sources.xz",
+    "keyringSha256": "506b815cbb32d9b6066b4a2aa524071e071761e7e7f68c3ac74f3061ba852017"
+  },
+  "files": [
+    {
+      "name": "pam_1.5.2-6+deb12u2.dsc",
+      "sha256": "049316ffb7c8be35b14e6815351397b52d65f283041f90fecf884db2c0bec7b1",
+      "bytes": 2038,
+      "url": "https://deb.debian.org/debian/pool/main/p/pam/pam_1.5.2-6+deb12u2.dsc"
+    },
+    {
+      "name": "pam_1.5.2.orig.tar.xz",
+      "sha256": "e4ec7131a91da44512574268f493c6d8ca105c87091691b8e9b56ca685d4f94d",
+      "bytes": 988784,
+      "url": "https://deb.debian.org/debian/pool/main/p/pam/pam_1.5.2.orig.tar.xz"
+    },
+    {
+      "name": "pam_1.5.2-6+deb12u2.debian.tar.xz",
+      "sha256": "17f5ead07046651fd2847b13f657e559af8ef6b43d2092cf1c5a7eea305ae01c",
+      "bytes": 137648,
+      "url": "https://deb.debian.org/debian/pool/main/p/pam/pam_1.5.2-6+deb12u2.debian.tar.xz"
+    }
+  ],
+  "rulesBeforeSha256": "18e2c55fcbc19dc84977c4320850f9e9c5fa174bd1993286356574e7d8762608",
+  "rulesWithGuardSha256": "be293ade44192c6b43de85538c00fb087804b5c91b31bb6f3cbf9d8b333151ef",
+  "controlSha256": "ee857a30a64e580608036dbb37438c6f58455723f762ee633a1426c9770d05a1",
+  "securitySeriesSha256": "f4b86ab718a368e9be1392518093f2f3109b5a91f71516d2ad47385b1a15ca8c",
+  "legacySeriesSha256": "f598e2207137b375f6a73d1a44106c3bdd4f693fd54deef162f2ac34138a7aee",
+  "compiledSeriesSha256": "fbbe8586fbd923bf7514fd6088c76c3aee62bf4eabf23417d6f3ed447858bd59",
+  "securityPatches": [
+    {
+      "path": "upstream/0001-pam_inline-introduce-pam_asprintf-pam_snprintf-and-p.patch",
+      "sha256": "ad7ce3c4338171197a16a7b1146bd478916561ac5d9778f97e0e5b38a0e9c22a",
+      "bytes": 3954
+    },
+    {
+      "path": "upstream/0002-pam_namespace-from-v1.7.1.patch",
+      "sha256": "ecbd73757ea1eef234924dd2eca941730b5f7c2c407355cd1966e772bbc85db3",
+      "bytes": 64971
+    },
+    {
+      "path": "0003-pam_namespace-adjust-paths-back-to-bookworm.patch",
+      "sha256": "890977a6e50844dae1fc5201a4099d567c949f866a0ba2d8da88f1c5be3865ec",
+      "bytes": 1271
+    },
+    {
+      "path": "0004-configure.ac-secure-memory-erasure.patch",
+      "sha256": "4d197d7635a73717eca9a7539690c9c46646d2f7d5f7d057469a8b5ba4b28e47",
+      "bytes": 810
+    }
+  ],
+  "targets": {
+    "modules/pam_namespace/pam_namespace.c": "ee7d0cd02e4dfb57f4e850d09fe0e86a800e6a7d34fada375ba0f785c29f78de",
+    "modules/pam_namespace/pam_namespace.h": "8fc1e7d2430b7c04e3fe353498085ff4ae92ff8a5e8cec49e90ea946f733c50a",
+    "modules/pam_namespace/namespace.init": "772e5773586a236034156ac660f8d234bf50f4cebf5811b15b55b890b83cef64",
+    "libpam/include/pam_inline.h": "505e5b5a8854c6dae405416ca3f511a39315d42665288cf316cf05471719ec05",
+    "configure.ac": "0520c1d9a75e32a798513848a241e58706a6b81226a2524d64076d31137746dc"
+  },
+  "officialCommits": [
+    {
+      "url": "https://github.com/linux-pam/linux-pam/commit/475bd60c552b98c7eddb3270b0b4196847c0072e.patch",
+      "sha256": "743c137564b7e3f6155a333bb45ff7c11eef8d80d86b8d8637783cac19eb3b60",
+      "bytes": 37363,
+      "note": "Debian认证源码的v1.7.1整体回补包含这三项；实际构建消费下列固定Debian补丁闭包，不把原1.7.1diff盲贴旧源码"
+    },
+    {
+      "url": "https://github.com/linux-pam/linux-pam/commit/592d84e1265d04c3104acee815a503856db503a1.patch",
+      "sha256": "f62d7cc751bfc87146524b5aa9e8da4d87cb6397d50ae0cbc29e125717f9b5cd",
+      "bytes": 6979,
+      "note": "Debian认证源码的v1.7.1整体回补包含这三项；实际构建消费下列固定Debian补丁闭包，不把原1.7.1diff盲贴旧源码"
+    },
+    {
+      "url": "https://github.com/linux-pam/linux-pam/commit/976c20079358d133514568fc7fd95c02df8b5773.patch",
+      "sha256": "9c3d9831ef01b21362c005e40e4b98d292d7d4d41aa0092d76f0ab70e7c4ce89",
+      "bytes": 1182,
+      "note": "Debian认证源码的v1.7.1整体回补包含这三项；实际构建消费下列固定Debian补丁闭包，不把原1.7.1diff盲贴旧源码"
+    }
+  ],
+  "patchClosureNote": "恢复Debian已交付的四项安全/兼容前置到真正的patches-applied链，保留旧23项；configure前强制核对五份最终源码和完整series。"
+}

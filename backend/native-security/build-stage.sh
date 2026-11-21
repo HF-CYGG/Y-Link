@@ -1,6 +1,7 @@
 #!/bin/sh
 # 仅镜像构建阶段：APT原有archive信任→Sources→精确源码版本；只产出两个本地运行库包。
 set -eu
+test "$#" = 1 && test "$1" = --candidate-only
 test "${Y_LINK_NATIVE_SECURITY_BUILD:-}" = image
 test "$(sed -n 's/^VERSION_CODENAME=//p' /etc/os-release)" = bookworm
 case "$(dpkg --print-architecture)" in amd64|arm64) ;; *) exit 1 ;; esac
@@ -11,4 +12,8 @@ DEBIAN_FRONTEND=noninteractive apt-get build-dep -y --no-install-recommends --bu
 mkdir /native-source
 cd /native-source
 apt-get source --download-only --only-source 'util-linux=2.38.1-5+deb12u3' 'zlib=1:1.2.13.dfsg-1'
-node /ylink-native-security/build-backports.mjs --work=/native-source --out=/native-out
+node /ylink-native-security/build-backports.mjs --candidate-only --work=/native-source --out=/native-out
+# PAM独立精确包契约；原两源包/单so流程不变，不泛化成任意包安装器。
+DEBIAN_FRONTEND=noninteractive apt-get build-dep -y --no-install-recommends --build-profiles=nobiarch 'pam=1.5.2-6+deb12u2'
+apt-get source --download-only --only-source 'pam=1.5.2-6+deb12u2'
+node /ylink-native-security/build-pam-backport.mjs --candidate-only --work=/native-source
