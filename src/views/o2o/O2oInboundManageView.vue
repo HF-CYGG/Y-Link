@@ -4,18 +4,21 @@
  * 文件职责：提供扫码识别、批量入库清单确认与库存流水联动追踪的一体化入库操作界面
  * 维护说明：调整入库流程时需同步维护“识别→入清单→批量确认→流水核对”四段式状态链路，避免库存口径不一致
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { CameraFilled } from '@element-plus/icons-vue'
 import { PageContainer, PassiveNumberInput, UnifiedScanDialog } from '@/components/common'
-import { getProductList, type ProductRecord, type ProductSkuRecord } from '@/api/modules/product'
+import type { ProductRecord, ProductSkuRecord } from '@/api/modules/product'
+import { getAdminProductOptions } from '@/composables/useAdminProductOptionsCache'
 import { getO2oInventoryLogsPaged, inboundO2oStock, type O2oInventoryLog } from '@/api/modules/o2o'
-import { useDataChangeRefresh } from '@/composables/useDataChangeRefresh'
+import { dataChangeVersions } from '@/utils/data-change-signal'
 import { useCameraQrScanner } from '@/composables/useCameraQrScanner'
-import { extractErrorMessage } from '@/utils/error'
+import { extractErrorMessage, isRequestCanceled } from '@/utils/error'
 
 
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
+
+defineOptions({ name: 'O2oInboundManageView' })
 
 // 两种扫码模式：
 // - scan_plus_one：扫一件算一件，适合逐件补货；
@@ -51,7 +54,7 @@ const loading = ref(false)
 const logLoading = ref(false)
 const submittingSingle = ref(false)
 const confirmingBatch = ref(false)
-const products = ref<ProductRecord[]>([])
+const products = shallowRef<ProductRecord[]>([])
 const logs = ref<O2oInventoryLog[]>([])
 const logPage = ref(1)
 const logPageSize = ref(10)
@@ -75,6 +78,10 @@ let scanPanelResizeObserver: ResizeObserver | null = null
 const desktopWorkbenchMediaQuery = '(min-width: 1280px)'
 let desktopWorkbenchMediaList: MediaQueryList | null = null
 let inventoryLogPanelHeightFrame = 0
+let layoutObserversActive = false
+let productLoad: AbortController | undefined
+let loadedProductVersions = ''
+const readProductVersions = () => dataChangeVersions.products + ':' + dataChangeVersions.inventory
 
 const manualForm = reactive({
   productId: '',
@@ -173,16 +180,8 @@ const scanCapabilityHint = computed(() => {
 // - 不再依赖整行 stretch，避免被中间清单或其他列错误撑高；
 // - 仅在 PC 三列工作台下同步，移动端仍保留原来的自然布局。
 // - 扫码区内容增减后，右侧高度会通过 ResizeObserver 自动同步。
-const isDesktopWorkbenchLayout = () => {
-  if (globalThis.window === undefined || typeof globalThis.window.matchMedia !== 'function') {
-    return false
-  }
-
-  return globalThis.window.matchMedia(desktopWorkbenchMediaQuery).matches
-}
-
 const syncInventoryLogPanelHeight = () => {
-  if (!isDesktopWorkbenchLayout()) {
+  if (!desktopWorkbenchMediaList?.matches) {
     if (inventoryLogPanelHeight.value) {
       inventoryLogPanelHeight.value = ''
     }
@@ -197,6 +196,7 @@ const syncInventoryLogPanelHeight = () => {
 }
 
 const scheduleInventoryLogPanelHeightSync = () => {
+  if (!layoutObserversActive) return
   if (globalThis.window === undefined || typeof globalThis.window.requestAnimationFrame !== 'function') {
     syncInventoryLogPanelHeight()
     return
@@ -295,13 +295,34 @@ const clearInboundList = async () => {
 }
 
 // 拉取商品列表，既供扫码识别使用，也为手动下拉选择与库存显示提供数据源。
-const loadProducts = async () => {
+const cancelProductLoad = () => {
+  productLoad?.abort()
+  productLoad = undefined
+  loading.value = false
+}
+
+const loadProducts = async (force = false) => {
+  if (confirmingBatch.value || submittingSingle.value || productLoad) return
+  const controller = new AbortController()
+  productLoad = controller
   loading.value = true
   try {
-    products.value = await getProductList({})
+    const rows = await getAdminProductOptions({}, { force, signal: controller.signal })
+    if (productLoad !== controller) return
+    products.value = rows
+    loadedProductVersions = readProductVersions()
+  } catch (error) {
+    if (!isRequestCanceled(error)) showAppError(extractErrorMessage(error, '加载商品库存失败'))
   } finally {
-    loading.value = false
+    if (productLoad === controller) {
+      productLoad = undefined
+      loading.value = false
+    }
   }
+}
+
+const refreshProductsIfStale = () => {
+  if (layoutObserversActive && loadedProductVersions !== readProductVersions()) return loadProducts()
 }
 
 // 最近库存流水用于“提交后立即核对”，通过分页避免一次铺满所有流水。
@@ -489,6 +510,7 @@ const addManualToInboundList = () => {
 // 兼容老流程：不走清单，直接单笔入库。
 // 适合偶发补货、只处理一个商品的场景。
 const handleSingleInbound = async () => {
+  if (submittingSingle.value || confirmingBatch.value) return
   if (!manualForm.productId) {
     showAppWarning('请选择商品')
     return
@@ -502,6 +524,7 @@ const handleSingleInbound = async () => {
     return
   }
   submittingSingle.value = true
+  cancelProductLoad()
   try {
     await inboundO2oStock({
       productId: manualForm.productId,
@@ -512,11 +535,12 @@ const handleSingleInbound = async () => {
     showAppSuccess('单笔入库成功')
     manualForm.qty = 1
     manualForm.remark = ''
-    await Promise.all([loadProducts(), loadLatestLogs()])
+    await loadLatestLogs()
   } catch (error) {
     showAppError(extractErrorMessage(error, '单笔入库失败'))
   } finally {
     submittingSingle.value = false
+    await refreshProductsIfStale()
   }
 }
 
@@ -525,11 +549,13 @@ const handleSingleInbound = async () => {
 // - 成功项从清单移除，失败项保留，便于用户修正后再次提交；
 // - 最后统一刷新商品库存与流水。
 const handleBatchConfirmInbound = async () => {
+  if (confirmingBatch.value || submittingSingle.value) return
   if (!inboundList.value.length) {
     showAppWarning('本次入库清单为空')
     return
   }
   confirmingBatch.value = true
+  cancelProductLoad()
   const successKeys = new Set<string>()
   const resultDetails: BatchInboundResultItem[] = []
   try {
@@ -576,40 +602,35 @@ const handleBatchConfirmInbound = async () => {
       showAppSuccess(`本次入库完成：成功 ${successCount} 条`)
       listRemark.value = ''
     }
-    await Promise.all([loadProducts(), loadLatestLogs()])
   } finally {
     confirmingBatch.value = false
+    await Promise.all([refreshProductsIfStale(), successKeys.size ? loadLatestLogs() : undefined])
   }
 }
 
-// 其他页面新增或调整商品后，切回入库管理时刷新商品目录。
-useDataChangeRefresh(['products'], loadProducts)
+// 批量提交仍逐笔发出全局变更信号，本页等批次完成后合并刷新。
+watch(readProductVersions, refreshProductsIfStale)
 
-onMounted(async () => {
-  await Promise.all([loadProducts(), loadLogs()])
-  // 页面初始化后把焦点放到扫码框，保证扫码枪/键盘可直接开始录入。
-  focusScanInput()
-
-  await nextTick()
-  scheduleInventoryLogPanelHeightSync()
-
+const startLayoutObservers = () => {
+  if (layoutObserversActive) return
+  layoutObserversActive = true
   if (globalThis.window !== undefined && typeof globalThis.window.matchMedia === 'function') {
     desktopWorkbenchMediaList = globalThis.window.matchMedia(desktopWorkbenchMediaQuery)
     desktopWorkbenchMediaList.addEventListener('change', scheduleInventoryLogPanelHeightSync)
   }
 
   if (typeof ResizeObserver !== 'undefined') {
-    scanPanelResizeObserver = new ResizeObserver(() => {
-      scheduleInventoryLogPanelHeightSync()
-    })
+    scanPanelResizeObserver = new ResizeObserver(scheduleInventoryLogPanelHeightSync)
 
     if (scanPanelRef.value) {
       scanPanelResizeObserver.observe(scanPanelRef.value)
     }
   }
-})
+  scheduleInventoryLogPanelHeightSync()
+}
 
-onBeforeUnmount(() => {
+const stopLayoutObservers = () => {
+  layoutObserversActive = false
   scanPanelResizeObserver?.disconnect()
   scanPanelResizeObserver = null
   desktopWorkbenchMediaList?.removeEventListener('change', scheduleInventoryLogPanelHeightSync)
@@ -618,7 +639,24 @@ onBeforeUnmount(() => {
     globalThis.window.cancelAnimationFrame(inventoryLogPanelHeightFrame)
     inventoryLogPanelHeightFrame = 0
   }
+}
+
+onMounted(async () => {
+  startLayoutObservers()
+  await Promise.all([loadProducts(), loadLogs()])
+  if (layoutObserversActive) focusScanInput()
 })
+
+onActivated(() => {
+  startLayoutObservers()
+  void refreshProductsIfStale()
+})
+const deactivatePage = () => {
+  stopLayoutObservers()
+  cancelProductLoad()
+}
+onDeactivated(deactivatePage)
+onBeforeUnmount(deactivatePage)
 </script>
 
 <template>
@@ -817,7 +855,7 @@ onBeforeUnmount(() => {
 
         <div class="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
           <el-button :disabled="!inboundList.length" @click="clearInboundList">清空清单</el-button>
-          <el-button :disabled="!inboundList.length" @click="loadProducts">刷新商品库存</el-button>
+          <el-button :disabled="!inboundList.length || confirmingBatch || submittingSingle" @click="loadProducts(true)">刷新商品库存</el-button>
           <el-button
             type="primary"
             :loading="confirmingBatch"

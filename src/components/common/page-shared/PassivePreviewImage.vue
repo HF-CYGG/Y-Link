@@ -5,13 +5,14 @@
  * 实现逻辑：
  * - 缩略图使用原生 img 渲染，通过 span role="button" 承接点击与键盘打开行为，避免在上传按钮内形成按钮嵌套；
  * - 预览态使用普通 ElDialog 展示图片，不支持滚轮缩放，从源头避免 passive:false 的 wheel 监听；
+ * - 首次打开才挂载弹窗，关闭动画完成后释放弹窗与原图。
  * - previewImages 为空时仅展示缩略图，不开启预览，兼容占位图展示场景。
  * - 缩略图默认懒加载、异步解码，长列表（如盘点明细）只加载进入视口的图片。
  * 维护说明：
  * - 商品、规格等业务图片预览优先复用本组件，不要直接使用 el-image 的预览能力；
  * - 若未来要支持多图切换，只增加按钮或键盘切换，不要引入滚轮缩放交互。
  */
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 
 defineOptions({
   inheritAttrs: false,
@@ -31,7 +32,10 @@ const props = withDefaults(defineProps<{
 })
 
 const previewVisible = ref(false)
+const previewMounted = ref(false)
 const activeIndex = ref(0)
+let previewClosing = false
+let reopenPreview = false
 
 const normalizedPreviewImages = computed(() => {
   return props.previewImages
@@ -59,9 +63,29 @@ const openPreview = () => {
   if (!canPreview.value) {
     return
   }
+  if (previewClosing) {
+    reopenPreview = true
+    return
+  }
 
   activeIndex.value = 0
+  previewMounted.value = true
   previewVisible.value = true
+}
+
+const handlePreviewClose = () => { previewClosing = true }
+
+const updatePreviewVisibility = async (visible: boolean) => {
+  previewVisible.value = visible
+  if (visible) return
+  // 关闭动画完整结束后 ElDialog 才发出 false；先渲染关闭态，确保排队的打开触发一次新的渲染。
+  await nextTick()
+  previewClosing = false
+  if (reopenPreview) {
+    reopenPreview = false
+    openPreview()
+  }
+  if (!previewVisible.value) previewMounted.value = false
 }
 
 const showPreviousImage = () => {
@@ -99,12 +123,15 @@ const showNextImage = () => {
   </span>
 
   <el-dialog
-    v-model="previewVisible"
+    v-if="previewMounted"
+    :model-value="previewVisible"
     :title="props.dialogTitle"
     append-to-body
     destroy-on-close
     class="passive-preview-image-dialog"
     width="min(92vw, 960px)"
+    @close="handlePreviewClose"
+    @update:model-value="updatePreviewVisibility"
   >
     <div class="passive-preview-image-dialog__body">
       <button

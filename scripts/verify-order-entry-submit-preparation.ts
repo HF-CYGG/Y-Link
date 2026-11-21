@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import ts from 'typescript'
+import { reactive, ref, watch } from 'vue'
 import type { ProductRecord } from '../src/api/modules/product'
 import type { OrderHeaderForm, OrderItemRow } from '../src/views/order-entry/types'
 import { prepareOrderSubmission } from '../src/views/order-entry/composables/prepare-order-submission'
@@ -102,6 +103,7 @@ type Harness = {
   messages: string[]
   draftWrites: number[]
   setSubmitResponse: (response: (payload: Record<string, unknown>) => Promise<unknown>) => void
+  changeDraftOwner: () => void
 }
 const createHarness = (): Harness => {
   const saving = { value: false }
@@ -120,7 +122,7 @@ const createHarness = (): Harness => {
     'isSaving', 'pendingScanCount', 'headerForm', 'itemRows', 'products', 'pendingSubmission', 'loadPreparation',
     'showAppWarning', 'showAppError', 'showAppSuccess', 'showCriticalErrorDialog',
     'orderApi', 'persistDraft', 'resetForm', 'router', 'loadDepartmentOptions', 'loadProducts',
-    `${submitCode}; return submitOrder`,
+    `let draftGeneration = 0; ${submitCode}; return { submit: submitOrder, changeDraftOwner: () => { draftGeneration += 1; isSaving.value = false; } }`,
   )(
     saving, pendingScanCount, header(), rows, { value: singleSku }, pending, () => loadPreparation(),
     (message: string) => messages.push(`warning:${message}`),
@@ -133,9 +135,9 @@ const createHarness = (): Harness => {
     { push: async () => undefined },
     async () => undefined,
     async () => undefined,
-  ) as () => Promise<void>
+  ) as Pick<Harness, 'submit' | 'changeDraftOwner'>
   return {
-    submit,
+    ...submit,
     resolveLoad: (value) => resolveLoad(value),
     setLoader: (loader) => { loadPreparation = loader },
     rows, saving, pendingScanCount, pending, requests, messages, draftWrites,
@@ -209,5 +211,62 @@ await unknownResult.submit()
 assert.equal(unknownResult.requests.length, 2)
 assert.equal(unknownResult.requests[1].idempotencyKey, firstKey, '相同载荷重试须复用原幂等键')
 assert.equal(unknownResult.pending.value, null, '成功后须清理待确认幂等态')
+
+const ownerChange = createHarness()
+ownerChange.setLoader(async () => ({ prepareOrderSubmission }))
+let resolveOldSubmission!: (value: unknown) => void
+const oldSubmission = new Promise((resolve) => { resolveOldSubmission = resolve })
+ownerChange.setSubmitResponse(() => oldSubmission)
+const submittingAsOldOwner = ownerChange.submit()
+await Promise.resolve()
+await Promise.resolve()
+assert.equal(ownerChange.requests.length, 1, '先等原账号开始提交')
+ownerChange.changeDraftOwner()
+ownerChange.rows.value = [row({ qty: 3 })]
+const draftWritesBeforeResponse = ownerChange.draftWrites.length
+resolveOldSubmission({ order: { id: 'old-order', businessNo: 'old' } })
+await submittingAsOldOwner
+assert.equal(ownerChange.rows.value[0]?.qty, 3, '旧账号成功响应不得清空新账号草稿')
+assert.equal(ownerChange.draftWrites.length, draftWritesBeforeResponse, '旧响应不得写入新账号存储')
+
+const draftMethods = new Map<string, string>()
+let draftOwnerWatch = ''
+const findDraftPersistence = (node: ts.Node) => {
+  if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) draftMethods.set(node.name.text, node.getText(composableAst))
+  if (ts.isCallExpression(node) && node.expression.getText(composableAst) === 'watch'
+    && node.arguments[0]?.getText(composableAst) === '() => authStore.currentUser?.id') {
+    draftOwnerWatch = node.getText(composableAst)
+  }
+  ts.forEachChild(node, findDraftPersistence)
+}
+findDraftPersistence(composableAst)
+assert.ok(draftOwnerWatch, '草稿绑定必须监听账号切换')
+const storage = new Map<string, string>()
+const authStore = reactive<{ currentUser: { id: string } | null }>({ currentUser: { id: '旧账号' } })
+const draftValue = ref('刚录入的旧账号内容')
+const persistedDraftCode = ts.transpileModule([
+  "const ORDER_ENTRY_DRAFT_STORAGE_KEY_PREFIX = 'draft'; const draftPersistenceReady = { value: true }; const draftStorageActive = true; let draftProductsReady = true;",
+  "let draftOwnerId = '旧账号'; let lastPersistedDraft = null; let draftSaveTimer; const isSaving = { value: false };",
+  "const initializeDraft = () => { clearTimeout(draftSaveTimer); draftOwnerId = authStore.currentUser?.id; lastPersistedDraft = null; draftValue.value = ''; };",
+  ...['resolveDraftStorageContext', 'cancelDraftSave', 'persistBoundDraft', 'persistDraft', 'scheduleDraftSave'].map((name) => {
+    const declaration = draftMethods.get(name)
+    assert.ok(declaration, name)
+    return 'const ' + declaration + ';'
+  }),
+  draftOwnerWatch,
+  'return scheduleDraftSave;',
+].join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+const scheduleSave = new Function('watch', 'authStore', 'draftValue', 'buildDraftSnapshot', 'getBrowserStorage',
+  'resolveUserScopedStorageKey', persistedDraftCode)(
+  watch, authStore, draftValue, () => ({ content: draftValue.value }),
+  () => ({ setItem: (key: string, value: string) => storage.set(key, value) }),
+  (prefix: string, owner: string | undefined) => owner ? prefix + ':' + owner : null,
+) as () => void
+scheduleSave()
+assert.equal(storage.size, 0, '防抖间隔内没有立即落盘')
+authStore.currentUser = null
+assert.deepEqual(JSON.parse(storage.get('draft:旧账号')!), { content: '刚录入的旧账号内容' }, '清认证状态时立即按旧绑定保存草稿')
+authStore.currentUser = { id: '新账号' }
+assert.equal(storage.has('draft:新账号'), false, '旧账号草稿不得串入新账号')
 
 console.log('[verify:order-entry-submit-preparation] 开单提交准备边界通过')

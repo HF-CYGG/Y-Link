@@ -7,16 +7,17 @@
  * 3. 针对“正式出库单只给部门单”规则，在此做最终提交兜底，确保散客单不会误传相关状态。
  */
 
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, shallowRef, watch } from 'vue'
+import { getAdminProductOptions } from '@/composables/useAdminProductOptionsCache'
 import { useDataChangeRefresh } from '@/composables/useDataChangeRefresh'
 
 import { useRouter } from 'vue-router'
-import { orderApi, productApi } from '@/api'
+import { orderApi } from '@/api'
 import type { OrderDepartmentOption, SubmitOrderPayload } from '@/api/modules/order'
 import type { ProductRecord } from '@/api/modules/product'
 import { useAppStore, useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
-import { extractErrorMessage } from '@/utils/error'
+import { extractErrorMessage, isRequestCanceled } from '@/utils/error'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { createTimedAsyncLoader } from '@/utils/timed-async-loader'
 import {
@@ -118,7 +119,7 @@ export const useOrderEntryForm = () => {
    * - products 只保存当前启用且至少有一个可选 SKU 的产品，供选择与自动带价使用。
    */
   const itemRows = ref<OrderItemRow[]>([])
-  const products = ref<ProductRecord[]>([])
+  const products = shallowRef<ProductRecord[]>([])
 
   /**
    * 交互状态：
@@ -164,6 +165,13 @@ export const useOrderEntryForm = () => {
   const fieldRefMap = new Map<string, unknown>()
   const focusFieldOrder: FocusField[] = ['product', 'sku', 'qty', 'unitPrice', 'remark']
   const draftPersistenceReady = ref(false)
+  let draftOwnerId: string | undefined
+  let draftGeneration = 0
+  let draftProductsReady = false
+  let draftSaveTimer: ReturnType<typeof setTimeout> | undefined
+  let draftStorageActive = false
+  let lastPersistedDraft: string | null = null
+  let productLoadSequence = 0
 
   /**
    * 设备模式：
@@ -267,21 +275,10 @@ export const useOrderEntryForm = () => {
    * - 使用 sessionStorage 保留“当前浏览器会话内”的录入草稿；
    * - 同时清理历史全局 key，避免旧版本未分账号的草稿继续污染当前账号。
    */
-  const resolveDraftStorageContext = () => {
-    const storage = getBrowserStorage('session')
-    if (!storage) {
-      return {
-        storage: null,
-        storageKey: null,
-      }
-    }
-
-    clearLegacyScopedStorageKey(storage, LEGACY_ORDER_ENTRY_DRAFT_STORAGE_KEY)
-    return {
-      storage,
-      storageKey: resolveUserScopedStorageKey(ORDER_ENTRY_DRAFT_STORAGE_KEY_PREFIX, authStore.currentUser?.id),
-    }
-  }
+  const resolveDraftStorageContext = () => ({
+    storage: getBrowserStorage('session'),
+    storageKey: resolveUserScopedStorageKey(ORDER_ENTRY_DRAFT_STORAGE_KEY_PREFIX, draftOwnerId),
+  })
 
   /**
    * 构建当前草稿快照：
@@ -332,17 +329,50 @@ export const useOrderEntryForm = () => {
    * - 使用 sessionStorage 保留“临时切页后返回”的输入状态；
    * - 仅在浏览器环境且持久化开关就绪后执行，避免初始化阶段把空白态覆盖到草稿。
    */
+  const cancelDraftSave = () => {
+    clearTimeout(draftSaveTimer)
+    draftSaveTimer = undefined
+  }
+
+  const persistBoundDraft = () => {
+    cancelDraftSave()
+    if (!draftPersistenceReady.value || !draftProductsReady) return
+    try {
+      const { storage, storageKey } = resolveDraftStorageContext()
+      if (!storage || !storageKey) return
+      const serialized = JSON.stringify(buildDraftSnapshot())
+      if (serialized !== lastPersistedDraft) {
+        storage.setItem(storageKey, serialized)
+        lastPersistedDraft = serialized
+      }
+    } catch {
+      // 浏览器阻止存储时，草稿不可写也不能阻断离页或退出。
+    }
+  }
+
   const persistDraft = () => {
-    if (!draftPersistenceReady.value || !productCandidatesReady.value) {
-      return
-    }
+    if (draftOwnerId === authStore.currentUser?.id) persistBoundDraft()
+  }
 
-    const { storage, storageKey } = resolveDraftStorageContext()
-    if (!storage || !storageKey) {
-      return
-    }
+  const scheduleDraftSave = () => {
+    if (!draftStorageActive || !draftPersistenceReady.value || !draftProductsReady) return
+    cancelDraftSave()
+    draftSaveTimer = setTimeout(persistDraft, 350)
+  }
 
-    storage.setItem(storageKey, JSON.stringify(buildDraftSnapshot()))
+  const activateDraftStorage = () => {
+    if (draftStorageActive) return
+    draftStorageActive = true
+    globalThis.window?.addEventListener('beforeunload', persistDraft)
+    globalThis.window?.addEventListener('pagehide', persistDraft)
+  }
+
+  const deactivateDraftStorage = () => {
+    if (!draftStorageActive) return
+    draftStorageActive = false
+    globalThis.window?.removeEventListener('beforeunload', persistDraft)
+    globalThis.window?.removeEventListener('pagehide', persistDraft)
+    persistDraft()
   }
 
   /**
@@ -352,10 +382,12 @@ export const useOrderEntryForm = () => {
    */
   const restoreDraft = (): boolean => {
     const { storage, storageKey } = resolveDraftStorageContext()
+    lastPersistedDraft = null
     if (!storage || !storageKey) {
       return false
     }
 
+    clearLegacyScopedStorageKey(storage, LEGACY_ORDER_ENTRY_DRAFT_STORAGE_KEY)
     const rawDraft = storage.getItem(storageKey)
     if (!rawDraft) {
       return false
@@ -403,6 +435,7 @@ export const useOrderEntryForm = () => {
       drawerForm.qty = typeof parsedDraft.drawerForm.qty === 'number' ? parsedDraft.drawerForm.qty : null
       drawerForm.unitPrice = typeof parsedDraft.drawerForm.unitPrice === 'number' ? parsedDraft.drawerForm.unitPrice : null
       drawerForm.remark = parsedDraft.drawerForm.remark ?? ''
+      lastPersistedDraft = rawDraft
       return true
     } catch {
       storage.removeItem(storageKey)
@@ -453,21 +486,29 @@ export const useOrderEntryForm = () => {
    * - 仅请求启用产品，并过滤掉没有当前启用 SKU 的记录；
    * - 失败时给出稳定错误提示，避免页面沉默失败。
    */
-  const loadProducts = async (): Promise<boolean> => {
+  const loadProducts = async (force = false): Promise<boolean> => {
+    const sequence = ++productLoadSequence
+    const userId = authStore.currentUser?.id
     productsLoading.value = true
     productCandidatesReady.value = false
     try {
-      const loadedProducts = await productApi.getProductList({
-        isActive: true,
-      })
+      const loadedProducts = await getAdminProductOptions({ isActive: true }, { force })
+      if (sequence !== productLoadSequence || userId !== authStore.currentUser?.id) return false
       products.value = loadedProducts.filter((product) => getSelectableProductSkus(product).length > 0)
       productCandidatesReady.value = true
+      if (!draftProductsReady) {
+        reconcileRestoredDraftProducts()
+        draftProductsReady = true
+        scheduleDraftSave()
+      }
       return true
     } catch (error) {
-      showAppError(extractErrorMessage(error, '产品加载失败，请稍后重试'))
+      if (sequence === productLoadSequence && !isRequestCanceled(error)) {
+        showAppError(extractErrorMessage(error, '产品加载失败，请稍后重试'))
+      }
       return false
     } finally {
-      productsLoading.value = false
+      if (sequence === productLoadSequence) productsLoading.value = false
     }
   }
 
@@ -790,6 +831,7 @@ export const useOrderEntryForm = () => {
    * - 关闭移动端抽屉并清理编辑上下文。
    */
   const resetForm = () => {
+    cancelDraftSave()
     headerForm.orderType = 'walkin'
     headerForm.hasCustomerOrder = false
     headerForm.isSystemApplied = false
@@ -825,10 +867,12 @@ export const useOrderEntryForm = () => {
     }
     // 模块下载期间先锁定按钮；下载结束再同步读取当前表单，避免双击或编辑期间混用旧载荷。
     isSaving.value = true
+    const submittingDraft = draftGeneration
     let preparationLoaded = false
     let submittedDepartmentNodeId = ''
     try {
       const { prepareOrderSubmission } = await loadOrderEntrySubmission()
+      if (submittingDraft !== draftGeneration) return
       preparationLoaded = true
       const prepared = prepareOrderSubmission(headerForm, itemRows.value, products.value)
       if (!prepared.payload) {
@@ -847,6 +891,7 @@ export const useOrderEntryForm = () => {
       persistDraft()
 
       const result = await orderApi.submitOrder({ ...payloadWithoutKey, idempotencyKey } as SubmitOrderPayload)
+      if (submittingDraft !== draftGeneration) return
 
       pendingSubmission.value = null
       showAppSuccess(
@@ -866,6 +911,7 @@ export const useOrderEntryForm = () => {
         },
       })
     } catch (error) {
+      if (submittingDraft !== draftGeneration) return
       if (!preparationLoaded) {
         showAppError('校验加载失败，录入已保留；请刷新后重试')
         return
@@ -877,14 +923,14 @@ export const useOrderEntryForm = () => {
       }
       // 失败可能源于库存已被其他单据扣减：刷新商品可用库存，便于用户按最新数量调整后重试。
       // 明细行只保存商品/SKU 主键，刷新候选不影响已录内容；草稿与待确认幂等键保持不变。
-      void loadProducts()
+      void loadProducts(true)
       void showCriticalErrorDialog(error, {
         title: '出库单保存失败',
         fallback: '保存失败，请稍后重试',
         operation: '保存出库单',
       })
     } finally {
-      isSaving.value = false
+      if (submittingDraft === draftGeneration) isSaving.value = false
     }
   }
 
@@ -893,30 +939,39 @@ export const useOrderEntryForm = () => {
    * - 首屏恢复草稿并拉取产品，再统一迁移旧商品名称和对齐 SKU/价格；
    * - 无论请求是否成功，都确保页面至少有一条可编辑的空白明细。
    */
-  onMounted(async () => {
-    if (!headerForm.issuerName) {
-      headerForm.issuerName = defaultIssuerName.value
-    }
-    const restored = restoreDraft()
-    // 部门选项与商品候选并行加载；部门加载内部已兜底失败，只影响下拉提示，不影响商品草稿对账。
-    const departmentOptionsTask = loadDepartmentOptions()
-    const productsLoaded = await loadProducts()
-    if (productsLoaded) {
-      reconcileRestoredDraftProducts()
-    }
-    await departmentOptionsTask
-    if (!restored) {
-      itemRows.value = [createBlankRow()]
-    }
+  const initializeDraft = async () => {
+    cancelDraftSave()
+    const generation = ++draftGeneration
+    productLoadSequence += 1
+    const userId = authStore.currentUser?.id
+    draftOwnerId = userId
+    draftPersistenceReady.value = false
+    draftProductsReady = false
+    productCandidatesReady.value = false
+    productsLoading.value = false
+    products.value = []
+    if (!userId || !restoreDraft()) resetForm()
+    if (!userId) return
+    await nextTick()
+    if (generation !== draftGeneration) return
+    // 部门和商品候选并行；商品第一次加载成功后再对账历史草稿。
+    await Promise.all([loadDepartmentOptions(), loadProducts()])
+    if (generation !== draftGeneration || authStore.currentUser?.id !== userId) return
     syncDepartmentNodeId()
     draftPersistenceReady.value = true
-    if (productsLoaded) {
-      persistDraft()
-    }
+    persistDraft()
+  }
+
+  onMounted(() => {
+    activateDraftStorage()
+    void initializeDraft()
   })
+  onActivated(activateDraftStorage)
+  onDeactivated(deactivateDraftStorage)
+  onBeforeUnmount(deactivateDraftStorage)
 
   // 开单页被缓存期间若其他页面新增或调整了商品、部门，切回时静默刷新候选，不改动已填写的表头与明细。
-  useDataChangeRefresh(['products'], loadProducts)
+  useDataChangeRefresh(['products', 'inventory'], loadProducts)
   useDataChangeRefresh(['departments'], loadDepartmentOptions)
 
   /**
@@ -985,9 +1040,7 @@ export const useOrderEntryForm = () => {
       () => drawerForm.unitPrice,
       () => drawerForm.remark,
     ],
-    () => {
-      persistDraft()
-    },
+    scheduleDraftSave,
     { deep: true },
   )
 
@@ -1008,20 +1061,13 @@ export const useOrderEntryForm = () => {
    */
   watch(
     () => authStore.currentUser?.id,
-    (nextUserId, previousUserId) => {
-      if (!draftPersistenceReady.value || nextUserId === previousUserId) {
-        return
-      }
-
-      const restored = restoreDraft()
-      if (!restored) {
-        resetForm()
-      }
-      if (productCandidatesReady.value) {
-        reconcileRestoredDraftProducts()
-        persistDraft()
-      }
+    (_nextUserId, previousUserId) => {
+      // Pinia 已更新身份，但表单仍绑定原账号。切换草稿之前按原键立即落盘。
+      if (draftStorageActive && draftOwnerId === previousUserId) persistBoundDraft()
+      isSaving.value = false
+      void initializeDraft()
     },
+    { flush: 'sync' },
   )
 
   return {

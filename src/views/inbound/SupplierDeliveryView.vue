@@ -16,16 +16,16 @@
  * - 当前页面在供货工作台中作为被嵌入子页面渲染，不要重新恢复独立页头。
  */
 
-import { computed, defineAsyncComponent, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, shallowRef, watch } from 'vue'
 import { useDataChangeRefresh } from '@/composables/useDataChangeRefresh'
 import { ElMessageBox } from 'element-plus'
-import QRCode from 'qrcode'
 import { useRouter } from 'vue-router'
 import { PageContainer, PassiveNumberInput } from '@/components/common'
-import { getProductList, type ProductRecord } from '@/api/modules/product'
+import type { ProductRecord } from '@/api/modules/product'
+import { getAdminProductOptions } from '@/composables/useAdminProductOptionsCache'
 import { submitSupplierDelivery, type InboundOrderDetail } from '@/api/modules/inbound'
 import { useAuthStore } from '@/store'
-import { extractErrorMessage } from '@/utils/error'
+import { extractErrorMessage, isRequestCanceled } from '@/utils/error'
 import { disabledInboundExpectedArrivalDate } from '@/utils/inbound-expected-arrival'
 import {
   SUPPLIER_DELIVERY_ITEM_QTY_MAX,
@@ -48,7 +48,7 @@ const router = useRouter()
 const authStore = useAuthStore()
 const loading = ref(false)
 const submitting = ref(false)
-const products = ref<ProductRecord[]>([])
+const products = shallowRef<ProductRecord[]>([])
 
 // 单行录入项结构：使用稳定 uid 作为 transition-group key，避免按索引 key 在删除中间项时触发错位过渡。
 interface DeliveryItemRow {
@@ -250,10 +250,11 @@ watch([items, remark, expectedArrivalAt], scheduleDraftSave, { deep: true })
 const loadProducts = async () => {
   loading.value = true
   try {
-    products.value = await getProductList({ isActive: true })
+    products.value = await getAdminProductOptions({ isActive: true })
     initializeDraftIfNeeded()
     return true
   } catch (error) {
+    if (isRequestCanceled(error)) return false
     products.value = []
     showAppError(extractErrorMessage(error, '加载商品列表失败，请稍后重试'))
     return false
@@ -277,6 +278,7 @@ const handleRemoveItem = (index: number) => {
 // 送货单创建成功后立即生成二维码；失败只标记状态，不回滚已创建单据，提示由调用方统一给出。
 const generateQRCode = async (verifyCode: string) => {
   try {
+    const { default: QRCode } = await import('qrcode')
     qrCodeDataUrl.value = await QRCode.toDataURL(verifyCode, {
       width: 300,
       margin: 2,

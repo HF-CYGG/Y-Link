@@ -24,6 +24,7 @@ export interface ProductRecord {
   o2oStatus: 'listed' | 'unlisted'
   o2oRecommended: boolean
   thumbnail: string | null
+  thumbnailSmall?: string | null
   detailContent: string | null
   limitPerUser: number
   currentStock: number
@@ -69,6 +70,7 @@ export interface ProductSkuRecord {
   isCurrent?: boolean
   o2oRecommended?: boolean
   thumbnail?: string | null
+  thumbnailSmall?: string | null
   sortOrder?: number
   /** 原厂条码；为空表示以 SKU 编码作为内部条码。 */
   barcode?: string | null
@@ -170,6 +172,8 @@ export interface ProductListQuery {
   isActive?: boolean
   tagId?: string
   categoryId?: string
+  o2oStatus?: 'listed' | 'unlisted'
+  includeDetail?: boolean
   page?: number
   pageSize?: number
 }
@@ -201,6 +205,7 @@ interface ProductRawRecord {
   o2oStatus?: PrimitiveValue
   o2oRecommended?: PrimitiveValue
   thumbnail?: PrimitiveValue
+  thumbnailSmall?: PrimitiveValue
   detailContent?: PrimitiveValue
   limitPerUser?: PrimitiveValue
   currentStock?: PrimitiveValue
@@ -319,6 +324,7 @@ const normalizeProductSkuRecord = (record: ProductSkuRecord): ProductSkuRecord =
   isCurrent: record.isCurrent === undefined ? true : normalizeBoolean(record.isCurrent),
   o2oRecommended: normalizeBoolean(record.o2oRecommended),
   thumbnail: normalizeText(record.thumbnail) || null,
+  thumbnailSmall: normalizeText(record.thumbnailSmall) || null,
   sortOrder: normalizeInteger(record.sortOrder),
   barcode: normalizeText(record.barcode) || null,
   effectiveBarcode: normalizeText(record.effectiveBarcode) || normalizeText(record.barcode) || normalizeText(record.skuCode),
@@ -346,6 +352,7 @@ const normalizeProductRecord = (record: ProductRawRecord): ProductRecord => {
     o2oStatus: normalizeText(record.o2oStatus, 'unlisted') === 'listed' ? 'listed' : 'unlisted',
     o2oRecommended: normalizeBoolean(record.o2oRecommended),
     thumbnail: normalizeText(record.thumbnail) || null,
+    thumbnailSmall: normalizeText(record.thumbnailSmall) || null,
     detailContent: normalizeText(record.detailContent) || null,
     limitPerUser: normalizeInteger(record.limitPerUser, 5),
     currentStock: normalizeInteger(record.currentStock, 0),

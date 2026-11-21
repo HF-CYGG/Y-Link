@@ -13,7 +13,7 @@
  * - 模板里用到的图标必须与脚本导入保持一致，否则运行时会直接报错并表现为页面无响应。
  */
 
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { PageContainer, PassiveNumberInput, PassiveSegmentedTabs, UnifiedScanDialog } from '@/components/common'
 import {
@@ -23,16 +23,19 @@ import {
   verifyInboundOrder,
   type InboundOrderDetail,
 } from '@/api/modules/inbound'
-import { getProductList, type ProductRecord } from '@/api/modules/product'
+import type { ProductRecord } from '@/api/modules/product'
+import { getAdminProductOptions } from '@/composables/useAdminProductOptionsCache'
 import { CameraFilled, Check, Document, DocumentCopy, Edit, Loading, Picture, Search } from '@element-plus/icons-vue'
 import { useDataChangeRefresh } from '@/composables/useDataChangeRefresh'
 import { useCameraQrScanner } from '@/composables/useCameraQrScanner'
 import { useDevice } from '@/composables/useDevice'
-import { extractErrorMessage } from '@/utils/error'
+import { extractErrorMessage, isRequestCanceled } from '@/utils/error'
 import dayjs from 'dayjs'
 
 
 import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
+
+defineOptions({ name: 'InboundScanView' })
 
 // 送货单池属于低频查看面板，异步拆包避免把列表与轮询逻辑打进扫码页首屏分包。
 const InboundDeliveryPoolPanel = defineAsyncComponent(() => import('./components/InboundDeliveryPoolPanel.vue'))
@@ -55,7 +58,7 @@ const currentOrder = ref<InboundOrderDetail | null>(null)
 const recentScans = ref<Array<{ verifyCode: string; showNo: string; status: InboundOrderDetail['order']['status']; scannedAt: string }>>([])
 const editDialogVisible = ref(false)
 const editProductsLoading = ref(false)
-const products = ref<ProductRecord[]>([])
+const products = shallowRef<ProductRecord[]>([])
 
 interface EditItemRow {
   uid: string
@@ -269,9 +272,9 @@ const ensureProductsLoaded = async () => {
 
   editProductsLoading.value = true
   try {
-    products.value = await getProductList({})
+    products.value = await getAdminProductOptions({})
   } catch (error) {
-    showAppError(extractErrorMessage(error, '加载商品目录失败'))
+    if (!isRequestCanceled(error)) showAppError(extractErrorMessage(error, '加载商品目录失败'))
   } finally {
     editProductsLoading.value = false
   }
@@ -553,7 +556,7 @@ useDataChangeRefresh(['products'], async () => {
   }
   editProductsLoading.value = true
   try {
-    products.value = await getProductList({})
+    products.value = await getAdminProductOptions({})
     return true
   } catch {
     return false

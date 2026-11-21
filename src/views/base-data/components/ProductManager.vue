@@ -39,7 +39,7 @@
  */
 
 
-import { computed, defineAsyncComponent, h, nextTick, onActivated, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, h, nextTick, onActivated, onMounted, ref, shallowRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowDown } from '@element-plus/icons-vue'
 import { type FormInstance, type FormRules, type TableInstance, type UploadRequestOptions } from 'element-plus'
@@ -120,6 +120,7 @@ const printSkuIds = ref<string[]>([])
 const exportLoading = ref(false)
 const searchCategoryId = ref('')
 const formRef = ref<FormInstance>()
+const thumbnailSmallByOriginal = shallowRef(new Map<string, string>())
 const productTableRef = ref<TableInstance>()
 const pageReady = ref(false)
 const keepAliveActivated = ref(false)
@@ -701,6 +702,11 @@ const buildEditForm = (row: ProductRecord): ProductForm => {
       .map((sku) => [String(sku.id), Number(sku.currentStock ?? 0)])),
   }
   const currentSkus = (row.skus ?? []).filter((sku) => sku.isCurrent !== false)
+  const smallImages = new Map<string, string>()
+  for (const item of [row, ...currentSkus]) {
+    if (item.thumbnail && item.thumbnailSmall) smallImages.set(item.thumbnail, item.thumbnailSmall)
+  }
+  thumbnailSmallByOriginal.value = smallImages
   productEditLocationBaseline = {
     productId: row.id,
     skus: new Map(currentSkus
@@ -1041,6 +1047,11 @@ const buildDiscountRateOptions = (defaultPrice: unknown) => {
 const resolveSkuThumbnail = (row: ProductSkuForm) => {
   const skuThumbnail = typeof row.thumbnail === 'string' ? row.thumbnail.trim() : ''
   return skuThumbnail || form.value.productThumbnail || ''
+}
+
+const resolveSmallSkuThumbnail = (row: ProductSkuForm) => {
+  const original = resolveSkuThumbnail(row)
+  return thumbnailSmallByOriginal.value.get(original) ?? original
 }
 
 const resolveSkuFormKey = (row: ProductSkuForm) => {
@@ -2280,7 +2291,7 @@ onActivated(() => {
                     >
                       <PassivePreviewImage
                         v-if="resolveSkuThumbnail(row) && !isSkuThumbnailUploading(row)"
-                        :src="resolveSkuThumbnail(row)"
+                        :src="resolveSmallSkuThumbnail(row)"
                         :preview-images="currentSkuPreviewImageList(row)"
                         fit="cover"
                         class="sku-thumb-image sku-thumb-preview-trigger"

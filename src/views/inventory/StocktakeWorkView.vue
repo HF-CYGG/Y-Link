@@ -67,7 +67,8 @@ const pagination = reactive({ page: 1, pageSize: 50, total: 0 })
  * 规格示例图：服务端已按“SKU 图优先、商品图兜底”填充 thumbnail；
  * 无图时展示统一占位图且不开启预览，避免点开空白大图。
  */
-const resolveItemImage = (row: Pick<StocktakeItemRecord, 'thumbnail'>) => resolveProductPlaceholder(row.thumbnail)
+const resolveItemImage = (row: Pick<StocktakeItemRecord, 'thumbnail' | 'thumbnailSmall'>) =>
+  resolveProductPlaceholder(row.thumbnailSmall || row.thumbnail)
 const resolveItemPreviewImages = (row: Pick<StocktakeItemRecord, 'thumbnail'>) => {
   const thumbnail = row.thumbnail?.trim()
   return thumbnail ? [thumbnail] : []

@@ -388,6 +388,7 @@ export interface StocktakeItemRecord {
   productId: string
   productName: string
   thumbnail: string | null
+  thumbnailSmall?: string | null
   /** 按库位盘点时为该行盘的库位，按总量盘点时为主库位。 */
   locationCode: string | null
   /** 按库位盘点时为该行盘的库位 ID，按总量盘点时为 null。 */

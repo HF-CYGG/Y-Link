@@ -68,10 +68,12 @@ assertSourceIncludes(clientMallSource, 'client-detail-sku-group', '客户端详�
 assertSourceIncludes(clientMallSource, '<ElButton', '客户端详情规格值应使用 Element Plus 交互控件')
 assert.ok(!clientMallSource.includes('v-for="sku in resolveActiveSkus(detailProduct)"'), '客户端详情不应继续纵向渲染完整 SKU 卡片')
 
-assertSourceIncludes(cartStoreSource, 'thumbnail: string | null', '购物车项应保存商品或 SKU 图片快照')
+assertSourceIncludes(cartStoreSource, 'export type ClientCartItem = ClientCartSnapshotItem', '购物车项应复用存储层的快照类型')
 assertSourceIncludes(cartStoreSource, 'resolveCartItemThumbnail', '购物车应按 SKU 图片优先生成快照图')
 assertSourceIncludes(cartStoreSource, 'thumbnail: resolveCartItemThumbnail(product, sku)', '加入购物车应优先写入 SKU 图片')
-assertSourceIncludes(cartStorageSource, 'thumbnail: string | null', '购物车本地快照类型应保存图片字段')
+const cartItemContract = cartStorageSource.match(/export interface ClientCartSnapshotItem\s*\{([^}]*)\}/)?.[1]
+assert.ok(cartItemContract, '购物车存储层应声明 ClientCartSnapshotItem')
+assertSourceIncludes(cartItemContract, 'thumbnail: string | null', '购物车本地快照类型应保存商品或 SKU 图片字段')
 assertSourceIncludes(cartStorageSource, 'thumbnail = typeof row.thumbnail', '购物车本地快照恢复应归一化图片字段')
 assertSourceIncludes(productApiSource, 'o2oRecommended?: boolean', '产品 SKU 前端类型应包含 SKU 级推荐字段')
 assertSourceIncludes(o2oApiSource, 'O2oMallSku', 'O2O API 应导出共享 SKU 类型')
