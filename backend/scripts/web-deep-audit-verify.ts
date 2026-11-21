@@ -475,7 +475,6 @@ async function verifyJsonImportRequiresPermanentDeletePassword() {
   }
 
   const app = express()
-  app.use(express.json())
   app.use((req, _res, next) => {
     ;(req as unknown as { auth: Record<string, unknown> }).auth = {
       userId: 'verify-admin',
@@ -501,18 +500,22 @@ async function verifyJsonImportRequiresPermanentDeletePassword() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })
-    // 频控按账号计每一次请求：以下 5 次放行、第 6 次 429。
-    assert.equal((await post({ ...basePayload, permanentDeletePassword: 'Verify-Import-Pass-123' })).status, 403, '未开启时必须拒绝')
+    const enabledPayload = { ...basePayload, permanentDeletePassword: 'Verify-Import-Pass-123' }
+    const largeTables = (length: number) => ({ products: [{ description: 'x'.repeat(length) }] })
+    // 禁用时应在解析大请求体和消耗账号额度以前拒绝。
+    assert.equal((await post({ ...enabledPayload, tables: largeTables(8 * 1024 * 1024) })).status, 403)
     mutableEnv.Y_LINK_JSON_DATA_TRANSFER_ENABLED = true
     assert.equal((await post({ ...basePayload, currentPassword: 'wrong-current', permanentDeletePassword: 'Verify-Import-Pass-123' })).status, 400, '本人密码复核失败必须拒绝')
     assert.equal((await post(basePayload)).status, 400, '缺少永久删除口令必须拒绝')
     assert.equal((await post({ ...basePayload, permanentDeletePassword: 'wrong-pass' })).status, 403, '口令错误必须拒绝')
     assert.equal(importedPayloads.length, 0, '复核与口令通过前不得进入清表导入逻辑')
     assert.deepEqual(failureAudits, ['disabled', 'password_missing', 'password_rejected'], '开关拒绝与口令拒绝必须写脱敏失败审计')
-    assert.equal((await post({ ...basePayload, permanentDeletePassword: 'Verify-Import-Pass-123' })).status, 200)
+    assert.equal((await post({ ...enabledPayload, tables: largeTables(2 * 1024 * 1024) })).status, 200)
     assert.equal(importedPayloads.length, 1)
     assert.ok(!('permanentDeletePassword' in importedPayloads[0]), '口令不得透传进导入服务与审计')
     assert.ok(!('currentPassword' in importedPayloads[0]), '本人密码不得透传进导入服务与审计')
+    assert.equal((await post({ ...enabledPayload, tables: largeTables(8 * 1024 * 1024) })).status, 413)
+    assert.equal(importedPayloads.length, 1, '超限请求不得进入导入服务')
     assert.equal((await post(basePayload)).status, 429, 'JSON 导入必须按账号限流')
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()))

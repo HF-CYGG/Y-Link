@@ -4,7 +4,7 @@
  * 维护重点：调整数据治理流程时，需要同步核对权限边界、导入导出结构版本以及迁移切换的审计留痕。
  */
 
-import { Router, type Request } from 'express'
+import { Router, json, type Request } from 'express'
 import { z } from 'zod'
 import { env } from '../config/env.js'
 import { requirePermission, requireRole } from '../middleware/auth.middleware.js'
@@ -241,10 +241,14 @@ dataMaintenanceRouter.post(
   '/import/json',
   requirePermission('data_maintenance:import'),
   requireRole('admin'),
+  asyncHandler(async (req, _res, next) => {
+    await assertJsonDataTransferEnabled(req, JSON_IMPORT_AUDIT_TARGET)
+    next()
+  }),
   jsonImportLimiter,
+  json({ limit: '8mb' }),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
-    await assertJsonDataTransferEnabled(req, JSON_IMPORT_AUDIT_TARGET)
     const { permanentDeletePassword, currentPassword, ...payload } = importPayloadSchema.parse(req.body)
     // 先复核本人密码、再核对永久删除口令，最后才进入清表事务：被劫持的管理员会话不能凭一次请求清空业务数据。
     await authService.verifyStepUpPassword(authReq.auth, currentPassword ?? '', extractRequestMeta(req), JSON_IMPORT_AUDIT_TARGET.actionType)

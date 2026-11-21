@@ -319,6 +319,8 @@ export function createApp(options: CreateAppOptions = {}) {
   const protectedJsonParser = express.json({ limit: PROTECTED_JSON_BODY_LIMIT })
   const staffDirectoryImportJsonParser = express.json({ limit: STAFF_DIRECTORY_IMPORT_JSON_BODY_LIMIT })
   app.use('/api', requireAuth, requireAdminCsrf, (req, res, next) => {
+    // 大请求体只由导入路由在功能开关、角色、细粒度权限和账号频控通过后解析。
+    if (req.method === 'POST' && staticPathKey(req.path) === '/data-maintenance/import/json') return next()
     const isStaffDirectoryJsonImport = req.path === '/system-configs/client-staff-directory/import'
       || req.path === '/system-configs/client-staff-directory/import/preview'
     return (isStaffDirectoryJsonImport ? staffDirectoryImportJsonParser : protectedJsonParser)(req, res, next)

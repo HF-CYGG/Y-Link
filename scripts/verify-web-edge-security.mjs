@@ -71,6 +71,9 @@ for (const file of ['docker/nginx/default.conf', 'docker/nginx/default.conf.temp
     assert.match(body, /client_max_body_size 11m;/, `${file} ${declaration} 上传/导入入口应放宽到 11m`)
     assert.match(body, /limit_req zone=ylink_api_general /, `${file} ${declaration} 应计入通用限流`)
   }
+  const jsonImport = blockOf('location = /api/data-maintenance/import/json')
+  assert.match(jsonImport, /client_max_body_size 8m;/, `${file} 应仅在 JSON 导入标准路径放宽到 8 MiB`)
+  assert.match(jsonImport, /limit_req zone=ylink_api_general /, `${file} JSON 导入须保留通用边缘频控`)
   for (const endpoint of ['/api/auth/me', '/api/client-auth/me']) {
     const body = blockOf(`location = ${endpoint}`)
     assert.match(body, /add_header Cache-Control "no-store" always;/)
@@ -123,6 +126,7 @@ for (const file of ['docker/nginx/default.conf', 'docker/nginx/default.conf.temp
     }
     assert.match(apiBlock, new RegExp(`limit_req zone=ylink_auth_${kind} burst=`))
   }
+  assert.ok(!bodyLimitPattern.test('/api/data-maintenance/import/json'), `${file} 治理导入应保留独立的 8 MiB 限制`)
   assert.doesNotMatch(source.replace(apiBlock, ''), /location[^\n]*~\*[^\n]*api\//, `${file} 不得在 /api/ 外扩展大小写代理范围`)
   assert.match(apiBlock, /limit_req zone=ylink_api_general burst=\d+ nodelay;/, `${file} /api/ 缺少通用每 IP 限流`)
   assert.match(blockOf('location ^~ /uploads/'), /limit_req zone=ylink_api_general burst=\d+ nodelay;/, `${file} /uploads/ 缺少通用每 IP 限流`)
@@ -173,6 +177,8 @@ for (const file of ['compose.yml', 'compose.mysql.yml', 'compose.cloud.yml']) {
   const backend = source.slice(source.indexOf('  backend:'), source.indexOf('  frontend:'))
   assert.doesNotMatch(backend, /^    ports:/m, `${file} 默认不公开后端端口`)
   assert.match(backend, /Y_LINK_TRUST_PROXY/)
+  assert.match(backend, /Y_LINK_JSON_DATA_TRANSFER_ENABLED:-false/)
+  assert.match(backend, /PERMANENT_DELETE_PASSWORD:-\}/)
   assert.match(source, /ipv4_address: \$\{Y_LINK_FRONTEND_PROXY_IP/)
 }
 console.log('[web-edge-security] 代理头覆盖、HTML安全头、端口静态契约、边缘限流/连接/请求体上限、代理路径改写与静态缓存/压缩策略通过')
