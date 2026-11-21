@@ -78,6 +78,11 @@ FROM prod-deps AS native-security-candidate
 COPY native-security /ylink-native-security
 RUN Y_LINK_NATIVE_SECURITY_BUILD=image sh /ylink-native-security/build-stage.sh --candidate-only
 
+# glibc开发闭包独占原始基座，禁止在已修补运行库上混装发行版dev依赖。
+FROM ${Y_LINK_NODE_IMAGE} AS glibc-security-build
+COPY native-security /ylink-native-security
+RUN Y_LINK_GLIBC_SECURITY_BUILD=image sh /ylink-native-security/build-glibc-stage.sh --candidate-only
+
 # 仅显式--target package-security-candidate产出未验收DEB；普通runtime不依赖此stage。
 FROM ${Y_LINK_NODE_IMAGE} AS package-security-candidate
 COPY native-security /ylink-native-security

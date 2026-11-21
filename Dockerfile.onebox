@@ -94,6 +94,12 @@ RUN Y_LINK_NATIVE_SECURITY_BUILD=image sh /ylink-native-security/build-stage.sh
 FROM backend-prod-deps AS native-security-candidate
 COPY backend/native-security /ylink-native-security
 RUN Y_LINK_NATIVE_SECURITY_BUILD=image sh /ylink-native-security/build-stage.sh --candidate-only
+
+# glibc同版本完整包使用独立原始构建stage；dev闭包不进入运行镜像。
+FROM ${Y_LINK_NODE_IMAGE} AS glibc-security-build
+COPY backend/native-security /ylink-native-security
+RUN Y_LINK_GLIBC_SECURITY_BUILD=image sh /ylink-native-security/build-glibc-stage.sh --candidate-only
+
 FROM backend-prod-deps AS nginx-keyring
 RUN set -eu; \
   apt-get update \
