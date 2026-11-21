@@ -335,6 +335,7 @@ const handleImportPreviewPageSizeChange = () => {
 }
 
 const loadList = async () => {
+  if (!authStore.isAdmin) return
   listLoading.value = true
   try {
     const result = await getClientStaffDirectoryList({
@@ -587,15 +588,17 @@ watch(
 )
 
 onMounted(() => {
-  void loadList()
-  void loadDepartmentOptions()
+  if (authStore.isAdmin) {
+    void loadList()
+    void loadDepartmentOptions()
+  }
   void loadUnifiedInviteCodeConfig()
 })
 </script>
 
 <template>
   <div class="rounded-2xl border border-slate-200/80 bg-white/90 p-4 shadow-sm dark:border-white/10 dark:bg-black/40">
-    <div class="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-4 dark:border-white/5">
+    <div v-if="authStore.isAdmin" class="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-4 dark:border-white/5">
       <div>
         <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100">教职工工号库</h3>
         <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
@@ -654,7 +657,7 @@ onMounted(() => {
       </div>
     </section>
 
-    <div class="mt-4 flex flex-wrap items-center gap-2">
+    <div v-if="authStore.isAdmin" class="mt-4 flex flex-wrap items-center gap-2">
       <el-input
         v-model="queryForm.keyword"
         placeholder="搜索工号、姓名或部门"
@@ -682,6 +685,7 @@ onMounted(() => {
     </div>
 
     <el-alert
+      v-if="authStore.isAdmin"
       class="mt-4"
       type="info"
       :closable="false"
@@ -691,6 +695,7 @@ onMounted(() => {
     />
 
     <el-table
+      v-if="authStore.isAdmin"
       ref="tableRef"
       class="mt-4"
       :data="records"
@@ -749,7 +754,7 @@ onMounted(() => {
       </el-table-column>
     </el-table>
 
-    <div v-if="total > 0" class="mt-4 flex justify-end">
+    <div v-if="authStore.isAdmin && total > 0" class="mt-4 flex justify-end">
       <el-pagination
         v-model:current-page="queryForm.page"
         v-model:page-size="queryForm.pageSize"
@@ -762,6 +767,7 @@ onMounted(() => {
     </div>
 
     <el-dialog
+      v-if="authStore.isAdmin"
       v-model="dialogVisible"
       :title="dialogTitle"
       class="staff-directory-dialog staff-directory-dialog--entry ylink-dialog-height-mode--auto"
@@ -814,6 +820,7 @@ onMounted(() => {
     </el-dialog>
 
     <el-dialog
+      v-if="authStore.isAdmin"
       v-model="importVisible"
       title="批量导入教职工目录"
       class="staff-directory-dialog staff-directory-dialog--import ylink-dialog-height-mode--auto"
