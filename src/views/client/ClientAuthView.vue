@@ -68,6 +68,7 @@
 
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { resolveSafeLocalRedirect } from '@/utils/safe-local-redirect'
 import {
   getPersonalClientUsernameRuleHint,
   normalizePersonalClientUsername,
@@ -194,10 +195,7 @@ const registerForm = reactive({
 })
 
 // 登录成功后优先跳回用户原本准备访问的客户端页面，否则进入商品大厅。
-const redirectPath = computed(() => {
-  const raw = typeof route.query.redirect === 'string' ? route.query.redirect : ''
-  return raw.startsWith('/') && !raw.startsWith('//') ? raw : '/client/mall'
-})
+const redirectPath = computed(() => resolveSafeLocalRedirect(route.query.redirect) ?? '/client/mall')
 
 const registerAccountChannel = computed(() => resolveAccountChannel(registerForm.account))
 const isRegisterMode = computed(() => activeMode.value !== 'login')
