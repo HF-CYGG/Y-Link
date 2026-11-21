@@ -138,6 +138,7 @@ export const exportReportExcel = async (type: ReportType, params: ReportQuery) =
     url: `/reports/${type}/export`,
     params: buildReportParams(params),
     responseType: 'blob',
+    timeout: 300_000,
   })
 
   const disposition = response.headers['content-disposition']

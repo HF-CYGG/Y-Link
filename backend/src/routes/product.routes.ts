@@ -42,9 +42,13 @@ const requireUploadedFile = (file: Express.Multer.File | undefined) => {
   return file.buffer
 }
 
-const sendXlsx = (res: import('express').Response, fileName: string, buffer: Buffer) => {
+const setXlsxHeaders = (res: import('express').Response, fileName: string) => {
   res.setHeader('Content-Type', XLSX_MIME)
   res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`)
+}
+
+const sendXlsx = (res: import('express').Response, fileName: string, buffer: Buffer) => {
+  setXlsxHeaders(res, fileName)
   res.send(buffer)
 }
 
@@ -437,21 +441,26 @@ productRouter.get(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const includeCostPrice = canViewCostPrice(req)
-    // 租约持有到“生成结束”且“文件完整发出或连接关闭”：生成期间断连不会提前归还，慢速客户端也无法借未读完的响应叠加导出。
-    const exported = await runExportHoldingLease(
-      await dataExportLeasePool.acquireShared(authReq.auth.userId),
-      res,
-      () => productExcelService.exportProductsWithSummary({ includeCostPrice }),
-    )
-    // 成本价属于内部经营数据：是否包含成本列随导出审计一并留痕。
-    await auditService.recordDataExport({
-      exportType: 'products',
-      actor: authReq.auth,
-      requestMeta: extractRequestMeta(req),
-      rowCount: exported.rowCount,
-      filters: { includeCostPrice },
-    })
-    sendXlsx(res, `products-${new Date().toISOString().slice(0, 10)}.xlsx`, exported.buffer)
+    const fileName = `products-${new Date().toISOString().slice(0, 10)}.xlsx`
+    let exported: { rowCount: number } | undefined
+    try {
+      exported = await runExportHoldingLease(
+        await dataExportLeasePool.acquireShared(authReq.auth.userId),
+        res,
+        () => productExcelService.exportProductsToStream({ includeCostPrice }, res, () => setXlsxHeaders(res, fileName)),
+      )
+    } finally {
+      // XLSX 已开始发送时也记录中断，成本列权限仍随导出摘要留痕。
+      if (exported || res.headersSent) {
+        await auditService.recordDataExport({
+          exportType: 'products',
+          actor: authReq.auth,
+          requestMeta: extractRequestMeta(req),
+          rowCount: exported?.rowCount ?? null,
+          filters: { includeCostPrice, ...(exported ? {} : { transferStatus: 'incomplete' }) },
+        })
+      }
+    }
   }),
 )
 

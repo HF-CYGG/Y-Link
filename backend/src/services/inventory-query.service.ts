@@ -7,7 +7,7 @@
  * 维护重点：只读服务，不参与任何写库存流程。
  */
 
-import { loadExcelJs } from '../utils/exceljs-loader.js'
+import type { Writable } from 'node:stream'
 import { AppDataSource } from '../config/data-source.js'
 import { INVENTORY_CHANGE_TYPE_LABELS } from '../constants/inventory-change-types.js'
 import { BaseProductSku } from '../entities/base-product-sku.entity.js'
@@ -18,6 +18,7 @@ import { calculateDiscountedPrice } from '../utils/discount-price.js'
 import { BizError } from '../utils/errors.js'
 import { loadSkuLocationDistributions, type SkuLocationQty } from './sku-location-stock.service.js'
 import { buildSqlLikeContains } from '../utils/sql-like.js'
+import { assertXlsxOutputOpen, bufferXlsxExport, writeStreamingXlsx } from '../utils/xlsx-export.js'
 
 export interface StockQuery {
   page?: number
@@ -92,9 +93,28 @@ export interface InventoryLogRowView {
   remark: string | null
 }
 
+type InventoryLogStock = Pick<InventoryLog,
+  'skuId' | 'beforeCurrentStock' | 'afterCurrentStock' | 'beforeSkuCurrentStock' | 'afterSkuCurrentStock'>
+
+type InventoryLogExportRow = InventoryLogStock & Pick<InventoryLog,
+  'id' | 'changeType' | 'changeQty' | 'operatorName' | 'refType' | 'refId' | 'remark'> & {
+  createdAt: Date | string
+  productName: string | null
+  skuCode: string | null
+  specText: string | null
+}
+
 const LOG_EXPORT_LIMIT = 20000
+const LOG_EXPORT_BATCH_SIZE = 500
 
 const isEnabled = (value: unknown) => value !== false && value !== 0 && value !== '0'
+
+function resolveLogStock(row: InventoryLogStock) {
+  const hasSku = row.skuId !== null && row.skuId !== undefined && row.beforeSkuCurrentStock !== null
+  const beforeStock = Number(hasSku ? row.beforeSkuCurrentStock : row.beforeCurrentStock)
+  const afterStock = Number(hasSku ? row.afterSkuCurrentStock : row.afterCurrentStock)
+  return { beforeStock, afterStock, stockDelta: afterStock - beforeStock }
+}
 
 export class InventoryQueryService {
   async listStocks(query: StockQuery): Promise<PaginationResult<StockRowView> & { totalQty: number }> {
@@ -214,39 +234,98 @@ export class InventoryQueryService {
     return (await this.exportLogsWithSummary(query)).buffer
   }
 
-  /** 导出库存流水并返回行数，供路由写导出审计。 */
   async exportLogsWithSummary(query: InventoryLogQuery): Promise<{ buffer: Buffer; rowCount: number }> {
+    return bufferXlsxExport((output) => this.exportLogsToStream(query, output))
+  }
+
+  /** 以流水主键倒序读取并流式导出，返回实际写出的行数。 */
+  async exportLogsToStream(query: InventoryLogQuery, output: Writable, onReady?: () => void): Promise<{ rowCount: number }> {
+    assertXlsxOutputOpen(output)
     const qb = this.buildLogQuery(query)
-    const total = await qb.getCount()
+    const sqlite = AppDataSource.options.type === 'sqlite'
+    const idType = sqlite ? 'TEXT' : 'CHAR'
+    const idParameterType = sqlite ? 'INTEGER' : 'UNSIGNED'
+    const createdAtColumn = AppDataSource.getMetadata(InventoryLog).findColumnWithPropertyName('createdAt')!
+    const totals = await qb.clone()
+      .select('COUNT(*)', 'total')
+      .addSelect(`CAST(MAX(log.id) AS ${idType})`, 'maxId')
+      .getRawOne<{ total: number | string; maxId: string | null }>()
+    const total = Number(totals?.total ?? 0)
     if (total > LOG_EXPORT_LIMIT) throw new BizError(`导出结果 ${total} 条，超过 ${LOG_EXPORT_LIMIT} 条上限，请缩小时间范围`, 400)
-    const rows = await qb.orderBy('log.id', 'DESC').getMany()
-    const ExcelJS = await loadExcelJs()
-    const workbook = new ExcelJS.Workbook()
-    const sheet = workbook.addWorksheet('库存流水')
-    sheet.columns = [
-      { header: '时间', key: 'createdAt', width: 20 },
-      { header: '商品', key: 'productName', width: 24 },
-      { header: 'SKU编码', key: 'skuCode', width: 20 },
-      { header: '规格', key: 'specText', width: 18 },
-      { header: '操作类型', key: 'changeTypeLabel', width: 16 },
-      // 销售出库等历史流水的 changeQty 以出库为正，导出统一给出带符号的实际库存变化，原始数量单列保留。
-      { header: '库存变化', key: 'stockDelta', width: 10 },
-      { header: '记录数量', key: 'changeQty', width: 10 },
-      { header: '操作前库存', key: 'beforeStock', width: 12 },
-      { header: '操作后库存', key: 'afterStock', width: 12 },
-      { header: '操作人', key: 'operatorName', width: 14 },
-      { header: '关联单据', key: 'ref', width: 22 },
-      { header: '备注', key: 'remark', width: 40 },
-    ]
-    sheet.getRow(1).font = { bold: true }
-    for (const row of rows.map((item) => this.buildLogView(item))) {
-      sheet.addRow({
-        ...row,
-        createdAt: new Date(row.createdAt).toLocaleString('zh-CN', { hour12: false }),
-        ref: row.refType ? `${row.refType}#${row.refId ?? ''}` : '',
-      })
+    const fetchBatch = (limit: number, cursor?: string) => {
+      assertXlsxOutputOpen(output)
+      const batch = qb.clone()
+        // 用文本承接大整数游标，避免 SQLite 数字精度丢失使相邻流水合并或跨批跳过。
+        .select(`CAST(log.id AS ${idType})`, 'id')
+        .addSelect('log.createdAt', 'createdAt')
+        .addSelect(`CAST(log.skuId AS ${idType})`, 'skuId')
+        .addSelect('log.changeType', 'changeType')
+        .addSelect('log.changeQty', 'changeQty')
+        .addSelect('log.beforeCurrentStock', 'beforeCurrentStock')
+        .addSelect('log.afterCurrentStock', 'afterCurrentStock')
+        .addSelect('log.beforeSkuCurrentStock', 'beforeSkuCurrentStock')
+        .addSelect('log.afterSkuCurrentStock', 'afterSkuCurrentStock')
+        .addSelect('log.operatorName', 'operatorName')
+        .addSelect('log.refType', 'refType')
+        .addSelect('log.refId', 'refId')
+        .addSelect('log.remark', 'remark')
+        .addSelect('product.productName', 'productName')
+        .addSelect('sku.skuCode', 'skuCode')
+        .addSelect('sku.specText', 'specText')
+        .andWhere(`log.id <= CAST(:maxId AS ${idParameterType})`, { maxId: totals?.maxId })
+        .orderBy('log.id', 'DESC')
+        .limit(limit)
+      if (cursor !== undefined) batch.andWhere(`log.id < CAST(:cursor AS ${idParameterType})`, { cursor })
+      return batch.getRawMany<InventoryLogExportRow>()
     }
-    return { buffer: Buffer.from(await workbook.xlsx.writeBuffer()), rowCount: rows.length }
+    let rows = total > 0 ? await fetchBatch(LOG_EXPORT_BATCH_SIZE) : []
+
+    return writeStreamingXlsx(output, onReady, async (workbook, waitForRows) => {
+      const sheet = workbook.addWorksheet('库存流水')
+      sheet.columns = [
+        { header: '时间', key: 'createdAt', width: 20 },
+        { header: '商品', key: 'productName', width: 24 },
+        { header: 'SKU编码', key: 'skuCode', width: 20 },
+        { header: '规格', key: 'specText', width: 18 },
+        { header: '操作类型', key: 'changeTypeLabel', width: 16 },
+        // 销售出库等历史流水的 changeQty 以出库为正，单列保留原始数量。
+        { header: '库存变化', key: 'stockDelta', width: 10 },
+        { header: '记录数量', key: 'changeQty', width: 10 },
+        { header: '操作前库存', key: 'beforeStock', width: 12 },
+        { header: '操作后库存', key: 'afterStock', width: 12 },
+        { header: '操作人', key: 'operatorName', width: 14 },
+        { header: '关联单据', key: 'ref', width: 22 },
+        { header: '备注', key: 'remark', width: 40 },
+      ]
+      sheet.getRow(1).font = { bold: true }
+      sheet.getRow(1).commit()
+      let rowCount = 0
+      while (rows.length) {
+        await waitForRows()
+        for (const row of rows) {
+          // 沿用实体的驱动时间转换，特别是 SQLite 无时区 DATETIME 的 UTC 解释。
+          const createdAt = AppDataSource.driver.prepareHydratedValue(row.createdAt, createdAtColumn) as Date
+          sheet.addRow({
+            createdAt: createdAt.toLocaleString('zh-CN', { hour12: false }),
+            productName: row.productName ?? '',
+            skuCode: row.skuCode,
+            specText: row.specText,
+            changeTypeLabel: INVENTORY_CHANGE_TYPE_LABELS[row.changeType] ?? row.changeType,
+            changeQty: Number(row.changeQty),
+            ...resolveLogStock(row),
+            operatorName: row.operatorName,
+            ref: row.refType ? `${row.refType}#${row.refId ?? ''}` : '',
+            remark: row.remark,
+          }).commit()
+        }
+        rowCount += rows.length
+        await waitForRows()
+        if (rows.length < LOG_EXPORT_BATCH_SIZE || rowCount >= LOG_EXPORT_LIMIT) break
+        rows = await fetchBatch(Math.min(LOG_EXPORT_BATCH_SIZE, LOG_EXPORT_LIMIT - rowCount), rows[rows.length - 1].id)
+      }
+      sheet.commit()
+      return { rowCount }
+    })
   }
 
   private buildLogQuery(query: InventoryLogQuery) {
@@ -271,7 +350,6 @@ export class InventoryQueryService {
   }
 
   private buildLogView(row: InventoryLog): InventoryLogRowView {
-    const hasSku = row.skuId !== null && row.skuId !== undefined && row.beforeSkuCurrentStock !== null
     return {
       id: String(row.id),
       createdAt: new Date(row.createdAt).toISOString(),
@@ -283,9 +361,7 @@ export class InventoryQueryService {
       changeType: row.changeType,
       changeTypeLabel: INVENTORY_CHANGE_TYPE_LABELS[row.changeType] ?? row.changeType,
       changeQty: Number(row.changeQty),
-      stockDelta: Number(hasSku ? row.afterSkuCurrentStock : row.afterCurrentStock) - Number(hasSku ? row.beforeSkuCurrentStock : row.beforeCurrentStock),
-      beforeStock: Number(hasSku ? row.beforeSkuCurrentStock : row.beforeCurrentStock),
-      afterStock: Number(hasSku ? row.afterSkuCurrentStock : row.afterCurrentStock),
+      ...resolveLogStock(row),
       beforeProductStock: Number(row.beforeCurrentStock),
       afterProductStock: Number(row.afterCurrentStock),
       operatorName: row.operatorName ?? null,

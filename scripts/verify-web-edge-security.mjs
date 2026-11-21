@@ -129,16 +129,55 @@ for (const file of ['docker/nginx/default.conf', 'docker/nginx/default.conf.temp
   assert.ok(!bodyLimitPattern.test('/api/data-maintenance/import/json'), `${file} 治理导入应保留独立的 8 MiB 限制`)
   assert.doesNotMatch(source.replace(apiBlock, ''), /location[^\n]*~\*[^\n]*api\//, `${file} 不得在 /api/ 外扩展大小写代理范围`)
   assert.match(apiBlock, /limit_req zone=ylink_api_general burst=\d+ nodelay;/, `${file} /api/ 缺少通用每 IP 限流`)
+  const streamingRoutes = [
+    {
+      paths: ['/api/client-feedback/stream', '/api/customer-service/stream'],
+      directives: ['proxy_read_timeout 3600s;', 'proxy_send_timeout 3600s;', 'proxy_cache off;', 'gzip off;',
+        'include /etc/nginx/ylink/proxy-security-headers.conf;', 'add_header X-Accel-Buffering no always;'],
+    },
+    {
+      paths: ['/api/reports/inventory/export', '/api/reports/tag-sales/export', '/api/audit-logs/export',
+        '/api/inventory/logs/export', '/api/products/export'],
+      directives: ['proxy_read_timeout 300s;'],
+    },
+  ]
+  const apiLocations = [...apiBlock.matchAll(/^        location ~\* (\S+) \{\n([\s\S]*?)^        \}/gm)]
+  for (const { paths, directives } of streamingRoutes) {
+    const matchingLocations = apiLocations.filter(([, pattern]) => new RegExp(pattern, 'i').test(paths[0]))
+    assert.equal(matchingLocations.length, 1, `${file} ${paths[0]} 必须命中独立的 API 子位置`)
+    const [, pattern, body] = matchingLocations[0]
+    const matchesPath = new RegExp(pattern, 'i')
+    for (const path of paths) {
+      const alternate = `/api/${path.slice('/api/'.length).toUpperCase()}`
+      for (const variant of [path, `${path}/`, alternate, `${alternate}/`]) {
+        assert.ok(matchesPath.test(variant), `${file} 流式规则缺少 ${variant}`)
+      }
+      assert.ok(!matchesPath.test(`${path}/unknown`), `${file} 流式规则越过端点 ${path}`)
+    }
+    assert.ok(!matchesPath.test('/api/reports/inventory'))
+    assert.ok(!matchesPath.test('/api/products/import'))
+    assert.match(body, /rewrite \^ \$uri break;/, `${file} 流式代理须沿用标准化 URI 并保留查询参数`)
+    assert.match(body, /proxy_pass http:\/\/(?:ylink_backend|backend:3001);/, `${file} 流式代理不应在 upstream 后写替换 URI`)
+    assert.doesNotMatch(body, /limit_(?:req|conn)\s|proxy_set_header/, `${file} 流式代理须继承 API 限流与代理头`)
+    for (const directive of ['proxy_buffering off;', ...directives]) {
+      assert.ok(body.includes(directive), `${file} ${paths[0]} 缺少 ${directive}`)
+    }
+  }
   assert.match(blockOf('location ^~ /uploads/'), /limit_req zone=ylink_api_general burst=\d+ nodelay;/, `${file} /uploads/ 缺少通用每 IP 限流`)
   // “变量 + URI”的 proxy_pass 会让 Nginx 用 URI 整体替换请求路径并丢弃查询参数（/api/orders?page=2 被转成 /api/），必须使用具名 upstream 或字面地址。
   assert.doesNotMatch(source, /proxy_pass\s+https?:\/\/\$[A-Za-z_]+\/[^;]*;/, `${file} 禁止在 proxy_pass 中同时使用变量与 URI`)
   // 压缩：优先发送构建期预压缩产物，且 JS 的两种 MIME 写法都要覆盖。
   assert.match(source, /^    gzip_static on;$/m, `${file} 缺少 gzip_static`)
+  assert.match(source, /^    gzip_comp_level 4;$/m, `${file} 动态压缩应固定在 4 级`)
   for (const mime of ['application/javascript', 'text/javascript', 'image/svg+xml', 'application/json']) {
     assert.match(source, new RegExp(`gzip_types[\\s\\S]*?${mime.replace('+', '\\+')}[\\s\\S]*?;`), `${file} gzip_types 缺少 ${mime}`)
   }
   // 未带哈希的站点图标不得按 immutable 缓存一年，且该规则必须位于通用静态资源正则之前。
-  const iconLocation = source.indexOf('location ~ ^/(?:favicon\\.ico|y-link-icon\\.png|apple-touch-icon\\.png|icons\\.svg)$')
+  const favicon = blockOf('location = /favicon.ico')
+  assert.match(favicon, /try_files \/favicon\.ico =404;/, `${file} favicon 应直出实际静态文件`)
+  assert.match(favicon, /include \/etc\/nginx\/ylink\/page-security-headers\.conf;/, `${file} favicon 必须显式包含页面头`)
+  assert.match(favicon, /add_header Cache-Control "public, max-age=86400" always;/, `${file} favicon 应使用一天缓存`)
+  const iconLocation = source.indexOf('location ~ ^/(?:y-link-icon\\.png|apple-touch-icon\\.png|icons\\.svg)$')
   const assetLocation = source.indexOf('location ~* \\.(?:css|js|mjs|json|map|svg|ico|png|jpe?g|webp|gif|woff2?|ttf|otf|eot)$')
   assert.ok(iconLocation >= 0 && iconLocation < assetLocation, `${file} 站点图标缓存规则缺失或顺序错误`)
   assert.doesNotMatch(source.slice(iconLocation, source.indexOf('\n    }', iconLocation)), /immutable/, `${file} 站点图标不得声明 immutable`)

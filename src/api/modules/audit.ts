@@ -284,6 +284,7 @@ export const exportAuditLogs = async (params: AuditLogListQuery) => {
     url: '/audit-logs/export',
     params,
     responseType: 'blob',
+    timeout: 300_000,
   })
 
   const disposition = response.headers['content-disposition']
