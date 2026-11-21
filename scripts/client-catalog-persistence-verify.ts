@@ -2,7 +2,10 @@
 import assert from 'node:assert/strict'
 import { createPinia, setActivePinia } from 'pinia'
 import type { O2oMallStorefrontConfig } from '../src/api/modules/o2o'
+import { useClientCartStore } from '../src/store/modules/client-cart'
 import { useClientCatalogStore } from '../src/store/modules/client-catalog'
+import { useClientOrderStore } from '../src/store/modules/client-order'
+import { clearClientSessionData } from '../src/utils/client-session-cleanup'
 
 let now = 0
 let serial = 0
@@ -47,6 +50,8 @@ documentTarget.visibilityState = 'visible'
 Object.defineProperty(globalThis, 'window', { configurable: true, value: Object.assign(page, { localStorage: storage, sessionStorage: storage }) })
 Object.defineProperty(globalThis, 'document', { configurable: true, value: documentTarget })
 const dataWrites = () => storage.writes.filter((key) => key.includes('catalog') && !key.includes('storefront') && !key.includes('context')).length
+const browseKey = (owner: string) => `y-link.client-catalog.context:${owner}`
+const browseWrites = () => storage.writes.filter((key) => key.startsWith('y-link.client-catalog.context:')).length
 const data = (name: string) => [{ id: name, productName: name, skus: [] }] as Parameters<ReturnType<typeof useClientCatalogStore>['setProducts']>[0]
 try {
   setActivePinia(createPinia())
@@ -155,6 +160,74 @@ try {
     advance(200)
     assert.equal(dataWrites(), before + (transition === 'empty' ? 0 : 1))
     owner.$dispose()
+  }
+
+  // 分类滚动变化不触发本帧同步写入；查询和排序共用小快照定时器。
+  const sessionPinia = createPinia()
+  const browse = useClientCatalogStore(sessionPinia)
+  const cart = useClientCartStore(sessionPinia)
+  const order = useClientOrderStore(sessionPinia)
+  browse.initialize('A')
+  cart.initialize('A')
+  order.initialize('A')
+  const browseBefore = browseWrites()
+  browse.setActiveCategoryKey('tea')
+  advance(100)
+  browse.setKeyword('红茶')
+  browse.setSortMode('recommended')
+  advance(399)
+  assert.equal(browseWrites(), browseBefore)
+  browse.setActiveCategoryKey('tea')
+  browse.setKeyword('红茶')
+  browse.setSortMode('recommended')
+  advance(1)
+  assert.equal(browseWrites(), browseBefore + 1, '无变化的值不延期且不增加写入')
+  assert.deepEqual(JSON.parse(storage.getItem(browseKey('A')) ?? '{}'), { activeCategoryKey: 'tea', keyword: '红茶', sortMode: 'recommended' })
+  browse.setKeyword('可见性刷新')
+  documentTarget.visibilityState = 'hidden'
+  documentTarget.dispatchEvent(new Event('visibilitychange'))
+  assert.equal(browseWrites(), browseBefore + 2)
+  documentTarget.visibilityState = 'visible'
+
+  browse.setKeyword('待清除的旧词')
+  browse.setProducts(data('待清除的目录'))
+  order.setSearch('账户A的订单', 'contains')
+  const canceled = [...timers.values()].map((timer) => timer.run)
+  const afterHiddenWrite = browseWrites()
+  const beforeClearData = dataWrites()
+  clearClientSessionData(sessionPinia, 'A')
+  assert.equal(cart.clientUserId, '')
+  assert.equal(order.keyword, '')
+  assert.equal(browse.keyword, '')
+  assert.equal(storage.getItem(browseKey('A')), null)
+  assert.equal(storage.getItem('y-link.client-cart.snapshot:A'), null)
+  assert.equal(storage.getItem('y-link.client-order.snapshot.meta:A'), null)
+  assert.ok(storage.values.has('y-link.client-catalog.public-data.v2'))
+  browse.initialize('B')
+  browse.setKeyword('账号B')
+  page.dispatchEvent(new Event('pagehide'))
+  browse.initialize('A')
+  canceled.forEach((run) => run())
+  advance(1000)
+  assert.equal(browse.keyword, '')
+  assert.equal(storage.getItem(browseKey('A')), null)
+  assert.equal(JSON.parse(storage.getItem(browseKey('B')) ?? '{}').keyword, '账号B')
+  assert.equal(browseWrites(), afterHiddenWrite + 1, '只有账号 B 被 pagehide 写入，切回 A 不得复活旧词')
+  assert.equal(dataWrites(), beforeClearData, '账号切换同时取消旧目录快照写入')
+
+  const actualNow = Date.now
+  try {
+    Date.now = () => 10_000
+    order.initialize('B')
+    order.setOrders([])
+    assert.equal(order.isFresh, true)
+    Date.now = () => 10_000 + 3 * 60_000 + 1
+    assert.equal(order.isFreshNow(), false, '没有响应字段发生变化，订单请求仍按当前时间判过期')
+  } finally {
+    Date.now = actualNow
+    browse.$dispose()
+    cart.$dispose()
+    order.$dispose()
   }
 
   // 订单详情可能从未加载商品目录，独立门店快照也应能恢复，并在兼容旧响应时补齐取货地址。

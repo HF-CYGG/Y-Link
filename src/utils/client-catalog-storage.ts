@@ -14,6 +14,12 @@ import type { O2oMallProduct, O2oMallSku, O2oMallStorefrontConfig } from '@/api/
 import { calculateDiscountedPriceText, normalizeDiscountRateText } from '@/utils/o2o-price'
 import { DEFAULT_STORE_BUSINESS_HOURS, DEFAULT_STORE_PICKUP_ADDRESS } from '@/utils/store-business-hours'
 import {
+  CLIENT_CATALOG_CONTEXT_SNAPSHOT_KEY_PREFIX,
+  CLIENT_CATALOG_DATA_SNAPSHOT_KEY_PREFIX,
+  LEGACY_CLIENT_CATALOG_SNAPSHOT_KEY,
+  LEGACY_CLIENT_CATALOG_SNAPSHOT_KEY_PREFIX,
+} from '@/utils/client-session-cleanup'
+import {
   clearLegacyScopedStorageKey,
   getBrowserStorage,
   resolveUserScopedStorageKey,
@@ -51,10 +57,6 @@ type ClientCatalogStorageScopeId = string | number | null | undefined
 // - 旧版本使用“商品数据 + 浏览上下文”合并快照；
 // - 新版本拆成 data/context 两个分片，减少高频筛选造成的大对象重复写入；
 // - legacy key 同时保留“全局 key + 旧版按用户分片 key”两种兼容读取入口。
-const CLIENT_CATALOG_DATA_SNAPSHOT_KEY_PREFIX = 'y-link.client-catalog.data'
-const CLIENT_CATALOG_CONTEXT_SNAPSHOT_KEY_PREFIX = 'y-link.client-catalog.context'
-const LEGACY_CLIENT_CATALOG_SNAPSHOT_KEY_PREFIX = 'y-link.client-catalog.snapshot'
-const LEGACY_CLIENT_CATALOG_SNAPSHOT_KEY = 'y-link.client-catalog.snapshot'
 const CLIENT_CATALOG_PUBLIC_DATA_SNAPSHOT_KEY = 'y-link.client-catalog.public-data.v2'
 const CLIENT_CATALOG_PUBLIC_STOREFRONT_SNAPSHOT_KEY = 'y-link.client-catalog.public-storefront.v2'
 const CLIENT_CATALOG_DATA_SCHEMA_VERSION = 2

@@ -323,10 +323,14 @@ const categoryFollowSource = mallSource.slice(
 )
 assert.ok(categoryFollowSource.includes('categoryScrollerRef.value'), '分类栏跟随必须只滚动分类栏自身容器')
 assert.ok(!categoryFollowSource.includes('scrollIntoView'), '分类栏跟随不得使用可能带动页面滚动的 scrollIntoView')
-assert.ok(categoryFollowSource.includes('prefers-reduced-motion: reduce'), '分类栏跟随需尊重减少动画偏好')
+assert.match(categoryFollowSource, /shouldReduceClientMotion\(\) \? 'auto' : behavior/, '分类栏跟随需尊重减少动画偏好')
 assert.ok(categoryFollowSource.includes('bottomInset'), '分类栏跟随必须扣掉悬浮购物车对分类栏底部的遮挡')
+const categoryGeometrySource = mallSource.slice(
+  mallSource.indexOf('const measureCategoryGeometry'),
+  mallSource.indexOf('const ensureActiveCategoryVisible'),
+)
 assert.ok(
-  categoryFollowSource.includes('--mall-category-rail-tail-space'),
+  categoryGeometrySource.includes('--mall-category-rail-tail-space'),
   '分类栏需要与遮挡等高的尾部占位，否则末尾分类无法滚到购物车上方',
 )
 assert.ok(
@@ -364,9 +368,17 @@ const listScrollSource = mallSource.slice(
   mallSource.indexOf('const isCategorySyncTemporarilyBlocked'),
 )
 assert.ok(
-  listScrollSource.includes('hasReachedRequestedCategory(scroller)'),
+  listScrollSource.includes('hasReachedRequestedCategory(scrollTop, geometry)'),
   '点击会话是否结束必须按真实滚动位置判定',
 )
+assert.match(mallSource, /@scroll\.passive="handleProductListScroll"/)
+assert.match(listScrollSource, /if \(productListScrollFrame !== null[^\n]*\) return\s+productListScrollFrame = scheduleMallFrame\(/)
+assert.match(listScrollSource, /const scrollTop = scroller\.scrollTop/)
+assert.doesNotMatch(listScrollSource + categoryFollowSource, /getBoundingClientRect\(|\b(?:offsetTop|offsetHeight|clientHeight|scrollHeight)\b|localStorage/, '滚动帧和左栏跟随不得读布局几何或同步写盘')
+assert.match(categoryGeometrySource, /categoryListGeometry = \{[\s\S]*?section\.offsetHeight/)
+assert.match(categoryGeometrySource, /categoryRailGeometry = \{[\s\S]*?contentHeight: rail\.scrollHeight/)
+assert.match(mallSource, /ResizeObserver\(\(\) => scheduleMallFloatingLayoutSync\(\)\)/)
+assert.match(mallSource, /watch\(\s*\[searchMode,[^\]]*categoryGroups\][\s\S]*?syncMallViewportAfterRender\(\)/)
 const reachedSource = mallSource.slice(
   mallSource.indexOf('const hasReachedRequestedCategory'),
   mallSource.indexOf('const handleMallViewportResize'),

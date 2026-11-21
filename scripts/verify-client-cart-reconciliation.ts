@@ -22,6 +22,7 @@ import { decideClientCheckoutSubmit } from '../src/views/client/client-checkout-
 
 class MemoryStorage {
   private readonly values = new Map<string, string>()
+  writes = 0
   failOperation: 'get' | 'set' | 'remove' | null = null
   failRemoveKey: string | null = null
 
@@ -49,6 +50,7 @@ class MemoryStorage {
 
   setItem(key: string, value: string) {
     if (this.failOperation === 'set') throw new DOMException('存储配额耗尽', 'QuotaExceededError')
+    this.writes += 1
     this.values.set(key, String(value))
   }
 }
@@ -125,6 +127,16 @@ assert.equal(firstTabCart.items[0]?.qty, 5, '目录库存从 5 降到 1 时，�
 assert.equal(firstTabCart.items[0]?.selected, true, '目录库存减少时，后台同步不得取消用户原有勾选')
 assert.equal(firstTabCart.selectedCheckoutConflicts.length, 1, '超出可购量的已选商品必须被标记为结算冲突')
 assert.equal(firstTabCart.createSelectedCheckoutSnapshot(), null, '含超库存选中行时不得生成部分提交载荷')
+
+const reconciledRows = firstTabCart.items
+const reconcileWrites = storage.writes
+firstTabCart.syncWithCatalog([createProduct({ availableStock: 1 })])
+assert.equal(firstTabCart.items, reconciledRows, '相同目录不能替换购物车数组')
+assert.equal(storage.writes, reconcileWrites, '相同目录不能重复写入浏览器存储')
+const renamedProduct = { ...createProduct({ availableStock: 1 }), productName: '商品新名称' }
+firstTabCart.syncWithCatalog([renamedProduct])
+assert.equal(firstTabCart.items[0]?.productName, '商品新名称', '只变更展示字段也须更新快照')
+assert.equal(storage.writes, reconcileWrites + 1)
 
 firstTabCart.updateQty('sku-1', 4)
 assert.equal(firstTabCart.items[0]?.qty, 4, '用户主动减量保留目标，即使仍超库存也不能静默截到上限')

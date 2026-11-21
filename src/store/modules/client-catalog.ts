@@ -10,8 +10,8 @@
  * - 若库存口径改为以后端聚合字段为准，应优先调整 `applyPreorderSubmission` 的增量计算方式。
  */
 
-import { computed, onScopeDispose, ref } from 'vue'
-import { defineStore } from 'pinia'
+import { computed, onScopeDispose, ref, shallowRef } from 'vue'
+import { defineStore, getActivePinia } from 'pinia'
 import type { O2oMallProduct, O2oMallProductsResult, O2oMallStorefrontConfig } from '@/api/modules/o2o'
 import {
   clearPersistedClientCatalogSnapshot,
@@ -23,6 +23,7 @@ import {
   readPersistedClientCatalogSnapshot,
 } from '@/utils/client-catalog-storage'
 import { createClientCatalogPersistenceTimer } from '@/utils/client-catalog-persistence-timer'
+import { registerClientSessionReset } from '@/utils/client-session-cleanup'
 
 // 商品目录缓存时间不宜过长：
 // - 过短会导致用户切页返回时仍频繁请求接口；
@@ -32,7 +33,7 @@ const STOREFRONT_REFRESH_MIN_INTERVAL_MS = 5_000
 
 export const useClientCatalogStore = defineStore('client-catalog', () => {
   const clientUserId = ref('')
-  const products = ref<O2oMallProduct[]>([])
+  const products = shallowRef<O2oMallProduct[]>([])
   const storefront = ref(normalizeStorefront(null))
   let hasIndependentStorefront = false
   let storefrontRequest: Promise<Required<O2oMallStorefrontConfig> | null> | null = null
@@ -70,30 +71,37 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
       updatedAt: updatedAt.value,
     })
   })
-  const flushWhenHidden = () => {
-    if (globalThis.document?.visibilityState === 'hidden') catalogPersistence.flush()
-  }
-  globalThis.document?.addEventListener?.('visibilitychange', flushWhenHidden)
-  globalThis.window?.addEventListener?.('pagehide', catalogPersistence.flush)
-  onScopeDispose(() => {
-    invalidateStorefrontRefresh()
-    catalogPersistence.flush()
-    catalogPersistence.cancel()
-    globalThis.document?.removeEventListener?.('visibilitychange', flushWhenHidden)
-    globalThis.window?.removeEventListener?.('pagehide', catalogPersistence.flush)
-  })
-
-  const persistBrowseContextSnapshot = () => {
-    if (!clientUserId.value) {
-      return
-    }
-
-    // 浏览上下文独立落盘后，商城页可以在不触碰商品数组缓存的前提下持续记录分类与搜索状态。
-    persistClientCatalogBrowseContextSnapshot(clientUserId.value, {
+  const browseContextPersistence = createClientCatalogPersistenceTimer((owner) => {
+    if (clientUserId.value !== owner) return
+    persistClientCatalogBrowseContextSnapshot(owner, {
       activeCategoryKey: activeCategoryKey.value,
       keyword: keyword.value,
       sortMode: sortMode.value,
     })
+  }, 400)
+  const flushPersistence = () => {
+    catalogPersistence.flush()
+    browseContextPersistence.flush()
+  }
+  const cancelPersistence = () => {
+    catalogPersistence.cancel()
+    browseContextPersistence.cancel()
+  }
+  const flushWhenHidden = () => {
+    if (globalThis.document?.visibilityState === 'hidden') flushPersistence()
+  }
+  globalThis.document?.addEventListener?.('visibilitychange', flushWhenHidden)
+  globalThis.window?.addEventListener?.('pagehide', flushPersistence)
+  onScopeDispose(() => {
+    invalidateStorefrontRefresh()
+    flushPersistence()
+    cancelPersistence()
+    globalThis.document?.removeEventListener?.('visibilitychange', flushWhenHidden)
+    globalThis.window?.removeEventListener?.('pagehide', flushPersistence)
+  })
+
+  const persistBrowseContextSnapshot = () => {
+    browseContextPersistence.schedule(clientUserId.value)
   }
 
   const replaceCatalogData = (
@@ -138,7 +146,7 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
     if (normalizedClientUserId && initialized.value && clientUserId.value === normalizedClientUserId) {
       return
     }
-    catalogPersistence.cancel()
+    cancelPersistence()
     if (!normalizedClientUserId) {
       clientUserId.value = ''
       resetState()
@@ -264,26 +272,37 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
   }
 
   const setActiveCategoryKey = (key: string) => {
-    activeCategoryKey.value = key || 'all'
+    const nextKey = key || 'all'
+    if (activeCategoryKey.value === nextKey) return
+    activeCategoryKey.value = nextKey
     persistBrowseContextSnapshot()
   }
 
   const setKeyword = (value: string) => {
+    if (keyword.value === value) return
     keyword.value = value
     persistBrowseContextSnapshot()
   }
 
   const setSortMode = (value: ClientCatalogSortMode) => {
-    sortMode.value = value === 'recommended' ? 'recommended' : 'default'
+    const nextMode = value === 'recommended' ? 'recommended' : 'default'
+    if (sortMode.value === nextMode) return
+    sortMode.value = nextMode
     persistBrowseContextSnapshot()
   }
 
-  const clearAll = () => {
-    catalogPersistence.cancel()
-    const currentClientUserId = clientUserId.value
+  const resetSession = () => {
+    cancelPersistence()
     resetState()
     clientUserId.value = ''
     initialized.value = false
+  }
+  const sessionPinia = getActivePinia()
+  if (sessionPinia) onScopeDispose(registerClientSessionReset(sessionPinia, resetSession))
+
+  const clearAll = () => {
+    const currentClientUserId = clientUserId.value
+    resetSession()
     clearPersistedClientCatalogSnapshot(currentClientUserId)
   }
 
@@ -305,6 +324,7 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
     setActiveCategoryKey,
     setKeyword,
     setSortMode,
+    flushBrowseContext: browseContextPersistence.flush,
     clearAll,
   }
 })

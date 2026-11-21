@@ -1271,6 +1271,8 @@ onBeforeUnmount(() => {
                 :src="resolveAttachmentUrl(item.attachment)"
                 :alt="item.attachment.name"
                 class="detail-attachment-preview"
+                loading="lazy"
+                decoding="async"
               />
               <div
                 v-else
@@ -1416,6 +1418,8 @@ onBeforeUnmount(() => {
                   :src="resolveAttachmentUrl(attachment)"
                   :alt="attachment.name"
                   class="reply-attachment-thumb"
+                  loading="lazy"
+                  decoding="async"
                 />
                 <div
                   v-else

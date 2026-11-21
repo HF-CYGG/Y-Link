@@ -16,8 +16,8 @@ import ClientProductSmallImage from './components/ClientProductSmallImage.vue'
  */
 
 
-import { useVirtualList } from '@vueuse/core'
-import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
+import { createReusableTemplate, useVirtualList } from '@vueuse/core'
+import { computed, defineAsyncComponent, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, shallowRef, watch, type PropType } from 'vue'
 import { onBeforeRouteLeave, useRoute } from 'vue-router'
 
 import { ArrowDown, ArrowRight, Close, Search, ShoppingCart } from '@element-plus/icons-vue'
@@ -51,21 +51,31 @@ import {
   resolveKeepVisibleScrollTop,
   resolveViewportCategoryKey,
   resolveViewportHeight,
+  type ViewportCategorySection,
 } from './client-mall-viewport.helpers'
 
-import ClientCartView from './ClientCartView.vue'
 import ClientCardCartStepper from './components/ClientCardCartStepper.vue'
-import ClientCheckoutView from './ClientCheckoutView.vue'
-import ClientImagePreviewer from './components/ClientImagePreviewer.vue'
 import ClientQtyInput from './components/ClientQtyInput.vue'
 import type { ClientCartBatchResult } from '@/store/modules/client-cart'
 import { buildClientBatchSelections, resolveClientBatchSkuMaxQty, summarizeClientBatch } from './client-multi-sku.helpers'
-import ClientMultiSkuSelector from './components/ClientMultiSkuSelector.vue'
 import ClientRestockButton from './components/ClientRestockButton.vue'
 import { getRestockSkus } from '@/utils/restock'
 
 
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
+
+defineOptions({ name: 'ClientMallView' })
+
+const ClientCartView = defineAsyncComponent(() => import('./ClientCartView.vue'))
+const ClientCheckoutView = defineAsyncComponent(() => import('./ClientCheckoutView.vue'))
+const ClientImagePreviewer = defineAsyncComponent(() => import('./components/ClientImagePreviewer.vue'))
+const ClientMultiSkuSelector = defineAsyncComponent(() => import('./components/ClientMultiSkuSelector.vue'))
+
+// 各列表保留自己的卡片根元素和定位引用，共用其内部模板与本页样式作用域。
+const [DefineProductCardContent, ProductCardContent] = createReusableTemplate<{ product: O2oMallProduct; cardKey: string }>({
+  inheritAttrs: false,
+  props: { product: { type: Object as PropType<O2oMallProduct>, required: true }, cardKey: { type: String, required: true } },
+})
 
 interface ProductCategoryGroup {
   key: string
@@ -85,6 +95,7 @@ interface ProductCardDisplay {
   previewImage: string
   priceView: ReturnType<typeof resolveO2oPriceView>
   description: string
+  canSingleRestock: boolean
 }
 
 type ProductSortMode = 'default' | 'recommended'
@@ -111,7 +122,10 @@ const cancelStorefrontRefresh = () => {
   storefrontRequest.cancel()
   pendingStorefrontRefresh = undefined
 }
-onBeforeRouteLeave(cancelStorefrontRefresh)
+onBeforeRouteLeave(() => {
+  flushSearchBeforeLeave()
+  cancelStorefrontRefresh()
+})
 const { isPhone } = useDevice()
 const route = useRoute()
 const animateMiniCartOnAppear = inject('hasMountedClientMainLayout', () => false)()
@@ -123,11 +137,48 @@ const finishProductRefresh = () => {
   refreshing.value = false
 }
 const requestError = ref<{ type: 'offline' | 'error'; message: string } | null>(null)
-// 搜索词与激活分类直接映射到 Store，保证页面切走后仍能恢复到用户上次浏览上下文。
-const keyword = computed({
-  get: () => clientCatalogStore.keyword,
-  set: (value: string) => clientCatalogStore.setKeyword(value),
-})
+const keyword = computed(() => clientCatalogStore.keyword)
+const keywordDraft = ref(keyword.value)
+let searchCommitTimer: ReturnType<typeof setTimeout> | undefined
+const searchComposition = shallowRef<{ confirmedDraft: string; appliedKeyword: string } | null>(null)
+const cancelSearchCommit = () => {
+  clearTimeout(searchCommitTimer)
+  searchCommitTimer = undefined
+}
+const commitSearch = (event?: KeyboardEvent) => {
+  if (searchComposition.value || event?.isComposing || event?.keyCode === 229) return
+  cancelSearchCommit()
+  clientCatalogStore.setKeyword(keywordDraft.value.trim())
+}
+const scheduleSearchCommit = (draft: string) => {
+  cancelSearchCommit()
+  if (searchComposition.value) return
+  const next = draft.trim()
+  if (next === keyword.value) return
+  if (!next) commitSearch()
+  else searchCommitTimer = setTimeout(commitSearch, 180)
+}
+watch(keywordDraft, scheduleSearchCommit, { flush: 'sync' })
+const startSearchComposition = () => {
+  searchComposition.value ??= { confirmedDraft: keywordDraft.value.trim(), appliedKeyword: keyword.value }
+  cancelSearchCommit()
+}
+const finishSearchComposition = (event: CompositionEvent) => {
+  if (!searchComposition.value) return
+  searchComposition.value = null
+  if (event.target instanceof HTMLInputElement) keywordDraft.value = event.target.value
+  scheduleSearchCommit(keywordDraft.value)
+}
+const flushSearchBeforeLeave = () => {
+  if (searchComposition.value) {
+    // 只提交组字前已确认的内容，活动查询保持冻结，等组字结束才切换输入框。
+    clientCatalogStore.setKeyword(searchComposition.value.confirmedDraft)
+  } else if (searchCommitTimer !== undefined) commitSearch()
+  clientCatalogStore.flushBrowseContext()
+}
+watch(keyword, (value) => {
+  if (!searchComposition.value && keywordDraft.value.trim() !== value) keywordDraft.value = value
+}, { flush: 'sync' })
 const activeCategoryKey = computed({
   get: () => clientCatalogStore.activeCategoryKey,
   set: (value: string) => clientCatalogStore.setActiveCategoryKey(value),
@@ -144,6 +195,22 @@ const detailSelectionSkuId = ref<string | null>(null)
 const detailCatalogUnavailable = ref(false)
 const detailCatalogNotice = ref('')
 const detailMode = ref<'single' | 'multi'>('single')
+const multiSkuMounted = ref(false)
+let multiSkuReady = false
+let pendingMultiSkuMode = false
+const changeDetailMode = (mode: string | number | boolean | undefined) => {
+  pendingMultiSkuMode = mode === 'multi' && !multiSkuReady
+  if (pendingMultiSkuMode) {
+    multiSkuMounted.value = true
+  } else if (mode === 'single' || mode === 'multi') {
+    detailMode.value = mode
+  }
+}
+const handleMultiSkuReady = () => {
+  if (!detailVisible.value || !multiSkuMounted.value) return
+  multiSkuReady = true
+  if (pendingMultiSkuMode) changeDetailMode('multi')
+}
 const detailBatchDrafts = reactive<Record<string, string>>({})
 const detailBatchConflicts = ref<ClientCartBatchResult['conflicts']>([])
 const detailInitialSkus = ref<O2oMallSku[]>([])
@@ -204,6 +271,9 @@ const resetDetailBatch = () => {
   Object.keys(detailBatchDrafts).forEach((id) => delete detailBatchDrafts[id])
   detailBatchConflicts.value = []
   detailInitialSkus.value = []
+  multiSkuMounted.value = false
+  multiSkuReady = false
+  pendingMultiSkuMode = false
   detailMode.value = 'single'
 }
 watch(detailVisible, (visible) => {
@@ -211,12 +281,47 @@ watch(detailVisible, (visible) => {
 }, { flush: 'sync' })
 
 const imagePreviewVisible = ref(false)
+const imagePreviewMounted = ref(false)
 const previewImageUrl = ref('')
+const previewFocusOrigin = shallowRef<HTMLElement | null>(null)
+let imagePreviewReady = false
+const handlePendingPreviewEscape = (event: KeyboardEvent) => {
+  if (event.key !== 'Escape' || !imagePreviewVisible.value) return
+  event.preventDefault()
+  event.stopImmediatePropagation()
+  const origin = previewFocusOrigin.value
+  imagePreviewVisible.value = false
+  if (origin?.isConnected) origin.focus({ preventScroll: true })
+}
+const stopPendingPreviewKeys = () => globalThis.window?.removeEventListener('keydown', handlePendingPreviewEscape, true)
+const onImagePreviewReady = () => {
+  imagePreviewReady = true
+  stopPendingPreviewKeys()
+}
+watch(imagePreviewVisible, (visible) => {
+  if (visible) {
+    imagePreviewMounted.value = true
+    if (!imagePreviewReady) globalThis.window?.addEventListener('keydown', handlePendingPreviewEscape, true)
+  } else {
+    stopPendingPreviewKeys()
+    if (!imagePreviewReady) imagePreviewMounted.value = false
+    previewFocusOrigin.value = null
+  }
+}, { flush: 'sync' })
+const openImagePreview = (src: string, event?: MouseEvent) => {
+  const trigger = event?.currentTarget
+  const activeElement = globalThis.document?.activeElement
+  previewFocusOrigin.value = trigger instanceof HTMLElement && trigger.tabIndex >= 0 ? trigger
+    : activeElement instanceof HTMLElement ? activeElement : null
+  previewImageUrl.value = src
+  imagePreviewVisible.value = true
+}
 const miniCartVisible = ref(false)
 const settlePulsing = ref(false)
 const miniCartBadgeBouncing = ref(false)
 const miniCartIconRef = ref<HTMLElement | null>(null)
 const searchInputFocused = ref(false)
+const desktopSearchInputRef = ref<HTMLInputElement | null>(null)
 const mobileSearchVisible = ref(false)
 const mobileSearchInputRef = ref<HTMLInputElement | null>(null)
 const compactAnnouncementCollapsed = ref(false)
@@ -227,6 +332,7 @@ const sortModeAnimating = ref(false)
 const isMallRoute = computed(() => route.path.startsWith('/client/mall'))
 const shouldShowMobileSearchEntry = computed(() => isPhone.value && isMallRoute.value)
 const productCardElementMap = new Map<string, HTMLElement>()
+const cardRestockSource = shallowRef<{ key: string; element: HTMLElement } | null>(null)
 const productCardStableKeyMap = new Map<string, string>()
 const productCardStableElementMap = new Map<string, HTMLElement>()
 
@@ -234,7 +340,16 @@ const listScrollerRef = ref<HTMLElement | null>(null)
 // 左侧分类栏滚动容器与各分类按钮，用于右侧滚动切换激活分类时让左栏“跟随可见”。
 const categoryScrollerRef = ref<HTMLElement | null>(null)
 const categoryButtonElementMap = new Map<string, HTMLElement>()
-const sectionRefMap = reactive<Record<string, HTMLElement | null>>({})
+const sectionRefMap = new Map<string, HTMLElement>()
+type CategoryScrollerGeometry = {
+  scroller: HTMLElement
+  viewportHeight: number
+  contentHeight: number
+  sections: ViewportCategorySection[]
+}
+let categoryListGeometry: CategoryScrollerGeometry | null = null
+let categoryRailGeometry: (CategoryScrollerGeometry & { bottomInset: number }) | null = null
+let productListScrollFrame: number | null = null
 const scrollingByCategoryClick = ref(false)
 // 用户点击的目标分类：只表示“想去哪”，右侧是否已经滚到由 activeCategoryKey 单独表示。
 const requestedCategoryKey = ref<string | null>(null)
@@ -242,7 +357,6 @@ const categoryScrollUnlockTimer = ref<number | null>(null)
 const categoryScrollSettleTimer = ref<number | null>(null)
 const categoryScrollSessionId = ref(0)
 const currentLockedSessionId = ref(0)
-const pendingCategoryTargetTop = ref<number | null>(null)
 /**
  * 分类栏高亮与跟随使用的分类键：
  * - 点击后立即显示点击目标，避免右侧平滑滚动途中高亮扫过中间分类；
@@ -310,7 +424,7 @@ const phonePaneTooShort = computed(() => isPhone.value && phonePaneHeight.value 
   && phonePaneHeight.value < VIRTUAL_PRODUCT_ITEM_HEIGHT)
 const phoneStorefrontCollapsed = computed(() => isPhone.value && !phonePaneTooShort.value && compactAnnouncementCollapsed.value)
 let acknowledgedAnnouncementText = ''
-const normalizedKeyword = computed(() => keyword.value.trim().toLowerCase())
+const normalizedKeyword = computed(() => (searchComposition.value?.appliedKeyword ?? keyword.value).trim().toLowerCase())
 const hasKeyword = computed(() => normalizedKeyword.value.length > 0)
 const hasRenderableProducts = computed(() => products.value.length > 0)
 const blockingRequestError = computed(() => {
@@ -413,6 +527,7 @@ const buildProductCardDisplay = (product: O2oMallProduct): ProductCardDisplay =>
     previewImage: resolveHallProductPreviewImage(product),
     priceView: resolveO2oPriceView(previewSku ?? product),
     description: normalizeProductCardDescription(product),
+    canSingleRestock: getRestockSkus(product).length === 1,
   }
 }
 
@@ -519,7 +634,20 @@ const detailSkuSpecGroups = computed(() => buildClientSkuSelectionModel(
   { allowOutOfStock: true },
 ))
 
-const isSingleRestockSku = (product: O2oMallProduct) => getRestockSkus(product).length === 1
+const restockEntry = useClientRestockEntry()
+const canSingleRestock = (product: O2oMallProduct) => resolveProductCardDisplay(product).canSingleRestock
+const openCardRestock = (cardKey: string, productId: string) => {
+  const element = productCardElementMap.get(cardKey)
+  if (!element?.isConnected) return
+  if (cardRestockSource.value?.element === element && restockEntry.isLoading('card', productId)) return
+  const source = { key: cardKey, element }
+  cardRestockSource.value = source
+  return restockEntry.openRestock('card', () => {
+    if (cardRestockSource.value !== source || !element.isConnected || !isMallRoute.value) return null
+    const product = products.value.find((item) => item.id === productId)
+    return product && canSingleRestock(product) ? { product } : null
+  })
+}
 
 // 只有明确选中的真实启用 SKU 可触发缺货替换；限购触顶不能当作缺货。
 const detailNeedsRestock = computed(() => {
@@ -555,13 +683,17 @@ const changeBatchDraft = (skuId: string, raw: string) => {
   detailBatchDrafts[skuId] = raw
   detailBatchConflicts.value = detailBatchConflicts.value.filter((conflict) => conflict.skuId !== skuId)
 }
-const batchRestockSku = ref<O2oMallSku | null>(null)
-const batchRestockEntry = useClientRestockEntry(() => batchCurrentProduct.value, () => batchRestockSku.value, () => detailVisible.value)
-const openBatchRestock = (sku: O2oMallSku) => { batchRestockSku.value = sku; void batchRestockEntry.openRestock() }
+const openBatchRestock = (sku: O2oMallSku) => {
+  const productId = batchCurrentProduct.value?.id
+  void restockEntry.openRestock('batch', () => {
+    const product = batchCurrentProduct.value
+    return isMallRoute.value && detailVisible.value && detailMode.value === 'multi' && product && product.id === productId
+      ? { product, skuId: sku.id } : null
+  })
+}
 const batchThumbnail = (sku: O2oMallSku) => sku.thumbnailSmall || sku.thumbnail || detailProduct.value?.thumbnailSmall || detailProduct.value?.thumbnail || resolveProductPlaceholder(null)
-const previewBatchSku = (sku: O2oMallSku) => {
-  previewImageUrl.value = sku.thumbnail || detailProduct.value?.thumbnail || batchThumbnail(sku)
-  imagePreviewVisible.value = true
+const previewBatchSku = (sku: O2oMallSku, event: MouseEvent) => {
+  openImagePreview(sku.thumbnail || detailProduct.value?.thumbnail || batchThumbnail(sku), event)
 }
 const submitDetailBatch = () => {
   const current = batchCurrentProduct.value
@@ -583,8 +715,7 @@ const submitDetailBatch = () => {
   detailVisible.value = false
 }
 
-const detailRestockEntry = useClientRestockEntry(() => detailProduct.value, () => selectedDetailSku.value, () => detailVisible.value)
-const detailRestockLoading = detailRestockEntry.loading
+const detailRestockLoading = computed(() => restockEntry.isLoading('detail', detailProduct.value?.id))
 const detailActionMode = computed<DetailActionMode>(() => {
   if (!detailProduct.value || detailCatalogUnavailable.value || !selectedDetailSku.value) {
     return 'unavailable'
@@ -592,7 +723,7 @@ const detailActionMode = computed<DetailActionMode>(() => {
   if (resolveCurrentDetailAvailableStock(detailProduct.value) > 0) {
     return 'purchase'
   }
-  return detailNeedsRestock.value && detailRestockEntry.restockAvailable.value ? 'restock' : 'unavailable'
+  return detailNeedsRestock.value ? 'restock' : 'unavailable'
 })
 const detailActionLabel = computed(() => {
   if (detailActionMode.value === 'purchase') return '加入购物车'
@@ -601,17 +732,15 @@ const detailActionLabel = computed(() => {
 })
 
 // 商城图片预览统一走同一套状态，避免商品卡和详情抽屉各自维护一套弹层开关。
-const openProductImagePreview = (product: O2oMallProduct) => {
-  previewImageUrl.value = resolveProductCardDisplay(product).previewImage
-  imagePreviewVisible.value = true
+const openProductImagePreview = (product: O2oMallProduct, event: MouseEvent) => {
+  openImagePreview(resolveProductCardDisplay(product).previewImage, event)
 }
 
-const openDetailImagePreview = () => {
+const openDetailImagePreview = (event: MouseEvent) => {
   if (!detailProduct.value) {
     return
   }
-  previewImageUrl.value = resolveDetailProductThumbnail(detailProduct.value)
-  imagePreviewVisible.value = true
+  openImagePreview(resolveDetailProductThumbnail(detailProduct.value), event)
 }
 
 const productSearchEntries = computed<ProductSearchEntry[]>(() => products.value.map((product) => ({
@@ -685,6 +814,11 @@ const mallBrowseIndex = computed<MallBrowseIndexSnapshot>(() => {
 const categoryGroups = computed(() => mallBrowseIndex.value.categoryGroups)
 const categoryOptions = computed(() => mallBrowseIndex.value.categoryOptions)
 const searchMode = computed(() => hasKeyword.value)
+watch(searchMode, async () => {
+  if (globalThis.document?.activeElement !== desktopSearchInputRef.value) return
+  await nextTick()
+  if (isMallRoute.value) desktopSearchInputRef.value?.focus({ preventScroll: true })
+})
 const largeDatasetMode = computed(() => products.value.length > 100)
 const isRecommendedSortMode = computed(() => sortMode.value === 'recommended')
 const showCategoryRail = computed(() => !isRecommendedSortMode.value && categoryGroups.value.length > 0)
@@ -713,7 +847,7 @@ const searchPaginationRef = ref<HTMLElement | null>(null)
 const pagedSearchResults = computed(() => searchResults.value.slice((searchPage.value - 1) * searchPageSize, searchPage.value * searchPageSize))
 const showProductSort = computed(() => !loading.value && !blockingRequestError.value
   && hasRenderableProducts.value && (!searchMode.value || searchResults.value.length > 0))
-watch([keyword, sortMode], () => { searchPage.value = 1 }, { flush: 'sync' })
+watch([normalizedKeyword, sortMode], () => { searchPage.value = 1 }, { flush: 'sync' })
 watch(searchResults, (results) => {
   searchPage.value = Math.min(searchPage.value, Math.max(1, Math.ceil(results.length / searchPageSize)))
 }, { flush: 'sync' })
@@ -814,6 +948,8 @@ const stopMallFeedback = () => {
   warmupIdleIds.forEach((id) => window.cancelIdleCallback?.(id)); warmupIdleIds.clear()
   mallTimeouts.forEach((id) => window.clearTimeout(id)); mallTimeouts.clear()
   mallFrames.forEach((id) => window.cancelAnimationFrame(id)); mallFrames.clear()
+  productListScrollFrame = null
+  floatingOcclusionFrameId = null
   settlePulsing.value = false; miniCartBadgeBouncing.value = false
 }
 const triggerSettlePulse = () => {
@@ -1011,6 +1147,8 @@ const revalidateCatalogInBackground = () => {
 const handleMallVisibilityChange = () => {
   if (globalThis.document?.visibilityState === 'visible') {
     void revalidateCatalogInBackground()
+  } else {
+    flushSearchBeforeLeave()
   }
 }
 
@@ -1044,7 +1182,8 @@ const loadProducts = async (force = false) => {
 }
 
 const setSectionRef = (key: string, element: unknown) => {
-  sectionRefMap[key] = element instanceof HTMLElement ? element : null
+  if (element instanceof HTMLElement) sectionRefMap.set(key, element)
+  else sectionRefMap.delete(key)
 }
 
 const openProductDetail = (product: O2oMallProduct) => {
@@ -1061,7 +1200,9 @@ const openProductDetail = (product: O2oMallProduct) => {
 }
 
 const clearSearch = () => {
-  keyword.value = ''
+  searchComposition.value = null
+  keywordDraft.value = ''
+  commitSearch()
 }
 
 const openMobileSearch = async () => {
@@ -1071,6 +1212,7 @@ const openMobileSearch = async () => {
 }
 
 const closeMobileSearch = () => {
+  commitSearch()
   mobileSearchVisible.value = false
 }
 
@@ -1086,6 +1228,9 @@ const promoteStableProductCardElement = (stableProductId: string) => {
 
 const setProductCardRef = (cardKey: string | number, element: unknown, stableProductId: string | number = cardKey) => {
   const normalizedCardKey = String(cardKey)
+  if (cardRestockSource.value?.key === normalizedCardKey && cardRestockSource.value.element !== element) {
+    cardRestockSource.value = null
+  }
   const normalizedStableProductId = String(stableProductId)
   if (element instanceof HTMLElement) {
     productCardElementMap.set(normalizedCardKey, element)
@@ -1312,7 +1457,12 @@ const handleDetailPrimaryAction = () => {
     return
   }
   if (detailActionMode.value === 'restock') {
-    void detailRestockEntry.openRestock()
+    void restockEntry.openRestock('detail', () => {
+      const product = batchCurrentProduct.value
+      const sku = selectedDetailSku.value
+      return isMallRoute.value && detailVisible.value && detailMode.value === 'single' && product && sku
+        ? { product, skuId: sku.id } : null
+    })
   }
 }
 
@@ -1448,7 +1598,6 @@ const releaseCategoryScrollLock = () => {
   clearCategoryUnlockTimer()
   scrollingByCategoryClick.value = false
   requestedCategoryKey.value = null
-  pendingCategoryTargetTop.value = null
 }
 
 /**
@@ -1556,51 +1705,24 @@ watch(phonePaneTooShort, () => {
   syncMallDocumentScrollLock()
 })
 
-const resolveSectionTopWithinScroller = (section: HTMLElement, scroller: HTMLElement) => {
-  const sectionRect = section.getBoundingClientRect()
-  const scrollerRect = scroller.getBoundingClientRect()
-  // 统一转换为“相对于滚动容器内容区”的坐标，避免 offsetTop 因 offsetParent 不一致而计算失真。
-  return Math.max(0, sectionRect.top - scrollerRect.top + scroller.scrollTop)
-}
-
-const resolveCategoryScrollMetrics = (categoryKey: string, scroller: HTMLElement) => {
-  if (categoryKey === 'all') {
-    return {
-      rawTargetTop: 0,
-      reachableTargetTop: 0,
-      maxScrollTop: Math.max(0, scroller.scrollHeight - scroller.clientHeight),
-      relativeTop: 0,
-      relativeBottom: 0,
-    }
-  }
-  const section = sectionRefMap[categoryKey]
-  if (!section) {
-    return null
-  }
-  const maxScrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
-  const sectionTopWithinScroller = resolveSectionTopWithinScroller(section, scroller)
-  // 统一以分组容器起点作为锚点：
-  // 1. 点击标签时，分组标题与第一行商品一起进入顶部视口；
-  // 2. “全部”和第一个标签天然对应同一顶部位置，不会再点击首标签后异常下滑。
-  const rawTargetTop = sectionTopWithinScroller
-  const relativeTop = sectionTopWithinScroller - scroller.scrollTop
-  const relativeBottom = sectionTopWithinScroller + section.offsetHeight - scroller.scrollTop
-  return {
-    rawTargetTop,
-    reachableTargetTop: Math.min(rawTargetTop, maxScrollTop),
+const resolveCategoryScrollMetrics = (categoryKey: string, scrollTop: number, geometry: CategoryScrollerGeometry) => {
+  const maxScrollTop = Math.max(0, geometry.contentHeight - geometry.viewportHeight)
+  if (categoryKey === 'all') return { reachableTargetTop: 0, maxScrollTop, relativeTop: 0, relativeBottom: 0 }
+  const section = geometry.sections.find(({ key }) => key === categoryKey)
+  return section ? {
+    reachableTargetTop: Math.min(section.top, maxScrollTop),
     maxScrollTop,
-    relativeTop,
-    relativeBottom,
-  }
+    relativeTop: section.top - scrollTop,
+    relativeBottom: section.top + section.height - scrollTop,
+  } : null
 }
 
-const lockCategoryScrollSession = (categoryKey: string, targetTop: number) => {
+const lockCategoryScrollSession = (categoryKey: string) => {
   const nextSessionId = categoryScrollSessionId.value + 1
   categoryScrollSessionId.value = nextSessionId
   currentLockedSessionId.value = nextSessionId
   scrollingByCategoryClick.value = true
   requestedCategoryKey.value = categoryKey
-  pendingCategoryTargetTop.value = targetTop
   clearCategoryUnlockTimer()
   scheduleCategoryScrollSettleCheck(nextSessionId)
   categoryScrollUnlockTimer.value = scheduleMallTimeout(() => {
@@ -1639,6 +1761,7 @@ const scrollToCategory = async (categoryKey: string) => {
   // activeCategoryKey 仍等右侧真正滚到目标后再更新。
   requestedCategoryKey.value = categoryKey
   await nextTick()
+  if (requestedCategoryKey.value !== categoryKey) return
   const scroller = listScrollerRef.value
   if (!scroller) {
     activeCategoryKey.value = categoryKey
@@ -1648,6 +1771,7 @@ const scrollToCategory = async (categoryKey: string) => {
 
   syncBrowseListHeight()
   await nextTick()
+  if (requestedCategoryKey.value !== categoryKey) return
   const nextScroller = listScrollerRef.value
   if (!nextScroller) {
     activeCategoryKey.value = categoryKey
@@ -1655,14 +1779,15 @@ const scrollToCategory = async (categoryKey: string) => {
     return
   }
 
-  const targetMetrics = resolveCategoryScrollMetrics(categoryKey, nextScroller)
+  measureCategoryGeometry()
+  const targetMetrics = categoryListGeometry && resolveCategoryScrollMetrics(categoryKey, nextScroller.scrollTop, categoryListGeometry)
   if (!targetMetrics) {
     // 搜索结果态等没有分组锚点的场景无法滚动定位，直接认定已落到目标分类。
     activeCategoryKey.value = categoryKey
     releaseCategoryScrollLock()
     return
   }
-  lockCategoryScrollSession(categoryKey, targetMetrics.reachableTargetTop)
+  lockCategoryScrollSession(categoryKey)
   // 只驱动右侧滚动容器，避免 scrollIntoView 在不同浏览器下误触发页面级滚动或无滚动。
   nextScroller.scrollTo({
     top: targetMetrics.reachableTargetTop,
@@ -1694,6 +1819,39 @@ const measureCategoryRailBottomInset = (scroller: HTMLElement) => {
   return Math.max(0, Math.round(scroller.getBoundingClientRect().bottom - occlusionTop))
 }
 
+// 分组、分类栏或视口尺寸变化时才读几何。滚动中的右栏只读 scrollTop，左栏跟随也复用坐标快照。
+const measureCategoryGeometry = () => {
+  const list = listScrollerRef.value
+  categoryListGeometry = null
+  if (list) {
+    const contentTop = list.getBoundingClientRect().top - list.scrollTop
+    categoryListGeometry = {
+      scroller: list,
+      viewportHeight: list.clientHeight,
+      contentHeight: list.scrollHeight,
+      sections: categoryGroups.value.flatMap(({ key }) => {
+        const section = sectionRefMap.get(key)
+        return section ? [{ key, top: Math.max(0, section.getBoundingClientRect().top - contentTop), height: section.offsetHeight }] : []
+      }),
+    }
+  }
+
+  const rail = categoryScrollerRef.value
+  categoryRailGeometry = null
+  if (!rail) return
+  const bottomInset = measureCategoryRailBottomInset(rail)
+  const tailSpace = `${bottomInset}px`
+  if (rail.style.getPropertyValue('--mall-category-rail-tail-space') !== tailSpace) {
+    rail.style.setProperty('--mall-category-rail-tail-space', tailSpace)
+  }
+  const contentTop = rail.getBoundingClientRect().top + rail.clientTop - rail.scrollTop
+  const sections = Array.from(categoryButtonElementMap, ([key, button]) => {
+    const rect = button.getBoundingClientRect()
+    return { key, top: rect.top - contentTop, height: rect.height }
+  })
+  categoryRailGeometry = { scroller: rail, viewportHeight: rail.clientHeight, contentHeight: rail.scrollHeight, bottomInset, sections }
+}
+
 /**
  * 左侧分类栏跟随可见：
  * - 只滚动左侧分类栏自身容器，不带动页面或商品列表；
@@ -1702,35 +1860,30 @@ const measureCategoryRailBottomInset = (scroller: HTMLElement) => {
  */
 const ensureActiveCategoryVisible = (behavior: ScrollBehavior = 'smooth') => {
   const scroller = categoryScrollerRef.value
-  const button = categoryButtonElementMap.get(displayCategoryKey.value)
-  if (!mallRuntimeActive || !scroller || !button || scroller.clientHeight <= 0) {
+  const geometry = categoryRailGeometry
+  const button = geometry?.sections.find(({ key }) => key === displayCategoryKey.value)
+  if (!mallRuntimeActive || !scroller || !button || geometry?.scroller !== scroller || geometry.viewportHeight <= 0) {
     return
   }
   if (scroller.classList.contains('mall-category-panel-enter-active') || scroller.classList.contains('mall-category-panel-leave-active')) {
     // 分类栏展开/收起过渡中高度仍在变化，交给过渡结束回调再对齐。
     return
   }
-  const prefersReducedMotion = globalThis.window?.matchMedia?.('(prefers-reduced-motion: reduce)').matches
-  const bottomInset = measureCategoryRailBottomInset(scroller)
-  // 尾部占位与遮挡等高，直接写在容器上即时生效，随后读取的 scrollHeight 才包含这段可滚动空间。
-  scroller.style.setProperty('--mall-category-rail-tail-space', `${bottomInset}px`)
-  const scrollerRect = scroller.getBoundingClientRect()
-  const buttonRect = button.getBoundingClientRect()
   const nextScrollTop = resolveKeepVisibleScrollTop({
     scrollTop: scroller.scrollTop,
-    viewportHeight: scroller.clientHeight,
-    contentHeight: scroller.scrollHeight,
-    itemTop: buttonRect.top - scrollerRect.top - scroller.clientTop + scroller.scrollTop,
-    itemHeight: buttonRect.height,
+    viewportHeight: geometry.viewportHeight,
+    contentHeight: geometry.contentHeight,
+    itemTop: button.top,
+    itemHeight: button.height,
     padding: CATEGORY_RAIL_VISIBLE_PADDING,
-    bottomInset,
+    bottomInset: geometry.bottomInset,
   })
   if (nextScrollTop === null) {
     return
   }
   scroller.scrollTo({
     top: nextScrollTop,
-    behavior: prefersReducedMotion ? 'auto' : behavior,
+    behavior: shouldReduceClientMotion() ? 'auto' : behavior,
   })
 }
 
@@ -1742,45 +1895,42 @@ const handleCategoryManualInterrupt = () => {
   handleProductListScroll()
 }
 
-const resolveActiveCategoryByViewport = (scroller: HTMLElement) => {
-  const sections = categoryGroups.value.flatMap((group) => {
-    const section = sectionRefMap[group.key]
-    if (!section) {
-      return []
-    }
-    return [{
-      key: group.key,
-      top: resolveSectionTopWithinScroller(section, scroller),
-      height: section.offsetHeight,
-    }]
-  })
+const resolveActiveCategoryByViewport = (scrollTop: number, { sections, viewportHeight, contentHeight }: CategoryScrollerGeometry) => {
   return resolveViewportCategoryKey({
     sections,
-    scrollTop: scroller.scrollTop,
-    viewportHeight: scroller.clientHeight,
-    contentHeight: scroller.scrollHeight,
+    scrollTop,
+    viewportHeight,
+    contentHeight,
     anchorOffset: Math.min(
       CATEGORY_VIEWPORT_ACTIVATE_OFFSET,
-      Math.max(18, Math.floor(scroller.clientHeight * 0.12)),
+      Math.max(18, Math.floor(viewportHeight * 0.12)),
     ),
     hysteresis: CATEGORY_ACTIVATE_HYSTERESIS,
     bottomVisiblePadding: CATEGORY_BOTTOM_VISIBLE_PADDING,
     edgeThreshold: CATEGORY_SCROLL_HIT_THRESHOLD,
     currentKey: activeCategoryKey.value,
-    firstCategoryKey: categoryGroups.value[0]?.key ?? 'all',
+    firstCategoryKey: sections[0]?.key ?? 'all',
   })
 }
 
 const handleProductListScroll = () => {
+  if (productListScrollFrame !== null || !mallRuntimeActive) return
+  productListScrollFrame = scheduleMallFrame(() => {
+    productListScrollFrame = null
+    syncActiveCategoryFromScroll()
+  })
+}
+
+const syncActiveCategoryFromScroll = () => {
   const scroller = listScrollerRef.value
-  if (!scroller) {
-    return
-  }
+  const geometry = categoryListGeometry
+  if (!scroller || geometry?.scroller !== scroller) return
+  const scrollTop = scroller.scrollTop
 
   if (requestedCategoryKey.value && scrollingByCategoryClick.value) {
     // 点击会话进行中：只按真实位置判断“是否已抵达目标”，
     // 中途位置一律不回写 activeCategoryKey，杜绝“目标 → 中间分类 → 目标”的回跳。
-    if (hasReachedRequestedCategory(scroller)) {
+    if (hasReachedRequestedCategory(scrollTop, geometry)) {
       settleCategoryScrollSession()
       return
     }
@@ -1793,7 +1943,7 @@ const handleProductListScroll = () => {
     return
   }
 
-  activeCategoryKey.value = resolveActiveCategoryByViewport(scroller)
+  activeCategoryKey.value = resolveActiveCategoryByViewport(scrollTop, geometry)
 }
 
 const isCategorySyncTemporarilyBlocked = () => {
@@ -1807,22 +1957,22 @@ const isCategorySyncTemporarilyBlocked = () => {
  *   只判顶边会让向上跳转和点击“全部”在第一帧就误判抵达，锁提前释放后高亮又会扫过中间分类；
  * - 列表已到底时目标分组顶不到锚线，改以“分组清晰可见”兜底。
  */
-const hasReachedRequestedCategory = (scroller: HTMLElement): boolean => {
+const hasReachedRequestedCategory = (scrollTop: number, geometry: CategoryScrollerGeometry): boolean => {
   const requestedKey = requestedCategoryKey.value
   if (!requestedKey) {
     return false
   }
-  const targetMetrics = resolveCategoryScrollMetrics(requestedKey, scroller)
+  const targetMetrics = resolveCategoryScrollMetrics(requestedKey, scrollTop, geometry)
   if (!targetMetrics) {
     return true
   }
-  const distanceToTarget = Math.abs(targetMetrics.reachableTargetTop - scroller.scrollTop)
-  const nearBottom = targetMetrics.maxScrollTop - scroller.scrollTop <= CATEGORY_SCROLL_HIT_THRESHOLD
+  const distanceToTarget = Math.abs(targetMetrics.reachableTargetTop - scrollTop)
+  const nearBottom = targetMetrics.maxScrollTop - scrollTop <= CATEGORY_SCROLL_HIT_THRESHOLD
   const sectionStraddlesAnchor = targetMetrics.relativeTop <= CATEGORY_VIEWPORT_ACTIVATE_OFFSET
     && targetMetrics.relativeBottom > CATEGORY_VIEWPORT_ACTIVATE_OFFSET
   const sectionVisibleAtBottom = nearBottom
     && targetMetrics.relativeBottom > CATEGORY_VIEWPORT_ACTIVATE_OFFSET
-    && targetMetrics.relativeTop < scroller.clientHeight - CATEGORY_BOTTOM_VISIBLE_PADDING
+    && targetMetrics.relativeTop < geometry.viewportHeight - CATEGORY_BOTTOM_VISIBLE_PADDING
   return distanceToTarget <= CATEGORY_SCROLL_HIT_THRESHOLD || sectionStraddlesAnchor || sectionVisibleAtBottom
 }
 
@@ -1830,9 +1980,16 @@ const handleMallViewportResize = () => {
   syncMallFloatingOcclusion()
   syncPhonePaneGeometry()
   syncBrowseListHeight()
-  handleProductListScroll()
-  if (isPhone.value) void nextTick(() => ensureActiveCategoryVisible('auto'))
+  void syncCategoryGeometryAfterRender()
   void updateCompactAnnouncementOverflow()
+}
+
+const syncCategoryGeometryAfterRender = async () => {
+  await nextTick()
+  if (!mallRuntimeActive) return
+  measureCategoryGeometry()
+  handleProductListScroll()
+  ensureActiveCategoryVisible('auto')
 }
 
 // 窗口缩放、可视视口变化、摘要栏换行与列表尺寸变化可能在同一帧内连续触发，合并到下一帧只测量一次，避免布局抖动。
@@ -1859,7 +2016,10 @@ const bindFloatingLayoutObserver = () => {
   }
   floatingLayoutResizeObserver = new win.ResizeObserver(() => scheduleMallFloatingLayoutSync())
   // 门店说明异步换行时，列表顶边会移动，浏览面板的尺寸可能尚未变化。
-  const observedElements = [miniCartSummaryBarRef.value, mallHeroCardRef.value, browsePanelRef.value, phoneToolbarRef.value, getMallLayoutHeader()]
+  const observedElements = [
+    miniCartSummaryBarRef.value, mallHeroCardRef.value, browsePanelRef.value, phoneToolbarRef.value, getMallLayoutHeader(),
+    listScrollerRef.value, categoryScrollerRef.value, ...sectionRefMap.values(), ...categoryButtonElementMap.values(),
+  ]
   observedElements.forEach((element) => {
     if (element) {
       floatingLayoutResizeObserver?.observe(element)
@@ -1869,12 +2029,12 @@ const bindFloatingLayoutObserver = () => {
 
 const syncMallViewportAfterRender = async () => {
   await nextTick()
+  if (!mallRuntimeActive) return
   syncMallFloatingOcclusion()
   syncPhonePaneGeometry()
   syncBrowseListHeight()
-  handleProductListScroll()
   // KeepAlive 返回、列表重建或尺寸变化后分类栏滚动位置可能丢失，直接对齐到激活分类。
-  ensureActiveCategoryVisible('auto')
+  await syncCategoryGeometryAfterRender()
   if (mallRuntimeActive) {
     // 搜索 / 分类 / 大数据量模式切换会替换列表容器，需要重新挂载尺寸观察目标。
     bindFloatingLayoutObserver()
@@ -1883,8 +2043,20 @@ const syncMallViewportAfterRender = async () => {
 }
 
 const cartDrawerVisible = ref(false)
+const cartDrawerMounted = ref(false)
 const checkoutDrawerVisible = ref(false)
+const checkoutDrawerMounted = ref(false)
 type CartDrawer = 'cart' | 'checkout'
+const openDrawer = (drawer: CartDrawer) => {
+  if (drawer === 'cart') {
+    // 结算返回时需恢复同一个按钮的焦点，已打开的购物车保留到页面卸载。
+    cartDrawerMounted.value = true
+    cartDrawerVisible.value = true
+  } else {
+    checkoutDrawerMounted.value = true
+    checkoutDrawerVisible.value = true
+  }
+}
 const drawerHandoff = ref<CartDrawer | null>(null)
 let checkoutFromCart = false
 let drawerHandoffGeneration = 0
@@ -1907,11 +2079,14 @@ const completeDrawerHandoff = async (source: CartDrawer) => {
   await nextTick()
   if (!mallRuntimeActive || generation !== drawerHandoffGeneration || drawerHandoff.value !== target || drawerHandoffOwner !== clientAuthStore.currentUser?.id) return
   drawerHandoff.value = null
-  if (target === 'cart') cartDrawerVisible.value = true
-  else checkoutDrawerVisible.value = true
+  openDrawer(target)
 }
 const finishCartClose = () => { drawerCloseState.cart.closed = true; void completeDrawerHandoff('cart') }
-const finishCheckoutClose = () => { drawerCloseState.checkout.closed = true; void completeDrawerHandoff('checkout') }
+const finishCheckoutClose = () => {
+  if (!checkoutDrawerVisible.value) checkoutDrawerMounted.value = false
+  drawerCloseState.checkout.closed = true
+  void completeDrawerHandoff('checkout')
+}
 const handleDrawerCloseAutoFocus = (source: CartDrawer) => {
   drawerCloseState[source].released = true
   void completeDrawerHandoff(source)
@@ -1928,10 +2103,15 @@ const closeCheckout = () => {
   prepareCheckoutReturn()
   checkoutDrawerVisible.value = false
 }
-watch(() => clientAuthStore.currentUser?.id, () => {
+watch([() => clientAuthStore.sessionGeneration, () => clientAuthStore.currentUser?.id], () => {
+  cancelSearchCommit()
+  searchComposition.value = null
+  keywordDraft.value = keyword.value
+  releaseCategoryScrollLock()
   drawerHandoffGeneration += 1; drawerHandoff.value = null; cartReturnFocus = null; checkoutFromCart = false
   cartDrawerVisible.value = false; checkoutDrawerVisible.value = false
   detailVisible.value = false
+  imagePreviewVisible.value = false
   resetDetailBatch()
   stopMallFeedback()
   feedbackController = new AbortController()
@@ -1940,7 +2120,7 @@ watch(() => clientAuthStore.currentUser?.id, () => {
 const openCartDrawer = () => {
   if (drawerHandoff.value || checkoutDrawerVisible.value) return
   miniCartVisible.value = false
-  cartDrawerVisible.value = true
+  openDrawer('cart')
 }
 
 const goToCheckout = () => {
@@ -1962,7 +2142,7 @@ const goToCheckout = () => {
     cartReturnFocus = focused instanceof HTMLElement && focused.closest('[role="dialog"]') ? focused : null
     beginDrawerHandoff('checkout'); cartDrawerVisible.value = false
   }
-  else checkoutDrawerVisible.value = true
+  else openDrawer('checkout')
 }
 
 // 切离商城路由时立即收拢 mini-cart：
@@ -2000,6 +2180,7 @@ const activateMallRuntime = () => {
   mallRuntimeActive = true
   syncMallDocumentScrollLock()
   globalThis.window.addEventListener('resize', scheduleMallFloatingLayoutSync, { passive: true })
+  globalThis.window.addEventListener('pagehide', flushSearchBeforeLeave)
   globalThis.window.addEventListener('orientationchange', scheduleMallFloatingLayoutSync)
   // 移动端地址栏收起/展开只改变可视视口，不一定触发 window resize。
   globalThis.window.visualViewport?.addEventListener('resize', scheduleMallFloatingLayoutSync)
@@ -2021,19 +2202,28 @@ const deactivateMallRuntime = () => {
   stopMallFeedback()
   invalidateClearCartConfirm()
   detailVisible.value = false
+  imagePreviewVisible.value = false
   cartDrawerVisible.value = false
   checkoutDrawerVisible.value = false
   drawerHandoffGeneration += 1; drawerHandoff.value = null; cartReturnFocus = null; checkoutFromCart = false
   if (!mallRuntimeActive) {
     return
   }
+  flushSearchBeforeLeave()
+  if (searchComposition.value) {
+    searchComposition.value = null
+    keywordDraft.value = keyword.value
+  }
   mallRuntimeActive = false
   finishProductRefresh()
   cancelStorefrontRefresh()
   stopStorefrontMotion()
   syncMallDocumentScrollLock()
-  clearCategoryUnlockTimer()
+  releaseCategoryScrollLock()
+  categoryListGeometry = null
+  categoryRailGeometry = null
   globalThis.window.removeEventListener('resize', scheduleMallFloatingLayoutSync)
+  globalThis.window.removeEventListener('pagehide', flushSearchBeforeLeave)
   globalThis.window.removeEventListener('orientationchange', scheduleMallFloatingLayoutSync)
   globalThis.window.visualViewport?.removeEventListener('resize', scheduleMallFloatingLayoutSync)
   globalThis.document?.removeEventListener('visibilitychange', handleMallVisibilityChange)
@@ -2043,17 +2233,13 @@ const deactivateMallRuntime = () => {
   }
   floatingLayoutResizeObserver?.disconnect()
   floatingLayoutResizeObserver = null
-  if (floatingOcclusionFrameId !== null) {
-    globalThis.window.cancelAnimationFrame(floatingOcclusionFrameId)
-    floatingOcclusionFrameId = null
-  }
   // 页面级焦点滚动留白只属于商城页，切走后还原，避免影响订单、个人中心等其他客户端页面。
   globalThis.document?.documentElement?.style.removeProperty('scroll-padding-bottom')
 }
 
 // 搜索、排序、大数据量与购物车展开状态切换都会改变列表容器或摘要栏尺寸，渲染完成后重新测量遮挡高度。
 watch(
-  [searchMode, largeDatasetMode, isRecommendedSortMode, miniCartVisible, () => products.value.length],
+  [searchMode, largeDatasetMode, isRecommendedSortMode, miniCartVisible, categoryGroups],
   () => {
     if (mallRuntimeActive) {
       void syncMallViewportAfterRender()
@@ -2077,7 +2263,6 @@ onActivated(() => {
 
 onDeactivated(() => {
   deactivateMallRuntime()
-  imagePreviewVisible.value = false
   mobileSearchVisible.value = false
   searchInputFocused.value = false
 })
@@ -2141,15 +2326,19 @@ onBeforeUnmount(() => {
               </span>
               <input
                 ref="mobileSearchInputRef"
-                v-model.trim="keyword"
+                :key="clientAuthStore.sessionGeneration"
+                v-model="keywordDraft"
                 type="search"
                 class="mall-search-inline-input"
                 placeholder="搜索商品名称"
                 @focus="searchInputFocused = true"
                 @blur="searchInputFocused = false"
+                @compositionstart="startSearchComposition"
+                @compositionend="finishSearchComposition"
+                @keydown.enter="commitSearch"
               />
               <button
-                v-if="hasKeyword"
+                v-if="keywordDraft"
                 type="button"
                 class="mall-search-inline-clear"
                 aria-label="清空搜索"
@@ -2163,8 +2352,45 @@ onBeforeUnmount(() => {
       </Transition>
     </Teleport>
 
+    <DefineProductCardContent v-slot="{ product, cardKey }">
+      <button type="button" :data-product-id="product.id" class="client-product-card__image-button" @click="openProductImagePreview(product, $event)">
+        <img
+          :key="`${product.id}:${resolveProductThumbnail(product)}:${resolveProductCardDisplay(product).previewImage}`"
+          :src="resolveProductThumbnail(product)"
+          :alt="product.productName"
+          class="client-product-card__cover"
+          loading="lazy"
+          decoding="async"
+          @error="handleProductImageError($event, resolveProductCardDisplay(product).previewImage)"
+        />
+      </button>
+      <el-button text class="client-product-card__name" @click="openProductDetail(product)">{{ product.productName }}</el-button>
+      <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
+        <div class="client-product-card__content">
+          <div class="client-product-card__price-wrap">
+            <p class="client-product-card__price">¥{{ Number(resolveProductPriceView(product).discountedPrice).toFixed(2) }}</p>
+            <p v-if="resolveProductPriceView(product).isDiscounted" class="client-product-card__price-extra">
+              原价 ¥{{ Number(resolveProductPriceView(product).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(product).discountLabel }}
+            </p>
+          </div>
+          <div class="client-product-card__meta" @click="keepStockSwipeLocal">
+            <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">
+              可订 {{ product.availableStock }}
+            </span>
+            <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
+              已订 {{ product.preOrderedStock }}
+            </span>
+            <span class="rounded-full bg-slate-100 px-2 py-1 text-slate-600 dark:bg-white/10 dark:text-slate-300">
+              已售 {{ resolveSoldQty(product) }}
+            </span>
+          </div>
+        </div>
+      </button>
+      <div class="client-product-card__actions"><ClientCardCartStepper :data-product-id="product.id" :product="product" @add="quickAdd(product, $event)" @decrease="decreaseCardQty" @choose="openProductDetail(product)" /><ClientRestockButton v-if="canSingleRestock(product)" :loading="cardRestockSource?.key === cardKey && restockEntry.isLoading('card', product.id)" @restock="openCardRestock(cardKey, product.id)" /></div>
+    </DefineProductCardContent>
+
     <!-- 商品原图预览：初始完整适配，提供放大 / 缩小 / 适配按钮与键盘操作，放大后用舞台原生滚动平移。 -->
-    <ClientImagePreviewer v-model:visible="imagePreviewVisible" :src="previewImageUrl" alt="商品原图" />
+    <ClientImagePreviewer v-if="imagePreviewMounted" v-model:visible="imagePreviewVisible" :src="previewImageUrl" :focus-origin="previewFocusOrigin" alt="商品原图" @ready="onImagePreviewReady" />
 
     <div v-if="isPhone" ref="phoneToolbarRef" class="mall-sort-row mall-phone-toolbar">
       <div v-if="showProductSort" class="mall-sort-control" :class="{ 'is-animating': sortModeAnimating }" role="group" aria-label="商品排序">
@@ -2295,7 +2521,7 @@ onBeforeUnmount(() => {
     </div>
     <div v-else-if="searchMode && !searchResults.length">
       <p ref="searchHeadingRef" tabindex="-1">搜索结果 0 条</p>
-      <BaseRequestState type="empty" title="未找到相关商品" description="请尝试其他关键字" action-text="清空搜索" @retry="keyword = ''" />
+      <BaseRequestState type="empty" title="未找到相关商品" description="请尝试其他关键字" action-text="清空搜索" @retry="clearSearch" />
     </div>
 
     <template v-else>
@@ -2327,15 +2553,20 @@ onBeforeUnmount(() => {
             <el-icon><Search /></el-icon>
           </span>
           <input
-            v-model.trim="keyword"
+            ref="desktopSearchInputRef"
+            :key="clientAuthStore.sessionGeneration"
+            v-model="keywordDraft"
             type="search"
             class="mall-search-inline-input"
             placeholder="搜索商品名称 / 标签"
             @focus="searchInputFocused = true"
             @blur="searchInputFocused = false"
+            @compositionstart="startSearchComposition"
+            @compositionend="finishSearchComposition"
+            @keydown.enter="commitSearch"
           />
           <button
-            v-if="hasKeyword"
+            v-if="keywordDraft"
             type="button"
             class="mall-search-inline-clear"
             @click="clearSearch"
@@ -2355,40 +2586,7 @@ onBeforeUnmount(() => {
           :ref="(el) => setProductCardRef(`search:${product.id}`, el, product.id)"
           class="client-product-card"
         >
-          <button type="button" :data-product-id="product.id" class="client-product-card__image-button" @click="openProductImagePreview(product)">
-            <img
-              :key="`${product.id}:${resolveProductThumbnail(product)}:${resolveProductCardDisplay(product).previewImage}`"
-                  :src="resolveProductThumbnail(product)"
-              :alt="product.productName"
-              class="client-product-card__cover"
-              loading="lazy"
-              decoding="async"
-              @error="handleProductImageError($event, resolveProductCardDisplay(product).previewImage)"
-            />
-          </button>
-          <el-button text class="client-product-card__name" @click="openProductDetail(product)">{{ product.productName }}</el-button>
-          <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
-            <div class="client-product-card__content">
-              <div class="client-product-card__price-wrap">
-                <p class="client-product-card__price">¥{{ Number(resolveProductPriceView(product).discountedPrice).toFixed(2) }}</p>
-                <p v-if="resolveProductPriceView(product).isDiscounted" class="client-product-card__price-extra">
-                  原价 ¥{{ Number(resolveProductPriceView(product).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(product).discountLabel }}
-                </p>
-              </div>
-              <div class="client-product-card__meta" @click="keepStockSwipeLocal">
-                <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">
-                  可订 {{ product.availableStock }}
-                </span>
-                <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
-                  已订 {{ product.preOrderedStock }}
-                </span>
-                <span class="rounded-full bg-slate-100 px-2 py-1 text-slate-600 dark:bg-white/10 dark:text-slate-300">
-                  已售 {{ resolveSoldQty(product) }}
-                </span>
-              </div>
-            </div>
-          </button>
-          <div class="client-product-card__actions"><ClientCardCartStepper :data-product-id="product.id" :product="product" @add="quickAdd(product, $event)" @decrease="decreaseCardQty" @choose="openProductDetail(product)" /><ClientRestockButton v-if="isSingleRestockSku(product)" :product="product" /></div>
+          <ProductCardContent :product="product" :card-key="`search:${product.id}`" />
         </article>
       </div>
       <div v-if="searchResults.length > searchPageSize" ref="searchPaginationRef" class="mall-search-pagination">
@@ -2410,15 +2608,20 @@ onBeforeUnmount(() => {
             <el-icon><Search /></el-icon>
           </span>
           <input
-            v-model.trim="keyword"
+            ref="desktopSearchInputRef"
+            :key="clientAuthStore.sessionGeneration"
+            v-model="keywordDraft"
             type="search"
             class="mall-search-inline-input"
             placeholder="搜索商品名称 / 标签"
             @focus="searchInputFocused = true"
             @blur="searchInputFocused = false"
+            @compositionstart="startSearchComposition"
+            @compositionend="finishSearchComposition"
+            @keydown.enter="commitSearch"
           />
           <button
-            v-if="hasKeyword"
+            v-if="keywordDraft"
             type="button"
             class="mall-search-inline-clear"
             @click="clearSearch"
@@ -2444,7 +2647,7 @@ onBeforeUnmount(() => {
           </button>
         </div>
       </div>
-      <Transition name="mall-category-panel" @after-enter="ensureActiveCategoryVisible('auto')">
+      <Transition name="mall-category-panel" @after-enter="syncCategoryGeometryAfterRender">
         <aside
           v-if="showCategoryRail"
           ref="categoryScrollerRef"
@@ -2475,34 +2678,7 @@ onBeforeUnmount(() => {
             :ref="(el) => setProductCardRef(`virtual:${row.data.id}`, el, row.data.id)"
             class="client-product-card mb-2"
           >
-            <button type="button" :data-product-id="row.data.id" class="client-product-card__image-button" @click="openProductImagePreview(row.data)">
-              <img
-                :key="`${row.data.id}:${resolveProductThumbnail(row.data)}:${resolveProductCardDisplay(row.data).previewImage}`"
-                  :src="resolveProductThumbnail(row.data)"
-                :alt="row.data.productName"
-                class="client-product-card__cover"
-                loading="lazy"
-                decoding="async"
-                @error="handleProductImageError($event, resolveProductCardDisplay(row.data).previewImage)"
-              />
-            </button>
-            <el-button text class="client-product-card__name" @click="openProductDetail(row.data)">{{ row.data.productName }}</el-button>
-            <button type="button" class="client-product-card__body" @click="openProductDetail(row.data)">
-              <div class="client-product-card__content">
-                <div class="client-product-card__price-wrap">
-                  <p class="client-product-card__price">¥{{ Number(resolveProductPriceView(row.data).discountedPrice).toFixed(2) }}</p>
-                  <p v-if="resolveProductPriceView(row.data).isDiscounted" class="client-product-card__price-extra">
-                    原价 ¥{{ Number(resolveProductPriceView(row.data).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(row.data).discountLabel }}
-                  </p>
-                </div>
-                <div class="client-product-card__meta" @click="keepStockSwipeLocal">
-                  <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可订 {{ row.data.availableStock }}</span>
-                  <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">已订 {{ row.data.preOrderedStock }}</span>
-                  <span class="rounded-full bg-slate-100 px-2 py-1 text-slate-600 dark:bg-white/10 dark:text-slate-300">已售 {{ resolveSoldQty(row.data) }}</span>
-                </div>
-              </div>
-            </button>
-            <div class="client-product-card__actions"><ClientCardCartStepper :data-product-id="row.data.id" :product="row.data" @add="quickAdd(row.data, $event)" @decrease="decreaseCardQty" @choose="openProductDetail(row.data)" /><ClientRestockButton v-if="isSingleRestockSku(row.data)" :product="row.data" /></div>
+            <ProductCardContent :product="row.data" :card-key="`virtual:${row.data.id}`" />
           </article>
         </div>
         <!-- 尾部只保留底部渐隐遮罩所需空间，保证最后一行完整可读。 -->
@@ -2513,7 +2689,7 @@ onBeforeUnmount(() => {
         v-else
         ref="listScrollerRef"
         class="mall-browse-list mall-browse-list--group overflow-y-auto pr-1"
-        @scroll="handleProductListScroll"
+        @scroll.passive="handleProductListScroll"
         @wheel.passive="handleCategoryManualInterrupt"
         @touchstart.passive="handleCategoryManualInterrupt"
       >
@@ -2528,34 +2704,7 @@ onBeforeUnmount(() => {
               :ref="(el) => setProductCardRef(`recommended:${product.id}`, el, product.id)"
               class="client-product-card"
             >
-              <button type="button" :data-product-id="product.id" class="client-product-card__image-button" @click="openProductImagePreview(product)">
-                <img
-                  :key="`${product.id}:${resolveProductThumbnail(product)}:${resolveProductCardDisplay(product).previewImage}`"
-                  :src="resolveProductThumbnail(product)"
-                  :alt="product.productName"
-                  class="client-product-card__cover"
-                  loading="lazy"
-                  decoding="async"
-                  @error="handleProductImageError($event, resolveProductCardDisplay(product).previewImage)"
-                />
-              </button>
-              <el-button text class="client-product-card__name" @click="openProductDetail(product)">{{ product.productName }}</el-button>
-              <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
-                <div class="client-product-card__content">
-                  <div class="client-product-card__price-wrap">
-                    <p class="client-product-card__price">¥{{ Number(resolveProductPriceView(product).discountedPrice).toFixed(2) }}</p>
-                    <p v-if="resolveProductPriceView(product).isDiscounted" class="client-product-card__price-extra">
-                      原价 ¥{{ Number(resolveProductPriceView(product).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(product).discountLabel }}
-                    </p>
-                  </div>
-                  <div class="client-product-card__meta" @click="keepStockSwipeLocal">
-                    <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可订 {{ product.availableStock }}</span>
-                    <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">已订 {{ product.preOrderedStock }}</span>
-                    <span class="rounded-full bg-slate-100 px-2 py-1 text-slate-600 dark:bg-white/10 dark:text-slate-300">已售 {{ resolveSoldQty(product) }}</span>
-                  </div>
-                </div>
-              </button>
-              <div class="client-product-card__actions"><ClientCardCartStepper :data-product-id="product.id" :product="product" @add="quickAdd(product, $event)" @decrease="decreaseCardQty" @choose="openProductDetail(product)" /><ClientRestockButton v-if="isSingleRestockSku(product)" :product="product" /></div>
+              <ProductCardContent :product="product" :card-key="`recommended:${product.id}`" />
             </article>
           </div>
         </section>
@@ -2576,34 +2725,7 @@ onBeforeUnmount(() => {
                 :ref="(el) => setProductCardRef(`${group.key}:${product.id}`, el, product.id)"
                 class="client-product-card"
               >
-                <button type="button" :data-product-id="product.id" class="client-product-card__image-button" @click="openProductImagePreview(product)">
-                  <img
-                    :key="`${product.id}:${resolveProductThumbnail(product)}:${resolveProductCardDisplay(product).previewImage}`"
-                  :src="resolveProductThumbnail(product)"
-                    :alt="product.productName"
-                    class="client-product-card__cover"
-                    loading="lazy"
-                    decoding="async"
-                    @error="handleProductImageError($event, resolveProductCardDisplay(product).previewImage)"
-                  />
-                </button>
-                <el-button text class="client-product-card__name" @click="openProductDetail(product)">{{ product.productName }}</el-button>
-                <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
-                  <div class="client-product-card__content">
-                    <div class="client-product-card__price-wrap">
-                      <p class="client-product-card__price">¥{{ Number(resolveProductPriceView(product).discountedPrice).toFixed(2) }}</p>
-                      <p v-if="resolveProductPriceView(product).isDiscounted" class="client-product-card__price-extra">
-                        原价 ¥{{ Number(resolveProductPriceView(product).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(product).discountLabel }}
-                      </p>
-                    </div>
-                    <div class="client-product-card__meta" @click="keepStockSwipeLocal">
-                      <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可订 {{ product.availableStock }}</span>
-                      <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">已订 {{ product.preOrderedStock }}</span>
-                      <span class="rounded-full bg-slate-100 px-2 py-1 text-slate-600 dark:bg-white/10 dark:text-slate-300">已售 {{ resolveSoldQty(product) }}</span>
-                    </div>
-                  </div>
-                </button>
-                <div class="client-product-card__actions"><ClientCardCartStepper :data-product-id="product.id" :product="product" @add="quickAdd(product, $event)" @decrease="decreaseCardQty" @choose="openProductDetail(product)" /><ClientRestockButton v-if="isSingleRestockSku(product)" :product="product" /></div>
+                <ProductCardContent :product="product" :card-key="`${group.key}:${product.id}`" />
               </article>
             </div>
           </section>
@@ -2798,17 +2920,17 @@ onBeforeUnmount(() => {
             </div>
           </header>
           <div v-if="detailInitialSkus.length > 1 || hasDetailSkuChoices || detailMode === 'multi'" ref="detailModeToggleRef" class="client-detail-mode-toggle" :class="{ 'is-multi': detailMode === 'multi' }">
-            <el-radio-group v-model="detailMode" aria-label="选购模式">
+            <el-radio-group :model-value="detailMode" aria-label="选购模式" @update:model-value="changeDetailMode">
               <el-radio-button value="single">单选规格</el-radio-button>
               <el-radio-button value="multi">多规格选购</el-radio-button>
             </el-radio-group>
           </div>
           <div ref="detailModeContentRef" class="client-detail-mode-stage">
           <div v-if="detailInitialSkus.length > 1 || hasDetailSkuChoices || detailMode === 'multi'" class="client-detail-mode-pane client-detail-mode-pane--multi" :class="{ 'is-active': detailMode === 'multi' }" :inert="detailMode !== 'multi'" :aria-hidden="detailMode !== 'multi'">
-          <ClientMultiSkuSelector class="client-detail-sku-section"
+          <ClientMultiSkuSelector v-if="multiSkuMounted" class="client-detail-sku-section"
             :product="batchCurrentProduct ?? { ...detailProduct, skus: [] }" :skus="batchSkuRows" :drafts="detailBatchDrafts"
             :max-by-sku="batchMaxBySku" :conflicts="detailBatchConflicts" :thumbnail="batchThumbnail"
-            @change="changeBatchDraft" @restock="openBatchRestock" @preview="previewBatchSku" />
+            @ready="handleMultiSkuReady" @change="changeBatchDraft" @restock="openBatchRestock" @preview="previewBatchSku" />
           </div>
           <div class="client-detail-mode-pane client-detail-mode-pane--single" :class="{ 'is-active': detailMode === 'single' }" :inert="detailMode !== 'single'" :aria-hidden="detailMode !== 'single'">
           <div v-if="hasDetailSkuChoices || detailSingleReplacementSku" class="client-detail-sku-section">
@@ -2909,6 +3031,7 @@ onBeforeUnmount(() => {
       class="client-drawer-responsive"
     >
       <ClientCartView
+        v-if="cartDrawerMounted"
         @close="cartDrawerVisible = false"
         @checkout="goToCheckout"
       />
@@ -2928,6 +3051,7 @@ onBeforeUnmount(() => {
       destroy-on-close
     >
       <ClientCheckoutView
+        v-if="checkoutDrawerMounted"
         :active="checkoutDrawerVisible"
         @close="closeCheckout"
       />

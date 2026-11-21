@@ -501,6 +501,8 @@ onMounted(async () => {
                   :src="resolveAttachmentPreviewUrl(attachment)"
                   :alt="attachment.name"
                   class="feedback-attachment-thumb"
+                  loading="lazy"
+                  decoding="async"
                 />
                 <div
                   v-else

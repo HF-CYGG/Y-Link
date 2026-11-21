@@ -18,6 +18,7 @@ import {
   resolveUserScopedStorageKey,
 } from '@/utils/storage-user-scope'
 import { calculateDiscountedPriceText, normalizeDiscountRateText } from '@/utils/o2o-price'
+import { CLIENT_CART_SNAPSHOT_KEY_PREFIX, LEGACY_CLIENT_CART_SNAPSHOT_KEY } from '@/utils/client-session-cleanup'
 
 export interface ClientCartSnapshotItem {
   productId: string
@@ -60,8 +61,6 @@ type ClientCartStorageScopeId = string | number | null | undefined
 // - 历史版本使用单一全局 key，会让同一浏览器上的多个客户端账号共用一份购物车；
 // - 新版本改为“前缀 + clientUserId”的隔离键；
 // - legacy key 继续保留仅用于升级时清理，不再作为读取来源。
-const CLIENT_CART_SNAPSHOT_KEY_PREFIX = 'y-link.client-cart.snapshot'
-const LEGACY_CLIENT_CART_SNAPSHOT_KEY = 'y-link.client-cart.snapshot'
 
 const normalizePrice = (value: unknown) => {
   if (typeof value === 'number' && Number.isFinite(value)) {

@@ -29,6 +29,8 @@ import { showAppSuccess, showAppWarning } from '@/utils/app-alert'
 import { resolveO2oPriceView } from '@/utils/o2o-price'
 import ClientQtyInput from './components/ClientQtyInput.vue'
 
+defineOptions({ name: 'ClientCartView' })
+
 const props = defineProps<{
   standalone?: boolean
 }>()

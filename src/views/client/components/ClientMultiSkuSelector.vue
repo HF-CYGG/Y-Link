@@ -5,7 +5,7 @@
  * 实现逻辑：输入原文由详情持有，不逐字截量；目录变更与单多切换不会静默重置草稿。
  * 维护说明：提交统一走购物车批量原子入口，补货仍由既有共享入口处理。
  */
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
 import { resolveProductPlaceholder } from '@/utils/product-placeholder'
 import type { O2oMallProduct, O2oMallSku } from '@/api/modules/o2o'
 import type { ClientCartBatchResult } from '@/store/modules/client-cart'
@@ -18,7 +18,8 @@ const props = defineProps<{
   conflicts: ClientCartBatchResult['conflicts']
   thumbnail: (sku: O2oMallSku) => string
 }>()
-const emit = defineEmits<{ change: [skuId: string, raw: string]; restock: [sku: O2oMallSku]; preview: [sku: O2oMallSku] }>()
+const emit = defineEmits<{ ready: []; change: [skuId: string, raw: string]; restock: [sku: O2oMallSku]; preview: [sku: O2oMallSku, event: MouseEvent] }>()
+onMounted(() => emit('ready'))
 const activeIds = computed(() => new Set(props.product.skus.filter((sku) => sku.isActive !== false && sku.isCurrent !== false).map((sku) => sku.id)))
 const handleImageError = (event: Event) => {
   const image = event.target as HTMLImageElement
@@ -36,7 +37,7 @@ const changeQty = (sku: O2oMallSku, delta: number) => {
 <template>
   <div class="multi-sku-list">
     <div v-for="sku in skus" :key="sku.id" class="multi-sku-row" :data-sku-id="sku.id" :class="{ 'is-selected': parseClientBatchQty(drafts[sku.id] ?? '0') > 0, 'is-unavailable': !activeIds.has(sku.id) || Number(sku.availableStock) <= 0 }">
-      <el-button class="multi-sku-image" text :aria-label="`预览${sku.specText || '规格'}图片`" @click="emit('preview', sku)"><img :src="thumbnail(sku)" alt="" @error="handleImageError" /></el-button>
+      <el-button class="multi-sku-image" text :aria-label="`预览${sku.specText || '规格'}图片`" @click="emit('preview', sku, $event)"><img :src="thumbnail(sku)" alt="" loading="lazy" decoding="async" @error="handleImageError" /></el-button>
       <div class="multi-sku-info">
         <p :title="sku.specText || sku.skuCode">{{ sku.specText || sku.skuCode || '默认规格' }}</p>
         <span class="multi-sku-price">¥{{ Number(sku.discountedPrice).toFixed(2) }}</span>

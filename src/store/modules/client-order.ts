@@ -4,15 +4,15 @@
  * 实现逻辑：
  * - 订单缓存按 `clientUserId` 绑定，账号切换时立即清空旧内存态并读取新账号快照，避免串号；
  * - Store 同步保存状态筛选、关键词、当前页、总数与最后更新时间，供订单列表页和详情页共享；
- * - 页面层可基于 `isFresh` 判断是否直接使用缓存，或在展示旧内容的同时发起后台刷新。
+ * - 页面发起请求前用 `isFreshNow()` 判断是否复用缓存，或在展示旧内容的同时后台刷新。
  * 维护说明：
  * - 若订单列表查询条件继续扩展，需要同时补齐 `persist()` 与 `initialize()` 的快照字段；
  * - 详情页与列表页收到单条订单变更时会复用 `syncOrderSummary()`，因此新增摘要字段时也要同步合并策略。
  */
 
 import { synchronizeKingdeeResponse } from '@/utils/kingdee-freshness'
-import { computed, ref } from 'vue'
-import { defineStore } from 'pinia'
+import { computed, onScopeDispose, ref } from 'vue'
+import { defineStore, getActivePinia } from 'pinia'
 import type { O2oMyOrderSearchMode } from '../../../packages/shared-types/src/orders'
 import type { O2oPreorderSummary } from '@/api/modules/o2o'
 import {
@@ -24,6 +24,7 @@ import {
   type PersistedO2oPreorderSummary,
 } from '@/utils/client-order-storage'
 import { matchesClientOrderStatus } from '@/utils/client-order-summary'
+import { registerClientSessionReset } from '@/utils/client-session-cleanup'
 
 // 订单列表缓存时间比商品目录更短：
 // 用户对“待提货 / 已核销 / 已取消”状态变化更敏感，需要更快看到最新状态。
@@ -76,7 +77,8 @@ export const useClientOrderStore = defineStore('client-order', () => {
     activeStatus: activeStatus.value, keyword: keyword.value, searchMode: searchMode.value,
   }))
   const hasCurrentResults = computed(() => resultQueryKey.value === queryKey.value)
-  const isFresh = computed(() => hasCurrentResults.value && Date.now() - updatedAt.value <= CLIENT_ORDER_CACHE_TTL_MS)
+  const isFreshNow = () => hasCurrentResults.value && updatedAt.value > 0 && Date.now() - updatedAt.value <= CLIENT_ORDER_CACHE_TTL_MS
+  const isFresh = computed(isFreshNow)
 
   const resetState = () => {
     orders.value = []
@@ -263,11 +265,17 @@ export const useClientOrderStore = defineStore('client-order', () => {
     upsertOrder(nextOrder, freshness)
   }
 
-  const clearAll = (options?: { clearPersisted?: boolean }) => {
-    const currentClientUserId = clientUserId.value
+  const resetSession = () => {
     resetState()
     clientUserId.value = ''
     initialized.value = false
+  }
+  const sessionPinia = getActivePinia()
+  if (sessionPinia) onScopeDispose(registerClientSessionReset(sessionPinia, resetSession))
+
+  const clearAll = (options?: { clearPersisted?: boolean }) => {
+    const currentClientUserId = clientUserId.value
+    resetSession()
     if (options?.clearPersisted !== false && currentClientUserId) {
       clearPersistedClientOrderSnapshot(currentClientUserId)
     }
@@ -287,6 +295,7 @@ export const useClientOrderStore = defineStore('client-order', () => {
     updatedAt,
     initialized,
     isFresh,
+    isFreshNow,
     initialize,
     setOrders,
     appendOrders,

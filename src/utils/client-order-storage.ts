@@ -13,6 +13,12 @@
 import type { O2oMyOrderSearchMode } from '../../packages/shared-types/src/orders'
 import type { O2oPreorderSummary } from '@/api/modules/o2o'
 import {
+  CLIENT_ORDER_SNAPSHOT_META_KEY_PREFIX,
+  CLIENT_ORDER_SNAPSHOT_ORDERS_KEY_PREFIX,
+  LEGACY_CLIENT_ORDER_SNAPSHOT_KEY,
+  LEGACY_CLIENT_ORDER_SNAPSHOT_KEY_PREFIX,
+} from '@/utils/client-session-cleanup'
+import {
   getClientOrderReportScenario,
   isO2oOrderStatus,
   O2O_ORDER_BUSINESS_STATUSES,
@@ -62,10 +68,6 @@ export interface ClientOrderSnapshotMeta {
 // - 历史版本只使用单一全局 key，会导致不同客户端账号读取到同一份订单缓存；
 // - 新版本改为“前缀 + clientUserId”分片存储；
 // - 同时保留 legacy key，便于升级时统一清理旧数据。
-const CLIENT_ORDER_SNAPSHOT_META_KEY_PREFIX = 'y-link.client-order.snapshot.meta'
-const CLIENT_ORDER_SNAPSHOT_ORDERS_KEY_PREFIX = 'y-link.client-order.snapshot.orders'
-const LEGACY_CLIENT_ORDER_SNAPSHOT_KEY_PREFIX = 'y-link.client-order.snapshot'
-const LEGACY_CLIENT_ORDER_SNAPSHOT_KEY = 'y-link.client-order.snapshot'
 
 const getStorage = () => {
   if (globalThis.window === undefined) {

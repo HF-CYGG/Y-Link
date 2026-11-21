@@ -1,5 +1,5 @@
 /** 合并目录写入；代次同时防止已取消但仍被调用的旧回调生效。 */
-export const createClientCatalogPersistenceTimer = (write: (owner: string) => void) => {
+export const createClientCatalogPersistenceTimer = (write: (owner: string) => void, delayMs = 200) => {
   let generation = 0
   let owner = ''
   let dirty = false
@@ -36,7 +36,7 @@ export const createClientCatalogPersistenceTimer = (write: (owner: string) => vo
       maximum = setTimeout(run, 1000)
     }
     clearTimeout(quiet)
-    quiet = setTimeout(run, 200)
+    quiet = setTimeout(run, delayMs)
   }
   return { schedule, flush, cancel }
 }

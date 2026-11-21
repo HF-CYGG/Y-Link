@@ -38,6 +38,8 @@ import { extractErrorMessage, normalizeRequestError } from '@/utils/error'
 
 import { showAppError } from '@/utils/app-alert'
 
+defineOptions({ name: 'ClientFeedbackView' })
+
 const router = useRouter()
 const clientAuthStore = useClientAuthStore(pinia)
 const portalConfigRequest = useStableRequest()

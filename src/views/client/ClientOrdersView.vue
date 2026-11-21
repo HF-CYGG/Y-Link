@@ -134,6 +134,8 @@ const orderListBodyRef = ref<HTMLElement | null>(null)
 const orderListPageRef = ref<HTMLElement | null>(null)
 const lastAutoRefreshAt = ref(0)
 const orderRefreshMarkExpiresAtMap = ref<Record<string, number>>({})
+defineOptions({ name: 'ClientOrdersView' })
+
 const router = useRouter()
 const clientAuthStore = useClientAuthStore(pinia)
 const clientOrderStore = useClientOrderStore(pinia)
@@ -835,7 +837,7 @@ const loadOrders = async (force = false, options?: { append?: boolean; silent?: 
   const hasCurrentResults = clientOrderStore.hasCurrentResults
   const silent = options?.silent === true && hasCurrentResults
   if (append && !hasMoreOrders.value) return
-  if (!append && !force && clientOrderStore.orders.length > 0 && clientOrderStore.isFresh) {
+  if (!append && !force && clientOrderStore.orders.length > 0 && clientOrderStore.isFreshNow()) {
     requestError.value = null
     return
   }
@@ -1004,7 +1006,7 @@ watch(
 onMounted(async () => {
   syncStoreWithCurrentUser()
   const hadCachedOrders = clientOrderStore.orders.length > 0
-  const hadFreshCache = hadCachedOrders && clientOrderStore.isFresh
+  const hadFreshCache = hadCachedOrders && clientOrderStore.isFreshNow()
   if (hadCachedOrders && getOrderListReturnScroll()) {
     await nextTick()
     restoreOrderListReturnScroll()

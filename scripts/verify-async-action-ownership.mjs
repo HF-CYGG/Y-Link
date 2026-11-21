@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import vm from 'node:vm'
 import ts from 'typescript'
-import { ref, computed, reactive, watch, nextTick } from 'vue'
+import { ref, shallowRef, computed, reactive, watch, nextTick } from 'vue'
 
 const read = (file) => fs.readFileSync(file, 'utf8')
 const pageAst = (file) => ts.createSourceFile(file, read(file).split('<script setup lang="ts">')[1].split('</script>')[0], ts.ScriptTarget.Latest, true)
@@ -34,16 +34,22 @@ const plain = (value) => JSON.parse(JSON.stringify(value))
 const mallAst = pageAst('src/views/client/ClientMallView.vue')
 const mallActions = ['togglePhoneStorefront', 'refreshMallStorefront', 'revalidateCatalogInBackground',
   'handleMallVisibilityChange', 'loadProducts', 'activateMallRuntime', 'deactivateMallRuntime']
-const mallNames = ['mallStorefront', 'compactAnnouncementCollapsed', 'loading', 'refreshing', ...mallActions]
+const searchNames = ['keywordDraft', 'normalizedKeyword', 'startSearchComposition', 'finishSearchComposition', 'commitSearch']
+const mallNames = ['mallStorefront', 'compactAnnouncementCollapsed', 'loading', 'refreshing', ...mallActions, ...searchNames]
 const mallHooks = mallAst.statements.filter((statement) => ts.isExpressionStatement(statement)
   && /^(?:on(?:Mounted|Activated|Deactivated|BeforeRouteLeave)\(|watch\(\s*announcementSessionSources,)/.test(statement.getText(mallAst)))
 assert.equal(mallHooks.length, 6, '必须执行商城挂载、激活、失活、离页和两段归属监听')
+const searchHooks = mallAst.statements.filter((statement) => ts.isExpressionStatement(statement)
+  && /^watch\((?:keywordDraft,|keyword,)/.test(statement.getText(mallAst)))
+assert.equal(searchHooks.length, 2)
 const mallSource = declarations(mallAst, [
   'CATALOG_BACKGROUND_REVALIDATE_MS', 'CATALOG_REVALIDATE_MIN_GAP_MS', 'lastCatalogRevalidateAt',
   'catalogRevalidateTimer', 'mallRuntimeActive', 'hasActivatedOnce', 'storefrontRequest', 'cancelStorefrontRefresh',
   'confirmedMallStorefront', 'mallStorefront', 'mallAnnouncementText', 'compactAnnouncementCollapsed', 'loading',
   'refreshing', 'finishProductRefresh', 'acknowledgedAnnouncementText', ...mallActions, 'announcementSessionSources',
-]) + '\n' + mallHooks.map((statement) => statement.getText(mallAst)).join('\n')
+  'keyword', 'keywordDraft', 'searchComposition', 'normalizedKeyword', 'cancelSearchCommit', 'commitSearch', 'scheduleSearchCommit',
+  'startSearchComposition', 'finishSearchComposition', 'flushSearchBeforeLeave',
+]) + '\n' + [...mallHooks, ...searchHooks].map((statement) => statement.getText(mallAst)).join('\n')
 const stableRequestFile = 'src/composables/useStableRequest.ts'
 const stableRequestAst = ts.createSourceFile(stableRequestFile, read(stableRequestFile), ts.ScriptTarget.Latest, true)
 const stableRequestSource = declarations(stableRequestAst, ['useStableRequest'])
@@ -59,15 +65,21 @@ const mall = () => {
     AbortController, onDeactivated, onBeforeUnmount: noop, isRequestCanceled: () => false,
   }, ['useStableRequest'])
   const clientAuthStore = reactive({ currentUser: { id: 'A' }, sessionGeneration: 1 })
+  const flushedSearches = []
   // 模拟共享 Store 已恢复独立快照，商品回包不能替换它。
   const clientCatalogStore = reactive({
-    products: [{ id: 'p' }], storefront: cachedStorefront, initialize: noop, isFreshNow: () => true,
+    products: [{ id: 'p' }], storefront: cachedStorefront, initialize: noop, isFreshNow: () => true, keyword: '',
+    setKeyword(value) { this.keyword = value },
+    flushBrowseContext() { flushedSearches.push(this.keyword) },
     async refreshStorefront(load) { this.storefront = await load() },
   })
   const document = { visibilityState: 'visible', addEventListener: noop, removeEventListener: noop }
   let interval
+  let searchTimer
+  const windowEvents = new Map()
   const window = {
-    addEventListener: noop, removeEventListener: noop,
+    addEventListener: (name, callback) => windowEvents.set(name, callback),
+    removeEventListener: (name) => windowEvents.delete(name),
     setInterval: (callback, delay) => { assert.equal(delay, 30_000); interval = callback; return 1 },
     clearInterval: () => { interval = undefined },
   }
@@ -78,6 +90,7 @@ const mall = () => {
   let productFailure = false
   let nextProductsRead
   let mount, activate, routeLeave
+  class HTMLInputElement { constructor(value) { this.value = value } }
   const subject = execute(mallSource, {
     clientAuthStore, clientCatalogStore, isMallRoute, document, window, requestError, useStableRequest,
     Date: { now: () => clock }, navigator: { onLine: true }, runLatest: useStableRequest().runLatest,
@@ -86,11 +99,14 @@ const mall = () => {
     detailVisible: ref(false), cartDrawerVisible: ref(false), checkoutDrawerVisible: ref(false),
     imagePreviewVisible: ref(false), mobileSearchVisible: ref(false), searchInputFocused: ref(false),
     drawerHandoffGeneration: 0, drawerHandoff: ref(null), cartReturnFocus: null, checkoutFromCart: false,
-    floatingLayoutResizeObserver: null, floatingOcclusionFrameId: null,
+    floatingLayoutResizeObserver: null, categoryListGeometry: null, categoryRailGeometry: null,
     onMounted: (callback) => { mount = callback }, onActivated: (callback) => { activate = callback },
     onDeactivated, onBeforeRouteLeave: (guard) => { routeLeave = guard },
     stopDetailModeMotion: noop, stopStorefrontMotion: noop, stopMallFeedback: noop, invalidateClearCartConfirm: noop,
-    syncMallDocumentScrollLock: noop, scheduleMallFloatingLayoutSync: noop, clearCategoryUnlockTimer: noop,
+    syncMallDocumentScrollLock: noop, scheduleMallFloatingLayoutSync: noop, releaseCategoryScrollLock: noop,
+    searchCommitTimer: undefined, shallowRef, HTMLInputElement,
+    setTimeout: (callback, delayMs) => { assert.equal(delayMs, 180); searchTimer = callback; return 1 },
+    clearTimeout: () => { searchTimer = undefined },
     syncMallViewportAfterRender: noop, warmupProductImages: noop,
     clientCartStore: { syncWithCatalog: noop, initialize: noop },
     getO2oCheckoutStorefront: ({ signal }) => {
@@ -118,7 +134,10 @@ const mall = () => {
     normalizeRequestError: (error) => error,
   }, mallNames)
   return { subject, clientAuthStore, clientCatalogStore, document, requestError, reads, publicReads, productSignals, mount,
-    advance: (ms) => { clock += ms },
+    advance: (ms) => { clock += ms }, flushedSearches,
+    pagehide: () => windowEvents.get('pagehide')(),
+    expireSearchTimer: () => searchTimer?.(),
+    finishComposition: (value) => subject.finishSearchComposition({ target: new HTMLInputElement(value) }),
     poll: () => interval(),
     failProducts: () => { productFailure = true },
     holdProducts: () => { nextProductsRead = deferred(); return nextProductsRead },
@@ -126,6 +145,39 @@ const mall = () => {
     enter: () => { isMallRoute.value = true; activate() },
     displayed: () => plain(subject.mallStorefront.value),
   }
+}
+{
+  const h = mall()
+  await h.mount()
+  h.subject.keywordDraft.value = '刚输入的词'
+  assert.equal(h.clientCatalogStore.keyword, '')
+  h.pagehide()
+  assert.equal(h.flushedSearches.at(-1), '刚输入的词', '刷新或关闭页面前先提交搜索，再写缓存')
+
+  h.subject.keywordDraft.value = 'cha'
+  h.subject.startSearchComposition()
+  h.expireSearchTimer()
+  h.subject.commitSearch({ isComposing: true })
+  assert.equal(h.clientCatalogStore.keyword, '刚输入的词', '组合输入期间取消上一条待提交搜索')
+  h.finishComposition('茶叶')
+  assert.equal(h.clientCatalogStore.keyword, '刚输入的词')
+  h.expireSearchTimer()
+  assert.equal(h.clientCatalogStore.keyword, '茶叶')
+
+  h.subject.keywordDraft.value = '离开前已确认'
+  h.subject.startSearchComposition()
+  h.subject.keywordDraft.value = '离开前已确认sheng'
+  h.pagehide()
+  assert.equal(h.flushedSearches.at(-1), '离开前已确认', '组字期间刷新只保存开始组字前已确认的词')
+  assert.equal(h.subject.normalizedKeyword.value, '茶叶', '保存缓存不能在组字期间切换活动搜索')
+  h.finishComposition('离开前已确认生产')
+  h.expireSearchTimer()
+  assert.equal(h.subject.normalizedKeyword.value, '离开前已确认生产')
+
+  h.subject.keywordDraft.value = '离页前的词'
+  h.subject.startSearchComposition()
+  h.leave()
+  assert.equal(h.flushedSearches.at(-1), '离页前的词', '同账号在组字期间离页也保存已确认的词')
 }
 {
   const h = mall()

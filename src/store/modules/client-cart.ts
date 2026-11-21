@@ -9,8 +9,8 @@
  * - 目录同步只刷新库存、价格与可购状态，不得静默缩量。
  */
 
-import { computed, ref } from 'vue'
-import { defineStore } from 'pinia'
+import { computed, onScopeDispose, ref } from 'vue'
+import { defineStore, getActivePinia } from 'pinia'
 
 import type { O2oMallProduct, O2oMallSku } from '@/api/modules/o2o'
 import { showAppWarning } from '@/utils/app-alert'
@@ -24,6 +24,7 @@ import {
   type ClientCartSnapshotItem,
 } from '@/utils/client-cart-storage'
 import { normalizeStorageScopeId } from '@/utils/storage-user-scope'
+import { registerClientSessionReset } from '@/utils/client-session-cleanup'
 
 export type ClientCartItem = ClientCartSnapshotItem
 export type ClientCartAvailabilityStatus = ClientCartItem['availabilityStatus']
@@ -254,43 +255,50 @@ export const useClientCartStore = defineStore('client-cart', () => {
     // 目录刷新只更新可购快照，不能静默缩减 qty、移除行或取消用户原有勾选。
     // 目录中不存在的商品也必须写成不可购，避免继续沿用旧缓存库存。
     const productMap = new Map(products.map((product) => [product.id, product]))
-    const nextItems = items.value
-      .map((item) => {
-        const latest = productMap.get(item.productId)
-        if (!latest) {
-          return normalizeItem({
-            ...item,
-            availableStock: 0,
-            availabilityStatus: 'product_unavailable',
-          })
-        }
-        const latestSku = item.skuId
-          ? latest.skus?.find((sku) => sku.id === item.skuId && isCartSkuAvailable(sku)) ?? null
-          : resolveDefaultSku(latest)
-        const productPrice = resolveO2oPriceView(latest)
-        const latestPrice = latestSku ?? productPrice
-        const skuUnavailable = (latest.skus?.length ?? 0) > 0 && !latestSku
+    const reconcileItem = (item: ClientCartItem) => {
+      const latest = productMap.get(item.productId)
+      if (!latest) {
         return normalizeItem({
           ...item,
-          skuId: latestSku?.id ?? item.skuId,
-          specText: latestSku?.specText ?? item.specText,
-          productName: latest.productName,
-          thumbnail: resolveCartItemThumbnail(latest, latestSku),
-          thumbnailSmall: (latestSku?.thumbnail ? latestSku.thumbnailSmall : latest.thumbnailSmall)?.trim() || null,
-          defaultPrice: latestSku ? latestSku.discountedPrice : productPrice.unitPrice,
-          originalPrice: latestPrice.originalPrice,
-          discountRate: latestPrice.discountRate,
-          discountedPrice: latestPrice.discountedPrice,
-          availableStock: skuUnavailable ? 0 : Math.max(0, Number(latestSku?.availableStock ?? latest.availableStock ?? 0)),
-          limitPerUser: Math.max(0, Number(latest.limitPerUser ?? 0)),
-          availabilityStatus: skuUnavailable
-            ? 'sku_unavailable'
-            : resolveAvailabilityStatus(Math.max(0, Number(latestSku?.availableStock ?? latest.availableStock ?? 0))),
+          availableStock: 0,
+          availabilityStatus: 'product_unavailable',
         })
+      }
+      const latestSku = item.skuId
+        ? latest.skus?.find((sku) => sku.id === item.skuId && isCartSkuAvailable(sku)) ?? null
+        : resolveDefaultSku(latest)
+      const productPrice = resolveO2oPriceView(latest)
+      const latestPrice = latestSku ?? productPrice
+      const skuUnavailable = (latest.skus?.length ?? 0) > 0 && !latestSku
+      const availableStock = skuUnavailable ? 0 : Math.max(0, Number(latestSku?.availableStock ?? latest.availableStock ?? 0))
+      return normalizeItem({
+        ...item,
+        skuId: latestSku?.id ?? item.skuId,
+        specText: latestSku?.specText ?? item.specText,
+        productName: latest.productName,
+        thumbnail: resolveCartItemThumbnail(latest, latestSku),
+        thumbnailSmall: (latestSku?.thumbnail ? latestSku.thumbnailSmall : latest.thumbnailSmall)?.trim() || null,
+        defaultPrice: latestSku ? latestSku.discountedPrice : productPrice.unitPrice,
+        originalPrice: latestPrice.originalPrice,
+        discountRate: latestPrice.discountRate,
+        discountedPrice: latestPrice.discountedPrice,
+        availableStock,
+        limitPerUser: Math.max(0, Number(latest.limitPerUser ?? 0)),
+        availabilityStatus: skuUnavailable ? 'sku_unavailable' : resolveAvailabilityStatus(availableStock),
       })
-      .filter((item) => item.qty > 0)
+    }
 
-    replaceItems(nextItems)
+    let nextItems: ClientCartItem[] | undefined
+    items.value.forEach((item, index) => {
+      const next = reconcileItem(item)
+      const changed = (Object.keys(next) as Array<keyof ClientCartItem>).some((key) => next[key] !== item[key])
+      const keep = next.qty > 0
+      if (!nextItems && (changed || !keep)) nextItems = items.value.slice(0, index)
+      if (keep) nextItems?.push(changed ? next : item)
+    })
+    if (!nextItems) return
+    items.value = nextItems
+    persist()
   }
 
   const otherProductQty = (productId: string, skuId: string | null) => items.value
@@ -518,11 +526,17 @@ export const useClientCartStore = defineStore('client-cart', () => {
     persist()
   }
 
-  const clearAll = () => {
-    const currentClientUserId = clientUserId.value
+  const resetSession = () => {
     resetState()
     clientUserId.value = ''
     initialized.value = false
+  }
+  const sessionPinia = getActivePinia()
+  if (sessionPinia) onScopeDispose(registerClientSessionReset(sessionPinia, resetSession))
+
+  const clearAll = () => {
+    const currentClientUserId = clientUserId.value
+    resetSession()
     clearPersistedClientCartSnapshot(currentClientUserId)
   }
 
