@@ -17,9 +17,7 @@ for (const file of ['docker/nginx/default.conf', 'docker/nginx/default.conf.temp
     assert.match(body[1], /include \/etc\/nginx\/ylink\/proxy-security-headers\.conf;/,
       `${file} 代理响应必须由上游保留 API/上传专用 CSP，禁止继承页面 CSP 或重复 HSTS`)
   }
-  const htmlLocations = file.endsWith('.template')
-    ? ['location = /index.html', 'location / {']
-    : ['location = /index.html', 'location = / {', 'location ~ ^/(?:database-rescue|login']
+  const htmlLocations = ['location = /index.html', 'location = / {', 'location ~ ^/(?:database-rescue|login']
   for (const needle of htmlLocations) {
     const offset = source.indexOf(needle)
     assert.ok(offset >= 0, `${file} 缺少 HTML 入口 ${needle}`)
@@ -73,15 +71,30 @@ for (const file of ['docker/nginx/default.conf', 'docker/nginx/default.conf.temp
     assert.match(body, /client_max_body_size 11m;/, `${file} ${declaration} 上传/导入入口应放宽到 11m`)
     assert.match(body, /limit_req zone=ylink_api_general /, `${file} ${declaration} 应计入通用限流`)
   }
+  for (const endpoint of ['/api/auth/me', '/api/client-auth/me']) {
+    const body = blockOf(`location = ${endpoint}`)
+    assert.match(body, /add_header Cache-Control "no-store" always;/)
+    assert.match(body, /add_header Vary "Authorization, Cookie" always;/)
+  }
   // 从真实配置提取分类正则，覆盖三种认证桶与所有既有 exact 入口，防止别名只走通用区。
   const authCases = {
     login: ['/api/auth/login', '/api/client-auth/login', '/api/auth/login/mfa',
       '/api/auth/login/mfa/webauthn/options', '/api/auth/login/mfa/webauthn/verify',
-      '/api/auth/webauthn/login/options', '/api/auth/webauthn/login/verify'],
-    captcha: ['/api/auth/captcha', '/api/client-auth/captcha'],
+      '/api/auth/webauthn/login/options', '/api/auth/webauthn/login/verify', '/api/v1/mobile-auth/login'],
+    captcha: ['/api/auth/captcha', '/api/client-auth/captcha', '/api/v1/mobile-auth/captcha'],
     sensitive: ['/api/client-auth/register', '/api/client-auth/verification-code/send',
-      '/api/client-auth/forgot-password/verify', '/api/client-auth/forgot-password/reset'],
+      '/api/client-auth/forgot-password/verify', '/api/client-auth/forgot-password/reset',
+      '/api/v1/mobile-auth/register', '/api/v1/mobile-auth/verification-code', '/api/v1/mobile-auth/forgot-password/verify',
+      '/api/v1/mobile-auth/forgot-password/reset', '/api/v1/mobile-auth/refresh'],
   }
+  const apiBlock = blockOf('location ^~ /api/')
+  const authLocation = apiBlock.match(/^        location ~\* (\S+) \{\n([\s\S]*?)^        \}/m)
+  assert.ok(authLocation, `${file} 认证 64 KiB 位置必须嵌套在既有 /api/ 代理内`)
+  assert.match(authLocation[2], /client_max_body_size 64k;/)
+  assert.match(authLocation[2], /rewrite \^ \$uri break;/, `${file} 认证别名须沿用标准化 URI`)
+  assert.match(authLocation[2], /proxy_pass http:\/\/(?:ylink_backend|backend:3001);/, `${file} 正则位置不应在 upstream 后写替换 URI`)
+  assert.doesNotMatch(authLocation[2], /limit_req\s|proxy_set_header|proxy_cache/, `${file} 认证入口须继承 API 频控与安全代理头`)
+  const bodyLimitPattern = new RegExp(authLocation[1], 'i')
   for (const [kind, paths] of Object.entries(authCases)) {
     const map = source.match(new RegExp(`map \\$uri \\$ylink_auth_${kind}_key \\{([\\s\\S]*?)\\n\\}`))
     assert.ok(map, `${file} 缺少 ${kind} 条件键`)
@@ -90,23 +103,28 @@ for (const file of ['docker/nginx/default.conf', 'docker/nginx/default.conf.temp
     assert.ok(expression, `${file} ${kind} 必须按 URI 忽略大小写并返回原每 IP 键`)
     const pattern = new RegExp(expression[1], 'i')
     for (const path of paths) {
-      for (const variant of [path, path.toUpperCase(), `${path}/`, `${path.toUpperCase()}/`]) {
+      const alternate = `/api/${path.slice('/api/'.length).toUpperCase()}`
+      for (const variant of [path, alternate, `${path}/`, `${alternate}/`]) {
         assert.ok(pattern.test(variant), `${file} ${kind} 未覆盖 ${variant}`)
+        assert.ok(bodyLimitPattern.test(variant), `${file} ${variant} 缺少 64 KiB 请求体限制`)
       }
       assert.ok(!pattern.test(`${path}//`))
       assert.ok(!pattern.test(`${path}/unknown`))
-      assert.match(blockOf(`location = ${path}`), new RegExp(`limit_req zone=ylink_auth_${kind} `))
+      if (!path.startsWith('/api/v1/mobile-auth/')) {
+        assert.match(blockOf(`location = ${path}`), new RegExp(`limit_req zone=ylink_auth_${kind} `))
+      }
     }
     for (const path of Object.entries(authCases).filter(([other]) => other !== kind).flatMap(([, paths]) => paths)) {
       assert.ok(!pattern.test(path), `${file} ${kind} 不得消耗其他认证类配额`)
     }
-    for (const path of ['/api/users', '/api/v1/mobile-auth/login', '/api/auth/%6cogin', '/api/auth//login']) {
+    for (const path of ['/api/users', '/api/v1/mobile-auth/me', '/api/v1/mobile-auth/capabilities', '/api/auth/%6cogin', '/api/auth//login']) {
       assert.ok(!pattern.test(path), `${file} ${kind} 不得扩展路径语义`)
+      assert.ok(!bodyLimitPattern.test(path), `${file} ${path} 不应使用匿名认证请求体限制`)
     }
-    assert.match(blockOf('location ^~ /api/'), new RegExp(`limit_req zone=ylink_auth_${kind} burst=`))
+    assert.match(apiBlock, new RegExp(`limit_req zone=ylink_auth_${kind} burst=`))
   }
-  assert.doesNotMatch(source, /location[^\n]*~\*[^\n]*api\//, `${file} 不得扩展大小写 API 代理范围`)
-  assert.match(blockOf('location ^~ /api/'), /limit_req zone=ylink_api_general burst=\d+ nodelay;/, `${file} /api/ 缺少通用每 IP 限流`)
+  assert.doesNotMatch(source.replace(apiBlock, ''), /location[^\n]*~\*[^\n]*api\//, `${file} 不得在 /api/ 外扩展大小写代理范围`)
+  assert.match(apiBlock, /limit_req zone=ylink_api_general burst=\d+ nodelay;/, `${file} /api/ 缺少通用每 IP 限流`)
   assert.match(blockOf('location ^~ /uploads/'), /limit_req zone=ylink_api_general burst=\d+ nodelay;/, `${file} /uploads/ 缺少通用每 IP 限流`)
   // “变量 + URI”的 proxy_pass 会让 Nginx 用 URI 整体替换请求路径并丢弃查询参数（/api/orders?page=2 被转成 /api/），必须使用具名 upstream 或字面地址。
   assert.doesNotMatch(source, /proxy_pass\s+https?:\/\/\$[A-Za-z_]+\/[^;]*;/, `${file} 禁止在 proxy_pass 中同时使用变量与 URI`)
@@ -120,7 +138,7 @@ for (const file of ['docker/nginx/default.conf', 'docker/nginx/default.conf.temp
   const assetLocation = source.indexOf('location ~* \\.(?:css|js|mjs|json|map|svg|ico|png|jpe?g|webp|gif|woff2?|ttf|otf|eot)$')
   assert.ok(iconLocation >= 0 && iconLocation < assetLocation, `${file} 站点图标缓存规则缺失或顺序错误`)
   assert.doesNotMatch(source.slice(iconLocation, source.indexOf('\n    }', iconLocation)), /immutable/, `${file} 站点图标不得声明 immutable`)
-  if (!file.endsWith('.template')) {
+  {
     const pagePattern = source.match(/location ~ (\^\/\(\?:database-rescue\|login\S+) \{/)
     assert.ok(pagePattern, `${file} 缺少页面路由白名单`)
     const pageRoute = new RegExp(pagePattern[1])

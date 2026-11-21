@@ -60,15 +60,15 @@ map $request_uri $ylink_attack_class {
 # 仅分类 URI，不扩展 /api/ 代理范围，不重写请求路径或参数。
 map $uri $ylink_auth_login_key {
     default "";
-    ~*^/api/(?:auth/(?:login(?:/mfa(?:/webauthn/(?:options|verify))?)?|webauthn/login/(?:options|verify))|client-auth/login)/?$ $binary_remote_addr;
+    ~*^/api/(?:auth/(?:login(?:/mfa(?:/webauthn/(?:options|verify))?)?|webauthn/login/(?:options|verify))|(?:client-auth|v1/mobile-auth)/login)/?$ $binary_remote_addr;
 }
 map $uri $ylink_auth_captcha_key {
     default "";
-    ~*^/api/(?:auth|client-auth)/captcha/?$ $binary_remote_addr;
+    ~*^/api/(?:auth|client-auth|v1/mobile-auth)/captcha/?$ $binary_remote_addr;
 }
 map $uri $ylink_auth_sensitive_key {
     default "";
-    ~*^/api/client-auth/(?:register|verification-code/send|forgot-password/(?:verify|reset))/?$ $binary_remote_addr;
+    ~*^/api/(?:client-auth/(?:register|verification-code/send|forgot-password/(?:verify|reset))|v1/mobile-auth/(?:register|verification-code|forgot-password/(?:verify|reset)|refresh))/?$ $binary_remote_addr;
 }
 
 limit_req_zone $ylink_auth_login_key zone=ylink_auth_login:10m rate=12r/m;
@@ -218,14 +218,22 @@ server {
     location ~ ^/v[0-9]+/(?:models|logging)(?:/|$) { return 404; }
     location ~* ^/phpmyadmin(?:/|$) { return 404; }
 
-    # Vue Router history 模式回退：
-    # - 优先返回真实静态文件；
-    # - 其余路径统一回落到 index.html 交给前端路由处理。
-    location / {
-        try_files $uri $uri/ /index.html;
+    # 仅已发布的前端路由允许进入 SPA，未知路径保留 404。
+    location ~ ^/(?:database-rescue|login|dashboard|order-entry|order-list|reports|supplier-delivery|supplier-history|inbound-scan|inbound-manage|base-data(?:/.*)?|inventory(?:/(?:overview|scan|stocks|stocktakes(?:/[0-9]+)?|docs|logs|master-data))?|o2o-console(?:/.*)?|system(?:/.*)?|client(?:/.*)?)$ {
+        if ($request_method !~ ^(GET|HEAD)$) { return 405; }
+        try_files /index.html =404;
         include /etc/nginx/ylink/page-security-headers.conf;
         add_header Cache-Control "no-store" always;
     }
+
+    location = / {
+        if ($request_method !~ ^(GET|HEAD)$) { return 405; }
+        try_files /index.html =404;
+        include /etc/nginx/ylink/page-security-headers.conf;
+        add_header Cache-Control "no-store" always;
+    }
+
+    location / { return 404; }
 
     location = /api/auth/login {
         limit_req zone=ylink_auth_login burst=5 nodelay;
@@ -408,6 +416,38 @@ server {
         proxy_set_header Connection "";
     }
 
+    location = /api/auth/me {
+        limit_req zone=ylink_api_general burst=500 nodelay;
+        proxy_pass http://ylink_backend;
+        proxy_http_version 1.1;
+        include /etc/nginx/ylink/proxy-security-headers.conf;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $ylink_forwarded_proto;
+        proxy_set_header Connection "";
+        add_header Cache-Control "no-store" always;
+        add_header Pragma "no-cache" always;
+        add_header Vary "Authorization, Cookie" always;
+    }
+
+    location = /api/client-auth/me {
+        limit_req zone=ylink_api_general burst=500 nodelay;
+        proxy_pass http://ylink_backend;
+        proxy_http_version 1.1;
+        include /etc/nginx/ylink/proxy-security-headers.conf;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $ylink_forwarded_proto;
+        proxy_set_header Connection "";
+        add_header Cache-Control "no-store" always;
+        add_header Pragma "no-cache" always;
+        add_header Vary "Authorization, Cookie" always;
+    }
+
     # 这两个路由当前均为完全匿名且不按 Cookie 个性化的公开数据。
     # 若后续引入用户专属价格或可见范围，必须先移除共享缓存或把身份维度纳入 cache key。
     location = /api/o2o/mall/products {
@@ -546,6 +586,14 @@ server {
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $ylink_forwarded_proto;
         proxy_set_header Connection "";
+
+        # 在既有 /api/ 内匹配认证别名及移动端入口，继承父级限流与安全代理头。
+        location ~* ^/api/(?:auth/(?:captcha|login(?:/mfa(?:/webauthn/(?:options|verify))?)?|webauthn/login/(?:options|verify))|client-auth/(?:captcha|login|register|verification-code/send|forgot-password/(?:verify|reset))|v1/mobile-auth/(?:captcha|login|register|verification-code|forgot-password/(?:verify|reset)|refresh))/?$ {
+            client_max_body_size 64k;
+            # 正则位置不支持在 proxy_pass 指定 URI；使用与父级相同的标准化路径和原查询参数。
+            rewrite ^ $uri break;
+            proxy_pass http://ylink_backend;
+        }
     }
 
     # 商品图片等上传静态资源实际落在后端容器磁盘，
