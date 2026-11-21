@@ -237,6 +237,17 @@ try {
   assert.equal(loginResult.generation, 0)
   const loginAuth = await mobileSessionService.resolveAccess(loginResult.accessToken, 'contract-login')
   assert.equal(loginAuth.userId, loginUser.id)
+  const failedAccount = 'failed-login-fixture@example.test'
+  const failedDevice = { ...device(84), deviceName: 'sensitive-fixture-device-name', appVersion: 'sensitive-fixture-version' }
+  await assert.rejects(mobileAuthService.login({ account: failedAccount, password: 'UnmatchedFixture123!', device: failedDevice },
+    { ipAddress: '192.0.2.14' }), expectBizErrorCode(40120))
+  const failedLogin = await AppDataSource.getRepository(SysAuditLog).findOneOrFail({
+    where: { actionType: 'mobile_login', resultStatus: 'failed' }, order: { id: 'DESC' },
+  })
+  assert.notEqual(failedLogin.targetCode, failedAccount)
+  assert.match(failedLogin.targetCode ?? '', /\*\*\*@example\.test/)
+  assert.ok(!failedLogin.detailJson?.includes(failedDevice.deviceName))
+  assert.ok(!failedLogin.detailJson?.includes(failedDevice.appVersion))
   await assert.rejects(mobileSessionService.resolveAccess('malformed-bearer'), expectBizErrorCode(40100))
   pass('Login', `${VERIFY_MODE} 真实密码校验、Mobile 签发与 access authentication 通过`)
 

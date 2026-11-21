@@ -10,6 +10,7 @@ import { ClientUser } from '../entities/client-user.entity.js'
 import { ClientUserSession } from '../entities/client-user-session.entity.js'
 import type { ClientAuthContext } from '../types/client-auth.js'
 import type { MobileAuthContext, MobileDeviceInput } from '../types/mobile-auth.js'
+import { maskLoginInputForAudit } from '../utils/audit-subject-mask.js'
 import { normalizeClientAccount } from '../utils/client-auth-account.js'
 import { BizError } from '../utils/errors.js'
 import { assertClientPasswordPolicy, hashPassword } from '../utils/password.js'
@@ -102,14 +103,12 @@ class MobileAuthService {
         actionType: 'mobile_login',
         actionLabel: 'Mobile 登录',
         targetType: 'client_mobile_session',
-        targetCode: normalizedAccount,
+        targetCode: maskLoginInputForAudit(normalizedAccount),
         resultStatus: 'failed',
         requestMeta,
         detail: {
           deviceId: input.device.deviceId,
-          deviceName: input.device.deviceName ?? null,
-          platform: input.device.platform ?? null,
-          appVersion: input.device.appVersion ?? null,
+          platform: input.device.platform,
           reason: error instanceof BizError ? `http_${error.statusCode}` : 'unexpected',
         },
       })
