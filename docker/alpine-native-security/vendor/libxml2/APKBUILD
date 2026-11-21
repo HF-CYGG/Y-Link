@@ -1,0 +1,131 @@
+# Contributor: Carlo Landmeter <clandmeter@alpinelinux.org>
+# Maintainer: Carlo Landmeter <clandmeter@alpinelinux.org>
+pkgname=libxml2
+pkgver=2.13.9
+pkgrel=2
+pkgdesc="XML parsing library, version 2"
+url="https://gitlab.gnome.org/GNOME/libxml2"
+arch="all"
+license="MIT"
+depends_dev="zlib-dev xz-dev $pkgname-utils=$pkgver-r$pkgrel"
+checkdepends="perl tar"
+makedepends_host="$depends_dev"
+subpackages="$pkgname-dbg $pkgname-doc $pkgname-static $pkgname-dev $pkgname-utils"
+if [ -z "$BOOTSTRAP" ]; then
+	makedepends_build="$makedepends_build python3-dev"
+	subpackages="$subpackages py3-$pkgname-pyc py3-$pkgname:_py3"
+	_py_configure="--with-python=/usr/bin/python3"
+else
+	_py_configure="--with-python=no"
+fi
+source="https://download.gnome.org/sources/libxml2/${pkgver%.*}/libxml2-$pkgver.tar.xz
+	CVE-2026-6732.patch
+	CVE-2026-6732-test.patch
+	"
+
+# secfixes:
+#   2.13.9-r2:
+#     - CVE-2026-6732
+#   2.13.9-r0:
+#     - CVE-2025-49794
+#     - CVE-2025-49796
+#     - CVE-2025-49795
+#     - CVE-2025-6170
+#     - CVE-2025-6021
+#   2.13.8-r0:
+#     - CVE-2025-32414
+#     - CVE-2025-32415
+#   2.13.6-r0:
+#     - CVE-2025-24928
+#     - CVE-2024-56171
+#     - CVE-2025-27113
+#   2.12.7-r0:
+#     - CVE-2024-34459
+#   2.12.5-r0:
+#     - CVE-2024-25062
+#   2.10.4-r0:
+#     - CVE-2023-28484
+#     - CVE-2023-29469
+#   2.10.3-r0:
+#     - CVE-2022-40303
+#     - CVE-2022-40304
+#   2.10.0-r0:
+#     - CVE-2022-2309
+#   2.9.14-r0:
+#     - CVE-2022-29824
+#   2.9.13-r0:
+#     - CVE-2022-23308
+#   2.9.11-r0:
+#     - CVE-2016-3709
+#     - CVE-2021-3517
+#     - CVE-2021-3518
+#     - CVE-2021-3537
+#     - CVE-2021-3541
+#   2.9.10-r5:
+#     - CVE-2020-24977
+#   2.9.10-r4:
+#     - CVE-2019-20388
+#   2.9.8-r3:
+#     - CVE-2020-7595
+#   2.9.8-r1:
+#     - CVE-2018-9251
+#     - CVE-2018-14404
+#     - CVE-2018-14567
+#   2.9.4-r4:
+#     - CVE-2017-5969
+#   2.9.4-r2:
+#     - CVE-2016-9318
+#   2.9.4-r1:
+#     - CVE-2016-5131
+
+prepare() {
+	default_prepare
+
+	# We don't build libxml2 with icu.
+	rm test/icu_parse_test.xml
+}
+
+build() {
+	./configure \
+		--build=$CBUILD \
+		--host=$CHOST \
+		--prefix=/usr \
+		--sysconfdir=/etc \
+		--mandir=/usr/share/man \
+		--infodir=/usr/share/info \
+		--enable-static \
+		--with-legacy \
+		--with-lzma \
+		--with-zlib \
+		$_py_configure
+	make
+}
+
+check() {
+	rm -f test/ebcdic_566012.xml
+	make runtests
+}
+
+package() {
+	make -j1 DESTDIR="$pkgdir" install
+}
+
+_py3() {
+	depends="python3"
+	pkgdesc="$pkgname python3 bindings"
+
+	amove usr/lib/python3*
+}
+
+utils() {
+	pkgdesc="XML utilities"
+	replaces="libxml2"
+
+	amove usr/bin
+}
+
+sha512sums="
+62d4813860124c969f204aaf33b497105dbc32a6c5655f5a86168743660e10987d687d7e5e7ee49fdfdeb8f6ad9fa4503f81fcce2e4d459094895f02436d1b13  libxml2-2.13.9.tar.xz
+a54eca0b69fb49c9894684069b0e68dd80f002977c59249bee6d1a168391179e9815dfbe49a9cce3de28ca4a1bdfcac8a691daa240dd70a0206d24d32f6e84cb  CVE-2026-6732.patch
+9117a6a060d9c760ae4aa88c33131b02b4677a6703fe02ea36a474035c901d5da778a4d98402a87187410e9bcfe9819d382f9df4e6fe42ff3cf33acc88ba28a9  CVE-2026-6732-test.patch
+"
