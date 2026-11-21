@@ -179,6 +179,8 @@ for (const file of ['compose.yml', 'compose.mysql.yml', 'compose.cloud.yml']) {
   assert.match(backend, /Y_LINK_TRUST_PROXY/)
   assert.match(backend, /Y_LINK_JSON_DATA_TRANSFER_ENABLED:-false/)
   assert.match(backend, /PERMANENT_DELETE_PASSWORD:-\}/)
+  assert.match(backend, /AUTH_WEBAUTHN_ENABLED:-false/)
+  assert.match(backend, /Y_LINK_DATA_ENCRYPTION_KEY:-\}/)
   assert.match(source, /ipv4_address: \$\{Y_LINK_FRONTEND_PROXY_IP/)
 }
 const oneboxCompose = readSource('compose.onebox.yml')
