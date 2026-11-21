@@ -256,8 +256,8 @@ export class StocktakeService {
       qb.andWhere('item.countedQty IS NOT NULL AND item.bookQtySnapshot IS NOT NULL AND item.countedQty <> item.bookQtySnapshot')
     }
     if (query.keyword?.trim()) {
-      qb.andWhere('(product.productName LIKE :keyword OR sku.skuCode LIKE :keyword OR sku.barcode LIKE :keyword OR sku.specText LIKE :keyword)', {
-        keyword: `%${query.keyword.trim()}%`,
+      qb.andWhere("(product.productName LIKE :keyword ESCAPE '!' OR sku.skuCode LIKE :keyword ESCAPE '!' OR sku.barcode LIKE :keyword ESCAPE '!' OR sku.specText LIKE :keyword ESCAPE '!')", {
+        keyword: buildSqlLikeContains(query.keyword.trim()),
       })
     }
     qb.orderBy('item.countedAt', 'DESC').addOrderBy('item.id', 'ASC').skip((page - 1) * pageSize).take(pageSize)

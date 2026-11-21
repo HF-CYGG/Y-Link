@@ -54,7 +54,7 @@ async function main() {
     const supplier = await userRepo.save(userRepo.create({
       username: `inbound-pool-supplier-${verifySeed}`,
       passwordHash: 'verify-only',
-      displayName: '送货单池验证供货方',
+      displayName: '送货单池_验证供货方',
       email: null,
       role: 'supplier',
       status: 'enabled',
@@ -182,6 +182,10 @@ async function main() {
 
     const keywordPool = await inboundService.listInboundOrderPool(adminActor, { keyword: soonerDelivery.order.showNo, pageSize: 50 })
     assert.deepEqual(keywordPool.records.map((order) => order.id), [soonerDelivery.order.id], '关键词必须按送货单号命中')
+    for (const keyword of ['%', '_验']) {
+      const wanted = keyword === '%' ? 0 : allPool.total
+      assert.equal((await inboundService.listInboundOrderPool(adminActor, { keyword })).total, wanted)
+    }
 
     // 新单提醒：以上一轮返回的 latestOrderId 为基准统计新增待入库单据。
     const baselineOrderId = allPool.latestOrderId

@@ -55,7 +55,7 @@ import {
   SPEC_VALUE_MAX_LENGTH,
   VARIANT_CODE_POOL,
 } from './product-code.service.js'
-import { buildSqlLikePrefix } from '../utils/sql-like.js'
+import { buildSqlLikeContains, buildSqlLikePrefix } from '../utils/sql-like.js'
 
 /**
  * YZ 通用 SKU 编码体系的规格两轴映射（B8 批次改名）：
@@ -716,9 +716,9 @@ export class ProductService {
     }
     if (query.keyword?.trim()) {
       qb.andWhere(
-        `(p.product_name LIKE :keyword OR p.pinyin_abbr LIKE :keyword OR p.product_code LIKE :keyword
-          OR EXISTS (SELECT 1 FROM base_product_sku ks WHERE ks.product_id = p.id AND (ks.sku_code LIKE :keyword OR ks.barcode LIKE :keyword)))`,
-        { keyword: `%${query.keyword.trim()}%` },
+        `(p.product_name LIKE :keyword ESCAPE '!' OR p.pinyin_abbr LIKE :keyword ESCAPE '!' OR p.product_code LIKE :keyword ESCAPE '!'
+          OR EXISTS (SELECT 1 FROM base_product_sku ks WHERE ks.product_id = p.id AND (ks.sku_code LIKE :keyword ESCAPE '!' OR ks.barcode LIKE :keyword ESCAPE '!')))`,
+        { keyword: buildSqlLikeContains(query.keyword.trim()) },
       )
     }
     if (query.tagId) {

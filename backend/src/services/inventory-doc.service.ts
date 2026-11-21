@@ -24,6 +24,7 @@ import { auditService } from './audit.service.js'
 import { applyInventoryDeltas, loadLockedSkuTargets, skuContributesToProductAggregate } from './inventory-ledger.service.js'
 import { allocateStockDocNo } from './inventory-sequence.service.js'
 import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
+import { buildSqlLikeContains } from '../utils/sql-like.js'
 
 export const STOCK_DOC_REF_TYPE = 'inv_stock_doc'
 const MAX_DOC_ITEMS = 200
@@ -295,9 +296,9 @@ export class InventoryDocService {
     if (query.status === 'completed' || query.status === 'voided') qb.andWhere('doc.status = :status', { status: query.status })
     if (query.keyword?.trim()) {
       qb.andWhere(
-        `(doc.docNo LIKE :keyword OR doc.remark LIKE :keyword OR doc.operatorName LIKE :keyword
-          OR EXISTS (SELECT 1 FROM inv_stock_doc_item di WHERE di.doc_id = doc.id AND (di.sku_code_snapshot LIKE :keyword OR di.product_name_snapshot LIKE :keyword)))`,
-        { keyword: `%${query.keyword.trim()}%` },
+        `(doc.docNo LIKE :keyword ESCAPE '!' OR doc.remark LIKE :keyword ESCAPE '!' OR doc.operatorName LIKE :keyword ESCAPE '!'
+          OR EXISTS (SELECT 1 FROM inv_stock_doc_item di WHERE di.doc_id = doc.id AND (di.sku_code_snapshot LIKE :keyword ESCAPE '!' OR di.product_name_snapshot LIKE :keyword ESCAPE '!')))`,
+        { keyword: buildSqlLikeContains(query.keyword.trim()) },
       )
     }
     if (query.startDate) qb.andWhere('doc.createdAt >= :startDate', { startDate: new Date(`${query.startDate}T00:00:00`) })

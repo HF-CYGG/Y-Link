@@ -24,6 +24,7 @@ import { assertPermanentDeletePassword } from '../utils/permanent-delete-passwor
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 import { buildSkuLogFields, persistLockedInventoryStocks, snapshotSkuStock } from './inventory-ledger.service.js'
 import { formatLocationDeductions, reconcileSkuLocationStockTransitions } from './sku-location-stock.service.js'
+import { buildSqlLikeContains } from '../utils/sql-like.js'
 import { supplierSkuFieldMask } from '../utils/supplier-product-visibility.js'
 import { allocateUtcDailyDeliveryNo } from './inventory-sequence.service.js'
 
@@ -1200,8 +1201,8 @@ class InboundService {
       baseQueryBuilder.andWhere(
         new Brackets((keywordBuilder) => {
           keywordBuilder
-            .where('order.showNo LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
-            .orWhere('order.supplierName LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
+            .where("order.showNo LIKE :keyword ESCAPE '!'", { keyword: buildSqlLikeContains(normalizedKeyword) })
+            .orWhere("order.supplierName LIKE :keyword ESCAPE '!'", { keyword: buildSqlLikeContains(normalizedKeyword) })
         }),
       )
     }
@@ -1474,8 +1475,8 @@ class InboundService {
         queryBuilder.andWhere(
           new Brackets((keywordBuilder) => {
             keywordBuilder
-              .where('order.showNo LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
-              .orWhere('order.supplierName LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
+              .where("order.showNo LIKE :keyword ESCAPE '!'", { keyword: buildSqlLikeContains(normalizedKeyword) })
+              .orWhere("order.supplierName LIKE :keyword ESCAPE '!'", { keyword: buildSqlLikeContains(normalizedKeyword) })
           }),
         )
       }

@@ -1891,13 +1891,13 @@ class ClientFeedbackService {
       qb.andWhere(
         `
           (
-            conversation.subject LIKE :keyword
-            OR conversation.category LIKE :keyword
-            OR conversation.conversationNo LIKE :keyword
-            OR conversation.lastMessagePreview LIKE :keyword
+            conversation.subject LIKE :keyword ESCAPE '!'
+            OR conversation.category LIKE :keyword ESCAPE '!'
+            OR conversation.conversationNo LIKE :keyword ESCAPE '!'
+            OR conversation.lastMessagePreview LIKE :keyword ESCAPE '!'
           )
         `,
-        { keyword: `%${query.keyword.trim()}%` },
+        { keyword: buildSqlLikeContains(query.keyword.trim()) },
       )
     }
 
@@ -2295,17 +2295,17 @@ class ClientFeedbackService {
       qb.andWhere(
         `
           (
-            conversation.subject LIKE :keyword
-            OR conversation.category LIKE :keyword
-            OR conversation.conversationNo LIKE :keyword
-            OR conversation.clientUsername LIKE :keyword
-            OR conversation.clientAccount LIKE :keyword
-            OR conversation.staffNoSnapshot LIKE :keyword
-            OR conversation.departmentNameSnapshot LIKE :keyword
-            OR conversation.lastMessagePreview LIKE :keyword
+            conversation.subject LIKE :keyword ESCAPE '!'
+            OR conversation.category LIKE :keyword ESCAPE '!'
+            OR conversation.conversationNo LIKE :keyword ESCAPE '!'
+            OR conversation.clientUsername LIKE :keyword ESCAPE '!'
+            OR conversation.clientAccount LIKE :keyword ESCAPE '!'
+            OR conversation.staffNoSnapshot LIKE :keyword ESCAPE '!'
+            OR conversation.departmentNameSnapshot LIKE :keyword ESCAPE '!'
+            OR conversation.lastMessagePreview LIKE :keyword ESCAPE '!'
           )
         `,
-        { keyword: `%${query.keyword.trim()}%` },
+        { keyword: buildSqlLikeContains(query.keyword.trim()) },
       )
     }
     if (query.assignedToMe) {

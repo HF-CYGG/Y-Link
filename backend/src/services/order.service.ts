@@ -63,6 +63,7 @@ import {
   buildRedactedDeleteTarget,
   cleanupOrderIdentifiableData,
 } from './order-permanent-delete-cleanup.service.js'
+import { buildSqlLikeContains } from '../utils/sql-like.js'
 
 /**
  * 开单页客户部门选项：
@@ -469,23 +470,24 @@ export class OrderService {
 
     const normalizedKeyword = String(query.keyword ?? query.showNo ?? '').trim()
     if (normalizedKeyword) {
+      const keyword = buildSqlLikeContains(normalizedKeyword)
       const isLikelyShowNo = /^[A-Za-z0-9-]+$/.test(normalizedKeyword)
       qb.andWhere(
         new Brackets((keywordQb) => {
           keywordQb.where(new Brackets((rootQb) => {
             rootQb
-              .where('order.businessNo LIKE :keyword', { keyword: '%' + normalizedKeyword + '%' })
-              .orWhere(exposeSystemNo ? 'order.systemNo LIKE :keyword' : '1 = 0', { keyword: '%' + normalizedKeyword + '%' })
-              .orWhere('order.sourceDocNo LIKE :keyword', { keyword: '%' + normalizedKeyword + '%' })
+              .where("order.businessNo LIKE :keyword ESCAPE '!'", { keyword })
+              .orWhere(exposeSystemNo ? "order.systemNo LIKE :keyword ESCAPE '!'" : '1 = 0', { keyword })
+              .orWhere("order.sourceDocNo LIKE :keyword ESCAPE '!'", { keyword })
               .orWhere(exposeSystemNo && isLikelyShowNo ? 'order.systemNo = :exactShowNo' : '1 = 0', { exactShowNo: normalizedKeyword })
-              .orWhere('order.customerName LIKE :keyword', { keyword: '%' + normalizedKeyword + '%' })
-              .orWhere('order.customerDepartmentName LIKE :keyword', { keyword: '%' + normalizedKeyword + '%' })
-              .orWhere('order.issuerName LIKE :keyword', { keyword: '%' + normalizedKeyword + '%' })
-              .orWhere('order.creatorDisplayName LIKE :keyword', { keyword: '%' + normalizedKeyword + '%' })
-              .orWhere('order.creatorUsername LIKE :keyword', { keyword: '%' + normalizedKeyword + '%' })
+              .orWhere("order.customerName LIKE :keyword ESCAPE '!'", { keyword })
+              .orWhere("order.customerDepartmentName LIKE :keyword ESCAPE '!'", { keyword })
+              .orWhere("order.issuerName LIKE :keyword ESCAPE '!'", { keyword })
+              .orWhere("order.creatorDisplayName LIKE :keyword ESCAPE '!'", { keyword })
+              .orWhere("order.creatorUsername LIKE :keyword ESCAPE '!'", { keyword })
           })).orWhere(
-            `EXISTS (SELECT 1 FROM order_merge_relation relation INNER JOIN biz_outbound_order child ON child.id = relation.source_order_id WHERE relation.parent_order_id = order.id AND (child.business_no LIKE :keyword ${exposeSystemNo ? 'OR child.show_no LIKE :keyword' : ''} OR child.source_doc_no LIKE :keyword OR child.customer_name LIKE :keyword OR child.customer_department_name LIKE :keyword OR child.issuer_name LIKE :keyword OR child.creator_display_name LIKE :keyword OR child.creator_username LIKE :keyword))`,
-            { keyword: '%' + normalizedKeyword + '%' },
+            `EXISTS (SELECT 1 FROM order_merge_relation relation INNER JOIN biz_outbound_order child ON child.id = relation.source_order_id WHERE relation.parent_order_id = order.id AND (child.business_no LIKE :keyword ESCAPE '!' ${exposeSystemNo ? "OR child.show_no LIKE :keyword ESCAPE '!'" : ''} OR child.source_doc_no LIKE :keyword ESCAPE '!' OR child.customer_name LIKE :keyword ESCAPE '!' OR child.customer_department_name LIKE :keyword ESCAPE '!' OR child.issuer_name LIKE :keyword ESCAPE '!' OR child.creator_display_name LIKE :keyword ESCAPE '!' OR child.creator_username LIKE :keyword ESCAPE '!'))`,
+            { keyword },
           )
         }),
       )

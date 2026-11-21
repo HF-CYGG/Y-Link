@@ -17,6 +17,7 @@ import type { PaginationResult } from '../types/api.js'
 import { calculateDiscountedPrice } from '../utils/discount-price.js'
 import { BizError } from '../utils/errors.js'
 import { loadSkuLocationDistributions, type SkuLocationQty } from './sku-location-stock.service.js'
+import { buildSqlLikeContains } from '../utils/sql-like.js'
 
 export interface StockQuery {
   page?: number
@@ -109,8 +110,8 @@ export class InventoryQueryService {
       qb.andWhere('sku.isActive = :isActive', { isActive: true }).andWhere('p.is_active = :productActive', { productActive: 1 })
     }
     if (query.keyword?.trim()) {
-      qb.andWhere('(p.product_name LIKE :keyword OR p.pinyin_abbr LIKE :keyword OR sku.skuCode LIKE :keyword OR sku.barcode LIKE :keyword OR sku.specText LIKE :keyword)', {
-        keyword: `%${query.keyword.trim()}%`,
+      qb.andWhere("(p.product_name LIKE :keyword ESCAPE '!' OR p.pinyin_abbr LIKE :keyword ESCAPE '!' OR sku.skuCode LIKE :keyword ESCAPE '!' OR sku.barcode LIKE :keyword ESCAPE '!' OR sku.specText LIKE :keyword ESCAPE '!')", {
+        keyword: buildSqlLikeContains(query.keyword.trim()),
       })
     }
     if (query.categoryId) qb.andWhere('p.category_id = :categoryId', { categoryId: query.categoryId })
@@ -260,8 +261,8 @@ export class InventoryQueryService {
     if (query.refType) qb.andWhere('log.refType = :refType', { refType: query.refType })
     if (query.refId) qb.andWhere('log.refId = :refId', { refId: query.refId })
     if (query.keyword?.trim()) {
-      qb.andWhere('(product.productName LIKE :keyword OR sku.skuCode LIKE :keyword OR sku.barcode LIKE :keyword OR log.operatorName LIKE :keyword OR log.remark LIKE :keyword)', {
-        keyword: `%${query.keyword.trim()}%`,
+      qb.andWhere("(product.productName LIKE :keyword ESCAPE '!' OR sku.skuCode LIKE :keyword ESCAPE '!' OR sku.barcode LIKE :keyword ESCAPE '!' OR log.operatorName LIKE :keyword ESCAPE '!' OR log.remark LIKE :keyword ESCAPE '!')", {
+        keyword: buildSqlLikeContains(query.keyword.trim()),
       })
     }
     if (query.startDate) qb.andWhere('log.createdAt >= :startDate', { startDate: new Date(`${query.startDate}T00:00:00`) })

@@ -731,6 +731,18 @@ async function main() {
     )
     pass('Issue 字段保存与双端实时字段事件通过')
 
+    for (const [endpoint, token] of [['client-feedback', clientToken], ['customer-service', operatorToken]]) {
+      const lookup = async (keyword: string) => {
+        const data = await expectJsonOk<{ data: { list: { id: string }[] } }>(() =>
+          fetch(`${baseUrl}/api/${endpoint}/conversations?keyword=${encodeURIComponent(keyword)}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          }), '工单关键词按字面搜索')
+        return data.list.map(({ id }) => id)
+      }
+      assert.deepEqual(await lookup('_已受理'), [conversationId])
+      assert.deepEqual(await lookup('%'), [])
+    }
+
     const updatedRemark = await expectJsonOk<{
       data: {
         changed: boolean
