@@ -637,6 +637,9 @@ const isSelectedConversationOwnedByCurrentUser = computed(() => {
   return selectedConversation.value.assigneeUserId === currentUserId.value
 })
 
+const canEditSelectedConversation = computed(() => hasPermission('customer_service:reply')
+  && isSelectedConversationOwnedByCurrentUser.value && selectedConversation.value?.status !== 'closed')
+
 const selectedConversationSla = computed(() => {
   return selectedConversation.value ? resolveSupportFeedbackConversationSla(selectedConversation.value) : null
 })
@@ -1241,6 +1244,7 @@ const handleSaveIssue = async () => {
     showAppWarning('请先选择一条会话')
     return
   }
+  if (!canEditSelectedConversation.value) return
 
   const normalizedTitle = normalizeSubmitText(issueForm.title)
   const normalizedExpectedResult = normalizeSubmitText(issueForm.expectedResult)
@@ -1260,7 +1264,6 @@ const handleSaveIssue = async () => {
   try {
     await updateFeedbackIssue(selectedConversation.value.id, {
       title: normalizedTitle,
-      status: issueForm.status,
       priority: issueForm.priority,
       issueType: selectedConversation.value.restock ? undefined : issueForm.issueType,
       category: issueForm.category,
@@ -1330,6 +1333,7 @@ const handleReassignPriority = async (priority: FeedbackIssuePriority) => {
     showAppWarning('请先选择一条会话')
     return
   }
+  if (!canEditSelectedConversation.value) return
 
   priorityUpdating.value = priority
   saving.value = true
@@ -1369,6 +1373,7 @@ const handleSaveInternalRemark = async () => {
     showAppWarning('请先选择一条会话')
     return
   }
+  if (!canEditSelectedConversation.value) return
 
   remarkSaving.value = true
   try {
@@ -2328,7 +2333,7 @@ onBeforeUnmount(() => {
                       :type="getPriorityButtonType(item.value)"
                       :plain="issueForm.priority !== item.value"
                       :loading="priorityUpdating === item.value"
-                      :disabled="saving"
+                      :disabled="saving || !canEditSelectedConversation"
                       @click="handleReassignPriority(item.value)"
                     >
                       {{ item.label }}
@@ -2344,14 +2349,14 @@ onBeforeUnmount(() => {
                       <el-tag type="info" effect="plain" round size="small">{{ getCategoryLabel(issueForm.category) }}</el-tag>
                     </div>
                   </div>
-                  <el-form label-position="top" class="cs-issue-form">
+                  <el-form label-position="top" class="cs-issue-form" :disabled="!canEditSelectedConversation">
                     <el-form-item label="标题">
                       <el-input v-model="issueForm.title" maxlength="80" show-word-limit />
                     </el-form-item>
 
                     <div class="grid grid-cols-2 gap-2">
                       <el-form-item label="问题类型">
-                        <el-select v-model="issueForm.issueType" class="w-full" :disabled="Boolean(selectedConversation.restock)">
+                        <el-select v-model="issueForm.issueType" class="w-full" :disabled="!canEditSelectedConversation || Boolean(selectedConversation.restock)">
                           <el-option
                             v-for="item in FEEDBACK_ISSUE_TYPE_OPTIONS.filter((option) => selectedConversation?.restock || option.value !== 'restock')"
                             :key="item.value"
@@ -2430,7 +2435,7 @@ onBeforeUnmount(() => {
                     type="primary"
                     class="w-full"
                     :loading="saving && quickStatusUpdating === '' && priorityUpdating === ''"
-                    :disabled="saving"
+                    :disabled="saving || !canEditSelectedConversation"
                     @click="handleSaveIssue"
                   >
                     保存工单信息
@@ -2444,6 +2449,7 @@ onBeforeUnmount(() => {
                   </div>
                   <el-input
                     v-model="issueForm.internalRemark"
+                    :disabled="!canEditSelectedConversation"
                     class="cs-issue-form"
                     type="textarea"
                     :autosize="{ minRows: 4, maxRows: 10 }"
@@ -2464,7 +2470,7 @@ onBeforeUnmount(() => {
                       </template>
                       <template v-else>暂无备注</template>
                     </p>
-                    <el-button size="small" :loading="remarkSaving" :disabled="remarkSaving" @click="handleSaveInternalRemark">
+                    <el-button size="small" :loading="remarkSaving" :disabled="remarkSaving || !canEditSelectedConversation" @click="handleSaveInternalRemark">
                       保存备注
                     </el-button>
                   </div>

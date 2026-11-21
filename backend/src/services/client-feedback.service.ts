@@ -18,7 +18,7 @@ import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { initializeDatabaseInfrastructure } from '../database/database-strategy.js'
 import { databaseOperationGate } from '../database/operation-gate.js'
-import { resolvePermissionsByRole } from '../constants/auth-permissions.js'
+import { resolvePermissionsByRole, resolveUserPermissions } from '../constants/auth-permissions.js'
 import {
   ClientFeedbackConversation,
   CLIENT_FEEDBACK_CONVERSATION_STATUSES,
@@ -588,15 +588,40 @@ class ClientFeedbackService {
       throw new BizError('反馈附件不存在、已过期或已被使用', 404)
     }
     const byId = new Map(rows.map((row) => [String(row.id), row]))
-    return normalizedIds.map((id) => {
-      const row = byId.get(id)!
-      return {
-        name: row.originalName,
-        url: `/api/client-feedback/attachments/${row.id}`,
-        mimeType: row.mimeType,
-        size: row.sizeBytes,
-      }
+    return normalizedIds.map((id) => this.buildAttachmentReference(byId.get(id)!))
+  }
+
+  private async resolveBoundAttachmentReferences(
+    attachments: ClientFeedbackMessageAttachment[],
+    conversation: ClientFeedbackConversation,
+    manager: EntityManager,
+  ): Promise<ClientFeedbackMessageAttachment[]> {
+    if (!attachments.length) return []
+    const ids = attachments.map(({ url }) => url.slice(url.lastIndexOf('/') + 1))
+    if (ids.some((id) => !/^[1-9]\d{0,19}$/.test(id))) throw new BizError('反馈附件不存在', 404)
+    const rows = await manager.getRepository(ClientFeedbackAttachment).findBy({
+      id: In(ids), conversationId: conversation.id, ownerClientUserId: conversation.clientUserId,
     })
+    const messageIds = rows.map((row) => row.messageId).filter((id): id is string => Boolean(id))
+    const messages = new Map(messageIds.length
+      ? (await manager.getRepository(ClientFeedbackMessage).findBy({ id: In(messageIds), conversationId: conversation.id }))
+        .map((message) => [String(message.id), message])
+      : [])
+    const rowsById = new Map(rows.map((row) => [String(row.id), row]))
+    return Promise.all(ids.map(async (id) => {
+      const row = rowsById.get(id)
+      const message = row?.messageId ? messages.get(row.messageId) : undefined
+      if (!row || !message || !UPLOAD_PUBLIC_FILE_NAME_MATCHER.test(row.storageName)
+        || !this.messageReferencesBoundAttachment(message, row)) throw new BizError('反馈附件不存在', 404)
+      const file = path.join(ensureUploadCategoryDir('client-feedback'), row.storageName)
+      try {
+        if (!(await fs.promises.lstat(file)).isFile()) throw new BizError('反馈附件不存在', 404)
+        await fs.promises.access(file, fs.constants.R_OK)
+      } catch {
+        throw new BizError('反馈附件不存在', 404)
+      }
+      return this.buildAttachmentReference(row)
+    }))
   }
 
   private async bindOwnedAttachmentsToMessage(
@@ -1309,6 +1334,19 @@ class ClientFeedbackService {
     if (conversation.assignedUserId !== actor.userId) {
       throw new BizError(`当前会话由 ${conversation.assignedDisplayName || conversation.assignedUsername || '其他客服'} 负责，请先转派或接回自己后再操作`, 400)
     }
+  }
+
+  private async requireEditableServiceConversation(id: string, actor: AuthUserContext, manager: EntityManager) {
+    const account = await lockActiveSysAccountForBusiness(manager, actor.userId)
+    if (!resolveUserPermissions(account).includes('customer_service:reply')) {
+      throw new BizError('当前账号无客服处理权限', 403)
+    }
+    const conversation = await this.requireConversationById(id, manager)
+    this.ensureConversationOwnedByActor(conversation, actor)
+    if (conversation.status === 'closed') {
+      throw new BizError('当前反馈会话已关闭，请先重新打开后再处理', 400)
+    }
+    return conversation
   }
 
   private buildAssignableUserView(user: SysUser): CustomerServiceAssignableUser {
@@ -2334,15 +2372,11 @@ class ClientFeedbackService {
     requestMeta?: RequestMeta,
   ) {
     const content = this.normalizeMessageContent(input.content)
-    const attachments = this.normalizeAttachments(input.attachments)
+    const requestedAttachments = this.normalizeAttachments(input.attachments)
 
     const result = await runInTransaction(async (manager) => {
-      await lockActiveSysAccountForBusiness(manager, actor.userId)
-      const conversation = await this.requireConversationById(id, manager)
-      if (conversation.status === 'closed') {
-        throw new BizError('当前反馈会话已关闭，请先重新打开后再回复', 400)
-      }
-      this.ensureConversationOwnedByActor(conversation, actor)
+      const conversation = await this.requireEditableServiceConversation(id, actor, manager)
+      const attachments = await this.resolveBoundAttachmentReferences(requestedAttachments, conversation, manager)
 
       // 客服回复只应把“待处理”推进到“处理中”。
       // 若会话已被人工标记为“已解决”，继续补充回复时应保持已解决状态，不应回退。
@@ -2630,8 +2664,7 @@ class ClientFeedbackService {
     requestMeta?: RequestMeta,
   ) {
     const result = await runInTransaction(async (manager) => {
-      await lockActiveSysAccountForBusiness(manager, actor.userId)
-      const conversation = await this.requireConversationById(id, manager)
+      const conversation = await this.requireEditableServiceConversation(id, actor, manager)
       const before = this.buildConversationFields(conversation)
       const subjectBefore = conversation.subject
 
@@ -2739,8 +2772,7 @@ class ClientFeedbackService {
     )
 
     const result = await runInTransaction(async (manager) => {
-      await lockActiveSysAccountForBusiness(manager, actor.userId)
-      const conversation = await this.requireConversationById(id, manager)
+      const conversation = await this.requireEditableServiceConversation(id, actor, manager)
       const before = this.buildInternalRemarkView(conversation)
       const beforeContent = before?.content ?? null
       if (beforeContent === normalizedRemark) {

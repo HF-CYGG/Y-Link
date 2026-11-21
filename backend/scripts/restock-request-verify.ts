@@ -436,6 +436,8 @@ try {
   await db.getRepository(e.ClientFeedbackConversation).update({ id: String(normal.conversation.id) }, { createdAt: new Date(2025, 11, 31, 23, 59, 59, 999) })
   const ordinaryRange = await http('/customer-service/conversations?issueType=suggestion&dateRange=2025-12-31,2025-12-31&pageSize=100', runtime.operator.token)
   assert.ok(ordinaryRange.list.some((row: any) => String(row.id) === String(normal.conversation.id)), '普通反馈仍按会话日期过滤')
+  await http(`/customer-service/conversations/${normal.conversation.id}/fields`, runtime.operator.token, 'PATCH', { issueType: 'restock' }, 400)
+  await take(String(normal.conversation.id))
   await http(`/customer-service/conversations/${normal.conversation.id}/fields`, runtime.operator.token, 'PATCH', { issueType: 'restock' }, 409)
   await assert.rejects(() => runtime.productService.delete(String(p.empty.id), runtime.admin.auth), /补货需求/)
   await assert.rejects(() => db.getRepository(e.BaseProductSku).delete({ id: p.emptySku.id }), /FOREIGN KEY|foreign key/i)
