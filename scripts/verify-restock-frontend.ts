@@ -469,7 +469,11 @@ for (const authId of [1, '1']) {
   assert.equal(workbenchValue('takeOverButtonText', { selectedConversation, isSelectedConversationOwnedByCurrentUser: owned }).value, '当前由我负责')
   assert.match(workbenchValue('assignmentActionTip', { selectedConversation, isSelectedConversationOwnedByCurrentUser: owned }).value, /由你负责/)
   const assigneeOptions = vue.ref<any[]>([])
-  const loadAssignable = workbenchValue('loadAssignableUsers', { assigneeOptions, assigneeLoading: vue.ref(false), assigneeRequest: stableRequestRuntime.useStableRequest(), listSupportAssignableUsers: async () => [{ id: 1 }, { id: '2' }] })
+  const loadAssignable = workbenchValue('loadAssignableUsers', {
+    authStore, currentUserId, assigneeCache: null, ASSIGNEE_CACHE_TTL_MS: workbenchValue('ASSIGNEE_CACHE_TTL_MS', {}),
+    assigneeOptions, assigneeLoading: vue.ref(false), assigneeRequest: stableRequestRuntime.useStableRequest(),
+    listSupportAssignableUsers: async () => [{ id: 1 }, { id: '2' }],
+  })
   await loadAssignable()
   assert.deepEqual(assigneeOptions.value.map((item) => item.id), ['1', '2'])
   const candidates = workbenchValue('transferAssigneeOptions', { assigneeOptions, selectedConversation })
@@ -501,7 +505,7 @@ for (const authId of [1, '1']) {
   selectedConversation.value.assigneeUserId = null
   assert.equal(owned.value, false)
   const remarks: string[] = []
-  await workbenchValue('handleSaveInternalRemark', { ...bindings, remarkSaving: vue.ref(false), issueForm: { internalRemark: '内部草稿' }, hasUnsavedInternalRemarkDraft: vue.ref(true),
+  await workbenchValue('handleSaveInternalRemark', { ...bindings, canEditSelectedConversation: vue.ref(true), remarkSaving: vue.ref(false), issueForm: { internalRemark: '内部草稿' }, hasUnsavedInternalRemarkDraft: vue.ref(true),
     updateFeedbackInternalRemark: async (id: string) => { remarks.push(id) }, loadConversationDetail: async (id: string) => { assert.equal(id, '3') } })()
   assert.deepEqual(remarks, ['3'], '内部备注沿用其原权限与可空负责人规则，使用规范化会话ID')
   authStore.currentUser.id = 2

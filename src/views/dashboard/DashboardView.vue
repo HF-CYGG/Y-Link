@@ -12,7 +12,7 @@
  */
 
 
-import { computed, defineAsyncComponent, onActivated, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, onActivated, onDeactivated, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import dayjs from 'dayjs'
 
@@ -30,11 +30,14 @@ import { useDashboardAnalytics } from './composables/useDashboardAnalytics'
 import { showAppError } from '@/utils/app-alert'
 
 const router = useRouter()
+defineOptions({ name: 'DashboardView' })
+
 const appStore = useAppStore(pinia)
 const authStore = useAuthStore(pinia)
 const loading = ref(false)
 const stats = ref<DashboardStats | null>(null)
 const loadStatus = ref<'idle' | 'success' | 'error' | 'canceled'>('idle')
+const overviewPending = computed(() => !stats.value && (loading.value || loadStatus.value === 'idle'))
 const dashboardRequest = useStableRequest()
 const {
   analyticsLoading,
@@ -316,87 +319,16 @@ onMounted(() => {
 onActivated(() => {
   ensureDashboardReady()
 })
+
+onDeactivated(() => {
+  if (loading.value && !stats.value) loadStatus.value = 'canceled'
+  loading.value = false
+})
 </script>
 
 <template>
   <PageContainer title="工作台" description="查看今日出库概览，快速进入常用业务操作。">
-    <div v-if="(loading && !stats) || loadStatus === 'idle'" class="dashboard-container min-w-0 space-y-5 sm:space-y-6 lg:space-y-7">
-      <section
-        :class="[
-          'relative overflow-hidden rounded-2xl bg-gradient-to-r from-teal-500 via-teal-400 to-cyan-400 text-white shadow-sm',
-          appStore.isPhone ? 'p-5' : 'p-6 sm:p-8 xl:p-9',
-        ]"
-      >
-        <div class="relative z-10 max-w-2xl space-y-3">
-          <div class="h-7 w-44 animate-pulse rounded-full bg-white/30" />
-          <div class="h-4 w-full max-w-xl animate-pulse rounded-full bg-white/20" />
-          <div class="h-4 w-3/4 max-w-lg animate-pulse rounded-full bg-white/20" />
-        </div>
-        <div
-          class="pointer-events-none absolute right-0 top-0 translate-x-1/4 -translate-y-1/4 transform opacity-10"
-          :class="appStore.isPhone ? 'hidden' : ''"
-        >
-          <el-icon :size="160"><DataAnalysis /></el-icon>
-        </div>
-      </section>
-
-      <section class="space-y-4">
-        <div class="h-6 w-28 animate-pulse rounded-full bg-slate-200 dark:bg-white/10" />
-        <div :class="appStore.isPhone ? 'dashboard-mobile-metric-panel' : ['grid gap-4', statsGridClass]">
-          <div
-            v-for="index in 4"
-            :key="`stats-skeleton-${index}`"
-            :class="[
-              appStore.isPhone
-                ? 'dashboard-mobile-metric-cell dashboard-mobile-metric-skeleton'
-                : 'min-h-[112px] animate-pulse rounded-2xl bg-white/90 p-5 shadow-sm dark:bg-white/5',
-            ]"
-          >
-            <template v-if="appStore.isPhone">
-              <div class="h-3.5 w-20 rounded-full bg-slate-200 dark:bg-white/10" />
-              <div class="mt-3 h-7 w-16 rounded-full bg-slate-200 dark:bg-white/10" />
-            </template>
-            <template v-else>
-              <div class="mb-5 flex items-center justify-between">
-                <div class="h-4 w-24 rounded-full bg-slate-200 dark:bg-white/10" />
-                <div class="h-10 w-10 rounded-xl bg-slate-200 dark:bg-white/10" />
-              </div>
-              <div class="h-8 w-20 rounded-full bg-slate-200 dark:bg-white/10" />
-            </template>
-          </div>
-        </div>
-      </section>
-
-      <section class="space-y-4">
-        <div class="h-6 w-24 animate-pulse rounded-full bg-slate-200 dark:bg-white/10" />
-        <div class="flex flex-wrap gap-3">
-          <div
-            v-for="index in 4"
-            :key="`shortcut-chip-skeleton-${index}`"
-            class="h-10 w-[160px] animate-pulse rounded-xl bg-white/90 shadow-sm dark:bg-white/5"
-          />
-        </div>
-      </section>
-
-      <div :class="['grid gap-6 xl:gap-7', appStore.isDesktop ? 'xl:grid-cols-[1.3fr_1fr] lg:grid-cols-[1.2fr_1fr]' : 'grid-cols-1']">
-        <section class="space-y-4">
-          <div class="h-6 w-32 animate-pulse rounded-full bg-slate-200 dark:bg-white/10" />
-          <div class="min-h-[300px] animate-pulse rounded-2xl bg-white/90 p-6 shadow-sm dark:bg-white/5" />
-        </section>
-
-        <section class="space-y-4">
-          <div class="h-6 w-32 animate-pulse rounded-full bg-slate-200 dark:bg-white/10" />
-          <div class="min-h-[300px] animate-pulse rounded-2xl bg-white/90 p-6 shadow-sm dark:bg-white/5" />
-        </section>
-      </div>
-
-      <section class="space-y-4">
-        <div class="h-6 w-24 animate-pulse rounded-full bg-slate-200 dark:bg-white/10" />
-        <div class="min-h-[220px] animate-pulse rounded-2xl bg-white/90 p-6 shadow-sm dark:bg-white/5 sm:min-h-[260px]" />
-      </section>
-    </div>
-
-    <div v-else class="dashboard-container min-w-0 space-y-5 sm:space-y-6 lg:space-y-7">
+    <div class="dashboard-container min-w-0 space-y-5 sm:space-y-6 lg:space-y-7">
       <section
         :class="[
           'relative overflow-hidden rounded-2xl bg-gradient-to-r from-teal-500 via-teal-400 to-cyan-400 text-white shadow-sm',
@@ -410,7 +342,7 @@ onActivated(() => {
           </p>
 
           <div
-            v-if="!stats"
+            v-if="!stats && !overviewPending"
             class="mt-4 inline-flex max-w-xl items-start gap-3 rounded-2xl bg-white/14 px-4 py-3 text-left shadow-sm ring-1 ring-white/18 backdrop-blur-sm"
           >
             <div class="rounded-xl bg-white/16 p-2 text-white/95">
@@ -446,7 +378,32 @@ onActivated(() => {
       <section>
         <h2 class="mb-4 text-lg font-semibold text-slate-800 dark:text-slate-200">核心看板</h2>
 
+        <div v-if="overviewPending" aria-hidden="true" :class="appStore.isPhone ? 'dashboard-mobile-metric-panel' : ['grid gap-4', statsGridClass]">
+          <div
+            v-for="index in 4"
+            :key="`stats-skeleton-${index}`"
+            :class="[
+              appStore.isPhone
+                ? 'dashboard-mobile-metric-cell dashboard-mobile-metric-skeleton'
+                : 'min-h-[112px] animate-pulse rounded-2xl bg-white/90 p-5 shadow-sm dark:bg-white/5',
+            ]"
+          >
+            <template v-if="appStore.isPhone">
+              <div class="h-3.5 w-20 rounded-full bg-slate-200 dark:bg-white/10" />
+              <div class="mt-3 h-7 w-16 rounded-full bg-slate-200 dark:bg-white/10" />
+            </template>
+            <template v-else>
+              <div class="mb-5 flex items-center justify-between">
+                <div class="h-4 w-24 rounded-full bg-slate-200 dark:bg-white/10" />
+                <div class="h-10 w-10 rounded-xl bg-slate-200 dark:bg-white/10" />
+              </div>
+              <div class="h-8 w-20 rounded-full bg-slate-200 dark:bg-white/10" />
+            </template>
+          </div>
+        </div>
+
         <transition-group
+          v-else
           name="staggered-fade"
           tag="div"
           :class="appStore.isPhone ? 'dashboard-mobile-metric-panel' : ['grid gap-4 xl:gap-5', statsGridClass]"
@@ -587,7 +544,7 @@ onActivated(() => {
                 </div>
               </button>
             </div>
-            <div v-else class="flex min-h-[160px] items-center justify-center">
+            <div v-else-if="!overviewPending" class="flex min-h-[160px] items-center justify-center">
               <el-empty :image-size="72" description="最近24小时暂无出库变更" />
             </div>
           </div>

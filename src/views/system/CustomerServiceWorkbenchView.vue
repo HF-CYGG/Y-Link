@@ -15,7 +15,7 @@
  * - 若客服在线规则改为更精细的排班模型，本页优先消费共享 API 已暴露的 presence 数据，不在页面层重复实现。
  */
 
-import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter, type LocationQueryRaw } from 'vue-router'
 
 import {
@@ -69,6 +69,8 @@ import { formatDateTime } from '@/utils/date-time'
 import { normalizeSubmitText } from '@/utils/submit-feedback'
 
 import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
+
+defineOptions({ name: 'CustomerServiceWorkbenchView' })
 
 /**
  * 显式注入全局 Pinia 单例：
@@ -152,6 +154,11 @@ const issueFormScrollbarRef = ref<WorkbenchScrollbarLike | null>(null)
 const freshConversationIds = ref<string[]>([])
 const freshMessageIds = ref<string[]>([])
 let realtimeConnection: FeedbackRealtimeConnection | null = null
+let realtimeAttempt = 0
+let readyRealtimeAttempt = 0
+let snapshotStartedForAttempt = 0
+let firstSnapshotStarted = false
+let firstSnapshotTimer: ReturnType<typeof setTimeout> | undefined
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let refreshTimer: ReturnType<typeof setTimeout> | null = null
 let freshConversationTimer: ReturnType<typeof setTimeout> | null = null
@@ -162,10 +169,13 @@ let replyOperationGeneration = 0
 let replyDraftGeneration = 0
 let detailUiGeneration = 0
 let refreshInFlight = false
-let pendingRefresh = false
+let pendingRefresh: WorkbenchRefreshOptions | null = null
 let workbenchComponentActive = false
+let assigneeCache: { userId: string; sessionExpiresAt: string | null; validUntil: number; options: SupportAssignableUser[] } | null = null
 const CUSTOMER_SERVICE_FALLBACK_POLL_MIN_MS = 25_000
 const CUSTOMER_SERVICE_FALLBACK_POLL_MAX_MS = 35_000
+const FIRST_SNAPSHOT_WAIT_MS = 350
+const ASSIGNEE_CACHE_TTL_MS = 30_000
 const listRequest = useStableRequest()
 const detailRequest = useStableRequest()
 const presenceRequest = useStableRequest()
@@ -947,16 +957,20 @@ const loadConversations = async (
   const listScrollTop = options.preserveUiState ? (conversationListPanelRef.value?.scrollTop ?? 0) : null
   loading.value = true
   await listRequest.runLatest({
-    executor: (signal) => listSupportFeedbackConversations({
-      keyword: searchForm.keyword,
-      status: searchForm.status,
-      priority: searchForm.priority,
-      assigneeScope: searchForm.assigneeScope,
-      issueType: searchForm.issueType,
-      restockStatus: searchForm.restockStatus,
-      productId: searchForm.productId,
-      dateRange: searchForm.dateRange,
-    }, { signal }),
+    executor: (signal) => {
+      firstSnapshotStarted = true
+      snapshotStartedForAttempt = readyRealtimeAttempt
+      return listSupportFeedbackConversations({
+        keyword: searchForm.keyword,
+        status: searchForm.status,
+        priority: searchForm.priority,
+        assigneeScope: searchForm.assigneeScope,
+        issueType: searchForm.issueType,
+        restockStatus: searchForm.restockStatus,
+        productId: searchForm.productId,
+        dateRange: searchForm.dateRange,
+      }, { signal })
+    },
     onSuccess: async (nextConversations) => {
       if (options.mayApply?.() === false) return
       conversations.value = nextConversations
@@ -1496,9 +1510,13 @@ const handleReplyShortcut = (event: Event | KeyboardEvent) => {
 }
 
 const loadPresence = async () => {
+  const attempt = realtimeAttempt
+  const readyAttempt = readyRealtimeAttempt
   await presenceRequest.runLatest({
     executor: (signal) => getCustomerServicePresence({ signal }),
     onSuccess: (result) => {
+      // 同一次连接的握手完成也会使握手前启动的快照过时。
+      if (attempt !== realtimeAttempt || readyAttempt !== readyRealtimeAttempt) return
       presence.value = result
       realtimeState.value = result.availability.isOnline ? 'online' : 'offline'
     },
@@ -1511,11 +1529,20 @@ const loadPresence = async () => {
  * - 若后端调整可接单范围，前端只消费统一结果，不自行推断角色。
  */
 const loadAssignableUsers = async () => {
+  const userId = currentUserId.value
+  const sessionExpiresAt = authStore.expiresAt
+  if (assigneeCache?.userId === userId && assigneeCache.sessionExpiresAt === sessionExpiresAt && assigneeCache.validUntil > Date.now()) {
+    assigneeOptions.value = assigneeCache.options
+    return
+  }
   assigneeLoading.value = true
   await assigneeRequest.runLatest({
     executor: (signal) => listSupportAssignableUsers({ signal }),
     onSuccess: (result) => {
-      assigneeOptions.value = result.map((user) => ({ ...user, id: String(user.id) }))
+      if (currentUserId.value !== userId || authStore.expiresAt !== sessionExpiresAt) return
+      const options = result.map((user) => ({ ...user, id: String(user.id) }))
+      assigneeCache = { userId, sessionExpiresAt, validUntil: Date.now() + ASSIGNEE_CACHE_TTL_MS, options }
+      assigneeOptions.value = options
     },
     onFinally: () => {
       assigneeLoading.value = false
@@ -1528,41 +1555,47 @@ const loadAssignableUsers = async () => {
  * - SSE 与轮询都走同一条刷新链路，避免多处各自拉取导致覆盖顺序混乱；
  * - 若前一次刷新尚未完成，新的刷新请求只做排队，等当前批次结束后立即补一次。
  */
-const refreshWorkbenchData = async (
-  currentToken: number,
-  options: {
-    refreshPresence?: boolean
-    refreshSelectedDetail?: boolean
-    preserveUiState?: boolean
-  } = {},
-) => {
+type WorkbenchRefreshOptions = {
+  refreshPresence?: boolean
+  refreshSelectedDetail?: boolean
+  preserveUiState?: boolean
+}
+const refreshWorkbenchData = async (currentToken: number, options: WorkbenchRefreshOptions = {}) => {
   if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
     return
   }
 
   if (refreshInFlight) {
-    pendingRefresh = true
+    pendingRefresh = pendingRefresh ? {
+      refreshPresence: pendingRefresh.refreshPresence !== false || options.refreshPresence !== false,
+      refreshSelectedDetail: pendingRefresh.refreshSelectedDetail !== false || options.refreshSelectedDetail !== false,
+      preserveUiState: pendingRefresh.preserveUiState !== false || options.preserveUiState !== false,
+    } : options
     return
   }
 
   refreshInFlight = true
   try {
+    if (options.refreshPresence !== false) void loadPresence()
     await loadConversations({
       refreshSelectedDetail: options.refreshSelectedDetail,
       preserveUiState: options.preserveUiState ?? true,
     })
-    if (options.refreshPresence !== false) {
-      await loadPresence()
-    }
   } finally {
-    refreshInFlight = false
-    const shouldStopRefreshLoop = !isWorkbenchResident.value || currentToken !== lifecycleToken
-    if (shouldStopRefreshLoop) {
-      pendingRefresh = false
-    } else if (pendingRefresh) {
-      pendingRefresh = false
-      await refreshWorkbenchData(currentToken, options)
+    if (currentToken === lifecycleToken) {
+      refreshInFlight = false
+      if (isWorkbenchResident.value && pendingRefresh) {
+        const next = pendingRefresh
+        pendingRefresh = null
+        await refreshWorkbenchData(currentToken, next)
+      }
     }
+  }
+}
+
+const readFirstSnapshot = (currentToken: number) => {
+  if (!firstSnapshotStarted && currentToken === lifecycleToken && isWorkbenchResident.value) {
+    void refreshWorkbenchData(currentToken, { refreshPresence: false, refreshSelectedDetail: true })
   }
 }
 
@@ -1640,6 +1673,8 @@ const handleRealtimeConversation = async (
  * - 统一收口后可以避免重连定时器在离页后继续把客服重新拉回在线。
  */
 const disposeRealtimeConnection = () => {
+  realtimeAttempt += 1
+  readyRealtimeAttempt = 0
   realtimeConnection?.close()
   realtimeConnection = null
 
@@ -1668,7 +1703,7 @@ const disposeRealtime = () => {
   }
 }
 
-const connectRealtime = (currentToken: number) => {
+const connectRealtime = (currentToken: number, reconnecting = false) => {
   // 重连只替换 SSE 本身；兜底轮询与页面高亮计时必须继续保留。
   disposeRealtimeConnection()
 
@@ -1681,11 +1716,15 @@ const connectRealtime = (currentToken: number) => {
   }
 
   realtimeState.value = 'connecting'
+  const attempt = realtimeAttempt
+  const isCurrentConnection = () => isWorkbenchResident.value && currentToken === lifecycleToken && attempt === realtimeAttempt
   realtimeConnection = openFeedbackRealtimeStream('service', {
     onOpen: (payload) => {
-      if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
+      if (!isCurrentConnection() || readyRealtimeAttempt === attempt) {
         return
       }
+      readyRealtimeAttempt = attempt
+      clearTimeout(firstSnapshotTimer)
       if (payload.availability || payload.session) {
         presence.value = {
           availability: payload.availability ?? presence.value?.availability ?? {
@@ -1708,27 +1747,36 @@ const connectRealtime = (currentToken: number) => {
           },
         }
       }
-      void refreshWorkbenchData(currentToken, {
-        refreshPresence: true,
-        refreshSelectedDetail: Boolean(selectedConversationId.value),
-        preserveUiState: true,
-      })
-      reconnectTip.value = '已恢复客服实时连接，当前工作台会自动续接最新会话变化。'
+      realtimeState.value = presence.value?.availability.isOnline ? 'online' : 'offline'
+      // SSE 不回放。每次连通后，要有一份在本次流就绪之后才开始读取的快照。
+      if (snapshotStartedForAttempt !== attempt) {
+        void refreshWorkbenchData(currentToken, {
+          refreshPresence: false,
+          refreshSelectedDetail: true,
+          preserveUiState: true,
+        })
+      }
+      reconnectTip.value = reconnecting
+        ? '已恢复客服实时连接，当前工作台会自动续接最新会话变化。'
+        : '已连接客服实时消息。'
     },
     onConversation: async (payload) => {
-      await handleRealtimeConversation(currentToken, payload)
+      if (isCurrentConnection()) await handleRealtimeConversation(currentToken, payload)
     },
     onError: () => {
-      if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
+      if (!isCurrentConnection()) {
         return
       }
+      disposeRealtimeConnection()
+      clearTimeout(firstSnapshotTimer)
+      readFirstSnapshot(currentToken)
       realtimeState.value = 'offline'
       reconnectTip.value = '实时连接已中断，系统正在尝试自动续接...'
       reconnectTimer = setTimeout(() => {
         if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
           return
         }
-        connectRealtime(currentToken)
+        connectRealtime(currentToken, true)
       }, 3000)
     },
   })
@@ -1740,22 +1788,25 @@ const connectRealtime = (currentToken: number) => {
  * - 通过生命周期令牌拦截旧请求回流，避免离页后旧异步任务重新接管连接。
  */
 const enterWorkbench = async () => {
-  if (!workbenchComponentActive || globalThis.document?.visibilityState === 'hidden') {
+  if (!workbenchComponentActive || isWorkbenchResident.value || globalThis.document?.visibilityState === 'hidden') {
     return
   }
   lifecycleToken += 1
   const currentToken = lifecycleToken
   isWorkbenchResident.value = true
+  firstSnapshotStarted = false
+  snapshotStartedForAttempt = 0
   reconnectTip.value = '进入工作台后会自动续接当前客服会话。'
 
   try {
-    await loadAssignableUsers()
-    await refreshWorkbenchData(currentToken, { refreshPresence: true, refreshSelectedDetail: true })
-    if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
-      return
-    }
     startRefreshPolling(currentToken)
+    firstSnapshotTimer = setTimeout(() => readFirstSnapshot(currentToken), FIRST_SNAPSHOT_WAIT_MS)
     connectRealtime(currentToken)
+    if (!realtimeConnection) {
+      clearTimeout(firstSnapshotTimer)
+      readFirstSnapshot(currentToken)
+    }
+    await Promise.all([loadAssignableUsers(), loadPresence()])
   } catch (error) {
     if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
       return
@@ -1767,8 +1818,9 @@ const enterWorkbench = async () => {
 const leaveWorkbench = () => {
   isWorkbenchResident.value = false
   lifecycleToken += 1
-  pendingRefresh = false
+  pendingRefresh = null
   refreshInFlight = false
+  clearTimeout(firstSnapshotTimer)
   listRequest.cancel()
   detailRequest.cancel()
   presenceRequest.cancel()
@@ -1855,6 +1907,9 @@ watch([selectedQuickReplyKey, transferAssigneeUserId, activeDetailTab], () => {
 watch(
   currentUserId,
   (currentUserId, previousUserId) => {
+    assigneeCache = null
+    assigneeOptions.value = []
+    leaveWorkbench()
     if (
       currentUserId
       && currentUserId !== previousUserId
@@ -1862,13 +1917,9 @@ watch(
       && globalThis.document?.visibilityState !== 'hidden'
     ) {
       void enterWorkbench()
-      return
-    }
-
-    if (!currentUserId) {
-      leaveWorkbench()
     }
   },
+  { flush: 'sync' },
 )
 
 const handleVisibilityChange = () => {
@@ -1883,7 +1934,7 @@ const handleVisibilityChange = () => {
   void enterWorkbench()
 }
 
-onActivated(() => {
+const activateWorkbench = () => {
   syncRestockRouteQuery()
   if (workbenchComponentActive) {
     return
@@ -1893,7 +1944,10 @@ onActivated(() => {
   if (globalThis.document?.visibilityState !== 'hidden') {
     void enterWorkbench()
   }
-})
+}
+
+onMounted(activateWorkbench)
+onActivated(activateWorkbench)
 
 onDeactivated(() => {
   workbenchComponentActive = false

@@ -14,11 +14,10 @@
  */
 
 
-import { computed, onActivated, onBeforeUnmount, onDeactivated, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onActivated, onBeforeUnmount, onDeactivated, ref, watch } from 'vue'
 import type { EChartsOption } from 'echarts'
 
 import { Document, Money } from '@element-plus/icons-vue'
-import BaseEChart from '@/components/charts/BaseEChart.vue'
 import { getDashboardPieData, type DashboardPieDataResult, type DashboardPieSlice } from '@/api/modules/dashboard'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useThemeStore } from '@/store'
@@ -34,6 +33,7 @@ const props = defineProps<{
   rangeLabel: string
 }>()
 
+const BaseEChart = defineAsyncComponent(() => import('@/components/charts/BaseEChart.vue'))
 const themeStore = useThemeStore(pinia)
 const pieRequest = useStableRequest()
 const pieLoading = ref(false)
@@ -61,7 +61,7 @@ const pieRangeLabel = computed(() => {
 })
 
 const pieCards = computed(() => {
-  return [
+  const cards = [
     {
       key: 'productPie',
       title: '商品金额占比',
@@ -87,6 +87,11 @@ const pieCards = computed(() => {
       valueType: 'count' as PieValueType,
     },
   ] as const
+  return cards.map((card) => ({
+    ...card,
+    totalValue: getCardTotalValue(card.slices),
+    option: buildPieOption(card.slices, card.valueType),
+  }))
 })
 
 const formatAmount = (value: NumericLike): string => {
@@ -260,8 +265,8 @@ watch(
           <div class="text-xs font-semibold text-slate-600 dark:text-slate-300">
             {{
               card.valueType === 'count'
-                ? `${formatCount(getCardTotalValue(card.slices))} 单`
-                : `¥${formatAmount(getCardTotalValue(card.slices))}`
+                ? `${formatCount(card.totalValue)} 单`
+                : `¥${formatAmount(card.totalValue)}`
             }}
           </div>
         </div>
@@ -272,7 +277,7 @@ watch(
       <div v-else-if="card.slices.length" class="space-y-4">
         <div class="mx-auto flex w-full max-w-[240px] items-center justify-center">
           <div class="relative h-44 w-full max-w-[240px]">
-            <BaseEChart :option="buildPieOption(card.slices, card.valueType)" :min-height="176" />
+            <BaseEChart :option="card.option" :min-height="176" />
             <div class="pointer-events-none absolute inset-0 flex items-center justify-center text-center">
               <el-icon :size="32" class="text-slate-300/80 dark:text-slate-600/80">
                 <component :is="card.valueType === 'count' ? Document : Money" />

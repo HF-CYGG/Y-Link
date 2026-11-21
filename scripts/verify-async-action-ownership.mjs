@@ -443,16 +443,20 @@ try {
 }
 
 const progressAst=pageAst('src/views/o2o/O2oOrderQueryView.vue')
-const progressNames=['activeBusinessStatus','draftBusinessStatus','businessStatusSaving','businessStatusOwnerGeneration','businessStatusOperation','businessStatusPageActive','handleBusinessStatusChange','deactivatePageRuntime']
+const progressNames=['activeBusinessStatus','draftBusinessStatus','businessStatusSaving','businessStatusOwnerGeneration','businessStatusOperation','businessStatusPageActive','orderPoolReadSequence','handleBusinessStatusChange','deactivatePageRuntime']
 const progressWatcher=progressAst.statements.find((statement)=>ts.isExpressionStatement(statement)&&statement.getText(progressAst).startsWith('watch(')&&statement.getText(progressAst).includes('businessStatusOwnerGeneration'))
 assert.ok(progressWatcher,'必须执行真实归属watcher')
 const progressSource=declarations(progressAst,progressNames)+'\n'+progressWatcher.getText(progressAst)
 const order=(id,status='awaiting_shipment')=>({order:{id,preorderNo:id,businessStatus:status}})
 const progress=()=>{
   const activeOrderId=ref('A'),activeOrderDetail=ref(order('A')),authStore=reactive({currentUser:{id:'admin'}})
-  const confirms=[],posts=[],success=[],errors=[]
+  const confirms=[],posts=[],success=[],errors=[],canceledRequests=[],clearedTimers=[]
+  const listLoading=ref(true),detailLoading=ref(true),countdownClockActive=ref(true)
   const subject=execute(progressSource,{activeOrderId,activeOrderDetail,authStore,
-    pageRuntimeActive:true,document:{removeEventListener:()=>{}},handleVisibilityChange:()=>{},scheduleAutoRefresh:()=>{},stopSecondTick:()=>{},
+    pageRuntimeActive:true,document:{removeEventListener:()=>{}},handleVisibilityChange:()=>{},scheduleAutoRefresh:()=>{},
+    orderListRequest:{cancel:()=>canceledRequests.push('list')},orderDetailRequest:{cancel:()=>canceledRequests.push('detail')},
+    listLoading,detailLoading,countdownClockActive,statusBoundaryTimer:1,transientMarksTimer:2,
+    clearTimeout:(timer)=>clearedTimers.push(timer),
     getO2oOrderBusinessStatusMeta:(value)=>({label:value}),
     ElMessageBox:{confirm:()=>{const d=deferred();confirms.push(d);return d.promise}},
     updateO2oOrderBusinessStatus:(id,value)=>{const d=deferred();posts.push({id,value,...d});return d.promise},
@@ -460,7 +464,12 @@ const progress=()=>{
   },progressNames)
   return {subject,activeOrderId,activeOrderDetail,authStore,confirms,posts,success,errors,
     switch:(id)=>{activeOrderId.value=id??'';activeOrderDetail.value=id?order(id,'preparing'):null},
-    unmount:()=>subject.deactivatePageRuntime(),
+    unmount:()=>{
+      subject.deactivatePageRuntime()
+      assert.deepEqual(canceledRequests,['list','detail'])
+      assert.deepEqual(clearedTimers,[1,2])
+      assert.ok(!listLoading.value&&!detailLoading.value&&!countdownClockActive.value)
+    },
   }
 }
 // 生命周期变量由handler闭包读取，卸载测试必须执行真实deactivate中的归属失效语句。

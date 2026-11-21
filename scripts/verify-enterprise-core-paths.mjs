@@ -10,6 +10,7 @@ import path from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
+import { parse as parseSfc } from '@vue/compiler-sfc'
 
 /**
  * 核心路径自动化验证脚本：
@@ -474,6 +475,44 @@ const requestApi = async (
   }
 }
 
+const verifyDashboardOverview = (source, filename) => {
+  const { descriptor, errors } = parseSfc(source, { filename })
+  assert.deepEqual(errors, [], '工作台 Vue 文件无法解析')
+  assert.ok(descriptor.template?.ast && descriptor.scriptSetup, '工作台须包含模板和 setup')
+  const script = descriptor.scriptSetup.content
+  assert.match(
+    script,
+    /const overviewPending = computed\(\(\) => !stats\.value && \(loading\.value \|\| loadStatus\.value === 'idle'\)\)/,
+    '工作台须在初始或首次概览请求期间显示概览骨架',
+  )
+
+  const chartTags = new Set(['DashboardPieSection', 'TrendChartCard'])
+  const mountedCharts = new Set()
+  let overviewSkeleton = false
+  const visit = (nodes, conditionalParent = false, pendingParent = false) => {
+    for (const node of nodes) {
+      if (typeof node.tag !== 'string') continue
+      const conditional = conditionalParent || node.props.some(({ name }) => ['if', 'else-if', 'else', 'show', 'for'].includes(name))
+      const pending = pendingParent || node.props.some(({ name, exp }) => name === 'if' && exp?.content === 'overviewPending')
+      if (pending && node.props.some(({ name, arg, exp }) =>
+        name === 'bind' && arg?.content === 'key' && exp?.content.includes('stats-skeleton-'))) {
+        overviewSkeleton = true
+      }
+      if (chartTags.has(node.tag)) {
+        assert.ok(!conditional, `工作台 ${node.tag} 须独立挂载，不能等待概览数据`)
+        mountedCharts.add(node.tag)
+      }
+      visit(node.children, conditional, pending)
+    }
+  }
+  visit(descriptor.template.ast.children)
+  assert.ok(overviewSkeleton, '工作台概览卡须挂载 pending 骨架')
+  assert.deepEqual(mountedCharts, chartTags, '工作台首屏须挂载饼图和趋势图')
+  assert.match(script, /onDeactivated\(\(\) => \{[^}]*loading\.value = false/, '工作台失活取消请求后须解除加载状态')
+  assert.match(script, /const ensureDashboardReady = \(\) => \{\s*if \(!stats\.value && !loading\.value\) \{\s*void loadData\(\)/, '工作台重新进入时须恢复未完成的概览请求')
+  assert.match(script, /onActivated\(\(\) => \{\s*ensureDashboardReady\(\)/, '工作台缓存页恢复须触发概览重试守卫')
+}
+
 /**
  * 前端静态断言：
  * - 覆盖 keepAlive / preload / warmup / stable-request 四类实现；
@@ -537,7 +576,7 @@ const verifyFrontendStaticCoverage = () => {
   assert.match(stableRequestSource, /activeController\??\.abort\(\)/, '稳定请求封装未在新请求前取消旧请求')
   assert.match(stableRequestSource, /requestId !== latestRequestId/, '稳定请求封装缺少“仅最新请求生效”保护')
   assert.match(appLayoutSource, /route-loading-shell__heading/, '壳层级 fallback 未增强首屏可见占位')
-  assert.match(dashboardViewSource, /loading && !stats/, '工作台未提供页面级首屏加载态')
+  verifyDashboardOverview(dashboardViewSource, dashboardViewPath)
   assert.match(crudManagerSource, /executor: \(signal\) => config\.loadList\(\{ signal \}\)/, '基础资料通用 CRUD 未透传 signal')
   assert.match(dashboardViewSource, /executor: \(signal\) => getDashboardStats\(\{ signal \}\)/, '工作台未接入 signal 控制')
   assert.match(orderListComposableSource, /executor: \(signal\) => getOrderList\(buildQueryParams\(\), \{ signal \}\)/, '出库列表未接入 signal 控制')
