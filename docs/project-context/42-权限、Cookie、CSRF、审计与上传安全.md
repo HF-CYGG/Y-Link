@@ -4,7 +4,7 @@
 
 - `utils/safe-http-request.ts` 的 `timeoutMs` 是单次调用的总预算，覆盖 DNS、连接、响应体和全部重定向；持续小包或进入下一跳均不会续期。总时限、请求错误、响应 error/aborted/未完成 close、半包及超限统一只收口一次，并清理计时器和活动请求/响应；迟到 DNS 不再成功连接。
 - `Y_LINK_OUTBOUND_REDIRECT_POLICY=compat` 为默认值，保留 301/302/303/307/308 的现有 method/body 规则、HTTP 首跳及跨源敏感头剥离。验证码平台仍把总时限映射为 504，其余传输失败为 502。
-- `strict` 只允许跳回初始请求 Origin 或进入 `Y_LINK_OUTBOUND_REDIRECT_ALLOWED_ORIGINS` 中批准的完整 Origin，并始终拒绝 HTTPS→HTTP 降级。白名单默认 `[]`，JSON 数组中的项只接受完整 HTTP/HTTPS Origin；禁止 userinfo、通配符、业务路径、query/hash、内网与保留 IP，启动期即校验。拒绝跳转不会把原 POST 改成 GET 后重试。
+- 生产环境的验证码与通知建议使用 `strict`。`compat` 下若供应商返回 307 或 308，原请求体中的验证码、收件地址或配置参数会随跨源跳转发送；HTTPS 降级还可能让请求经过明文链路。`strict` 仅允许初始请求 Origin 与 `Y_LINK_OUTBOUND_REDIRECT_ALLOWED_ORIGINS` 中批准的完整 Origin，并拒绝 HTTPS 降级。白名单默认 `[]`，例如 `["https://notifications.example"]`。启动时校验配置，每一跳继续检查 URL 和 DNS 地址；跳转被拒绝后结束请求。
 - Origin 白名单不是 SSRF 豁免：初始请求与每次跳转仍执行 URL 检查、完整 DNS 地址集合安全校验、地址族过滤及响应大小限制。跨源连接不会恢复前面已剥离的敏感头。策略由共享 helper 收口，不增加业务 API 或设置页面。
 
 ## 适用范围

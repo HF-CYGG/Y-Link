@@ -5,7 +5,9 @@ import { promises as dns } from 'node:dns'
 import http, { type ClientRequest, type IncomingMessage, type IncomingHttpHeaders, type RequestOptions } from 'node:http'
 import https from 'node:https'
 import { isIP, type LookupFunction } from 'node:net'
-import { detectUnsafeHost } from './safe-network.js'
+import { detectUnsafeHost, isPublicNetworkAddress } from './safe-network.js'
+
+export { isPublicNetworkAddress } from './safe-network.js'
 
 const SENSITIVE_HEADERS = new Set(['authorization', 'cookie', 'proxy-authorization', 'x-api-key', 'api-key'])
 
@@ -22,47 +24,6 @@ export interface SafeHttpResponse {
   statusCode: number
   headers: IncomingHttpHeaders
   body: Buffer
-}
-
-function ipv4Octets(address: string) {
-  const values = address.split('.').map(Number)
-  return values.length === 4 && values.every((value) => Number.isInteger(value) && value >= 0 && value <= 255)
-    ? values
-    : null
-}
-
-export function isPublicNetworkAddress(address: string): boolean {
-  const normalized = address.trim().replace(/^\[(.*)\]$/, '$1').split('%')[0].toLowerCase()
-  if (!normalized || detectUnsafeHost(normalized)) return false
-  if (isIP(normalized) === 4) {
-    const octets = ipv4Octets(normalized)
-    if (!octets) return false
-    const [a, b, c] = octets
-    if (a >= 224 || a === 255) return false
-    if (a === 192 && b === 0 && c === 2) return false
-    if (a === 198 && b === 51 && c === 100) return false
-    if (a === 203 && b === 0 && c === 113) return false
-    return true
-  }
-  if (isIP(normalized) === 6) {
-    if (/^ff/i.test(normalized)) return false
-    if (/^2001:db8:/i.test(normalized)) return false
-    // IPv4-compatible IPv6，例如 ::127.0.0.1 或 ::7f00:1。
-    const compatible = /^::(?:ffff:)?(.+)$/.exec(normalized)
-    if (compatible?.[1]) {
-      const tail = compatible[1]
-      if (isIP(tail) === 4) return isPublicNetworkAddress(tail)
-      const groups = tail.split(':')
-      if (groups.length <= 2 && groups.every((item) => /^[0-9a-f]{1,4}$/i.test(item))) {
-        const padded = groups.map((item) => Number.parseInt(item, 16))
-        const high = padded.length === 1 ? 0 : padded[0]
-        const low = padded.at(-1) ?? 0
-        return isPublicNetworkAddress(`${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`)
-      }
-    }
-    return true
-  }
-  return false
 }
 
 export function assertSafeOutboundUrl(input: string | URL): URL {

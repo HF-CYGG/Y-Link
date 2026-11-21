@@ -17,11 +17,29 @@ import { type LookupFunction } from 'node:net'
 import { PassThrough } from 'node:stream'
 import { setImmediate as nextTurn } from 'node:timers/promises'
 import { test, type TestContext } from 'node:test'
-import { safeHttpRequest, readOutboundRedirectPolicy } from '../src/utils/safe-http-request.js'
+import { assertSafeOutboundUrl, isPublicNetworkAddress, safeHttpRequest, readOutboundRedirectPolicy } from '../src/utils/safe-http-request.js'
+import { detectUnsafeHost } from '../src/utils/safe-network.js'
 
 const ipv4: LookupAddress = { address: '8.8.8.8', family: 4 }
 const ipv6: LookupAddress = { address: '2606:4700:4700::1111', family: 6 }
 const privateV6: LookupAddress = { address: 'fd00::1', family: 6 }
+
+await test('URL 与 DNS 统一拒绝特殊用途地址的等价表示', () => {
+  for (const address of [
+    '64:ff9b::0808:0808', '0064:ff9b:0001::1', '0:0:0:0:ffff:0:0808:0808',
+    '2002::1', '2001:0000::1', '0100::1', '100:0:0:1::1', '2001:0db8::1',
+    '3fff::1', 'ff00::1', '0:0:0:0:0:ffff:c000:0201', '0:0:0:0:0:0:c000:0201',
+  ]) {
+    assert.equal(detectUnsafeHost(address), 'reserved', address)
+    assert.equal(isPublicNetworkAddress(address), false, address)
+    assert.throws(() => assertSafeOutboundUrl('https://[' + address + ']/'), /内网或保留地址/)
+  }
+  for (const address of [ipv6.address, '::ffff:8.8.8.8']) {
+    assert.equal(detectUnsafeHost(address), null, address)
+    assert.equal(isPublicNetworkAddress(address), true, address)
+    assert.doesNotThrow(() => assertSafeOutboundUrl('https://[' + address + ']/'))
+  }
+})
 
 async function captureLookup(t: TestContext, protocol = 'https:') {
   let lookup: LookupFunction | undefined
@@ -61,6 +79,8 @@ type LookupCase = {
 }
 
 const cases: LookupCase[] = [
+  { name: '双栈中的 IPv6 过渡地址拦截全部解析结果', addresses: [ipv4, { address: '0064:ff9b:0001::1', family: 6 }],
+    options: { all: true, family: 4 }, errorCode: 'EACCES' },
   { name: '双栈数组保持解析顺序', addresses: [ipv6, ipv4], options: { all: true }, expected: [ipv6, ipv4] },
   { name: '单 IPv4 也返回数组', addresses: [ipv4], options: { all: true }, expected: [ipv4] },
   { name: '单 IPv6 也返回数组', addresses: [ipv6], options: { all: true }, expected: [ipv6] },
