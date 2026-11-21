@@ -20,7 +20,7 @@ import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
 import { type EntityManager, type Repository } from 'typeorm'
 import { systemConfigService } from './system-config.service.js'
-import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
+import { assertSysAccountGovernancePermission, lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 import { assertXlsxArchiveWithinLimits } from '../utils/xlsx-archive-guard.js'
 
 const STAFF_DIRECTORY_IMPORT_ARCHIVE_LIMITS = { maxEntries: 2000, maxTotalUncompressedBytes: 40 * 1024 * 1024 }
@@ -772,7 +772,8 @@ export class ClientStaffDirectoryService {
     const status = this.normalizeStatus(input.status)
 
     return runInTransaction(async (manager) => {
-      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const lockedActor = await lockActiveSysAccountForBusiness(manager, actor.userId)
+      assertSysAccountGovernancePermission(lockedActor, 'system_configs:update')
       const departmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName, manager)
       await this.assertUniqueStaffNo(manager, staffNo)
       const repo = manager.getRepository(ClientStaffDirectory)
@@ -816,7 +817,8 @@ export class ClientStaffDirectoryService {
     const realName = this.normalizeRealName(input.realName)
 
     return runInTransaction(async (manager) => {
-      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const lockedActor = await lockActiveSysAccountForBusiness(manager, actor.userId)
+      assertSysAccountGovernancePermission(lockedActor, 'system_configs:update')
       const departmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName, manager)
       const repo = manager.getRepository(ClientStaffDirectory)
       const record = await this.findForUpdate(manager, id)
@@ -871,7 +873,8 @@ export class ClientStaffDirectoryService {
   ): Promise<{ record: ClientStaffDirectoryRecord }> {
     const status = this.normalizeStatus(input.status)
     return runInTransaction(async (manager) => {
-      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const lockedActor = await lockActiveSysAccountForBusiness(manager, actor.userId)
+      assertSysAccountGovernancePermission(lockedActor, 'system_configs:update')
       const repo = manager.getRepository(ClientStaffDirectory)
       const record = await this.findForUpdate(manager, id)
       if (!record) {
@@ -915,7 +918,8 @@ export class ClientStaffDirectoryService {
     }
 
     return runInTransaction(async (manager) => {
-      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const lockedActor = await lockActiveSysAccountForBusiness(manager, actor.userId)
+      assertSysAccountGovernancePermission(lockedActor, 'system_configs:update')
       const repo = manager.getRepository(ClientStaffDirectory)
       const recordsQuery = repo.createQueryBuilder('directory')
         .where('directory.id IN (:...ids)', { ids: normalizedIds })
@@ -1011,7 +1015,8 @@ export class ClientStaffDirectoryService {
   }> {
     const normalizedRows = this.normalizeImportRows(input)
     return runInTransaction(async (manager) => {
-      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const lockedActor = await lockActiveSysAccountForBusiness(manager, actor.userId)
+      assertSysAccountGovernancePermission(lockedActor, 'system_configs:update')
       const repo = manager.getRepository(ClientStaffDirectory)
       const resolvedRows = await this.resolveImportDepartmentRows(normalizedRows, manager)
       const existingMap = await this.loadExistingByStaffNos(manager, resolvedRows.map((item) => item.staffNo), true)

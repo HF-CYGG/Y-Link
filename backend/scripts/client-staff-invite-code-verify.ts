@@ -139,6 +139,7 @@ async function main() {
   const { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } = await import('../src/config/database-bootstrap.js')
   const { SystemConfig } = await import('../src/entities/system-config.entity.js')
   const { SysAuditLog } = await import('../src/entities/sys-audit-log.entity.js')
+  const { SysUser } = await import('../src/entities/sys-user.entity.js')
   const { ClientStaffDirectory } = await import('../src/entities/client-staff-directory.entity.js')
   const { ClientUser } = await import('../src/entities/client-user.entity.js')
   const { authService } = await import('../src/services/auth.service.js')
@@ -214,6 +215,36 @@ async function main() {
       freeze.release()
     }
     pass('教师统一邀请码读取接口要求登录和 system_configs:view，写闸冻结时仍可纯读')
+
+    const accountRepo = AppDataSource.getRepository(SysUser)
+    const beforeAuthChange = await accountRepo.findOneByOrFail({ id: adminAuth.userId })
+    const directoryRepo = AppDataSource.getRepository(ClientStaffDirectory)
+    const firstDirectory = await directoryRepo.findOneByOrFail({ staffNo: 'I1001' })
+    const add = { staffNo: 'I2099', realName: '权限复核夹具', departmentName: '信息中心', status: 'active' as const }
+    const addStaff = () => clientStaffDirectoryService.create(add, adminAuth)
+    // 原请求仍持有管理权限快照，事务锁后的账号已撤权。
+    await accountRepo.update(adminAuth.userId, { governancePermissionsJson: '[]' })
+    try {
+      for (const write of [
+        addStaff,
+        () => clientStaffDirectoryService.update(firstDirectory.id, { ...add, staffNo: firstDirectory.staffNo }, adminAuth),
+        () => clientStaffDirectoryService.updateStatus(firstDirectory.id, { status: 'inactive' }, adminAuth),
+        () => clientStaffDirectoryService.deleteBatch({ ids: [firstDirectory.id] }, adminAuth),
+        () => clientStaffDirectoryService.importRows({ rows: [add] }, adminAuth),
+        () => clientStaffInviteCodeService.setInviteCode('75318642', adminAuth),
+        () => clientStaffInviteCodeService.disableInviteCode(adminAuth),
+      ]) await expectBizError(write, '旧鉴权快照后的目录或邀请码写入', 403, '权限不足')
+      await accountRepo.update(adminAuth.userId, { role: 'operator', governancePermissionsJson: null })
+      await expectBizError(addStaff, '锁后才发现角色降级', 403, '权限不足')
+    } finally {
+      await accountRepo.update(adminAuth.userId, {
+        governancePermissionsJson: beforeAuthChange.governancePermissionsJson, role: beforeAuthChange.role,
+      })
+    }
+    assert.equal(await directoryRepo.countBy({ staffNo: add.staffNo }), 0)
+    assert.equal((await directoryRepo.findOneByOrFail({ id: firstDirectory.id })).realName, firstDirectory.realName)
+    assert.equal((await directoryRepo.findOneByOrFail({ id: firstDirectory.id })).status, 'active')
+    assert.deepEqual(await clientStaffInviteCodeService.getConfig(), initial)
 
     await expectBizError(
       () => clientAuthService.register({ accountType: 'personal', staffNo: 'I1001', inviteCode: '00001234', password: 'Teacher_Invite_Aa1!' }),

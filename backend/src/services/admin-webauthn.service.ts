@@ -16,7 +16,7 @@ import { hashSessionToken } from '../utils/session-token.js'
 import { isAdminSessionIdleExpired } from '../utils/admin-session-idle.js'
 import { verifyPassword } from '../utils/password.js'
 import type { RequestMeta } from '../utils/request-meta.js'
-import { isAccountCurrentlyDeactivated, lockSysAccountsInStableOrder } from './account-business-guard.service.js'
+import { assertSysAccountGovernancePermission, isAccountCurrentlyDeactivated, lockSysAccountsInStableOrder } from './account-business-guard.service.js'
 import { authService } from './auth.service.js'
 import { authSecurityService } from './auth-security.service.js'
 import { adminMfaService, type AdminMfaFactorInput } from './admin-mfa.service.js'
@@ -357,6 +357,7 @@ export class AdminWebauthnService {
       if (actorUser.status !== 'enabled' || isAccountCurrentlyDeactivated(actorUser) || actorUser.role !== 'admin') {
         throw new BizError('操作者账号无效', 403)
       }
+      assertSysAccountGovernancePermission(actorUser, 'users:reset_password')
       await this.assertSessionLiveUnderAccountLock(manager, actor)
       const actorSecret = await manager.getRepository(SysUser).createQueryBuilder('user')
         .addSelect('user.passwordHash').where('user.id = :id', { id: actorUser.id }).getOneOrFail()

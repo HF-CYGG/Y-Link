@@ -245,7 +245,15 @@ async function verifyPermanentDeletePasswordSharedBucket() {
 
 function verifySelfPasswordAndClientWriteGuards() {
   const userService = read('src/services/user.service.ts')
-  assert.match(userService, /normalizedPassword !== undefined && actor\.userId === id[\s\S]{0,80}请使用本人修改密码入口/, '编辑用户接口不得用于本人免旧密码改密')
+  const lockStart = userService.indexOf('  private async lockLifecycleActorAndTarget(')
+  const lockActorAndTarget = userService.slice(lockStart, userService.indexOf('\n  }\n', lockStart))
+  assert.match(lockActorAndTarget, /const accounts = await lockSysAccountGovernanceSnapshot\(manager\)\s+const lockedActor = this\.assertLifecycleActor\(accounts\.get\(String\(actor\.userId\)\), requiredPermission\)\s+const target = accounts\.get\(String\(targetId\)\)/, '本人判定必须使用同一治理锁内的操作人与目标账号')
+  assert.match(lockActorAndTarget, /isSelf: String\(lockedActor\.id\) === String\(target\.id\)/, '本人判定必须比较规范化的已锁实体 ID')
+
+  const updateStart = userService.indexOf('  async update(')
+  const updateUser = userService.slice(updateStart, userService.indexOf('\n  }\n', updateStart))
+  assert.match(updateUser, /const normalizedPassword = input\.password === undefined \? undefined : assertAdminPasswordPolicy\(input\.password\)/, '编辑用户必须识别是否提交密码')
+  assert.match(updateUser, /await runInTransaction\(async \(manager\) => \{\s*const \{ user, accounts, isSelf \} = await this\.lockLifecycleActorAndTarget\(manager, id, actor, 'users:update'\)[\s\S]{0,160}if \(normalizedPassword !== undefined && isSelf\) \{\s*throw new BizError\('请使用本人修改密码入口[^']*', 400\)/, '编辑用户接口必须在锁后拒绝本人免旧密码改密并返回 400')
 
   const feedbackRoutes = read('src/routes/client-feedback.routes.ts')
   const o2oRoutes = read('src/routes/o2o.routes.ts')
