@@ -217,7 +217,7 @@ async function main() {
     await seedOutboundOrder({
       createdAt: new Date(2026, 2, 5, 1, 0, 0),
       orderType: 'department',
-      departmentName: '行政部',
+      departmentName: ' 行政部 ',
       items: [{ productId: canvasBag.id, nameSnapshot: '帆布包（红色）', qty: 5, unitPrice: 20 }],
     })
     await seedOutboundOrder({
@@ -448,6 +448,14 @@ async function main() {
       departmentName: '行政部',
       items: [{ productId: mug.id, nameSnapshot: '马克杯', qty: 10, unitPrice: 30 }],
     })
+    for (const departmentName of ['  ', undefined]) {
+      await seedOutboundOrder({
+        createdAt: new Date(2026, 5, 1, 10, 0, 0),
+        orderType: 'department',
+        departmentName,
+        items: [{ productId: mug.id, nameSnapshot: '马克杯', qty: 10, unitPrice: 30 }],
+      })
+    }
     const departmentRank = await dashboardService.getAnalytics({ ...baseRange, topN: 20 })
     assert.deepEqual(
       departmentRank.topCustomers.map((item) => [item.customerName, item.totalAmount, item.orderCount]),
@@ -455,12 +463,12 @@ async function main() {
         ['行政部', '160.00', 2],
         ['教务处', '120.00', 1],
       ],
-      '部门榜只能包含部门单，散客金额更高也不得进入，且误填部门名的散客单不能计入部门金额',
+      '旧快照两端留空格仍合并同名部门，纯空格、NULL 与误填部门的散客单都不得入榜',
     )
     const topOneDepartment = await dashboardService.getAnalytics({ ...baseRange, topN: 5 })
     assert.equal(topOneDepartment.topCustomers[0]?.customerName, '行政部', '排除散客后应重新排序，榜首为金额最高的部门')
     const departmentDrilldown = await dashboardService.getCustomerRankDrilldown({ customerName: '行政部', ...baseRange }, actor)
-    assert.equal(departmentDrilldown.orderCount, 2, '部门下钻应与榜单口径一致，只含该部门的部门单')
+    assert.equal(departmentDrilldown.orderCount, 2, '部门下钻应包含同名旧快照，保持与榜单口径一致')
     assert.equal(departmentDrilldown.totalAmount, '160.00')
     assert.equal(
       departmentDrilldown.records.every((record) => record.orderType === 'department'),

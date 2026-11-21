@@ -52,6 +52,7 @@ import { orderSerialService } from './order-serial.service.js'
 import { orderMergeService, type OrderMergeMetadata } from './order-merge.service.js'
 import { systemConfigService, type O2oRuleConfigRecord } from './system-config.service.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
+import { invalidateBusinessDataAfterCommit } from '../middleware/business-data-cache.middleware.js'
 import { notificationService } from './notification.service.js'
 import { auditService } from './audit.service.js'
 import {
@@ -1422,13 +1423,12 @@ class O2oPreorderService {
       lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
     })
     if (!outboundOrder) {
-      return
+      return false
     }
     const outboundOrderId = String(outboundOrder.id)
     const metadata = (await orderMergeService.getMetadataMap([outboundOrderId], manager)).get(outboundOrderId)
     if (!metadata || metadata.role === 'standalone') {
-      await this.applyOutboundOrderComplianceFlags(manager, outboundOrder, payload)
-      return
+      return this.applyOutboundOrderComplianceFlags(manager, outboundOrder, payload)
     }
     if (!payload.allowMergeMemberMutation) {
       throw new BizError('合并成员禁止修改合规状态', 409)
@@ -1502,13 +1502,16 @@ class O2oPreorderService {
         ? preorders.some((preorder) => Boolean(preorder.isSystemApplied))
         : undefined,
     })
+    let changed = false
     for (const [affectedOrder, complianceFlags] of [...updates.entries()]
       .sort(([left], [right]) => String(left.id).localeCompare(String(right.id)))) {
-      await this.applyOutboundOrderComplianceFlags(manager, affectedOrder, {
+      const updated = await this.applyOutboundOrderComplianceFlags(manager, affectedOrder, {
         ...payload,
         ...complianceFlags,
       })
+      changed = changed || updated
     }
+    return changed
   }
 
   private async applyOutboundOrderComplianceFlags(
@@ -1547,7 +1550,7 @@ class O2oPreorderService {
       && beforeSnapshot.hasCustomerOrder === Boolean(outboundOrder.hasCustomerOrder)
       && beforeSnapshot.isSystemApplied === Boolean(outboundOrder.isSystemApplied)
     ) {
-      return
+      return false
     }
     outboundOrder.editVersion = beforeSnapshot.editVersion + 1
     await outboundOrderRepo.save(outboundOrder)
@@ -1575,6 +1578,7 @@ class O2oPreorderService {
       ipAddress: null,
       userAgent: null,
     })
+    return true
   }
 
   // 详细注释：客户端展示正式出库单号时，不能再直接复用 O2O 预订单号。
@@ -4218,7 +4222,7 @@ class O2oPreorderService {
   }
 
   async markCustomerOrderPrintedByClient(auth: ClientAuthContext, orderId: string) {
-    return runInTransaction(async (manager) => {
+    const { outboundChanged, ...result } = await runInTransaction(async (manager) => {
       await lockActiveClientAccountForBusiness(manager, auth.userId)
       await this.lockLinkedOutboundOrderGroupInManager(manager, orderId)
       const orderRepo = manager.getRepository(O2oPreorder)
@@ -4236,10 +4240,11 @@ class O2oPreorderService {
         throw new BizError('已取消订单不可标记已打印', 409)
       }
       const printedNow = !order.hasCustomerOrder
+      let outboundChanged = false
       if (printedNow) {
         order.hasCustomerOrder = true
         await orderRepo.save(order)
-        await this.syncOutboundOrderComplianceFlags(manager, String(order.id), {
+        outboundChanged = await this.syncOutboundOrderComplianceFlags(manager, String(order.id), {
           hasCustomerOrder: true,
           allowMergeMemberMutation: true,
           reason: '客户端打印正式出库单',
@@ -4253,8 +4258,11 @@ class O2oPreorderService {
       return {
         detail: await this.buildOrderDetail(order, manager, false),
         printedNow,
+        outboundChanged,
       }
     })
+    if (outboundChanged) invalidateBusinessDataAfterCommit()
+    return result
   }
 
   private async runKingdeeTransaction<T>(work: (manager: EntityManager) => Promise<T>): Promise<T> {

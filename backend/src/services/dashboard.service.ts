@@ -106,8 +106,8 @@ interface DashboardRecentActivity {
 
 const DATE_MS = 24 * 60 * 60 * 1000
 const ORDER_TYPE_VALUES = ['department', 'walkin'] as const
-// 部门榜分组键：去掉首尾空白后的部门名称，配合 applyDepartmentRankFilter 排除空值与散客单。
-const DEPARTMENT_RANK_LABEL_EXPR = `COALESCE(TRIM(order.customerDepartmentName), '')`
+// 保留历史快照首尾空格的合并口径，NULL 由 applyDepartmentRankFilter 的比较条件排除。
+const DEPARTMENT_RANK_LABEL_EXPR = 'TRIM(order.customerDepartmentName)'
 type DashboardOrderType = (typeof ORDER_TYPE_VALUES)[number]
 
 // 区间上限：统计区间最长一年，既覆盖“年末/学期报告”场景，也约束日历桶及查询参数数量。

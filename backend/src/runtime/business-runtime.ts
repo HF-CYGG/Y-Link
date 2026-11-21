@@ -571,7 +571,7 @@ export async function startBusinessRuntime(startup: { mode: 'normal' | 'cutover'
     mobileSessionService.startCleanupLoop()
     clientFeedbackService.startAttachmentCleanupWorker()
     // 商品缩略图存量回填只读写 uploads/products 文件、不触碰数据库，延迟到启动完成后低优先级执行。
-    configureProductThumbnailInvalidation(invalidateMallCatalogReadCache)
+    configureProductThumbnailInvalidation(() => invalidateMallCatalogReadCache({ affectsBusinessData: false }))
     scheduleProductThumbnailBackfill()
     if (databaseMaintenanceModeService.isReadOnly()) {
       logLine('DB MIGRATION', '数据库仍处于只读维护，后台写任务保持暂停', 'warn')
