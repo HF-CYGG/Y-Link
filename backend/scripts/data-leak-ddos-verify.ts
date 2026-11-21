@@ -31,8 +31,10 @@ import { Writable } from 'node:stream'
 import { EventEmitter } from 'node:events'
 import { fileURLToPath } from 'node:url'
 import type { AuthUserContext } from '../src/types/auth.js'
+import { buildMySqlTargetConnectionIssue } from '../src/utils/mysql-target-issue.js'
 import type { ClientAuthContext } from '../src/types/client-auth.js'
 import type { RequestMeta } from '../src/utils/request-meta.js'
+import { toSafeStartupErrorLog } from '../src/utils/safe-error-log.js'
 
 const scriptPath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(scriptPath), '..')
@@ -100,7 +102,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 // ---------------------------------------------------------------------------
 
 async function loadModules() {
-  const { AppDataSource, resolveMysqlSslOptions } = await import('../src/config/data-source.js')
+  const { AppDataSource, createDataSourceOptions, resolveMysqlSslOptions } = await import('../src/config/data-source.js')
   const bootstrap = await import('../src/config/database-bootstrap.js')
   const { env } = await import('../src/config/env.js')
   const { createApp } = await import('../src/app.js')
@@ -138,6 +140,7 @@ async function loadModules() {
   const { NotificationRule } = await import('../src/entities/notification-rule.entity.js')
   return {
     AppDataSource,
+    createDataSourceOptions,
     resolveMysqlSslOptions,
     bootstrap,
     env,
@@ -604,11 +607,49 @@ function verifyAuditMaskPrimitives() {
 function verifyMysqlSslOptions() {
   assert.deepEqual(m.resolveMysqlSslOptions('disabled', undefined), {})
   assert.deepEqual(m.resolveMysqlSslOptions('required', undefined), { ssl: { rejectUnauthorized: false } })
-  assert.deepEqual(m.resolveMysqlSslOptions('verify-full', undefined), { ssl: { rejectUnauthorized: true } })
+  assert.deepEqual(m.resolveMysqlSslOptions('verify-full', undefined), { ssl: { rejectUnauthorized: true, verifyIdentity: true } })
   const caFile = path.join(tempRoot, 'verify-ca.pem')
   fs.writeFileSync(caFile, 'VERIFY-CA-PEM')
-  assert.deepEqual(m.resolveMysqlSslOptions('verify-full', caFile), { ssl: { rejectUnauthorized: true, ca: 'VERIFY-CA-PEM' } })
+  assert.deepEqual(m.resolveMysqlSslOptions('verify-full', caFile), { ssl: { rejectUnauthorized: true, verifyIdentity: true, ca: 'VERIFY-CA-PEM' } })
   assert.throws(() => m.resolveMysqlSslOptions('verify-full', path.join(tempRoot, 'missing-ca.pem')), /DB_SSL_CA/)
+
+  const previous = { DB_TYPE: m.env.DB_TYPE, DB_HOST: m.env.DB_HOST, DB_SSL_MODE: m.env.DB_SSL_MODE, DB_SSL_CA: m.env.DB_SSL_CA }
+  const mysql = { DB_TYPE: 'mysql' as const, DB_HOST: 'mysql.verify.test', DB_PORT: 3306, DB_USER: 'fixture_user', DB_NAME: 'fixture_db' }
+  const ipAddress = '192.0.2.15'
+  try {
+    Object.assign(m.env, { DB_TYPE: 'mysql', DB_HOST: ipAddress, DB_SSL_MODE: 'verify-full', DB_SSL_CA: undefined })
+    assert.throws(() => m.createDataSourceOptions(), (error: unknown) => {
+      assert.match(String(toSafeStartupErrorLog(error).message), /证书匹配的 DNS 名称/)
+      return true
+    }, '普通启动按环境配置的主机阻断 IP 并保留可行动诊断')
+
+    const dnsOptions = m.createDataSourceOptions(mysql)
+    assert.equal(dnsOptions.type, 'mysql')
+    assert.equal(dnsOptions.host, mysql.DB_HOST, '覆盖目标使用自身 DNS 名称，即使环境地址是 IP')
+    assert.deepEqual(dnsOptions.ssl, { rejectUnauthorized: true, verifyIdentity: true })
+
+    Object.assign(m.env, { DB_HOST: mysql.DB_HOST })
+    for (const host of [ipAddress, '2001:db8::15', '[::ffff:192.0.2.15]', '[fe80::1%eth0]', '127.1', '0177.0.0.1', '0x7f000001', `${ipAddress}.`]) {
+      assert.throws(() => m.createDataSourceOptions({ ...mysql, DB_HOST: host }), (error: unknown) => {
+        const issue = buildMySqlTargetConnectionIssue(error, host)
+        assert.equal(issue.level, 'error')
+        assert.equal(issue.code, 'target_tls_dns_host_required')
+        assert.match(issue.message, /证书匹配的 DNS 名称/)
+        return true
+      }, '迁移目标预检在连接前拒绝 IP 字面量')
+    }
+    const sqliteOptions = m.createDataSourceOptions({ DB_TYPE: 'sqlite', SQLITE_DB_PATH: path.join(tempRoot, 'tls-options.sqlite') })
+    assert.equal(sqliteOptions.type, 'sqlite')
+    for (const mode of ['disabled', 'required'] as const) {
+      Object.assign(m.env, { DB_SSL_MODE: mode })
+      const options = m.createDataSourceOptions({ ...mysql, DB_HOST: ipAddress })
+      assert.equal(options.type, 'mysql')
+      assert.equal(options.host, ipAddress)
+      assert.deepEqual(options.ssl, mode === 'required' ? { rejectUnauthorized: false } : undefined)
+    }
+  } finally {
+    Object.assign(m.env, previous)
+  }
 }
 
 /** 第 9 项：新哈希参数、旧格式兼容与升级标记、参数区间校验，以及三种情况的耗时一致。 */

@@ -14,6 +14,15 @@ export interface MySqlTargetIssue {
   message: string
 }
 
+const MYSQL_TLS_DNS_HOST_REQUIRED_MESSAGE = 'MySQL 使用 DB_SSL_MODE=verify-full 时，请将数据库主机设置为与服务端证书匹配的 DNS 名称。'
+
+export class MySqlTlsDnsHostRequiredError extends Error {
+  constructor() {
+    super(MYSQL_TLS_DNS_HOST_REQUIRED_MESSAGE)
+    this.name = 'MySqlTlsDnsHostRequiredError'
+  }
+}
+
 type MySqlTargetErrorKind =
   | 'authentication_failed'
   | 'database_missing'
@@ -276,6 +285,9 @@ function buildIssueForKind(kind: MySqlTargetErrorKind, host?: string): MySqlTarg
 }
 
 export function buildMySqlTargetConnectionIssue(error: unknown, host?: string): MySqlTargetIssue {
+  if (error instanceof MySqlTlsDnsHostRequiredError) {
+    return { level: 'error', code: 'target_tls_dns_host_required', message: MYSQL_TLS_DNS_HOST_REQUIRED_MESSAGE }
+  }
   return buildIssueForKind(classifyMySqlTargetError(error), host)
 }
 

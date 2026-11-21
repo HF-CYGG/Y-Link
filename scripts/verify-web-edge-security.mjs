@@ -181,4 +181,13 @@ for (const file of ['compose.yml', 'compose.mysql.yml', 'compose.cloud.yml']) {
   assert.match(backend, /PERMANENT_DELETE_PASSWORD:-\}/)
   assert.match(source, /ipv4_address: \$\{Y_LINK_FRONTEND_PROXY_IP/)
 }
+const oneboxCompose = readSource('compose.onebox.yml')
+for (const file of ['compose.yml', 'compose.mysql.yml', 'compose.cloud.yml', 'compose.onebox.yml']) {
+  const source = readSource(file)
+  const service = file === 'compose.onebox.yml' ? oneboxCompose : source.slice(source.indexOf('  backend:'), source.indexOf('  frontend:'))
+  for (const [key, fallback] of [['DB_SSL_MODE', 'disabled'], ['DB_SSL_CA', ''], ['DB_AUTO_MIGRATE', 'false']]) {
+    assert.match(service, new RegExp(`^      (?:- )?${key}[:=]\\s*\\$\\{${key}:-${fallback}\\}$`, 'm'),
+      `${file} 后端必须透传 ${key} 并保留兼容默认值`)
+  }
+}
 console.log('[web-edge-security] 代理头覆盖、HTML安全头、端口静态契约、边缘限流/连接/请求体上限、代理路径改写与静态缓存/压缩策略通过')

@@ -26,6 +26,9 @@ services:
       DB_TYPE: sqlite
       SQLITE_DB_PATH: /app/data/y-link.sqlite
       DB_SYNC: "false"
+      DB_SSL_MODE: ${DB_SSL_MODE:-disabled}
+      DB_SSL_CA: ${DB_SSL_CA:-}
+      DB_AUTO_MIGRATE: ${DB_AUTO_MIGRATE:-false}
       Y_LINK_DATA_DIR: /app/data
       Y_LINK_ONEBOX_NON_ROOT: ${Y_LINK_ONEBOX_NON_ROOT:-false}
       Y_LINK_AUTOMATIC_DB_MIGRATION_ENABLED: ${Y_LINK_AUTOMATIC_DB_MIGRATION_ENABLED:-true}

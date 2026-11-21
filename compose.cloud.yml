@@ -30,6 +30,8 @@ services:
       - DB_PASSWORD=${DB_PASSWORD:-}
       - DB_NAME=${DB_NAME:-y_link}
       - DB_SYNC=${DB_SYNC:-false}
+      - DB_SSL_MODE=${DB_SSL_MODE:-disabled}
+      - DB_SSL_CA=${DB_SSL_CA:-}
       - DB_AUTO_MIGRATE=${DB_AUTO_MIGRATE:-false}
       - INIT_ADMIN_USERNAME=${INIT_ADMIN_USERNAME:-admin}
       - INIT_ADMIN_DISPLAY_NAME=${INIT_ADMIN_DISPLAY_NAME:-系统管理员}
