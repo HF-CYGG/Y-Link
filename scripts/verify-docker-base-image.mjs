@@ -57,8 +57,30 @@ const mysqlSource = readFileSync('backend/Dockerfile.mysql', 'utf8')
 assert.ok(mysqlSource.includes('npm ci --ignore-scripts'), 'MySQL-only构建显式跳过不会保留的SQLite安装hook')
 assert.ok(mysqlSource.includes('npm uninstall sqlite3 --ignore-scripts') && mysqlSource.includes('test ! -e node_modules/sqlite3'), 'MySQL-only卸载不得重新构建SQLite，最终必须不存在')
 const webSource = readFileSync('Dockerfile', 'utf8')
-const webRuntime = webSource.split('FROM nginx:1.30.6-alpine AS runtime')[1]
-assert.ok(webRuntime, '独立前端 Nginx 必须固定批准的补丁版本')
+const webRuntime = webSource.split('FROM nginx:1.30.6-alpine AS alpine-native-base')[1]?.split('FROM alpine-native-base AS alpine-native-build')[0]
+assert.ok(webRuntime, '独立前端基座必须固定批准的Nginx补丁版本')
+assert.ok(webSource.includes('FROM alpine-native-base AS runtime'), '最终层必须继承同一已约束的原基座')
+const alpineCandidate = webSource.split('FROM alpine-native-base AS alpine-native-build')[1]?.split('FROM alpine-native-base AS runtime')[0]
+const webOrdinaryRuntime = webSource.split('FROM alpine-native-base AS runtime')[1]
+assert.ok(alpineCandidate?.includes('COPY docker/alpine-native-security /opt/ylink-alpine-security'), '候选stage必须消费固定完整生产/安装契约')
+assert.ok(alpineCandidate.includes('python3 /opt/ylink-alpine-security/build.py --candidate-only'), '候选构建必须显式选择未验收模式')
+assert.doesNotMatch(webOrdinaryRuntime, /--from=alpine-native-build|\/tmp\/ylink-alpine-security\/install\.sh/, '普通前端保留v7基线，不能消费未验收APK')
+for (const file of ['backend/Dockerfile', 'backend/Dockerfile.mysql', 'Dockerfile.onebox']) {
+  const source = readFileSync(file, 'utf8'), prefix = file === 'Dockerfile.onebox' ? 'backend/' : ''
+  const baseline = source.split(/ AS native-security-build\r?\n/)[1]?.split(/^FROM /m)[0]
+  const runtime = source.split(/ AS runtime\r?\n/)[1]
+  assert.ok(baseline?.includes(`COPY ${prefix}native-security/baseline-v7 /ylink-native-security`), `${file}普通链只构建冻结v7资产`)
+  assert.ok(runtime?.includes('COPY --from=native-security-build /native-out /tmp/ylink-native-security'), `${file}保留原已接受的libblkid/zlib闭包`)
+  assert.ok(runtime.includes(`${prefix}native-security/baseline-v7/install-backports.mjs ${prefix}native-security/baseline-v7/source-pins.json`), `${file}原安装器及pins不能与新候选混用`)
+  assert.doesNotMatch(runtime, /--from=(?:native-security-candidate|glibc-security-build|package-security-candidate|gcc-security-candidate|node-security-candidate)/, `${file}普通runtime不得引用本批候选`)
+  for (const target of ['native-security-candidate', 'glibc-security-build', 'package-security-candidate', 'gcc-security-candidate', 'node-security-candidate']) assert.ok(new RegExp(' AS ' + target + '\\r?$', 'm').test(source), `${file}保留独立候选target：${target}`)
+}
+const alpineInstall = readFileSync('docker/alpine-native-security/install.sh', 'utf8')
+assert.ok(alpineInstall.includes('--keys-dir /tmp/ylink-alpine-security/keys'), '只能使用本批独立keys-dir')
+assert.ok(alpineInstall.includes('--no-network') && alpineInstall.includes('--simulate'), '安装禁止网络且必须核对模拟事务')
+assert.ok(alpineInstall.includes('sh ./verify-candidate-policy.sh'), '候选状态必须由producer机器契约严格消费')
+assert.ok(alpineInstall.includes('verify_payload after.tsv') && alpineInstall.includes('cmp -s after-packages.tsv current-packages.tsv'), '必须比较完整载荷与全运行包库存')
+assert.doesNotMatch(alpineInstall, /--allow-untrusted|--force-|--no-check-certificate|cp[^\n]*\/etc\/apk\/keys/)
 assert.ok(webRuntime.includes("grep -Eq '^3\\.24\\.' /etc/alpine-release"), 'Web运行包定向修补仅使用已核实的Alpine3.24分支')
 assert.ok(webRuntime.includes('apk info -e zlib libxslt >/dev/null'), '两个目标运行库必须原已安装，不能新增运行包')
 assert.ok(webRuntime.includes('apk add --no-cache --upgrade zlib=1.4-r0 libxslt=1.1.43-r4'), 'Web仅固定同源已核实的zlib/libxslt安全补丁版本')
