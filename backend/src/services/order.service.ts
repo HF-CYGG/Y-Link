@@ -269,7 +269,6 @@ interface PreparedSubmitItemsResult {
   totalQty: number
   totalAmount: number
   itemEntities: BizOutboundOrderItem[]
-  latestProductPriceMap: Map<string, string>
 }
 
 interface NormalizedSubmitOrderItem {
@@ -283,7 +282,6 @@ interface NormalizedSubmitOrderItem {
 interface ResolvedSubmitOrderItem extends Omit<NormalizedSubmitOrderItem, 'skuId'> {
   skuId: string
   sku: BaseProductSku
-  shouldUpdateProductDefaultPrice: boolean
 }
 
 const normalizeEntityId = (value: string | number): string => String(value).trim()
@@ -1218,14 +1216,6 @@ export class OrderService {
             buildRemark: (delta) => `创建手工出库单 ${savedOrder.businessNo}，扣减库存 ${delta.deltaQty}`,
           })
 
-          products.forEach((product) => {
-            const latestPrice = preparedItems.latestProductPriceMap.get(String(product.id))
-            if (latestPrice) {
-              product.defaultPrice = latestPrice
-            }
-          })
-          await productRepo.save(products)
-
           await auditService.record(
             {
               actionType: 'order.create',
@@ -1389,11 +1379,6 @@ export class OrderService {
     const skus = await skuQuery.getMany()
     const skuMap = new Map(skus.map((sku) => [String(sku.id), sku]))
     const activeSkusByProduct = new Map<string, BaseProductSku[]>()
-    const currentSkuCountByProduct = new Map<string, number>()
-    skus.filter((sku) => this.isDatabaseFlagEnabled(sku.isCurrent)).forEach((sku) => {
-      const productId = String(sku.productId)
-      currentSkuCountByProduct.set(productId, (currentSkuCountByProduct.get(productId) ?? 0) + 1)
-    })
     skus.filter((sku) => this.isCurrentActiveSku(sku)).forEach((sku) => {
       const productId = String(sku.productId)
       const current = activeSkusByProduct.get(productId) ?? []
@@ -1441,8 +1426,6 @@ export class OrderService {
         ...item,
         skuId: resolvedSkuId,
         sku,
-        // 商品主价只保留单 current SKU 的历史回写；多 SKU 人工价不能因明细顺序污染主价。
-        shouldUpdateProductDefaultPrice: currentSkuCountByProduct.get(item.productId) === 1,
       }
     })
   }
@@ -1497,7 +1480,6 @@ export class OrderService {
     let totalQty = 0
     let totalAmount = 0
     const itemEntities: BizOutboundOrderItem[] = []
-    const latestProductPriceMap = new Map<string, string>()
 
     inputItems.forEach((item, index) => {
       const normalizedProductId = String(item.productId).trim()
@@ -1509,9 +1491,6 @@ export class OrderService {
       const lineAmount = Number((item.qty * item.unitPrice).toFixed(2))
       totalQty += item.qty
       totalAmount += lineAmount
-      if (item.shouldUpdateProductDefaultPrice) {
-        latestProductPriceMap.set(normalizedProductId, item.unitPrice.toFixed(2))
-      }
 
       itemEntities.push(
         itemRepo.create({
@@ -1533,7 +1512,6 @@ export class OrderService {
       totalQty,
       totalAmount,
       itemEntities,
-      latestProductPriceMap,
     }
   }
 

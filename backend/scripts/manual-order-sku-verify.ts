@@ -3,7 +3,7 @@
  * 文件职责：在隔离 SQLite 中验证手工出库的 SKU 校验、快照、历史兼容与库存扣减流水。
  * 实现逻辑：
  * - 创建单规格、多规格商品，覆盖自动选择、强制选择、归属/启停/当前版本校验；
- * - 以人工修改价提交同商品不同 SKU，核对单 SKU 主价兼容与多 current SKU 主价隔离；
+ * - 以人工修改价提交单 SKU 与多 SKU 商品，核对商品和规格默认价均保持稳定；
  * - 模拟存量 SQLite 缺少 SKU 外键，确认安全复制升级不丢明细并补齐 ON DELETE SET NULL；
  * - 将一张隔离单据改造成历史无 SKU 数据，确认仍可读取，并校验打印/PDF 共用聚合逻辑。
  */
@@ -339,9 +339,11 @@ async function main() {
     const singleProductAfterSubmit = await AppDataSource.getRepository(BaseProduct).findOneByOrFail({ id: singleProduct.id })
     assert.equal(
       Number(singleProductAfterSubmit.defaultPrice).toFixed(2),
-      '12.34',
-      '单一 current SKU 商品必须保留手工单价回写商品主价的既有兼容行为',
+      '11.00',
+      '单一 current SKU 商品主价不能受手工出库价影响',
     )
+    const singleSkuAfterSubmit = await AppDataSource.getRepository(BaseProductSku).findOneByOrFail({ id: singleSku.id })
+    assert.equal(Number(singleSkuAfterSubmit.defaultPrice).toFixed(2), '11.00')
 
     const invalidPriceIdempotencyKey = `manual-invalid-price-${verifySeed}`
     const invalidPriceProductBefore = await AppDataSource.getRepository(BaseProduct).findOneByOrFail({ id: singleProduct.id })
