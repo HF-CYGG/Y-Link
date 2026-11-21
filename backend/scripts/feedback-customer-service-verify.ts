@@ -308,11 +308,13 @@ function createSseClient(url: string, scene: string, token?: string) {
 async function main() {
   const { createApp } = await import('../src/app.js')
   const { AppDataSource } = await import('../src/config/data-source.js')
+  const { ClientFeedbackMessage } = await import('../src/entities/client-feedback-message.entity.js')
   const { ClientUser } = await import('../src/entities/client-user.entity.js')
   const { ClientUserSession } = await import('../src/entities/client-user-session.entity.js')
   const { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } = await import('../src/config/database-bootstrap.js')
   const { authService } = await import('../src/services/auth.service.js')
   const { clientAuthService } = await import('../src/services/client-auth.service.js')
+  const { clientFeedbackService } = await import('../src/services/client-feedback.service.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
   const { hashPassword } = await import('../src/utils/password.js')
   const { hashSessionToken } = await import('../src/utils/session-token.js')
@@ -1106,6 +1108,72 @@ async function main() {
     })
     assert.equal(crossConversationReply.status, 404, '其他会话已绑定的附件仍不能引用')
     await crossConversationReply.text()
+
+    // 在摘要读取后提交首条消息，再于消息快照和写锁之间提交两条新消息和读取方的回复。
+    type DetailBody = {
+      data: {
+        conversation: { unreadForClientCount: number; unreadForServiceCount: number }
+        messages: Array<{ content: string; clientReadAt: string | null; serviceReadAt: string | null }>
+      }
+    }
+    const reader = clientFeedbackService as unknown as {
+      loadConversationMessages: (manager: unknown, id: string, lastVisibleId?: string) => Promise<unknown>
+    }
+    const loadMessages = reader.loadConversationMessages
+    const postMessage = (realm: string, token: string, content: string) =>
+      expectJsonOk(() => fetch(baseUrl + '/api/' + realm + '/conversations/' + secondId + '/messages', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+        signal: AbortSignal.timeout(5_000),
+      }), '提交竞态中的会话消息 ' + content)
+    const messages = AppDataSource.getRepository(ClientFeedbackMessage)
+    for (const [readerRealm, readerToken, writerRealm, writerToken, counter, readAt, eventType, stream] of [
+      ['client-feedback', clientToken, 'customer-service', operatorToken, 'unreadForClientCount', 'clientReadAt', 'conversation_read_by_client', serviceStream],
+      ['customer-service', operatorToken, 'client-feedback', clientToken, 'unreadForServiceCount', 'serviceReadAt', 'conversation_read_by_service', clientStream],
+    ] as const) {
+      const loadDetail = () => expectJsonOk<DetailBody>(() => fetch(
+        baseUrl + '/api/' + readerRealm + '/conversations/' + secondId,
+        { headers: { Authorization: 'Bearer ' + readerToken } },
+      ), '读取竞态中的会话详情')
+      assert.equal((await loadDetail()).conversation[counter], 0, '竞态开始前读取方没有未读消息')
+      const first = '读取消息快照之前提交的消息 ' + writerRealm
+      const beforeReply = '读取方回复前的未显示消息 ' + writerRealm
+      const reply = '读取方从另一标签回复 ' + readerRealm
+      const afterReply = '读取方回复后的未显示消息 ' + writerRealm
+      let inserted = false
+      reader.loadConversationMessages = async function (manager, id, lastVisibleId) {
+        if (id === secondId && lastVisibleId === undefined && !inserted) {
+          inserted = true
+          await postMessage(writerRealm, writerToken, first)
+          const snapshot = await loadMessages.call(this, manager, id, lastVisibleId)
+          await postMessage(writerRealm, writerToken, beforeReply)
+          await postMessage(readerRealm, readerToken, reply)
+          await postMessage(writerRealm, writerToken, afterReply)
+          return snapshot
+        }
+        return loadMessages.call(this, manager, id, lastVisibleId)
+      }
+      try {
+        const detail = await loadDetail()
+        assert.equal(inserted, true)
+        assert.ok(detail.messages.find((message) => message.content === first)?.[readAt], '本次已经显示的新增消息必须标为已读')
+        assert.equal(detail.conversation[counter], 1, '仅回复之后尚未显示的对方消息保留在未读计数')
+        for (const content of [beforeReply, reply, afterReply]) {
+          assert.ok(!detail.messages.some((message) => message.content === content), '详情保留本次实际显示的消息范围')
+        }
+        for (const content of [beforeReply, afterReply]) {
+          const unread = await messages.findOneByOrFail({ conversationId: secondId, content })
+          assert.equal(unread[readAt], null, '未显示的对方消息不写入已读时间')
+        }
+      } finally {
+        reader.loadConversationMessages = loadMessages
+      }
+      await stream.waitForEvent<{ eventType: string; conversationId: string; conversation?: { lastMessagePreview?: string } }>(
+        'conversation', (event) => event.eventType === eventType && event.conversationId === secondId && event.conversation?.lastMessagePreview === afterReply,
+      )
+    }
+    pass('客户端与客服详情并发新消息的已读计数与事件通过')
 
     clientStream.close()
     serviceStream.close()

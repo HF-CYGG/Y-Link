@@ -13,7 +13,7 @@
 import { randomInt } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import { And, In, IsNull, LessThanOrEqual, MoreThan, type EntityManager } from 'typeorm'
+import { In, IsNull, LessThanOrEqual, MoreThan, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { initializeDatabaseInfrastructure } from '../database/database-strategy.js'
@@ -101,6 +101,10 @@ interface AttachmentCleanupCandidate {
 
 const ATTACHMENT_CLEANUP_TRANSACTION_SIZE = 64
 const ATTACHMENT_CLEANUP_READ_SIZE = 500
+const FEEDBACK_SENDERS_BY_SIDE: Record<'client' | 'service', readonly ClientFeedbackSenderType[]> = {
+  client: ['client'],
+  service: ['service', 'system'],
+}
 
 export const CLIENT_FEEDBACK_SUBJECT_MAX_LENGTH = 128
 export const CLIENT_FEEDBACK_CATEGORY_MAX_LENGTH = 32
@@ -500,11 +504,16 @@ class ClientFeedbackService {
     }
     // 上传频控已由路由在接收文件前通过 consumeAttachmentUploadRate 计次，这里不重复消耗额度。
     await this.assertFeedbackAttachmentDiskCapacity()
+    const filePath = path.resolve(ensureUploadCategoryDir('client-feedback'), input.storageName)
+    try {
+      if (!(await fs.promises.stat(filePath)).isFile()) throw new Error('not-file')
+    } catch {
+      throw new BizError('反馈附件文件不存在，请重新上传', 404)
+    }
     return this.runAttachmentCoordinatedTransaction(async (manager) => {
-      const filePath = path.resolve(ensureUploadCategoryDir('client-feedback'), input.storageName)
+      // 回收也持有该协调锁，重新确认预检的路径没有在等待期间被清理。
       try {
-        const stats = await fs.promises.stat(filePath)
-        if (!stats.isFile()) throw new Error('not-file')
+        await fs.promises.access(filePath, fs.constants.F_OK)
       } catch {
         throw new BizError('反馈附件文件不存在，请重新上传', 404)
       }
@@ -681,15 +690,25 @@ class ClientFeedbackService {
       for (const match of text.matchAll(/\/attachments\/(\d+)/g)) record(draftNamesById.get(match[1]!), evidence)
     }
 
+    // 历史异常行可能引用未绑定草稿。数据库先筛可能含候选文件或附件 ID 的消息；
+    // 带转义的 JSON 交回旧检查，避免漏掉 Unicode、转义斜杠等兼容格式。
+    const identifiers = [...storageNames.keys(), ...draftNamesById.keys()]
+    // 大批次限制 SQL 谓词数量，回退到识别潜在 UUID、路由 ID 与历史字段的粗筛。
+    const needles = identifiers.length <= 128 ? identifiers : ['-', '/attachments/', 'attachmentid']
+    const conditions = needles.map((_, index) => 'INSTR(LOWER(message.attachmentJson), :needle' + index + ') > 0')
+    const parameters = Object.fromEntries(needles.map((needle, index) => ['needle' + index, needle]))
+    conditions.push('INSTR(message.attachmentJson, :escape) > 0')
+
     // 消息只追加。新的合法引用只能绑定有效草稿或引用同会话已绑定附件，最终会二次校验登记行。
     let after = '0'
     while (true) {
-      const page = await repo.find({
-        select: ['id', 'attachmentJson'],
-        where: { id: And(MoreThan(after), LessThanOrEqual(String(lastMessage.id))) },
-        order: { id: 'ASC' },
-        take: ATTACHMENT_CLEANUP_READ_SIZE,
-      })
+      const page = await repo.createQueryBuilder('message')
+        .select(['message.id', 'message.attachmentJson'])
+        .where('message.id > :after AND message.id <= :lastId', { after, lastId: String(lastMessage.id) })
+        .andWhere('(' + conditions.join(' OR ') + ')', { ...parameters, escape: '\\' })
+        .orderBy('message.id', 'ASC')
+        .take(ATTACHMENT_CLEANUP_READ_SIZE)
+        .getMany()
       for (const { attachmentJson } of page) {
         if (!attachmentJson || attachmentJson === '[]') continue
         const items = this.parseJsonArray<unknown>(attachmentJson, [])
@@ -1472,45 +1491,52 @@ class ClientFeedbackService {
     return message
   }
 
-  private async markConversationReadForClient(manager: EntityManager, conversation: ClientFeedbackConversation) {
-    if (conversation.unreadForClientCount <= 0) {
-      return false
+  private countVisibleUnreadMessages(messages: ClientFeedbackMessage[], scope: 'client' | 'service'): number {
+    const readAt = scope === 'client' ? 'clientReadAt' : 'serviceReadAt'
+    let unread = 0
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]!
+      // 自己发送消息已清掉此前的未读计数，即使历史消息的已读时间仍为空。
+      if (FEEDBACK_SENDERS_BY_SIDE[scope].includes(message.senderType)) break
+      if (!message[readAt]) unread += 1
     }
-    const now = new Date()
-    await manager
-      .createQueryBuilder()
-      .update(ClientFeedbackMessage)
-      .set({ clientReadAt: now })
-      .where('conversation_id = :conversationId', { conversationId: conversation.id })
-      .andWhere('sender_type IN (:...senderTypes)', { senderTypes: ['service', 'system'] })
-      .andWhere('client_read_at IS NULL')
-      .execute()
-    conversation.unreadForClientCount = 0
+    return unread
+  }
+
+  private async markConversationRead(
+    manager: EntityManager,
+    conversation: ClientFeedbackConversation,
+    scope: 'client' | 'service',
+    lastVisibleId: string,
+  ) {
+    const client = scope === 'client'
+    const unreadCount = client ? 'unreadForClientCount' : 'unreadForServiceCount'
+    if (conversation[unreadCount] <= 0) return false
+    const readAt = client ? 'clientReadAt' : 'serviceReadAt'
+    const senderTypes = FEEDBACK_SENDERS_BY_SIDE[client ? 'service' : 'client']
+    const filter = {
+      conversationId: conversation.id,
+      senderType: In(senderTypes),
+      [readAt]: IsNull(),
+      ...(client ? { internalOnly: false } : {}),
+    }
+    const messages = manager.getRepository(ClientFeedbackMessage)
+    const { affected } = await messages.update({ ...filter, id: LessThanOrEqual(lastVisibleId) }, { [readAt]: new Date() })
+    if (!affected) return false
+    // 会话锁串行化追加与已读。并发的本方回复已清零此前的未读计数，其前面的旧消息不能被计回。
+    const latestOwnReply = await messages.findOne({
+      select: { id: true },
+      where: { conversationId: conversation.id, senderType: In(FEEDBACK_SENDERS_BY_SIDE[scope]), id: MoreThan(lastVisibleId) },
+      order: { id: 'DESC' },
+    })
+    conversation[unreadCount] = await messages.countBy({ ...filter, id: MoreThan(latestOwnReply?.id ?? lastVisibleId) })
     await manager.getRepository(ClientFeedbackConversation).save(conversation)
     return true
   }
 
-  private async markConversationReadForService(manager: EntityManager, conversation: ClientFeedbackConversation) {
-    if (conversation.unreadForServiceCount <= 0) {
-      return false
-    }
-    const now = new Date()
-    await manager
-      .createQueryBuilder()
-      .update(ClientFeedbackMessage)
-      .set({ serviceReadAt: now })
-      .where('conversation_id = :conversationId', { conversationId: conversation.id })
-      .andWhere('sender_type = :senderType', { senderType: 'client' })
-      .andWhere('service_read_at IS NULL')
-      .execute()
-    conversation.unreadForServiceCount = 0
-    await manager.getRepository(ClientFeedbackConversation).save(conversation)
-    return true
-  }
-
-  private async loadConversationMessages(manager: EntityManager, conversationId: string) {
+  private async loadConversationMessages(manager: EntityManager, conversationId: string, lastVisibleId?: string) {
     return manager.getRepository(ClientFeedbackMessage).find({
-      where: { conversationId },
+      where: { conversationId, ...(lastVisibleId ? { id: LessThanOrEqual(lastVisibleId) } : {}) },
       order: {
         id: 'ASC',
       },
@@ -1919,35 +1945,33 @@ class ClientFeedbackService {
   }
 
   async getMyConversationDetail(clientAuth: ClientAuthContext, id: string): Promise<ClientFeedbackConversationDetail> {
-    if (databaseMaintenanceModeService.isReadOnly()) {
-      const conversation = await this.requireOwnedConversation(id, clientAuth, AppDataSource.manager)
-      const messages = (await this.loadConversationMessages(AppDataSource.manager, conversation.id))
-        .filter((message) => !message.internalOnly)
-      return {
-        conversation: this.buildConversationSummary(conversation),
-        messages: messages.map((message) => this.buildMessageView(message, { scope: 'client', userId: clientAuth.userId })),
+    let conversation = await this.requireOwnedConversation(id, clientAuth)
+    const loadVisibleMessages = async (lastVisibleId?: string) => (await this.loadConversationMessages(AppDataSource.manager, conversation.id, lastVisibleId))
+      .filter((message) => !message.internalOnly)
+    let messages = await loadVisibleMessages()
+    const lastVisibleId = messages.at(-1)?.id
+    const visibleUnread = this.countVisibleUnreadMessages(messages, 'client')
+    if (lastVisibleId && visibleUnread > 0 && !databaseMaintenanceModeService.isReadOnly()) {
+      const result = await runInTransaction(async (manager) => {
+        await lockActiveClientAccountForBusiness(manager, clientAuth.userId)
+        const locked = await this.requireOwnedConversation(id, clientAuth, manager)
+        const readChanged = !databaseMaintenanceModeService.isReadOnly()
+          && await this.markConversationRead(manager, locked, 'client', lastVisibleId)
+        return { conversation: locked, readChanged }
+      })
+      conversation = result.conversation
+      if (result.readChanged) {
+        this.publishConversationEvent('conversation_read_by_client', conversation, { readBy: 'client' })
       }
-    }
-
-    const result = await runInTransaction(async (manager) => {
-      const conversation = await this.requireOwnedConversation(id, clientAuth, manager)
-      const readChanged = await this.markConversationReadForClient(manager, conversation)
-      const messages = (await this.loadConversationMessages(manager, conversation.id))
-        .filter((message) => !message.internalOnly)
-      return {
-        conversation,
-        messages,
-        readChanged,
-      }
-    })
-
-    if (result.readChanged) {
-      this.publishConversationEvent('conversation_read_by_client', result.conversation, { readBy: 'client' })
+      // 在事务外回读已读时间，同时保持首次可见消息的上界。
+      messages = await loadVisibleMessages(lastVisibleId)
+    } else if (!databaseMaintenanceModeService.isReadOnly()) {
+      conversation.unreadForClientCount = visibleUnread
     }
 
     return {
-      conversation: this.buildConversationSummary(result.conversation),
-      messages: result.messages.map((message) => this.buildMessageView(message, { scope: 'client', userId: clientAuth.userId })),
+      conversation: this.buildConversationSummary(conversation),
+      messages: messages.map((message) => this.buildMessageView(message, { scope: 'client', userId: clientAuth.userId })),
     }
   }
 
@@ -2332,36 +2356,32 @@ class ClientFeedbackService {
   }
 
   async getServiceConversationDetail(id: string, actor: AuthUserContext): Promise<ClientFeedbackConversationDetail> {
-    if (databaseMaintenanceModeService.isReadOnly()) {
-      const conversation = await this.requireConversationById(id, AppDataSource.manager)
-      const messages = await this.loadConversationMessages(AppDataSource.manager, conversation.id)
-      return {
-        conversation: this.buildConversationSummary(conversation, actor.userId),
-        messages: messages.map((message) => this.buildMessageView(message, { scope: 'service', userId: actor.userId })),
-        internalRemark: this.buildInternalRemarkView(conversation),
+    let conversation = await this.requireConversationById(id)
+    let messages = await this.loadConversationMessages(AppDataSource.manager, conversation.id)
+    const lastVisibleId = messages.at(-1)?.id
+    const visibleUnread = this.countVisibleUnreadMessages(messages, 'service')
+    if (lastVisibleId && visibleUnread > 0 && !databaseMaintenanceModeService.isReadOnly()) {
+      const result = await runInTransaction(async (manager) => {
+        const account = await lockActiveSysAccountForBusiness(manager, actor.userId)
+        if (!resolveUserPermissions(account).includes('customer_service:view')) throw new BizError('当前账号无客服查看权限', 403)
+        const locked = await this.requireConversationById(id, manager)
+        const readChanged = !databaseMaintenanceModeService.isReadOnly()
+          && await this.markConversationRead(manager, locked, 'service', lastVisibleId)
+        return { conversation: locked, readChanged }
+      })
+      conversation = result.conversation
+      if (result.readChanged) {
+        this.publishConversationEvent('conversation_read_by_service', conversation, { readBy: 'service' })
       }
-    }
-
-    const result = await runInTransaction(async (manager) => {
-      await lockActiveSysAccountForBusiness(manager, actor.userId)
-      const conversation = await this.requireConversationById(id, manager)
-      const readChanged = await this.markConversationReadForService(manager, conversation)
-      const messages = await this.loadConversationMessages(manager, conversation.id)
-      return {
-        conversation,
-        messages,
-        readChanged,
-      }
-    })
-
-    if (result.readChanged) {
-      this.publishConversationEvent('conversation_read_by_service', result.conversation, { readBy: 'service' })
+      messages = await this.loadConversationMessages(AppDataSource.manager, conversation.id, lastVisibleId)
+    } else if (!databaseMaintenanceModeService.isReadOnly()) {
+      conversation.unreadForServiceCount = visibleUnread
     }
 
     return {
-      conversation: this.buildConversationSummary(result.conversation, actor.userId),
-      messages: result.messages.map((message) => this.buildMessageView(message, { scope: 'service', userId: actor.userId })),
-      internalRemark: this.buildInternalRemarkView(result.conversation),
+      conversation: this.buildConversationSummary(conversation, actor.userId),
+      messages: messages.map((message) => this.buildMessageView(message, { scope: 'service', userId: actor.userId })),
+      internalRemark: this.buildInternalRemarkView(conversation),
     }
   }
 
