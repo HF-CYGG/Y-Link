@@ -148,6 +148,7 @@ async function main() {
   const { systemConfigService } = await import('../src/services/system-config.service.js')
   const { userService } = await import('../src/services/user.service.js')
   const { installSqliteTransactionQueue } = await import('../src/utils/sqlite-transaction-queue.js')
+  const { databaseOperationGate } = await import('../src/database/operation-gate.js')
 
   prepareDatabaseRuntime()
   await AppDataSource.initialize()
@@ -206,7 +207,13 @@ async function main() {
       '具备 system_configs:view 的操作员读取教师统一邀请码',
     )
     assert.equal(operatorRead.status, 'not_set')
-    pass('教师统一邀请码读取接口要求登录和 system_configs:view，写入另行要求管理员')
+    const freeze = databaseOperationGate.freeze()
+    try {
+      assert.deepEqual(await clientStaffInviteCodeService.getConfig(), initial, '写闸冻结时仍可纯读邀请码状态')
+    } finally {
+      freeze.release()
+    }
+    pass('教师统一邀请码读取接口要求登录和 system_configs:view，写闸冻结时仍可纯读')
 
     await expectBizError(
       () => clientAuthService.register({ accountType: 'personal', staffNo: 'I1001', inviteCode: '00001234', password: 'Teacher_Invite_Aa1!' }),
