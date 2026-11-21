@@ -4,8 +4,78 @@ import fs from 'node:fs'
 import { validatePinnedNpmToolchain, validateControlledSqliteCi, workflowRunLengths, renderTrustedNpmSteps } from './pinned-npm-contract.mjs'
 import { fetchPinnedNpmArchive, installPinnedNpm, NPM_TARBALL_URL } from '../backend/scripts/install-pinned-npm.mjs'
 
-test('全部10阶段/4个非Mobile job固定派生npm，可信分步不执行checkout脚本', () => {
+test('10个普通阶段/9个源码候选/3个Node候选及4个CI job保持精确工具契约', () => {
   assert.deepEqual(validatePinnedNpmToolchain(), [])
+})
+
+function dockerMutation(file, mutate) {
+  const read = name => {
+    const source = fs.readFileSync(name, 'utf8').replaceAll('\r\n', '\n')
+    return name === file ? mutate(source) : source
+  }
+  return validatePinnedNpmToolchain(process.cwd(), read)
+}
+function nodeCandidateMutation(source, mutate) {
+  return source.replace(/(FROM \$\{Y_LINK_NODE_IMAGE\} AS node-security-candidate\n)([\s\S]*?)(?=\nFROM )/, (_, header, body) => header + mutate(body))
+}
+
+test('源码例外只接受固定stage/继承/入口，重复或未知图必须拒绝', () => {
+  for (const file of ['Dockerfile.onebox', 'backend/Dockerfile', 'backend/Dockerfile.mysql']) {
+    for (const mutate of [
+      source => source.replace('AS gcc-security-candidate', 'AS another-candidate'),
+      source => source.replace('FROM ${Y_LINK_NODE_IMAGE} AS glibc-security-build', 'FROM build AS glibc-security-build'),
+      source => source.replace('build-glibc-stage.sh --candidate-only', 'unknown-stage.sh --candidate-only'),
+      source => source + '\nFROM ${Y_LINK_NODE_IMAGE} AS gcc-security-candidate\n',
+      source => source + '\nFROM gcc-security-candidate AS hidden-helper\n',
+      source => source.replace('FROM ${Y_LINK_NODE_IMAGE} AS node-security-candidate', 'FROM gcc-security-candidate AS node-security-candidate'),
+    ]) assert.ok(dockerMutation(file, mutate).length > 0, file)
+  }
+})
+
+test('Docker有效但未支持的缩进/小写/Tab FROM或RUN不得被忽略', () => {
+  for (const header of ['  FROM ${Y_LINK_NODE_IMAGE} AS hidden', 'from ${Y_LINK_NODE_IMAGE} AS hidden', '\tFROM ${Y_LINK_NODE_IMAGE} AS hidden', 'FROM\t${Y_LINK_NODE_IMAGE} AS hidden']) {
+    for (const mutate of [source => source + '\n' + header + '\n', source => source.replace('FROM ${Y_LINK_NODE_IMAGE} AS glibc-security-build', header + '\nFROM ${Y_LINK_NODE_IMAGE} AS glibc-security-build')]) assert.ok(dockerMutation('backend/Dockerfile', mutate).length > 0)
+  }
+  for (const command of ['  RUN npm ci', 'run npm ci', '\tRUN npx --offline probe', 'RUN\tnpm ci']) {
+    assert.ok(dockerMutation('backend/Dockerfile', source => source.replace('FROM --platform=$BUILDPLATFORM ${Y_LINK_NODE_IMAGE} AS build\n', 'FROM --platform=$BUILDPLATFORM ${Y_LINK_NODE_IMAGE} AS build\n' + command + '\n')).length > 0)
+  }
+})
+
+test('三个精确源码stage中增加npm/npx或任意额外指令必须拒绝', () => {
+  for (const name of ['glibc-security-build', 'package-security-candidate', 'gcc-security-candidate']) {
+    for (const command of ['RUN npm --version', 'RUN npx --offline probe', 'ENV NPM_CONFIG_PREFIX=/unknown']) {
+      assert.ok(dockerMutation('backend/Dockerfile', source => source.replace('AS ' + name + '\n', 'AS ' + name + '\n' + command + '\n')).length > 0)
+    }
+  }
+})
+
+test('普通链不能继承候选或经名称/数字COPY/BuildKit mount取得候选载荷', () => {
+  for (const mutate of [
+    source => source.replace('FROM ${Y_LINK_NODE_IMAGE} AS runtime', 'FROM gcc-security-candidate AS runtime'),
+    ...['gcc-security-candidate', '6', '"GCC-SECURITY-CANDIDATE"', 'unknown-stage'].map(from => source => source.replace('FROM ${Y_LINK_NODE_IMAGE} AS runtime\n', 'FROM ${Y_LINK_NODE_IMAGE} AS runtime\nCOPY --from=' + from + ' /candidate /leak\n')),
+    source => source.replace('FROM ${Y_LINK_NODE_IMAGE} AS runtime\n', 'FROM ${Y_LINK_NODE_IMAGE} AS runtime\nRUN --mount=type=bind,from=node-security-candidate,target=/input true\n'),
+  ]) assert.ok(dockerMutation('backend/Dockerfile', mutate).length > 0)
+})
+
+test('三个Node独立候选精确消费17包/119工具/同版libgcc参考，npm先于生成及使用', () => {
+  const install = 'RUN node /tmp/ylink-install-pinned-npm.mjs --context=image --data-dir=/tmp/ylink-npm-toolchain'
+  const generation = 'RUN --network=none Y_LINK_NODE_SECURITY_BUILD=image sh /ylink-native-security/build-node-stage.sh --candidate-only'
+  for (const file of ['Dockerfile.onebox', 'backend/Dockerfile', 'backend/Dockerfile.mysql']) {
+    const reference = 'COPY ' + (file === 'Dockerfile.onebox' ? 'backend/' : '') + 'native-security/candidate-inputs/gcc/reference/libgcc-s1_12.2.0-14+deb12u1_amd64.deb /ylink-gcc-inputs/reference/libgcc-s1_12.2.0-14+deb12u1_amd64.deb'
+    for (const mutate of [
+      body => body.replace(install, ''),
+      body => body.replace(install, '').replace(generation, generation + '\n' + install),
+      body => 'RUN env npm --version\n' + body,
+      body => body.replace(/COPY .*scripts\/build-pinned-npm.mjs \/tmp\/build-pinned-npm.mjs/, ''),
+      body => body.replace(generation, generation + '\n' + generation),
+      body => body.replace('native-security/candidate-inputs/gcc/debs /ylink-gcc-inputs/debs', 'native-security/candidate-inputs/gcc /ylink-gcc-inputs'),
+      body => body.replace('COPY --from=gcc-security-candidate /native-gcc-out /tmp/ylink-gcc-candidate', 'COPY --from=gcc-security-candidate /native-source /tmp/ylink-gcc-candidate'),
+      body => body.replace(reference, ''),
+      body => body.replace(reference, reference + '\n' + reference),
+      body => body.replace('reference/libgcc-s1_12.2.0-14+deb12u1_amd64.deb', 'reference/libgcc-s1_wrong_amd64.deb'),
+      body => body.replace(reference, reference + '\nCOPY extra-builder /ylink-gcc-inputs/extra'),
+    ]) assert.ok(dockerMutation(file, source => nodeCandidateMutation(source, mutate)).length > 0, file)
+  }
 })
 test('任一运行时阶段漏装或在安装前执行npm，契约必须拒绝', () => {
   const read = file => {

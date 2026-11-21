@@ -131,20 +131,71 @@ export function validatePinnedNpmToolchain(root = process.cwd(), read = name => 
       || lock.format !== 'ylink-npm-source-archives-v1' || JSON.stringify(lock.base) !== JSON.stringify(BASE_SOURCE)) errors.push('工具来源/修订身份不一致')
   } catch { errors.push('固定工具纯数据缺失或格式不符') }
   if (/^import .*?from ['"](?!node:)/m.test(builder) || /^import .*?from ['"](?!node:|\.\/build-pinned-npm\.mjs['"])/m.test(installer)) errors.push('可信内联不得引入其它仓库可执行文件')
-  let stageCount = 0
+  let stageCount = 0, sourceCount = 0, nodeCandidateCount = 0
   for (const file of ['Dockerfile', 'Dockerfile.onebox', 'backend/Dockerfile', 'backend/Dockerfile.mysql']) {
     const source = read(file).replaceAll('\r\n', '\n')
-    for (const stage of source.split(/(?=^FROM )/m).filter(value => /^FROM .*\$\{Y_LINK_NODE_IMAGE\}/.test(value))) {
-      stageCount++
-      const prefix = file.startsWith('backend/') ? '' : 'backend/'
+    // Docker接受缩进、Tab及不区分大小写的指令；此固定图只解析规范格式，其余显式拒绝。
+    for (const line of source.split('\n')) if (/^[ \t]*(?:FROM|RUN)\b/i.test(line) && !/^(?:FROM|RUN) /.test(line)) errors.push(file + '的FROM/RUN格式不在固定解析范围，拒绝忽略有效指令')
+    const nodeBase = '${Y_LINK_NODE_IMAGE}', prefix = file.startsWith('backend/') ? '' : 'backend/'
+    const parent = file === 'Dockerfile.onebox' ? 'backend-prod-deps' : file === 'backend/Dockerfile.mysql' ? 'build' : 'prod-deps'
+    const graph = file === 'Dockerfile'
+      ? [['build', nodeBase], ['alpine-native-base', 'nginx:1.30.6-alpine'], ['alpine-native-build', 'alpine-native-base'], ['runtime', 'alpine-native-base']]
+      : [...(file === 'Dockerfile.onebox' ? [['frontend-build', nodeBase], ['backend-build', nodeBase], ['backend-prod-deps', nodeBase]] : file === 'backend/Dockerfile.mysql' ? [['build', nodeBase]] : [['build', nodeBase], ['prod-deps', nodeBase]]),
+        ['native-security-build', parent], ['native-security-candidate', parent], ['glibc-security-build', nodeBase],
+        ...(file === 'Dockerfile.onebox' ? [['nginx-keyring', parent]] : []),
+        ['package-security-candidate', nodeBase], ['gcc-security-candidate', nodeBase], ['node-security-candidate', nodeBase], ['runtime', nodeBase]]
+    const candidates = new Set(['native-security-candidate', 'glibc-security-build', 'package-security-candidate', 'gcc-security-candidate', 'node-security-candidate', 'alpine-native-build'])
+    const stages = source.split(/(?=^FROM )/m).filter(value => /^FROM /m.test(value)).map(value => {
+      const instructions = value.split('\n').filter(line => line.trim() && !line.trim().startsWith('#')).join('\n').replace(/\\\n\s*/g, ' ').split('\n')
+      const match = /^FROM (?:--platform=\S+ )?(\S+) AS ([a-z][a-z0-9-]*)$/.exec(instructions[0])
+      if (!match) errors.push(file + '存在未知FROM/别名格式')
+      return { base: match?.[1], alias: match?.[2], instructions, text: instructions.join('\n') }
+    })
+    if (JSON.stringify(stages.map(stage => [stage.alias, stage.base])) !== JSON.stringify(graph)) errors.push(file + '阶段/顺序/继承必须匹配普通基线与独立候选精确图')
+    const aliases = new Map(stages.map(stage => [stage.alias, stage]))
+    if (aliases.size !== stages.length) errors.push(file + '存在重复stage别名')
+    for (const stage of stages) {
+      // 不能经数字stage、改名或间接继承把未验收候选带入普通链。
+      for (const line of stage.instructions) {
+        const references = [...line.matchAll(/--from=(?:"([^"]+)"|'([^']+)'|([^\s]+))/g)].map(match => match[1] ?? match[2] ?? match[3])
+        for (const mount of line.matchAll(/--mount=([^\s]+)/g)) for (const field of mount[1].split(',')) if (field.startsWith('from=')) references.push(field.slice(5))
+        for (const reference of references) {
+          const target = /^\d+$/.test(reference) ? stages[Number(reference)] : aliases.get(reference.toLowerCase())
+          if (!target || !candidates.has(stage.alias) && candidates.has(target.alias)) errors.push(file + '的' + stage.alias + '存在未知或泄漏候选的stage引用：' + reference)
+        }
+      }
+      const sourceOnly = {
+        'glibc-security-build': ['COPY ' + prefix + 'native-security /ylink-native-security', 'RUN Y_LINK_GLIBC_SECURITY_BUILD=image sh /ylink-native-security/build-glibc-stage.sh --candidate-only'],
+        'package-security-candidate': ['COPY ' + prefix + 'native-security /ylink-native-security', 'RUN Y_LINK_PACKAGE_SECURITY_BUILD=image sh /ylink-native-security/build-package-stage.sh --candidate-only --sources=' + (file === 'Dockerfile.onebox' ? 'coreutils,openssl,perl' : 'coreutils,perl')],
+        'gcc-security-candidate': ['COPY ' + prefix + 'native-security /ylink-native-security', 'COPY ' + prefix + 'native-security/candidate-inputs/gcc /ylink-gcc-inputs', 'RUN --network=none Y_LINK_GCC_SECURITY_BUILD=image sh /ylink-native-security/build-gcc-stage.sh --candidate-only'],
+      }[stage.alias]
+      if (sourceOnly) {
+        sourceCount++
+        if (stage.base !== nodeBase || JSON.stringify(stage.instructions.slice(1)) !== JSON.stringify(sourceOnly)) errors.push(file + '的' + stage.alias + '只允许固定源码候选入口，不能调用npm/npx或增加指令')
+        continue
+      }
+      const nodeCandidate = stage.alias === 'node-security-candidate'
+      if (stage.base !== nodeBase && !nodeCandidate) continue
+      if (nodeCandidate) nodeCandidateCount++
+      else stageCount++
       const copies = ['COPY ' + prefix + 'scripts/install-pinned-npm.mjs /tmp/ylink-install-pinned-npm.mjs',
         'COPY ' + prefix + 'scripts/build-pinned-npm.mjs /tmp/build-pinned-npm.mjs', 'COPY ' + prefix + 'npm-toolchain /tmp/ylink-npm-toolchain']
-      const install = stage.indexOf('RUN node /tmp/ylink-install-pinned-npm.mjs --context=image --data-dir=/tmp/ylink-npm-toolchain')
-      const firstNpm = stage.search(/^RUN npm\b/m)
-      if (install < 0 || copies.some(copy => stage.indexOf(copy) < 0 || stage.indexOf(copy) > install) || firstNpm >= 0 && install > firstNpm) errors.push(file + '的' + stage.split('\n')[0] + '未先固定完整工具制品')
+      const installLine = 'RUN node /tmp/ylink-install-pinned-npm.mjs --context=image --data-dir=/tmp/ylink-npm-toolchain'
+      const install = stage.instructions.indexOf(installLine)
+      const firstNpm = stage.instructions.findIndex(line => /^RUN\b/.test(line) && /(?:^|[\s/;&|("'])(?:npm|npx)(?=[\s;&|)"'])/.test(line))
+      if (install < 0 || stage.instructions.filter(line => line === installLine).length !== 1 || copies.some(copy => stage.instructions.indexOf(copy) < 0 || stage.instructions.indexOf(copy) > install || stage.instructions.filter(line => line === copy).length !== 1) || firstNpm >= 0 && install > firstNpm) errors.push(file + '的' + stage.alias + '未先固定完整工具制品')
+      if (nodeCandidate) {
+        const generation = 'RUN --network=none Y_LINK_NODE_SECURITY_BUILD=image sh /ylink-native-security/build-node-stage.sh --candidate-only'
+        const expected = ['COPY ' + prefix + 'native-security /ylink-native-security',
+          'COPY ' + prefix + 'native-security/candidate-inputs/gcc/debs /ylink-gcc-inputs/debs',
+          'COPY ' + prefix + 'native-security/candidate-inputs/gcc/reference/libgcc-s1_12.2.0-14+deb12u1_amd64.deb /ylink-gcc-inputs/reference/libgcc-s1_12.2.0-14+deb12u1_amd64.deb',
+          'COPY ' + prefix + 'native-security/candidate-inputs/node /ylink-node-inputs',
+          'COPY --from=gcc-security-candidate /native-gcc-out /tmp/ylink-gcc-candidate', ...copies, installLine, generation]
+        if (stage.base !== nodeBase || JSON.stringify(stage.instructions.slice(1)) !== JSON.stringify(expected)) errors.push(file + '的Node候选必须独占原基座、精确导入17候选包/119工具/同版libgcc参考，并先装npm再生成/编译')
+      }
     }
   }
-  if (stageCount !== 10) errors.push('非Mobile Node镜像应覆盖10阶段，实际' + stageCount)
+  if (stageCount !== 10 || sourceCount !== 9 || nodeCandidateCount !== 3) errors.push('非Mobile应精确覆盖10个普通Node阶段/9个源码候选/3个Node候选，实际' + [stageCount, sourceCount, nodeCandidateCount].join('/'))
   let jobs = 0
   for (const file of ['verify-db-concurrency.yml', 'security-updates.yml', 'sonarcloud.yml']) {
     const source = read('.github/workflows/' + file).replaceAll('\r\n', '\n')
