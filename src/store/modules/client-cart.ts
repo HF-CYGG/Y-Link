@@ -19,28 +19,14 @@ import {
   clearPersistedClientCartSnapshot,
   persistClientCartSnapshot,
   readPersistedClientCartSnapshot,
+  recentClientCartRequests,
+  type ClientCartSnapshot,
   type ClientCartSnapshotItem,
 } from '@/utils/client-cart-storage'
+import { normalizeStorageScopeId } from '@/utils/storage-user-scope'
 
-export interface ClientCartItem {
-  productId: string
-  skuId: string | null
-  productName: string
-  thumbnail: string | null
-  thumbnailSmall: string | null
-  specText: string | null
-  defaultPrice: string
-  originalPrice: string
-  discountRate: string
-  discountedPrice: string
-  limitPerUser: number
-  availableStock: number
-  qty: number
-  selected: boolean
-  availabilityStatus: ClientCartAvailabilityStatus
-}
-
-export type ClientCartAvailabilityStatus = 'available' | 'out_of_stock' | 'product_unavailable' | 'sku_unavailable'
+export type ClientCartItem = ClientCartSnapshotItem
+export type ClientCartAvailabilityStatus = ClientCartItem['availabilityStatus']
 
 export interface ClientCartBatchResult {
   ok: boolean
@@ -138,6 +124,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
   const clientUserId = ref('')
   const items = ref<ClientCartItem[]>([])
   const initialized = ref(false)
+  let appliedRequests: ClientCartSnapshot['appliedRequests'] = []
 
   // 这些派生状态尽量只从 items 推导，避免同时维护多份可结算/失效/选中列表造成同步偏差。
   const totalQty = computed(() => items.value.reduce((sum, item) => sum + item.qty, 0))
@@ -190,27 +177,8 @@ export const useClientCartStore = defineStore('client-cart', () => {
       return
     }
 
-    // 本地快照除了数量，还保留库存与限购字段：
-    // 这样页面刷新后仍能先恢复可视状态，再等待目录接口回填最新库存。
-    const snapshot: ClientCartSnapshotItem[] = items.value.map((item) => ({
-      productId: item.productId,
-      skuId: item.skuId,
-      productName: item.productName,
-      thumbnail: item.thumbnail,
-      thumbnailSmall: item.thumbnailSmall ?? null,
-      specText: item.specText,
-      defaultPrice: item.defaultPrice,
-      originalPrice: item.originalPrice,
-      discountRate: item.discountRate,
-      discountedPrice: item.discountedPrice,
-      limitPerUser: item.limitPerUser,
-      availableStock: item.availableStock,
-      qty: item.qty,
-      selected: item.selected,
-      availabilityStatus: item.availabilityStatus,
-    }))
-
-    persistClientCartSnapshot(clientUserId.value, snapshot)
+    appliedRequests = recentClientCartRequests(appliedRequests)
+    persistClientCartSnapshot(clientUserId.value, { items: items.value, appliedRequests })
   }
 
   /**
@@ -243,17 +211,8 @@ export const useClientCartStore = defineStore('client-cart', () => {
   }
 
   const resetState = () => {
+    appliedRequests = []
     items.value = []
-  }
-
-  const normalizeClientUserId = (value: string | number | null | undefined): string => {
-    if (typeof value === 'string') {
-      return value.trim()
-    }
-    if (typeof value === 'number' && Number.isFinite(value)) {
-      return String(value).trim()
-    }
-    return ''
   }
 
   const replaceItems = (nextItems: ClientCartItem[]) => {
@@ -262,7 +221,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
   }
 
   const initialize = (nextClientUserId: string | number | null | undefined) => {
-    const normalizedClientUserId = normalizeClientUserId(nextClientUserId)
+    const normalizedClientUserId = normalizeStorageScopeId(nextClientUserId)
     if (!normalizedClientUserId) {
       clientUserId.value = ''
       resetState()
@@ -278,8 +237,9 @@ export const useClientCartStore = defineStore('client-cart', () => {
     clientUserId.value = normalizedClientUserId
     resetState()
     const persisted = readPersistedClientCartSnapshot(normalizedClientUserId)
+    appliedRequests = persisted?.appliedRequests ?? []
     // 持久化快照读取后仍需再次标准化，避免旧版本缓存或异常值污染当前会话。
-    replaceItems(persisted)
+    replaceItems(persisted?.items ?? [])
     initialized.value = true
   }
 
@@ -523,17 +483,25 @@ export const useClientCartStore = defineStore('client-cart', () => {
     persist()
   }
 
-  // 恢复原提交时只消费已经确认的数量，保留后来新增的同规格数量与其它规格。
-  const consumeSubmittedItems = (submitted: Array<{ productId: string | number; skuId?: string | number | null; qty: number }>) => {
+  // 每个请求键只扣一次已确认数量，保留后来新增的同规格数量与其它规格。
+  const consumeSubmittedItems = (
+    submitted: Array<{ productId: string | number; skuId?: string | number | null; qty: number }>,
+    requestKey: string,
+  ) => {
     ensureInitialized()
+    appliedRequests = recentClientCartRequests(appliedRequests)
+    if (appliedRequests.some(([key]) => key === requestKey)) return false
     const quantities = new Map<string, number>()
     for (const item of submitted) {
       const key = JSON.stringify([String(item.productId), item.skuId == null ? null : String(item.skuId)])
       quantities.set(key, (quantities.get(key) ?? 0) + Math.max(0, item.qty))
     }
-    items.value = items.value.map((item) => ({ ...item, qty: Math.max(0,
+    const remainingItems = items.value.map((item) => ({ ...item, qty: Math.max(0,
       item.qty - (quantities.get(JSON.stringify([item.productId, item.skuId])) ?? 0)) })).filter((item) => item.qty > 0)
+    appliedRequests.push([requestKey, Date.now()])
+    items.value = remainingItems
     persist()
+    return true
   }
 
   const clearSelectedItems = () => {

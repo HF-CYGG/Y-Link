@@ -6,6 +6,7 @@
  * 2. 恢复时统一做结构归一化，避免旧版本或被污染的缓存把非法数量、价格写回 Store；
  * 3. 每次读写顺手清理历史单一全局 key，确保升级后不会再被旧缓存串号。
  * 4. 存储访问、读写或清理受限时降级到内存，不把本地缓存失败传播为目录刷新或下单失败。
+ * 5. 近期已扣量的请求键放在购物车快照末尾的嵌套数组中，旧版读取时会跳过这条非商品记录。
  * 维护说明：
  * - 若购物车快照后续新增字段，需要同步补齐 `normalizeSnapshotItems()`；
  * - 若未来购物车还要按门店、租户隔离，可在作用域 key 的拼装逻辑上继续扩展。
@@ -34,6 +35,22 @@ export interface ClientCartSnapshotItem {
   qty: number
   selected: boolean
   availabilityStatus: 'available' | 'out_of_stock' | 'product_unavailable' | 'sku_unavailable'
+}
+
+type ClientCartAppliedRequest = [requestKey: string, appliedAt: number]
+
+export interface ClientCartSnapshot {
+  items: ClientCartSnapshotItem[]
+  appliedRequests: ClientCartAppliedRequest[]
+}
+
+// 从首次扣量开始保留一小时，覆盖原锁的 30 分钟确认期和临近到期时已发出的请求。
+export const recentClientCartRequests = (requests: unknown): ClientCartAppliedRequest[] => {
+  const cutoff = Date.now() - 60 * 60 * 1000
+  return Array.isArray(requests) ? requests.filter((entry): entry is ClientCartAppliedRequest => (
+    Array.isArray(entry) && entry.length === 2 && typeof entry[0] === 'string' && entry[0].length > 0 && entry[0].length <= 64
+    && Number.isFinite(entry[1]) && entry[1] > cutoff
+  )) : []
 }
 
 // 统一抽出客户端账号作用域类型，避免同一联合类型在读/写/清理函数签名中重复展开。
@@ -118,25 +135,26 @@ const normalizeSnapshotItems = (items: unknown): ClientCartSnapshotItem[] => {
     .filter((item): item is ClientCartSnapshotItem => item !== null)
 }
 
-export const readPersistedClientCartSnapshot = (clientUserId: ClientCartStorageScopeId) => {
+export const readPersistedClientCartSnapshot = (clientUserId: ClientCartStorageScopeId): ClientCartSnapshot | null => {
   try {
     const storage = getBrowserStorage('local')
-    if (!storage) return [] as ClientCartSnapshotItem[]
+    if (!storage) return null
     clearLegacyScopedStorageKey(storage, LEGACY_CLIENT_CART_SNAPSHOT_KEY)
     const scopedKey = resolveUserScopedStorageKey(CLIENT_CART_SNAPSHOT_KEY_PREFIX, clientUserId)
-    if (!scopedKey) return [] as ClientCartSnapshotItem[]
-    const raw = storage.getItem(scopedKey)
-    return raw ? normalizeSnapshotItems(JSON.parse(raw)) : [] as ClientCartSnapshotItem[]
+    if (!scopedKey) return null
+    const rows: unknown = JSON.parse(storage.getItem(scopedKey) ?? 'null')
+    if (!Array.isArray(rows)) return null
+    return { items: normalizeSnapshotItems(rows), appliedRequests: recentClientCartRequests(rows.at(-1)) }
   } catch {
     // 隐私策略也可能拒绝读取或删除损坏快照；清理本身必须同样可失败。
     clearPersistedClientCartSnapshot(clientUserId)
-    return [] as ClientCartSnapshotItem[]
+    return null
   }
 }
 
 export const persistClientCartSnapshot = (
   clientUserId: ClientCartStorageScopeId,
-  items: ClientCartSnapshotItem[],
+  { items, appliedRequests }: ClientCartSnapshot,
 ) => {
   try {
     const storage = getBrowserStorage('local')
@@ -144,11 +162,11 @@ export const persistClientCartSnapshot = (
     clearLegacyScopedStorageKey(storage, LEGACY_CLIENT_CART_SNAPSHOT_KEY)
     const scopedKey = resolveUserScopedStorageKey(CLIENT_CART_SNAPSHOT_KEY_PREFIX, clientUserId)
     if (!scopedKey) return
-    if (!items.length) {
+    if (!items.length && !appliedRequests.length) {
       storage.removeItem(scopedKey)
       return
     }
-    storage.setItem(scopedKey, JSON.stringify(items))
+    storage.setItem(scopedKey, JSON.stringify(appliedRequests.length ? [...items, appliedRequests] : items))
   } catch {
     // 购物车 Store 已更新内存；配额不足或存储被禁用不能阻断成功的目录同步。
   }

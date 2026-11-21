@@ -471,8 +471,8 @@ const sendFrozenSubmission = async (payload: SubmitO2oPreorderPayload, isCurrent
   const settled = settleCurrentClientCheckoutSuccess({
     isCurrent,
     applyConfirmedItems: () => {
-      clientCartStore.consumeSubmittedItems(payload.items)
-      if (!recovered) {
+      const consumed = clientCartStore.consumeSubmittedItems(payload.items, payload.clientRequestId)
+      if (!recovered && consumed) {
         clientCatalogStore.applyPreorderSubmission(payload.items.map((item) => ({ ...item, productId: String(item.productId), skuId: item.skuId == null ? null : String(item.skuId) })))
         clientCartStore.syncWithCatalog(clientCatalogStore.products)
       }

@@ -34,14 +34,14 @@ const checkoutPolicy = helper('src/views/client/client-checkout-submit-policy.ts
 const checkoutAst = pageAst('src/views/client/ClientCheckoutView.vue')
 const checkoutSource = declarations(checkoutAst, ['sendFrozenSubmission'])
 const payload = { clientRequestId:'original-key', isSystemApplied:false, pickupContact:'原领取人', items:[{productId:'p',skuId:'s',qty:2}] }
-const checkout = ({status, recovered=true, refreshSuccess=true}={}) => {
+const checkout = ({status, recovered=true, refreshSuccess=true, alreadyConsumed=false}={}) => {
   const sent=deferred(), refreshed=deferred(), calls={clear:[],consume:[],apply:[],sync:[],success:[],warning:[],error:[],navigate:[],restore:0}
   let current=true
   const subject=execute(checkoutSource, {
     ...checkoutPolicy, submitO2oPreorder:()=>sent.promise,
     normalizeRequestError:(error)=>({status:error.status,message:'fixture'}),
     restorePendingSubmit:()=>{calls.restore++}, clearClientPreorderSubmitLock:(...args)=>calls.clear.push(args), pendingSubmit:ref({payload}),
-    clientCartStore:{consumeSubmittedItems:(items)=>calls.consume.push(plain(items)),syncWithCatalog:(items)=>calls.sync.push(items)},
+    clientCartStore:{consumeSubmittedItems:(items,requestKey)=>{calls.consume.push([plain(items),requestKey]);return !alreadyConsumed},syncWithCatalog:(items)=>calls.sync.push(items)},
     clientCatalogStore:{products:[{availableStock:8}],applyPreorderSubmission:(items)=>calls.apply.push(items)},
     refreshMallSnapshot:async(context)=>{await refreshed.promise;assert.equal(context.isCurrent(),current);return {success:refreshSuccess}},
     showAppSuccess:(value)=>calls.success.push(value), showAppWarning:(value)=>calls.warning.push(value), showCriticalErrorDialog:(value)=>calls.error.push(value),
@@ -62,14 +62,21 @@ for(const status of [500,501,502,503,504,507,599]) {
 for(const status of [400,403,409,422]) {const h=checkout({status});await h.running;assert.equal(h.calls.clear.length,1);assert.equal(h.calls.error.length,1)}
 for(const refreshSuccess of [true,false]) {
   const h=checkout({refreshSuccess});h.sent.resolve({order:{id:'original-order'}});await flush()
-  assert.deepEqual(h.calls.consume,[payload.items]);assert.equal(h.calls.apply.length,0,'确认恢复不能重复增量扣库存')
+  assert.deepEqual(h.calls.consume,[[payload.items,payload.clientRequestId]]);assert.equal(h.calls.apply.length,0,'确认恢复不能重复增量扣库存')
   h.refreshed.resolve();await h.running
   assert.equal(h.calls.clear.length,1);assert.equal(h.calls.success.length,1);assert.equal(h.calls.error.length,0);assert.equal(h.calls.warning.length,refreshSuccess?0:1)
   assert.deepEqual(h.calls.navigate,['/client/orders/original-order'])
 }
 {
   const h=checkout({recovered:false});h.sent.resolve({order:{id:'new'}});await h.running
+  assert.deepEqual(h.calls.consume,[[payload.items,payload.clientRequestId]])
   assert.equal(h.calls.apply.length,1,'首次提交仍只增量扣一次')
+}
+{
+  const h=checkout({recovered:false,alreadyConsumed:true});h.sent.resolve({order:{id:'new'}});await h.running
+  assert.equal(h.calls.apply.length,0,'同键成功结果已消费则跳过本地库存增量扣减')
+  assert.equal(h.calls.clear.length,1)
+  assert.deepEqual(h.calls.navigate,['/client/orders/new'])
 }
 {
   const h=checkout();h.leave();h.sent.resolve({order:{id:'old'}});await h.running

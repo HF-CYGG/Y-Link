@@ -54,9 +54,10 @@ class MemoryStorage {
 }
 
 const storage = new MemoryStorage()
+const sessionStorage = new MemoryStorage()
 Object.defineProperty(globalThis, 'window', {
   configurable: true,
-  value: { localStorage: storage, sessionStorage: storage },
+  value: { localStorage: storage, sessionStorage },
 })
 
 const createProduct = ({
@@ -574,12 +575,99 @@ for (const entry of ['stepper', 'input'] as const) {
   assert.deepEqual(createCart(owner).items.map(({ skuId, qty, selected }) => [skuId, qty, selected]), state())
 }
 
-const recoveryCart = createCart('confirmed-recovery-quantity')
-recoveryCart.addProductsBatch({ ...batchProduct, limitPerUser: 0 }, [{ skuId: 'batch-a', qty: 5 }, { skuId: 'batch-b', qty: 3 }])
+const recoveryOwner = 'confirmed-recovery-quantity'
+const recoveryCart = createCart(recoveryOwner)
+const recoveryProduct = { ...batchProduct, limitPerUser: 0 }
+recoveryCart.addProduct(recoveryProduct, 2, recoveryProduct.skus![0])
+const firstCheckoutItems = recoveryCart.createSelectedCheckoutSnapshot()!
+const firstCheckoutDraft = { isSystemApplied: false, pickupContact: '测试用户', items: firstCheckoutItems }
+const firstCheckoutKey = createClientPreorderSubmitLock(recoveryOwner, 'first-checkout', firstCheckoutDraft)
+recoveryCart.addProductsBatch(recoveryProduct, [{ skuId: 'batch-a', qty: 3 }, { skuId: 'batch-b', qty: 3 }])
 recoveryCart.toggleItemSelected('batch-a', false)
-recoveryCart.consumeSubmittedItems([{ productId: batchProduct.id, skuId: 'batch-a', qty: 2 }])
+recoveryCart.consumeSubmittedItems(firstCheckoutItems, firstCheckoutKey)
 assert.deepEqual(recoveryCart.items.map(({ skuId, qty, selected }) => [skuId, qty, selected]), [['batch-a', 3, false], ['batch-b', 3, true]], '确认原2件后保留后加3件及其它SKU')
-recoveryCart.consumeSubmittedItems([{ productId: batchProduct.id, skuId: 'batch-a', qty: 8 }])
-assert.deepEqual(recoveryCart.items.map(({ skuId, qty }) => [skuId, qty]), [['batch-b', 3]], '消费不产生负数或影响其它SKU')
+// 上一版 4a85e049 的 normalizeSnapshotItems 要求顶层数组，逐行保留具有商品 ID、名称和有效数量的记录。
+const savedRecoveryRows: unknown = JSON.parse(storage.getItem(`y-link.client-cart.snapshot:${recoveryOwner}`) ?? 'null')
+assert.ok(Array.isArray(savedRecoveryRows), '旧版必须能按原数组结构读取扣量后的商品')
+const legacyItems = savedRecoveryRows.filter((row) => row && typeof row === 'object'
+  && typeof row.productId === 'string' && row.productId && typeof row.productName === 'string' && row.productName
+  && Number.isFinite(row.qty) && Math.floor(row.qty) > 0)
+assert.deepEqual(legacyItems.map(({ skuId, qty, selected }) => [skuId, qty, selected]), [['batch-a', 3, false], ['batch-b', 3, true]], '旧版跳过请求记录，仍能恢复后加商品、其它规格和选择状态')
+sessionStorage.failOperation = 'remove'
+assert.throws(() => clearClientPreorderSubmitLock(recoveryOwner, firstCheckoutKey), { name: 'SecurityError' })
+sessionStorage.failOperation = null
+const recoveredCheckout = readActiveClientPreorderSubmitLock(recoveryOwner)?.payload
+assert.deepEqual(recoveredCheckout, { ...firstCheckoutDraft, clientRequestId: firstCheckoutKey }, '清锁失败仍保留完整原请求')
+const reopenedCart = createCart(recoveryOwner)
+reopenedCart.consumeSubmittedItems(recoveredCheckout!.items, recoveredCheckout!.clientRequestId)
+assert.equal(reopenedCart.qtyByItemId.get('batch-a'), 3, '刷新后确认同一笔订单，仍保留后加3件')
+clearClientPreorderSubmitLock(recoveryOwner, firstCheckoutKey)
+const secondCheckoutItems = [{ productId: batchProduct.id, skuId: 'batch-a', qty: 1 }]
+const secondCheckoutKey = createClientPreorderSubmitLock(recoveryOwner, 'second-checkout', { ...firstCheckoutDraft, items: secondCheckoutItems })
+reopenedCart.consumeSubmittedItems(secondCheckoutItems, secondCheckoutKey)
+assert.equal(reopenedCart.qtyByItemId.get('batch-a'), 2, '新订单使用自己的请求键独立扣量')
+const againCart = createCart(recoveryOwner)
+againCart.consumeSubmittedItems(firstCheckoutItems, firstCheckoutKey)
+againCart.consumeSubmittedItems(secondCheckoutItems, secondCheckoutKey)
+assert.deepEqual(againCart.items.map(({ skuId, qty, selected }) => [skuId, qty, selected]), [['batch-a', 2, false], ['batch-b', 3, true]], '确认了新订单后，两笔订单的重放仍都应跳过')
+
+const emptyOwner = 'confirmed-empty-cart'
+const emptyCart = createCart(emptyOwner)
+emptyCart.addProduct(recoveryProduct, 1, recoveryProduct.skus![0])
+const emptyCheckoutKey = 'empty-cart-checkout'
+emptyCart.consumeSubmittedItems(firstCheckoutItems, emptyCheckoutKey)
+assert.equal(emptyCart.totalQty, 0, '扣量不会产生负数')
+const restoredEmptyCart = createCart(emptyOwner)
+assert.equal(restoredEmptyCart.totalQty, 0)
+restoredEmptyCart.addProduct(recoveryProduct, 3, recoveryProduct.skus![0])
+const restoredNewItemsCart = createCart(emptyOwner)
+restoredNewItemsCart.consumeSubmittedItems(firstCheckoutItems, emptyCheckoutKey)
+assert.equal(restoredNewItemsCart.totalQty, 3, '空车快照也要保留原请求记录以保护后加商品')
+restoredNewItemsCart.clearItems()
+restoredNewItemsCart.addProduct(recoveryProduct, 3, recoveryProduct.skus![0])
+restoredNewItemsCart.consumeSubmittedItems(firstCheckoutItems, emptyCheckoutKey)
+assert.equal(restoredNewItemsCart.totalQty, 3, '主动清空商品不应丢失原请求记录')
+restoredNewItemsCart.clearAll()
+assert.equal(storage.getItem(`y-link.client-cart.snapshot:${emptyOwner}`), null, '登出按原规则清除账号快照')
+
+const volatileOwner = 'confirmed-storage-failure'
+const volatileCart = createCart(volatileOwner)
+volatileCart.addProduct(recoveryProduct, 5, recoveryProduct.skus![0])
+const volatileKey = 'storage-failure-checkout'
+const volatileCartKey = `y-link.client-cart.snapshot:${volatileOwner}`
+const snapshotBeforeFailure = storage.getItem(volatileCartKey)
+try {
+  storage.failOperation = 'set'
+  volatileCart.consumeSubmittedItems(firstCheckoutItems, volatileKey)
+  volatileCart.consumeSubmittedItems(firstCheckoutItems, volatileKey)
+  assert.equal(volatileCart.totalQty, 3, '辅助缓存拒写时，同一内存购物车也只扣一次')
+  assert.equal(storage.getItem(volatileCartKey), snapshotBeforeFailure, '拒写时持久缓存的数量与请求记录均不应部分变更')
+} finally {
+  storage.failOperation = null
+}
+volatileCart.initialize('confirmed-storage-other-owner')
+volatileCart.addProduct(recoveryProduct, 5, recoveryProduct.skus![0])
+volatileCart.consumeSubmittedItems(firstCheckoutItems, volatileKey)
+assert.equal(volatileCart.totalQty, 3, '相同请求键在另一账号独立生效')
+
+const retentionOwner = 'checkout-confirmation-retention'
+const retentionKey = 'retained-checkout'
+const originalNow = Date.now
+const firstConfirmedAt = Date.now()
+try {
+  const retentionCart = createCart(retentionOwner)
+  retentionCart.addProduct(recoveryProduct, 5, recoveryProduct.skus![0])
+  Date.now = () => firstConfirmedAt
+  retentionCart.consumeSubmittedItems(firstCheckoutItems, retentionKey)
+  Date.now = () => firstConfirmedAt + 30 * 60 * 1000 + 45 * 1000
+  const inFlightCart = createCart(retentionOwner)
+  inFlightCart.consumeSubmittedItems(firstCheckoutItems, retentionKey)
+  assert.equal(inFlightCart.totalQty, 3, '记录须覆盖原确认期及临近到期前发出的请求')
+  Date.now = () => firstConfirmedAt + 60 * 60 * 1000
+  assert.equal(createCart(retentionOwner).totalQty, 3, '清理过期记录时应保留商品')
+  assert.ok(!storage.getItem(`y-link.client-cart.snapshot:${retentionOwner}`)?.includes(retentionKey), '重放不会延长记录保留期')
+} finally {
+  Date.now = originalNow
+}
 
 console.log('[verify:client-cart-reconciliation] 购物车目录对账及存储故障降级回归验证通过')
