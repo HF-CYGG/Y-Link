@@ -26,6 +26,7 @@ import { databaseMaintenanceModeService } from '../services/database-maintenance
 import { databaseMigrationService } from '../services/database-migration.service.js'
 import { notificationService } from '../services/notification.service.js'
 import { mobileSessionService } from '../services/mobile-session.service.js'
+import { startWebSessionCleanup, stopWebSessionCleanup } from '../services/web-session-cleanup.service.js'
 import { o2oPreorderService } from '../services/o2o-preorder.service.js'
 import { persistentRiskStateService } from '../services/persistent-risk-state.service.js'
 import { productService } from '../services/product.service.js'
@@ -167,6 +168,7 @@ const shutdownRuntime = (reason: string, exitCode: number, exit = true): Promise
     // HTTP 断开不代表业务 Promise 完成；先关闭新准入，排空所有操作和 worker 才销毁连接。
     await databaseMaintenanceModeService.shutdownAndDrain()
     await mobileSessionService.stopCleanupLoop()
+    await stopWebSessionCleanup()
     server?.closeAllConnections?.()
     await Promise.race([serverClosed, sleep(1000)])
 
@@ -569,6 +571,7 @@ export async function startBusinessRuntime(startup: { mode: 'normal' | 'cutover'
     o2oPreorderService.startTimeoutRecycleLoop()
     persistentRiskStateService.startCleanupLoop()
     mobileSessionService.startCleanupLoop()
+    startWebSessionCleanup()
     clientFeedbackService.startAttachmentCleanupWorker()
     // 商品缩略图存量回填只读写 uploads/products 文件、不触碰数据库，延迟到启动完成后低优先级执行。
     configureProductThumbnailInvalidation(() => invalidateMallCatalogReadCache({ affectsBusinessData: false }))

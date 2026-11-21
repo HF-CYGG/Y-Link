@@ -245,6 +245,7 @@ export class AuthService {
     const token = generateSessionToken()
 
     await sessionRepo.delete({
+      userId: lockedUser.id,
       expiresAt: LessThan(now),
     })
 

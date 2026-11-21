@@ -1,6 +1,6 @@
 /**
- * 文件说明：管理端会话活跃时间前置节流专项验收。
- * 实现逻辑：真实执行鉴权与 UPDATE，统计驱动收到的 SQL；以受控时间验证普通鉴权、心跳、并发旧快照与撤权。
+ * 文件说明：管理端与客户端 Web 会话活跃节流及过期回收专项验收。
+ * 实现逻辑：真实执行鉴权、更新和回收，以受控时间验证心跳、写入边界、并发、维护和撤权。
  * 维护说明：默认使用系统临时 SQLite；MySQL 模式仅接受专用参数、本机高位端口和显式测试实例确认，
  * 创建随机临时库并在 finally 删除。不会连接通用 DB_* 指向的业务库，不启动 HTTP 端口。
  * 执行：在 backend 目录运行 node --import tsx scripts/auth-activity-throttle-verify.ts。
@@ -13,6 +13,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { mock } from 'node:test'
+import { setTimeout as delay } from 'node:timers/promises'
 import type { Request, Response } from 'express'
 import type { Connection } from 'mysql2/promise'
 import type { AuthenticatedRequest } from '../src/types/auth.js'
@@ -34,6 +35,7 @@ let mysqlAdmin: Connection | undefined
 let databaseCreated = false
 let destroyDataSource: (() => Promise<void>) | undefined
 let leaveMaintenance: (() => Promise<void>) | undefined
+let stopCleanup: (() => Promise<void>) | undefined
 
 try {
   if (mode === 'mysql') {
@@ -60,15 +62,23 @@ try {
   const { AppDataSource } = await import('../src/config/data-source.js')
   const { SysUser } = await import('../src/entities/sys-user.entity.js')
   const { SysUserSession } = await import('../src/entities/sys-user-session.entity.js')
+  const { ClientUser } = await import('../src/entities/client-user.entity.js')
+  const { ClientUserSession } = await import('../src/entities/client-user-session.entity.js')
   const activitySql: string[] = []
+  const clientActivitySql: string[] = []
+  const clientIdentifierSql: string[] = []
   AppDataSource.setOptions({
-    entities: [SysUser, SysUserSession], logging: ['query'],
+    entities: [SysUser, SysUserSession, ClientUser, ClientUserSession], logging: ['query'],
     logger: {
       logQuery(query) {
         const normalized = query.replaceAll(String.fromCharCode(96), '').replaceAll('"', '')
         if (/^UPDATE sys_user_session SET /i.test(normalized) && normalized.includes('last_access_at')) {
           activitySql.push(normalized)
         }
+        if (/^UPDATE client_user_session SET /i.test(normalized) && normalized.includes('last_access_at')) {
+          clientActivitySql.push(normalized)
+        }
+        if (/FROM client_user user WHERE /i.test(normalized)) clientIdentifierSql.push(normalized)
       },
       logQueryError() {}, logQuerySlow() {}, logSchemaBuild() {}, logMigration() {}, log() {},
     },
@@ -77,10 +87,14 @@ try {
   destroyDataSource = async () => { await AppDataSource.destroy() }
   // 专用临时 schema 允许历史空值夹具；生产实体及 schema 不作任何更改。
   AppDataSource.getMetadata(SysUserSession).findColumnWithPropertyName('lastAccessAt')!.isNullable = true
+  AppDataSource.getMetadata(ClientUserSession).findColumnWithPropertyName('lastAccessAt')!.isNullable = true
   await AppDataSource.synchronize()
   const { initializeDatabaseInfrastructure } = await import('../src/database/database-strategy.js')
   await initializeDatabaseInfrastructure(AppDataSource)
   const { authService } = await import('../src/services/auth.service.js')
+  const { clientAuthService } = await import('../src/services/client-auth.service.js')
+  const { startWebSessionCleanup, stopWebSessionCleanup } = await import('../src/services/web-session-cleanup.service.js')
+  stopCleanup = stopWebSessionCleanup
   const { requireAuth } = await import('../src/middleware/auth.middleware.js')
   const { hashSessionToken } = await import('../src/utils/session-token.js')
   const { databaseMaintenanceModeService } = await import('../src/services/database-maintenance-mode.service.js')
@@ -89,7 +103,7 @@ try {
   const users = AppDataSource.getRepository(SysUser)
   const sessions = AppDataSource.getRepository(SysUserSession)
   const now = Date.UTC(2026, 9, 30, 12)
-  mock.timers.enable({ apis: ['Date'], now })
+  mock.timers.enable({ apis: ['Date', 'setInterval'], now })
   let sequence = 0
   const createSession = async (lastAccessAt: Date | null = new Date(now)) => {
     sequence += 1
@@ -202,12 +216,101 @@ try {
   await assert.rejects(customerServiceRealtimeService.assertOwnerCanRegister(idleTicket, idle.token), /失效/)
   await assert.rejects(authenticate(idle.token), /长时间未操作/)
   assert.equal(await sessions.existsBy({ id: idle.session.id }), false, '空闲过期会话不能被 touch 复活')
-  console.log(`[auth-activity] ${mode}：实际 SQL 节流、心跳边界、旧快照、维护态、撤权与 SSE 验收通过`)
-} finally {
-  mock.timers.reset()
+
+  const clientUsers = AppDataSource.getRepository(ClientUser)
+  const clientSessions = AppDataSource.getRepository(ClientUserSession)
+  await clientUsers.save({ realName: 'StaffAlias', passwordHash: 'fixture-only' })
+  const client = await clientUsers.save({ realName: 'FiXtUrE', staffNo: 'StaffAlias', passwordHash: 'fixture-only' })
+  assert.equal(await clientAuthService.resolveLoginRiskSubject('StaffAlias'), `uid:${client.id}`, '工号必须优先于历史同名')
+  clientIdentifierSql.length = 0
+  assert.equal(await clientAuthService.resolveLoginRiskSubject('fixture'), `uid:${client.id}`)
+  assert.ok(clientIdentifierSql.some((sql) => mode === 'mysql'
+    ? /WHERE user\.real_name = /i.test(sql)
+    : /WHERE LOWER\(user\.real_name\) = /i.test(sql)), '使用当前数据库对应的姓名索引查询')
+  const createClientSession = async (lastAccessAt: Date | null) => {
+    const token = randomBytes(32).toString('hex')
+    const session = await clientSessions.save({
+      sessionToken: hashSessionToken(token), userId: client.id,
+      expiresAt: new Date(now + 24 * 60 * 60_000), lastAccessAt: lastAccessAt as Date,
+    })
+    return { token, session }
+  }
+  const recentClient = await createClientSession(null)
+  clientActivitySql.length = 0
+  await Promise.all(Array.from({ length: 8 }, () => clientAuthService.resolveClientByToken(recentClient.token)))
+  assert.equal(clientActivitySql.length, 1, '同一客户端会话并发只发送一个活动写入')
+  assert.match(clientActivitySql[0]!, /last_access_at IS NULL OR last_access_at < /i, 'SQL 重验旧快照')
+  assert.equal((await clientSessions.findOneByOrFail({ id: recentClient.session.id })).lastAccessAt.getTime(), now + 65_000)
+  await clientSessions.update(recentClient.session.id, { lastAccessAt: new Date(now) })
+  clientActivitySql.length = 0
+  await clientAuthService.resolveClientByToken(recentClient.token)
+  assert.equal(clientActivitySql.length, 0, '即使读取到旧活动时间，同一会话的成功写入仍有进程内窗口')
+
+  const failedClient = await createClientSession(null)
+  await AppDataSource.query(mode === 'mysql'
+    ? "CREATE TRIGGER reject_client_activity BEFORE UPDATE ON client_user_session FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'fixture rejection'"
+    : "CREATE TRIGGER reject_client_activity BEFORE UPDATE ON client_user_session BEGIN SELECT RAISE(ABORT, 'fixture rejection'); END")
   try {
+    await assert.rejects(clientAuthService.resolveClientByToken(failedClient.token), /fixture rejection/)
+  } finally {
+    await AppDataSource.query('DROP TRIGGER reject_client_activity')
+  }
+  await clientAuthService.resolveClientByToken(failedClient.token)
+  assert.equal((await clientSessions.findOneByOrFail({ id: failedClient.session.id })).lastAccessAt.getTime(), now + 65_000, '失败后下一次请求可重试')
+  await clientSessions.delete(recentClient.session.id)
+  await assert.rejects(clientAuthService.resolveClientByToken(recentClient.token), /失效/, '节流不能缓存鉴权结果')
+
+  const expiredClient = await createClientSession(new Date(now))
+  await clientSessions.update(expiredClient.session.id, { expiresAt: new Date(now) })
+  const expiredAdmin = await createSession()
+  await sessions.update(expiredAdmin.session.id, { expiresAt: new Date(now) })
+  const equalCutoffAdmin = await createSession()
+  const highSessionCases = [
+    { repository: sessions, userId: expiredAdmin.session.userId },
+    { repository: clientSessions, userId: expiredClient.session.userId },
+  ].map((item) => ({
+    ...item, expiredHash: hashSessionToken(randomUUID()), activeHash: hashSessionToken(randomUUID()),
+  }))
+  for (const { repository, userId, expiredHash, activeHash } of highSessionCases) {
+    // 两个相邻主键在 JavaScript Number 中会折叠为同一值。
+    await repository.createQueryBuilder().insert().values([
+      { id: () => '9007199254740992', userId, sessionToken: activeHash,
+        expiresAt: new Date(now + 24 * 60 * 60_000), lastAccessAt: new Date(now) },
+      { id: () => '9007199254740993', userId, sessionToken: expiredHash,
+        expiresAt: new Date(now), lastAccessAt: new Date(now) },
+    ]).updateEntity(false).execute()
+  }
+  await databaseMaintenanceModeService.beginReadOnly({ taskId: 'auth-activity-verify', phase: 'snapshot' })
+  try {
+    startWebSessionCleanup()
+    mock.timers.tick(10 * 60_000)
+    assert.equal(await sessions.existsBy({ id: expiredAdmin.session.id }), true, '维护冻结期间不得回收')
+  } finally {
+    await leaveMaintenance()
+  }
+  await sessions.update(equalCutoffAdmin.session.id, { expiresAt: new Date(Date.now() + 10 * 60_000) })
+  mock.timers.tick(10 * 60_000)
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (!await clientSessions.existsBy({ id: expiredClient.session.id })
+      && !await sessions.existsBy({ id: expiredAdmin.session.id })) break
+    await delay(20)
+  }
+  await stopWebSessionCleanup()
+  assert.equal(await sessions.existsBy({ id: expiredAdmin.session.id }), false, '回收超过有效期的管理端会话')
+  assert.equal(await clientSessions.existsBy({ id: expiredClient.session.id }), false, '回收超过有效期的客户端会话')
+  assert.equal(await sessions.existsBy({ id: equalCutoffAdmin.session.id }), true, '回收保留等于当前批次截止时间的会话')
+  assert.equal(await clientSessions.existsBy({ id: failedClient.session.id }), true, '回收保留活跃会话')
+  for (const { repository, expiredHash, activeHash } of highSessionCases) {
+    assert.equal(await repository.existsBy({ sessionToken: expiredHash }), false, '必须清理超过安全整数范围的过期主键')
+    assert.equal(await repository.existsBy({ sessionToken: activeHash }), true, '必须保留相邻高位主键的有效会话')
+  }
+  console.log(`[auth-activity] ${mode}：真实 SQL 节流、旧快照、回收和账号解析验收通过`)
+} finally {
+  try {
+    await stopCleanup?.()
     await leaveMaintenance?.()
   } finally {
+    mock.timers.reset()
     try {
       await destroyDataSource?.()
     } finally {
