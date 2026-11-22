@@ -139,7 +139,7 @@ for (const filePath of dockerfiles) {
 
 const workflowSource = readFileSync('.github/workflows/docker-publish.yml', 'utf8')
 assert.deepEqual(validateActionWorkflowPins(readdirSync('.github/workflows').filter(file => /\.ya?ml$/.test(file))
-  .map(file => ({ file: `.github/workflows/${file}`, content: readFileSync(`.github/workflows/${file}`, 'utf8') }))), [], '非 Mobile Action 固定点与最小权限契约')
+  .map(file => ({ file: `.github/workflows/${file}`, content: readFileSync(`.github/workflows/${file}`, 'utf8') }))), [], '全部工作流 Action 固定点与最小权限契约')
 const buildJobSource = workflowSource.split('\n  build:\n')[1]?.split('\n  merge:\n')[0]
 assert.ok(buildJobSource, '镜像发布工作流应包含 build 作业')
 const buildStepSource = buildJobSource.split('\n      - name: 构建并按 digest 推送\n')[1]?.split('\n      - name: 导出 digest\n')[0]

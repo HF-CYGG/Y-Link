@@ -707,7 +707,7 @@ Y-Link
 │  ├─ src/services/             业务服务
 │  ├─ sql/                      初始化和迁移 SQL
 │  └─ scripts/                  后端验证脚本
-├─ apps/mobile/                 根 npm workspace 中的 Expo Mobile 工程
+├─ apps/mobile/                 根 npm workspace 中保留的 Mobile 配置
 ├─ packages/                    @ylink 跨端共享 packages
 ├─ docker/
 │  ├─ nginx/                    Nginx 配置
@@ -730,7 +730,7 @@ Y-Link
 | `/app/uploads` | 容器内上传文件目录，必须持久化 |
 | `backend/sql` | MySQL 历史增量迁移脚本（用于给已有库补齐特定变更；全新空库请用 `DB_SYNC=true` 初始化，详见 `.env.docker.mysql.example`） |
 | `backend/data` | 本地开发 SQLite 数据目录 |
-| `apps/mobile` | Mobile 路由占位、providers、本地与平台能力基础 |
+| `apps/mobile` | Mobile workspace 清单、EAS 配置与开发说明 |
 | `packages` | API client、共享类型、领域、校验与设计 token 边界 |
 | `docs` | 使用指南、迁移手册、维护文档 |
 
@@ -755,28 +755,24 @@ Y-Link
 
 ## Mobile 工程基础状态
 
-仓库包含 `apps/mobile` Expo 工程和 `packages/*` 跨端基础。Mobile 固定使用 Node.js `22.23.5`；根 npm workspace 让 Mobile 通过正式 package dependency 消费共享 Contract，同时不改变现有 Vue Web、Express 后端、数据库或部署方式。
+原 Expo 应用源码已移除，`apps/mobile` 保留 `package.json`、`eas.json` 与使用说明。根 npm workspace 仍将 Mobile 清单与 `packages/*` 共享基础纳入同一 `package-lock.json`，使用 Node.js `22.23.5`。
 
-当前 Mobile 尚未接入真实 API，也没有实现正式登录会话、服务端购物车、订单、库存、退货、相机、相册、通知或 Deep Link。未运行模拟器或真机验证时，只能依据 SQLite migration 专项测试、typecheck 与 Android JS bundle export 判断工程基础，不代表设备交互、签名 APK 或发布链路可用。
+Mobile 基础检查工作流目前只支持 GitHub Actions 手动触发（`workflow_dispatch`）。当前运行 workspace 契约检查、共享包 TypeScript 检查和 Native API client 单元测试。应用源码及必要配置完整恢复后，再恢复 Expo 依赖一致性、SQLite 迁移测试、应用类型检查和 Android bundle 导出。
 
 主要目录：
 
-- `apps/mobile`：根 npm workspace 中的 Expo package，自身保留 manifest，依赖统一锁定在根 `package-lock.json`；
+- `apps/mobile`：保留 Mobile workspace 清单和 EAS 配置，应用级命令见 [Mobile 开发说明](./apps/mobile/README.md)；
 - `packages/api-client`：`@ylink/api-client`，传输无关 HTTP 契约与 Native/Web adapter；
 - `packages/shared-types`：`@ylink/shared-types`，已核对的跨端客户端 Contract 真源；
-- `packages/domain`、`packages/validation`、`packages/design-tokens`：已纳入 workspace 的最小共享边界，尚未由 Mobile 消费。
+- `packages/validation`：Mobile 清单声明的共享校验包；`packages/domain` 与 `packages/design-tokens` 属于共享 workspace。
 
 常用命令：
 
 ```bash
 npm ci
 npm run verify:mobile:workspace
-npm --workspace y-link-mobile run dependencies:check
-npm --workspace y-link-mobile run test:db
-npm --workspace y-link-mobile run typecheck
-npm --workspace y-link-mobile run export:android
 node ./node_modules/typescript/bin/tsc -p packages/tsconfig.json --noEmit
 node --experimental-strip-types --test packages/api-client/test/*.test.ts
 ```
 
-开发者、GitHub Actions 与 Expo/EAS 构建入口统一使用根 workspace 与根 lockfile。Mobile 只能通过 `@ylink/*` package 名称消费共享包，禁止用相对路径跨目录导入 `packages/*`。详细边界见 [`docs/project-context/60-移动端工程与共享基础.md`](./docs/project-context/60-移动端工程与共享基础.md)。
+Mobile 通过 `@ylink/*` 包名消费共享包。详细边界见 [移动端工程与共享基础](./docs/project-context/60-移动端工程与共享基础.md)。

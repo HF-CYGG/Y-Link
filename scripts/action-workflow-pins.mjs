@@ -1,4 +1,4 @@
-/** 非 Mobile 工作流供应链契约：只接受从官方仓库 tag/commit 核验的固定版本与最小令牌权限。 */
+/** 工作流供应链契约：只接受从官方仓库 tag/commit 核验的固定版本与最小令牌权限。 */
 export const officialActionPins = Object.freeze({
   'actions/checkout': ['d23441a48e516b6c34aea4fa41551a30e30af803', 'v6.1.0'],
   'actions/setup-node': ['49933ea5288caeca8642d1e84afbd3f7d6820020', 'v4.4.0'],
@@ -17,7 +17,6 @@ export const officialActionPins = Object.freeze({
 export function validateActionWorkflowPins(workflows) {
   const errors = []
   for (const { file, content } of workflows) {
-    if (file === '.github/workflows/mobile-check.yml') continue
     const lines = content.replaceAll('\r\n', '\n').split('\n')
     const permissionBlock = (start, indent) => {
       const entries = []
