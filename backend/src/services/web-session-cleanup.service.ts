@@ -7,6 +7,7 @@ import { runInTransaction } from '../config/transaction-runner.js'
 import { databaseOperationGate, DatabaseWriteFrozenError } from '../database/operation-gate.js'
 import { ClientUserSession } from '../entities/client-user-session.entity.js'
 import { SysUserSession } from '../entities/sys-user-session.entity.js'
+import { runExclusive } from '../redis/redis-lease.js'
 import { toSafeErrorLog } from '../utils/safe-error-log.js'
 
 const CLEANUP_INTERVAL_MS = 10 * 60_000
@@ -62,11 +63,11 @@ function armCleanupTimer(): void {
   if (timer || databaseOperationGate.isFrozen()) return
   timer = setInterval(() => {
     if (running) return
-    running = runCleanupCycle().catch((error: unknown) => {
+    running = runExclusive('job:web-session-cleanup', 60_000, runCleanupCycle).catch((error: unknown) => {
       if (!(error instanceof DatabaseWriteFrozenError)) {
         console.warn('[web-session-cleanup] 过期会话回收失败', toSafeErrorLog(error))
       }
-    }).finally(() => { running = undefined })
+    }).then(() => undefined).finally(() => { running = undefined })
   }, CLEANUP_INTERVAL_MS)
   timer.unref()
 }
