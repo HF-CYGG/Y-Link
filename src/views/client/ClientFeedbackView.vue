@@ -25,11 +25,11 @@ import {
   summarizeClientFeedbackConversations,
   type FeedbackConversationRecord,
   type FeedbackPortalAvailability,
-  type FeedbackRealtimeConnection,
 } from '@/api/modules/customer-service-feedback'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useRestockExpiryRefresh } from '@/composables/useRestockExpiryRefresh'
 import RestockRequestSummary from './components/RestockRequestSummary.vue'
+import { createClientFeedbackRealtime } from './client-feedback-realtime'
 import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { formatDateTime } from '@/utils/date-time'
@@ -49,16 +49,23 @@ const listLoaded = ref(false)
 const listError = ref('')
 const loading = ref(false)
 const conversations = ref<FeedbackConversationRecord[]>([])
-const portalNotice = ref('请尽量描述问题现象、出现时间和影响范围，便于客服持续跟进。')
+const defaultPortalNotice = '请尽量描述问题现象、出现时间和影响范围，便于客服持续跟进。'
+const portalNotice = ref(defaultPortalNotice)
 const availability = ref<FeedbackPortalAvailability | null>(null)
 const realtimeState = ref<'connecting' | 'online' | 'offline'>('offline')
 const reconnectTip = ref('进入页面后会自动同步最新会话进展。')
-let realtimeConnection: FeedbackRealtimeConnection | null = null
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let pageRuntimeActive = false
-let hasActivatedOnce = false
+let pageRuntimeGeneration = 0
 
 const currentClientUser = computed(() => clientAuthStore.currentUser)
+const capturePage = () => {
+  const owner = currentClientUser.value?.id
+  const session = clientAuthStore.sessionGeneration
+  const generation = pageRuntimeGeneration
+  return () => pageRuntimeActive && router.currentRoute.value.name === 'client-feedback'
+    && owner === currentClientUser.value?.id && session === clientAuthStore.sessionGeneration
+    && generation === pageRuntimeGeneration
+}
 const summary = computed(() => summarizeClientFeedbackConversations(conversations.value))
 /**
  * 分组式会话数据直接复用共享 API 的统一口径：
@@ -125,199 +132,145 @@ const handleNavigateToDetail = (conversationId: string) => {
   router.push(`/client/feedback/${conversationId}`)
 }
 
-const loadPortalConfig = async () => {
+const loadPortalConfig = async (mayApply = capturePage()) => {
+  if (!mayApply()) return
   await portalConfigRequest.runLatest({
     executor: (signal) => getClientFeedbackPortalConfig({ signal }),
     onSuccess: (config) => {
+      if (!mayApply()) return
       portalNotice.value = config.entryNotice
       availability.value = config.availability
+      if (realtime.hasConnectionOrRetry() || !isRealtimeEligible()) return
       realtimeState.value = config.availability.isOnline ? 'online' : 'offline'
       reconnectTip.value = config.availability.isOnline
         ? '客服当前在线，进入详情页后会自动续接同一条会话。'
         : '客服当前离线，你仍可先进入详情页留言，客服上线后会从原会话继续跟进。'
     },
     onError: (error) => {
-      throw error
+      if (mayApply()) throw error
     },
   })
 }
 
-const loadConversations = async () => {
+const loadConversations = async (mayApply = capturePage()) => {
   if (!currentClientUser.value?.id) {
     conversations.value = []
     return
   }
+  if (!mayApply()) return
 
-  const owner = currentClientUser.value.id
-  const session = clientAuthStore.sessionGeneration
-  const isCurrent = () => owner === currentClientUser.value?.id && session === clientAuthStore.sessionGeneration
+  const isCurrentPage = capturePage()
   loading.value = true
   await conversationListRequest.runLatest({
     executor: (signal) => listClientFeedbackConversations({ signal }),
     onSuccess: (items) => {
-      if (!isCurrent()) return
+      if (!mayApply()) return
       listLoaded.value = true
       listError.value = ''
       conversations.value = items
     },
     onError: (error) => {
-      if (!isCurrent()) return
+      if (!mayApply()) return
       const status = normalizeRequestError(error).status
       listError.value = status === 403 || status === 404 ? '当前账号无法访问会话列表，请重试或重新登录。' : listLoaded.value ? '最新会话同步失败，已保留现有列表。' : '会话列表加载失败，请重试。'
       throw error
     },
     onFinally: () => {
-      if (isCurrent()) loading.value = false
+      if (isCurrentPage()) loading.value = false
     },
   })
 }
 
 useRestockExpiryRefresh(() => conversations.value, () => loadConversations())
 
-const refreshAuthoritativeFeedbackState = async () => {
-  await Promise.all([loadPortalConfig(), loadConversations()])
+const refreshAuthoritativeFeedbackState = async (mayApply: () => boolean) => {
+  await Promise.all([loadPortalConfig(mayApply), loadConversations(mayApply)])
 }
 
 const isRealtimeEligible = () => {
   return pageRuntimeActive
+    && router.currentRoute.value.name === 'client-feedback'
     && globalThis.document?.visibilityState !== 'hidden'
     && Boolean(currentClientUser.value?.id)
 }
 
 const stopRealtime = (tip = '页面暂未显示，已暂停实时连接。') => {
-  realtimeConnection?.close()
-  realtimeConnection = null
-
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer)
-    reconnectTimer = null
-  }
-
+  realtime.stop()
   realtimeState.value = 'offline'
   reconnectTip.value = tip
 }
 
-const connectRealtime = () => {
-  stopRealtime()
-  if (!isRealtimeEligible()) {
-    return
-  }
-
-  const session = clientAuthStore.sessionGeneration
-  const isCurrentRealtime = () => isRealtimeEligible() && session === clientAuthStore.sessionGeneration
-  realtimeState.value = 'connecting'
-  realtimeConnection = openFeedbackRealtimeStream('client', {
-    onOpen: (payload) => {
-      if (!isCurrentRealtime()) {
-        return
+const realtime = createClientFeedbackRealtime({
+  openStream: (handlers) => openFeedbackRealtimeStream('client', handlers),
+  isEligible: isRealtimeEligible,
+  captureOwner: capturePage,
+  onConnecting: () => {
+    realtimeState.value = 'connecting'
+    reconnectTip.value = '正在连接客服实时消息。'
+  },
+  onOpen: (payload, isCurrentRealtime) => {
+    availability.value = payload.availability ?? availability.value
+    realtimeState.value = availability.value?.isOnline ? 'online' : 'offline'
+    void refreshAuthoritativeFeedbackState(isCurrentRealtime).then(() => {
+      if (!isCurrentRealtime()) return
+      realtimeState.value = availability.value?.isOnline ? 'online' : 'offline'
+      reconnectTip.value = '已恢复在线连接，并同步了最新会话列表。'
+    }).catch((error) => {
+      if (!isCurrentRealtime()) return
+      reconnectTip.value = '实时连接已恢复，但最新会话列表同步失败，请稍后重试。'
+      showAppError(extractErrorMessage(error, '反馈会话同步失败，请稍后重试'))
+    })
+  },
+  onConversation: async (_payload, isCurrentRealtime) => {
+    try {
+      await loadConversations(isCurrentRealtime)
+      if (isCurrentRealtime()) {
+        reconnectTip.value = '检测到会话有新进展，列表已自动刷新。'
       }
-      availability.value = payload.availability ?? availability.value
-      realtimeState.value = payload.availability?.isOnline ? 'online' : 'offline'
-      void refreshAuthoritativeFeedbackState().then(() => {
-        if (!isCurrentRealtime()) {
-          return
-        }
-        reconnectTip.value = '已恢复在线连接，并同步了最新会话列表。'
-      }).catch((error) => {
-        if (!isCurrentRealtime()) {
-          return
-        }
-        reconnectTip.value = '实时连接已恢复，但最新会话列表同步失败，请稍后重试。'
+    } catch (error) {
+      if (isCurrentRealtime()) {
+        reconnectTip.value = '检测到会话有新进展，但列表同步失败，请稍后重试。'
         showAppError(extractErrorMessage(error, '反馈会话同步失败，请稍后重试'))
-      })
-    },
-    onConversation: async () => {
-      if (!isCurrentRealtime()) {
-        return
       }
-      try {
-        await loadConversations()
-        if (isCurrentRealtime()) {
-          reconnectTip.value = '检测到会话有新进展，列表已自动刷新。'
-        }
-      } catch (error) {
-        if (isCurrentRealtime()) {
-          reconnectTip.value = '检测到会话有新进展，但列表同步失败，请稍后重试。'
-          showAppError(extractErrorMessage(error, '反馈会话同步失败，请稍后重试'))
-        }
-      }
-    },
-    onError: () => {
-      if (!isCurrentRealtime()) {
-        return
-      }
-      realtimeState.value = 'offline'
-      reconnectTip.value = '实时连接已中断，系统正在尝试自动续接...'
-      reconnectTimer = setTimeout(() => {
-        if (isCurrentRealtime()) {
-          connectRealtime()
-        }
-      }, 3000)
-    },
-  })
-}
+    }
+  },
+  onDisconnect: () => {
+    realtimeState.value = 'offline'
+    reconnectTip.value = '实时连接已中断，系统正在尝试自动续接...'
+  },
+})
 
-watch(() => currentClientUser.value?.id, () => {
+const sessionContext = [() => currentClientUser.value?.id, () => clientAuthStore.sessionGeneration] as const
+watch(sessionContext, () => {
   conversationListRequest.cancel()
   portalConfigRequest.cancel()
   conversations.value = []
   availability.value = null
+  portalNotice.value = defaultPortalNotice
   listLoaded.value = false
   listError.value = ''
   loading.value = false
-  stopRealtime()
+  stopRealtime(currentClientUser.value?.id ? undefined : '登录状态已失效，实时连接已释放。')
 }, { flush: 'sync' })
 
 const retryConversations = () => { void loadConversations().catch(() => {}) }
 
-watch(
-  () => currentClientUser.value?.id,
-  async () => {
-    if (!currentClientUser.value?.id) {
-      conversations.value = []
-      stopRealtime('登录状态已失效，实时连接已释放。')
-      return
-    }
-    try {
-      await loadPortalConfig().catch(() => {})
-      await loadConversations()
-      if (isRealtimeEligible()) {
-        connectRealtime()
-      }
-    } catch (error) {
-      showAppError(extractErrorMessage(error, '反馈中心初始化失败，请稍后重试'))
-    }
-  },
-)
-
-onMounted(async () => {
-  if (!currentClientUser.value?.id) {
-    return
-  }
-  try {
-    await loadPortalConfig().catch(() => {})
-    await loadConversations()
-  } catch (error) {
-    showAppError(extractErrorMessage(error, '反馈中心加载失败，请稍后重试'))
-  }
-})
-
-const resumePageRuntime = async (refreshData: boolean) => {
+const resumePageRuntime = async () => {
   if (!isRealtimeEligible()) {
     return
   }
-  connectRealtime()
-  if (!refreshData) {
-    return
-  }
+  const isCurrent = capturePage()
+  realtime.connect()
   try {
     await Promise.all([loadPortalConfig(), loadConversations()])
   } catch (error) {
-    if (isRealtimeEligible()) {
+    if (isCurrent() && isRealtimeEligible()) {
       showAppError(extractErrorMessage(error, '反馈中心刷新失败，请稍后重试'))
     }
   }
 }
+
+watch(sessionContext, () => { void resumePageRuntime() })
 
 const handleVisibilityChange = () => {
   if (!pageRuntimeActive) {
@@ -327,7 +280,7 @@ const handleVisibilityChange = () => {
     stopRealtime('页面进入后台，已暂停实时连接。')
     return
   }
-  void resumePageRuntime(true)
+  void resumePageRuntime()
 }
 
 const activatePageRuntime = () => {
@@ -336,8 +289,7 @@ const activatePageRuntime = () => {
   }
   pageRuntimeActive = true
   globalThis.document?.addEventListener('visibilitychange', handleVisibilityChange)
-  void resumePageRuntime(hasActivatedOnce)
-  hasActivatedOnce = true
+  void resumePageRuntime()
 }
 
 const deactivatePageRuntime = () => {
@@ -345,6 +297,7 @@ const deactivatePageRuntime = () => {
     return
   }
   pageRuntimeActive = false
+  pageRuntimeGeneration += 1
   globalThis.document?.removeEventListener('visibilitychange', handleVisibilityChange)
   portalConfigRequest.cancel()
   conversationListRequest.cancel()
@@ -352,17 +305,23 @@ const deactivatePageRuntime = () => {
   stopRealtime('离开反馈中心后已释放实时连接，返回页面会自动续接。')
 }
 
-onActivated(() => {
-  activatePageRuntime()
-})
+watch(() => router.currentRoute.value.name, (name) => {
+  if (!pageRuntimeActive) return
+  if (name === 'client-feedback') {
+    void resumePageRuntime()
+  } else {
+    pageRuntimeGeneration += 1
+    portalConfigRequest.cancel()
+    conversationListRequest.cancel()
+    loading.value = false
+    stopRealtime()
+  }
+}, { flush: 'sync' })
 
-onDeactivated(() => {
-  deactivatePageRuntime()
-})
-
-onBeforeUnmount(() => {
-  deactivatePageRuntime()
-})
+onMounted(activatePageRuntime)
+onActivated(activatePageRuntime)
+onDeactivated(deactivatePageRuntime)
+onBeforeUnmount(deactivatePageRuntime)
 </script>
 
 <template>
@@ -469,14 +428,14 @@ onBeforeUnmount(() => {
           <span class="text-xs font-medium text-slate-400">{{ conversations.length }} 条</span>
         </div>
 
-        <div v-if="listError && listLoaded" class="mt-4 rounded-xl bg-amber-50 p-3 text-sm text-amber-800" role="status">
+        <div v-if="listError && listLoaded" class="mt-4 rounded-xl bg-amber-50 p-3 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-200" role="status">
           {{ listError }} <el-button text @click="retryConversations">重试刷新</el-button>
         </div>
         <div v-if="loading && !listLoaded" class="mt-4 rounded-[1rem] bg-slate-50 px-4 py-8 text-center text-sm text-slate-500 dark:bg-white/5 dark:text-slate-400">
           正在加载会话...
         </div>
 
-        <div v-else-if="listError && !listLoaded" class="mt-4 rounded-xl bg-slate-50 p-6 text-center" role="alert">
+        <div v-else-if="listError && !listLoaded" class="mt-4 rounded-xl bg-slate-50 p-6 text-center dark:bg-white/5 dark:text-slate-200" role="alert">
           <p>{{ listError }}</p><el-button class="mt-3" @click="retryConversations">重试加载</el-button>
         </div>
         <div v-else-if="!conversations.length" class="mt-4 rounded-[1rem] bg-slate-50 px-4 py-8 text-center text-sm text-slate-500 dark:bg-white/5 dark:text-slate-400">

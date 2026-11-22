@@ -36,7 +36,6 @@ import {
   type FeedbackIssueCategory,
   type FeedbackMessageSenderRole,
   type FeedbackPortalAvailability,
-  type FeedbackRealtimeConnection,
   type FeedbackSatisfactionLevel,
 } from '@/api/modules/customer-service-feedback'
 import { useStableRequest } from '@/composables/useStableRequest'
@@ -49,6 +48,7 @@ import { formatDateTime } from '@/utils/date-time'
 import { extractErrorMessage, normalizeRequestError } from '@/utils/error'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { createFeedbackDetailLifecycle } from './client-feedback-detail-lifecycle'
+import { createClientFeedbackRealtime } from './client-feedback-realtime'
 import { retryFeedbackDetailAndEnsureRealtime } from './client-feedback-retry-policy'
 import { sendFeedbackReplyAndRefresh, resolveReplyDraftAfterSend } from './client-feedback-reply-policy'
 import { normalizeSubmitText } from '@/utils/submit-feedback'
@@ -59,6 +59,7 @@ const route = useRoute()
 const router = useRouter()
 const clientAuthStore = useClientAuthStore(pinia)
 const detailRequest = useStableRequest()
+const portalConfigRequest = useStableRequest()
 const FEEDBACK_ATTACHMENT_LIMIT = 9
 const FEEDBACK_ATTACHMENT_MAX_SIZE = 10 * 1024 * 1024
 
@@ -88,23 +89,23 @@ const reconnectTip = ref('进入页面后会自动续接当前会话。')
 const previewImageUrl = ref('')
 const previewVisible = computed({ get: () => Boolean(previewImageUrl.value), set: (value: boolean) => { if (!value) previewImageUrl.value = '' } })
 const freshMessageIds = ref<string[]>([])
-let realtimeConnection: FeedbackRealtimeConnection | null = null
-let realtimeConnectionIsCurrent: (() => boolean) | null = null
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let freshMessageTimer: ReturnType<typeof setTimeout> | null = null
 let pageRuntimeMounted = false
 const detailLifecycle = createFeedbackDetailLifecycle({
-  isMounted: () => pageRuntimeMounted,
+  isMounted: () => pageRuntimeMounted && router.currentRoute.value.name === 'client-feedback-detail',
   readContext: () => ({
     ownerId: clientAuthStore.currentUser?.id,
     sessionGeneration: clientAuthStore.sessionGeneration,
     conversationId: typeof route.params.id === 'string' ? route.params.id : '',
   }),
 })
-watch([() => route.params.id, () => clientAuthStore.currentUser?.id, () => clientAuthStore.sessionGeneration], () => {
+const pageContext = [() => router.currentRoute.value.name, () => route.params.id,
+  () => clientAuthStore.currentUser?.id, () => clientAuthStore.sessionGeneration] as const
+watch(pageContext, () => {
   detailLifecycle.invalidatePage()
   detailRequest.cancel()
-  stopRealtime()
+  portalConfigRequest.cancel()
+  stopRealtime(clientAuthStore.currentUser?.id ? undefined : '登录状态已失效，实时连接已释放。')
   availability.value = null
   conversation.value = null
   replyDraft.value = ''
@@ -390,19 +391,32 @@ const handleNavigateBack = () => {
 
 const loadPortalConfig = async () => {
   const isCurrent = detailLifecycle.capturePage()
-  const config = await getClientFeedbackPortalConfig()
-  if (!isCurrent()) return
-  availability.value = config.availability
-  realtimeState.value = config.availability.isOnline ? 'online' : 'offline'
-  reconnectTip.value = config.availability.isOnline
-    ? '客服当前在线，后续回复会自动同步到当前反馈单。'
-    : '客服当前离线，你仍可先留言，客服上线后会在当前反馈单继续跟进。'
+  await portalConfigRequest.runLatest({
+    executor: (signal) => getClientFeedbackPortalConfig({ signal }),
+    onSuccess: (config) => {
+      if (!isCurrent()) return
+      availability.value = config.availability
+      if (!isRealtimeEligible()) return
+      if (realtime.hasConnectionOrRetry()) {
+        if (realtime.hasConnection() && realtimeState.value !== 'connecting') {
+          realtimeState.value = config.availability.isOnline ? 'online' : 'offline'
+        }
+        return
+      }
+      realtimeState.value = config.availability.isOnline ? 'online' : 'offline'
+      reconnectTip.value = config.availability.isOnline
+        ? '客服当前在线，后续回复会自动同步到当前反馈单。'
+        : '客服当前离线，你仍可先留言，客服上线后会在当前反馈单继续跟进。'
+    },
+    onError: (error) => { if (isCurrent()) throw error },
+  })
 }
 
 const loadConversationDetail = async (
   conversationId: string,
   options: {
     preserveLocalState?: boolean
+    mayApply?: () => boolean
   } = {},
 ) => {
   if (!conversationId) {
@@ -415,7 +429,8 @@ const loadConversationDetail = async (
   }
 
   const isCurrentPage = detailLifecycle.capturePage()
-  const isCurrent = () => isCurrentPage() && currentConversationId.value === conversationId
+  const isCurrentDetail = () => isCurrentPage() && currentConversationId.value === conversationId
+  const isCurrent = () => isCurrentDetail() && (options.mayApply?.() ?? true)
   const previousConversationId = conversation.value?.id ?? ''
   const shouldPreserveLocalState = Boolean(options.preserveLocalState && previousConversationId === conversationId)
   const previousMessageIds = shouldPreserveLocalState
@@ -477,16 +492,17 @@ const loadConversationDetail = async (
       throw error
     },
     onFinally: () => {
-      if (!isCurrent()) return
+      if (!isCurrentDetail()) return
       detailLoading.value = false
       loading.value = false
     },
   })
 }
 
-const refreshAuthoritativeConversationDetail = async (conversationId: string) => {
+const refreshAuthoritativeConversationDetail = async (conversationId: string, mayApply?: () => boolean) => {
   await loadConversationDetail(conversationId, {
     preserveLocalState: true,
+    mayApply,
   })
 }
 
@@ -497,8 +513,8 @@ const retryConversationDetail = () => {
     isCurrent: detailLifecycle.capturePage(),
     hasDetail: () => conversation.value?.id === conversationId,
     eligible: isRealtimeEligible,
-    hasConnection: () => Boolean(realtimeConnection && realtimeConnectionIsCurrent?.()),
-    connect: connectRealtime,
+    hasConnection: realtime.hasConnection,
+    connect: realtime.connect,
   }).catch(() => {})
 }
 
@@ -772,89 +788,58 @@ const handleSubmitSatisfaction = async () => {
 
 const isRealtimeEligible = () => {
   return pageRuntimeMounted
+    && router.currentRoute.value.name === 'client-feedback-detail'
     && globalThis.document?.visibilityState !== 'hidden'
     && Boolean(currentClientUser.value?.id && currentConversationId.value)
 }
 
 const stopRealtime = (tip = '页面暂未显示，已暂停实时连接。') => {
   detailLifecycle.invalidateRealtime()
-  realtimeConnectionIsCurrent = null
-  realtimeConnection?.close()
-  realtimeConnection = null
-
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer)
-    reconnectTimer = null
-  }
-
+  realtime.stop()
   realtimeState.value = 'offline'
   reconnectTip.value = tip
 }
 
-const connectRealtime = () => {
-  stopRealtime()
-  if (!isRealtimeEligible()) {
-    return
-  }
-
-  const isCurrentConnection = detailLifecycle.startRealtime()
-  realtimeConnectionIsCurrent = isCurrentConnection
-  const isCurrentRealtime = () => isRealtimeEligible() && isCurrentConnection()
-  realtimeState.value = 'connecting'
-  realtimeConnection = openFeedbackRealtimeStream('client', {
-    onOpen: (payload) => {
-      if (!isCurrentRealtime()) {
-        return
+const realtime = createClientFeedbackRealtime({
+  openStream: (handlers) => openFeedbackRealtimeStream('client', handlers),
+  isEligible: isRealtimeEligible,
+  captureOwner: detailLifecycle.startRealtime,
+  onConnecting: () => {
+    realtimeState.value = 'connecting'
+    reconnectTip.value = '正在连接客服实时消息。'
+  },
+  onOpen: (payload, isCurrentRealtime) => {
+    if (payload.availability) portalConfigRequest.cancel()
+    availability.value = payload.availability ?? availability.value
+    realtimeState.value = availability.value?.isOnline ? 'online' : 'offline'
+    void refreshAuthoritativeConversationDetail(currentConversationId.value, isCurrentRealtime).then(() => {
+      if (!isCurrentRealtime()) return
+      reconnectTip.value = '已恢复在线连接，并同步了当前反馈单的最新状态。'
+    }).catch((error) => {
+      if (!isCurrentRealtime()) return
+      reconnectTip.value = '实时连接已恢复，但当前反馈单同步失败，请稍后重试。'
+      showAppError(extractErrorMessage(error, '反馈单详情同步失败，请稍后重试'))
+    })
+  },
+  onConversation: async (payload, isCurrentRealtime) => {
+    if (payload?.conversationId !== currentConversationId.value) return
+    try {
+      await refreshAuthoritativeConversationDetail(currentConversationId.value, isCurrentRealtime)
+      if (isCurrentRealtime()) {
+        reconnectTip.value = '检测到当前反馈单有新进展，已自动刷新详情。'
       }
-      availability.value = payload.availability ?? availability.value
-      realtimeState.value = payload.availability?.isOnline ? 'online' : 'offline'
-      const conversationId = currentConversationId.value
-      void refreshAuthoritativeConversationDetail(conversationId).then(() => {
-        if (!isCurrentRealtime() || currentConversationId.value !== conversationId) {
-          return
-        }
-        reconnectTip.value = '已恢复在线连接，并同步了当前反馈单的最新状态。'
-      }).catch((error) => {
-        if (!isCurrentRealtime() || currentConversationId.value !== conversationId) {
-          return
-        }
-        reconnectTip.value = '实时连接已恢复，但当前反馈单同步失败，请稍后重试。'
+    } catch (error) {
+      if (isCurrentRealtime()) {
+        reconnectTip.value = '检测到当前反馈单有新进展，但详情同步失败，请稍后重试。'
         showAppError(extractErrorMessage(error, '反馈单详情同步失败，请稍后重试'))
-      })
-    },
-    onConversation: async (payload) => {
-      if (!isCurrentRealtime()) {
-        return
       }
-      if (payload?.conversationId !== currentConversationId.value) {
-        return
-      }
-      try {
-        await refreshAuthoritativeConversationDetail(currentConversationId.value)
-        if (isCurrentRealtime()) {
-          reconnectTip.value = '检测到当前反馈单有新进展，已自动刷新详情。'
-        }
-      } catch (error) {
-        if (isCurrentRealtime()) {
-          reconnectTip.value = '检测到当前反馈单有新进展，但详情同步失败，请稍后重试。'
-          showAppError(extractErrorMessage(error, '反馈单详情同步失败，请稍后重试'))
-        }
-      }
-    },
-    onError: () => {
-      if (!isCurrentRealtime()) {
-        return
-      }
-      realtimeState.value = 'offline'
-      reconnectTip.value = '实时连接已中断，系统正在尝试自动续接...'
-      reconnectTimer = setTimeout(() => {
-        if (isCurrentRealtime()) {
-          connectRealtime()
-        }
-      }, 3000)
-    },
-  })
-}
+    }
+  },
+  onDisconnect: () => {
+    realtimeState.value = 'offline'
+    reconnectTip.value = '实时连接已中断，系统正在尝试自动续接...'
+  },
+})
 
 const handleOpenSatisfactionDialog = () => {
   if (!showSatisfactionEntry.value) {
@@ -863,41 +848,23 @@ const handleOpenSatisfactionDialog = () => {
   satisfactionDialogVisible.value = true
 }
 
-watch(
-  [() => currentClientUser.value?.id, () => clientAuthStore.sessionGeneration],
-  async () => {
-    if (!currentClientUser.value?.id || !currentConversationId.value) {
-      stopRealtime('登录状态已失效，实时连接已释放。')
-      return
-    }
-    try {
-      await loadPortalConfig().catch(() => {})
-      await loadConversationDetail(currentConversationId.value)
-      if (isRealtimeEligible()) {
-        connectRealtime()
-      }
-    } catch (error) {
-      showAppError(extractErrorMessage(error, '反馈单详情初始化失败，请稍后重试'))
-    }
-  },
-)
-
-watch(
-  () => currentConversationId.value,
-  async (conversationId) => {
-    if (!conversationId || !currentClientUser.value?.id) {
-      return
-    }
-    try {
-      await loadConversationDetail(conversationId)
-      if (isRealtimeEligible()) {
-        connectRealtime()
-      }
-    } catch (error) {
+const resumePageRuntime = async (preserveLocalState = false) => {
+  if (!isRealtimeEligible()) return
+  const isCurrent = detailLifecycle.capturePage()
+  realtime.connect()
+  try {
+    await Promise.all([
+      loadPortalConfig().catch(() => {}),
+      loadConversationDetail(currentConversationId.value, { preserveLocalState }),
+    ])
+  } catch (error) {
+    if (isCurrent() && isRealtimeEligible()) {
       showAppError(extractErrorMessage(error, '反馈单详情加载失败，请稍后重试'))
     }
-  },
-)
+  }
+}
+
+watch(pageContext, () => { void resumePageRuntime() })
 
 const handleVisibilityChange = () => {
   if (!pageRuntimeMounted) {
@@ -907,35 +874,13 @@ const handleVisibilityChange = () => {
     stopRealtime('页面进入后台，已暂停实时连接。')
     return
   }
-  void Promise.all([
-    loadPortalConfig(),
-    loadConversationDetail(currentConversationId.value, { preserveLocalState: true }),
-  ]).then(() => {
-    if (isRealtimeEligible()) {
-      connectRealtime()
-    }
-  }).catch((error) => {
-    if (isRealtimeEligible()) {
-      showAppError(extractErrorMessage(error, '反馈单详情刷新失败，请稍后重试'))
-    }
-  })
+  void resumePageRuntime(true)
 }
 
-onMounted(async () => {
+onMounted(() => {
   pageRuntimeMounted = true
   globalThis.document?.addEventListener('visibilitychange', handleVisibilityChange)
-  if (!currentClientUser.value?.id || !currentConversationId.value) {
-    return
-  }
-  try {
-    await loadPortalConfig().catch(() => {})
-    await loadConversationDetail(currentConversationId.value)
-    if (isRealtimeEligible()) {
-      connectRealtime()
-    }
-  } catch (error) {
-    showAppError(extractErrorMessage(error, '反馈单详情加载失败，请稍后重试'))
-  }
+  void resumePageRuntime()
 })
 
 onBeforeUnmount(() => {
@@ -986,7 +931,7 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div v-if="refreshWarning" class="rounded-xl bg-amber-50 p-4 text-sm text-amber-800" role="status">
+    <div v-if="refreshWarning" class="rounded-xl bg-amber-50 p-4 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-200" role="status">
       {{ refreshWarning }} <el-button text @click="retryConversationDetail">重试刷新</el-button>
     </div>
     <article v-if="loading && !conversation" class="rounded-[1.4rem] bg-white p-8 text-center shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
