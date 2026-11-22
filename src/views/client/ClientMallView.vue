@@ -1295,12 +1295,13 @@ const animateProductCardReorder = (previousRects: Map<string, DOMRect>) => {
     .forEach(({ element, deltaX, deltaY, distance }, index) => {
       const delay = Math.min(maxDelay, index * staggerStep)
       const largePhoneMove = distance > maxPhoneDistance
-      const startTransform = largePhoneMove
-        ? 'translate3d(0, 10px, 0) scale(0.992)'
-        : `translate3d(${deltaX}px, ${deltaY}px, 0) scale(0.986)`
-      const settleTransform = largePhoneMove
-        ? 'translate3d(0, 1px, 0) scale(1)'
-        : `translate3d(${deltaX * 0.04}px, ${deltaY * 0.04}px, 0) scale(1.002)`
+      // 手机端“默认 ↔ 推荐”切换时卡片位移通常超过阈值；此前超距直接退化为原地淡入，
+      // 导致看不到卡片移动。这里改为沿原方向把起点钳制到阈值内，仍保留可见的滑动轨迹。
+      const moveScale = largePhoneMove ? maxPhoneDistance / distance : 1
+      const startX = deltaX * moveScale
+      const startY = deltaY * moveScale
+      const startTransform = `translate3d(${startX}px, ${startY}px, 0) scale(0.986)`
+      const settleTransform = `translate3d(${startX * 0.04}px, ${startY * 0.04}px, 0) scale(1.002)`
       element.style.willChange = 'transform, opacity'
       const animation = element.animate(
         [
