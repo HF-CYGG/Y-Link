@@ -11,6 +11,7 @@ import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { env } from '../config/env.js'
 import { GOVERNANCE_PERMISSION_CODES, resolveUserPermissions } from '../constants/auth-permissions.js'
+import { databaseOperationGate, DatabaseWriteFrozenError } from '../database/operation-gate.js'
 import { SysUser } from '../entities/sys-user.entity.js'
 import { SysUserSession } from '../entities/sys-user-session.entity.js'
 import { SysUserWebauthnCredential } from '../entities/sys-user-webauthn-credential.entity.js'
@@ -782,6 +783,15 @@ export class AuthService {
     throw new BizError('当前密码错误，身份复核未通过', 400)
   }
 
+  private async deleteInvalidSession(id: string): Promise<void> {
+    if (databaseOperationGate.isFrozen()) return
+    try {
+      await this.sessionRepo.delete({ id })
+    } catch (error) {
+      if (!(error instanceof DatabaseWriteFrozenError)) throw error
+    }
+  }
+
   async resolveAuthUserByToken(sessionToken: string): Promise<AuthUserContext> {
     const now = new Date()
     const sessionTokenHash = hashSessionToken(sessionToken)
@@ -799,19 +809,19 @@ export class AuthService {
     }
     // 空闲超时：遗留在公共设备上的管理端会话不能凭 7 天绝对时效长期可用。
     if (isAdminSessionIdleExpired(session, now)) {
-      await this.sessionRepo.delete({ id: session.id })
+      await this.deleteInvalidSession(session.id)
       customerServiceRealtimeService.disconnectBySessionHash('service', sessionTokenHash)
       throw new BizError('登录已因长时间未操作失效，请重新登录', 401)
     }
 
     const user = session.user
     if (!user) {
-      await this.sessionRepo.delete({ id: session.id })
+      await this.deleteInvalidSession(session.id)
       throw new BizError('登录状态无效，请重新登录', 401)
     }
 
     if (user.status !== 'enabled') {
-      await this.sessionRepo.delete({ id: session.id })
+      await this.deleteInvalidSession(session.id)
       throw new BizError('当前账号已停用，请联系管理员', 403)
     }
 

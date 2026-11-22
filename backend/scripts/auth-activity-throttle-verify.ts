@@ -174,16 +174,25 @@ try {
   assert.equal(await readActivity(concurrent.session.id), now + 64_000, '第二个旧快照的 SQL 必须被数据库条件拦住')
 
   const frozen = await createSession(new Date(now))
+  const disabledWhileFrozen = await createSession()
+  const idleWhileFrozen = await createSession(new Date(now - 721 * 60_000))
+  await users.update(disabledWhileFrozen.user.id, { status: 'disabled' })
   await databaseMaintenanceModeService.beginReadOnly({ taskId: 'auth-activity-verify', phase: 'snapshot' })
   try {
     activitySql.length = 0
     await authenticate(frozen.token)
     assert.equal(activitySql.length, 0, '维护期不能尝试发送活动 UPDATE')
+    await assert.rejects(authService.resolveAuthUserByToken(idleWhileFrozen.token), { statusCode: 401 })
+    await assert.rejects(authService.resolveAuthUserByToken(disabledWhileFrozen.token), { statusCode: 403 })
+    assert.equal(await sessions.existsBy({ id: idleWhileFrozen.session.id }), true, '冻结期只拒绝鉴权，延后清理闲置会话')
+    assert.equal(await sessions.existsBy({ id: disabledWhileFrozen.session.id }), true, '冻结期只拒绝鉴权，延后清理停用会话')
   } finally {
     await leaveMaintenance()
   }
   await authenticate(frozen.token)
   assert.equal(await readActivity(frozen.session.id), now + 65_000, '解除维护后恢复活跃更新')
+  await assert.rejects(authService.resolveAuthUserByToken(idleWhileFrozen.token), { statusCode: 401 })
+  assert.equal(await sessions.existsBy({ id: idleWhileFrozen.session.id }), false, '解除维护后恢复清理无效会话')
 
   const failedTouch = await createSession(new Date(now))
   const originalTouch = authService.touchSessionActivity
