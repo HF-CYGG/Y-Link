@@ -38,7 +38,7 @@ const load = (source, dependencies, environment = globalThis) => {
   }, module, module.exports, () => {}, environment);
   return module.exports;
 };
-const harness = ({savedUser = null, restore, storageDenied = false} = {}) => {
+const harness = ({savedUser = null, restore, storageDenied = false, persistenceError} = {}) => {
   const pageScope = vue.effectScope();
   const pinia = createPinia();
   const writes = [], messages = [], activate = [], deactivate = [], unmount = [];
@@ -55,6 +55,7 @@ const harness = ({savedUser = null, restore, storageDenied = false} = {}) => {
   let pageDisposed = false;
   const api = {
     clientLogin: async ({account}) => ({user: user(account), expiresAt: '2099-01-01T00:00:00Z'}),
+    clientUpdateProfile: () => {assert.ok(response); return response.promise;},
     confirmClientSavedContactVerification: () => {assert.ok(response); return response.promise;},
     getClientAuthCapabilities: async () => ({channels: {mobile: true, email: true}}),
     getClientMe: () => {assert.ok(restore); return restore.promise;},
@@ -71,7 +72,10 @@ const harness = ({savedUser = null, restore, storageDenied = false} = {}) => {
     '@/store/pinia': {__esModule: true, default: pinia},
     '@/api/modules/client-auth': api,
     '@/utils/client-auth-storage': {
-      persistClientAuthState: value => writes.push(structuredClone(value)),
+      persistClientAuthState: value => {
+        if (persistenceError) throw persistenceError;
+        writes.push(structuredClone(value));
+      },
       clearPersistedClientAuthState: () => {},
       readPersistedClientAuthState: () => ({user: savedUser, expiresAt: null}),
       hasRecoverableClientSessionHint: () => savedUser !== null,
@@ -232,5 +236,25 @@ for (const outcome of ['success', 'failure']) {
     assert.equal(await action, null);
     assert.equal(h.store.currentUser, null);
     assert.equal(h.writes.length, beforeWrites);
+  } finally {h.dispose();}
+}
+
+for (const failure of ['QuotaExceededError', 'SecurityError']) {
+  const h = harness({persistenceError: new DOMException('持久化不可用', failure)});
+  try {
+    await h.store.login({account: 'A', password: 'fixture'});
+    const profileResponse = h.begin();
+    const profileAction = h.store.updateProfile({currentPassword: 'fixture'});
+    const profile = {...user('A'), realName: '新姓名'};
+    profileResponse.resolve(profile);
+    assert.deepEqual(await profileAction, profile);
+    assert.equal(h.store.currentUser.realName, '新姓名');
+
+    const contactResponse = h.begin();
+    const contactAction = h.store.confirmSavedContact({channel: 'email', code: '123456'});
+    const verified = {...profile, emailVerifiedAt: '2026-01-02T03:04:05Z'};
+    contactResponse.resolve(verified);
+    assert.deepEqual(await contactAction, verified);
+    assert.equal(h.store.currentUser.emailVerifiedAt, verified.emailVerifiedAt);
   } finally {h.dispose();}
 }
