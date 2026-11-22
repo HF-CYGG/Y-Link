@@ -1,8 +1,8 @@
+# syntax=docker/dockerfile:1
+
 # 模块说明：前端独立部署 Docker 构建文件
 # 文件职责：定义前端静态资源的打包过程与 Nginx 运行环境
 # 维护说明：若前端构建流程增加必须的环境变量或改变产物目录，需同步修改此处
-
-# syntax=docker/dockerfile:1
 
 # ------------------------------
 # 文件说明：Y-Link 前端镜像构建文件。
@@ -58,21 +58,7 @@ RUN apk add --no-cache tzdata \
   && mkdir -p /var/cache/nginx/ylink-public \
   && chown -R nginx:nginx /var/cache/nginx/ylink-public
 
-# 仅定向更新基座中已安装的两个运行库；保留Alpine分支、Nginx及全部现有模块。
-# 仍由既有官方源和可信key验签；新增、删除或改变其它包时停止构建。
-RUN set -eu; \
-  grep -Eq '^3\.24\.' /etc/alpine-release; \
-  apk info -e zlib libxslt >/dev/null; \
-  before_packages="$(apk info -v)"; \
-  before_other="$(printf '%s\n' "$before_packages" | grep -Ev '^(zlib|libxslt)-[0-9]' | sort)"; \
-  apk add --no-cache --upgrade zlib=1.4-r0 libxslt=1.1.43-r4; \
-  after_packages="$(apk info -v)"; \
-  after_other="$(printf '%s\n' "$after_packages" | grep -Ev '^(zlib|libxslt)-[0-9]' | sort)"; \
-  test "$before_other" = "$after_other"; \
-  printf '%s\n' "$after_packages" | grep -Fqx 'zlib-1.4-r0'; \
-  printf '%s\n' "$after_packages" | grep -Fqx 'libxslt-1.1.43-r4'
-
-# 构建工具只进入独立层；先记录原目标完整载荷，最终不增加运行依赖或信任根。
+# 候选阶段保留原基座的精确修订和载荷，供固定源包和签名契约核对。
 FROM alpine-native-base AS alpine-native-build
 COPY docker/alpine-native-security /opt/ylink-alpine-security
 RUN --mount=from=alpine-native-base,source=/,target=/mnt/ylink-alpine-original,ro \
@@ -81,7 +67,34 @@ RUN --mount=from=alpine-native-base,source=/,target=/mnt/ylink-alpine-original,r
   && python3 /opt/ylink-alpine-security/build.py --candidate-only
 
 FROM alpine-native-base AS runtime
-# 保留既有合法运行基线；本批未验收OpenSSL/libxml2候选尚未接入runtime。
+# 仅从 Alpine 3.24 官方源更新三个已装包。libxslt 依赖 libxml2，后者依赖 zlib。
+# 保留系统可信密钥，校验版本下限并核对其它包的名称和版本。
+RUN set -eu; \
+  set -o pipefail; \
+  grep -Eq '^3\.24\.' /etc/alpine-release; \
+  apk info -e zlib libxml2 libxslt >/dev/null; \
+  before_packages="$(apk info -v)"; \
+  before_other="$(printf '%s\n' "$before_packages" | grep -Ev '^(zlib|libxml2|libxslt)-[0-9]' | LC_ALL=C sort)"; \
+  apk --repositories-file /dev/null \
+    --repository https://dl-cdn.alpinelinux.org/alpine/v3.24/main \
+    --repository https://dl-cdn.alpinelinux.org/alpine/v3.24/community \
+    add --no-cache --upgrade 'zlib>=1.4-r0' 'libxml2>=2.13.9-r3' 'libxslt>=1.1.43-r4'; \
+  after_packages="$(apk info -v)"; \
+  after_other="$(printf '%s\n' "$after_packages" | grep -Ev '^(zlib|libxml2|libxslt)-[0-9]' | LC_ALL=C sort)"; \
+  test "$before_other" = "$after_other" || { printf >&2 '%s\n' 'APK 事务更改了范围外的运行包库存'; exit 1; }; \
+  for requirement in zlib:1.4-r0 libxml2:2.13.9-r3 libxslt:1.1.43-r4; do \
+    package="${requirement%:*}"; \
+    minimum="${requirement#*:}"; \
+    previous="$(printf '%s\n' "$before_packages" | sed -n "/^$package-[0-9]/s/^$package-//p")"; \
+    installed="$(printf '%s\n' "$after_packages" | sed -n "/^$package-[0-9]/s/^$package-//p")"; \
+    test -n "$installed"; \
+    apk version --check "$previous" "$installed"; \
+    if [ "$(apk version --test "$previous" "$minimum")" = '>' ]; then minimum="$previous"; fi; \
+    case "$(apk version --test "$installed" "$minimum")" in \
+      '='|'>') ;; \
+      *) printf >&2 '%s 安装版本 %s 低于要求的 %s\n' "$package" "$installed" "$minimum"; exit 1 ;; \
+    esac; \
+  done
 
 # 使用可模板化站点配置：
 # - 处理 Vue Router history 路由回退；

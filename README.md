@@ -687,7 +687,9 @@ docker build --file backend/Dockerfile.mysql --tag ylink-backend-mysql:local bac
 docker build --file Dockerfile.onebox --tag ylink-onebox:local .
 ```
 
-涉及依赖变更时，再在本地执行 `npm audit --omit=dev` 与 `npm --prefix backend audit --omit=dev`。Mobile 工作流只在 `apps/mobile/**`、`packages/**`、`.npmrc` 或其专用检查脚本变化时触发；仅修改 Web、后端或根锁文件不会启动 Mobile 构建。
+涉及依赖变更时，再在本地执行 `npm audit --omit=dev` 与 `npm --prefix backend audit --omit=dev`。
+
+独立 Web 镜像从 Alpine 3.24 官方仓库定向更新已安装的 zlib 和 libxslt，并纳入 APK 求解时同步更新的 libxml2。三个包的最低版本分别为 `1.4-r0`、`1.1.43-r4` 和 `2.13.9-r3`。其它运行包的名称及版本须保持一致。OpenSSL 与 libxml2 原生候选的构建阶段保留升级前的精确基座。三份后端运行镜像继续使用经过验签和完整性核验的冻结 Debian `baseline-v7` 源码与 keyring。若官方仓库归档了所需字节，构建会停止，应从 Debian 官方归档核对相同输入，再更新构建来源并重新验收。原生安全候选仅通过独立构建 target 产出。
 
 ## 项目结构
 
