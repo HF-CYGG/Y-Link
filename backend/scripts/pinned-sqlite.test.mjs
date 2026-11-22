@@ -5,6 +5,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { runInNewContext } from 'node:vm'
 import test from 'node:test'
 import { PINNED_SQLITE, SQLITE_REQUIRED_OPTIONS, assertSqliteHash, assertSqliteRuntime } from './pinned-sqlite-source.mjs'
 import { assertOwnedSqliteProject } from './build-pinned-sqlite.mjs'
@@ -116,6 +117,24 @@ test('Onebox只复制验过指纹的keyring，正式APT验签/健康/救援入�
   assert.ok(runtime.includes('COPY --from=nginx-keyring /usr/share/keyrings/nginx-archive-keyring.gpg'))
   assert.doesNotMatch(runtime, /apt-get install[^\n]*(?:\bcurl\b|\bgnupg\b)/)
   assert.ok(runtime.includes('gpgv --status-fd 1 --keyring'))
-  assert.ok(runtime.includes('CMD node -e'))
+  const healthcheck = runtime.match(/^HEALTHCHECK [^\r\n]+\\\r?\n\s+CMD (\[.*\])$/m)
+  assert.ok(healthcheck, '健康探针必须使用 exec 形式')
+  const [executable, flag, script, ...extra] = JSON.parse(healthcheck[1])
+  assert.deepEqual([executable, flag, ...extra], ['node', '-e'])
+  for (const [statusCode, expected] of [[200, 0], [503, 1], [null, 1]]) {
+    const exitCodes = []
+    const require = (module) => {
+      assert.equal(module, 'node:http')
+      return {
+        get(url, onResponse) {
+          assert.equal(url, 'http://127.0.0.1/health')
+          if (statusCode !== null) onResponse({ statusCode })
+          return { on(event, onError) { assert.equal(event, 'error'); if (statusCode === null) onError() } }
+        },
+      }
+    }
+    runInNewContext(script, { require, process: { exit: code => exitCodes.push(code) } }, { timeout: 1000 })
+    assert.deepEqual(exitCodes, [expected])
+  }
   assert.ok(runtime.includes('ENTRYPOINT ["/entrypoint.sh"]'))
 })
