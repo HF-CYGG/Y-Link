@@ -59,6 +59,7 @@ const kingdeeSfcTargets = [
   { generated: path.join(kingdeeBuildRoot, 'O2oVerifyConsoleView-setup.mjs'), source: path.join(projectRoot, 'src/views/o2o/O2oVerifyConsoleView.vue'), allowedSources: [
     kingdeeErrorSource, kingdeeRefreshSource, path.join(projectRoot, 'src/composables/useStableRequest.ts'),
     path.join(projectRoot, 'src/composables/usePermissionAction.ts'), path.join(projectRoot, 'src/utils/permission.ts'),
+    path.join(projectRoot, 'src/composables/useAdminProductOptionsCache.ts'), path.join(projectRoot, 'src/utils/data-change-signal.ts'),
     path.join(projectRoot, 'src/constants/o2o-order-status.ts'), path.join(projectRoot, 'src/views/o2o/o2o-verify-console.helpers.ts'),
   ] },
   // 这些产物包含真实业务 setup/模板，必须映射回源码，不能当作临时生成壳丢弃。

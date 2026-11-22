@@ -28,6 +28,7 @@ export async function compileBehaviorSfc(relative, output) {
   if (compiled.has(relative)) return compiled.get(relative)
   await freshness()
   const sourcePath = path.join(root, relative)
+  const isVerifyConsole = relative === 'src/views/o2o/O2oVerifyConsoleView.vue'
   const parsed = parse(fs.readFileSync(sourcePath, 'utf8'), { filename: sourcePath, sourceMap: true })
   assert.deepEqual(parsed.errors, [])
   const script = compileScript(parsed.descriptor, { id: relative, sourceMap: true })
@@ -41,10 +42,12 @@ export async function compileBehaviorSfc(relative, output) {
         if (id === '@/utils/error') return path.join(root, 'src/utils/error.ts')
         if (id === '@/utils/client-order-refresh') return path.join(root, 'src/utils/client-order-refresh.ts')
         if (id === 'vue-router') return '\0behavior:router'
-        if (relative === 'src/views/o2o/O2oVerifyConsoleView.vue' && ['element-plus', '@element-plus/icons-vue', '@/composables/useDevice', '@/composables/useCameraQrScanner', '@/api/modules/product'].includes(id)) return `\0behavior:${id}`
-        if (relative === 'src/views/o2o/O2oVerifyConsoleView.vue' && [
-          '@/composables/useStableRequest', '@/composables/usePermissionAction', '@/utils/permission',
-          '@/constants/o2o-order-status', '@/views/o2o/o2o-verify-console.helpers',
+        if (isVerifyConsole && ['element-plus', '@element-plus/icons-vue', '@/composables/useDevice', '@/composables/useCameraQrScanner', '@/api/modules/product'].includes(id)) return `\0behavior:${id}`
+        if (isVerifyConsole && id === '@/store/modules/auth') return '\0behavior:@/store'
+        if (isVerifyConsole && [
+          '@/composables/useStableRequest', '@/composables/usePermissionAction', '@/composables/useAdminProductOptionsCache',
+          '@/utils/permission', '@/utils/data-change-signal', '@/constants/o2o-order-status',
+          '@/views/o2o/o2o-verify-console.helpers',
         ].includes(id)) return path.join(root, 'src', id.slice(2) + '.ts')
         if (['@/components/common','@/api/modules/inventory','@/utils/app-alert','@/api/modules/o2o','@/store','@/store/pinia'].includes(id) || id.endsWith('.vue')) return `\0behavior:${id}`
         if (id.startsWith('@/')) return path.join(root, 'src', id.slice(2))
