@@ -44,6 +44,7 @@ import { authSecurityService } from './auth-security.service.js'
 import { captchaService } from './captcha.service.js'
 import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
+import { acquireSequenceMutex } from './inventory-sequence.service.js'
 import { systemConfigService, type VerificationProviderConfigsResult } from './system-config.service.js'
 import { clientStaffInviteCodeService } from './client-staff-invite-code.service.js'
 import { maskMobileVerificationTarget } from './sms-verification-record.service.js'
@@ -79,6 +80,7 @@ interface ClientLoginSecuritySnapshot {
 const RESET_TICKET_TTL_MS = 10 * 60 * 1000
 const CLIENT_SESSION_ACTIVITY_WRITE_INTERVAL_MS = 60 * 1000
 const CLIENT_SESSION_ACTIVITY_MAX_ENTRIES = 10_000
+const PROFILE_USERNAME_MUTEX_KEY = 'client_user.profile_username'
 const resetTicketStore = createTicketStore<ResetTicket>({
   namespace: 'client-password-reset-v2',
   maxSize: 3000,
@@ -709,14 +711,14 @@ class ClientAuthService {
     return query.getOne()
   }
 
-  /** 必须在持有账号行锁后调用，不能根据 Cookie/Bearer 来源判断会话所属表。 */
-  private async assertProfileSessionCurrent(manager: EntityManager, auth: ClientAuthContext) {
+  /** 写入前须在持有账号行锁后锁定会话，不能根据 Cookie/Bearer 来源判断所属表。 */
+  private async assertProfileSessionCurrent(manager: EntityManager, auth: ClientAuthContext, lock = true) {
     if (isMobileAccessToken(auth.sessionToken)) {
       const query = manager.getRepository(ClientMobileSession).createQueryBuilder('session')
         .where('session.clientUserId = :userId AND session.accessTokenHash = :hash', {
           userId: auth.userId, hash: hashMobileToken(auth.sessionToken),
         })
-      if (manager.connection.options.type === 'mysql') query.setLock('pessimistic_write')
+      if (lock && manager.connection.options.type === 'mysql') query.setLock('pessimistic_write')
       const session = await query.getOne()
       const now = new Date()
       if (!session || session.revokedAt) throw new BizError('Access Token 无效或已撤销', 401, { code: 40101 })
@@ -729,7 +731,7 @@ class ClientAuthService {
       .where('session.userId = :userId AND session.sessionToken = :hash', {
         userId: auth.userId, hash: hashSessionToken(auth.sessionToken),
       })
-    if (manager.connection.options.type === 'mysql') query.setLock('pessimistic_write')
+    if (lock && manager.connection.options.type === 'mysql') query.setLock('pessimistic_write')
     const session = await query.getOne()
     const now = new Date()
     if (!session || session.expiresAt <= now) throw new BizError('未登录或登录状态已失效', 401)
@@ -1568,23 +1570,22 @@ class ClientAuthService {
   async updateProfile(
     auth: ClientAuthContext,
     input: ClientUpdateProfileInput,
-    manager?: EntityManager,
+    source: 'web' | 'mobile' = 'web',
     requestMeta?: RequestMeta,
   ) {
-    const userRepository = manager?.getRepository(ClientUser) ?? this.userRepo
-    const userQuery = userRepository.createQueryBuilder('user')
+    if (source === 'mobile') await authSecurityService.assertClientPasswordReauthAllowed(requestMeta, auth.userId)
+    const userRepository = this.userRepo
+    const user = await userRepository.createQueryBuilder('user')
       .addSelect('user.passwordHash')
       .where('user.id = :id', { id: auth.userId })
-    if (manager && AppDataSource.options.type === 'mysql') userQuery.setLock('pessimistic_write')
-    const user = await userQuery.getOne()
+      .getOne()
     if (!user || user.status !== 'enabled') throw new BizError('未登录或登录状态已失效', 401)
-    if (manager) await this.assertProfileSessionCurrent(manager, auth)
+    if (source === 'mobile') await this.assertProfileSessionCurrent(AppDataSource.manager, auth, false)
     if (user.accountType === 'department') throw new BizError('部门账号资料由管理员维护', 403)
     const securitySnapshot = this.buildLoginSecuritySnapshot(user)
-    // Web 入口（无外层事务）把旧密码复核纳入账号失败锁定；Mobile 由外层编排事务调用，不在事务内写风控状态。
-    if (!manager) await authSecurityService.assertClientPasswordReauthAllowed(requestMeta, user.id)
+    if (source === 'web') await authSecurityService.assertClientPasswordReauthAllowed(requestMeta, user.id)
     if (!(await verifyPassword(input.currentPassword, user.passwordHash))) {
-      if (!manager) await this.recordCurrentPasswordFailure(auth, requestMeta, 'update_profile')
+      await this.recordCurrentPasswordFailure(auth, requestMeta, 'update_profile')
       throw new BizError('当前密码错误', 400, { reason: 'CURRENT_PASSWORD_MISMATCH' })
     }
 
@@ -1642,8 +1643,10 @@ class ClientAuthService {
       profilePatch.emailVerifiedAt = email && capabilities.channels.email ? new Date() : null
     }
 
-    const persist = async (transactionManager: EntityManager) => {
+    const result = await runInTransaction(async (transactionManager) => {
       // 外部验证码可能已消费；冲突不重试、不恢复验证码，也不重复执行 scrypt。
+      // 姓名允许保留历史重名，MySQL 只串行化实际改名的资料提交，以复核最新用户名和工号。
+      if (usernameChanged) await acquireSequenceMutex(transactionManager, PROFILE_USERNAME_MUTEX_KEY)
       const lockedUser = await this.lockUserForSession(transactionManager, user.id)
       if (!lockedUser || lockedUser.status !== 'enabled') throw new BizError('未登录或登录状态已失效', 401)
       await this.assertProfileSessionCurrent(transactionManager, auth)
@@ -1651,7 +1654,8 @@ class ClientAuthService {
         throw new BizError('账号资料已变更，请刷新资料并重新获取验证码后重试', 409)
       }
       const repository = transactionManager.getRepository(ClientUser)
-      if (Object.keys(profilePatch).length > 0) {
+      if (identityChanged) {
+        await this.ensureProfileIdentifiersUnique(checks, user.id, repository)
         await repository.update({ id: user.id }, profilePatch)
       }
       const savedUser = await repository.findOneByOrFail({ id: user.id })
@@ -1663,34 +1667,30 @@ class ClientAuthService {
           .where('client_user_id = :userId AND revoked_at IS NULL', { userId: savedUser.id })
           .execute()
       }
-      // Web 端无外层编排事务时在此写审计；Mobile 端由 mobile-auth.service 在外层事务内自行记录，避免重复。
-      if (!manager) {
+      if (identityChanged) {
+        const actorUser = source === 'mobile' ? lockedUser : savedUser
         const changedFields = [
           usernameChanged ? 'username' : null,
           mobileChanged ? 'mobile' : null,
           emailChanged ? 'email' : null,
-        ].filter((field): field is 'username' | 'mobile' | 'email' => field !== null)
-        if (changedFields.length > 0) {
-          await auditService.record({
-            actionType: 'client_user.update_profile',
-            actionLabel: '客户端更新个人资料',
-            targetType: 'client_user',
-            targetId: savedUser.id,
-            actor: {
-              userId: savedUser.id,
-              username: savedUser.email ?? savedUser.mobile ?? savedUser.realName,
-              displayName: savedUser.realName,
-            },
-            requestMeta,
-            detail: { source: 'web', changedFields },
-          }, transactionManager)
-        }
+        ].filter((field) => field !== null)
+        await auditService.record({
+          actionType: 'client_user.update_profile',
+          actionLabel: '客户端更新个人资料',
+          targetType: 'client_user',
+          targetId: savedUser.id,
+          actor: {
+            userId: actorUser.id,
+            username: actorUser.email ?? actorUser.mobile ?? actorUser.realName,
+            displayName: actorUser.realName,
+          },
+          requestMeta,
+          detail: { source, changedFields },
+        }, transactionManager)
       }
       return { ...this.toClientProfile(savedUser), requiresRelogin: identityChanged || undefined }
-    }
-    const result = manager ? await persist(manager) : await runInTransaction(persist)
-    // 外层事务由 Mobile 编排负责在提交后断开实时连接。
-    if (!manager && result.requiresRelogin) customerServiceRealtimeService.disconnectByOwner('client', user.id)
+    }, usernameChanged ? { mysqlIsolationLevel: 'READ COMMITTED' } : undefined)
+    if (result.requiresRelogin) customerServiceRealtimeService.disconnectByOwner('client', user.id)
     return result
   }
 }

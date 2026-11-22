@@ -73,6 +73,7 @@ const { systemConfigService } = await import('../src/services/system-config.serv
 const { verificationCodeService, VerificationCodeService } = await import('../src/services/verification-code.service.js')
 const { authSecurityService } = await import('../src/services/auth-security.service.js')
 const { authService } = await import('../src/services/auth.service.js')
+const { auditService } = await import('../src/services/audit.service.js')
 const { clientUserManageService } = await import('../src/services/client-user-manage.service.js')
 const { persistentRiskStateService } = await import('../src/services/persistent-risk-state.service.js')
 const { hashPassword } = await import('../src/utils/password.js')
@@ -93,7 +94,7 @@ const barrier = () => {
   let enter!: () => void, release!: () => void
   const entered = new Promise<void>(resolve => { enter = resolve })
   const released = new Promise<void>(resolve => { release = resolve })
-  return { entered, release, wait: async () => { enter(); await released } }
+  return { entered, released, release, wait: async () => { enter(); await released } }
 }
 const withTimeout = <T>(action: Promise<T>) => new Promise<T>((resolve, reject) => {
   const timer = setTimeout(() => reject(new Error('受控屏障超时')), 15_000)
@@ -211,8 +212,9 @@ try {
     const input = { ...profileInput(f), username: '生命周期改名' }
     const original = internals.ensureProfileIdentifiersUnique
     internals.ensureProfileIdentifiersUnique = async (...args) => { await original.apply(clientAuthService, args); await gate.wait() }
-    const auth = kind.startsWith('mobile-') ? f.bearer : f.web
-    const action = clientAuthService.updateProfile(auth, input, undefined, meta(f.user.id))
+    const action = kind.startsWith('mobile-')
+      ? mobileAuthService.updateProfile(f.mobile, input, meta(f.user.id))
+      : clientAuthService.updateProfile(f.web, input, 'web', meta(f.user.id))
     try {
       await withTimeout(gate.entered)
       if (kind === 'password-change') {
@@ -244,16 +246,77 @@ try {
     } finally { gate.release(); await action.catch(() => undefined); internals.ensureProfileIdentifiersUnique = original }
     console.log(`PASS profile 并发 ${kind}`)
   }
+  // 两个不同账号都完成事务外查重，再争用同一可用用户名。
+  {
+    const fixtures = [await createFixture(), await createFixture()] as const
+    const gate = barrier()
+    const original = internals.ensureProfileIdentifiersUnique
+    let prechecks = 0
+    internals.ensureProfileIdentifiersUnique = async (...args) => {
+      await original.apply(clientAuthService, args)
+      if (getCurrentTransactionManager(AppDataSource)) return
+      prechecks += 1
+      if (prechecks === 2) await gate.wait()
+      else await gate.released
+    }
+    const username = '并发改名唯一'
+    const actions = Promise.allSettled([
+      mobileAuthService.updateProfile(fixtures[0].mobile, { ...profileInput(fixtures[0]), username }),
+      clientAuthService.updateProfile(fixtures[1].web, { ...profileInput(fixtures[1]), username }),
+    ])
+    try {
+      await withTimeout(gate.entered)
+      gate.release()
+      const results = await withTimeout(actions)
+      assert.equal(results.filter(result => result.status === 'fulfilled').length, 1)
+      assert.equal(await users.countBy({ realName: username }), 1)
+      for (const [index, result] of results.entries()) {
+        const fixture = fixtures[index]!
+        const changed = result.status === 'fulfilled'
+        if (!changed) assert.ok(isStatus(409)(result.reason))
+        assert.equal(await audits.countBy({ actionType: 'client_user.update_profile', targetId: fixture.user.id }), changed ? 1 : 0)
+        assert.equal(await AppDataSource.getRepository(ClientUserSession).countBy({ userId: fixture.user.id }), changed ? 0 : 1)
+        const mobile = await AppDataSource.getRepository(ClientMobileSession).findOneByOrFail({ id: fixture.mobile.sessionId })
+        assert.equal(Boolean(mobile.revokedAt), changed)
+      }
+    } finally {
+      gate.release()
+      await actions
+      internals.ensureProfileIdentifiersUnique = original
+    }
+  }
+  // 受控阻塞 Mobile 旧密码派生；独立写入必须能完成，凭据快照改变后不能提交资料。
+  {
+    const f = await createFixture(), gate = barrier(), nextHash = await hashPassword(newPassword)
+    const original = crypto.scrypt
+    let transactionActiveDuringScrypt = false
+    crypto.scrypt = ((...args: unknown[]) => {
+      if (args[0] !== oldPassword) return Reflect.apply(original, crypto, args)
+      transactionActiveDuringScrypt = Boolean(getCurrentTransactionManager(AppDataSource))
+      void gate.wait().then(() => Reflect.apply(original, crypto, args))
+    }) as typeof crypto.scrypt
+    syncBuiltinESMExports()
+    const action = mobileAuthService.updateProfile(f.mobile, { ...profileInput(f), username: '密码派生期间冻结' })
+    try {
+      await withTimeout(gate.entered)
+      assert.equal(transactionActiveDuringScrypt, false, 'Mobile 资料密码派生不能持有写事务')
+      await withTimeout(runInTransaction(manager => manager.getRepository(ClientUser).update(f.user.id, { passwordHash: nextHash })))
+      gate.release()
+      await assert.rejects(action, isStatus(409))
+      assert.equal(await audits.countBy({ actionType: 'client_user.update_profile', targetId: f.user.id }), 0)
+      assert.equal((await users.findOneByOrFail({ id: f.user.id })).realName, f.user.realName)
+    } finally { gate.release(); await action.catch(() => undefined); crypto.scrypt = original; syncBuiltinESMExports() }
+  }
   // 冲突发生于验证码消费后：409 不恢复验证码、不重试、不写成功审计。
   {
     const f = await createFixture(), gate = barrier(), email = `${crypto.randomUUID()}@example.test`
     await fakeSender.sendCode({ channel: 'email', target: email, scene: 'profile_update' })
     const original = verificationCodeService.verifyCode
     verificationCodeService.verifyCode = async input => { await original.call(verificationCodeService, input); await gate.wait() }
-    const action = clientAuthService.updateProfile(f.web, { ...profileInput(f), email, emailVerificationCode: '123456' })
+    const action = mobileAuthService.updateProfile(f.mobile, { ...profileInput(f), email, emailVerificationCode: '123456' })
     try {
       await withTimeout(gate.entered)
-      await runInTransaction(manager => manager.getRepository(ClientUser).update(f.user.id, { realName: '验证码后并发' }))
+      await withTimeout(runInTransaction(manager => manager.getRepository(ClientUser).update(f.user.id, { realName: '验证码后并发' })))
       gate.release()
       await assert.rejects(action, (error: unknown) => isStatus(409)(error)
         && error instanceof Error && error.message.includes('重新获取验证码'))
@@ -268,6 +331,22 @@ try {
     const f = await createFixture()
     const result = await clientAuthService.updateProfile(f.bearer, profileInput(f))
     assert.equal(result.id, f.user.id)
+  }
+  // Mobile 资料写入、撤销和成功审计发生在同一事务。
+  {
+    const f = await createFixture()
+    const original = auditService.record
+    auditService.record = async (input, manager) => {
+      if (input.actionType === 'client_user.update_profile') throw new Error('夹具注入资料审计失败')
+      return original.call(auditService, input, manager)
+    }
+    try {
+      await assert.rejects(mobileAuthService.updateProfile(f.mobile, { ...profileInput(f), username: '审计异常后回滚' }), /夹具注入资料审计失败/)
+      assert.equal((await users.findOneByOrFail({ id: f.user.id })).realName, f.user.realName)
+      assert.equal(await AppDataSource.getRepository(ClientUserSession).countBy({ userId: f.user.id }), 1)
+      const mobile = await AppDataSource.getRepository(ClientMobileSession).findOneByOrFail({ id: f.mobile.sessionId })
+      assert.equal(mobile.revokedAt, null)
+    } finally { auditService.record = original }
   }
   // Web/Mobile 资料与改密、登录共享 uid 桶；回滚后每次只记一次脱敏复核审计。
   {

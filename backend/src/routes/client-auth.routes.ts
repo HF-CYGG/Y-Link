@@ -357,7 +357,7 @@ clientAuthRouter.patch(
     const data = await clientAuthService.updateProfile(
       authReq.clientAuth,
       updateProfileSchema.parse(req.body),
-      undefined,
+      'web',
       requestMeta,
     )
     if (data.requiresRelogin) {
