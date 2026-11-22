@@ -5,6 +5,7 @@
  * - 优先把可解析时间格式化为 `YYYY-MM-DD HH:mm:ss`，保证客户端与管理端视觉口径一致；
  * - 对空值使用调用方传入的兜底文案，避免各页面重复编写相同空态判断；
  * - 对无效时间保留原始字符串，降低后端偶发脏数据时的信息丢失风险。
+ * - 需要指定业务时区的页面可显式传入时区，并用页面自己的兜底文案处理不可用时间。
  * 维护说明：
  * - 若后续需要国际化或相对时间展示，可在此文件扩展更多格式化函数；
  * - 用户可见时间字段应优先复用本工具，不再直接渲染接口原始值。
@@ -12,14 +13,25 @@
 
 const padDateUnit = (value: number) => String(value).padStart(2, '0')
 
-export const formatDateTime = (value?: string | null, fallback = '-') => {
+export const formatDateTime = (value?: string | null, fallback = '-', timeZone?: string) => {
   if (!value) {
     return fallback
   }
 
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) {
-    return value
+    return timeZone ? fallback : value
+  }
+
+  if (timeZone) {
+    const formatter = new Intl.DateTimeFormat('en-GB', {
+      timeZone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    })
+    const { year, month, day, hour, minute, second } = Object.fromEntries(
+      formatter.formatToParts(date).map(({ type, value }) => [type, value]),
+    )
+    return `${year}-${month}-${day} ${hour}:${minute}:${second}`
   }
 
   const year = date.getFullYear()
