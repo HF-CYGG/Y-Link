@@ -172,6 +172,7 @@ const feedbackIssueSource = sliceMethod(feedbackServiceSource, '  async updateCo
 const feedbackRemarkSource = sliceMethod(feedbackServiceSource, '  async updateConversationInternalRemark(', '  async getServicePresence(')
 const feedbackServiceDetailSource = sliceMethod(feedbackServiceSource, '  async getServiceConversationDetail(', '  async appendServiceMessage(')
 const feedbackConversationLookupSource = sliceMethod(feedbackServiceSource, '  private async requireConversationById(', '  /** 锁后复核目标负责人仍具备客服工作台处理能力。 */')
+const feedbackEditableConversationSource = sliceMethod(feedbackServiceSource, '  private async requireEditableServiceConversation(', '  private buildAssignableUserView(')
 const notificationListRulesSource = sliceMethod(notificationServiceSource, '  async listRules(', '  private validateRuleUserSelections(')
 const notificationRulesSource = sliceMethod(notificationServiceSource, '  async updateRules(', '  async getPresenceSnapshot(')
 const notificationInboxReadSource = sliceMethod(notificationServiceSource, '  async markInboxRead(', '  async getUnreadCount(')
@@ -226,8 +227,8 @@ assert.equal(usesIrreversibleClear('// TRUNCATE 仅作为风险说明'), true, '
 assert.equal(usesIrreversibleClear('// TRUNCATE 仅作为风险说明'.split('\n').filter((line) => !line.trimStart().startsWith('//')).join('\n')), false, '注释不应触发不可回滚清表告警')
 assert.equal(usesIrreversibleClear('await manager.getRepository(InventoryLog).clear()'), true, '真实 clear 调用必须触发保护')
 assert.doesNotMatch(importExecutableSource, /\.clear\(\)|\bTRUNCATE\b/i, '导入 JSON 不得使用 MySQL 事务不可回滚的清表方式')
-// 只统计 importJson 直接返回的 runInTransaction 回调 AST 中实际执行的 DELETE，
-// 不把方法外层、回调外层或注释中的同名文本误判为可回滚操作。
+// 兼容直接返回事务，以及等待事务后执行缓存失效并返回同一结果。
+// 只统计事务回调顶层在直接返回或抛错前等待执行的 DELETE。
 const transactionalDeleteTables = (methodSource: string): Set<string> => {
   const sourceFile = ts.createSourceFile(
     'import-json-contract.ts',
@@ -239,29 +240,37 @@ const transactionalDeleteTables = (methodSource: string): Set<string> => {
   const classNode = sourceFile.statements.find(ts.isClassDeclaration)
   const method = classNode?.members.find((member): member is ts.MethodDeclaration =>
     ts.isMethodDeclaration(member) && member.name.getText(sourceFile) === 'importJson')
-  const transactionReturn = method?.body?.statements.find((statement) =>
-    ts.isReturnStatement(statement)
-    && statement.expression
-    && ts.isCallExpression(statement.expression)
-    && ts.isIdentifier(statement.expression.expression)
-    && statement.expression.expression.text === 'runInTransaction')
-  const transactionCall = transactionReturn && ts.isReturnStatement(transactionReturn)
-    ? transactionReturn.expression
-    : undefined
-  const callback = transactionCall && ts.isCallExpression(transactionCall)
-    ? transactionCall.arguments[0]
+  const statements = method?.body?.statements ?? []
+  const returnIndex = statements.findIndex(ts.isReturnStatement)
+  const returnStatement = statements[returnIndex]
+  let transaction = returnStatement && ts.isReturnStatement(returnStatement) ? returnStatement.expression : undefined
+  if (transaction && ts.isIdentifier(transaction)) {
+    const resultName = transaction.text
+    transaction = statements.slice(0, returnIndex)
+      .filter(ts.isVariableStatement)
+      .filter((statement) => (statement.declarationList.flags & ts.NodeFlags.Const) !== 0)
+      .flatMap((statement) => [...statement.declarationList.declarations])
+      .find(({ name }) => ts.isIdentifier(name) && name.text === resultName)?.initializer
+    if (!transaction || !ts.isAwaitExpression(transaction)) return new Set()
+  }
+  if (transaction && ts.isAwaitExpression(transaction)) transaction = transaction.expression
+  const callback = transaction && ts.isCallExpression(transaction)
+    && ts.isIdentifier(transaction.expression) && transaction.expression.text === 'runInTransaction'
+    ? transaction.arguments[0]
     : undefined
   const tables = new Set<string>()
   if (!callback || !ts.isArrowFunction(callback) || !ts.isBlock(callback.body)) return tables
-  const visit = (node: ts.Node) => {
-    if (ts.isCallExpression(node) && ts.isAwaitExpression(node.parent)) {
-      const normalized = node.getText(sourceFile).replace(/\s+/g, '')
-      const match = /^manager\.createQueryBuilder\(\)\.delete\(\)\.from\((\w+)\)\.execute\(\)$/.exec(normalized)
-      if (match) tables.add(match[1])
-    }
-    ts.forEachChild(node, visit)
+  const manager = callback.parameters[0]?.name
+  if (!manager || !ts.isIdentifier(manager) || manager.text !== 'manager') return tables
+  for (const statement of callback.body.statements) {
+    if (ts.isReturnStatement(statement) || ts.isThrowStatement(statement)) break
+    if (!ts.isExpressionStatement(statement) || !ts.isAwaitExpression(statement.expression)) continue
+    const call = statement.expression.expression
+    if (!ts.isCallExpression(call)) continue
+    const normalized = call.getText(sourceFile).replace(/\s+/g, '')
+    const match = /^manager\.createQueryBuilder\(\)\.delete\(\)\.from\((\w+)\)\.execute\(\)$/.exec(normalized)
+    if (match) tables.add(match[1])
   }
-  visit(callback.body)
   return tables
 }
 const sampleDelete = 'await manager.createQueryBuilder().delete().from(InventoryLog).execute()'
@@ -271,6 +280,39 @@ assert.deepEqual(
   [...transactionalDeleteTables(`async importJson() { return runInTransaction(async (manager) => { ${sampleDelete} }); await manager.createQueryBuilder().delete().from(SystemConfig).execute() }`)],
   ['InventoryLog'],
   '回调外的第二张表不得计入事务内删除',
+)
+assert.deepEqual(
+  [...transactionalDeleteTables(`async importJson() {
+    const result = await runInTransaction(async (manager) => {
+      ${sampleDelete}
+      manager.createQueryBuilder().delete().from(BaseProduct).execute()
+      const unused = async () => { await manager.createQueryBuilder().delete().from(ClientUser).execute() }
+      // await manager.createQueryBuilder().delete().from(O2oPreorder).execute()
+    })
+    await manager.createQueryBuilder().delete().from(SystemConfig).execute()
+    return result
+  }`)],
+  ['InventoryLog'],
+  '等待事务后返回结果的写法只应计入回调直接等待执行的删除',
+)
+assert.equal(
+  transactionalDeleteTables(`async importJson() {
+    return runInTransaction(async (manager) => {
+      if (false) { ${sampleDelete} }
+      return
+      ${sampleDelete}
+    })
+  }`).size,
+  0,
+  '条件分支和回调返回后的删除不得计入顶层删除',
+)
+assert.equal(
+  transactionalDeleteTables(`async importJson() {
+    const pendingResult = runInTransaction(async (manager) => { ${sampleDelete} })
+    return pendingResult
+  }`).size,
+  0,
+  '事务结果赋值形式必须先等待事务完成',
 )
 const deletedInsideTransaction = transactionalDeleteTables(dataMaintenanceImportSource)
 for (const table of ['InventoryLog', 'O2oPreorderItem', 'O2oPreorder', 'ClientUser', 'BaseProduct', 'SystemConfig']) {
@@ -369,14 +411,27 @@ for (const [source, guard, label] of [
   [inboundSubmitSource, 'lockActiveSysAccountForBusiness', '供应方 pending 送货单'],
   [feedbackCreateSource, 'lockActiveClientAccountForBusiness', '客户端 open 反馈'],
   [feedbackClientMessageSource, 'lockActiveClientAccountForBusiness', '客户端客服消息'],
-  [feedbackReplySource, 'lockActiveSysAccountForBusiness', '客服消息历史'],
   [feedbackStatusSource, 'lockActiveSysAccountForBusiness', '客服状态更新'],
   [feedbackAssigneeSource, 'lockActiveSysAccountsForBusiness', '客服指派职责'],
-  [feedbackIssueSource, 'lockActiveSysAccountForBusiness', '客服问题字段更新'],
-  [feedbackRemarkSource, 'lockActiveSysAccountForBusiness', '客服内部备注职责'],
   [notificationRulesSource, 'lockActiveSysAccountsForBusiness', '通知规则职责'],
 ] as const) {
   assert.ok(source.indexOf(guard) >= 0, `${label}写入口缺少事务账号 guard`)
+}
+assert.match(
+  feedbackEditableConversationSource,
+  /\{\s*const account = await lockActiveSysAccountForBusiness\(manager, actor\.userId\)\s*if \(!resolveUserPermissions\(account\)\.includes\('customer_service:reply'\)\) \{\s*throw new BizError\([^\n]*403\)\s*\}\s*const conversation = await this\.requireConversationById\(id, manager\)/,
+  '客服可编辑会话必须先锁定并复核操作人权限，再用同一事务 manager 锁定会话',
+)
+for (const [source, write, label] of [
+  [feedbackReplySource, /await this\.createMessage\(\s*manager,\s*conversation,/, '客服消息历史'],
+  [feedbackIssueSource, /await manager\.getRepository\(ClientFeedbackConversation\)\.save\(conversation\)/, '客服问题字段更新'],
+  [feedbackRemarkSource, /await manager\.getRepository\(ClientFeedbackConversation\)\.save\(conversation\)/, '客服内部备注职责'],
+] as const) {
+  const callbackStart = source.match(/runInTransaction\(async \(manager\) => \{\s*const conversation = await this\.requireEditableServiceConversation\(id, actor, manager\)/)
+  assert.ok(callbackStart?.index !== undefined, `${label}必须在事务回调开始时锁定账号和会话`)
+  const callbackEnd = source.indexOf('\n    })', callbackStart.index + callbackStart[0].length)
+  const writeIndex = source.search(write)
+  assert.ok(writeIndex > callbackStart.index + callbackStart[0].length && writeIndex < callbackEnd, `${label}必须在锁后复用事务 manager 写入`)
 }
 assert.ok(inboundSubmitSource.indexOf('lockActiveSysAccountForBusiness') < inboundSubmitSource.indexOf('loadActiveProductsByIds'), '供应送货单必须先锁账号再锁商品')
 assert.ok(o2oReturnSource.indexOf('lockActiveClientAccountForBusiness') < o2oReturnSource.indexOf('getRepository(O2oPreorder)'), '退货申请必须先锁账号再锁订单')
