@@ -372,15 +372,32 @@ for (const status of [301, 302, 303, 307, 308]) {
         incoming.end('ok')
       })
       assert.equal((await safeHttpRequest('https://first.example/start', {
-        method: 'POST', body: 'body', headers: { Authorization: 'fixture', 'CONTENT-LENGTH': '4', Accept: 'text/plain' },
+        method: 'POST', body: 'body',
+        headers: { Authorization: 'fixture', HoSt: 'first.example', 'CONTENT-LENGTH': '4', 'Content-TYPE': 'text/plain', Accept: 'text/plain' },
       })).statusCode, 200)
       const preserve = status === 307 || status === 308
       assert.equal(fixture.requests[1].options.method, preserve ? 'POST' : 'GET')
       assert.equal(fixture.requests[1].body, preserve ? 'body' : '')
-      assert.deepEqual(fixture.requests[1].options.headers, preserve ? { 'CONTENT-LENGTH': '4', Accept: 'text/plain' } : { Accept: 'text/plain' })
+      assert.deepEqual(fixture.requests[1].options.headers,
+        preserve ? { 'CONTENT-LENGTH': '4', 'Content-TYPE': 'text/plain', Accept: 'text/plain' } : { Accept: 'text/plain' })
     })
   }
 }
+
+await test('同源重定向保留 Host，改用 GET 时去掉无请求体的传输头', { timeout: 2000 }, async t => {
+  redirectEnvironment(t)
+  t.mock.method(dns, 'lookup', async () => [ipv4])
+  const fixture = sequenceTransport(t, (incoming, index) => {
+    if (index === 0) { incoming.statusCode = 303; incoming.headers.location = '/result' }
+    incoming.end('ok')
+  })
+  const headers = { Host: 'first.example', 'Transfer-Encoding': 'chunked' }
+  await safeHttpRequest('https://first.example/start', { method: 'POST', body: 'fixture', headers })
+  assert.deepEqual(fixture.requests[0].options.headers, headers)
+  assert.equal(fixture.requests[1].options.method, 'GET')
+  assert.equal(fixture.requests[1].body, '')
+  assert.deepEqual(fixture.requests[1].options.headers, { Host: 'first.example' })
+})
 
 for (const scenario of ['same-http', 'reject-cross-post', 'reject-downgrade', 'allowlist-private-dns', 'reject-second-cross-hop']) {
   await test(`strict ${scenario} 不绕过逐跳策略或 DNS 校验`, { timeout: 2000 }, async t => {
