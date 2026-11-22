@@ -77,12 +77,19 @@ test('三个Node独立候选精确消费17包/119工具/同版libgcc参考，npm
     ]) assert.ok(dockerMutation(file, source => nodeCandidateMutation(source, mutate)).length > 0, file)
   }
 })
-test('任一运行时阶段漏装或在安装前执行npm，契约必须拒绝', () => {
-  const read = file => {
-    const source = fs.readFileSync(file, 'utf8')
-    return file === 'backend/Dockerfile' ? source.replace('RUN node /tmp/ylink-install-pinned-npm.mjs --context=image', 'RUN npm ci') : source
+test('运行时必须先通过只读挂载安装 npm，且不能把输入复制进镜像', () => {
+  for (const file of ['Dockerfile.onebox', 'backend/Dockerfile', 'backend/Dockerfile.mysql']) {
+    for (const mutate of [
+      body => body.replace('node /tmp/ylink-install-pinned-npm.mjs --context=image', 'true #'),
+      body => 'RUN npm --version\n' + body,
+      body => body.replace('target=/tmp/ylink-npm-toolchain,ro', 'target=/tmp/ylink-npm-toolchain,rw'),
+      body => body.replace('RUN --mount=type=bind', 'COPY npm-toolchain /tmp/ylink-npm-toolchain\nRUN --mount=type=bind'),
+    ]) {
+      assert.ok(dockerMutation(file, source => source.replace(/(^FROM .+ AS runtime\r?\n)([\s\S]*)/m,
+        (_match, heading, body) => heading + mutate(body)))
+        .some(error => error.includes(`${file}的runtime`)), file)
+    }
   }
-  assert.ok(validatePinnedNpmToolchain(process.cwd(), read).length > 0)
 })
 test('Sonar密钥作业若改回仓库脚本或内联校验被篡改，必须拒绝', () => {
   for (const replacement of ['run: node backend/scripts/install-pinned-npm.mjs --context=ci', 'const NPM_TARBALL_INTEGRITY = "不可信"']) {

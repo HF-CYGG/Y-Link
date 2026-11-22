@@ -118,6 +118,7 @@ assert.doesNotMatch(webRuntime, /\bapk\s+upgrade\b|--allow-untrusted|--no-check-
 
 for (const filePath of dockerfiles) {
   const source = readFileSync(filePath, 'utf8')
+  assert.match(source, /^# syntax=docker\/dockerfile:1\r?\n/, `${filePath} 的 BuildKit syntax 必须位于首行`)
   assert.ok(
     source.includes('ARG Y_LINK_NODE_IMAGE='),
     `${filePath} should expose Y_LINK_NODE_IMAGE build arg for registry mirror override`,

@@ -617,11 +617,10 @@ Redis 已配置但暂时不可用时按能力分级降级：限流与风控回�
 
 ### 环境要求
 
-- Node.js 20+
-- 覆盖率命令 `npm run coverage:report` 需要 Node.js 22.6 及以上（与 CI、Docker 镜像一致使用 Node.js 22 即可）
-- 登录页主题切换浏览器回归脚本需要 Node.js 22 及以上和全局 WebSocket；不改变应用的 Node.js 20+ 要求
-- npm
-- Docker 可选，用于容器验证和 MySQL 并发验收
+- 使用 **Node.js `22.23.5`** 和 npm。后端安装会通过 `postinstall` 校验官方源码并静态重建 SQLite `3.54.1`，运行 SQLite 前必须完成这一步。
+- Linux x64／arm64 准备 C/C++ 编译器、`make`、Python 3、`ar`、`readelf` 和 `tar`。Windows x64 准备 Visual Studio 2022 或 Build Tools 的 C++ x64 工具链和 Windows SDK，以及 Python 3 和 `tar`。macOS 或 Windows ARM64 可使用受支持架构的 Linux 容器构建和运行。
+- 后端首次重建需要能访问 `sqlite.org`。本机缺少同版本 Node 头文件时还需访问 `nodejs.org`，Windows 构建需要匹配的 x64 `node.lib`。
+- 本地容器验证需要 Docker，四份 Dockerfile 均要求 BuildKit。使用 Docker Desktop 或支持 BuildKit 的 Docker 构建器。
 
 ### 安装依赖
 
