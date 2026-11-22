@@ -3,6 +3,16 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+const publicErrors = new Set([
+  'ONEBOX_NON_ROOT_FLAG_INVALID',
+  'ONEBOX_NODE_IDENTITY_INVALID',
+  'ONEBOX_IDENTITY_API_UNAVAILABLE',
+  'ONEBOX_IDENTITY_DROP_FAILED',
+  'ONEBOX_NON_ROOT_REQUIRED',
+  'ONEBOX_VOLUME_PERMISSION_DENIED',
+  'EACCES', 'EPERM', 'ENOENT', 'ERR_MODULE_NOT_FOUND',
+])
+
 export function dropOneboxIdentity(identity = process, passwd = fs.readFileSync('/etc/passwd', 'utf8')) {
   const account = passwd.split('\n').find(line => line.startsWith('node:'))?.split(':')
   const uid = Number(account?.[2]), gid = Number(account?.[3])
@@ -33,8 +43,10 @@ export async function launchOneboxBackend() {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try { await launchOneboxBackend() } catch {
-    console.error('[onebox] 后端引导失败：请核对非 root 开关、镜像 node 身份与已准备卷的必要权限；未尝试回退或修改权限。')
+  try { await launchOneboxBackend() } catch (error) {
+    // 只打印公开的错误分类，原始消息与堆栈可能包含本地路径或连接信息。
+    const code = [error?.code, error?.message].find(value => publicErrors.has(value)) ?? 'ONEBOX_BOOTSTRAP_FAILED'
+    console.error(`[onebox] 后端引导失败 [${code}]，请核对非 root 开关、镜像 node 身份与数据卷权限。`)
     process.exitCode = 1
   }
 }

@@ -44,6 +44,18 @@ test('API 调用返回但实际身份/补充组未切换也必须中止', () => 
   assert.throws(() => dropOneboxIdentity(f.identity, passwd), /DROP_FAILED/)
 })
 
+test('引导失败输出公开分类并隐藏无效开关原值', () => {
+  const launcher = fileURLToPath(new URL('../docker/onebox/backend-launcher.mjs', import.meta.url))
+  const invalidFlag = 'invalid-onebox-flag-fixture'
+  const result = spawnSync(process.execPath, [launcher], {
+    encoding: 'utf8', windowsHide: true, timeout: 15_000,
+    env: { ...process.env, NODE_OPTIONS: '', NODE_PATH: '', Y_LINK_ONEBOX_NON_ROOT: invalidFlag },
+  })
+  assert.equal(result.status, 1, result.stderr)
+  assert.match(result.stderr, /\[ONEBOX_NON_ROOT_FLAG_INVALID\]/)
+  assert.ok(!result.stderr.includes(invalidFlag))
+})
+
 test('权限预检不提前解释损坏override或缓存恢复前MySQL配置', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ylink-permission-order-'))
   const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
