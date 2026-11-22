@@ -201,6 +201,14 @@ async function main() {
     assert.deepEqual(stocksAtA.list[0]?.otherLocations.map((item) => [item.locationCode, item.qty]), [['A-01', 2]])
 
     // 5. 按库位盘点：A-01 账面 2 实盘 1，C-01（主库位）账面 6 实盘 7。
+    await assert.rejects(
+      () => stocktakeService.create({ scopeType: 'location', locationIds: [shelfA.id + '失效'] }, actor),
+      { statusCode: 400, message: '存在无效的库位' },
+    )
+    await assert.rejects(
+      () => stocktakeService.create({ scopeType: 'location', locationIds: ['9223372036854775808'] }, actor),
+      { statusCode: 400, message: '存在无效的库位' },
+    )
     const stocktake = await stocktakeService.create({ scopeType: 'location', locationIds: [shelfA.id, shelfC.id], blindMode: false }, actor)
     assert.equal(stocktake.itemCount, 2)
     assert.deepEqual(stocktake.scopeLocations.map((item) => item.locationCode).sort(), ['A-01', 'C-01'])
@@ -262,7 +270,7 @@ async function main() {
       productName: '盘点编号规范化验证', currentStock: 2, defaultSku: { locationId: stockedLocation.id },
     }, actor)
     const aliasStocktake = await stocktakeService.create({
-      scopeType: 'location', locationIds: [`00${newScopeOnly.id}`, stockedLocation.id], blindMode: false,
+      scopeType: 'location', locationIds: [`00${newScopeOnly.id}`, stockedLocation.id, `+${stockedLocation.id}.00`], blindMode: false,
     }, actor)
     assert.equal(aliasStocktake.itemCount, 1)
     const aliasRow = await stocktakeRepo.findOneByOrFail({ id: aliasStocktake.id })
