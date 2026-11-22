@@ -333,6 +333,7 @@ const isDatabaseFlagEnabled = (value: unknown): boolean => {
 
 export const CLIENT_ORDER_SEARCH_MODES = ['contains', 'prefix', 'exact'] as const
 type ClientOrderSearchMode = (typeof CLIENT_ORDER_SEARCH_MODES)[number]
+const MAX_CLIENT_ORDER_CONTAINS_TERMS = 6
 type ClientOrderIdentifierSearch = { mode: ClientOrderSearchMode; terms: readonly string[] }
 
 const CLIENT_ORDER_TYPE_SEARCH_TERMS = {
@@ -3727,12 +3728,11 @@ class O2oPreorderService {
 
   private applyMyOrderKeyword(
     queryBuilder: SelectQueryBuilder<O2oPreorder>,
-    keyword: string,
+    words: string[],
     searchMode?: ClientOrderSearchMode,
   ): ClientOrderIdentifierSearch {
     const identifierMode = searchMode ?? 'prefix'
     const textMode = searchMode ?? 'contains'
-    const words = searchMode === 'contains' ? [...new Set(keyword.split(/\s+/))] : [keyword]
     const isMysql = AppDataSource.options.type === 'mysql'
     const lowerCaseCollation = isMysql ? ' COLLATE utf8mb4_bin' : ''
     const like = (column: string, parameter: string) => {
@@ -3821,6 +3821,13 @@ class O2oPreorderService {
     const normalizedPageSize = Math.max(1, Math.min(50, Number(query?.pageSize) || 20))
     const normalizedKeyword = query?.keyword?.trim() ?? ''
     const normalizedStatus = query?.status
+    // 仅折叠两库都能等价匹配的 ASCII 大写字母，保留 SQLite 的非 ASCII 匹配语义。
+    const terms = query?.searchMode === 'contains'
+      ? [...new Set(normalizedKeyword.replace(/[A-Z]/g, (letter) => letter.toLowerCase()).split(/\s+/).filter(Boolean))]
+      : normalizedKeyword ? [normalizedKeyword] : []
+    if (terms.length > MAX_CLIENT_ORDER_CONTAINS_TERMS) {
+      throw new BizError(`最多支持 ${MAX_CLIENT_ORDER_CONTAINS_TERMS} 个不同的搜索关键词`, 400)
+    }
 
     // 索引命中策略说明：
     // 1. status 有值时：优先命中 idx_o2o_preorder_client_status_id(client_user_id, status, id)；
@@ -3837,8 +3844,8 @@ class O2oPreorderService {
       queryBuilder.andWhere('order.status = :status', { status: normalizedStatus })
     }
 
-    const clientIdentifierSearch = normalizedKeyword
-      ? this.applyMyOrderKeyword(queryBuilder, normalizedKeyword, query?.searchMode)
+    const clientIdentifierSearch = terms.length
+      ? this.applyMyOrderKeyword(queryBuilder, terms, query?.searchMode)
       : undefined
 
     const [rows, total] = await queryBuilder.getManyAndCount()

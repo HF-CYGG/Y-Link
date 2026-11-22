@@ -416,6 +416,16 @@ const run = async () => {
   )
   log('客户端订单列表支持通过工号关键词命中订单')
 
+  const searchTerm = departmentSnapshotPreorder.order.preorderNo.slice(0, 3)
+  const repeatedTerms = Array.from({ length: 7 }, (_, index) =>
+    index % 2 === 0 ? searchTerm : searchTerm.toLowerCase()).join(' ')
+  const repeatedSearch = await o2oPreorderService.listMyOrders(clientAuth, { keyword: repeatedTerms, searchMode: 'contains' })
+  assert.ok(repeatedSearch.list.some((item) => item.id === departmentSnapshotPreorder.order.id))
+  await assert.rejects(
+    () => o2oPreorderService.listMyOrders(clientAuth, { keyword: '库存 商品 订单 领取 规格 批次 部门', searchMode: 'contains' }),
+    { statusCode: 400, message: '最多支持 6 个不同的搜索关键词' },
+  )
+
   // 下单完成后模拟用户资料被维护人员修改，正式出库单仍必须沿用“下单时快照”。
   await clientUserRepo.update(
     { id: clientAuth.userId },
@@ -1198,6 +1208,31 @@ const run = async () => {
   })
   assert.equal(historicalWalkinOutbound.customerName, otherClientAuth.realName, '散客历史正式单保留原有客户名称兜底')
   log('历史散客单的提货人展示与正式单客户名称兼容原行为')
+
+  if (AppDataSource.options.type === 'sqlite') {
+    const [upperOrder, lowerOrder] = await Promise.all(['Ä', 'ä'].map(async (name, index) => {
+      const searchProduct = await productService.create({
+        productName: `搜索规格 ${name}`, defaultPrice: 10, currentStock: 1, o2oStatus: 'listed',
+      }, scriptAdminActor)
+      const submitted = await submitPreorderWithPickup(clientAuth, {
+        clientRequestId: `o2o-verify-unicode-search-${index}`,
+        items: [{ productId: searchProduct.id, qty: 1 }],
+        pickupContact: '搜索验收领取人',
+      })
+      return submitted.order.id
+    }))
+    const search = async (keyword: string) => (await o2oPreorderService.listMyOrders(clientAuth, {
+      keyword, searchMode: 'contains',
+    })).list.map(({ id }) => id)
+    const [upperMatches, lowerMatches, upperFirst, lowerFirst] = await Promise.all(
+      ['Ä', 'ä', 'Ä ä', 'ä Ä'].map(search),
+    )
+    assert.ok(upperMatches?.includes(upperOrder!) && !upperMatches.includes(lowerOrder!))
+    assert.ok(lowerMatches?.includes(lowerOrder!) && !lowerMatches.includes(upperOrder!))
+    for (const matches of [upperFirst, lowerFirst]) {
+      assert.ok(!matches?.includes(upperOrder!) && !matches?.includes(lowerOrder!), 'SQLite 模糊搜索保留两个非 ASCII 关键词的交集')
+    }
+  }
 
   const o2oRules = await systemConfigService.getO2oRuleConfigs()
   assert.equal(o2oRules.autoCancelHours, 24)
