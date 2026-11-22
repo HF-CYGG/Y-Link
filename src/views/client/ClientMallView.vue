@@ -2830,7 +2830,7 @@ onBeforeUnmount(() => {
         class="client-detail-panel"
         :class="{ 'client-detail-panel--compact': !hasDetailSkuChoices && detailMode !== 'multi' }"
       >
-        <p v-if="detailCatalogNotice" class="mx-4 mt-3 rounded-xl bg-amber-50 p-3 text-sm text-amber-800" role="status">{{ detailCatalogNotice }}</p>
+        <p v-if="detailCatalogNotice" class="mx-4 mt-3 rounded-xl bg-amber-50 p-3 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-200" role="status">{{ detailCatalogNotice }}</p>
         <div class="client-detail-scroll">
           <header v-if="hasDetailSkuChoices || detailMode === 'multi'" ref="detailSplitHeaderRef" class="client-detail-header client-detail-header--split">
             <div class="client-detail-summary">
