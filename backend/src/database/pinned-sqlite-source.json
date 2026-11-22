@@ -1,0 +1,23 @@
+{
+  "node": "22.23.5",
+  "driver": "5.1.7",
+  "version": "3.54.1",
+  "sourceId": "2026-10-16 14:45:20 555e07ef33f69a0957d24d8e555b702464a131d6f1607f4c3c1e4551e8e6ca76",
+  "archiveRoot": "sqlite-autoconf-3540100",
+  "url": "https://sqlite.org/2026/sqlite-autoconf-3540100.tar.gz",
+  "archiveSha3": "b6ced585c750916b1052667239a12c25a7ff34e7f06e1e6e01ecb0427657d9c4",
+  "sourceSha3": "e2b869d3003b33c942b7dd7063604fbc53553e1b66609570df39b9b7b558ee81",
+  "nodeHeadersUrl": "https://nodejs.org/dist/v22.23.5/node-v22.23.5-headers.tar.gz",
+  "nodeHeadersSha256": "be890e343a72acd49e3b0491aefdc55400ed8a8fa29272d2d1ad19823e80035f",
+  "windowsNodeLibUrl": "https://nodejs.org/dist/v22.23.5/win-x64/node.lib",
+  "windowsNodeLibSha256": "c243185f2347870cadb637c909bf123fc703dc65dbfa769b17ec45a4b661d782",
+  "requiredOptions": [
+    "THREADSAFE=1",
+    "ENABLE_FTS3",
+    "ENABLE_FTS4",
+    "ENABLE_FTS5",
+    "ENABLE_RTREE",
+    "ENABLE_DBSTAT_VTAB",
+    "ENABLE_MATH_FUNCTIONS"
+  ]
+}

@@ -1,11 +1,11 @@
 /**
  * 模块说明：backend/src/redis/redis-scripts.ts
- * 文件职责：集中维护需要原子执行的 Redis Lua 脚本：滑动窗口限流、登录失败计数与锁定、票据错误次数、租约续期与释放。
+ * 文件职责：集中维护需要原子执行的 Redis Lua 脚本：滑动窗口限流、登录失败计数与锁定、票据核验准入与消费、租约续期与释放。
  * 实现逻辑：
  * - 首次执行时用 SCRIPT LOAD 取得服务端返回的脚本摘要，之后走 EVALSHA；服务端缓存缺失（NOSCRIPT，例如 Redis 重启）时回退 EVAL 并重新缓存；
  * - 脚本摘要只作 Redis 协议标识、由服务端计算，本地不做任何哈希运算；
  * - 所有时间戳由调用方以毫秒传入，脚本内不读取 Redis 时钟，保证与数据库实现的窗口口径一致；
- * - 返回值统一为整数数组，Lua 中的数字在回复时被截断为整数，毫秒时间戳不会丢失精度。
+ * - Lua 中的数字在回复时被截断为整数，毫秒时间戳不会丢失精度；票据密文按字符串返回。
  * 维护说明：
  * - 修改脚本语义时必须同步核对 persistent-risk-state.service.ts 中数据库实现的对应分支，两条路径的判定口径必须一致；
  * - 每个脚本只能操作 KEYS 中声明的键，保证将来切换到 Redis Cluster 时仍可按 hash tag 部署。
@@ -146,21 +146,29 @@ return {count, first, last, locked}
 `)
 
 /**
- * 票据错误次数原子递增。KEYS[1]=票据键，KEYS[2]=计数键；ARGV=maxAttempts。
- * 票据不存在返回 -1；计数达到上限时同时删除票据与计数键；计数键与票据共享剩余有效期。
+ * 原子预占一次票据核验。KEYS[1]=票据键，KEYS[2]=计数键；ARGV[1]=最大尝试次数。
+ * 票据不存在或额度已用尽返回空数组，否则返回 {票据密文, 剩余额度}。
+ * 计数键与票据同时到期；用尽时保留密文供已获准的正确核验消费。
  */
-export const TICKET_RECORD_FAILED_ATTEMPT = defineScript(`
+export const TICKET_CLAIM_ATTEMPT = defineScript(`
+local raw = redis.call('GET', KEYS[1])
 local ttl = redis.call('PTTL', KEYS[1])
-if ttl <= 0 then
-  redis.call('DEL', KEYS[2])
-  return -1
-end
-local attempts = redis.call('INCR', KEYS[2])
+if not raw or ttl <= 0 then return {} end
+local limit = tonumber(ARGV[1])
+local attempts = tonumber(redis.call('GET', KEYS[2]) or '0')
+if attempts >= limit then return {} end
+attempts = redis.call('INCR', KEYS[2])
 redis.call('PEXPIRE', KEYS[2], ttl)
-if attempts >= tonumber(ARGV[1]) then
+return {raw, limit - attempts}
+`)
+
+/** 仅消费核验时预占的原票据。KEYS 同上，ARGV[1]=当时获得的密文。 */
+export const TICKET_CONSUME_MATCHED = defineScript(`
+if redis.call('GET', KEYS[1]) == ARGV[1] then
   redis.call('DEL', KEYS[1], KEYS[2])
+  return 1
 end
-return attempts
+return 0
 `)
 
 /** 租约续期：仅 owner 一致时延长。KEYS[1]=租约键；ARGV=owner, ttlMs。返回 1 表示续期成功。 */

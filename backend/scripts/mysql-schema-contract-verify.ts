@@ -61,6 +61,7 @@ const REQUIRED_TABLES = [
 ] as const
 
 const REQUIRED_COLUMNS = [
+  ['biz_outbound_order', 'submit_request_hash'],
   ['sys_user', 'governance_permissions_json'],
   ...['conversation_id', 'client_user_id', 'product_id', 'sku_id', 'product_name_snapshot', 'product_code_snapshot', 'sku_code_snapshot', 'spec_text_snapshot', 'quantity', 'latest_pickup_at', 'remark', 'status', 'handled_at', 'client_request_id', 'payload_digest', 'created_at', 'updated_at'].map((columnName) => ['client_restock_request', columnName]),
   ...['client_user_id', 'client_request_id', 'payload_digest', 'restock_request_id', 'created_at'].map((columnName) => ['client_restock_request_key', columnName]),
@@ -201,6 +202,7 @@ interface ColumnFixture {
 }
 
 const REQUIRED_MANUAL_OUTBOUND_COLUMN_DEFINITIONS = new Map<string, ColumnFixture>([
+  ['biz_outbound_order.submit_request_hash', { dataType: 'varchar', columnType: 'varchar(64)', isNullable: 'YES', characterMaximumLength: 64 }],
   ['sys_user.governance_permissions_json', { dataType: 'text', columnType: 'text', isNullable: 'YES', characterMaximumLength: 65535 }],
   ...['client_restock_request', 'client_restock_request_key'].flatMap((tableName): Array<[string, ColumnFixture]> => ['client_request_id', 'payload_digest'].map((columnName) => [`${tableName}.${columnName}`, { dataType: 'varchar', columnType: 'varchar(64)', isNullable: 'NO', characterMaximumLength: 64 }])),
   ['client_restock_request.quantity', { dataType: 'int', columnType: 'int', isNullable: 'NO', characterMaximumLength: null }],
@@ -582,6 +584,17 @@ const REQUIRED_INDEXES: readonly IndexFixture[] = [
     unique: false,
   },
   { tableName: 'biz_outbound_order', indexName: 'idx_biz_outbound_status', columns: ['status'], unique: false },
+  { tableName: 'biz_outbound_order', indexName: 'idx_biz_outbound_active_created_id', columns: ['is_deleted', 'status', 'created_at', 'id'], unique: false },
+  { tableName: 'biz_outbound_order', indexName: 'idx_biz_outbound_active_type_created', columns: ['is_deleted', 'status', 'order_type', 'created_at'], unique: false },
+  { tableName: 'biz_inbound_order', indexName: 'idx_biz_inbound_deleted_status_arrival_id', columns: ['is_deleted', 'status', 'expected_arrival_at', 'id'], unique: false },
+  { tableName: 'biz_inbound_order', indexName: 'idx_biz_inbound_supplier_deleted_status_id', columns: ['supplier_id', 'is_deleted', 'status', 'id'], unique: false },
+  { tableName: 'o2o_preorder', indexName: 'idx_o2o_preorder_deleted_status_id', columns: ['is_deleted', 'status', 'id'], unique: false },
+  { tableName: 'o2o_preorder_item', indexName: 'idx_o2o_preorder_item_product_order_qty', columns: ['product_id', 'order_id', 'qty'], unique: false },
+  { tableName: 'client_user', indexName: 'idx_client_user_real_name', columns: ['real_name'], unique: false },
+  { tableName: 'inv_stocktake_item', indexName: 'idx_inv_stocktake_item_counted', columns: ['stocktake_id', 'counted_at', 'id'], unique: false },
+  { tableName: 'client_feedback_conversation', indexName: 'idx_feedback_conv_client_last_msg', columns: ['client_user_id', 'last_message_at', 'id'], unique: false },
+  { tableName: 'client_feedback_conversation', indexName: 'idx_feedback_conv_status_last_msg', columns: ['status', 'last_message_at', 'id'], unique: false },
+  { tableName: 'client_feedback_conversation', indexName: 'idx_feedback_conv_assigned_status_last_msg', columns: ['assigned_user_id', 'status', 'last_message_at', 'id'], unique: false },
   { tableName: 'biz_outbound_order', indexName: 'idx_biz_outbound_source_doc', columns: ['source_doc_type', 'source_doc_id'], unique: false },
   { tableName: 'biz_outbound_order_item', indexName: 'idx_biz_outbound_item_source_order_id', columns: ['source_order_id'], unique: false },
   { tableName: 'biz_outbound_order_item', indexName: 'idx_biz_outbound_item_source_item_id', columns: ['source_order_item_id'], unique: false },
@@ -834,6 +847,28 @@ async function expectSchemaFailure(
 }
 
 await assert.doesNotReject(() => assertMysqlRequiredSchemaExists(createDataSource(createCompleteFixture())))
+
+const missingSupplierPerformanceIndex = createCompleteFixture()
+missingSupplierPerformanceIndex.indexes.delete(objectKey('biz_inbound_order', 'idx_biz_inbound_supplier_deleted_status_id'))
+await expectSchemaFailure(missingSupplierPerformanceIndex, ['idx_biz_inbound_supplier_deleted_status_id', '065_performance_composite_indexes.sql'])
+
+const invalidSupplierPerformanceIndex = createCompleteFixture()
+const supplierPerformanceIndex = invalidSupplierPerformanceIndex.indexes.get(objectKey('biz_inbound_order', 'idx_biz_inbound_supplier_deleted_status_id'))!
+supplierPerformanceIndex.columns = ['is_deleted', 'supplier_id', 'status', 'id']
+await expectSchemaFailure(invalidSupplierPerformanceIndex, ['idx_biz_inbound_supplier_deleted_status_id', '065_performance_composite_indexes.sql'])
+
+const missingSubmitRequestHash = createCompleteFixture()
+missingSubmitRequestHash.columns.delete(objectKey('biz_outbound_order', 'submit_request_hash'))
+await expectSchemaFailure(missingSubmitRequestHash, ['字段 biz_outbound_order.submit_request_hash', '064_manual_outbound_submit_request_hash.sql'])
+const invalidSubmitRequestHash = createCompleteFixture()
+Object.assign(invalidSubmitRequestHash.columnDefinitions.get(objectKey('biz_outbound_order', 'submit_request_hash'))!, {
+  isNullable: 'NO', characterMaximumLength: 32, columnType: 'varchar(32)',
+})
+await expectSchemaFailure(invalidSubmitRequestHash, [
+  '字段 biz_outbound_order.submit_request_hash 必须允许 NULL',
+  '字段 biz_outbound_order.submit_request_hash 长度应为 64',
+  '064_manual_outbound_submit_request_hash.sql',
+])
 
 for (const tableName of ['client_restock_request', 'client_restock_request_key']) {
   const fixture = createCompleteFixture()

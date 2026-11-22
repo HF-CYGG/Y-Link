@@ -19,12 +19,14 @@ import { BizO2oItemSpecText, PageContainer, PagePaginationBar } from '@/componen
 import { useDataChangeRefresh } from '@/composables/useDataChangeRefresh'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
+import O2oCountdownText from './components/O2oCountdownText.vue'
 import {
   getClientOrderStatusReportConfig,
   getO2oOrderBusinessStatusMeta,
   getClientOrderReportScenario,
   isO2oOrderPending,
   O2O_ORDER_BUSINESS_STATUS_META,
+  O2O_ORDER_TIMEOUT_SOON_WINDOW_MS,
   VERIFY_CONSOLE_O2O_ORDER_STATUS_LABEL_MAP,
   type O2oOrderBusinessStatus,
   type O2oOrderStatus,
@@ -53,6 +55,8 @@ import { extractErrorMessage } from '@/utils/error'
 import { captureOrderRefreshAnchor, restoreOrderRefreshAnchor } from '@/utils/order-refresh-visual'
 
 import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
+
+defineOptions({ name: 'O2oOrderQueryView' })
 
 type OrderPoolKey = O2oConsoleOrderPoolKey
 
@@ -133,7 +137,8 @@ const persistSoundNoticePreference = (enabled: boolean) => {
   }
 }
 const soundNoticeEnabled = ref(readSoundNoticePreference())
-const nowMs = ref(Date.now())
+const statusBoundaryMs = ref(Date.now())
+const countdownClockActive = ref(false)
 const orderHighlightExpiresAtMap = ref<Record<string, number>>({})
 const latestNewOrderNotice = ref<{ count: number; expiresAt: number } | null>(null)
 const orderSnapshotReady = ref(false)
@@ -152,10 +157,13 @@ const departmentOptions = ref<string[]>([])
 const departmentOptionsLoading = ref(false)
 
 let autoRefreshTimer: ReturnType<typeof globalThis.setInterval> | null = null
-let secondTickTimer: ReturnType<typeof globalThis.setInterval> | null = null
+let statusBoundaryTimer: ReturnType<typeof globalThis.setTimeout> | undefined
+let transientMarksTimer: ReturnType<typeof globalThis.setTimeout> | undefined
 let reminderAudioContext: AudioContext | null = null
 let pageRuntimeActive = false
 let hasActivatedOnce = false
+let orderPoolReadSequence = 0
+let refreshOnVisibility = false
 // 最近一次成功加载的筛选键与视图键：用于判断静默刷新是否仍是同一视图，决定新单提醒、更新标记与滚动锚点。
 let lastLoadedFilterKey = ''
 let lastLoadedViewKey = ''
@@ -236,7 +244,7 @@ const getOrderReportConfig = (order: { statusReport?: O2oOrderStatusReport; stat
     statusReport: order.statusReport,
     status: order.status,
     timeoutAt: order.timeoutAt,
-  }, nowMs.value)
+  }, statusBoundaryMs.value)
 }
 
 /**
@@ -267,16 +275,8 @@ const detailEmptyText = computed(() => {
   }
   return '请选择左侧订单查看状态报告与进度节点'
 })
-const activeNewOrderNotice = computed(() => {
-  if (!latestNewOrderNotice.value) {
-    return null
-  }
-  if (latestNewOrderNotice.value.expiresAt <= nowMs.value) {
-    return null
-  }
-  return latestNewOrderNotice.value
-})
-const showDetailRefreshNotice = computed(() => detailRefreshNoticeExpiresAt.value > nowMs.value)
+const activeNewOrderNotice = latestNewOrderNotice
+const showDetailRefreshNotice = computed(() => detailRefreshNoticeExpiresAt.value > 0)
 const listAutoRefreshStatusText = computed(() => {
   if (!lastSilentListRefreshAt.value) {
     return '订单池自动轮询中'
@@ -289,7 +289,7 @@ const activeScenario = computed(() => {
     return 'pending'
   }
   return activeOrderDetail.value.order.statusReport?.scenario
-    ?? getClientOrderReportScenario(activeOrderDetail.value.order.status, activeOrderDetail.value.order.timeoutAt, nowMs.value)
+    ?? getClientOrderReportScenario(activeOrderDetail.value.order.status, activeOrderDetail.value.order.timeoutAt, statusBoundaryMs.value)
 })
 
 // 详情状态卡复用共享配置解析，确保“主动撤回”和“超时取消”展示口径一致。
@@ -305,7 +305,7 @@ const reportConfig = computed(() => {
     statusReport: activeOrderDetail.value.order.statusReport,
     status: activeOrderDetail.value.order.status,
     timeoutAt: activeOrderDetail.value.order.timeoutAt,
-  }, nowMs.value)
+  }, statusBoundaryMs.value)
 })
 
 const detailAmountSummary = computed(() => {
@@ -415,9 +415,8 @@ const getCancellationSourceLabel = (source: O2oOrderStatusReport['cancellationSo
   return '历史记录'
 }
 
-// 管理端状态选择保留门店当前对外使用的核心业务状态，并新增“已完结（交易结束）”。
-// 这样门店既能表达待接单/备货/售后，也能在不改动主状态的前提下补充交易收尾完成。
-const BUSINESS_STATUS_PICKER_ORDER: O2oOrderBusinessStatus[] = ['awaiting_shipment', 'preparing', 'ready', 'completed', 'after_sale']
+// 新单默认等待接单；手动编辑只开放接单后的四项进度，历史状态仍沿用共享中文元数据回显。
+const BUSINESS_STATUS_PICKER_ORDER: O2oOrderBusinessStatus[] = ['preparing', 'ready', 'completed', 'after_sale']
 
 const businessStatusOptions = BUSINESS_STATUS_PICKER_ORDER.map((value) => {
   const meta = O2O_ORDER_BUSINESS_STATUS_META[value]
@@ -430,6 +429,15 @@ const businessStatusOptions = BUSINESS_STATUS_PICKER_ORDER.map((value) => {
 
 const activeBusinessStatus = computed(() => activeOrderDetail.value?.order.businessStatus ?? null)
 const draftBusinessStatus = ref<O2oOrderBusinessStatus | null>(null)
+const businessStatusSaving = ref(false)
+let businessStatusOwnerGeneration = 0
+let businessStatusOperation = 0
+let businessStatusPageActive = true
+watch([() => activeOrderId.value, () => activeOrderDetail.value?.order.id ?? '', () => authStore.currentUser?.id], () => {
+  businessStatusOwnerGeneration += 1
+  businessStatusSaving.value = false
+  draftBusinessStatus.value = activeBusinessStatus.value
+}, { flush: 'sync' })
 const draftMerchantMessage = ref('')
 const complianceSaving = ref(false)
 const complianceForm = ref({
@@ -518,34 +526,6 @@ const timelineItems = computed(() => {
   ]
 })
 
-const resolveRemainSeconds = (order: { status: O2oOrderStatus; expireInSeconds?: number; timeoutAt: string | null }) => {
-  if (order.status !== 'pending') {
-    return null
-  }
-  if (order.timeoutAt) {
-    const remain = Math.floor((new Date(order.timeoutAt).getTime() - nowMs.value) / 1000)
-    return Math.max(0, remain)
-  }
-  if (typeof order.expireInSeconds === 'number') {
-    return Math.max(0, Math.floor(order.expireInSeconds))
-  }
-  return null
-}
-
-const formatCountdown = (order: { status: O2oOrderStatus; expireInSeconds?: number; timeoutAt: string | null }) => {
-  const remainSeconds = resolveRemainSeconds(order)
-  if (remainSeconds === null) {
-    return '--'
-  }
-  if (remainSeconds <= 0) {
-    return '已超时'
-  }
-  const hour = Math.floor(remainSeconds / 3600)
-  const minute = Math.floor((remainSeconds % 3600) / 60)
-  const second = remainSeconds % 60
-  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:${String(second).padStart(2, '0')}`
-}
-
 // 详细注释：订单池静默刷新只高亮新增或摘要变更的订单，
 // 这样操作员可以快速感知关键变化，但不会因为整个列表轮询而失去视觉焦点。
 const hasOrderSummaryChanged = (previous: O2oConsolePreorderSummary | undefined, next: O2oConsolePreorderSummary) => {
@@ -590,7 +570,7 @@ const markRefreshedOrders = (orderIds: string[]) => {
   if (!orderIds.length) {
     return
   }
-  const expiresAt = nowMs.value + ORDER_POOL_REFRESH_MARK_MS
+  const expiresAt = Date.now() + ORDER_POOL_REFRESH_MARK_MS
   const nextMap = { ...orderRefreshMarkExpiresAtMap.value }
   for (const orderId of orderIds) {
     nextMap[orderId] = expiresAt
@@ -599,40 +579,26 @@ const markRefreshedOrders = (orderIds: string[]) => {
 }
 
 const isOrderRefreshed = (orderId: string) => {
-  return (orderRefreshMarkExpiresAtMap.value[orderId] ?? 0) > nowMs.value
-}
-
-/**
- * 订单池卡片倒计时文案：
- * - 仅待核销订单且存在有效剩余时间时展示；
- * - 将倒计时提升到卡片头部状态区，避免与金额/件数信息混排后视觉重心下坠；
- * - 已超时、已取消、已核销统一不再在列表卡片重复展示倒计时，状态标签本身已足够表达结果。
- */
-const getOrderCountdownText = (order: { status: O2oOrderStatus; expireInSeconds?: number; timeoutAt: string | null }) => {
-  const remainSeconds = resolveRemainSeconds(order)
-  if (remainSeconds === null || remainSeconds <= 0) {
-    return ''
-  }
-  return `剩余 ${formatCountdown(order)}`
+  return Boolean(orderRefreshMarkExpiresAtMap.value[orderId])
 }
 
 const isOrderHighlighted = (orderId: string) => {
-  return (orderHighlightExpiresAtMap.value[orderId] ?? 0) > nowMs.value
+  return Boolean(orderHighlightExpiresAtMap.value[orderId])
 }
 
-const pruneTransientMarks = () => {
-  const activeEntries = Object.entries(orderHighlightExpiresAtMap.value).filter(([, expiresAt]) => expiresAt > nowMs.value)
+const pruneTransientMarks = (now: number) => {
+  const activeEntries = Object.entries(orderHighlightExpiresAtMap.value).filter(([, expiresAt]) => expiresAt > now)
   if (activeEntries.length !== Object.keys(orderHighlightExpiresAtMap.value).length) {
     orderHighlightExpiresAtMap.value = Object.fromEntries(activeEntries)
   }
-  const activeRefreshEntries = Object.entries(orderRefreshMarkExpiresAtMap.value).filter(([, expiresAt]) => expiresAt > nowMs.value)
+  const activeRefreshEntries = Object.entries(orderRefreshMarkExpiresAtMap.value).filter(([, expiresAt]) => expiresAt > now)
   if (activeRefreshEntries.length !== Object.keys(orderRefreshMarkExpiresAtMap.value).length) {
     orderRefreshMarkExpiresAtMap.value = Object.fromEntries(activeRefreshEntries)
   }
-  if (latestNewOrderNotice.value && latestNewOrderNotice.value.expiresAt <= nowMs.value) {
+  if (latestNewOrderNotice.value && latestNewOrderNotice.value.expiresAt <= now) {
     latestNewOrderNotice.value = null
   }
-  if (detailRefreshNoticeExpiresAt.value <= nowMs.value) {
+  if (detailRefreshNoticeExpiresAt.value <= now) {
     detailRefreshNoticeExpiresAt.value = 0
   }
 }
@@ -733,7 +699,7 @@ const markIncrementalNewOrders = (count: number, visibleOrderIds: string[]) => {
     return
   }
   const nextMap = { ...orderHighlightExpiresAtMap.value }
-  const expiresAt = nowMs.value + NEW_ORDER_HIGHLIGHT_MS
+  const expiresAt = Date.now() + NEW_ORDER_HIGHLIGHT_MS
   for (const orderId of visibleOrderIds) {
     nextMap[orderId] = expiresAt
   }
@@ -761,6 +727,7 @@ const loadOrderDetail = async (
     errorMessage?: string
   },
 ) => {
+  if (!pageRuntimeActive) return 'canceled' as const
   if (!id) {
     activeOrderDetail.value = null
     return 'canceled' as const
@@ -777,7 +744,7 @@ const loadOrderDetail = async (
       activeOrderDetail.value = detail
       mergeOrderSummaryFromDetail(detail)
       if (options?.silent && changed) {
-        detailRefreshNoticeExpiresAt.value = nowMs.value + ORDER_POOL_REFRESH_MARK_MS
+        detailRefreshNoticeExpiresAt.value = Date.now() + ORDER_POOL_REFRESH_MARK_MS
       }
     },
     onError: (error) => {
@@ -857,7 +824,7 @@ const mergeOrderSummaryFromDetail = (detail: O2oConsolePreorderDetail) => {
  *   仅在详情已无法获取（例如已被删除）时才回退到当前页首单，避免打断操作员；
  * - 静默轮询时同步使用静默详情刷新，避免右侧面板每 10/15 秒闪烁一次。
  */
-const syncActiveOrder = async (options?: { silentDetail?: boolean }) => {
+const syncActiveOrder = async (options: { silentDetail: boolean; isCurrent: () => boolean }) => {
   const currentOrders = currentPoolOrders.value
   const exists = currentOrders.some((item) => item.id === activeOrderId.value)
   if (exists) {
@@ -869,7 +836,7 @@ const syncActiveOrder = async (options?: { silentDetail?: boolean }) => {
   }
   if (options?.silentDetail && activeOrderId.value && activeOrderDetail.value?.order.id === activeOrderId.value) {
     const outcome = await loadOrderDetail(activeOrderId.value, { silent: true })
-    if (outcome !== 'error') {
+    if (outcome !== 'error' || !options.isCurrent()) {
       return
     }
   }
@@ -894,6 +861,9 @@ const syncActiveOrder = async (options?: { silentDetail?: boolean }) => {
  * - 仅在同一筛选条件下的静默刷新里计算新单提醒，同一视图下才计算“已更新”标记与恢复滚动锚点。
  */
 const loadOrders = async (options?: { silent?: boolean }) => {
+  if (!pageRuntimeActive) return
+  const sequence = ++orderPoolReadSequence
+  const isCurrent = () => pageRuntimeActive && sequence === orderPoolReadSequence
   const silent = options?.silent ?? false
   const committedKeyword = appliedKeyword.value.trim()
   const committedAccountType = query.accountType
@@ -958,9 +928,10 @@ const loadOrders = async (options?: { silent?: boolean }) => {
         lastSilentListRefreshAt.value = Date.now()
       }
       orderSnapshotReady.value = true
-      await syncActiveOrder({ silentDetail: silent })
+      await syncActiveOrder({ silentDetail: silent, isCurrent })
       if (scrollAnchor) {
         await nextTick()
+        if (!isCurrent()) return
         restoreOrderRefreshAnchor(scrollAnchor, {
           listRoot: orderPoolListRef.value,
           itemAttributeName: 'data-order-pool-card-id',
@@ -1217,18 +1188,23 @@ const handleDeleteCurrentOrder = async () => {
 }
 
 const handleBusinessStatusChange = async (value: O2oOrderBusinessStatus | null) => {
-  if (!activeOrderDetail.value?.order.id) {
+  const target = activeOrderDetail.value?.order
+  if (!target?.id || !businessStatusPageActive || businessStatusSaving.value) {
     return
   }
   const previousValue = activeBusinessStatus.value
   if (value === previousValue) {
     return
   }
+  const generation = businessStatusOwnerGeneration
+  const operation = ++businessStatusOperation
+  const isCurrent = () => businessStatusPageActive && generation === businessStatusOwnerGeneration
+    && operation === businessStatusOperation && activeOrderId.value === target.id && activeOrderDetail.value?.order.id === target.id
 
   const nextMeta = getO2oOrderBusinessStatusMeta(value)
   const confirmMessage = value
-    ? `确认将预订单“${activeOrderDetail.value.order.preorderNo}”的商家特殊状态更新为“${nextMeta?.label ?? value}”吗？`
-    : `确认清除预订单“${activeOrderDetail.value.order.preorderNo}”的商家特殊状态吗？`
+    ? `确认将预订单“${target.preorderNo}”的商家特殊状态更新为“${nextMeta?.label ?? value}”吗？`
+    : `确认清除预订单“${target.preorderNo}”的商家特殊状态吗？`
 
   try {
     await ElMessageBox.confirm(confirmMessage, '确认更新特殊状态', {
@@ -1238,22 +1214,25 @@ const handleBusinessStatusChange = async (value: O2oOrderBusinessStatus | null) 
       closeOnClickModal: false,
     })
   } catch {
-    draftBusinessStatus.value = previousValue
+    if (isCurrent()) draftBusinessStatus.value = previousValue
     return
   }
 
-  detailLoading.value = true
+  if (!isCurrent()) return
+  businessStatusSaving.value = true
   try {
-    const latestDetail = await updateO2oOrderBusinessStatus(activeOrderDetail.value.order.id, value)
+    const latestDetail = await updateO2oOrderBusinessStatus(target.id, value)
+    if (!isCurrent()) return
     activeOrderDetail.value = latestDetail
     mergeOrderSummaryFromDetail(latestDetail)
     draftBusinessStatus.value = latestDetail.order.businessStatus
     showAppSuccess(value ? '商家特殊状态已更新' : '商家特殊状态已清除')
   } catch (error) {
+    if (!isCurrent()) return
     draftBusinessStatus.value = previousValue
     showAppError(error instanceof Error ? error.message : '更新商家状态失败，请稍后重试')
   } finally {
-    detailLoading.value = false
+    if (isCurrent()) businessStatusSaving.value = false
   }
 }
 
@@ -1350,24 +1329,49 @@ const scheduleAutoRefresh = () => {
   }, pollIntervalSeconds.value * 1000)
 }
 
-const stopSecondTick = () => {
-  if (secondTickTimer === null) {
-    return
+const scheduleStatusBoundary = () => {
+  clearTimeout(statusBoundaryTimer)
+  if (!countdownClockActive.value) return
+  const now = Date.now()
+  statusBoundaryMs.value = now
+  const visibleOrders = activeOrderDetail.value ? [...orders.value, activeOrderDetail.value.order] : orders.value
+  let nextBoundary = Infinity
+  for (const order of visibleOrders) {
+    const deadline = parseTimeMs(order.timeoutAt)
+    if (deadline <= now) continue
+    if (order.status === 'pending' || (order.status === 'cancelled' && !order.statusReport?.scenario)) {
+      nextBoundary = Math.min(nextBoundary, deadline)
+    }
+    if (order.status === 'pending' && !order.statusReport?.scenario && deadline - O2O_ORDER_TIMEOUT_SOON_WINDOW_MS > now) {
+      nextBoundary = Math.min(nextBoundary, deadline - O2O_ORDER_TIMEOUT_SOON_WINDOW_MS)
+    }
   }
-  globalThis.clearInterval(secondTickTimer)
-  secondTickTimer = null
+  if (Number.isFinite(nextBoundary)) {
+    statusBoundaryTimer = setTimeout(scheduleStatusBoundary, Math.min(nextBoundary - now, 2_147_483_647))
+  }
 }
 
-const scheduleSecondTick = () => {
-  stopSecondTick()
-  if (!pageRuntimeActive || globalThis.document?.visibilityState === 'hidden') {
-    return
+const scheduleTransientMarks = () => {
+  clearTimeout(transientMarksTimer)
+  if (!countdownClockActive.value) return
+  const now = Date.now()
+  pruneTransientMarks(now)
+  const nextExpiry = Math.min(
+    ...Object.values(orderHighlightExpiresAtMap.value),
+    ...Object.values(orderRefreshMarkExpiresAtMap.value),
+    latestNewOrderNotice.value?.expiresAt ?? Infinity,
+    detailRefreshNoticeExpiresAt.value || Infinity,
+  )
+  if (Number.isFinite(nextExpiry)) {
+    transientMarksTimer = setTimeout(scheduleTransientMarks, nextExpiry - now)
   }
-  secondTickTimer = globalThis.setInterval(() => {
-    nowMs.value = Date.now()
-    pruneTransientMarks()
-  }, 1000)
 }
+
+watch([orders, activeOrderDetail, countdownClockActive], scheduleStatusBoundary)
+watch(
+  [orderHighlightExpiresAtMap, orderRefreshMarkExpiresAtMap, latestNewOrderNotice, detailRefreshNoticeExpiresAt, countdownClockActive],
+  scheduleTransientMarks,
+)
 
 const handleAutoRefreshChange = () => {
   scheduleAutoRefresh()
@@ -1405,44 +1409,59 @@ const handleVisibilityChange = () => {
   }
   if (globalThis.document.visibilityState === 'hidden') {
     scheduleAutoRefresh()
-    stopSecondTick()
+    countdownClockActive.value = false
     return
   }
   scheduleAutoRefresh()
-  scheduleSecondTick()
-  if (autoRefreshEnabled.value && !listLoading.value && !detailLoading.value) {
+  countdownClockActive.value = true
+  if ((refreshOnVisibility || autoRefreshEnabled.value) && !listLoading.value && !detailLoading.value) {
+    refreshOnVisibility = false
     void loadOrders({ silent: true })
   }
 }
 
 const activatePageRuntime = () => {
+  businessStatusPageActive = true
   if (pageRuntimeActive) {
     return
   }
   pageRuntimeActive = true
   globalThis.document?.addEventListener('visibilitychange', handleVisibilityChange)
   scheduleAutoRefresh()
-  scheduleSecondTick()
-  if (hasActivatedOnce && globalThis.document?.visibilityState !== 'hidden' && !listLoading.value && !detailLoading.value) {
-    void loadOrders({ silent: true })
+  countdownClockActive.value = globalThis.document?.visibilityState !== 'hidden'
+  if (hasActivatedOnce) {
+    refreshOnVisibility = !countdownClockActive.value
+    if (!refreshOnVisibility) void loadOrders({ silent: true })
   }
   hasActivatedOnce = true
 }
 
 const deactivatePageRuntime = () => {
+  businessStatusPageActive = false
+  businessStatusOwnerGeneration += 1
+  businessStatusSaving.value = false
+  draftBusinessStatus.value = activeBusinessStatus.value
   if (!pageRuntimeActive) {
     return
   }
   pageRuntimeActive = false
+  orderPoolReadSequence += 1
+  orderListRequest.cancel()
+  orderDetailRequest.cancel()
+  listLoading.value = false
+  detailLoading.value = false
   globalThis.document?.removeEventListener('visibilitychange', handleVisibilityChange)
   scheduleAutoRefresh()
-  stopSecondTick()
+  countdownClockActive.value = false
+  clearTimeout(statusBoundaryTimer)
+  clearTimeout(transientMarksTimer)
 }
 
 // 部门配置在系统配置中新增或调整后，切回订单池时刷新部门筛选项。
 useDataChangeRefresh(['departments'], loadDepartmentOptions)
 
 onMounted(async () => {
+  activatePageRuntime()
   // 偏好为开启时，刷新页面后的音频上下文仍需一次用户手势才能出声。
   if (soundNoticeEnabled.value) {
     addReminderAudioGestureListeners()
@@ -1650,12 +1669,12 @@ onBeforeUnmount(() => {
                   <span class="rounded-full px-2 py-0.5 text-[11px] font-medium" :class="getOrderReportConfig(order).cardClassName">
                     {{ getOrderReportConfig(order).statusLabel }}
                   </span>
-                  <span
-                    v-if="getOrderCountdownText(order)"
-                    class="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:bg-amber-500/10 dark:text-amber-300"
-                  >
-                    {{ getOrderCountdownText(order) }}
-                  </span>
+                  <O2oCountdownText
+                    v-if="order.status === 'pending' && (!order.timeoutAt || parseTimeMs(order.timeoutAt) > statusBoundaryMs)"
+                    :active="countdownClockActive"
+                    :timeout-at="order.timeoutAt"
+                    :expire-in-seconds="order.expireInSeconds"
+                  />
                 </div>
               </div>
               <div class="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500 dark:text-slate-400">
@@ -1807,11 +1826,15 @@ onBeforeUnmount(() => {
                     <el-select
                       v-model="draftBusinessStatus"
                       clearable
+                      :value-on-clear="null"
                       placeholder="选择特殊状态"
                       class="w-full lg:w-72"
-                      :disabled="detailLoading"
+                      :disabled="detailLoading || businessStatusSaving"
                       @change="handleBusinessStatusChange"
                     >
+                      <template #label>
+                        {{ getO2oOrderBusinessStatusMeta(draftBusinessStatus)?.label ?? '状态待确认' }}
+                      </template>
                       <el-option
                         v-for="option in businessStatusOptions"
                         :key="option.value"

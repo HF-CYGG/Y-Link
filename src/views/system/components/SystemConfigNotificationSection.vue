@@ -1,8 +1,15 @@
 <script setup lang="ts">
+/**
+ * 模块说明：src/views/system/components/SystemConfigNotificationSection.vue
+ * 文件职责：集中展示共用通知连接、业务功能提醒、在线窗口与逐规则测试反馈。
+ * 实现逻辑：连接配置由父页统一保存，功能规则只选择渠道和来源；旧连接状态独立保留以支持显式回退。
+ * 维护说明：不得回显连接密钥；测试发送要求先保存共用连接，隐藏的 Mobile 安全规则由父页排除。
+ */
 import dayjs from 'dayjs'
 
 import { computed, reactive } from 'vue'
 import type {
+  NotificationChannelsRecord,
   NotificationPresenceSnapshot,
   NotificationPresenceUser,
   NotificationRuleRecord,
@@ -15,6 +22,9 @@ import { showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 const props = defineProps<{
   rules: NotificationRuleRecord[]
+  channels: NotificationChannelsRecord | null
+  channelDraft: { feishuWebhookUrl: string; feishuSignSecret: string; clearFeishuWebhook: boolean; clearFeishuSignSecret: boolean; emailSubjectPrefix: string }
+  channelDirty: boolean
   presenceSnapshot: NotificationPresenceSnapshot | null
   offlineWindowSeconds: number
   managementUsers: NotificationPresenceUser[]
@@ -26,6 +36,9 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (event: 'refresh-presence'): void
+  (event: 'configure-email'): void
+  (event: 'external-channel-change', ruleId: string): void
+  (event: 'external-mode-change', ruleId: string): void
   (event: 'update-offline-window-seconds', value: number): void
 }>()
 
@@ -50,6 +63,14 @@ const supplierUsers = computed(() => props.managementUsers.filter((user) => user
 const testingState = reactive<Record<string, boolean>>({})
 const testFeedbackState = reactive<Record<string, TestFeedback>>({})
 const OFFLINE_WINDOW_OPTIONS = [30, 60, 90, 120, 180, 300, 600, 900, 1800, 3600]
+
+const handleExternalChannelChange = (rule: NotificationRuleRecord) => {
+  emit('external-channel-change', String(rule.id))
+}
+
+const handleExternalModeChange = (rule: NotificationRuleRecord) => {
+  emit('external-mode-change', String(rule.id))
+}
 
 const handleOfflineWindowChange = (value: string | number | boolean | undefined) => {
   const seconds = Number.parseInt(String(value ?? ''), 10)
@@ -95,8 +116,14 @@ const getTestBlockedReason = (rule: NotificationRuleRecord, channel: TestChannel
   if (channel === 'feishu' && !rule.feishuEnabled) {
     return '请先勾选飞书外发渠道，再执行测试'
   }
-  if (channel === 'feishu' && !rule.feishuWebhookUrl?.trim() && !rule.feishuWebhookConfigured) {
-    return '请先填写飞书 Webhook 地址'
+  if (props.channelDirty) {
+    return '请先保存统一渠道配置后再测试'
+  }
+  if (channel === 'feishu' && rule.useSharedFeishu && (!props.channels?.feishu.webhookConfigured || props.channels.feishu.statusError)) {
+    return '统一飞书配置不可用，请先检查并保存'
+  }
+  if (channel === 'feishu' && !rule.useSharedFeishu && (!rule.legacyFeishuWebhookConfigured || rule.legacyFeishuStatusError)) {
+    return '历史飞书配置不可用，请使用统一飞书'
   }
   return ''
 }
@@ -114,11 +141,9 @@ const buildRuleDraft = (rule: NotificationRuleRecord) => {
       .filter(Boolean),
     emailEnabled: Boolean(rule.emailEnabled),
     feishuEnabled: Boolean(rule.feishuEnabled),
+    useSharedFeishu: rule.useSharedFeishu,
     externalTriggerMode: rule.externalTriggerMode,
     watchedUserIds: (rule.watchedUserIds ?? []).map((value) => String(value ?? '').trim()).filter(Boolean),
-    feishuWebhookUrl: String(rule.feishuWebhookUrl ?? '').trim(),
-    feishuSignSecret: String(rule.feishuSignSecret ?? '').trim(),
-    emailSubjectPrefix: String(rule.emailSubjectPrefix ?? '').trim() || '[Y-Link]',
   }
 }
 
@@ -180,11 +205,38 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: TestChannel
 <template>
   <div class="config-stage__panel grid gap-6">
     <div class="apple-card p-5 sm:p-6 xl:p-7">
+      <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">统一渠道配置</h2>
+      <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">渠道配置由各功能规则共用，修改后请点击页面顶部“保存配置”。</p>
+      <div class="mt-4 grid gap-4 lg:grid-cols-2">
+        <section class="rounded-xl border border-slate-200 p-4 dark:border-white/10">
+          <h3 class="font-medium">邮件服务</h3>
+          <p class="mt-2 text-sm">{{ channels?.email.statusError ? '配置异常，请检查邮件服务' : channels?.email.configured ? (channels.email.enabled ? '已配置并启用' : '已配置，未启用') : '尚未配置' }}</p>
+          <p class="mt-1 text-xs text-slate-500">验证码与通知共用同一邮件服务。</p>
+          <el-button class="mt-3" plain size="small" @click="emit('configure-email')">配置邮件服务</el-button>
+        </section>
+        <section class="rounded-xl border border-slate-200 p-4 dark:border-white/10">
+          <h3 class="font-medium">统一飞书</h3>
+          <p class="mt-2 text-sm">{{ channels?.feishu.statusError ? '配置不可用，请重新录入或清空后保存' : channels?.feishu.webhookConfigured ? '已配置' : '尚未配置' }}</p>
+          <p class="mt-1 text-xs text-slate-500">{{ channels?.feishu.signSecretConfigured ? '签名密钥已配置' : '签名密钥未配置' }}；留空保留已保存值。</p>
+          <el-input v-model.trim="channelDraft.feishuWebhookUrl" class="mt-3" maxlength="300" :disabled="loading || saving || !canUpdateConfigs || channelDraft.clearFeishuWebhook" placeholder="填写新的飞书 Webhook，留空保留" />
+          <el-checkbox v-model="channelDraft.clearFeishuWebhook" :disabled="loading || saving || !canUpdateConfigs">清空已保存的 Webhook</el-checkbox>
+          <el-input v-model.trim="channelDraft.feishuSignSecret" class="mt-2" maxlength="128" show-password autocomplete="off" :disabled="loading || saving || !canUpdateConfigs || channelDraft.clearFeishuSignSecret" placeholder="填写新的签名密钥，留空保留" />
+          <el-checkbox v-model="channelDraft.clearFeishuSignSecret" :disabled="loading || saving || !canUpdateConfigs">清空已保存的签名密钥</el-checkbox>
+        </section>
+      </div>
+      <div class="mt-4 max-w-lg">
+        <label class="text-sm">统一邮件主题前缀</label>
+        <el-input v-model="channelDraft.emailSubjectPrefix" class="mt-1" maxlength="128" :disabled="loading || saving || !canUpdateConfigs" placeholder="留空恢复各规则原有前缀" />
+        <p class="mt-1 text-xs text-slate-500">{{ channels?.emailSubjectPrefixConfigured ? '已配置统一前缀；清空后恢复各规则原有前缀。' : '尚未设置统一前缀，当前显示默认值。' }}</p>
+      </div>
+      <p v-if="rules.some((rule) => rule.legacyFeishuWebhookConfigured)" class="mt-3 text-xs text-slate-500">{{ rules.filter((rule) => rule.legacyFeishuWebhookConfigured).length }} 项功能保留历史飞书配置，可在规则中选择来源。</p>
+    </div>
+    <div class="apple-card p-5 sm:p-6 xl:p-7">
       <div class="mb-4 flex items-center justify-between gap-3">
         <div>
-          <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">通知规则</h2>
+          <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">功能提醒规则</h2>
           <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            站内通知始终生成；邮箱、飞书按离线触发条件外发。
+            站内通知始终生成；邮箱、飞书按所选时机外发。
           </p>
         </div>
         <div class="flex items-center gap-2">
@@ -314,8 +366,8 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: TestChannel
               <el-col :xs="24" :lg="12">
                 <el-form-item class="!mb-0" label="外发渠道">
                   <el-space wrap class="notification-rule-inline-control">
-                    <el-checkbox v-model="rule.emailEnabled" :disabled="loading || saving || !canUpdateConfigs">邮箱</el-checkbox>
-                    <el-checkbox v-model="rule.feishuEnabled" :disabled="loading || saving || !canUpdateConfigs">飞书</el-checkbox>
+                    <el-checkbox v-model="rule.emailEnabled" :disabled="loading || saving || !canUpdateConfigs" @change="handleExternalChannelChange(rule)">邮箱</el-checkbox>
+                    <el-checkbox v-model="rule.feishuEnabled" :disabled="loading || saving || !canUpdateConfigs" @change="handleExternalChannelChange(rule)">飞书</el-checkbox>
                   </el-space>
                 </el-form-item>
               </el-col>
@@ -326,10 +378,13 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: TestChannel
                     v-model="rule.externalTriggerMode"
                     :disabled="loading || saving || !canUpdateConfigs"
                     class="notification-rule-radio-group"
+                    @change="handleExternalModeChange(rule)"
                   >
+                    <el-radio value="always">{{ rule.eventType === 'inbound_order_submitted' ? '立即发送（推荐）' : '立即发送' }}</el-radio>
                     <el-radio value="all_management_offline">管理端人员全部离线时发送</el-radio>
                     <el-radio value="watched_accounts_offline">指定账号全部离线时发送</el-radio>
                   </el-radio-group>
+                  <p v-if="rule.eventType === 'inbound_order_submitted'" class="mt-1 text-xs text-slate-500">首次开启外发默认提交后立即发送，也可按需要选择离线时机。</p>
                 </el-form-item>
               </el-col>
 
@@ -356,43 +411,10 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: TestChannel
                 </el-form-item>
               </el-col>
 
-              <el-col :xs="24" :lg="12">
-                <el-form-item class="!mb-0" label="邮件主题前缀">
-                  <el-input
-                    v-model.trim="rule.emailSubjectPrefix"
-                    maxlength="128"
-                    show-word-limit
-                    placeholder="例如 [Y-Link]"
-                    :disabled="loading || saving || !canUpdateConfigs || !rule.emailEnabled"
-                    class="w-full"
-                  />
-                </el-form-item>
-              </el-col>
-
-              <el-col :xs="24" :lg="12">
-                <el-form-item class="!mb-0" label="飞书 Webhook">
-                  <el-input
-                    v-model.trim="rule.feishuWebhookUrl"
-                    maxlength="500"
-                    :placeholder="rule.feishuWebhookConfigured ? '已配置，留空保存将保留原值' : 'https://open.feishu.cn/open-apis/bot/v2/hook/...'"
-                    :disabled="loading || saving || !canUpdateConfigs || !rule.feishuEnabled"
-                    class="w-full"
-                  />
-                </el-form-item>
-              </el-col>
-
-              <el-col :xs="24" :lg="12">
-                <el-form-item class="!mb-0" label="飞书签名密钥（可选）">
-                  <el-input
-                    v-model.trim="rule.feishuSignSecret"
-                    maxlength="256"
-                    show-password
-                    autocomplete="off"
-                    :name="`feishu-sign-secret-${rule.id}`"
-                    placeholder="未启用签名可留空，已配置可保留占位符"
-                    :disabled="loading || saving || !canUpdateConfigs || !rule.feishuEnabled"
-                    class="w-full"
-                  />
+              <el-col v-if="rule.legacyFeishuWebhookConfigured" :xs="24">
+                <el-form-item class="!mb-0" label="飞书配置来源">
+                  <el-switch v-model="rule.useSharedFeishu" :disabled="loading || saving || !canUpdateConfigs" active-text="使用统一飞书" inactive-text="保留历史飞书配置" />
+                  <p v-if="rule.legacyFeishuStatusError && !rule.useSharedFeishu" class="w-full text-xs text-rose-600">历史飞书配置不可用，可选择统一飞书。</p>
                 </el-form-item>
               </el-col>
 

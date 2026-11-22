@@ -22,6 +22,7 @@ import {
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { writeControlFile, removeControlFile } from '../runtime/durable-control-file.js'
 import { prepareAutomaticDatabaseRescueRollback, completeRecoveryIntent } from '../runtime/database-rescue-control.js'
+import { isControlledManualMigration } from '../runtime/database-migration-protocol.js'
 
 export const PLANNED_DATABASE_MIGRATION_EXIT_CODE = 75
 export const DATABASE_MIGRATION_PLANNED_RESTART_EXIT_CODE = PLANNED_DATABASE_MIGRATION_EXIT_CODE
@@ -420,7 +421,11 @@ export async function handleDatabaseMigrationCutoverStartupFailure(input: {
     }
   }
 
-  await prepareAutomaticDatabaseRescueRollback(attemptedMarker.taskId)
+  await prepareAutomaticDatabaseRescueRollback(attemptedMarker.taskId, async () => {
+    // index先停止失败业务运行时；即使该收口失败，也必须再次完成真实gate排空才允许恢复写入。
+    // 此进程随后退出75，不重新开放业务；保持shutdown门禁而非重新建立可释放的维护freeze。
+    await databaseMaintenanceModeService.shutdownAndDrain()
+  })
   const rollbackMarker = markDatabaseMigrationCutover({
     status: 'rollback_pending',
   })
@@ -523,6 +528,11 @@ export async function completeDatabaseMigrationCutoverStartup(taskId: string): P
     throw new Error('数据库切换标记与只读维护任务不一致，禁止解除维护')
   }
   // 冻结状态下先清控制文件，最后才删除维护文件并开放业务；中断由启动预检续接终态。
+  const taskFile = path.join(appDataPaths.migrationTaskDir, `${normalizedTaskId}.json`)
+  if (fs.existsSync(taskFile)) {
+    const task = JSON.parse(fs.readFileSync(taskFile, 'utf8'))
+    if (isControlledManualMigration(task) && !['accepted', 'cancelled'].includes(task.controlPhase)) throw new Error('手动迁移启动补数及持久终态尚未完成，禁止解冻')
+  }
   clearDatabaseMigrationCutoverMarker()
   if (marker.status === 'rollback_pending') completeRecoveryIntent(normalizedTaskId)
   await databaseMaintenanceModeService.finishReadOnly(normalizedTaskId)

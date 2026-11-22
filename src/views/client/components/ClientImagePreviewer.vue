@@ -13,7 +13,7 @@
  * - 键盘事件在 window 捕获阶段处理并阻止继续传播，避免从商品详情抽屉打开时 Esc 同时关闭底层抽屉。
  */
 
-import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useZIndex } from 'element-plus'
 import { Close } from '@element-plus/icons-vue'
 
@@ -29,13 +29,16 @@ const props = withDefaults(defineProps<{
   visible: boolean
   src: string
   alt?: string
+  focusOrigin?: HTMLElement | null
 }>(), {
   alt: '商品原图',
 })
 
 const emit = defineEmits<{
   'update:visible': [value: boolean]
+  ready: []
 }>()
+onMounted(() => emit('ready'))
 
 // 预览层必须高于 Element Plus 抽屉/遮罩、商城移动端搜索层与悬浮购物车。
 const PREVIEW_BASE_Z_INDEX = 4000
@@ -389,7 +392,7 @@ const unbindRuntimeListeners = () => {
 
 const handleOpen = async () => {
   const activeElement = globalThis.document.activeElement
-  previousActiveElement = activeElement instanceof HTMLElement ? activeElement : null
+  previousActiveElement = props.focusOrigin ?? (activeElement instanceof HTMLElement ? activeElement : null)
   overlayZIndex.value = Math.max(PREVIEW_BASE_Z_INDEX, nextZIndex())
   resetViewState()
   lockBodyScroll()

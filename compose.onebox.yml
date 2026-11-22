@@ -13,6 +13,14 @@ services:
       dockerfile: Dockerfile.onebox
     environment:
       NODE_ENV: production
+      NODE_OPTIONS: ${NODE_OPTIONS:-}
+      Y_LINK_NODE_MAX_OLD_SPACE_MB: ${Y_LINK_NODE_MAX_OLD_SPACE_MB:-256}
+      MALLOC_ARENA_MAX: ${MALLOC_ARENA_MAX:-2}
+      UV_THREADPOOL_SIZE: ${UV_THREADPOOL_SIZE:-8}
+      YLINK_PASSWORD_HASH_CONCURRENCY: ${YLINK_PASSWORD_HASH_CONCURRENCY:-}
+      YLINK_CAPTCHA_RENDER_CONCURRENCY: ${YLINK_CAPTCHA_RENDER_CONCURRENCY:-}
+      YLINK_PRODUCT_IMAGE_CONCURRENCY: ${YLINK_PRODUCT_IMAGE_CONCURRENCY:-}
+      Y_LINK_MAX_CONCURRENT_EXPORTS: ${Y_LINK_MAX_CONCURRENT_EXPORTS:-2}
       TZ: ${TZ:-Asia/Shanghai}
       PORT: 3001
       Y_LINK_TRUST_PROXY: "127.0.0.1,::1"
@@ -26,8 +34,13 @@ services:
       DB_TYPE: sqlite
       SQLITE_DB_PATH: /app/data/y-link.sqlite
       DB_SYNC: "false"
+      DB_SSL_MODE: ${DB_SSL_MODE:-disabled}
+      DB_SSL_CA: ${DB_SSL_CA:-}
+      DB_AUTO_MIGRATE: ${DB_AUTO_MIGRATE:-false}
       Y_LINK_DATA_DIR: /app/data
+      Y_LINK_ONEBOX_NON_ROOT: ${Y_LINK_ONEBOX_NON_ROOT:-false}
       Y_LINK_AUTOMATIC_DB_MIGRATION_ENABLED: ${Y_LINK_AUTOMATIC_DB_MIGRATION_ENABLED:-true}
+      Y_LINK_MANUAL_DB_MIGRATION_ENABLED: ${Y_LINK_MANUAL_DB_MIGRATION_ENABLED:-true}
       SQLITE_SYNCHRONOUS: ${SQLITE_SYNCHRONOUS:-FULL}
       SQLITE_BUSY_TIMEOUT_MS: ${SQLITE_BUSY_TIMEOUT_MS:-5000}
       SQLITE_CACHE_SIZE_KIB: ${SQLITE_CACHE_SIZE_KIB:-65536}
@@ -49,6 +62,8 @@ services:
       Y_LINK_JSON_DATA_TRANSFER_ENABLED: ${Y_LINK_JSON_DATA_TRANSFER_ENABLED:-false}
       INVITE_CODE_PEPPER: ${INVITE_CODE_PEPPER:-}
       VERIFICATION_CODE_REQUEST_TIMEOUT_MS: ${VERIFICATION_CODE_REQUEST_TIMEOUT_MS:-8000}
+      Y_LINK_OUTBOUND_REDIRECT_POLICY: ${Y_LINK_OUTBOUND_REDIRECT_POLICY:-compat}
+      Y_LINK_OUTBOUND_REDIRECT_ALLOWED_ORIGINS: ${Y_LINK_OUTBOUND_REDIRECT_ALLOWED_ORIGINS:-[]}
       ALIBABA_CLOUD_ACCESS_KEY_ID: ${ALIBABA_CLOUD_ACCESS_KEY_ID:-}
       ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${ALIBABA_CLOUD_ACCESS_KEY_SECRET:-}
       VERIFICATION_TICKET_HMAC_SECRET: ${VERIFICATION_TICKET_HMAC_SECRET:-}
@@ -78,10 +93,10 @@ services:
         - CMD
         - node
         - -e
-        - fetch('http://127.0.0.1/health').then((response)=>process.exit(response.ok?0:1)).catch(()=>process.exit(1))
-      interval: 15s
+        - "require('node:http').get('http://127.0.0.1/health', (res) => process.exit(res.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
+      interval: 30s
       timeout: 5s
-      retries: 6
+      retries: 3
       start_period: 20s
     restart: unless-stopped
     stop_grace_period: 30s

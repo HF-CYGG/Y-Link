@@ -66,6 +66,8 @@ export interface AppRouteMeta extends RouteMeta {
   requiredAnyPermissions?: PermissionCode[]
   allowedRoles?: UserRole[]
   keepAlive?: boolean
+  /** 与视图的显式组件名一致，供布局层 KeepAlive 按组件匹配。 */
+  keepAliveViewName?: string
   preloadTargets?: AppRouteName[]
   deferPreloadOnColdStart?: boolean
   viewKey?: string
@@ -139,6 +141,7 @@ const layoutChildren: AppRouteRecord[] = [
       requiredPermissions: ['dashboard:view'],
       allowedRoles: ['admin', 'operator'],
       keepAlive: true,
+      keepAliveViewName: 'DashboardView',
       // 工作台仅预热最邻近的高频业务页：
       // - 出库开单与出库单列表是首页最常见下一跳；
       // - 产品中心、用户中心属于次级治理链路，继续在这里预热会额外拉起共享壳层子包，
@@ -165,6 +168,7 @@ const layoutChildren: AppRouteRecord[] = [
         bgClass: 'bg-brand/10 dark:bg-brand/20',
       },
       keepAlive: true,
+      keepAliveViewName: 'OrderEntryView',
       preloadTargets: ['order-list', 'products'],
     },
   },
@@ -187,6 +191,7 @@ const layoutChildren: AppRouteRecord[] = [
         bgClass: 'bg-secondary/10 dark:bg-secondary/20',
       },
       keepAlive: true,
+      keepAliveViewName: 'OrderListView',
       preloadTargets: ['order-entry'],
     },
   },
@@ -209,6 +214,7 @@ const layoutChildren: AppRouteRecord[] = [
         bgClass: 'bg-brand/10 dark:bg-brand/20',
       },
       keepAlive: true,
+      keepAliveViewName: 'ReportCenterView',
       preloadTargets: ['order-list'],
     },
   },
@@ -224,6 +230,7 @@ const layoutChildren: AppRouteRecord[] = [
       requiredPermissions: ['inbound:create'],
       allowedRoles: ['supplier'],
       keepAlive: true,
+      keepAliveViewName: 'SupplierWorkbenchView',
       viewKey: 'supplier-workbench',
       suppressGlobalLoadingBar: true,
     },
@@ -242,6 +249,7 @@ const layoutChildren: AppRouteRecord[] = [
       requiredPermissions: ['inbound:view'],
       allowedRoles: ['supplier'],
       keepAlive: true,
+      keepAliveViewName: 'SupplierWorkbenchView',
       viewKey: 'supplier-workbench',
       suppressGlobalLoadingBar: true,
     },
@@ -258,6 +266,7 @@ const layoutChildren: AppRouteRecord[] = [
       requiredPermissions: ['inbound:verify'],
       allowedRoles: ['admin', 'operator'],
       keepAlive: true,
+      keepAliveViewName: 'InboundScanView',
     },
   },
   {
@@ -272,6 +281,7 @@ const layoutChildren: AppRouteRecord[] = [
       requiredAnyPermissions: ['inbound:view', 'inbound:verify'],
       allowedRoles: ['admin', 'operator'],
       keepAlive: true,
+      keepAliveViewName: 'O2oInboundManageView',
     },
   },
   {
@@ -305,6 +315,7 @@ const layoutChildren: AppRouteRecord[] = [
           activeMenu: '/base-data',
           requiredPermissions: ['products:view'],
           keepAlive: true,
+          keepAliveViewName: 'ProductCenterView',
           viewKey: 'product-center',
           suppressGlobalLoadingBar: true,
           preloadTargets: ['tags', 'o2o-console-products'],
@@ -322,6 +333,7 @@ const layoutChildren: AppRouteRecord[] = [
           // 仅有 products:view 的账号看不到“商品标签”，菜单入口改指向“分类与库位”标签，保证工作台仍可从侧栏进入。
           menuFallbackSibling: 'master-data',
           keepAlive: true,
+          keepAliveViewName: 'TagCenterView',
           viewKey: 'tag-center',
           suppressGlobalLoadingBar: true,
         },
@@ -337,6 +349,7 @@ const layoutChildren: AppRouteRecord[] = [
           activeMenu: '/base-data/tags',
           requiredPermissions: ['products:view'],
           keepAlive: true,
+          keepAliveViewName: 'TagCenterView',
           viewKey: 'tag-center',
           suppressGlobalLoadingBar: true,
         },
@@ -377,6 +390,7 @@ const layoutChildren: AppRouteRecord[] = [
           activeMenu: '/base-data/products',
           requiredPermissions: ['products:view'],
           keepAlive: true,
+          keepAliveViewName: 'ProductCenterView',
           viewKey: 'product-center',
           suppressGlobalLoadingBar: true,
           // 线上展示入口命中后，除了预热后续核销链路，也要把基础信息标签对应子包补齐，
@@ -394,6 +408,7 @@ const layoutChildren: AppRouteRecord[] = [
           activeMenu: '/o2o-console',
           requiredPermissions: ['orders:view'],
           keepAlive: true,
+          keepAliveViewName: 'O2oOrderQueryView',
           preloadTargets: ['o2o-console-verify'],
         },
       },
@@ -407,6 +422,7 @@ const layoutChildren: AppRouteRecord[] = [
           activeMenu: '/o2o-console',
           requiredPermissions: ['orders:view'],
           keepAlive: true,
+          keepAliveViewName: 'O2oVerifyConsoleView',
           preloadTargets: ['o2o-console-inbound'],
         },
       },
@@ -419,7 +435,6 @@ const layoutChildren: AppRouteRecord[] = [
           menuOrder: 40,
           activeMenu: '/inbound-manage',
           requiredAnyPermissions: ['inbound:view', 'inbound:verify'],
-          keepAlive: true,
         },
       },
     ],
@@ -464,6 +479,7 @@ const layoutChildren: AppRouteRecord[] = [
           activeMenu: '/inventory',
           requiredPermissions: ['inventory:operate'],
           keepAlive: true,
+          keepAliveViewName: 'InventoryScanView',
         },
       },
       {
@@ -475,6 +491,7 @@ const layoutChildren: AppRouteRecord[] = [
           menuOrder: 20,
           requiredPermissions: ['inventory:view'],
           keepAlive: true,
+          keepAliveViewName: 'InventoryStockView',
         },
       },
       {
@@ -486,6 +503,7 @@ const layoutChildren: AppRouteRecord[] = [
           menuOrder: 30,
           requiredPermissions: ['stocktake:view'],
           keepAlive: true,
+          keepAliveViewName: 'StocktakeListView',
         },
       },
       {
@@ -509,6 +527,7 @@ const layoutChildren: AppRouteRecord[] = [
           activeMenu: '/inventory',
           requiredPermissions: ['inventory:view'],
           keepAlive: true,
+          keepAliveViewName: 'InventoryDocListView',
         },
       },
       {
@@ -521,6 +540,7 @@ const layoutChildren: AppRouteRecord[] = [
           activeMenu: '/inventory',
           requiredPermissions: ['inventory:view'],
           keepAlive: true,
+          keepAliveViewName: 'InventoryLogView',
         },
       },
       {
@@ -548,6 +568,7 @@ const layoutChildren: AppRouteRecord[] = [
       // 客服工作台应与后端路由权限保持一致，避免只有客服权限的账号被前端菜单误挡住。
       requiredPermissions: ['customer_service:view'],
       keepAlive: true,
+      keepAliveViewName: 'CustomerServiceWorkbenchView',
       preloadTargets: ['system-client-users'],
       deferPreloadOnColdStart: true,
     },
@@ -584,6 +605,7 @@ const layoutChildren: AppRouteRecord[] = [
           activeMenu: '/system',
           requiredPermissions: ['system_configs:view'],
           keepAlive: true,
+          keepAliveViewName: 'SystemConfigView',
           // 系统治理页首次进入时优先让当前页先稳定显示：
           // - 系统配置原本会顺手预热数据库迁移与用户中心，冷启动时会把多个重模块一起拉起；
           // - 这里改为仅保留更轻量的治理链路，并结合 deferPreloadOnColdStart 避免首次进入时抢占带宽。
@@ -610,6 +632,7 @@ const layoutChildren: AppRouteRecord[] = [
             bgClass: 'bg-secondary/10 dark:bg-secondary/20',
           },
           keepAlive: true,
+          keepAliveViewName: 'DatabaseMigrationView',
           preloadTargets: ['system-audit-logs'],
           deferPreloadOnColdStart: true,
         },
@@ -624,6 +647,7 @@ const layoutChildren: AppRouteRecord[] = [
           activeMenu: '/system',
           requiredPermissions: ['users:view'],
           keepAlive: true,
+          keepAliveViewName: 'UserCenterView',
           viewKey: 'user-center',
           suppressGlobalLoadingBar: true,
           preloadTargets: ['system-client-users'],
@@ -641,6 +665,7 @@ const layoutChildren: AppRouteRecord[] = [
           activeMenu: '/system/users',
           requiredPermissions: ['users:view'],
           keepAlive: true,
+          keepAliveViewName: 'UserCenterView',
           viewKey: 'user-center',
           suppressGlobalLoadingBar: true,
           deferPreloadOnColdStart: true,
@@ -656,6 +681,7 @@ const layoutChildren: AppRouteRecord[] = [
           activeMenu: '/system',
           requiredPermissions: ['audit_logs:view'],
           keepAlive: true,
+          keepAliveViewName: 'AuditLogView',
           deferPreloadOnColdStart: true,
         },
       },
@@ -721,6 +747,7 @@ export const routes: RouteRecordRaw[] = [
           clientNavOrder: 10,
           requiresClientAuth: true,
           keepAlive: true,
+          keepAliveViewName: 'ClientMallView',
           // 商城主入口优先预热“购物车 -> 订单列表”：
           // - 加购后去购物车是最高频下一跳；
           // - 订单列表是次高频回访入口；
@@ -739,6 +766,7 @@ export const routes: RouteRecordRaw[] = [
           clientNavOrder: 20,
           requiresClientAuth: true,
           keepAlive: true,
+          keepAliveViewName: 'ClientOrdersView',
           // 订单列表优先照顾“详情查看”，其次才是回商城继续下单。
           preloadTargets: ['client-order-detail', 'client-mall'],
         } satisfies AppRouteMeta,
@@ -753,6 +781,7 @@ export const routes: RouteRecordRaw[] = [
           menu: false,
           requiresClientAuth: true,
           keepAlive: true,
+          keepAliveViewName: 'ClientCartView',
           // 购物车下一跳几乎总是结算，回商城作为补充链路保留在第二优先级。
           preloadTargets: ['client-checkout', 'client-mall'],
         } satisfies AppRouteMeta,
@@ -781,6 +810,7 @@ export const routes: RouteRecordRaw[] = [
           clientNavOrder: 30,
           requiresClientAuth: true,
           keepAlive: true,
+          keepAliveViewName: 'ClientProfileView',
           // “我的”页进入反馈中心的频率高于回订单列表，因此先预热反馈页。
           preloadTargets: ['client-feedback', 'client-orders'],
         } satisfies AppRouteMeta,
@@ -795,6 +825,7 @@ export const routes: RouteRecordRaw[] = [
           requiresClientAuth: true,
           hideClientBottomNav: true,
           keepAlive: true,
+          keepAliveViewName: 'ClientFeedbackView',
           // 反馈会话页的高频下一跳是“新建反馈”和“进入详情”，返回个人页放在兜底位。
           preloadTargets: ['client-feedback-create', 'client-feedback-detail', 'client-profile'],
         } satisfies AppRouteMeta,
@@ -860,6 +891,21 @@ export const routes: RouteRecordRaw[] = [
     } satisfies AppRouteMeta,
   },
 ]
+
+const collectKeepAliveViewNames = (records: RouteRecordRaw[]): string[] => {
+  const names = new Set<string>()
+  const collect = (records: RouteRecordRaw[]) => {
+    for (const { meta, children } of records) {
+      if (meta?.keepAlive && typeof meta.keepAliveViewName === 'string') names.add(meta.keepAliveViewName)
+      if (children) collect(children)
+    }
+  }
+  collect(records)
+  return [...names]
+}
+
+export const managementKeepAliveViewNames = collectKeepAliveViewNames(layoutChildren as RouteRecordRaw[])
+export const clientKeepAliveViewNames = collectKeepAliveViewNames(routes.find(({ path }) => path === '/client')?.children ?? [])
 
 /**
  * 将子路由 path 解析为绝对路径：

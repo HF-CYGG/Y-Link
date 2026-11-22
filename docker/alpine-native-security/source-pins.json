@@ -1,0 +1,601 @@
+{
+  "schema": 1,
+  "distro": "alpine",
+  "branch": "3.24",
+  "architectures": [
+    "x86_64",
+    "aarch64"
+  ],
+  "localRevision": 100,
+  "status": "implementation-candidate-unreviewed-no-build-or-runtime-verification",
+  "sourceDateEpoch": 1794873600,
+  "protectedPackages": {
+    "nginx": "1.30.6",
+    "musl": "1.2.6-r3",
+    "zlib": "1.4-r0",
+    "libxslt": "1.1.43-r4"
+  },
+  "packages": {
+    "libxml2": {
+      "name": "libxml2",
+      "version": "2.13.9",
+      "baseRevision": 2,
+      "recipeSha256": "843a8013c86b73c9873735bfe5f155f4b9b6b4cbfbf9794a6c98b57d141a52ab",
+      "aportsRef": "f1bd5b6767a0e7fdda380c95138a1c938eb6e102",
+      "recipe": "vendor/libxml2/APKBUILD",
+      "upstreamInputs": [
+        {
+          "name": "libxml2-2.13.9.tar.xz",
+          "url": "https://download.gnome.org/sources/libxml2/2.13/libxml2-2.13.9.tar.xz",
+          "bytes": 2426164,
+          "sha256": "a2c9ae7b770da34860050c309f903221c67830c86e4a7e760692b803df95143a",
+          "sha512": "62d4813860124c969f204aaf33b497105dbc32a6c5655f5a86168743660e10987d687d7e5e7ee49fdfdeb8f6ad9fa4503f81fcce2e4d459094895f02436d1b13"
+        },
+        {
+          "name": "CVE-2026-6732.patch",
+          "url": "https://raw.githubusercontent.com/alpinelinux/aports/f1bd5b6767a0e7fdda380c95138a1c938eb6e102/main/libxml2/CVE-2026-6732.patch",
+          "bytes": 1565,
+          "sha256": "42d45b35f36bf29229e39a9e5349d7347e51d92099573b5a509f448dbf0e34d7",
+          "sha512": "a54eca0b69fb49c9894684069b0e68dd80f002977c59249bee6d1a168391179e9815dfbe49a9cce3de28ca4a1bdfcac8a691daa240dd70a0206d24d32f6e84cb"
+        },
+        {
+          "name": "CVE-2026-6732-test.patch",
+          "url": "https://raw.githubusercontent.com/alpinelinux/aports/f1bd5b6767a0e7fdda380c95138a1c938eb6e102/main/libxml2/CVE-2026-6732-test.patch",
+          "bytes": 2563,
+          "sha256": "7c93e102dfdeaaf5d7adeda70c0dec6bfc492dbe9a14a29d42512a6c3f39a6c2",
+          "sha512": "9117a6a060d9c760ae4aa88c33131b02b4677a6703fe02ea36a474035c901d5da778a4d98402a87187410e9bcfe9819d382f9df4e6fe42ff3cf33acc88ba28a9"
+        }
+      ],
+      "patches": [
+        {
+          "cve": "CVE-2026-86140",
+          "commit": "d1686f91dbda141a752200419d35639fd6b38340",
+          "file": "patches/libxml2/CVE-2026-86140.patch",
+          "sha256": "5e51f8dcadfe3294a15d9e8644d61e8d92bd5b9e72c10cf13ef010eccfbfa4df",
+          "sha512": "ebde6e3172c7e5a1e87423becf9ae748b6f67ec2c9380892c045d9d698ab29e78755894a501341f5201ad42ec9f6ef6fa62878d26c3fe653e36d27c36b04dea5"
+        },
+        {
+          "cve": "CVE-2025-8732",
+          "commit": "3425dece47c8db600f8d7328ae2d7ddfaa0d7b2d",
+          "file": "patches/libxml2/CVE-2025-8732.patch",
+          "sha256": "ecfc52d92bb9f69c75b6871a357cfb1125de9a3b351d9da9543bd092e0f245c3",
+          "sha512": "e151c02574af3e7597eedfb88536525aeea3ee05cb1573f47ad5aac42b7d37fe45073855d4cfe01020cf464095e669711c28a47e4b5debf68139e1275e733499",
+          "upstreamFile": "vendor/libxml2/upstream/CVE-2025-8732.patch",
+          "upstreamSha256": "693c35fbca8588e194fb03cc200d2e6956678cb404c5a1ce6e660bde51fe43e9",
+          "adaptation": "同版SGML递归路径传递depth；旧注释/局部变量/锁调用上下文保留；全部内部调用点收口",
+          "sourceTargets": {
+            "catalog.c": {
+              "before": "c985ea50eaa57345643a67c64b711bef285843de509332d324b3a9338b6c74fb",
+              "after": "2f57d78e5e0e9b2f8c9cb03f687701056f5cd656d656ae0ff4bd978af2e9c013"
+            }
+          },
+          "upstreamNewTests": "原始测试增量保留在upstreamFile；本阶段生产补丁不移植新增测试，统一验收前需完成适用测试契约；原APKBUILD.check不改、不跳过"
+        },
+        {
+          "cve": "CVE-2026-0989",
+          "commit": "66c52b3ac6c32ab112ec2a3bf41e6c30948be113",
+          "file": "patches/libxml2/CVE-2026-0989.patch",
+          "sha256": "a93af9c06a9feb1928ea9d40ac9ea5b4da6093f369c8535f9d0c723617499dba",
+          "sha512": "f066e7ed57ab7a998fd747ca831d39d009247dec719c9641dd05fb44a58350c659ad9279db4c732596738d7a4614745fa6895176c3d387f17b3e8bdb84b61035",
+          "upstreamFile": "vendor/libxml2/upstream/CVE-2026-0989.patch",
+          "upstreamSha256": "44bdcc1beadf833247a392b3a2f31e184a4181fead83239cc9ec0a518facb676",
+          "adaptation": "保留旧LIBXML_SCHEMAS_ENABLED/指针typedef，采用上游1000默认深度、RNG_INCLUDE_LIMIT和兼容setter；增加既有版本节点的setter导出，不删旧符号",
+          "sourceTargets": {
+            "relaxng.c": {
+              "before": "a468c9a1d7e13217eb18b93b58be7efee3929dac98de7abc1a2a0973eee3778e",
+              "after": "e51b61ac3c7e235771d7680365e5cfb01d6dcc06a59eedc506b7ed0aba1e9d0c"
+            },
+            "include/libxml/relaxng.h": {
+              "before": "9a2ca0046680c69c621b5ea4cc659b6a1f4f97ce13ba7cea28841ff467139211",
+              "after": "6591ea41c00f5ed6b0371ccbccd480aac488976a702db3d662ac0128147a7564"
+            },
+            "libxml2.syms": {
+              "before": "c23595cddc4d90e222df6370329297a2229fde3d207b2328bae8fbb8322cfdfe",
+              "after": "df4f760a813a0dce1ed169d37b043b212418317916b4170b22609c401caef7ff"
+            }
+          },
+          "upstreamNewTests": "原始测试增量保留在upstreamFile；本阶段生产补丁不移植新增测试，统一验收前需完成适用测试契约；原APKBUILD.check不改、不跳过"
+        },
+        {
+          "cve": "CVE-2026-11979",
+          "commit": "c2e233fc1b341685fc99621b2768b503f777a72e",
+          "file": "patches/libxml2/CVE-2026-11979.patch",
+          "sha256": "55fd8a1ce60ab4f3379ff870e5b64f3ee132db5a746cd0b20478b45b7ee3b4b3",
+          "sha512": "57783de4dea22f77b79033ba9569c0ac2b93409349c077d3f798fbbc81898199e1bb56a3a34ca0b7145a7f4287e783a21c08ccfa0b08d38ec9d3c10d2263d5bf",
+          "upstreamFile": "vendor/libxml2/upstream/CVE-2026-11979.patch",
+          "upstreamSha256": "428632c18c3e817394dbe33cc61a2310b63b14994b3252b85faa2ad95438c1b3",
+          "adaptation": "生产xmlcatalog.c三处完整16行边界检查；旧版没有test/catalogs/test.sh，原上游测试文本单独保留，不以工具未安装判不适用",
+          "sourceTargets": {
+            "xmlcatalog.c": {
+              "before": "009990adc095025b38331c611447027c2edb40cf2dc70b2fcd13270c8b2991bc",
+              "after": "6898480baaeb4dff433b582ac60db169c61e5f86a93301e7bc14f4758c8b15b3"
+            }
+          },
+          "upstreamNewTests": "原始测试增量保留在upstreamFile；本阶段生产补丁不移植新增测试，统一验收前需完成适用测试契约；原APKBUILD.check不改、不跳过"
+        },
+        {
+          "cve": "CVE-2026-86138",
+          "commit": "a4cba4b5b5a8c42e155ed42d2d2a44955465a2e4",
+          "file": "patches/libxml2/CVE-2026-86138.patch",
+          "sha256": "9f23442e8d674ae5ee1decda0a7b1e43ff7d4f601ff71e57909af877a0c7be30",
+          "sha512": "e6bf924cc3d66a708e1c40276a691f1d96c7da941d3481d232ccf0142520870d7b77cde9b767b82240845e7e93ac4af36271da56c3cad97ad8963790adc9b313",
+          "upstreamFile": "vendor/libxml2/upstream/CVE-2026-86138.patch",
+          "upstreamSha256": "f207c148a8defa5fcf564a05396748b1cf23e9788ae174a750556efdf9261f29",
+          "adaptation": "生产dict.c完整size_t/SIZE_MAX检查；仅重生成对应2.13行号上下文",
+          "sourceTargets": {
+            "dict.c": {
+              "before": "516f59a03a18bc92234e3e06515d598e59a56450c7c587e64be48c5cd63db8e1",
+              "after": "7a4497931edf8ea6c69dd492748047a0c88a7a4e37215fa984f21ced4f2d3ce0"
+            }
+          },
+          "upstreamNewTests": "原始测试增量保留在upstreamFile；本阶段生产补丁不移植新增测试，统一验收前需完成适用测试契约；原APKBUILD.check不改、不跳过"
+        },
+        {
+          "cve": "CVE-2026-86139",
+          "commit": "8edbbdb09f24d26a2f900141fddc2b9d014f53b0",
+          "file": "patches/libxml2/CVE-2026-86139.patch",
+          "sha256": "ba773379561f79799cd188b1842f7bfa88b94846c0da9329ace434c1b597d2dc",
+          "sha512": "2348c66ca60d2e6ab9db283b6db267ae0eaa0ffcc7cca766f8e3f2ca5c7f20597522d1c6a411165abaa6367b7d1158aa34e02007dc88f96eb7ad6d74228b10da",
+          "upstreamFile": "vendor/libxml2/upstream/CVE-2026-86139.patch",
+          "upstreamSha256": "d7ac6d515d52b34e44180f49c4089fe7c5889492daa111cfeb4cdcd101ce73e0",
+          "adaptation": "新增上游xmlStrlen饱和保护；保留旧xmlMallocAtomic",
+          "sourceTargets": {
+            "uri.c": {
+              "before": "321c404ce5a52d593a1a64e060edaa7222dfec418147cca3146138cdb6909928",
+              "after": "e297f05efa0f48105a4c5474441d8ee9cf133a43757fdd165ffd99f7642a1f63"
+            }
+          },
+          "upstreamNewTests": "原始测试增量保留在upstreamFile；本阶段生产补丁不移植新增测试，统一验收前需完成适用测试契约；原APKBUILD.check不改、不跳过"
+        },
+        {
+          "cve": "CVE-2026-86142",
+          "commit": "6b3a736c0edc74ceec3d82f5252499d7911b3a58",
+          "file": "patches/libxml2/CVE-2026-86142.patch",
+          "sha256": "606cfd867c9acd41429d0ff19a262bcc015b2efef27a44da5c15c29d7b0fd4f6",
+          "sha512": "1a019138e63bacff9c5d55aefc6102d70d14f476c5ae1751a73ef27f772cff5fe2e2e3fe7fff27cd674e46213f151117c77bdbfd39b1587b1c0beba587496a6b",
+          "upstreamFile": "vendor/libxml2/upstream/CVE-2026-86142.patch",
+          "upstreamSha256": "8a8153323a3fb797f4f8fcaa6fd12dcdb2081aee8c13baee6f88e22bd5fc87bd",
+          "adaptation": "完整上游溢出/释放name/返回路径；保留旧xmlMallocAtomic",
+          "sourceTargets": {
+            "xpointer.c": {
+              "before": "0c4f251220c371feefbebd4c0a552c182caf3938b28cd846b926f5fc7b41271f",
+              "after": "f5558a5bd6dfabe4bdb53c3fa1705caf44d66a1e6905da522832fddd5c1d4e3b"
+            }
+          },
+          "upstreamNewTests": "原始测试增量保留在upstreamFile；本阶段生产补丁不移植新增测试，统一验收前需完成适用测试契约；原APKBUILD.check不改、不跳过"
+        },
+        {
+          "cve": "CVE-2026-86143",
+          "commit": "90f293ba74d28b1d570920382e707586f68ebf35",
+          "file": "patches/libxml2/CVE-2026-86143.patch",
+          "sha256": "3ebee7738b59e904ce57b01cf42e6ca050815fbb78f6091153fad9df96a760ec",
+          "sha512": "74fdbd9235e743eaa3143572ed6f47774f15349e209485b645b7523a6df9be029380fc0cb7977f506d427ec7632ac0db7cb3fbf6432ce4779d96d4c7c21b1429",
+          "upstreamFile": "vendor/libxml2/upstream/CVE-2026-86143.patch",
+          "upstreamSha256": "f521d43d4bdd669009c0986963c33465f33ef7390343491bf751b25d72a0655d",
+          "adaptation": "2.13有独立WriteEscape且nbchars为int：在Write和WriteEscape四处size_t到int赋值前保护；Flush两处保持上游bufsize检查；不改正常回调/计数路径",
+          "sourceTargets": {
+            "xmlIO.c": {
+              "before": "1fb3c693ce3f35325ed009a2906aae6965ea14100b8c06b8bd3a512956ab22f7",
+              "after": "168265a8f3c6f66e8745cd8f2f437fa754fc0a0d8534bda3349a5fc7697f0abd"
+            }
+          },
+          "upstreamNewTests": "原始测试增量保留在upstreamFile；本阶段生产补丁不移植新增测试，统一验收前需完成适用测试契约；原APKBUILD.check不改、不跳过"
+        },
+        {
+          "cve": "CVE-2026-86144",
+          "commit": "b63cd517afecb76582dd9488c55e54ceaf50de61",
+          "file": "patches/libxml2/CVE-2026-86144.patch",
+          "sha256": "2bbd1c867a120e4d1b8c2ac9d398a94cbb4bb52be4ece2d0b5c2b92c5e070e87",
+          "sha512": "8cccde4ebed2d67411fcda19115d23b91d9b0b25c23a20371dc8bafba7ed8e2b36ca0bf46e229e730a94d46f0cc7630dabaef20f256df60677ebe3c5d1b7ddd3",
+          "upstreamFile": "vendor/libxml2/upstream/CVE-2026-86144.patch",
+          "upstreamSha256": "49b3c2caba6fcba424ced833b26d67efb6c0749d26e7494f4951db61f55f211f",
+          "adaptation": "在旧xmlLoadExternalEntity前用既有xmlCtxtUseOptions传ctxt->parseFlags；两默认wrapper继承doc旗标；保留现有handler/input/parser/encoding错误清理，不引新loader API",
+          "sourceTargets": {
+            "xinclude.c": {
+              "before": "4110343ddd883f2c48499803526b723a06ea836146a6e9fa1712a91848110bf1",
+              "after": "e6422c95d596165789af8b3fbfe60c98db1434107db14c8d1dddbe994d2ff461"
+            }
+          },
+          "upstreamNewTests": "原始测试增量保留在upstreamFile；本阶段生产补丁不移植新增测试，统一验收前需完成适用测试契约；原APKBUILD.check不改、不跳过"
+        }
+      ],
+      "targets": {
+        "parser.c": "b8a6c6a58be267f131129dc2458c796166db483b3538cecfb003df49f8e13098",
+        "valid.c": "f3e1e845441670751c183cc626ede221cb2011f442d6e3d13c70cc302d109182",
+        "testparser.c": "639377e7ffb7f697f7bc47c810963359f78b600d86a891e97d248ed7270d5406",
+        "catalog.c": "2f57d78e5e0e9b2f8c9cb03f687701056f5cd656d656ae0ff4bd978af2e9c013",
+        "relaxng.c": "e51b61ac3c7e235771d7680365e5cfb01d6dcc06a59eedc506b7ed0aba1e9d0c",
+        "include/libxml/relaxng.h": "6591ea41c00f5ed6b0371ccbccd480aac488976a702db3d662ac0128147a7564",
+        "libxml2.syms": "df4f760a813a0dce1ed169d37b043b212418317916b4170b22609c401caef7ff",
+        "xmlcatalog.c": "6898480baaeb4dff433b582ac60db169c61e5f86a93301e7bc14f4758c8b15b3",
+        "dict.c": "7a4497931edf8ea6c69dd492748047a0c88a7a4e37215fa984f21ced4f2d3ce0",
+        "uri.c": "e297f05efa0f48105a4c5474441d8ee9cf133a43757fdd165ffd99f7642a1f63",
+        "xpointer.c": "f5558a5bd6dfabe4bdb53c3fa1705caf44d66a1e6905da522832fddd5c1d4e3b",
+        "xmlIO.c": "168265a8f3c6f66e8745cd8f2f437fa754fc0a0d8534bda3349a5fc7697f0abd",
+        "xinclude.c": "e6422c95d596165789af8b3fbfe60c98db1434107db14c8d1dddbe994d2ff461"
+      },
+      "targetPackageAllowlist": [
+        "libxml2"
+      ],
+      "allExistingFunctionsPreserved": true,
+      "keepOfficialBuildAndCheckConfiguration": true,
+      "contextOnlyBasePatch": {
+        "file": "vendor/libxml2/CVE-2026-6732.patch",
+        "originalSha256": "42d45b35f36bf29229e39a9e5349d7347e51d92099573b5a509f448dbf0e34d7",
+        "sha256": "de4ba0be92cbc1c7e96be17c61d4dd5d72323cdf6706ca5619473798c5876f4f",
+        "changes": "仅两条上下文表达式XML_PARSE_NOCDATA→旧版cdataBlock==NULL；所有加减行逐条相同",
+        "parserBeforeSha256": "44ae0f100afb329149dd284976a4e187623ab89b43087c7f43f4d80f3af48191",
+        "originalFile": "vendor/libxml2/CVE-2026-6732.upstream.patch",
+        "sha512": "dd1525aaac0ddd174132f4a9655755420bfb19568e851e2c02fd11931094c3b859d6ee7472800dda7799cca6cc1a4df4fc5660aaccce1aa7c5b46c276ee8c5b7"
+      }
+    },
+    "openssl": {
+      "name": "openssl",
+      "version": "3.5.9",
+      "baseRevision": 0,
+      "recipeSha256": "ea459c051ee8d846c06f1d47d09d0f737778502c01de88c9696e96a208de5943",
+      "aportsRef": "29b9ec24b1b5b39aeef51fa2a044210e2ec5258e",
+      "recipe": "vendor/openssl/APKBUILD",
+      "upstreamInputs": [
+        {
+          "name": "openssl-3.5.9.tar.gz",
+          "url": "https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz",
+          "bytes": 53279637,
+          "sha256": "603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a",
+          "sha512": "c4c8136fd2c98d13bb85a57bfb0def25c906f47f1fe97675cd114594944eab957b5b81a3e0f48826e1a0f093afff5e83766b539d49768f6db68310fd678d7de6"
+        },
+        {
+          "name": "auxv.patch",
+          "url": "https://raw.githubusercontent.com/alpinelinux/aports/29b9ec24b1b5b39aeef51fa2a044210e2ec5258e/main/openssl/auxv.patch",
+          "bytes": 2013,
+          "sha256": "0b3a36c0f1b3d8e0adcf02c251374ce4d2578b0c9f4b88207bf85c5c1b58c7d8",
+          "sha512": "b2541075148fd5af4552d34158deb1a325f5adced90626dc03fd126f47323cde949b15b2657523c34b26530b322312a43bd42ada7295b4f2dd1d3b5d11892c62"
+        },
+        {
+          "name": "openssl-fips.post-install",
+          "url": "https://raw.githubusercontent.com/alpinelinux/aports/29b9ec24b1b5b39aeef51fa2a044210e2ec5258e/main/openssl/openssl-fips.post-install",
+          "bytes": 231,
+          "sha256": "441311401af66e9f1b4b38730827ade609669196f91c56b82351a7226b903755",
+          "sha512": "1e63a322d406a740c0e04798b813251aa4aca1fff236f34b63550c610fa792a0f2c0081b37962079109c036c5a4a0fa9beb1226f74c7aaa6fe21309cf7b95003"
+        }
+      ],
+      "patches": [
+        {
+          "cve": "CVE-2026-88822",
+          "commit": "1a73dc590cbad62d6f0329ea4779eadaa8d8fd75",
+          "file": "patches/openssl/CVE-2026-88822.patch",
+          "sha256": "50f7cc52fb146703379ca043d17e204c4fda99c684efe3db6d6f3ae1d175bd2a",
+          "sha512": "d4d7b8e740384cc4b129bbc53eb92c61abebb009b83a7c434ec5d0820021b95d402245a4d3d577ea28e0935d8de96d339eec6a6411ef00f3b9d982ccf0718721"
+        },
+        {
+          "cve": "CVE-2026-88823",
+          "commit": "159e1de0c448d7b9f09ad768c8e141def4aa1eb4",
+          "file": "patches/openssl/CVE-2026-88823.patch",
+          "sha256": "a945077c0a978dbfe5af5e4f7174a2151466547f8fb94562f395baa7b6b7c147",
+          "sha512": "ca38eeb1aa261d1051100b0e37a9699ccad73de551825bf49ade50af9396b1e749983f802fa3967f67ef778590adb3aba39b1fd8290a17aa753fa351953487a9"
+        },
+        {
+          "cve": "CVE-2026-95691",
+          "commit": "f6244675833e097c2429a40d1b206d95385bd42f",
+          "file": "patches/openssl/CVE-2026-95691.patch",
+          "sha256": "93d8e82fdc995172a6d5cc6952491658106191bd5ac221d34596adbddfcd1afe",
+          "sha512": "2c9c869d0427b08c1480307583c1803971fb6223e5876dd20f61fd64102f095373fb32f5cc7bbbd2bf62aca82c229d740a95c39d5556ec72fd41f371e4a311b6"
+        },
+        {
+          "cve": "CVE-2026-95692",
+          "commit": "257a3427aa0ef8d9dd2ef5b3e2d1c021a221b116",
+          "file": "patches/openssl/CVE-2026-95692.patch",
+          "sha256": "0e328604c0038de6629a29322ae5f02d2f5f5128c2625b57ca64262efab99e05",
+          "sha512": "f23fa46c18fca5e475286f4a5fe57834ccca8603a34f54ab0032af16d296f82eee6a9614f70aec4632fc9024f6af9ded9f2698693f02b3ade889c9d58d2cbe59"
+        },
+        {
+          "cve": "CVE-2026-107496",
+          "commit": "a0051cfe699bf5a047bc1c4faef65f80f7987366",
+          "file": "patches/openssl/CVE-2026-107496.patch",
+          "sha256": "77d3759d279c71af59629c4a0fa82d8272a099762f2fa9e3f66d7ca5ed544157",
+          "sha512": "0bbd1f64e7bc62c8bbba9c85131a51cbfb6f7715156457d575df1e557d649340b8074195860f83be18fe3ed6852111f10053702d72658012f9c3a4c3fd504cea"
+        },
+        {
+          "cve": "CVE-2026-107493",
+          "commit": "c8f6d04f8e6d40b1bf83334e4a2ec9daf5943a3d",
+          "file": "patches/openssl/CVE-2026-107493.patch",
+          "sha256": "6176d694ac38251bfa4e11198d002d8720f9efb05deffb35703adb93be6173e1",
+          "sha512": "3c7e6e79d2246229f5d0b8bdb4bd3c0e0a868a9e28656b208b6d6753a596b6db75614bf275faf12cae450ee639c4540e389ac0d22e7140a18ae3d62eb9cd6a9c"
+        },
+        {
+          "cve": "CVE-2026-124709",
+          "commit": "f3acb0a3328046741479482c51cec815839e1b05",
+          "file": "patches/openssl/CVE-2026-124709.patch",
+          "sha256": "d52a6af23bc966daaa9eded816a392d429a67bb76faafd922f4c4cf35a9349f4",
+          "sha512": "b467d83808a33444e7fcb601042923c348564944fcffc4af77fd315a0afbcb2a31aee21d650917a478d054f87979e797ba89621b5974f8084caff8455141bbec"
+        },
+        {
+          "cve": "CVE-2026-35190",
+          "commit": "9491b0d9cc7950af1f3dc89499bd5433b9cd4f43",
+          "file": "patches/openssl/CVE-2026-35190.patch",
+          "sha256": "e1b45282a8876fdda6b930273e28bad1cdb1c6915ccd25fe0b61789281489ed1",
+          "sha512": "70fe068698303cdb6a8d2ba42b7fddc3f8c1ce01b0a6e149a12ff19d42364a142ad3d1a1c14e77b3851f1da4dc3fc1c5f7e57e5d3c6624483bf869e217085770"
+        }
+      ],
+      "targets": {
+        "crypto/bio/bss_dgram.c": "9b0e09c21fdc0ae8c253d1a7aed1114814090d83f92c1ae6e2d83a28c829cb64",
+        "providers/implementations/ciphers/cipher_aes_gcm_siv.c": "62510edfb867c2c33b034ec7f1f04913551827441a0f156966bc857cc271c211",
+        "providers/implementations/ciphers/cipher_aes_gcm_siv_hw.c": "d5ea349bd8c5d48634b3a6006f1a1ef233213564ee675ee2fce4faec824cc639",
+        "include/internal/quic_strm_reas.h": "23cddd86dd8ed5246bca7f668197e73cec4a2653e476310a1d6a34ee243f4d1f",
+        "ssl/quic/quic_rstream.c": "ca832c01b754e6556d0d29ee667616102870bb93be2c21e5845e461861b21c31",
+        "ssl/quic/quic_strm_reas.c": "9ed4d3ab6508b79c04033ebb793c0fbcce5615e75323022de20bf2748f74c319",
+        "crypto/ec/ec_key.c": "72726357d1e33de2fdc28da42781bb489d4a87762ed308ce81e0c49feaaa82bb",
+        "test/ectest.c": "404248bb6baaffa0ba1663cd21be5df7bd65e17c283591b29ab2664cc1ed6582",
+        "crypto/pem/pem_info.c": "25b5bdecc831e734fd3af3d8b1222883929a57f4f15fa44190c0e4f88376a475",
+        "test/x509_check_cert_pkey_test.c": "fd7408c4e2fc6b87d5ce8c1b7c9264d16212cb855250b41445730fa5b6c059d2",
+        "ssl/quic/quic_stream_map.c": "7bceb5bdc408c3e5a46eb38944f5d16727b812e3e049dae6f2b2e4cdadce3616",
+        "ssl/statem/extensions_srvr.c": "004fb384e61fd3ca36d12c7d83baa29fa5ed42950ab727e3d19504f97f5606f6",
+        "ssl/t1_lib.c": "3a5988443e2b6cd6aac52ab1438b5f211cab83864cbed90b32b0feba60ff5652"
+      },
+      "targetPackageAllowlist": [
+        "libcrypto3",
+        "libssl3",
+        "openssl",
+        "openssl-fips"
+      ],
+      "allExistingFunctionsPreserved": true,
+      "keepOfficialBuildAndCheckConfiguration": true
+    }
+  },
+  "libxmlUnclosed": [
+    {
+      "id": "CVE-2025-8732",
+      "cnaUrl": "https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/2025/8xxx/CVE-2025-8732.json",
+      "cnaSha256": "3ec77df969a834fe17912f622e73913125461b79e8fa2e9d9d4f7e877a057fd4",
+      "status": "同版本静态源码候选已准备且严格应用/源码hash匹配；尚未构建/安装/统一验收，不称已修",
+      "references": [
+        {
+          "url": "https://vuldb.com/?id.319228",
+          "name": "VDB-319228 | libxml2 xmlcatalog xmlParseSGMLCatalog recursion",
+          "tags": [
+            "vdb-entry",
+            "technical-description"
+          ]
+        },
+        {
+          "url": "https://vuldb.com/?ctiid.319228",
+          "name": "VDB-319228 | CTI Indicators (IOB, IOC, IOA)",
+          "tags": [
+            "signature",
+            "permissions-required"
+          ]
+        },
+        {
+          "url": "https://vuldb.com/?submit.622285",
+          "name": "Submit #622285 | LibXML2  xmlcatalog  the newest master stack overflow",
+          "tags": [
+            "third-party-advisory"
+          ]
+        },
+        {
+          "url": "https://gitlab.gnome.org/GNOME/libxml2/-/issues/958",
+          "tags": [
+            "issue-tracking"
+          ]
+        },
+        {
+          "url": "https://gitlab.gnome.org/GNOME/libxml2/-/issues/958#note_2505853",
+          "tags": [
+            "issue-tracking"
+          ]
+        },
+        {
+          "url": "https://drive.google.com/file/d/1woIeYVcSQB_NwfEhaVnX6MedpWJ_nqWl/view?usp=drive_link",
+          "tags": [
+            "exploit"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "CVE-2026-0989",
+      "cnaUrl": "https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/2026/0xxx/CVE-2026-0989.json",
+      "cnaSha256": "b6c0c45f423ae6bc089693fd57c5f2dfab4adc85377195743a2db507bee45918",
+      "status": "同版本静态源码候选已准备且严格应用/源码hash匹配；尚未构建/安装/统一验收，不称已修",
+      "references": [
+        {
+          "url": "https://access.redhat.com/errata/RHSA-2026:7519",
+          "name": "RHSA-2026:7519",
+          "tags": [
+            "vendor-advisory",
+            "x_refsource_REDHAT"
+          ]
+        },
+        {
+          "url": "https://access.redhat.com/security/cve/CVE-2026-0989",
+          "tags": [
+            "vdb-entry",
+            "x_refsource_REDHAT"
+          ]
+        },
+        {
+          "url": "https://bugzilla.redhat.com/show_bug.cgi?id=2429933",
+          "name": "RHBZ#2429933",
+          "tags": [
+            "issue-tracking",
+            "x_refsource_REDHAT"
+          ]
+        },
+        {
+          "url": "https://gitlab.gnome.org/GNOME/libxml2/-/issues/998"
+        }
+      ]
+    },
+    {
+      "id": "CVE-2026-11979",
+      "cnaUrl": "https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/2026/11xxx/CVE-2026-11979.json",
+      "cnaSha256": "c4173153e46908eb2f19014dbe5c6a2e4b232863e35d0a171bd4cf0db40f1ed4",
+      "status": "同版本静态源码候选已准备且严格应用/源码hash匹配；尚未构建/安装/统一验收，不称已修",
+      "references": [
+        {
+          "tags": [
+            "third-party-advisory"
+          ],
+          "url": "https://cert.pl/en/posts/2026/06/CVE-2026-11979"
+        },
+        {
+          "tags": [
+            "patch"
+          ],
+          "url": "https://gitlab.gnome.org/GNOME/libxml2/-/commit/c2e233fc1b341685fc99621b2768b503f777a72e"
+        }
+      ]
+    },
+    {
+      "id": "CVE-2026-86137",
+      "cnaUrl": "https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/2026/86xxx/CVE-2026-86137.json",
+      "cnaSha256": "2a3c8f37245257be11a9360d6f5c8bc56598460d8dab343ce139dc872f78e03e",
+      "status": "主线源码triage确认2.13.9无相应引入路径；保留raw，不强塞不适用patch，不称patchfixed",
+      "references": [
+        {
+          "url": "https://github.com/GNOME/libxml2/compare/v2.15.3...v2.15.4"
+        },
+        {
+          "url": "https://github.com/GNOME/libxml2/commit/76fe08d97de88bfaef2f7d5cd27f11954cc5bee2"
+        },
+        {
+          "url": "https://gitlab.gnome.org/GNOME/libxml2/-/work_items/1099"
+        }
+      ]
+    },
+    {
+      "id": "CVE-2026-86138",
+      "cnaUrl": "https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/2026/86xxx/CVE-2026-86138.json",
+      "cnaSha256": "6e37783b8a1c6f95c84f5edd3ca7d1bb8db9d7c800534eaaf56d9a4cca4cba2b",
+      "status": "同版本静态源码候选已准备且严格应用/源码hash匹配；尚未构建/安装/统一验收，不称已修",
+      "references": [
+        {
+          "url": "https://github.com/GNOME/libxml2/compare/v2.15.3...v2.15.4"
+        },
+        {
+          "url": "https://github.com/GNOME/libxml2/commit/a4cba4b5b5a8c42e155ed42d2d2a44955465a2e4"
+        }
+      ]
+    },
+    {
+      "id": "CVE-2026-86139",
+      "cnaUrl": "https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/2026/86xxx/CVE-2026-86139.json",
+      "cnaSha256": "9ea81034ee5b22b208de80bad2ed2dae6c1d3b77391d102c60c2b6b6e59894bf",
+      "status": "同版本静态源码候选已准备且严格应用/源码hash匹配；尚未构建/安装/统一验收，不称已修",
+      "references": [
+        {
+          "url": "https://github.com/GNOME/libxml2/compare/v2.15.3...v2.15.4"
+        },
+        {
+          "url": "https://github.com/GNOME/libxml2/commit/8edbbdb09f24d26a2f900141fddc2b9d014f53b0"
+        }
+      ]
+    },
+    {
+      "id": "CVE-2026-86141",
+      "cnaUrl": "https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/2026/86xxx/CVE-2026-86141.json",
+      "cnaSha256": "5cfa8e67b5f836357812d22206c030a4c8a095f7122ce6ec6c06be3d1eea77b8",
+      "status": "主线源码triage确认2.13.9无相应引入路径；保留raw，不强塞不适用patch，不称patchfixed",
+      "references": [
+        {
+          "url": "https://github.com/GNOME/libxml2/compare/v2.15.3...v2.15.4"
+        },
+        {
+          "url": "https://github.com/GNOME/libxml2/commit/e89a8aae4c9b40cdafcf66b3f9e57c62db37bb55"
+        },
+        {
+          "url": "https://gitlab.gnome.org/GNOME/libxml2/-/work_items/1107"
+        }
+      ]
+    },
+    {
+      "id": "CVE-2026-86142",
+      "cnaUrl": "https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/2026/86xxx/CVE-2026-86142.json",
+      "cnaSha256": "6b9ff0f1530d907f80a95dab5afaafa207d202beab8908ea6b3d49d5e82fbbb8",
+      "status": "同版本静态源码候选已准备且严格应用/源码hash匹配；尚未构建/安装/统一验收，不称已修",
+      "references": [
+        {
+          "url": "https://github.com/GNOME/libxml2/compare/v2.15.3...v2.15.4"
+        },
+        {
+          "url": "https://github.com/GNOME/libxml2/commit/6b3a736c0edc74ceec3d82f5252499d7911b3a58"
+        },
+        {
+          "url": "https://gitlab.gnome.org/GNOME/libxml2/-/work_items/1113"
+        }
+      ]
+    },
+    {
+      "id": "CVE-2026-86143",
+      "cnaUrl": "https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/2026/86xxx/CVE-2026-86143.json",
+      "cnaSha256": "ec386011f56f722662cfc9a2dd651c950d95b45fad782e338f53f7f3fe662d73",
+      "status": "同版本静态源码候选已准备且严格应用/源码hash匹配；尚未构建/安装/统一验收，不称已修",
+      "references": [
+        {
+          "url": "https://github.com/GNOME/libxml2/compare/v2.15.3...v2.15.4"
+        },
+        {
+          "url": "https://github.com/GNOME/libxml2/commit/90f293ba74d28b1d570920382e707586f68ebf35"
+        },
+        {
+          "url": "https://gitlab.gnome.org/GNOME/libxml2/-/work_items/1111"
+        }
+      ]
+    },
+    {
+      "id": "CVE-2026-86144",
+      "cnaUrl": "https://raw.githubusercontent.com/CVEProject/cvelistV5/main/cves/2026/86xxx/CVE-2026-86144.json",
+      "cnaSha256": "b2a4db313fdcec711dc6979f26f17fa5802077915d515d2b09cbc287dd32a4b6",
+      "status": "同版本静态源码候选已准备且严格应用/源码hash匹配；尚未构建/安装/统一验收，不称已修",
+      "references": [
+        {
+          "url": "https://github.com/GNOME/libxml2/compare/v2.15.3...v2.15.4"
+        },
+        {
+          "url": "https://github.com/GNOME/libxml2/commit/b63cd517afecb76582dd9488c55e54ceaf50de61"
+        }
+      ]
+    }
+  ],
+  "installBoundary": {
+    "allowed": "仅已安装目标包升级；libcrypto3/libssl3/libxml2为必要目标，openssl/openssl-fips仅原已安装时保留升级",
+    "signing": "临时构建专属RSA key，输出公钥与其SHA256/每个完整APK SHA256；最终仅独立keys-dir验签，不使用allow-untrusted，不改永久keyring",
+    "pending": "构建/安装/临时独立签名实现已落盘；尚未语法/契约/实际APK构建/正式QA验收，不是已修声明"
+  },
+  "libxmlTriageReference": {
+    "path": "hardening/20261117-existing-package-triage/libxml-10-official.json",
+    "sha256": "c5cb4a0b0c1f2b817eef45c65f5d549ef04b00a309f009426eb7fc360376142c"
+  },
+  "libxmlCoverageBoundary": {
+    "rawRuleCount": 11,
+    "sourceFixCandidates": 9,
+    "sourceNotApplicable": [
+      "CVE-2026-86137",
+      "CVE-2026-86141"
+    ],
+    "notApplicableBasis": "仅同版2.13.9缺少2.15.3引入路径及其后续修复路径；不外推其他私有副本",
+    "binaryPayloadAssociationComplete": false
+  },
+  "installationContractDraft": {
+    "mandatoryAlreadyInstalled": [
+      "libcrypto3",
+      "libssl3",
+      "libxml2"
+    ],
+    "optionalAlreadyInstalledOnly": [
+      "openssl",
+      "openssl-fips"
+    ],
+    "neverAddRuntimePackages": true,
+    "neverRemovePackages": true,
+    "versions": {
+      "libcrypto3": "3.5.9-r100",
+      "libssl3": "3.5.9-r100",
+      "openssl": "3.5.9-r100",
+      "openssl-fips": "3.5.9-r100",
+      "libxml2": "2.13.9-r100"
+    },
+    "signing": "已实现候选：构建层临时RSA4096，finally删除私钥；输出精确公钥SHA256及完整APK SHA256；安装仅本次keys-dir验签并禁联网，不改永久keyring",
+    "payloadAbiDependencyGuards": "已实现候选：APK索引元数据name/origin/version/arch、完整文件/模式/链接、SONAME/NEEDED/interpreter/旧导出集合、同批版本归一的完整依赖/提供者、模拟只升级及完整库存不变；非ELF配置逐字保留（仅原FIPS生成MAC配置可变）。尚未执行"
+  }
+}

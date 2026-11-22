@@ -1,0 +1,179 @@
+{
+  "schema": 1,
+  "status": "source-candidate-only-binary-packaging-decision-pending",
+  "distro": "bookworm",
+  "source": "gcc-12",
+  "version": "12.2.0-14+deb12u1",
+  "proposedRevision": "12.2.0-14+deb12u1+ylink1",
+  "architectures": {
+    "amd64": "x86_64-linux-gnu",
+    "arm64": "aarch64-linux-gnu"
+  },
+  "runtimePackages": [
+    "gcc-12-base",
+    "libgcc-s1",
+    "libstdc++6"
+  ],
+  "buildOnlyPackages": [
+    "libstdc++-12-dev"
+  ],
+  "files": [
+    {
+      "name": "gcc-12_12.2.0-14+deb12u1.debian.tar.xz",
+      "bytes": 1675204,
+      "sha256": "59f7f7763a0c355e3f27ff9e7ac80d06382b29939361a87e7b139226bfe7402e",
+      "url": "https://deb.debian.org/debian/pool/main/g/gcc-12/gcc-12_12.2.0-14+deb12u1.debian.tar.xz"
+    },
+    {
+      "name": "gcc-12_12.2.0-14+deb12u1.dsc",
+      "bytes": 27330,
+      "sha256": "3aed0b189189c744dc9f4b74798a51d3e512ea85e492568db788a927c88e20ba",
+      "url": "https://deb.debian.org/debian/pool/main/g/gcc-12/gcc-12_12.2.0-14+deb12u1.dsc"
+    },
+    {
+      "name": "gcc-12_12.2.0.orig.tar.gz",
+      "bytes": 87090343,
+      "sha256": "b8298be16aeeb96a889c6afed0a8e2241b47452e89cc81fe65ea849d5c740fcb",
+      "url": "https://deb.debian.org/debian/pool/main/g/gcc-12/gcc-12_12.2.0.orig.tar.gz",
+      "authenticatedTransportArtifact": "hardening/20261117-source-inputs/gcc-12_12.2.0.orig.mirror-003.tar.gz"
+    }
+  ],
+  "originAuthentication": {
+    "method": "existing archive keyring -> historical InRelease/Sources -> exact dsc/archive SHA256",
+    "freshness": "historical signed Sources; not a current repository freshness assertion",
+    "reference": "hardening/20261117-source-inputs/source-input-report-003.md",
+    "referenceSha256": "a33e13e092a11de6bbfae806c1c9736e69113a4586ae70f4496959eedf676d4b",
+    "keyringSha256": "506b815cbb32d9b6066b4a2aa524071e071761e7e7f68c3ac74f3061ba852017"
+  },
+  "packagingInputs": [
+    {
+      "path": "debian/control",
+      "sha256": "95e87a47f81ec65109e3a72a987ae19a01eb65655f08d0e0e4663eef2f5d03f6",
+      "bytes": 87105
+    },
+    {
+      "path": "debian/rules",
+      "sha256": "e99bd407df7ea7d0b26428416c048c482a30e55aa581781f842292b7182fdaf9",
+      "bytes": 2950
+    },
+    {
+      "path": "debian/rules.d/binary-libstdcxx.mk",
+      "sha256": "d53cc4585d5e2df01345d33519c7ee2deb24dbea1b0b51aa9a16c0183acb4222",
+      "bytes": 17278
+    },
+    {
+      "path": "debian/rules.defs",
+      "sha256": "deb0936094dbb29e48ce0b35828abc91ebaec50eadef8440306e12896c581a84",
+      "bytes": 66563
+    },
+    {
+      "path": "debian/rules.patch",
+      "sha256": "ce0d6ba2897c89b4aa91e9012e100b8cd31d1635288416c9765b73ea64748e28",
+      "bytes": 10647
+    },
+    {
+      "path": "debian/rules2",
+      "sha256": "4ff468f979ae27278dcda93188f9dcf1c5de24d451d5e2050b454908854164ad",
+      "bytes": 92681
+    }
+  ],
+  "productionPatch": {
+    "file": "patches/gcc12-filebuf-raii.diff",
+    "sha256": "2577561eaa5f509be7ab70a7e2d4f74c6e38b15171c6c3bf17c0d270358b28f5",
+    "upstreamFile": "patches/gcc12-filebuf-raii.upstream.patch",
+    "upstreamSha256": "12339c5f108351a7b1f560579c09fef760f988d110b8935b66c7771757122a7e",
+    "commit": "2d296e9f024edbb49cad1f3ebb5ae34c71ea5f7a",
+    "cve": "CVE-2026-125709",
+    "target": "src/libstdc++-v3/include/bits/fstream.tcc",
+    "beforeSha256": "e7248bfd51bb8407c9c158c03957edcd0b9de7b0cf8287eaefd1c9d8e0c8f06e",
+    "afterSha256": "8a7bf918ef1fa7600f43d8da057166a5de0b2e52d8830a6e4e54990b4bea2c64",
+    "changedProductionFiles": 1,
+    "abiClaim": "no public layout/export source changes; actual binary ABI unverified",
+    "tests": "full upstream test text retained separately; not executed"
+  },
+  "conditionalCandidate": {
+    "cve": "CVE-2026-115456",
+    "enabledInProduction": false,
+    "status": "source-application-proven-only-CVE-association-and-compiled-backend-unverified",
+    "master": {
+      "commit": "524847fec983eaedca147840ce46fcbb0cd38952",
+      "file": "patches/gcc-pr127666-master.reference.patch",
+      "sha256": "8779cf4ca29f265e89bdc396eb94328ce2c62bd4f0f069fd48dd16611d991530"
+    },
+    "gcc14": {
+      "commit": "0a038d40de7323ad225e50d451bd2ecdd27aa4b4",
+      "file": "patches/gcc-pr127666-gcc14.reference.patch",
+      "sha256": "267563fb4f44f6ea71e2a3b2beb3c2818b17b9102faaa3b7a6589b41c7cdf398"
+    },
+    "target": "src/libstdc++-v3/src/c++17/floating_from_chars.cc",
+    "beforeSha256": "6b84e3ec311f4a35976442c0bfa3901ec6c01e6d3512b051d11aa9460d83136e",
+    "afterSha256": "1beac45397ef59c26dc7b0d2f983da4ea22b6e920b697cae343744ab6fae1cc7",
+    "requiredEvidence": [
+      "actual generated _GLIBCXX_HAVE_USELOCALE and floating/long-double macros per architecture",
+      "preprocessed production TU and compile command prove selected path",
+      "official CVE/bug linkage or source-level matching trigger and complete fix argument without executing blocked tests"
+    ]
+  },
+  "buildReady": false,
+  "buildBlockers": [
+    "official rtlibs disables dev packages and check; cannot meet paired header/static contract unchanged",
+    "normal binary-libstdcxx/dev stamps depend on generic install/build; configure/target graph still unverified",
+    "config-001 official zlib1g-dev exact dependency conflicts with already patched zlib1g +ylink1 in chosen accepted backend runtime image; use a compatible fixed pristine Bookworm build base, do not downgrade or rewrite dependencies"
+  ],
+  "privateTemplateCopies": "not closed by replacing system shared runtime; Node/addons must use rebuilt matched headers/static input; precompiled third-party copies remain separate",
+  "runtimeInventoryEvidence": {
+    "image": "sha256:ed2d28560c40b1483b660372406e86a4476f8d6a444302bbc5312cfd8c5a7adf",
+    "architecture": "amd64",
+    "reference": "hardening/20261117-gcc-config-001/evidence/baseline.json",
+    "sha256": "a2c3428c89ee3994797dfa19ef9b727d7e5f8f00b98d0f39bdb2d88c19d1a0f5",
+    "packages": [
+      {
+        "name": "gcc-12-base:amd64",
+        "version": "12.2.0-14+deb12u1",
+        "source": "gcc-12",
+        "depends": "",
+        "preDepends": ""
+      },
+      {
+        "name": "libgcc-s1:amd64",
+        "version": "12.2.0-14+deb12u1",
+        "source": "gcc-12",
+        "depends": "gcc-12-base (= 12.2.0-14+deb12u1), libc6 (>= 2.35)",
+        "preDepends": ""
+      },
+      {
+        "name": "libstdc++6:amd64",
+        "version": "12.2.0-14+deb12u1",
+        "source": "gcc-12",
+        "depends": "gcc-12-base (= 12.2.0-14+deb12u1), libc6 (>= 2.36), libgcc-s1 (>= 4.2)",
+        "preDepends": ""
+      }
+    ],
+    "edges": [
+      {
+        "from": "libgcc-s1:amd64",
+        "to": "gcc-12-base",
+        "oldExact": "12.2.0-14+deb12u1"
+      }
+    ],
+    "boundary": "只证明固定SQLite amd64镜像；其他镜像/架构必须核对实物，禁止外推已有安装状态"
+  },
+  "runtimeDependencyDecision": {
+    "rootChoice": "A preserve official exact dependencies",
+    "acceptedRuntimePackages": [
+      "gcc-12-base",
+      "libgcc-s1",
+      "libstdc++6"
+    ],
+    "alwaysRequireAlreadyInstalled": true,
+    "noPrefixAllowlist": true,
+    "developmentClosure": "libstdc++-12-dev plus exact source development dependencies only in build stages; not yet materialized by config-001"
+  },
+  "forbidden": [
+    "unknown prerequisite/fuzz",
+    "new runtime development packages",
+    "replace isolated .so",
+    "change default C++ ABI or delete old export/version/module",
+    "disable original library features or blocked native trigger tests"
+  ]
+}

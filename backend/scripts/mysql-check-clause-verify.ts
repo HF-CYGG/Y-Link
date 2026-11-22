@@ -27,6 +27,8 @@ const MYSQL_CHECK_CLAUSE_SAMPLES: Record<string, string> = {
   ck_biz_outbound_inventory_mode: "(`inventory_mode` in (_latin1\\'legacy_none\\',_latin1\\'manual_applied\\',_latin1\\'o2o_preapplied\\'))",
   ck_biz_outbound_status: "(`status` in (_latin1\\'active\\',_latin1\\'merged\\'))",
   ck_order_merge_relation_distinct_orders: '(`parent_order_id` <> `source_order_id`)',
+  // 2026-11-14：独占MySQL8.4.10使用实体相同unsigned列/CHECK实际回读，未猜造括号或运算符。
+  ck_o2o_kingdee_version_non_negative: '(`kingdee_version` >= 0)',
   // 061 缺货申请：取自 restock-request-verify 在真实 MySQL 8.4 回读的 check_clause。
   ck_restock_quantity_positive: '(`quantity` > 0)',
   ck_restock_status: "(`status` in (_utf8mb4\\'requested\\',_utf8mb4\\'accepted\\',_utf8mb4\\'restocked\\',_utf8mb4\\'cancelled\\'))",
@@ -55,6 +57,10 @@ for (const check of checks) {
 for (const name of Object.keys(MYSQL_CHECK_CLAUSE_SAMPLES)) {
   assert.ok(seen.has(name), `样本 ${name} 已无对应实体约束，请删除或核对`)
 }
+
+const kingdeeVersionExpected = normalizeStaticCheckClause(MYSQL_CHECK_CLAUSE_SAMPLES.ck_o2o_kingdee_version_non_negative!)
+assert.notEqual(normalizeStaticCheckClause('(`kingdee_version` > 0)'), kingdeeVersionExpected, '版本0仍合法，不能将>=误判为>')
+assert.notEqual(normalizeStaticCheckClause('(`kingdee_version` >= 1)'), kingdeeVersionExpected, '版本约束下界变化必须判为不等')
 
 const statusExpected = normalizeStaticCheckClause("`status` IN ('active', 'merged')")
 assert.notEqual(

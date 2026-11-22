@@ -10,6 +10,7 @@
  * - 若前端托管层也有安全头策略，需与本文件保持不冲突、不过度收紧。
  */
 
+import { staticPathKey } from './utils/static-path-key.js'
 import express from 'express'
 import { rateLimit } from 'express-rate-limit'
 import path from 'node:path'
@@ -160,7 +161,7 @@ export function createApp(options: CreateAppOptions = {}) {
       limit,
       standardHeaders: 'draft-8',
       legacyHeaders: false,
-      skip: (req) => !limitedPaths.has(req.path),
+      skip: (req) => !limitedPaths.has(staticPathKey(req.path)),
       ...(sharedStore ? { store: sharedStore } : {}),
       handler: (req, res) => {
         if (errorCode === 42900) {
@@ -206,7 +207,7 @@ export function createApp(options: CreateAppOptions = {}) {
   // 在途上限挂在限流之前：被拦下的请求不再消耗限流存储（MySQL 模式下为数据库读写）。
   const adminAnonymousAuthInFlight = createInFlightLimitMiddleware({ gate: anonymousAuthInFlightGate, limitedPaths: adminAnonymousAuthPaths })
   const clientAnonymousAuthInFlight = createInFlightLimitMiddleware({ gate: anonymousAuthInFlightGate, limitedPaths: clientAnonymousAuthPaths })
-  const mobileAuthLimiter = createPublicAuthLimiter('express-mobile-auth', 180, new Set([
+  const mobileAnonymousAuthPaths = new Set([
     '/captcha',
     '/capabilities',
     '/verification-code',
@@ -214,7 +215,9 @@ export function createApp(options: CreateAppOptions = {}) {
     '/login',
     '/forgot-password/verify',
     '/forgot-password/reset',
-  ]), 42900)
+  ])
+  const mobileAnonymousAuthInFlight = createInFlightLimitMiddleware({ gate: anonymousAuthInFlightGate, limitedPaths: mobileAnonymousAuthPaths })
+  const mobileAuthLimiter = createPublicAuthLimiter('express-mobile-auth', 180, mobileAnonymousAuthPaths, 42900)
 
   // 确保 uploads 目录存在
   const uploadsDir = path.resolve(process.cwd(), 'uploads')
@@ -283,6 +286,13 @@ export function createApp(options: CreateAppOptions = {}) {
    */
   // 救援身份独立于业务数据库和维护准入，不允许借用普通管理员会话。
   app.use('/api/database-rescue', databaseRescueRouter)
+  // 只有同任务手动switch需在维护写屏障前读取taskId；保留原受保护JSON上限，后续鉴权/CSRF/权限仍完整执行。
+  const parseManualSwitch = express.json({ limit: PROTECTED_JSON_BODY_LIMIT })
+  app.use('/api/data-maintenance/db-migration/switch', (req, res, next) => {
+    // 这是同一受保护路由的准入前置解析，不注册第二个看似匿名的POST端点，也不处理子路径/其它方法。
+    if (req.method === 'POST' && req.path === '/') parseManualSwitch(req, res, next)
+    else next()
+  })
   app.use(databaseMaintenanceWriteBarrier)
 
   app.get('/health', (_req, res) => {
@@ -303,7 +313,7 @@ export function createApp(options: CreateAppOptions = {}) {
   const publicJsonParser = express.json({ limit: PUBLIC_JSON_BODY_LIMIT })
   app.use('/api/auth', adminAnonymousAuthInFlight, adminAuthLimiter, publicJsonParser, authRouter)
   app.use('/api/client-auth', clientAnonymousAuthInFlight, clientAuthLimiter, publicJsonParser, clientAuthRouter)
-  app.use('/api/v1/mobile-auth', mobileAuthLimiter, publicJsonParser, mobileAuthRouter)
+  app.use('/api/v1/mobile-auth', mobileAnonymousAuthInFlight, mobileAuthLimiter, publicJsonParser, mobileAuthRouter)
   app.use('/api/client-feedback', publicJsonParser, clientFeedbackRouter)
   app.use('/api/o2o', publicJsonParser, o2oRouter)
 
@@ -311,6 +321,8 @@ export function createApp(options: CreateAppOptions = {}) {
   const protectedJsonParser = express.json({ limit: PROTECTED_JSON_BODY_LIMIT })
   const staffDirectoryImportJsonParser = express.json({ limit: STAFF_DIRECTORY_IMPORT_JSON_BODY_LIMIT })
   app.use('/api', requireAuth, requireAdminCsrf, (req, res, next) => {
+    // 大请求体只由导入路由在功能开关、角色、细粒度权限和账号频控通过后解析。
+    if (req.method === 'POST' && staticPathKey(req.path) === '/data-maintenance/import/json') return next()
     const isStaffDirectoryJsonImport = req.path === '/system-configs/client-staff-directory/import'
       || req.path === '/system-configs/client-staff-directory/import/preview'
     return (isStaffDirectoryJsonImport ? staffDirectoryImportJsonParser : protectedJsonParser)(req, res, next)
@@ -339,7 +351,7 @@ export function createApp(options: CreateAppOptions = {}) {
   // 将 zod 参数校验错误转为业务错误，统一响应格式。
   app.use((err: unknown, _req: express.Request, _res: express.Response, next: express.NextFunction) => {
     if (err instanceof ZodError) {
-      return next(new BizError(err.errors[0]?.message ?? '参数校验失败', 400))
+      return next(new BizError(err.issues[0]?.message ?? '参数校验失败', 400))
     }
     return next(err)
   })

@@ -1,0 +1,22 @@
+Upstream-Commit: 03067f3c5e39aec5ec250a44bc1b395a1afd45e8
+Local-Adaptation: only removed legacy comment spelling Ignore -> Ingore
+
+diff --git a/intl/dcigettext.c b/intl/dcigettext.c
+index 43b99c2dea1..e9611dae7a8 100644
+--- a/intl/dcigettext.c
++++ b/intl/dcigettext.c
+@@ -591,10 +591,10 @@ DCIGETTEXT (const char *domainname, const char *msgid1, const char *msgid2,
+ 	    *cp++ = *categoryvalue++;
+ 	  *cp = '\0';
+ 
+-	  /* When this is a SUID binary we must not allow accessing files
+-	     outside the dedicated directories.  */
+-	  if (ENABLE_SECURE && IS_PATH_WITH_DIR (single_locale))
+-	    /* Ingore this entry.  */
++	  /* Do not allow accessing files outside the dedicated
++	     directories.  */
++	  if (IS_PATH_WITH_DIR (single_locale)
++	      || strcmp (single_locale, "..") == 0)
+ 	    continue;
+ 	}
+ 

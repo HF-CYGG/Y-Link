@@ -194,9 +194,8 @@ export class AuditService {
     return qb
   }
 
-  async record(input: CreateAuditLogInput, manager?: EntityManager): Promise<SysAuditLog> {
-    const repository = (manager ?? AppDataSource.manager).getRepository(SysAuditLog)
-    const entity = repository.create({
+  private buildAuditLogValues(input: CreateAuditLogInput) {
+    return {
       actionType: input.actionType,
       actionLabel: input.actionLabel,
       actorUserId: input.actor?.userId ?? null,
@@ -211,9 +210,18 @@ export class AuditService {
       detailJson: input.detail ? JSON.stringify(input.detail) : null,
       ipAddress: truncateAuditTextByCodePoint(input.requestMeta?.ipAddress, 64),
       userAgent: truncateAuditTextByCodePoint(input.requestMeta?.userAgent, 255),
-    })
+    }
+  }
 
-    return repository.save(entity)
+  async record(input: CreateAuditLogInput, manager?: EntityManager): Promise<SysAuditLog> {
+    const repository = (manager ?? AppDataSource.manager).getRepository(SysAuditLog)
+    return repository.save(repository.create(this.buildAuditLogValues(input)))
+  }
+
+  /** 业务批处理使用同一个事务写入逐条审计，任一错误由事务统一回滚。 */
+  async recordBatch(inputs: CreateAuditLogInput[], manager: EntityManager): Promise<void> {
+    if (!inputs.length) return
+    await manager.getRepository(SysAuditLog).insert(inputs.map((input) => this.buildAuditLogValues(input)))
   }
 
   private shouldPauseSafeRecord(input: CreateAuditLogInput, options: SafeAuditRecordOptions): boolean {
@@ -305,19 +313,31 @@ export class AuditService {
       return this.filterOptionsCache.value
     }
     const repository = AppDataSource.getRepository(SysAuditLog)
-    const [actionRows, targetRows] = await Promise.all([
+    const [distinctActions, targetRows] = await Promise.all([
       repository
         .createQueryBuilder('audit')
         .select('audit.actionType', 'actionType')
-        .addSelect('MAX(audit.actionLabel)', 'actionLabel')
-        .groupBy('audit.actionType')
-        .getRawMany<{ actionType: string; actionLabel: string | null }>(),
+        .distinct(true)
+        .getRawMany<{ actionType: string }>(),
       repository
         .createQueryBuilder('audit')
         .select('audit.targetType', 'targetType')
         .groupBy('audit.targetType')
         .getRawMany<{ targetType: string }>(),
     ])
+    // 动作类型索引可以直接去重；只有未登记的历史类型才需要访问标签列。
+    const historicalTypes = distinctActions.map(({ actionType }) => actionType)
+      .filter((type) => type?.trim() && !Object.hasOwn(AUDIT_ACTION_CATALOG, type.trim()))
+    const actionRows: Array<{ actionType: string; actionLabel: string | null }> = []
+    for (let offset = 0; offset < historicalTypes.length; offset += 200) {
+      const rows = await repository.createQueryBuilder('audit')
+        .select('audit.actionType', 'actionType')
+        .addSelect('MAX(audit.actionLabel)', 'actionLabel')
+        .where('audit.actionType IN (:...historicalTypes)', { historicalTypes: historicalTypes.slice(offset, offset + 200) })
+        .groupBy('audit.actionType')
+        .getRawMany<{ actionType: string; actionLabel: string | null }>()
+      actionRows.push(...rows)
+    }
 
     const actionTypesByCategory = new Map<AuditCategoryKey, Map<string, string>>(
       AUDIT_CATEGORIES.map((category) => [category.key, new Map<string, string>()]),
@@ -327,7 +347,7 @@ export class AuditService {
     }
     for (const row of actionRows) {
       const actionType = String(row.actionType ?? '').trim()
-      if (!actionType || AUDIT_ACTION_CATALOG[actionType]) continue
+      if (!actionType || Object.hasOwn(AUDIT_ACTION_CATALOG, actionType)) continue
       actionTypesByCategory.get(resolveAuditCategory(actionType))?.set(actionType, row.actionLabel?.trim() || actionType)
     }
 

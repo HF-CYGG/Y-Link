@@ -4,23 +4,27 @@
  * 实现逻辑：
  * - 订单缓存按 `clientUserId` 绑定，账号切换时立即清空旧内存态并读取新账号快照，避免串号；
  * - Store 同步保存状态筛选、关键词、当前页、总数与最后更新时间，供订单列表页和详情页共享；
- * - 页面层可基于 `isFresh` 判断是否直接使用缓存，或在展示旧内容的同时发起后台刷新。
+ * - 页面发起请求前用 `isFreshNow()` 判断是否复用缓存，或在展示旧内容的同时后台刷新。
  * 维护说明：
  * - 若订单列表查询条件继续扩展，需要同时补齐 `persist()` 与 `initialize()` 的快照字段；
  * - 详情页与列表页收到单条订单变更时会复用 `syncOrderSummary()`，因此新增摘要字段时也要同步合并策略。
  */
 
 import { synchronizeKingdeeResponse } from '@/utils/kingdee-freshness'
-import { computed, ref } from 'vue'
-import { defineStore } from 'pinia'
+import { computed, onScopeDispose, ref } from 'vue'
+import { defineStore, getActivePinia } from 'pinia'
+import type { O2oMyOrderSearchMode } from '../../../packages/shared-types/src/orders'
 import type { O2oPreorderSummary } from '@/api/modules/o2o'
 import {
+  buildClientOrderQueryKey,
   clearPersistedClientOrderSnapshot,
+  normalizeClientOrderKeyword,
   persistClientOrderSnapshot,
   readPersistedClientOrderSnapshot,
   type PersistedO2oPreorderSummary,
 } from '@/utils/client-order-storage'
-import { matchesClientOrderQuery } from '@/utils/client-order-summary'
+import { matchesClientOrderStatus } from '@/utils/client-order-summary'
+import { registerClientSessionReset } from '@/utils/client-session-cleanup'
 
 // 订单列表缓存时间比商品目录更短：
 // 用户对“待提货 / 已核销 / 已取消”状态变化更敏感，需要更快看到最新状态。
@@ -61,18 +65,27 @@ export const useClientOrderStore = defineStore('client-order', () => {
   const orders = ref<PersistedO2oPreorderSummary[]>([])
   const activeStatus = ref<'all' | O2oPreorderSummary['status']>('all')
   const keyword = ref('')
+  const searchMode = ref<O2oMyOrderSearchMode>('contains')
+  const resultQueryKey = ref('')
   const page = ref(1)
   const pageSize = ref(20)
   const total = ref(0)
   const updatedAt = ref(0)
   const initialized = ref(false)
 
-  const isFresh = computed(() => Date.now() - updatedAt.value <= CLIENT_ORDER_CACHE_TTL_MS)
+  const queryKey = computed(() => buildClientOrderQueryKey({
+    activeStatus: activeStatus.value, keyword: keyword.value, searchMode: searchMode.value,
+  }))
+  const hasCurrentResults = computed(() => resultQueryKey.value === queryKey.value)
+  const isFreshNow = () => hasCurrentResults.value && updatedAt.value > 0 && Date.now() - updatedAt.value <= CLIENT_ORDER_CACHE_TTL_MS
+  const isFresh = computed(isFreshNow)
 
   const resetState = () => {
     orders.value = []
     activeStatus.value = 'all'
     keyword.value = ''
+    searchMode.value = 'contains'
+    resultQueryKey.value = ''
     page.value = 1
     pageSize.value = 20
     total.value = 0
@@ -87,6 +100,8 @@ export const useClientOrderStore = defineStore('client-order', () => {
     persistClientOrderSnapshot(clientUserId.value, {
       activeStatus: activeStatus.value,
       keyword: keyword.value,
+      searchMode: searchMode.value,
+      resultQueryKey: resultQueryKey.value,
       orders: orders.value,
       page: page.value,
       pageSize: pageSize.value,
@@ -122,6 +137,8 @@ export const useClientOrderStore = defineStore('client-order', () => {
       orders.value = snapshot.orders
       activeStatus.value = snapshot.activeStatus
       keyword.value = snapshot.keyword
+      searchMode.value = snapshot.searchMode
+      resultQueryKey.value = snapshot.resultQueryKey
       page.value = snapshot.page
       pageSize.value = snapshot.pageSize
       total.value = snapshot.total
@@ -139,6 +156,7 @@ export const useClientOrderStore = defineStore('client-order', () => {
     },
   ) => {
     orders.value = synchronizeKingdeeResponse('client', nextOrders)
+    resultQueryKey.value = queryKey.value
     // 每次订单列表更新都刷新时间戳，为“订单页回到前台是否立即重拉”提供依据。
     page.value = payload?.page ?? 1
     pageSize.value = payload?.pageSize ?? pageSize.value
@@ -155,6 +173,7 @@ export const useClientOrderStore = defineStore('client-order', () => {
       total: number
     },
   ) => {
+    if (!hasCurrentResults.value) return
     const existedOrderIdSet = new Set(orders.value.map((item) => item.id))
     const mergedOrders = [
       ...orders.value,
@@ -177,12 +196,13 @@ export const useClientOrderStore = defineStore('client-order', () => {
     persist({ includeOrders: false })
   }
 
-  const setKeyword = (nextKeyword: string) => {
-    const normalizedKeyword = nextKeyword.trim()
-    if (keyword.value === normalizedKeyword) {
+  const setSearch = (nextKeyword: string, nextMode: O2oMyOrderSearchMode) => {
+    const normalizedKeyword = normalizeClientOrderKeyword(nextKeyword)
+    if (keyword.value === normalizedKeyword && searchMode.value === nextMode) {
       return
     }
     keyword.value = normalizedKeyword
+    searchMode.value = nextMode
     // 详细注释：关键词输入在弱网和高频搜索下会频繁变化，只持久化 meta 可显著降低同步写入成本。
     persist({ includeOrders: false })
   }
@@ -229,22 +249,33 @@ export const useClientOrderStore = defineStore('client-order', () => {
   }
 
   const syncOrderSummary = (nextOrder: O2oPreorderSummary, options?: { preserveFresh?: boolean }) => {
-    const matchesCurrentQuery = matchesClientOrderQuery(nextOrder, {
-      activeStatus: activeStatus.value,
-      keyword: keyword.value,
-    })
-    if (!matchesCurrentQuery) {
-      removeOrder(nextOrder.id, options)
+    // 查询切换期间仍可能显示旧列表。只有当前查询的结果才可局部同步。
+    if (!hasCurrentResults.value && orders.value.length > 0) return
+    if (keyword.value && !orders.value.some((item) => item.id === nextOrder.id)) {
+      markStale()
       return
     }
-    upsertOrder(nextOrder, options)
+    const freshness = keyword.value ? undefined : options
+    if (!matchesClientOrderStatus(nextOrder, activeStatus.value)) {
+      removeOrder(nextOrder.id, freshness)
+      return
+    }
+    // 摘要无法判定商品和规格是否匹配。搜索命中行只更新展示，结果归属需重新查询。
+    resultQueryKey.value = queryKey.value
+    upsertOrder(nextOrder, freshness)
   }
 
-  const clearAll = (options?: { clearPersisted?: boolean }) => {
-    const currentClientUserId = clientUserId.value
+  const resetSession = () => {
     resetState()
     clientUserId.value = ''
     initialized.value = false
+  }
+  const sessionPinia = getActivePinia()
+  if (sessionPinia) onScopeDispose(registerClientSessionReset(sessionPinia, resetSession))
+
+  const clearAll = (options?: { clearPersisted?: boolean }) => {
+    const currentClientUserId = clientUserId.value
+    resetSession()
     if (options?.clearPersisted !== false && currentClientUserId) {
       clearPersistedClientOrderSnapshot(currentClientUserId)
     }
@@ -255,17 +286,21 @@ export const useClientOrderStore = defineStore('client-order', () => {
     orders,
     activeStatus,
     keyword,
+    searchMode,
+    queryKey,
+    hasCurrentResults,
     page,
     pageSize,
     total,
     updatedAt,
     initialized,
     isFresh,
+    isFreshNow,
     initialize,
     setOrders,
     appendOrders,
     setActiveStatus,
-    setKeyword,
+    setSearch,
     markStale,
     upsertOrder,
     removeOrder,

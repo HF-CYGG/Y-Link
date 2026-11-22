@@ -8,6 +8,11 @@
  * 维护说明：本文件不负责发请求、落锁或弹窗；调用方必须把 `new_submit` 才交给创建新锁的流程。
  */
 
+import type { SubmitO2oPreorderPayload } from '@/api/modules/o2o'
+
+// 服务端可能已提交事务才读取详情失败；没有确定拒绝的5xx必须按原请求继续确认。
+export const isClientCheckoutSubmitOutcomeUnknown = (status: number | undefined) => status === undefined || status === 408 || (status >= 500 && status <= 599)
+
 export interface ClientCheckoutSubmitItem {
   productId: string
   skuId: string | null
@@ -17,59 +22,70 @@ export interface ClientCheckoutSubmitItem {
 export interface ActiveClientCheckoutSubmitLock {
   intentKey: string
   requestKey: string
+  payload?: SubmitO2oPreorderPayload | null
+  expired?: boolean
 }
 
-export type ClientCheckoutSubmitDecision =
-  | { type: 'blocked'; reason: 'refresh_failed' | 'pending_intent_changed' | 'selected_conflicts' | 'empty_snapshot' | 'selection_changed_after_refresh' }
-  | { type: 'retry_pending'; items: ClientCheckoutSubmitItem[]; intentKey: string; requestKey: string }
-  | { type: 'new_submit'; items: ClientCheckoutSubmitItem[]; intentKey: string }
-
-export const decideClientCheckoutSubmit = ({
-  refreshSucceeded,
-  requestedItems,
-  requestedIntentKey,
-  activeSubmitLock,
-  selectedConflictCount,
-  freshItems,
-  freshIntentKey,
-}: {
+type ClientCheckoutNewSubmitInput = {
   refreshSucceeded: boolean
-  requestedItems: ClientCheckoutSubmitItem[]
   requestedIntentKey: string
-  activeSubmitLock: ActiveClientCheckoutSubmitLock | null
   selectedConflictCount: number
   freshItems: ClientCheckoutSubmitItem[] | null
   freshIntentKey: string | null
+}
+
+type ClientCheckoutNewSubmitBlockReason = 'refresh_failed' | 'selected_conflicts' | 'empty_snapshot' | 'selection_changed_after_refresh'
+
+export type ClientCheckoutSubmitDecision =
+  | { type: 'blocked'; reason: ClientCheckoutNewSubmitBlockReason | 'pending_unrecoverable' | 'pending_intent_changed' }
+  | { type: 'retry_pending'; items: ClientCheckoutSubmitItem[]; intentKey: string; requestKey: string; payload: SubmitO2oPreorderPayload }
+  | { type: 'new_submit'; items: ClientCheckoutSubmitItem[]; intentKey: string }
+
+/** 原提交已单独处理时，新单只校验最新目录和冻结意图。 */
+export const getClientCheckoutNewSubmitBlockReason = ({
+  refreshSucceeded, requestedIntentKey, selectedConflictCount, freshItems, freshIntentKey,
+}: ClientCheckoutNewSubmitInput): ClientCheckoutNewSubmitBlockReason | null => {
+  if (!refreshSucceeded) return 'refresh_failed'
+  if (selectedConflictCount > 0) return 'selected_conflicts'
+  if (!freshItems?.length || !freshIntentKey) return 'empty_snapshot'
+  return freshIntentKey === requestedIntentKey ? null : 'selection_changed_after_refresh'
+}
+
+export const decideClientCheckoutSubmit = ({
+  requestedItems,
+  activeSubmitLock,
+  ...newSubmitInput
+}: ClientCheckoutNewSubmitInput & {
+  requestedItems: ClientCheckoutSubmitItem[]
+  activeSubmitLock: ActiveClientCheckoutSubmitLock | null
 }): ClientCheckoutSubmitDecision => {
-  if (!refreshSucceeded) {
-    return { type: 'blocked', reason: 'refresh_failed' }
-  }
-
   if (activeSubmitLock) {
-    if (activeSubmitLock.intentKey !== requestedIntentKey) {
-      return { type: 'blocked', reason: 'pending_intent_changed' }
+    if (!activeSubmitLock.payload || activeSubmitLock.expired || activeSubmitLock.payload.clientRequestId !== activeSubmitLock.requestKey) {
+      return { type: 'blocked', reason: 'pending_unrecoverable' }
     }
-    return {
-      type: 'retry_pending',
-      items: requestedItems,
-      intentKey: requestedIntentKey,
-      requestKey: activeSubmitLock.requestKey,
-    }
+    if (activeSubmitLock.intentKey !== newSubmitInput.requestedIntentKey) return { type: 'blocked', reason: 'pending_intent_changed' }
+    return { type: 'retry_pending',
+      items: activeSubmitLock.payload.items.map((item) => ({ productId: String(item.productId), skuId: item.skuId == null ? null : String(item.skuId), qty: item.qty })),
+      intentKey: activeSubmitLock.intentKey, requestKey: activeSubmitLock.requestKey, payload: activeSubmitLock.payload }
   }
-
-  if (selectedConflictCount > 0) {
-    return { type: 'blocked', reason: 'selected_conflicts' }
-  }
-  if (!freshItems?.length || !freshIntentKey) {
-    return { type: 'blocked', reason: 'empty_snapshot' }
-  }
-  if (freshIntentKey !== requestedIntentKey) {
-    return { type: 'blocked', reason: 'selection_changed_after_refresh' }
-  }
+  const reason = getClientCheckoutNewSubmitBlockReason(newSubmitInput)
+  if (reason) return { type: 'blocked', reason }
   return {
     type: 'new_submit',
     // 目录校验确认意图未变后，仍使用点击时冻结的 payload，避免 await 期间的状态回写改写本次操作。
     items: requestedItems,
-    intentKey: requestedIntentKey,
+    intentKey: newSubmitInput.requestedIntentKey,
   }
+}
+
+/** 已失效页面保留原提交锁供再次进入时恢复，不能在保留购物车时单独清锁。 */
+export const settleCurrentClientCheckoutSuccess = ({ isCurrent, applyConfirmedItems, clearPending }: {
+  isCurrent: () => boolean
+  applyConfirmedItems: () => void
+  clearPending: () => void
+}) => {
+  if (!isCurrent()) return false
+  applyConfirmedItems()
+  clearPending()
+  return true
 }

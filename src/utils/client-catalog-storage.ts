@@ -12,6 +12,13 @@
 
 import type { O2oMallProduct, O2oMallSku, O2oMallStorefrontConfig } from '@/api/modules/o2o'
 import { calculateDiscountedPriceText, normalizeDiscountRateText } from '@/utils/o2o-price'
+import { DEFAULT_STORE_BUSINESS_HOURS, DEFAULT_STORE_PICKUP_ADDRESS } from '@/utils/store-business-hours'
+import {
+  CLIENT_CATALOG_CONTEXT_SNAPSHOT_KEY_PREFIX,
+  CLIENT_CATALOG_DATA_SNAPSHOT_KEY_PREFIX,
+  LEGACY_CLIENT_CATALOG_SNAPSHOT_KEY,
+  LEGACY_CLIENT_CATALOG_SNAPSHOT_KEY_PREFIX,
+} from '@/utils/client-session-cleanup'
 import {
   clearLegacyScopedStorageKey,
   getBrowserStorage,
@@ -20,7 +27,8 @@ import {
 
 export interface ClientCatalogSnapshot {
   products: O2oMallProduct[]
-  storefront: O2oMallStorefrontConfig
+  storefront: Required<O2oMallStorefrontConfig>
+  hasIndependentStorefront: boolean
   activeCategoryKey: string
   keyword: string
   sortMode: ClientCatalogSortMode
@@ -49,10 +57,6 @@ type ClientCatalogStorageScopeId = string | number | null | undefined
 // - 旧版本使用“商品数据 + 浏览上下文”合并快照；
 // - 新版本拆成 data/context 两个分片，减少高频筛选造成的大对象重复写入；
 // - legacy key 同时保留“全局 key + 旧版按用户分片 key”两种兼容读取入口。
-const CLIENT_CATALOG_DATA_SNAPSHOT_KEY_PREFIX = 'y-link.client-catalog.data'
-const CLIENT_CATALOG_CONTEXT_SNAPSHOT_KEY_PREFIX = 'y-link.client-catalog.context'
-const LEGACY_CLIENT_CATALOG_SNAPSHOT_KEY_PREFIX = 'y-link.client-catalog.snapshot'
-const LEGACY_CLIENT_CATALOG_SNAPSHOT_KEY = 'y-link.client-catalog.snapshot'
 const CLIENT_CATALOG_PUBLIC_DATA_SNAPSHOT_KEY = 'y-link.client-catalog.public-data.v2'
 const CLIENT_CATALOG_PUBLIC_STOREFRONT_SNAPSHOT_KEY = 'y-link.client-catalog.public-storefront.v2'
 const CLIENT_CATALOG_DATA_SCHEMA_VERSION = 2
@@ -206,20 +210,13 @@ export const normalizePickupWindowHours = (value: unknown): number | null => {
   return Number.isInteger(hours) && hours > 0 ? hours : null
 }
 
-const normalizeStorefront = (value: unknown): O2oMallStorefrontConfig => {
-  if (!value || typeof value !== 'object') {
-    return {
-      businessHoursText: '10:00 - 22:00',
-      mallAnnouncementText: '',
-      pickupWindowHours: null,
-    }
-  }
-  const row = value as Record<string, unknown>
-  const businessHoursText = typeof row.businessHoursText === 'string' && row.businessHoursText.trim()
-    ? row.businessHoursText.trim()
-    : '10:00 - 22:00'
+export const normalizeStorefront = (value: unknown): Required<O2oMallStorefrontConfig> => {
+  const row = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  const businessHoursText = typeof row.businessHoursText === 'string' ? row.businessHoursText.trim() : ''
+  const pickupAddress = typeof row.pickupAddress === 'string' ? row.pickupAddress.trim() : ''
   return {
-    businessHoursText,
+    businessHoursText: businessHoursText || DEFAULT_STORE_BUSINESS_HOURS,
+    pickupAddress: pickupAddress || DEFAULT_STORE_PICKUP_ADDRESS,
     mallAnnouncementText: typeof row.mallAnnouncementText === 'string' ? row.mallAnnouncementText.trim() : '',
     pickupWindowHours: normalizePickupWindowHours(row.pickupWindowHours),
   }
@@ -276,14 +273,20 @@ export const readPersistedClientCatalogSnapshot = (
 
     const sourceData = parsedPublicData ?? parsedData ?? parsedLegacy
     const sourceContext = parsedContext ?? parsedLegacy
-    if (!sourceData && !sourceContext) {
+    if (!sourceData && !sourceContext && !parsedPublicStorefront) {
       clearLegacyScopedStorageKey(storage, LEGACY_CLIENT_CATALOG_SNAPSHOT_KEY)
       return null
     }
 
     clearLegacyScopedStorageKey(storage, LEGACY_CLIENT_CATALOG_SNAPSHOT_KEY)
     const products = normalizeProducts(sourceData?.products)
-    const storefront = normalizeStorefront(parsedPublicStorefront?.storefront ?? sourceData?.storefront)
+    const independentStorefront = parsedPublicStorefront?.storefront
+    const hasIndependentStorefront = Boolean(independentStorefront
+      && typeof independentStorefront === 'object'
+      && 'businessHoursText' in independentStorefront
+      && typeof independentStorefront.businessHoursText === 'string'
+      && independentStorefront.businessHoursText.trim())
+    const storefront = normalizeStorefront(hasIndependentStorefront ? independentStorefront : sourceData?.storefront)
     const updatedAt = normalizeUpdatedAt(sourceData?.updatedAt)
 
     // 首次读取旧版全量按账号快照时立即收敛为一份公共轻量数据，避免继续复制长描述。
@@ -304,6 +307,7 @@ export const readPersistedClientCatalogSnapshot = (
     return {
       products,
       storefront,
+      hasIndependentStorefront,
       activeCategoryKey: normalizeActiveCategoryKey(sourceContext?.activeCategoryKey),
       keyword: normalizeKeyword(sourceContext?.keyword),
       sortMode: normalizeSortMode(sourceContext?.sortMode),
@@ -340,10 +344,6 @@ export const persistClientCatalogDataSnapshot = (
 
   try {
     storage.setItem(CLIENT_CATALOG_PUBLIC_DATA_SNAPSHOT_KEY, JSON.stringify(createCompactCatalogDataSnapshot(snapshot)))
-    storage.setItem(CLIENT_CATALOG_PUBLIC_STOREFRONT_SNAPSHOT_KEY, JSON.stringify({
-      schemaVersion: CLIENT_CATALOG_DATA_SCHEMA_VERSION,
-      storefront: snapshot.storefront,
-    }))
     // 新版公共快照写入成功后删除当前账号的旧全量数据分片；浏览上下文仍保持账号隔离。
     removeScopedKey(storage, scopedKey)
     removeScopedKey(storage, resolveUserScopedStorageKey(LEGACY_CLIENT_CATALOG_SNAPSHOT_KEY_PREFIX, clientUserId))

@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict'
-import { existsSync, realpathSync } from 'node:fs'
+import { existsSync, realpathSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const require = createRequire(import.meta.url)
+const mobileRoot = path.join(repositoryRoot, 'apps/mobile')
+const mobileRequire = createRequire(path.join(mobileRoot, 'package.json'))
 
 const readJson = async (relativePath) => {
   const absolutePath = path.join(repositoryRoot, relativePath)
@@ -23,20 +24,17 @@ assert.deepEqual(
   '根 package.json 必须声明唯一的 Mobile/shared npm workspace 范围',
 )
 assert.equal(
-  existsSync(path.join(repositoryRoot, 'apps/mobile/package-lock.json')),
+  existsSync(path.join(mobileRoot, 'package-lock.json')),
   false,
   'Mobile 不得保留与根依赖图分叉的 package-lock.json',
 )
-assert.equal(
-  mobileManifest.dependencies?.['@ylink/shared-types'],
-  '*',
-  'Mobile 必须通过 workspace 依赖 @ylink/shared-types',
-)
-assert.equal(
-  mobileManifest.dependencies?.['@ylink/api-client'],
-  '*',
-  'Mobile 必须通过 workspace 依赖 @ylink/api-client',
-)
+for (const specifier of ['@ylink/shared-types', '@ylink/api-client', '@ylink/validation']) {
+  assert.equal(
+    mobileManifest.dependencies?.[specifier],
+    '*',
+    `Mobile 必须通过 workspace 依赖 ${specifier}`,
+  )
+}
 assert.equal(
   Object.hasOwn(mobileManifest.dependencies ?? {}, 'y-link'),
   false,
@@ -78,31 +76,45 @@ for (const workspacePath of [
 }
 
 const resolveWorkspaceEntry = (specifier, expectedDirectory) => {
-  const resolvedEntry = require.resolve(specifier)
+  const resolvedEntry = mobileRequire.resolve(specifier)
   const realEntry = realpathSync(resolvedEntry)
   const expectedRoot = `${realpathSync(path.join(repositoryRoot, expectedDirectory))}${path.sep}`
   assert.ok(
     realEntry.startsWith(expectedRoot),
     `${specifier} 必须解析到仓库 workspace，而不是 registry 或临时副本`,
   )
+  return pathToFileURL(realEntry).href
 }
 
 resolveWorkspaceEntry('@ylink/shared-types', 'packages/shared-types')
-resolveWorkspaceEntry('@ylink/api-client', 'packages/api-client')
+resolveWorkspaceEntry('@ylink/validation', 'packages/validation')
 
-const mobileBoundaryUrl = pathToFileURL(
-  path.join(repositoryRoot, 'apps/mobile/src/contracts/shared-packages.ts'),
-).href
-const [{ ApiClientError }, mobileBoundary] = await Promise.all([
-  import('@ylink/api-client'),
-  import(mobileBoundaryUrl),
-])
+const apiClientUrl = resolveWorkspaceEntry('@ylink/api-client', 'packages/api-client')
+const { ApiClientError } = await import(apiClientUrl)
 const normalizedError = new ApiClientError('workspace-smoke', { kind: 'network' })
+assert.ok(normalizedError instanceof Error, 'api-client 的标准错误必须继承 Error')
+assert.equal(normalizedError.kind, 'network', 'api-client 的标准错误必须保留错误种类')
 
-assert.equal(
-  mobileBoundary.isSharedApiClientError(normalizedError),
-  true,
-  'Mobile Contract 边界必须实际消费 api-client 的标准错误类型',
-)
+const hasMobileApp = ['app', 'src', 'app.config.ts', 'app.config.js', 'app.json', 'tsconfig.json']
+  .some((entry) => existsSync(path.join(mobileRoot, entry)))
 
-console.log('Mobile workspace dependency model verified')
+if (hasMobileApp) {
+  const mobileBoundaryPath = 'src/contracts/shared-packages.ts'
+  const requiredAppFiles = ['app.config.ts', 'tsconfig.json', 'app/_layout.tsx', 'app/index.tsx', mobileBoundaryPath]
+  const missingAppFiles = requiredAppFiles.filter(
+    (entry) => !statSync(path.join(mobileRoot, entry), { throwIfNoEntry: false })?.isFile(),
+  )
+  assert.equal(missingAppFiles.length, 0, `Mobile 应用缺少必要文件：${missingAppFiles.join('、')}`)
+
+  const mobileBoundary = await import(pathToFileURL(path.join(mobileRoot, mobileBoundaryPath)).href)
+  assert.equal(
+    mobileBoundary.isSharedApiClientError(normalizedError),
+    true,
+    'Mobile Contract 边界必须实际消费 api-client 的标准错误类型',
+  )
+  console.log('Mobile 应用共享包 Contract 检查通过')
+} else {
+  console.log('Mobile 应用源码已移除，应用 Contract 检查不适用')
+}
+
+console.log('Mobile workspace 依赖模型验证通过')

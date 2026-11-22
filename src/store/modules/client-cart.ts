@@ -9,8 +9,8 @@
  * - 目录同步只刷新库存、价格与可购状态，不得静默缩量。
  */
 
-import { computed, ref } from 'vue'
-import { defineStore } from 'pinia'
+import { computed, onScopeDispose, ref } from 'vue'
+import { defineStore, getActivePinia } from 'pinia'
 
 import type { O2oMallProduct, O2oMallSku } from '@/api/modules/o2o'
 import { showAppWarning } from '@/utils/app-alert'
@@ -19,28 +19,27 @@ import {
   clearPersistedClientCartSnapshot,
   persistClientCartSnapshot,
   readPersistedClientCartSnapshot,
+  recentClientCartRequests,
+  type ClientCartSnapshot,
   type ClientCartSnapshotItem,
 } from '@/utils/client-cart-storage'
+import { normalizeStorageScopeId } from '@/utils/storage-user-scope'
+import { registerClientSessionReset } from '@/utils/client-session-cleanup'
 
-export interface ClientCartItem {
-  productId: string
-  skuId: string | null
-  productName: string
-  thumbnail: string | null
-  thumbnailSmall: string | null
-  specText: string | null
-  defaultPrice: string
-  originalPrice: string
-  discountRate: string
-  discountedPrice: string
-  limitPerUser: number
-  availableStock: number
-  qty: number
-  selected: boolean
-  availabilityStatus: ClientCartAvailabilityStatus
+export type ClientCartItem = ClientCartSnapshotItem
+export type ClientCartAvailabilityStatus = ClientCartItem['availabilityStatus']
+
+export interface ClientCartBatchResult {
+  ok: boolean
+  addedQty: number
+  conflicts: Array<{
+    skuId: string
+    code: 'invalid_qty' | 'sku_unavailable' | 'exceeds_max'
+    message: string
+    maxQty: number
+  }>
+  addedSkus: Array<{ skuId: string; qty: number }>
 }
-
-export type ClientCartAvailabilityStatus = 'available' | 'out_of_stock' | 'product_unavailable' | 'sku_unavailable'
 
 export interface ClientCartCheckoutConflict {
   item: ClientCartItem
@@ -49,14 +48,14 @@ export interface ClientCartCheckoutConflict {
 }
 
 // 购物车单项最大可购买数量由“可预订库存”和“单人限购”共同决定。
-// 统一用于主动增减和冲突提示，不得用它在缓存恢复或目录刷新时静默缩量。
-export const resolveClientCartMaxQty = (item: Pick<ClientCartItem, 'availableStock' | 'limitPerUser'>) => {
+// 用于主动增量和冲突提示；减量可逐步处理超限，缓存恢复或目录刷新不得静默缩量。
+export const resolveClientCartMaxQty = (item: Pick<ClientCartItem, 'availableStock' | 'limitPerUser'>, otherProductQty = 0) => {
   const stock = Math.max(0, item.availableStock)
   const limit = Math.max(0, item.limitPerUser)
   if (limit <= 0) {
     return stock
   }
-  return Math.min(stock, limit)
+  return Math.min(stock, Math.max(0, limit - otherProductQty))
 }
 
 const resolveAvailabilityStatus = (availableStock: number): ClientCartAvailabilityStatus => (
@@ -126,6 +125,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
   const clientUserId = ref('')
   const items = ref<ClientCartItem[]>([])
   const initialized = ref(false)
+  let appliedRequests: ClientCartSnapshot['appliedRequests'] = []
 
   // 这些派生状态尽量只从 items 推导，避免同时维护多份可结算/失效/选中列表造成同步偏差。
   const totalQty = computed(() => items.value.reduce((sum, item) => sum + item.qty, 0))
@@ -161,7 +161,14 @@ export const useClientCartStore = defineStore('client-cart', () => {
     const conflict = resolveCartConflict(item)
     return conflict ? [conflict] : []
   }))
-  const selectedCheckoutConflicts = computed(() => checkoutConflicts.value.filter(({ item }) => item.selected))
+  const selectedCheckoutConflicts = computed(() => selectedItems.value.flatMap((item) => {
+    const conflict = resolveCartConflict(item)
+    if (conflict) return [conflict]
+    const productQty = selectedItems.value.filter((row) => row.productId === item.productId).reduce((sum, row) => sum + row.qty, 0)
+    return item.limitPerUser > 0 && productQty > item.limitPerUser
+      ? [{ item, availableQty: item.limitPerUser, message: `同商品各规格合计最多可购 ${item.limitPerUser} 件，请调整数量或取消选择` }]
+      : []
+  }))
   const allValidSelected = computed(() => {
     return validItems.value.length > 0 && validItems.value.every((item) => item.selected)
   })
@@ -171,27 +178,8 @@ export const useClientCartStore = defineStore('client-cart', () => {
       return
     }
 
-    // 本地快照除了数量，还保留库存与限购字段：
-    // 这样页面刷新后仍能先恢复可视状态，再等待目录接口回填最新库存。
-    const snapshot: ClientCartSnapshotItem[] = items.value.map((item) => ({
-      productId: item.productId,
-      skuId: item.skuId,
-      productName: item.productName,
-      thumbnail: item.thumbnail,
-      thumbnailSmall: item.thumbnailSmall ?? null,
-      specText: item.specText,
-      defaultPrice: item.defaultPrice,
-      originalPrice: item.originalPrice,
-      discountRate: item.discountRate,
-      discountedPrice: item.discountedPrice,
-      limitPerUser: item.limitPerUser,
-      availableStock: item.availableStock,
-      qty: item.qty,
-      selected: item.selected,
-      availabilityStatus: item.availabilityStatus,
-    }))
-
-    persistClientCartSnapshot(clientUserId.value, snapshot)
+    appliedRequests = recentClientCartRequests(appliedRequests)
+    persistClientCartSnapshot(clientUserId.value, { items: items.value, appliedRequests })
   }
 
   /**
@@ -224,17 +212,8 @@ export const useClientCartStore = defineStore('client-cart', () => {
   }
 
   const resetState = () => {
+    appliedRequests = []
     items.value = []
-  }
-
-  const normalizeClientUserId = (value: string | number | null | undefined): string => {
-    if (typeof value === 'string') {
-      return value.trim()
-    }
-    if (typeof value === 'number' && Number.isFinite(value)) {
-      return String(value).trim()
-    }
-    return ''
   }
 
   const replaceItems = (nextItems: ClientCartItem[]) => {
@@ -243,7 +222,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
   }
 
   const initialize = (nextClientUserId: string | number | null | undefined) => {
-    const normalizedClientUserId = normalizeClientUserId(nextClientUserId)
+    const normalizedClientUserId = normalizeStorageScopeId(nextClientUserId)
     if (!normalizedClientUserId) {
       clientUserId.value = ''
       resetState()
@@ -259,8 +238,9 @@ export const useClientCartStore = defineStore('client-cart', () => {
     clientUserId.value = normalizedClientUserId
     resetState()
     const persisted = readPersistedClientCartSnapshot(normalizedClientUserId)
+    appliedRequests = persisted?.appliedRequests ?? []
     // 持久化快照读取后仍需再次标准化，避免旧版本缓存或异常值污染当前会话。
-    replaceItems(persisted)
+    replaceItems(persisted?.items ?? [])
     initialized.value = true
   }
 
@@ -275,44 +255,55 @@ export const useClientCartStore = defineStore('client-cart', () => {
     // 目录刷新只更新可购快照，不能静默缩减 qty、移除行或取消用户原有勾选。
     // 目录中不存在的商品也必须写成不可购，避免继续沿用旧缓存库存。
     const productMap = new Map(products.map((product) => [product.id, product]))
-    const nextItems = items.value
-      .map((item) => {
-        const latest = productMap.get(item.productId)
-        if (!latest) {
-          return normalizeItem({
-            ...item,
-            availableStock: 0,
-            availabilityStatus: 'product_unavailable',
-          })
-        }
-        const latestSku = item.skuId
-          ? latest.skus?.find((sku) => sku.id === item.skuId && isCartSkuAvailable(sku)) ?? null
-          : resolveDefaultSku(latest)
-        const productPrice = resolveO2oPriceView(latest)
-        const latestPrice = latestSku ?? productPrice
-        const skuUnavailable = (latest.skus?.length ?? 0) > 0 && !latestSku
+    const reconcileItem = (item: ClientCartItem) => {
+      const latest = productMap.get(item.productId)
+      if (!latest) {
         return normalizeItem({
           ...item,
-          skuId: latestSku?.id ?? item.skuId,
-          specText: latestSku?.specText ?? item.specText,
-          productName: latest.productName,
-          thumbnail: resolveCartItemThumbnail(latest, latestSku),
-          thumbnailSmall: (latestSku?.thumbnail ? latestSku.thumbnailSmall : latest.thumbnailSmall)?.trim() || null,
-          defaultPrice: latestSku ? latestSku.discountedPrice : productPrice.unitPrice,
-          originalPrice: latestPrice.originalPrice,
-          discountRate: latestPrice.discountRate,
-          discountedPrice: latestPrice.discountedPrice,
-          availableStock: skuUnavailable ? 0 : Math.max(0, Number(latestSku?.availableStock ?? latest.availableStock ?? 0)),
-          limitPerUser: Math.max(0, Number(latest.limitPerUser ?? 0)),
-          availabilityStatus: skuUnavailable
-            ? 'sku_unavailable'
-            : resolveAvailabilityStatus(Math.max(0, Number(latestSku?.availableStock ?? latest.availableStock ?? 0))),
+          availableStock: 0,
+          availabilityStatus: 'product_unavailable',
         })
+      }
+      const latestSku = item.skuId
+        ? latest.skus?.find((sku) => sku.id === item.skuId && isCartSkuAvailable(sku)) ?? null
+        : resolveDefaultSku(latest)
+      const productPrice = resolveO2oPriceView(latest)
+      const latestPrice = latestSku ?? productPrice
+      const skuUnavailable = (latest.skus?.length ?? 0) > 0 && !latestSku
+      const availableStock = skuUnavailable ? 0 : Math.max(0, Number(latestSku?.availableStock ?? latest.availableStock ?? 0))
+      return normalizeItem({
+        ...item,
+        skuId: latestSku?.id ?? item.skuId,
+        specText: latestSku?.specText ?? item.specText,
+        productName: latest.productName,
+        thumbnail: resolveCartItemThumbnail(latest, latestSku),
+        thumbnailSmall: (latestSku?.thumbnail ? latestSku.thumbnailSmall : latest.thumbnailSmall)?.trim() || null,
+        defaultPrice: latestSku ? latestSku.discountedPrice : productPrice.unitPrice,
+        originalPrice: latestPrice.originalPrice,
+        discountRate: latestPrice.discountRate,
+        discountedPrice: latestPrice.discountedPrice,
+        availableStock,
+        limitPerUser: Math.max(0, Number(latest.limitPerUser ?? 0)),
+        availabilityStatus: skuUnavailable ? 'sku_unavailable' : resolveAvailabilityStatus(availableStock),
       })
-      .filter((item) => item.qty > 0)
+    }
 
-    replaceItems(nextItems)
+    let nextItems: ClientCartItem[] | undefined
+    items.value.forEach((item, index) => {
+      const next = reconcileItem(item)
+      const changed = (Object.keys(next) as Array<keyof ClientCartItem>).some((key) => next[key] !== item[key])
+      const keep = next.qty > 0
+      if (!nextItems && (changed || !keep)) nextItems = items.value.slice(0, index)
+      if (keep) nextItems?.push(changed ? next : item)
+    })
+    if (!nextItems) return
+    items.value = nextItems
+    persist()
   }
+
+  const otherProductQty = (productId: string, skuId: string | null) => items.value
+    .filter((item) => item.productId === productId && item.skuId !== skuId)
+    .reduce((sum, item) => sum + item.qty, 0)
 
   const addProduct = (product: O2oMallProduct, qty = 1, sku: O2oMallSku | null = resolveDefaultSku(product)) => {
     ensureInitialized()
@@ -322,7 +313,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
 
     if (itemIndex === -1) {
       const draft = createCartItemFromProduct(product, targetQty, sku)
-      const maxQty = resolveClientCartMaxQty(draft)
+      const maxQty = resolveClientCartMaxQty(draft, otherProductQty(product.id, draft.skuId))
       if (maxQty <= 0) {
         showAppWarning('该商品库存不足或已达单人限购上限')
         return 0
@@ -341,7 +332,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
 
     const existing = items.value[itemIndex]
     const merged = createCartItemFromProduct(product, existing.qty + targetQty, sku)
-    const maxQty = resolveClientCartMaxQty(merged)
+    const maxQty = resolveClientCartMaxQty(merged, otherProductQty(product.id, merged.skuId))
 
     if (existing.qty >= maxQty) {
       showAppWarning('购物车内已达单人限购上限或最大库存')
@@ -365,25 +356,99 @@ export const useClientCartStore = defineStore('client-cart', () => {
     return nextQty - existing.qty
   }
 
+  // 批量数量表示本次新增量；完整校验后才替换内存和持久化，不能循环调用会截量的单项入口。
+  const addProductsBatch = (
+    product: O2oMallProduct,
+    selections: Array<{ skuId: string; qty: number }>,
+  ): ClientCartBatchResult => {
+    ensureInitialized()
+    const conflicts: ClientCartBatchResult['conflicts'] = []
+    const quantities = new Map<string, number>()
+    for (const { skuId, qty } of selections) {
+      if (!Number.isSafeInteger(qty) || qty < 0) {
+        conflicts.push({ skuId, code: 'invalid_qty', message: '请输入大于等于 0 的整数数量', maxQty: 0 })
+        continue
+      }
+      if (qty === 0) continue
+      quantities.set(skuId, (quantities.get(skuId) ?? 0) + qty)
+    }
+    for (const [skuId] of quantities) {
+      if (!isCartSkuAvailable(product.skus?.find((sku) => sku.id === skuId && sku.productId === product.id))) {
+        conflicts.push({ skuId, code: 'sku_unavailable', message: '所选规格已下架或不可购买', maxQty: 0 })
+      }
+    }
+    if (conflicts.length) return { ok: false, addedQty: 0, conflicts, addedSkus: [] }
+    const productQty = items.value.filter((item) => item.productId === product.id).reduce((sum, item) => sum + item.qty, 0)
+    const addedProductQty = [...quantities.values()].reduce((sum, qty) => sum + qty, 0)
+    if (product.limitPerUser > 0 && productQty + addedProductQty > product.limitPerUser) {
+      for (const [skuId, qty] of quantities) {
+        const maxQty = Math.max(0, product.limitPerUser - productQty - (addedProductQty - qty))
+        conflicts.push({ skuId, code: 'exceeds_max', maxQty, message: `同商品各规格含购物车已有量合计最多可购 ${product.limitPerUser} 件` })
+      }
+      return { ok: false, addedQty: 0, conflicts, addedSkus: [] }
+    }
+    const nextItems = [...items.value]
+    const addedSkus: ClientCartBatchResult['addedSkus'] = []
+    for (const [skuId, qty] of quantities) {
+      const sku = product.skus?.find((entry) => entry.id === skuId && entry.productId === product.id)
+      if (!isCartSkuAvailable(sku)) {
+        conflicts.push({ skuId, code: 'sku_unavailable', message: '所选规格已下架或不可购买', maxQty: 0 })
+        continue
+      }
+      const index = nextItems.findIndex((item) => item.productId === product.id && item.skuId === skuId)
+      const existing = index >= 0 ? nextItems[index] : undefined
+      const nextQty = (existing?.qty ?? 0) + qty
+      const draft = createCartItemFromProduct(product, nextQty, sku)
+      const maxQty = resolveClientCartMaxQty(draft)
+      if (!Number.isSafeInteger(nextQty) || !Number.isFinite(maxQty) || nextQty > maxQty || maxQty <= 0) {
+        conflicts.push({ skuId, code: 'exceeds_max', message: `含购物车已有数量最多可购 ${Number.isFinite(maxQty) ? maxQty : 0} 件`, maxQty: Number.isFinite(maxQty) ? maxQty : 0 })
+        continue
+      }
+      const next = { ...draft, selected: existing?.selected ?? true }
+      if (index >= 0) nextItems[index] = next
+      else nextItems.push(next)
+      addedSkus.push({ skuId, qty })
+    }
+    if (conflicts.length) return { ok: false, addedQty: 0, conflicts, addedSkus: [] }
+    const addedQty = addedSkus.reduce((sum, item) => sum + item.qty, 0)
+    if (!Number.isSafeInteger(addedQty) || !Number.isSafeInteger(nextItems.reduce((sum, item) => sum + item.qty, 0))) {
+      return { ok: false, addedQty: 0, addedSkus: [], conflicts: [...quantities.keys()].map((skuId) => ({
+        skuId, code: 'invalid_qty', message: '数量合计超出有效范围，请调整后重试', maxQty: 0,
+      })) }
+    }
+    if (addedQty > 0) {
+      items.value = nextItems
+      persist()
+    }
+    return { ok: true, addedQty, conflicts: [], addedSkus }
+  }
+
   const updateQty = (productId: string, qty: number) => {
     ensureInitialized()
+    if (!Number.isFinite(qty) || qty < 0) {
+      showAppWarning('请输入有效的商品数量')
+      return
+    }
     const itemIndex = items.value.findIndex((item) => resolveCartItemId(item.productId, item.skuId) === productId || item.productId === productId)
     if (itemIndex === -1) {
       return
     }
 
     const item = items.value[itemIndex]
-    const maxQty = resolveClientCartMaxQty(item)
-    const nextQty = Math.min(Math.max(0, Math.floor(qty)), maxQty)
+    const maxQty = resolveClientCartMaxQty(item, otherProductQty(item.productId, item.skuId))
+    const requestedQty = Math.floor(qty)
+    // 目录降低限购/库存后仍允许逐步减量；保持用户目标，剩余超限继续由结算冲突拦截。
+    const isReduction = requestedQty < item.qty
+    const nextQty = isReduction ? requestedQty : Math.min(requestedQty, maxQty)
 
-    if (qty > maxQty) {
+    if (!isReduction && qty > maxQty) {
       showAppWarning(maxQty > 0 ? `当前最多可购 ${maxQty} 件，已按可购数量调整` : '该商品库存不足或已达单人限购上限')
       if (maxQty <= 0) {
         return
       }
     }
 
-    if (qty > item.qty && item.qty >= maxQty) {
+    if (!isReduction && qty > item.qty && item.qty >= maxQty) {
       showAppWarning('购物车内已达单人限购上限或最大库存')
       return
     }
@@ -403,7 +468,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
 
   // 手动输入数量：空值、非数字、小数或小于 1 的输入不写入购物车，避免 NaN 落入缓存或输入 0 被当成删除；
   // 小数一律拒绝而不是向下取整：提示文案要求“大于 0 的整数”，静默取整会让用户以为 2.7 这类输入被原样接受。
-  // 合法值统一交给 updateQty，复用“可预订库存 + 单人限购”上限与超限提示，不另立一套校验口径。
+  // 合法值统一交给 updateQty：减量保留用户目标，增量复用库存/限购上限，不另立校验口径。
   const setQtyFromInput = (productId: string, qty: number | null) => {
     if (qty === null || !Number.isInteger(qty) || qty < 1) {
       showAppWarning('请输入大于 0 的整数数量')
@@ -426,6 +491,27 @@ export const useClientCartStore = defineStore('client-cart', () => {
     persist()
   }
 
+  // 每个请求键只扣一次已确认数量，保留后来新增的同规格数量与其它规格。
+  const consumeSubmittedItems = (
+    submitted: Array<{ productId: string | number; skuId?: string | number | null; qty: number }>,
+    requestKey: string,
+  ) => {
+    ensureInitialized()
+    appliedRequests = recentClientCartRequests(appliedRequests)
+    if (appliedRequests.some(([key]) => key === requestKey)) return false
+    const quantities = new Map<string, number>()
+    for (const item of submitted) {
+      const key = JSON.stringify([String(item.productId), item.skuId == null ? null : String(item.skuId)])
+      quantities.set(key, (quantities.get(key) ?? 0) + Math.max(0, item.qty))
+    }
+    const remainingItems = items.value.map((item) => ({ ...item, qty: Math.max(0,
+      item.qty - (quantities.get(JSON.stringify([item.productId, item.skuId])) ?? 0)) })).filter((item) => item.qty > 0)
+    appliedRequests.push([requestKey, Date.now()])
+    items.value = remainingItems
+    persist()
+    return true
+  }
+
   const clearSelectedItems = () => {
     ensureInitialized()
     // 这里按“勾选状态”而非“有效状态”清理，便于购物车页做批量删除操作。
@@ -440,11 +526,17 @@ export const useClientCartStore = defineStore('client-cart', () => {
     persist()
   }
 
-  const clearAll = () => {
-    const currentClientUserId = clientUserId.value
+  const resetSession = () => {
     resetState()
     clientUserId.value = ''
     initialized.value = false
+  }
+  const sessionPinia = getActivePinia()
+  if (sessionPinia) onScopeDispose(registerClientSessionReset(sessionPinia, resetSession))
+
+  const clearAll = () => {
+    const currentClientUserId = clientUserId.value
+    resetSession()
     clearPersistedClientCartSnapshot(currentClientUserId)
   }
 
@@ -489,10 +581,12 @@ export const useClientCartStore = defineStore('client-cart', () => {
     initialize,
     syncWithCatalog,
     addProduct,
+    addProductsBatch,
     updateQty,
     setQtyFromInput,
     incrementQty,
     removeItem,
+    consumeSubmittedItems,
     clearSelectedItems,
     clearItems,
     clearAll,

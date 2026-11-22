@@ -1,0 +1,40 @@
+Description: perl536-poscache-countdown，固定旧版生产目标的本地回补候选
+Origin: https://github.com/Perl/perl5/commit/568e6fd238867bb9e99fa3f47cba3169009239e0
+Comment: 上游完整补丁另存upstream.patch；不应用或执行其中测试；本候选未构建、未验收。
+
+diff --git a/regexec.c b/regexec.c
+index 35a727459c4a..29aa73c13cb9 100644
+--- a/regexec.c
++++ b/regexec.c
+@@ -9211,7 +9211,8 @@ NULL
+                     reginfo->poscache_iter = reginfo->poscache_maxiter;
+                 }
+ 
+-                if (reginfo->poscache_iter-- == 0) {
++                if (reginfo->poscache_iter == 1) {
++                    reginfo->poscache_iter--;
+                     /* initialise cache */
+                     const SSize_t size = (reginfo->poscache_maxiter + 7)/8;
+                     regmatch_info_aux *const aux = reginfo->info_aux;
+@@ -9232,11 +9233,10 @@ NULL
+                     );
+                 }
+ 
+-                if (reginfo->poscache_iter < 0) {
++                if (reginfo->poscache_iter == 0) {
+                     /* have we already failed at this position? */
+                     SSize_t offset, mask;
+ 
+-                    reginfo->poscache_iter = -1; /* stop eventual underflow */
+                     offset  = (scan->flags & 0xf) - 1
+                                 +   (locinput - reginfo->strbeg)
+                                   * (scan->flags>>4);
+@@ -9252,6 +9252,8 @@ NULL
+                     ST.cache_offset = offset;
+                     ST.cache_mask   = mask;
+                 }
++                else
++                    reginfo->poscache_iter--;
+             }
+ 
+             /* Prefer B over A for minimal matching. */

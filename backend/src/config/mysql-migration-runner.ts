@@ -209,6 +209,7 @@ interface MysqlRequiredCheck {
 // 只列会被当前业务代码直接读写、缺失后必然导致运行时失败的增量字段。
 // 表不存在时由 MYSQL_REQUIRED_TABLES 先给出建表脚本，避免同一张缺表重复打印多条缺列提示。
 const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
+  { tableName: 'biz_outbound_order', columnName: 'submit_request_hash', introducingScript: '064_manual_outbound_submit_request_hash.sql', expectedDataType: 'varchar', expectedNullable: true, expectedCharacterMaximumLength: 64 },
   { tableName: 'sys_user', columnName: 'governance_permissions_json', introducingScript: '063_sys_user_governance_permissions.sql', expectedDataType: 'text', expectedNullable: true },
   // 060：按库位盘点的明细库位列，0 表示按规格总量盘点；缺失时盘点建单与计数都会写库失败。
   { tableName: 'inv_stocktake_item', columnName: 'location_scope_id', introducingScript: '060_sku_location_stock.sql', expectedDataType: 'bigint', expectedNullable: false, expectedDefault: '0' },
@@ -495,6 +496,17 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
 
 // 不只按索引名判断，还校验列顺序与唯一性，避免旧库中存在同名但错误的索引时误判为可启动。
 const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
+  { tableName: 'biz_outbound_order', indexName: 'idx_biz_outbound_active_created_id', columns: ['is_deleted', 'status', 'created_at', 'id'], unique: false, introducingScript: '065_performance_composite_indexes.sql' },
+  { tableName: 'biz_outbound_order', indexName: 'idx_biz_outbound_active_type_created', columns: ['is_deleted', 'status', 'order_type', 'created_at'], unique: false, introducingScript: '065_performance_composite_indexes.sql' },
+  { tableName: 'biz_inbound_order', indexName: 'idx_biz_inbound_deleted_status_arrival_id', columns: ['is_deleted', 'status', 'expected_arrival_at', 'id'], unique: false, introducingScript: '065_performance_composite_indexes.sql' },
+  { tableName: 'biz_inbound_order', indexName: 'idx_biz_inbound_supplier_deleted_status_id', columns: ['supplier_id', 'is_deleted', 'status', 'id'], unique: false, introducingScript: '065_performance_composite_indexes.sql' },
+  { tableName: 'o2o_preorder', indexName: 'idx_o2o_preorder_deleted_status_id', columns: ['is_deleted', 'status', 'id'], unique: false, introducingScript: '065_performance_composite_indexes.sql' },
+  { tableName: 'o2o_preorder_item', indexName: 'idx_o2o_preorder_item_product_order_qty', columns: ['product_id', 'order_id', 'qty'], unique: false, introducingScript: '065_performance_composite_indexes.sql' },
+  { tableName: 'client_user', indexName: 'idx_client_user_real_name', columns: ['real_name'], unique: false, introducingScript: '065_performance_composite_indexes.sql' },
+  { tableName: 'inv_stocktake_item', indexName: 'idx_inv_stocktake_item_counted', columns: ['stocktake_id', 'counted_at', 'id'], unique: false, introducingScript: '065_performance_composite_indexes.sql' },
+  { tableName: 'client_feedback_conversation', indexName: 'idx_feedback_conv_client_last_msg', columns: ['client_user_id', 'last_message_at', 'id'], unique: false, introducingScript: '065_performance_composite_indexes.sql' },
+  { tableName: 'client_feedback_conversation', indexName: 'idx_feedback_conv_status_last_msg', columns: ['status', 'last_message_at', 'id'], unique: false, introducingScript: '065_performance_composite_indexes.sql' },
+  { tableName: 'client_feedback_conversation', indexName: 'idx_feedback_conv_assigned_status_last_msg', columns: ['assigned_user_id', 'status', 'last_message_at', 'id'], unique: false, introducingScript: '065_performance_composite_indexes.sql' },
   // 060：分库位库存同一规格同一库位至多一行；盘点明细唯一键扩展到“规格 × 库位”（旧的 uk_inv_stocktake_item_sku 由 060 删除）。
   { tableName: 'inv_sku_location_stock', indexName: 'uk_inv_sku_location_stock_sku_location', columns: ['sku_id', 'location_id'], unique: true, introducingScript: '060_sku_location_stock.sql' },
   { tableName: 'inv_sku_location_stock', indexName: 'idx_inv_sku_location_stock_location_id', columns: ['location_id'], unique: false, introducingScript: '060_sku_location_stock.sql' },
@@ -879,7 +891,16 @@ const MYSQL_REQUIRED_CHECKS: readonly MysqlRequiredCheck[] = [
  * 人工执行若在收尾前中断，契约仍会通过。基线登记必须同时确认这些收尾已完成，否则交给脚本重放其幂等收尾。
  * 这里只用于基线判定，不进入启动契约，避免改变未开启自动迁移部署的启动口径。
  */
-const MYSQL_BASELINE_ABSENT_INDEXES: readonly { tableName: string; indexName: string; introducingScript: string }[] = [
+const MYSQL_MIGRATION_ABSENT_INDEXES: readonly {
+  tableName: string
+  indexName: string
+  introducingScript: string
+  checkAfterMigration?: boolean
+}[] = [
+  { tableName: 'biz_outbound_order', indexName: 'idx_biz_outbound_order_type', introducingScript: '065_performance_composite_indexes.sql', checkAfterMigration: true },
+  { tableName: 'biz_outbound_order', indexName: 'idx_biz_outbound_is_deleted', introducingScript: '065_performance_composite_indexes.sql', checkAfterMigration: true },
+  { tableName: 'biz_inbound_order', indexName: 'idx_biz_inbound_is_deleted', introducingScript: '065_performance_composite_indexes.sql', checkAfterMigration: true },
+  { tableName: 'o2o_preorder_item', indexName: 'idx_o2o_preorder_item_product_order', introducingScript: '065_performance_composite_indexes.sql', checkAfterMigration: true },
   { tableName: 'base_yz_series_seq_reservation', indexName: 'uk_yz_series_seq_reservation', introducingScript: '053_yz_reservation_series_code.sql' },
   { tableName: 'inv_stocktake_item', indexName: 'uk_inv_stocktake_item_sku', introducingScript: '060_sku_location_stock.sql' },
 ]
@@ -986,6 +1007,8 @@ const AUTO_MIGRATABLE_FILES = [
   '062_o2o_preorder_kingdee_registration.sql',
   '063_sys_user_governance_permissions.sql',
   '063_o2o_preorder_reserved_business_no.sql',
+  '064_manual_outbound_submit_request_hash.sql',
+  '065_performance_composite_indexes.sql',
 ]
 
 /**
@@ -1388,9 +1411,9 @@ async function collectAutoMigrationContractIssues(
       .filter(([, script]) => script === filename)
       .map(([tableName]) => tableName)
     : []
-  const absentIndexes = options.forBaseline
-    ? MYSQL_BASELINE_ABSENT_INDEXES.filter((item) => item.introducingScript === filename)
-    : []
+  const absentIndexes = MYSQL_MIGRATION_ABSENT_INDEXES.filter((item) => (
+    item.introducingScript === filename && (options.forBaseline || item.checkAfterMigration)
+  ))
   const requiredColumns = [
     ...MYSQL_REQUIRED_COLUMNS,
     ...(options.forBaseline ? MYSQL_BASELINE_EXTRA_COLUMNS : []),

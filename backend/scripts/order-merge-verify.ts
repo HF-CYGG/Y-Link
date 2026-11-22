@@ -4,7 +4,7 @@
  * 实现逻辑：先验证必需模块存在，再以真实 TypeORM 实体和服务执行端到端数据一致性断言。
  */
 
-import { resolveIssueVerificationRoot } from './issue-verification-paths.js'
+import { createVerificationIsolation } from './verification-isolation.js'
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
@@ -50,10 +50,12 @@ assert.match(routeSource, /\/merges\/preview[\s\S]*orders:merge/, '合并预览�
 assert.match(routeSource, /\/merges['"][\s\S]*orders:merge/, '合并提交必须使用 orders:merge 权限')
 
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
-const sqliteRoot = resolveIssueVerificationRoot(path.resolve(process.cwd(), 'data', 'local-dev'))
+const verificationIsolation = createVerificationIsolation('order-merge-verify')
+const sqliteRoot = verificationIsolation.rootDir
 const sqlitePath = path.resolve(sqliteRoot, `order-merge-${verifySeed}.sqlite`)
 process.env.APP_PROFILE = `order-merge-${verifySeed}`
 process.env.DB_TYPE = 'sqlite'
+verificationIsolation.seal({ type: 'sqlite', database: sqlitePath })
 process.env.DB_SYNC = 'true'
 process.env.SQLITE_DB_PATH = sqlitePath
 
@@ -152,8 +154,10 @@ async function main() {
     import('../src/app.js'),
   ])
 
+  await verificationIsolation.assertTarget(AppDataSource)
   await AppDataSource.initialize()
   try {
+    await verificationIsolation.assertTarget(AppDataSource)
     await AppDataSource.synchronize()
     const sysUserRepo = AppDataSource.getRepository(SysUser)
     const persistedActor = await sysUserRepo.save(sysUserRepo.create({

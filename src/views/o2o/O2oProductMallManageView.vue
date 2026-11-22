@@ -5,27 +5,28 @@
  * 实现逻辑：桌面紧凑表格与手机卡片共用筛选、选择和预览图规则；写入仅调用线上展示专用接口。
  * 维护说明：商品资料、SKU 启停、价格、库存和图片只读；新增和规格配置跳基础资料入口，不能回传完整商品或 SKU。
  */
-import { computed, nextTick, onActivated, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import type { TableInstance } from 'element-plus'
-import { PageContainer, PageToolbarCard, PassivePreviewImage } from '@/components/common'
+import { PageContainer, PageToolbarCard, PassiveNumberInput, PassivePreviewImage } from '@/components/common'
 import { getTagList, type Tag } from '@/api/modules/tag'
 import {
   batchUpdateProductOnlineDisplay,
   getProductDetail,
-  getProductList,
   updateProductOnlineDisplay,
   type ProductRecord,
   type ProductSkuRecord,
 } from '@/api/modules/product'
+import { getAdminProductOptions, readAdminProductOptionsExpiry } from '@/composables/useAdminProductOptionsCache'
 import { useDataChangeRefresh } from '@/composables/useDataChangeRefresh'
 import { useDevice } from '@/composables/useDevice'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
-import { normalizeRequestError } from '@/utils/error'
+import { isRequestCanceled, normalizeRequestError } from '@/utils/error'
+import { dataChangeVersions } from '@/utils/data-change-signal'
 import { resolveO2oPriceView } from '@/utils/o2o-price'
 import { resolveProductPlaceholder } from '@/utils/product-placeholder'
-import { resolveProductPreviewImage, resolveProductPreviewSku } from '@/utils/product-preview'
+import { resolveProductPreviewImage, resolveProductPreviewSku, resolveProductPreviewSmallImage } from '@/utils/product-preview'
 import {
   buildOnlineDisplayPatch,
   clampOnlineDisplayPage,
@@ -47,7 +48,7 @@ const canManageProducts = computed(() => hasPermission('products:manage'))
 
 const loading = ref(false)
 const tags = ref<Tag[]>([])
-const products = ref<ProductRecord[]>([])
+const products = shallowRef<ProductRecord[]>([])
 const keywordDraft = ref('')
 const keyword = ref('')
 const tagId = ref('')
@@ -65,7 +66,13 @@ const batchSubmitting = ref(false)
 const busyIds = ref<Set<string>>(new Set())
 let loadSequence = 0
 let editorRequestSequence = 0
-let mountedReady = false
+let pageActive = false
+let loadedProductVersion = -1
+let loadedInventoryVersion = -1
+let loadedQueryKey = ''
+let loadedValidUntil = 0
+let pendingProductWrites = 0
+let tagLoadSequence = 0
 
 const filteredProducts = computed(() => filterOnlineDisplayProducts(products.value, {
   online: onlineFilter.value, base: baseFilter.value, image: imageFilter.value,
@@ -80,7 +87,7 @@ const activeCurrentSkus = (product: ProductRecord): ProductSkuRecord[] =>
   currentSkus(product).filter((sku) => sku.isActive !== false)
 const skuName = (sku: ProductSkuRecord) => sku.specText || sku.skuCode || '默认规格'
 const imageUrl = (product: ProductRecord) => resolveProductPreviewImage(product)
-const imageOrPlaceholder = (product: ProductRecord) => resolveProductPlaceholder(imageUrl(product))
+const imageOrPlaceholder = (product: ProductRecord) => resolveProductPlaceholder(resolveProductPreviewSmallImage(product))
 const priceText = (product: ProductRecord) =>
   `¥${Number(resolveO2oPriceView(resolveProductPreviewSku(product) ?? product).discountedPrice).toFixed(2)}`
 const recommendationLabel = (product: ProductRecord) => {
@@ -97,7 +104,7 @@ const form = reactive({
   o2oStatus: 'unlisted' as 'listed' | 'unlisted',
   recommendationMode: 'none' as RecommendationMode,
   selectedSkuIds: [] as string[],
-  limitPerUser: 5,
+  limitPerUser: 5 as number | null,
   detailContent: '',
 })
 let originalDisplay: OnlineDisplaySnapshot | null = null
@@ -145,22 +152,74 @@ function onCompactBatchCommand(command: string): void {
   if (command === 'clear') void clearSelection()
 }
 
-async function loadProducts(): Promise<void> {
+async function syncProductSelection(): Promise<void> {
+  const visibleIds = new Set(filteredProducts.value.map((product) => product.id))
+  selectedIds.value = selectedIds.value.filter((id) => visibleIds.has(id))
+  clampPage()
+  await restoreTableSelection()
+}
+
+const readProductQuery = () => ({ keyword: keyword.value || undefined, tagId: tagId.value || undefined })
+
+async function loadProducts(force = false): Promise<void> {
+  const query = readProductQuery()
   const sequence = ++loadSequence
   loading.value = true
   try {
-    const result = await getProductList({ keyword: keyword.value || undefined, tagId: tagId.value || undefined })
+    const result = await getAdminProductOptions(query, { force })
     if (sequence !== loadSequence) return
+    loadedProductVersion = dataChangeVersions.products
+    loadedInventoryVersion = dataChangeVersions.inventory
+    loadedQueryKey = JSON.stringify(query)
+    loadedValidUntil = readAdminProductOptionsExpiry(query)
     products.value = result
-    const visibleIds = new Set(filteredProducts.value.map((product) => product.id))
-    selectedIds.value = selectedIds.value.filter((id) => visibleIds.has(id))
-    clampPage()
-    await restoreTableSelection()
+    await syncProductSelection()
   } catch (error) {
-    if (sequence === loadSequence) showAppError(error, '加载线上商品失败')
+    if (sequence === loadSequence) {
+      loadedValidUntil = 0
+      if (!isRequestCanceled(error)) showAppError(error, '加载线上商品失败')
+    }
   } finally {
     if (sequence === loadSequence) loading.value = false
   }
+}
+
+function refreshProductsIfStale(checkExpiry = false): void {
+  if (!pageActive || loading.value || pendingProductWrites) return
+  if (loadedQueryKey !== JSON.stringify(readProductQuery())
+    || loadedProductVersion !== dataChangeVersions.products
+    || loadedInventoryVersion !== dataChangeVersions.inventory
+    || (checkExpiry && loadedValidUntil <= Date.now())) {
+    void loadProducts()
+  }
+}
+
+function beginProductWrite(): number {
+  pendingProductWrites += 1
+  return dataChangeVersions.products
+}
+
+function acceptProductWrite(previousVersion: number): void {
+  // 本页能证明只应用了自己的写入时才推进列表版本；并发其他写入时保留一次权威刷新。
+  if (loadedProductVersion === previousVersion && dataChangeVersions.products === previousVersion + 1) {
+    loadedProductVersion = previousVersion + 1
+  }
+}
+
+function endProductWrite(): void {
+  pendingProductWrites -= 1
+  refreshProductsIfStale()
+}
+
+function patchOnlineProduct(updated: ProductRecord): void {
+  const recommended = new Map(updated.skus?.map((sku) => [sku.id, sku.o2oRecommended]))
+  products.value = products.value.map((product) => product.id === updated.id ? {
+    ...product,
+    o2oStatus: updated.o2oStatus,
+    o2oRecommended: updated.o2oRecommended,
+    limitPerUser: updated.limitPerUser,
+    skus: product.skus?.map((sku) => recommended.has(sku.id) ? { ...sku, o2oRecommended: recommended.get(sku.id) } : sku),
+  } : product)
 }
 
 function applySearch(): void {
@@ -208,7 +267,7 @@ async function openEditor(product: ProductRecord): Promise<void> {
       o2oStatus: form.o2oStatus,
       recommendationMode: form.recommendationMode,
       selectedSkuIds: [...form.selectedSkuIds],
-      limitPerUser: form.limitPerUser,
+      limitPerUser: latest.limitPerUser,
       detailContent: form.detailContent,
     }
     editorVisible.value = true
@@ -228,13 +287,14 @@ async function refreshAfterConflict(error: unknown): Promise<boolean> {
   if (normalized.status !== 409) return false
   editorVisible.value = false
   showAppWarning(`${normalized.message}，已刷新商品，请检查后重试`)
-  await loadProducts()
+  await loadProducts(true)
   return true
 }
 
 async function saveOnlineDisplay(): Promise<void> {
   const product = editingProduct.value
   if (!product || !originalDisplay || !ensurePermission('products:manage', '保存线上展示')) return
+  if (submitting.value || batchSubmitting.value || busyIds.value.has(product.id)) return
   if (!product.isActive && form.o2oStatus === 'listed') {
     showAppWarning('商品已停用，请先在基础资料中启用')
     return
@@ -252,7 +312,7 @@ async function saveOnlineDisplay(): Promise<void> {
     o2oStatus: form.o2oStatus,
     recommendationMode: form.recommendationMode,
     selectedSkuIds,
-    limitPerUser: form.limitPerUser,
+    limitPerUser: form.limitPerUser ?? Number.NaN,
     detailContent: form.detailContent,
   }, currentSkus(product).map((sku) => String(sku.id ?? '')).filter(Boolean))
   const validationError = validateOnlineDisplayPatch(payload)
@@ -265,40 +325,50 @@ async function saveOnlineDisplay(): Promise<void> {
     return
   }
   submitting.value = true
+  const previousVersion = beginProductWrite()
   try {
-    await updateProductOnlineDisplay(product.id, payload)
+    const updated = await updateProductOnlineDisplay(product.id, payload)
+    patchOnlineProduct(updated)
+    acceptProductWrite(previousVersion)
     editorVisible.value = false
     showAppSuccess('线上展示已保存')
-    await loadProducts()
+    await syncProductSelection()
   } catch (error) {
     if (!(await refreshAfterConflict(error))) showAppError(error, '保存线上展示失败')
   } finally {
     submitting.value = false
+    endProductWrite()
   }
 }
 
 async function toggleListed(product: ProductRecord, nextStatus: 'listed' | 'unlisted'): Promise<void> {
   if (!ensurePermission('products:manage', '切换线上状态')) return
+  if (batchSubmitting.value || busyIds.value.has(product.id) || (submitting.value && editingProduct.value?.id === product.id)) return
   if (nextStatus === 'listed' && !product.isActive) {
     showAppWarning('商品已停用，请先在基础资料中启用')
     return
   }
   busyIds.value = new Set([...busyIds.value, product.id])
+  const previousVersion = beginProductWrite()
   try {
-    await updateProductOnlineDisplay(product.id, { o2oStatus: nextStatus })
+    const updated = await updateProductOnlineDisplay(product.id, { o2oStatus: nextStatus })
+    patchOnlineProduct(updated)
+    acceptProductWrite(previousVersion)
     showAppSuccess(nextStatus === 'listed' ? '商品已上架' : '商品已下架')
-    await loadProducts()
+    await syncProductSelection()
   } catch (error) {
     if (!(await refreshAfterConflict(error))) showAppError(error, '切换线上状态失败')
   } finally {
     const next = new Set(busyIds.value)
     next.delete(product.id)
     busyIds.value = next
+    endProductWrite()
   }
 }
 
 async function batchSetListed(nextStatus: 'listed' | 'unlisted'): Promise<void> {
   if (!ensurePermission('products:manage', '批量切换线上状态')) return
+  if (batchSubmitting.value || submitting.value || busyIds.value.size) return
   if (!selectedIds.value.length) {
     showAppWarning('请先选择商品')
     return
@@ -312,32 +382,50 @@ async function batchSetListed(nextStatus: 'listed' | 'unlisted'): Promise<void> 
     return
   }
   batchSubmitting.value = true
+  const previousVersion = beginProductWrite()
   try {
     const result = await batchUpdateProductOnlineDisplay({ ids: selectedIds.value, o2oStatus: nextStatus })
+    const updatedIds = new Set(result.ids)
+    products.value = products.value.map((product) => updatedIds.has(product.id) ? { ...product, o2oStatus: nextStatus } : product)
+    acceptProductWrite(previousVersion)
     await clearSelection()
-    await loadProducts()
+    clampPage()
     showAppSuccess(`已${nextStatus === 'listed' ? '上架' : '下架'} ${result.updatedCount} 个商品`)
   } catch (error) {
     if (!(await refreshAfterConflict(error))) showAppError(error, '批量切换线上状态失败')
   } finally {
     batchSubmitting.value = false
+    endProductWrite()
   }
 }
 
-// 商品列表在激活时已重新查询；标签在其他页面新增或改名后同样需要刷新筛选项。
-useDataChangeRefresh(['products'], () => getTagList().then((result) => { tags.value = result }))
+const loadTags = async () => {
+  const sequence = ++tagLoadSequence
+  const result = await getTagList()
+  if (sequence === tagLoadSequence) tags.value = result
+}
+useDataChangeRefresh(['tags'], loadTags)
+watch(() => [dataChangeVersions.products, dataChangeVersions.inventory], () => refreshProductsIfStale())
 
-onMounted(async () => {
-  await Promise.all([loadProducts(), getTagList().then((result) => { tags.value = result }).catch(() => {})])
-  mountedReady = true
-})
-onActivated(() => {
-  if (mountedReady) void loadProducts()
-})
-onDeactivated(() => {
+const activatePage = () => {
+  pageActive = true
+  refreshProductsIfStale(true)
+}
+const deactivatePage = () => {
+  pageActive = false
+  loadSequence += 1
+  loading.value = false
   editorRequestSequence += 1
+  editorLoading.value = false
   editorVisible.value = false
+}
+onMounted(() => {
+  activatePage()
+  void loadTags().catch(() => {})
 })
+onActivated(activatePage)
+onDeactivated(deactivatePage)
+onBeforeUnmount(deactivatePage)
 </script>
 
 <template>
@@ -485,7 +573,7 @@ onDeactivated(() => {
                 :disabled="!canManageProducts || (!editingProduct.isActive && form.o2oStatus !== 'listed')" />
             </el-form-item>
             <el-form-item label="单人限购">
-              <el-input-number v-model="form.limitPerUser" :min="1" :max="Math.max(999999, editingProduct.limitPerUser)" :step="1" :disabled="!canManageProducts" controls-position="right" />
+              <PassiveNumberInput v-model="form.limitPerUser" :min="1" :max="Math.max(999999, editingProduct.limitPerUser)" :step="1" :disabled="!canManageProducts" style="width: 150px" />
             </el-form-item>
           </div>
           <el-form-item label="客户端推荐">

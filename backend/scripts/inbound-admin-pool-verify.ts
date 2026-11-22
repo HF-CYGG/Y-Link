@@ -12,42 +12,29 @@
 
 import 'reflect-metadata'
 import assert from 'node:assert/strict'
-import fs from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import type { AuthUserContext } from '../src/types/auth.js'
+import { createVerificationIsolation } from './verification-isolation.js'
 
-const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
-const sqlitePath = path.resolve(sqliteRoot, `inbound-admin-pool-${verifySeed}.sqlite`)
-
-process.env.APP_PROFILE = `inbound-admin-pool-${verifySeed}`
-process.env.DB_TYPE = 'sqlite'
+const isolation = createVerificationIsolation('inbound-admin-pool-verify')
+isolation.seal({ type: 'sqlite', database: path.join(isolation.rootDir, 'fixture.sqlite') })
 process.env.DB_SYNC = 'false'
-process.env.SQLITE_DB_PATH = sqlitePath
 process.env.INIT_ADMIN_PASSWORD = `Admin_${verifySeed}_Aa1!`
 
 const hoursLater = (hours: number) => new Date(Date.now() + hours * 60 * 60 * 1000).toISOString()
 
-function cleanupSqliteFile() {
-  for (const suffix of ['', '-shm', '-wal']) {
-    const target = `${sqlitePath}${suffix}`
-    if (fs.existsSync(target)) {
-      fs.rmSync(target, { force: true })
-    }
-  }
-}
-
 async function main() {
-  fs.mkdirSync(sqliteRoot, { recursive: true })
   const { AppDataSource } = await import('../src/config/data-source.js')
   const { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } = await import('../src/config/database-bootstrap.js')
+  const { BizInboundOrder } = await import('../src/entities/biz-inbound-order.entity.js')
   const { SysUser } = await import('../src/entities/sys-user.entity.js')
   const { inboundService } = await import('../src/services/inbound.service.js')
   const { productService } = await import('../src/services/product.service.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
 
+  await isolation.assertTarget(AppDataSource)
   prepareDatabaseRuntime()
   await AppDataSource.initialize()
   try {
@@ -67,7 +54,7 @@ async function main() {
     const supplier = await userRepo.save(userRepo.create({
       username: `inbound-pool-supplier-${verifySeed}`,
       passwordHash: 'verify-only',
-      displayName: '送货单池验证供货方',
+      displayName: '送货单池_验证供货方',
       email: null,
       role: 'supplier',
       status: 'enabled',
@@ -90,8 +77,8 @@ async function main() {
       productCode: `INBOUND-POOL-${verifySeed}`,
       productName: `送货单池验证商品-${verifySeed}`,
       pinyinAbbr: 'SHDCYZ',
-      defaultPrice: 10,
-      discountRate: 10,
+      defaultPrice: 12.34,
+      discountRate: 8.5,
       isActive: true,
       o2oStatus: 'unlisted',
       currentStock: 0,
@@ -128,8 +115,33 @@ async function main() {
     const emptyPool = await inboundService.listInboundOrderPool(adminActor, {})
     assert.deepEqual(emptyPool.poolCounts, { all: 0, pending: 0, verified: 0 }, '被拒绝的提交不得留下任何送货单')
 
+    const todayPrefix = `IN${new Date().toISOString().slice(0, 10).replaceAll('-', '')}`
+    const inboundOrderRepo = AppDataSource.getRepository(BizInboundOrder)
+    for (const suffix of ['9999', '10000']) {
+      await inboundOrderRepo.insert({
+        showNo: todayPrefix + suffix, verifyCode: randomUUID(), supplierId: supplier.id,
+        supplierName: supplier.displayName, status: 'cancelled', totalQty: '1.00',
+      })
+    }
+
     // 三张待入库 + 一张已入库 + 一张已撤销，撤销单不应出现在送货单池。
     const laterDelivery = await submitDelivery(hoursLater(48), 2)
+    assert.equal(laterDelivery.order.showNo, todayPrefix + '10001', '已有五位流水时按数字后缀续编')
+    for (const detail of [
+      laterDelivery,
+      await inboundService.detailByShowNo(laterDelivery.order.showNo, supplierActor),
+      await inboundService.detailByVerifyCode(laterDelivery.order.verifyCode, supplierActor),
+    ]) {
+      const skuJson = JSON.parse(JSON.stringify(detail.items[0]?.sku))
+      assert.equal(Number(skuJson.defaultPrice), 0)
+      assert.equal(Number(skuJson.discountRate), 10)
+      assert.equal(Number(skuJson.currentStock), 0)
+      assert.equal(Number(skuJson.preOrderedStock), 0)
+      assert.equal(Object.hasOwn(skuJson, 'costPrice'), false)
+    }
+    const adminSku = (await inboundService.detailByShowNo(laterDelivery.order.showNo, adminActor)).items[0]?.sku
+    assert.equal(Number(adminSku?.defaultPrice), 12.34, '管理员仍可读取售价')
+    assert.equal(Number(adminSku?.discountRate), 8.5, '管理员仍可读取真实折扣')
     const soonerDelivery = await submitDelivery(hoursLater(6), 3)
     const middleDelivery = await submitDelivery(hoursLater(24), 4)
     const verifiedDelivery = await submitDelivery(hoursLater(12), 5)
@@ -170,6 +182,10 @@ async function main() {
 
     const keywordPool = await inboundService.listInboundOrderPool(adminActor, { keyword: soonerDelivery.order.showNo, pageSize: 50 })
     assert.deepEqual(keywordPool.records.map((order) => order.id), [soonerDelivery.order.id], '关键词必须按送货单号命中')
+    for (const keyword of ['%', '_验']) {
+      const wanted = keyword === '%' ? 0 : allPool.total
+      assert.equal((await inboundService.listInboundOrderPool(adminActor, { keyword })).total, wanted)
+    }
 
     // 新单提醒：以上一轮返回的 latestOrderId 为基准统计新增待入库单据。
     const baselineOrderId = allPool.latestOrderId
@@ -249,12 +265,12 @@ async function main() {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()
     }
-    cleanupSqliteFile()
+    isolation.cleanup()
   }
 }
 
 main().catch((error) => {
   console.error(`[inbound-admin-pool-verify] 验证失败：${error instanceof Error ? error.stack ?? error.message : String(error)}`)
-  cleanupSqliteFile()
+  isolation.cleanup()
   process.exitCode = 1
 })

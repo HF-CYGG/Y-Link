@@ -1,0 +1,149 @@
+{
+  "format": 1,
+  "revision": "11.21.2-ylink.1",
+  "files": [
+    {
+      "path": "package.json",
+      "beforeSha256": "b6e9315ebb177a93b5faa372fae5f0215fdf3005909ab74ae6dfb8dfe63dc147",
+      "afterSha256": "c63c6d68ee5dc30f532c448fe6ef4c7219efa1b5d003b51017bfc2f0df598683",
+      "edits": [
+        {
+          "field": [
+            "version"
+          ],
+          "before": "11.21.2",
+          "after": "11.21.2-ylink.1"
+        },
+        {
+          "field": [
+            "dependencies",
+            "glob"
+          ],
+          "before": "^13.0.6",
+          "after": "14.0.2"
+        },
+        {
+          "field": [
+            "dependencies",
+            "minimatch"
+          ],
+          "before": "^10.2.5",
+          "after": "11.0.1"
+        }
+      ]
+    },
+    {
+      "path": "node_modules/@npmcli/arborist/package.json",
+      "beforeSha256": "df0a95f15021d3cb892047195ee24fe6cd78bc8ad5f302f5acc7f8d97848183b",
+      "afterSha256": "a79e59dda7f590dc2922de4bfeae1a1e3dac5a1f30cbc85d1d44015407a8329e",
+      "edits": [
+        {
+          "field": [
+            "dependencies",
+            "minimatch"
+          ],
+          "before": "^10.0.3",
+          "after": "11.0.1"
+        }
+      ]
+    },
+    {
+      "path": "node_modules/@npmcli/map-workspaces/package.json",
+      "beforeSha256": "4e5e0897f2ba236dbb738a523c4d95139cd9cc12acfeeb3aaa546464397bb994",
+      "afterSha256": "3bb6aac44f595265267a68d3bc58c953160f100fcf728e989851ca79bbb0b1e1",
+      "edits": [
+        {
+          "field": [
+            "dependencies",
+            "glob"
+          ],
+          "before": "^13.0.0",
+          "after": "14.0.2"
+        },
+        {
+          "field": [
+            "dependencies",
+            "minimatch"
+          ],
+          "before": "^10.0.3",
+          "after": "11.0.1"
+        }
+      ]
+    },
+    {
+      "path": "node_modules/@npmcli/package-json/package.json",
+      "beforeSha256": "9441c601599b8b032ec8c58c786d443849dbb91c992ab05af9bc6b0ca90e6c55",
+      "afterSha256": "b0b1658267b9f8746bc5683dd786c818a0d808d1ac67f8631f342191ea2385ff",
+      "edits": [
+        {
+          "field": [
+            "dependencies",
+            "glob"
+          ],
+          "before": "^13.0.0",
+          "after": "14.0.2"
+        }
+      ]
+    },
+    {
+      "path": "node_modules/@tufjs/models/package.json",
+      "beforeSha256": "664120e5d3f92ec6472b9e6f7463078eba6e24e4c7cdfc54b90c37e724271984",
+      "afterSha256": "917d4cf6aadb47d7c9bba706d18f267798920b27e16c6d4da8cfa3caebd5ee7b",
+      "edits": [
+        {
+          "field": [
+            "dependencies",
+            "minimatch"
+          ],
+          "before": "^10.1.1",
+          "after": "11.0.1"
+        }
+      ]
+    },
+    {
+      "path": "node_modules/cacache/package.json",
+      "beforeSha256": "9065ec2ec01da8b31cb872e6c4ccb80cb8791313fc80d292620e9b217b5b2d11",
+      "afterSha256": "00d3ab58f4e44178501ef25fc9a913ba5407cfed66e74235cd3d09d9787c8176",
+      "edits": [
+        {
+          "field": [
+            "dependencies",
+            "glob"
+          ],
+          "before": "^13.0.0",
+          "after": "14.0.2"
+        }
+      ]
+    },
+    {
+      "path": "node_modules/ignore-walk/package.json",
+      "beforeSha256": "50d9f31359090c64a83515b51e950171426eff75efe9419347392244402c7990",
+      "afterSha256": "9fd4950d34af1de1d5f7b478795e69ff170e86843334d1018779bfed12b30cfb",
+      "edits": [
+        {
+          "field": [
+            "dependencies",
+            "minimatch"
+          ],
+          "before": "^10.0.3",
+          "after": "11.0.1"
+        }
+      ]
+    },
+    {
+      "path": "node_modules/libnpmdiff/package.json",
+      "beforeSha256": "44c4aa6b1d0accff9f2c723b6795a9c1692eb5af4f5087307cc2540c3488cd49",
+      "afterSha256": "8118be71b9eb07297836aa12b0d13aba83562c7757b0fc3f3b42f53123bdcee6",
+      "edits": [
+        {
+          "field": [
+            "dependencies",
+            "minimatch"
+          ],
+          "before": "^10.0.3",
+          "after": "11.0.1"
+        }
+      ]
+    }
+  ]
+}

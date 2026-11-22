@@ -1,0 +1,322 @@
+{
+  "schema": 1,
+  "distro": "bookworm",
+  "phase": "生产源码候选；未构建、未审查、未正式验收",
+  "candidateDate": "2026-11-18",
+  "localRevisionPolicy": "原精确版本+ylink本地修订；不是官方安全包",
+  "sourceDateEpoch": 1794873600,
+  "components": [
+    {
+      "source": "util-linux",
+      "version": "2.38.1-5+deb12u3",
+      "revision": "2.38.1-5+deb12u3+ylink1",
+      "integration": "已接既有libblkid1窄回补链；旧dos.c/53615补丁保留，未构建",
+      "candidatePatches": [
+        {
+          "name": "libblkid-partition-storage",
+          "upstreamCommit": "132d9c8aa15a8efd0a23d8ca7ed8b98f365e84fa",
+          "upstreamPatchSha256": "935ae9372061b9988c58297d1d5b12aa04cbc01e538e8606d0103b401f68de1c",
+          "productionPatch": "patches/libblkid-partition-storage.diff",
+          "productionPatchSha256": "c8a99cde8e820178052d32f15542fdd2b022d8f2ddfc4e870bf1173033885919",
+          "adaptation": "realloc",
+          "scope": [
+            "CVE-2026-13595"
+          ],
+          "upstreamPatch": "patches/libblkid-partition-storage.upstream.patch",
+          "targets": [
+            {
+              "path": "libblkid/src/partitions/partitions.c",
+              "beforeSha256": "e5439339f2054298851181f8e44a5533f049a80ce658bb5b9c2506e58c3d30ee",
+              "afterSha256": "ad12ab2888ce5f812f614bd51a8b561a2552a87e536692880647e9f83c06fead"
+            }
+          ],
+          "strictStaticApply": {
+            "checkExit": 0,
+            "applyExit": 0,
+            "fuzz": false,
+            "execution": "仅Git文本应用；不是运行、编译或安全回归"
+          }
+        }
+      ],
+      "notClosed": [
+        "CVE-2026-53613",
+        "CVE-2026-78410"
+      ],
+      "compatibility": "仅不透明partlist私有存储改为稳定分配的对象指针数组；保留旧realloc接口和分区公开API。运行兼容/ABI仍待验收"
+    },
+    {
+      "source": "openssl",
+      "version": "3.0.22-1~deb12u2",
+      "revision": "3.0.22-1~deb12u2+ylink1",
+      "integration": "未接构建或运行安装；系统3.0与Node/Alpine副本分开",
+      "originAuthentication": {
+        "receipt": "hardening/20261117-source-inputs/stage008/source-auth-static-report-008.md",
+        "inReleaseSha256": "d5876b12101ba0847a00f4fb1a27562eaa04c94f6cc489ffbfdad47badee91ef",
+        "sourcesSha256": "30dbb2b083c4446882a009c0bd2cac37b83de5bfa61889ac86d458d0af03a1f8",
+        "exactEntrySha256": "bc5a54c55019331b683b5e1937bce5898795165e9001e521fc5df26423afa7aa"
+      },
+      "files": [
+        {
+          "name": "openssl_3.0.22-1~deb12u2.dsc",
+          "bytes": 2742,
+          "sha256": "7c45299a4363febec120676393d4314841c7c50da244a6e6a256f072d632d337",
+          "url": "https://security.debian.org/debian-security/pool/updates/main/o/openssl/openssl_3.0.22-1~deb12u2.dsc"
+        },
+        {
+          "name": "openssl_3.0.22.orig.tar.gz",
+          "bytes": 15330396,
+          "sha256": "67ebca7e50d17383028045486653492195b83db95f8558709701bb47b5c1ef81",
+          "url": "https://mirrors.ustc.edu.cn/debian-security/pool/updates/main/o/openssl/openssl_3.0.22.orig.tar.gz"
+        },
+        {
+          "name": "openssl_3.0.22.orig.tar.gz.asc",
+          "bytes": 931,
+          "sha256": "b0cc4a379a7731c3a74c349f6756d85253d83099fd63352cf12407bce4395d19",
+          "url": "https://security.debian.org/debian-security/pool/updates/main/o/openssl/openssl_3.0.22.orig.tar.gz.asc"
+        },
+        {
+          "name": "openssl_3.0.22-1~deb12u2.debian.tar.xz",
+          "bytes": 72104,
+          "sha256": "48971306c5df8124daea7f2bd0de2be7d711e18f2f53711c11327293732e42aa",
+          "url": "https://security.debian.org/debian-security/pool/updates/main/o/openssl/openssl_3.0.22-1~deb12u2.debian.tar.xz"
+        }
+      ],
+      "candidatePatches": [
+        {
+          "name": "openssl30-ec-order",
+          "upstreamCommit": "a957a4bfc0b9691b20c9036b6ecc110f89f8d15c",
+          "upstreamPatchSha256": "6a1df1152e7a1bc3becfcdd90a757b401b7a7a739ad214bd61c74d603a498f28",
+          "productionPatch": "patches/openssl30-ec-order.diff",
+          "productionPatchSha256": "389eb093d43e275b9e93497786bf9548d7725d0a8acdc3b9ee4dbc696e561d82",
+          "adaptation": null,
+          "scope": [
+            "CVE-2026-107496"
+          ],
+          "upstreamPatch": "patches/openssl30-ec-order.upstream.patch",
+          "targets": [
+            {
+              "path": "crypto/ec/ec_key.c",
+              "beforeSha256": "fb0196d8c09a74bdd0308c3ad3bfb84b880463d60eb69e6676cea90f9c18d83b",
+              "afterSha256": "17dc5d9fdd05e7488074ff84884f348e5346dda3a6661e03e2ece102b77a6102"
+            }
+          ],
+          "strictStaticApply": {
+            "checkExit": 0,
+            "applyExit": 0,
+            "fuzz": false,
+            "execution": "仅Git文本应用；不是运行、编译或安全回归"
+          }
+        },
+        {
+          "name": "openssl30-pem-preserve-stack",
+          "upstreamCommit": "7174737196dfc563c14719f51f7187dfda90dbe3",
+          "upstreamPatchSha256": "c30ea0476ca9cd36b31a6e552d8c06b85dbe9a52d832907d2799ddbe54a14abf",
+          "productionPatch": "patches/openssl30-pem-preserve-stack.diff",
+          "productionPatchSha256": "9e357f5bcad66b6b5658e405e01fcc2104fcbe24b92d911d315e5349c315867f",
+          "adaptation": "pem",
+          "scope": [
+            "CVE-2026-107493"
+          ],
+          "upstreamPatch": "patches/openssl30-pem-preserve-stack.upstream.patch",
+          "targets": [
+            {
+              "path": "crypto/pem/pem_info.c",
+              "beforeSha256": "938557f60d803cfb617708108ffb8b128bbca9268bb79857bbdf331441a93334",
+              "afterSha256": "18dac6be24ffbb88069c8e6cb2df7e2f6bc09daa188fd836ccb6ab56ce73e7f4"
+            }
+          ],
+          "strictStaticApply": {
+            "checkExit": 0,
+            "applyExit": 0,
+            "fuzz": false,
+            "execution": "仅Git文本应用；不是运行、编译或安全回归"
+          }
+        }
+      ],
+      "upstreamBranch": "master；不是已核实的官方3.0维护分支专属补丁",
+      "compatibility": "保留3.0旧d2i函数指针、malloc错误码、BIO/FILE包装与成功解析路径；失败时仅弹出释放本次新增stack项；provider/engine/SONAME均未改",
+      "packagingGate": "按原真实已安装二进制包选择完整DEB；不能仅凭SBOM来源条目决定安装openssl CLI"
+    },
+    {
+      "source": "perl",
+      "version": "5.36.0-7+deb12u4",
+      "revision": "5.36.0-7+deb12u4+ylink1",
+      "integration": "未接构建或运行安装；有语义和内部布局兼容待决项",
+      "originAuthentication": {
+        "receipt": "hardening/20261117-source-inputs/stage008/source-auth-static-report-008.md",
+        "inReleaseSha256": "d5876b12101ba0847a00f4fb1a27562eaa04c94f6cc489ffbfdad47badee91ef",
+        "sourcesSha256": "30dbb2b083c4446882a009c0bd2cac37b83de5bfa61889ac86d458d0af03a1f8",
+        "exactEntrySha256": "ffffde6e3b8b52e89bf0526a209703b8b7cbb2f45bb629f644079ec6bbe5abd2"
+      },
+      "files": [
+        {
+          "name": "perl_5.36.0-7+deb12u4.dsc",
+          "bytes": 2922,
+          "sha256": "6f71e571ae69894ad2115013bbc3207e77dc796581e30a62be0297e7d90ee7b9",
+          "url": "https://security.debian.org/debian-security/pool/updates/main/p/perl/perl_5.36.0-7+deb12u4.dsc"
+        },
+        {
+          "name": "perl_5.36.0.orig-regen-configure.tar.xz",
+          "bytes": 417784,
+          "sha256": "10ac353bc5a933403afe60ed1817e7a456f99bdbcaf80c1cdb0eb3a08ea56d4e",
+          "url": "https://mirrors.ustc.edu.cn/debian/pool/main/p/perl/perl_5.36.0.orig-regen-configure.tar.xz"
+        },
+        {
+          "name": "perl_5.36.0.orig.tar.xz",
+          "bytes": 13051500,
+          "sha256": "0f386dccbee8e26286404b2cca144e1005be65477979beb9b1ba272d4819bcf0",
+          "url": "https://mirrors.ustc.edu.cn/debian/pool/main/p/perl/perl_5.36.0.orig.tar.xz"
+        },
+        {
+          "name": "perl_5.36.0-7+deb12u4.debian.tar.xz",
+          "bytes": 190620,
+          "sha256": "f49d224fa9a6a356e1140f95fb5c864864b5423c9aece94cc68b4d348a3694b6",
+          "url": "https://security.debian.org/debian-security/pool/updates/main/p/perl/perl_5.36.0-7+deb12u4.debian.tar.xz"
+        }
+      ],
+      "preExistingTargetPatch": {
+        "name": "fixes/CVE-2026-19487.diff",
+        "sha256": "4bec40ff468fe6a791ae59f142eb9f625bd3f3fc005b4aa84f4213516501b52c",
+        "retained": true
+      },
+      "candidatePatches": [
+        {
+          "name": "perl536-poscache-countdown",
+          "upstreamCommit": "568e6fd238867bb9e99fa3f47cba3169009239e0",
+          "upstreamPatchSha256": "b763455236629383cf720ae6e60cfa42ce01e23728693a779abb8275f90a9e40",
+          "productionPatch": "patches/perl536-poscache-countdown.diff",
+          "productionPatchSha256": "978b738bd6430f4162aebd739fa0b3ef459a7c8c812757435df5ad8b391571ec",
+          "adaptation": "flags",
+          "scope": [
+            "CVE-2026-15534前置"
+          ],
+          "upstreamPatch": "patches/perl536-poscache-countdown.upstream.patch",
+          "targets": [
+            {
+              "path": "regexec.c",
+              "beforeSha256": "74ea33ae058c040cf948c3e75d97e8032e3d59faa0f5eab5021b918605397b4f",
+              "afterSha256": "fad6cdff34947f24ab1b000409f27b7bfdcbfccc75fadafff5f895574754b1c3"
+            }
+          ],
+          "strictStaticApply": {
+            "checkExit": 0,
+            "applyExit": 0,
+            "fuzz": false,
+            "execution": "仅Git文本应用；不是运行、编译或安全回归"
+          }
+        },
+        {
+          "name": "perl536-poscache-width",
+          "upstreamCommit": "54cf3d44cbbedd17d774e9a37921963e8fd5d0cb",
+          "upstreamPatchSha256": "c7cc877ae64338c3a91398116d34ae9bb76c8835632f3259aa205eb70ded920a",
+          "productionPatch": "patches/perl536-poscache-width.diff",
+          "productionPatchSha256": "f7a28be72b054de1e5a569cd7e22bc3580359442ca2b9c2091359eb93455359d",
+          "adaptation": "flags",
+          "scope": [
+            "CVE-2026-15534"
+          ],
+          "upstreamPatch": "patches/perl536-poscache-width.upstream.patch",
+          "targets": [
+            {
+              "path": "regexec.c",
+              "beforeSha256": "fad6cdff34947f24ab1b000409f27b7bfdcbfccc75fadafff5f895574754b1c3",
+              "afterSha256": "1d6c4b0b03c71a8182149151269c99fb971cbbf36f8e127628081f86475e3dfe"
+            },
+            {
+              "path": "regexp.h",
+              "beforeSha256": "1443bf0b86b7104ab7f3c61e77132d8e0a3316a08d2c3e84502b5821d7a0812c",
+              "afterSha256": "4208851913cbe325977e68a55c418d3cd5c525d699097a10487afd8fbe65627a"
+            }
+          ],
+          "strictStaticApply": {
+            "checkExit": 0,
+            "applyExit": 0,
+            "fuzz": false,
+            "execution": "仅Git文本应用；不是运行、编译或安全回归"
+          }
+        }
+      ],
+      "adaptation": "仅将生产上下文FLAGS(scan)转为5.36真实scan->flags；未擅自改上游条件或缓存算法",
+      "blockers": [
+        "官方第二提交的长度守卫失败分支未给poscache_iter赋值，但后续仍读取/递减它；旧入口只初始化poscache_maxiter。尚无额外防线裁决，不能称此路径安全。",
+        "regexp.h的regmatch_info中两个I32改为STRLEN，公开头可见且64位布局改变；需确认全部实际消费者边界，不能仅凭内部使用假设宣称ABI不变。"
+      ],
+      "packagingGate": "旧精确dpkg证据仅支持perl-base，SBOM中perl为同描述来源聚合；不得由来源名安装完整perl/libperl/模块或新增运行依赖"
+    },
+    {
+      "source": "coreutils",
+      "version": "9.1-1",
+      "revision": "9.1-1+ylink1",
+      "integration": "未接构建或运行安装；仅5278生产改动，未搬入56391/56392",
+      "originAuthentication": {
+        "receipt": "hardening/20261117-source-inputs/static-system-006/static-system-report-006.md",
+        "inReleaseSha256": "77737fa4b34f2693e982cc9ee35736816c35a7778fc2d326cc1bbf5b301fe1aa",
+        "sourcesSha256": "92d11a035571df011f06f28c61cb9825130ef1d92abb2f2e0525e8674dc44af8"
+      },
+      "files": [
+        {
+          "name": "coreutils_9.1-1.dsc",
+          "bytes": 1848,
+          "sha256": "2f2fca0a07a1a3f38e3ebeb4cbd97e97e675e77bed84f3e9d0b7e5da4cde75fc"
+        },
+        {
+          "name": "coreutils_9.1.orig.tar.xz",
+          "bytes": 5712104,
+          "sha256": "61a1f410d78ba7e7f37a5a4f50e6d1320aca33375484a3255eddf17a38580423"
+        },
+        {
+          "name": "coreutils_9.1-1.debian.tar.xz",
+          "bytes": 30624,
+          "sha256": "45d4ae88d933a7d713ef038943e818a2488e759b6196a409788744cbc6df1832"
+        }
+      ],
+      "candidatePatches": [
+        {
+          "name": "coreutils-sort-field-bounds",
+          "upstreamCommit": "8c9602e3a145e9596dc1a63c6ed67865814b6633",
+          "upstreamPatchSha256": "382956d973e753726fd02f2f2e1e124a893bb8f6004cf68b976b27ee37fd0ae6",
+          "productionPatch": "patches/coreutils-sort-field-bounds.diff",
+          "productionPatchSha256": "2d3d799e3141c51d96743ecc4781b66e41d80f913c931ccaa83762245e331af3",
+          "adaptation": null,
+          "scope": [
+            "CVE-2025-5278"
+          ],
+          "upstreamPatch": "patches/coreutils-sort-field-bounds.upstream.patch",
+          "targets": [
+            {
+              "path": "src/sort.c",
+              "beforeSha256": "8ebb33a1f0258c4654a0b2d49da8cc9a0080166e93ef781ccb93e7471975d2a2",
+              "afterSha256": "9a84c780edbed90fbc01c93f5a83d967b2a3b274c715c770bacdfe1cf9225ad2"
+            }
+          ],
+          "strictStaticApply": {
+            "checkExit": 0,
+            "applyExit": 0,
+            "fuzz": false,
+            "execution": "仅Git文本应用；不是运行、编译或安全回归"
+          }
+        }
+      ],
+      "compatibility": "先比较剩余字节数再做有界指针移动；保留旧sort选项、locale及所有其它coreutils工具，正式包必须保留完整载荷/UID/modes/维护脚本"
+    }
+  ],
+  "verificationPolicy": {
+    "formalQa": "未运行；本次仅源码适配诊断",
+    "upstreamTests": "完整官方参考补丁不参与quilt生产应用；未执行其中测试",
+    "packagingTestBehavior": {
+      "openssl": "精确Debian rules默认运行build_static/shared及可选优化flavour的make test；包含平台禁止场景时该入口受阻，不能直接执行或宣称完整通过",
+      "perl": "精确Debian rules默认经dh_auto_test执行static/shared测试；既有Debian安全测试原样保留，禁止在未对账平台边界前执行",
+      "coreutils": "精确Debian rules的override_dh_auto_test为空，打包不会自动运行其上游suite；不得声称原生测试通过",
+      "util-linux": "既有build-backports入口调用dpkg-buildpackage并保留默认测试；原生被禁触发器未运行，不以配置存在声称通过"
+    },
+    "blockedTriggers": "不执行、不改写绕过malformed PEM、故障写、QUIC reset flood、mount races及此前被阻断原生触发器",
+    "notVerified": [
+      "编译/打包",
+      "完整DEB文件/控制元数据/维护脚本",
+      "新旧ABI与动态依赖",
+      "有效输入兼容",
+      "最终镜像SBOM/载荷",
+      "原生安全动态证明"
+    ]
+  }
+}

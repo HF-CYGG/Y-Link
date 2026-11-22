@@ -6,19 +6,36 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
-import { AppDataSource } from '../src/config/data-source.js'
-import { BizOutboundOrder } from '../src/entities/biz-outbound-order.entity.js'
-import { BizOutboundOrderItem } from '../src/entities/biz-outbound-order-item.entity.js'
-import { BaseProduct } from '../src/entities/base-product.entity.js'
-import { BaseProductSku } from '../src/entities/base-product-sku.entity.js'
-import { BusinessSequence } from '../src/entities/business-sequence.entity.js'
-import { InventoryLog } from '../src/entities/inventory-log.entity.js'
-import { SystemConfig } from '../src/entities/system-config.entity.js'
-import { SysAuditLog } from '../src/entities/sys-audit-log.entity.js'
-import { SysUser } from '../src/entities/sys-user.entity.js'
-import { orderService } from '../src/services/order.service.js'
-import { orderSerialService } from '../src/services/order-serial.service.js'
 import type { AuthUserContext } from '../src/types/auth.js'
+import { createVerificationIsolation } from './verification-isolation.js'
+
+const backendRoot = process.cwd()
+const isolation = createVerificationIsolation('task6')
+process.env.NODE_ENV = 'test'
+process.env.SQLITE_BUSY_TIMEOUT_MS = '5000'
+isolation.seal({ type: 'sqlite', database: path.join(isolation.rootDir, 'unused.sqlite') })
+
+const [
+  { AppDataSource }, { BizOutboundOrder }, { BizOutboundOrderItem }, { BaseProduct }, { BaseProductSku },
+  { BusinessSequence }, { InvSkuLocationStock }, { InventoryLog }, { O2oPreorder }, { SystemConfig },
+  { SysAuditLog }, { SysUser }, { orderService }, { orderSerialService },
+] = await Promise.all([
+  import('../src/config/data-source.js'),
+  import('../src/entities/biz-outbound-order.entity.js'),
+  import('../src/entities/biz-outbound-order-item.entity.js'),
+  import('../src/entities/base-product.entity.js'),
+  import('../src/entities/base-product-sku.entity.js'),
+  import('../src/entities/business-sequence.entity.js'),
+  import('../src/entities/inv-sku-location-stock.entity.js'),
+  import('../src/entities/inventory-log.entity.js'),
+  import('../src/entities/o2o-preorder.entity.js'),
+  import('../src/entities/system-config.entity.js'),
+  import('../src/entities/sys-audit-log.entity.js'),
+  import('../src/entities/sys-user.entity.js'),
+  import('../src/services/order.service.js'),
+  import('../src/services/order-serial.service.js'),
+])
+await isolation.assertTarget(AppDataSource)
 
 /**
  * Task 6 自动化验证脚本（无需真实 MySQL）：
@@ -37,6 +54,9 @@ interface OrderRecord {
   systemNo: string
   businessNo: string
   idempotencyKey: string
+  creatorUserId: string
+  submitRequestHash: string | null
+  isDeleted: boolean
   customerName: string | null
   remark: string | null
   totalQty: string
@@ -70,6 +90,11 @@ interface AuditLogRecord {
   ipAddress: string | null
   userAgent: string | null
 }
+
+type ProductRecord = Pick<InstanceType<typeof BaseProduct>, 'id' | 'productName' | 'isActive' | 'currentStock' | 'preOrderedStock'>
+type SkuRecord = Pick<InstanceType<typeof BaseProductSku>,
+  'id' | 'productId' | 'skuCode' | 'specText' | 'currentStock' | 'preOrderedStock' | 'isActive' | 'isCurrent' | 'locationId'>
+type InventoryLogRecord = Partial<InstanceType<typeof InventoryLog>>
 
 /**
  * 统一断言输出，失败时抛错并让 npm script 直接退出非 0。
@@ -192,6 +217,7 @@ function findOrderByWhere(
 
 function createOrderRepository(
   stagedOrders: OrderRecord[],
+  stagedItems: ItemRecord[],
   getNextOrderId: () => string,
 ) {
   return {
@@ -202,19 +228,36 @@ function createOrderRepository(
       return { ...args } as OrderRecord
     },
     async save(args: OrderRecord) {
-      const row = { ...args, id: getNextOrderId() }
+      const row = { ...args, id: getNextOrderId(), isDeleted: args.isDeleted ?? false }
       stagedOrders.push(row)
       return row
     },
     async find() {
       return []
     },
-    createQueryBuilder() {
+    createQueryBuilder(alias: string) {
       let businessNo = ''
       let orderUuid = ''
+      let idempotencyKey: string | undefined
+      let joinFilters: { actorId: string; isDeleted: boolean; submitRequestHash: string } | undefined
+      let orderItemsByLineNo = false
       return {
-        where(_sql: string, params: { businessNo?: string }) {
-          businessNo = params.businessNo ?? ''
+        leftJoinAndSelect(relation: string, alias: string, condition: string, filters: NonNullable<typeof joinFilters>) {
+          assert.equal(relation, 'outbound.items')
+          assert.equal(alias, 'item')
+          assert.match(condition, /outbound\.creatorUserId\s*=\s*:actorId/)
+          assert.match(condition, /outbound\.isDeleted\s*=\s*:isDeleted/)
+          assert.match(condition, /outbound\.submitRequestHash\s*=\s*:submitRequestHash/)
+          joinFilters = filters
+          return this
+        },
+        where(sql: string, params: { businessNo?: string; idempotencyKey?: string }) {
+          if (alias === 'outbound') {
+            assert.match(sql.trim(), /^outbound\.idempotencyKey\s*=\s*:idempotencyKey$/, '重放查询必须按幂等键列查找订单')
+            idempotencyKey = params.idempotencyKey
+          } else {
+            businessNo = params.businessNo ?? ''
+          }
           return this
         },
         andWhere(_sql: string, params: { orderUuid?: string }) {
@@ -222,6 +265,22 @@ function createOrderRepository(
           return this
         },
         setLock() { return this },
+        orderBy(column: string, direction: 'ASC' | 'DESC') {
+          assert.equal(column, 'item.lineNo')
+          orderItemsByLineNo = direction === 'ASC'
+          return this
+        },
+        async getOne() {
+          const order = findOrderByWhere(stagedOrders, { idempotencyKey })
+          if (!order) return null
+          // 左连接条件只限制明细，仍返回命中幂等键的主单，由服务决定是否拒绝重放。
+          const items = joinFilters && order.creatorUserId === joinFilters.actorId
+            && order.isDeleted === joinFilters.isDeleted && order.submitRequestHash === joinFilters.submitRequestHash
+            ? stagedItems.filter((item) => item.orderId === order.id)
+            : []
+          if (orderItemsByLineNo) items.sort((a, b) => a.lineNo - b.lineNo)
+          return { ...order, items }
+        },
         async getExists() {
           return stagedOrders.some((order) => order.businessNo === businessNo && order.orderUuid !== orderUuid)
         },
@@ -261,7 +320,7 @@ function createOrderItemRepository(
   }
 }
 
-function createProductRepository(products: Array<{ id: string; productName: string; isActive: boolean }>) {
+function createProductRepository(products: ProductRecord[]) {
   /**
    * 模拟 TypeORM QueryBuilder：
    * - orderService 当前通过 createQueryBuilder + IN 条件查询启用产品；
@@ -286,13 +345,16 @@ function createProductRepository(products: Array<{ id: string; productName: stri
         return this
       },
       async getMany() {
-        return filtered
+        return filtered.map((product) => ({ ...product }))
       },
     }
   }
 
   return {
-    async update() {
+    async update({ id }: { id: string }, { currentStock }: { currentStock: number }) {
+      const product = products.find((row) => row.id === id)
+      assert.ok(product, '被更新的商品必须存在')
+      product.currentStock = currentStock
       return { affected: 1 }
     },
     async find(args: { where: Array<{ id: string; isActive: boolean }> }) {
@@ -331,8 +393,10 @@ function createMockManager(
   stagedOrders: OrderRecord[],
   stagedItems: ItemRecord[],
   stagedAuditLogs: AuditLogRecord[],
+  stagedInventoryLogs: InventoryLogRecord[],
   serialConfigState: Map<string, string>,
-  products: Array<{ id: string; productName: string; isActive: boolean }>,
+  products: ProductRecord[],
+  skus: SkuRecord[],
   shouldFailOnItemSaveRef: { value: boolean },
   opts: {
     getNextOrderId: () => string
@@ -348,7 +412,7 @@ function createMockManager(
     getRepository: (entity: unknown) => {
       const getRepo = () => {
         if (entity === BizOutboundOrder) {
-          return createOrderRepository(stagedOrders, getNextOrderId)
+          return createOrderRepository(stagedOrders, stagedItems, getNextOrderId)
         }
         if (entity === BizOutboundOrderItem) {
           return createOrderItemRepository(stagedItems, shouldFailOnItemSaveRef, getNextItemId)
@@ -358,27 +422,22 @@ function createMockManager(
         }
         if (entity === BaseProductSku) {
           return {
-            async update() { return { affected: 1 } },
+            async update({ id }: { id: string }, { currentStock }: { currentStock: number }) {
+              const sku = skus.find((row) => row.id === id)
+              assert.ok(sku, '被更新的规格必须存在')
+              sku.currentStock = currentStock
+              return { affected: 1 }
+            },
             async save(args: unknown) { return args },
             createQueryBuilder() {
+              let productIds: string[] = []
               return {
-                where() { return this },
-                andWhere() { return this },
+                where(_sql: string, params: { productIds: string[] }) { productIds = params.productIds; return this },
                 orderBy() { return this },
                 addOrderBy() { return this },
                 setLock() { return this },
                 async getMany() {
-                  return [{
-                    id: 'sku-1001',
-                    productId: '1001',
-                    skuCode: 'TASK6-DEFAULT',
-                    specText: '默认规格',
-                    defaultPrice: '12.50',
-                    currentStock: 100,
-                    preOrderedStock: 0,
-                    isActive: true,
-                    isCurrent: true,
-                  }]
+                  return skus.filter((sku) => productIds.includes(sku.productId)).map((sku) => ({ ...sku }))
                 },
               }
             },
@@ -390,21 +449,47 @@ function createMockManager(
         if (entity === BusinessSequence) {
           return createSequenceRepository(serialConfigState)
         }
-        if (entity === InventoryLog) {
+        // 本夹具没有预订单预留号或分库位库存行，保留生产查询的空结果语义。
+        if (entity === O2oPreorder) {
           return {
-            create(args: unknown) { return args },
-            async save(args: unknown) { return args },
+            createQueryBuilder() {
+              return { where() { return this }, async getExists() { return false } }
+            },
           }
         }
-        if (entity === SysUser) {
+        if (entity === InvSkuLocationStock) {
           return {
             createQueryBuilder() {
               return {
                 where() { return this },
                 orderBy() { return this },
+                addOrderBy() { return this },
+                async getMany() { return [] },
+              }
+            },
+          }
+        }
+        if (entity === InventoryLog) {
+          return {
+            create(args: InventoryLogRecord) { return { ...args } },
+            async save(args: InventoryLogRecord[]) {
+              stagedInventoryLogs.push(...args)
+              return args
+            },
+          }
+        }
+        if (entity === SysUser) {
+          return {
+            createQueryBuilder() {
+              let userIds: string[] = []
+              return {
+                where(where: { id: { value: string[] } }) { userIds = where.id.value; return this },
+                orderBy() { return this },
                 setLock() { return this },
                 async getMany() {
-                  return [{ id: '9001', username: 'verifier', displayName: '验证脚本', role: 'admin', status: 'enabled', deactivatedAt: null, restoredAt: null }]
+                  return ['9001', '9002'].filter((id) => userIds.includes(id)).map((id) => ({
+                    id, username: `verifier-${id}`, displayName: '验证脚本', role: 'admin', status: 'enabled', deactivatedAt: null, restoredAt: null,
+                  }))
                 },
               }
             },
@@ -429,8 +514,32 @@ async function verifyOrderTransactionAndNumbering() {
   const committedOrders: OrderRecord[] = []
   const committedItems: ItemRecord[] = []
   const committedAuditLogs: AuditLogRecord[] = []
+  const committedInventoryLogs: InventoryLogRecord[] = []
   const committedSerialConfigState = createSerialConfigState()
-  const products = [{ id: '1001', productName: '电缆', isActive: true }]
+  const products: ProductRecord[] = [
+    { id: '1001', productName: '电缆', isActive: true, currentStock: 100, preOrderedStock: 0 },
+    { id: '1002', productName: '开关', isActive: true, currentStock: 100, preOrderedStock: 0 },
+  ]
+  const skus: SkuRecord[] = products.map((product) => ({
+    id: `sku-${product.id}`,
+    productId: product.id,
+    skuCode: `TASK6-${product.id}`,
+    specText: '默认规格',
+    currentStock: product.currentStock,
+    preOrderedStock: product.preOrderedStock,
+    isActive: true,
+    isCurrent: true,
+    locationId: null,
+  }))
+  const readCommittedState = () => ({
+    orders: committedOrders,
+    items: committedItems,
+    auditLogs: committedAuditLogs,
+    inventoryLogs: committedInventoryLogs,
+    serialConfigs: committedSerialConfigState,
+    products,
+    skus,
+  })
   /**
    * 构建固定的验证操作者上下文：
    * - 显式声明返回 AuthUserContext，避免编辑器在增量诊断时把对象字面量推断为不完整类型；
@@ -438,7 +547,7 @@ async function verifyOrderTransactionAndNumbering() {
    */
   const createMockActor = (): AuthUserContext => ({
     userId: '9001',
-    username: 'verifier',
+    username: 'verifier-9001',
     displayName: '验证脚本',
     role: 'admin',
     status: 'enabled',
@@ -478,13 +587,18 @@ async function verifyOrderTransactionAndNumbering() {
     const stagedOrders = committedOrders.map((item) => ({ ...item }))
     const stagedItems = committedItems.map((item) => ({ ...item }))
     const stagedAuditLogs = committedAuditLogs.map((item) => ({ ...item }))
+    const stagedInventoryLogs = [...committedInventoryLogs]
     const stagedSerialConfigState = new Map(committedSerialConfigState)
+    const stagedProducts = products.map((product) => ({ ...product }))
+    const stagedSkus = skus.map((sku) => ({ ...sku }))
     const manager = createMockManager(
       stagedOrders,
       stagedItems,
       stagedAuditLogs,
+      stagedInventoryLogs,
       stagedSerialConfigState,
-      products,
+      stagedProducts,
+      stagedSkus,
       shouldFailOnItemSaveRef,
       {
         getNextOrderId: () => String(++orderSeq),
@@ -499,6 +613,9 @@ async function verifyOrderTransactionAndNumbering() {
     committedItems.push(...stagedItems)
     committedAuditLogs.length = 0
     committedAuditLogs.push(...stagedAuditLogs)
+    committedInventoryLogs.splice(0, committedInventoryLogs.length, ...stagedInventoryLogs)
+    products.splice(0, products.length, ...stagedProducts)
+    skus.splice(0, skus.length, ...stagedSkus)
     committedSerialConfigState.clear()
     stagedSerialConfigState.forEach((value, key) => {
       committedSerialConfigState.set(key, value)
@@ -507,33 +624,49 @@ async function verifyOrderTransactionAndNumbering() {
   }
 
   try {
-    const first = await orderService.submit(
-      {
-        idempotencyKey: 'task6-idem-0001',
-        customerName: '客户A',
-        remark: '首单',
-        items: [{ productId: '1001', qty: 2, unitPrice: 12.5 }],
-      },
-      mockActor,
-    )
+    const firstInput = {
+      idempotencyKey: 'task6-idem-0001',
+      customerName: '客户A',
+      remark: '首单',
+      items: [
+        { productId: '1002', qty: 1, unitPrice: 8 },
+        { productId: '1001', qty: 2, unitPrice: 12.5 },
+      ],
+    }
+    const first = await orderService.submit(firstInput, mockActor)
 
     assert.equal(committedOrders.length, 1)
-    assert.equal(committedItems.length, 1)
+    assert.equal(committedItems.length, 2)
     assert.equal(first.order.systemNo, 'OUT-W-000001')
     assert.equal(first.order.businessNo, 'hyyz000001')
+    assert.equal(first.idempotentReplay, false)
+    assert.equal(first.inventory.deductedQty, 3)
+    assert.equal(committedAuditLogs.length, 1)
+    assert.equal(committedInventoryLogs.length, 2)
+    assert.deepEqual(products.map((product) => product.currentStock), [98, 99])
+    assert.deepEqual(skus.map((sku) => sku.currentStock), [98, 99])
     pass('整单提交成功：主子表均写入且 systemNo/businessNo 独立生成首号')
 
-    const duplicated = await orderService.submit(
-      {
-        idempotencyKey: 'task6-idem-0001',
-        customerName: '客户A',
-        items: [{ productId: '1001', qty: 9, unitPrice: 99 }],
-      },
-      mockActor,
-    )
-    assert.equal(committedOrders.length, 1)
-    assert.equal(duplicated.order.id, first.order.id)
-    pass('幂等防重生效：重复 idempotencyKey 不重复落库')
+    committedItems.reverse()
+    const firstCommit = structuredClone(readCommittedState())
+    const duplicated = await orderService.submit(firstInput, mockActor)
+    assert.equal(duplicated.idempotentReplay, true)
+    assert.deepEqual(duplicated.order, first.order)
+    assert.deepEqual(duplicated.items, first.items, '重放明细必须按行号返回')
+    assert.deepEqual(duplicated.inventory, { deductedQty: 0, lines: [] })
+    assert.deepEqual(readCommittedState(), firstCommit, '重放不得再次写入订单、库存、审计或流水')
+
+    const idempotencyConflict = { statusCode: 409, message: '订单处理中，请稍后重试' }
+    await assert.rejects(orderService.submit({ ...firstInput, remark: '不同的请求内容' }, mockActor), idempotencyConflict)
+    await assert.rejects(orderService.submit(firstInput, { ...mockActor, userId: '9002', username: 'verifier-9002' }), idempotencyConflict)
+    committedOrders[0].isDeleted = true
+    try {
+      await assert.rejects(orderService.submit(firstInput, mockActor), idempotencyConflict)
+    } finally {
+      committedOrders[0].isDeleted = false
+    }
+    assert.deepEqual(readCommittedState(), firstCommit, '幂等冲突不得写入订单、库存、审计或流水')
+    pass('幂等防重生效：相同请求按行号重放；不同请求、不同账号和已删除订单统一返回冲突')
 
     shouldFailOnItemSaveRef.value = true
     await assert.rejects(
@@ -545,9 +678,9 @@ async function verifyOrderTransactionAndNumbering() {
         },
         mockActor,
       ),
+      { message: '模拟明细写入失败' },
     )
-    assert.equal(committedOrders.length, 1)
-    assert.equal(committedItems.length, 1)
+    assert.deepEqual(readCommittedState(), firstCommit, '明细写入失败后必须回滚事务中的全部写入')
     pass('事务回滚生效：明细写入失败时主表未脏写')
     shouldFailOnItemSaveRef.value = false
 
@@ -586,15 +719,15 @@ async function verifyOrderSerialStartsFromConfigStart() {
  * - 多端：开单页存在 PC/移动端分支、键盘流入口、共享抽屉编辑组件。
  */
 function verifySearchAndMultiDeviceByStaticChecks() {
-  const productServiceFile = path.resolve(process.cwd(), 'src/services/product.service.ts')
-  const orderEntryFile = path.resolve(process.cwd(), '../src/views/order-entry/OrderEntryView.vue')
-  const orderEntryItemsEditorFile = path.resolve(process.cwd(), '../src/views/order-entry/components/OrderEntryItemsEditor.vue')
+  const productServiceFile = path.resolve(backendRoot, 'src/services/product.service.ts')
+  const orderEntryFile = path.resolve(backendRoot, '../src/views/order-entry/OrderEntryView.vue')
+  const orderEntryItemsEditorFile = path.resolve(backendRoot, '../src/views/order-entry/components/OrderEntryItemsEditor.vue')
 
   const productServiceSource = fs.readFileSync(productServiceFile, 'utf8')
   const orderEntrySource = fs.readFileSync(orderEntryFile, 'utf8')
   const orderEntryItemsEditorSource = fs.readFileSync(orderEntryItemsEditorFile, 'utf8')
 
-  assert.match(productServiceSource, /p\.product_name LIKE :keyword OR p\.pinyin_abbr LIKE :keyword/)
+  assert.match(productServiceSource, /p\.product_name LIKE :keyword ESCAPE '!'\s+OR\s+p\.pinyin_abbr LIKE :keyword ESCAPE '!'/)
   assert.match(productServiceSource, /innerJoin\('rel_product_tag'/)
   pass('检索能力存在：后端已实现拼音模糊检索与标签过滤 SQL 条件')
 
@@ -610,6 +743,8 @@ async function main() {
   await verifyOrderSerialStartsFromConfigStart()
   await verifyOrderTransactionAndNumbering()
   verifySearchAndMultiDeviceByStaticChecks()
+  assert.equal(AppDataSource.isInitialized, false, 'Task6 不得初始化真实数据连接')
+  assert.equal(fs.existsSync(path.join(isolation.rootDir, 'unused.sqlite')), false, 'Task6 不得创建真实 SQLite 文件')
   // eslint-disable-next-line no-console
   console.log('\nTask6 自动化验证全部通过。')
 }

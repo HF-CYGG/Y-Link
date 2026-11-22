@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { DataSource, type EntityManager } from 'typeorm'
+import { VerifiedDataSource } from '../database/verified-data-source.js'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { runDatabaseExclusive } from '../database/transaction-coordinator.js'
@@ -42,6 +43,8 @@ import {
 } from './data-maintenance-identifier-reconcile.js'
 import { assertDataMaintenanceImportBoundary } from './data-maintenance-import-boundary.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
+import { systemConfigService } from './system-config.service.js'
+import { notificationChannelConfigService } from './notification-channel-config.service.js'
 
 class DataMaintenanceService {
   /**
@@ -91,7 +94,7 @@ class DataMaintenanceService {
         await AppDataSource.query(`VACUUM INTO ${quotedTargetPath}`)
       })
 
-      const backupDataSource = new DataSource({
+      const backupDataSource = new VerifiedDataSource({
         type: 'sqlite',
         database: targetPath,
         entities: [],
@@ -233,7 +236,7 @@ class DataMaintenanceService {
     const adminActor = await this.assertAdminActor(actor, requestMeta, 'data_maintenance.import_json', '导入 JSON 数据')
     const normalizedPayload = validateExportPayload(payload)
     const importSummary: ImportSummary = buildImportSummary(normalizedPayload)
-    return runInTransaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
       const previousIdentifierConfigs = await captureOrderIdentifierConfigsBeforeImport(manager)
       await assertDataMaintenanceImportBoundary(manager)
@@ -287,6 +290,9 @@ class DataMaintenanceService {
         imported: importSummary,
       }
     }, { mysqlIsolationLevel: 'REPEATABLE READ' })
+    systemConfigService.invalidateVerificationProviderCacheAfterCommit()
+    notificationChannelConfigService.invalidateAfterCommit()
+    return result
   }
 }
 

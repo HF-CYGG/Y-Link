@@ -16,7 +16,7 @@
 
 import { getO2oConsoleOrderDetail } from '@/api/modules/o2o'
 import KingdeeRegistrationEditor from '@/components/common/KingdeeRegistrationEditor.vue'
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onDeactivated, onMounted, ref, shallowRef, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { useRoute } from 'vue-router'
 import { CameraFilled, DocumentCopy, Search } from '@element-plus/icons-vue'
@@ -38,7 +38,8 @@ import {
   type O2oReturnRequestDetail,
   type O2oVerifyDetailResult,
 } from '@/api/modules/o2o'
-import { getProductList, type ProductRecord } from '@/api/modules/product'
+import type { ProductRecord } from '@/api/modules/product'
+import { getAdminProductOptions } from '@/composables/useAdminProductOptionsCache'
 import { useCameraQrScanner } from '@/composables/useCameraQrScanner'
 import { useDevice } from '@/composables/useDevice'
 import { usePermissionAction } from '@/composables/usePermissionAction'
@@ -59,6 +60,8 @@ import { notifyClientOrderRefresh } from '@/utils/client-order-refresh'
 
 
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
+
+defineOptions({ name: 'O2oVerifyConsoleView' })
 
 // 到店取货时间只在核销台展示，使用与订单池一致的本地时间格式，空值按“未填写”兜底。
 const formatPickupAt = (value: string | null | undefined) => {
@@ -98,8 +101,9 @@ interface OnsiteProductOption {
 
 const ONSITE_PRODUCT_SKU_SEPARATOR = '::'
 
-const productCatalog = ref<ProductRecord[]>([])
+const productCatalog = shallowRef<ProductRecord[]>([])
 const productCatalogLoading = ref(false)
+let onsiteAdjustOpenSequence = 0
 
 const rejectDialogVisible = ref(false)
 const rejectSubmitting = ref(false)
@@ -482,7 +486,7 @@ const loadProductCatalog = async () => {
   }
   productCatalogLoading.value = true
   await productCatalogRequest.runLatest({
-    executor: (signal) => getProductList({ isActive: true }, { signal }),
+    executor: (signal) => getAdminProductOptions({ isActive: true }, { signal }),
     onSuccess: (result) => {
       // 现场改单只允许加入仍在 O2O 商城上架的商品，避免门店把线下禁售商品加入线上预订单。
       productCatalog.value = result.filter((item) => item.o2oStatus === 'listed')
@@ -627,7 +631,8 @@ const addOnsiteProduct = () => {
 }
 
 const openOnsiteAdjustDialog = async () => {
-  if (!preorderDetail.value) {
+  const orderId = preorderDetail.value?.order.id
+  if (!orderId || productCatalogLoading.value) {
     return
   }
   if (!ensurePermission('orders:update', '现场改单')) {
@@ -637,7 +642,9 @@ const openOnsiteAdjustDialog = async () => {
     showAppWarning('当前订单不可现场改单')
     return
   }
+  const sequence = ++onsiteAdjustOpenSequence
   await loadProductCatalog()
+  if (sequence !== onsiteAdjustOpenSequence || orderId !== preorderDetail.value?.order.id || !canOpenOnsiteAdjust.value) return
   resetOnsiteAdjustForm()
   onsiteAdjustDialogVisible.value = true
 }
@@ -823,6 +830,11 @@ const handleVerify = async () => {
 onMounted(async () => {
   await focusInput()
   await applyVerifyCodeFromRoute()
+})
+
+onDeactivated(() => {
+  onsiteAdjustOpenSequence += 1
+  productCatalogLoading.value = false
 })
 
 watch(

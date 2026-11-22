@@ -2,6 +2,7 @@ import { request, type RequestConfig } from '@/api/http'
 import type { UserRole } from '@/api/modules/auth'
 
 export const NOTIFICATION_EXTERNAL_TRIGGER_MODES = [
+  'always',
   'all_management_offline',
   'watched_accounts_offline',
 ] as const
@@ -43,6 +44,11 @@ export interface NotificationRuleRecord {
   emailRecipientSupplierUserIds: string[]
   emailEnabled: boolean
   feishuEnabled: boolean
+  useSharedFeishu: boolean
+  feishuConfigSource: 'shared' | 'legacy' | 'none'
+  feishuStatusError: string | null
+  legacyFeishuWebhookConfigured: boolean
+  legacyFeishuStatusError: string | null
   externalTriggerMode: NotificationExternalTriggerMode
   watchedUserIds: string[]
   feishuWebhookUrl: string
@@ -79,12 +85,14 @@ export interface UpdateNotificationRulesPayload {
     emailRecipientSupplierUserIds: string[]
     emailEnabled: boolean
     feishuEnabled: boolean
+    useSharedFeishu?: boolean
     externalTriggerMode: NotificationExternalTriggerMode
     watchedUserIds: string[]
-    feishuWebhookUrl: string
+    feishuWebhookUrl?: string
     clearFeishuWebhook?: boolean
-    feishuSignSecret: string
-    emailSubjectPrefix: string
+    clearFeishuSignSecret?: boolean
+    feishuSignSecret?: string
+    emailSubjectPrefix?: string
   }>
 }
 
@@ -92,6 +100,26 @@ export interface UpdateNotificationRulesResult {
   changed: boolean
   list: NotificationRuleRecord[]
 }
+
+export interface NotificationChannelsRecord {
+  email: { enabled: boolean; configured: boolean; statusError: string | null }
+  feishu: { webhookConfigured: boolean; signSecretConfigured: boolean; webhookStatusError: string | null; signSecretStatusError: string | null; statusError: string | null; legacyRuleCount: number }
+  emailSubjectPrefix: string
+  emailSubjectPrefixConfigured: boolean
+  updatedAt: string | null
+}
+
+export interface UpdateNotificationChannelsPayload {
+  feishuWebhookUrl?: string
+  feishuSignSecret?: string
+  clearFeishuWebhook?: boolean
+  clearFeishuSignSecret?: boolean
+  emailSubjectPrefix?: string
+}
+
+export const getNotificationChannels = () => request<NotificationChannelsRecord>({ method: 'GET', url: '/notifications/channels' })
+export const updateNotificationChannels = (payload: UpdateNotificationChannelsPayload) =>
+  request<{ changed: boolean; config: NotificationChannelsRecord }>({ method: 'PUT', url: '/notifications/channels', data: payload })
 
 export interface TestNotificationRuleSendPayload {
   ruleId: string

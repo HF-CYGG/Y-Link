@@ -1,0 +1,27 @@
+{
+  "format": "ylink-npm-derived-tool-v1",
+  "officialBase": "11.21.2",
+  "revision": "11.21.2-ylink.1",
+  "node": "22.23.5",
+  "sourceLockSha256": "9be3972a0219abdb235f908d55c9c12a073f7c7b218bb528c42cfa091e2c050f",
+  "sourceOverlaySha256": "5b83397c8825cba969154f468ff91a5cb8afc6499d5d6094bc30e6eddb02bef4",
+  "assemblyTreeSha256": "d57a8cb4817728341a7ef285edfa340844c649d7604b9dc8ea21781331befc93",
+  "packageCount": 145,
+  "artifact": {
+    "sha256": "d51cff6a9be7fe1ceac3da76f5b35d8a36b9b246e0091041cac6bd2e2747af1d",
+    "integrity": "sha512-LI6UbyMpDnO6pmlGXDB/Ai3pa767nIh4b1TWaQ97oXrV1SNNocL5ZvcSbSCSIJCGLX+Rm4tbW6dvdBguKXDC4A==",
+    "bytes": 3637414
+  },
+  "provenance": "原树来自整包官方SRI，不编造逐包SRI；目标归档各有官方SRI；manifest覆盖后的字节为本项目派生，非官方包字节",
+  "scope": "三替换一新增及必要消费者manifest；非目标路径/版本/其余文件字节不变",
+  "bootstrapResidual": "官方npm11.21.2原闭包仅作为离线打包构建工具，残余风险保留；不是最终修订的零漏洞声明",
+  "archiveIdentity": {
+    "format": "authenticated-source-modes-v1",
+    "fileCount": 2060,
+    "modesSha256": "2ee48862f38a98e05ddedcbc9e572cc865c41a0047a199edc22b6b757405e53c",
+    "tarSha256": "48f401030c0b5a7c03014a2120a63c6be30ee088b29c6a0e7175c23d282e89d5",
+    "gzipLevel": 9,
+    "gzipOs": 255,
+    "sourceRule": "仅已核验官方归档普通文件0644/0755；必要manifest内容覆盖保留原模式；禁止宿主mode或自定义清单替代来源"
+  }
+}

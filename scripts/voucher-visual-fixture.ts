@@ -71,11 +71,12 @@ const captureExport = async () => {
   if (!source) return
   const originalCreateObjectURL = URL.createObjectURL.bind(URL)
   URL.createObjectURL = (object) => {
-    if (object instanceof Blob) {
+    if (object instanceof Blob && object.type === 'application/pdf') {
       const reader = new FileReader()
       reader.onload = () => {
         const node = document.createElement('pre')
         node.id = 'voucher-export-data'
+        node.hidden = true
         node.textContent = String(reader.result ?? '')
         document.body.appendChild(node)
       }

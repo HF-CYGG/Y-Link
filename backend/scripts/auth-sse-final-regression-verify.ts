@@ -4,6 +4,8 @@
  * 维护重点：每个 case 独立进程运行，环境变量必须在动态导入生产服务前设置，避免单例策略常量串扰。
  */
 
+import { createVerificationIsolation } from './verification-isolation.js'
+import { createOwnedVerificationDatabase, verificationDatabaseName } from './owned-verification-database.js'
 import 'reflect-metadata'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
@@ -14,7 +16,8 @@ import { fileURLToPath } from 'node:url'
 
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
-const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
+const verificationIsolation = createVerificationIsolation('auth-sse-final-regression')
+const sqliteRoot = verificationIsolation.rootDir
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqlitePath = path.resolve(sqliteRoot, `auth-sse-final-regression-${verifySeed}.sqlite`)
 const adminPassword = `Admin_${verifySeed}_Aa1!`
@@ -28,14 +31,21 @@ if (mysqlHost) {
   process.env.DB_SYNC = 'true'
   process.env.DB_HOST = mysqlHost
   process.env.DB_PORT = process.env.AUTH_SSE_VERIFY_MYSQL_PORT ?? '3306'
-  process.env.DB_USERNAME = process.env.AUTH_SSE_VERIFY_MYSQL_USERNAME ?? 'root'
+  process.env.DB_USER = process.env.AUTH_SSE_VERIFY_MYSQL_USERNAME ?? 'root'
   process.env.DB_PASSWORD = process.env.AUTH_SSE_VERIFY_MYSQL_PASSWORD ?? ''
-  process.env.DB_NAME = process.env.AUTH_SSE_VERIFY_MYSQL_DATABASE ?? ''
+  process.env.DB_NAME = process.env.AUTH_SSE_VERIFY_MYSQL_DATABASE || verificationDatabaseName('auth_sse')
 } else {
   process.env.DB_TYPE = 'sqlite'
   process.env.DB_SYNC = 'false'
   process.env.SQLITE_DB_PATH = sqlitePath
 }
+if (mysqlHost) {
+  assert.equal(process.env.AUTH_SSE_VERIFY_MYSQL_CONFIRM_TEST_SERVER, 'true', '必须确认隔离MySQL测试实例')
+  assert.equal(mysqlHost, '127.0.0.1', '仅允许隔离loopback MySQL')
+  const port = Number(process.env.DB_PORT)
+  assert.ok(Number.isInteger(port) && port >= 10000 && port <= 65535, '必须使用隔离高位端口')
+  verificationIsolation.seal({ type: 'mysql', host: mysqlHost, port, user: process.env.DB_USER!, password: process.env.DB_PASSWORD!, database: process.env.DB_NAME! })
+} else verificationIsolation.seal({ type: 'sqlite', database: sqlitePath })
 process.env.INIT_ADMIN_USERNAME = 'admin'
 process.env.INIT_ADMIN_PASSWORD = adminPassword
 process.env.INVITE_CODE_PEPPER ||= `auth-sse-final-regression-${verifySeed}-minimum-32-bytes`
@@ -94,16 +104,24 @@ async function waitFor(predicate: () => boolean, message: string, timeoutMs = 2_
   assert.fail(message)
 }
 
+let ownedMysql: Awaited<ReturnType<typeof createOwnedVerificationDatabase>> | undefined
 async function withDatabase<T>(run: (context: Awaited<ReturnType<typeof prepareDatabaseContext>>) => Promise<T>) {
   fs.mkdirSync(sqliteRoot, { recursive: true })
-  const context = await prepareDatabaseContext()
+  let context: Awaited<ReturnType<typeof prepareDatabaseContext>> | undefined
   try {
+    if (mysqlHost) {
+      // 显式名字也必须由本进程CREATE成功；确认flag不能授权同步任何已有库。
+      ownedMysql = await createOwnedVerificationDatabase({ host: mysqlHost, port: Number(process.env.DB_PORT),
+        user: process.env.DB_USER!, password: process.env.DB_PASSWORD! }, process.env.DB_NAME!)
+      await ownedMysql.assertEmpty()
+    }
+    context = await prepareDatabaseContext()
     return await run(context)
   } finally {
-    if (context.AppDataSource.isInitialized) {
+    if (context?.AppDataSource.isInitialized) {
       await context.AppDataSource.destroy()
     }
-    fs.rmSync(sqlitePath, { force: true })
+    try { await ownedMysql?.cleanup() } finally { ownedMysql = undefined; fs.rmSync(sqlitePath, { force: true }) }
   }
 }
 
@@ -120,8 +138,11 @@ async function prepareDatabaseContext() {
   const { hashPassword } = await import('../src/utils/password.js')
   const { runInTransaction } = await import('../src/config/transaction-runner.js')
 
+  await verificationIsolation.assertTarget(AppDataSource)
+  if (mysqlHost) await ownedMysql!.assertEmpty()
   prepareDatabaseRuntime()
   try {
+    await verificationIsolation.assertTarget(AppDataSource)
     await AppDataSource.initialize()
     await initializeDatabaseSchemaIfNeeded(AppDataSource)
     await authService.ensureDefaultAdmin()

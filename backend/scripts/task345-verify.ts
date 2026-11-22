@@ -1,6 +1,6 @@
 /**
  * 文件说明：backend/scripts/task345-verify.ts
- * 文件职责：验证商品自动编码、批量启停、成交价回写以及看板统计下钻链路。
+ * 文件职责：在独占临时 SQLite 中验证商品自动编码、批量启停、订单价格快照以及看板统计下钻。
  * 维护说明：若调整商品管理、订单提交流程或前端静态实现约束，请同步更新本脚本断言。
  */
 
@@ -8,16 +8,9 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { initializeDatabaseSchemaIfNeeded } from '../src/config/database-bootstrap.js'
-import { AppDataSource } from '../src/config/data-source.js'
-import { env } from '../src/config/env.js'
-import { SysUser } from '../src/entities/sys-user.entity.js'
-import { dashboardService } from '../src/services/dashboard.service.js'
-import { orderService } from '../src/services/order.service.js'
-import { productService } from '../src/services/product.service.js'
-import { systemConfigService } from '../src/services/system-config.service.js'
-import { tagService } from '../src/services/tag.service.js'
+import { prepareOrderSubmission } from '../../src/views/order-entry/composables/prepare-order-submission.ts'
 import type { AuthUserContext } from '../src/types/auth.js'
+import { createVerificationIsolation } from './verification-isolation.js'
 
 function pass(title: string) {
   console.log(`✅ ${title}`)
@@ -27,6 +20,7 @@ const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
 const frontendRoot = path.resolve(backendRoot, '..')
 const orderEntryFile = path.resolve(frontendRoot, 'src/views/order-entry/composables/useOrderEntryForm.ts')
+const prepareSubmissionFile = path.resolve(frontendRoot, 'src/views/order-entry/composables/prepare-order-submission.ts')
 const productManagerFile = path.resolve(frontendRoot, 'src/views/base-data/components/ProductManager.vue')
 const productRouteFile = path.resolve(backendRoot, 'src/routes/product.routes.ts')
 
@@ -40,25 +34,22 @@ const mockActor: AuthUserContext = {
   permissions: [],
 }
 
-function resetVerifyDatabase() {
-  if (env.DB_TYPE !== 'sqlite') {
-    return
-  }
-
-  const verifyDatabasePath = path.resolve(backendRoot, env.SQLITE_DB_PATH)
-  fs.mkdirSync(path.dirname(verifyDatabasePath), { recursive: true })
-  if (fs.existsSync(verifyDatabasePath)) {
-    fs.rmSync(verifyDatabasePath, { force: true })
-  }
-}
-
 function verifyFrontendSources() {
   const orderEntrySource = fs.readFileSync(orderEntryFile, 'utf8')
+  const prepareSubmissionSource = fs.readFileSync(prepareSubmissionFile, 'utf8')
   const productManagerSource = fs.readFileSync(productManagerFile, 'utf8')
   const productRouteSource = fs.readFileSync(productRouteFile, 'utf8')
 
-  assert.doesNotMatch(orderEntrySource, /productApi\.createProduct\(/, '出库开单不得隐式创建商品')
-  assert.match(orderEntrySource, /const invalidProductRow = itemRows\.value\.find/, '旧草稿中的未知商品必须在提交前被拒绝')
+  for (const source of [orderEntrySource, prepareSubmissionSource]) {
+    assert.doesNotMatch(source, /\bcreateProduct\s*\(/, '出库开单不得隐式创建商品')
+  }
+  assert.match(orderEntrySource, /getAdminProductOptions\(\{\s*isActive:\s*true\s*\}/, '开单候选必须从启用商品中获取')
+  assert.match(orderEntrySource, /load:\s*\(\)\s*=>\s*import\('\.\/prepare-order-submission'\)/, '开单必须使用实际提交准备模块')
+  assert.match(
+    orderEntrySource,
+    /await loadOrderEntrySubmission\(\)[\s\S]{0,180}prepareOrderSubmission\(headerForm, itemRows\.value, products\.value\)[\s\S]{0,100}if\s*\(!prepared\.payload\)\s*\{[\s\S]{0,100}return[\s\S]{0,1000}orderApi\.submitOrder\(/,
+    '开单必须先校验当前明细，失败时不调用订单提交接口',
+  )
 
   // 编辑弹窗必须走详情接口回填，并且详情请求要透传 useStableRequest 下发的 signal：
   // 少了 signal，连点不同行时旧详情会覆盖新选择（见 src/composables/useStableRequest.ts 的 runLatest）。
@@ -71,18 +62,29 @@ function verifyFrontendSources() {
   assert.match(productManagerSource, /batchUpdateProducts/)
   assert.match(productManagerSource, /留空则自动生成统一编码/)
   assert.match(productRouteSource, /productRouter\.post\(\s*'\/batch'/)
-  pass('出库开单仅允许已建档商品，产品中心保留编辑详情回填与批量改状态入口')
+  pass('出库开单接入提交准备模块，产品中心保留编辑详情回填与批量改状态入口')
 }
 
-async function main() {
-  resetVerifyDatabase()
-  verifyFrontendSources()
-
-  await AppDataSource.initialize()
-  await initializeDatabaseSchemaIfNeeded(AppDataSource)
-  await systemConfigService.ensureDefaultConfigs()
+async function main(isolation: ReturnType<typeof createVerificationIsolation>) {
+  isolation.seal({ type: 'sqlite', database: path.join(isolation.rootDir, 'task345.sqlite') })
+  process.env.DB_SYNC = 'false'
+  const { AppDataSource } = await import('../src/config/data-source.js')
+  await isolation.assertTarget(AppDataSource)
+  const [
+    { initializeDatabaseSchemaIfNeeded }, { SysUser }, { dashboardService }, { orderService },
+    { productService }, { systemConfigService }, { tagService },
+  ] = await Promise.all([
+    import('../src/config/database-bootstrap.js'), import('../src/entities/sys-user.entity.js'),
+    import('../src/services/dashboard.service.js'), import('../src/services/order.service.js'),
+    import('../src/services/product.service.js'), import('../src/services/system-config.service.js'),
+    import('../src/services/tag.service.js'),
+  ])
 
   try {
+    await AppDataSource.initialize()
+    await initializeDatabaseSchemaIfNeeded(AppDataSource)
+    await systemConfigService.ensureDefaultConfigs()
+
     const persistedActor = await AppDataSource.getRepository(SysUser).save({
       username: mockActor.username,
       passwordHash: 'test-only-password-hash',
@@ -151,6 +153,20 @@ async function main() {
       isActive: true,
       defaultPrice: 10,
     }, mockActor)
+
+    const activeProducts = await productService.list({ isActive: true })
+    assert.deepEqual(activeProducts.map((product) => product.id), [firstProduct.id])
+    for (const productId of ['未建档的旧草稿商品', secondProduct.id]) {
+      const prepared = prepareOrderSubmission({
+        orderType: 'walkin', hasCustomerOrder: false, isSystemApplied: false,
+        issuerName: mockActor.displayName, customerDepartmentName: '', customerDepartmentNodeId: '',
+        customerName: '', remark: '',
+      }, [{ uid: 'draft-row', productId, skuId: secondProduct.skus[0]?.id ?? '', qty: 1, unitPrice: 12, remark: '' }], activeProducts)
+      assert.equal(prepared.error, '存在未建档、已停用或暂无可用规格的商品，请重新选择', `应拒绝草稿商品 ${productId}`)
+      assert.equal(prepared.payload, undefined, '无效商品不得产生出库载荷')
+    }
+    pass('真实提交准备拒绝旧草稿中的未知和已停用商品')
+
     await productService.update(secondProduct.id, {
       isActive: true,
       defaultPrice: 12,
@@ -161,13 +177,13 @@ async function main() {
         idempotencyKey: `task345-${Date.now()}`,
         orderType: 'walkin',
         customerName: 'Task345客户',
-        remark: '验证默认售价回写',
+        remark: '验证成交价快照',
         items: [
           {
             productId: firstProduct.id,
             qty: 2,
             unitPrice: 18.8,
-            remark: '成交价回写测试',
+            remark: '成交价快照测试',
           },
         ],
       },
@@ -221,9 +237,11 @@ async function main() {
 
     const productAfterSubmit = await productService.detail(firstProduct.id)
     const orderDetail = await orderService.detailById(submitResult.order.id)
-    assert.equal(productAfterSubmit.defaultPrice, '18.80')
+    assert.equal(productAfterSubmit.defaultPrice, '10.00')
+    assert.equal(productAfterSubmit.skus[0]?.defaultPrice, '10.00')
+    assert.equal(productAfterSubmit.currentStock, firstProduct.currentStock - 2)
     assert.equal(orderDetail.items[0]?.unitPrice, '18.80')
-    pass('出库单提交后会将成交单价回写为产品默认售价')
+    pass('出库单保留成交单价并扣减库存，商品与规格默认价保持原值')
 
     const today = new Date()
     const todayText = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
@@ -274,9 +292,15 @@ async function main() {
 }
 
 try {
-  await main()
+  verifyFrontendSources()
+  const isolation = createVerificationIsolation('task345')
+  try {
+    await main(isolation)
+  } finally {
+    isolation.cleanup()
+  }
   console.log('\nTask3/4/5 自动化验证全部通过。')
 } catch (error) {
   console.error('\nTask3/4/5 自动化验证失败：', error)
-  process.exit(1)
+  process.exitCode = 1
 }

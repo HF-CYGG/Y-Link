@@ -16,7 +16,7 @@
  * 维护说明：若后续要扩展更多按钮或插槽，优先继续保持“简短说明 + 明确动作”的结构。
  */
 
-import { ElButton } from 'element-plus'
+import { ElButton } from 'element-plus/es/components/button/index.mjs'
 
 interface Props {
   title?: string

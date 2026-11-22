@@ -180,7 +180,7 @@ export type DatabaseMigrationTaskReadState = 'healthy' | 'corrupted'
 export type DatabaseMigrationStage = 'freeze' | 'precheck' | 'snapshot' | 'import' | 'validate' | 'cutover'
 
 /** 后端针对当前任务显式开放的救援动作，前端不得自行推断。 */
-export type DatabaseMigrationAllowedAction = 'prepare_rollback' | 'resume_rollback'
+export type DatabaseMigrationAllowedAction = 'prepare_rollback' | 'resume_rollback' | 'manual_switch' | 'cancel'
 
 /** 自动恢复过程的最小公开状态，不包含数据库路径、凭据或其他拓扑细节。 */
 export interface DatabaseMigrationRecoveryState {
@@ -476,11 +476,11 @@ export const getSQLiteToMySqlMigrationTaskDetail = (taskId: string, requestConfi
  * - 后端会同步执行一次预检并把结果落入任务文件；
  * - 成功后返回完整任务记录，便于页面立即选中并展示。
  */
-export const createSQLiteToMySqlMigrationTask = (payload: CreateSQLiteToMySqlTaskPayload) =>
+export const createSQLiteToMySqlMigrationTask = (payload: CreateSQLiteToMySqlTaskPayload, currentPassword: string) =>
   request<SQLiteToMySqlTaskRecord>({
     method: 'POST',
     url: '/data-maintenance/db-migration/tasks',
-    data: payload,
+    data: { ...payload, currentPassword },
   })
 
 /**
@@ -490,11 +490,12 @@ export const createSQLiteToMySqlMigrationTask = (payload: CreateSQLiteToMySqlTas
  */
 export const createAutomaticSQLiteToMySqlMigrationTask = (
   payload: CreateAutomaticSQLiteToMySqlTaskPayload,
+  currentPassword: string,
 ) =>
   request<SQLiteToMySqlTaskRecord & { rescueCredential?: DatabaseRescueCredential }>({
     method: 'POST',
     url: '/data-maintenance/db-migration/automatic-tasks',
-    data: payload,
+    data: { ...payload, currentPassword },
   })
 
 /**
@@ -502,11 +503,16 @@ export const createAutomaticSQLiteToMySqlMigrationTask = (
  * - 仅允许对待执行或失败后的任务再次运行；
  * - 返回最新任务记录，页面应及时刷新列表与运行时状态。
  */
-export const runSQLiteToMySqlMigrationTask = (taskId: string) =>
+export const runSQLiteToMySqlMigrationTask = (taskId: string, currentPassword: string) =>
   request<SQLiteToMySqlTaskRecord>({
     method: 'POST',
     url: `/data-maintenance/db-migration/tasks/${taskId}/run`,
+    data: { currentPassword },
   })
+
+/** 复用既有独立签发接口，在手动冻结开始前将救援凭证保存在当前标签页。 */
+export const issueDatabaseMigrationRescueCredential = (taskId: string, currentPassword: string) =>
+  request<DatabaseRescueCredential>({ method: 'POST', url: `/data-maintenance/db-migration/tasks/${taskId}/rescue-credential`, data: { currentPassword } })
 
 /**
  * 获取数据库运行时覆盖状态：
@@ -525,7 +531,7 @@ export const getDatabaseMigrationRuntimeOverrideState = (requestConfig: RequestC
  * - 常规场景优先使用 taskId，让切换动作与某次迁移任务建立审计关联；
  * - 返回 restartRequired 供页面明确提示“需要重启后端服务”。
  */
-export const applyDatabaseMigrationSwitch = (payload: ApplyDatabaseSwitchPayload) =>
+export const applyDatabaseMigrationSwitch = (payload: ApplyDatabaseSwitchPayload, currentPassword: string) =>
   request<{
     restartRequired: true
     activeOverride: DatabaseRuntimeOverrideFile | null
@@ -533,15 +539,15 @@ export const applyDatabaseMigrationSwitch = (payload: ApplyDatabaseSwitchPayload
   }>({
     method: 'POST',
     url: '/data-maintenance/db-migration/switch',
-    data: payload,
+    data: { ...payload, currentPassword },
   })
 
 /**
  * 回退数据库切换：
- * - 可根据任务来源回退，也可显式指定 SQLite 路径；
+ * - 可按任务来源回退，显式路径须为可信源文件或受管物理备份；
  * - clearOnly 为 true 时仅清除覆盖文件，不强制写入 SQLite 配置。
  */
-export const rollbackDatabaseMigrationSwitch = (payload: RollbackDatabaseSwitchPayload) =>
+export const rollbackDatabaseMigrationSwitch = (payload: RollbackDatabaseSwitchPayload, currentPassword: string) =>
   request<{
     restartRequired: true
     rollbackMode: 'clear' | 'sqlite_override'
@@ -549,7 +555,7 @@ export const rollbackDatabaseMigrationSwitch = (payload: RollbackDatabaseSwitchP
   }>({
     method: 'POST',
     url: '/data-maintenance/db-migration/rollback',
-    data: payload,
+    data: { ...payload, currentPassword },
   })
 
 /**
@@ -557,8 +563,9 @@ export const rollbackDatabaseMigrationSwitch = (payload: RollbackDatabaseSwitchP
  * - 用于撤销此前的切换决定，回到默认环境变量配置；
  * - 仍需重启后端服务后才会完全生效。
  */
-export const clearDatabaseMigrationRuntimeOverride = () =>
+export const clearDatabaseMigrationRuntimeOverride = (currentPassword: string) =>
   request<ClearDatabaseMigrationRuntimeOverrideResult>({
     method: 'DELETE',
     url: '/data-maintenance/db-migration/runtime-override',
+    data: { currentPassword },
   })

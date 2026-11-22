@@ -19,6 +19,7 @@ import {
   O2O_RETURN_REASON_MAX_LENGTH,
   O2O_RETURN_REJECT_REASON_MAX_LENGTH,
   O2O_CONSOLE_ORDER_POOL_KEYS,
+  CLIENT_ORDER_SEARCH_MODES,
   o2oPreorderService,
   type O2oPublicJsonSnapshot,
 } from '../services/o2o-preorder.service.js'
@@ -27,6 +28,7 @@ import { CLIENT_USER_ACCOUNT_TYPES } from '../entities/client-user.entity.js'
 import { assertPermanentDeletePasswordForRequest, createPermanentDeleteLimiter } from '../utils/permanent-delete-guard.js'
 import { resolveCompatibleIdentifierInput } from '../services/order-serial.service.js'
 import { projectSystemIdentifiersForRole } from '../utils/system-identifier-visibility.js'
+import { staticPathKey } from '../utils/static-path-key.js'
 
 import { MAX_DATABASE_INT, MAX_O2O_ORDER_ITEM_COUNT } from '../constants/web-resource-limits.js'
 
@@ -79,6 +81,7 @@ const verifySchema = z.object({
 const myOrderQuerySchema = z.object({
   status: z.enum(['pending', 'verified', 'cancelled']).optional(),
   keyword: z.string().trim().max(64).optional(),
+  searchMode: z.enum(CLIENT_ORDER_SEARCH_MODES).optional(),
   page: z.coerce.number().int().min(1).optional(),
   pageSize: z.coerce.number().int().min(1).max(50).optional(),
 })
@@ -231,7 +234,7 @@ const o2oAdminRouter = Router()
 // 公共、客户端与管理端共用同一响应边界；执行 res.json 时管理端鉴权上下文已完成注入。
 o2oRouter.use((req, res, next) => {
   // 商品目录/门店配置等高频公共响应不含订单标识，避免对大对象做无意义深复制。
-  if (!/^\/(?:mall\/preorders(?:\/|$)|orders(?:\/|$)|verify(?:\/|$))/.test(req.path)) {
+  if (!/^\/(?:mall\/preorders(?:\/|$)|orders(?:\/|$)|verify(?:\/|$))/.test(staticPathKey(req.path))) {
     next()
     return
   }
@@ -274,6 +277,17 @@ o2oRouter.get(
   }),
 )
 
+// 新部门单提交前重新读取门店规则，绕过公开展示缓存。
+o2oRouter.get(
+  '/mall/storefront/checkout',
+  requireClientAuth,
+  asyncHandler(async (_req, res) => {
+    res.setHeader('Cache-Control', 'private, no-store')
+    const data = await o2oPreorderService.readCurrentMallStorefrontConfig()
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
 // 提交预订单：必须走客户端独立鉴权，避免与后台管理鉴权体系混用。
 o2oRouter.post(
   '/mall/preorders',
@@ -305,7 +319,11 @@ o2oRouter.get('/mall/preorders/kingdee-todos', requireClientAuth, asyncHandler(a
   res.json({ code: 0, message: 'ok', data })
 }))
 o2oRouter.patch('/mall/preorders/:id/kingdee-registration', requireClientAuth, asyncHandler(async (req, res) => {
-  const data = await o2oPreorderService.updateKingdeeRegistration(req.params.id, kingdeeRegistrationSchema.parse(req.body), { client: (req as ClientAuthenticatedRequest).clientAuth }, extractRequestMeta(req))
+  const authReq = req as ClientAuthenticatedRequest
+  const payload = kingdeeRegistrationSchema.parse(req.body)
+  const requestMeta = extractRequestMeta(req)
+  await authSecurityService.guardClientBusinessWrite(requestMeta, authReq.clientAuth.userId, 'preorder_document')
+  const data = await o2oPreorderService.updateKingdeeRegistration(req.params.id, payload, { client: authReq.clientAuth }, requestMeta)
   res.json({ code: 0, message: 'ok', data })
 }))
 o2oAdminRouter.patch('/orders/:id/kingdee-registration', requirePermission('orders:update'), asyncHandler(async (req, res) => {
@@ -341,6 +359,8 @@ o2oRouter.post(
   requireClientAuth,
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
+    const requestMeta = extractRequestMeta(req)
+    await authSecurityService.guardClientBusinessWrite(requestMeta, authReq.clientAuth.userId, 'preorder_document')
     const result = await o2oPreorderService.markCustomerOrderPrintedByClient(authReq.clientAuth, req.params.id)
     if (result.printedNow) {
       await auditService.record({
@@ -354,7 +374,7 @@ o2oRouter.post(
           username: authReq.clientAuth.account || authReq.clientAuth.mobile,
           displayName: authReq.clientAuth.realName || authReq.clientAuth.account || authReq.clientAuth.mobile,
         },
-        requestMeta: extractRequestMeta(req),
+        requestMeta,
         detail: { clientOrderType: result.detail.order.clientOrderType },
       })
     }
@@ -381,6 +401,8 @@ o2oRouter.patch(
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const payload = updateMyPreorderSchema.parse(req.body)
+    const requestMeta = extractRequestMeta(req)
+    await authSecurityService.guardClientBusinessWrite(requestMeta, authReq.clientAuth.userId, 'preorder_update')
     const previous = await o2oPreorderService.getMyOrderDetail(authReq.clientAuth, req.params.id)
     const data = await o2oPreorderService.updateMyOrder(authReq.clientAuth, req.params.id, payload)
 
@@ -395,7 +417,7 @@ o2oRouter.patch(
         username: authReq.clientAuth.account,
         displayName: authReq.clientAuth.realName || authReq.clientAuth.mobile,
       },
-      requestMeta: extractRequestMeta(req),
+      requestMeta,
       detail: {
         previousRemark: previous.order.remark,
         nextRemark: data.order.remark,

@@ -42,6 +42,8 @@ import {
   getCategoryTagType,
 } from './category-importance'
 
+defineOptions({ name: 'AuditLogView' })
+
 // 通知事件面板按需异步加载：只有进入“通知事件”页签才下载对应分包，保持审计日志路由首包在性能预算内。
 const NotificationEventLogPanel = defineAsyncComponent(() => import('./components/NotificationEventLogPanel.vue'))
 
@@ -180,6 +182,21 @@ const formatDetail = (detailJson: string | null) => {
     return JSON.stringify(JSON.parse(detailJson), null, 2)
   } catch {
     return detailJson
+  }
+}
+
+// 剪贴板与手选区都使用原文，详情预览的格式化可能改变原始数字或重复键。
+const manualCopyDetail = ref('')
+const manualCopyVisible = ref(false)
+const copyDetail = async (detailJson: string | null) => {
+  if (!detailJson?.trim()) return
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
+    await navigator.clipboard.writeText(detailJson)
+    showAppSuccess('审计详情已复制')
+  } catch {
+    manualCopyDetail.value = detailJson
+    manualCopyVisible.value = true
   }
 }
 
@@ -581,7 +598,10 @@ onMounted(() => {
                 </el-table-column>
                 <el-table-column label="详情" min-width="420" show-overflow-tooltip>
                   <template #default="{ row }">
-                    <pre class="max-h-[92px] overflow-hidden whitespace-pre-wrap break-all text-xs leading-5 text-slate-500 dark:text-slate-400">{{ formatDetail(row.detailJson) }}</pre>
+                    <div class="flex min-w-0 items-start gap-2">
+                      <pre class="max-h-[92px] min-w-0 flex-1 overflow-hidden whitespace-pre-wrap break-all text-xs leading-5 text-slate-500 dark:text-slate-400">{{ formatDetail(row.detailJson) }}</pre>
+                      <el-button v-if="row.detailJson?.trim()" size="small" link type="primary" aria-label="复制审计详情" @click="copyDetail(row.detailJson)">复制</el-button>
+                    </div>
                   </template>
                 </el-table-column>
               </el-table>
@@ -625,7 +645,10 @@ onMounted(() => {
                 </el-button>
 
                 <div class="rounded-2xl border border-dashed border-slate-200 p-3 text-xs leading-6 text-slate-500 dark:border-white/10 dark:text-slate-400">
-                  <div class="mb-1 font-semibold text-slate-700 dark:text-slate-200">详情上下文</div>
+                  <div class="mb-1 flex items-center justify-between gap-2">
+                    <span class="font-semibold text-slate-700 dark:text-slate-200">详情上下文</span>
+                    <el-button v-if="item.detailJson?.trim()" size="small" link type="primary" aria-label="复制审计详情" @click="copyDetail(item.detailJson)">复制</el-button>
+                  </div>
                   <pre class="whitespace-pre-wrap break-all font-sans">{{ item.detailText }}</pre>
                 </div>
               </div>
@@ -652,5 +675,9 @@ onMounted(() => {
         :focus-event-id="focusNotificationEventId"
       />
     </div>
+    <el-dialog v-model="manualCopyVisible" title="手动复制审计详情" width="min(640px, 90vw)" @closed="manualCopyDetail = ''">
+      <p class="mb-2 text-sm text-slate-500">当前浏览器无法直接复制，请选择下方完整内容后复制。</p>
+      <pre tabindex="0" aria-label="完整审计详情" class="max-h-[50vh] select-text overflow-auto whitespace-pre-wrap break-all rounded-lg bg-[var(--el-fill-color-light)] p-3 text-xs leading-5">{{ manualCopyDetail }}</pre>
+    </el-dialog>
   </PageContainer>
 </template>

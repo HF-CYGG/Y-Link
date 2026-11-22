@@ -9,6 +9,8 @@ import { entityColumnOptions } from './entity-column-options.js'
 import { SysUser } from './sys-user.entity.js'
 
 @Entity({ name: 'biz_inbound_order' })
+@Index('idx_biz_inbound_deleted_status_arrival_id', ['isDeleted', 'status', 'expectedArrivalAt', 'id'])
+@Index('idx_biz_inbound_supplier_deleted_status_id', ['supplierId', 'isDeleted', 'status', 'id'])
 export class BizInboundOrder {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })
   id!: string
@@ -31,6 +33,7 @@ export class BizInboundOrder {
   })
   verifyCode!: string
 
+  // MySQL 结构同步会暂时移除含状态列的复合索引，供货方外键需要独立左前缀。
   @Index('idx_biz_inbound_supplier_id')
   @Column({
     name: 'supplier_id',
@@ -164,7 +167,6 @@ export class BizInboundOrder {
   })
   verifiedByDisplayName!: string | null
 
-  @Index('idx_biz_inbound_is_deleted')
   @Column({
     name: 'is_deleted',
     type: 'tinyint',

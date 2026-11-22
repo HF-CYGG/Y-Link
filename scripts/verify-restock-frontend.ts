@@ -8,6 +8,8 @@ import dayjs from 'dayjs'
 import { parse, compileScript, compileTemplate } from '@vue/compiler-sfc'
 import type { ClientRestockRequest, O2oMallSku } from '../packages/shared-types/src/index'
 import { formatRestockTime, getRestockExpiryDelay, getRestockSkus, isValidRestockQuantity, RESTOCK_MAX_QUANTITY, toRestockIso } from '../src/utils/restock'
+import { createFeedbackDetailLifecycle } from '../src/views/client/client-feedback-detail-lifecycle'
+import { sendFeedbackReplyAndRefresh } from '../src/views/client/client-feedback-reply-policy'
 
 const sku = (id: string, stock: number, isActive = true, isCurrent = true): O2oMallSku => ({
   id, productId: 'p1', skuCode: id, specValues: {}, specText: id, defaultPrice: '1', originalPrice: '1', discountRate: '1', discountedPrice: '1',
@@ -52,10 +54,21 @@ const evaluate = (filename: string, imports: Record<string, unknown>, globals: R
 const stableRequestRuntime = evaluate('src/composables/useStableRequest.ts', {
   vue: vueRuntime, '@/utils/error': { isRequestCanceled: (error: unknown) => error instanceof Error && error.name === 'AbortError' },
 })
+const activeQueryRuntime = evaluate('src/api/modules/client-restock-query.ts', {
+  '@/api/http': { request: async (config: unknown) => config },
+})
+const querySignal = new AbortController().signal
+const activeQuery = await activeQueryRuntime.getActiveClientRestockRequest('sku1', { signal: querySignal })
+assert.equal(activeQuery.method, 'GET')
+assert.equal(activeQuery.url, '/client-feedback/restock-requests/active')
+assert.equal(activeQuery.params.skuId, 'sku1')
+assert.equal(activeQuery.signal, querySignal)
 const feedbackRuntime = evaluate('src/api/modules/customer-service-feedback.ts', {
   '@/api/http': { request: () => { throw new Error('提示规则不得调用网络') } },
   '@/utils/image-upload': { compressImageForUpload: () => { throw new Error('提示规则不得上传') } },
+  './client-restock-query': activeQueryRuntime,
 })
+assert.equal(feedbackRuntime.getActiveClientRestockRequest, activeQueryRuntime.getActiveClientRestockRequest)
 const promptBase = { status: 'processing', unreadForClient: 0, unreadForStaff: 1 } as any
 const ordinaryPrompt = feedbackRuntime.buildClientFeedbackNextStepPrompt(promptBase)
 assert.match(ordinaryPrompt.nextStep, /无需重复提交.*保持消息畅通/, '普通反馈保留原指导')
@@ -135,15 +148,18 @@ for (const filename of vueFiles) {
 }
 const read = (path: string) => readFileSync(path, 'utf8')
 const mall = read('src/views/client/ClientMallView.vue')
-assert.equal((mall.match(/<ClientRestockButton v-if="isSingleRestockSku\([^)]*\)" :product=/g) ?? []).length, 4, '四套卡片仅单规格显示补货')
-assert.match(mall, /itemHeight: 98/, '虚拟列表高度契约保留')
-assert.match(mall, /useClientRestockEntry\(\(\) => detailProduct\.value, \(\) => selectedDetailSku\.value, \(\) => detailVisible\.value\)/, '商品详情按当前明确选择的规格覆盖缺货入口')
-assert.match(mall, /return detailNeedsRestock\.value && detailRestockEntry\.restockAvailable\.value \? 'restock' : 'unavailable'/, '详情底栏仅真实缺货时合并为申请补货')
-assert.match(mall, /void detailRestockEntry\.openRestock\(\)/, '详情主按钮在补货态打开补货入口')
-assert.match(read('src/views/client/components/ClientRestockButton.vue'), /useClientRestockEntry\(/, '卡片补货按钮与详情共用补货入口逻辑')
+assert.equal((mall.match(/<ProductCardContent :product=/g) ?? []).length, 4, '四个列表复用同一商品卡片内容')
+const cardContent = mall.match(/<DefineProductCardContent[\s\S]*?<\/DefineProductCardContent>/)?.[0] ?? ''
+assert.equal((mall.match(/<ClientRestockButton /g) ?? []).length, 1, '补货按钮在四个列表间共用')
+assert.match(cardContent, /<ClientRestockButton v-if="canSingleRestock\(product\)"[^\n]*@restock="openCardRestock\(cardKey, product.id\)"/, '每个列表仍仅为单个启用规格展示补货并绑定实际卡片')
+assert.match(mall, /const VIRTUAL_PRODUCT_ITEM_HEIGHT = 98\b/)
+assert.match(mall, /itemHeight: VIRTUAL_PRODUCT_ITEM_HEIGHT\b/, '虚拟列表高度契约保留')
+assert.equal((mall.match(/useClientRestockEntry\(/g) ?? []).length, 1, '商城卡片、详情、多规格共用一个活跃申请查询')
+assert.match(mall, /return detailNeedsRestock\.value \? 'restock' : 'unavailable'/, '详情底栏仅真实缺货时合并为申请补货')
+assert.match(mall, /restockEntry\.openRestock\('detail'[\s\S]*?skuId: sku\.id/, '详情主按钮绑定当前选中规格')
+assert.doesNotMatch(read('src/views/client/components/ClientRestockButton.vue'), /useClientRestockEntry\(/, '卡片按钮只负责显示和派发点击')
 const restockEntry = read('src/composables/useClientRestockEntry.ts')
-assert.match(restockEntry, /getRestockSkus\(product\)/, '补货入口以真实缺货规格为准，不用限购后的可购量')
-assert.match(restockEntry, /const valid = \(\) => active && resolveVisible\(\) && runId === generation && resolveProduct\(\)\?\.id === product\.id && auth\.currentUser\?\.id === userId/, '补货查询返回时绑定页面、可见性、代次、商品及发起账号')
+assert.match(restockEntry, /getRestockSkus\(target\.product\)/, '补货入口只接受当前启用规格')
 assert.match(restockEntry, /onSuccess: async \(result\) => \{\s*if \(!valid\(\)\) return/, '成功回调通过上下文门禁才可导航')
 assert.match(restockEntry, /onError: \(error\) => \{ if \(!valid\(\)\) return;/, '失败回调通过上下文门禁才可提示')
 const form = read('src/views/client/components/ClientRestockForm.vue')
@@ -225,17 +241,20 @@ assert.equal(sentPayloads[1].quantity, 5)
 assert.equal(sentPayloads[1].clientRequestId, 'request-1')
 // 执行商城真实 computed 和动作栏模板，验证切换时数量控件与缺货替换入口互斥。
 const mallAst = ts.createSourceFile('ClientMallView.ts', parse(mall).descriptor.scriptSetup!.content, ts.ScriptTarget.Latest, true)
-const isSingleRestockSku = detailFunction('isSingleRestockSku', { getRestockSkus }, false, mallAst)
-assert.equal(isSingleRestockSku({ skus: [sku('one', 15), sku('old', 0, false)] }), true, '只计算当前启用规格')
-assert.equal(isSingleRestockSku({ skus: [sku('one', 15), sku('two', 0)] }), false, '多规格不显示卡片补货')
+const cardDisplay = detailFunction('buildProductCardDisplay', {
+  getRestockSkus, resolveHallProductPreviewSku: () => null, resolveHallProductThumbnail: () => '',
+  resolveHallProductPreviewImage: () => '', resolveO2oPriceView: () => ({}), normalizeProductCardDescription: () => '',
+}, false, mallAst)
+assert.equal(cardDisplay({ skus: [sku('one', 15), sku('old', 0, false)] }).canSingleRestock, true, '只计算当前启用规格')
+assert.equal(cardDisplay({ skus: [sku('one', 15), sku('two', 0)] }).canSingleRestock, false, '多规格不显示卡片补货')
 const detailProductRef = vue.ref<any>({ id: 'p1', limitPerUser: 1, availableStock: 15, skus: [sku('stocked', 15), sku('empty', 0)] })
 const selectedSkuRef = vue.ref<any>(detailProductRef.value.skus[1])
-const needsRestock = detailFunction('detailNeedsRestock', { computed: vue.computed, selectedDetailSku: selectedSkuRef, detailProduct: detailProductRef, getRestockSkus }, false, mallAst)
+const detailCatalogUnavailable = vue.ref(false)
+const needsRestock = detailFunction('detailNeedsRestock', { computed: vue.computed, selectedDetailSku: selectedSkuRef, detailProduct: detailProductRef, detailCatalogUnavailable, getRestockSkus }, false, mallAst)
 const detailMax = detailFunction('detailMaxQty', { computed: vue.computed, selectedDetailSku: selectedSkuRef, detailProduct: detailProductRef }, false, mallAst)
 const resolveStock = detailFunction('resolveCurrentDetailAvailableStock', { selectedDetailSku: selectedSkuRef }, false, mallAst)
-const eligible = vue.computed(() => getRestockSkus(detailProductRef.value).some((item) => item.id === selectedSkuRef.value?.id))
 const actionMode = detailFunction('detailActionMode', { computed: vue.computed, detailProduct: detailProductRef, detailNeedsRestock: needsRestock,
-  resolveCurrentDetailAvailableStock: resolveStock, detailRestockEntry: { restockAvailable: eligible } }, false, mallAst)
+  resolveCurrentDetailAvailableStock: resolveStock, detailCatalogUnavailable, selectedDetailSku: selectedSkuRef }, false, mallAst)
 for (const index of [1, 0, 1, 0]) {
   selectedSkuRef.value = detailProductRef.value.skus[index]
   const empty = index === 1
@@ -265,34 +284,86 @@ for (const invalid of [null, sku('foreign', 0), sku('disabled', 0, false), sku('
 // 执行组件实际使用的共享入口，覆盖现货资格、选中规格、多规格未选中以及换号后的迟到响应。
 const pushes: any[] = []
 const checkedIds: string[] = []
-const buttonProps: any = vue.reactive({ product: detailProductRef.value, sku: null })
-const restockAuth = vue.reactive({ currentUser: { id: 'u1' } })
-let beforeRestockResponse: (() => void) | undefined
+const buttonProps: any = vue.reactive({ product: detailProductRef.value, sku: null, visible: true })
+const restockAuth = vue.reactive({ currentUser: { id: 'u1' }, sessionGeneration: 1 })
+let restockResponse: Promise<unknown> | undefined
+let queryAbortSignal: AbortSignal | undefined
 const entryRuntime = evaluate('src/composables/useClientRestockEntry.ts', {
   vue: { ...vueRuntime, onActivated: () => undefined }, 'vue-router': { useRouter: () => ({ push: async (target: any) => { pushes.push(target) } }) },
-  '@/api/modules/customer-service-feedback': { getActiveClientRestockRequest: async (id: string) => { checkedIds.push(id); beforeRestockResponse?.(); return { restock: null } } },
+  '@/api/modules/client-restock-query': { getActiveClientRestockRequest: async (id: string, { signal }: { signal: AbortSignal }) => {
+    checkedIds.push(id)
+    queryAbortSignal = signal
+    return restockResponse ?? { restock: null }
+  } },
   '@/store': { useClientAuthStore: () => restockAuth }, '@/store/pinia': { default: {} }, '@/utils/restock': { getRestockSkus },
   '@/composables/useStableRequest': stableRequestRuntime, '@/utils/error': { extractErrorMessage: String },
   '@/utils/app-alert': { showAppError: (message: string) => { throw new Error(message) } },
 })
-const entry = entryRuntime.useClientRestockEntry(() => buttonProps.product, () => buttonProps.sku)
+const entry = entryRuntime.useClientRestockEntry()
+const openRestock = () => entry.openRestock('detail', () => (
+  buttonProps.visible ? { product: buttonProps.product, skuId: buttonProps.sku?.id } : null
+))
 for (const selected of detailProductRef.value.skus) {
   buttonProps.sku = selected
-  assert.equal(entry.restockAvailable.value, true, '启用SKU正库存/零库存都可显式申请')
-  await entry.openRestock()
+  await openRestock()
   assert.equal(pushes.at(-1).query.productId, 'p1')
   assert.equal(pushes.at(-1).query.skuId, selected.id)
   assert.equal(checkedIds.at(-1), selected.id)
 }
 buttonProps.sku = null
-await entry.openRestock()
+await openRestock()
 assert.equal(Object.hasOwn(pushes.at(-1).query, 'skuId'), false, '多规格未选择时不能猜SKU')
 buttonProps.sku = detailProductRef.value.skus[0]
-const beforeStale = pushes.length
-beforeRestockResponse = () => { restockAuth.currentUser.id = 'u2' }
-await entry.openRestock()
-assert.equal(pushes.length, beforeStale, '换号后的旧响应不能导航')
-beforeRestockResponse = undefined
+restockResponse = Promise.resolve({ restock: { conversationId: 'active-request' } })
+await openRestock()
+assert.equal(pushes.at(-1), '/client/feedback/active-request', '已有活跃补货直接进入原会话')
+
+for (const invalidate of [
+  () => { restockAuth.sessionGeneration += 1; restockAuth.currentUser.id = 'u2'; restockAuth.currentUser.id = 'u1'; restockAuth.sessionGeneration += 1 },
+  () => { const original = buttonProps.sku; buttonProps.sku = detailProductRef.value.skus[1]; buttonProps.sku = original },
+  () => { buttonProps.visible = false; buttonProps.visible = true },
+]) {
+  let finish!: (result: unknown) => void
+  restockResponse = new Promise((resolve) => { finish = resolve })
+  const beforeStale = pushes.length
+  const response = openRestock()
+  assert.equal(entry.isLoading('detail', 'p1'), true)
+  invalidate()
+  assert.equal(queryAbortSignal?.aborted, true)
+  assert.equal(entry.isLoading('detail', 'p1'), false)
+  finish({ restock: { conversationId: 'obsolete' } })
+  await response
+  assert.equal(pushes.length, beforeStale, '账号、规格或可见状态切回后仍舍弃旧查询')
+}
+restockResponse = undefined
+
+// 同商品在其他列表仍存在时，真实来源卡片卸载仍应取消查询。
+class FixtureCardElement { isConnected = true }
+const originalCard = new FixtureCardElement()
+const otherCard = new FixtureCardElement()
+const cardRestockSource = vue.shallowRef(null)
+const productCardElementMap = new Map([['search:p1', originalCard], ['virtual:p1', otherCard]])
+const productCardStableKeyMap = new Map([['search:p1', 'p1'], ['virtual:p1', 'p1']])
+const productCardStableElementMap = new Map([['p1', otherCard]])
+const removeSourceCard = detailFunction('setProductCardRef', {
+  HTMLElement: FixtureCardElement, cardRestockSource, productCardElementMap, productCardStableKeyMap, productCardStableElementMap,
+}, false, mallAst)
+const clickCardRestock = detailFunction('openCardRestock', {
+  cardRestockSource, productCardElementMap, restockEntry: entry, isMallRoute: vue.ref(true),
+  products: vue.shallowRef([{ id: 'p1', skus: [sku('stocked', 15)] }]), canSingleRestock: () => true,
+}, false, mallAst)
+let finishCardRestock!: (result: unknown) => void
+restockResponse = new Promise((resolve) => { finishCardRestock = resolve })
+const previousPushes = pushes.length
+const originalCardRequest = clickCardRestock('search:p1', 'p1')
+assert.equal(entry.isLoading('card', 'p1'), true)
+removeSourceCard('search:p1', null, 'p1')
+assert.equal(productCardElementMap.get('virtual:p1'), otherCard)
+assert.equal(queryAbortSignal?.aborted, true)
+finishCardRestock({ restock: { conversationId: 'stale-card' } })
+await originalCardRequest
+assert.equal(pushes.length, previousPushes, '来源卡片消失后，不按同商品的另一张卡片放行旧结果')
+restockResponse = undefined
 
 const wireSummary: any = {
   id: 3, clientUserId: 2, assignedUserId: 1, assignedUsername: 'operator', assignedDisplayName: '客服', conversationNo: 'F3', subject: '补货',
@@ -319,7 +390,7 @@ const streamApi = evaluate('src/api/modules/customer-service-feedback.ts', {
     if (config.url === '/customer-service/assignees') return [{ id: 1, username: 'operator' }]
     if (config.method === 'PATCH') { wireSummary.status = 'closed'; wireSummary.restock.effectiveStatus = 'cancelled'; return { changed: true } }
     return structuredClone({ conversation: wireSummary, messages: [wireMessage], internalRemark: { updatedByUserId: 1 } })
-  } }, '@/utils/image-upload': {},
+  } }, '@/utils/image-upload': {}, './client-restock-query': activeQueryRuntime,
 }, { window: { location: { origin: 'https://fixture.invalid' } }, EventSource: TestEventSource, URL })
 const detailConversation = vue.ref(await streamApi.getClientFeedbackConversation('3'))
 assert.equal(detailConversation.value.id, '3')
@@ -340,14 +411,21 @@ wireSummary.assignedUserId = 1
 const reconnectTip = vue.ref('')
 const currentConversationId = vue.ref('3')
 const loading = vue.ref(false), detailLoading = vue.ref(false)
+const unavailable = vue.ref(false), loadError = vue.ref(''), refreshWarning = vue.ref('')
+const detailLifecycle = createFeedbackDetailLifecycle({
+  isMounted: () => true,
+  readContext: () => ({ ownerId: '2', sessionGeneration: 1, conversationId: currentConversationId.value }),
+})
 const loadDetail = detailFunction('loadConversationDetail', {
   conversation: detailConversation, currentConversationId, detailRequest: stableRequestRuntime.useStableRequest(), loading, detailLoading,
-  getClientFeedbackConversation: streamApi.getClientFeedbackConversation, captureDetailUiSnapshot: () => null, restoreDetailUiSnapshot: async () => undefined,
+  detailLifecycle, unavailable, loadError, refreshWarning,
+  getClientFeedbackConversation: streamApi.getClientFeedbackConversation,
   markFreshMessageIds: () => undefined, satisfactionComment: vue.ref(''), selectedSatisfactionLevel: vue.ref('satisfied'), satisfactionDialogVisible: vue.ref(false),
   showAppWarning: (text: string) => assert.fail(text), router: { replace: () => assert.fail('不得错误离开当前详情') },
 })
 const withdraw = detailFunction('handleWithdrawConversation', {
   conversation: detailConversation, canWithdrawConversation: vue.ref(true), withdrawingConversation: vue.ref(false), ElMessageBox: { confirm: async () => undefined },
+  detailLifecycle, sendFeedbackReplyAndRefresh, refreshWarning,
   withdrawClientFeedbackConversation: streamApi.withdrawClientFeedbackConversation, loadConversationDetail: loadDetail, reconnectTip,
   showAppSuccess: () => undefined, showAppWarning: (text: string) => assert.fail(text), showAppError: (text: string) => assert.fail(text),
   showCriticalErrorDialog: (error: unknown) => { throw error },
@@ -360,7 +438,7 @@ assert.ok(apiCalls.includes('PATCH /client-feedback/conversations/3/withdraw'))
 assert.equal(apiCalls.at(-1), 'GET /client-feedback/conversations/3')
 const refreshedIds: string[] = []
 const realOnConversation = detailFunction('onConversation', {
-  isRealtimeEligible: () => true, currentConversationId, reconnectTip,
+  isCurrentRealtime: detailLifecycle.capturePage(), currentConversationId, reconnectTip,
   refreshAuthoritativeConversationDetail: async (id: string) => { refreshedIds.push(id) },
   showAppError: (text: string) => assert.fail(text), extractErrorMessage: (error: unknown) => String(error),
 }, true)
@@ -391,7 +469,11 @@ for (const authId of [1, '1']) {
   assert.equal(workbenchValue('takeOverButtonText', { selectedConversation, isSelectedConversationOwnedByCurrentUser: owned }).value, '当前由我负责')
   assert.match(workbenchValue('assignmentActionTip', { selectedConversation, isSelectedConversationOwnedByCurrentUser: owned }).value, /由你负责/)
   const assigneeOptions = vue.ref<any[]>([])
-  const loadAssignable = workbenchValue('loadAssignableUsers', { assigneeOptions, assigneeLoading: vue.ref(false), assigneeRequest: stableRequestRuntime.useStableRequest(), listSupportAssignableUsers: async () => [{ id: 1 }, { id: '2' }] })
+  const loadAssignable = workbenchValue('loadAssignableUsers', {
+    authStore, currentUserId, assigneeCache: null, ASSIGNEE_CACHE_TTL_MS: workbenchValue('ASSIGNEE_CACHE_TTL_MS', {}),
+    assigneeOptions, assigneeLoading: vue.ref(false), assigneeRequest: stableRequestRuntime.useStableRequest(),
+    listSupportAssignableUsers: async () => [{ id: 1 }, { id: '2' }],
+  })
   await loadAssignable()
   assert.deepEqual(assigneeOptions.value.map((item) => item.id), ['1', '2'])
   const candidates = workbenchValue('transferAssigneeOptions', { assigneeOptions, selectedConversation })
@@ -423,7 +505,7 @@ for (const authId of [1, '1']) {
   selectedConversation.value.assigneeUserId = null
   assert.equal(owned.value, false)
   const remarks: string[] = []
-  await workbenchValue('handleSaveInternalRemark', { ...bindings, remarkSaving: vue.ref(false), issueForm: { internalRemark: '内部草稿' }, hasUnsavedInternalRemarkDraft: vue.ref(true),
+  await workbenchValue('handleSaveInternalRemark', { ...bindings, canEditSelectedConversation: vue.ref(true), remarkSaving: vue.ref(false), issueForm: { internalRemark: '内部草稿' }, hasUnsavedInternalRemarkDraft: vue.ref(true),
     updateFeedbackInternalRemark: async (id: string) => { remarks.push(id) }, loadConversationDetail: async (id: string) => { assert.equal(id, '3') } })()
   assert.deepEqual(remarks, ['3'], '内部备注沿用其原权限与可空负责人规则，使用规范化会话ID')
   authStore.currentUser.id = 2

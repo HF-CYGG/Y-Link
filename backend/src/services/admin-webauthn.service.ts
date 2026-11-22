@@ -1,6 +1,5 @@
 /** 管理端 WebAuthn 的一次性挑战与凭据事务入口。票据为单进程短期状态。 */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
-import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse } from '@simplewebauthn/server'
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from '@simplewebauthn/server'
 import type { EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
@@ -17,12 +16,25 @@ import { hashSessionToken } from '../utils/session-token.js'
 import { isAdminSessionIdleExpired } from '../utils/admin-session-idle.js'
 import { verifyPassword } from '../utils/password.js'
 import type { RequestMeta } from '../utils/request-meta.js'
-import { isAccountCurrentlyDeactivated, lockSysAccountsInStableOrder } from './account-business-guard.service.js'
+import { assertSysAccountGovernancePermission, isAccountCurrentlyDeactivated, lockSysAccountsInStableOrder } from './account-business-guard.service.js'
 import { authService } from './auth.service.js'
 import { authSecurityService } from './auth-security.service.js'
 import { adminMfaService, type AdminMfaFactorInput } from './admin-mfa.service.js'
 import { auditService } from './audit.service.js'
 import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
+
+type WebauthnSdk = typeof import('@simplewebauthn/server')
+// 开启时在模块装配（监听之前）等待 SDK，失败中断启动；关闭时不装载证书依赖。
+const webauthnSdk: WebauthnSdk | null = webauthnConfig.enabled ? await import('@simplewebauthn/server') : null
+function requireWebauthnSdk(): WebauthnSdk {
+  requireWebauthnEnabled()
+  if (!webauthnSdk) throw new BizError('通行密钥服务尚未就绪', 503)
+  return webauthnSdk
+}
+const generateAuthenticationOptions: WebauthnSdk['generateAuthenticationOptions'] = (...args) => requireWebauthnSdk().generateAuthenticationOptions(...args)
+const generateRegistrationOptions: WebauthnSdk['generateRegistrationOptions'] = (...args) => requireWebauthnSdk().generateRegistrationOptions(...args)
+const verifyAuthenticationResponse: WebauthnSdk['verifyAuthenticationResponse'] = (...args) => requireWebauthnSdk().verifyAuthenticationResponse(...args)
+const verifyRegistrationResponse: WebauthnSdk['verifyRegistrationResponse'] = (...args) => requireWebauthnSdk().verifyRegistrationResponse(...args)
 
 const CHALLENGE_TTL_MS = 5 * 60 * 1000
 interface LoginTicket {
@@ -345,6 +357,7 @@ export class AdminWebauthnService {
       if (actorUser.status !== 'enabled' || isAccountCurrentlyDeactivated(actorUser) || actorUser.role !== 'admin') {
         throw new BizError('操作者账号无效', 403)
       }
+      assertSysAccountGovernancePermission(actorUser, 'users:reset_password')
       await this.assertSessionLiveUnderAccountLock(manager, actor)
       const actorSecret = await manager.getRepository(SysUser).createQueryBuilder('user')
         .addSelect('user.passwordHash').where('user.id = :id', { id: actorUser.id }).getOneOrFail()

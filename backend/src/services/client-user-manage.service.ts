@@ -32,7 +32,7 @@ import type { RequestMeta } from '../utils/request-meta.js'
 import { assertPermanentDeletePassword } from '../utils/permanent-delete-password.js'
 import { auditService } from './audit.service.js'
 import { systemConfigService } from './system-config.service.js'
-import type { EntityManager } from 'typeorm'
+import { Brackets, type EntityManager } from 'typeorm'
 import { randomBytes } from 'node:crypto'
 import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
 import {
@@ -425,12 +425,19 @@ export class ClientUserManageService {
     }
   }
 
-  private async findUserByAnyIdentifier(account: string, manager?: EntityManager) {
+  private async findUserByAnyIdentifier(account: string, manager?: EntityManager, excludedUserId?: string) {
     const targetRepo = manager ? manager.getRepository(ClientUser) : this.userRepo
-    return targetRepo
+    const query = targetRepo
       .createQueryBuilder('user')
-      .where('user.mobile = :account OR user.email = :account OR user.realName = :account OR user.staffNo = :account', { account })
-      .getOne()
+      .where(new Brackets((where) => {
+        where.where('user.mobile = :account OR user.email = :account OR user.staffNo = :account', { account })
+          .orWhere('LOWER(user.realName) = :name', { name: account.toLowerCase() })
+      }))
+    if (excludedUserId !== undefined) {
+      const idType = targetRepo.manager.connection.options.type === 'mysql' ? 'UNSIGNED' : 'INTEGER'
+      query.andWhere(`user.id <> CAST(:excludedUserId AS ${idType})`, { excludedUserId })
+    }
+    return query.getExists()
   }
 
   private normalizeProfileKind(profileKind: string | undefined): ClientUserProfileKind {
@@ -634,6 +641,16 @@ export class ClientUserManageService {
         }
         const existingUsers = await existingUsersQuery.getMany()
         const existingByNodeId = new Map(existingUsers.map((user) => [user.departmentNodeId, user]))
+        const newAccounts = resolvedItems.filter((item) => !existingByNodeId.has(item.departmentNodeId)).map((item) => item.account)
+        if (newAccounts.length > 0 && await userRepo.createQueryBuilder('user')
+          .where(`user.mobile IN (:...accounts) OR user.email IN (:...accounts)
+            OR user.staffNo IN (:...accounts) OR LOWER(user.realName) IN (:...names)`, {
+            accounts: newAccounts,
+            names: newAccounts.map((account) => account.toLowerCase()),
+          })
+          .getExists()) {
+          throw new BizError('该账号编号已被其他客户端用户使用', 409)
+        }
         const created: DepartmentAccountBatchCreatedItem[] = []
         const skipped: DepartmentAccountBatchSkippedItem[] = []
 
@@ -648,10 +665,6 @@ export class ClientUserManageService {
               status: existing.status,
             })
             continue
-          }
-          const duplicatedAccount = await this.findUserByAnyIdentifier(item.account, manager)
-          if (duplicatedAccount) {
-            throw new BizError('该账号编号已被其他客户端用户使用', 409)
           }
           const savedUser = await userRepo.save(userRepo.create({
             realName: item.account,
@@ -1092,31 +1105,26 @@ export class ClientUserManageService {
         throw new BizError('手机号和邮箱至少保留一项', 400)
       }
 
-      const duplicatedUsernameUser = await this.findUserByAnyIdentifier(username, manager)
-      if (duplicatedUsernameUser && duplicatedUsernameUser.id !== user.id) {
+      const usernameChanged = username !== user.realName.trim()
+      const usernameConflict = username !== user.realName && await this.findUserByAnyIdentifier(username, manager, user.id)
+      if (usernameChanged && usernameConflict) {
         throw new BizError('该用户名已被其他客户端用户使用', 409)
       }
 
-      if (mobile) {
-        const duplicatedMobileUser = await this.findUserByAnyIdentifier(mobile, manager)
-        if (duplicatedMobileUser && duplicatedMobileUser.id !== user.id) {
-          throw new BizError('该手机号已被其他客户端用户使用', 409)
-        }
+      if (mobile && mobile !== user.mobile && await this.findUserByAnyIdentifier(mobile, manager, user.id)) {
+        throw new BizError('该手机号已被其他客户端用户使用', 409)
       }
-      if (email) {
-        const duplicatedEmailUser = await this.findUserByAnyIdentifier(email, manager)
-        if (duplicatedEmailUser && duplicatedEmailUser.id !== user.id) {
-          throw new BizError('该邮箱已被其他客户端用户使用', 409)
-        }
+      if (email && email !== user.email && await this.findUserByAnyIdentifier(email, manager, user.id)) {
+        throw new BizError('该邮箱已被其他客户端用户使用', 409)
       }
 
       const before = sanitizeClientUserProfile(user)
-      const previousDepartmentNodeId = user.departmentNodeId
       const profileKind = deriveClientUserProfileKind(user)
       const resolvedDepartment = profileKind === 'department'
         ? await systemConfigService.resolveClientDepartmentReference(input, manager, latestDepartmentConfig)
         : null
-      user.realName = username
+      // 旧姓名仅去空格时，安全则归一化；若会碰撞另一账号的登录标识，保留旧存储值。
+      if (!usernameConflict) user.realName = username
       user.mobile = mobile
       user.email = email
       user.departmentName = profileKind === 'department'
@@ -1140,12 +1148,14 @@ export class ClientUserManageService {
         throw error
       }
 
-      const identityChanged = before.realName !== savedUser.realName
-        || before.mobile !== savedUser.mobile
-        || before.email !== savedUser.email
-        || before.departmentName !== savedUser.departmentName
-        || previousDepartmentNodeId !== savedUser.departmentNodeId
-        || before.status !== savedUser.status
+      const after = sanitizeClientUserProfile(savedUser)
+      // 前后使用同一口径，未填写联系方式在数据库中的 NULL 与界面空字符串等价。
+      const identityChanged = before.realName !== after.realName
+        || before.mobile !== after.mobile
+        || before.email !== after.email
+        || before.departmentName !== after.departmentName
+        || before.departmentNodeId !== after.departmentNodeId
+        || before.status !== after.status
       let revokedSessionCount = 0
       let revokedMobileSessionCount = 0
       if (identityChanged) {
@@ -1170,7 +1180,7 @@ export class ClientUserManageService {
           requestMeta,
           detail: {
             before,
-            after: sanitizeClientUserProfile(savedUser),
+            after,
             revokedSessionCount,
             revokedMobileSessionCount,
             identityChanged,
@@ -1179,7 +1189,7 @@ export class ClientUserManageService {
         manager,
       )
 
-      return { profile: sanitizeClientUserProfile(savedUser), identityChanged }
+      return { profile: after, identityChanged }
     })
     if (result.identityChanged) {
       customerServiceRealtimeService.disconnectByOwner('client', id)

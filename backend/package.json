@@ -5,6 +5,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "postinstall": "node scripts/install-pinned-sqlite.mjs",
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
@@ -15,6 +16,7 @@
     "transaction-coordinator:verify": "node --import tsx scripts/transaction-coordinator-verify.ts",
     "verify:mysql:schema-contract": "node --import tsx scripts/mysql-schema-contract-verify.ts",
     "verify:db:migration:foundation": "tsx scripts/database-migration-foundation-verify.ts",
+    "verify:db:migration:manual": "node --import tsx scripts/manual-migration-protocol-verify.ts",
     "verify:db:migration:check-clause": "tsx scripts/mysql-check-clause-verify.ts",
     "verify:db:write-freeze": "node --import tsx scripts/database-write-freeze-verify.ts",
     "verify:db:rescue:control": "node --import tsx scripts/database-rescue-control-verify.ts",
@@ -39,7 +41,11 @@
     "auth:webauthn:compat:verify": "node --import tsx scripts/admin-webauthn-verify.ts --enabled --compat",
     "security:data-leak-ddos:verify": "node --import tsx scripts/data-leak-ddos-verify.ts",
     "captcha:rendering:verify": "node --import tsx scripts/captcha-rendering-verify.ts",
+    "image:lazy:verify": "node --import tsx scripts/image-module-lazy-verify.ts",
     "security:auth-sse-final:verify": "node --import tsx scripts/auth-sse-final-regression-verify.ts",
+    "security:verification-isolation:verify": "node --import tsx scripts/verification-isolation-verify.ts",
+    "security:client-account-write:verify": "node --import tsx scripts/client-account-write-boundary-verify.ts",
+    "security:inventory-csv:verify": "node --import tsx scripts/inventory-audit-csv-verify.ts",
     "security:http-boundary:verify": "node --import tsx scripts/http-security-verify.ts",
     "security:business-boundary:verify": "node --import tsx scripts/security-business-contract-verify.ts",
     "security:findings:verify": "tsx scripts/security-findings-remediation-verify.ts",
@@ -118,12 +124,17 @@
     "supplier:portal:verify": "tsx scripts/supplier-portal-verify.ts",
     "audit:catalog:verify": "tsx scripts/audit-action-catalog-verify.ts",
     "notification:event-log:verify": "tsx scripts/notification-event-log-verify.ts",
+    "notification:channels:verify": "tsx scripts/notification-unified-channels-verify.ts",
     "order-query:baseline:verify": "tsx scripts/order-query-baseline-verify.ts",
     "reports:contract:verify": "tsx scripts/report-center-contract-verify.ts",
     "reports:inventory:verify": "tsx scripts/report-inventory-verify.ts",
     "uploads:legacy:inspect": "tsx scripts/inspect-legacy-upload-urls.ts",
     "product:thumbnail:backfill": "tsx scripts/product-thumbnail-backfill.ts",
-    "product:thumbnail:verify": "tsx scripts/product-thumbnail-verify.ts"
+    "product:thumbnail:verify": "tsx scripts/product-thumbnail-verify.ts",
+    "verify:zod4:contract": "node --import tsx scripts/zod4-contract-verify.ts",
+    "verify:optional-sdk:lazy": "node --import tsx scripts/optional-sdk-lazy-verify.ts",
+    "verify:typeorm:glob": "node scripts/typeorm-glob-compat-verify.mjs",
+    "verify:security-performance:mysql": "node scripts/security-performance-mysql-verify.mjs"
   },
   "dependencies": {
     "@alicloud/dypnsapi20170525": "^2.0.0",
@@ -142,7 +153,7 @@
     "svg-captcha": "1.4.0",
     "typeorm": "^0.3.29",
     "uuid": "^11.1.1",
-    "zod": "^3.25.76"
+    "zod": "4.6.7"
   },
   "optionalDependencies": {
     "sqlite3": "^5.1.7"
@@ -161,7 +172,13 @@
     "node-gyp": "^12.3.0",
     "tar": "^7.5.19",
     "uuid": "^11.1.1",
-    "qs@<6.16.0": "6.16.0",
-    "xml2js@<0.5.0": "0.6.2"
+    "xml2js@<0.5.0": "0.6.2",
+    "qs@<6.16.1": "6.16.1",
+    "typeorm": {
+      "glob": {
+        ".": "14.0.3",
+        "minimatch": "11.0.2"
+      }
+    }
   }
 }

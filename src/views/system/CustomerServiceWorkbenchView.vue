@@ -8,13 +8,14 @@
  * - 宽屏（≥1536px）三栏并排、各自独立滚动；较窄时退化为“队列 + 详情”或单列，详情内用两枚标签切换
  *   “会话 / 工单与协同”，属性栏模板只写一份，通过 v-show 在不同布局间复用；
  * - 页面通过真实后端接口与 SSE 订阅同步在线状态、续接提示和会话变化，保证客服视角与客户端视角一致。
+ * - 回复在首个异步边界前固定会话和载荷，使用会话、操作与草稿代次隔离迟到结果，避免跨会话误发或清空新输入。
  * 维护说明：
  * - 若后续继续扩展附件、快捷回复或 SLA 指标，优先在属性栏新增分段，不再拆分独立子页或新增顶部卡片；
  * - 自动刷新会快照草稿与三栏滚动位置，新增可编辑区域时需同步纳入快照与脏检查，避免刷新覆盖输入；
  * - 若客服在线规则改为更精细的排班模型，本页优先消费共享 API 已暴露的 presence 数据，不在页面层重复实现。
  */
 
-import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter, type LocationQueryRaw } from 'vue-router'
 
 import {
@@ -68,6 +69,8 @@ import { formatDateTime } from '@/utils/date-time'
 import { normalizeSubmitText } from '@/utils/submit-feedback'
 
 import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
+
+defineOptions({ name: 'CustomerServiceWorkbenchView' })
 
 /**
  * 显式注入全局 Pinia 单例：
@@ -151,16 +154,28 @@ const issueFormScrollbarRef = ref<WorkbenchScrollbarLike | null>(null)
 const freshConversationIds = ref<string[]>([])
 const freshMessageIds = ref<string[]>([])
 let realtimeConnection: FeedbackRealtimeConnection | null = null
+let realtimeAttempt = 0
+let readyRealtimeAttempt = 0
+let snapshotStartedForAttempt = 0
+let firstSnapshotStarted = false
+let firstSnapshotTimer: ReturnType<typeof setTimeout> | undefined
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let refreshTimer: ReturnType<typeof setTimeout> | null = null
 let freshConversationTimer: ReturnType<typeof setTimeout> | null = null
 let freshMessageTimer: ReturnType<typeof setTimeout> | null = null
 let lifecycleToken = 0
+let conversationGeneration = 0
+let replyOperationGeneration = 0
+let replyDraftGeneration = 0
+let detailUiGeneration = 0
 let refreshInFlight = false
-let pendingRefresh = false
+let pendingRefresh: WorkbenchRefreshOptions | null = null
 let workbenchComponentActive = false
+let assigneeCache: { userId: string; sessionExpiresAt: string | null; validUntil: number; options: SupportAssignableUser[] } | null = null
 const CUSTOMER_SERVICE_FALLBACK_POLL_MIN_MS = 25_000
 const CUSTOMER_SERVICE_FALLBACK_POLL_MAX_MS = 35_000
+const FIRST_SNAPSHOT_WAIT_MS = 350
+const ASSIGNEE_CACHE_TTL_MS = 30_000
 const listRequest = useStableRequest()
 const detailRequest = useStableRequest()
 const presenceRequest = useStableRequest()
@@ -566,8 +581,8 @@ const captureWorkbenchDetailUiSnapshot = (): WorkbenchDetailUiSnapshot => {
   }
 }
 
-const restoreWorkbenchDetailUiSnapshot = async (snapshot: WorkbenchDetailUiSnapshot | null) => {
-  if (!snapshot) {
+const restoreWorkbenchDetailUiSnapshot = async (snapshot: WorkbenchDetailUiSnapshot | null, mayApply?: () => boolean) => {
+  if (!snapshot || mayApply?.() === false) {
     return
   }
   runWithSuspendedDraftTracking(() => {
@@ -578,6 +593,7 @@ const restoreWorkbenchDetailUiSnapshot = async (snapshot: WorkbenchDetailUiSnaps
     Object.assign(issueForm, snapshot.issueForm)
   })
   await nextTick()
+  if (mayApply?.() === false) return
   if (conversationListPanelRef.value) {
     conversationListPanelRef.value.scrollTop = snapshot.listScrollTop
   }
@@ -630,6 +646,9 @@ const isSelectedConversationOwnedByCurrentUser = computed(() => {
   }
   return selectedConversation.value.assigneeUserId === currentUserId.value
 })
+
+const canEditSelectedConversation = computed(() => hasPermission('customer_service:reply')
+  && isSelectedConversationOwnedByCurrentUser.value && selectedConversation.value?.status !== 'closed')
 
 const selectedConversationSla = computed(() => {
   return selectedConversation.value ? resolveSupportFeedbackConversationSla(selectedConversation.value) : null
@@ -825,7 +844,12 @@ const patchConversationListItem = (conversationId: string, patch: Partial<Feedba
  * - 若当前选中项仍在视图内，只保留原详情；
  * - 若已被筛掉，则自动切到该视图下第一条，保证“左侧列表”和“右侧详情”始终一致。
  */
-const syncVisibleConversationSelection = async (options: { forceReloadDetail?: boolean } = {}) => {
+const syncVisibleConversationSelection = async (options: {
+  forceReloadDetail?: boolean
+  mayApply?: () => boolean
+  captureContinuationGuard?: () => () => boolean
+} = {}) => {
+  if (options.mayApply?.() === false) return
   const visibleConversations = getQuickViewFilteredConversations()
   if (!visibleConversations.length) {
     selectedConversationId.value = ''
@@ -849,10 +873,14 @@ const syncVisibleConversationSelection = async (options: { forceReloadDetail?: b
     && nextConversationId === selectedConversation.value?.id
     && Boolean(options.forceReloadDetail)
 
+  const selectionChanged = selectedConversationId.value !== nextConversationId
   selectedConversationId.value = nextConversationId
+  // 回复后的队列刷新自行切到下一单时，先移除旧单详情，避免新单加载中仍可编辑旧单内容。
+  if (selectionChanged && options.captureContinuationGuard) selectedConversation.value = null
   if (shouldLoadDetail) {
     await loadConversationDetail(nextConversationId, {
       preserveDetailUiState: shouldPreserveDetailUiState,
+      mayApply: options.captureContinuationGuard?.() ?? options.mayApply,
     })
   }
 }
@@ -861,6 +889,7 @@ const loadConversationDetail = async (
   conversationId: string,
   options: {
     preserveDetailUiState?: boolean
+    mayApply?: () => boolean
   } = {},
 ) => {
   if (!conversationId) {
@@ -885,7 +914,7 @@ const loadConversationDetail = async (
   await detailRequest.runLatest({
     executor: (signal) => getSupportFeedbackConversation(conversationId, { signal }),
     onSuccess: async (detail) => {
-      if (selectedConversationId.value !== conversationId) {
+      if (selectedConversationId.value !== conversationId || options.mayApply?.() === false) {
         return
       }
 
@@ -903,7 +932,7 @@ const loadConversationDetail = async (
           .filter((message) => !previousMessageIds?.has(message.id))
           .map((message) => message.id) ?? []
         markFreshMessageIds(nextFreshMessageIds)
-        await restoreWorkbenchDetailUiSnapshot(detailUiSnapshot)
+        await restoreWorkbenchDetailUiSnapshot(detailUiSnapshot, options.mayApply)
       }
       syncLocalDraftFlags()
     },
@@ -917,6 +946,8 @@ const loadConversations = async (
   options: {
     refreshSelectedDetail?: boolean
     preserveUiState?: boolean
+    mayApply?: () => boolean
+    captureContinuationGuard?: () => () => boolean
   } = {},
 ) => {
   const shouldRefreshSelectedDetail = options.refreshSelectedDetail ?? true
@@ -926,17 +957,22 @@ const loadConversations = async (
   const listScrollTop = options.preserveUiState ? (conversationListPanelRef.value?.scrollTop ?? 0) : null
   loading.value = true
   await listRequest.runLatest({
-    executor: (signal) => listSupportFeedbackConversations({
-      keyword: searchForm.keyword,
-      status: searchForm.status,
-      priority: searchForm.priority,
-      assigneeScope: searchForm.assigneeScope,
-      issueType: searchForm.issueType,
-      restockStatus: searchForm.restockStatus,
-      productId: searchForm.productId,
-      dateRange: searchForm.dateRange,
-    }, { signal }),
+    executor: (signal) => {
+      firstSnapshotStarted = true
+      snapshotStartedForAttempt = readyRealtimeAttempt
+      return listSupportFeedbackConversations({
+        keyword: searchForm.keyword,
+        status: searchForm.status,
+        priority: searchForm.priority,
+        assigneeScope: searchForm.assigneeScope,
+        issueType: searchForm.issueType,
+        restockStatus: searchForm.restockStatus,
+        productId: searchForm.productId,
+        dateRange: searchForm.dateRange,
+      }, { signal })
+    },
     onSuccess: async (nextConversations) => {
+      if (options.mayApply?.() === false) return
       conversations.value = nextConversations
       if (previousConversationIds) {
         markFreshConversationIds(
@@ -947,10 +983,12 @@ const loadConversations = async (
       }
       await syncVisibleConversationSelection({
         forceReloadDetail: shouldRefreshSelectedDetail,
+        mayApply: options.mayApply,
+        captureContinuationGuard: options.captureContinuationGuard,
       })
-      if (listScrollTop !== null) {
+      if (listScrollTop !== null && options.mayApply?.() !== false) {
         await nextTick()
-        if (conversationListPanelRef.value) {
+        if (conversationListPanelRef.value && options.mayApply?.() !== false) {
           conversationListPanelRef.value.scrollTop = listScrollTop
         }
       }
@@ -1220,6 +1258,7 @@ const handleSaveIssue = async () => {
     showAppWarning('请先选择一条会话')
     return
   }
+  if (!canEditSelectedConversation.value) return
 
   const normalizedTitle = normalizeSubmitText(issueForm.title)
   const normalizedExpectedResult = normalizeSubmitText(issueForm.expectedResult)
@@ -1239,7 +1278,6 @@ const handleSaveIssue = async () => {
   try {
     await updateFeedbackIssue(selectedConversation.value.id, {
       title: normalizedTitle,
-      status: issueForm.status,
       priority: issueForm.priority,
       issueType: selectedConversation.value.restock ? undefined : issueForm.issueType,
       category: issueForm.category,
@@ -1309,6 +1347,7 @@ const handleReassignPriority = async (priority: FeedbackIssuePriority) => {
     showAppWarning('请先选择一条会话')
     return
   }
+  if (!canEditSelectedConversation.value) return
 
   priorityUpdating.value = priority
   saving.value = true
@@ -1348,6 +1387,7 @@ const handleSaveInternalRemark = async () => {
     showAppWarning('请先选择一条会话')
     return
   }
+  if (!canEditSelectedConversation.value) return
 
   remarkSaving.value = true
   try {
@@ -1369,6 +1409,7 @@ const handleSaveInternalRemark = async () => {
 }
 
 const handleReply = async () => {
+  if (replying.value) return
   if (!selectedConversation.value) {
     showAppWarning('请先选择一条会话')
     return
@@ -1380,32 +1421,51 @@ const handleReply = async () => {
     return
   }
 
+  const conversationId = selectedConversation.value.id
+  const isRestock = Boolean(selectedConversation.value.restock)
+  const issueInput = {
+    title: issueForm.title,
+    status: issueForm.status,
+    priority: issueForm.priority,
+    issueType: isRestock ? undefined : issueForm.issueType,
+    category: issueForm.category,
+    orderRef: issueForm.orderRef,
+    expectedResult: issueForm.expectedResult,
+    actualResult: issueForm.actualResult,
+    reproductionSteps: issueForm.reproductionSteps,
+    contactPreference: issueForm.contactPreference,
+    tags: parseTagText(issueForm.tagText),
+  }
+  const operation = ++replyOperationGeneration
+  const session = conversationGeneration
+  const lifecycle = lifecycleToken
+  const draft = replyDraftGeneration
+  const ui = detailUiGeneration
+  const isCurrentReply = () => operation === replyOperationGeneration
+    && lifecycle === lifecycleToken && session === conversationGeneration
+    && selectedConversationId.value === conversationId && selectedConversation.value?.id === conversationId
+  const captureContinuationGuard = () => {
+    const selection = conversationGeneration, currentId = selectedConversationId.value, revision = detailUiGeneration
+    return () => operation === replyOperationGeneration && lifecycle === lifecycleToken
+      && selection === conversationGeneration && currentId === selectedConversationId.value && revision === detailUiGeneration
+  }
   replying.value = true
   try {
-    if (!selectedConversation.value.restock) await updateFeedbackIssue(selectedConversation.value.id, {
-      title: issueForm.title,
-      status: issueForm.status,
-      priority: issueForm.priority,
-      issueType: selectedConversation.value.restock ? undefined : issueForm.issueType,
-      category: issueForm.category,
-      orderRef: issueForm.orderRef,
-      expectedResult: issueForm.expectedResult,
-      actualResult: issueForm.actualResult,
-      reproductionSteps: issueForm.reproductionSteps,
-      contactPreference: issueForm.contactPreference,
-      tags: parseTagText(issueForm.tagText),
-    })
+    if (!isRestock) await updateFeedbackIssue(conversationId, issueInput)
 
-    await appendStaffFeedbackMessage(selectedConversation.value.id, {
+    await appendStaffFeedbackMessage(conversationId, {
       body: normalizedReply,
     })
-    replyDraft.value = ''
-    hasUnsavedReplyDraft.value = false
-    await loadConversations({
-      preserveUiState: true,
-    })
-    reconnectTip.value = '已续接当前客服会话，最新回复已同步发送给客户端。'
-    void scrollConversationToBottom()
+    if (isCurrentReply() && draft === replyDraftGeneration && ui === detailUiGeneration) {
+      replyDraft.value = ''
+      hasUnsavedReplyDraft.value = false
+      const mayApply = captureContinuationGuard()
+      await loadConversations({ preserveUiState: true, mayApply, captureContinuationGuard })
+      if (isCurrentReply() && mayApply()) {
+        reconnectTip.value = '已续接当前客服会话，最新回复已同步发送给客户端。'
+        void scrollConversationToBottom()
+      }
+    }
     showAppSuccess('客服回复已发送')
   } catch (error) {
     void showCriticalErrorDialog(error, {
@@ -1414,7 +1474,7 @@ const handleReply = async () => {
       operation: '发送客服回复',
     })
   } finally {
-    replying.value = false
+    if (operation === replyOperationGeneration) replying.value = false
   }
 }
 
@@ -1450,9 +1510,13 @@ const handleReplyShortcut = (event: Event | KeyboardEvent) => {
 }
 
 const loadPresence = async () => {
+  const attempt = realtimeAttempt
+  const readyAttempt = readyRealtimeAttempt
   await presenceRequest.runLatest({
     executor: (signal) => getCustomerServicePresence({ signal }),
     onSuccess: (result) => {
+      // 同一次连接的握手完成也会使握手前启动的快照过时。
+      if (attempt !== realtimeAttempt || readyAttempt !== readyRealtimeAttempt) return
       presence.value = result
       realtimeState.value = result.availability.isOnline ? 'online' : 'offline'
     },
@@ -1465,11 +1529,20 @@ const loadPresence = async () => {
  * - 若后端调整可接单范围，前端只消费统一结果，不自行推断角色。
  */
 const loadAssignableUsers = async () => {
+  const userId = currentUserId.value
+  const sessionExpiresAt = authStore.expiresAt
+  if (assigneeCache?.userId === userId && assigneeCache.sessionExpiresAt === sessionExpiresAt && assigneeCache.validUntil > Date.now()) {
+    assigneeOptions.value = assigneeCache.options
+    return
+  }
   assigneeLoading.value = true
   await assigneeRequest.runLatest({
     executor: (signal) => listSupportAssignableUsers({ signal }),
     onSuccess: (result) => {
-      assigneeOptions.value = result.map((user) => ({ ...user, id: String(user.id) }))
+      if (currentUserId.value !== userId || authStore.expiresAt !== sessionExpiresAt) return
+      const options = result.map((user) => ({ ...user, id: String(user.id) }))
+      assigneeCache = { userId, sessionExpiresAt, validUntil: Date.now() + ASSIGNEE_CACHE_TTL_MS, options }
+      assigneeOptions.value = options
     },
     onFinally: () => {
       assigneeLoading.value = false
@@ -1482,41 +1555,47 @@ const loadAssignableUsers = async () => {
  * - SSE 与轮询都走同一条刷新链路，避免多处各自拉取导致覆盖顺序混乱；
  * - 若前一次刷新尚未完成，新的刷新请求只做排队，等当前批次结束后立即补一次。
  */
-const refreshWorkbenchData = async (
-  currentToken: number,
-  options: {
-    refreshPresence?: boolean
-    refreshSelectedDetail?: boolean
-    preserveUiState?: boolean
-  } = {},
-) => {
+type WorkbenchRefreshOptions = {
+  refreshPresence?: boolean
+  refreshSelectedDetail?: boolean
+  preserveUiState?: boolean
+}
+const refreshWorkbenchData = async (currentToken: number, options: WorkbenchRefreshOptions = {}) => {
   if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
     return
   }
 
   if (refreshInFlight) {
-    pendingRefresh = true
+    pendingRefresh = pendingRefresh ? {
+      refreshPresence: pendingRefresh.refreshPresence !== false || options.refreshPresence !== false,
+      refreshSelectedDetail: pendingRefresh.refreshSelectedDetail !== false || options.refreshSelectedDetail !== false,
+      preserveUiState: pendingRefresh.preserveUiState !== false || options.preserveUiState !== false,
+    } : options
     return
   }
 
   refreshInFlight = true
   try {
+    if (options.refreshPresence !== false) void loadPresence()
     await loadConversations({
       refreshSelectedDetail: options.refreshSelectedDetail,
       preserveUiState: options.preserveUiState ?? true,
     })
-    if (options.refreshPresence !== false) {
-      await loadPresence()
-    }
   } finally {
-    refreshInFlight = false
-    const shouldStopRefreshLoop = !isWorkbenchResident.value || currentToken !== lifecycleToken
-    if (shouldStopRefreshLoop) {
-      pendingRefresh = false
-    } else if (pendingRefresh) {
-      pendingRefresh = false
-      await refreshWorkbenchData(currentToken, options)
+    if (currentToken === lifecycleToken) {
+      refreshInFlight = false
+      if (isWorkbenchResident.value && pendingRefresh) {
+        const next = pendingRefresh
+        pendingRefresh = null
+        await refreshWorkbenchData(currentToken, next)
+      }
     }
+  }
+}
+
+const readFirstSnapshot = (currentToken: number) => {
+  if (!firstSnapshotStarted && currentToken === lifecycleToken && isWorkbenchResident.value) {
+    void refreshWorkbenchData(currentToken, { refreshPresence: false, refreshSelectedDetail: true })
   }
 }
 
@@ -1594,6 +1673,8 @@ const handleRealtimeConversation = async (
  * - 统一收口后可以避免重连定时器在离页后继续把客服重新拉回在线。
  */
 const disposeRealtimeConnection = () => {
+  realtimeAttempt += 1
+  readyRealtimeAttempt = 0
   realtimeConnection?.close()
   realtimeConnection = null
 
@@ -1622,7 +1703,7 @@ const disposeRealtime = () => {
   }
 }
 
-const connectRealtime = (currentToken: number) => {
+const connectRealtime = (currentToken: number, reconnecting = false) => {
   // 重连只替换 SSE 本身；兜底轮询与页面高亮计时必须继续保留。
   disposeRealtimeConnection()
 
@@ -1635,11 +1716,15 @@ const connectRealtime = (currentToken: number) => {
   }
 
   realtimeState.value = 'connecting'
+  const attempt = realtimeAttempt
+  const isCurrentConnection = () => isWorkbenchResident.value && currentToken === lifecycleToken && attempt === realtimeAttempt
   realtimeConnection = openFeedbackRealtimeStream('service', {
     onOpen: (payload) => {
-      if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
+      if (!isCurrentConnection() || readyRealtimeAttempt === attempt) {
         return
       }
+      readyRealtimeAttempt = attempt
+      clearTimeout(firstSnapshotTimer)
       if (payload.availability || payload.session) {
         presence.value = {
           availability: payload.availability ?? presence.value?.availability ?? {
@@ -1662,27 +1747,36 @@ const connectRealtime = (currentToken: number) => {
           },
         }
       }
-      void refreshWorkbenchData(currentToken, {
-        refreshPresence: true,
-        refreshSelectedDetail: Boolean(selectedConversationId.value),
-        preserveUiState: true,
-      })
-      reconnectTip.value = '已恢复客服实时连接，当前工作台会自动续接最新会话变化。'
+      realtimeState.value = presence.value?.availability.isOnline ? 'online' : 'offline'
+      // SSE 不回放。每次连通后，要有一份在本次流就绪之后才开始读取的快照。
+      if (snapshotStartedForAttempt !== attempt) {
+        void refreshWorkbenchData(currentToken, {
+          refreshPresence: false,
+          refreshSelectedDetail: true,
+          preserveUiState: true,
+        })
+      }
+      reconnectTip.value = reconnecting
+        ? '已恢复客服实时连接，当前工作台会自动续接最新会话变化。'
+        : '已连接客服实时消息。'
     },
     onConversation: async (payload) => {
-      await handleRealtimeConversation(currentToken, payload)
+      if (isCurrentConnection()) await handleRealtimeConversation(currentToken, payload)
     },
     onError: () => {
-      if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
+      if (!isCurrentConnection()) {
         return
       }
+      disposeRealtimeConnection()
+      clearTimeout(firstSnapshotTimer)
+      readFirstSnapshot(currentToken)
       realtimeState.value = 'offline'
       reconnectTip.value = '实时连接已中断，系统正在尝试自动续接...'
       reconnectTimer = setTimeout(() => {
         if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
           return
         }
-        connectRealtime(currentToken)
+        connectRealtime(currentToken, true)
       }, 3000)
     },
   })
@@ -1694,22 +1788,25 @@ const connectRealtime = (currentToken: number) => {
  * - 通过生命周期令牌拦截旧请求回流，避免离页后旧异步任务重新接管连接。
  */
 const enterWorkbench = async () => {
-  if (!workbenchComponentActive || globalThis.document?.visibilityState === 'hidden') {
+  if (!workbenchComponentActive || isWorkbenchResident.value || globalThis.document?.visibilityState === 'hidden') {
     return
   }
   lifecycleToken += 1
   const currentToken = lifecycleToken
   isWorkbenchResident.value = true
+  firstSnapshotStarted = false
+  snapshotStartedForAttempt = 0
   reconnectTip.value = '进入工作台后会自动续接当前客服会话。'
 
   try {
-    await loadAssignableUsers()
-    await refreshWorkbenchData(currentToken, { refreshPresence: true, refreshSelectedDetail: true })
-    if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
-      return
-    }
     startRefreshPolling(currentToken)
+    firstSnapshotTimer = setTimeout(() => readFirstSnapshot(currentToken), FIRST_SNAPSHOT_WAIT_MS)
     connectRealtime(currentToken)
+    if (!realtimeConnection) {
+      clearTimeout(firstSnapshotTimer)
+      readFirstSnapshot(currentToken)
+    }
+    await Promise.all([loadAssignableUsers(), loadPresence()])
   } catch (error) {
     if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
       return
@@ -1721,8 +1818,9 @@ const enterWorkbench = async () => {
 const leaveWorkbench = () => {
   isWorkbenchResident.value = false
   lifecycleToken += 1
-  pendingRefresh = false
+  pendingRefresh = null
   refreshInFlight = false
+  clearTimeout(firstSnapshotTimer)
   listRequest.cancel()
   detailRequest.cancel()
   presenceRequest.cancel()
@@ -1762,9 +1860,15 @@ watch(workbenchLayout, (layout) => {
   }
 })
 
+watch(selectedConversationId, () => { conversationGeneration += 1 }, { flush: 'sync' })
+
 watch(replyDraft, () => {
+  if (!draftTrackingSuspended.value) {
+    replyDraftGeneration += 1
+    detailUiGeneration += 1
+  }
   syncLocalDraftFlags()
-})
+}, { flush: 'sync' })
 
 watch(
   () => [
@@ -1781,20 +1885,31 @@ watch(
     issueForm.tagText,
   ],
   () => {
+    if (!draftTrackingSuspended.value) detailUiGeneration += 1
     syncLocalDraftFlags()
   },
+  { flush: 'sync' },
 )
 
 watch(
   () => issueForm.internalRemark,
   () => {
+    if (!draftTrackingSuspended.value) detailUiGeneration += 1
     syncLocalDraftFlags()
   },
+  { flush: 'sync' },
 )
+
+watch([selectedQuickReplyKey, transferAssigneeUserId, activeDetailTab], () => {
+  if (!draftTrackingSuspended.value) detailUiGeneration += 1
+}, { flush: 'sync' })
 
 watch(
   currentUserId,
   (currentUserId, previousUserId) => {
+    assigneeCache = null
+    assigneeOptions.value = []
+    leaveWorkbench()
     if (
       currentUserId
       && currentUserId !== previousUserId
@@ -1802,13 +1917,9 @@ watch(
       && globalThis.document?.visibilityState !== 'hidden'
     ) {
       void enterWorkbench()
-      return
-    }
-
-    if (!currentUserId) {
-      leaveWorkbench()
     }
   },
+  { flush: 'sync' },
 )
 
 const handleVisibilityChange = () => {
@@ -1823,7 +1934,7 @@ const handleVisibilityChange = () => {
   void enterWorkbench()
 }
 
-onActivated(() => {
+const activateWorkbench = () => {
   syncRestockRouteQuery()
   if (workbenchComponentActive) {
     return
@@ -1833,7 +1944,10 @@ onActivated(() => {
   if (globalThis.document?.visibilityState !== 'hidden') {
     void enterWorkbench()
   }
-})
+}
+
+onMounted(activateWorkbench)
+onActivated(activateWorkbench)
 
 onDeactivated(() => {
   workbenchComponentActive = false
@@ -2273,7 +2387,7 @@ onBeforeUnmount(() => {
                       :type="getPriorityButtonType(item.value)"
                       :plain="issueForm.priority !== item.value"
                       :loading="priorityUpdating === item.value"
-                      :disabled="saving"
+                      :disabled="saving || !canEditSelectedConversation"
                       @click="handleReassignPriority(item.value)"
                     >
                       {{ item.label }}
@@ -2289,14 +2403,14 @@ onBeforeUnmount(() => {
                       <el-tag type="info" effect="plain" round size="small">{{ getCategoryLabel(issueForm.category) }}</el-tag>
                     </div>
                   </div>
-                  <el-form label-position="top" class="cs-issue-form">
+                  <el-form label-position="top" class="cs-issue-form" :disabled="!canEditSelectedConversation">
                     <el-form-item label="标题">
                       <el-input v-model="issueForm.title" maxlength="80" show-word-limit />
                     </el-form-item>
 
                     <div class="grid grid-cols-2 gap-2">
                       <el-form-item label="问题类型">
-                        <el-select v-model="issueForm.issueType" class="w-full" :disabled="Boolean(selectedConversation.restock)">
+                        <el-select v-model="issueForm.issueType" class="w-full" :disabled="!canEditSelectedConversation || Boolean(selectedConversation.restock)">
                           <el-option
                             v-for="item in FEEDBACK_ISSUE_TYPE_OPTIONS.filter((option) => selectedConversation?.restock || option.value !== 'restock')"
                             :key="item.value"
@@ -2375,7 +2489,7 @@ onBeforeUnmount(() => {
                     type="primary"
                     class="w-full"
                     :loading="saving && quickStatusUpdating === '' && priorityUpdating === ''"
-                    :disabled="saving"
+                    :disabled="saving || !canEditSelectedConversation"
                     @click="handleSaveIssue"
                   >
                     保存工单信息
@@ -2389,6 +2503,7 @@ onBeforeUnmount(() => {
                   </div>
                   <el-input
                     v-model="issueForm.internalRemark"
+                    :disabled="!canEditSelectedConversation"
                     class="cs-issue-form"
                     type="textarea"
                     :autosize="{ minRows: 4, maxRows: 10 }"
@@ -2409,7 +2524,7 @@ onBeforeUnmount(() => {
                       </template>
                       <template v-else>暂无备注</template>
                     </p>
-                    <el-button size="small" :loading="remarkSaving" :disabled="remarkSaving" @click="handleSaveInternalRemark">
+                    <el-button size="small" :loading="remarkSaving" :disabled="remarkSaving || !canEditSelectedConversation" @click="handleSaveInternalRemark">
                       保存备注
                     </el-button>
                   </div>

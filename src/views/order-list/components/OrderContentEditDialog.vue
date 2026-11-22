@@ -9,14 +9,16 @@
  * 维护说明：不得在前端推断或写库存；`legacy_none` 只展示服务端约定的不追溯提示。
  */
 
-import { computed, ref, watch } from 'vue'
-import { getProductList, type ProductRecord } from '@/api/modules/product'
+import { computed, ref, shallowRef, watch } from 'vue'
+import type { ProductRecord } from '@/api/modules/product'
 import {
   updateOrderContent,
   type OrderDetailResult,
   type UpdateOrderContentPayload,
 } from '@/api/modules/order'
 import { BizCrudDialogShell, PassiveNumberInput } from '@/components/common'
+import { getAdminProductOptions } from '@/composables/useAdminProductOptionsCache'
+import { useStableRequest } from '@/composables/useStableRequest'
 import { showAppSuccess, showAppWarning } from '@/utils/app-alert'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 
@@ -38,12 +40,13 @@ const emit = defineEmits<{
   committed: [result: Awaited<ReturnType<typeof updateOrderContent>>]
 }>()
 
-const products = ref<ProductRecord[]>([])
+const products = shallowRef<ProductRecord[]>([])
 const rows = ref<DraftRow[]>([])
 const reason = ref('')
 const businessNo = ref('')
 const loadingProducts = ref(false)
 const committing = ref(false)
+const productRequest = useStableRequest()
 let rowSequence = 0
 
 const inventoryNotice = computed(() => props.order.inventoryMode === 'legacy_none'
@@ -82,22 +85,28 @@ const initialize = async () => {
   reason.value = ''
   businessNo.value = props.order.businessNo
   loadingProducts.value = true
-  try {
-    products.value = await getProductList({ isActive: true })
-  } catch (error) {
-    void showCriticalErrorDialog(error, {
-      title: '商品候选加载失败',
-      fallback: '暂时无法新增或替换明细，可关闭后重试',
-      operation: '加载订单编辑商品候选',
-    })
-  } finally {
-    loadingProducts.value = false
-  }
+  await productRequest.runLatest({
+    executor: (signal) => getAdminProductOptions({ isActive: true }, { signal }),
+    onSuccess: (result) => { products.value = result },
+    onError: (error) => {
+      void showCriticalErrorDialog(error, {
+        title: '商品候选加载失败',
+        fallback: '暂时无法新增或替换明细，可关闭后重试',
+        operation: '加载订单编辑商品候选',
+      })
+    },
+    onFinally: () => { loadingProducts.value = false },
+  })
 }
 
 watch(() => props.modelValue, (visible) => {
   if (visible) void initialize()
-})
+  else {
+    productRequest.cancel()
+    loadingProducts.value = false
+    products.value = []
+  }
+}, { immediate: true })
 
 const addRow = () => {
   rowSequence += 1

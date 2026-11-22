@@ -62,6 +62,9 @@ export const CLIENT_FEEDBACK_LAST_SENDER_TYPES = ['client', 'service', 'system']
 export type ClientFeedbackLastSenderType = (typeof CLIENT_FEEDBACK_LAST_SENDER_TYPES)[number]
 
 @Entity({ name: 'client_feedback_conversation' })
+@Index('idx_feedback_conv_client_last_msg', ['clientUserId', 'lastMessageAt', 'id'])
+@Index('idx_feedback_conv_status_last_msg', ['status', 'lastMessageAt', 'id'])
+@Index('idx_feedback_conv_assigned_status_last_msg', ['assignedUserId', 'status', 'lastMessageAt', 'id'])
 export class ClientFeedbackConversation {
   @OneToOne(() => ClientRestockRequest, (request) => request.conversation)
   restock?: Relation<ClientRestockRequest> | null

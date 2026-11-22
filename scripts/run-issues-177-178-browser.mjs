@@ -7,6 +7,7 @@ import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { runIssueBrowserCases } from './issues-177-178-browser-cases.mjs'
 import { createServer } from 'vite'
+import { startProductionStaticServer } from './production-static-server.mjs'
 import vue from '@vitejs/plugin-vue'
 import Components from 'unplugin-vue-components/vite'
 import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
@@ -53,8 +54,9 @@ try{
   const ready=await new Promise((resolve,reject)=>{const timeout=setTimeout(()=>reject(new Error('隔离后端未就绪')),60000);child.once('message',(message)=>{clearTimeout(timeout);resolve(message)});child.once('exit',(code)=>{clearTimeout(timeout);reject(new Error(`隔离后端退出 ${code}`))});child.once('error',reject)})
   assert.equal(ready.type,'ready')
   const backend=`http://127.0.0.1:${ready.port}`
-  vite=await createServer({configFile:false,envDir:false,root,cacheDir:path.join(process.env.YLINK_ISSUES_VERIFY_ROOT,'vite-browser-cache'),plugins:[builtPagesPlugin,vue(),Components({dts:false,resolvers:[ElementPlusResolver()]}),code128BarcodePlugin()],optimizeDeps:{noDiscovery:true,include:['vue','vue-router','pinia','axios','dayjs','dayjs/plugin/advancedFormat.js','dayjs/plugin/customParseFormat.js','dayjs/plugin/dayOfYear.js','dayjs/plugin/isSameOrAfter.js','dayjs/plugin/isSameOrBefore.js','dayjs/plugin/localeData.js','dayjs/plugin/weekOfYear.js','dayjs/plugin/weekYear.js','element-plus','@element-plus/icons-vue','@vueuse/core','qrcode','browser-image-compression','html5-qrcode']},resolve:{alias:{'@':path.join(root,'src')}},server:{host:'127.0.0.1',port:0,proxy:{'/api':backend,'/health':backend,'/uploads':backend,'/__issues_verify':backend}}})
-  await vite.listen();const address=vite.httpServer.address();assert.ok(address&&typeof address!=='string');const origin=`http://127.0.0.1:${address.port}`
+  if(process.env.YLINK_BROWSER_PRODUCTION==='true'){vite=await startProductionStaticServer({dist:path.join(root,'dist'),backend});}
+  else vite=await createServer({configFile:false,envDir:false,root,cacheDir:path.join(process.env.YLINK_ISSUES_VERIFY_ROOT,'vite-browser-cache'),plugins:[builtPagesPlugin,vue(),Components({dts:false,resolvers:[ElementPlusResolver()]}),code128BarcodePlugin()],optimizeDeps:{noDiscovery:true,include:['vue','vue-router','pinia','axios','dayjs','dayjs/plugin/advancedFormat.js','dayjs/plugin/customParseFormat.js','dayjs/plugin/dayOfYear.js','dayjs/plugin/isSameOrAfter.js','dayjs/plugin/isSameOrBefore.js','dayjs/plugin/localeData.js','dayjs/plugin/weekOfYear.js','dayjs/plugin/weekYear.js','element-plus','@element-plus/icons-vue','@vueuse/core','qrcode','browser-image-compression','html5-qrcode']},resolve:{alias:{'@':path.join(root,'src')}},server:{host:'127.0.0.1',port:0,proxy:{'/api':backend,'/health':backend,'/uploads':backend,'/__issues_verify':backend}}})
+  let origin= vite.origin; if(!origin){await vite.listen();const address=vite.httpServer.address();assert.ok(address&&typeof address!=='string');origin=`http://127.0.0.1:${address.port}`}
   browser=await chromium.launch({headless:true,...(process.env.YLINK_BROWSER_EXECUTABLE?{executablePath:process.env.YLINK_BROWSER_EXECUTABLE}:{})})
   await runIssueBrowserCases({browser,origin,ready,evidence,root,PDFDocument,pdfjs,ExcelJS,scenario,recordArtifact})
   saveResults('passed')

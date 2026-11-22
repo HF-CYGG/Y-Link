@@ -12,8 +12,7 @@
  */
 import { publishRedisBus, subscribeRedisBus } from '../redis/redis-bus.js'
 import { getRedisClient, isRedisReady, recordRedisDegrade, redisKey } from '../redis/redis-client.js'
-import { bumpSharedCacheGenerationInBackground } from '../redis/redis-cache.js'
-import { BUSINESS_DATA_CACHE_GENERATION } from '../middleware/business-data-cache.middleware.js'
+import { invalidateBusinessDataAfterCommit } from '../middleware/business-data-cache.middleware.js'
 
 const MALL_CATALOG_BUS_TOPIC = 'cache:mall-catalog'
 const clusterRevisionKey = () => redisKey('cache', 'mall-catalog', 'revision')
@@ -29,14 +28,14 @@ const bumpLocalRevision = () => {
   return currentRevision
 }
 
-export function invalidateMallCatalogReadCache(): number {
+export function invalidateMallCatalogReadCache(options?: { affectsBusinessData?: boolean }): number {
   const revision = bumpLocalRevision()
   const client = isRedisReady() ? getRedisClient() : null
   // 不等待结果：命令立即进入连接的发送队列，排在随后的广播之前；失败时共享快照仍受短 TTL 约束。
   client?.incr(clusterRevisionKey()).catch((error: unknown) => recordRedisDegrade('商城目录集群修订号', error))
   void publishRedisBus(MALL_CATALOG_BUS_TOPIC, null)
-  // 商品、库存与订单变化同样影响报表和工作台：后台任务（如超时回收）不经过 HTTP 写入中间件，在此一并递增业务数据缓存代际。
-  bumpSharedCacheGenerationInBackground(BUSINESS_DATA_CACHE_GENERATION)
+  // 库存及经营数据变更同时刷新报表、工作台；仅商城展示变化的调用须显式标明。
+  if (options?.affectsBusinessData !== false) invalidateBusinessDataAfterCommit()
   return revision
 }
 
@@ -59,3 +58,8 @@ export async function readMallCatalogClusterRevision(): Promise<string | null> {
 subscribeRedisBus(MALL_CATALOG_BUS_TOPIC, () => {
   bumpLocalRevision()
 })
+
+/** 仅监听其他实例的失效，处理器执行前本地商城修订已更新。 */
+export function subscribeMallCatalogRemoteInvalidation(listener: () => void): () => void {
+  return subscribeRedisBus(MALL_CATALOG_BUS_TOPIC, listener)
+}

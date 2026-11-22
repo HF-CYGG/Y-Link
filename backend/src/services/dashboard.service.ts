@@ -106,8 +106,8 @@ interface DashboardRecentActivity {
 
 const DATE_MS = 24 * 60 * 60 * 1000
 const ORDER_TYPE_VALUES = ['department', 'walkin'] as const
-// 部门榜分组键：去掉首尾空白后的部门名称，配合 applyDepartmentRankFilter 排除空值与散客单。
-const DEPARTMENT_RANK_LABEL_EXPR = `COALESCE(TRIM(order.customerDepartmentName), '')`
+// 保留历史快照首尾空格的合并口径，NULL 由 applyDepartmentRankFilter 的比较条件排除。
+const DEPARTMENT_RANK_LABEL_EXPR = 'TRIM(order.customerDepartmentName)'
 type DashboardOrderType = (typeof ORDER_TYPE_VALUES)[number]
 
 // 区间上限：统计区间最长一年，既覆盖“年末/学期报告”场景，也约束日历桶及查询参数数量。
@@ -551,6 +551,7 @@ export const dashboardService = {
         .where('order.createdAt >= :monthStart', { monthStart })
         .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
         .andWhere('order.status = :activeOrderStatus', { activeOrderStatus: 'active' })
+        .andWhere("(order.inventoryMode <> 'o2o_preapplied' OR order.totalQty > 0)")
         .setParameter('today', today)
         .getRawOne<DashboardStatsAggregateRaw>(),
       // 产品总数（仅统计启用产品）。
@@ -1045,6 +1046,7 @@ export const dashboardService = {
   applyOrderFilter(queryBuilder: { andWhere: (sql: string, parameters?: Record<string, unknown>) => unknown }, filter: DashboardResolvedFilter): void {
     queryBuilder.andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
     queryBuilder.andWhere('order.status = :activeOrderStatus', { activeOrderStatus: 'active' })
+    queryBuilder.andWhere("(order.inventoryMode <> 'o2o_preapplied' OR order.totalQty > 0)")
     if (filter.startAt) {
       queryBuilder.andWhere('order.createdAt >= :startAt', { startAt: filter.startAt })
     }

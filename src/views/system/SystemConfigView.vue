@@ -6,7 +6,7 @@
  * - 首屏优先并行加载“订单流水 + 线上预订规则”，保证核心配置尽快可见；
  * - 客服中心、验证码配置与部门配置继续后台补齐，并按分区维护各自的加载态与错误态；
  * - 当前激活分区只受自身加载状态约束，避免某个低优先级分区未完成时把整页表单都锁成“看得见但点不动”；
- * - 保存时继续串行提交四类配置，避免 SQLite 单连接场景下并发事务冲突。
+ * - 保存时按业务分区串行提交配置、共用通知连接与功能规则，避免 SQLite 单连接场景下并发事务冲突。
  * 维护说明：
  * - 若后续新增新的延迟加载分区，必须同步补充本页的分区可交互状态映射，而不是直接复用整页 loading；
  * - 高风险保存仍应保持串行提交，优先保证一致性与可回溯性。
@@ -15,12 +15,16 @@
 
 import dayjs from 'dayjs'
 import { computed, nextTick, onActivated, onMounted, reactive, ref, toRaw } from 'vue'
-import { ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+import type { FormInstance, FormRules } from 'element-plus'
+import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 import { PageContainer, PageToolbarCard } from '@/components/common'
 import {
   getNotificationPresenceSnapshot,
+  getNotificationChannels,
   getNotificationRules,
+  updateNotificationChannels,
   updateNotificationRules,
+  type NotificationChannelsRecord,
   type NotificationPresenceSnapshot,
   type NotificationRuleRecord,
 } from '@/api/modules/notification'
@@ -49,20 +53,33 @@ import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import {
   showAppError as showTopError,
+  showAppInfo as showTopInfo,
   showAppSuccess as showTopSuccess,
   showAppWarning as showTopWarning,
 } from '@/utils/app-alert'
 import { extractErrorMessage } from '@/utils/error'
-import SystemConfigDepartmentSection from '@/views/system/components/SystemConfigDepartmentSection.vue'
-import SystemConfigCustomerServiceSection from '@/views/system/components/SystemConfigCustomerServiceSection.vue'
-import SystemConfigO2oRulesSection from '@/views/system/components/SystemConfigO2oRulesSection.vue'
-import SystemConfigNotificationSection from '@/views/system/components/SystemConfigNotificationSection.vue'
-import SystemConfigSerialSection from '@/views/system/components/SystemConfigSerialSection.vue'
-import SystemConfigVerificationSection from '@/views/system/components/SystemConfigVerificationSection.vue'
+import { defineRetryablePanel } from '@/utils/define-retryable-panel'
+import {
+  DEFAULT_STORE_BUSINESS_HOURS,
+  DEFAULT_STORE_PICKUP_ADDRESS,
+  STORE_BUSINESS_HOURS_MAX_LENGTH,
+  formatStoreBusinessHours,
+  parseEditableStoreBusinessHours,
+  type StoreBusinessPeriod,
+} from '@/utils/store-business-hours'
 import {
   DATABASE_MIGRATION_ASSISTANT_NAME,
   DATABASE_MIGRATION_RECOMMENDED_FLOW_TEXT,
 } from './database-migration-copy'
+
+defineOptions({ name: 'SystemConfigView' })
+
+const SystemConfigDepartmentSection = defineRetryablePanel(() => import('./components/SystemConfigDepartmentSection.vue'))
+const SystemConfigCustomerServiceSection = defineRetryablePanel(() => import('./components/SystemConfigCustomerServiceSection.vue'))
+const SystemConfigO2oRulesSection = defineRetryablePanel(() => import('./components/SystemConfigO2oRulesSection.vue'))
+const SystemConfigNotificationSection = defineRetryablePanel(() => import('./components/SystemConfigNotificationSection.vue'))
+const SystemConfigSerialSection = defineRetryablePanel(() => import('./components/SystemConfigSerialSection.vue'))
+const SystemConfigVerificationSection = defineRetryablePanel(() => import('./components/SystemConfigVerificationSection.vue'))
 
 type VerificationFormValue = {
   enabled: boolean
@@ -113,6 +130,11 @@ const hasCompletedInitialLoad = ref(false)
 const loadError = ref('')
 const testSendingChannel = ref<'mobile' | 'email' | ''>('')
 const activeSection = ref<ConfigSectionKey>('order_serial')
+// 分区表单项完成挂载后才允许校验，避免异步组件下载期间提交未渲染的表单。
+const mountedSection = ref<ConfigSectionKey>()
+const markSectionMounted = (section: ConfigSectionKey) => {
+  if (activeSection.value === section) mountedSection.value = section
+}
 const selectedDepartmentNodeId = ref('')
 const identifierConfigs = ref<OrderIdentifierConfigs | null>(null)
 const identifierForm = reactive<{
@@ -127,6 +149,12 @@ const customerServiceConfig = ref<CustomerServiceConfigRecord | null>(null)
 const verificationConfigMap = ref<VerificationProviderConfigsResult | null>(null)
 const clientDepartmentConfig = ref<ClientDepartmentConfigRecord | null>(null)
 const notificationRules = ref<NotificationRuleRecord[]>([])
+// 编辑期状态与规则草稿同属父页，不随通知分区卸载、邮件服务跳转或通道刷新而重置。
+const notificationRuleEditPreferences = ref<Record<string, { initiallyEnabled: boolean; defaultApplied: boolean; manuallySelected: boolean }>>({})
+const visibleNotificationRules = computed(() => notificationRules.value.filter((rule) => rule.eventType !== 'mobile_refresh_replay_detected'))
+const notificationChannels = ref<NotificationChannelsRecord | null>(null)
+const channelDraft = reactive({ feishuWebhookUrl: '', feishuSignSecret: '', clearFeishuWebhook: false, clearFeishuSignSecret: false, emailSubjectPrefix: '' })
+const channelDirty = computed(() => Boolean(channelDraft.feishuWebhookUrl.trim() || channelDraft.feishuSignSecret.trim() || channelDraft.clearFeishuWebhook || channelDraft.clearFeishuSignSecret || (notificationChannels.value && channelDraft.emailSubjectPrefix !== notificationChannels.value.emailSubjectPrefix)))
 const notificationPresence = ref<NotificationPresenceSnapshot | null>(null)
 const notificationOfflineWindowSeconds = ref(120)
 const notificationPresenceLoading = ref(false)
@@ -183,6 +211,8 @@ const serialForm = reactive<{
     limitQty: number
     clientPreorderUpdateLimit: number
     storeBusinessHoursText: string
+    businessPeriods: StoreBusinessPeriod[] | null
+    storePickupAddress: string
     mallAnnouncementText: string
   }
   customerService: {
@@ -203,7 +233,9 @@ const serialForm = reactive<{
     limitQty: 5,
     // 客户端改单次数上限默认值，与后端默认配置保持一致，避免页面首屏空值。
     clientPreorderUpdateLimit: 3,
-    storeBusinessHoursText: '10:00 - 22:00',
+    storeBusinessHoursText: DEFAULT_STORE_BUSINESS_HOURS,
+    businessPeriods: parseEditableStoreBusinessHours(DEFAULT_STORE_BUSINESS_HOURS),
+    storePickupAddress: DEFAULT_STORE_PICKUP_ADDRESS,
     mallAnnouncementText: '库存实时刷新，请以下单结果为准',
   },
   customerService: {
@@ -411,6 +443,8 @@ const snapshotForm = () =>
       limitQty: Number(serialForm.o2o.limitQty),
       clientPreorderUpdateLimit: Number(serialForm.o2o.clientPreorderUpdateLimit),
       storeBusinessHoursText: serialForm.o2o.storeBusinessHoursText.trim(),
+      businessPeriods: serialForm.o2o.businessPeriods,
+      storePickupAddress: serialForm.o2o.storePickupAddress.trim(),
       mallAnnouncementText: serialForm.o2o.mallAnnouncementText.trim(),
     },
     customerService: {
@@ -446,7 +480,7 @@ const snapshotForm = () =>
       },
     },
     clientDepartmentTree: serialForm.clientDepartmentTree,
-    notificationRules: notificationRules.value.map((rule) => ({
+    notificationRules: visibleNotificationRules.value.map((rule) => ({
       id: rule.id,
       enabled: rule.enabled,
       recipientUserIds: [...(rule.recipientUserIds ?? [])].sort(),
@@ -454,6 +488,7 @@ const snapshotForm = () =>
       emailRecipientSupplierUserIds: [...(rule.emailRecipientSupplierUserIds ?? [])].sort(),
       emailEnabled: rule.emailEnabled,
       feishuEnabled: rule.feishuEnabled,
+      useSharedFeishu: rule.useSharedFeishu,
       externalTriggerMode: rule.externalTriggerMode,
       watchedUserIds: [...rule.watchedUserIds].sort(),
       feishuWebhookUrl: rule.feishuWebhookUrl.trim(),
@@ -461,6 +496,7 @@ const snapshotForm = () =>
       emailSubjectPrefix: rule.emailSubjectPrefix.trim(),
     })),
     notificationOfflineWindowSeconds: Number(notificationOfflineWindowSeconds.value) || 120,
+    channelDraft: { ...channelDraft },
   })
 
 const isDirty = computed(() => snapshotForm() !== initialSnapshot.value)
@@ -479,6 +515,8 @@ const applyO2oRules = (config: O2oRuleConfigRecord) => {
   serialForm.o2o.limitQty = config.limitQty
   serialForm.o2o.clientPreorderUpdateLimit = config.clientPreorderUpdateLimit
   serialForm.o2o.storeBusinessHoursText = config.storeBusinessHoursText
+  serialForm.o2o.businessPeriods = parseEditableStoreBusinessHours(config.storeBusinessHoursText)
+  serialForm.o2o.storePickupAddress = config.storePickupAddress?.trim() || DEFAULT_STORE_PICKUP_ADDRESS
   serialForm.o2o.mallAnnouncementText = config.mallAnnouncementText
 }
 
@@ -517,6 +555,12 @@ const applyClientDepartmentConfigs = (config: ClientDepartmentConfigRecord) => {
 }
 
 const applyNotificationRules = (list: NotificationRuleRecord[]) => {
+  // 只有应用重新加载/保存成功后的服务器基线才建立新一轮编辑状态。
+  notificationRuleEditPreferences.value = Object.fromEntries(list.map((rule) => [String(rule.id), {
+    initiallyEnabled: rule.emailEnabled || rule.feishuEnabled,
+    defaultApplied: false,
+    manuallySelected: false,
+  }]))
   notificationRules.value = list.map((rule) => ({
     ...rule,
     recipientUserIds: [...(rule.recipientUserIds ?? [])],
@@ -525,6 +569,29 @@ const applyNotificationRules = (list: NotificationRuleRecord[]) => {
     watchedUserIds: [...(rule.watchedUserIds ?? [])],
     feishuSignSecret: rule.feishuSignSecretMasked ? '[已配置签名密钥，保存时保留原值]' : '',
   }))
+}
+
+const handleNotificationExternalChannelChange = (ruleId: string) => {
+  const rule = notificationRules.value.find((item) => String(item.id) === ruleId)
+  const preference = notificationRuleEditPreferences.value[ruleId]
+  if (!rule || rule.eventType !== 'inbound_order_submitted' || !preference || preference.initiallyEnabled || preference.defaultApplied || preference.manuallySelected || !(rule.emailEnabled || rule.feishuEnabled)) return
+  preference.defaultApplied = true
+  rule.externalTriggerMode = 'always'
+  showTopInfo('新送货单首次开启外发已默认立即发送，可在外发时机中改为离线发送')
+}
+
+const handleNotificationExternalModeChange = (ruleId: string) => {
+  const preference = notificationRuleEditPreferences.value[ruleId]
+  if (preference) preference.manuallySelected = true
+}
+
+const applyNotificationChannels = (config: NotificationChannelsRecord) => {
+  notificationChannels.value = config
+  channelDraft.feishuWebhookUrl = ''
+  channelDraft.feishuSignSecret = ''
+  channelDraft.clearFeishuWebhook = false
+  channelDraft.clearFeishuSignSecret = false
+  channelDraft.emailSubjectPrefix = config.emailSubjectPrefix
 }
 
 const applyNotificationPresenceSnapshot = (snapshot: NotificationPresenceSnapshot) => {
@@ -549,7 +616,11 @@ const validateNotificationRules = () => {
     showTopWarning('离线窗口需设置在 30-3600 秒之间')
     return false
   }
-  for (const rule of notificationRules.value) {
+  if ((channelDraft.clearFeishuWebhook && channelDraft.feishuWebhookUrl.trim()) || (channelDraft.clearFeishuSignSecret && channelDraft.feishuSignSecret.trim())) {
+    showTopWarning('清空飞书配置时不能同时填写新的值')
+    return false
+  }
+  for (const rule of visibleNotificationRules.value) {
     const watchedUserIds = rule.watchedUserIds ?? []
     const emailRecipientAdminUserIds = rule.emailRecipientAdminUserIds ?? []
     const emailRecipientSupplierUserIds = rule.emailRecipientSupplierUserIds ?? []
@@ -561,8 +632,14 @@ const validateNotificationRules = () => {
       showTopWarning(`规则“${rule.ruleName}”启用邮箱提醒时必须选择邮件接收账号`)
       return false
     }
-    if (rule.feishuEnabled && !rule.feishuWebhookUrl.trim() && !rule.feishuWebhookConfigured) {
-      showTopWarning(`规则“${rule.ruleName}”启用飞书提醒时必须填写 Webhook 地址`)
+    const webhookInput = channelDraft.feishuWebhookUrl.trim()
+    const signatureInput = channelDraft.feishuSignSecret.trim()
+    const sharedWebhookUsable = Boolean(!channelDraft.clearFeishuWebhook && ((webhookInput && webhookInput !== '[已配置 Webhook，保存时保留原值]') || (notificationChannels.value?.feishu.webhookConfigured && !notificationChannels.value.feishu.webhookStatusError)))
+    const sharedSignatureUsable = Boolean(channelDraft.clearFeishuSignSecret || (signatureInput && signatureInput !== '[已配置签名密钥，保存时保留原值]') || (notificationChannels.value && !notificationChannels.value.feishu.signSecretStatusError))
+    const sharedUsable = sharedWebhookUsable && sharedSignatureUsable
+    const legacyUsable = rule.legacyFeishuWebhookConfigured && !rule.legacyFeishuStatusError
+    if (rule.feishuEnabled && !(rule.useSharedFeishu ? sharedUsable : legacyUsable)) {
+      showTopWarning(`规则“${rule.ruleName}”的飞书配置不可用，请检查对应渠道`)
       return false
     }
   }
@@ -1110,12 +1187,14 @@ const loadData = async () => {
             clientDepartmentResult,
             notificationRulesResult,
             notificationPresenceResult,
+            notificationChannelsResult,
           ] = await Promise.allSettled([
             getCustomerServiceConfigs(),
             getVerificationProviderConfigs(),
             getClientDepartmentConfigs(),
             getNotificationRules(),
             getNotificationPresenceSnapshot(),
+            getNotificationChannels(),
           ])
           return {
             customerServiceResult,
@@ -1123,6 +1202,7 @@ const loadData = async () => {
             clientDepartmentResult,
             notificationRulesResult,
             notificationPresenceResult,
+            notificationChannelsResult,
           }
         },
         onSuccess: (deferredResult) => {
@@ -1154,6 +1234,12 @@ const loadData = async () => {
             applyNotificationPresenceSnapshot(deferredResult.notificationPresenceResult.value)
           } else {
             sectionErrorState.notification = sectionErrorState.notification || '在线状态快照加载失败'
+          }
+
+          if (deferredResult.notificationChannelsResult.status === 'fulfilled') {
+            applyNotificationChannels(deferredResult.notificationChannelsResult.value)
+          } else {
+            sectionErrorState.notification = sectionErrorState.notification || '统一通知渠道加载失败'
           }
 
           if (
@@ -1228,6 +1314,11 @@ const handleSubmit = async () => {
   if (!ensurePermission('system_configs:update')) {
     return
   }
+  if (saving.value || formInteractionLoading.value || mountedSection.value !== activeSection.value
+    || hasDeferredSectionFailure.value || !notificationChannels.value) {
+    showTopWarning('配置尚未完整加载或正在保存，请稍后重试')
+    return
+  }
 
   const form = formRef.value
   if (!form && activeSection.value !== 'notification') {
@@ -1249,6 +1340,18 @@ const handleSubmit = async () => {
   if (!validateNotificationRules()) {
     return
   }
+  const { businessPeriods, storeBusinessHoursText: savedHours } = serialForm.o2o
+  const businessHoursChanged = JSON.stringify(businessPeriods) !== JSON.stringify(parseEditableStoreBusinessHours(savedHours))
+  const storeBusinessHoursText = businessHoursChanged && businessPeriods ? formatStoreBusinessHours(businessPeriods) : savedHours
+  if (!storeBusinessHoursText || storeBusinessHoursText.length > STORE_BUSINESS_HOURS_MAX_LENGTH) {
+    showTopWarning('请完整填写营业时段。每段至少 30 分钟，须在同一天且互不重叠，总长度不超过 100 字符。')
+    return
+  }
+  const storePickupAddress = serialForm.o2o.storePickupAddress.trim()
+  if (storePickupAddress.length > 100) {
+    showTopWarning('取货地址不能超过 100 字符')
+    return
+  }
   let normalizedDepartmentTree: DepartmentTreeNode[] = []
   try {
     normalizedDepartmentTree = normalizeDepartmentTreeForSubmit(cloneDepartmentTree(serialForm.clientDepartmentTree))
@@ -1259,6 +1362,7 @@ const handleSubmit = async () => {
   }
 
   saving.value = true
+  let savedSteps = 0
   try {
     const currentCustomerServiceConfig = customerServiceConfig.value
     if (!currentCustomerServiceConfig) {
@@ -1283,15 +1387,18 @@ const handleSubmit = async () => {
       business: currentIdentifierConfigs.business,
     }
     const result = await updateOrderIdentifierConfigs(identifierPayload)
+    savedSteps += 1
     const o2oResult = await updateO2oRuleConfigs({
       autoCancelEnabled: serialForm.o2o.autoCancelEnabled,
       autoCancelHours: Number(serialForm.o2o.autoCancelHours),
       limitEnabled: serialForm.o2o.limitEnabled,
       limitQty: Number(serialForm.o2o.limitQty),
       clientPreorderUpdateLimit: Number(serialForm.o2o.clientPreorderUpdateLimit),
-      storeBusinessHoursText: serialForm.o2o.storeBusinessHoursText.trim(),
+      storeBusinessHoursText,
+      ...(storePickupAddress !== (o2oRuleConfig.value?.storePickupAddress?.trim() || DEFAULT_STORE_PICKUP_ADDRESS) ? { storePickupAddress } : {}),
       mallAnnouncementText: serialForm.o2o.mallAnnouncementText.trim(),
     })
+    savedSteps += 1
     const customerServiceResult = await updateCustomerServiceConfigs({
       enabled: currentCustomerServiceConfig.enabled,
       realtimeEnabled: currentCustomerServiceConfig.realtimeEnabled,
@@ -1303,6 +1410,7 @@ const handleSubmit = async () => {
       offlineFaqs: currentCustomerServiceConfig.offlineFaqs,
       sseKeepaliveSeconds: currentCustomerServiceConfig.sseKeepaliveSeconds,
     })
+    savedSteps += 1
     const verificationResult = await updateVerificationProviderConfigs({
       mobile: {
         enabled: serialForm.verification.mobile.enabled,
@@ -1330,12 +1438,27 @@ const handleSubmit = async () => {
         successMatch: serialForm.verification.email.successMatch.trim(),
       },
     })
+    savedSteps += 1
     const departmentResult = await updateClientDepartmentConfigs({
       tree: normalizedDepartmentTree,
     })
+    savedSteps += 1
+    let channelsChanged = false
+    if (channelDirty.value && notificationChannels.value) {
+      const channelsResult = await updateNotificationChannels({
+        ...(channelDraft.feishuWebhookUrl.trim() ? { feishuWebhookUrl: channelDraft.feishuWebhookUrl.trim() } : {}),
+        ...(channelDraft.feishuSignSecret.trim() ? { feishuSignSecret: channelDraft.feishuSignSecret.trim() } : {}),
+        ...(channelDraft.clearFeishuWebhook ? { clearFeishuWebhook: true } : {}),
+        ...(channelDraft.clearFeishuSignSecret ? { clearFeishuSignSecret: true } : {}),
+        ...(channelDraft.emailSubjectPrefix !== notificationChannels.value.emailSubjectPrefix ? { emailSubjectPrefix: channelDraft.emailSubjectPrefix.trim() } : {}),
+      })
+      channelsChanged = channelsResult.changed
+      applyNotificationChannels(channelsResult.config)
+      savedSteps += 1
+    }
     const notificationResult = await updateNotificationRules({
       offlineWindowSeconds: Number(notificationOfflineWindowSeconds.value),
-      rules: notificationRules.value.map((rule) => ({
+      rules: visibleNotificationRules.value.map((rule) => ({
         id: String(rule.id ?? '').trim(),
         enabled: rule.enabled,
         recipientUserIds: (rule.recipientUserIds ?? []).map((value) => String(value ?? '').trim()).filter(Boolean),
@@ -1343,13 +1466,14 @@ const handleSubmit = async () => {
         emailRecipientSupplierUserIds: (rule.emailRecipientSupplierUserIds ?? []).map((value) => String(value ?? '').trim()).filter(Boolean),
         emailEnabled: rule.emailEnabled,
         feishuEnabled: rule.feishuEnabled,
+        useSharedFeishu: rule.useSharedFeishu,
         externalTriggerMode: rule.externalTriggerMode,
         watchedUserIds: (rule.watchedUserIds ?? []).map((value) => String(value ?? '').trim()).filter(Boolean),
-        feishuWebhookUrl: rule.feishuWebhookUrl.trim(),
-        feishuSignSecret: rule.feishuSignSecret?.trim() || '',
-        emailSubjectPrefix: rule.emailSubjectPrefix.trim() || '[Y-Link]',
       })),
     })
+    savedSteps += 1
+    // 邮件服务与验证码共用，保存后重新读取服务端渠道状态。
+    const refreshedChannels = await getNotificationChannels()
 
     applyIdentifierConfigs(result.configs)
     applyO2oRules(o2oResult.config)
@@ -1357,6 +1481,7 @@ const handleSubmit = async () => {
     applyVerificationConfigs(verificationResult.config)
     applyClientDepartmentConfigs(departmentResult.config)
     applyNotificationRules(notificationResult.list)
+    applyNotificationChannels(refreshedChannels)
     await refreshNotificationPresenceSnapshot()
     initialSnapshot.value = snapshotForm()
     const hasConfigChanged = result.changed
@@ -1365,6 +1490,7 @@ const handleSubmit = async () => {
       || verificationResult.changed
       || departmentResult.changed
       || notificationResult.changed
+      || channelsChanged
     if (hasConfigChanged) {
       showTopSuccess('系统配置已保存')
     } else {
@@ -1375,7 +1501,7 @@ const handleSubmit = async () => {
       )
     }
   } catch (error) {
-    showTopError(extractErrorMessage(error, '保存系统配置失败，请稍后重试'))
+    showTopError(`${savedSteps ? '部分配置可能已保存，请核对后重试。' : ''}${extractErrorMessage(error, '保存系统配置失败，请稍后重试')}`)
   } finally {
     saving.value = false
   }
@@ -1426,7 +1552,7 @@ onActivated(() => {
             v-if="canUpdateConfigs"
             type="primary"
             :loading="saving"
-            :disabled="formInteractionLoading || hasDeferredSectionFailure || !isDirty"
+            :disabled="formInteractionLoading || mountedSection !== activeSection || hasDeferredSectionFailure || !isDirty"
             @click="handleSubmit"
           >
             保存配置
@@ -1503,6 +1629,7 @@ onActivated(() => {
                   :can-update-configs="canUpdateConfigs"
                   :loading="activeSectionInteractionLoading"
                   :get-updated-at-label="getIdentifierUpdatedAtLabel"
+                  @panel-mounted="markSectionMounted('order_serial')"
                 />
 
                 <SystemConfigO2oRulesSection
@@ -1511,6 +1638,7 @@ onActivated(() => {
                   :can-update-configs="canUpdateConfigs"
                   :loading="activeSectionInteractionLoading"
                   :o2o-updated-at-label="o2oUpdatedAtLabel"
+                  @panel-mounted="markSectionMounted('o2o_rules')"
                 />
 
                 <SystemConfigCustomerServiceSection
@@ -1519,6 +1647,7 @@ onActivated(() => {
                   :can-update-configs="canUpdateConfigs"
                   :loading="activeSectionInteractionLoading"
                   :customer-service-updated-at-label="customerServiceUpdatedAtLabel"
+                  @panel-mounted="markSectionMounted('customer_service')"
                 />
 
                 <SystemConfigVerificationSection
@@ -1531,6 +1660,7 @@ onActivated(() => {
                   :saving="saving"
                   :test-sending-channel="testSendingChannel"
                   :get-verification-updated-at-label="getVerificationUpdatedAtLabel"
+                  @panel-mounted="markSectionMounted('verification')"
                   @test-send="handleTestVerificationSend"
                 />
 
@@ -1546,6 +1676,7 @@ onActivated(() => {
                   :get-department-path-label="getDepartmentPathLabel"
                   :handle-allow-department-drop="handleAllowDepartmentDrop"
                   :handle-department-node-drop="handleDepartmentNodeDrop"
+                  @panel-mounted="markSectionMounted('department')"
                   @add-root="handleAddRootDepartment"
                   @add-child="handleAddChildDepartment"
                   @edit="handleEditDepartment"
@@ -1558,7 +1689,10 @@ onActivated(() => {
                 v-else
                 key="notification"
                 class="workbench-horizontal-slide__panel"
-                :rules="notificationRules"
+                :rules="visibleNotificationRules"
+                :channels="notificationChannels"
+                :channel-draft="channelDraft"
+                :channel-dirty="channelDirty"
                 :presence-snapshot="notificationPresence"
                 :offline-window-seconds="notificationOfflineWindowSeconds"
                 :management-users="managementUsers"
@@ -1566,7 +1700,11 @@ onActivated(() => {
                 :saving="saving"
                 :can-update-configs="canUpdateConfigs"
                 :presence-loading="notificationPresenceLoading"
+                @panel-mounted="markSectionMounted('notification')"
                 @refresh-presence="refreshNotificationPresenceSnapshot"
+                @configure-email="handleSectionChange('verification')"
+                @external-channel-change="handleNotificationExternalChannelChange"
+                @external-mode-change="handleNotificationExternalModeChange"
                 @update-offline-window-seconds="notificationOfflineWindowSeconds = $event"
               />
             </transition>

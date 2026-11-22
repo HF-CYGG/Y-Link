@@ -13,7 +13,7 @@ import type { AuthUserContext } from '../types/auth.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { BizError } from '../utils/errors.js'
 import { isUniqueConstraintError } from '../utils/database-errors.js'
-import { auditService } from './audit.service.js'
+import { auditService, type CreateAuditLogInput } from './audit.service.js'
 import { orderBusinessNoService } from './order-business-no.service.js'
 import type { BusinessNoCursorPlan, ParsedBusinessNo } from './order-business-no.service.js'
 import type { OrderType } from './order-serial.service.js'
@@ -89,6 +89,8 @@ const BUSINESS_NO_UNIQUE_MATCHER = {
 } as const
 
 const hasOwn = (input: object, key: PropertyKey): boolean => Object.prototype.hasOwnProperty.call(input, key)
+const normalizeOrderLookupId = (value: string): string => value.replace(/^0+(?=\d+$)/, '')
+const orderIdParameterType = (manager: EntityManager) => manager.connection.options.type === 'sqlite' ? 'INTEGER' : 'UNSIGNED'
 
 const truncateByCodePoint = (value: string | null | undefined, maxLength: number): string | null => {
   if (value == null) return null
@@ -150,18 +152,22 @@ export class OrderAmendmentService {
       )
       const orderRepo = manager.getRepository(BizOutboundOrder)
       const revisionRepo = manager.getRepository(OrderRevision)
+      const revisionRows: Omit<OrderRevision, 'id' | 'createdAt'>[] = []
+      const auditRows: CreateAuditLogInput[] = []
       for (const item of evaluated) {
-        item.order.businessNo = item.after.businessNo
-        item.order.orderType = item.after.orderType
-        item.order.customerDepartmentName = item.after.customerDepartmentName
-        item.order.customerName = item.after.customerName
-        item.order.issuerName = item.after.issuerName
-        item.order.hasCustomerOrder = item.after.hasCustomerOrder
-        item.order.isSystemApplied = item.after.isSystemApplied
-        item.order.remark = item.after.remark
-        item.order.editVersion = item.before.editVersion + 1
+        item.after.editVersion = item.before.editVersion + 1
         try {
-          await orderRepo.save(item.order)
+          await orderRepo.createQueryBuilder().update().set({
+            businessNo: item.after.businessNo,
+            orderType: item.after.orderType,
+            customerDepartmentName: item.after.customerDepartmentName,
+            customerName: item.after.customerName,
+            issuerName: item.after.issuerName,
+            hasCustomerOrder: item.after.hasCustomerOrder,
+            isSystemApplied: item.after.isSystemApplied,
+            remark: item.after.remark,
+            editVersion: item.after.editVersion,
+          }).where(`id = CAST(:orderId AS ${orderIdParameterType(manager)})`, { orderId: item.order.id }).execute()
         } catch (error) {
           if (isUniqueConstraintError(error, BUSINESS_NO_UNIQUE_MATCHER)) {
             throw new BizError(`业务号 ${item.after.businessNo} 当前已被其他订单使用`, 409)
@@ -169,12 +175,11 @@ export class OrderAmendmentService {
           throw error
         }
 
-        item.after.editVersion = item.order.editVersion
-        const reason = this.normalizeNullableText(item.input.reason, FIELD_LIMITS.reason, '修订原因')
-        await revisionRepo.insert(revisionRepo.create({
+        const reason = item.input.reason ?? null
+        revisionRows.push({
           orderIdSnapshot: String(item.order.id),
           orderUuid: item.order.orderUuid,
-          revisionNo: item.order.editVersion,
+          revisionNo: item.after.editVersion,
           beforeSnapshotJson: JSON.stringify(item.before),
           afterSnapshotJson: JSON.stringify(item.after),
           reason,
@@ -183,13 +188,13 @@ export class OrderAmendmentService {
           actorDisplayName: actor.displayName,
           ipAddress: truncateByCodePoint(requestMeta?.ipAddress, 64),
           userAgent: truncateByCodePoint(requestMeta?.userAgent, 255),
-        }))
-        await auditService.record({
+        })
+        auditRows.push({
           actionType: 'order.amendment',
           actionLabel: '修订出库单',
           targetType: 'order',
           targetId: String(item.order.id),
-          targetCode: item.order.businessNo,
+          targetCode: item.after.businessNo,
           actor,
           requestMeta,
           detail: {
@@ -200,8 +205,10 @@ export class OrderAmendmentService {
               ? cursorPlans.find((plan) => plan.namespace === item.parsedBusinessNo?.namespace) ?? null
               : null,
           },
-        }, manager)
+        })
       }
+      await revisionRepo.insert(revisionRows)
+      await auditService.recordBatch(auditRows, manager)
 
       return this.toPreviewResult(evaluated, cursorPlans)
     })
@@ -223,25 +230,24 @@ export class OrderAmendmentService {
     const seenOrderIds = new Set<string>()
     for (const amendment of input.amendments) {
       const orderId = String(amendment.orderId ?? '').trim()
-      if (seenOrderIds.has(orderId)) duplicateOrderIds.add(orderId)
-      seenOrderIds.add(orderId)
+      if (!orderId) throw new BizError('订单 ID 不能为空', 400)
+      const lookupId = normalizeOrderLookupId(orderId)
+      if (seenOrderIds.has(lookupId)) duplicateOrderIds.add(lookupId)
+      seenOrderIds.add(lookupId)
     }
 
     // 所有提交按稳定主键顺序锁订单行；与业务号服务的命名空间顺序锁配合，降低批量并发死锁概率。
     const orderedAmendments = [...input.amendments].sort((left, right) =>
       String(left.orderId ?? '').trim().localeCompare(String(right.orderId ?? '').trim()),
     )
+    const ordersById = await orderMergeService.loadOrdersByExactId([...seenOrderIds].filter((id) => /^\d+$/.test(id)), manager, lockOrders)
+    const loadedIds = new Set(ordersById.keys())
+    const metadata = await orderMergeService.getMetadataMap([...loadedIds], manager, ordersById)
     const evaluated: EvaluatedAmendment[] = []
     for (const amendment of orderedAmendments) {
       const orderId = String(amendment.orderId ?? '').trim()
-      if (!orderId) throw new BizError('订单 ID 不能为空', 400)
-      const query = manager.getRepository(BizOutboundOrder)
-        .createQueryBuilder('order')
-        .where('order.id = :orderId', { orderId })
-      if (lockOrders && manager.connection.options.type !== 'sqlite') {
-        query.setLock('pessimistic_write')
-      }
-      const order = await query.getOne()
+      const lookupId = normalizeOrderLookupId(orderId)
+      const order = loadedIds.has(lookupId) ? ordersById.get(lookupId) : undefined
       if (!order) {
         const emptySnapshot = this.emptySnapshot()
         evaluated.push({
@@ -264,7 +270,7 @@ export class OrderAmendmentService {
         && (after.isSystemApplied !== before.isSystemApplied || after.orderType !== before.orderType)) {
         blockingReasons.push('O2O 来源申请状态由原预订单维护，请到金蝶登记入口修改')
       }
-      const mergeMetadata = (await orderMergeService.getMetadataMap([orderId], manager)).get(orderId)
+      const mergeMetadata = metadata.get(lookupId)
       if (order.isDeleted) {
         blockingReasons.push('已删除订单不可修订')
       }
@@ -276,7 +282,7 @@ export class OrderAmendmentService {
       } else if (amendment.editVersion !== before.editVersion) {
         blockingReasons.push(`editVersion 已过期，当前版本为 ${before.editVersion}`)
       }
-      if (duplicateOrderIds.has(orderId)) {
+      if (duplicateOrderIds.has(lookupId)) {
         blockingReasons.push('同一批次不得重复提交同一订单')
       }
 
@@ -295,7 +301,6 @@ export class OrderAmendmentService {
       ) {
         blockingReasons.push('合并目标父单禁止结构或合规字段修订')
       }
-      let parsedBusinessNo: ParsedBusinessNo | null = null
       if (orderTypeChanged && !businessNoChanged) {
         blockingReasons.push('切换订单类型时必须确认目标命名空间的新业务号')
       }
@@ -305,14 +310,6 @@ export class OrderAmendmentService {
       if (after.orderType === 'walkin' && !after.customerName) {
         blockingReasons.push('散客订单必须填写客户名称')
       }
-      if (businessNoChanged) {
-        const inspection = await orderBusinessNoService.inspectConfirmed(after.businessNo, after.orderType, manager)
-        parsedBusinessNo = inspection.parsed
-        if (inspection.blockingReason) {
-          blockingReasons.push(inspection.blockingReason)
-        }
-      }
-
       const comparableBefore = JSON.stringify(before)
       const comparableAfter = JSON.stringify(after)
       if (comparableBefore === comparableAfter) {
@@ -326,8 +323,16 @@ export class OrderAmendmentService {
         order,
         input: amendment,
         businessNoChanged,
-        parsedBusinessNo,
+        parsedBusinessNo: null,
       })
+    }
+
+    const numberChanges = evaluated.filter((item) => item.businessNoChanged)
+    const inspections = await orderBusinessNoService.inspectConfirmedBatch(numberChanges.map(({ after }) => after), manager)
+    for (const [index, item] of numberChanges.entries()) {
+      const inspection = inspections[index]!
+      item.parsedBusinessNo = inspection.parsed
+      if (inspection.blockingReason) item.blockingReasons.push(inspection.blockingReason)
     }
 
     const seenBusinessNos = new Map<string, string>()

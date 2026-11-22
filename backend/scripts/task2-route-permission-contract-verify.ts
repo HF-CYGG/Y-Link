@@ -293,6 +293,13 @@ function main() {
   const rescue = parseApp(rescueAppFilePath, routers)
   const routes = [...resolveRoutes(routers, [...app.mounts, ...rescue.mounts]), ...app.directRoutes, ...rescue.directRoutes]
   assertContracts(routes, parsePermissionCodes())
+  const locationDelete = routes.find((route) => route.method === 'DELETE' && route.path === '/api/inventory/locations/:id')
+  assert.ok(locationDelete?.guards.has('requireAuth') && locationDelete.guards.has('requireAdminCsrf'))
+  assert.ok(locationDelete.guards.has('requirePermission') && !locationDelete.guards.has('requireRole'))
+  assert.deepEqual(locationDelete.permissions, ['products:manage'])
+  const checkoutStorefront = routes.find((route) => route.method === 'GET' && route.path === '/api/o2o/mall/storefront/checkout')
+  assert.ok(checkoutStorefront?.guards.has('requireClientAuth'))
+  assert.equal(checkoutStorefront.audience, 'client')
   const counts = routes.reduce<Record<Audience, number>>((result, route) => { result[route.audience] += 1; return result }, { public: 0, admin: 0, client: 0, rescue: 0 })
   log(`AST 解析 ${routes.length} 条路由：公开 ${counts.public}、管理端 ${counts.admin}、客户端 ${counts.client}、rescue ${counts.rescue}`)
   console.log('Task2 后端路由权限契约验证通过')

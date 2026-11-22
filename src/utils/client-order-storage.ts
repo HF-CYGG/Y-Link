@@ -10,7 +10,14 @@
  * - 若后端新增订单摘要字段或前端新增列表查询条件，需要同步补齐恢复逻辑，避免刷新后退化成旧口径。
  */
 
+import type { O2oMyOrderSearchMode } from '../../packages/shared-types/src/orders'
 import type { O2oPreorderSummary } from '@/api/modules/o2o'
+import {
+  CLIENT_ORDER_SNAPSHOT_META_KEY_PREFIX,
+  CLIENT_ORDER_SNAPSHOT_ORDERS_KEY_PREFIX,
+  LEGACY_CLIENT_ORDER_SNAPSHOT_KEY,
+  LEGACY_CLIENT_ORDER_SNAPSHOT_KEY_PREFIX,
+} from '@/utils/client-session-cleanup'
 import {
   getClientOrderReportScenario,
   isO2oOrderStatus,
@@ -38,6 +45,8 @@ export type PersistedO2oPreorderSummary = Omit<
 export interface ClientOrderSnapshot {
   activeStatus: 'all' | PersistedO2oPreorderSummary['status']
   keyword: string
+  searchMode: O2oMyOrderSearchMode
+  resultQueryKey: string
   orders: PersistedO2oPreorderSummary[]
   page: number
   pageSize: number
@@ -48,6 +57,7 @@ export interface ClientOrderSnapshot {
 export interface ClientOrderSnapshotMeta {
   activeStatus: ClientOrderSnapshot['activeStatus']
   keyword: ClientOrderSnapshot['keyword']
+  searchMode: O2oMyOrderSearchMode
   page: ClientOrderSnapshot['page']
   pageSize: ClientOrderSnapshot['pageSize']
   total: ClientOrderSnapshot['total']
@@ -58,10 +68,6 @@ export interface ClientOrderSnapshotMeta {
 // - 历史版本只使用单一全局 key，会导致不同客户端账号读取到同一份订单缓存；
 // - 新版本改为“前缀 + clientUserId”分片存储；
 // - 同时保留 legacy key，便于升级时统一清理旧数据。
-const CLIENT_ORDER_SNAPSHOT_META_KEY_PREFIX = 'y-link.client-order.snapshot.meta'
-const CLIENT_ORDER_SNAPSHOT_ORDERS_KEY_PREFIX = 'y-link.client-order.snapshot.orders'
-const LEGACY_CLIENT_ORDER_SNAPSHOT_KEY_PREFIX = 'y-link.client-order.snapshot'
-const LEGACY_CLIENT_ORDER_SNAPSHOT_KEY = 'y-link.client-order.snapshot'
 
 const getStorage = () => {
   if (globalThis.window === undefined) {
@@ -169,11 +175,17 @@ const normalizeNonNegativeInteger = (value: unknown, fallback = 0) => {
   return normalizedValue
 }
 
-const normalizeKeyword = (value: unknown) => {
+export const normalizeClientOrderKeyword = (value: unknown) => {
   return typeof value === 'string'
-    ? value.trim()
+    ? value.trim().slice(0, 64).replace(/[\uD800-\uDBFF]$/, '').trimEnd()
     : ''
 }
+
+export const normalizeClientOrderSearchMode = (value: unknown): O2oMyOrderSearchMode =>
+  value === 'prefix' || value === 'exact' ? value : 'contains'
+
+export const buildClientOrderQueryKey = ({ activeStatus, keyword, searchMode }: Pick<ClientOrderSnapshotMeta, 'activeStatus' | 'keyword' | 'searchMode'>) =>
+  JSON.stringify([activeStatus, keyword, searchMode])
 
 const normalizeStringField = (value: unknown, fallback = '') => {
   return typeof value === 'string' ? value : fallback
@@ -271,8 +283,9 @@ const normalizeSnapshotMeta = (value: unknown): ClientOrderSnapshotMeta => {
   const activeStatus = isO2oOrderStatus(parsed.activeStatus) ? parsed.activeStatus : 'all'
   return {
     activeStatus,
-    keyword: normalizeKeyword(parsed.keyword),
-    page: normalizePositiveInteger(parsed.page, 1),
+    keyword: normalizeClientOrderKeyword(parsed.keyword),
+    searchMode: normalizeClientOrderSearchMode(parsed.searchMode),
+    page: normalizeNonNegativeInteger(parsed.page, 1),
     pageSize: normalizePositiveInteger(parsed.pageSize, 20),
     total: normalizeNonNegativeInteger(parsed.total),
     updatedAt: Number.isFinite(parsed.updatedAt) ? Number(parsed.updatedAt) : 0,
@@ -283,11 +296,34 @@ const buildSnapshotMeta = (snapshot: ClientOrderSnapshot): ClientOrderSnapshotMe
   return {
     activeStatus: snapshot.activeStatus,
     keyword: snapshot.keyword,
+    searchMode: snapshot.searchMode,
     page: snapshot.page,
     pageSize: snapshot.pageSize,
     total: snapshot.total,
     updatedAt: snapshot.updatedAt,
   }
+}
+
+const restoreSnapshot = (rawMeta: unknown, rawOrders: unknown, combinedLegacy = false): ClientOrderSnapshot => {
+  const meta = normalizeSnapshotMeta(rawMeta)
+  const queryKey = buildClientOrderQueryKey(meta)
+  // 旧拆分缓存的条件和结果可能在不同请求间写入，只有同份无关键词的旧整包可恢复。
+  if (combinedLegacy && !meta.keyword && Array.isArray(rawOrders)) {
+    const orders = normalizeOrders(rawOrders)
+    if (meta.activeStatus === 'all' || orders.every((order) => order.status === meta.activeStatus)) {
+      return { ...meta, resultQueryKey: queryKey, orders }
+    }
+  }
+  const body = rawOrders as { queryKey?: unknown; records?: unknown } | null
+  if (body?.queryKey === queryKey) {
+    return { ...meta, resultQueryKey: queryKey, orders: normalizeOrders(body.records) }
+  }
+  return { ...meta, resultQueryKey: '', orders: [], page: 1, total: 0, updatedAt: 0 }
+}
+
+const writeSnapshotOrders = (storage: Storage, key: string, snapshot: ClientOrderSnapshot) => {
+  // 结果和所属查询同键写入，meta 提前变更时也不会把旧结果识别成当前结果。
+  storage.setItem(key, JSON.stringify({ queryKey: snapshot.resultQueryKey, records: snapshot.orders }))
 }
 
 const readLegacyPersistedClientOrderSnapshot = (storage: Storage, clientUserId: string): ClientOrderSnapshot | null => {
@@ -297,11 +333,7 @@ const readLegacyPersistedClientOrderSnapshot = (storage: Storage, clientUserId: 
   }
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>
-    const snapshot = {
-      ...normalizeSnapshotMeta(parsed),
-      orders: normalizeOrders(parsed.orders),
-    }
-    return snapshot
+    return restoreSnapshot(parsed, parsed.orders, true)
   } catch (error) {
     if (error instanceof Error) {
       storage.removeItem(getLegacySnapshotKey(clientUserId))
@@ -328,12 +360,7 @@ export const readPersistedClientOrderSnapshot = (clientUserId: string): ClientOr
 
   if (metaRaw || ordersRaw) {
     try {
-      const meta = metaRaw ? normalizeSnapshotMeta(JSON.parse(metaRaw) as unknown) : normalizeSnapshotMeta(null)
-      const orders = ordersRaw ? normalizeOrders(JSON.parse(ordersRaw) as unknown) : []
-      return {
-        ...meta,
-        orders,
-      }
+      return restoreSnapshot(metaRaw ? JSON.parse(metaRaw) : null, ordersRaw ? JSON.parse(ordersRaw) : null)
     } catch (error) {
       if (error instanceof Error) {
         storage.removeItem(metaKey)
@@ -350,7 +377,7 @@ export const readPersistedClientOrderSnapshot = (clientUserId: string): ClientOr
   // 详细注释：读取到旧版“整包快照”后，立即迁移到拆分后的 meta/orders key，
   // 后续再更新关键词或 freshness 时就不需要重复重写整份订单数组。
   storage.setItem(metaKey, JSON.stringify(buildSnapshotMeta(legacySnapshot)))
-  storage.setItem(ordersKey, JSON.stringify(legacySnapshot.orders))
+  writeSnapshotOrders(storage, ordersKey, legacySnapshot)
   storage.removeItem(getLegacySnapshotKey(normalizedClientUserId))
   return legacySnapshot
 }
@@ -371,7 +398,7 @@ export const persistClientOrderSnapshot = (
   clearLegacySnapshotIfNeeded(storage)
   storage.setItem(getMetaSnapshotKey(normalizedClientUserId), JSON.stringify(buildSnapshotMeta(snapshot)))
   if (options?.includeOrders !== false) {
-    storage.setItem(getOrdersSnapshotKey(normalizedClientUserId), JSON.stringify(snapshot.orders))
+    writeSnapshotOrders(storage, getOrdersSnapshotKey(normalizedClientUserId), snapshot)
   }
   storage.removeItem(getLegacySnapshotKey(normalizedClientUserId))
 }

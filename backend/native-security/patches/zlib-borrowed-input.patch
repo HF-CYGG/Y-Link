@@ -1,0 +1,25 @@
+Description: 旧版直接调用方缓冲写失败后结束借用，保留原零返回/错误门禁/位置计数
+ 此为1.2.13窄适配，不引入新版again/部分返回或自动重试。
+ 失败后未消费尾部不再由clearerr/close暗中重放；close成功不代表先前失败写完成。
+Origin: other, https://github.com/madler/zlib/commit/df84af25dc1942490e1d1c899a07619152a46148
+Bug: https://security-tracker.debian.org/tracker/CVE-2026-85091
+Forwarded: not-needed
+Last-Update: 2026-11-15
+
+--- a/gzwrite.c
++++ b/gzwrite.c
+@@ -241,8 +241,13 @@
+                 n = (unsigned)len;
+             state->strm.avail_in = n;
+             state->x.pos += n;
+-            if (gz_comp(state, Z_NO_FLUSH) == -1)
++            if (gz_comp(state, Z_NO_FLUSH) == -1) {
++                /* 失败后结束调用方输入借用，不让clearerr/close重放已失效内存。
++                   只收回直接输入；库自有待写输出、CRC和deflate状态保持原样。 */
++                state->strm.avail_in = 0;
++                state->strm.next_in = state->in;
+                 return 0;
++            }
+             len -= n;
+         } while (len);
+     }

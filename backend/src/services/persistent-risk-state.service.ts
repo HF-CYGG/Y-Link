@@ -426,7 +426,7 @@ class PersistentRiskStateService {
     await AppDataSource.getRepository(AuthRiskState).delete({ bucketDigest })
   }
 
-  async readFailure(bucketKey: string, resetWindowMs: number, nowMs = Date.now()): Promise<PersistentFailureState | null> {
+  async readFailure(bucketKey: string, resetWindowMs: number, nowMs = Date.now(), readOnly = false): Promise<PersistentFailureState | null> {
     const repository = AppDataSource.getRepository(AuthRiskState)
     const bucketDigest = digestBucketKey(`login_failure:${bucketKey}`)
     const cachedLock = this.failureLocks.get(bucketDigest, nowMs)
@@ -442,7 +442,7 @@ class PersistentRiskStateService {
       if (!redisState || redisState.lockedUntil <= nowMs) {
         // Redis 故障期间任一实例都可能把锁定写进数据库；恢复后 Redis 里没有这条锁定，
         // 必须补读数据库，否则切换到未缓存该锁定的实例即可绕过尚未到期的账号锁定。
-        redisState = await this.readDatabaseFailureLock(bucketDigest, nowMs) ?? redisState
+        redisState = await this.readDatabaseFailureLock(bucketDigest, nowMs, readOnly) ?? redisState
       }
       if (redisState && redisState.lockedUntil > nowMs) {
         this.failureLocks.set(bucketDigest, redisState.lockedUntil, redisState, nowMs)
@@ -453,7 +453,7 @@ class PersistentRiskStateService {
     if (!state?.lastFailedAt) return null
     const lockedUntil = state.lockedUntil?.getTime() ?? 0
     if (nowMs - state.lastFailedAt.getTime() >= resetWindowMs && lockedUntil <= nowMs) {
-      await repository.delete({ bucketDigest })
+      if (!readOnly) await repository.delete({ bucketDigest })
       return null
     }
     const result: PersistentFailureState = {
@@ -472,7 +472,7 @@ class PersistentRiskStateService {
    * Redis 就绪时的兜底：只按主键读取数据库中仍然有效的锁定（降级期间写入），不加锁、不写入。
    * 数据库读取失败时不影响 Redis 判定，只记录一次降级日志。
    */
-  private async readDatabaseFailureLock(bucketDigest: string, nowMs: number): Promise<PersistentFailureState | null> {
+  private async readDatabaseFailureLock(bucketDigest: string, nowMs: number, requirePersistedState: boolean): Promise<PersistentFailureState | null> {
     try {
       const state = await AppDataSource.getRepository(AuthRiskState).findOne({ where: { bucketDigest, stateType: 'login_failure' } })
       const lockedUntil = state?.lockedUntil?.getTime() ?? 0
@@ -484,6 +484,7 @@ class PersistentRiskStateService {
         lockedUntil,
       }
     } catch (error) {
+      if (requirePersistedState) throw error
       console.warn('[risk-state] 读取数据库兜底锁定失败', error instanceof Error ? error.message : error)
       return null
     }

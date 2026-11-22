@@ -1,0 +1,20 @@
+Description: openssl30-ec-order，固定旧版生产目标的本地回补候选
+Origin: https://github.com/openssl/openssl/commit/a957a4bfc0b9691b20c9036b6ecc110f89f8d15c
+Comment: 上游完整补丁另存upstream.patch；不应用或执行其中测试；本候选未构建、未验收。
+
+diff --git a/crypto/ec/ec_key.c b/crypto/ec/ec_key.c
+index d8640a4bca1db..6e53f245a838a 100644
+--- a/crypto/ec/ec_key.c
++++ b/crypto/ec/ec_key.c
+@@ -276,6 +276,11 @@ static int ec_generate_key(EC_KEY *eckey, int pairwise_test)
+             goto err;
+     }
+ 
++    if (BN_cmp(order, BN_value_one()) <= 0) {
++        ERR_raise(ERR_LIB_EC, EC_R_INVALID_GROUP_ORDER);
++        goto err;
++    }
++
+     do
+         if (!BN_priv_rand_range_ex(priv_key, order, 0, ctx))
+             goto err;

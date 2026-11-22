@@ -12,9 +12,14 @@
 # ------------------------------
 # sqlite3@5 的 N-API 预编译产物在 Node 22 LTS 上稳定可用；升级 Node 主版本前必须先通过 Onebox SQLite 冒烟。
 # 固定到 Node 22 最新安全补丁版本；Node 发布新安全版本后 `npm run verify:security-updates` 会报红，需同步升级全部 Node 版本固定点。
-ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:22.23.4-bookworm-slim
+ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:22.23.5-bookworm-slim
 
 FROM --platform=$BUILDPLATFORM ${Y_LINK_NODE_IMAGE} AS build
+# 固定既有npm工具；官方包完整性失败即停，不改变Node/Nginx或应用锁。
+COPY backend/scripts/install-pinned-npm.mjs /tmp/ylink-install-pinned-npm.mjs
+COPY backend/scripts/build-pinned-npm.mjs /tmp/build-pinned-npm.mjs
+COPY backend/npm-toolchain /tmp/ylink-npm-toolchain
+RUN node /tmp/ylink-install-pinned-npm.mjs --context=image --data-dir=/tmp/ylink-npm-toolchain
 
 WORKDIR /app
 
@@ -45,13 +50,38 @@ RUN npm run build
 # 运行阶段：使用 Nginx 托管静态资源并代理后端 API
 # ------------------------------
 # nginx 跟随官方 stable 分支（1.30.x）；1.27 主线分支已停止维护，不再获得安全修复。
-FROM nginx:1.30-alpine AS runtime
+FROM nginx:1.30.6-alpine AS alpine-native-base
 
 ENV TZ=Asia/Shanghai
 
 RUN apk add --no-cache tzdata \
   && mkdir -p /var/cache/nginx/ylink-public \
   && chown -R nginx:nginx /var/cache/nginx/ylink-public
+
+# 仅定向更新基座中已安装的两个运行库；保留Alpine分支、Nginx及全部现有模块。
+# 仍由既有官方源和可信key验签；新增、删除或改变其它包时停止构建。
+RUN set -eu; \
+  grep -Eq '^3\.24\.' /etc/alpine-release; \
+  apk info -e zlib libxslt >/dev/null; \
+  before_packages="$(apk info -v)"; \
+  before_other="$(printf '%s\n' "$before_packages" | grep -Ev '^(zlib|libxslt)-[0-9]' | sort)"; \
+  apk add --no-cache --upgrade zlib=1.4-r0 libxslt=1.1.43-r4; \
+  after_packages="$(apk info -v)"; \
+  after_other="$(printf '%s\n' "$after_packages" | grep -Ev '^(zlib|libxslt)-[0-9]' | sort)"; \
+  test "$before_other" = "$after_other"; \
+  printf '%s\n' "$after_packages" | grep -Fqx 'zlib-1.4-r0'; \
+  printf '%s\n' "$after_packages" | grep -Fqx 'libxslt-1.1.43-r4'
+
+# 构建工具只进入独立层；先记录原目标完整载荷，最终不增加运行依赖或信任根。
+FROM alpine-native-base AS alpine-native-build
+COPY docker/alpine-native-security /opt/ylink-alpine-security
+RUN --mount=from=alpine-native-base,source=/,target=/mnt/ylink-alpine-original,ro \
+  sh /opt/ylink-alpine-security/capture-baseline.sh \
+  && apk add --no-cache abuild build-base python3 python3-dev perl linux-headers xz-dev zlib-dev patch binutils openssl \
+  && python3 /opt/ylink-alpine-security/build.py --candidate-only
+
+FROM alpine-native-base AS runtime
+# 保留既有合法运行基线；本批未验收OpenSSL/libxml2候选尚未接入runtime。
 
 # 使用可模板化站点配置：
 # - 处理 Vue Router history 路由回退；

@@ -18,7 +18,7 @@ import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { initializeDatabaseInfrastructure } from '../database/database-strategy.js'
 import { databaseOperationGate } from '../database/operation-gate.js'
-import { resolvePermissionsByRole } from '../constants/auth-permissions.js'
+import { resolvePermissionsByRole, resolveUserPermissions } from '../constants/auth-permissions.js'
 import {
   ClientFeedbackConversation,
   CLIENT_FEEDBACK_CONVERSATION_STATUSES,
@@ -46,7 +46,10 @@ import { isRetryableMysqlTransactionError, isUniqueConstraintError } from '../ut
 import { BizError } from '../utils/errors.js'
 import { toSafeErrorLog } from '../utils/safe-error-log.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
-import { ensureUploadCategoryDir, IMAGE_UPLOAD_MAX_FILE_SIZE, isUploadPublicUrlForCategory, removeClientFeedbackUploadFile, UPLOAD_PUBLIC_FILE_NAME_MATCHER } from '../utils/upload-storage.js'
+import {
+  cleanupExpiredUploadTempFiles, ensureUploadCategoryDir, IMAGE_UPLOAD_MAX_FILE_SIZE,
+  isRecoverableUploadFileCleanupError, isUploadPublicUrlForCategory, UPLOAD_PUBLIC_FILE_NAME_MATCHER,
+} from '../utils/upload-storage.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
 import {
@@ -86,13 +89,21 @@ export interface ClientFeedbackAttachmentCleanupResult {
   scannedFiles: number
   removedExpiredDrafts: number
   removedOrphanFiles: number
+  removedTempFiles: number
   retainedReferencedFiles: number
   anomalies: ClientFeedbackAttachmentCleanupAnomaly[]
 }
 
-interface AttachmentTransactionResult<T> {
-  value: T
-  afterCommit?: () => Promise<void>
+interface AttachmentCleanupCandidate {
+  storageName: string
+  draft?: ClientFeedbackAttachment
+}
+
+const ATTACHMENT_CLEANUP_TRANSACTION_SIZE = 64
+const ATTACHMENT_CLEANUP_READ_SIZE = 500
+const FEEDBACK_SENDERS_BY_SIDE: Record<'client' | 'service', readonly ClientFeedbackSenderType[]> = {
+  client: ['client'],
+  service: ['service', 'system'],
 }
 
 export const CLIENT_FEEDBACK_SUBJECT_MAX_LENGTH = 128
@@ -352,6 +363,9 @@ class ClientFeedbackService {
   private attachmentCleanupTimer: ReturnType<typeof globalThis.setInterval> | null = null
 
   private attachmentCleanupInFlight: Promise<ClientFeedbackAttachmentCleanupResult> | null = null
+  private attachmentCleanupFileCursor = ''
+  private attachmentCleanupDraftCursor = ''
+  private attachmentCleanupTempCursor = ''
 
   private attachmentCleanupWorkerDesired = false
 
@@ -369,17 +383,14 @@ class ClientFeedbackService {
   }
 
   /**
-   * MySQL 用命名锁把全局容量检查、草稿建档与清理串到同一数据库协调域；锁保持到事务提交和
-   * 文件后处理结束。SQLite 则复用统一事务协调器，不再叠加无界进程 Promise 锁。
+   * MySQL 用命名锁协调容量检查、草稿建档与回收。SQLite 复用统一写事务队列。
    */
   private async runAttachmentCoordinatedTransaction<T>(
-    operation: (manager: EntityManager, isMysql: boolean) => Promise<AttachmentTransactionResult<T>>,
+    operation: (manager: EntityManager, isMysql: boolean) => Promise<T>,
   ): Promise<T> {
     const isMysql = AppDataSource.options.type === 'mysql'
     if (!isMysql) {
-      const result = await runInTransaction((manager) => operation(manager, false))
-      if (result.afterCommit) await result.afterCommit()
-      return result.value
+      return runInTransaction((manager) => operation(manager, false))
     }
 
     await initializeDatabaseInfrastructure(AppDataSource)
@@ -398,8 +409,7 @@ class ClientFeedbackService {
       }
       const result = await operation(queryRunner.manager, true)
       await queryRunner.commitTransaction()
-      if (result.afterCommit) await result.afterCommit()
-      return result.value
+      return result
     } catch (error) {
       if (queryRunner.isTransactionActive) await queryRunner.rollbackTransaction()
       throw error
@@ -494,11 +504,16 @@ class ClientFeedbackService {
     }
     // 上传频控已由路由在接收文件前通过 consumeAttachmentUploadRate 计次，这里不重复消耗额度。
     await this.assertFeedbackAttachmentDiskCapacity()
+    const filePath = path.resolve(ensureUploadCategoryDir('client-feedback'), input.storageName)
+    try {
+      if (!(await fs.promises.stat(filePath)).isFile()) throw new Error('not-file')
+    } catch {
+      throw new BizError('反馈附件文件不存在，请重新上传', 404)
+    }
     return this.runAttachmentCoordinatedTransaction(async (manager) => {
-      const filePath = path.resolve(ensureUploadCategoryDir('client-feedback'), input.storageName)
+      // 回收也持有该协调锁，重新确认预检的路径没有在等待期间被清理。
       try {
-        const stats = await fs.promises.stat(filePath)
-        if (!stats.isFile()) throw new Error('not-file')
+        await fs.promises.access(filePath, fs.constants.F_OK)
       } catch {
         throw new BizError('反馈附件文件不存在，请重新上传', 404)
       }
@@ -534,14 +549,9 @@ class ClientFeedbackService {
         expiresAt: new Date(now.getTime() + CLIENT_FEEDBACK_ATTACHMENT_POLICY.draftTtlMs),
       }))
       return {
-        value: {
-          id: String(attachment.id),
-          name: attachment.originalName,
-          url: `/api/client-feedback/attachments/${attachment.id}`,
-          mimeType: attachment.mimeType,
-          size: attachment.sizeBytes,
-          expiresAt: attachment.expiresAt,
-        },
+        ...this.buildAttachmentReference(attachment),
+        id: String(attachment.id),
+        expiresAt: attachment.expiresAt,
       }
     })
   }
@@ -553,6 +563,15 @@ class ClientFeedbackService {
     }
     if (normalizedIds.some((id) => id.length > 64)) throw new BizError('反馈附件标识非法', 400)
     return normalizedIds
+  }
+
+  private buildAttachmentReference(row: ClientFeedbackAttachment) {
+    return {
+      name: row.originalName,
+      url: `/api/client-feedback/attachments/${row.id}`,
+      mimeType: row.mimeType,
+      size: row.sizeBytes,
+    }
   }
 
   private async resolveOwnedAttachmentReferencesInTransaction(
@@ -578,15 +597,40 @@ class ClientFeedbackService {
       throw new BizError('反馈附件不存在、已过期或已被使用', 404)
     }
     const byId = new Map(rows.map((row) => [String(row.id), row]))
-    return normalizedIds.map((id) => {
-      const row = byId.get(id)!
-      return {
-        name: row.originalName,
-        url: `/api/client-feedback/attachments/${row.id}`,
-        mimeType: row.mimeType,
-        size: row.sizeBytes,
-      }
+    return normalizedIds.map((id) => this.buildAttachmentReference(byId.get(id)!))
+  }
+
+  private async resolveBoundAttachmentReferences(
+    attachments: ClientFeedbackMessageAttachment[],
+    conversation: ClientFeedbackConversation,
+    manager: EntityManager,
+  ): Promise<ClientFeedbackMessageAttachment[]> {
+    if (!attachments.length) return []
+    const ids = attachments.map(({ url }) => url.slice(url.lastIndexOf('/') + 1))
+    if (ids.some((id) => !/^[1-9]\d{0,19}$/.test(id))) throw new BizError('反馈附件不存在', 404)
+    const rows = await manager.getRepository(ClientFeedbackAttachment).findBy({
+      id: In(ids), conversationId: conversation.id, ownerClientUserId: conversation.clientUserId,
     })
+    const messageIds = rows.map((row) => row.messageId).filter((id): id is string => Boolean(id))
+    const messages = new Map(messageIds.length
+      ? (await manager.getRepository(ClientFeedbackMessage).findBy({ id: In(messageIds), conversationId: conversation.id }))
+        .map((message) => [String(message.id), message])
+      : [])
+    const rowsById = new Map(rows.map((row) => [String(row.id), row]))
+    return Promise.all(ids.map(async (id) => {
+      const row = rowsById.get(id)
+      const message = row?.messageId ? messages.get(row.messageId) : undefined
+      if (!row || !message || !UPLOAD_PUBLIC_FILE_NAME_MATCHER.test(row.storageName)
+        || !this.messageReferencesBoundAttachment(message, row)) throw new BizError('反馈附件不存在', 404)
+      const file = path.join(ensureUploadCategoryDir('client-feedback'), row.storageName)
+      try {
+        if (!(await fs.promises.lstat(file)).isFile()) throw new BizError('反馈附件不存在', 404)
+        await fs.promises.access(file, fs.constants.R_OK)
+      } catch {
+        throw new BizError('反馈附件不存在', 404)
+      }
+      return this.buildAttachmentReference(row)
+    }))
   }
 
   private async bindOwnedAttachmentsToMessage(
@@ -612,233 +656,260 @@ class ClientFeedbackService {
     }
   }
 
-  private async findMessageAttachmentReference(
-    manager: EntityManager,
-    input: { attachmentId?: string; storageName: string },
-  ): Promise<'referenced' | 'none' | 'uncertain'> {
-    const apiUrl = input.attachmentId ? `/api/client-feedback/attachments/${input.attachmentId}` : null
-    const storageUrl = `/uploads/client-feedback/${input.storageName}`
-    const query = manager.getRepository(ClientFeedbackMessage)
-      .createQueryBuilder('message')
-      // 引用检查按存储名/附件 ID 子串匹配，转义通配符后才是真正的“包含”判断。
-      .where("message.attachmentJson LIKE :storageNeedle ESCAPE '!'", { storageNeedle: buildSqlLikeContains(input.storageName) })
-    if (input.attachmentId) {
-      query.orWhere("message.attachmentJson LIKE :idNeedle ESCAPE '!'", { idNeedle: buildSqlLikeContains(input.attachmentId) })
-    }
-    const messages = await query.take(CLIENT_FEEDBACK_ATTACHMENT_POLICY.cleanupBatchSize).getMany()
-    let uncertain = false
-    for (const message of messages) {
-      let parsed: unknown
-      try {
-        parsed = JSON.parse(message.attachmentJson)
-      } catch {
-        uncertain = true
-        continue
+  private async groupAttachmentStorageRows(names: string[], manager: EntityManager = AppDataSource.manager) {
+    const result = new Map<string, ClientFeedbackAttachment[]>()
+    const repo = manager.getRepository(ClientFeedbackAttachment)
+    for (let start = 0; start < names.length; start += ATTACHMENT_CLEANUP_READ_SIZE) {
+      const rows = await repo.findBy({ storageName: In(names.slice(start, start + ATTACHMENT_CLEANUP_READ_SIZE)) })
+      for (const row of rows) {
+        const key = row.storageName.toLowerCase()
+        const matches = result.get(key) ?? []
+        matches.push(row)
+        result.set(key, matches)
       }
-      if (!Array.isArray(parsed)) {
-        uncertain = true
-        continue
-      }
-      const referenced = parsed.some((item) => {
-        if (!item || typeof item !== 'object') return false
-        const url = 'url' in item && typeof item.url === 'string' ? item.url.trim() : ''
-        return url === storageUrl
-          || url.includes(input.storageName)
-          || (apiUrl !== null && (url === apiUrl || url.includes(`/attachments/${input.attachmentId}`)))
-      })
-      if (referenced) return 'referenced'
     }
-    if (messages.length >= CLIENT_FEEDBACK_ATTACHMENT_POLICY.cleanupBatchSize) return 'uncertain'
-    return uncertain ? 'uncertain' : 'none'
+    return result
   }
 
-  private async removeOldOrphanFileIfStillEligible(storageName: string, cutoffTime: number): Promise<boolean> {
-    if (!UPLOAD_PUBLIC_FILE_NAME_MATCHER.test(storageName)) return false
-    const filePath = path.resolve(ensureUploadCategoryDir('client-feedback'), storageName)
-    if (path.dirname(filePath) !== ensureUploadCategoryDir('client-feedback')) return false
-    try {
-      const stats = await fs.promises.lstat(filePath)
-      if (!stats.isFile() || stats.mtimeMs > cutoffTime) return false
-      await removeClientFeedbackUploadFile(storageName)
-      return true
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
-      throw error
+  /** 批量定位候选文件的历史快照，所有消息读取和解析均在写锁之外。 */
+  private async collectHistoricalAttachmentReferences(candidates: AttachmentCleanupCandidate[]) {
+    const storageNames = new Map(candidates.map(({ storageName }) => [storageName.toLowerCase(), storageName]))
+    const draftNamesById = new Map(candidates.flatMap(({ storageName, draft }) => draft ? [[String(draft.id), storageName] as const] : []))
+    const references = new Map<string, 'referenced' | 'uncertain'>()
+    if (!candidates.length) return references
+
+    const repo = AppDataSource.getRepository(ClientFeedbackMessage)
+    const [lastMessage] = await repo.find({ select: ['id'], order: { id: 'DESC' }, take: 1 })
+    if (!lastMessage) return references
+    const uploadNamePattern = new RegExp(UPLOAD_PUBLIC_FILE_NAME_MATCHER.source.slice(1, -1), 'gi')
+    const record = (storageName: string | undefined, evidence: 'referenced' | 'uncertain') => {
+      if (storageName && references.get(storageName) !== 'referenced') references.set(storageName, evidence)
     }
+    const inspect = (text: string, evidence: 'referenced' | 'uncertain') => {
+      for (const match of text.matchAll(uploadNamePattern)) record(storageNames.get(match[0].toLowerCase()), evidence)
+      for (const match of text.matchAll(/\/attachments\/(\d+)/g)) record(draftNamesById.get(match[1]!), evidence)
+    }
+
+    // 历史异常行可能引用未绑定草稿。数据库先筛可能含候选文件或附件 ID 的消息；
+    // 带转义的 JSON 交回旧检查，避免漏掉 Unicode、转义斜杠等兼容格式。
+    const identifiers = [...storageNames.keys(), ...draftNamesById.keys()]
+    // 大批次限制 SQL 谓词数量，回退到识别潜在 UUID、路由 ID 与历史字段的粗筛。
+    const needles = identifiers.length <= 128 ? identifiers : ['-', '/attachments/', 'attachmentid']
+    const conditions = needles.map((_, index) => 'INSTR(LOWER(message.attachmentJson), :needle' + index + ') > 0')
+    const parameters = Object.fromEntries(needles.map((needle, index) => ['needle' + index, needle]))
+    conditions.push('INSTR(message.attachmentJson, :escape) > 0')
+
+    // 消息只追加。新的合法引用只能绑定有效草稿或引用同会话已绑定附件，最终会二次校验登记行。
+    let after = '0'
+    while (true) {
+      const page = await repo.createQueryBuilder('message')
+        .select(['message.id', 'message.attachmentJson'])
+        .where('message.id > :after AND message.id <= :lastId', { after, lastId: String(lastMessage.id) })
+        .andWhere('(' + conditions.join(' OR ') + ')', { ...parameters, escape: '\\' })
+        .orderBy('message.id', 'ASC')
+        .take(ATTACHMENT_CLEANUP_READ_SIZE)
+        .getMany()
+      for (const { attachmentJson } of page) {
+        if (!attachmentJson || attachmentJson === '[]') continue
+        const items = this.parseJsonArray<unknown>(attachmentJson, [])
+        if (items.length > 0) {
+          for (const item of items) {
+            if (item && typeof item === 'object' && 'url' in item && typeof item.url === 'string') {
+              inspect(item.url, 'referenced')
+            }
+          }
+        } else {
+          inspect(attachmentJson.replaceAll('\\/', '/'), 'uncertain')
+          for (const match of attachmentJson.matchAll(/"attachmentId"\s*:\s*"?(\d+)/g)) {
+            record(draftNamesById.get(match[1]!), 'uncertain')
+          }
+        }
+      }
+      if (page.length < ATTACHMENT_CLEANUP_READ_SIZE || references.size === candidates.length) return references
+      after = String(page.at(-1)!.id)
+    }
+  }
+
+  private async removeExpiredAttachmentDrafts(
+    candidates: ClientFeedbackAttachment[],
+    now: Date,
+    anomalies: ClientFeedbackAttachmentCleanupAnomaly[],
+  ) {
+    if (!candidates.length) return []
+    return this.runAttachmentCoordinatedTransaction(async (manager, isMysql) => {
+      const owners = await manager.getRepository(ClientUser).find({
+        select: ['id'],
+        where: { id: In([...new Set(candidates.map((item) => item.ownerClientUserId))]) },
+        order: { id: 'ASC' },
+        lock: isMysql ? { mode: 'pessimistic_write' } : undefined,
+      })
+      const ownerIds = new Set(owners.map(({ id }) => String(id)))
+      const stored = await this.groupAttachmentStorageRows(candidates.map((item) => item.storageName), manager)
+      const removable: ClientFeedbackAttachment[] = []
+      for (const previous of candidates) {
+        const matches = stored.get(previous.storageName.toLowerCase()) ?? []
+        if (matches.length > 1) {
+          anomalies.push({ storageName: previous.storageName, reason: '同一存储名存在多条附件记录，保留待人工核查' })
+          continue
+        }
+        const current = matches[0]
+        if (!current || String(previous.id) !== String(current.id) || current.storageName !== previous.storageName
+          || current.ownerClientUserId !== previous.ownerClientUserId || current.messageId || current.conversationId
+          || !current.expiresAt || current.expiresAt > now) continue
+        if (!ownerIds.has(String(current.ownerClientUserId))) {
+          anomalies.push({ storageName: current.storageName, reason: '草稿所属用户不存在，保留记录与文件待人工核查' })
+          continue
+        }
+        removable.push(current)
+      }
+      if (removable.length) await manager.getRepository(ClientFeedbackAttachment).delete(removable.map(({ id }) => id))
+      return removable.map(({ storageName }) => storageName)
+    })
+  }
+
+  private async removeUnregisteredAttachmentFiles(
+    directory: string,
+    expirationByName: ReadonlyMap<string, number>,
+    anomalies: ClientFeedbackAttachmentCleanupAnomaly[],
+  ) {
+    if (!expirationByName.size || !(await fs.promises.lstat(directory)).isDirectory()) return new Set<string>()
+    return this.runAttachmentCoordinatedTransaction(async (manager) => {
+      const rows = await this.groupAttachmentStorageRows([...expirationByName.keys()], manager)
+      const removed = new Set<string>()
+      for (const [storageName, cutoff] of expirationByName) {
+        if (rows.has(storageName.toLowerCase())) continue
+        const file = path.join(directory, storageName)
+        try {
+          const info = await fs.promises.lstat(file)
+          if (!info.isFile() || info.mtimeMs > cutoff) continue
+          await fs.promises.unlink(file)
+          removed.add(storageName)
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+          if (!isRecoverableUploadFileCleanupError(error)) throw error
+          anomalies.push({ storageName, reason: '附件文件无法访问或正在使用，保留待下次核查' })
+        }
+      }
+      return removed
+    })
   }
 
   private async performAttachmentCleanup(): Promise<ClientFeedbackAttachmentCleanupResult> {
     const now = new Date()
-    const orphanCutoffTime = now.getTime() - CLIENT_FEEDBACK_ATTACHMENT_POLICY.orphanGraceMs
-    const uploadDirectory = ensureUploadCategoryDir('client-feedback')
-    const directoryEntries = await fs.promises.readdir(uploadDirectory, { withFileTypes: true })
+    const { orphanGraceMs, cleanupBatchSize, tempFileGraceMs } = CLIENT_FEEDBACK_ATTACHMENT_POLICY
+    const orphanCutoffTime = now.getTime() - orphanGraceMs
+    const directory = ensureUploadCategoryDir('client-feedback')
     const anomalies: ClientFeedbackAttachmentCleanupAnomaly[] = []
-    const oldUuidStorageNames: string[] = []
+    const directoryIsSafe = (await fs.promises.lstat(directory)).isDirectory()
+    const entries = directoryIsSafe
+      ? await fs.promises.readdir(directory, { withFileTypes: true })
+      : []
+    const names = entries.flatMap((entry) => {
+      if (entry.isFile() && UPLOAD_PUBLIC_FILE_NAME_MATCHER.test(entry.name)) return [entry.name]
+      if (anomalies.length < cleanupBatchSize) {
+        anomalies.push({ storageName: entry.name, reason: '目录项不是受控 UUID 普通文件，保留待人工核查' })
+      }
+      return []
+    }).sort()
+    const scanLimit = Math.max(1_000, cleanupBatchSize * 2)
+    const scanPage = names.filter((name) => name > this.attachmentCleanupFileCursor).slice(0, scanLimit)
+    const drafts = !directoryIsSafe ? [] : await this.attachmentRepo.find({
+      where: {
+        id: MoreThan(this.attachmentCleanupDraftCursor || '0'),
+        expiresAt: LessThanOrEqual(now), conversationId: IsNull(), messageId: IsNull(),
+      },
+      order: { id: 'ASC' },
+      take: cleanupBatchSize,
+    })
+    const stored = await this.groupAttachmentStorageRows([...new Set([...scanPage, ...drafts.map(({ storageName }) => storageName)])])
+    const candidates: AttachmentCleanupCandidate[] = []
+    for (const draft of drafts) {
+      if (!UPLOAD_PUBLIC_FILE_NAME_MATCHER.test(draft.storageName)) {
+        anomalies.push({ storageName: draft.storageName, reason: '草稿存储名不符合受控 UUID 规则，保留待人工核查' })
+      } else if (stored.get(draft.storageName.toLowerCase())?.length !== 1) {
+        anomalies.push({ storageName: draft.storageName, reason: '草稿存储名对应的登记记录不一致，保留待人工核查' })
+      } else {
+        candidates.push({ storageName: draft.storageName, draft })
+      }
+    }
 
-    for (const entry of directoryEntries) {
-      if (!UPLOAD_PUBLIC_FILE_NAME_MATCHER.test(entry.name)) {
-        anomalies.push({ storageName: entry.name, reason: '文件名不符合受控 UUID 规则，保留待人工核查' })
+    let retainedReferencedFiles = 0
+    let orphanCount = 0
+    const observedBindings: ClientFeedbackAttachment[] = []
+    let visitedName = ''
+    for (const storageName of scanPage) {
+      visitedName = storageName
+      const matches = stored.get(storageName.toLowerCase()) ?? []
+      const attachment = matches[0]
+      if (attachment) {
+        retainedReferencedFiles += 1
+        if (matches.length > 1 || Boolean(attachment.conversationId) !== Boolean(attachment.messageId)) {
+          anomalies.push({ storageName, reason: '附件登记或绑定关系不一致，保留待人工核查' })
+        } else if (attachment.messageId && attachment.conversationId) {
+          observedBindings.push(attachment)
+        }
         continue
       }
-      if (!entry.isFile()) {
-        anomalies.push({ storageName: entry.name, reason: '目录项不是普通文件，保留待人工核查' })
-        continue
-      }
-      if (oldUuidStorageNames.length >= CLIENT_FEEDBACK_ATTACHMENT_POLICY.cleanupBatchSize) continue
       try {
-        const stats = await fs.promises.lstat(path.resolve(uploadDirectory, entry.name))
-        if (stats.isFile() && stats.mtimeMs <= orphanCutoffTime) oldUuidStorageNames.push(entry.name)
+        const info = await fs.promises.lstat(path.join(directory, storageName))
+        if (info.isFile() && info.mtimeMs <= orphanCutoffTime) {
+          candidates.push({ storageName })
+          orphanCount += 1
+          if (orphanCount >= cleanupBatchSize) break
+        }
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-          anomalies.push({ storageName: entry.name, reason: '读取文件状态失败，保留待下次核查' })
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+        if (!isRecoverableUploadFileCleanupError(error)) throw error
+        anomalies.push({ storageName, reason: '附件文件无法访问或正在使用，保留待下次核查' })
+      }
+    }
+
+    for (let start = 0; start < observedBindings.length; start += ATTACHMENT_CLEANUP_READ_SIZE) {
+      const watched = observedBindings.slice(start, start + ATTACHMENT_CLEANUP_READ_SIZE)
+      const messages = await AppDataSource.getRepository(ClientFeedbackMessage).findBy({ id: In(watched.map(({ messageId }) => messageId!)) })
+      const byId = new Map(messages.map((message) => [String(message.id), message]))
+      for (const attachment of watched) {
+        const message = byId.get(attachment.messageId!)
+        if (!message || String(message.conversationId) !== String(attachment.conversationId)
+          || !this.messageReferencesBoundAttachment(message, attachment)) {
+          anomalies.push({ storageName: attachment.storageName, reason: '附件登记与绑定消息快照不一致，保留待人工核查' })
         }
       }
     }
 
-    return this.runAttachmentCoordinatedTransaction(async (manager, isMysql) => {
-      const attachmentRepo = manager.getRepository(ClientFeedbackAttachment)
-      const expiredDraftCandidates = await attachmentRepo.find({
-        where: {
-          expiresAt: LessThanOrEqual(now),
-          conversationId: IsNull(),
-          messageId: IsNull(),
-        },
-        order: { ownerClientUserId: 'ASC', expiresAt: 'ASC', id: 'ASC' },
-        take: CLIENT_FEEDBACK_ATTACHMENT_POLICY.cleanupBatchSize,
+    const references = await this.collectHistoricalAttachmentReferences(candidates)
+    const eligible = candidates.filter(({ storageName, draft }) => {
+      const evidence = references.get(storageName)
+      if (!evidence) return true
+      if (!draft) retainedReferencedFiles += 1
+      anomalies.push({
+        storageName,
+        reason: evidence === 'uncertain' ? '消息附件历史格式无法确认，保留待人工核查' : '文件仍被历史消息引用，保留待人工核查',
       })
-      const ownerIds = [...new Set(expiredDraftCandidates.map((item) => item.ownerClientUserId))].sort()
-      const expiredFilesAfterCommit: string[] = []
-
-      for (const ownerId of ownerIds) {
-        const owner = await this.lockAttachmentOwner(manager, ownerId, false)
-        if (!owner) {
-          for (const item of expiredDraftCandidates.filter((candidate) => candidate.ownerClientUserId === ownerId)) {
-            anomalies.push({ storageName: item.storageName, reason: '草稿所属用户不存在，保留记录与文件待人工核查' })
-          }
-          continue
-        }
-        const currentExpiredDrafts = await attachmentRepo.find({
-          where: {
-            ownerClientUserId: ownerId,
-            expiresAt: LessThanOrEqual(now),
-            conversationId: IsNull(),
-            messageId: IsNull(),
-          },
-          order: { expiresAt: 'ASC', id: 'ASC' },
-          take: CLIENT_FEEDBACK_ATTACHMENT_POLICY.cleanupBatchSize,
-        })
-        const removableIds: string[] = []
-        for (const attachment of currentExpiredDrafts) {
-          if (!UPLOAD_PUBLIC_FILE_NAME_MATCHER.test(attachment.storageName)) {
-            anomalies.push({ storageName: attachment.storageName, reason: '草稿存储名不符合受控 UUID 规则，保留待人工核查' })
-            continue
-          }
-          const sameStorageRows = await attachmentRepo.find({
-            where: { storageName: attachment.storageName },
-            take: 2,
-          })
-          if (sameStorageRows.length > 1) {
-            anomalies.push({ storageName: attachment.storageName, reason: '同一存储名存在多条附件记录，保留待人工核查' })
-            continue
-          }
-          const reference = await this.findMessageAttachmentReference(manager, {
-            attachmentId: attachment.id,
-            storageName: attachment.storageName,
-          })
-          if (reference !== 'none') {
-            anomalies.push({
-              storageName: attachment.storageName,
-              reason: reference === 'referenced'
-                ? '过期草稿仍被消息历史引用，保留待人工核查'
-                : '消息附件历史格式无法确认，保留待人工核查',
-            })
-            continue
-          }
-          removableIds.push(attachment.id)
-          expiredFilesAfterCommit.push(attachment.storageName)
-        }
-        if (removableIds.length) await attachmentRepo.delete(removableIds)
-      }
-
-      const expiredFileSet = new Set(expiredFilesAfterCommit)
-      const orphanFiles: string[] = []
-      let retainedReferencedFiles = 0
-      for (const storageName of oldUuidStorageNames) {
-        if (expiredFileSet.has(storageName)) continue
-        const rows = await attachmentRepo.find({ where: { storageName }, take: 2 })
-        if (rows.length > 1) {
-          anomalies.push({ storageName, reason: '同一存储名存在多条附件记录，保留待人工核查' })
-          continue
-        }
-        const attachment = rows[0]
-        if (attachment) {
-          if (Boolean(attachment.conversationId) !== Boolean(attachment.messageId)) {
-            anomalies.push({ storageName, reason: '附件会话与消息关系不完整，保留待人工核查' })
-            continue
-          }
-          if (attachment.conversationId && attachment.messageId) {
-            const message = await manager.getRepository(ClientFeedbackMessage).findOne({
-              where: { id: attachment.messageId, conversationId: attachment.conversationId },
-            })
-            if (!message) {
-              anomalies.push({ storageName, reason: '附件指向的消息关系不存在，保留待人工核查' })
-              continue
-            }
-            const reference = await this.findMessageAttachmentReference(manager, {
-              attachmentId: attachment.id,
-              storageName,
-            })
-            if (reference !== 'referenced') {
-              anomalies.push({ storageName, reason: '附件记录与消息附件快照不一致，保留待人工核查' })
-              continue
-            }
-          }
-          retainedReferencedFiles += 1
-          continue
-        }
-
-        const historicalReference = await this.findMessageAttachmentReference(manager, { storageName })
-        if (historicalReference !== 'none') {
-          retainedReferencedFiles += 1
-          anomalies.push({
-            storageName,
-            reason: historicalReference === 'referenced'
-              ? '文件仅被历史消息快照引用，缺少附件记录，保留待人工核查'
-              : '消息附件历史格式无法确认，保留待人工核查',
-          })
-          continue
-        }
-        orphanFiles.push(storageName)
-      }
-
-      let removedOrphanFiles = 0
-      if (!isMysql) {
-        for (const storageName of orphanFiles) {
-          if (await this.removeOldOrphanFileIfStillEligible(storageName, orphanCutoffTime)) removedOrphanFiles += 1
-        }
-      }
-
-      const cleanupResult: ClientFeedbackAttachmentCleanupResult = {
-        scannedFiles: directoryEntries.length,
-        removedExpiredDrafts: expiredFilesAfterCommit.length,
-        removedOrphanFiles,
-        retainedReferencedFiles,
-        anomalies,
-      }
-      return {
-        value: cleanupResult,
-        afterCommit: async () => {
-          for (const storageName of expiredFilesAfterCommit) await removeClientFeedbackUploadFile(storageName)
-          if (isMysql) {
-            for (const storageName of orphanFiles) {
-              if (await this.removeOldOrphanFileIfStillEligible(storageName, orphanCutoffTime)) {
-                cleanupResult.removedOrphanFiles += 1
-              }
-            }
-          }
-        },
-      }
+      return false
     })
+
+    let removedExpiredDrafts = 0
+    let removedOrphanFiles = 0
+    for (let start = 0; start < eligible.length; start += ATTACHMENT_CLEANUP_TRANSACTION_SIZE) {
+      const batch = eligible.slice(start, start + ATTACHMENT_CLEANUP_TRANSACTION_SIZE)
+      const expired = await this.removeExpiredAttachmentDrafts(batch.flatMap(({ draft }) => draft ? [draft] : []), now, anomalies)
+      removedExpiredDrafts += expired.length
+      const cutoffByName = new Map(batch.filter(({ draft }) => !draft).map(({ storageName }) => [storageName, orphanCutoffTime]))
+      for (const storageName of expired) cutoffByName.set(storageName, now.getTime())
+      // 全部文件在删除前重新确认未登记。过期草稿必须先提交数据库删除，不能在回滚后遗留错误记录。
+      const removed = await this.removeUnregisteredAttachmentFiles(directory, cutoffByName, anomalies)
+      removedOrphanFiles += batch.filter(({ draft, storageName }) => !draft && removed.has(storageName)).length
+    }
+
+    const temp = await cleanupExpiredUploadTempFiles(now.getTime() - tempFileGraceMs, cleanupBatchSize, this.attachmentCleanupTempCursor)
+    for (const storageName of temp.failed) {
+      anomalies.push({ storageName, reason: '临时文件无法访问或正在使用，保留待下次核查' })
+    }
+    this.attachmentCleanupTempCursor = temp.cursor
+    this.attachmentCleanupDraftCursor = drafts.length === cleanupBatchSize ? String(drafts.at(-1)!.id) : ''
+    this.attachmentCleanupFileCursor = visitedName && visitedName !== names.at(-1) ? visitedName : ''
+    return { scannedFiles: entries.length, removedExpiredDrafts, removedOrphanFiles, removedTempFiles: temp.removed, retainedReferencedFiles, anomalies }
   }
 
   async runAttachmentCleanupOnce(): Promise<ClientFeedbackAttachmentCleanupResult> {
@@ -893,8 +964,13 @@ class ClientFeedbackService {
       where: { id: attachment.messageId, conversationId: attachment.conversationId },
     })
     if (!message) return false
+    return this.messageReferencesBoundAttachment(message, attachment)
+  }
+
+  private messageReferencesBoundAttachment(message: ClientFeedbackMessage, attachment: ClientFeedbackAttachment) {
+    const { url } = this.buildAttachmentReference(attachment)
     return this.parseJsonArray<ClientFeedbackMessageAttachment>(message.attachmentJson, [])
-      .some((item) => item.url === `/api/client-feedback/attachments/${attachment.id}`)
+      .some((item) => item?.url === url)
   }
 
   async getAttachmentForClient(id: string, clientAuth: ClientAuthContext) {
@@ -1279,6 +1355,19 @@ class ClientFeedbackService {
     }
   }
 
+  private async requireEditableServiceConversation(id: string, actor: AuthUserContext, manager: EntityManager) {
+    const account = await lockActiveSysAccountForBusiness(manager, actor.userId)
+    if (!resolveUserPermissions(account).includes('customer_service:reply')) {
+      throw new BizError('当前账号无客服处理权限', 403)
+    }
+    const conversation = await this.requireConversationById(id, manager)
+    this.ensureConversationOwnedByActor(conversation, actor)
+    if (conversation.status === 'closed') {
+      throw new BizError('当前反馈会话已关闭，请先重新打开后再处理', 400)
+    }
+    return conversation
+  }
+
   private buildAssignableUserView(user: SysUser): CustomerServiceAssignableUser {
     return {
       id: user.id,
@@ -1402,45 +1491,52 @@ class ClientFeedbackService {
     return message
   }
 
-  private async markConversationReadForClient(manager: EntityManager, conversation: ClientFeedbackConversation) {
-    if (conversation.unreadForClientCount <= 0) {
-      return false
+  private countVisibleUnreadMessages(messages: ClientFeedbackMessage[], scope: 'client' | 'service'): number {
+    const readAt = scope === 'client' ? 'clientReadAt' : 'serviceReadAt'
+    let unread = 0
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]!
+      // 自己发送消息已清掉此前的未读计数，即使历史消息的已读时间仍为空。
+      if (FEEDBACK_SENDERS_BY_SIDE[scope].includes(message.senderType)) break
+      if (!message[readAt]) unread += 1
     }
-    const now = new Date()
-    await manager
-      .createQueryBuilder()
-      .update(ClientFeedbackMessage)
-      .set({ clientReadAt: now })
-      .where('conversation_id = :conversationId', { conversationId: conversation.id })
-      .andWhere('sender_type IN (:...senderTypes)', { senderTypes: ['service', 'system'] })
-      .andWhere('client_read_at IS NULL')
-      .execute()
-    conversation.unreadForClientCount = 0
+    return unread
+  }
+
+  private async markConversationRead(
+    manager: EntityManager,
+    conversation: ClientFeedbackConversation,
+    scope: 'client' | 'service',
+    lastVisibleId: string,
+  ) {
+    const client = scope === 'client'
+    const unreadCount = client ? 'unreadForClientCount' : 'unreadForServiceCount'
+    if (conversation[unreadCount] <= 0) return false
+    const readAt = client ? 'clientReadAt' : 'serviceReadAt'
+    const senderTypes = FEEDBACK_SENDERS_BY_SIDE[client ? 'service' : 'client']
+    const filter = {
+      conversationId: conversation.id,
+      senderType: In(senderTypes),
+      [readAt]: IsNull(),
+      ...(client ? { internalOnly: false } : {}),
+    }
+    const messages = manager.getRepository(ClientFeedbackMessage)
+    const { affected } = await messages.update({ ...filter, id: LessThanOrEqual(lastVisibleId) }, { [readAt]: new Date() })
+    if (!affected) return false
+    // 会话锁串行化追加与已读。并发的本方回复已清零此前的未读计数，其前面的旧消息不能被计回。
+    const latestOwnReply = await messages.findOne({
+      select: { id: true },
+      where: { conversationId: conversation.id, senderType: In(FEEDBACK_SENDERS_BY_SIDE[scope]), id: MoreThan(lastVisibleId) },
+      order: { id: 'DESC' },
+    })
+    conversation[unreadCount] = await messages.countBy({ ...filter, id: MoreThan(latestOwnReply?.id ?? lastVisibleId) })
     await manager.getRepository(ClientFeedbackConversation).save(conversation)
     return true
   }
 
-  private async markConversationReadForService(manager: EntityManager, conversation: ClientFeedbackConversation) {
-    if (conversation.unreadForServiceCount <= 0) {
-      return false
-    }
-    const now = new Date()
-    await manager
-      .createQueryBuilder()
-      .update(ClientFeedbackMessage)
-      .set({ serviceReadAt: now })
-      .where('conversation_id = :conversationId', { conversationId: conversation.id })
-      .andWhere('sender_type = :senderType', { senderType: 'client' })
-      .andWhere('service_read_at IS NULL')
-      .execute()
-    conversation.unreadForServiceCount = 0
-    await manager.getRepository(ClientFeedbackConversation).save(conversation)
-    return true
-  }
-
-  private async loadConversationMessages(manager: EntityManager, conversationId: string) {
+  private async loadConversationMessages(manager: EntityManager, conversationId: string, lastVisibleId?: string) {
     return manager.getRepository(ClientFeedbackMessage).find({
-      where: { conversationId },
+      where: { conversationId, ...(lastVisibleId ? { id: LessThanOrEqual(lastVisibleId) } : {}) },
       order: {
         id: 'ASC',
       },
@@ -1821,13 +1917,13 @@ class ClientFeedbackService {
       qb.andWhere(
         `
           (
-            conversation.subject LIKE :keyword
-            OR conversation.category LIKE :keyword
-            OR conversation.conversationNo LIKE :keyword
-            OR conversation.lastMessagePreview LIKE :keyword
+            conversation.subject LIKE :keyword ESCAPE '!'
+            OR conversation.category LIKE :keyword ESCAPE '!'
+            OR conversation.conversationNo LIKE :keyword ESCAPE '!'
+            OR conversation.lastMessagePreview LIKE :keyword ESCAPE '!'
           )
         `,
-        { keyword: `%${query.keyword.trim()}%` },
+        { keyword: buildSqlLikeContains(query.keyword.trim()) },
       )
     }
 
@@ -1849,35 +1945,33 @@ class ClientFeedbackService {
   }
 
   async getMyConversationDetail(clientAuth: ClientAuthContext, id: string): Promise<ClientFeedbackConversationDetail> {
-    if (databaseMaintenanceModeService.isReadOnly()) {
-      const conversation = await this.requireOwnedConversation(id, clientAuth, AppDataSource.manager)
-      const messages = (await this.loadConversationMessages(AppDataSource.manager, conversation.id))
-        .filter((message) => !message.internalOnly)
-      return {
-        conversation: this.buildConversationSummary(conversation),
-        messages: messages.map((message) => this.buildMessageView(message, { scope: 'client', userId: clientAuth.userId })),
+    let conversation = await this.requireOwnedConversation(id, clientAuth)
+    const loadVisibleMessages = async (lastVisibleId?: string) => (await this.loadConversationMessages(AppDataSource.manager, conversation.id, lastVisibleId))
+      .filter((message) => !message.internalOnly)
+    let messages = await loadVisibleMessages()
+    const lastVisibleId = messages.at(-1)?.id
+    const visibleUnread = this.countVisibleUnreadMessages(messages, 'client')
+    if (lastVisibleId && visibleUnread > 0 && !databaseMaintenanceModeService.isReadOnly()) {
+      const result = await runInTransaction(async (manager) => {
+        await lockActiveClientAccountForBusiness(manager, clientAuth.userId)
+        const locked = await this.requireOwnedConversation(id, clientAuth, manager)
+        const readChanged = !databaseMaintenanceModeService.isReadOnly()
+          && await this.markConversationRead(manager, locked, 'client', lastVisibleId)
+        return { conversation: locked, readChanged }
+      })
+      conversation = result.conversation
+      if (result.readChanged) {
+        this.publishConversationEvent('conversation_read_by_client', conversation, { readBy: 'client' })
       }
-    }
-
-    const result = await runInTransaction(async (manager) => {
-      const conversation = await this.requireOwnedConversation(id, clientAuth, manager)
-      const readChanged = await this.markConversationReadForClient(manager, conversation)
-      const messages = (await this.loadConversationMessages(manager, conversation.id))
-        .filter((message) => !message.internalOnly)
-      return {
-        conversation,
-        messages,
-        readChanged,
-      }
-    })
-
-    if (result.readChanged) {
-      this.publishConversationEvent('conversation_read_by_client', result.conversation, { readBy: 'client' })
+      // 在事务外回读已读时间，同时保持首次可见消息的上界。
+      messages = await loadVisibleMessages(lastVisibleId)
+    } else if (!databaseMaintenanceModeService.isReadOnly()) {
+      conversation.unreadForClientCount = visibleUnread
     }
 
     return {
-      conversation: this.buildConversationSummary(result.conversation),
-      messages: result.messages.map((message) => this.buildMessageView(message, { scope: 'client', userId: clientAuth.userId })),
+      conversation: this.buildConversationSummary(conversation),
+      messages: messages.map((message) => this.buildMessageView(message, { scope: 'client', userId: clientAuth.userId })),
     }
   }
 
@@ -2135,6 +2229,7 @@ class ClientFeedbackService {
     )
 
     const result = await runInTransaction(async (manager) => {
+      await lockActiveClientAccountForBusiness(manager, clientAuth.userId)
       const conversation = await this.requireOwnedConversation(id, clientAuth, manager)
       if (conversation.status !== 'resolved' && conversation.status !== 'closed') {
         throw new BizError('当前反馈单尚未进入可评价阶段', 400)
@@ -2224,17 +2319,17 @@ class ClientFeedbackService {
       qb.andWhere(
         `
           (
-            conversation.subject LIKE :keyword
-            OR conversation.category LIKE :keyword
-            OR conversation.conversationNo LIKE :keyword
-            OR conversation.clientUsername LIKE :keyword
-            OR conversation.clientAccount LIKE :keyword
-            OR conversation.staffNoSnapshot LIKE :keyword
-            OR conversation.departmentNameSnapshot LIKE :keyword
-            OR conversation.lastMessagePreview LIKE :keyword
+            conversation.subject LIKE :keyword ESCAPE '!'
+            OR conversation.category LIKE :keyword ESCAPE '!'
+            OR conversation.conversationNo LIKE :keyword ESCAPE '!'
+            OR conversation.clientUsername LIKE :keyword ESCAPE '!'
+            OR conversation.clientAccount LIKE :keyword ESCAPE '!'
+            OR conversation.staffNoSnapshot LIKE :keyword ESCAPE '!'
+            OR conversation.departmentNameSnapshot LIKE :keyword ESCAPE '!'
+            OR conversation.lastMessagePreview LIKE :keyword ESCAPE '!'
           )
         `,
-        { keyword: `%${query.keyword.trim()}%` },
+        { keyword: buildSqlLikeContains(query.keyword.trim()) },
       )
     }
     if (query.assignedToMe) {
@@ -2261,36 +2356,32 @@ class ClientFeedbackService {
   }
 
   async getServiceConversationDetail(id: string, actor: AuthUserContext): Promise<ClientFeedbackConversationDetail> {
-    if (databaseMaintenanceModeService.isReadOnly()) {
-      const conversation = await this.requireConversationById(id, AppDataSource.manager)
-      const messages = await this.loadConversationMessages(AppDataSource.manager, conversation.id)
-      return {
-        conversation: this.buildConversationSummary(conversation, actor.userId),
-        messages: messages.map((message) => this.buildMessageView(message, { scope: 'service', userId: actor.userId })),
-        internalRemark: this.buildInternalRemarkView(conversation),
+    let conversation = await this.requireConversationById(id)
+    let messages = await this.loadConversationMessages(AppDataSource.manager, conversation.id)
+    const lastVisibleId = messages.at(-1)?.id
+    const visibleUnread = this.countVisibleUnreadMessages(messages, 'service')
+    if (lastVisibleId && visibleUnread > 0 && !databaseMaintenanceModeService.isReadOnly()) {
+      const result = await runInTransaction(async (manager) => {
+        const account = await lockActiveSysAccountForBusiness(manager, actor.userId)
+        if (!resolveUserPermissions(account).includes('customer_service:view')) throw new BizError('当前账号无客服查看权限', 403)
+        const locked = await this.requireConversationById(id, manager)
+        const readChanged = !databaseMaintenanceModeService.isReadOnly()
+          && await this.markConversationRead(manager, locked, 'service', lastVisibleId)
+        return { conversation: locked, readChanged }
+      })
+      conversation = result.conversation
+      if (result.readChanged) {
+        this.publishConversationEvent('conversation_read_by_service', conversation, { readBy: 'service' })
       }
-    }
-
-    const result = await runInTransaction(async (manager) => {
-      await lockActiveSysAccountForBusiness(manager, actor.userId)
-      const conversation = await this.requireConversationById(id, manager)
-      const readChanged = await this.markConversationReadForService(manager, conversation)
-      const messages = await this.loadConversationMessages(manager, conversation.id)
-      return {
-        conversation,
-        messages,
-        readChanged,
-      }
-    })
-
-    if (result.readChanged) {
-      this.publishConversationEvent('conversation_read_by_service', result.conversation, { readBy: 'service' })
+      messages = await this.loadConversationMessages(AppDataSource.manager, conversation.id, lastVisibleId)
+    } else if (!databaseMaintenanceModeService.isReadOnly()) {
+      conversation.unreadForServiceCount = visibleUnread
     }
 
     return {
-      conversation: this.buildConversationSummary(result.conversation, actor.userId),
-      messages: result.messages.map((message) => this.buildMessageView(message, { scope: 'service', userId: actor.userId })),
-      internalRemark: this.buildInternalRemarkView(result.conversation),
+      conversation: this.buildConversationSummary(conversation, actor.userId),
+      messages: messages.map((message) => this.buildMessageView(message, { scope: 'service', userId: actor.userId })),
+      internalRemark: this.buildInternalRemarkView(conversation),
     }
   }
 
@@ -2301,15 +2392,11 @@ class ClientFeedbackService {
     requestMeta?: RequestMeta,
   ) {
     const content = this.normalizeMessageContent(input.content)
-    const attachments = this.normalizeAttachments(input.attachments)
+    const requestedAttachments = this.normalizeAttachments(input.attachments)
 
     const result = await runInTransaction(async (manager) => {
-      await lockActiveSysAccountForBusiness(manager, actor.userId)
-      const conversation = await this.requireConversationById(id, manager)
-      if (conversation.status === 'closed') {
-        throw new BizError('当前反馈会话已关闭，请先重新打开后再回复', 400)
-      }
-      this.ensureConversationOwnedByActor(conversation, actor)
+      const conversation = await this.requireEditableServiceConversation(id, actor, manager)
+      const attachments = await this.resolveBoundAttachmentReferences(requestedAttachments, conversation, manager)
 
       // 客服回复只应把“待处理”推进到“处理中”。
       // 若会话已被人工标记为“已解决”，继续补充回复时应保持已解决状态，不应回退。
@@ -2597,8 +2684,7 @@ class ClientFeedbackService {
     requestMeta?: RequestMeta,
   ) {
     const result = await runInTransaction(async (manager) => {
-      await lockActiveSysAccountForBusiness(manager, actor.userId)
-      const conversation = await this.requireConversationById(id, manager)
+      const conversation = await this.requireEditableServiceConversation(id, actor, manager)
       const before = this.buildConversationFields(conversation)
       const subjectBefore = conversation.subject
 
@@ -2706,8 +2792,7 @@ class ClientFeedbackService {
     )
 
     const result = await runInTransaction(async (manager) => {
-      await lockActiveSysAccountForBusiness(manager, actor.userId)
-      const conversation = await this.requireConversationById(id, manager)
+      const conversation = await this.requireEditableServiceConversation(id, actor, manager)
       const before = this.buildInternalRemarkView(conversation)
       const beforeContent = before?.content ?? null
       if (beforeContent === normalizedRemark) {

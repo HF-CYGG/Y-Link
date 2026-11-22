@@ -19,6 +19,7 @@ import {
   type LocationRecord,
   type SkuLocationDistribution,
 } from '@/api/modules/inventory'
+import { PassiveNumberInput } from '@/components/common'
 import { showAppError, showAppSuccess } from '@/utils/app-alert'
 import { normalizeRequestError } from '@/utils/error'
 
@@ -48,7 +49,7 @@ const submitting = ref(false)
 const distribution = ref<SkuLocationDistribution | null>(null)
 const sourceKey = ref('')
 const targetIds = ref<string[]>([])
-const qtyByTarget = ref<Record<string, number>>({})
+const qtyByTarget = ref<Record<string, number | null>>({})
 const setAsMain = ref(false)
 
 const locationCodeOf = (id: string | null) => {
@@ -230,14 +231,14 @@ const submit = async () => {
             class="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 px-3 py-2 dark:border-white/10"
           >
             <span class="text-sm">拨到 {{ locationCodeOf(targetId) }}</span>
-            <el-input-number
+            <PassiveNumberInput
               v-model="qtyByTarget[targetId]"
               :min="1"
               :max="Math.max(1, sourceQty)"
               :step="1"
               step-strictly
               size="small"
-              controls-position="right"
+              style="width: 120px"
             />
           </div>
           <div class="text-xs text-slate-500 dark:text-slate-400">

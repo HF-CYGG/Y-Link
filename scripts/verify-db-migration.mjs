@@ -31,6 +31,11 @@ const mysqlTarget = Object.freeze({
 })
 
 const allowedScenarios = new Set([
+  'manual-switch',
+  'manual-prepared-switch',
+  'manual-cancel',
+  'manual-failure-rollback',
+  'manual-corrupt-override',
   'success',
   'wrong-connection',
   'old-version',
@@ -54,6 +59,7 @@ const allowedScenarios = new Set([
 ])
 const terminalTaskStatuses = new Set(['succeeded', 'failed', 'rolled_back'])
 const acceptedTaskStatuses = new Set([
+  'prechecked',
   'queued',
   'running',
   'restart_pending',
@@ -301,6 +307,7 @@ const buildComposeEnvironment = (oneboxPort) => ({
   ) ? 'true' : 'false',
   Y_LINK_VERIFY_MYSQL_STARTUP_FAILURES: (
     scenario === 'failure-rollback'
+    || scenario === 'manual-failure-rollback'
     || scenario === 'rollback-finalizer-persistence-failure'
   ) ? '2' : '0',
   Y_LINK_VERIFY_FINALIZER_DELAY_MS: scenario === 'verifying-emergency-rollback' ? '10000' : '0',
@@ -315,8 +322,13 @@ const composeArgs = (...args) => [
   ...args,
 ]
 
-const runCompose = async (args, options = {}) =>
-  await runProcess('docker', composeArgs(...args), options)
+const runCompose = async (args, options = {}) => {
+  // 非 root 矩阵的隔离夹具也以 node 执行，防止测试进程制造 root 私有控制文件污染后续重启。
+  const nonRoot = (options.env ?? process.env).Y_LINK_VERIFY_ONEBOX_NON_ROOT === 'true'
+  const actual = nonRoot && args[0] === 'exec' && args.includes('onebox')
+    ? ['exec', '--user', 'node', ...args.slice(1)] : args
+  return await runProcess('docker', composeArgs(...actual), options)
+}
 
 const fetchWithTimeout = async (url, options = {}, timeoutMs = 5000) => {
   const controller = new AbortController()
@@ -376,12 +388,15 @@ const createHttpClient = (baseUrl) => {
   const request = async (pathname, options = {}) => {
     const {
       method = 'GET',
-      body,
+      body: submittedBody,
       expectedStatuses = [200],
       authenticated = true,
       includeCsrf = !['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase()),
       timeoutMs = 10_000,
     } = options
+    const migrationControl = (method === 'POST' && /^\/api\/data-maintenance\/db-migration\/(?:automatic-tasks|tasks(?:\/[^/]+\/(?:run|rescue-credential))?|switch|rollback)$/.test(pathname))
+      || (method === 'DELETE' && pathname === '/api/data-maintenance/db-migration/runtime-override')
+    const body = migrationControl ? { currentPassword: adminPassword, ...submittedBody } : submittedBody
     const headers = {
       Accept: 'application/json',
       'User-Agent': 'Y-Link-Isolated-Migration-Verify',
@@ -1719,14 +1734,17 @@ const runSwitchingEmergencyRollbackScenario = async ({
   assert.equal(mismatchRollback.response.status, 409, '活动自动回退的自定义 SQLite 路径必须被拒绝')
   await assertAutomaticControlArtifactsPresent(composeEnv, createdTask.id, '拒绝错误 SQLite 路径后')
 
-  const rollbackResult = await client.request('/api/data-maintenance/db-migration/rollback', {
-    method: 'POST',
-    body: {
+  const recoveryMethod = process.env.Y_LINK_VERIFY_RECOVERY_METHOD ?? 'POST'
+  assert.ok(['POST', 'DELETE'].includes(recoveryMethod))
+  const rollbackResult = await client.request(recoveryMethod === 'DELETE' ? '/api/data-maintenance/db-migration/runtime-override' : '/api/data-maintenance/db-migration/rollback', {
+    method: recoveryMethod,
+    body: recoveryMethod === 'POST' ? {
       taskId: createdTask.id,
       reason: 'E2E：切换窗口紧急回退',
-    },
+    } : undefined,
   })
   assert.equal(rollbackResult.payload?.code, 0, '切换窗口紧急回退接口必须成功')
+  if (recoveryMethod === 'POST') {
   assert.equal(
     rollbackResult.payload?.data?.activeOverride?.config?.DB_TYPE,
     'sqlite',
@@ -1737,6 +1755,7 @@ const runSwitchingEmergencyRollbackScenario = async ({
     false,
     '自动迁移回退必须固定 DB_SYNC=false',
   )
+  } else assert.deepEqual(rollbackResult.payload?.data, { cleared: false, restartRequired: true })
 
   const pendingTask = await readMigrationTask(client, createdTask.id)
   assert.equal(pendingTask.status, 'restart_pending', 'SQLite 真正重启验收前不得提前标记 rolled_back')
@@ -1752,6 +1771,8 @@ const runSwitchingEmergencyRollbackScenario = async ({
     readOnly: false,
   })
   assert.equal(finalRuntimeState.runtimeState.effectiveDatabase?.source, 'runtime_override')
+  assert.equal(finalRuntimeState.runtimeState.activeOverride?.config?.DB_TYPE, 'sqlite')
+  assert.equal(finalRuntimeState.runtimeState.activeOverride?.config?.DB_SYNC, false)
   assert.deepEqual(await readExportSnapshot(client), baselineSnapshot, '切换窗口紧急回退后 SQLite 内容发生变化')
   log('切换窗口紧急回退断言通过：路径保护、持久化握手、重启后终态与 SQLite 内容一致')
 }
@@ -1770,28 +1791,33 @@ const runCutoverCancelPersistenceFailureScenario = async ({
   await waitForMaintenanceReadOnly(baseUrl, client, createdTask.id)
   await waitForCutoverCancelWindow(composeEnv, createdTask.id)
 
-  const rollbackResult = await client.request('/api/data-maintenance/db-migration/rollback', {
-    method: 'POST',
+  const recoveryMethod = process.env.Y_LINK_VERIFY_RECOVERY_METHOD ?? 'POST'
+  assert.ok(['POST', 'DELETE'].includes(recoveryMethod))
+  const rollbackResult = await client.request(recoveryMethod === 'DELETE' ? '/api/data-maintenance/db-migration/runtime-override' : '/api/data-maintenance/db-migration/rollback', {
+    method: recoveryMethod,
     expectedStatuses: [500],
-    body: {
+    body: recoveryMethod === 'POST' ? {
       taskId: createdTask.id,
       reason: 'E2E：注入取消意图持久化失败',
-    },
+    } : undefined,
   })
   assert.equal(rollbackResult.response.status, 500, '取消意图写盘失败必须明确返回失败')
 
   // 新恢复协议在任务取消写盘前已经持久化 PREPARED；不能清空控制文件或解除维护。
   const frozen = await readHealth(baseUrl)
   assert.equal(frozen.maintenance?.readOnly, true)
-  await runCompose(['exec', '-T', 'onebox', 'node', '--input-type=module', '-e', `
+  const preparedEvidence = await runCompose(['exec', '-T', 'onebox', 'node', '--input-type=module', '-e', `
     import assert from 'node:assert/strict';
     import fs from 'node:fs';
     const root = '/app/data';
     const intent = JSON.parse(fs.readFileSync(root + '/runtime/database-recovery-intent.json', 'utf8'));
     assert.equal(intent.phase, 'PREPARED');
     assert.equal(intent.taskId, process.argv[1]);
+    assert.equal(intent.sqliteRestartAttempts, 0);
+    assert.equal(JSON.parse(fs.readFileSync(root + '/runtime/database-runtime-override.json', 'utf8')).config.DB_TYPE, 'mysql', '必须保留旧MySQL override以覆盖env提前求值回归');
     assert.equal(JSON.parse(fs.readFileSync(root + '/runtime/maintenance-state.json', 'utf8')).readOnly, true);
     assert.equal(JSON.parse(fs.readFileSync(root + '/database-migration/automatic-migration.lock', 'utf8')).taskId, process.argv[1]);
+    console.log(JSON.stringify({ sourceDigest: intent.sourceDigest.sha256, attempts: intent.sqliteRestartAttempts }));
   `, createdTask.id], { capture: true, env: composeEnv, label: '取消写盘中断后的恢复意图与冻结证据' })
   const beforeForcedRestart = await getOneboxContainerState(composeEnv)
   assert.equal(
@@ -1812,9 +1838,19 @@ const runCutoverCancelPersistenceFailureScenario = async ({
     readOnly: false,
   })
   assert.equal(afterRestartState.runtimeState.effectiveDatabase?.source, 'runtime_override')
+  const performance = await client.request('/api/data-maintenance/database/performance')
+  assert.equal(performance.payload?.data?.engine, 'sqlite', '须验证运行中AppDataSource实际驱动，不能只看磁盘override')
   assert.equal((await waitForTaskTerminal(client, createdTask.id)).status, 'rolled_back')
   await assertRollbackFinalizationArtifactsAbsent(composeEnv, createdTask.id, '恢复意图重放完成')
   await assertMigrationAuditExists(client, 'database_migration.automatic_rolled_back', createdTask.id)
+  await runCompose(['exec', '-T', 'onebox', 'node', '--input-type=module', '-e', `
+    import assert from 'node:assert/strict';
+    import fs from 'node:fs';
+    const intent = JSON.parse(fs.readFileSync('/app/data/runtime/database-recovery-intent.json', 'utf8'));
+    assert.equal(intent.phase, 'COMPLETED');
+    assert.equal(intent.sqliteRestartAttempts, 1, 'PREPARED只应重放一次SQLite启动');
+    assert.equal(intent.sourceDigest.sha256, process.argv[1], '重放不能重建或替换冻结源摘要');
+  `, JSON.parse(preparedEvidence.stdout.trim()).sourceDigest], { capture: true, env: composeEnv, label: 'PREPARED恢复次数与原始源摘要保持' })
   assert.deepEqual(await readExportSnapshot(client), baselineSnapshot, '强制重启后 SQLite 内容发生变化')
   log('取消任务写盘中断通过：PREPARED 保持冻结，重启重放显式 SQLite，终态与审计精确完成')
 }
@@ -2324,7 +2360,98 @@ const runOverlongDiagnosticTextScenario = async (context) => {
   log(`MySQL 中超长 UA 已按字符精确截断到 ${diagnosticTextMaxLength} 并保留多字节内容`)
 }
 
+const runManualScenario = async ({ baseUrl, client, composeEnv, baselineSnapshot, fixtureManifest }) => {
+  const initial = await getOneboxContainerState(composeEnv)
+  const switchAfterSuccess = !['manual-switch', 'manual-cancel'].includes(scenario)
+  const created = await client.request('/api/data-maintenance/db-migration/tasks', { method: 'POST', body: {
+    target: { ...mysqlTarget, password: mysqlPassword, dbSync: false }, allowTargetWithData: false,
+    initializeSchema: true, clearTargetBeforeImport: false, switchAfterSuccess,
+  }, timeoutMs: defaultTimeoutMs })
+  assert.equal(created.payload?.code, 0)
+  const taskId = created.payload?.data?.id
+  assert.ok(taskId)
+  // 此矩阵是经过Nginx的HTTP远端；必须保留明文凭证403门禁，转用同一容器本地CLI准备。
+  await client.request(`/api/data-maintenance/db-migration/tasks/${taskId}/rescue-credential`, { method: 'POST', expectedStatuses: [403] })
+  const localPrepared = await runCompose(['exec', '-T', 'onebox', 'node', '--input-type=module', '-e', `
+    import assert from 'node:assert/strict';
+    import { spawnSync } from 'node:child_process';
+    const taskId = process.argv[1];
+    const result = spawnSync(process.execPath, ['/app/backend/dist/runtime/database-rescue-cli.js', 'prepare-manual-credential', taskId], { encoding: 'utf8' });
+    assert.equal(result.status, 0, '容器本地准备失败；禁止输出明文凭证');
+    const value = JSON.parse(result.stdout); assert.equal(value.taskId, taskId);
+    console.log(JSON.stringify({ taskId, prepared: true }));
+  `, taskId], { capture: true, env: composeEnv, label: '容器本地准备同任务手动救援凭证（明文不出容器）' })
+  assert.equal(JSON.parse(localPrepared.stdout).taskId, taskId)
+  const copied = await client.request(`/api/data-maintenance/db-migration/tasks/${taskId}/run`, { method: 'POST', timeoutMs: defaultTimeoutMs })
+  assert.equal(copied.payload?.code, 0); assert.equal(copied.payload?.data?.status, 'succeeded')
+  assertFullTableValidationPassed(copied.payload.data, fixtureManifest)
+  assert.equal((await readHealth(baseUrl)).maintenance?.readOnly, true, 'public succeeded只表示复制完成，不能解冻')
+  assert.equal((await getOneboxContainerState(composeEnv)).restartCount, initial.restartCount, 'manual必须保留人工重启')
+  await assertWriteBarrier(client)
+  await client.request('/api/data-maintenance/db-migration/switch', { method: 'POST', body: { taskId: 'other-task' }, expectedStatuses: [503] })
+  if (scenario === 'manual-cancel') {
+    const method = process.env.Y_LINK_VERIFY_MANUAL_CANCEL_METHOD ?? 'POST'
+    assert.ok(['POST', 'DELETE'].includes(method), '只接受两条真实取消入口')
+    const cancelled = method === 'DELETE'
+      ? await client.request('/api/data-maintenance/db-migration/runtime-override', { method: 'DELETE', timeoutMs: defaultTimeoutMs })
+      : await client.request('/api/data-maintenance/db-migration/rollback', { method: 'POST', body: { taskId }, timeoutMs: defaultTimeoutMs })
+    if (method === 'DELETE') assert.deepEqual(cancelled.payload?.data, { cleared: false, restartRequired: true })
+    else assert.equal(cancelled.payload?.data?.rollbackMode, 'clear')
+    log(`手动取消入口验证：${method}`)
+    await waitForRuntimeState({ baseUrl, client, label: '手动取消后原SQLite继续服务', dbType: 'sqlite', readOnly: false })
+    assert.equal((await readMigrationTask(client, taskId)).status, 'rolled_back')
+    await client.request('/api/data-maintenance/db-migration/switch', { method: 'POST', body: { taskId }, expectedStatuses: [409] })
+    assert.deepEqual(await readExportSnapshot(client), baselineSnapshot)
+    return
+  }
+  if (!switchAfterSuccess) {
+    const switched = await client.request('/api/data-maintenance/db-migration/switch', { method: 'POST', body: { taskId }, timeoutMs: defaultTimeoutMs })
+    assert.equal(switched.payload?.data?.restartRequired, true)
+  }
+  if (scenario === 'manual-corrupt-override') {
+    await runCompose(['exec', '-T', 'onebox', 'node', '-e', "require('node:fs').writeFileSync('/app/data/runtime/database-runtime-override.json', '{')"], { env: composeEnv, label: '只损坏本轮手动迁移隔离覆盖文件' })
+  }
+  await runCompose(['restart', 'onebox'], { env: composeEnv, label: '人工重启本轮专属onebox验证手动切换' })
+  if (scenario === 'manual-corrupt-override') {
+    await waitFor('手动覆盖损坏进入稳定独立救援', async () => {
+      const response = await fetchWithTimeout(`${baseUrl}/health`, {}, 5000)
+      return response.status === 503 && (await response.json()).status === 'RESCUE'
+    })
+    const state = await getOneboxContainerState(composeEnv)
+    await delay(3000)
+    assert.equal((await getOneboxContainerState(composeEnv)).restartCount, state.restartCount, '损坏覆盖不能重启循环')
+    assert.equal((await fetchWithTimeout(`${baseUrl}/api/auth/me`, {}, 5000)).status, 503)
+    await runCompose(['exec', '-T', 'onebox', 'node', '--input-type=module', '-e', `
+      import assert from 'node:assert/strict';
+      import { spawnSync } from 'node:child_process';
+      import { randomBytes } from 'node:crypto';
+      const taskId = process.argv[1];
+      const issued = spawnSync(process.execPath, ['/app/backend/dist/runtime/database-rescue-cli.js', 'rotate-credential', taskId], { encoding: 'utf8' });
+      assert.equal(issued.status, 0, '容器本地救援签发失败；禁止输出凭证');
+      const credential = JSON.parse(issued.stdout); assert.equal(credential.taskId, taskId);
+      const headers = { Authorization: 'Bearer ' + credential.credential, 'Content-Type': 'application/json' };
+      const prepared = await fetch('http://127.0.0.1:3001/api/database-rescue/prepare-rollback', { method: 'POST', headers, signal: AbortSignal.timeout(15000) });
+      assert.equal(prepared.status, 200); const nonce = (await prepared.json()).data.nonce;
+      const recovered = await fetch('http://127.0.0.1:3001/api/database-rescue/rollback-to-source-sqlite', {
+        method: 'POST', headers: { ...headers, 'Idempotency-Key': 'manual_' + randomBytes(16).toString('hex') }, body: JSON.stringify({ nonce }), signal: AbortSignal.timeout(30000),
+      });
+      assert.equal(recovered.status, 202, 'manual public succeeded不能关闭尚未验收的救援窗口');
+      console.log(JSON.stringify({ taskId, preparedStatus: prepared.status, recoveryStatus: recovered.status }));
+    `, taskId], { capture: true, env: composeEnv, label: '容器本地回环受控救援（凭证/nonce不出容器）' })
+  }
+  const rollback = ['manual-failure-rollback', 'manual-corrupt-override'].includes(scenario)
+  const final = await waitForRuntimeState({ baseUrl, client, label: '手动迁移启动强验收/补数/终态后才开放写入',
+    dbType: rollback ? 'sqlite' : 'mysql', readOnly: false })
+  await client.login()
+  const terminal = await readMigrationTask(client, taskId)
+  assert.equal(terminal.mode, 'manual', '不得伪装成automatic')
+  assert.equal(terminal.status, rollback ? 'rolled_back' : 'succeeded')
+  if (!rollback) { await assertMySqlRuntime(composeEnv, final.runtimeState); await assertMigrationAuditExists(client, 'database_migration.manual_succeeded', taskId) }
+  assert.deepEqual(await readExportSnapshot(client), baselineSnapshot, '手动复制/启动/回退不能丢失业务数据')
+}
+
 const runSelectedScenario = async (context) => {
+  if (scenario.startsWith('manual-')) { await runManualScenario(context); return }
   if (scenario === 'success') {
     await runSuccessScenario(context)
     return

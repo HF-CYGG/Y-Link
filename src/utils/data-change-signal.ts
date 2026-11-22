@@ -12,10 +12,12 @@
 
 import { reactive } from 'vue'
 
-export type DataChangeDomain = 'products' | 'departments'
+export type DataChangeDomain = 'products' | 'inventory' | 'tags' | 'departments'
 
 export const dataChangeVersions = reactive<Record<DataChangeDomain, number>>({
   products: 0,
+  inventory: 0,
+  tags: 0,
   departments: 0,
 })
 
@@ -23,6 +25,12 @@ const DATA_CHANGE_URL_RULES: Array<{ domain: DataChangeDomain; pattern: RegExp }
   // 商品、SKU、标签、分类、库位与库存单据都会影响各页的商品选择器、筛选项和库存展示。
   { domain: 'products', pattern: /^\/(products|tags)(\/|$)/ },
   { domain: 'products', pattern: /^\/inventory\/(categories|locations|docs|stocktakes)(\/|$)/ },
+  { domain: 'products', pattern: /^\/data-maintenance\/import\/json\/?$/ },
+  { domain: 'tags', pattern: /^\/(?:tags(?:\/|$)|data-maintenance\/import\/json\/?$)/ },
+  // 商品候选显示实时库存；仅加入能扣减、占用或回补库存的额外入口。
+  { domain: 'inventory', pattern: /^\/orders\/(?:submit|amendments|\d+(?:\/(?:content|restore))?)\/?$/ },
+  { domain: 'inventory', pattern: /^\/inbound\/(?:admin\/verify|supplier\/\d+\/verified)\/?$/ },
+  { domain: 'inventory', pattern: /^\/o2o\/(?:verify|inbound|orders\/\d+(?:\/(?:cancel|onsite-adjust))?|mall\/preorders(?:\/\d+(?:\/cancel)?)?)\/?$/ },
   // 客户端部门树与部门账号决定开单、订单池、客户端用户管理中的部门选项。
   { domain: 'departments', pattern: /^\/system-configs\/client-departments(\/|$)/ },
   { domain: 'departments', pattern: /^\/client-users\/department-accounts(\/|$)/ },

@@ -8,6 +8,7 @@ export const CLIENT_USER_ACCOUNT_TYPES = ['personal', 'department'] as const
 export type ClientUserAccountType = (typeof CLIENT_USER_ACCOUNT_TYPES)[number]
 
 @Entity({ name: 'client_user' })
+@Index('idx_client_user_real_name', ['realName'])
 export class ClientUser {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })
   id!: string

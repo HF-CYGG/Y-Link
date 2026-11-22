@@ -388,6 +388,7 @@ export interface StocktakeItemRecord {
   productId: string
   productName: string
   thumbnail: string | null
+  thumbnailSmall?: string | null
   /** 按库位盘点时为该行盘的库位，按总量盘点时为主库位。 */
   locationCode: string | null
   /** 按库位盘点时为该行盘的库位 ID，按总量盘点时为 null。 */
@@ -433,9 +434,9 @@ const readBlobErrorPayload = async (blob: Blob) => {
   }
 }
 
-const requestInventoryBlob = async (url: string, params: object) => {
+const requestInventoryBlob = async (url: string, params: object, timeout?: number) => {
   try {
-    const response = await http.request<Blob>({ method: 'GET', url, params: cleanParams(params), responseType: 'blob' })
+    const response = await http.request<Blob>({ method: 'GET', url, params: cleanParams(params), responseType: 'blob', timeout })
     if (isJsonBlob(response.data)) {
       // 服务端以 200 返回业务错误体时同样按错误处理，避免把 JSON 当文件下载。
       const { message, code } = await readBlobErrorPayload(response.data)
@@ -455,8 +456,8 @@ const requestInventoryBlob = async (url: string, params: object) => {
   }
 }
 
-export const downloadInventoryFile = async (url: string, fallbackName: string, params: object = {}) => {
-  const response = await requestInventoryBlob(url, params)
+export const downloadInventoryFile = async (url: string, fallbackName: string, params: object = {}, timeout?: number) => {
+  const response = await requestInventoryBlob(url, params, timeout)
   const disposition = response.headers['content-disposition']
   const matched = typeof disposition === 'string' ? /filename="?([^";]+)"?/.exec(disposition) : null
   const objectUrl = globalThis.URL.createObjectURL(response.data)
@@ -482,6 +483,8 @@ export const createLocation = (data: LocationPayload) =>
   request<LocationRecord>({ method: 'POST', url: '/inventory/locations', data })
 export const updateLocation = (id: string, data: LocationPayload) =>
   request<LocationRecord>({ method: 'PUT', url: `/inventory/locations/${id}`, data })
+export const deleteLocation = (id: string, permanentDeletePassword: string) =>
+  request<{ id: string }>({ method: 'DELETE', url: `/inventory/locations/${id}`, data: { permanentDeletePassword } })
 export const getLocationSkus = (
   id: string,
   params: {
@@ -518,7 +521,7 @@ export const lookupProductByCode = (code: string, purpose?: 'stocktake', config:
   request<ProductLookupResult>({ ...config, method: 'GET', url: '/products/lookup', params: cleanParams({ code, purpose }) })
 export const getProductLabels = (skuIds: string[]) =>
   request<ProductLabelRecord[]>({ method: 'POST', url: '/products/labels', data: { skuIds } })
-export const exportProducts = () => downloadInventoryFile('/products/export', 'products.xlsx')
+export const exportProducts = () => downloadInventoryFile('/products/export', 'products.xlsx', undefined, 300_000)
 export const downloadProductImportTemplate = () => downloadInventoryFile('/products/import/template', 'product-import-template.xlsx')
 
 const uploadProductFile = <T>(url: string, file: File) => {
@@ -549,7 +552,7 @@ const buildLogParams = (params: InventoryLogQuery) => cleanParams({ ...params, c
 export const getInventoryLogs = (params: InventoryLogQuery, config: RequestConfig = {}) =>
   request<PagedResult<InventoryLogRow>>({ ...config, method: 'GET', url: '/inventory/logs', params: buildLogParams(params) })
 export const exportInventoryLogs = (params: InventoryLogQuery) =>
-  downloadInventoryFile('/inventory/logs/export', 'inventory-logs.xlsx', buildLogParams({ ...params, page: undefined, pageSize: undefined }))
+  downloadInventoryFile('/inventory/logs/export', 'inventory-logs.xlsx', buildLogParams({ ...params, page: undefined, pageSize: undefined }), 300_000)
 
 // ---- 库存单据 ----
 export const getStockDocs = (params: StockDocQuery, config: RequestConfig = {}) =>

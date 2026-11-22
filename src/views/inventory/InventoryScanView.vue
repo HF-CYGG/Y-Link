@@ -25,6 +25,8 @@ import { STOCK_DOC_TYPE_OPTIONS, type StockDocType } from '@/constants/inventory
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 import { normalizeRequestError } from '@/utils/error'
 
+defineOptions({ name: 'InventoryScanView' })
+
 interface DraftLine {
   skuId: string
   skuCode: string

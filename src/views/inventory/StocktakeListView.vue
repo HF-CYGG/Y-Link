@@ -31,6 +31,8 @@ import { useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
+defineOptions({ name: 'StocktakeListView' })
+
 const router = useRouter()
 const authStore = useAuthStore(pinia)
 const canCreate = computed(() => authStore.hasPermission('stocktake:count'))

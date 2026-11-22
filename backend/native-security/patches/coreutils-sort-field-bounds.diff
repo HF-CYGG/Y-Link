@@ -1,0 +1,34 @@
+Description: coreutils-sort-field-bounds，固定旧版生产目标的本地回补候选
+Origin: https://github.com/coreutils/coreutils/commit/8c9602e3a145e9596dc1a63c6ed67865814b6633
+Comment: 上游完整补丁另存upstream.patch；不应用或执行其中测试；本候选未构建、未验收。
+
+diff --git a/src/sort.c b/src/sort.c
+index b10183b6f6..7af1a25121 100644
+--- a/src/sort.c
++++ b/src/sort.c
+@@ -1644,7 +1644,11 @@ begfield (struct line const *line, struct keyfield const *key)
+       ++ptr;
+ 
+   /* Advance PTR by SCHAR (if possible), but no further than LIM.  */
+-  ptr = MIN (lim, ptr + schar);
++  size_t remaining_bytes = lim - ptr;
++  if (schar < remaining_bytes)
++    ptr += schar;
++  else
++    ptr = lim;
+ 
+   return ptr;
+ }
+@@ -1746,7 +1750,11 @@ limfield (struct line const *line, struct keyfield const *key)
+           ++ptr;
+ 
+       /* Advance PTR by ECHAR (if possible), but no further than LIM.  */
+-      ptr = MIN (lim, ptr + echar);
++      size_t remaining_bytes = lim - ptr;
++      if (echar < remaining_bytes)
++        ptr += echar;
++      else
++        ptr = lim;
+     }
+ 
+   return ptr;

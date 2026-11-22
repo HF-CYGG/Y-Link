@@ -1,6 +1,7 @@
 /** 验证可信代理和协议边界；仅启动本机临时 HTTP 服务，不连接业务数据库。 */
 import assert from 'node:assert/strict'
 import { once } from 'node:events'
+import { mock } from 'node:test'
 import express from 'express'
 
 process.env.APP_PROFILE = `http-security-${process.pid}`
@@ -14,6 +15,202 @@ assert.equal(createApp().get('trust proxy'), false, '直接运行 Node 默认不
 
 const { configureHttpSecurity, readHttpSecurityConfig, resolveSecureCookieFlag, isSecureOrDirectLoopback } =
   await import('../src/utils/http-security.js')
+
+// 实际app挂载链：switch的前置JSON解析不能成为绕过认证/跨站策略的响应端点。
+const guardedServer = createApp().listen(0, '127.0.0.1')
+await once(guardedServer, 'listening')
+const guardedAddress = guardedServer.address()
+assert.ok(guardedAddress && typeof guardedAddress === 'object')
+try {
+  const url = `http://127.0.0.1:${guardedAddress.port}/api/data-maintenance/db-migration/switch`
+  const unauthorized = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ taskId: 'fixture-only' }) })
+  assert.equal(unauthorized.status, 401, '解析taskId之后仍必须经过真实管理员认证')
+  const crossSite = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Sec-Fetch-Site': 'cross-site' }, body: '{}' })
+  assert.equal(crossSite.status, 403, '维护切换路径仍受全局跨站保护')
+  await crossSite.text()
+  const baseUrl = 'http://127.0.0.1:' + guardedAddress.port
+  for (const route of ['/api/auth/webauthn/capabilities', '/API/Auth/WebAuthn/Capabilities/?query=fixture']) {
+    const sameOrigin = await fetch(baseUrl + route)
+    assert.equal(sameOrigin.status, 200)
+    assert.equal(sameOrigin.headers.get('cache-control'), 'no-store')
+    await sameOrigin.text()
+    const rejected = await fetch(baseUrl + route, { headers: { 'Sec-Fetch-Site': 'cross-site' } })
+    assert.equal(rejected.status, 403)
+    assert.equal(rejected.headers.get('cache-control'), 'no-store')
+    await rejected.text()
+  }
+  const originRejected = await fetch(baseUrl + '/API/Data-Maintenance/DB-Migration/Switch/', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://cross-site.example' }, body: '{}',
+  })
+  assert.equal(originRejected.status, 403)
+  await originRejected.text()
+} finally { await new Promise<void>((resolve, reject) => guardedServer.close(error => error ? reject(error) : resolve())) }
+
+// 在抛弃型 Express 应用中让真实屏障面对长连接，避免修改维护状态文件及业务数据库。
+const { databaseMaintenanceWriteBarrier } = await import('../src/middleware/database-maintenance.middleware.js')
+const { databaseMaintenanceModeService } = await import('../src/services/database-maintenance-mode.service.js')
+const { databaseOperationGate } = await import('../src/database/operation-gate.js')
+const maintenanceApp = express()
+maintenanceApp.use(databaseMaintenanceWriteBarrier)
+maintenanceApp.get(['/api/client-feedback/stream', '/api/customer-service/stream'], (_req, res) => {
+  res.type('text/event-stream').flushHeaders()
+})
+maintenanceApp.get('/api/v1/mobile-auth/capabilities', (_req, res) => res.json({ code: 0 }))
+const maintenanceServer = maintenanceApp.listen(0, '127.0.0.1')
+await once(maintenanceServer, 'listening')
+const maintenanceAddress = maintenanceServer.address()
+assert.ok(maintenanceAddress && typeof maintenanceAddress === 'object')
+try {
+  const baseUrl = 'http://127.0.0.1:' + maintenanceAddress.port
+  const activeBefore = databaseOperationGate.snapshot().activeOperations
+  for (const route of ['/api/client-feedback/stream', '/api/Client-Feedback/Stream/?fixture=1', '/api/Customer-Service/Stream/']) {
+    const connection = new AbortController()
+    try {
+      const response = await fetch(baseUrl + route, { signal: AbortSignal.any([connection.signal, AbortSignal.timeout(3000)]) })
+      assert.equal(response.status, 200)
+      assert.match(response.headers.get('content-type') ?? '', /text\/event-stream/)
+      assert.equal(databaseOperationGate.snapshot().activeOperations, activeBefore, 'SSE 长连接不得持有排空租约')
+      const freeze = databaseOperationGate.freeze()
+      try { await freeze.drain(300) } finally { freeze.release() }
+    } finally { connection.abort() }
+  }
+  const normal = await fetch(baseUrl + '/api/v1/mobile-auth/capabilities')
+  assert.equal(normal.status, 200)
+  await normal.text()
+  const readOnly = mock.method(databaseMaintenanceModeService, 'isReadOnly', () => true)
+  try {
+    for (const method of ['GET', 'HEAD']) {
+      const blocked = await fetch(baseUrl + '/API/V1/Mobile-Auth/Capabilities/?fixture=1', { method })
+      assert.equal(blocked.status, 503, '维护期请求不能越过屏障到达认证限流')
+      assert.equal(blocked.headers.get('cache-control'), 'no-store')
+      if (method === 'GET') assert.equal((await blocked.json()).code, 50301)
+    }
+  } finally { readOnly.mock.restore() }
+} finally {
+  maintenanceServer.closeAllConnections()
+  await new Promise<void>((resolve, reject) => maintenanceServer.close(error => error ? reject(error) : resolve()))
+}
+
+// 使用真实路由、投影和频控，在隔离夹具中代替会话、持久窗口和业务写入。
+const { o2oRouter } = await import('../src/routes/o2o.routes.js')
+const { clientFeedbackRouter } = await import('../src/routes/client-feedback.routes.js')
+const { errorHandler } = await import('../src/middleware/error-handler.js')
+const { auditService } = await import('../src/services/audit.service.js')
+const { authSecurityService } = await import('../src/services/auth-security.service.js')
+const { clientFeedbackService } = await import('../src/services/client-feedback.service.js')
+const { persistentRiskStateService } = await import('../src/services/persistent-risk-state.service.js')
+const { o2oPreorderService } = await import('../src/services/o2o-preorder.service.js')
+const { authService } = await import('../src/services/auth.service.js')
+const { clientAuthService } = await import('../src/services/client-auth.service.js')
+const o2oApp = express()
+o2oApp.use(express.json())
+o2oApp.use('/api/o2o', o2oRouter)
+o2oApp.use('/api/client-feedback', clientFeedbackRouter)
+o2oApp.use(errorHandler)
+const o2oServer = o2oApp.listen(0, '127.0.0.1')
+await once(o2oServer, 'listening')
+const o2oAddress = o2oServer.address()
+assert.ok(o2oAddress && typeof o2oAddress === 'object')
+const orderFixture = {
+  records: [{ id: 'fixture', systemNo: 'SYS-FIXTURE', customerOrderShowNo: 'SYS-FIXTURE', businessNo: 'BUS-FIXTURE' }],
+}
+const orderDetailFixture = {
+  order: { id: '1', preorderNo: 'PRE-FIXTURE', remark: '', updateCount: 0, remainingUpdateCount: 1, totalQty: 1 },
+  items: [],
+}
+const feedbackFixture = { conversation: { id: '1' } }
+const writeCases = [
+  { path: '/client-feedback/restock-requests', method: 'POST', kind: 'restock_request_create', limit: 30,
+    payload: { productId: '1', skuId: '1', quantity: 2, latestPickupAt: '2030-01-01T09:00:00+08:00', clientRequestId: 'restock-fixture' },
+    write: mock.method(clientFeedbackService, 'createRestockRequest', async () => feedbackFixture), data: feedbackFixture },
+  { path: '/client-feedback/conversations/1/confirm-resolved', method: 'PATCH', kind: 'feedback_conversation_state', limit: 30,
+    write: mock.method(clientFeedbackService, 'confirmConversationResolvedByClient', async () => feedbackFixture), data: feedbackFixture },
+  { path: '/client-feedback/conversations/1/withdraw', method: 'PATCH', kind: 'feedback_conversation_state', limit: 30,
+    write: mock.method(clientFeedbackService, 'withdrawConversationByClient', async () => feedbackFixture), data: feedbackFixture },
+  { path: '/client-feedback/conversations/1/satisfaction', method: 'POST', kind: 'feedback_conversation_state', limit: 30,
+    payload: { level: 'satisfied' },
+    write: mock.method(clientFeedbackService, 'submitConversationSatisfactionByClient', async () => feedbackFixture), data: feedbackFixture },
+  { path: '/o2o/mall/preorders/1/kingdee-registration', method: 'PATCH', kind: 'preorder_document', limit: 30,
+    payload: { kingdeeVoucherNo: 'KD-FIXTURE', expectedKingdeeVersion: 0 },
+    write: mock.method(o2oPreorderService, 'updateKingdeeRegistration', async () => orderDetailFixture), data: orderDetailFixture },
+  { path: '/o2o/mall/preorders/1/customer-order-print', method: 'POST', kind: 'preorder_document', limit: 30,
+    write: mock.method(o2oPreorderService, 'markCustomerOrderPrintedByClient', async () => ({
+      printedNow: false, detail: orderDetailFixture,
+    })), data: orderDetailFixture },
+  { path: '/o2o/mall/preorders/1', method: 'PATCH', kind: 'preorder_update', limit: 20,
+    payload: { items: [{ productId: '1', qty: 1 }] },
+    write: mock.method(o2oPreorderService, 'updateMyOrder', async () => orderDetailFixture), data: orderDetailFixture },
+]
+const fullWindows = new Set(writeCases.map(({ kind }) => `client-business-write:${kind}:user:client-full-fixture`))
+const consumeWindow = mock.method(persistentRiskStateService, 'consumeWindow',
+  async (key: string, _windowMs: number, nowMs: number, limit: number) => ({
+    totalHits: fullWindows.has(key) ? limit + 1 : limit,
+    resetTime: new Date(nowMs + 5_000),
+  }),
+)
+const stubs = [
+  ...writeCases.map(({ write }) => write),
+  consumeWindow,
+  mock.method(auditService, 'safeRecord', async () => undefined),
+  mock.method(o2oPreorderService, 'getMyOrderDetail', async () => orderDetailFixture),
+  mock.method(authService, 'resolveAuthUserByToken', async (token: string) => ({
+    role: token === 'admin-fixture' ? 'admin' : 'operator', permissions: ['orders:view'], sessionToken: token,
+  })),
+  mock.method(authService, 'isSessionActivityUpdateDue', () => false),
+  mock.method(clientAuthService, 'resolveClientByToken', async (token: string) => ({ userId: token })),
+  mock.method(o2oPreorderService, 'listConsoleOrders', async () => orderFixture),
+  mock.method(o2oPreorderService, 'listMyOrders', async () => orderFixture),
+]
+try {
+  const baseUrl = 'http://127.0.0.1:' + o2oAddress.port
+  for (const [token, route] of [
+    ['admin-fixture', '/api/o2o/Orders/'],
+    ['operator-fixture', '/api/o2o/Orders/'],
+    ['client-fixture', '/api/o2o/Mall/Preorders/'],
+  ]) {
+    const result = await fetch(baseUrl + route, { headers: { Authorization: 'Bearer ' + token }, signal: AbortSignal.timeout(3000) })
+    assert.equal(result.status, 200, route)
+    const { records } = (await result.json()).data
+    assert.equal(records[0].businessNo, 'BUS-FIXTURE')
+    assert.equal('systemNo' in records[0], token === 'admin-fixture')
+    assert.equal('customerOrderShowNo' in records[0], token === 'admin-fixture')
+  }
+  assert.equal(orderFixture.records[0].systemNo, 'SYS-FIXTURE', '投影不得修改原有快照')
+
+  for (const { path, method, kind, limit, payload, write, data } of writeCases) {
+    const writeRequest = (token: string) => fetch(baseUrl + '/api' + path, {
+      method,
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: payload === undefined ? undefined : JSON.stringify(payload),
+      signal: AbortSignal.timeout(3000),
+    })
+    const denied = await writeRequest('client-full-fixture')
+    assert.equal(denied.status, 429, path)
+    assert.equal(denied.headers.get('Retry-After'), '5', path)
+    await denied.text()
+    assert.equal(write.mock.callCount(), 0, '超限后不能进入业务写入 ' + path)
+    const deniedWindow = consumeWindow.mock.calls.at(-1)?.arguments
+    assert.equal(deniedWindow?.[0], `client-business-write:${kind}:user:client-full-fixture`)
+    assert.equal(deniedWindow?.[1], 600_000)
+    assert.equal(deniedWindow?.[3], limit)
+
+    const allowed = await writeRequest('client-fixture')
+    assert.equal(allowed.status, 200, path)
+    assert.deepEqual(await allowed.json(), { code: 0, message: 'ok', data })
+    assert.equal(write.mock.callCount(), 1, path)
+    assert.equal(consumeWindow.mock.calls.at(-1)?.arguments[0], `client-business-write:${kind}:user:client-fixture`)
+  }
+  // 新增写桶耗尽时，同账号仍能使用已有消息和下单额度。
+  for (const [kind, limit] of [['feedback_message', 30], ['preorder_submit', 20]] as const) {
+    await authSecurityService.guardClientBusinessWrite(undefined, 'client-full-fixture', kind)
+    const window = consumeWindow.mock.calls.at(-1)?.arguments
+    assert.equal(window?.[0], `client-business-write:${kind}:user:client-full-fixture`)
+    assert.equal(window?.[3], limit)
+  }
+} finally {
+  for (const stub of stubs) stub.mock.restore()
+  await new Promise<void>((resolve, reject) => o2oServer.close(error => error ? reject(error) : resolve()))
+}
 
 async function probe(trusted: string) {
   const app = express()
@@ -51,4 +248,4 @@ assert.equal(resolveSecureCookieFlag({ secure: false }), true)
 assert.throws(() => readHttpSecurityConfig({ Y_LINK_TRUST_PROXY: 'true' }))
 assert.throws(() => readHttpSecurityConfig({ Y_LINK_TRUST_PROXY: '0.0.0.0/0' }))
 assert.throws(() => readHttpSecurityConfig({ Y_LINK_TRUST_PROXY: '127.0.0.1; injected' }))
-console.log('[http-security] 默认拒绝代理伪造、可信单跳协议、Cookie 与本机救援边界通过')
+console.log('[http-security] 默认拒绝代理伪造、可信单跳协议、Cookie、本机救援与 HTTP 路径边界通过')

@@ -45,7 +45,7 @@ const emit = defineEmits<{
       <div>
         <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">第 4 步：切换到 MySQL 或回退 SQLite</h2>
         <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
-          只有成功任务才建议执行切换。无论写入的是切换配置、回退配置还是清空覆盖，都应把“写入运行时覆盖”和“重启后端服务”视为同一次变更动作。
+          手动复制完成后继续只读，可切换同一任务或主动取消。写入覆盖尚未恢复营业，必须重启并通过目标启动强验收与补数后才开放写入。
         </p>
       </div>
       <el-tag :type="hasPreparedMysqlSwitch ? 'success' : 'warning'" effect="light">

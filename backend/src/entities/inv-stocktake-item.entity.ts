@@ -15,6 +15,7 @@ import { InvStocktake } from './inv-stocktake.entity.js'
 
 @Entity({ name: 'inv_stocktake_item' })
 @Index('uk_inv_stocktake_item_sku_location', ['stocktakeId', 'skuId', 'locationScopeId'], { unique: true })
+@Index('idx_inv_stocktake_item_counted', ['stocktakeId', 'countedAt', 'id'])
 export class InvStocktakeItem {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })
   id!: string

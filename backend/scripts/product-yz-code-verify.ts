@@ -1,3 +1,4 @@
+import { createVerificationIsolation } from './verification-isolation.js'
 import 'reflect-metadata'
 import { resolveIssueVerificationRoot } from './issue-verification-paths.js'
 import assert from 'node:assert/strict'
@@ -9,12 +10,14 @@ import { isDatabaseFlagEnabled } from '../src/utils/product-inventory-summary.js
 
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
-const sqliteRoot = resolveIssueVerificationRoot(path.resolve(backendRoot, 'data', 'local-dev'))
+const verificationIsolation = createVerificationIsolation('product-yz-code-verify')
+const sqliteRoot = verificationIsolation.rootDir
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqlitePath = path.resolve(sqliteRoot, `product-yz-code-${verifySeed}.sqlite`)
 
 process.env.APP_PROFILE = `product-yz-code-${verifySeed}`
 process.env.DB_TYPE = 'sqlite'
+verificationIsolation.seal({ type: 'sqlite', database: sqlitePath })
 process.env.DB_SYNC = 'false'
 process.env.SQLITE_DB_PATH = sqlitePath
 process.env.INIT_ADMIN_PASSWORD = `Admin_${verifySeed}_Aa1!`
@@ -68,7 +71,9 @@ async function main() {
   } = await import('../src/services/product-code.service.js')
   const { acquireSequenceMutex } = await import('../src/services/inventory-sequence.service.js')
 
+  await verificationIsolation.assertTarget(AppDataSource)
   prepareDatabaseRuntime()
+  await verificationIsolation.assertTarget(AppDataSource)
   await AppDataSource.initialize()
   try {
     await initializeDatabaseSchemaIfNeeded(AppDataSource)

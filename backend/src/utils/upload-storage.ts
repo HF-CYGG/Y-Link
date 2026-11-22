@@ -9,7 +9,8 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import multer from 'multer'
 import type { Express } from 'express'
-import sharp, { type Metadata } from 'sharp'
+import type { Metadata } from 'sharp'
+import { loadSharp } from './image-module-loader.js'
 import { productImageProcessingGate } from './product-image-gate.js'
 import { BizError } from './errors.js'
 import { generateProductThumbnailForFile, notifyProductOriginalCreated } from './product-thumbnail.js'
@@ -87,6 +88,46 @@ export const buildUploadPublicUrl = (category: UploadCategory, fileName: string)
 
 export const UPLOAD_PUBLIC_FILE_NAME_MATCHER =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(?:jpg|jpeg|png|webp|gif)$/i
+const UPLOAD_TEMP_FILE_NAME_MATCHER = new RegExp(
+  `^(?:products|client-feedback)-${UPLOAD_PUBLIC_FILE_NAME_MATCHER.source.slice(1)}`,
+)
+
+/** 文件权限或占用可在后续轮次恢复。目录不可读、设备故障等错误由调用方报告。 */
+export function isRecoverableUploadFileCleanupError(error: unknown) {
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  return code === 'EACCES' || code === 'EPERM' || code === 'EBUSY' || code === 'ETXTBSY'
+}
+
+/** 仅回收当前上传器产生的超时临时文件，按名称推进以遍历共享目录。 */
+export async function cleanupExpiredUploadTempFiles(cutoffTime: number, limit: number, after: string) {
+  const failed: string[] = []
+  try {
+    if (!(await fs.promises.lstat(UPLOAD_TEMP_DIR)).isDirectory()) return { removed: 0, cursor: '', failed }
+    const entries = await fs.promises.readdir(UPLOAD_TEMP_DIR, { withFileTypes: true })
+    const names = entries.filter((entry) => entry.isFile() && UPLOAD_TEMP_FILE_NAME_MATCHER.test(entry.name))
+      .map(({ name }) => name).sort()
+    const page = names.filter((name) => name > after).slice(0, limit)
+    let removed = 0
+    for (const name of page) {
+      const file = path.join(UPLOAD_TEMP_DIR, name)
+      try {
+        const info = await fs.promises.lstat(file)
+        if (info.isFile() && info.mtimeMs <= cutoffTime) {
+          await fs.promises.unlink(file)
+          removed += 1
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+        if (!isRecoverableUploadFileCleanupError(error)) throw error
+        failed.push(name)
+      }
+    }
+    return { removed, cursor: page.length === limit ? page.at(-1)! : '', failed }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { removed: 0, cursor: '', failed }
+    throw error
+  }
+}
 
 export const isUploadPublicUrlForCategory = (category: UploadCategory, value: string) => {
   const normalizedValue = value.trim()
@@ -201,7 +242,11 @@ async function runClientFeedbackImageProcessing<T>(operation: () => Promise<T>):
   }
 }
 
-const createSharpInput = (buffer: Buffer, mimeType: DetectedImageContent['mimeType']) => {
+const createSharpInput = (
+  sharp: Awaited<ReturnType<typeof loadSharp>>,
+  buffer: Buffer,
+  mimeType: DetectedImageContent['mimeType'],
+) => {
   return sharp(buffer, {
     animated: SHARP_ANIMATED_MIME_TYPES.has(mimeType),
     failOn: 'error',
@@ -219,9 +264,11 @@ const validateImageDimensions = async (
   buffer: Buffer,
   detectedContent: DetectedImageContent,
 ): Promise<ValidatedImageDimensions> => {
+  // 依赖暂不可用是可重试的 503；只有真实解码失败才归为图片内容错误。
+  const sharp = await loadSharp()
   let metadata: Metadata
   try {
-    metadata = await createSharpInput(buffer, detectedContent.mimeType).metadata()
+    metadata = await createSharpInput(sharp, buffer, detectedContent.mimeType).metadata()
   } catch {
     throw new BizError('上传图片已损坏或内容异常，请重新选择图片', 400)
   }
@@ -255,7 +302,8 @@ const reencodeValidatedImage = async (
   buffer: Buffer,
   detectedContent: DetectedImageContent,
 ): Promise<Buffer> => {
-  const pipeline = createSharpInput(buffer, detectedContent.mimeType).rotate()
+  const sharp = await loadSharp()
+  const pipeline = createSharpInput(sharp, buffer, detectedContent.mimeType).rotate()
 
   try {
     if (detectedContent.mimeType === 'image/jpeg') {
@@ -270,7 +318,7 @@ const reencodeValidatedImage = async (
     if (detectedContent.mimeType === 'image/png') {
       return await pipeline
         .png({
-          compressionLevel: 9,
+          compressionLevel: 6,
           adaptiveFiltering: true,
           palette: false,
         })
@@ -315,7 +363,7 @@ export const finalizeUploadedImageFile = async (
   }
 
   try {
-    const fileBuffer = await fs.promises.readFile(tempFilePath)
+    let fileBuffer: Buffer | undefined = await fs.promises.readFile(tempFilePath)
     const detectedContent = detectImageContentFromBuffer(fileBuffer)
     if (!detectedContent) {
       throw new BizError('上传文件不是受支持的真实图片内容，请重新选择图片', 400)
@@ -329,6 +377,7 @@ export const finalizeUploadedImageFile = async (
 
     await validateImageDimensions(fileBuffer, detectedContent)
     const reencodedBuffer = await reencodeValidatedImage(fileBuffer, detectedContent)
+    fileBuffer = undefined
 
     const finalExtension = IMAGE_MIME_TO_FINAL_EXTENSION[detectedContent.mimeType]
     const finalFileName = `${randomUUID()}${finalExtension}`

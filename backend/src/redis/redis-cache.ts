@@ -2,7 +2,7 @@
  * 模块说明：backend/src/redis/redis-cache.ts
  * 文件职责：为读多写少的查询结果提供跨实例共享的短时缓存（Redis 二级缓存），供商城目录快照、报表与工作台统计使用。
  * 实现逻辑：
- * - 未配置 Redis 或 Redis 不可用时直接执行加载函数，行为与未接入缓存时完全一致（只读缓存可以安全降级）；
+ * - 未配置 Redis 时，有代际的查询使用带容量上限的本地短时缓存；已配置 Redis 但故障时合并同代际回源；
  * - 命中时返回 JSON 反序列化结果；未命中时执行加载函数，并在后台写回，写回失败不影响本次响应；
  * - 同一进程内相同键的并发未命中只执行一次加载函数（单飞），避免缓存过期瞬间多个请求同时回源数据库；
  * - 单条缓存超过上限时不写入，防止异常大的结果占满 Redis 内存。
@@ -17,8 +17,25 @@ import { getRedisClient, isRedisEnabled, isRedisReady, recordRedisDegrade, redis
 
 /** 单条缓存值上限（序列化后字节数）。 */
 const MAX_CACHE_VALUE_BYTES = 4 * 1024 * 1024
+const MAX_LOCAL_CACHE_ENTRIES = 128
+const MAX_LOCAL_CACHE_BYTES = 8 * 1024 * 1024
+
+interface LocalCacheEntry {
+  serialized: string
+  bytes: number
+  expiresAt: number
+}
+
+interface CacheGeneration {
+  local: number
+  confirmed: number
+  pending: number
+}
 
 const inFlight = new Map<string, Promise<unknown>>()
+const localCache = new Map<string, LocalCacheEntry>()
+const generations = new Map<string, CacheGeneration>()
+let localCacheBytes = 0
 const stats = { hits: 0, misses: 0, writes: 0, skippedOversize: 0, errors: 0 }
 
 /** 把任意查询条件压成固定长度摘要，避免原始筛选值（关键字、客户名等）出现在键名里。 */
@@ -66,15 +83,22 @@ export async function writeSharedCacheRaw(key: string, value: string, ttlMs: num
   }
 }
 
-/**
- * 读穿缓存：命中直接返回，未命中执行 loader 并写回。
- * 未启用或 Redis 不可用时等价于直接调用 loader。
- */
-export async function getOrLoadShared<T>(key: string, ttlMs: number, loader: () => Promise<T>): Promise<T> {
-  if (!readyClient()) return loader()
+async function singleFlight<T>(key: string, load: () => Promise<T>): Promise<T> {
   const pending = inFlight.get(key) as Promise<T> | undefined
   if (pending) return pending
-  const task = (async () => {
+  const task = Promise.resolve().then(load)
+  inFlight.set(key, task)
+  try {
+    return await task
+  } finally {
+    inFlight.delete(key)
+  }
+}
+
+/** 读穿 Redis 缓存；连接不可用时，同键请求仍合并为一次回源。 */
+export function getOrLoadShared<T>(key: string, ttlMs: number, loader: () => Promise<T>): Promise<T> {
+  return singleFlight(key, async () => {
+    if (!readyClient()) return loader()
     const cached = await readSharedCacheRaw(key)
     if (cached !== null) {
       try {
@@ -90,13 +114,7 @@ export async function getOrLoadShared<T>(key: string, ttlMs: number, loader: () 
     const serialized = JSON.stringify(value)
     if (serialized !== undefined) void writeSharedCacheRaw(key, serialized, ttlMs)
     return value
-  })()
-  inFlight.set(key, task)
-  try {
-    return await task
-  } finally {
-    inFlight.delete(key)
-  }
+  })
 }
 
 /**
@@ -105,17 +123,26 @@ export async function getOrLoadShared<T>(key: string, ttlMs: number, loader: () 
  */
 const generationKey = (name: string) => sharedCacheKey('generation', name)
 
-/**
- * 递增代际并等待 Redis 确认（带超时）。写请求在返回响应前调用，保证调用方随后在任意实例上的查询都能读到新代际；
- * 超时或失败时只记录降级，旧缓存最多在其有效期后自然过期。
- */
-export async function bumpSharedCacheGeneration(name: string, timeoutMs = 200): Promise<void> {
+function getGeneration(name: string): CacheGeneration {
+  let state = generations.get(name)
+  if (!state) {
+    state = { local: 0, confirmed: 0, pending: 0 }
+    generations.set(name, state)
+  }
+  return state
+}
+
+async function syncGeneration(name: string, state: CacheGeneration, timeoutMs: number): Promise<void> {
   const client = readyClient()
   if (!client) return
+  const target = state.local
+  state.pending += 1
   let timer: NodeJS.Timeout | undefined
   try {
     await Promise.race([
-      client.incr(generationKey(name)),
+      client.incr(generationKey(name)).then(() => {
+        state.confirmed = Math.max(state.confirmed, target)
+      }),
       new Promise((_, reject) => {
         timer = setTimeout(() => reject(new Error('递增缓存代际超时')), timeoutMs)
       }),
@@ -124,13 +151,16 @@ export async function bumpSharedCacheGeneration(name: string, timeoutMs = 200): 
     stats.errors += 1
     recordRedisDegrade('共享缓存代际', error)
   } finally {
+    state.pending -= 1
     if (timer) clearTimeout(timer)
   }
 }
 
-/** 不等待结果地递增代际：命令按序进入同一连接，适合提交后紧跟广播或后台任务等无需阻塞响应的场景。 */
-export function bumpSharedCacheGenerationInBackground(name: string): void {
-  void bumpSharedCacheGeneration(name, 1_000)
+/** 同步递增本地代际，将 Redis 确认交给调用方按部署模式等待。 */
+export function bumpSharedCacheGeneration(name: string, timeoutMs = 200): Promise<void> {
+  const state = getGeneration(name)
+  state.local += 1
+  return syncGeneration(name, state, timeoutMs)
 }
 
 /** 读取当前代际；Redis 不可用时返回 null（调用方应跳过缓存），从未递增过按 0 处理。 */
@@ -146,16 +176,67 @@ export async function readSharedCacheGeneration(name: string): Promise<string | 
   }
 }
 
-/** 带代际的读穿缓存：键名末尾追加当前代际，代际读取失败时直接回源。 */
+async function getOrLoadLocal<T>(
+  key: string,
+  ttlMs: number,
+  loader: () => Promise<T>,
+  generationIsCurrent: () => boolean,
+): Promise<T> {
+  const cached = localCache.get(key)
+  if (cached) {
+    localCache.delete(key)
+    if (cached.expiresAt > Date.now()) {
+      localCache.set(key, cached)
+      stats.hits += 1
+      return JSON.parse(cached.serialized) as T
+    }
+    localCacheBytes -= cached.bytes
+  }
+  const result = await singleFlight(key, async () => {
+    stats.misses += 1
+    const value = await loader()
+    const serialized = JSON.stringify(value)
+    if (serialized === undefined) return { value }
+    const bytes = Buffer.byteLength(serialized)
+    if (bytes > MAX_CACHE_VALUE_BYTES) {
+      stats.skippedOversize += 1
+      return { value }
+    }
+    if (generationIsCurrent()) {
+      for (const [oldKey, oldEntry] of localCache) {
+        if (localCache.size < MAX_LOCAL_CACHE_ENTRIES && localCacheBytes + bytes <= MAX_LOCAL_CACHE_BYTES) break
+        localCache.delete(oldKey)
+        localCacheBytes -= oldEntry.bytes
+      }
+      localCache.set(key, { serialized, bytes, expiresAt: Date.now() + ttlMs })
+      localCacheBytes += bytes
+    }
+    return { serialized }
+  })
+  // 等待同一加载的请求也有独立对象，调用方修改不会污染下次命中。
+  return result.serialized === undefined ? result.value as T : JSON.parse(result.serialized) as T
+}
+
+/** 已配置的 Redis 故障时只合并回源；写入实例在补递增成功前跳过可能过期的 Redis 结果。 */
 export async function getOrLoadSharedVersioned<T>(
   generation: string,
   key: string,
   ttlMs: number,
   loader: () => Promise<T>,
 ): Promise<T> {
+  const state = getGeneration(generation)
+  const local = state.local
+  const fallbackKey = () => key + ':local:' + generation + ':' + state.local
+  if (!isRedisEnabled()) {
+    return getOrLoadLocal(fallbackKey(), ttlMs, loader, () => state.local === local)
+  }
+  if (state.confirmed < local) {
+    if (state.pending === 0) void syncGeneration(generation, state, 1_000)
+    return singleFlight(fallbackKey(), loader)
+  }
   const current = await readSharedCacheGeneration(generation)
-  if (current === null) return loader()
+  if (current === null || state.local !== local) return singleFlight(fallbackKey(), loader)
   return getOrLoadShared(`${key}:g${current}`, ttlMs, loader)
 }
 
-export const getSharedCacheSnapshot = () => ({ ...stats, inFlight: inFlight.size })
+export const getSharedCacheSnapshot = () => ({ ...stats, inFlight: inFlight.size, localEntries: localCache.size, localBytes: localCacheBytes })

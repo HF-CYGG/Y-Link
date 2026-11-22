@@ -1,6 +1,6 @@
 /**
  * 文件说明：backend/scripts/inventory-http-permission-verify.ts
- * 文件职责：经过真实 Express 中间件回归库存管理接口的鉴权、权限点、CSRF、盲盘裁剪、成本价裁剪与上传校验。
+ * 文件职责：经过真实 Express 中间件回归库存管理接口的鉴权、权限点、CSRF、库位永久删除、盲盘与成本价裁剪及上传校验。
  * 实现逻辑：
  * 1) 强制使用本轮唯一 SQLite 临时库，并在动态导入数据库配置前锁定环境；
  * 2) 管理员登录后建分类、库位、商品，再创建操作员与供货方账号并分别登录；
@@ -8,33 +8,27 @@
  * 4) 无论成功失败都关闭服务并删除临时库。
  * 维护说明：新增库存接口时同步补充这里的越权用例；口令均为本轮随机生成，只用于临时库。
  */
-import { resolveIssueVerificationRoot } from './issue-verification-paths.js'
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
-import fs from 'node:fs'
 import { request as httpRequest, type Server } from 'node:http'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import ExcelJS from 'exceljs'
 import { requestLocalHttp } from './support/local-http-request.js'
+import { createVerificationIsolation } from './verification-isolation.js'
 
-const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const sqliteRoot = resolveIssueVerificationRoot(path.resolve(backendRoot, 'data', 'local-dev'))
+const isolation = createVerificationIsolation('inventory-http-permission')
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
-const sqlitePath = path.resolve(sqliteRoot, `inventory-http-permission-${verifySeed}.sqlite`)
 const adminPassword = `Admin_${verifySeed}_Zz9!`
 const operatorPassword = `Op_${verifySeed}_Aa1!`
 const supplierPassword = `Supplier_${verifySeed}_Cc3!`
+const permanentDeletePassword = `Purge_${verifySeed}_Bb2!`
+const wrongDeletePassword = `Wrong_${verifySeed}_Dd4!`
 
-delete process.env.ENV_FILE
-process.env.Y_LINK_SKIP_DATABASE_RUNTIME_OVERRIDE = 'true'
-process.env.APP_PROFILE = `inventory-http-permission-${verifySeed}`
-process.env.DB_TYPE = 'sqlite'
+isolation.seal({ type: 'sqlite', database: path.join(isolation.rootDir, 'inventory.sqlite') })
 process.env.DB_SYNC = 'false'
 process.env.DB_AUTO_MIGRATE = 'false'
-process.env.SQLITE_DB_PATH = sqlitePath
-delete process.env.DB_NAME
 process.env.INIT_ADMIN_PASSWORD = adminPassword
+process.env.PERMANENT_DELETE_PASSWORD = permanentDeletePassword
 
 type JsonPayload = { code?: number; message?: string; data?: unknown }
 type Session = { token: string; csrfToken: string }
@@ -115,23 +109,15 @@ async function readXlsxHeaders(buffer: ArrayBuffer): Promise<string[]> {
   return headers
 }
 
-function cleanupSqliteFile() {
-  for (const suffix of ['', '-wal', '-shm', '-journal']) {
-    fs.rmSync(`${sqlitePath}${suffix}`, { force: true })
-  }
-}
-
 async function main() {
-  fs.mkdirSync(sqliteRoot, { recursive: true })
   const { createApp } = await import('../src/app.js')
   const { AppDataSource } = await import('../src/config/data-source.js')
-  const { env } = await import('../src/config/env.js')
   const { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } = await import('../src/config/database-bootstrap.js')
   const { authService } = await import('../src/services/auth.service.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
   const { SysAuditLog } = await import('../src/entities/sys-audit-log.entity.js')
 
-  assert.equal(path.resolve(env.SQLITE_DB_PATH), sqlitePath, '必须连接本轮临时库')
+  await isolation.assertTarget(AppDataSource)
   let server: Server | undefined
   try {
     prepareDatabaseRuntime()
@@ -163,8 +149,14 @@ async function main() {
     })
     const get = (session: Session | null, url: string) =>
       requestLocalHttp(`${baseUrl}${url}`, { headers: session ? bearer(session, false) : {} })
-    const send = (session: Session, method: string, url: string, body?: unknown) =>
-      requestLocalHttp(`${baseUrl}${url}`, { method, headers: bearer(session), body: JSON.stringify(body ?? {}) })
+    const send = (session: Session, method: string, url: string, body?: unknown) => {
+      const payload = JSON.stringify(body ?? {})
+      return requestLocalHttp(`${baseUrl}${url}`, {
+        method,
+        headers: { ...bearer(session), 'Content-Length': String(Buffer.byteLength(payload)) },
+        body: payload,
+      })
+    }
 
     // ---- 未登录 ----
     for (const url of ['/api/inventory/stocks', '/api/inventory/stocktakes', '/api/products/lookup?code=x', '/api/inventory/categories', '/api/inventory/locations/1/skus']) {
@@ -216,6 +208,54 @@ async function main() {
     const operator = await login((await createUser('operator', operatorPassword)).username, operatorPassword)
     const supplier = await login((await createUser('supplier', supplierPassword)).username, supplierPassword)
 
+    // ---- 库位永久删除：权限、全局口令、引用与审计 ----
+    const unused = await expectOk<{ id: string; isActive: boolean }>(
+      send(admin, 'POST', '/api/inventory/locations', { locationCode: 'c-02', isActive: true }),
+      '管理员建无引用库位',
+    )
+    assert.equal(unused.isActive, true)
+    const unusedLocationUrl = `/api/inventory/locations/${unused.id}`
+    const deleteBody = { permanentDeletePassword }
+    const wrongDeleteBody = { permanentDeletePassword: wrongDeletePassword }
+    await expectStatus(send(supplier, 'DELETE', unusedLocationUrl, deleteBody), '供货方带正确口令删除库位', 403)
+    const missingPassword = await expectStatus(requestLocalHttp(`${baseUrl}${unusedLocationUrl}`, {
+      method: 'DELETE', headers: bearer(admin, false),
+    }), '缺少永久删除口令', 400)
+    assert.match(missingPassword.message ?? '', /请输入永久删除密码/)
+    const rejectedPassword = await expectStatus(send(admin, 'DELETE', unusedLocationUrl, wrongDeleteBody), '永久删除口令错误', 403)
+    assert.match(rejectedPassword.message ?? '', /永久删除密码不正确/)
+    assert.equal(JSON.stringify(rejectedPassword).includes(wrongDeletePassword), false, '响应不得回显输入的永久删除口令')
+    await expectStatus(send(admin, 'DELETE', `/api/inventory/locations/${location.id}`, deleteBody), '正确口令仍拒绝删除被引用的库位', 409)
+
+    // 库位的两次口令失败与出库单入口的失败合并计数，两边的入口请求次数均未达到各自的上限。
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await expectStatus(send(admin, 'DELETE', '/api/orders/1/purge', wrongDeleteBody), '出库单入口口令错误', 403)
+    }
+    const throttled = await expectStatus(send(admin, 'DELETE', unusedLocationUrl, deleteBody), '跨入口共享口令失败上限', 429)
+    assert.match(throttled.message ?? '', /永久删除口令错误次数过多/)
+
+    const listLocations = () => expectOk<Array<{ id: string; isActive: boolean }>>(get(admin, '/api/inventory/locations'), '读取库位状态')
+    const afterDenied = await listLocations()
+    assert.equal(afterDenied.find((row) => row.id === unused.id)?.isActive, true, '拒绝删除后无引用库位仍保留且启用')
+    assert.ok(afterDenied.some((row) => row.id === location.id), '被引用库位仍保留')
+    const assignedAfterDenied = await expectOk<typeof assigned>(get(admin, `${locationSkuUrl}?scope=assigned&page=1&pageSize=1`), '读取拒绝删除后的库存分布')
+    assert.deepEqual(assignedAfterDenied, assigned, '拒绝删除不改变库位关联和库存')
+
+    const deleted = await expectOk<{ id: string }>(send(operator, 'DELETE', unusedLocationUrl, deleteBody), '店员删除启用中的无引用库位')
+    assert.equal(deleted.id, unused.id)
+    assert.ok(!(await listLocations()).some((row) => row.id === unused.id), '合法删除后库位从列表移除')
+    const deletionLogs = await AppDataSource.getRepository(SysAuditLog).find({ where: { actionType: 'product.location.delete', targetId: unused.id } })
+    const successLogs = deletionLogs.filter((log) => log.resultStatus === 'success')
+    assert.equal(successLogs.length, 1, '仅实际删除写成功审计')
+    assert.equal(successLogs[0]?.targetCode, 'C-02')
+    const failedDetails = deletionLogs.filter((log) => log.resultStatus === 'failed').map((log) => JSON.parse(log.detailJson ?? '{}'))
+    assert.ok(failedDetails.some((detail) => detail.reason === 'password_missing'))
+    assert.ok(failedDetails.some((detail) => detail.reason === 'password_rejected'))
+    assert.ok(failedDetails.some((detail) => detail.scope === 'shared_password_failures'))
+    const deletionAuditText = JSON.stringify(deletionLogs)
+    assert.equal(deletionAuditText.includes(permanentDeletePassword) || deletionAuditText.includes(wrongDeletePassword), false, '删除审计不得记录口令')
+    pass('库位永久删除校验权限、口令与共享频控，保护引用和库存并保留脱敏审计')
+
     // ---- 供货方：只能看商品，看不到成本价，也进不了库存与盘点 ----
     const supplierDetail = await expectOk<{ skus: Array<{ costPrice: string | null }> }>(get(supplier, `/api/products/${product.id}`), '供货方读商品详情')
     assert.equal(supplierDetail.skus[0]!.costPrice, null, '供货方不应看到成本价（详情）')
@@ -225,9 +265,7 @@ async function main() {
     assert.ok(supplierPaged.list.every((item) => item.skus.every((row) => row.costPrice === null)), '供货方不应看到成本价（分页）')
     const supplierLookup = await expectOk<{ sku: { costPrice: string | null } }>(get(supplier, '/api/products/lookup?code=6900000000017'), '供货方扫码识别')
     assert.equal(supplierLookup.sku.costPrice, null, '供货方不应看到成本价（扫码识别）')
-    const supplierExport = await get(supplier, '/api/products/export')
-    assert.equal(supplierExport.status, 200)
-    assert.ok(!(await readXlsxHeaders(await supplierExport.arrayBuffer())).includes('成本价'), '供货方导出不应包含成本价列')
+    await expectStatus(get(supplier, '/api/products/export'), '供货方导出商品', 403)
     const adminExport = await get(admin, '/api/products/export')
     assert.ok((await readXlsxHeaders(await adminExport.arrayBuffer())).includes('成本价'), '管理员导出应包含成本价列')
     for (const url of ['/api/inventory/stocks', '/api/inventory/logs', '/api/inventory/logs/export', '/api/inventory/docs', '/api/inventory/stocktakes', '/api/products/import/template']) {
@@ -369,7 +407,6 @@ async function main() {
 }
 
 try {
-  cleanupSqliteFile()
   await main()
   // eslint-disable-next-line no-console
   console.log('\n库存接口 HTTP 权限回归通过')
@@ -380,5 +417,5 @@ try {
   console.error(error)
   process.exitCode = 1
 } finally {
-  cleanupSqliteFile()
+  isolation.cleanup()
 }

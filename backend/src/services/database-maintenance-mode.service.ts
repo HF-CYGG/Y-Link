@@ -22,6 +22,7 @@ import {
   removeControlFile,
   writeControlFile,
 } from '../runtime/durable-control-file.js'
+import { staticPathKey } from '../utils/static-path-key.js'
 
 export const MAINTENANCE_READ_ONLY_CODE = 50301
 export const MAINTENANCE_READ_ONLY_MESSAGE = '服务器维护中，当前为只读状态，暂时无法提交操作'
@@ -54,14 +55,13 @@ const DATABASE_MUTATING_AUTH_PATHS = new Set([
   '/api/client-auth/captcha',
   '/api/v1/mobile-auth/captcha',
   '/api/client-auth/capabilities',
+  '/api/v1/mobile-auth/capabilities',
 ])
-function normalizeRequestPath(requestPath: string): string {
-  return requestPath.split('?')[0]?.replace(/\/+$/, '') || '/'
-}
 
-export function shouldAllowWriteDuringDatabaseMaintenance(method: string, requestPath: string): boolean {
+export function shouldAllowWriteDuringDatabaseMaintenance(method: string, requestPath: string,
+  control?: { taskId?: unknown; activeTaskId?: string | null }): boolean {
   const normalizedMethod = method.toUpperCase()
-  const normalizedPath = normalizeRequestPath(requestPath)
+  const normalizedPath = staticPathKey(requestPath.split('?', 1)[0] ?? '/')
   if (SAFE_METHODS.has(normalizedMethod)) {
     // 这些认证读取入口会经过数据库持久化限流或验证码风控，语义上属于写请求。
     // 维护期必须在进入限流器前阻断，保证 SQLite 快照窗口没有未登记写入。
@@ -70,6 +70,9 @@ export function shouldAllowWriteDuringDatabaseMaintenance(method: string, reques
 
   if (normalizedPath === '/api/data-maintenance/db-migration/rollback' && normalizedMethod === 'POST') {
     return true
+  }
+  if (normalizedPath === '/api/data-maintenance/db-migration/switch' && normalizedMethod === 'POST') {
+    return typeof control?.taskId === 'string' && !!control.activeTaskId && control.taskId === control.activeTaskId
   }
   return normalizedPath === '/api/data-maintenance/db-migration/runtime-override' && normalizedMethod === 'DELETE'
 }

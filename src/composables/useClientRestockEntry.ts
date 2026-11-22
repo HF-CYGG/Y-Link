@@ -7,14 +7,14 @@
  * - 多规格且未指定规格时直接进入表单，由用户在表单中明确选择；
  * - 请求通过 useStableRequest 收口，商品/规格/账号变化、页面失活或卸载时取消在途请求，防止旧结果跳转串号。
  * 维护说明：
- * - 入参使用 getter，保证卡片复用与详情切换规格时都读取最新值；
+ * - 一个页面只持有一个查询；点击时提供读取当前目标的 getter，规格失效立即取消；
  * - 这里只负责跳转，不修改购物车或库存。
  */
-import { computed, onActivated, onBeforeUnmount, onDeactivated, ref, watch } from 'vue'
+import { onActivated, onBeforeUnmount, onDeactivated, shallowRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
-import { getActiveClientRestockRequest } from '@/api/modules/customer-service-feedback'
-import type { O2oMallProduct, O2oMallSku } from '@/api/modules/o2o'
+import { getActiveClientRestockRequest } from '@/api/modules/client-restock-query'
+import type { O2oMallProduct } from '@/api/modules/o2o'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
@@ -22,63 +22,74 @@ import { showAppError } from '@/utils/app-alert'
 import { extractErrorMessage } from '@/utils/error'
 import { getRestockSkus } from '@/utils/restock'
 
-export const useClientRestockEntry = (
-  resolveProduct: () => O2oMallProduct | null | undefined,
-  resolveSku: () => O2oMallSku | null | undefined = () => null,
-  resolveVisible: () => boolean = () => true,
-) => {
+type RestockEntrySource = 'card' | 'detail' | 'batch'
+type ResolveRestockTarget = () => { product: O2oMallProduct; skuId?: string } | null
+
+const resolveEligibleTarget = (resolveTarget: ResolveRestockTarget) => {
+  const target = resolveTarget()
+  if (!target) return null
+  const skus = getRestockSkus(target.product)
+  if (!skus.length || (target.skuId && !skus.some((sku) => sku.id === target.skuId))) return null
+  return { productId: target.product.id, skuId: target.skuId ?? (skus.length === 1 ? skus[0]?.id : undefined) }
+}
+
+export const useClientRestockEntry = () => {
   const router = useRouter()
   const auth = useClientAuthStore(pinia)
   const request = useStableRequest()
-  const loading = ref(false)
+  const pending = shallowRef<{
+    source: RestockEntrySource
+    productId: string
+    skuId: string
+    resolveTarget: ResolveRestockTarget
+  } | null>(null)
   let active = true
-  let generation = 0
 
   const resetPending = () => {
-    generation += 1
     request.cancel()
-    loading.value = false
+    pending.value = null
   }
-  watch(() => [resolveProduct()?.id, resolveSku()?.id, auth.currentUser?.id, resolveVisible()], resetPending, { flush: 'sync' })
+  const isCurrentTarget = () => {
+    const current = pending.value
+    if (!current) return false
+    const target = resolveEligibleTarget(current.resolveTarget)
+    return target?.productId === current.productId && target.skuId === current.skuId
+  }
+  watch(isCurrentTarget, (valid) => { if (!valid && pending.value) resetPending() }, { flush: 'sync' })
+  watch([() => auth.currentUser?.id, () => auth.sessionGeneration], resetPending, { flush: 'sync' })
   onActivated(() => { active = true })
   onDeactivated(() => { active = false; resetPending() })
   onBeforeUnmount(() => { active = false; resetPending() })
 
-  const candidates = computed(() => {
-    const product = resolveProduct()
-    return product ? getRestockSkus(product) : []
-  })
+  const isLoading = (source: RestockEntrySource, productId: string | undefined) => (
+    pending.value?.source === source && pending.value.productId === productId
+  )
 
-  /** 补货资格只看当前启用规格；现货数量不作为申请门槛。 */
-  const restockAvailable = computed(() => {
-    const sku = resolveSku()
-    return sku ? candidates.value.some((candidate) => candidate.id === sku.id) : candidates.value.length > 0
-  })
-
-  const openRestock = async () => {
-    const product = resolveProduct()
-    if (!active || !resolveVisible() || !product || loading.value || !restockAvailable.value || !auth.currentUser?.id) return
-    const userId = auth.currentUser.id
-    const runId = ++generation
-    const valid = () => active && resolveVisible() && runId === generation && resolveProduct()?.id === product.id && auth.currentUser?.id === userId
-    const activeSkus = product.skus.filter((sku) => sku.isActive && sku.isCurrent)
-    const sku = resolveSku() ?? (activeSkus.length === 1 ? candidates.value[0] : null)
-    const query = { type: 'restock', productId: product.id, ...(sku ? { skuId: sku.id } : {}) }
-    if (!sku) {
+  const openRestock = async (source: RestockEntrySource, resolveTarget: ResolveRestockTarget) => {
+    if (!active || !auth.currentUser?.id) return
+    const target = resolveEligibleTarget(resolveTarget)
+    if (!target) return
+    const { productId, skuId } = target
+    if (pending.value?.source === source && pending.value.productId === productId && pending.value.skuId === skuId) return
+    resetPending()
+    const query = { type: 'restock', productId, ...(skuId ? { skuId } : {}) }
+    if (!skuId) {
       await router.push({ path: '/client/feedback/create', query })
       return
     }
-    loading.value = true
+    const current = { source, productId, skuId, resolveTarget }
+    pending.value = current
+    const valid = () => active && pending.value === current && isCurrentTarget()
     await request.runLatest({
-      executor: (signal) => getActiveClientRestockRequest(sku.id, { signal }),
+      executor: (signal) => getActiveClientRestockRequest(skuId, { signal }),
       onSuccess: async (result) => {
         if (!valid()) return
         await router.push(result.restock ? `/client/feedback/${result.restock.conversationId}` : { path: '/client/feedback/create', query })
       },
       onError: (error) => { if (!valid()) return; showAppError(extractErrorMessage(error, '查询补货申请失败，请重试')) },
-      onFinally: () => { loading.value = false },
+      onFinally: () => { if (pending.value === current) pending.value = null },
     })
   }
 
-  return { loading, restockAvailable, openRestock }
+  return { isLoading, openRestock }
 }

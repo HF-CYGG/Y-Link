@@ -7,6 +7,7 @@
  * - 按库位盘点：建单按“规格 × 库位”展开、账面取库位件数、计数需选库位、只调本库位、冲突口径；
  * - 列表与查询：库位已关联规格、关联数、库存查询的库位筛选与分布；
  * - 商品编辑调低库存时按扣减规则规整分库位件数。
+ * - 删除库位：实时权限、无引用删除、四类真实引用阻断和事务审计。
  */
 import { resolveIssueVerificationRoot } from './issue-verification-paths.js'
 import 'reflect-metadata'
@@ -41,6 +42,10 @@ async function main() {
   const { runInTransaction } = await import('../src/config/transaction-runner.js')
   const { resolvePermissionsByRole } = await import('../src/constants/auth-permissions.js')
   const { BaseProductSku } = await import('../src/entities/base-product-sku.entity.js')
+  const { BaseStorageLocation } = await import('../src/entities/base-storage-location.entity.js')
+  const { InvSkuLocationStock } = await import('../src/entities/inv-sku-location-stock.entity.js')
+  const { InvStocktake } = await import('../src/entities/inv-stocktake.entity.js')
+  const { InvStocktakeItem } = await import('../src/entities/inv-stocktake-item.entity.js')
   const { InventoryLog } = await import('../src/entities/inventory-log.entity.js')
   const { SysAuditLog } = await import('../src/entities/sys-audit-log.entity.js')
   const { SysUser } = await import('../src/entities/sys-user.entity.js')
@@ -49,6 +54,7 @@ async function main() {
   const { applyInventoryDeltas, loadLockedSkuTargets } = await import('../src/services/inventory-ledger.service.js')
   const { productService } = await import('../src/services/product.service.js')
   const { stocktakeService } = await import('../src/services/stocktake.service.js')
+  const { readStocktakeLocationIds } = await import('../src/services/stocktake-scope.js')
   const { hashPassword } = await import('../src/utils/password.js')
   prepareDatabaseRuntime()
   await AppDataSource.initialize()
@@ -236,6 +242,81 @@ async function main() {
     await deduct(3)
     await skuRepo.update({ id: skuId }, { isCurrent: false })
     await assert.rejects(() => transfer(shelfA.id, shelfC.id, 1), /已退役/)
+
+    // 8. 删除低频入口要复核账户当前权限，并保护四类引用（包括历史盘点与退役零库存规格）。
+    const makeLocation = (locationCode: string) => inventoryMasterDataService.createLocation({ locationCode }, actor)
+    const unused = await makeLocation('DELETE-UNUSED')
+    const skuOnly = await makeLocation('DELETE-SKU')
+    const stockOnly = await makeLocation('DELETE-STOCK')
+    const scopeOnly = await makeLocation('DELETE-SCOPE')
+    const newScopeOnly = await makeLocation('DELETE-SCOPE-ALIAS')
+    const stockedLocation = await makeLocation('DELETE-STOCKED-ALIAS')
+    const itemOnly = await makeLocation('DELETE-ITEM')
+    const historySku = await productService.create({
+      productName: '库位删除历史规格', currentStock: 0, defaultSku: { locationId: skuOnly.id },
+    }, actor)
+    await skuRepo.update({ id: historySku.skus[0]!.id }, { isCurrent: false })
+    await AppDataSource.getRepository(InvSkuLocationStock).save({ skuId, locationId: stockOnly.id, qty: 1 })
+    const stocktakeRepo = AppDataSource.getRepository(InvStocktake)
+    const scopedProduct = await productService.create({
+      productName: '盘点编号规范化验证', currentStock: 2, defaultSku: { locationId: stockedLocation.id },
+    }, actor)
+    const aliasStocktake = await stocktakeService.create({
+      scopeType: 'location', locationIds: [`00${newScopeOnly.id}`, stockedLocation.id], blindMode: false,
+    }, actor)
+    assert.equal(aliasStocktake.itemCount, 1)
+    const aliasRow = await stocktakeRepo.findOneByOrFail({ id: aliasStocktake.id })
+    assert.deepEqual(JSON.parse(aliasRow.scopeJson).locationIds.sort(), [newScopeOnly.id, stockedLocation.id].sort())
+    await assert.rejects(() => inventoryMasterDataService.deleteLocation(newScopeOnly.id, actor), { statusCode: 409 })
+    assert.equal(await AppDataSource.getRepository(BaseStorageLocation).existsBy({ id: newScopeOnly.id }), true)
+    assert.equal(await auditRepo.countBy({ actionType: 'product.location.delete', targetId: newScopeOnly.id }), 0)
+    assert.deepEqual(readStocktakeLocationIds('{"locationIds":[9007199254740993,"+0009007199254740995.0","1.2e1"]}'),
+      ['9007199254740993', '9007199254740995', '12'], '历史 JSON 数字不得损失主键精度')
+    // 历史盘点即使保存的是别名，详情和指定库位计数也继续使用真实编号。
+    await stocktakeRepo.update({ id: aliasRow.id }, {
+      scopeJson: JSON.stringify({ locationIds: [`00${newScopeOnly.id}`, `+${stockedLocation.id}.00`] }),
+    })
+    const aliasDetail = await stocktakeService.detail(aliasRow.id, actor)
+    assert.deepEqual(aliasDetail.scopeLocations.map(({ id }) => id).sort(), [newScopeOnly.id, stockedLocation.id].sort())
+    const aliasedCount = await stocktakeService.count(aliasRow.id, {
+      skuId: scopedProduct.skus[0]!.id, qty: 2, mode: 'set', locationId: `00${stockedLocation.id}`,
+    }, actor)
+    assert.equal(aliasedCount.locationScopeId, stockedLocation.id)
+    await stocktakeRepo.save({
+      stocktakeNo: 'PD-DELETE-SCOPE', scopeType: 'location', blindMode: false, status: 'cancelled',
+      scopeJson: `{"locationIds":[${scopeOnly.id},"${unused.id}0"]}`,
+    })
+    const itemRecord = await stocktakeRepo.save({
+      stocktakeNo: 'PD-DELETE-ITEM', scopeType: 'location', scopeJson: '{}', blindMode: false, status: 'completed',
+    })
+    await AppDataSource.getRepository(InvStocktakeItem).save({
+      stocktakeId: itemRecord.id, productId: product.id, skuId, locationScopeId: itemOnly.id, inScope: false,
+    })
+    await stocktakeRepo.save({
+      stocktakeNo: 'PD-DELETE-CAT', scopeType: 'category', blindMode: false, status: 'completed',
+      scopeJson: JSON.stringify({ locationIds: [unused.id] }),
+    })
+    const deleteAction = 'product.location.delete'
+    for (const location of [skuOnly, stockOnly, scopeOnly, newScopeOnly, itemOnly]) {
+      await assert.rejects(() => inventoryMasterDataService.deleteLocation(location.id, actor), { statusCode: 409 })
+      assert.equal(await AppDataSource.getRepository(BaseStorageLocation).existsBy({ id: location.id }), true)
+      assert.equal(await auditRepo.countBy({ actionType: deleteAction, targetId: location.id }), 0)
+    }
+    const operator = await userRepo.save({
+      username: `location-delete-${seed}`, passwordHash: 'verify-only-hash', displayName: '库位验证操作员', role: 'operator', status: 'enabled',
+    })
+    const operatorActor = { ...actor, userId: String(operator.id), username: operator.username, role: operator.role }
+    await userRepo.update({ id: operator.id }, { role: 'supplier' })
+    await assert.rejects(() => inventoryMasterDataService.deleteLocation(unused.id, operatorActor), { statusCode: 403 })
+    assert.equal(await auditRepo.countBy({ actionType: deleteAction, targetId: unused.id }), 0)
+    await userRepo.update({ id: operator.id }, { role: 'operator' })
+    assert.deepEqual(await inventoryMasterDataService.deleteLocation(unused.id, operatorActor), { id: unused.id })
+    assert.equal(await AppDataSource.getRepository(BaseStorageLocation).existsBy({ id: unused.id }), false)
+    await assert.rejects(() => inventoryMasterDataService.deleteLocation(unused.id, operatorActor), { statusCode: 404 })
+    const records = await auditRepo.findBy({ actionType: deleteAction, targetId: unused.id })
+    assert.equal(records.length, 1)
+    assert.equal(records[0]?.targetCode, unused.locationCode)
+    assert.equal(await stocktakeRepo.existsBy({ id: itemRecord.id }), true)
 
     console.log('[inventory:location-stock:verify] 分库位库存、拨转、扣减规则与按库位盘点回归通过')
   } finally {

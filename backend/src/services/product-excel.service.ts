@@ -9,6 +9,7 @@
  */
 
 import { loadExcelJs } from '../utils/exceljs-loader.js'
+import type { Writable } from 'node:stream'
 import { In, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
@@ -18,8 +19,10 @@ import { BaseProductSku } from '../entities/base-product-sku.entity.js'
 import { BaseStorageLocation } from '../entities/base-storage-location.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
+import { isDatabaseFlagEnabled } from '../utils/product-inventory-summary.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { assertXlsxArchiveWithinLimits } from '../utils/xlsx-archive-guard.js'
+import { assertXlsxOutputOpen, bufferXlsxExport, writeStreamingXlsx } from '../utils/xlsx-export.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 import { auditService } from './audit.service.js'
 import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
@@ -57,6 +60,8 @@ const HEADER_ALIASES: Record<TemplateKey, string[]> = {
 }
 
 const MAX_IMPORT_ROWS = 1000
+const PRODUCT_EXPORT_BATCH_SIZE = 20
+const SKU_EXPORT_BATCH_SIZE = 100
 /** 解压体积预检上限：1000 行模板解压后远小于 1MB，留足余量给少量嵌入图片。 */
 const IMPORT_ARCHIVE_LIMITS = { maxEntries: 2000, maxTotalUncompressedBytes: 20 * 1024 * 1024 }
 /** 条码与 SKU 编码按文本读取；被 Excel 存成数字时只接受安全整数，避免科学计数法或精度丢失被悄悄导入。 */
@@ -88,6 +93,26 @@ export interface ProductImportPreview {
 interface ParsedRow extends ProductImportRowView {
   specValues: Record<string, string>
   thumbnail: string
+}
+
+interface ProductExportSku {
+  id: string
+  productCode: string
+  productName: string
+  productActive: number | string | boolean
+  productThumbnail: string | null
+  categoryCode: string | null
+  categoryName: string | null
+  skuCode: string
+  specValuesJson: string
+  barcode: string | null
+  costPrice?: string | number | null
+  defaultPrice: string | number
+  currentStock: number
+  preOrderedStock: number
+  skuActive: number | string | boolean
+  skuThumbnail: string | null
+  locationCode: string | null
 }
 
 const normalizeHeader = (value: string) => value.replace(/[\s*（）()]/g, '').toLowerCase()
@@ -160,71 +185,170 @@ export class ProductExcelService {
     return (await this.exportProductsWithSummary(options)).buffer
   }
 
-  /** 导出当前版本 SKU 并返回数据行数，供路由写导出审计。 */
   async exportProductsWithSummary(options: { includeCostPrice: boolean } = { includeCostPrice: true }): Promise<{ buffer: Buffer; rowCount: number }> {
-    const [products, skus, categories, locations] = await Promise.all([
-      AppDataSource.getRepository(BaseProduct).find({ order: { id: 'ASC' } }),
-      AppDataSource.getRepository(BaseProductSku).find({ where: { isCurrent: true }, order: { productId: 'ASC', sortOrder: 'ASC', id: 'ASC' } }),
-      AppDataSource.getRepository(BaseCategory).find(),
-      AppDataSource.getRepository(BaseStorageLocation).find(),
-    ])
-    const productMap = new Map(products.map((product) => [String(product.id), product]))
-    const categoryMap = new Map(categories.map((category) => [String(category.id), category]))
-    const locationMap = new Map(locations.map((location) => [String(location.id), location.locationCode]))
-    const ExcelJS = await loadExcelJs()
-    const workbook = new ExcelJS.Workbook()
-    const sheet = workbook.addWorksheet('商品SKU')
-    sheet.columns = [
-      { header: '商品编码', key: 'productCode', width: 18 },
-      { header: '商品名称', key: 'productName', width: 24 },
-      { header: '分类编码', key: 'categoryCode', width: 10 },
-      { header: '分类名称', key: 'categoryName', width: 14 },
-      { header: '规格', key: 'specs', width: 26 },
-      { header: 'SKU编码', key: 'skuCode', width: 22 },
-      { header: '原厂条码', key: 'barcode', width: 18 },
-      { header: '打印条码', key: 'effectiveBarcode', width: 18 },
-      ...(options.includeCostPrice ? [{ header: '成本价', key: 'costPrice', width: 10 }] : []),
-      { header: '售价', key: 'salePrice', width: 10 },
-      { header: '当前库存', key: 'currentStock', width: 10 },
-      { header: '已预订', key: 'preOrderedStock', width: 10 },
-      { header: '库位编码', key: 'locationCode', width: 12 },
-      { header: '商品状态', key: 'productStatus', width: 10 },
-      { header: '规格状态', key: 'skuStatus', width: 10 },
-      { header: '图片地址', key: 'thumbnail', width: 30 },
-    ]
-    sheet.getRow(1).font = { bold: true }
-    for (const sku of skus) {
-      const product = productMap.get(String(sku.productId))
-      if (!product) continue
-      const category = product.categoryId ? categoryMap.get(String(product.categoryId)) : undefined
-      let specs = ''
-      try {
-        specs = Object.entries(JSON.parse(sku.specValuesJson || '{}') as Record<string, string>)
-          .map(([name, value]) => `${name}=${value}`)
-          .join(';')
-      } catch {
-        specs = ''
-      }
-      sheet.addRow({
-        productCode: product.productCode,
-        productName: product.productName,
-        categoryCode: category?.categoryCode ?? '',
-        categoryName: category?.categoryName ?? '',
-        specs,
-        skuCode: sku.skuCode,
-        barcode: sku.barcode ?? '',
-        effectiveBarcode: sku.barcode || sku.skuCode,
-        ...(options.includeCostPrice ? { costPrice: sku.costPrice === null ? '' : Number(sku.costPrice) } : {}),
-        salePrice: Number(sku.defaultPrice ?? 0),
-        currentStock: Number(sku.currentStock ?? 0),
-        preOrderedStock: Number(sku.preOrderedStock ?? 0),
-        locationCode: sku.locationId ? locationMap.get(String(sku.locationId)) ?? '' : '',
-        productStatus: product.isActive ? '启用' : '停用',
-        skuStatus: sku.isActive ? '启用' : '停用',
-        thumbnail: sku.thumbnail ?? product.thumbnail ?? '',
-      })
+    return bufferXlsxExport((output) => this.exportProductsToStream(options, output))
+  }
+
+  /** 按商品主键和商品内排序分批导出当前 SKU，包括停用的当前规格。 */
+  async exportProductsToStream(
+    options: { includeCostPrice: boolean },
+    output: Writable,
+    onReady?: () => void,
+  ): Promise<{ rowCount: number }> {
+    assertXlsxOutputOpen(output)
+    const productRepo = AppDataSource.getRepository(BaseProduct)
+    const skuRepo = AppDataSource.getRepository(BaseProductSku)
+    const sqlite = AppDataSource.options.type === 'sqlite'
+    const idType = sqlite ? 'TEXT' : 'CHAR'
+    const idParameterType = sqlite ? 'INTEGER' : 'UNSIGNED'
+    const bindIds = (ids: string[]) => {
+      const parameters = Object.fromEntries(ids.map((id, index) => [`exportId${index}`, id]))
+      const list = Object.keys(parameters).map((key) => `CAST(:${key} AS ${idParameterType})`).join(', ')
+      return { list, parameters }
     }
-    return { buffer: Buffer.from(await workbook.xlsx.writeBuffer()), rowCount: Math.max(0, sheet.rowCount - 1) }
+    const maxSkuId = skuRepo.createQueryBuilder('sku').select('MAX(sku.id)').getQuery()
+    const boundary = await productRepo.createQueryBuilder('product')
+      .select(`CAST(MAX(product.id) AS ${idType})`, 'productId')
+      .addSelect(`CAST((${maxSkuId}) AS ${idType})`, 'skuId')
+      .getRawOne<{ productId: string | null; skuId: string | null }>()
+
+    const fetchProductIds = async (cursor?: string): Promise<string[]> => {
+      assertXlsxOutputOpen(output)
+      const query = productRepo.createQueryBuilder('product')
+        .select(`CAST(product.id AS ${idType})`, 'id')
+        .where(`product.id <= CAST(:maxId AS ${idParameterType})`, { maxId: boundary?.productId })
+        .orderBy('product.id', 'ASC')
+        .limit(PRODUCT_EXPORT_BATCH_SIZE)
+      if (cursor !== undefined) query.andWhere(`product.id > CAST(:cursor AS ${idParameterType})`, { cursor })
+      return (await query.getRawMany<{ id: string }>()).map((row) => row.id)
+    }
+    const fetchOrderedSkuIds = async (productIds: string[]): Promise<string[]> => {
+      assertXlsxOutputOpen(output)
+      if (!productIds.length) return []
+      const { list, parameters } = bindIds(productIds)
+      // 每页只保留按原顺序排好的主键。之后按主键取导出列，重排规格不会使其跨批重复或遗漏。
+      const rows = await skuRepo.createQueryBuilder('sku')
+        .select(`CAST(sku.id AS ${idType})`, 'id')
+        .where(`sku.productId IN (${list})`, parameters)
+        .andWhere('sku.isCurrent = :isCurrent', { isCurrent: true })
+        .andWhere(`sku.id <= CAST(:maxId AS ${idParameterType})`, { maxId: boundary?.skuId })
+        .orderBy('sku.productId', 'ASC')
+        .addOrderBy('sku.sortOrder', 'ASC')
+        .addOrderBy('sku.id', 'ASC')
+        .getRawMany<{ id: string }>()
+      return rows.map((row) => row.id)
+    }
+    const fetchSkuDetails = async (ids: string[]) => {
+      assertXlsxOutputOpen(output)
+      if (!ids.length) return new Map<string, ProductExportSku>()
+      const { list, parameters } = bindIds(ids)
+      const query = skuRepo.createQueryBuilder('sku')
+        .innerJoin('sku.product', 'product')
+        .leftJoin('product.category', 'category')
+        .leftJoin('sku.location', 'location')
+        // SQLite 的整数主键经驱动/实体分组可能丢精度，ID 匹配始终使用查询返回的文本。
+        .select(`CAST(sku.id AS ${idType})`, 'id')
+        .addSelect('sku.specValuesJson', 'specValuesJson')
+        .addSelect('sku.skuCode', 'skuCode')
+        .addSelect('sku.barcode', 'barcode')
+        .addSelect('sku.defaultPrice', 'defaultPrice')
+        .addSelect('sku.currentStock', 'currentStock')
+        .addSelect('sku.preOrderedStock', 'preOrderedStock')
+        .addSelect('sku.isActive', 'skuActive')
+        .addSelect('sku.thumbnail', 'skuThumbnail')
+        .addSelect('product.productCode', 'productCode')
+        .addSelect('product.productName', 'productName')
+        .addSelect('product.isActive', 'productActive')
+        .addSelect('product.thumbnail', 'productThumbnail')
+        .addSelect('category.categoryCode', 'categoryCode')
+        .addSelect('category.categoryName', 'categoryName')
+        .addSelect('location.locationCode', 'locationCode')
+        .where(`sku.id IN (${list})`, parameters)
+        .andWhere('sku.isCurrent = :isCurrent', { isCurrent: true })
+      if (options.includeCostPrice) query.addSelect('sku.costPrice', 'costPrice')
+      const rows = await query.getRawMany<ProductExportSku>()
+      return new Map(rows.map((row) => [row.id, row]))
+    }
+    const fetchPage = async (cursor?: string) => {
+      const productIds = await fetchProductIds(cursor)
+      const skuIds = await fetchOrderedSkuIds(productIds)
+      const firstSkuBatch = await fetchSkuDetails(skuIds.slice(0, SKU_EXPORT_BATCH_SIZE))
+      return { productIds, skuIds, firstSkuBatch }
+    }
+    let page = boundary?.productId != null && boundary.skuId != null ? await fetchPage() : undefined
+    // 兼容遗留无当前规格的商品。首个实际数据批仍须在声明下载前查询成功。
+    while (page && page.skuIds.length === 0 && page.productIds.length === PRODUCT_EXPORT_BATCH_SIZE) {
+      page = await fetchPage(page.productIds[page.productIds.length - 1])
+    }
+
+    return writeStreamingXlsx(output, onReady, async (workbook, waitForRows) => {
+      const sheet = workbook.addWorksheet('商品SKU')
+      sheet.columns = [
+        { header: '商品编码', key: 'productCode', width: 18 },
+        { header: '商品名称', key: 'productName', width: 24 },
+        { header: '分类编码', key: 'categoryCode', width: 10 },
+        { header: '分类名称', key: 'categoryName', width: 14 },
+        { header: '规格', key: 'specs', width: 26 },
+        { header: 'SKU编码', key: 'skuCode', width: 22 },
+        { header: '原厂条码', key: 'barcode', width: 18 },
+        { header: '打印条码', key: 'effectiveBarcode', width: 18 },
+        ...(options.includeCostPrice ? [{ header: '成本价', key: 'costPrice', width: 10 }] : []),
+        { header: '售价', key: 'salePrice', width: 10 },
+        { header: '当前库存', key: 'currentStock', width: 10 },
+        { header: '已预订', key: 'preOrderedStock', width: 10 },
+        { header: '库位编码', key: 'locationCode', width: 12 },
+        { header: '商品状态', key: 'productStatus', width: 10 },
+        { header: '规格状态', key: 'skuStatus', width: 10 },
+        { header: '图片地址', key: 'thumbnail', width: 30 },
+      ]
+      sheet.getRow(1).font = { bold: true }
+      sheet.getRow(1).commit()
+      let rowCount = 0
+      while (page?.productIds.length) {
+        await waitForRows()
+        for (let offset = 0; offset < page.skuIds.length; offset += SKU_EXPORT_BATCH_SIZE) {
+          const ids = page.skuIds.slice(offset, offset + SKU_EXPORT_BATCH_SIZE)
+          const details = offset === 0 ? page.firstSkuBatch : await fetchSkuDetails(ids)
+          for (const id of ids) {
+            const sku = details.get(id)
+            if (!sku) continue
+            let specs = ''
+            try {
+              specs = Object.entries(JSON.parse(sku.specValuesJson || '{}') as Record<string, string>)
+                .map(([name, value]) => `${name}=${value}`)
+                .join(';')
+            } catch {
+              specs = ''
+            }
+            sheet.addRow({
+              productCode: sku.productCode,
+              productName: sku.productName,
+              categoryCode: sku.categoryCode ?? '',
+              categoryName: sku.categoryName ?? '',
+              specs,
+              skuCode: sku.skuCode,
+              barcode: sku.barcode ?? '',
+              effectiveBarcode: sku.barcode || sku.skuCode,
+              ...(options.includeCostPrice ? { costPrice: sku.costPrice == null ? '' : Number(sku.costPrice) } : {}),
+              salePrice: Number(sku.defaultPrice ?? 0),
+              currentStock: Number(sku.currentStock ?? 0),
+              preOrderedStock: Number(sku.preOrderedStock ?? 0),
+              locationCode: sku.locationCode ?? '',
+              productStatus: isDatabaseFlagEnabled(sku.productActive) ? '启用' : '停用',
+              skuStatus: isDatabaseFlagEnabled(sku.skuActive) ? '启用' : '停用',
+              thumbnail: sku.skuThumbnail ?? sku.productThumbnail ?? '',
+            }).commit()
+            rowCount += 1
+          }
+          details.clear()
+          await waitForRows()
+        }
+        if (page.productIds.length < PRODUCT_EXPORT_BATCH_SIZE) break
+        page = await fetchPage(page.productIds[page.productIds.length - 1])
+      }
+      sheet.commit()
+      return { rowCount }
+    })
   }
 
   async parseWorkbook(buffer: Buffer): Promise<ParsedRow[]> {

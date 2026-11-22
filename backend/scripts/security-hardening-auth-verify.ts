@@ -142,10 +142,10 @@ const run = async () => {
     expiresAt: Date.now() + 60_000,
     failedAttempts: 0,
   })
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    assert.equal(await attempts.consume(key, '000000'), false, `第 ${attempt + 1} 次错误验证码必须失败`)
-  }
-  assert.equal(await attempts.consume(key, '123456'), null, '连续五次错误后验证码必须作废，不能再被正确答案消费')
+  const wrongResults = await Promise.all(Array.from({ length: 8 }, () => attempts.consume(key, '000000')))
+  assert.equal(wrongResults.filter((result) => result === false).length, 5, '仅五次并发请求可以完成错码核验')
+  assert.equal(wrongResults.filter((result) => result === null).length, 3, '超出额度的请求应视票据已失效')
+  assert.equal(await attempts.consume(key, '123456'), null, '耗尽额度后验证码必须作废')
 
   console.log('认证安全工作包核心回归验证通过')
 }

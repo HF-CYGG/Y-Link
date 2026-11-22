@@ -7,11 +7,12 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto'
+import { setTimeout as delay } from 'node:timers/promises'
 import { kingdeeRegistrationView, normalizeKingdeeVoucherNo, type KingdeeStatus } from '../utils/kingdee-registration.js'
 import { Brackets, type EntityManager, In, IsNull, Not, type SelectQueryBuilder } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
-import { databaseOperationGate } from '../database/operation-gate.js'
+import { DatabaseWriteFrozenError, databaseOperationGate } from '../database/operation-gate.js'
 import { MAX_DATABASE_INT, MAX_O2O_ORDER_ITEM_COUNT } from '../constants/web-resource-limits.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { BaseProductSku } from '../entities/base-product-sku.entity.js'
@@ -41,6 +42,8 @@ import { O2oReturnRequestItem } from '../entities/o2o-return-request-item.entity
 import type { AuthUserContext } from '../types/auth.js'
 import type { ClientAuthContext } from '../types/client-auth.js'
 import { BizError } from '../utils/errors.js'
+import { toSafeErrorLog } from '../utils/safe-error-log.js'
+import { buildSqlLikeContains, buildSqlLikePrefix, escapeSqlLikePattern } from '../utils/sql-like.js'
 import {
   isRetryableMysqlTransactionError,
   isUniqueConstraintError,
@@ -49,8 +52,9 @@ import { generateOrderUuid } from '../utils/id-generator.js'
 import { orderBusinessNoService } from './order-business-no.service.js'
 import { orderSerialService } from './order-serial.service.js'
 import { orderMergeService, type OrderMergeMetadata } from './order-merge.service.js'
-import { systemConfigService } from './system-config.service.js'
+import { systemConfigService, type O2oRuleConfigRecord } from './system-config.service.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
+import { invalidateBusinessDataAfterCommit } from '../middleware/business-data-cache.middleware.js'
 import { notificationService } from './notification.service.js'
 import { auditService } from './audit.service.js'
 import {
@@ -61,6 +65,7 @@ import {
   invalidateMallCatalogReadCache,
   readMallCatalogClusterRevision,
   readMallCatalogRevision,
+  subscribeMallCatalogRemoteInvalidation,
 } from './mall-catalog-revision.service.js'
 import { buildSkuLogFields, persistLockedInventoryStocks, skuContributesToProductAggregate, snapshotSkuStock } from './inventory-ledger.service.js'
 import { formatLocationDeductions, reconcileSkuLocationStockTransitions } from './sku-location-stock.service.js'
@@ -80,6 +85,8 @@ import {
 import { runExclusive } from '../redis/redis-lease.js'
 import { readSharedCacheRaw, sharedCacheKey, writeSharedCacheRaw } from '../redis/redis-cache.js'
 import { prepareProductThumbnailIndex, resolveProductThumbnailUrl } from '../utils/product-thumbnail.js'
+import { allocateUtcDailyDeliveryNo } from './inventory-sequence.service.js'
+import { applyReturnToOutboundOrders, lockReturnOutboundOrders } from './o2o-return-outbound.service.js'
 
 /** 部门单到店取货时间允许的过去容差：覆盖客户端时钟偏差与提交网络耗时。 */
 const O2O_PICKUP_AT_PAST_TOLERANCE_MS = 5 * 60 * 1000
@@ -287,10 +294,18 @@ export interface O2oMallProductView {
 
 export interface O2oMallStorefrontView {
   businessHoursText: string
+  pickupAddress: string
   mallAnnouncementText: string
   /** 部门单到店取货时间可选窗口（小时）：开启自动取消时等于自动取消时长，未开启为 null。 */
   pickupWindowHours: number | null
 }
+
+const buildMallStorefront = (rules: O2oRuleConfigRecord): O2oMallStorefrontView => ({
+  businessHoursText: rules.storeBusinessHoursText,
+  pickupAddress: rules.storePickupAddress,
+  mallAnnouncementText: rules.mallAnnouncementText,
+  pickupWindowHours: rules.autoCancelEnabled ? rules.autoCancelHours : null,
+})
 
 export interface O2oMallProductsView {
   list: O2oMallProductView[]
@@ -316,9 +331,30 @@ const isDatabaseFlagEnabled = (value: unknown): boolean => {
   return value !== false && value !== 0 && value !== '0' && value !== 'false'
 }
 
+export const CLIENT_ORDER_SEARCH_MODES = ['contains', 'prefix', 'exact'] as const
+type ClientOrderSearchMode = (typeof CLIENT_ORDER_SEARCH_MODES)[number]
+type ClientOrderIdentifierSearch = { mode: ClientOrderSearchMode; terms: readonly string[] }
+
+const CLIENT_ORDER_TYPE_SEARCH_TERMS = {
+  department: ['部门订', '部门', 'department'],
+  walkin: ['散客', 'walkin', 'walk in'],
+} as const
+
+const buildClientOrderSearchPattern = (keyword: string, mode: ClientOrderSearchMode) => {
+  if (mode === 'exact') return escapeSqlLikePattern(keyword)
+  return mode === 'prefix' ? buildSqlLikePrefix(keyword) : buildSqlLikeContains(keyword)
+}
+
+const matchesClientOrderSearchTerm = (value: string, term: string, mode: ClientOrderSearchMode) => {
+  const text = value.trim().toLowerCase()
+  if (mode === 'exact') return text === term
+  return mode === 'prefix' ? text.startsWith(term) : text.includes(term)
+}
+
 export interface MyOrderListQuery {
   status?: 'pending' | 'verified' | 'cancelled'
   keyword?: string
+  searchMode?: ClientOrderSearchMode
   page: number
   pageSize: number
 }
@@ -458,11 +494,7 @@ export interface O2oPreorderDetailView {
     totalQty: number
     totalItemCount: number
   }
-  storefront: {
-    businessHoursText: string
-    mallAnnouncementText: string
-    pickupWindowHours: number | null
-  }
+  storefront: O2oMallStorefrontView
   qrPayload: string
 }
 
@@ -510,12 +542,11 @@ export const O2O_RETURN_REASON_MAX_LENGTH = 500
 export const O2O_RETURN_REJECT_REASON_MAX_LENGTH = 500
 export const O2O_PICKUP_CONTACT_MAX_LENGTH = 32
 
-const LIKE_ESCAPE_CHAR = String.raw`\\`
-const LIKE_SPECIAL_CHAR_PATTERN = /[%_\\]/g
 const O2O_TIMEOUT_RECYCLE_RECENT_WINDOW_MS = 15 * 1000
 const O2O_TIMEOUT_BACKGROUND_RECYCLE_INTERVAL_MS = 60 * 1000
 const O2O_TIMEOUT_RECYCLE_BATCH_SIZE = 20
 const O2O_TIMEOUT_RECYCLE_MAX_BATCHES = 5
+const O2O_TIMEOUT_RECYCLE_MYSQL_ATTEMPTS = 3
 // L1 只保留“目录 + 门店配置”两个固定槽位，因此内存占用有明确上界。
 const O2O_MALL_CATALOG_FRESH_TTL_MS = 2_000
 const O2O_MALL_CATALOG_STALE_TTL_MS = 30_000
@@ -523,9 +554,11 @@ const O2O_MALL_STOREFRONT_FRESH_TTL_MS = 5_000
 const O2O_MALL_STOREFRONT_STALE_TTL_MS = 60_000
 // 销量是展示统计，不参与下单正确性；单独缓存以避免反复扫描全部历史核销明细。
 const O2O_MALL_SOLD_QTY_TTL_MS = 60_000
+const O2O_MALL_REFRESH_ATTEMPTS = 2
 
 const canViewSystemNo = (actor?: Pick<AuthUserContext, 'role'>): boolean => actor?.role === 'admin'
 const MYSQL_IDEMPOTENT_TRANSACTION_MAX_ATTEMPTS = 3
+const waitForMysqlTransactionRetry = (attempt: number) => delay(25 * (2 ** (attempt - 1)) + Math.floor(Math.random() * 25))
 
 class O2oPreorderService {
   private readonly productRepo = AppDataSource.getRepository(BaseProduct)
@@ -551,6 +584,7 @@ class O2oPreorderService {
   private mallSoldQtyRefreshInFlight: Promise<{ key: string; revision: number; data: Map<string, number> }> | null = null
 
   constructor() {
+    subscribeMallCatalogRemoteInvalidation(() => this.invalidateMallSoldQtyCache())
     databaseOperationGate.registerWorker({
       name: 'o2o-timeout-recycle',
       pause: () => this.pauseTimeoutRecycleLoop(),
@@ -580,11 +614,7 @@ class O2oPreorderService {
         if (attempt >= maxAttempts || !isRetryableMysqlTransactionError(error)) {
           throw error
         }
-        const baseDelayMs = 25 * (2 ** (attempt - 1))
-        const jitterMs = Math.floor(Math.random() * 25)
-        await new Promise<void>((resolve) => {
-          setTimeout(resolve, baseDelayMs + jitterMs)
-        })
+        await waitForMysqlTransactionRetry(attempt)
       }
     }
     throw new Error('下单事务重试次数已耗尽')
@@ -676,9 +706,12 @@ class O2oPreorderService {
       this.hasPreorderItemSnapshotValue(item.unitPrice)
         ? this.normalizeDecimalText(item.unitPrice)
         : calculateDiscountedPrice(originalPrice, discountRate)
-    const fallbackLineAmount = formatMoneyFromCents(parseMoneyToCents(unitPrice) * Math.max(0, Number(item.qty ?? 0)))
+    const remainingQty = Math.max(0, Number(item.qty ?? 0))
+    const unitPriceCents = parseMoneyToCents(unitPrice)
+    const fallbackLineAmount = formatMoneyFromCents(unitPriceCents * remainingQty)
+    // 历史退货可能已减数量但未写回行金额；有单价快照时按当前件数展示。
     const lineAmount =
-      this.hasPreorderItemSnapshotValue(item.lineAmount)
+      remainingQty > 0 && parseMoneyToCents(item.unitPrice) === 0 && this.hasPreorderItemSnapshotValue(item.lineAmount)
         ? this.normalizeDecimalText(item.lineAmount)
         : fallbackLineAmount
     return {
@@ -1171,21 +1204,6 @@ class O2oPreorderService {
     return stockPreferredSkus[0] ?? candidateSkus[0] ?? sortedActiveSkus[0] ?? null
   }
 
-  private async generateReturnRequestNo(manager = AppDataSource.manager): Promise<string> {
-    // 退货申请单号采用独立前缀，便于核销台与线下门店快速区分“取货码 / 退货码”。
-    const dateText = new Date().toISOString().slice(0, 10).replaceAll('-', '')
-    const prefix = `RO${dateText}`
-    const raw = await manager
-      .getRepository(O2oReturnRequest)
-      .createQueryBuilder('returnRequest')
-      .select('returnRequest.returnNo', 'returnNo')
-      .where('returnRequest.returnNo LIKE :prefix', { prefix: `${prefix}%` })
-      .orderBy('returnRequest.returnNo', 'DESC')
-      .getRawOne<{ returnNo?: string }>()
-    const current = raw?.returnNo ? Number.parseInt(raw.returnNo.slice(prefix.length), 10) || 0 : 0
-    return `${prefix}${String(current + 1).padStart(4, '0')}`
-  }
-
   private resolveCancelledOrderReason(
     order: Pick<O2oPreorder, 'status' | 'cancelReason'>,
   ): O2oPreorderCancelReason | null {
@@ -1408,13 +1426,12 @@ class O2oPreorderService {
       lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
     })
     if (!outboundOrder) {
-      return
+      return false
     }
     const outboundOrderId = String(outboundOrder.id)
     const metadata = (await orderMergeService.getMetadataMap([outboundOrderId], manager)).get(outboundOrderId)
     if (!metadata || metadata.role === 'standalone') {
-      await this.applyOutboundOrderComplianceFlags(manager, outboundOrder, payload)
-      return
+      return this.applyOutboundOrderComplianceFlags(manager, outboundOrder, payload)
     }
     if (!payload.allowMergeMemberMutation) {
       throw new BizError('合并成员禁止修改合规状态', 409)
@@ -1488,13 +1505,16 @@ class O2oPreorderService {
         ? preorders.some((preorder) => Boolean(preorder.isSystemApplied))
         : undefined,
     })
+    let changed = false
     for (const [affectedOrder, complianceFlags] of [...updates.entries()]
       .sort(([left], [right]) => String(left.id).localeCompare(String(right.id)))) {
-      await this.applyOutboundOrderComplianceFlags(manager, affectedOrder, {
+      const updated = await this.applyOutboundOrderComplianceFlags(manager, affectedOrder, {
         ...payload,
         ...complianceFlags,
       })
+      changed = changed || updated
     }
+    return changed
   }
 
   private async applyOutboundOrderComplianceFlags(
@@ -1533,7 +1553,7 @@ class O2oPreorderService {
       && beforeSnapshot.hasCustomerOrder === Boolean(outboundOrder.hasCustomerOrder)
       && beforeSnapshot.isSystemApplied === Boolean(outboundOrder.isSystemApplied)
     ) {
-      return
+      return false
     }
     outboundOrder.editVersion = beforeSnapshot.editVersion + 1
     await outboundOrderRepo.save(outboundOrder)
@@ -1561,6 +1581,7 @@ class O2oPreorderService {
       ipAddress: null,
       userAgent: null,
     })
+    return true
   }
 
   // 详细注释：客户端展示正式出库单号时，不能再直接复用 O2O 预订单号。
@@ -1679,12 +1700,13 @@ class O2oPreorderService {
   // - 已撤单、超时的预订单不再对外展示预留号，但号本身继续占用；
   // - 命中后以预订单 ID 为键，便于前端页面继续保留原订单实体，同时替换展示单号。
   private async resolveCustomerOrderIdentifierMap(
-    preorderIds: string[],
+    orders: Pick<O2oPreorder, 'id' | 'status' | 'reservedBusinessNo'>[],
     manager: EntityManager = AppDataSource.manager,
   ) {
-    if (!preorderIds.length) {
+    if (!orders.length) {
       return new Map<string, CustomerOrderIdentifiers>()
     }
+    const preorderIds = orders.map((order) => String(order.id))
     const outboundOrders = await manager.getRepository(BizOutboundOrder).find({
       select: ['id', 'sourceDocId', 'systemNo', 'businessNo'],
       where: {
@@ -1726,11 +1748,8 @@ class O2oPreorderService {
         originalBusinessNo: outboundOrder.businessNo?.trim() || '',
       })
     })
-    const reservedPreorders = await manager.getRepository(O2oPreorder).find({
-      select: ['id', 'reservedBusinessNo'],
-      where: { id: In(preorderIds), status: 'pending', reservedBusinessNo: Not(IsNull()) },
-    })
-    reservedPreorders.forEach((preorder) => {
+    orders.forEach((preorder) => {
+      if (preorder.status !== 'pending') return
       const reservedBusinessNo = preorder.reservedBusinessNo?.trim()
       if (!reservedBusinessNo || customerOrderIdentifierMap.has(String(preorder.id))) return
       customerOrderIdentifierMap.set(String(preorder.id), {
@@ -1750,7 +1769,7 @@ class O2oPreorderService {
     if (!normalizedKeyword) {
       return []
     }
-    const escapedKeyword = this.escapeLikeKeyword(normalizedKeyword)
+    const keywordPrefix = buildSqlLikePrefix(normalizedKeyword)
     const rows = await AppDataSource.getRepository(BizOutboundOrder)
       .createQueryBuilder('outboundOrder')
       .select([
@@ -1763,11 +1782,11 @@ class O2oPreorderService {
         new Brackets((numberQb) => {
           numberQb
             .where('outboundOrder.businessNo = :businessNoExact', { businessNoExact: normalizedKeyword })
-            .orWhere(String.raw`outboundOrder.businessNo LIKE :businessNoPrefix ESCAPE '\'`, { businessNoPrefix: `${escapedKeyword}%` })
+            .orWhere(`outboundOrder.businessNo LIKE :businessNoPrefix ESCAPE '!'`, { businessNoPrefix: keywordPrefix })
           if (exposeSystemNo) {
             numberQb
               .orWhere('outboundOrder.systemNo = :showNoExact', { showNoExact: normalizedKeyword })
-              .orWhere(String.raw`outboundOrder.systemNo LIKE :showNoPrefix ESCAPE '\'`, { showNoPrefix: `${escapedKeyword}%` })
+              .orWhere(`outboundOrder.systemNo LIKE :showNoPrefix ESCAPE '!'`, { showNoPrefix: keywordPrefix })
           }
         }),
       )
@@ -1799,7 +1818,7 @@ class O2oPreorderService {
       .createQueryBuilder('preorder')
       .select('preorder.id', 'preorderId')
       .where('preorder.status = :status', { status: 'pending' })
-      .andWhere(String.raw`preorder.reservedBusinessNo LIKE :reservedPrefix ESCAPE '\'`, { reservedPrefix: `${escapedKeyword}%` })
+      .andWhere(`preorder.reservedBusinessNo LIKE :reservedPrefix ESCAPE '!'`, { reservedPrefix: keywordPrefix })
       .getRawMany<{ preorderId: string }>()
     reservedRows.forEach((row) => preorderIdSet.add(String(row.preorderId).trim()))
     return [...preorderIdSet]
@@ -1823,14 +1842,6 @@ class O2oPreorderService {
       throw new BizError(`${fieldName}格式不正确`, 400)
     }
     return parsed
-  }
-
-  /**
-   * 对 LIKE 条件中的关键字做转义，避免把用户输入的 % / _ 误解为通配符。
-   * 这里使用 ESCAPE '\'，可同时兼容 MySQL 与 SQLite。
-   */
-  private escapeLikeKeyword(value: string) {
-    return value.replaceAll(LIKE_SPECIAL_CHAR_PATTERN, `${LIKE_ESCAPE_CHAR}$&`)
   }
 
   // 详细注释：客户端订单列表的“归属关键词”允许用户输入中文或英文习惯称呼。
@@ -2117,7 +2128,7 @@ class O2oPreorderService {
   ): Promise<O2oPreorderDetailView> {
     const id = String(order.id)
     const clientPreorderUpdateLimit = await this.getClientPreorderUpdateLimit(manager)
-    const customerOrderIdentifierMap = await this.resolveCustomerOrderIdentifierMap([id], manager)
+    const customerOrderIdentifierMap = await this.resolveCustomerOrderIdentifierMap([order], manager)
     const customerOrderNumbers = customerOrderIdentifierMap.get(id) ?? null
     const customerOrderSystemNo = customerOrderNumbers?.systemNo ?? null
     const customerOrderBusinessNo = customerOrderNumbers?.businessNo ?? null
@@ -2251,11 +2262,7 @@ class O2oPreorderService {
         totalQty: order.totalQty,
         totalItemCount: normalizedItems.length,
       },
-      storefront: {
-        businessHoursText: o2oRules.storeBusinessHoursText,
-        mallAnnouncementText: o2oRules.mallAnnouncementText,
-        pickupWindowHours: o2oRules.autoCancelEnabled ? o2oRules.autoCancelHours : null,
-      },
+      storefront: buildMallStorefront(o2oRules),
       qrPayload: `y-link://o2o/verify/${order.verifyCode}`,
     }
   }
@@ -2317,7 +2324,12 @@ class O2oPreorderService {
       .createQueryBuilder('item')
       .leftJoin('item.product', 'product')
       .select('item.orderId', 'orderId')
-      .addSelect('SUM(CASE WHEN COALESCE(item.lineAmount, 0) > 0 THEN item.lineAmount ELSE item.qty * COALESCE(item.unitPrice, product.defaultPrice, 0) END)', 'totalAmount')
+      .addSelect(`SUM(CASE
+        WHEN item.qty <= 0 THEN 0
+        WHEN item.unitPrice > 0 THEN (item.qty * item.unitPrice)
+        WHEN item.lineAmount > 0 THEN (item.lineAmount)
+        ELSE item.qty * COALESCE(item.unitPrice, product.defaultPrice, 0)
+      END)`, 'totalAmount')
       .where('item.orderId IN (:...orderIds)', { orderIds })
       .groupBy('item.orderId')
       .getRawMany<{ orderId: string; totalAmount: O2oNumericLike }>()
@@ -2426,6 +2438,7 @@ class O2oPreorderService {
     name: string,
     ttlMs: number,
     build: () => Promise<T>,
+    canPublish: () => boolean = () => true,
   ): Promise<O2oPublicJsonSnapshot<T>> {
     const clusterRevision = await readMallCatalogClusterRevision()
     if (clusterRevision === null) return this.createPublicJsonSnapshot(await build())
@@ -2442,7 +2455,7 @@ class O2oPreorderService {
       }
     }
     const snapshot = this.createPublicJsonSnapshot(await build())
-    void writeSharedCacheRaw(key, snapshot.responseBody, ttlMs)
+    if (canPublish()) void writeSharedCacheRaw(key, snapshot.responseBody, ttlMs)
     return snapshot
   }
 
@@ -2455,9 +2468,13 @@ class O2oPreorderService {
     this.mallProductsCache = null
     this.mallStorefrontCache = null
     if (options?.soldQtyChanged) {
-      this.mallSoldQtyRevision = this.mallSoldQtyRevision >= Number.MAX_SAFE_INTEGER ? 1 : this.mallSoldQtyRevision + 1
-      this.mallSoldQtyCache = null
+      this.invalidateMallSoldQtyCache()
     }
+  }
+
+  private invalidateMallSoldQtyCache(): void {
+    this.mallSoldQtyRevision = this.mallSoldQtyRevision >= Number.MAX_SAFE_INTEGER ? 1 : this.mallSoldQtyRevision + 1
+    this.mallSoldQtyCache = null
   }
 
   private async resolveProductSoldQtyMap(productIds: string[]): Promise<Map<string, number>> {
@@ -2466,57 +2483,46 @@ class O2oPreorderService {
     }
 
     const cacheKey = [...productIds].map(String).sort().join(',')
-    const revision = this.mallSoldQtyRevision
-    const now = Date.now()
-    if (
-      this.mallSoldQtyCache?.key === cacheKey
-      && this.mallSoldQtyCache.revision === revision
-      && this.mallSoldQtyCache.expiresAt > now
-    ) {
-      return this.mallSoldQtyCache.data
-    }
-    if (this.mallSoldQtyRefreshInFlight) {
-      const activeResult = await this.mallSoldQtyRefreshInFlight
-      if (activeResult.key === cacheKey && activeResult.revision === revision) {
-        return activeResult.data
+    for (let attempt = 0; attempt < O2O_MALL_REFRESH_ATTEMPTS; attempt += 1) {
+      const revision = this.mallSoldQtyRevision
+      const cached = this.mallSoldQtyCache
+      if (cached?.key === cacheKey && cached.revision === revision && cached.expiresAt > Date.now()) {
+        return cached.data
       }
-      return this.resolveProductSoldQtyMap(productIds)
-    }
 
-    const refresh = (async () => {
-      const soldRows = await this.preorderItemRepo
-        .createQueryBuilder('item')
-        .leftJoin('item.order', 'preorder')
-        .select('item.productId', 'productId')
-        .addSelect('SUM(item.qty)', 'soldQty')
-        .where('item.productId IN (:...productIds)', { productIds })
-        .andWhere('preorder.status = :status', { status: 'verified' })
-        .groupBy('item.productId')
-        .getRawMany<{ productId: string; soldQty: O2oNumericLike }>()
-
-      // 退货核销会同步扣减原预订单明细 qty，因此已核销订单明细本身就是净销量。
-      const data = new Map(
-        soldRows.map((item) => [
-          String(item.productId),
-          Math.max(0, Number(item.soldQty ?? 0)),
-        ]),
-      )
-      this.mallSoldQtyCache = {
-        key: cacheKey,
-        revision,
-        expiresAt: Date.now() + O2O_MALL_SOLD_QTY_TTL_MS,
-        data,
+      if (!this.mallSoldQtyRefreshInFlight) {
+        const refresh = this.queryProductSoldQty(productIds)
+          .then((data) => {
+            if (this.mallSoldQtyRevision === revision) {
+              this.mallSoldQtyCache = { key: cacheKey, revision, expiresAt: Date.now() + O2O_MALL_SOLD_QTY_TTL_MS, data }
+            }
+            return { key: cacheKey, revision, data }
+          })
+          .finally(() => {
+            if (this.mallSoldQtyRefreshInFlight === refresh) this.mallSoldQtyRefreshInFlight = null
+          })
+        this.mallSoldQtyRefreshInFlight = refresh
       }
-      return { key: cacheKey, revision, data }
-    })()
-    this.mallSoldQtyRefreshInFlight = refresh
-    try {
-      return (await refresh).data
-    } finally {
-      if (this.mallSoldQtyRefreshInFlight === refresh) {
-        this.mallSoldQtyRefreshInFlight = null
-      }
+      const result = await this.mallSoldQtyRefreshInFlight
+      if (result.key === cacheKey && result.revision === this.mallSoldQtyRevision) return result.data
     }
+    // 连续换代时不让一次请求长期持有回源资源，也不把旧销量写入新目录。
+    throw new BizError('商城销量更新中，请稍后重试', 503)
+  }
+
+  private async queryProductSoldQty(productIds: string[]): Promise<Map<string, number>> {
+    const soldRows = await this.preorderItemRepo
+      .createQueryBuilder('item')
+      .leftJoin('item.order', 'preorder')
+      .select('item.productId', 'productId')
+      .addSelect('SUM(item.qty)', 'soldQty')
+      .where('item.productId IN (:...productIds)', { productIds })
+      .andWhere('preorder.status = :status', { status: 'verified' })
+      .groupBy('item.productId')
+      .getRawMany<{ productId: string; soldQty: O2oNumericLike }>()
+
+    // 退货核销会扣减原预订单明细 qty，已核销明细表示净销量。
+    return new Map(soldRows.map((item) => [String(item.productId), Math.max(0, Number(item.soldQty ?? 0))]))
   }
 
   /**
@@ -2530,6 +2536,7 @@ class O2oPreorderService {
       nowMs?: number
       matchedKeyword?: string
       exposeSystemNo?: boolean
+      clientIdentifierSearch?: ClientOrderIdentifierSearch
     },
   ): Promise<O2oPreorderSummaryView[]> {
     if (!orders.length) {
@@ -2538,7 +2545,7 @@ class O2oPreorderService {
     const orderIds = orders.map((item) => String(item.id))
     const nowMs = options?.nowMs ?? Date.now()
     const exposeSystemNo = options?.exposeSystemNo !== false
-    const customerOrderIdentifierMap = await this.resolveCustomerOrderIdentifierMap(orderIds)
+    const customerOrderIdentifierMap = await this.resolveCustomerOrderIdentifierMap(orders)
     const totalAmountMap = await this.resolveOrderTotalAmountMap(orderIds)
     const returnRequestCountMap = await this.resolveOrderReturnRequestCountMap(orderIds)
     const latestReturnRequestMap = await this.resolveLatestReturnRequestSummaryMap(orderIds)
@@ -2549,6 +2556,7 @@ class O2oPreorderService {
         customerOrderNumbers,
         options?.matchedKeyword,
         exposeSystemNo,
+        options?.clientIdentifierSearch,
       )
       return {
       statusReport: this.resolveOrderStatusReport(item, nowMs),
@@ -2592,9 +2600,10 @@ class O2oPreorderService {
     customerOrderNumbers: CustomerOrderIdentifiers | null,
     keyword?: string,
     exposeSystemNo = true,
+    clientSearch?: ClientOrderIdentifierSearch,
   ): Pick<O2oPreorderSummaryView, 'matchedIdentifierType' | 'matchedIdentifierValue'> {
     const normalizedKeyword = keyword?.trim().toLowerCase() ?? ''
-    if (!normalizedKeyword) return { matchedIdentifierType: null, matchedIdentifierValue: null }
+    if (!normalizedKeyword && !clientSearch?.terms.length) return { matchedIdentifierType: null, matchedIdentifierValue: null }
     const candidates = [
       ['preorderNo', preorder.preorderNo],
       ['businessNo', customerOrderNumbers?.businessNo ?? null],
@@ -2602,7 +2611,11 @@ class O2oPreorderService {
       ['businessNo', customerOrderNumbers?.originalBusinessNo ?? null],
       ...(exposeSystemNo ? [['systemNo', customerOrderNumbers?.originalSystemNo ?? null] as const] : []),
     ] as const
-    const matched = candidates.find(([, value]) => value?.toLowerCase().includes(normalizedKeyword))
+    const matched = candidates.find(([, value]) => value && (
+      clientSearch
+        ? clientSearch.terms.some((term) => matchesClientOrderSearchTerm(value, term, clientSearch.mode))
+        : value.toLowerCase().includes(normalizedKeyword)
+    ))
     return matched
       ? { matchedIdentifierType: matched[0], matchedIdentifierValue: matched[1] }
       : { matchedIdentifierType: null, matchedIdentifierValue: null }
@@ -2627,7 +2640,7 @@ class O2oPreorderService {
   private async buildMallProductsUncached(): Promise<O2oMallProductsView> {
     // 商城端只暴露“可售且已上架”的商品，并把库存口径统一换算成前端直接可用的 availableStock。
     // 同时把允许对客户端公开的门店展示配置一并返回，避免客户端误调后台系统配置接口。
-    const o2oRules = await systemConfigService.getO2oRuleConfigs()
+    const o2oRules = await systemConfigService.readCurrentO2oRuleConfigs()
     const products = await this.productRepo.find({
       select: {
         id: true,
@@ -2649,11 +2662,7 @@ class O2oPreorderService {
     if (!products.length) {
       return {
         list: [],
-        storefront: {
-          businessHoursText: o2oRules.storeBusinessHoursText,
-          mallAnnouncementText: o2oRules.mallAnnouncementText,
-          pickupWindowHours: o2oRules.autoCancelEnabled ? o2oRules.autoCancelHours : null,
-        },
+        storefront: buildMallStorefront(o2oRules),
       }
     }
 
@@ -2770,68 +2779,66 @@ class O2oPreorderService {
           skus: skuViews,
         }
       }),
-      storefront: {
-        businessHoursText: o2oRules.storeBusinessHoursText,
-        mallAnnouncementText: o2oRules.mallAnnouncementText,
-        pickupWindowHours: o2oRules.autoCancelEnabled ? o2oRules.autoCancelHours : null,
-      },
+      storefront: buildMallStorefront(o2oRules),
     }
   }
 
-  private async loadMallStorefrontConfig(): Promise<O2oMallStorefrontView> {
-    const o2oRules = await systemConfigService.getO2oRuleConfigs()
-    return {
-      businessHoursText: o2oRules.storeBusinessHoursText,
-      mallAnnouncementText: o2oRules.mallAnnouncementText,
-      pickupWindowHours: o2oRules.autoCancelEnabled ? o2oRules.autoCancelHours : null,
-    }
+  async readCurrentMallStorefrontConfig(): Promise<O2oMallStorefrontView> {
+    const o2oRules = await systemConfigService.readCurrentO2oRuleConfigs()
+    return buildMallStorefront(o2oRules)
   }
 
   async getMallProductsPublicSnapshot(): Promise<O2oPublicJsonSnapshot<O2oMallProductsView>> {
-    const now = Date.now()
-    const revision = readMallCatalogRevision()
-    const cached = this.mallProductsCache
-    if (cached?.revision === revision && cached.freshUntil > now) {
-      return cached.snapshot
-    }
+    for (let attempt = 0; attempt < O2O_MALL_REFRESH_ATTEMPTS; attempt += 1) {
+      const now = Date.now()
+      const revision = readMallCatalogRevision()
+      const cached = this.mallProductsCache
+      if (cached?.revision === revision && cached.freshUntil > now) {
+        return cached.snapshot
+      }
 
-    if (this.mallProductsRefreshInFlight && this.mallProductsRefreshRevision !== revision) {
-      // 写事务可能在旧刷新进行中提交；先等待旧查询退出，再按新修订号重建，绝不把旧快照当作提交后结果返回。
-      await this.mallProductsRefreshInFlight.catch(() => undefined)
-      return this.getMallProductsPublicSnapshot()
-    }
+      if (this.mallProductsRefreshInFlight && this.mallProductsRefreshRevision !== revision) {
+        // 写事务提交后等待旧查询退出，再按新修订号共用一次刷新。
+        await this.mallProductsRefreshInFlight.catch(() => undefined)
+        continue
+      }
 
-    if (!this.mallProductsRefreshInFlight) {
-      const refreshRevision = revision
-      this.mallProductsRefreshRevision = refreshRevision
-      const refresh = (async () => {
-        try {
-          const snapshot = await this.loadSharedPublicSnapshot(
-            'mall-products',
-            O2O_MALL_CATALOG_FRESH_TTL_MS,
-            () => this.buildMallProductsUncached(),
-          )
-          this.mallProductsCache = {
-            revision: refreshRevision,
-            freshUntil: Date.now() + O2O_MALL_CATALOG_FRESH_TTL_MS,
-            staleUntil: Date.now() + O2O_MALL_CATALOG_STALE_TTL_MS,
-            snapshot,
+      if (!this.mallProductsRefreshInFlight) {
+        this.mallProductsRefreshRevision = revision
+        const isCurrent = () => readMallCatalogRevision() === revision
+        this.mallProductsRefreshInFlight = (async () => {
+          try {
+            const snapshot = await this.loadSharedPublicSnapshot(
+              // 共享快照新增自提地址后单独版本化，滚动升级期间也不会命中旧结构。
+              'mall-products-v2',
+              O2O_MALL_CATALOG_FRESH_TTL_MS,
+              () => this.buildMallProductsUncached(),
+              isCurrent,
+            )
+            if (isCurrent()) {
+              this.mallProductsCache = {
+                revision,
+                freshUntil: Date.now() + O2O_MALL_CATALOG_FRESH_TTL_MS,
+                staleUntil: Date.now() + O2O_MALL_CATALOG_STALE_TTL_MS,
+                snapshot,
+              }
+            }
+            return snapshot
+          } finally {
+            this.mallProductsRefreshInFlight = null
+            this.mallProductsRefreshRevision = null
           }
-          return snapshot
-        } finally {
-          this.mallProductsRefreshInFlight = null
-          this.mallProductsRefreshRevision = null
-        }
-      })()
-      this.mallProductsRefreshInFlight = refresh
-    }
+        })()
+      }
 
-    // 同一修订号的旧快照可在后台刷新期间短暂复用，避免 TTL 边界瞬间击穿数据库。
-    if (cached?.revision === revision && cached.staleUntil > now) {
-      void this.mallProductsRefreshInFlight.catch(() => undefined)
-      return cached.snapshot
+      // 同一修订号的旧快照可在后台刷新期间短暂复用，避免 TTL 边界瞬间击穿数据库。
+      if (cached?.revision === revision && cached.staleUntil > now) {
+        void this.mallProductsRefreshInFlight.catch(() => undefined)
+        return cached.snapshot
+      }
+      return this.mallProductsRefreshInFlight
     }
-    return this.mallProductsRefreshInFlight
+    throw new BizError('商城目录更新中，请稍后重试', 503)
   }
 
   async listMallProducts(): Promise<O2oMallProductsView> {
@@ -2857,9 +2864,9 @@ class O2oPreorderService {
       const refresh = (async () => {
         try {
           const snapshot = await this.loadSharedPublicSnapshot(
-            'mall-storefront',
+            'mall-storefront-v2',
             O2O_MALL_STOREFRONT_FRESH_TTL_MS,
-            () => this.loadMallStorefrontConfig(),
+            () => this.readCurrentMallStorefrontConfig(),
           )
           this.mallStorefrontCache = {
             revision: refreshRevision,
@@ -3122,6 +3129,7 @@ class O2oPreorderService {
             clientRequestHash,
             verifyCode: randomUUID(),
             status: 'pending',
+            businessStatus: 'awaiting_shipment',
             clientOrderType: normalizedClientOrderType,
             departmentNameSnapshot,
             staffNoSnapshot,
@@ -3717,6 +3725,96 @@ class O2oPreorderService {
     return result.detail
   }
 
+  private applyMyOrderKeyword(
+    queryBuilder: SelectQueryBuilder<O2oPreorder>,
+    keyword: string,
+    searchMode?: ClientOrderSearchMode,
+  ): ClientOrderIdentifierSearch {
+    const identifierMode = searchMode ?? 'prefix'
+    const textMode = searchMode ?? 'contains'
+    const words = searchMode === 'contains' ? [...new Set(keyword.split(/\s+/))] : [keyword]
+    const isMysql = AppDataSource.options.type === 'mysql'
+    const lowerCaseCollation = isMysql ? ' COLLATE utf8mb4_bin' : ''
+    const like = (column: string, parameter: string) => {
+      const field = searchMode ? `LOWER(${column})${lowerCaseCollation}` : column
+      // 字段与搜索词都由数据库处理大小写，保留 SQLite 无法折叠的 Unicode 原字。
+      const pattern = searchMode ? `LOWER(:${parameter})` : `:${parameter}`
+      return `${field} LIKE ${pattern} ESCAPE '!'`
+    }
+
+    // 同一来源预订单可见自己的原始业务号和有效父单的业务号，不搜索技术单号。
+    const visibleOutbound = queryBuilder.subQuery().select('1')
+      .from(BizOutboundOrder, 'sourceOrder')
+      .leftJoin(OrderMergeRelation, 'mergeLink', 'mergeLink.sourceOrderId = sourceOrder.id')
+      .leftJoin(BizOutboundOrder, 'parentOrder', 'parentOrder.id = mergeLink.parentOrderId AND parentOrder.isDeleted = :isDeleted')
+      .where("sourceOrder.sourceDocType = 'o2o_preorder' AND sourceOrder.sourceDocId = order.id")
+      .andWhere('sourceOrder.isDeleted = :isDeleted')
+      .andWhere("TRIM(sourceOrder.systemNo) <> ''")
+      .andWhere('(mergeLink.id IS NULL OR parentOrder.id IS NOT NULL)')
+
+    const visibleItem = queryBuilder.subQuery().select('1')
+      .from(O2oPreorderItem, 'searchItem')
+      .leftJoin(BaseProduct, 'searchProduct', 'searchProduct.id = searchItem.productId')
+      .where('searchItem.orderId = order.id')
+    const hasItem = queryBuilder.subQuery().select('1')
+      .from(O2oPreorderItem, 'existingItem')
+      .where('existingItem.orderId = order.id')
+    // 与详情一致，只在无明细且有数量的历史订单上走按预订单编号索引的流水兜底。
+    // MySQL 将数字主键转换成 ASCII 文本，由 ref_id 列决定比较的 Unicode 排序规则。
+    const orderIdText = isMysql ? 'CAST(order.id AS CHAR CHARACTER SET ascii)' : 'CAST(order.id AS CHAR)'
+    const legacyProduct = queryBuilder.subQuery().select('1')
+      .from(InventoryLog, 'holdLog')
+      .innerJoin(BaseProduct, 'heldProduct', 'heldProduct.id = holdLog.productId')
+      .where(`holdLog.refType = 'o2o_preorder' AND holdLog.refId = ${orderIdText} AND holdLog.changeType = 'preorder_hold'`)
+
+    words.forEach((word, index) => {
+      const idPattern = `clientOrderIdPattern${index}`
+      const textPattern = `clientOrderTextPattern${index}`
+      const verifyPattern = `clientOrderVerifyPattern${index}`
+      const compactVerifyPattern = `clientOrderCompactVerifyPattern${index}`
+      const typePattern = `clientOrderTypeValues${index}`
+      const matchingOutbound = visibleOutbound.clone().andWhere(
+        `(${like('TRIM(sourceOrder.businessNo)', idPattern)} OR ${like('TRIM(parentOrder.businessNo)', idPattern)})`,
+      ).getQuery()
+      const matchedTypes = searchMode
+        ? O2O_CLIENT_ORDER_TYPES.filter((type) =>
+          CLIENT_ORDER_TYPE_SEARCH_TERMS[type].some((label) => matchesClientOrderSearchTerm(label, word.toLowerCase(), searchMode)))
+        : [this.resolveClientOrderTypeByKeyword(word)].filter(Boolean)
+      queryBuilder.andWhere(new Brackets((wordQuery) => {
+        wordQuery
+          .where(like('order.preorderNo', idPattern), { [idPattern]: buildClientOrderSearchPattern(word, identifierMode) })
+          .orWhere(like('order.verifyCode', verifyPattern), {
+            [verifyPattern]: buildClientOrderSearchPattern(searchMode ? word : this.normalizeVerifyCode(word), identifierMode),
+          })
+          .orWhere(like('TRIM(order.departmentNameSnapshot)', textPattern), { [textPattern]: buildClientOrderSearchPattern(word, textMode) })
+          .orWhere(like('TRIM(order.staffNoSnapshot)', textPattern))
+          .orWhere(`EXISTS ${matchingOutbound}`)
+          .orWhere(`(order.status = 'pending' AND ${like('TRIM(order.reservedBusinessNo)', idPattern)} AND NOT EXISTS ${visibleOutbound.getQuery()})`)
+        if (matchedTypes.length) {
+          wordQuery.orWhere(`order.clientOrderType IN (:...${typePattern})`, { [typePattern]: matchedTypes })
+        }
+        if (!searchMode) return
+
+        // 核销码可按详情中的分组或无连字符输入，其他符号按字面含义处理。
+        if (/^[a-f\d]+(?:[-\s]+[a-f\d]+)*$/i.test(word)) {
+          wordQuery.orWhere(like("REPLACE(order.verifyCode, '-', '')", compactVerifyPattern), {
+            [compactVerifyPattern]: buildClientOrderSearchPattern(word.replace(/[-\s]/g, ''), searchMode),
+          })
+        }
+        const matchingItem = visibleItem.clone().andWhere(
+          `(${like('searchProduct.productName', textPattern)}
+            OR (TRIM(searchItem.specTextSnapshot) <> '默认规格' AND ${like('TRIM(searchItem.specTextSnapshot)', textPattern)})
+            OR (COALESCE(TRIM(searchItem.specTextSnapshot), '') = '' AND ${like('TRIM(searchItem.skuCodeSnapshot)', textPattern)}))`,
+        ).getQuery()
+        const matchingLegacyProduct = legacyProduct.clone()
+          .andWhere(like('heldProduct.productName', textPattern)).getQuery()
+        wordQuery.orWhere(`EXISTS ${matchingItem}`)
+          .orWhere(`(order.totalQty > 0 AND NOT EXISTS ${hasItem.getQuery()} AND EXISTS ${matchingLegacyProduct})`)
+      }))
+    })
+    return { mode: identifierMode, terms: words.map((word) => word.toLowerCase()) }
+  }
+
   async listMyOrders(auth: ClientAuthContext, query?: Partial<MyOrderListQuery>): Promise<PaginationResult<O2oPreorderSummaryView>> {
     // Timeout recycling runs in the background and on write paths; this read path stays query-only.
     const normalizedPage = Math.max(1, Number(query?.page) || 1)
@@ -3739,47 +3837,9 @@ class O2oPreorderService {
       queryBuilder.andWhere('order.status = :status', { status: normalizedStatus })
     }
 
-    if (normalizedKeyword) {
-      const escapedKeyword = this.escapeLikeKeyword(normalizedKeyword)
-      const keywordPrefix = `${escapedKeyword}%`
-      const normalizedVerifyCodeKeyword = this.normalizeVerifyCode(normalizedKeyword)
-      const escapedVerifyKeyword = this.escapeLikeKeyword(normalizedVerifyCodeKeyword)
-      const matchedClientOrderType = this.resolveClientOrderTypeByKeyword(normalizedKeyword)
-      const matchedCustomerOrderPreorderIds = await this.resolveMatchedPreorderIdsByCustomerOrderKeyword(normalizedKeyword, false)
-      const keywordContains = `%${escapedKeyword}%`
-
-      queryBuilder.andWhere(
-        new Brackets((keywordQb) => {
-          keywordQb
-            // 等值匹配优先命中 show_no / verify_code 唯一索引。
-            .where('order.preorderNo = :showNoExact', { showNoExact: normalizedKeyword })
-            .orWhere('order.verifyCode = :verifyCodeExact', { verifyCodeExact: normalizedVerifyCodeKeyword })
-            // 前缀匹配在输入单号前几位时仍可利用 B-Tree 索引。
-            .orWhere(String.raw`order.preorderNo LIKE :showNoPrefix ESCAPE '\'`, { showNoPrefix: keywordPrefix })
-            .orWhere(String.raw`order.verifyCode LIKE :verifyCodePrefix ESCAPE '\'`, {
-              verifyCodePrefix: `${escapedVerifyKeyword}%`,
-            })
-            // 部门名称是用户端“归属”常见搜索入口，允许做包含匹配覆盖历史使用习惯。
-            .orWhere(String.raw`order.departmentNameSnapshot LIKE :departmentKeyword ESCAPE '\'`, {
-              departmentKeyword: keywordContains,
-            })
-            // 工号快照已在列表卡片展示，这里必须同步纳入关键词命中，避免出现“看得到但搜不到”。
-            .orWhere(String.raw`order.staffNoSnapshot LIKE :staffNoKeyword ESCAPE '\'`, {
-              staffNoKeyword: keywordContains,
-            })
-          if (matchedCustomerOrderPreorderIds.length) {
-            keywordQb.orWhere('order.id IN (:...matchedCustomerOrderPreorderIds)', {
-              matchedCustomerOrderPreorderIds,
-            })
-          }
-          if (matchedClientOrderType) {
-            keywordQb.orWhere('order.clientOrderType = :clientOrderType', {
-              clientOrderType: matchedClientOrderType,
-            })
-          }
-        }),
-      )
-    }
+    const clientIdentifierSearch = normalizedKeyword
+      ? this.applyMyOrderKeyword(queryBuilder, normalizedKeyword, query?.searchMode)
+      : undefined
 
     const [rows, total] = await queryBuilder.getManyAndCount()
     const nowMs = Date.now()
@@ -3789,7 +3849,7 @@ class O2oPreorderService {
       total,
       list: await this.buildOrderSummaryViews(rows, {
         nowMs,
-        matchedKeyword: normalizedKeyword,
+        clientIdentifierSearch,
         exposeSystemNo: false,
       }),
     }
@@ -3861,7 +3921,7 @@ class O2oPreorderService {
       const returnRequestItemRepo = manager.getRepository(O2oReturnRequestItem)
       const savedRequest = await returnRequestRepo.save(
         returnRequestRepo.create({
-          returnNo: await this.generateReturnRequestNo(manager),
+          returnNo: await allocateUtcDailyDeliveryNo(manager, 'return'),
           orderId: String(order.id),
           clientUserId: String(auth.userId),
           verifyCode: randomUUID(),
@@ -3935,20 +3995,42 @@ class O2oPreorderService {
     const requestedPage = Math.max(1, Math.floor(Number(input.page) || 1))
     const baseQuery = await this.createConsoleOrderFilteredQuery(input, exposeSystemNo)
 
-    const statusRows = await baseQuery
-      .clone()
-      .select('order.status', 'status')
-      .addSelect('COUNT(1)', 'total')
-      .groupBy('order.status')
-      .getRawMany<{ status: string; total: O2oNumericLike }>()
-    const statusCountMap = new Map(statusRows.map((row) => [String(row.status), Number(row.total ?? 0)]))
-    const returnsCount = await this.applyConsoleOrderPoolCondition(baseQuery.clone(), 'returns').getCount()
+    // 同一请求只取一次时钟；先按数值聚合 ID，再由数据库转为字符串，避免 MySQL bigint 经 JS number 丢精度。
+    const nowMs = Date.now()
+    const idTextType = this.preorderRepo.manager.connection.options.type === 'sqlite' ? 'TEXT' : 'CHAR'
+    const aggregateQuery = baseQuery.clone()
+      .select('COUNT(1)', 'allCount')
+      .addSelect("SUM(CASE WHEN order.status = 'pending' THEN 1 ELSE 0 END)", 'pendingCount')
+      .addSelect("SUM(CASE WHEN order.status = 'verified' THEN 1 ELSE 0 END)", 'completedCount')
+      .addSelect("SUM(CASE WHEN order.status = 'cancelled' THEN 1 ELSE 0 END)", 'cancelledCount')
+      .addSelect(`CAST(MAX(order.id) AS ${idTextType})`, 'latestId')
+    if (input.sinceOrderId) {
+      aggregateQuery.addSelect(
+        'SUM(CASE WHEN order.id > :sinceOrderId AND order.status = :newOrderStatus AND order.createdAt >= :newOrderWindowStart THEN 1 ELSE 0 END)',
+        'newCount',
+      ).setParameters({
+        sinceOrderId: input.sinceOrderId,
+        newOrderStatus: 'pending',
+        newOrderWindowStart: new Date(nowMs - O2O_CONSOLE_NEW_ORDER_WINDOW_MS),
+      })
+    }
+    const aggregate = await aggregateQuery.getRawOne<{
+      allCount: O2oNumericLike; pendingCount: O2oNumericLike; completedCount: O2oNumericLike
+      cancelledCount: O2oNumericLike; latestId: string | null; newCount?: O2oNumericLike
+    }>()
+    const filteredOrders = baseQuery.clone().select('order.id', 'id')
+    const returnsAggregate = await this.returnRequestRepo
+      .createQueryBuilder('rr')
+      .innerJoin(`(${filteredOrders.getQuery()})`, 'filteredOrder', 'filteredOrder.id = rr.orderId')
+      .setParameters(filteredOrders.getParameters())
+      .select('COUNT(DISTINCT rr.orderId)', 'count')
+      .getRawOne<{ count: O2oNumericLike }>()
     const poolCounts: Record<O2oConsoleOrderPoolKey, number> = {
-      all: [...statusCountMap.values()].reduce((sum, value) => sum + value, 0),
-      pending: statusCountMap.get('pending') ?? 0,
-      completed: statusCountMap.get('verified') ?? 0,
-      cancelled: statusCountMap.get('cancelled') ?? 0,
-      returns: returnsCount,
+      all: Number(aggregate?.allCount ?? 0),
+      pending: Number(aggregate?.pendingCount ?? 0),
+      completed: Number(aggregate?.completedCount ?? 0),
+      cancelled: Number(aggregate?.cancelledCount ?? 0),
+      returns: Number(returnsAggregate?.count ?? 0),
     }
 
     const total = poolCounts[pool]
@@ -3961,24 +4043,11 @@ class O2oPreorderService {
         .getMany()
       : []
 
-    const latestRow = await baseQuery
-      .clone()
-      .select('MAX(order.id)', 'latestId')
-      .getRawOne<{ latestId: O2oNumericLike | null }>()
-    const latestOrderId = latestRow?.latestId === null || latestRow?.latestId === undefined ? null : String(latestRow.latestId)
-
-    let newOrderCount = 0
-    if (input.sinceOrderId) {
-      newOrderCount = await baseQuery
-        .clone()
-        .andWhere('order.id > :sinceOrderId', { sinceOrderId: input.sinceOrderId })
-        .andWhere('order.status = :newOrderStatus', { newOrderStatus: 'pending' })
-        .andWhere('order.createdAt >= :newOrderWindowStart', { newOrderWindowStart: new Date(Date.now() - O2O_CONSOLE_NEW_ORDER_WINDOW_MS) })
-        .getCount()
-    }
+    const latestOrderId = aggregate?.latestId ?? null
+    const newOrderCount = input.sinceOrderId ? Number(aggregate?.newCount ?? 0) : 0
 
     const list = await this.buildOrderSummaryViews(rows, {
-      nowMs: Date.now(),
+      nowMs,
       matchedKeyword: input.keyword,
       exposeSystemNo,
     })
@@ -4045,8 +4114,8 @@ class O2oPreorderService {
       queryBuilder.andWhere('order.departmentNameSnapshot = :departmentName', { departmentName: normalizedDepartmentName })
     }
     if (normalizedStaffNo) {
-      const escapedStaffNo = this.escapeLikeKeyword(normalizedStaffNo)
-      queryBuilder.andWhere(String.raw`order.staffNoSnapshot LIKE :staffNo ESCAPE '\'`, { staffNo: `%${escapedStaffNo}%` })
+      // 使用仓库统一的转义字符，避免 MySQL 字符串解析受反斜杠模式影响。
+      queryBuilder.andWhere("order.staffNoSnapshot LIKE :staffNo ESCAPE '!'", { staffNo: buildSqlLikeContains(normalizedStaffNo) })
     }
 
     if (startTime) {
@@ -4061,8 +4130,7 @@ class O2oPreorderService {
         normalizedKeyword,
         exposeSystemNo,
       )
-      const escapedKeyword = this.escapeLikeKeyword(normalizedKeyword)
-      const keyword = `%${escapedKeyword}%`
+      const keyword = buildSqlLikeContains(normalizedKeyword)
       const clientKeywordSubQuery = this.preorderRepo
         .createQueryBuilder('order_keyword_client')
         .subQuery()
@@ -4070,12 +4138,12 @@ class O2oPreorderService {
         .from(ClientUser, 'clientUser')
         .where('clientUser.id = order.clientUserId')
         .andWhere(
-          String.raw`(
-            clientUser.realName LIKE :keyword ESCAPE '\'
-            OR clientUser.mobile LIKE :keyword ESCAPE '\'
-            OR clientUser.email LIKE :keyword ESCAPE '\'
-            OR clientUser.departmentName LIKE :keyword ESCAPE '\'
-            OR clientUser.staffNo LIKE :keyword ESCAPE '\'
+          `(
+            clientUser.realName LIKE :keyword ESCAPE '!'
+            OR clientUser.mobile LIKE :keyword ESCAPE '!'
+            OR clientUser.email LIKE :keyword ESCAPE '!'
+            OR clientUser.departmentName LIKE :keyword ESCAPE '!'
+            OR clientUser.staffNo LIKE :keyword ESCAPE '!'
           )`,
         )
         .getQuery()
@@ -4086,17 +4154,17 @@ class O2oPreorderService {
         .from(O2oPreorderItem, 'item')
         .leftJoin(BaseProduct, 'product', 'product.id = item.productId')
         .where('item.orderId = order.id')
-        .andWhere(String.raw`(product.productName LIKE :keyword ESCAPE '\' OR product.productCode LIKE :keyword ESCAPE '\')`)
+        .andWhere(`(product.productName LIKE :keyword ESCAPE '!' OR product.productCode LIKE :keyword ESCAPE '!')`)
         .getQuery()
       queryBuilder.andWhere(
         new Brackets((keywordQb) => {
           keywordQb
-            .where(String.raw`order.preorderNo LIKE :keyword ESCAPE '\'`, { keyword })
-            .orWhere(String.raw`order.verifyCode LIKE :keyword ESCAPE '\'`, { keyword })
-            .orWhere(String.raw`order.remark LIKE :keyword ESCAPE '\'`, { keyword })
-            .orWhere(String.raw`order.verifiedBy LIKE :keyword ESCAPE '\'`, { keyword })
-            .orWhere(String.raw`order.departmentNameSnapshot LIKE :keyword ESCAPE '\'`, { keyword })
-            .orWhere(String.raw`order.staffNoSnapshot LIKE :keyword ESCAPE '\'`, { keyword })
+            .where(`order.preorderNo LIKE :keyword ESCAPE '!'`, { keyword })
+            .orWhere(`order.verifyCode LIKE :keyword ESCAPE '!'`, { keyword })
+            .orWhere(`order.remark LIKE :keyword ESCAPE '!'`, { keyword })
+            .orWhere(`order.verifiedBy LIKE :keyword ESCAPE '!'`, { keyword })
+            .orWhere(`order.departmentNameSnapshot LIKE :keyword ESCAPE '!'`, { keyword })
+            .orWhere(`order.staffNoSnapshot LIKE :keyword ESCAPE '!'`, { keyword })
             .orWhere(`EXISTS ${clientKeywordSubQuery}`, { keyword })
             .orWhere(`EXISTS ${itemKeywordSubQuery}`, { keyword })
           if (matchedCustomerOrderPreorderIds.length > 0) {
@@ -4160,7 +4228,8 @@ class O2oPreorderService {
   }
 
   async markCustomerOrderPrintedByClient(auth: ClientAuthContext, orderId: string) {
-    return runInTransaction(async (manager) => {
+    const { outboundChanged, ...result } = await runInTransaction(async (manager) => {
+      await lockActiveClientAccountForBusiness(manager, auth.userId)
       await this.lockLinkedOutboundOrderGroupInManager(manager, orderId)
       const orderRepo = manager.getRepository(O2oPreorder)
       const order = await orderRepo.findOne({
@@ -4177,10 +4246,11 @@ class O2oPreorderService {
         throw new BizError('已取消订单不可标记已打印', 409)
       }
       const printedNow = !order.hasCustomerOrder
+      let outboundChanged = false
       if (printedNow) {
         order.hasCustomerOrder = true
         await orderRepo.save(order)
-        await this.syncOutboundOrderComplianceFlags(manager, String(order.id), {
+        outboundChanged = await this.syncOutboundOrderComplianceFlags(manager, String(order.id), {
           hasCustomerOrder: true,
           allowMergeMemberMutation: true,
           reason: '客户端打印正式出库单',
@@ -4194,8 +4264,11 @@ class O2oPreorderService {
       return {
         detail: await this.buildOrderDetail(order, manager, false),
         printedNow,
+        outboundChanged,
       }
     })
+    if (outboundChanged) invalidateBusinessDataAfterCommit()
+    return result
   }
 
   private async runKingdeeTransaction<T>(work: (manager: EntityManager) => Promise<T>): Promise<T> {
@@ -4495,6 +4568,7 @@ class O2oPreorderService {
 
   async cancelMyOrder(auth: ClientAuthContext, id: string, requestMeta?: RequestMeta) {
     const result = await runInTransaction(async (manager) => {
+      await lockActiveClientAccountForBusiness(manager, auth.userId)
       const order = await manager.getRepository(O2oPreorder).findOne({
         where: { id, isDeleted: false },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
@@ -4775,9 +4849,9 @@ class O2oPreorderService {
       // nullable/SET NULL 只保留旧单读取能力，退货写库存必须能定位原商品下的真实 SKU。
       throw new BizError('退货明细的商品或 SKU 已失效或归属不一致，无法核销退货', 409)
     }
-    const requestQty = Math.max(0, Number(requestItem.qty ?? 0))
+    const requestQty = Number(requestItem.qty)
     const currentOrderQty = Math.max(0, Number(orderItem.qty ?? 0))
-    if (currentOrderQty < requestQty) {
+    if (!Number.isSafeInteger(requestQty) || requestQty <= 0 || currentOrderQty < requestQty) {
       throw new BizError(`商品「${product.productName}」可退数量不足，无法核销`, 409)
     }
 
@@ -4834,7 +4908,9 @@ class O2oPreorderService {
     }
 
     orderItem.qty = currentOrderQty - requestQty
+    orderItem.lineAmount = formatMoneyFromCents(orderItem.qty * parseMoneyToCents(orderItem.unitPrice))
     await manager.getRepository(O2oPreorderItem).save(orderItem)
+    return { orderItem, currentOrderQty }
   }
 
   private async verifyReturnRequestInManager(
@@ -4842,6 +4918,8 @@ class O2oPreorderService {
     returnRequest: O2oReturnRequest,
     order: O2oPreorder,
     actor: AuthUserContext,
+    outboundOrders: Awaited<ReturnType<typeof lockReturnOutboundOrders>>,
+    requestMeta?: RequestMeta,
   ): Promise<O2oVerifyResultView | null> {
     if (returnRequest.status !== 'pending') {
       if (returnRequest.status === 'rejected') {
@@ -4865,8 +4943,9 @@ class O2oPreorderService {
       returnRequest,
       order,
     )
+    const outboundChanges = new Map<O2oPreorderItem, number>()
     for (const requestItem of requestItems) {
-      await this.applyReturnVerificationForItem(
+      const { orderItem, currentOrderQty } = await this.applyReturnVerificationForItem(
         manager,
         returnRequest,
         actor,
@@ -4875,6 +4954,12 @@ class O2oPreorderService {
         productMap,
         skuMap,
       )
+      if (outboundOrders && !outboundChanges.has(orderItem)) {
+        outboundChanges.set(orderItem, currentOrderQty)
+      }
+    }
+    if (outboundOrders) {
+      await applyReturnToOutboundOrders(manager, outboundOrders, outboundChanges, returnRequest.returnNo, actor, requestMeta)
     }
 
     order.totalQty = Math.max(0, Number(order.totalQty ?? 0) - Number(returnRequest.totalQty ?? 0))
@@ -4959,10 +5044,12 @@ class O2oPreorderService {
     if (pendingReturnCount > 0) {
       throw new BizError('该订单存在待处理退货申请，请先完成退货核销后再执行取货核销', 409)
     }
-    const items = await manager.getRepository(O2oPreorderItem).find({
+    const allItems = await manager.getRepository(O2oPreorderItem).find({
       where: { orderId: String(order.id) }, order: { id: 'ASC' },
     })
-    if (!items.length || items.every((item) => Number(item.qty ?? 0) <= 0)) {
+    // 历史待取货退货保留原规格零数量行，取货和出库只处理实际剩余明细。
+    const items = allItems.filter((item) => Number(item.qty) > 0)
+    if (!items.length) {
       throw new BizError('当前订单已无可核销商品', 409)
     }
     const productIds = [...new Set(items.map((item) => String(item.productId)))]
@@ -4988,10 +5075,7 @@ class O2oPreorderService {
     const transitionLogIndexes: number[] = []
     const logRepo = manager.getRepository(InventoryLog)
     for (const row of items) {
-      const verifyQty = Math.max(0, Number(row.qty ?? 0))
-      if (verifyQty <= 0) {
-        continue
-      }
+      const verifyQty = Number(row.qty)
       const product = productMap.get(String(row.productId))
       if (!product) {
         throw new BizError('商品不存在，无法核销', 409)
@@ -5070,6 +5154,9 @@ class O2oPreorderService {
         where: { verifyCode: normalizedVerifyCode },
       })
       if (returnRequestCandidate) {
+        const outboundOrders = returnRequestCandidate.sourceOrderStatus === 'verified' && returnRequestCandidate.status === 'pending'
+          ? await lockReturnOutboundOrders(manager, String(returnRequestCandidate.orderId))
+          : null
         const order = await manager.getRepository(O2oPreorder).findOne({
           where: { id: String(returnRequestCandidate.orderId) },
           lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
@@ -5084,7 +5171,7 @@ class O2oPreorderService {
         if (!returnRequest || String(returnRequest.orderId) !== String(order.id)) {
           throw new BizError('退货申请不存在', 404)
         }
-        const detail = await this.verifyReturnRequestInManager(manager, returnRequest, order, actor)
+        const detail = await this.verifyReturnRequestInManager(manager, returnRequest, order, actor, outboundOrders, requestMeta)
         if (detail) {
           await auditService.record({
             actionType: 'o2o.return_request.verify',
@@ -5139,7 +5226,7 @@ class O2oPreorderService {
         },
       }, manager)
       return { timedOut: null, detail }
-    })
+    }, { mysqlIsolationLevel: 'READ COMMITTED' })
     this.invalidateMallReadCache({ soldQtyChanged: result.timedOut === null })
     if (result.timedOut === 'return_request') {
       throw new BizError('原订单已超时取消，退货申请无需再核销', 409)
@@ -5332,7 +5419,38 @@ class O2oPreorderService {
     }
   }
 
+  /** 候选名单不占行锁；每次试图处理一笔订单时重新取当前状态。 */
+  private async cancelTimedOutOrderById(orderId: string, cutoffMs: number): Promise<boolean> {
+    const sqlite = AppDataSource.options.type === 'sqlite'
+    const idType = sqlite ? 'INTEGER' : 'UNSIGNED'
+    const maxAttempts = sqlite ? 1 : O2O_TIMEOUT_RECYCLE_MYSQL_ATTEMPTS
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      if (databaseOperationGate.isFrozen()) return false
+      try {
+        return await runInTransaction(async (manager) => {
+          // 进入 SQLite 写队列后，维护或停机可能先于本单拿到写槽。
+          if (databaseOperationGate.isFrozen()) return false
+          const query = manager.getRepository(O2oPreorder)
+            .createQueryBuilder('order')
+            .where(`order.id = CAST(:orderId AS ${idType})`, { orderId })
+          if (!sqlite) query.setLock('pessimistic_write')
+          const order = await query.getOne()
+          if (!order || order.isDeleted || order.status !== 'pending' || !this.isOrderTimeoutReached(order, cutoffMs)) return false
+          // SQLite 实体水合可能把 64 位主键舍入，后续写入和审计沿用候选查询中的精确值。
+          order.id = orderId
+          return this.cancelTimedOutOrderInManager(manager, order)
+        })
+      } catch (error) {
+        if (attempt >= maxAttempts || !isRetryableMysqlTransactionError(error)) throw error
+        if (databaseOperationGate.isFrozen()) return false
+        await waitForMysqlTransactionRetry(attempt)
+      }
+    }
+    return false
+  }
+
   async cancelTimeoutOrders(options?: { skipRecentMs?: number }) {
+    if (databaseOperationGate.isFrozen()) return this.lastCancelTimeoutOrdersResult
     const releaseMaintenanceLease = databaseMaintenanceModeService.registerInFlightWrite()
     if (!releaseMaintenanceLease) {
       return this.lastCancelTimeoutOrdersResult
@@ -5359,43 +5477,49 @@ class O2oPreorderService {
 
       const recyclePromise = (async () => {
         let cancelledCount = 0
-        // 每批都在事务内重新读取并锁定最新状态：
-        // - MySQL 用 SKIP LOCKED 允许多个 Worker 安全分摊；
-        // - SQLite 由单写事务串行处理；
-        // - 单次最多处理 5 个小批次，避免后台任务长期占住 SQLite 写队列或 MySQL 行锁。
-        for (let batchIndex = 0; batchIndex < O2O_TIMEOUT_RECYCLE_MAX_BATCHES; batchIndex += 1) {
-          const batchResult = await runInTransaction(async (manager) => {
-            const timeoutQuery = manager.getRepository(O2oPreorder)
+        const sqlite = AppDataSource.options.type === 'sqlite'
+        const idTextType = sqlite ? 'TEXT' : 'CHAR'
+        const idParameterType = sqlite ? 'INTEGER' : 'UNSIGNED'
+        const attemptedIds: string[] = []
+        try {
+          for (let batchIndex = 0; batchIndex < O2O_TIMEOUT_RECYCLE_MAX_BATCHES; batchIndex += 1) {
+            if (databaseOperationGate.isFrozen()) break
+            const timeoutQuery = this.preorderRepo
               .createQueryBuilder('order')
+              .select(`CAST(order.id AS ${idTextType})`, 'id')
               .where('order.status = :status', { status: 'pending' })
               .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
               .andWhere('order.timeoutAt IS NOT NULL')
-              .andWhere('order.timeoutAt <= :now', { now: new Date() })
+              .andWhere('order.timeoutAt <= :now', { now: new Date(nowMs) })
               .orderBy('order.timeoutAt', 'ASC')
               .addOrderBy('order.id', 'ASC')
-              .take(O2O_TIMEOUT_RECYCLE_BATCH_SIZE)
-            if (manager.connection.options.type !== 'sqlite') {
-              timeoutQuery.setLock('pessimistic_write').setOnLocked('skip_locked')
+              .limit(O2O_TIMEOUT_RECYCLE_BATCH_SIZE)
+            if (attemptedIds.length) {
+              // 失败或状态已改变的候选本轮不重扫，避免一直占用靠前的候选名额。
+              const parameters = Object.fromEntries(attemptedIds.map((id, index) => [`attempted${index}`, id]))
+              const values = Object.keys(parameters).map((name) => `CAST(:${name} AS ${idParameterType})`).join(', ')
+              timeoutQuery.andWhere(`order.id NOT IN (${values})`, parameters)
             }
-            const lockedOrders = await timeoutQuery.getMany()
-            let batchCancelledCount = 0
-            for (const order of lockedOrders) {
-              const cancelled = await this.cancelTimedOutOrderInManager(manager, order)
-              if (cancelled) {
-                batchCancelledCount += 1
+            const candidates = await timeoutQuery.getRawMany<{ id: string }>()
+            for (const candidate of candidates) {
+              if (databaseOperationGate.isFrozen()) return { cancelledCount }
+              attemptedIds.push(candidate.id)
+              try {
+                if (await this.cancelTimedOutOrderById(candidate.id, nowMs)) cancelledCount += 1
+              } catch (error) {
+                if (error instanceof DatabaseWriteFrozenError) return { cancelledCount }
+                console.warn('[y-link-backend] 系统超时取消预订单失败', { orderId: candidate.id, ...toSafeErrorLog(error) })
               }
             }
-            return {
-              selectedCount: lockedOrders.length,
-              cancelledCount: batchCancelledCount,
-            }
-          })
-          cancelledCount += batchResult.cancelledCount
-          if (batchResult.selectedCount < O2O_TIMEOUT_RECYCLE_BATCH_SIZE) {
-            break
+            if (candidates.length < O2O_TIMEOUT_RECYCLE_BATCH_SIZE) break
+          }
+          return { cancelledCount }
+        } finally {
+          // 后续候选查询失败或冻结都不能吞掉已经独立提交的预占释放。
+          if (cancelledCount > 0) {
+            this.invalidateMallReadCache()
           }
         }
-        return { cancelledCount }
       })()
 
       this.cancelTimeoutOrdersInFlight = recyclePromise
@@ -5403,9 +5527,6 @@ class O2oPreorderService {
         const result = await recyclePromise
         this.lastCancelTimeoutOrdersAt = Date.now()
         this.lastCancelTimeoutOrdersResult = result
-        if (result.cancelledCount > 0) {
-          this.invalidateMallReadCache()
-        }
         return result
       } finally {
         if (this.cancelTimeoutOrdersInFlight === recyclePromise) {

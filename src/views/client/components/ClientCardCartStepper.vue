@@ -24,7 +24,7 @@ import { resolveProductPreviewSku, resolveSortedActivePreviewSkus } from '@/util
 
 const props = defineProps<{ product: O2oMallProduct }>()
 const emit = defineEmits<{
-  /** 加购一件：携带触发按钮，供商城页计算飞入动画起点。 */
+  /** 加购一件：携带触发按钮，供商城页定位同商品可见图片并捕获飞入动画起点。 */
   add: [source: HTMLElement | null]
   /** 减少一件：减到 0 时由购物车 store 移除该行。 */
   decrease: [itemId: string]
@@ -116,9 +116,9 @@ const handleAdd = (event: MouseEvent) => {
 
 <style scoped>
 .client-card-stepper {
-  --stepper-size: 1.95rem;
-  --stepper-width: 5.1rem;
-  --stepper-pill-width: 3.85rem;
+  --stepper-size: 1.625rem;
+  --stepper-width: 4.5rem;
+  --stepper-pill-width: 3.5rem;
   --stepper-duration: var(--ylink-motion-normal, 260ms);
   --stepper-label-fade: var(--ylink-motion-fast, 160ms);
   --stepper-label-resize: calc(var(--stepper-duration) - var(--stepper-label-fade));
@@ -170,7 +170,7 @@ const handleAdd = (event: MouseEvent) => {
 }
 
 .client-card-stepper__plus-icon {
-  font-size: 0.95rem;
+  font-size: 0.875rem;
   line-height: 1;
 }
 
@@ -199,7 +199,7 @@ const handleAdd = (event: MouseEvent) => {
   /* 背景与文字色直接引用主题变量，暗色模式自动切换。 */
   background: var(--ylink-color-surface, #ffffff);
   color: var(--ylink-color-primary-strong);
-  font-size: 1rem;
+  font-size: 0.875rem;
   font-weight: 800;
   line-height: 1;
   cursor: pointer;
@@ -222,7 +222,7 @@ const handleAdd = (event: MouseEvent) => {
   align-items: center;
   justify-content: center;
   color: var(--ylink-color-text, #0f172a);
-  font-size: 0.86rem;
+  font-size: 0.8rem;
   font-variant-numeric: tabular-nums;
   font-weight: 800;
   opacity: 0;
@@ -233,7 +233,7 @@ const handleAdd = (event: MouseEvent) => {
 }
 
 .client-card-stepper.is-expanded .client-card-stepper__plus {
-  width: var(--stepper-size);
+  width: 2rem;
 }
 
 .client-card-stepper.is-expanded .client-card-stepper__label {
@@ -323,9 +323,9 @@ const handleAdd = (event: MouseEvent) => {
 
 @media (max-width: 640px) {
   .client-card-stepper {
-    --stepper-size: 1.9rem;
-    --stepper-width: 4.9rem;
-    --stepper-pill-width: 3.7rem;
+    --stepper-size: 1.5rem;
+    --stepper-width: 4.25rem;
+    --stepper-pill-width: 3.375rem;
   }
 
   .client-card-stepper__plus,
@@ -349,12 +349,12 @@ const handleAdd = (event: MouseEvent) => {
 
 <style scoped>
 /* 命中区域立即到最终位置，只有视觉层移动，避免分裂中两个按钮相互覆盖。 */
-.client-card-stepper__plus { background: transparent; overflow: visible; transition: opacity var(--ylink-motion-fast, 160ms) ease; }
+.client-card-stepper__plus { top: calc((var(--stepper-size) - 2rem) / 2); height: 2rem; background: transparent; overflow: visible; transition: opacity var(--ylink-motion-fast, 160ms) ease; }
 /* 独立视觉层保留胶囊连续收缩；线性宽度为前160ms的完整文字留足空间，后100ms再收文字占位。 */
-.client-card-stepper__plus-visual { position: absolute; inset: 0 0 0 auto; display: inline-flex; align-items: center; justify-content: center; gap: .12rem; width: var(--stepper-pill-width); height: var(--stepper-size); overflow: hidden; border-radius: 9999px; background: var(--ylink-color-primary-strong); pointer-events: none; transition: width var(--stepper-duration) linear; }
-.client-card-stepper.is-expanded .client-card-stepper__plus-visual { width: var(--stepper-size); }
+.client-card-stepper__plus-visual { position: absolute; top: 50%; right: 0; transform: translateY(-50%); display: inline-flex; align-items: center; justify-content: center; gap: .12rem; width: var(--stepper-pill-width); height: var(--stepper-size); overflow: hidden; border-radius: 9999px; background: var(--ylink-color-primary-strong); pointer-events: none; transition: width var(--stepper-duration) linear; }
+.client-card-stepper.is-expanded .client-card-stepper__plus-visual { right: calc((2rem - var(--stepper-size)) / 2); width: var(--stepper-size); }
 .client-card-stepper__minus,
-.client-card-stepper.is-expanded .client-card-stepper__minus { padding: 0; border: 0; background: transparent; transform: none; overflow: visible; }
+.client-card-stepper.is-expanded .client-card-stepper__minus { top: calc((var(--stepper-size) - 2rem) / 2); width: 2rem; height: 2rem; padding: 0; border: 0; background: transparent; transform: none; overflow: visible; }
 .client-card-stepper__minus-visual { display: inline-flex; align-items: center; justify-content: center; width: var(--stepper-size); height: var(--stepper-size); border: 1.5px solid var(--ylink-color-primary-strong); border-radius: 50%; background: var(--ylink-color-surface, #fff); pointer-events: none; transform: translateX(calc(var(--stepper-width) - var(--stepper-size))) scale(.6); transition: transform var(--stepper-duration) var(--stepper-ease); }
 .client-card-stepper.is-expanded .client-card-stepper__minus-visual { transform: none; }
 @media (prefers-reduced-motion: reduce) { .client-card-stepper__plus-visual, .client-card-stepper__minus-visual, .client-card-stepper__label, .client-card-stepper.is-expanded .client-card-stepper__label { transition: none; } }

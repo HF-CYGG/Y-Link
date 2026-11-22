@@ -14,9 +14,11 @@ import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 import { createHash } from 'node:crypto'
 import { readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
+import { parse as parseCss } from 'postcss'
 import { constants as zlibConstants, gzipSync } from 'node:zlib'
 import { fileURLToPath, URL } from 'node:url'
-import { shortenHtml2pdfModuleIds } from './scripts/html2pdf-module-id-shortener.mjs'
+import { html2pdfSourcePlugin } from './scripts/html2pdf-source-guard.mjs'
+import { canvgSourcePlugin } from './scripts/canvg-source-guard.mjs'
 import { configureFeedbackSseProxy } from './scripts/feedback-sse-dev-proxy'
 import { code128BarcodePlugin, CODE128_BARCODE_RESOLVED_ID } from './scripts/code128-barcode-module.mjs'
 
@@ -68,36 +70,6 @@ const precompressAssetsPlugin = (): Plugin => ({
     }
   },
 })
-
-/** 仅在生产构建时压缩已核验供应商包的内部模块 ID；不改变 PDF 实现和外部 html2canvas 导入。 */
-const html2pdfModuleIdPlugin = (): Plugin => {
-  let transformedCount = 0
-  let verifiedOnce = false
-  return {
-    name: 'ylink-html2pdf-module-id-shortener',
-    enforce: 'pre',
-    apply: 'build',
-    // watch 重建可复用已转换模块的缓存：每轮重置重复计数，但保留首次成功验证标记。
-    buildStart() {
-      transformedCount = 0
-    },
-    transform(code, id) {
-      const normalizedId = id.replaceAll('\\', '/').split('?')[0]
-      if (!normalizedId.includes('/node_modules/html2pdf.js/')) return null
-      if (!normalizedId.endsWith('/node_modules/html2pdf.js/dist/html2pdf.js')) {
-        throw new Error(`html2pdf.js 构建入口已变化，拒绝未经复核的模块 ID 转换：${normalizedId}`)
-      }
-      transformedCount += 1
-      if (transformedCount !== 1) throw new Error('html2pdf.js 构建入口重复处理，拒绝转换')
-      const result = shortenHtml2pdfModuleIds(code)
-      verifiedOnce = true
-      return { code: result.code, map: null }
-    },
-    buildEnd(error) {
-      if (!error && !verifiedOnce) throw new Error('构建未发现预期 html2pdf.js 入口，拒绝静默跳过模块 ID 转换')
-    },
-  }
-}
 
 const themeInitScriptPlugin = (): Plugin[] => {
   let publicBase = '/'
@@ -205,6 +177,76 @@ const resolveVendorChunk = (normalizedId: string) => {
   return undefined
 }
 
+const ELEMENT_PLUS_ASYNC_GROUPS = [
+  { name: 'table', components: ['table', 'table-column'] },
+  { name: 'ui-date-picker', components: ['date-picker', 'date-picker-panel', 'time-picker', 'calendar'] },
+  { name: 'ui-tree', components: ['tree', 'tree-select', 'tree-v2'] },
+  { name: 'ui-upload', components: ['upload'] },
+  { name: 'ui-color-picker', components: ['color-picker', 'color-picker-panel'] },
+  { name: 'ui-menu', components: ['menu', 'menu-item', 'menu-item-group', 'sub-menu'] },
+  { name: 'ui-pagination-desc', components: ['pagination', 'descriptions', 'descriptions-item'] },
+] as const
+
+const ELEMENT_PLUS_SHARED_ENTRIES: Record<string, string> = {
+  'table-column': 'table',
+  'menu-item': 'menu',
+  'menu-item-group': 'menu',
+  'sub-menu': 'menu',
+  'descriptions-item': 'descriptions',
+}
+const ELEMENT_PLUS_COMPONENT_PATH = 'element-plus/es/components'
+const ELEMENT_PLUS_ENTRY_COMPONENTS = [
+  'alert', 'button', 'config-provider', 'icon', 'input', 'loading', 'message', 'message-box',
+  ...ELEMENT_PLUS_ASYNC_GROUPS.flatMap(({ components }) => components),
+]
+const ELEMENT_PLUS_COMPONENT_NAMES = new Set(ELEMENT_PLUS_ENTRY_COMPONENTS)
+const resolveElementPlusEntry = (component: string) =>
+  `${ELEMENT_PLUS_COMPONENT_PATH}/${ELEMENT_PLUS_SHARED_ENTRIES[component] ?? component}/index.mjs`
+
+const elementPlusChunkGroups = ELEMENT_PLUS_ASYNC_GROUPS.map(({ name, components }) => ({
+  name,
+  priority: 90,
+  includeDependenciesRecursively: false,
+  test(id: string) {
+    const normalized = id.replaceAll('\\', '/').split('?')[0]
+    return components.some((component) => normalized.includes(`/${ELEMENT_PLUS_COMPONENT_PATH}/${component}/`)
+      || normalized.endsWith(`/element-plus/theme-chalk/el-${component}.css`))
+  },
+}))
+
+const elementPlusTransitionStylesPlugin = (): Plugin => {
+  const duplicateStyleFiles = new Set(['el-date-picker-panel.css', 'el-time-picker.css', 'el-menu.css', 'el-tree.css'])
+  let baseRules: Set<string> | undefined
+  return {
+    name: 'ylink-element-plus-shared-transition-styles',
+    apply: 'build',
+    enforce: 'pre',
+    buildStart() {
+      baseRules = undefined
+    },
+    transform(code, id) {
+      const sourcePath = id.split('?')[0].replaceAll('\\', '/')
+      if (!sourcePath.includes('/element-plus/theme-chalk/') || !duplicateStyleFiles.has(path.posix.basename(sourcePath))) return
+
+      // 这四个样式入口均先引入 base.css，只移除与其字面完全一致的通用过渡规则。
+      if (!baseRules) {
+        const basePath = path.posix.join(path.posix.dirname(sourcePath), 'base.css')
+        this.addWatchFile(basePath)
+        const baseCss = parseCss(readFileSync(basePath, 'utf8'), { from: basePath })
+        baseRules = new Set(baseCss.nodes
+          .filter((node) => node.type === 'rule' && /(?:transition|enter-|leave-)/.test(node.selector))
+          .map((node) => node.toString()))
+      }
+      const root = parseCss(code, { from: sourcePath })
+      const sharedRules = baseRules
+      root.each((node) => {
+        if (node.type === 'rule' && sharedRules.has(node.toString())) node.remove()
+      })
+      return root.toString()
+    },
+  }
+}
+
 /**
  * 开发态 Element Plus 预构建白名单：
  * - 路由级懒加载页面会在首次进入时才暴露模板里实际使用到的组件样式深导入；
@@ -213,6 +255,7 @@ const resolveVendorChunk = (normalizedId: string) => {
  */
 const DEV_OPTIMIZE_DEPS_INCLUDE = [
   'element-plus/es',
+  ...new Set(ELEMENT_PLUS_ENTRY_COMPONENTS.map(resolveElementPlusEntry)),
   'element-plus/es/components/base/style/css',
   'element-plus/es/components/config-provider/style/css',
   'element-plus/es/components/alert/style/css',
@@ -265,7 +308,9 @@ export default defineConfig(({ command, mode }) => {
       code128BarcodePlugin(),
       vue(),
       ...themeInitScriptPlugin(),
-      html2pdfModuleIdPlugin(),
+      html2pdfSourcePlugin(),
+      canvgSourcePlugin(),
+      elementPlusTransitionStylesPlugin(),
       precompressAssetsPlugin(),
       /**
        * Element Plus 编译期按需引入：
@@ -277,6 +322,20 @@ export default defineConfig(({ command, mode }) => {
       Components({
         dts: false,
         resolvers: [
+          // 异步组件族及入口共用组件的静态依赖直接指向真实模块，避免通过根 barrel 形成分包回边。
+          (name: string) => {
+            if (!name.startsWith('El')) return
+            const component = name.slice(2).replace(/[A-Z]/g, (letter, offset: number) =>
+              `${offset === 0 ? '' : '-'}${letter.toLowerCase()}`)
+            if (!ELEMENT_PLUS_COMPONENT_NAMES.has(component)) return
+            return {
+              name,
+              from: resolveElementPlusEntry(component),
+              sideEffects: elementPlusImportStyleStrategy
+                ? `${ELEMENT_PLUS_COMPONENT_PATH}/${component}/style/css.mjs`
+                : undefined,
+            }
+          },
           ElementPlusResolver({
             importStyle: elementPlusImportStyleStrategy,
           }),
@@ -350,7 +409,12 @@ export default defineConfig(({ command, mode }) => {
           rescue: fileURLToPath(new URL('./rescue.html', import.meta.url)),
         },
         output: {
-          manualChunks(id) {
+          codeSplitting: { groups: [
+            // Rolldown 的普通分组会递归收纳依赖；通用预加载 helper 必须先独立归组，避免首屏反向加载 PDF。
+            { name: 'preload-helper', test: (id: string) => id === '\0vite/preload-helper.js', priority: 100, includeDependenciesRecursively: false },
+            // 通用 Popper、表单等依赖留在公共块，各组件族只收纳自己的实现和样式。
+            ...elementPlusChunkGroups,
+            { debugName: '既有供应商边界', name(id) {
             if (id === CODE128_BARCODE_RESOLVED_ID) return 'barcode'
             const normalizedId = id.replaceAll('\\', '/')
 
@@ -359,7 +423,8 @@ export default defineConfig(({ command, mode }) => {
             }
 
             return resolveVendorChunk(normalizedId)
-          },
+          } },
+          ] },
         },
       },
     },

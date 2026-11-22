@@ -25,6 +25,8 @@ backend/uploads/*
 .AGENTS.md
 
 # 本地测试产物；正式回归脚本继续纳入版本管理。
+/.tmp-*/
+/.codex-attachments/
 /coverage/
 /test-results/
 /playwright-report/
@@ -45,6 +47,7 @@ backend/uploads/*
 .agents
 
 # Mobile / Expo
+/apps/mobile/expo-env.d.ts
 apps/mobile/.expo/
 apps/mobile/.expo-shared/
 apps/mobile/.expo-export/

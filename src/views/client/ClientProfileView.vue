@@ -12,7 +12,7 @@
  *   通道状态以打开弹窗时读取的 capabilities 为准，读取失败按不可用处理；服务端会再次校验。
  */
 
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onDeactivated, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   CLIENT_PERSONAL_USERNAME_RULE_MESSAGE,
@@ -39,6 +39,8 @@ import {
   validateClientConfirmNewPassword,
   validateClientNewPassword,
 } from '@/utils/client-password-policy'
+
+defineOptions({ name: 'ClientProfileView' })
 
 const clientAuthStore = useClientAuthStore(pinia)
 const router = useRouter()
@@ -80,7 +82,9 @@ const savedContactCodes = reactive<Record<ContactChannel, string>>({ mobile: '',
 const savedContactSending = ref<ContactChannel | ''>('')
 const savedContactConfirming = ref<ContactChannel | ''>('')
 const codeCooldowns = reactive<Record<ContactChannel, number>>({ mobile: 0, email: 0 })
+const codeCooldownUntil: Record<ContactChannel, number> = { mobile: 0, email: 0 }
 let codeCooldownTimer: ReturnType<typeof setInterval> | null = null
+let profilePageActive = true
 
 const isDepartmentAccount = computed(() => clientAuthStore.currentUser?.accountType === 'department')
 const isTeacherAccount = computed(() => (
@@ -150,25 +154,26 @@ const loadVerificationChannels = async () => {
   }
 }
 
-const startCodeCooldown = (channel: ContactChannel) => {
-  codeCooldowns[channel] = CODE_RESEND_COOLDOWN_SECONDS
-  if (codeCooldownTimer) return
-  codeCooldownTimer = setInterval(() => {
-    codeCooldowns.mobile = Math.max(0, codeCooldowns.mobile - 1)
-    codeCooldowns.email = Math.max(0, codeCooldowns.email - 1)
-    if (!codeCooldowns.mobile && !codeCooldowns.email && codeCooldownTimer) {
-      clearInterval(codeCooldownTimer)
-      codeCooldownTimer = null
-    }
-  }, 1000)
+const stopCodeCooldownTimer = () => {
+  if (codeCooldownTimer !== null) clearInterval(codeCooldownTimer)
+  codeCooldownTimer = null
 }
-
-onBeforeUnmount(() => {
-  if (codeCooldownTimer) {
-    clearInterval(codeCooldownTimer)
-    codeCooldownTimer = null
+const updateCodeCooldowns = () => {
+  const now = Date.now()
+  codeCooldowns.mobile = Math.max(0, Math.ceil((codeCooldownUntil.mobile - now) / 1000))
+  codeCooldowns.email = Math.max(0, Math.ceil((codeCooldownUntil.email - now) / 1000))
+  if (!codeCooldowns.mobile && !codeCooldowns.email) stopCodeCooldownTimer()
+}
+const resumeCodeCooldownTimer = () => {
+  updateCodeCooldowns()
+  if (profilePageActive && codeCooldownTimer === null && (codeCooldowns.mobile || codeCooldowns.email)) {
+    codeCooldownTimer = setInterval(updateCodeCooldowns, 1000)
   }
-})
+}
+const startCodeCooldown = (channel: ContactChannel) => {
+  codeCooldownUntil[channel] = Date.now() + CODE_RESEND_COOLDOWN_SECONDS * 1000
+  resumeCodeCooldownTimer()
+}
 
 const rules: FormRules = {
   currentPassword: [{ required: true, message: '请输入原密码', trigger: 'blur' }],
@@ -271,23 +276,50 @@ const openPasswordDialog = () => {
   }
 }
 
-type ProfileAction = 'password' | 'profile'
+type ProfileAction = 'password' | 'profile' | 'saved_contact' | 'profile_send' | 'saved_contact_send'
 const profileRuns = new Map<ProfileAction, symbol>()
-let profilePageActive = true
 const invalidateProfileAction = (kind: ProfileAction) => {
   profileRuns.delete(kind)
-  if (kind === 'password') submitting.value = false; else profileSubmitting.value = false
+  if (kind === 'password') submitting.value = false
+  else if (kind === 'profile') profileSubmitting.value = false
+  else if (kind === 'saved_contact') savedContactConfirming.value = ''
+  else if (kind === 'profile_send') profileCodeSending.value = ''
+  else savedContactSending.value = ''
+}
+const invalidateProfileDialogActions = () => {
+  invalidateProfileAction('profile')
+  invalidateProfileAction('saved_contact')
+  invalidateProfileAction('profile_send')
+  invalidateProfileAction('saved_contact_send')
 }
 watch(passwordDialogVisible, () => invalidateProfileAction('password'), { flush: 'sync' })
-watch(profileDialogVisible, () => invalidateProfileAction('profile'), { flush: 'sync' })
-watch(() => clientAuthStore.currentUser?.id, () => { invalidateProfileAction('password'); invalidateProfileAction('profile') }, { flush: 'sync' })
-onBeforeUnmount(() => { profilePageActive = false; profileRuns.clear() })
+watch(profileDialogVisible, invalidateProfileDialogActions, { flush: 'sync' })
+watch([() => clientAuthStore.sessionGeneration, () => clientAuthStore.currentUser?.id], () => {
+  invalidateProfileAction('password')
+  invalidateProfileDialogActions()
+  codeCooldownUntil.mobile = codeCooldownUntil.email = 0
+  updateCodeCooldowns()
+}, { flush: 'sync' })
+onActivated(() => {
+  profilePageActive = true
+  resumeCodeCooldownTimer()
+})
+const deactivateProfile = () => {
+  profilePageActive = false
+  passwordDialogVisible.value = false
+  profileDialogVisible.value = false
+  stopCodeCooldownTimer()
+  invalidateProfileAction('password')
+  invalidateProfileDialogActions()
+}
+onDeactivated(deactivateProfile)
+onBeforeUnmount(deactivateProfile)
 const withProfileAction = async (kind: ProfileAction, action: (valid: () => boolean) => Promise<void>) => {
   if (profileRuns.has(kind)) return
-  const token = Symbol(), userId = clientAuthStore.currentUser?.id
+  const token = Symbol(), userId = clientAuthStore.currentUser?.id, generation = clientAuthStore.sessionGeneration
   profileRuns.set(kind, token)
-  const valid = () => profilePageActive && profileRuns.get(kind) === token && userId === clientAuthStore.currentUser?.id && (kind === 'password' ? passwordDialogVisible.value : profileDialogVisible.value)
-  if (kind === 'password') submitting.value = true; else profileSubmitting.value = true
+  const valid = () => profilePageActive && profileRuns.get(kind) === token && generation === clientAuthStore.sessionGeneration && userId === clientAuthStore.currentUser?.id && (kind === 'password' ? passwordDialogVisible.value : profileDialogVisible.value)
+  if (kind === 'password') submitting.value = true; else if (kind === 'profile') profileSubmitting.value = true
   try { await action(valid) } finally { if (profileRuns.get(kind) === token) invalidateProfileAction(kind) }
 }
 const submitChangePassword = () => withProfileAction('password', async (isCurrent) => {
@@ -374,7 +406,7 @@ const submitUpdateProfile = () => withProfileAction('profile', async (isCurrent)
   }
 })
 
-const sendProfileCode = async (channel: 'mobile' | 'email') => {
+const sendProfileCode = (channel: ContactChannel) => withProfileAction('profile_send', async (isCurrent) => {
   const target = channel === 'mobile' ? profileForm.mobile.trim() : profileForm.email.trim().toLowerCase()
   if (!target) {
     showAppWarning(channel === 'mobile' ? '请先填写新手机号' : '请先填写新邮箱')
@@ -383,35 +415,33 @@ const sendProfileCode = async (channel: 'mobile' | 'email') => {
   try {
     profileCodeSending.value = channel
     await sendClientProfileVerificationCode({ channel, target })
+    if (!isCurrent()) return
     showAppSuccess('验证码已发送')
     startCodeCooldown(channel)
   } catch (error: any) {
-    showAppError(error.message || '验证码发送失败，请稍后重试')
-  } finally {
-    profileCodeSending.value = ''
+    if (isCurrent()) showAppError(error.message || '验证码发送失败，请稍后重试')
   }
-}
+})
 
 /**
  * 向当前已保存的联系方式发送认证验证码：目标由服务端读取，前端只声明通道。
  */
-const sendSavedContactCode = async (channel: ContactChannel) => {
+const sendSavedContactCode = (channel: ContactChannel) => withProfileAction('saved_contact_send', async (isCurrent) => {
   try {
     savedContactSending.value = channel
     await sendClientSavedContactVerificationCode({ channel })
+    if (!isCurrent()) return
     showAppSuccess(`验证码已发送至当前${contactLabel(channel)}`)
     startCodeCooldown(channel)
   } catch (error: any) {
-    showAppError(error.message || '验证码发送失败，请稍后重试')
-  } finally {
-    savedContactSending.value = ''
+    if (isCurrent()) showAppError(error.message || '验证码发送失败，请稍后重试')
   }
-}
+})
 
 /**
  * 确认当前已保存的联系方式：独立于“保存”，不需要当前密码，成功后资料卡片标签即时更新。
  */
-const confirmSavedContactCode = async (channel: ContactChannel) => {
+const confirmSavedContactCode = (channel: ContactChannel) => withProfileAction('saved_contact', async (isCurrent) => {
   const code = savedContactCodes[channel].trim()
   if (!code) {
     showAppWarning('请输入验证码')
@@ -419,15 +449,15 @@ const confirmSavedContactCode = async (channel: ContactChannel) => {
   }
   try {
     savedContactConfirming.value = channel
-    await clientAuthStore.confirmSavedContact({ channel, code })
+    const profile = await clientAuthStore.confirmSavedContact({ channel, code }, { isCurrent })
+    if (!profile || !isCurrent()) return
     savedContactCodes[channel] = ''
     showAppSuccess(`${contactLabel(channel)}验证成功`)
   } catch (error: any) {
+    if (!isCurrent()) return
     showAppError(error.message || '验证失败，请稍后重试')
-  } finally {
-    savedContactConfirming.value = ''
   }
-}
+})
 
 </script>
 

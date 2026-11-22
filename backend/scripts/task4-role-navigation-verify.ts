@@ -4,7 +4,7 @@
  * 实现逻辑：
  * 1) 直接复用前端路由同源函数 `buildAppMenuItems`、`resolveFirstAccessibleManagementPath` 与 `canAccessRoute`；
  * 2) 从管理端根路由递归构建“绝对路径 -> 元信息链”映射，模拟 `to.matched` 逐层守卫校验；
- * 3) 逐角色断言：可见菜单集合、不可见入口直达拦截、隐藏但授权入口可访问、无权限时回退目标可达且可见。
+ * 3) 逐角色断言：菜单层级和点击目标、不可见入口直达拦截、隐藏但授权入口可访问、无权限时回退目标可达且可见。
  * 维护说明：若后续新增管理端业务路由或调整角色权限，请同步更新本脚本中的期望矩阵与断言说明。
  */
 import assert from 'node:assert/strict'
@@ -23,6 +23,8 @@ type RoleUser = {
   role: UserRole
   permissions: string[]
 }
+
+type ExpectedMenuItem = string | { path: string; children: string[] }
 
 /**
  * 输出通过日志：
@@ -121,17 +123,24 @@ function canAccessManagementPath(path: string, user: RoleUser, chainMap: Map<str
   return metaChain.every((meta) => canAccessRoute(meta, user))
 }
 
-/**
- * 验证角色菜单可见性：
- * - 断言“实际可见菜单集合”与“业务期望集合”一致；
- * - 集合比较采用排序后深比较，确保顺序变化不影响断言稳定性。
- */
-function verifyMenuVisibility(role: UserRole, expectedVisiblePaths: string[]) {
-  const user = createRoleUser(role)
-  const visiblePaths = flattenMenuPaths(buildAppMenuItems(user)).sort((left, right) => left.localeCompare(right))
-  const expected = [...expectedVisiblePaths].sort((left, right) => left.localeCompare(right))
-  assert.deepEqual(visiblePaths, expected, `${role} 菜单可见性不符合预期`)
-  pass(`${role} 菜单可见性符合预期`)
+function verifyMenuVisibility(user: RoleUser, expected: ExpectedMenuItem[], chainMap: Map<string, AppRouteMeta[]>) {
+  // 分组点击目标也是首个可访问子菜单的路径。分别比较父节点和子节点，保留有意重复的路径。
+  const project = (item: AppMenuItem): ExpectedMenuItem => item.children?.length
+    ? { path: item.path, children: item.children.map((child) => child.path) }
+    : item.path
+  const itemPath = (item: ExpectedMenuItem) => typeof item === 'string' ? item : item.path
+  const compare = (left: ExpectedMenuItem, right: ExpectedMenuItem) => itemPath(left).localeCompare(itemPath(right))
+  const menu = buildAppMenuItems(user)
+  assert.deepEqual(menu.map(project).sort(compare), [...expected].sort(compare), `${user.role} 菜单可见性或层级不符合预期`)
+  for (const item of menu) {
+    if (item.children?.length) {
+      assert.equal(item.path, item.children[0].path, `${item.title} 点击后应进入首个可访问子页`)
+      assert.equal(item.children.some((child) => child.children?.length), false, `${item.title} 的子菜单不应继续分组`)
+    }
+  }
+  for (const path of flattenMenuPaths(menu)) {
+    assert.equal(canAccessManagementPath(path, user, chainMap), true, `${user.role} 的可见菜单不能直达 ${path}`)
+  }
 }
 
 /**
@@ -147,6 +156,7 @@ function verifyAccessAndFallbackConsistency(chainMap: Map<string, AppRouteMeta[]
   const cases: Array<{ user: RoleUser; path: string; expectAccessible: boolean; scene: string }> = [
     { user: adminUser, path: '/dashboard', expectAccessible: true, scene: '管理员访问工作台' },
     { user: adminUser, path: '/supplier-delivery', expectAccessible: false, scene: '管理员访问供货入口应拦截' },
+    { user: operatorUser, path: '/system/db-migration', expectAccessible: false, scene: '操作员访问数据库迁移应拦截' },
     { user: operatorUser, path: '/system/users', expectAccessible: false, scene: '操作员访问用户中心应拦截' },
     { user: operatorUser, path: '/supplier-delivery', expectAccessible: false, scene: '操作员访问供货入口应拦截' },
     { user: supplierUser, path: '/supplier-delivery', expectAccessible: true, scene: '供货方访问供货工作台' },
@@ -154,6 +164,9 @@ function verifyAccessAndFallbackConsistency(chainMap: Map<string, AppRouteMeta[]
     { user: supplierUser, path: '/dashboard', expectAccessible: false, scene: '供货方访问工作台应拦截' },
     { user: supplierUser, path: '/order-entry', expectAccessible: false, scene: '供货方访问出库开单应拦截' },
     { user: supplierUser, path: '/base-data/products', expectAccessible: false, scene: '供货方访问基础资料应拦截' },
+    { user: supplierUser, path: '/inventory/scan', expectAccessible: false, scene: '供货方访问库存作业应拦截' },
+    { user: supplierUser, path: '/reports', expectAccessible: false, scene: '供货方访问报表应拦截' },
+    { user: supplierUser, path: '/system/customer-service', expectAccessible: false, scene: '供货方访问客服工作台应拦截' },
     { user: supplierUser, path: '/system/configs', expectAccessible: false, scene: '供货方访问系统治理应拦截' },
   ]
 
@@ -164,6 +177,7 @@ function verifyAccessAndFallbackConsistency(chainMap: Map<string, AppRouteMeta[]
     if (!item.expectAccessible) {
       const fallbackPath = resolveFirstAccessibleManagementPath(item.user)
       assert.ok(fallbackPath, `${item.scene} 未找到回退路径`)
+      assert.equal(fallbackPath, item.user.role === 'supplier' ? '/supplier-delivery' : '/dashboard', `${item.scene} 回退目标不符合预期`)
       const menuPaths = flattenMenuPaths(buildAppMenuItems(item.user))
       assert.equal(menuPaths.includes(fallbackPath), true, `${item.scene} 回退路径不在可见菜单内`)
       assert.equal(
@@ -182,43 +196,36 @@ function verifyAccessAndFallbackConsistency(chainMap: Map<string, AppRouteMeta[]
 }
 
 async function main() {
-  verifyMenuVisibility('admin', [
-    '/dashboard',
-    '/order-entry',
-    '/order-list',
-    '/inbound-scan',
-    '/inbound-manage',
-    '/base-data',
-    '/base-data/products',
-    '/base-data/tags',
-    '/o2o-console',
-    '/o2o-console/orders',
-    '/o2o-console/verify',
-    '/system',
-    '/system/configs',
-    '/system/db-migration',
-    '/system/users',
-    '/system/audit-logs',
-  ])
-  verifyMenuVisibility('operator', [
-    '/dashboard',
-    '/order-entry',
-    '/order-list',
-    '/inbound-scan',
-    '/inbound-manage',
-    '/base-data',
-    '/base-data/products',
-    '/base-data/tags',
-    '/o2o-console',
-    '/o2o-console/orders',
-    '/o2o-console/verify',
-    '/system',
-    '/system/configs',
-    '/system/db-migration',
-  ])
-  verifyMenuVisibility('supplier', ['/supplier-delivery'])
-
   const chainMap = buildManagementMetaChainMap()
+  const sharedManagementMenu: ExpectedMenuItem[] = [
+    '/dashboard',
+    '/order-entry',
+    '/order-list',
+    '/reports',
+    '/inbound-scan',
+    '/inbound-manage',
+    '/system/customer-service',
+    { path: '/base-data/products', children: ['/base-data/products', '/base-data/tags'] },
+    { path: '/o2o-console/orders', children: ['/o2o-console/orders', '/o2o-console/verify'] },
+    { path: '/inventory/scan', children: ['/inventory/scan', '/inventory/stocks', '/inventory/stocktakes', '/inventory/docs', '/inventory/logs'] },
+  ]
+  verifyMenuVisibility(createRoleUser('admin'), [
+    ...sharedManagementMenu,
+    { path: '/system/configs', children: ['/system/configs', '/system/db-migration', '/system/users', '/system/audit-logs'] },
+  ], chainMap)
+  verifyMenuVisibility(createRoleUser('operator'), [
+    ...sharedManagementMenu,
+    { path: '/system/configs', children: ['/system/configs'] },
+  ], chainMap)
+  verifyMenuVisibility(createRoleUser('supplier'), ['/supplier-delivery'], chainMap)
+  pass('默认角色菜单、分组点击目标与路由访问权限一致')
+
+  const stocktakeOnly: RoleUser = { role: 'operator', permissions: ['stocktake:view'] }
+  verifyMenuVisibility(stocktakeOnly, [{ path: '/inventory/stocktakes', children: ['/inventory/stocktakes'] }], chainMap)
+  assert.equal(canAccessManagementPath('/inventory/scan', stocktakeOnly, chainMap), false, '仅有盘点权限时应拦截扫码作业')
+  assert.equal(resolveFirstAccessibleManagementPath(stocktakeOnly), '/inventory/stocktakes', '仅有盘点权限时应回退到盘点页')
+  pass('权限裁剪后的库存分组跳过不可访问子页')
+
   verifyAccessAndFallbackConsistency(chainMap)
 
   // eslint-disable-next-line no-console

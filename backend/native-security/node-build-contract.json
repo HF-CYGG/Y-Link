@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "sourceDateEpoch": 1794873600,
+  "generationMakefileTemplateSha256": "e5680fd3add540d4feb934282dbb19db528ffe24a841a414a216b2b29bd3090d",
+  "buildInfoGeneratorSha256": "71449df12e0bb956cb8785bb370489a5d7fbce4b1b786980585244d6faef51a4",
+  "sourcePinsSha256": "824f58129deff5eac24f3bcf80a2dd611d748f78e4b79ec6176142fb5f7a5759",
+  "sourceRoot": "/native-node-source/node-v22.23.5",
+  "generationRoot": "/native-node-source/generation",
+  "sourcePrefix": "deps/openssl",
+  "cleanupAdaptation": {
+    "target": "deps/openssl/config/generate_gypi.pl",
+    "beforeSha256": "c8ae4ea8406f981f6980ce93186224632d46c475b84f47370fcce9827027d0bc",
+    "afterSha256": "95e75328d3296149ca9fdfa1ee46931052c8fdb0e95ab92b54317e8cb1abae27",
+    "patch": "patches/node/generator-cleanup-isolation.diff",
+    "sha256": "5009a9592da6b4b54b72505455387c524ed71c3eebcc0a3d302c00dccfde1f5e",
+    "scope": "cleanup only; && fail propagation; no git init/clean; no changes to generation or tests"
+  },
+  "baseline": {
+    "amd64": {
+      "missing": false,
+      "processConfig": {
+        "file": "reference/node-amd64-process-config.json",
+        "sha256": "d89a4f2475fb75b16b46afe2aa7e01a7268f67e92d5464eadf7a5542dcfbce5d"
+      },
+      "identity": {
+        "file": "reference/node-amd64-runtime-identity.json",
+        "sha256": "27fc57fd9e09c0d1d6ccee6b7a0f0dd31bc5a61d48ee0220c434bddfa01d6cce"
+      },
+      "evidence": "hardening/20261118-node-runtime-baseline-020/report-020.md",
+      "evidenceSha256": "fe8a2d750d9c0e0724d74934607c897d7661a877eec35757fd7dc9cd178e1ee9"
+    },
+    "arm64": {
+      "missing": true,
+      "reason": "no actual original ARM64 binary/config/header baseline"
+    }
+  },
+  "configureArgs": [
+    "--prefix=/",
+    "--release-urlbase=https://nodejs.org/download/release/",
+    "--with-intl=full-icu",
+    "--without-npm"
+  ],
+  "localVersion": "22.23.5",
+  "derivativeIdentity": "node-v22.23.5-ylink.1；二进制保留原兼容版本，固定源码/补丁/产物哈希公开本地衍生身份",
+  "generationArchitectures": [
+    "linux-x86_64",
+    "linux-aarch64"
+  ],
+  "generationVariants": [
+    "asm",
+    "asm_avx2",
+    "no-asm"
+  ],
+  "allowedProcessConfigDifferences": {
+    "node_install_npm": [
+      true,
+      false
+    ],
+    "gas_version": [
+      "2.35",
+      "2.40"
+    ]
+  },
+  "gasSelectionEvidence": {
+    "configure.py": { "sha256": "9ae98ce309ca866955c4860cc2e0f664d15ac326e9401523973ee4ee1c012984", "line": 1810, "threshold": "2.23" },
+    "deps/openssl/openssl.gyp": { "sha256": "6db46b7dae108e5d094dc59db291adef3b05825c79b3b6e05ee4ba80295c56c0", "lines": [39, 99], "threshold": "2.26" },
+    "deps/openssl/openssl.gypi": { "sha256": "71dcc792305db4d9454ff43bf69b54f0d249e08d9b165bf73e2c8649a1ae5060", "line": 1040, "threshold": "2.23" },
+    "deps/openssl/config/generate_gypi.pl": { "sha256": "c8ae4ea8406f981f6980ce93186224632d46c475b84f47370fcce9827027d0bc", "line": 31, "threshold": "2.30" }
+  },
+  "generationExecuted": false,
+  "buildReady": false,
+  "runtimeQaExecuted": false
+}

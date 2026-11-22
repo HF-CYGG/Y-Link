@@ -6,7 +6,8 @@
 
 import { createRouter, createWebHistory, type RouteLocationNormalized } from 'vue-router'
 import { scheduleRouteComponentWarmup, type AppRouteName } from '@/router/route-performance'
-import { useAuthStore, useClientAuthStore } from '@/store'
+import { useAuthStore } from '@/store/modules/auth'
+import { useClientAuthStore } from '@/store/modules/client-auth'
 import { canAccessRoute, resolveFirstAccessibleManagementPath, resolveInventoryEntryRedirect, routes } from '@/router/routes'
 import type { UserSafeProfile } from '@/api/modules/auth'
 import { showPermissionDenied } from '@/utils/permission'

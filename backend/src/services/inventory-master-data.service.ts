@@ -4,7 +4,7 @@
  * 实现逻辑：
  * - 分类编码固定两位数字，作为 SKU 的 WC 编码组成部分；已关联商品的分类禁止改码；
  * - 库位编码统一转大写，仅允许字母、数字与短横线；
- * - 主数据只停用不删除，保证历史 SKU、盘点单引用始终可追溯；
+ * - 库位仅在无 SKU、库存和盘点引用时可删除，已引用的库位仍可停用；
  * - 同一规格可分放多个库位：主库位件数 = 总库存 − 其他库位件数之和（见 sku-location-stock.service），
  *   库位的“已关联”规格 = 主库位在此或在此拆有件数的规格，库位操作只搬动件数，不改总库存与流水。
  * 维护重点：列表附带引用计数，前端据此提示“已被使用”；新增字段需同步前端表单与导入模板。
@@ -13,18 +13,22 @@
 import { Brackets, In, Not, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
+import { resolveUserPermissions } from '../constants/auth-permissions.js'
 import { BaseCategory } from '../entities/base-category.entity.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { BaseProductSku } from '../entities/base-product-sku.entity.js'
 import { BaseStorageLocation } from '../entities/base-storage-location.entity.js'
 import { InvSkuLocationStock } from '../entities/inv-sku-location-stock.entity.js'
+import { InvStocktake } from '../entities/inv-stocktake.entity.js'
+import { InvStocktakeItem } from '../entities/inv-stocktake-item.entity.js'
 import { RelProductTag } from '../entities/rel-product-tag.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
-import { isUniqueConstraintError } from '../utils/database-errors.js'
+import { isForeignKeyReferenceError, isUniqueConstraintError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 import { auditService } from './audit.service.js'
+import { acquireSequenceMutex } from './inventory-sequence.service.js'
 import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
 import {
   loadSkuLocationDistributions,
@@ -33,6 +37,13 @@ import {
   transferSkuLocationStock,
   type SkuLocationDistribution,
 } from './sku-location-stock.service.js'
+import {
+  isCanonicalStocktakeLocationId,
+  isInStocktakeLocationIdRange,
+  normalizeStocktakeLocationId,
+  readStocktakeLocationIds,
+  STOCKTAKE_SCOPE_MUTEX_KEY,
+} from './stocktake-scope.js'
 
 export interface CategoryInput {
   categoryCode?: string
@@ -602,7 +613,7 @@ export class InventoryMasterDataService {
       }, manager)
       return this.buildCategoryView(saved, 0)
     })
-    invalidateMallCatalogReadCache()
+    invalidateMallCatalogReadCache({ affectsBusinessData: false })
     return result
   }
 
@@ -637,7 +648,7 @@ export class InventoryMasterDataService {
       }, manager)
       return this.buildCategoryView(saved, productCount)
     })
-    invalidateMallCatalogReadCache()
+    invalidateMallCatalogReadCache({ affectsBusinessData: false })
     return result
   }
 
@@ -696,6 +707,74 @@ export class InventoryMasterDataService {
       }, manager)
       return this.buildLocationView(saved, skuCount)
     })
+  }
+
+  async deleteLocation(id: string, actor: AuthUserContext, requestMeta?: RequestMeta): Promise<{ id: string }> {
+    return runInTransaction(async (manager) => {
+      const account = await lockActiveSysAccountForBusiness(manager, actor.userId)
+      if (!resolveUserPermissions(account).includes('products:manage')) {
+        throw new BizError('当前账号没有库位管理权限', 403)
+      }
+      await acquireSequenceMutex(manager, STOCKTAKE_SCOPE_MUTEX_KEY)
+      const mysql = manager.connection.options.type === 'mysql'
+      const locationId = normalizeStocktakeLocationId(id)
+      if (!isInStocktakeLocationIdRange(locationId, mysql)) throw new BizError('库位不存在', 404)
+      const idSql = mysql ? 'CAST(:locationId AS UNSIGNED)' : 'CAST(:locationId AS INTEGER)'
+      const locationRepo = manager.getRepository(BaseStorageLocation)
+      const locationQuery = locationRepo.createQueryBuilder('location').where(`location.id = ${idSql}`, { locationId })
+      if (mysql) locationQuery.setLock('pessimistic_write')
+      const location = await locationQuery.getOne()
+      if (!location) throw new BizError('库位不存在', 404)
+      const blocked = () => new BizError('库位仍被商品规格、分库位库存或盘点单引用，无法删除', 409)
+
+      // 物理外键阻止持锁期间新增 SKU/库存引用。盘点范围与明细由共享互斥保护，不反向获取盘点行锁。
+      if (await manager.getRepository(BaseProductSku).existsBy({ locationId })
+        || await manager.getRepository(InvSkuLocationStock).existsBy({ locationId })
+        || await manager.getRepository(InvStocktakeItem).existsBy({ locationScopeId: locationId })) {
+        throw blocked()
+      }
+      const locationScopes = await manager.getRepository(InvStocktake).find({
+        where: { scopeType: 'location' },
+        select: ['scopeJson'],
+      })
+      const legacyIds = new Set<string>()
+      for (const { scopeJson } of locationScopes) {
+        for (const scopedId of readStocktakeLocationIds(scopeJson)) {
+          if (scopedId === locationId) throw blocked()
+          if (mysql && !isCanonicalStocktakeLocationId(scopedId)) legacyIds.add(scopedId)
+        }
+      }
+      // 旧版本存入过 MySQL 能按数值比较的原文，例如带非数字后缀的历史编号。
+      const legacy = [...legacyIds]
+      for (let start = 0; start < legacy.length; start += 500) {
+        const matchesLegacy = await locationRepo.createQueryBuilder('location')
+          .where(`location.id = ${idSql}`, { locationId })
+          .andWhere('location.id IN (:...aliases)', { aliases: legacy.slice(start, start + 500) })
+          .getExists()
+        if (matchesLegacy) throw blocked()
+      }
+      try {
+        await locationRepo.createQueryBuilder().delete().where(`id = ${idSql}`, { locationId }).execute()
+      } catch (error) {
+        if (isForeignKeyReferenceError(error)) throw blocked()
+        throw error
+      }
+      await auditService.record({
+        actionType: 'product.location.delete',
+        actionLabel: '删除库位',
+        targetType: 'base_storage_location',
+        targetId: locationId,
+        targetCode: location.locationCode,
+        actor,
+        requestMeta,
+        detail: {
+          locationCode: location.locationCode,
+          locationName: location.locationName,
+          isActive: isEnabled(location.isActive),
+        },
+      }, manager)
+      return { id: locationId }
+    }, { mysqlIsolationLevel: 'READ COMMITTED' })
   }
 
   /** 库位关联规格数：主库位在此或在此拆有件数的当前版本规格（同一规格只算一次）。 */

@@ -1,4 +1,4 @@
-/** 生产核销页真实setup/handler：异步登记刷新不能改变后续核销目标或提交码。 */
+/** 生产核销页真实 setup 和事件处理：验证核销目标竞态及现场改单候选。 */
 import assert from 'node:assert/strict'
 import test, { afterEach } from 'node:test'
 import { host, mountConsole, preorder, result, search, flush } from './o2o-verify-console-behavior-runtime.mjs'
@@ -82,4 +82,38 @@ test('卸载后刷新迟到不能回写；失效请求失败不提示，当前�
   calls.refreshes[2].resolve(preorder('B', 9)); await late
   assert.equal(calls.refreshes[2].options.signal.aborted, true)
   assert.equal(state.preorderDetail.value.order.kingdeeVersion, 1); assert.deepEqual(calls.verifications, [])
+}))
+
+test('现场改单只显示上架候选，快照到期或切换管理会话时重新查询', async (context) => withBrowser(async () => {
+  const calls = network(), { state } = await mountConsole()
+  await load(state, calls, 'A')
+  let now = Date.now()
+  context.mock.method(Date, 'now', () => now)
+  const requestedBy = []
+  host.api.getProductList = async (query, { signal }) => {
+    assert.deepEqual(query, { isActive: true })
+    assert.ok(signal instanceof AbortSignal && !signal.aborted)
+    const userId = host.auth.currentUser.id
+    requestedBy.push(userId)
+    return [
+      { id: userId, productName: `可选商品 ${userId}`, o2oStatus: 'listed' },
+      { id: 'hidden', productName: '下架商品', o2oStatus: 'unlisted' },
+    ]
+  }
+
+  await state.openOnsiteAdjustDialog()
+  assert.equal(state.onsiteAdjustDialogVisible.value, true)
+  assert.deepEqual(state.onsiteEditableProductOptions.value, [{ value: '185', label: '可选商品 185' }])
+  now += 19_999
+  await state.openOnsiteAdjustDialog()
+  assert.deepEqual(requestedBy, ['185'])
+  now += 1
+  await state.openOnsiteAdjustDialog()
+  assert.deepEqual(requestedBy, ['185', '185'])
+
+  host.auth.setAuthState({ user: { ...host.auth.currentUser, id: '186' } })
+  await state.openOnsiteAdjustDialog()
+  assert.deepEqual(requestedBy, ['185', '185', '186'])
+  assert.deepEqual(state.onsiteEditableProductOptions.value, [{ value: '186', label: '可选商品 186' }])
+  assert.deepEqual(host.errors, [])
 }))

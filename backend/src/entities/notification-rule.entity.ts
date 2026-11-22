@@ -7,6 +7,7 @@ export const FEISHU_WEBHOOK_SEAL_CONTEXT = 'notification_rule.feishu_webhook_url
 export const FEISHU_SIGN_SECRET_SEAL_CONTEXT = 'notification_rule.feishu_sign_secret'
 
 export const NOTIFICATION_EXTERNAL_TRIGGER_MODES = [
+  'always',
   'all_management_offline',
   'watched_accounts_offline',
 ] as const

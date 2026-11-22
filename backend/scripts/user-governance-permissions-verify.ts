@@ -182,6 +182,47 @@ try {
       method: 'POST', headers: { Authorization: `Bearer ${context.sessionToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     })
   const auditRepo = source.getRepository(audit.SysAuditLog)
+  // 真实 SQLite 鉴权会返回数值 ID，路由参数仍是字符串；两条他人改密入口都必须拒绝本人。
+  if (databaseType === 'sqlite') assert.equal(typeof actor.userId, 'number', '覆盖真实 SQLite 数值 actor ID')
+  const ownTarget = String(first.id)
+  const ownSecret = () => repo.createQueryBuilder('account').addSelect('account.passwordHash')
+    .where('account.id = :id', { id: ownTarget }).getOneOrFail()
+  const ownSnapshot = async () => ({
+    hash: (await ownSecret()).passwordHash,
+    sessions: await sessionRepo.count({ where: { userId: first.id } }),
+    edits: await auditRepo.count({ where: { actionType: 'user.update', targetId: ownTarget, resultStatus: 'success' } }),
+    resets: await auditRepo.count({ where: { actionType: 'user.reset_password', targetId: ownTarget, resultStatus: 'success' } }),
+  })
+  const beforeOwn = await ownSnapshot()
+  for (const context of [actor, { ...actor, userId: String(actor.userId) }]) {
+    await expectStatus(() => users.userService.update(ownTarget, { password: 'OwnBoundary_New!2026Aa' }, context), 400)
+    await expectStatus(() => users.userService.resetPassword(ownTarget, { newPassword: 'OwnBoundary_Reset!2026Aa' }, context), 400)
+  }
+  assert.equal((await call(actor, { password: 'OwnBoundary_Http!2026Aa' }, ownTarget)).status, 400)
+  const selfReset = await requestLocalHttp(`http://127.0.0.1:${address.port}/api/users/${ownTarget}/reset-password`, {
+    method: 'POST', headers: { Authorization: `Bearer ${actor.sessionToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ newPassword: 'OwnBoundary_HttpReset!2026Aa' }),
+  })
+  assert.equal(selfReset.status, 400)
+  assert.deepEqual(await ownSnapshot(), beforeOwn, '拒绝本人改密不能改变密码、会话或成功审计')
+  const passwordTarget = await users.userService.create({ username: 'password_boundary_target', displayName: '合法他人改密夹具',
+    role: 'operator', password: 'InitialBoundary!2026Aa' }, actor)
+  const firstOldSession = await actorFor(passwordTarget.id)
+  assert.equal((await call(actor, { password: 'OtherBoundary_Edit!2026Aa' }, String(passwordTarget.id))).status, 200)
+  const { verifyPassword } = await import('../src/utils/password.js')
+  const targetPassword = async () => (await repo.createQueryBuilder('account').addSelect('account.passwordHash')
+    .where('account.id = :id', { id: passwordTarget.id }).getOneOrFail()).passwordHash
+  assert.equal(await verifyPassword('OtherBoundary_Edit!2026Aa', await targetPassword()), true, '合法他人编辑密码确实生效')
+  await expectStatus(() => auth.authService.resolveAuthUserByToken(firstOldSession.sessionToken), 401)
+  const secondOldSession = await actorFor(passwordTarget.id)
+  const otherReset = await requestLocalHttp(`http://127.0.0.1:${address.port}/api/users/${passwordTarget.id}/reset-password`, {
+    method: 'POST', headers: { Authorization: `Bearer ${actor.sessionToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ newPassword: 'OtherBoundary_Reset!2026Aa' }),
+  })
+  assert.equal(otherReset.status, 200)
+  assert.equal(await verifyPassword('OtherBoundary_Reset!2026Aa', await targetPassword()), true, '合法他人重置密码确实生效')
+  await expectStatus(() => auth.authService.resolveAuthUserByToken(secondOldSession.sessionToken), 401)
+  assert.equal((await auth.authService.resolveAuthUserByToken(actor.sessionToken)).userId, actor.userId, '治理他人不能撤销操作者会话')
   let createIndex = 0
   const createInput = (role: UserRole = 'operator') => ({
     username: `create_fixture_${++createIndex}`, displayName: '隔离创建权限', role,

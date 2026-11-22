@@ -31,27 +31,6 @@ function isLocalhostHost(hostname: string) {
   return hostname === 'localhost' || hostname.endsWith('.localhost')
 }
 
-function parseIpv4ToInt(hostname: string) {
-  const segments = hostname.split('.')
-  if (segments.length !== 4) {
-    return null
-  }
-
-  let value = 0
-  for (const segment of segments) {
-    if (!/^\d+$/.test(segment)) {
-      return null
-    }
-    const octet = Number.parseInt(segment, 10)
-    if (octet < 0 || octet > 255) {
-      return null
-    }
-    value = (value << 8) | octet
-  }
-
-  return value >>> 0
-}
-
 function parseIpv4Segments(hostname: string) {
   const segments = hostname.split('.').map((segment) => Number.parseInt(segment, 10))
   if (segments.length !== 4 || segments.some((segment) => !Number.isInteger(segment) || segment < 0 || segment > 255)) {
@@ -61,15 +40,11 @@ function parseIpv4Segments(hostname: string) {
 }
 
 type Ipv4UnsafeMatcher = {
-  matches: (segments: number[], ipValue: number) => boolean
+  matches: (segments: number[]) => boolean
   reason: UnsafeHostReason
 }
 
 const IPV4_UNSAFE_MATCHERS: Ipv4UnsafeMatcher[] = [
-  {
-    matches: (_segments, ipValue) => ipValue === 0,
-    reason: 'unspecified',
-  },
   {
     matches: ([firstOctet]) => firstOctet === 0,
     reason: 'unspecified',
@@ -108,17 +83,21 @@ const IPV4_UNSAFE_MATCHERS: Ipv4UnsafeMatcher[] = [
     matches: ([firstOctet, secondOctet]) => firstOctet === 198 && (secondOctet === 18 || secondOctet === 19),
     reason: 'reserved',
   },
+  {
+    matches: ([a, b, c]) => a >= 224 || (a === 192 && b === 0 && c === 2)
+      || (a === 198 && b === 51 && c === 100) || (a === 203 && b === 0 && c === 113),
+    reason: 'reserved',
+  },
 ]
 
 function detectUnsafeIpv4(hostname: string): UnsafeHostReason | null {
   const segments = parseIpv4Segments(hostname)
-  const ipValue = parseIpv4ToInt(hostname)
-  if (!segments || ipValue == null) {
+  if (!segments) {
     return null
   }
 
   for (const matcher of IPV4_UNSAFE_MATCHERS) {
-    if (matcher.matches(segments, ipValue)) {
+    if (matcher.matches(segments)) {
       return matcher.reason
     }
   }
@@ -206,7 +185,7 @@ function detectUnsafeIpv6(hostname: string): UnsafeHostReason | null {
     return 'loopback'
   }
 
-  const firstGroup = groups[0]
+  const [firstGroup, secondGroup, thirdGroup, fourthGroup, fifthGroup, sixthGroup] = groups
   if ((firstGroup & 0xfe00) === 0xfc00) {
     return 'private'
   }
@@ -217,15 +196,20 @@ function detectUnsafeIpv6(hostname: string): UnsafeHostReason | null {
     return 'private'
   }
 
-  const isIpv4Mapped =
-    groups[0] === 0
-    && groups[1] === 0
-    && groups[2] === 0
-    && groups[3] === 0
-    && groups[4] === 0
-    && groups[5] === 0xffff
+  // 拒绝特殊用途与过渡前缀，按展开后的数字比较，与文本压缩和前导零无关。
+  if ((firstGroup & 0xff00) === 0xff00 // 多播
+    || (firstGroup === 0x2001 && (secondGroup === 0 || secondGroup === 0x0db8)) // Teredo、文档
+    || firstGroup === 0x2002 // 6to4
+    || (firstGroup === 0x3fff && (secondGroup & 0xf000) === 0) // 文档
+    || (firstGroup === 0x0100 && secondGroup === 0 && thirdGroup === 0 && fourthGroup <= 1) // 丢弃、占位
+    || (firstGroup === 0x0064 && secondGroup === 0xff9b
+      && (thirdGroup === 1 || (thirdGroup === 0 && fourthGroup === 0 && fifthGroup === 0 && sixthGroup === 0))) // NAT64
+    || (groups.slice(0, 4).every((group) => group === 0) && fifthGroup === 0xffff && sixthGroup === 0)) { // SIIT
+    return 'reserved'
+  }
 
-  if (isIpv4Mapped) {
+  // IPv4 映射与旧兼容形式均校验嵌入的 IPv4，包括文档和多播地址。
+  if (groups.slice(0, 5).every((group) => group === 0) && (sixthGroup === 0xffff || sixthGroup === 0)) {
     const embeddedIpv4 = `${groups[6] >> 8}.${groups[6] & 0xff}.${groups[7] >> 8}.${groups[7] & 0xff}`
     return detectUnsafeIpv4(embeddedIpv4)
   }
@@ -257,6 +241,12 @@ export function detectUnsafeHost(hostname: string): UnsafeHostReason | null {
   }
 
   return null
+}
+
+/** DNS 结果必须为地址字面量，并与 URL 使用同一套地址分类。 */
+export function isPublicNetworkAddress(address: string): boolean {
+  const normalized = normalizeHost(address)
+  return isIP(normalized) !== 0 && detectUnsafeHost(normalized) === null
 }
 
 /**

@@ -6,8 +6,10 @@
 
 import 'reflect-metadata'
 import fs from 'node:fs'
+import { isIP } from 'node:net'
 import path from 'node:path'
-import { DataSource, type DataSourceOptions } from 'typeorm'
+import type { DataSourceOptions } from 'typeorm'
+import { VerifiedDataSource } from '../database/verified-data-source.js'
 import { resolveSqliteDatabasePath } from './database-bootstrap.js'
 import { env } from './env.js'
 import type { DatabaseRuntimeOverrideConfig } from './database-runtime-override.js'
@@ -60,6 +62,7 @@ import { InvStockDocItem } from '../entities/inv-stock-doc-item.entity.js'
 import { InvStocktake } from '../entities/inv-stocktake.entity.js'
 import { InvStocktakeItem } from '../entities/inv-stocktake-item.entity.js'
 import { InvSkuLocationStock } from '../entities/inv-sku-location-stock.entity.js'
+import { MySqlTlsDnsHostRequiredError } from '../utils/mysql-target-issue.js'
 
 export const appEntities = [
   BaseProduct,
@@ -116,13 +119,13 @@ export const appEntities = [
  * MySQL 传输加密选项（外置或云数据库场景下，凭据与客户个人数据不应明文经过网络）：
  * - disabled：不启用 TLS，保持现有内网直连部署的兼容行为；
  * - required：启用 TLS 但不校验证书，可防被动窃听，无法防中间人，仅作过渡；
- * - verify-full：校验证书链与主机名（DB_HOST 须与证书一致），可用 DB_SSL_CA 指定私有 CA。
+ * - verify-full：校验证书链与 DNS 主机名，可用 DB_SSL_CA 指定私有 CA。
  * 运行时覆盖与迁移目标库共用本函数，因此开启后迁移目标 MySQL 也必须支持相同的 TLS 要求。
  */
 export function resolveMysqlSslOptions(
   mode: typeof env.DB_SSL_MODE,
   caPath: string | undefined,
-): { ssl?: { rejectUnauthorized: boolean; ca?: string } } {
+): { ssl?: { rejectUnauthorized: boolean; verifyIdentity?: true; ca?: string } } {
   if (mode === 'disabled') {
     return {}
   }
@@ -130,7 +133,7 @@ export function resolveMysqlSslOptions(
     return { ssl: { rejectUnauthorized: false } }
   }
   if (!caPath) {
-    return { ssl: { rejectUnauthorized: true } }
+    return { ssl: { rejectUnauthorized: true, verifyIdentity: true } }
   }
   let ca: string
   try {
@@ -138,7 +141,7 @@ export function resolveMysqlSslOptions(
   } catch {
     throw new Error('DB_SSL_CA 指定的 CA 证书文件不存在或不可读')
   }
-  return { ssl: { rejectUnauthorized: true, ca } }
+  return { ssl: { rejectUnauthorized: true, verifyIdentity: true, ca } }
 }
 
 function resolveEffectiveDatabaseConfig(
@@ -196,6 +199,13 @@ export function createDataSourceOptions(runtimeOverride?: DatabaseRuntimeOverrid
   if (!databaseConfig.DB_HOST || !databaseConfig.DB_PORT || !databaseConfig.DB_USER || !databaseConfig.DB_NAME) {
     throw new Error('MySQL 数据库配置缺失，无法创建数据源配置')
   }
+  if (env.DB_SSL_MODE === 'verify-full') {
+    const host = databaseConfig.DB_HOST.trim().replace(/^\[(.+)\]$/, '$1')
+    // 除标准 IP 文本外，短式、八进制和十六进制 IPv4 也可能被系统解析为地址。
+    if (isIP(host) || /^(?:\d+|0x[\da-f]+)(?:\.(?:\d+|0x[\da-f]+)){0,3}\.?$/i.test(host)) {
+      throw new MySqlTlsDnsHostRequiredError()
+    }
+  }
 
   return {
     type: 'mysql',
@@ -230,7 +240,7 @@ export function createDataSourceOptions(runtimeOverride?: DatabaseRuntimeOverrid
 
 // TypeORM 数据源统一管理，避免在各业务模块重复创建连接。
 // 主应用启动时需要先执行 SQLite 旧库兼容补列，再决定是否同步结构，因此这里显式关闭 initialize 阶段的隐式同步。
-export const AppDataSource = new DataSource({
+export const AppDataSource = new VerifiedDataSource({
   ...createDataSourceOptions(),
   synchronize: false,
 })

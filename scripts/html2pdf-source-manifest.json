@@ -1,0 +1,10 @@
+{
+  "src/index.js": "904673d7c6959b67a63102acde67c2866b3b695f7e8dd7e739cd796c4578f0fe",
+  "src/plugin/hyperlinks.js": "836865d9f05fd851b161f2705c48a132c47c2174a9ea97a6d99f5342ad38d92e",
+  "src/plugin/jspdf-plugin.js": "0558084da73407db16a5812076650a71f407c0428dc4ae8605b0c804012d40b9",
+  "src/plugin/pagebreaks.js": "54086236a5c11fc44d493cd9597e36c39162611ccd4aa3130825eceac9f4f5e5",
+  "src/snapdom/clone.js": "a0daf8de774795ffc5bc9ae77fbbee67d07d19995681accff2f2a0b4c3739b9b",
+  "src/utils.js": "e17245a87f0302fcea583c5c3b3371405ca277bc2593d75f71b916dc4a5f4ab0",
+  "src/worker.js": "88f30d4a632f9322f0a28d0083b1b928e52b4e66e346c835001a5d6adebd7ed2",
+  "package.json": "26d8b7e114710c10e54cdcf36e67261db57d0557811e5b4a41e289ce5a05ff20"
+}

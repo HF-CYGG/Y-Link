@@ -311,6 +311,25 @@ try {
       body: JSON.stringify({ currentPassword: targetPassword, reason: '测试越权' }),
     })
     assert.equal(operatorReset.status, 403, 'operator 不能撤销其他账号密钥')
+    const adminRepo = AppDataSource.getRepository(SysUser)
+    const originalStepUp = authService.verifyStepUpPassword
+    authService.verifyStepUpPassword = async (...args) => {
+      await originalStepUp.apply(authService, args)
+      await adminRepo.update(adminUser.id, { governancePermissionsJson: '[]' })
+    }
+    try {
+      const staleReset = await fetch(`http://localhost:${port}/api/users/${operator.id}/webauthn/reset`, {
+        method: 'POST', headers: sessionHeaders,
+        body: JSON.stringify({ currentPassword: process.env.INIT_ADMIN_PASSWORD, reason: '测试密码复核后撤权' }),
+      })
+      assert.equal(staleReset.status, 403)
+      await staleReset.text()
+      assert.equal(await AppDataSource.getRepository(SysUserWebauthnCredential).countBy({ userId: operator.id }), 1)
+      assert.equal((await fetch(`http://localhost:${port}/api/auth/me`, { headers: operatorHeaders })).status, 200)
+    } finally {
+      authService.verifyStepUpPassword = originalStepUp
+      await adminRepo.update(adminUser.id, { governancePermissionsJson: adminUser.governancePermissionsJson })
+    }
     let reachedService!: () => void
     let releaseService!: () => void
     const serviceEntered = new Promise<void>((resolve) => { reachedService = resolve })

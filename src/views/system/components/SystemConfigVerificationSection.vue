@@ -6,6 +6,7 @@
  * - 父页面保留权限校验、测试发送和保存提交，本组件只编排配置字段与只读回执；
  * - 短信供应商按通用 HTTP / 阿里云 PNVS 分支展示，两套配置始终保留在同一表单中，切换时不会清空；
  * - 回执筛选和分页通过稳定请求只接收最后一次结果，列表只展示后端返回的脱敏字段。
+ * - 通知邮件继续共用本页 HTTP 邮件通道，不复制另一份邮件网关配置；敏感模板只显示占位。
  * 维护说明：密钥只允许由后端环境配置，本组件不得增加密钥输入框或展示第三方错误详情。
  */
 
@@ -385,8 +386,8 @@ onDeactivated(() => {
       <div class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-5 dark:border-white/10 dark:bg-black/30">
         <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100">邮箱验证码平台</h3>
-            <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">用于邮箱注册、邮箱找回密码。</p>
+            <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100">邮件服务（验证码与通知共用）</h3>
+            <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">用于邮箱注册、邮箱找回密码和通知发送。</p>
           </div>
           <div class="flex items-center gap-3">
             <el-button

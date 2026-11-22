@@ -69,6 +69,7 @@ const o2oEntity = read('backend/src/entities/o2o-preorder.entity.ts')
 const o2oService = read('backend/src/services/o2o-preorder.service.ts')
 const sequenceEntity = read('backend/src/entities/business-sequence.entity.ts')
 const reportService = read('backend/src/services/report.service.ts')
+const xlsxExport = read('backend/src/utils/xlsx-export.ts')
 const mysqlStrategy = read('backend/src/database/strategies/mysql.strategy.ts')
 const backendEntry = read('backend/src/index.ts')
 const businessRuntime = read('backend/src/runtime/business-runtime.ts')
@@ -109,7 +110,31 @@ assert.doesNotMatch(
   '可选 MySQL 不得把数据库端口发布到宿主机',
 )
 includes(envExample, 'MYSQL_PASSWORD=', 'Onebox 环境模板必须预留 MySQL 私有账号密码')
-includes(oneboxDockerfile, "node -e \"require('sqlite3')\"", 'Onebox 构建必须在镜像阶段验证 SQLite 驱动真实可加载')
+const productionDependencies = oneboxDockerfile.match(/^FROM [^\r\n]+ AS backend-prod-deps[ \t]*\r?\n([\s\S]*?)(?=^FROM )/m)?.[1] ?? ''
+assert.match(
+  productionDependencies,
+  /^COPY backend\/package\*\.json \.\/[ \t]*\r?\n[\s\S]*?^COPY [^\r\n]*backend\/scripts\/verify-pinned-sqlite\.mjs backend\/scripts\/install-pinned-sqlite\.mjs \.\/scripts\/[ \t]*\r?\n[\s\S]*?^RUN npm ci --omit=dev[ \t]*$/m,
+  'Onebox 原生依赖阶段必须先复制后端清单和固定 SQLite 安装验证脚本，再执行保留生命周期的 npm ci',
+)
+assert.doesNotMatch(productionDependencies, /^(?:ENV|RUN)\b[^\r\n]*\b(?:npm_config_ignore_scripts|--ignore-scripts)\b/im, 'Onebox 原生依赖阶段不得跳过 postinstall')
+assert.doesNotMatch(read('backend/.npmrc'), /^\s*ignore-scripts\s*=\s*(?:true|1)\b/im, '原生安装使用的 npm 配置不得跳过 postinstall')
+assert.equal(JSON.parse(read('backend/package.json')).scripts?.postinstall, 'node scripts/install-pinned-sqlite.mjs', '后端 postinstall 必须执行固定 SQLite 安装入口')
+const sqliteInstaller = read('backend/scripts/install-pinned-sqlite.mjs')
+assert.match(
+  sqliteInstaller,
+  /^\s*const builder = path\.join\(directory, 'build-pinned-sqlite\.mjs'\)\s+for \(const step of \['prepare', 'build', 'rebuild'\]\) \{\s+const args = \[builder, step,[\s\S]*?^\s*run\(process\.execPath, args, \{ cwd: project, env: environment \}\)/m,
+  'SQLite 安装入口必须执行准备、构建和重建驱动阶段',
+)
+assert.match(
+  read('backend/scripts/build-pinned-sqlite.mjs'),
+  /^\s*run\(process\.execPath, \[nodeGyp, 'build'\], child\)\s+const verified = run\(process\.execPath, \[path\.join\(scriptDir, 'verify-pinned-sqlite\.mjs'\), '--project=' \+ actualProject, '--static'\],/m,
+  '重建完成后必须验证实际项目驱动的静态绑定',
+)
+const sqliteVerifier = read('backend/scripts/verify-pinned-sqlite.mjs')
+assert.match(sqliteVerifier, /^\s*const sqlite3 = requireProject\('sqlite3'\)\s*$/m, '验证必须实际加载项目的 sqlite3 驱动')
+assert.match(sqliteVerifier, /\bif \(staticLink\) \{[\s\S]*?\bassertNoDynamicSqlite\(result\.stdout\)/, '固定 SQLite 验证必须检查实际驱动的静态链接')
+assert.match(sqliteVerifier, /new sqlite3\.Database\(':memory:'[\s\S]*?SELECT sqlite_version\(\) AS version, sqlite_source_id\(\) AS sourceId/, '固定 SQLite 验证必须从实际驱动查询引擎版本和 SourceID')
+assert.match(oneboxDockerfile, /^COPY --from=backend-prod-deps \/backend\/node_modules \/app\/backend\/node_modules[ \t]*$/m, 'Onebox 运行层必须使用已验证的原生依赖')
 
 includes(dataSource, 'enableWAL: true', 'SQLite 数据源必须显式启用 WAL')
 includes(dataSource, 'poolSize: env.DB_POOL_SIZE', 'MySQL 必须使用可配置连接池')
@@ -142,8 +167,20 @@ assert.doesNotMatch(
   '前台下单请求不得同步触发全局超时订单扫描',
 )
 
-includes(reportService, 'ExcelJS.stream.xlsx.WorkbookWriter', '大报表必须流式生成，不能整份驻留内存')
-includes(reportService, 'KeysetQueryOptions', '大报表必须使用游标分页，避免并发插单时 OFFSET 漏行或重复')
+const reportExport = reportService.match(/\n  async exportExcel\([\s\S]*?\n  getFieldDefinitions\(/)?.[0] ?? ''
+const streamingWriter = xlsxExport.match(/^export async function writeStreamingXlsx\b[\s\S]*?^}[ \t]*$/m)?.[0] ?? ''
+assert.match(reportService, /import \{[^}]*\bwriteStreamingXlsx\b[^}]*\} from '\.\.\/utils\/xlsx-export\.js'/, '大报表必须复用共享 XLSX 写入器')
+assert.match(
+  reportExport,
+  /\bawait fetchBatch\(\)\s+return await writeStreamingXlsx\(output,\s*onReady,/,
+  '大报表必须在首批查询成功后把响应流传给共享 XLSX 写入器',
+)
+assert.match(
+  streamingWriter,
+  /onReady\?\.\(\)\s+const workbook = new ExcelJS\.stream\.xlsx\.WorkbookWriter\(\{\s*stream:\s*output,/,
+  '共享 XLSX 写入器必须先设置响应头，再将流式工作簿接到响应流',
+)
+assert.match(reportExport, /\bKeysetQueryOptions\b[\s\S]*?\bawait fetchBatch\(result\.nextCursor\)/, '大报表必须使用游标分页，避免并发插单时 OFFSET 漏行或重复')
 includes(backendEntry, "import('./runtime/business-runtime.js')", '启动入口必须加载业务运行时')
 const shutdownDrainsBeforeDestroy = (source) => /await databaseMaintenanceModeService\.shutdownAndDrain\(\)[\s\S]*?await AppDataSource\.destroy\(/.test(source)
 assert.equal(shutdownDrainsBeforeDestroy('await AppDataSource.destroy()'), false, '反例：直接销毁连接不能通过停机排空探针')

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { formatOrderRecipient } from '../order-recipient-display'
 /**
  * 模块说明：`src/views/order-list/components/OrderDetailDrawerContent.vue`
  * 文件职责：负责渲染出库单详情抽屉中的合规状态、主单信息、明细列表与永久修订时间线。
@@ -9,7 +10,7 @@
  * 4. 金额、库存模式与订单类型在组件内统一格式化，确保表格端与移动端展示口径一致。
  * 维护说明：revision 请求使用订单 ID 与版本号抑制过期响应，不得用当前商品数据覆盖历史快照；合规草稿由父层拥有。
  */
-import { formatOrderKingdeeStatus, KINGDEE_STATUS_LABELS } from '@/utils/kingdee-status'
+import { getOrderKingdeeStatusLines, KINGDEE_STATUS_LABELS } from '@/utils/kingdee-status'
 
 
 
@@ -121,18 +122,8 @@ const formatOrderType = (value: OrderDetailResult['orderType']) => {
   return value === 'department' ? '部门单' : '散客单'
 }
 
-/**
- * 详情主显示名称：
- * - 部门单优先使用客户部门名称；
- * - 散客单回退客户名称；
- * - 兼容历史数据缺失时的兜底展示。
- */
-const getOrderDisplayName = (order: OrderDetailResult) => {
-  if (order.orderType === 'department') {
-    return order.customerDepartmentName || order.customerName || '-'
-  }
-  return order.customerName || order.customerDepartmentName || '-'
-}
+/** 详情优先使用真实来源领取记录，缺失时不推断姓名。 */
+const getOrderDisplayName = formatOrderRecipient
 const hasItemProvenance = () => props.order.items.some((item) => Boolean(item.sourceOrderId))
 const mergedPickupRecords = computed(() => {
   if (props.order.merge.role !== 'parent' || props.order.inventoryMode !== 'o2o_preapplied') return []
@@ -215,7 +206,7 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
             @update:model-value="emit('update:isSystemApplied', $event)"
           />
           <span v-else class="text-sm font-medium text-slate-700 dark:text-slate-200">
-            {{ formatOrderKingdeeStatus(order) }}
+            <span v-for="(line, index) in getOrderKingdeeStatusLines(order)" :key="index" class="block break-all">{{ line }}</span>
           </span>
           <p v-if="canEditStandaloneComplianceFlags && !canEditSystemApplied" class="mt-1 text-xs text-slate-500 dark:text-slate-400">来源预订单未唯一确认，系统申请仅供查看。</p>
         </div>
@@ -257,13 +248,13 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
       <el-descriptions-item label="库存模式">{{ formatInventoryMode(order) }}</el-descriptions-item>
       <el-descriptions-item label="订单类型">{{ formatOrderType(order.orderType) }}</el-descriptions-item>
       <el-descriptions-item label="开单时间">{{ dayjs(order.createdAt).format('YYYY-MM-DD HH:mm:ss') }}</el-descriptions-item>
-      <el-descriptions-item label="领用对象">{{ getOrderDisplayName(order) }}</el-descriptions-item>
+      <el-descriptions-item label="领用对象"><span class="recipient-text" :title="getOrderDisplayName(order)">{{ getOrderDisplayName(order) }}</span></el-descriptions-item>
       <el-descriptions-item label="客户部门">{{ order.orderType === 'department' ? order.customerDepartmentName || '-' : '不适用' }}</el-descriptions-item>
       <el-descriptions-item label="出库单状态">
         {{ order.orderType === 'department' ? (order.hasCustomerOrder ? '已带单' : '未带单') : '不适用' }}
       </el-descriptions-item>
       <el-descriptions-item label="金蝶状态">
-        {{ formatOrderKingdeeStatus(order) }}
+        <span v-for="(line, index) in getOrderKingdeeStatusLines(order)" :key="index" class="block break-all">{{ line }}</span>
       </el-descriptions-item>
       <el-descriptions-item v-if="!isMultiSourceOrder" label="金蝶单据编号" :span="isPhone ? 1 : 2">
         <template v-if="order.orderType === 'walkin' || singleRegistration?.kingdeeStatus === null">不适用</template>
@@ -438,3 +429,7 @@ const formatSourceDoc = (order: { sourceDocType?: string | null; sourcePreorderN
     </div>
   </section>
 </template>
+
+<style scoped>
+.recipient-text { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+</style>

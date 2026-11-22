@@ -245,6 +245,7 @@ export class AuthService {
     const token = generateSessionToken()
 
     await sessionRepo.delete({
+      userId: lockedUser.id,
       expiresAt: LessThan(now),
     })
 
@@ -741,6 +742,7 @@ export class AuthService {
     password: string,
     requestMeta: RequestMeta | undefined,
     purpose: string,
+    databaseMigration = false,
   ): Promise<void> {
     const normalizedPassword = password.trim()
     if (!normalizedPassword) {
@@ -752,13 +754,13 @@ export class AuthService {
       .addSelect('user.passwordHash')
       .where('user.id = :id', { id: auth.userId })
       .getOne()
-    if (!user || user.status !== 'enabled') {
+    if (!user || user.status !== 'enabled' || (databaseMigration && isAccountCurrentlyDeactivated(user))) {
       throw new BizError('当前账号已停用，请联系管理员', 403)
     }
     if (await verifyPassword(normalizedPassword, user.passwordHash)) {
       return
     }
-    await authSecurityService.recordAdminLoginFailure(requestMeta, user.username)
+    await authSecurityService.recordAdminLoginFailure(requestMeta, user.username, { migrationPurpose: databaseMigration ? purpose : undefined })
     await auditService.safeRecord({
       actionType: 'auth.step_up',
       actionLabel: '敏感操作身份复核',

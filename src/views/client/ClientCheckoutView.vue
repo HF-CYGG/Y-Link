@@ -8,7 +8,8 @@ import ClientProductSmallImage from './components/ClientProductSmallImage.vue'
  * - 下单归属完全由当前登录账号类型决定，页面只负责展示部门/工号/实名信息，不允许手动篡改归属；
  * - 部门账号下单前强制校验所属部门、教职工号与金蝶申请状态，避免订单归属与实名链路脱节；
  * - 部门单必须选择到店取货时间：日期按钮（el-button）+ 半小时时段下拉，日期范围受店铺自动取消时长（pickupWindowHours）约束，
- *   时段范围按店铺营业时间文案解析并在闭店前半小时截止，解析失败时回退默认营业时间。
+ *   各营业时段分别生成半小时档位，店铺配置刷新后复核新单草稿。
+ * - 原提交不能重试时，用户核实订单后可解除同账号的有效标记，重新填写并单独提交新单。
  * 维护说明：
  * - 若后端继续扩展实名字段或工号核验状态，请优先同步本页的实名信息展示区与 `handleSubmit()` 前置校验；
  * - 若调整下单归属说明文案，请保持“前端只展示，服务端强制判定”的口径不变；
@@ -18,10 +19,11 @@ import { onActivated, onDeactivated, onBeforeUnmount, computed, onMounted, ref, 
 import { useRouter } from 'vue-router'
 
 import { ArrowLeft } from '@element-plus/icons-vue'
-import { submitO2oPreorder } from '@/api/modules/o2o'
+import { ElMessageBox } from 'element-plus'
+import { getO2oCheckoutStorefront, getO2oMallStorefront, submitO2oPreorder, type SubmitO2oPreorderPayload } from '@/api/modules/o2o'
 import { useClientMallSnapshotRefresh } from '@/composables/useClientMallSnapshotRefresh'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
-import { decideClientCheckoutSubmit } from './client-checkout-submit-policy'
+import { getClientCheckoutNewSubmitBlockReason, isClientCheckoutSubmitOutcomeUnknown, settleCurrentClientCheckoutSuccess } from './client-checkout-submit-policy'
 import { useClientAuthStore, useClientCartStore } from '@/store'
 import { useClientCatalogStore } from '@/store/modules/client-catalog'
 import pinia from '@/store/pinia'
@@ -29,12 +31,14 @@ import { normalizeRequestError } from '@/utils/error'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 import { resolveO2oPriceView } from '@/utils/o2o-price'
+import { resolvePickupSlotMinutes } from '@/utils/store-business-hours'
 import {
   buildClientPreorderSubmitIntentKey,
   clearClientPreorderSubmitLock,
   createClientPreorderSubmitLock,
+  dismissClientPreorderSubmitMarker,
   readActiveClientPreorderSubmitLock,
-  refreshClientPreorderSubmitLock,
+  type ClientPreorderSubmitLockSnapshot,
 } from '@/utils/client-preorder-submit-guard'
 
 const props = defineProps<{
@@ -58,16 +62,27 @@ const pickupContact = ref('')
 const submitting = ref(false)
 const departmentSystemApplyChoice = ref<boolean | null>(null)
 const kingdeeVoucherNo = ref('')
+const pendingSubmit = ref<ClientPreorderSubmitLockSnapshot | null>(null)
+const recoveryError = ref('')
+const confirmingRecovery = ref(false)
+let pendingClockTimer: ReturnType<typeof setInterval> | null = null
+const restorePendingSubmit = () => {
+  try {
+    pendingSubmit.value = clientAuthStore.currentUser?.id ? readActiveClientPreorderSubmitLock(clientAuthStore.currentUser.id) : null
+    recoveryError.value = ''
+  } catch {
+    pendingSubmit.value = null
+    recoveryError.value = '无法读取原始提交记录，请恢复浏览器会话存储后刷新；请先查看订单，勿重复下单。'
+  }
+}
+
 
 // 到店取货时间：日期与时段分开选择，避免在手机上使用体积更大的日期时间弹层。
 const pickupDateKey = ref<string | null>(null)
 const pickupTimeSlot = ref<string | null>(null)
+const pickupSelectionNotice = ref('')
 /** 取货可选范围依赖“当前时间”，用一次性时钟快照驱动 computed，避免每次渲染都读 Date.now() 造成结果抖动。 */
 const pickupClock = ref(Date.now())
-/** 营业时间文案解析失败时的兜底范围，与系统配置 o2o.store_business_hours_text 的默认值 10:00 - 22:00 一致。 */
-const PICKUP_FALLBACK_OPEN_MINUTES = 10 * 60
-const PICKUP_FALLBACK_CLOSE_MINUTES = 22 * 60
-const PICKUP_SLOT_STEP_MINUTES = 30
 const PICKUP_LEAD_MINUTES = 15
 const PICKUP_MAX_DATE_OPTIONS = 8
 const PICKUP_DEFAULT_WINDOW_HOURS = 7 * 24
@@ -80,56 +95,28 @@ const buildPickupDate = (dateKey: string, minutesOfDay: number) => {
   return new Date(year, (month ?? 1) - 1, day ?? 1, Math.floor(minutesOfDay / 60), minutesOfDay % 60, 0, 0)
 }
 
-/**
- * 取货时段范围跟随店铺营业时间，闭店前半小时为最后一档。
- * 营业时间是管理员可改的自由文案，这里只解析其中的「HH:MM - HH:MM」，解析不出或范围非法时回退默认值；
- * 不能写死起始时间：服务端只校验当前时间与超时窗口，闭店时段照样会被接受。
- */
-const pickupSlotRange = computed(() => {
-  const fallback = {
-    startMinutes: PICKUP_FALLBACK_OPEN_MINUTES,
-    endMinutes: PICKUP_FALLBACK_CLOSE_MINUTES - PICKUP_SLOT_STEP_MINUTES,
-  }
-  const matched = /(\d{1,2}):(\d{2})\s*[-~～—–至]\s*(\d{1,2}):(\d{2})/.exec(clientCatalogStore.storefront.businessHoursText || '')
-  if (!matched) {
-    return fallback
-  }
-  const openMinutes = Number(matched[1]) * 60 + Number(matched[2])
-  const closeMinutes = Number(matched[3]) * 60 + Number(matched[4])
-  const withinDay = openMinutes >= 0 && closeMinutes <= 24 * 60
-  // 跨零点营业（如 18:00 - 02:00）无法用单日时段表达，按兜底范围处理，避免生成颠倒的空列表。
-  if (!withinDay || closeMinutes - openMinutes < PICKUP_SLOT_STEP_MINUTES) {
-    return fallback
-  }
-  return { startMinutes: openMinutes, endMinutes: closeMinutes - PICKUP_SLOT_STEP_MINUTES }
-})
-
-const pickupSlotRangeText = computed(() => {
-  const toText = (minutes: number) => `${pad2(Math.floor(minutes / 60))}:${pad2(minutes % 60)}`
-  return `${toText(pickupSlotRange.value.startMinutes)} - ${toText(pickupSlotRange.value.endMinutes + PICKUP_SLOT_STEP_MINUTES)}`
-})
+const pickupSlotMinutes = computed(() => resolvePickupSlotMinutes(clientCatalogStore.storefront.businessHoursText))
 
 const pickupWindowHours = computed(() => {
   const configuredHours = clientCatalogStore.storefront.pickupWindowHours
   return typeof configuredHours === 'number' && configuredHours > 0 ? configuredHours : null
 })
-const pickupWindowEndMs = computed(() => (
-  pickupClock.value + (pickupWindowHours.value ?? PICKUP_DEFAULT_WINDOW_HOURS) * 60 * 60 * 1000
-))
-const pickupWindowHint = computed(() => {
-  const windowText = pickupWindowHours.value
+const resolvePickupWindowEndMs = (windowHours: number | null) =>
+  pickupClock.value + (windowHours ?? PICKUP_DEFAULT_WINDOW_HOURS) * 60 * 60 * 1000
+const pickupWindowEndMs = computed(() => resolvePickupWindowEndMs(pickupWindowHours.value))
+const pickupWindowHint = computed(() => (
+  pickupWindowHours.value
     ? `请在下单后 ${pickupWindowHours.value} 小时内到店取货，超时未取将自动取消`
     : '可选择未来 7 天内的到店时间'
-  return `${windowText}；可选时段为营业时间 ${pickupSlotRangeText.value}`
-})
+))
 
-const buildPickupSlots = (dateKey: string) => {
+const buildPickupSlots = (dateKey: string, slotMinutes = pickupSlotMinutes.value, windowEndMs = pickupWindowEndMs.value) => {
   const earliestMs = pickupClock.value + PICKUP_LEAD_MINUTES * 60 * 1000
   const slots: Array<{ value: string; label: string }> = []
-  for (let minutes = pickupSlotRange.value.startMinutes; minutes <= pickupSlotRange.value.endMinutes; minutes += PICKUP_SLOT_STEP_MINUTES) {
+  for (const minutes of slotMinutes) {
     const slotDate = buildPickupDate(dateKey, minutes)
     const slotMs = slotDate.getTime()
-    if (slotMs < earliestMs || slotMs > pickupWindowEndMs.value) {
+    if (slotMs < earliestMs || slotMs > windowEndMs) {
       continue
     }
     const slotText = `${pad2(slotDate.getHours())}:${pad2(slotDate.getMinutes())}`
@@ -172,6 +159,7 @@ const pickupAtIso = computed(() => {
 
 const pickupAtStatusText = computed(() => {
   if (!isDepartmentOrder.value) return '散客单无需选择到店取货时间'
+  if (pickupSelectionNotice.value) return pickupSelectionNotice.value
   if (!pickupDateOptions.value.length) return '当前暂无可选到店时间，请稍后重试或联系门店'
   if (!pickupDateKey.value) return '必填：请先选择到店取货日期'
   if (!pickupTimeSlot.value) return '必填：请选择到店取货时段'
@@ -182,6 +170,7 @@ const pickupAtStatusText = computed(() => {
 /** 选择日期时同步刷新时钟，确保“今天”的过期时段被及时剔除；原时段不在新范围内时清空重选。 */
 const selectPickupDate = (dateKey: string) => {
   pickupClock.value = Date.now()
+  pickupSelectionNotice.value = ''
   pickupDateKey.value = dateKey
   if (pickupTimeSlot.value && !buildPickupSlots(dateKey).some((slot) => slot.value === pickupTimeSlot.value)) {
     pickupTimeSlot.value = null
@@ -192,10 +181,27 @@ const resetPickupSelection = () => {
   pickupClock.value = Date.now()
   pickupDateKey.value = null
   pickupTimeSlot.value = null
+  pickupSelectionNotice.value = ''
+}
+
+const PICKUP_RESELECT_NOTICE = '所选到店取货时间已不可选，请重新选择'
+const recheckPickupDraft = (slotsForDate = buildPickupSlots) => {
+  const dateKey = pickupDateKey.value
+  if (!dateKey) return
+  const options = slotsForDate(dateKey)
+  if (!options.length) pickupDateKey.value = null
+  if (!options.length || (pickupTimeSlot.value && !options.some((slot) => slot.value === pickupTimeSlot.value))) {
+    pickupTimeSlot.value = null
+    pickupSelectionNotice.value = PICKUP_RESELECT_NOTICE
+  }
+}
+
+const refreshPickupStorefront = () => {
+  clientCatalogStore.initialize(clientAuthStore.currentUser?.id)
+  return clientCatalogStore.refreshStorefront(getO2oMallStorefront)
 }
 
 const PICKUP_CONTACT_STORAGE_KEY_PREFIX = 'ylink:client:checkout:pickup-contact:'
-const AMBIGUOUS_PREORDER_SUBMIT_STATUS_SET = new Set<number | undefined>([undefined, 408, 502, 503, 504])
 
 const resolveDefaultPickupContact = () => {
   const currentUser = clientAuthStore.currentUser
@@ -278,16 +284,27 @@ onMounted(() => {
     clientCartStore.toggleAllValidSelected(true)
   }
   restorePickupContactDraft()
+  restorePendingSubmit()
+  pendingClockTimer = setInterval(restorePendingSubmit, 15000)
+  void refreshPickupStorefront()
   void refreshMallSnapshot()
 })
 
 watch(
   () => clientAuthStore.currentUser?.id,
   () => {
+    pendingSubmit.value = null
+    recoveryError.value = ''
+    remark.value = ''
+    kingdeeVoucherNo.value = ''
+    submitting.value = false
     restorePickupContactDraft()
+    restorePendingSubmit()
     departmentSystemApplyChoice.value = null
     resetPickupSelection()
+    if (checkoutActive && clientAuthStore.currentUser?.id) void refreshPickupStorefront()
   },
+  { flush: 'sync' },
 )
 
 watch(
@@ -299,7 +316,8 @@ watch(
 const selectedItems = computed(() => clientCartStore.selectedItems)
 const totalQty = computed(() => selectedItems.value.reduce((sum, item) => sum + item.qty, 0))
 const totalAmount = computed(() => selectedItems.value.reduce((sum, item) => sum + Math.max(0, Number(item.defaultPrice || 0)) * item.qty, 0))
-const submitDisabled = computed(() => submitting.value || !selectedItems.value.length)
+const submitDisabled = computed(() => submitting.value || confirmingRecovery.value || Boolean(recoveryError.value)
+  || (pendingSubmit.value ? !pendingSubmit.value.payload || pendingSubmit.value.expired : !selectedItems.value.length))
 const currentRealName = computed(() => (
   clientAuthStore.currentUser?.realName?.trim()
   || clientAuthStore.currentUser?.username?.trim()
@@ -346,13 +364,33 @@ const orderTypeDescription = computed(() => {
 })
 
 let checkoutActive = true
-watch(() => props.active, (active) => { if (active === false) invalidateCheckout(); else if (active === true) { checkoutActive = true; checkoutGeneration += 1 } }, { flush: 'sync' })
+watch(() => props.active, (active) => {
+  if (active === false) invalidateCheckout()
+  else if (active === true) {
+    checkoutActive = true
+    checkoutGeneration += 1
+    void refreshPickupStorefront()
+  }
+}, { flush: 'sync' })
 let checkoutGeneration = 0
 const invalidateCheckout = () => { checkoutActive = false; checkoutGeneration += 1 }
-onBeforeUnmount(invalidateCheckout)
+const refreshVisiblePickupStorefront = () => {
+  if (checkoutActive && globalThis.document.visibilityState === 'visible') void refreshPickupStorefront()
+}
+onMounted(() => globalThis.document?.addEventListener('visibilitychange', refreshVisiblePickupStorefront))
+onBeforeUnmount(() => {
+  invalidateCheckout()
+  if (pendingClockTimer) clearInterval(pendingClockTimer)
+  globalThis.document?.removeEventListener('visibilitychange', refreshVisiblePickupStorefront)
+})
 onDeactivated(invalidateCheckout)
-onActivated(() => { checkoutActive = true })
+onActivated(() => { checkoutActive = true; void refreshPickupStorefront() })
 watch(() => clientAuthStore.currentUser?.id, () => { checkoutGeneration += 1 }, { flush: 'sync' })
+watch([() => clientCatalogStore.storefront.businessHoursText, pickupWindowHours], () => {
+  if (!checkoutActive || pendingSubmit.value || recoveryError.value) return
+  pickupClock.value = Date.now()
+  recheckPickupDraft()
+})
 const handleBack = () => {
   invalidateCheckout()
   if (props.standalone) {
@@ -362,11 +400,117 @@ const handleBack = () => {
   }
 }
 
+const handleDismissPendingSubmit = async () => {
+  const owner = clientAuthStore.currentUser?.id
+  const session = clientAuthStore.sessionGeneration
+  const generation = checkoutGeneration
+  const route = router.currentRoute.value
+  const isCurrent = () => checkoutActive && props.active !== false && generation === checkoutGeneration
+    && owner === clientAuthStore.currentUser?.id && session === clientAuthStore.sessionGeneration
+    && route === router.currentRoute.value
+  const marker = pendingSubmit.value?.dismissibleMarker
+  if (!owner || !marker || !isCurrent() || recoveryError.value || submitting.value || confirmingRecovery.value) return
+
+  const matchesMarker = () => pendingSubmit.value?.dismissibleMarker === marker && !recoveryError.value
+  const warnMarkerChanged = () => showAppWarning(recoveryError.value || '原提交记录已变化，请重新核对订单。')
+  restorePendingSubmit()
+  if (!matchesMarker()) {
+    warnMarkerChanged()
+    return
+  }
+
+  confirmingRecovery.value = true
+  try {
+    await ElMessageBox.confirm(
+      '请先到“我的订单”核实原结果，避免重复下单。恢复填写后，如需下新单，请再次提交。',
+      '确认已核对订单',
+      { type: 'warning', confirmButtonText: '已核对，恢复结算', cancelButtonText: '取消', closeOnClickModal: false },
+    )
+    if (!isCurrent() || submitting.value) return
+    if (!matchesMarker()) {
+      warnMarkerChanged()
+      return
+    }
+    const dismissed = dismissClientPreorderSubmitMarker(owner, marker)
+    restorePendingSubmit()
+    if (!dismissed) {
+      warnMarkerChanged()
+      return
+    }
+    pickupClock.value = Date.now()
+    recheckPickupDraft()
+  } catch (error) {
+    if (!isCurrent() || error === 'cancel' || error === 'close') return
+    restorePendingSubmit()
+    showAppWarning(recoveryError.value || '未能恢复结算，请稍后重试。')
+  } finally {
+    confirmingRecovery.value = false
+  }
+}
+
+const sendFrozenSubmission = async (payload: SubmitO2oPreorderPayload, isCurrent: () => boolean, owner: string | number | undefined, recovered = false) => {
+  let result: Awaited<ReturnType<typeof submitO2oPreorder>>
+  try {
+    result = await submitO2oPreorder(payload)
+  } catch (error) {
+    const normalizedError = normalizeRequestError(error, '提交失败，请稍后再试')
+    if (isClientCheckoutSubmitOutcomeUnknown(normalizedError.status)) {
+      if (isCurrent()) {
+        restorePendingSubmit()
+        showAppWarning('提交结果尚未确认，请继续确认原提交或查看订单，勿重复下单。')
+      }
+      return
+    }
+    try { clearClientPreorderSubmitLock(owner, payload.clientRequestId) } catch { /* 清理失败保留查单入口。 */ }
+    if (!isCurrent()) return
+    restorePendingSubmit()
+    void showCriticalErrorDialog(normalizedError, { title: '预订单提交失败', fallback: '提交失败，请稍后再试', operation: '提交预订单' })
+    return
+  }
+  // 页面已失效时不清锁也不回写购物车；再次进入仍只能恢复原 key，不能为原购物车生成新 key。
+  const settled = settleCurrentClientCheckoutSuccess({
+    isCurrent,
+    applyConfirmedItems: () => {
+      const consumed = clientCartStore.consumeSubmittedItems(payload.items, payload.clientRequestId)
+      if (!recovered && consumed) {
+        clientCatalogStore.applyPreorderSubmission(payload.items.map((item) => ({ ...item, productId: String(item.productId), skuId: item.skuId == null ? null : String(item.skuId) })))
+        clientCartStore.syncWithCatalog(clientCatalogStore.products)
+      }
+    },
+    clearPending: () => {
+      try { clearClientPreorderSubmitLock(owner, payload.clientRequestId) } catch { /* 保守保留原锁，可再次查单。 */ }
+      pendingSubmit.value = null
+    },
+  })
+  if (!settled) return
+  showAppSuccess('预订单提交成功')
+  if (recovered) {
+    const refreshResult = await refreshMallSnapshot({ isCurrent })
+    if (!isCurrent()) return
+    if (!refreshResult.success) showAppWarning('订单已确认成功，商品目录暂未同步，请刷新后继续选购')
+  }
+  if (!props.standalone) emit('close')
+  await router.replace(`/client/orders/${result.order.id}`)
+}
+
 const handleSubmit = async () => {
-  if (!checkoutActive) return
+  if (!checkoutActive || confirmingRecovery.value) return
   const initiatingUserId = clientAuthStore.currentUser?.id
   const generation = checkoutGeneration
   const isCurrent = () => checkoutActive && generation === checkoutGeneration && initiatingUserId === clientAuthStore.currentUser?.id
+  restorePendingSubmit()
+  if (recoveryError.value) { showAppWarning(recoveryError.value); return }
+  if (pendingSubmit.value) {
+    const pending = pendingSubmit.value
+    if (!pending.payload || pending.expired) { showAppWarning('原始提交不能安全重试，请先查看订单核实结果。'); return }
+    const payload = JSON.parse(JSON.stringify(pending.payload)) as SubmitO2oPreorderPayload
+    await runWithGate({ actionKey: 'client-checkout-submit', executor: async () => {
+      submitting.value = true
+      try { await sendFrozenSubmission(payload, isCurrent, initiatingUserId, true) }
+      finally { if (isCurrent()) submitting.value = false }
+    } })
+    return
+  }
   const normalizedPickupContact = isDepartmentOrder.value
     ? pickupContact.value.trim()
     : (pickupContact.value.trim() || resolveDefaultPickupContact())
@@ -400,6 +544,7 @@ const handleSubmit = async () => {
 
   // 到店取货时间只对部门单必填；提交前刷新时钟复核所选时段是否仍在可选范围内，避免页面停留过久后提交已过期时间。
   let requestedPickupAt: string | null = null
+  let requestedPickupSlot: { dateKey: string; timeSlot: string } | null = null
   if (isDepartmentOrder.value) {
     pickupClock.value = Date.now()
     if (!pickupDateKey.value || !pickupTimeSlot.value) {
@@ -407,40 +552,36 @@ const handleSubmit = async () => {
       return
     }
     if (!pickupTimeOptions.value.some((slot) => slot.value === pickupTimeSlot.value)) {
-      pickupTimeSlot.value = null
-      showAppWarning('所选到店取货时间已不可选，请重新选择')
+      recheckPickupDraft()
+      showAppWarning(PICKUP_RESELECT_NOTICE)
       return
     }
     requestedPickupAt = pickupAtIso.value
+    requestedPickupSlot = { dateKey: pickupDateKey.value, timeSlot: pickupTimeSlot.value }
   }
 
   const requestedKingdeeVoucherNo = isDepartmentOrder.value && departmentSystemApplyChoice.value ? kingdeeVoucherNo.value.trim() || null : null
   if (isDepartmentOrder.value && departmentSystemApplyChoice.value && !requestedKingdeeVoucherNo) { showAppWarning('请填写金蝶单据编号'); return }
   const submitRemark = remark.value.trim() || undefined
   const requestedClientOrderType = enforcedClientOrderType.value
-  const requestedIsSystemApplied = isDepartmentOrder.value ? Boolean(departmentSystemApplyChoice.value) : false
-  // 必须在提交前刷新前冻结用户点击时的完整意图。若上一次响应丢失，刷新会反映出
-  // 服务端已占库存；此时只有完全相同的意图才能复用原 requestKey 查询原订单。
-  const requestedItemSnapshot = selectedItems.value.map((item) => ({
-    productId: item.productId,
-    skuId: item.skuId,
-    qty: item.qty,
-  }))
-  const requestedIntentKey = buildClientPreorderSubmitIntentKey({
-    clientUserId: initiatingUserId,
-    clientOrderType: requestedClientOrderType,
-    isSystemApplied: requestedIsSystemApplied,
-          kingdeeVoucherNo: requestedKingdeeVoucherNo,
+  // 刷新目录之前冻结新单原始载荷。刷新后的商品只用于校验提交意图。
+  const frozenPayload = {
+    isSystemApplied: isDepartmentOrder.value && Boolean(departmentSystemApplyChoice.value),
+    kingdeeVoucherNo: requestedKingdeeVoucherNo,
     pickupContact: normalizedPickupContact,
     pickupAt: requestedPickupAt,
-    remark: submitRemark,
-    items: requestedItemSnapshot,
+    ...(submitRemark === undefined ? {} : { remark: submitRemark }),
+    items: selectedItems.value.map(({ productId, skuId, qty }) => ({ productId, skuId, qty })),
+  }
+  const buildSubmitIntent = (items: typeof frozenPayload.items) => buildClientPreorderSubmitIntentKey({
+    ...frozenPayload,
+    clientUserId: initiatingUserId,
+    clientOrderType: requestedClientOrderType,
+    items,
   })
-  const activeSubmitLock = readActiveClientPreorderSubmitLock(initiatingUserId)
-  let submitIntentKey = ''
-  let submitRequestKey = ''
+  const requestedIntentKey = buildSubmitIntent(frozenPayload.items)
 
-  const runResult = await runWithGate({
+  await runWithGate({
     actionKey: 'client-checkout-submit',
     onDuplicated: () => {
       showAppInfo('订单提交中，请勿重复点击')
@@ -449,87 +590,57 @@ const handleSubmit = async () => {
       submitting.value = true
       try {
         // 提交前必须等待一次成功的最新目录刷新；失败或被取消时绝不能沿用旧快照提交。
-        const refreshResult = await refreshMallSnapshot({ isCurrent })
+        const [refreshResult, checkoutStorefront] = await Promise.all([
+          refreshMallSnapshot({ isCurrent }),
+          requestedPickupSlot ? clientCatalogStore.refreshStorefront(getO2oCheckoutStorefront, 'checkout') : null,
+        ])
         if (!isCurrent()) return
+        if (requestedPickupSlot) {
+          if (!checkoutStorefront) {
+            showAppWarning('门店取货时间同步失败，请稍后重试')
+            return
+          }
+          pickupClock.value = Date.now()
+          // 取本次私有读取的快照，目录与其他页面的回包不参与新单时段复核。
+          const slotMinutes = resolvePickupSlotMinutes(checkoutStorefront.businessHoursText)
+          const windowEndMs = resolvePickupWindowEndMs(checkoutStorefront.pickupWindowHours)
+          const slotsForDate = (key: string) => buildPickupSlots(key, slotMinutes, windowEndMs)
+          const { dateKey, timeSlot } = requestedPickupSlot
+          if (!slotsForDate(dateKey).some((slot) => slot.value === timeSlot)) {
+            recheckPickupDraft(slotsForDate)
+            showAppWarning(PICKUP_RESELECT_NOTICE)
+            return
+          }
+        }
         const freshItemSnapshot = clientCartStore.createSelectedCheckoutSnapshot()
-        const freshIntentKey = freshItemSnapshot ? buildClientPreorderSubmitIntentKey({
-          clientUserId: initiatingUserId,
-          clientOrderType: requestedClientOrderType,
-          isSystemApplied: requestedIsSystemApplied,
-          kingdeeVoucherNo: requestedKingdeeVoucherNo,
-          pickupContact: normalizedPickupContact,
-          pickupAt: requestedPickupAt,
-          remark: submitRemark,
-          items: freshItemSnapshot,
-        }) : null
-        const submitDecision = decideClientCheckoutSubmit({
+        const reason = getClientCheckoutNewSubmitBlockReason({
           refreshSucceeded: refreshResult.success,
-          requestedItems: requestedItemSnapshot,
           requestedIntentKey,
-          activeSubmitLock,
           selectedConflictCount: clientCartStore.selectedCheckoutConflicts.length,
           freshItems: freshItemSnapshot,
-          freshIntentKey,
+          freshIntentKey: freshItemSnapshot ? buildSubmitIntent(freshItemSnapshot) : null,
         })
-        if (submitDecision.type === 'blocked') {
+        if (reason) {
           const messageByReason = {
             refresh_failed: refreshResult.error?.message || '商品目录同步失败，请稍后重试',
-            pending_intent_changed: '上一次订单提交结果仍在确认中，请先前往“我的订单”核对，勿修改商品后重复提交',
             selected_conflicts: '已选商品的库存或规格已变化，请先返回购物车调整数量、取消选择或移除后再提交',
             empty_snapshot: '请先选择可结算商品',
             selection_changed_after_refresh: '商品选择在同步期间已变化，请确认购物车后重新提交',
-          } satisfies Record<typeof submitDecision.reason, string>
-          showAppWarning(messageByReason[submitDecision.reason])
+          } satisfies Record<typeof reason, string>
+          showAppWarning(messageByReason[reason])
           return
         }
-        const submitItemSnapshot = submitDecision.items
-        submitIntentKey = submitDecision.intentKey
-        submitRequestKey = submitDecision.type === 'retry_pending'
-          ? submitDecision.requestKey
-          : createClientPreorderSubmitLock(initiatingUserId, submitIntentKey)
-        const result = await submitO2oPreorder({
-          clientRequestId: submitRequestKey,
-          isSystemApplied: requestedIsSystemApplied,
-          kingdeeVoucherNo: requestedKingdeeVoucherNo,
-          pickupContact: normalizedPickupContact,
-          pickupAt: requestedPickupAt,
-          remark: submitRemark,
-          items: submitItemSnapshot,
-        })
-
-        if (!isCurrent()) return
-        submitItemSnapshot.forEach((item) => {
-          clientCartStore.removeItem(String(item.skuId || item.productId))
-        })
-        clientCatalogStore.applyPreorderSubmission(submitItemSnapshot)
-        clientCartStore.syncWithCatalog(clientCatalogStore.products)
-        clearClientPreorderSubmitLock(initiatingUserId, submitRequestKey)
-
-        showAppSuccess('预订单提交成功')
-        if (!props.standalone) {
-          emit('close')
-        }
-        await router.replace(`/client/orders/${result.order.id}`)
+        // 写入并读回完全一致后才允许首次 POST；存储失败不能发送。
+        const submitRequestKey = createClientPreorderSubmitLock(initiatingUserId, requestedIntentKey, frozenPayload)
+        restorePendingSubmit()
+        await sendFrozenSubmission({ ...frozenPayload, clientRequestId: submitRequestKey }, isCurrent, initiatingUserId)
       } catch (error) {
-        if (!isCurrent()) return
-        const normalizedError = normalizeRequestError(error, '提交失败，请稍后再试')
-        if (AMBIGUOUS_PREORDER_SUBMIT_STATUS_SET.has(normalizedError.status)) {
-          refreshClientPreorderSubmitLock(initiatingUserId, submitIntentKey, submitRequestKey)
-          showAppWarning('提交结果确认中，请勿重复提交。可前往“我的订单”查询是否已创建成功。')
-          return
-        }
-        clearClientPreorderSubmitLock(initiatingUserId, submitRequestKey)
-        void showCriticalErrorDialog(normalizedError, {
-          title: '预订单提交失败',
-          fallback: '提交失败，请稍后再试',
-          operation: '提交预订单',
-        })
+        if (isCurrent()) showAppWarning(normalizeRequestError(error, '原始提交保存失败，本次未发送').message)
       } finally {
-        submitting.value = false
+        if (isCurrent()) submitting.value = false
       }
     },
   })
-  if (runResult === null) return
 }
 </script>
 
@@ -544,12 +655,34 @@ const handleSubmit = async () => {
 
     <section class="flex-1 overflow-y-auto px-4 py-4 pb-32 sm:px-5">
       <div class="mb-4 rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:bg-[#141415]">
+        <p class="break-words text-sm text-slate-700 dark:text-slate-200">取货地址：{{ clientCatalogStore.storefront.pickupAddress }}</p>
+        <p class="mb-2 break-words text-sm text-slate-700 dark:text-slate-200">营业时间：{{ clientCatalogStore.storefront.businessHoursText }}</p>
         <p class="text-sm text-slate-500 dark:text-slate-400">提交前将以服务端库存与限购规则为准</p>
         <p class="mt-2 text-xs text-slate-400">
           {{ catalogSyncing ? '正在后台同步最新库存；提交时会再次校验全部已选商品' : '进入页面后会自动同步最新库存与限购信息' }}
         </p>
       </div>
 
+      <div v-if="pendingSubmit || recoveryError" class="mb-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900" role="status">
+        <p class="font-semibold">{{ recoveryError || (pendingSubmit?.expired ? '原提交确认期限已到，结果仍需核实' : '有一笔提交结果尚未确认') }}</p>
+        <template v-if="pendingSubmit?.payload">
+          <p class="mt-2">原提货人：{{ pendingSubmit.payload.pickupContact }}；取货时间：{{ pendingSubmit.payload.pickupAt || '无需预约' }}</p>
+          <p>金蝶申请：{{ pendingSubmit.payload.isSystemApplied ? '已申请' : '未申请' }} {{ pendingSubmit.payload.kingdeeVoucherNo }}</p>
+          <p class="whitespace-pre-wrap">原备注：{{ pendingSubmit.payload.remark || '无' }}</p>
+          <ul><li v-for="(item, index) in pendingSubmit.payload.items" :key="index">商品 {{ item.productId }} / 规格 {{ item.skuId || '默认' }} × {{ item.qty }}</li></ul>
+        </template>
+        <p v-if="pendingSubmit" class="mt-2">{{ pendingSubmit.payload ? '继续确认会原样重试首次提交。' : '原提交无法重试，结果仍需在“我的订单”核实。' }}</p>
+        <div class="mt-3 flex flex-wrap gap-2">
+          <el-button @click="router.push('/client/orders')">查看我的订单</el-button>
+          <el-button
+            v-if="pendingSubmit?.dismissibleMarker && !recoveryError"
+            class="!ml-0"
+            :disabled="submitting || confirmingRecovery"
+            @click="handleDismissPendingSubmit"
+          >已核对订单，恢复结算</el-button>
+        </div>
+      </div>
+      <template v-if="!pendingSubmit && !recoveryError">
       <div class="mb-4 rounded-[1.2rem] border border-slate-100 bg-white p-4 shadow-[var(--ylink-shadow-soft)] dark:border-white/5 dark:bg-[#141415]">
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-2">
@@ -646,11 +779,12 @@ const handleSubmit = async () => {
               placeholder="请选择到店时段"
               aria-label="到店时段"
               :disabled="!pickupDateKey"
+              @change="pickupSelectionNotice = ''"
             >
               <el-option v-for="slot in pickupTimeOptions" :key="slot.value" :label="slot.label" :value="slot.value" />
             </el-select>
 
-            <p class="mt-2 text-xs" :class="!pickupAtIso ? 'text-rose-600 dark:text-rose-400' : 'text-slate-500 dark:text-slate-400'">
+            <p class="mt-2 text-xs" :class="!pickupAtIso ? 'text-rose-600 dark:text-rose-400' : 'text-slate-500 dark:text-slate-400'" role="status">
               {{ pickupAtStatusText }}
             </p>
           </div>
@@ -702,13 +836,14 @@ const handleSubmit = async () => {
           placeholder="选填：如特殊说明、联系事项等"
         />
       </div>
+      </template>
     </section>
 
     <div class="client-cart-summary absolute bottom-0 left-0 right-0 z-20 border-t border-slate-200 bg-white px-4 py-3 pb-safe shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] dark:border-white/10 dark:bg-[#141415]">
       <div class="mx-auto flex w-full max-w-[1100px] items-center justify-between">
         <div class="flex flex-col">
           <p class="text-sm text-slate-500 dark:text-slate-400">共 <span class="font-bold text-slate-900 dark:text-slate-100">{{ totalQty }}</span> 件，合计 <span class="font-bold text-teal-600">¥{{ totalAmount.toFixed(2) }}</span></p>
-          <p class="mt-0.5 text-xs text-slate-400">提交后进入待提货状态</p>
+          <p class="mt-0.5 text-xs text-slate-400">{{ pendingSubmit?.payload ? '确认以原始提交摘要为准' : pendingSubmit || recoveryError ? '原提交结果待核实' : '提交后进入待提货状态' }}</p>
         </div>
         <button
           type="button"
@@ -716,7 +851,7 @@ const handleSubmit = async () => {
           :disabled="submitDisabled"
           @click="handleSubmit"
         >
-          {{ submitting ? '提交中...' : '提交预订单' }}
+          {{ submitting ? '提交中...' : pendingSubmit?.payload ? '继续确认原提交' : pendingSubmit || recoveryError ? '待核实原提交' : '提交预订单' }}
         </button>
       </div>
     </div>

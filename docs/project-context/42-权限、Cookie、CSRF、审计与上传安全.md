@@ -1,5 +1,12 @@
 ﻿# Y-Link 权限、Cookie、CSRF、审计与上传安全
 
+## 安全外发总时限与可选重定向约束
+
+- `utils/safe-http-request.ts` 的 `timeoutMs` 是单次调用的总预算，覆盖 DNS、连接、响应体和全部重定向；持续小包或进入下一跳均不会续期。总时限、请求错误、响应 error/aborted/未完成 close、半包及超限统一只收口一次，并清理计时器和活动请求/响应；迟到 DNS 不再成功连接。
+- `Y_LINK_OUTBOUND_REDIRECT_POLICY=compat` 为默认值，保留 301/302/303/307/308 的现有 method/body 规则、HTTP 首跳及跨源敏感头剥离。验证码平台仍把总时限映射为 504，其余传输失败为 502。
+- 生产环境的验证码与通知建议使用 `strict`。`compat` 下若供应商返回 307 或 308，原请求体中的验证码、收件地址或配置参数会随跨源跳转发送；HTTPS 降级还可能让请求经过明文链路。`strict` 仅允许初始请求 Origin 与 `Y_LINK_OUTBOUND_REDIRECT_ALLOWED_ORIGINS` 中批准的完整 Origin，并拒绝 HTTPS 降级。白名单默认 `[]`，例如 `["https://notifications.example"]`。启动时校验配置，每一跳继续检查 URL 和 DNS 地址；跳转被拒绝后结束请求。
+- Origin 白名单不是 SSRF 豁免：初始请求与每次跳转仍执行 URL 检查、完整 DNS 地址集合安全校验、地址族过滤及响应大小限制。跨源连接不会恢复前面已剥离的敏感头。策略由共享 helper 收口，不增加业务 API 或设置页面。
+
 ## 适用范围
 
 - 适用于管理端/客户端鉴权、Cookie 与 Bearer 兼容、CSRF、越权审计、上传资源安全与历史路径兼容。
@@ -45,7 +52,7 @@
 - 登录失败锁定与“需要图形验证码”判定按规范账号主体计数：管理端用库中真实用户名（`authService.resolveLoginRiskSubject`），客户端 Web/Mobile 用 `uid:<用户ID>`（`clientAuthService.resolveLoginRiskSubject`），账号不存在时才退回输入原文。MySQL 常用排序规则大小写、重音、全角不敏感，按输入计数会让 `Ádmin`、全角 `ａｄｍｉｎ` 各得一份失败额度；客户端同一账号的手机号、邮箱、用户名、工号也必须共用一个桶。
 - 全局撞库态势（`GlobalLoginFailureMonitor`，阈值见 `config/load-protection-policy.ts`）：分布式撞库时单个来源、单个账号都可能低于各自阈值，因此按端在进程内统计 5 分钟全站登录失败数（含会话内密码复核失败）。管理端达到 30 次、客户端（Web 与 Mobile 共用）达到 150 次后，该端所有登录强制图形验证码 15 分钟，持续失败会顺延；进入该状态时只写一次 `auth.guard.global_captcha`。阈值可用 `YLINK_ADMIN_GLOBAL_FAILURE_THRESHOLD`、`YLINK_CLIENT_GLOBAL_FAILURE_THRESHOLD`、`YLINK_GLOBAL_CAPTCHA_HOLD_MINUTES` 调整，非法值启动即报错。未配置 Redis 时按实例统计；Redis 就绪时额外合并集群失败量与强制验证码标志，Redis 故障时本项全局态势回退本实例计数，并非数据库共享桶。前端沿用既有“需要验证码”响应（管理端 428、客户端“请输入图形验证码”）自动显示验证码，无需改动。
 - 自研风控（登录/注册/发码/找回等频控与锁定，`normalizeRiskSource`）与救援入口的来源键经 `utils/ip-subnet.ts` 归一：IPv4 映射地址（`::ffff:a.b.c.d`）还原为 IPv4，IPv6 聚合到 /64。运营商通常给每个终端一整个 /64，按完整地址计数时攻击者在网段内轮换地址即可绕过。审计 `ipAddress` 仍记录完整 IP，`detail.source` 为聚合后的来源键。express-rate-limit 默认按 /56 聚合，无需改动；新增按 IP 计数的自研限流必须复用该工具。
-- 管理端与 Web 客户端认证入参在路由 schema 层限长（`constants/auth-input-limits.ts`）：账号与发码目标 ≤128，已有密码（登录、当前密码复核、JSON 导入导出复核）≤256（main 上客户端密码曾无上限，放宽以兼容历史口令），新密码 ≤64，图形验证码 ID ≤64、答案 ≤16，找回重置凭证 ≤256。超长输入在进入账号归一化、查库、密码派生与审计前即返回中文 400。移动端契约独立，未纳入。
+- 管理端与 Web 客户端认证入参在路由 schema 层限长（`constants/auth-input-limits.ts`）：账号与发码目标 ≤128，已有密码（登录、当前密码复核、JSON 导入导出复核）≤256（main 上客户端密码曾无上限，放宽以兼容历史口令），新密码 ≤64，图形验证码 ID ≤64、答案 ≤16，找回重置凭证 ≤256。Mobile 后端路由也采用以上账号、已有密码、新密码、图形验证码和找回凭证上限。登录及匿名找回在进入账号归一化、密码派生或失败审计前拒绝超长输入，受保护入口仍先校验 Bearer 会话。Mobile 与 Web 的改密及找回重置在账号锁下用最新用户名、手机号、邮箱和工号校验新密码。
 - 管理端密码登录第二因素策略（所有管理端账号自愿开启，`services/admin-mfa.service.ts`、`services/admin-webauthn.service.ts`、`utils/totp.ts`、表 `sys_user_mfa`）：
   - `sys_user_mfa` 一行存在即表示密码登录持续要求第二因素；TOTP 密文可空，`factor_revision` 在方式变更后递增，使在途登录票据与身份复核证明失效。`GET /api/auth/mfa/status` 的旧字段 `enabled` 仍表示 TOTP 是否启用，与 `totpEnabled` 同义；判断密码后是否需要第二步应读取 `mfaRequired`，不能用 `enabled` 代替。仅密钥的策略可保存一次性恢复码，摘要依赖数据加密主密钥；启动预检会扫描仍有效摘要中的 `kid`，缺配套密钥时阻断启动。
   - TOTP 绑定：`POST /api/auth/mfa/enroll` 先复核当前密码，返回 20 字节 Base32 秘钥与 `otpauth://` 地址（10 分钟内有效）；`POST /api/auth/mfa/enroll/confirm` 校验一次动态码后才落库。首次建立策略返回 10 个一次性恢复码，已有仅密钥策略添加 TOTP 时保留原恢复码。秘钥经 `data-encryption` 加密（AAD 绑定账号 ID）；恢复码只存 HMAC-SHA256 摘要与生成时的密钥 ID，密钥不匹配时拒绝校验，不把正确恢复码当错码计入锁定。
@@ -58,7 +65,7 @@
 - 商品图上传（`POST /api/upload`）的 sharp 校验与重编码经 `product-image-processing` 闸门执行（默认并发 2、排队 16、超时 15 秒，`YLINK_PRODUCT_IMAGE_*` 可调），满载返回 503 且临时文件照常清理；反馈附件仍用独立闸门，两者互不挤占。
 - 新密码 scrypt 派生一律在数据库事务外预先完成（管理端建号、编辑改密、重置他人密码，本人改密，客户端注册、找回重置、改密，管理员重置客户端密码），事务内只做账号锁定、信息校验与写入，避免在 SQLite 唯一写槽内等待并发闸门。**旧密码的最终校验仍在事务内锁定账号后进行**（账号生命周期契约与 `mobile-auth:review:verify` 的 Web 改密断言），不得改为事务外快照比对。
 - 风控负缓存（`persistent-risk-state.service.ts`，进程内 ≤2 万条）：只缓存“某限流桶已超限至某时刻”“某失败桶已锁定至某时刻”这类确定性拒绝结论，有效期内的后续请求直接拒绝、不读写数据库（`DatabaseRateLimitStore` 同样受益）；本实例的回退、清零与重置同步失效缓存，Redis 未启用或故障时由数据库承接共享状态；Redis 正常时使用 Redis 窗口与失败状态，已触发的账号锁定另有数据库镜像。负缓存只保存拒绝结论，多实例下可能让本实例额外拒绝到结论到期，不作为放行依据。拒绝审计去重：频控只在首次（走库判定）超限时记一次，锁定拒绝同一端同一主体每分钟最多记一次，避免攻击流量灌满审计表。负缓存规模见数据库性能接口 `riskNegativeCache`。直接清空 `auth_risk_state` 的同进程回归脚本须同时调用 `resetNegativeCacheForTesting()`。
-- 匿名认证入口在途上限（`middleware/in-flight-limit.middleware.ts`，挂在 `/api/auth` 与 `/api/client-auth` 的限流中间件之前）：管理端 `/captcha`、`/login`、`/login/mfa` 与 Web 客户端登录/验证码/能力/注册/发码/找回入口共用一个进程级闸门，默认同时处理 64 个（`YLINK_ANONYMOUS_AUTH_MAX_IN_FLIGHT`），超出直接 503 不排队；移动端入口不纳入。图形验证码 PNG 渲染另经 `captcha-render` 闸门（默认并发 4、排队 32、超时 3 秒，`YLINK_CAPTCHA_RENDER_*` 可调，Web 与移动端共用）。所有闸门均为模块级单例，同一进程多次 `createApp` 共用。
+- 匿名认证入口在途上限（`middleware/in-flight-limit.middleware.ts`，挂在管理端、Web 客户端与 Mobile 匿名认证入口的限流中间件之前）：管理端 `/captcha`、`/login`、`/login/mfa` 与 Web 客户端登录/验证码/能力/注册/发码/找回入口共用一个进程级闸门，默认同时处理 64 个（`YLINK_ANONYMOUS_AUTH_MAX_IN_FLIGHT`），超出直接 503 不排队；Mobile 的图形验证码、能力、登录、注册、发码及找回入口加入同一在途保护，原有 Native 入口速率桶保留。Mobile refresh 和受保护路由不占该闸门，Mobile 仍沿用既有自适应削峰豁免。图形验证码 PNG 渲染另经 `captcha-render` 闸门（默认并发 4、排队 32、超时 3 秒，`YLINK_CAPTCHA_RENDER_*` 可调，Web 与移动端共用）。所有闸门均为模块级单例，同一进程多次 `createApp` 共用。
 - 过载自适应削峰（`utils/overload-monitor.ts` + `middleware/overload-shedding.middleware.ts`，挂在 `/health` 之后、所有业务入口之前）：正式运行时每秒采样事件循环延迟 p99 与 SQLite 写队列占用，连续 3 次越线升级、连续 5 次回落到阈值一半以下降级。elevated（延迟 ≥500ms 或写队列 ≥90%）拒绝匿名认证入口、新建 SSE（`/client-feedback/stream`、`/customer-service/stream`）与各类导出；critical（延迟 ≥1 秒持续，写队列拥堵最多到 elevated）再拒绝 GET/HEAD 读请求，但保留 `/auth/me`、`/client-auth/me`。已登录写请求、`/health`、救援面与移动端 `/api/v1/*` 永不削峰；被削峰返回 503 + `Retry-After: 5`、`data.reason=SERVER_OVERLOADED`，不写审计。阈值与开关见 `YLINK_OVERLOAD_*`，等级、最近信号与削峰计数见数据库性能接口 `overload`。直接 `createApp` 的回归脚本不启动采样器（等级恒为 normal），测试削峰时用 `overloadMonitor.evaluate()` 注入信号。削峰只是自保手段，容量型 DDoS 仍需上游 CDN/高防。
 - 按会话的请求速率保险丝（`utils/session-rate-fuse.ts`）：管理端 `requireAuth` 与 Web 客户端 `requireClientAuth` 在查库之前按会话令牌哈希做令牌桶判定（默认突发 200、每秒补 30，`YLINK_SESSION_RATE_BURST/PER_SECOND` 可调，进程内 ≤5 万个会话桶，淘汰最久未活动者）。按会话而非账号计数，部门共享账号的多个会话互不影响；超出返回 429 + `Retry-After`、`data.reason=SESSION_RATE_LIMITED`。移动端访问令牌不纳入。该保险丝仍是进程级资源保护，Redis 启用时也不改为集群总额度；同一会话轮询多个实例会分别消耗各实例的桶，不能将它宣称为全集群统一会话限额。
 - 边缘层（Nginx）另有按 IP 的登录/验证码/敏感匿名入口/通用 API 限流、每 IP 在途请求上限与分入口请求体上限，超限返回 JSON 429/413（`EDGE_RATE_LIMITED` / `EDGE_PAYLOAD_TOO_LARGE`），前端按普通业务错误展示；阈值与调参见 `51-本地联调与部署模式.md`。
@@ -93,6 +100,8 @@
 - 操作日志未选择业务类别与操作类型时，默认排除 `notification.rule.matched`、`notification.external.dispatch`、`notification.event.process` 三类通知内部处理记录（导出同口径，数据不删不改）；选择“通知中心”或具体动作时仍可完整查询，按事件聚合的视图见审计日志页“通知事件”页签。
 
 ## 权限与安全边界
+
+- Mobile 登录失败审计复用登录账号掩码，并保留设备 ID、平台和错误分类；失败事件不写用户可自由填写的设备名称与版本文本。
 
 - 角色只是兜底；大多数接口仍应以权限点为主。
 - 高风险接口除了权限，还经常叠加 `admin` 角色与永久删除密码。

@@ -15,6 +15,7 @@ import { inventoryQueryService } from '../services/inventory-query.service.js'
 import { stocktakeService } from '../services/stocktake.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
+import { assertPermanentDeletePasswordForRequest, createPermanentDeleteLimiter } from '../utils/permanent-delete-guard.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { dataExportLeasePool, runExportHoldingLease } from '../utils/export-lease-pool.js'
 import { auditService } from '../services/audit.service.js'
@@ -35,6 +36,20 @@ const locationSchema = z.object({
   locationName: optionalText(64),
   remark: optionalText(255),
   isActive: z.boolean().optional(),
+})
+
+const deleteLocationSchema = z.object({
+  permanentDeletePassword: z.string().optional(),
+})
+
+const LOCATION_DELETE_AUDIT_TARGET = {
+  actionType: 'product.location.delete',
+  actionLabel: '删除库位',
+  targetType: 'base_storage_location',
+} as const
+const locationDeleteLimiter = createPermanentDeleteLimiter({
+  ...LOCATION_DELETE_AUDIT_TARGET,
+  storePrefix: 'express-inventory-location-delete',
 })
 
 const locationSkuQuerySchema = z.object({
@@ -162,6 +177,19 @@ inventoryRouter.put('/locations/:id', requirePermission('products:manage'), asyn
   ok(res, await inventoryMasterDataService.updateLocation(req.params.id, locationSchema.parse(req.body), authReq.auth, extractRequestMeta(req)))
 }))
 
+inventoryRouter.delete(
+  '/locations/:id',
+  requirePermission('products:manage'),
+  locationDeleteLimiter,
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const id = String(idSchema.parse(req.params.id))
+    const { permanentDeletePassword } = deleteLocationSchema.parse(req.body ?? {})
+    await assertPermanentDeletePasswordForRequest(req, permanentDeletePassword, LOCATION_DELETE_AUDIT_TARGET)
+    ok(res, await inventoryMasterDataService.deleteLocation(id, authReq.auth, extractRequestMeta(req)))
+  }),
+)
+
 inventoryRouter.get('/locations/:id/skus', requirePermission('products:manage'), asyncHandler(async (req, res) => {
   ok(res, await inventoryMasterDataService.listLocationSkus(req.params.id, locationSkuQuerySchema.parse(req.query)))
 }))
@@ -228,34 +256,39 @@ inventoryRouter.get('/logs', requirePermission('inventory:view'), asyncHandler(a
 inventoryRouter.get('/logs/export', requirePermission('inventory:view'), asyncHandler(async (req, res) => {
   const authReq = req as AuthenticatedRequest
   const logQuery = buildLogQuery(req.query as Record<string, unknown>)
-  // 租约持有到“生成结束”且“文件完整发出或连接关闭”：生成期间断连不会提前归还，慢速客户端也无法借未读完的响应叠加导出。
-  const exported = await runExportHoldingLease(
-    await dataExportLeasePool.acquireShared(authReq.auth.userId),
-    res,
-    () => inventoryQueryService.exportLogsWithSummary(logQuery),
-  )
-  // 批量导出留痕：只记筛选条件与行数，关键字截断，不记录导出内容。
-  await auditService.recordDataExport({
-    exportType: 'inventory_logs',
-    actor: authReq.auth,
-    requestMeta: extractRequestMeta(req),
-    rowCount: exported.rowCount,
-    filters: {
-      keyword: logQuery.keyword?.slice(0, 64) ?? null,
-      changeTypes: logQuery.changeTypes ?? null,
-      skuId: logQuery.skuId ?? null,
-      productId: logQuery.productId ?? null,
-      refType: logQuery.refType ?? null,
-      refId: logQuery.refId ?? null,
-      startDate: logQuery.startDate ?? null,
-      endDate: logQuery.endDate ?? null,
-    },
-  })
-  const buffer = exported.buffer
   const fileName = `inventory-logs-${new Date().toISOString().slice(0, 19).replaceAll(/[:T]/g, '-')}.xlsx`
-  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`)
-  res.send(buffer)
+  let exported: { rowCount: number } | undefined
+  try {
+    exported = await runExportHoldingLease(
+      await dataExportLeasePool.acquireShared(authReq.auth.userId),
+      res,
+      () => inventoryQueryService.exportLogsToStream(logQuery, res, () => {
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`)
+      }),
+    )
+  } finally {
+    // XLSX 一旦发出响应头，断连或写出失败也要留痕。此时无法确认已送达客户端的行数。
+    if (exported || res.headersSent) {
+      await auditService.recordDataExport({
+        exportType: 'inventory_logs',
+        actor: authReq.auth,
+        requestMeta: extractRequestMeta(req),
+        rowCount: exported?.rowCount ?? null,
+        filters: {
+          keyword: logQuery.keyword?.slice(0, 64) ?? null,
+          changeTypes: logQuery.changeTypes ?? null,
+          skuId: logQuery.skuId ?? null,
+          productId: logQuery.productId ?? null,
+          refType: logQuery.refType ?? null,
+          refId: logQuery.refId ?? null,
+          startDate: logQuery.startDate ?? null,
+          endDate: logQuery.endDate ?? null,
+          ...(exported ? {} : { transferStatus: 'incomplete' }),
+        },
+      })
+    }
+  }
 }))
 
 // ---- 库存单据 ----

@@ -5,14 +5,15 @@
  * - 外部 SDK 均通过依赖注入替身驱动，避免专项验证产生真实发送。
  */
 
+import { createVerificationIsolation } from './verification-isolation.js'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const runId = `${process.pid}-${Date.now()}`
-const runtimeDir = path.join(os.tmpdir(), `ylink-aliyun-pnvs-${runId}`)
+const verificationIsolation = createVerificationIsolation('verification-aliyun-verify')
+const runtimeDir = verificationIsolation.rootDir
 const sqlitePath = path.join(runtimeDir, 'verification.sqlite')
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -49,6 +50,7 @@ for (const envTemplatePath of ['.env.docker.cloud.example', '.env.docker.mysql.e
 process.env.NODE_ENV = 'test'
 process.env.APP_PROFILE = `aliyun-pnvs-${runId}`
 process.env.DB_TYPE = 'sqlite'
+verificationIsolation.seal({ type: 'sqlite', database: sqlitePath })
 process.env.DB_SYNC = 'true'
 process.env.SQLITE_DB_PATH = sqlitePath
 process.env.Y_LINK_DATA_DIR = runtimeDir
@@ -66,7 +68,9 @@ async function main() {
   const { systemConfigService } = await import('../src/services/system-config.service.js')
 
   try {
+    await verificationIsolation.assertTarget(AppDataSource)
     prepareDatabaseRuntime()
+    await verificationIsolation.assertTarget(AppDataSource)
     await AppDataSource.initialize()
     await initializeDatabaseSchemaIfNeeded(AppDataSource)
     await systemConfigService.ensureDefaultConfigs()
@@ -86,10 +90,13 @@ async function main() {
     const { databaseMaintenanceModeService } = await import('../src/services/database-maintenance-mode.service.js')
     const configRepo = AppDataSource.getRepository(SystemConfig)
     const recordRepo = AppDataSource.getRepository(SmsVerificationRecord)
+    // 直接插入历史或不完整配置夹具会绕过真实治理入口，持久化后显式发出同一组失效。
+    const invalidateProviderFixtures = () => systemConfigService.invalidateVerificationProviderCacheAfterCommit()
     await configRepo.createQueryBuilder().update(SystemConfig)
       .set({ configValue: 'https://example.com/legacy-sms-provider' })
       .where('config_key = :key', { key: 'verification.mobile.api_url' })
       .execute()
+    invalidateProviderFixtures()
     const switchedConfig = await systemConfigService.resolveVerificationProviderConfigInput('mobile', {
       enabled: false,
       httpMethod: 'POST',
@@ -164,6 +171,7 @@ async function main() {
 
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: '1' }).where('config_key = :key', { key: 'verification.mobile.enabled' }).execute()
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'aliyun_dypns' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
+    invalidateProviderFixtures()
     const unavailableCapabilities = await clientAuthService.getCapabilities()
     assert.equal(unavailableCapabilities.channels.mobile, false, '配置不完整的短信通道不得声明为可发送')
     assert.equal(
@@ -190,17 +198,20 @@ async function main() {
       ['verification.mobile.aliyun_template_test', 'SMS_TEST'],
     ].map(([key, value]) => configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: value }).where('config_key = :key', { key }).execute()))
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'scheme-before-switch' }).where('config_key = :key', { key: 'verification.mobile.aliyun_scheme_name' }).execute()
+    invalidateProviderFixtures()
     const readyConfigs = await systemConfigService.getVerificationProviderConfigs()
     assert.equal(readyConfigs.mobile.ready, true, '阿里云短信只有启用、签名、模板、AK 和 HMAC 均就绪时才可用')
     assert.equal((await clientAuthService.getCapabilities()).channels.mobile, true, '客户端能力必须基于 provider ready 而不是单独 enabled')
 
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: '0' }).where('config_key = :key', { key: 'verification.mobile.enabled' }).execute()
+    invalidateProviderFixtures()
     await assert.rejects(
       () => verificationService.sendCode({ channel: 'mobile', target: '13800001111', scene: 'register' }),
       /未就绪/,
       '公共发送必须拒绝已关闭的阿里云短信通道',
     )
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: '1' }).where('config_key = :key', { key: 'verification.mobile.enabled' }).execute()
+    invalidateProviderFixtures()
 
     const superseded = await verificationService.sendCode({ channel: 'mobile', target: '13800001111', scene: 'register' })
     const sent = await verificationService.sendCode({ channel: 'mobile', target: '13800001111', scene: 'register' })
@@ -227,6 +238,7 @@ async function main() {
 
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'generic_http' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'scheme-after-switch' }).where('config_key = :key', { key: 'verification.mobile.aliyun_scheme_name' }).execute()
+    invalidateProviderFixtures()
     await verificationService.verifyCode({ channel: 'mobile', target: '13800001111', scene: 'register', code: '123456' })
     assert.deepEqual(checkedRequests[0], {
       phoneNumber: '13800001111', countryCode: '86', outId: sent.outId, verifyCode: '123456', schemeName: 'scheme-before-switch',
@@ -242,6 +254,7 @@ async function main() {
     assert.equal((await recordRepo.findOneByOrFail({ outId: superseded.outId })).verificationStatus, 'pending', '更早记录不得被回退消费')
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'aliyun_dypns' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: '' }).where('config_key = :key', { key: 'verification.mobile.aliyun_scheme_name' }).execute()
+    invalidateProviderFixtures()
 
     const receiptWorker = new AliyunDypnsMnsWorkerService(recordService)
     const officialReportTime = '2026-09-04 10:20:30'
@@ -727,18 +740,22 @@ async function main() {
 
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'generic_http' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'https://example.com/verification' }).where('config_key = :key', { key: 'verification.mobile.api_url' }).execute()
+    invalidateProviderFixtures()
     const genericResult = await verificationService.sendCode({ channel: 'mobile', target: '13800002222', scene: 'register' })
     assert.equal(genericResult.provider, 'generic_http', 'generic_http 既有发送逻辑必须保持可用')
     assert.equal(genericCodes.length, 1, 'generic_http 仍应使用内存票据生成验证码')
     const checkedBeforeGenericVerify = checkedRequests.length
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'aliyun_dypns' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
+    invalidateProviderFixtures()
     await verificationService.verifyCode({ channel: 'mobile', target: '13800002222', scene: 'register', code: genericCodes[0] ?? '' })
     assert.equal(checkedRequests.length, checkedBeforeGenericVerify, 'HTTP 验证码必须按发送时 Provider 本地核验，不能受配置切换影响')
 
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'generic_http' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
+    invalidateProviderFixtures()
     await verificationService.sendCode({ channel: 'mobile', target: '13800008888', scene: 'profile_update' })
     const obsoleteGenericCode = genericCodes.at(-1) ?? ''
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'aliyun_dypns' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
+    invalidateProviderFixtures()
     const latestDypnsResult = await verificationService.sendCode({ channel: 'mobile', target: '13800008888', scene: 'profile_update' })
     verifyResult = 'UNKNOWN'
     await assert.rejects(
@@ -752,6 +769,7 @@ async function main() {
 
     const obsoleteDypnsResult = await verificationService.sendCode({ channel: 'mobile', target: '13800009998', scene: 'forgot_password' })
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'generic_http' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
+    invalidateProviderFixtures()
     await verificationService.sendCode({ channel: 'mobile', target: '13800009998', scene: 'forgot_password' })
     const latestGenericCode = genericCodes.at(-1) ?? ''
     const checkedBeforeLatestGenericVerify = checkedRequests.length
@@ -773,12 +791,17 @@ async function main() {
   }
 }
 
-main()
-  .then(() => console.log('OK 阿里云 PNVS 短信验证码专项验证通过'))
-  .catch((error) => {
-    console.error('[verification-aliyun] 验证失败:', error)
-    process.exitCode = 1
-  })
-  .finally(() => {
-    fs.rmSync(runtimeDir, { recursive: true, force: true })
-  })
+let verificationError: unknown
+try { await main() } catch (error) { verificationError = error }
+try {
+  // 清理前只记录资源种类和可执行文件名，不记录 SDK 参数、环境或凭证。
+  const handles = (process as unknown as { _getActiveHandles(): Array<{ constructor?: { name: string }; spawnfile?: string; exitCode?: number | null }> })._getActiveHandles()
+  console.log(JSON.stringify({ cleanupDiagnostic: { cwd: process.cwd(), rootDir: runtimeDir,
+    resources: process.getActiveResourcesInfo(), handles: handles.map(handle => ({ type: handle.constructor?.name,
+      executable: handle.spawnfile ? path.basename(handle.spawnfile) : undefined, exitCode: handle.exitCode })) } }))
+  verificationIsolation.cleanup()
+} catch (error) {
+  verificationError = verificationError ? new AggregateError([verificationError, error], '专项主异常与所属资源清理失败均保留') : error
+}
+if (verificationError) { console.error('[verification-aliyun] 验证失败:', verificationError); process.exitCode = 1 }
+else console.log('OK 阿里云 PNVS 短信验证码专项验证通过（含所属资源清理）')

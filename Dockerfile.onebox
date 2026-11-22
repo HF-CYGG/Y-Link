@@ -12,9 +12,14 @@
 # ------------------------------
 # Onebox 默认依赖 sqlite3，Node 主版本必须与其 N-API 发行产物联合验收。
 # 固定到 Node 22 最新安全补丁版本；Node 发布新安全版本后 `npm run verify:security-updates` 会报红，需同步升级全部 Node 版本固定点。
-ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:22.23.4-bookworm-slim
+ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:22.23.5-bookworm-slim
 
 FROM --platform=$BUILDPLATFORM ${Y_LINK_NODE_IMAGE} AS frontend-build
+# 固定既有npm工具；官方包完整性失败即停，不改变Node/Nginx或应用锁。
+COPY backend/scripts/install-pinned-npm.mjs /tmp/ylink-install-pinned-npm.mjs
+COPY backend/scripts/build-pinned-npm.mjs /tmp/build-pinned-npm.mjs
+COPY backend/npm-toolchain /tmp/ylink-npm-toolchain
+RUN node /tmp/ylink-install-pinned-npm.mjs --context=image --data-dir=/tmp/ylink-npm-toolchain
 WORKDIR /app
 COPY package*.json ./
 COPY .npmrc ./
@@ -42,6 +47,11 @@ RUN npm run build
 # `--ignore-scripts` 跳过 sqlite3 / sharp 的原生编译，本阶段只需要它们的类型定义；
 # 真正与架构绑定的原生产物由下方 backend-prod-deps 阶段在目标平台安装。
 FROM --platform=$BUILDPLATFORM ${Y_LINK_NODE_IMAGE} AS backend-build
+# 固定既有npm工具；官方包完整性失败即停，不改变Node/Nginx或应用锁。
+COPY backend/scripts/install-pinned-npm.mjs /tmp/ylink-install-pinned-npm.mjs
+COPY backend/scripts/build-pinned-npm.mjs /tmp/build-pinned-npm.mjs
+COPY backend/npm-toolchain /tmp/ylink-npm-toolchain
+RUN node /tmp/ylink-install-pinned-npm.mjs --context=image --data-dir=/tmp/ylink-npm-toolchain
 WORKDIR /backend
 COPY backend/package*.json ./
 COPY backend/.npmrc ./.npmrc
@@ -54,33 +64,113 @@ RUN npm run build
 # 后端运行时依赖阶段：仅保留生产依赖，减小最终镜像体积。
 # ------------------------------
 FROM ${Y_LINK_NODE_IMAGE} AS backend-prod-deps
+# 固定既有npm工具；官方包完整性失败即停，不改变Node/Nginx或应用锁。
+COPY backend/scripts/install-pinned-npm.mjs /tmp/ylink-install-pinned-npm.mjs
+COPY backend/scripts/build-pinned-npm.mjs /tmp/build-pinned-npm.mjs
+COPY backend/npm-toolchain /tmp/ylink-npm-toolchain
+RUN node /tmp/ylink-install-pinned-npm.mjs --context=image --data-dir=/tmp/ylink-npm-toolchain
 WORKDIR /backend
 # 官方 Node 镜像已内置 /usr/local/include/node；显式复用本地头文件，
 # 避免 sqlite3 回退 node-gyp 时还需外网下载与运行时完全匹配的 Node headers。
 ENV npm_config_nodedir=/usr/local
-# sqlite3 在新 Node ABI 尚无预编译包时会自动回退 node-gyp；构建工具只存在于该中间层，
-# 最终运行镜像不会携带编译器。缺失这些工具会让 optional sqlite3 被 npm 静默跳过，
-# 直到 Onebox 启动时才报 DriverPackageNotInstalled。
+# sqlite3必须使用固定官方引擎源码重建，构建工具只存在于中间层。
+# optional安装缺失、重建失败或实际绑定版本不匹配均阻断镜像，不能静默使用旧预编译包。
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends python3 make g++ \
+  && apt-get install -y --no-install-recommends python3 make g++ binutils \
   && rm -rf /var/lib/apt/lists/*
 COPY backend/package*.json ./
 COPY backend/.npmrc ./.npmrc
-RUN npm ci --omit=dev \
-  && node -e "require('sqlite3')"
+COPY backend/scripts/pinned-sqlite-source.mjs backend/scripts/build-pinned-sqlite.mjs backend/scripts/verify-pinned-sqlite.mjs backend/scripts/install-pinned-sqlite.mjs ./scripts/
+COPY backend/src/database/pinned-sqlite-source.json ./src/database/pinned-sqlite-source.json
+# 保留sqlite3@5.1.7/API，强制链接经官方源码校验的静态SQLite；旧预编译绑定不能回退通过。
+RUN npm ci --omit=dev
+
+# 仅构建所需的下载/验钥工具不进入最终层；复用已固定Node/npm的目标平台依赖阶段。
+FROM backend-prod-deps AS native-security-build
+COPY backend/native-security/baseline-v7 /ylink-native-security
+RUN Y_LINK_NATIVE_SECURITY_BUILD=image sh /ylink-native-security/build-stage.sh
+
+# 新增补丁及PAM为独立未验收候选，不混用v7 pins/安装器。
+FROM backend-prod-deps AS native-security-candidate
+COPY backend/native-security /ylink-native-security
+RUN Y_LINK_NATIVE_SECURITY_BUILD=image sh /ylink-native-security/build-stage.sh --candidate-only
+
+# glibc同版本完整包使用独立原始构建stage；dev闭包不进入运行镜像。
+FROM ${Y_LINK_NODE_IMAGE} AS glibc-security-build
+COPY backend/native-security /ylink-native-security
+RUN Y_LINK_GLIBC_SECURITY_BUILD=image sh /ylink-native-security/build-glibc-stage.sh --candidate-only
+
+FROM backend-prod-deps AS nginx-keyring
+RUN set -eu; \
+  apt-get update \
+  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl gnupg ca-certificates \
+  && export GNUPGHOME="$(mktemp -d)" \
+  && curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 https://nginx.org/keys/nginx_signing.key -o /tmp/nginx-signing.key \
+  && gpg --batch --import /tmp/nginx-signing.key \
+  && nginx_key_fingerprints='573BFD6B3D8FBC641079A6ABABF5BD827BD9BF62 8540A6F18833A80E9C1653A42FD21310B49F6B46 9E9BE90EACBCDE69FE9B204CBCDCD8A38D88A2B3' \
+  && for fingerprint in $nginx_key_fingerprints; do \
+       gpg --batch --with-colons --fingerprint "$fingerprint" | grep -qx "fpr:::::::::$fingerprint:" || exit 1; \
+       printf 'Verified nginx signing fingerprint: %s\n' "$fingerprint"; \
+     done \
+  && gpg --batch --export $nginx_key_fingerprints > /usr/share/keyrings/nginx-archive-keyring.gpg \
+  && chmod 0644 /usr/share/keyrings/nginx-archive-keyring.gpg \
+  && rm -rf "$GNUPGHOME" /tmp/nginx-signing.key /var/lib/apt/lists/*
 
 # ------------------------------
 # onebox 运行阶段：在同一容器中组合 Node 后端与 Nginx。
 # ------------------------------
-FROM ${Y_LINK_NODE_IMAGE} AS runtime
+# 仅显式--target package-security-candidate产出未验收DEB；普通runtime不依赖此stage。
+FROM ${Y_LINK_NODE_IMAGE} AS package-security-candidate
+COPY backend/native-security /ylink-native-security
+RUN Y_LINK_PACKAGE_SECURITY_BUILD=image sh /ylink-native-security/build-package-stage.sh --candidate-only --sources=coreutils,openssl,perl
 
-RUN apt-get update \
-  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nginx ca-certificates tzdata \
-  && mkdir -p /var/cache/nginx/ylink-public \
+# GCC/Node候选独立于runtime，缺原架构基线/完整闭包即停止；不在本阶段执行。
+FROM ${Y_LINK_NODE_IMAGE} AS gcc-security-candidate
+COPY backend/native-security /ylink-native-security
+COPY backend/native-security/candidate-inputs/gcc /ylink-gcc-inputs
+RUN --network=none Y_LINK_GCC_SECURITY_BUILD=image sh /ylink-native-security/build-gcc-stage.sh --candidate-only
+
+FROM ${Y_LINK_NODE_IMAGE} AS node-security-candidate
+COPY backend/native-security /ylink-native-security
+COPY backend/native-security/candidate-inputs/gcc/debs /ylink-gcc-inputs/debs
+COPY backend/native-security/candidate-inputs/gcc/reference/libgcc-s1_12.2.0-14+deb12u1_amd64.deb /ylink-gcc-inputs/reference/libgcc-s1_12.2.0-14+deb12u1_amd64.deb
+COPY backend/native-security/candidate-inputs/node /ylink-node-inputs
+COPY --from=gcc-security-candidate /native-gcc-out /tmp/ylink-gcc-candidate
+COPY backend/scripts/install-pinned-npm.mjs /tmp/ylink-install-pinned-npm.mjs
+COPY backend/scripts/build-pinned-npm.mjs /tmp/build-pinned-npm.mjs
+COPY backend/npm-toolchain /tmp/ylink-npm-toolchain
+RUN node /tmp/ylink-install-pinned-npm.mjs --context=image --data-dir=/tmp/ylink-npm-toolchain
+RUN --network=none Y_LINK_NODE_SECURITY_BUILD=image sh /ylink-native-security/build-node-stage.sh --candidate-only
+
+FROM ${Y_LINK_NODE_IMAGE} AS runtime
+# 保留既有合法运行基线；本批未验收native候选仅由独立target产出，尚未接入runtime。
+COPY --from=native-security-build /native-out /tmp/ylink-native-security
+COPY backend/native-security/baseline-v7/install-backports.mjs backend/native-security/baseline-v7/source-pins.json /tmp/ylink-native-security-installer/
+# 固定既有npm工具；官方包完整性失败即停，不改变Node/Nginx或应用锁。
+COPY backend/scripts/install-pinned-npm.mjs /tmp/ylink-install-pinned-npm.mjs
+COPY backend/scripts/build-pinned-npm.mjs /tmp/build-pinned-npm.mjs
+COPY backend/npm-toolchain /tmp/ylink-npm-toolchain
+RUN node /tmp/ylink-install-pinned-npm.mjs --context=image --data-dir=/tmp/ylink-npm-toolchain
+
+ARG Y_LINK_NGINX_VERSION=1.30.6-1~bookworm
+COPY --from=nginx-keyring /usr/share/keyrings/nginx-archive-keyring.gpg /usr/share/keyrings/nginx-archive-keyring.gpg
+# 独立 signed-by 仅信任核验过指纹的 nginx.org 签名公钥；不扩大系统全局信任。
+RUN set -eu; \
+  apt-get update \
+  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gpgv ca-certificates tzdata \
+  && arch="$(dpkg --print-architecture)" \
+  && case "$arch" in amd64|arm64) ;; *) exit 1 ;; esac \
+  && printf 'deb [arch=%s signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] https://nginx.org/packages/debian bookworm nginx\n' "$arch" > /etc/apt/sources.list.d/nginx.list \
+  && apt-get update \
+  && gpgv --status-fd 1 --keyring /usr/share/keyrings/nginx-archive-keyring.gpg /var/lib/apt/lists/nginx.org_packages_debian_dists_bookworm_InRelease \
+  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "nginx=${Y_LINK_NGINX_VERSION}" \
+  && node /tmp/ylink-native-security-installer/install-backports.mjs --input=/tmp/ylink-native-security \
+  && mkdir -p /var/cache/nginx/ylink-public /var/cache/nginx/client_temp /var/cache/nginx/proxy_temp /var/cache/nginx/fastcgi_temp /var/cache/nginx/uwsgi_temp /var/cache/nginx/scgi_temp \
   && chown -R www-data:www-data /var/cache/nginx/ylink-public \
+  && chown -R www-data:www-data /var/cache/nginx/*_temp \
   && rm -f /etc/nginx/sites-enabled/default \
   && rm -f /etc/nginx/conf.d/default.conf \
-  && rm -rf /var/lib/apt/lists/*
+  && rm -rf /tmp/ylink-native-security /tmp/ylink-native-security-installer /tmp/ylink-pam-security /tmp/ylink-pam-security-installer /tmp/ylink-glibc-security /tmp/ylink-glibc-security-installer /var/lib/apt/lists/*
 
 ENV TZ=Asia/Shanghai
 
@@ -95,16 +185,23 @@ COPY docker/nginx/configure-proxy-boundary.sh /usr/local/bin/ylink-proxy-boundar
 
 COPY --from=backend-build /backend/dist /app/backend/dist
 COPY --from=backend-prod-deps /backend/node_modules /app/backend/node_modules
+COPY --from=backend-prod-deps /backend/scripts /app/backend/scripts
+COPY --from=backend-prod-deps /backend/src/database/pinned-sqlite-source.json /app/backend/src/database/pinned-sqlite-source.json
+COPY --from=backend-prod-deps /backend/node_modules/.ylink-native-sqlite /usr/local/share/ylink-native-sqlite/
 COPY backend/package.json /app/backend/package.json
 # 启动期 MySQL 自动迁移与订单编号领养按 dist 相对路径读取 backend/sql，缺失会阻断开启 DB_AUTO_MIGRATE 的启动。
 COPY backend/sql /app/backend/sql
 
 COPY docker/onebox/entrypoint.sh /entrypoint.sh
+COPY docker/onebox/backend-launcher.mjs /usr/local/bin/ylink-backend-launcher.mjs
+# 只准备镜像内的新目录；已有挂载卷不会被启动脚本 chown/chmod。
+RUN install -d -o node -g node -m 0700 /app/data \
+  && install -d -o node -g node -m 0755 /app/uploads
 RUN chmod +x /entrypoint.sh
 
 EXPOSE 80
 
-HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
-  CMD node -e "require('node:http').get('http://127.0.0.1/health', (res) => process.exit(res.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD ["node", "-e", "require('node:http').get('http://127.0.0.1/health', (res) => process.exit(res.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
 
 ENTRYPOINT ["/entrypoint.sh"]

@@ -11,7 +11,7 @@
  */
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import fs from 'node:fs'
 import net from 'node:net'
 import path from 'node:path'
@@ -93,6 +93,7 @@ async function startDockerRedis(password: string): Promise<{ url: string; stop: 
 // ---------------------------------------------------------------------------------------------
 async function runMainScenario() {
   const tempRoot = prepareIsolatedEnv('main')
+  process.env.Y_LINK_MULTI_INSTANCE = 'false'
   process.env.REDIS_KEY_PREFIX = `ylv${Date.now().toString(36)}:`
   const { Redis } = await import('ioredis')
   const redisClient = await import('../src/redis/redis-client.js')
@@ -103,7 +104,7 @@ async function runMainScenario() {
   const { VerificationCodeAttemptStore } = await import('../src/services/verification-code.service.js')
   const { persistentRiskStateService, shouldUseSharedRateLimitStore } = await import('../src/services/persistent-risk-state.service.js')
   const { customerServiceRealtimeService } = await import('../src/services/customer-service-realtime.service.js')
-  const { readMallCatalogRevision } = await import('../src/services/mall-catalog-revision.service.js')
+  const { invalidateMallCatalogReadCache, readMallCatalogRevision, subscribeMallCatalogRemoteInvalidation } = await import('../src/services/mall-catalog-revision.service.js')
 
   await redisClient.connectRedis()
   redisBus.startRedisBus()
@@ -157,6 +158,100 @@ async function runMainScenario() {
     const takes = await Promise.all(Array.from({ length: 100 }, (_, index) => (index % 2 ? instanceA : instanceB).take('race')))
     assert.equal(takes.filter(Boolean).length, 1, '100 个并发 take 只能有一个拿到票据')
 
+    // 旧 namespace 在滚动升级期间可能仍有票据；v2 不能读取或迁移这些未绑定密码状态的凭证。
+    const oldReset = new RedisTicketStore<{ userId: string; accountKey: string; expireAt: number }>(
+      'client-password-reset', (ticket) => ticket.expireAt,
+    )
+    const newReset = new RedisTicketStore<{ version: 2; passwordState: string; expireAt: number }>(
+      'client-password-reset-v2', (ticket) => ticket.expireAt,
+    )
+    await oldReset.set('legacy-reset', { userId: '1', accountKey: 'email:fixture@example.test', expireAt: Date.now() + 60_000 })
+    assert.equal(await newReset.take('legacy-reset'), undefined, 'v2 必须拒绝旧 namespace 票据')
+    const { clientAuthService: resetAuthService } = await import('../src/services/client-auth.service.js')
+    await assert.rejects(resetAuthService.resetPassword({
+      account: 'fixture@example.test', resetToken: 'legacy-reset', newPassword: 'OrchidMountain927!',
+    }), (error: unknown) => error instanceof Error && error.message === '重置凭证已失效')
+    assert.ok(await oldReset.get('legacy-reset'), '业务拒绝不得消费旧 namespace 以外的数据')
+    // 即使把旧结构放入新 namespace，也必须失败关闭。
+    const malformedReset = new RedisTicketStore<{ userId: string; accountKey: string; expireAt: number }>(
+      'client-password-reset-v2', (ticket) => ticket.expireAt,
+    )
+    await malformedReset.set('malformed-reset', { userId: '1', accountKey: 'email:fixture@example.test', expireAt: Date.now() + 60_000 })
+    await assert.rejects(resetAuthService.resetPassword({
+      account: 'fixture@example.test', resetToken: 'malformed-reset', newPassword: 'OrchidMountain927!',
+    }), (error: unknown) => error instanceof Error && error.message === '重置凭证已失效')
+    assert.equal(await malformedReset.take('malformed-reset'), undefined, '畸形票据拒绝后仍然只能消费一次')
+
+    // 使用真实 Redis 与临时 SQLite 验证纠正、失败关门及并发只有一笔提交。
+    const { AppDataSource } = await import('../src/config/data-source.js')
+    const { initializeDatabaseInfrastructure } = await import('../src/database/database-strategy.js')
+    const { initializeDatabaseSchemaIfNeeded } = await import('../src/config/database-bootstrap.js')
+    const { getCurrentTransactionManager } = await import('../src/database/transaction-coordinator.js')
+    const { ClientUser } = await import('../src/entities/client-user.entity.js')
+    const { SysAuditLog } = await import('../src/entities/sys-audit-log.entity.js')
+    const { hashPassword, verifyPassword } = await import('../src/utils/password.js')
+    const { BizError } = await import('../src/utils/errors.js')
+    try {
+      await AppDataSource.initialize()
+      await initializeDatabaseInfrastructure(AppDataSource)
+      await initializeDatabaseSchemaIfNeeded(AppDataSource)
+      const email = 'reset-redis@example.test', mobile = '13800138009'
+      const originalHash = await hashPassword('PineCloud504!')
+      const users = AppDataSource.getRepository(ClientUser)
+      const audits = AppDataSource.getRepository(SysAuditLog)
+      const user = await users.save({
+        realName: '票据校验用户', email, emailVerifiedAt: new Date(), mobile,
+        passwordHash: originalHash, accountType: 'personal', status: 'enabled', departmentName: '', staffVerified: false,
+      })
+      const resetToken = 'redis-reset-fixture'
+      const reset = { account: email, resetToken, newPassword: 'OrchidMountain927!' }
+      const ticket = {
+        version: 2 as const, userId: user.id, accountKey: 'email:' + email, expireAt: Date.now() + 60_000,
+        passwordState: createHash('sha256')
+          .update(JSON.stringify(['client-password-reset-v2', BigInt(user.id).toString(), originalHash])).digest('hex'),
+      }
+      await newReset.set(resetToken, ticket)
+      const key = prefix + 'ticket:client-password-reset-v2:' + createHash('sha256').update(resetToken).digest('hex')
+      const originalCiphertext = await raw.get(key)
+      const originalTtl = await raw.pttl(key)
+      await assert.rejects(resetAuthService.resetPassword({ ...reset, newPassword: 'Alternate' + mobile + '!' }),
+        (error: unknown) => error instanceof BizError && error.statusCode === 400 && /账号信息/.test(error.message))
+      assert.ok(originalCiphertext && originalTtl > 0)
+      assert.equal(await raw.get(key), originalCiphertext, '纠正前不得重新签发票据')
+      assert.ok(await raw.pttl(key) <= originalTtl, '纠正前不得延长票据寿命')
+
+      const commandClient = redisClient.getRedisClient()
+      assert.ok(commandClient)
+      const originalMulti = commandClient.multi
+      let consumedInsideTransaction = false
+      commandClient.multi = () => {
+        consumedInsideTransaction = Boolean(getCurrentTransactionManager(AppDataSource))
+        throw new Error('隔离夹具模拟消费命令未完成')
+      }
+      try {
+        await assert.rejects(resetAuthService.resetPassword(reset),
+          (error: unknown) => error instanceof BizError && error.statusCode === 503)
+      } finally {
+        commandClient.multi = originalMulti
+      }
+      assert.equal(consumedInsideTransaction, true, '原子消费必须在写事务中进行')
+      assert.equal(await audits.countBy({ actionType: 'password_changed', targetId: user.id }), 0)
+      const readPassword = async () => (await users.createQueryBuilder('user').addSelect('user.passwordHash')
+        .where('user.id = :id', { id: user.id }).getOneOrFail()).passwordHash
+      assert.equal(await readPassword(), originalHash)
+      assert.equal(await raw.get(key), originalCiphertext)
+
+      const settled = await Promise.allSettled([resetAuthService.resetPassword(reset), resetAuthService.resetPassword(reset)])
+      assert.equal(settled.filter(result => result.status === 'fulfilled').length, 1)
+      assert.ok(settled.some(result => result.status === 'rejected' && result.reason instanceof BizError
+        && result.reason.statusCode === 400 && result.reason.message === '重置凭证已失效'))
+      assert.equal(await raw.get(key), null, '成功消费后 Redis 中不再保留凭证')
+      assert.equal(await audits.countBy({ actionType: 'password_changed', targetId: user.id }), 1)
+      assert.equal(await verifyPassword(reset.newPassword, await readPassword()), true)
+    } finally {
+      if (AppDataSource.isInitialized) await AppDataSource.destroy()
+    }
+
     // 伪造明文票据不能被接受
     await raw.set(ticketKeys[0], JSON.stringify({ code: '000000', secret: 'forged', expiresAt: Date.now() + 60_000 }))
     assert.equal(await instanceA.get('13800138000:register'), undefined, '未加密（伪造）的票据必须视为不存在')
@@ -166,7 +261,8 @@ async function runMainScenario() {
     const codeTicket = { channel: 'mobile' as const, target: '13800138001', scene: 'register' as const, code: '123456', expiresAt: Date.now() + 60_000, failedAttempts: 0 }
     await codeStore.set('k1', codeTicket)
     const wrongResults = await Promise.all(Array.from({ length: 20 }, () => codeStore.consume('k1', '000000')))
-    assert.ok(wrongResults.filter((item) => item === false).length >= 5, '错误答案至少前五次返回 false')
+    assert.equal(wrongResults.filter((item) => item === false).length, 5, '共享额度仅允许五次错码核验')
+    assert.equal(wrongResults.filter((item) => item === null).length, 15, '超额请求不得再读取答案')
     assert.equal(await codeStore.consume('k1', '123456'), null, '并发错误五次后票据必须作废')
     await codeStore.set('k2', codeTicket)
     const rightResults = await Promise.all(Array.from({ length: 20 }, () => codeStore.consume('k2', '123456')))
@@ -176,6 +272,39 @@ async function runMainScenario() {
     await codeStore.set('k3', codeTicket)
     for (let index = 0; index < 4; index += 1) assert.equal(await codeStore.consume('k3', '999999'), false)
     assert.equal(await codeStore.consume('k3', '123456'), true, '重新发送验证码后错误次数必须清零')
+
+    const fixture = { code: 'fixture', secret: 'ticket-fixture', expiresAt: Date.now() + 60_000 }
+    await instanceA.set('admitted', fixture)
+    let laterAttempts: Promise<unknown[]> | undefined
+    let comparisons = 0
+    const admitted = await instanceA.verifyAndConsume('admitted', 5, (ticket) => {
+      // 两个实例对象复用测试连接。先把其余预占命令送入 Redis，再发当前票据的消费命令。
+      laterAttempts = Promise.all(Array.from({ length: 5 }, () => instanceB.verifyAndConsume('admitted', 5, () => {
+        comparisons += 1
+        return null
+      })))
+      return ticket.code
+    })
+    assert.deepEqual(await laterAttempts, [
+      { status: 'mismatch', attemptsLeft: 3 },
+      { status: 'mismatch', attemptsLeft: 2 },
+      { status: 'mismatch', attemptsLeft: 1 },
+      { status: 'mismatch', attemptsLeft: 0 },
+      { status: 'unavailable' },
+    ])
+    assert.equal(comparisons, 4, '跨实例额度耗尽时不得再执行比对回调')
+    assert.deepEqual(admitted, { status: 'verified', value: fixture.code }, '额度耗尽不影响已获准的正确请求')
+
+    await instanceA.set('replacement', fixture)
+    let reissued: Promise<void> | undefined
+    const replaced = await instanceA.verifyAndConsume('replacement', 5, (ticket) => {
+      reissued = instanceB.set('replacement', { ...ticket, code: 'replacement-fixture' })
+      return true
+    })
+    await reissued
+    assert.equal(replaced.status, 'unavailable', '旧票据不能核验通过或消费改发后的新票据')
+    assert.deepEqual(await instanceB.verifyAndConsume('replacement', 5, (ticket) => ticket.code),
+      { status: 'verified', value: 'replacement-fixture' })
 
     // 2b. 全站撞库态势的近似滑动窗口计数不得在 1000 处封顶（阈值可配置到十万级以上）
     const counterWindowMs = 60_000
@@ -246,17 +375,49 @@ async function runMainScenario() {
     await getOrLoadShared(cacheKey, 300, loader)
     assert.equal(loads, 2, '过期后必须回源数据库')
 
-    // 3c. 写入即失效：业务写请求成功后、响应发出前递增代际；失败请求与认证接口不递增；带代际的缓存写后立即回源
+    // 3c. 业务提交失效、HTTP 与服务去重、单实例与多实例的响应时序。
     {
       const express = (await import('express')).default
-      const { businessDataCacheInvalidation, BUSINESS_DATA_CACHE_GENERATION } = await import('../src/middleware/business-data-cache.middleware.js')
-      const { getOrLoadSharedVersioned, readSharedCacheGeneration } = await import('../src/redis/redis-cache.js')
+      const { env } = await import('../src/config/env.js')
+      const { businessDataCacheInvalidation, BUSINESS_DATA_CACHE_GENERATION, invalidateBusinessDataAfterCommit } = await import('../src/middleware/business-data-cache.middleware.js')
+      const { bumpSharedCacheGeneration, getOrLoadSharedVersioned, readSharedCacheGeneration } = await import('../src/redis/redis-cache.js')
       const app = express()
       app.use(businessDataCacheInvalidation)
-      app.post('/api/orders', (_req, res) => { res.json({ code: 0 }) })
+      const endedWithinHandler: boolean[] = []
+      app.post('/api/orders/submit', (_req, res) => {
+        invalidateMallCatalogReadCache()
+        res.json({ code: 0 })
+        endedWithinHandler.push(res.writableEnded)
+      })
+      app.post('/api/orders/1/restore', (_req, res) => {
+        res.destroy()
+        invalidateMallCatalogReadCache()
+      })
+      app.post('/api/o2o/mall/preorders/1/cancel', (_req, res) => {
+        invalidateMallCatalogReadCache()
+        res.status(409).json({ code: 409 })
+      })
       app.post('/api/orders/invalid', (_req, res) => { res.status(400).json({ code: 400 }) })
-      app.post('/api/auth/login', (_req, res) => { res.json({ code: 0 }) })
-      const server = app.listen(0)
+      const unaffected = [
+        '/api/auth/login', '/api/Client-Auth/Login/', '/api/v1/Mobile-Auth/Refresh/',
+        '/api/Orders/Merges/Preview/', '/api/Products/Labels/', '/api/data-maintenance/export/json',
+        '/api/client-feedback/conversations/1/messages', '/api/notifications/inbox/1/read', '/api/users/1/restore',
+        '/api/inbound/supplier/submit', '/api/inventory/stocktakes/1/count',
+      ]
+      const relevant = ['/api/Client-Feedback/Restock-Requests/', '/api/Data-Maintenance/Import/Json/']
+      app.post([...unaffected, ...relevant], (_req, res) => { res.json({ code: 0 }) })
+      app.patch('/api/o2o/orders/1/kingdee-registration', (_req, res) => { res.json({ code: 0 }) })
+      const printedOrders = new Set<string>()
+      const endedPrintWithinHandler: boolean[] = []
+      app.post('/api/o2o/mall/preorders/:id/customer-order-print', (req, res) => {
+        if (!printedOrders.has(req.params.id)) {
+          printedOrders.add(req.params.id)
+          invalidateBusinessDataAfterCommit()
+        }
+        res.status(req.params.id === 'audit-failure' ? 500 : 200).json({ code: 0 })
+        endedPrintWithinHandler.push(res.writableEnded)
+      })
+      const server = app.listen(0, '127.0.0.1')
       await new Promise((resolve) => server.once('listening', resolve))
       const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`
       try {
@@ -271,15 +432,58 @@ async function runMainScenario() {
         assert.equal(reportLoads, 1, '代际未变时命中缓存')
         const before = Number(await readSharedCacheGeneration(BUSINESS_DATA_CACHE_GENERATION))
         await fetch(`${base}/api/orders/invalid`, { method: 'POST' })
-        await fetch(`${base}/api/auth/login`, { method: 'POST' })
-        assert.equal(Number(await readSharedCacheGeneration(BUSINESS_DATA_CACHE_GENERATION)), before, '失败的写请求与认证接口不递增代际')
-        const response = await fetch(`${base}/api/orders`, { method: 'POST' })
-        assert.equal(response.status, 200)
-        // 收到响应时代际必须已经递增：此后任意实例上的查询都读到新代际。
-        assert.equal(Number(await readSharedCacheGeneration(BUSINESS_DATA_CACHE_GENERATION)), before + 1, '成功写入在响应发出前递增代际')
+        for (const route of unaffected) {
+          const response = await fetch(base + route, { method: 'POST' })
+          assert.equal(response.status, 200, route)
+          await response.json()
+        }
+        assert.equal(Number(await readSharedCacheGeneration(BUSINESS_DATA_CACHE_GENERATION)), before, '失败、只读与无关写入不得递增代际')
+        for (const route of relevant) assert.equal((await fetch(base + route, { method: 'POST' })).status, 200, route)
+        assert.equal((await fetch(base + '/api/o2o/orders/1/kingdee-registration', { method: 'PATCH' })).status, 200)
+        assert.equal(Number(await readSharedCacheGeneration(BUSINESS_DATA_CACHE_GENERATION)), before + 3, '补货、JSON 导入和金蝶登记必须失效')
+        assert.equal((await fetch(base + '/api/orders/submit', { method: 'POST' })).status, 200)
+        assert.deepEqual(endedWithinHandler, [true], '单实例响应不等待 Redis')
+        assert.equal(Number(await readSharedCacheGeneration(BUSINESS_DATA_CACHE_GENERATION)), before + 4, 'HTTP 与商城服务重叠时只递增一次')
+        assert.deepEqual(await loadReport(), { loads: 2 }, '写入后的查询必须回源')
+
+        env.Y_LINK_MULTI_INSTANCE = true
+        assert.equal((await fetch(base + '/api/orders/submit', { method: 'POST' })).status, 200)
+        assert.deepEqual(endedWithinHandler, [true, false], '多实例必须延后结束响应以等待同一次递增')
+        const generationKey = sharedCacheKey('generation', BUSINESS_DATA_CACHE_GENERATION)
+        assert.equal(Number(await raw.get(generationKey)), before + 5, '收到写响应时独立 Redis 连接可读取新代际')
+        assert.equal((await fetch(base + '/api/o2o/mall/preorders/1/cancel', { method: 'POST' })).status, 409)
+        assert.equal(Number(await raw.get(generationKey)), before + 6, '返回 409 前已提交的变更不能丢失')
+        await assert.rejects(() => fetch(base + '/api/orders/1/restore', { method: 'POST' }))
+        assert.equal(Number(await readSharedCacheGeneration(BUSINESS_DATA_CACHE_GENERATION)), before + 7, '客户端断开后提交的变更不能丢失')
+        invalidateMallCatalogReadCache({ affectsBusinessData: false })
+        assert.equal(Number(await readSharedCacheGeneration(BUSINESS_DATA_CACHE_GENERATION)), before + 7, '仅商城展示更新不会使经营数据失效')
+        invalidateMallCatalogReadCache()
+        assert.equal(Number(await readSharedCacheGeneration(BUSINESS_DATA_CACHE_GENERATION)), before + 8, 'HTTP 外提交的变更也要使经营数据失效')
+
         await loadReport()
-        assert.equal(reportLoads, 2, '写入后的查询必须回源，不能读到写入前的缓存')
+        const cachedLoads = reportLoads
+        const commandClient = redisClient.getRedisClient()
+        assert.ok(commandClient)
+        const originalIncr = commandClient.incr
+        try {
+          commandClient.incr = (async () => { throw new Error('模拟递增失败') }) as typeof commandClient.incr
+          await bumpSharedCacheGeneration(BUSINESS_DATA_CACHE_GENERATION)
+        } finally {
+          commandClient.incr = originalIncr
+        }
+        assert.deepEqual(await loadReport(), { loads: cachedLoads + 1 }, '递增失败的本实例继续回源，不能读旧 Redis 代际')
+        assert.equal(Number(await readSharedCacheGeneration(BUSINESS_DATA_CACHE_GENERATION)), before + 9, 'Redis 恢复后必须补递增')
+
+        const print = (id: string) => fetch(base + '/api/O2O/Mall/Preorders/' + id + '/Customer-Order-Print/', { method: 'POST' })
+        assert.equal((await print('first')).status, 200)
+        assert.equal(Number(await raw.get(generationKey)), before + 10, '首次打印修改正式出库单后，只更新一次经营缓存代际')
+        assert.equal((await print('first')).status, 200)
+        assert.equal(Number(await raw.get(generationKey)), before + 10, '重复打印未更改正式单，成功返回也不补增')
+        assert.equal((await print('audit-failure')).status, 500)
+        assert.equal(Number(await raw.get(generationKey)), before + 11, '打印已提交后，即使审计失败仍需失效')
+        assert.deepEqual(endedPrintWithinHandler, [false, true, false], '多实例的打印响应只等待已有的失效操作')
       } finally {
+        env.Y_LINK_MULTI_INSTANCE = false
         await new Promise((resolve) => server.close(resolve))
       }
     }
@@ -314,9 +518,14 @@ async function runMainScenario() {
     assert.deepEqual(localHandled, [{ from: 'other' }], '其他实例的消息必须触发处理器，畸形消息被丢弃')
 
     const revisionBefore = readMallCatalogRevision()
+    const remoteRevisions: number[] = []
+    const unsubscribeRemoteRevision = subscribeMallCatalogRemoteInvalidation(() => remoteRevisions.push(readMallCatalogRevision()))
+    invalidateMallCatalogReadCache({ affectsBusinessData: false })
     await raw.publish(`${prefix}bus:cache:mall-catalog`, JSON.stringify({ o: 'other-instance', p: null }))
     await delay(300)
-    assert.equal(readMallCatalogRevision(), revisionBefore + 1, '其他实例的商城目录写入必须让本实例缓存失效')
+    unsubscribeRemoteRevision()
+    assert.equal(readMallCatalogRevision(), revisionBefore + 2, '本地与远端商城写入均应刷新本地目录修订')
+    assert.deepEqual(remoteRevisions, [revisionBefore + 2], '仅远端广播通知监听者，通知前修订已更新')
 
     // 5. 客服实时：撤权与会话事件广播、集群在线态合并
     received.length = 0
@@ -410,6 +619,9 @@ async function runDegradedScenario() {
     const store = createTicketStore<{ expiresAt: number }>({ namespace: 'degraded', maxSize: 10, resolveExpiresAt: (ticket) => ticket.expiresAt })
     await assert.rejects(async () => store.set('k', { expiresAt: Date.now() + 60_000 }), (error: unknown) => error instanceof BizError && error.statusCode === 503, 'Redis 不可用时票据必须返回 503')
     await assert.rejects(async () => store.take('k'), (error: unknown) => error instanceof BizError && error.statusCode === 503)
+    await assert.rejects(async () => store.verifyAndConsume('k', 5, () => {
+      assert.fail('Redis 不可用时不得执行票据比对')
+    }), (error: unknown) => error instanceof BizError && error.statusCode === 503)
 
     const now = Date.now()
     for (let index = 0; index < 3; index += 1) await persistentRiskStateService.consumeWindow('degraded-window', 60_000, now + index, 3)
@@ -486,16 +698,21 @@ async function runRecoveredScenario() {
     assert.ok(cacheClient)
     const revisionBefore = await readMallCatalogClusterRevision()
     assert.ok(revisionBefore !== null, 'Redis 就绪时应能读到集群修订号')
+    const oldSnapshot = JSON.stringify({ code: 0, message: 'ok', data: { list: [], storefront: {
+      businessHoursText: '10:00 - 22:00', mallAnnouncementText: '', pickupWindowHours: 24,
+    } } })
+    await cacheClient.set(redisClient.redisKey('cache', 'mall-products', revisionBefore), oldSnapshot, 'EX', 10)
     const firstSnapshot = await o2oPreorderService.getMallProductsPublicSnapshot()
+    assert.equal(firstSnapshot.data.storefront.pickupAddress, '海右书院112房间', '共享缓存不能返回滚动升级前缺少地址的快照')
     await delay(50)
-    const sharedKey = redisClient.redisKey('cache', 'mall-products', revisionBefore)
+    const sharedKey = redisClient.redisKey('cache', 'mall-products-v2', revisionBefore)
     assert.equal(await cacheClient.get(sharedKey), firstSnapshot.responseBody, '目录快照应按集群修订号写入 Redis')
     invalidateMallCatalogReadCache()
     const revisionAfter = await readMallCatalogClusterRevision()
     assert.equal(Number(revisionAfter), Number(revisionBefore) + 1, '目录失效必须递增集群修订号')
     const secondSnapshot = await o2oPreorderService.getMallProductsPublicSnapshot()
     await delay(50)
-    assert.equal(await cacheClient.get(redisClient.redisKey('cache', 'mall-products', revisionAfter as string)), secondSnapshot.responseBody, '失效后应按新修订号重建并写入')
+    assert.equal(await cacheClient.get(redisClient.redisKey('cache', 'mall-products-v2', revisionAfter as string)), secondSnapshot.responseBody, '失效后应按新修订号重建并写入')
     assert.equal(secondSnapshot.etag, firstSnapshot.etag, '内容未变时各实例生成的 ETag 一致')
     console.log('[redis-verify] 恢复场景：登录锁定双向兜底、商城目录二级缓存与集群修订号 通过')
   } finally {
@@ -506,7 +723,7 @@ async function runRecoveredScenario() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// 子场景：未配置 Redis → 行为与单实例现状一致
+// 子场景：未配置 Redis → 有界进程内查询缓存与单实例退化策略
 // ---------------------------------------------------------------------------------------------
 async function runDisabledScenario() {
   const tempRoot = prepareIsolatedEnv('disabled')
@@ -525,12 +742,53 @@ async function runDisabledScenario() {
     assert.equal(await withStartupLock(async () => 'ok'), 'ok')
     assert.equal(await publishRedisBus('topic', {}), false)
     assert.equal(redisClient.getRedisRuntimeSnapshot().degradeEvents, 0, '未启用 Redis 不应产生降级记录')
-    const { getOrLoadShared } = await import('../src/redis/redis-cache.js')
-    let disabledLoads = 0
-    await getOrLoadShared('k', 60_000, async () => { disabledLoads += 1 })
-    await getOrLoadShared('k', 60_000, async () => { disabledLoads += 1 })
-    assert.equal(disabledLoads, 2, '未配置 Redis 时报表与工作台不缓存，每次都回源')
-    console.log('[redis-verify] 未启用场景：行为与单实例现状一致 通过')
+    const { bumpSharedCacheGeneration, getOrLoadShared, getOrLoadSharedVersioned, getSharedCacheSnapshot } = await import('../src/redis/redis-cache.js')
+    let rawLoads = 0
+    const loadRaw = () => getOrLoadShared('raw', 60_000, async () => ++rawLoads)
+    assert.deepEqual(await Promise.all([loadRaw(), loadRaw()]), [1, 1], '无 Redis 时普通读穿仍合并并发回源')
+    assert.equal(await loadRaw(), 2, '无代际的键只单飞，不持久缓存')
+
+    const generation = 'verify-local'
+    let loads = 0
+    const load = (key: string) => getOrLoadSharedVersioned(generation, key, 60_000, async () => ({
+      rows: [{ id: ++loads }],
+    }))
+    const [first, concurrent] = await Promise.all([load('dashboard:admin'), load('dashboard:admin')])
+    assert.equal(loads, 1, '无 Redis 时同代际只执行一次加载')
+    first.rows[0].id = 999
+    assert.equal(concurrent.rows[0].id, 1, '同批响应对象互相隔离')
+    assert.equal((await load('dashboard:admin')).rows[0].id, 1, '修改响应不得污染 L1')
+    assert.equal((await load('dashboard:staff')).rows[0].id, 2, '不同视角的完整键不可混用')
+
+    let releaseOld = () => {}
+    const oldGate = new Promise<void>((resolve) => { releaseOld = resolve })
+    const old = getOrLoadSharedVersioned(generation, 'report', 60_000, async () => {
+      await oldGate
+      return '写入前'
+    })
+    await bumpSharedCacheGeneration(generation)
+    assert.equal(await getOrLoadSharedVersioned(generation, 'report', 60_000, async () => '写入后'), '写入后', '新读不能加入旧代单飞')
+    releaseOld()
+    assert.equal(await old, '写入前')
+    assert.equal(await getOrLoadSharedVersioned(generation, 'report', 60_000, async () => '不应回源'), '写入后', '旧代完成后不能覆盖新代')
+    assert.equal((await load('dashboard:admin')).rows[0].id, 3, '同一业务代际的既有键同步失效')
+
+    const loadExpiring = () => getOrLoadSharedVersioned(generation, 'expires', 1, async () => ++loads)
+    assert.equal(await loadExpiring(), 4)
+    await delay(10)
+    assert.equal(await loadExpiring(), 5, 'L1 过期后重新读取')
+    for (let index = 0; index < 129; index += 1) {
+      await getOrLoadSharedVersioned(generation, 'entry:' + index, 60_000, async () => index)
+    }
+    assert.equal(getSharedCacheSnapshot().localEntries, 128, 'L1 条数上限为 128')
+    assert.equal(await getOrLoadSharedVersioned(generation, 'entry:0', 60_000, async () => -1), -1, '超过条数上限时淘汰旧条目')
+    const bigValue = 'x'.repeat(3 * 1024 * 1024)
+    for (let index = 0; index < 3; index += 1) {
+      await getOrLoadSharedVersioned(generation, 'large:' + index, 60_000, async () => bigValue)
+    }
+    assert.ok(getSharedCacheSnapshot().localBytes <= 8 * 1024 * 1024, 'L1 同时受总字节约束')
+    assert.equal(await getOrLoadSharedVersioned(generation, 'large:0', 60_000, async () => '已淘汰'), '已淘汰', '超过总字节上限时淘汰旧条目')
+    console.log('[redis-verify] 未启用场景：单飞、L1 隔离、代际、过期和容量 通过')
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true })
   }

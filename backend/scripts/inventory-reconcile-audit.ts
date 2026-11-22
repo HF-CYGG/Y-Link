@@ -17,6 +17,7 @@ import 'reflect-metadata'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { escapeCsvCell } from '../src/utils/csv-security.js'
 
 // 核查脚本绝不允许触发结构同步。
 process.env.DB_SYNC = 'false'
@@ -59,11 +60,7 @@ function parseOutDir(argv: string[]): string {
 function toCsv(rows: Array<Record<string, unknown>>): string {
   if (rows.length === 0) return ''
   const headers = [...new Set(rows.flatMap((row) => Object.keys(row)))]
-  const escape = (value: unknown) => {
-    const text = value === null || value === undefined ? '' : String(value)
-    return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
-  }
-  return [headers.join(','), ...rows.map((row) => headers.map((header) => escape(row[header])).join(','))].join('\r\n')
+  return [headers.map(escapeCsvCell).join(','), ...rows.map((row) => headers.map((header) => escapeCsvCell(row[header])).join(','))].join('\r\n')
 }
 
 async function main() {

@@ -1,0 +1,564 @@
+{
+  "schema": 1,
+  "status": "source-candidate-only",
+  "version": "22.23.5",
+  "proposedLocalRevision": "22.23.5-ylink.1",
+  "sourceGateReady": true,
+  "buildReady": false,
+  "source": {
+    "file": "node-v22.23.5.tar.xz",
+    "url": "https://nodejs.org/download/release/v22.23.5/node-v22.23.5.tar.xz",
+    "bytes": 50529596,
+    "sha256": "6cce7c58bf058700c643944903d60a325e8c9ceede1f5c2c088b435f2ada091a",
+    "authenticationReceipt": "hardening/20261117-source-inputs/source-input-report-001.md",
+    "signedChecksumSha256": "fa48c3ebf4d3246b12090c0a5e0de342b65c7a035737d5fc7d24d6af8c60b884",
+    "releasePrimaryFingerprint": "5BE8A3F6C8A5C01D106C0AD820B1A390B168D356"
+  },
+  "architectures": {
+    "amd64": "linux-x86_64",
+    "arm64": "linux-aarch64"
+  },
+  "patches": [
+    {
+      "scope": "CVE-2026-88822",
+      "file": "patches/node/CVE-2026-88822.diff",
+      "sha256": "6faf6592591e180f125d3fbf8ac3274bdee0bf6efacf5d4edc1d3ebe46e2abfa",
+      "upstreamFile": "patches/node/CVE-2026-88822.upstream.patch",
+      "upstreamSha256": "50f7cc52fb146703379ca043d17e204c4fda99c684efe3db6d6f3ae1d175bd2a",
+      "commit": "1a73dc590cbad62d6f0329ea4779eadaa8d8fd75",
+      "targets": [
+        {
+          "path": "deps/openssl/openssl/crypto/bio/bss_dgram.c",
+          "beforeSha256": "25ac92a4db74c85b0d096860112c822a1c3b9e07f35ded77b88bfe891c3c7993",
+          "afterSha256": "9b0e09c21fdc0ae8c253d1a7aed1114814090d83f92c1ae6e2d83a28c829cb64"
+        }
+      ],
+      "strictStaticEvidence": {
+        "reusedFrom": "hardening/20261117-source-inputs/static-node-005/node-static-results.json",
+        "evidenceSha256": "592550f867cc488f3567bdb67eac0e5da2e9627b06ccd8b955b022d09d25c9da",
+        "checkExit": 0,
+        "applyExit": 0,
+        "sourceInputUnchanged": true,
+        "runtimeOrGeneratorExecution": false
+      }
+    },
+    {
+      "scope": "CVE-2026-88823",
+      "file": "patches/node/CVE-2026-88823.diff",
+      "sha256": "b3051c441f475735c434f0623ce42d3fe6f782b035a3b6a23ac938441e92ffe5",
+      "upstreamFile": "patches/node/CVE-2026-88823.upstream.patch",
+      "upstreamSha256": "a945077c0a978dbfe5af5e4f7174a2151466547f8fb94562f395baa7b6b7c147",
+      "commit": "159e1de0c448d7b9f09ad768c8e141def4aa1eb4",
+      "targets": [
+        {
+          "path": "deps/openssl/openssl/providers/implementations/ciphers/cipher_aes_gcm_siv.c",
+          "beforeSha256": "25012f573a36a465f0a68fe004366ef586f3a153d60a5a53db55df9b7b1da5c3",
+          "afterSha256": "1c9190d4dfbb2fd767c588376167358e7fd32b135aad0827b8d2cd6b78d69793"
+        },
+        {
+          "path": "deps/openssl/openssl/providers/implementations/ciphers/cipher_aes_gcm_siv_hw.c",
+          "beforeSha256": "37f4e407d03117c6b74e5d1385efb233f2d71225788f82857bff2368e7fd0457",
+          "afterSha256": "d5ea349bd8c5d48634b3a6006f1a1ef233213564ee675ee2fce4faec824cc639"
+        }
+      ],
+      "strictStaticEvidence": {
+        "reusedFrom": "hardening/20261117-source-inputs/static-node-005/node-static-results.json",
+        "evidenceSha256": "592550f867cc488f3567bdb67eac0e5da2e9627b06ccd8b955b022d09d25c9da",
+        "checkExit": 0,
+        "applyExit": 0,
+        "sourceInputUnchanged": true,
+        "runtimeOrGeneratorExecution": false
+      }
+    },
+    {
+      "scope": "CVE-2026-95691",
+      "file": "patches/node/CVE-2026-95691.diff",
+      "sha256": "9637f75ffb975f124ef3f77f515e413fa560abf57d5b7b443062bfe71ade8480",
+      "upstreamFile": "patches/node/CVE-2026-95691.upstream.patch",
+      "upstreamSha256": "93d8e82fdc995172a6d5cc6952491658106191bd5ac221d34596adbddfcd1afe",
+      "commit": "f6244675833e097c2429a40d1b206d95385bd42f",
+      "targets": [
+        {
+          "path": "deps/openssl/openssl/include/internal/quic_strm_reas.h",
+          "beforeSha256": "6dd9e3268036cd44869e40616e302c033902de6155a57c696420a75c83f0f457",
+          "afterSha256": "23cddd86dd8ed5246bca7f668197e73cec4a2653e476310a1d6a34ee243f4d1f"
+        },
+        {
+          "path": "deps/openssl/openssl/ssl/quic/quic_rstream.c",
+          "beforeSha256": "1d75050a351302038ffc4868c253cb73caaf202f1b91da7fbceb62514c712297",
+          "afterSha256": "ca832c01b754e6556d0d29ee667616102870bb93be2c21e5845e461861b21c31"
+        },
+        {
+          "path": "deps/openssl/openssl/ssl/quic/quic_strm_reas.c",
+          "beforeSha256": "040b6e3c0cc3144616d3c899a79b90f70a9517a5fb215a10f38b483499360c4c",
+          "afterSha256": "9ed4d3ab6508b79c04033ebb793c0fbcce5615e75323022de20bf2748f74c319"
+        }
+      ],
+      "strictStaticEvidence": {
+        "reusedFrom": "hardening/20261117-source-inputs/static-node-005/node-static-results.json",
+        "evidenceSha256": "592550f867cc488f3567bdb67eac0e5da2e9627b06ccd8b955b022d09d25c9da",
+        "checkExit": 0,
+        "applyExit": 0,
+        "sourceInputUnchanged": true,
+        "runtimeOrGeneratorExecution": false
+      }
+    },
+    {
+      "scope": "CVE-2026-95692",
+      "file": "patches/node/CVE-2026-95692.diff",
+      "sha256": "142a0445209dff7ed6eef923df4d886b4dc147670f48899b978d80a0b8684b61",
+      "upstreamFile": "patches/node/CVE-2026-95692.upstream.patch",
+      "upstreamSha256": "0e328604c0038de6629a29322ae5f02d2f5f5128c2625b57ca64262efab99e05",
+      "commit": "257a3427aa0ef8d9dd2ef5b3e2d1c021a221b116",
+      "targets": [
+        {
+          "path": "deps/openssl/openssl/providers/implementations/ciphers/cipher_aes_gcm_siv.c",
+          "beforeSha256": "1c9190d4dfbb2fd767c588376167358e7fd32b135aad0827b8d2cd6b78d69793",
+          "afterSha256": "62510edfb867c2c33b034ec7f1f04913551827441a0f156966bc857cc271c211"
+        }
+      ],
+      "strictStaticEvidence": {
+        "reusedFrom": "hardening/20261117-source-inputs/static-node-005/node-static-results.json",
+        "evidenceSha256": "592550f867cc488f3567bdb67eac0e5da2e9627b06ccd8b955b022d09d25c9da",
+        "checkExit": 0,
+        "applyExit": 0,
+        "sourceInputUnchanged": true,
+        "runtimeOrGeneratorExecution": false
+      }
+    },
+    {
+      "scope": "CVE-2026-107496",
+      "file": "patches/node/CVE-2026-107496.diff",
+      "sha256": "bb822185c3d45026f569f39ba860c7ea093f40a3cc1a4854837dd37dd98df1d1",
+      "upstreamFile": "patches/node/CVE-2026-107496.upstream.patch",
+      "upstreamSha256": "77d3759d279c71af59629c4a0fa82d8272a099762f2fa9e3f66d7ca5ed544157",
+      "commit": "a0051cfe699bf5a047bc1c4faef65f80f7987366",
+      "targets": [
+        {
+          "path": "deps/openssl/openssl/crypto/ec/ec_key.c",
+          "beforeSha256": "76ffd45abfc989d3f5a7c80e71e7ff712cff2c1b3c70f471a5f952190b545bf2",
+          "afterSha256": "72726357d1e33de2fdc28da42781bb489d4a87762ed308ce81e0c49feaaa82bb"
+        }
+      ],
+      "strictStaticEvidence": {
+        "reusedFrom": "hardening/20261117-source-inputs/static-node-005/node-static-results.json",
+        "evidenceSha256": "592550f867cc488f3567bdb67eac0e5da2e9627b06ccd8b955b022d09d25c9da",
+        "checkExit": 0,
+        "applyExit": 0,
+        "sourceInputUnchanged": true,
+        "runtimeOrGeneratorExecution": false
+      }
+    },
+    {
+      "scope": "CVE-2026-107493",
+      "file": "patches/node/CVE-2026-107493.diff",
+      "sha256": "a8018f2af720cd4c24775547b9ca6672a77a93525e1c4077d63852b42d3bc27a",
+      "upstreamFile": "patches/node/CVE-2026-107493.upstream.patch",
+      "upstreamSha256": "6176d694ac38251bfa4e11198d002d8720f9efb05deffb35703adb93be6173e1",
+      "commit": "c8f6d04f8e6d40b1bf83334e4a2ec9daf5943a3d",
+      "targets": [
+        {
+          "path": "deps/openssl/openssl/crypto/pem/pem_info.c",
+          "beforeSha256": "62da2460ad5fa302cf86bf8f9932ba6ae4b40cb67eb0a5e4290458692176c2f1",
+          "afterSha256": "25b5bdecc831e734fd3af3d8b1222883929a57f4f15fa44190c0e4f88376a475"
+        }
+      ],
+      "strictStaticEvidence": {
+        "reusedFrom": "hardening/20261117-source-inputs/static-node-005/node-static-results.json",
+        "evidenceSha256": "592550f867cc488f3567bdb67eac0e5da2e9627b06ccd8b955b022d09d25c9da",
+        "checkExit": 0,
+        "applyExit": 0,
+        "sourceInputUnchanged": true,
+        "runtimeOrGeneratorExecution": false
+      }
+    },
+    {
+      "scope": "CVE-2026-124709",
+      "file": "patches/node/CVE-2026-124709.diff",
+      "sha256": "7b3b1adbba54766b17e741a9c5979c4483e33f6b769282f58fc7fa5ed814183f",
+      "upstreamFile": "patches/node/CVE-2026-124709.upstream.patch",
+      "upstreamSha256": "d52a6af23bc966daaa9eded816a392d429a67bb76faafd922f4c4cf35a9349f4",
+      "commit": "f3acb0a3328046741479482c51cec815839e1b05",
+      "targets": [
+        {
+          "path": "deps/openssl/openssl/ssl/quic/quic_stream_map.c",
+          "beforeSha256": "8bc3bb3585d4131f25fadc1010d6367eb8085670c4d8cf814a62892e6f257088",
+          "afterSha256": "7bceb5bdc408c3e5a46eb38944f5d16727b812e3e049dae6f2b2e4cdadce3616"
+        }
+      ],
+      "strictStaticEvidence": {
+        "reusedFrom": "hardening/20261117-source-inputs/static-node-005/node-static-results.json",
+        "evidenceSha256": "592550f867cc488f3567bdb67eac0e5da2e9627b06ccd8b955b022d09d25c9da",
+        "checkExit": 0,
+        "applyExit": 0,
+        "sourceInputUnchanged": true,
+        "runtimeOrGeneratorExecution": false
+      }
+    },
+    {
+      "scope": "CVE-2026-35190",
+      "file": "patches/node/CVE-2026-35190.diff",
+      "sha256": "fe7c4e57febfcfdc582d0d1f6fc354485ee98e2c5f2b7200eba57a60abd7f17b",
+      "upstreamFile": "patches/node/CVE-2026-35190.upstream.patch",
+      "upstreamSha256": "e1b45282a8876fdda6b930273e28bad1cdb1c6915ccd25fe0b61789281489ed1",
+      "commit": "9491b0d9cc7950af1f3dc89499bd5433b9cd4f43",
+      "targets": [
+        {
+          "path": "deps/openssl/openssl/ssl/statem/extensions_srvr.c",
+          "beforeSha256": "2b7eb5ec78bdae624ab1b26c52a76810b45962d6ce26925a472d8ebebdaceeaa",
+          "afterSha256": "004fb384e61fd3ca36d12c7d83baa29fa5ed42950ab727e3d19504f97f5606f6"
+        },
+        {
+          "path": "deps/openssl/openssl/ssl/t1_lib.c",
+          "beforeSha256": "96a137ed0cb866f6fecc11ffbeed269321bce3fffc01af1d72e519d251448584",
+          "afterSha256": "3a5988443e2b6cd6aac52ab1438b5f211cab83864cbed90b32b0feba60ff5652"
+        }
+      ],
+      "strictStaticEvidence": {
+        "reusedFrom": "hardening/20261117-source-inputs/static-node-005/node-static-results.json",
+        "evidenceSha256": "592550f867cc488f3567bdb67eac0e5da2e9627b06ccd8b955b022d09d25c9da",
+        "checkExit": 0,
+        "applyExit": 0,
+        "sourceInputUnchanged": true,
+        "runtimeOrGeneratorExecution": false
+      }
+    },
+    {
+      "scope": "CVE-2026-85091",
+      "file": "patches/node/zlib-borrowed-input.diff",
+      "sha256": "fdde02ee63a54b332963ef3eb10bc239cba53090affa18e3e5f29234d0ad713f",
+      "upstreamFile": "patches/node/zlib-borrowed-input.upstream.patch",
+      "upstreamSha256": "110ff14375733173d8aa54574473424fbd7dfe4b81f1ca34a759c6fe14b15b14",
+      "commit": "df84af25dc1942490e1d1c899a07619152a46148",
+      "targets": [
+        {
+          "path": "deps/zlib/gzwrite.c",
+          "beforeSha256": "469b1e58932ea11bdda2a153f6655f7b3c13254240fae157181b49ed1bc93b47",
+          "afterSha256": "1b8cd2809422c2b44ac77bafc5ef54af858cdd3a03372849ae84ee2c73e09ea5"
+        }
+      ],
+      "adaptation": "旧gz_write失败即清空avail_in并回指库拥有的state->in；不修改旧返回/错误/位置/输出状态",
+      "strictStaticEvidence": {
+        "checkExit": 0,
+        "applyExit": 0,
+        "runtimeOrGeneratorExecution": false
+      }
+    }
+  ],
+  "targets": [
+    {
+      "path": "deps/openssl/openssl/crypto/bio/bss_dgram.c",
+      "beforeSha256": "25ac92a4db74c85b0d096860112c822a1c3b9e07f35ded77b88bfe891c3c7993",
+      "afterSha256": "9b0e09c21fdc0ae8c253d1a7aed1114814090d83f92c1ae6e2d83a28c829cb64"
+    },
+    {
+      "path": "deps/openssl/openssl/crypto/ec/ec_key.c",
+      "beforeSha256": "76ffd45abfc989d3f5a7c80e71e7ff712cff2c1b3c70f471a5f952190b545bf2",
+      "afterSha256": "72726357d1e33de2fdc28da42781bb489d4a87762ed308ce81e0c49feaaa82bb"
+    },
+    {
+      "path": "deps/openssl/openssl/crypto/pem/pem_info.c",
+      "beforeSha256": "62da2460ad5fa302cf86bf8f9932ba6ae4b40cb67eb0a5e4290458692176c2f1",
+      "afterSha256": "25b5bdecc831e734fd3af3d8b1222883929a57f4f15fa44190c0e4f88376a475"
+    },
+    {
+      "path": "deps/openssl/openssl/include/internal/quic_strm_reas.h",
+      "beforeSha256": "6dd9e3268036cd44869e40616e302c033902de6155a57c696420a75c83f0f457",
+      "afterSha256": "23cddd86dd8ed5246bca7f668197e73cec4a2653e476310a1d6a34ee243f4d1f"
+    },
+    {
+      "path": "deps/openssl/openssl/providers/implementations/ciphers/cipher_aes_gcm_siv.c",
+      "beforeSha256": "25012f573a36a465f0a68fe004366ef586f3a153d60a5a53db55df9b7b1da5c3",
+      "afterSha256": "62510edfb867c2c33b034ec7f1f04913551827441a0f156966bc857cc271c211"
+    },
+    {
+      "path": "deps/openssl/openssl/providers/implementations/ciphers/cipher_aes_gcm_siv_hw.c",
+      "beforeSha256": "37f4e407d03117c6b74e5d1385efb233f2d71225788f82857bff2368e7fd0457",
+      "afterSha256": "d5ea349bd8c5d48634b3a6006f1a1ef233213564ee675ee2fce4faec824cc639"
+    },
+    {
+      "path": "deps/openssl/openssl/ssl/quic/quic_rstream.c",
+      "beforeSha256": "1d75050a351302038ffc4868c253cb73caaf202f1b91da7fbceb62514c712297",
+      "afterSha256": "ca832c01b754e6556d0d29ee667616102870bb93be2c21e5845e461861b21c31"
+    },
+    {
+      "path": "deps/openssl/openssl/ssl/quic/quic_stream_map.c",
+      "beforeSha256": "8bc3bb3585d4131f25fadc1010d6367eb8085670c4d8cf814a62892e6f257088",
+      "afterSha256": "7bceb5bdc408c3e5a46eb38944f5d16727b812e3e049dae6f2b2e4cdadce3616"
+    },
+    {
+      "path": "deps/openssl/openssl/ssl/quic/quic_strm_reas.c",
+      "beforeSha256": "040b6e3c0cc3144616d3c899a79b90f70a9517a5fb215a10f38b483499360c4c",
+      "afterSha256": "9ed4d3ab6508b79c04033ebb793c0fbcce5615e75323022de20bf2748f74c319"
+    },
+    {
+      "path": "deps/openssl/openssl/ssl/statem/extensions_srvr.c",
+      "beforeSha256": "2b7eb5ec78bdae624ab1b26c52a76810b45962d6ce26925a472d8ebebdaceeaa",
+      "afterSha256": "004fb384e61fd3ca36d12c7d83baa29fa5ed42950ab727e3d19504f97f5606f6"
+    },
+    {
+      "path": "deps/openssl/openssl/ssl/t1_lib.c",
+      "beforeSha256": "96a137ed0cb866f6fecc11ffbeed269321bce3fffc01af1d72e519d251448584",
+      "afterSha256": "3a5988443e2b6cd6aac52ab1438b5f211cab83864cbed90b32b0feba60ff5652"
+    },
+    {
+      "path": "deps/zlib/gzwrite.c",
+      "beforeSha256": "469b1e58932ea11bdda2a153f6655f7b3c13254240fae157181b49ed1bc93b47",
+      "afterSha256": "1b8cd2809422c2b44ac77bafc5ef54af858cdd3a03372849ae84ee2c73e09ea5"
+    }
+  ],
+  "immutableSourceInputs": [
+    {
+      "path": "BUILDING.md",
+      "sha256": "947d7b5e88529d7d7fed6c7872f12c7f38d2acf4b98427c1fbe7f968b2e989b0",
+      "bytes": 38338
+    },
+    {
+      "path": "Makefile",
+      "sha256": "da6b3ed9fa64c338c3016c0ef3210dc22b2ec93d47c098f23ff53fded016012e",
+      "bytes": 60881
+    },
+    {
+      "path": "common.gypi",
+      "sha256": "50f3946fdc4422791ea2ccfcefeb68d4cba3179ef105637ffdeada6873b20cb9",
+      "bytes": 26973
+    },
+    {
+      "path": "configure.py",
+      "sha256": "9ae98ce309ca866955c4860cc2e0f664d15ac326e9401523973ee4ee1c012984",
+      "bytes": 87247
+    },
+    {
+      "path": "deps/icu-small/README-FULL-ICU.txt",
+      "sha256": "fb447b137c8a206a11455194dd34bc8d759b6a25d14fd1d16b7cfde341b72407",
+      "bytes": 329
+    },
+    {
+      "path": "deps/icu-small/source/common/unicode/uvernum.h",
+      "sha256": "13cd24940babf5c6c1016131c9917742fc6cf198228689904d88116bb7d04118",
+      "bytes": 6480
+    },
+    {
+      "path": "deps/npm/package.json",
+      "sha256": "7c04bf69824d17a1db64defd3a9a86d538781bf2d6ca2764e3f1143fa5b71166",
+      "bytes": 6706
+    },
+    {
+      "path": "deps/openssl/config/Makefile",
+      "sha256": "715048196d0ba4eb8682be67ed5d629cff40deec012902e335e7a9eed6a53bc8",
+      "bytes": 2938
+    },
+    {
+      "path": "deps/openssl/config/Makefile_VC-WIN32",
+      "sha256": "c300a4d240098fa6f666ea682066876695132fd11b8fdad9efa47b8d906f8424",
+      "bytes": 599644
+    },
+    {
+      "path": "deps/openssl/config/Makefile_VC-WIN64A",
+      "sha256": "17e9b252ac0c58ff52cdc090354603001badc54e66434f43c67267ad49889120",
+      "bytes": 272706
+    },
+    {
+      "path": "deps/openssl/config/fake_gcc.pl",
+      "sha256": "f2f1b29709192b02bcf9cac59bc5c97f4ee8fbe5930d907b8caac92d9197641c",
+      "bytes": 328
+    },
+    {
+      "path": "deps/openssl/config/generate_gypi.pl",
+      "sha256": "c8ae4ea8406f981f6980ce93186224632d46c475b84f47370fcce9827027d0bc",
+      "bytes": 13305
+    },
+    {
+      "path": "deps/openssl/openssl/Configure",
+      "sha256": "3d3ed5a3e4c69a917cee593643c4614a0d6ccc074c0e2b4ecad3293de47aa452",
+      "bytes": 142172
+    },
+    {
+      "path": "doc/contributing/maintaining/maintaining-icu.md",
+      "sha256": "4b185eb7cb2eb79753a794d68e8023a9159f6b20a7b3845a6184595eef595a75",
+      "bytes": 8432
+    },
+    {
+      "path": "doc/contributing/maintaining/maintaining-openssl.md",
+      "sha256": "05b4450b988ee898be6bad83a0f02effa5e43a1992a2a7b2a3f2daabd2296dcc",
+      "bytes": 3742
+    },
+    {
+      "path": "node.gyp",
+      "sha256": "b7f1544d40de42a76c8c6c88a8615db560db43d05dbfeb3bcfca72e9f35d9aac",
+      "bytes": 46926
+    },
+    {
+      "path": "node.gypi",
+      "sha256": "52426ab9d4988a91d20289557d591806d8d594b48ff0fdebb599a43034b04047",
+      "bytes": 13067
+    },
+    {
+      "path": "tools/configure.d/nodedownload.py",
+      "sha256": "1d2e91f17af0c715cbf83c5ad8696208ce80666408555a2fae7de803e8214da2",
+      "bytes": 4729
+    },
+    {
+      "path": "tools/icu/README.md",
+      "sha256": "42da5e963448fbad0bc984a2ca0b8abf893d40838ce610af04da62e3a04979ce",
+      "bytes": 1764
+    },
+    {
+      "path": "tools/icu/current_ver.dep",
+      "sha256": "b4e47eb0dbda04e46924e4ca4ea105b4501e849a6d8f04aa5e30e6209c54dac7",
+      "bytes": 161
+    },
+    {
+      "path": "tools/icu/icu-generic.gyp",
+      "sha256": "9c9015c5c71a2988797bb01e92f5804f06a63b60cb8c072d93c2e4a265388d3a",
+      "bytes": 19607
+    },
+    {
+      "path": "tools/icu/icu-system.gyp",
+      "sha256": "04d8c09ceb2bc362245cf6b9c623cca49c6fa4560498bfc9706725f583dcce53",
+      "bytes": 470
+    },
+    {
+      "path": "tools/icu/icu_versions.json",
+      "sha256": "a455e3ea7bc426bb0e036f2eee982a1d9dd4a6ad03e94ac3e3d9a1b62f38cc56",
+      "bytes": 26
+    },
+    {
+      "path": "tools/icu/shrink-icu-src.py",
+      "sha256": "1d30dd6b3e223ea0d554c0348888859952fbe495bad033a82c00626b099be183",
+      "bytes": 4793
+    },
+    {
+      "path": "tools/install.py",
+      "sha256": "3aa1082984b4c55d96c000edbbf3bf9b4d0cc55507dfccf3dea23b80d7e862a4",
+      "bytes": 16315
+    },
+    {
+      "path": "deps/openssl/config/Dockerfile",
+      "sha256": "e35fa69451308ef69a8e163dd120ea18d0b9e11e7fdd5eb096650e2474bd86de",
+      "bytes": 335
+    },
+    {
+      "path": "deps/openssl/config/Makefile_VC-WIN64-ARM",
+      "sha256": "bd80db6c0dac1e472ae5ffb28159bc5d44770a94d0e2b0cb22c613cc522c0eeb",
+      "bytes": 17427
+    },
+    {
+      "path": "deps/openssl/config/generate_headers.pl",
+      "sha256": "196d451f8ea2ff5c0b568098f7d3e3b85e2352d359fb28530969a8955fc32052",
+      "bytes": 2727
+    },
+    {
+      "path": "src/node_version.h",
+      "bytes": 4243,
+      "sha256": "a2e789a3d9480148f57780ff2ac1abc089f933a0524b136e476feaafcb9d4d55"
+    }
+  ],
+  "cannedIcuData": {
+    "path": "deps/icu-small/source/data/in/icudt78l.dat.bz2",
+    "bytes": 11344770,
+    "sha256": "7886df66f292144209d4ed19086d7d59695798cd5d91a16b4a8445eff5422f30",
+    "extracted": false,
+    "decompressed": false
+  },
+  "configurationPolicy": {
+    "opensslLinkage": "static",
+    "zlibLinkage": "static",
+    "icuMode": "full-icu",
+    "moduleVersion": 127,
+    "napiSupported": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "defaultNapiVersion": 8,
+    "requiredConfigureArgs": [
+      "--with-intl=full-icu",
+      "--without-npm"
+    ],
+    "forbiddenConfigureArgs": [
+      "--shared-openssl",
+      "--shared-zlib",
+      "--shared",
+      "--fully-static",
+      "--partly-static",
+      "--with-intl=small-icu",
+      "--with-intl=system-icu"
+    ],
+    "generationRequiredBeforeBuild": true,
+    "generationArchitectures": [
+      "linux-x86_64",
+      "linux-aarch64"
+    ],
+    "generationVariants": [
+      "asm",
+      "asm_avx2",
+      "no-asm"
+    ],
+    "buildUsesFixedPatchedGcc": true,
+    "retainedFeatures": [
+      "OpenSSL provider/legacy/CA/asm及原TLS安全级别",
+      "Node ABI/Node-API/动态addon",
+      "本地canned ICU78.3完整locale",
+      "现有安全npm/npx整树与build-proof.json"
+    ]
+  },
+  "npmPolicy": {
+    "requiredInstalledVersion": "11.21.2-ylink.1",
+    "nodeBundledVersionNotToInstall": "10.9.9",
+    "preservePrefixSubtrees": [
+      "lib/node_modules/npm",
+      "bin/npm",
+      "bin/npx",
+      "share/ylink-npm-toolchain/build-proof.json"
+    ],
+    "inputs": [
+      {
+        "path": "backend/scripts/install-pinned-npm.mjs",
+        "bytes": 4208,
+        "sha256": "1565bf2a435a1d92a8e9da880c4bbda99e337b515e9d0e38431bbd4b37ef8f45"
+      },
+      {
+        "path": "backend/scripts/build-pinned-npm.mjs",
+        "bytes": 22879,
+        "sha256": "f5d23a0b42df87ab848d7c02ad69811b0d5b8182e7354d6021af2542b27d770b"
+      },
+      {
+        "path": "backend/npm-toolchain/source-manifest.json",
+        "bytes": 1553,
+        "sha256": "c6c60c8ccb74084a9cead0e8aa62ef22d6081ba28938bafe4a124f97510375ee"
+      },
+      {
+        "path": "backend/npm-toolchain/source-lock.json",
+        "bytes": 1455,
+        "sha256": "9be3972a0219abdb235f908d55c9c12a073f7c7b218bb528c42cfa091e2c050f"
+      },
+      {
+        "path": "backend/npm-toolchain/source-overlay.json",
+        "bytes": 4018,
+        "sha256": "5b83397c8825cba969154f468ff91a5cb8afc6499d5d6094bc30e6eddb02bef4"
+      }
+    ]
+  },
+  "buildBlockers": [
+    "GCC12离线配置/目标图尚未通过，必须使用匹配已回补的头与静态库",
+    "官方OpenSSL两架构变体及共享包装头生成/对账尚未执行；需nasm、Text::Template等已有工具真实可用并认证",
+    "尚未核对原二进制完整process.config与派生配置等价",
+    "同次Node二进制/header/config.gypi安装与npm整树保持尚未实现/验证"
+  ],
+  "notVerified": [
+    "官方生成配置",
+    "编译/链接/ABI/ELF动态依赖",
+    "两架构实际载荷/私有副本",
+    "正常crypto/provider/CA/ICU/gzip/addon/npm兼容",
+    "平台禁止的安全动态触发器",
+    "正式QA"
+  ]
+}

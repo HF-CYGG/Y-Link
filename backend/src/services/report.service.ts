@@ -17,7 +17,6 @@
 import type ExcelJS from 'exceljs'
 import { kingdeeRegistrationView } from '../utils/kingdee-registration.js'
 import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
-import { loadExcelJs } from '../utils/exceljs-loader.js'
 import type { Writable } from 'node:stream'
 import { In, type SelectQueryBuilder } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
@@ -34,7 +33,8 @@ import {
   summarizeProductInventory,
   type ProductInventorySummary,
 } from '../utils/product-inventory-summary.js'
-import { acquireWithClusterActorSlot } from '../utils/export-lease-pool.js'
+import { dataExportLeasePool } from '../utils/export-lease-pool.js'
+import { assertXlsxOutputOpen, writeStreamingXlsx } from '../utils/xlsx-export.js'
 
 export const REPORT_TYPES = ['inventory', 'tag-sales', 'kingdee', 'walkin', 'outbound-flow'] as const
 export type ReportType = (typeof REPORT_TYPES)[number]
@@ -164,60 +164,6 @@ interface OutboundFlowRaw {
 const MAX_PAGE_SIZE = 100
 const EXPORT_BATCH_SIZE = 500
 const EMPTY_SALES_SUMMARY: ReportSalesSummary = { totalQty: '0.00', totalAmount: '0.00' }
-const MAX_REPORT_EXPORTS_PER_ACTOR = 1
-const MAX_REPORT_EXPORTS_PER_PROCESS = 4
-
-/** 流式导出在响应完全结束前持续占用数据库与网络资源，因此租约必须覆盖整个写入 Promise。 */
-export class ReportExportLeasePool {
-  private readonly activeActorCounts = new Map<string, number>()
-  private activeCount = 0
-
-  /** SQLite 下 integer 主键在运行时是数字（类型声明为 string），必须先转字符串，否则导出直接 500。 */
-  acquire(actorId: string | number) {
-    const normalizedActorId = String(actorId ?? '').trim()
-    if (!normalizedActorId) {
-      throw new BizError('导出操作者身份缺失', 401)
-    }
-    const actorActiveCount = this.activeActorCounts.get(normalizedActorId) ?? 0
-    if (actorActiveCount >= MAX_REPORT_EXPORTS_PER_ACTOR) {
-      throw new BizError('当前账号已有报表导出正在进行，请等待完成后再试', 429)
-    }
-    if (this.activeCount >= MAX_REPORT_EXPORTS_PER_PROCESS) {
-      throw new BizError('当前报表导出任务较多，请稍后重试', 429)
-    }
-
-    this.activeActorCounts.set(normalizedActorId, actorActiveCount + 1)
-    this.activeCount += 1
-    let released = false
-    return {
-      release: () => {
-        if (released) return
-        released = true
-        if (actorActiveCount === 0) {
-          this.activeActorCounts.delete(normalizedActorId)
-        } else {
-          this.activeActorCounts.set(normalizedActorId, actorActiveCount)
-        }
-        this.activeCount = Math.max(0, this.activeCount - 1)
-      },
-    }
-  }
-
-  get activeExports() {
-    return this.activeCount
-  }
-
-  /**
-   * 跨实例获取导出租约：先占本进程名额，再占集群级“每账号”名额（Redis 启用时），
-   * 避免多实例把每账号上限放大 N 倍；Redis 不可用时只按本进程口径限制。
-   */
-  acquireShared(actorId: string | number) {
-    return acquireWithClusterActorSlot('report', actorId, () => this.acquire(actorId), '当前账号已有报表导出正在进行，请等待完成后再试')
-  }
-}
-
-export const reportExportLeasePool = new ReportExportLeasePool()
-
 const REPORT_TITLE_MAP: Record<ReportType, string> = {
   inventory: '库存一览表',
   'tag-sales': '标签销售汇总表',
@@ -382,65 +328,55 @@ export class ReportService {
     onReady?: () => void,
     actorId?: string | number,
   ): Promise<ReportExportResult> {
-    const lease = await reportExportLeasePool.acquireShared(actorId ?? '')
+    const lease = await dataExportLeasePool.acquireShared(actorId ?? '', 'report')
     try {
       const query = this.resolveQuery(type, input)
-    const fetchBatch = (cursor?: string) => {
-      const batchQuery: ResolvedReportQuery = {
-        ...query,
-        page: 1,
-        pageSize: EXPORT_BATCH_SIZE,
+      const fetchBatch = (cursor?: string) => {
+        assertXlsxOutputOpen(output)
+        const batchQuery: ResolvedReportQuery = {
+          ...query,
+          page: 1,
+          pageSize: EXPORT_BATCH_SIZE,
+        }
+        const keyset: KeysetQueryOptions = { enabled: true, cursor }
+        return type === 'inventory'
+          ? this.queryInventory(type, batchQuery, undefined, keyset)
+          : type === 'outbound-flow'
+            ? this.queryOutboundFlow(type, batchQuery, undefined, keyset)
+            : this.queryOrderItemReport(type, batchQuery, undefined, keyset)
       }
-      const keyset: KeysetQueryOptions = { enabled: true, cursor }
-      return type === 'inventory'
-        ? this.queryInventory(type, batchQuery, undefined, keyset)
-        : type === 'outbound-flow'
-          ? this.queryOutboundFlow(type, batchQuery, undefined, keyset)
-          : this.queryOrderItemReport(type, batchQuery, undefined, keyset)
-    }
 
-    // 首批数据库查询完成前不创建 ZIP/写响应。这样输入或首查询失败仍可返回
-    // 结构化错误；首批最后一个主键也锚定导出上界，后续新插入不会混入。
-    let result = await fetchBatch()
-    const ExcelJS = await loadExcelJs()
-    onReady?.()
-    const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
-      stream: output,
-      useStyles: true,
-      useSharedStrings: false,
-    })
-    workbook.creator = 'Y-Link'
-    workbook.created = new Date()
-    const worksheet = workbook.addWorksheet(REPORT_TITLE_MAP[type], {
-      views: [{ state: 'frozen', ySplit: 5 }],
-    })
-    this.initializeWorksheet(worksheet, REPORT_TITLE_MAP[type], query.fields, input)
+      // 先完成首批查询。若参数或首批查询失败，由路由返回结构化错误。
+      let result = await fetchBatch()
+      return await writeStreamingXlsx(output, onReady, async (workbook, waitForRows) => {
+        workbook.creator = 'Y-Link'
+        workbook.created = new Date()
+        const worksheet = workbook.addWorksheet(REPORT_TITLE_MAP[type], {
+          views: [{ state: 'frozen', ySplit: 5 }],
+        })
+        this.initializeWorksheet(worksheet, REPORT_TITLE_MAP[type], query.fields, input)
 
-    let exportedRows = 0
-    while (true) {
-      result.list.forEach((row) => this.appendWorksheetRow(worksheet, query.fields, row))
-      exportedRows += result.list.length
-      if (result.list.length < EXPORT_BATCH_SIZE || !result.nextCursor) {
-        break
-      }
-      if (output.destroyed) {
-        throw new Error('报表下载连接已关闭')
-      }
-      result = await fetchBatch(result.nextCursor)
-    }
+        let exportedRows = 0
+        while (true) {
+          await waitForRows()
+          result.list.forEach((row) => this.appendWorksheetRow(worksheet, query.fields, row))
+          exportedRows += result.list.length
+          await waitForRows()
+          if (result.list.length < EXPORT_BATCH_SIZE || !result.nextCursor) break
+          result = await fetchBatch(result.nextCursor)
+        }
 
-    worksheet.autoFilter = {
-      from: { row: 5, column: 1 },
-      to: { row: Math.max(5, exportedRows + 5), column: Math.max(query.fields.length, 1) },
-    }
-    worksheet.commit()
-    await workbook.commit()
-      return {
-        fileName: `report-${type}-${new Date().toISOString().slice(0, 19).replaceAll(/[:T]/g, '-')}.xlsx`,
-        rowCount: exportedRows,
-      }
+        worksheet.autoFilter = {
+          from: { row: 5, column: 1 },
+          to: { row: Math.max(5, exportedRows + 5), column: Math.max(query.fields.length, 1) },
+        }
+        worksheet.commit()
+        return {
+          fileName: `report-${type}-${new Date().toISOString().slice(0, 19).replaceAll(/[:T]/g, '-')}.xlsx`,
+          rowCount: exportedRows,
+        }
+      })
     } finally {
-      // `workbook.commit()` 才代表响应流真正结束；断线和异常同样必须归还容量。
       lease.release()
     }
   }
@@ -762,6 +698,7 @@ export class ReportService {
       .addSelect('order.isDeleted', 'isDeleted')
       .where('1=1')
       .andWhere('order.status = :activeOrderStatus', { activeOrderStatus: 'active' })
+      .andWhere("(order.inventoryMode <> 'o2o_preapplied' OR order.totalQty > 0)")
 
     if (query.startAt) {
       qb.andWhere('order.createdAt >= :startAt', { startAt: query.startAt })

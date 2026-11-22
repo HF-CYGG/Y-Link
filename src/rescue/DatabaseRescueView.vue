@@ -10,7 +10,7 @@
  */
 
 import { computed, onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage } from 'element-plus/es/components/message/index.mjs'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import {
   RescueApiError,

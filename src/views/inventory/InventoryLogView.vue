@@ -22,6 +22,8 @@ import { useStableRequest } from '@/composables/useStableRequest'
 import { INVENTORY_CHANGE_TYPE_LABELS } from '@/constants/inventory'
 import { showAppError } from '@/utils/app-alert'
 
+defineOptions({ name: 'InventoryLogView' })
+
 const route = useRoute()
 const router = useRouter()
 const changeTypeOptions = Object.entries(INVENTORY_CHANGE_TYPE_LABELS).map(([value, label]) => ({ value, label }))

@@ -1,8 +1,8 @@
 /**
  * 文件说明：Task3 数据库迁移体验验证脚本。
- * 文件职责：自动验证数据库迁移快捷入口、统一提示文案以及运行时覆盖写入后的状态提示是否符合 Task3 目标，减少人工逐页排查成本。
+ * 文件职责：验证数据库迁移侧栏入口、统一提示文案和运行时覆盖写入后的状态提示。
  * 实现逻辑：
- * 1. 静态校验前端路由与系统配置页是否已经补上数据库迁移快捷入口。
+ * 1. 校验系统侧栏的实际菜单派生、独立路由权限，以及系统配置页的迁移说明。
  * 2. 静态校验前后端是否都改为复用统一的数据库迁移提示文案常量。
  * 3. 动态调用数据库运行时覆盖写入逻辑，确认状态摘要会明确提示“等待重启”与“返回数据库迁移助手确认当前实际生效数据库”。
  */
@@ -11,6 +11,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import ts from 'typescript'
 import {
   DATABASE_MIGRATION_ASSISTANT_NAME,
   DATABASE_MIGRATION_RECOMMENDED_FLOW_TEXT,
@@ -38,6 +39,10 @@ const frontendRoot = path.resolve(backendRoot, '..')
 
 const routeFilePath = path.resolve(frontendRoot, 'src/router/routes.ts')
 const systemConfigViewFilePath = path.resolve(frontendRoot, 'src/views/system/SystemConfigView.vue')
+const appLayoutFilePath = path.resolve(frontendRoot, 'src/layout/AppLayout.vue')
+const appSidebarFilePath = path.resolve(frontendRoot, 'src/layout/components/AppSidebar.vue')
+const routerFilePath = path.resolve(frontendRoot, 'src/router/index.ts')
+const routeLoadersFilePath = path.resolve(frontendRoot, 'src/router/route-performance.ts')
 const databaseMigrationViewFilePath = path.resolve(frontendRoot, 'src/views/system/DatabaseMigrationView.vue')
 const frontendCopyFilePath = path.resolve(frontendRoot, 'src/views/system/database-migration-copy.ts')
 const backendCopyFilePath = path.resolve(backendRoot, 'src/constants/database-migration-copy.ts')
@@ -48,25 +53,53 @@ function readSource(filePath: string): string {
   return fs.readFileSync(filePath, 'utf8')
 }
 
-function verifyFrontendQuickEntrySources() {
+function verifyFrontendMigrationEntry() {
   const routeSource = readSource(routeFilePath)
   const systemConfigViewSource = readSource(systemConfigViewFilePath)
   const databaseMigrationViewSource = readSource(databaseMigrationViewFilePath)
   const frontendCopySource = readSource(frontendCopyFilePath)
 
-  assert.match(
-    routeSource,
-    /path:\s*'db-migration'[\s\S]*?shortcut:\s*\{[\s\S]*?title:\s*'数据库迁移'[\s\S]*?path:\s*'\/system\/db-migration'/,
+  const loadDatabaseMigrationView = () => {}
+  const routeCode = ts.transpileModule(routeSource, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText
+  const { routes, buildAppMenuItems, canAccessRoute } = new Function('require', 'exports', routeCode + '\nreturn exports')(
+    (specifier: string) => {
+      assert.equal(specifier, '@/router/route-performance')
+      return { routeViewLoaders: { 'system-db-migration': loadDatabaseMigrationView } }
+    },
+    {},
   )
-  assert.match(routeSource, /const collectFromRecords = \(sourceRecords: AppRouteRecord\[], currentParentPath: string\)/)
-  assert.match(systemConfigViewSource, /DATABASE_MIGRATION_ENTRY_LABEL/)
-  assert.match(systemConfigViewSource, /DATABASE_MIGRATION_ENTRY_DESCRIPTION/)
-  assert.match(systemConfigViewSource, /router\.push\('\/system\/db-migration'\)/)
+  const app = routes.find((record: { path: string }) => record.path === '/')
+  const group = app?.children.find((record: { path: string }) => record.path === 'system')
+  const migration = group?.children.find((record: { path: string }) => record.path === 'db-migration')
+  assert.ok(migration, '系统治理必须定义独立数据库迁移路由')
+  assert.equal(migration.name, 'system-db-migration')
+  assert.equal(migration.component, loadDatabaseMigrationView)
+  assert.deepEqual(migration.meta.requiredPermissions, ['db_migration:view'])
+  const authorized = { role: 'operator', permissions: ['db_migration:view'] }
+  const missingPermission = { role: 'operator', permissions: ['system_configs:view'] }
+  assert.ok(app.meta.requiresAuth && [app, group, migration].every((record) => canAccessRoute(record.meta, authorized)))
+  assert.equal(canAccessRoute(migration.meta, missingPermission), false)
+  const getMigrationMenu = (user: typeof authorized) => buildAppMenuItems(user)
+    .find((item: { title: string }) => item.title === '系统治理')?.children
+    .find((item: { path: string }) => item.path === '/system/db-migration')
+  assert.equal(getMigrationMenu(authorized)?.title, '数据库迁移助手')
+  assert.equal(getMigrationMenu(missingPermission), undefined)
+  const layoutSource = readSource(appLayoutFilePath)
+  const sidebarSource = readSource(appSidebarFilePath)
+  assert.match(layoutSource, /menuItems = computed\(\(\) => buildAppMenuItems\(authStore\.currentUser\)\)/)
+  assert.match(layoutSource, /<AppSidebar :menu-items="menuItems"/)
+  assert.match(sidebarSource, /<el-menu\b[^>]*\srouter\s/)
+  assert.match(sidebarSource, /<el-menu-item v-for="child in menu\.children"[^>]*:index="child\.path"/)
+  assert.match(readSource(routerFilePath), /to\.matched\.find\(\(record\) => !canAccessRoute\(record\.meta, authStore\.currentUser\)\)/)
+  assert.match(readSource(routeLoadersFilePath), /'system-db-migration': \(\) => import\('@\/views\/system\/DatabaseMigrationView\.vue'\)/)
+  assert.match(systemConfigViewSource, /:description="[^"]*\bDATABASE_MIGRATION_ASSISTANT_NAME\b[^"]*\bDATABASE_MIGRATION_RECOMMENDED_FLOW_TEXT\b[^"]*"/)
   assert.match(databaseMigrationViewSource, /DATABASE_MIGRATION_PAGE_DESCRIPTION/)
   assert.match(databaseMigrationViewSource, /DATABASE_MIGRATION_RECOMMENDED_FLOW_TEXT/)
   assert.match(databaseMigrationViewSource, /DATABASE_MIGRATION_RESTART_EFFECT_TEXT/)
-  assert.match(frontendCopySource, /DATABASE_MIGRATION_ENTRY_LABEL = '进入数据库迁移助手'/)
-  pass('前端已补充数据库迁移快捷入口，并统一复用迁移助手提示文案')
+  assert.match(frontendCopySource, /DATABASE_MIGRATION_ASSISTANT_NAME = '数据库迁移助手'/)
+  pass('数据库迁移侧栏与独立路由按权限可达，系统配置与迁移页复用引导文案')
 }
 
 function verifyBackendCopySources() {
@@ -132,7 +165,7 @@ async function verifyRuntimeOverrideGuidance() {
 }
 
 async function main() {
-  verifyFrontendQuickEntrySources()
+  verifyFrontendMigrationEntry()
   verifyBackendCopySources()
   await verifyRuntimeOverrideGuidance()
 }

@@ -1,0 +1,124 @@
+{
+  "schema": 1,
+  "distro": "bookworm",
+  "sourceDateEpoch": 1794700800,
+  "localMaintainer": "Y-Link 本地安全构建 <security-build@localhost.invalid>",
+  "originAuthentication": {
+    "method": "existing trusted archive keyring -> InRelease -> Sources -> exact dsc + archives",
+    "artifact": "all-fixes-001/debian-source-auth-001/authenticated-source-pins.json",
+    "image": "sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee",
+    "releaseSha256": "77737fa4b34f2693e982cc9ee35736816c35a7778fc2d326cc1bbf5b301fe1aa",
+    "sources": {
+      "url": "https://deb.debian.org/debian/dists/bookworm/main/source/Sources.xz",
+      "sha256": "92d11a035571df011f06f28c61cb9825130ef1d92abb2f2e0525e8674dc44af8",
+      "bytes": 9491888
+    },
+    "keyringSha256": "506b815cbb32d9b6066b4a2aa524071e071761e7e7f68c3ac74f3061ba852017"
+  },
+  "packages": [
+    {
+      "source": "util-linux",
+      "version": "2.38.1-5+deb12u3",
+      "revision": "2.38.1-5+deb12u3+ylink1",
+      "runtimePackage": "libblkid1",
+      "files": [
+        {
+          "name": "util-linux_2.38.1-5+deb12u3.dsc",
+          "url": "https://deb.debian.org/debian/pool/main/u/util-linux/util-linux_2.38.1-5+deb12u3.dsc",
+          "bytes": 4579,
+          "sha256": "0fe5fcd2b83d0465e32ca5cb9d8319e9b6fbf14c9a69abfd7ea905e45fa90b67"
+        },
+        {
+          "name": "util-linux_2.38.1.orig.tar.xz",
+          "url": "https://deb.debian.org/debian/pool/main/u/util-linux/util-linux_2.38.1.orig.tar.xz",
+          "bytes": 7495904,
+          "sha256": "60492a19b44e6cf9a3ddff68325b333b8b52b6c59ce3ebd6a0ecaa4c5117e84f"
+        },
+        {
+          "name": "util-linux_2.38.1-5+deb12u3.debian.tar.xz",
+          "url": "https://deb.debian.org/debian/pool/main/u/util-linux/util-linux_2.38.1-5+deb12u3.debian.tar.xz",
+          "bytes": 121964,
+          "sha256": "d46b85313f536fc4831a69ba3fa2c8160450b5b26c7c5dfafce4f078fe4f205c"
+        }
+      ],
+      "target": "libblkid/src/partitions/dos.c",
+      "targetBeforeSha256": "db3d7342c97323ce462f3e804adc4e593ea76358ac07c8fb30e2c130099c83f9",
+      "patch": "patches/libblkid-ebr-bounds.patch",
+      "patchSha256": "e4c7ba8005409a6991d82f8725ed032d67c96fc9ae7f3c8b3847d68d5c9d66f7",
+      "targetAfterSha256": "189c7188a8dc28fed465fb6f1b03d836b621ff11d6582b5014314275f4cc8144",
+      "additionalBackports": [
+        {
+          "target": "libblkid/src/partitions/partitions.c",
+          "targetBeforeSha256": "e5439339f2054298851181f8e44a5533f049a80ce658bb5b9c2506e58c3d30ee",
+          "patch": "patches/libblkid-partition-storage.diff",
+          "patchSha256": "c8a99cde8e820178052d32f15542fdd2b022d8f2ddfc4e870bf1173033885919",
+          "targetAfterSha256": "ad12ab2888ce5f812f614bd51a8b561a2552a87e536692880647e9f83c06fead",
+          "upstreamCommit": "132d9c8aa15a8efd0a23d8ca7ed8b98f365e84fa",
+          "upstreamPatch": "patches/libblkid-partition-storage.upstream.patch",
+          "upstreamPatchSha256": "935ae9372061b9988c58297d1d5b12aa04cbc01e538e8606d0103b401f68de1c",
+          "adaptation": "仅将官方reallocarray上下文适配为2.38.1原有realloc乘法布局；按指针大小扩容并逐项分配/释放，不改公开不透明类型ABI",
+          "fixScope": ["CVE-2026-13595"],
+          "status": "候选已严格文本应用，未构建、未审查、未验收"
+        }
+      ],
+      "upstreamPatch": {
+        "commit": "05c2dbadf34cc74192287f377904afaaf4061623",
+        "url": "https://github.com/util-linux/util-linux/commit/05c2dbadf34cc74192287f377904afaaf4061623.patch",
+        "sha256": "63aeb1b85eecbf470d218d33bdffe420cfc07915c84d770ad24ce2723457601c",
+        "contextOnlyBackportSha256": "af9aad674437f8187250117ab7bee9fe109973163cb0dd8f8e77c23235f2e059"
+      },
+      "localHardening": {
+        "id": "ylink-ebr-uint32-narrowing-v1",
+        "description": "在abs和next转回uint32_t前拒绝大于UINT32_MAX的值，保留原有范围与前进检查",
+        "compatibility": "只保留旧版内部32位地址模型；不改ABI、主分区算法或正确可表示输入",
+        "upstreamByteOrFunctionIdentical": false,
+        "validation": "仅文本应用准备；编译、正常兼容与原生安全回归未通过本元数据宣称完成"
+      },
+      "fixScope": [
+        "CVE-2026-53615",
+        "CVE-2026-13595"
+      ],
+      "notClosed": [
+        "CVE-2026-53613",
+        "CVE-2026-78410"
+      ]
+    },
+    {
+      "source": "zlib",
+      "version": "1:1.2.13.dfsg-1",
+      "revision": "1:1.2.13.dfsg-1+ylink1",
+      "runtimePackage": "zlib1g",
+      "files": [
+        {
+          "name": "zlib_1.2.13.dfsg-1.dsc",
+          "url": "https://deb.debian.org/debian/pool/main/z/zlib/zlib_1.2.13.dfsg-1.dsc",
+          "bytes": 2399,
+          "sha256": "3fa1e6b2fc525062aa88207dda52fed8e045373c809d362fe8a2bfbf7cf515a8"
+        },
+        {
+          "name": "zlib_1.2.13.dfsg.orig.tar.bz2",
+          "url": "https://deb.debian.org/debian/pool/main/z/zlib/zlib_1.2.13.dfsg.orig.tar.bz2",
+          "bytes": 1239825,
+          "sha256": "71feb7947e3c00ef125f83b79a4e529bde31171e5babe48b391f06758d1ab0a1"
+        },
+        {
+          "name": "zlib_1.2.13.dfsg-1.debian.tar.xz",
+          "url": "https://deb.debian.org/debian/pool/main/z/zlib/zlib_1.2.13.dfsg-1.debian.tar.xz",
+          "bytes": 15700,
+          "sha256": "f66cf3d4f2d7defcd4d1fd1fb0a11ee39f1e01b42ec7d059c9dc5c1695133c44"
+        }
+      ],
+      "target": "gzwrite.c",
+      "targetBeforeSha256": "c7454689751c8f41ec63a1381a0053fb149095abe1c3b89c8a996b2d7ac8adce",
+      "patch": "patches/zlib-borrowed-input.patch",
+      "patchSha256": "1d60bdb1b7fbe24a15f3b5ae5578454bfc8f683750e3db5c4b406d41ce75a9e4",
+      "targetAfterSha256": "4bb72c5098d16080097f612862b56dee92be3473cddcc2369b1c87e10278df0b",
+      "fixScope": [
+        "CVE-2026-85091"
+      ],
+      "notClosed": [
+        "CVE-2026-76844-attribution-conflict"
+      ]
+    }
+  ]
+}

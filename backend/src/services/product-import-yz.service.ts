@@ -51,7 +51,7 @@ import {
   SPEC_VALUE_MAX_LENGTH,
   VARIANT_CODE_POOL,
 } from './product-code.service.js'
-import { PRODUCT_SCAN_CODE_MUTEX_KEY, productService, type CreateProductInput, type ProductView } from './product.service.js'
+import { PRODUCT_SCAN_CODE_MUTEX_KEY, productService, type CreateProductInput } from './product.service.js'
 
 const MAX_IMPORT_ROWS = 2000
 /** 解压体积预检上限：六列宽表，2000 行远小于 1MB，留足余量给少量嵌入图片。 */
@@ -220,11 +220,11 @@ export class ProductImportYzService {
     actor: AuthUserContext,
     requestMeta?: RequestMeta,
   ): Promise<YzImportResult> {
-    const result = await runInTransaction(async (manager) => {
+    const parsedRows = await this.parseWorkbook(fileBuffer)
+    const result = await runInTransaction((manager) => productService.withProductCreateBatch(manager, async () => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
       await acquireSequenceMutex(manager, PRODUCT_SCAN_CODE_MUTEX_KEY)
-      // 事务内重新解析 + 重新校验：不信任前端回传的预览结果，只信任 resolutions。
-      const parsedRows = await this.parseWorkbook(fileBuffer)
+      // 只在锁内重新校验依赖数据库的结论，不信任前端回传的预览结果。
       const { rows, groups, preview } = await this.validateAndGroup(parsedRows, manager, resolutions ?? [])
       if (preview.pendingConfirmCount > 0) {
         throw new BizError('存在未确认的规格轴归属或商品名归属，请在预览页逐项确认', 400)
@@ -268,19 +268,17 @@ export class ProductImportYzService {
           })),
         }
 
-        let view: ProductView
-        try {
-          view = await productService.createWithManager(input, manager, actor)
-        } catch (error) {
-          if (error instanceof BizError) {
-            throw new BizError(`系列「${group.seriesCode}」序号 ${group.seriesSeq}（第 ${group.rows.map((row) => row.rowNumber).join('、')} 行）导入失败：${error.message}`, error.statusCode)
-          }
-          throw error
-        }
-        if (view.seriesSeq !== group.seriesSeq) {
+        const { product, skuCount } = await productService.createWithManager(input, manager, actor, { skipViewBuild: true })
+          .catch((error: unknown) => {
+            if (error instanceof BizError) {
+              throw new BizError(`系列「${group.seriesCode}」序号 ${group.seriesSeq}（第 ${group.rows.map((row) => row.rowNumber).join('、')} 行）导入失败：${error.message}`, error.statusCode)
+            }
+            throw error
+          })
+        if (product.seriesSeq !== group.seriesSeq) {
           throw new BizError('系列内序号分配异常，导入已中止，请重试', 500)
         }
-        created.push({ id: view.id, productCode: view.productCode, productName: view.productName, skuCount: view.skus.length })
+        created.push({ id: String(product.id), productCode: product.productCode, productName: product.productName, skuCount })
       }
 
       await auditService.record({
@@ -298,7 +296,7 @@ export class ProductImportYzService {
       }, manager)
 
       return { productCount: created.length, skuCount: rows.length, products: created }
-    })
+    }))
     invalidateMallCatalogReadCache()
     return result
   }

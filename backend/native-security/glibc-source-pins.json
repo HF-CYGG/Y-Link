@@ -1,0 +1,156 @@
+{
+  "schema": 1,
+  "status": "source-and-package-build-candidate-unreviewed-unexecuted",
+  "source": "glibc",
+  "distro": "bookworm",
+  "version": "2.36-9+deb12u14",
+  "revision": "2.36-9+deb12u14+ylink1",
+  "localMaintainer": "Y-Link 本地安全构建 <security-build@localhost.invalid>",
+  "sourceDateEpoch": 1794873600,
+  "architectures": {
+    "amd64": "x86_64-linux-gnu",
+    "arm64": "aarch64-linux-gnu"
+  },
+  "runtimePackages": [
+    "libc6",
+    "libc-bin"
+  ],
+  "loaders": {
+    "amd64": "ld-linux-x86-64.so.2",
+    "arm64": "ld-linux-aarch64.so.1"
+  },
+  "originalMaintainer": "GNU Libc Maintainers <debian-glibc@lists.debian.org>",
+  "files": [
+    {
+      "name": "glibc_2.36-9+deb12u14.dsc",
+      "url": "https://deb.debian.org/debian/pool/main/g/glibc/glibc_2.36-9+deb12u14.dsc",
+      "bytes": 9765,
+      "sha256": "cfe1f0b8dc1fa211ce5a45b3725cc38b29f88667f1140ebdca6de35cf9c6f1fd"
+    },
+    {
+      "name": "glibc_2.36.orig.tar.xz",
+      "url": "https://deb.debian.org/debian/pool/main/g/glibc/glibc_2.36.orig.tar.xz",
+      "bytes": 19363988,
+      "sha256": "a543c02070d46ccaf866957efd13f10c924daa74c86a90a0254db09a92a708ee"
+    },
+    {
+      "name": "glibc_2.36-9+deb12u14.debian.tar.xz",
+      "url": "https://deb.debian.org/debian/pool/main/g/glibc/glibc_2.36-9+deb12u14.debian.tar.xz",
+      "bytes": 918488,
+      "sha256": "cf4ac9cd98185452cae3ef34e2e4ee12753e3d93fd0c62c61396d4a47eec902f"
+    }
+  ],
+  "originAuthentication": {
+    "method": "existing archive keyring -> historical signed InRelease/Sources -> exact dsc/archive SHA256",
+    "freshness": "historical authenticated Sources; not current repository freshness assertion",
+    "reference": "hardening/20261117-source-inputs/all-inputs.json",
+    "keyringSha256": "506b815cbb32d9b6066b4a2aa524071e071761e7e7f68c3ac74f3061ba852017"
+  },
+  "packagingInputs": [
+    {
+      "path": "debian/patches/series",
+      "sha256": "db7040b06e5f6e71b9be3484c60e03a65d9004f9554dc39ca250fa1b86d9e86c",
+      "bytes": 3613
+    },
+    {
+      "path": "debian/rules.d/build.mk",
+      "sha256": "0cd02a77da6fd4d18003b2da8bdb987d5f42b86eb8fc02649c7e07b1f90b01f1",
+      "bytes": 17814
+    },
+    {
+      "path": "debian/control.in/main",
+      "sha256": "a22cf4c89543625c8f60389b75a69288561e12ea98ba458bfd1664c8d590d36d",
+      "bytes": 5971
+    },
+    {
+      "path": "debian/control",
+      "sha256": "d085faf9b93e2e171e534b7e96652a25700e0b4bd7402928dd04b807a94f6d20",
+      "bytes": 59629
+    },
+    {
+      "path": "debian/rules",
+      "sha256": "338013799d87178321015fbd1ccba88cbf37dc3c581849ed148f6fe5a1292920",
+      "bytes": 7285
+    },
+    {
+      "path": "debian/sysdeps/amd64.mk",
+      "sha256": "0764a610656e5dd4cc2cad71207d36739f6355eff75055fd174529bbc056a8f0",
+      "bytes": 1622
+    },
+    {
+      "path": "debian/sysdeps/arm64.mk",
+      "sha256": "fc29262da66e13b6eff6d433aaa91397adb94f2b41611e0da8466e14cd0e6075",
+      "bytes": 108
+    }
+  ],
+  "patches": [
+    {
+      "file": "patches/glibc-language-path.diff",
+      "sha256": "83fce01df846c572a26a69b3a8f5adea9b9c94f25c101e020524c408f8fafcb5",
+      "production": true
+    },
+    {
+      "file": "patches/glibc-origin-normalized-path.diff",
+      "sha256": "946a41fd76b1ecc036f275280e714c05a9bc79bf47c44181ac2eef34a215951c",
+      "production": true
+    },
+    {
+      "file": "patches/glibc-language-path.upstream.patch",
+      "sha256": "26e576abfddc4cd240fcc5c33b799c43c2ca913b4c666992dcd8fd5c0fdb23b5",
+      "production": false
+    },
+    {
+      "file": "patches/glibc-origin-normalized-path.upstream.patch",
+      "sha256": "4aca374b00222fa85c6711e488cad53e5b91743e54cf3bda542dbc748a6506e6",
+      "production": false
+    }
+  ],
+  "targets": [
+    {
+      "path": "intl/dcigettext.c",
+      "beforeSha256": "4296c93313409ee06af126d31eefeba1432f38ad0974bfafb6c0a971346f2c52",
+      "afterSha256": "569d6387661783b54014d3d3870daf73f137dce5b0f6cd3321cc144e9eeb41bc"
+    },
+    {
+      "path": "elf/dl-load.c",
+      "beforeSha256": "a0bb281063e2e668e203bde9c75b1edee0cc62591da767e6ec97e493f9bed56c",
+      "afterSha256": "7c092dca275f1bc2c28e8c23f25ce388041a53daec1a96bc0152cd123f10302c"
+    },
+    {
+      "path": "elf/dl-path-normalize.h",
+      "beforeSha256": null,
+      "afterSha256": "3a3ea25f5a7218a34ae84052eeb16cbc3817ffd1bfba8ef9808110ca936610ab"
+    }
+  ],
+  "scope": [
+    "CVE-2026-84243",
+    "CVE-2026-86805",
+    "CVE-2026-95818"
+  ],
+  "notClosed": [
+    {
+      "id": "CVE-2026-100290",
+      "reason": "no verified complete fix; introduce commits must not be used as remediation"
+    },
+    {
+      "id": "CVE-2026-115819",
+      "reason": "no verified complete fix; remains blocked"
+    }
+  ],
+  "privateHeader": {
+    "path": "elf/dl-path-normalize.h",
+    "sha256": "3a3ea25f5a7218a34ae84052eeb16cbc3817ffd1bfba8ef9808110ca936610ab",
+    "status": "official private static inline helper only; not installed or exported; no new runtime dependency"
+  },
+  "preserve": [
+    "libc.so.6 and existing ELF loader paths/symlinks",
+    "NSS/gconv/all existing modules and exported symbol versions",
+    "original native Debian configure/build/test rules",
+    "all maintainer scripts/triggers in complete libc6 and libc-bin packages",
+    "normal HTTP/app functions unaffected at source scope; requires runtime QA"
+  ],
+  "buildProfile": "nobiarch; native passes only; parallel=2; explicit candidate-only nocheck; no stage1/stage2",
+  "tests": "new upstream test texts retained in full original patches; not ported/executed in this stage; native tests previously blocked remain forbidden",
+  "runtimeInstallReady": false,
+  "remaining": "complete-package build/install/contracts and pristine-stage wiring are candidates only; not built, installed, reviewed or tested. Unified verification and actual artifacts/ABI/maintainer compatibility remain pending; source application is not binary proof"
+}

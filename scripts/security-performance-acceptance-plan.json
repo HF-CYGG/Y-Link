@@ -1,0 +1,620 @@
+{
+  "owner": "security_performance_finish GPT-6.1 Sol/xhigh；唯一项目写入与统一验收负责人",
+  "phase": "final-candidate-frozen-unified-acceptance-pending",
+  "reviewRounds": { "complete": 1, "directedRecheck": 0 },
+  "approvedVersionCorrection": "主线依据官方发布bundle缺失修复证据，将仅TypeORM子树目标修正为glob14.0.3/minimatch11.0.2；不改TypeORM或拦截raw loader",
+  "gate": "全批实现冻结，一次完整独立深审，集中修复，至多一次定向闭环后统一执行；不按文件重跑",
+  "checks": [
+    {
+      "id": "performance",
+      "command": "npm run verify:performance",
+      "sources": [
+        "scripts/verify-enterprise-performance-suite.mjs",
+        "scripts/verify-enterprise-page-performance.mjs",
+        "scripts/verify-enterprise-core-paths.mjs"
+      ],
+      "coverage": [
+        "正式前端 build",
+        "total<=4780KB",
+        "initial JS<=870KB",
+        "CSS<=325KB",
+        "critical graph<=1195KB",
+        "原 core-path cold<=3000ms，不变起止与统计范围",
+        "真实 @ylink/validation 消费者 ClientAuthView/ClientProfileView 的类型与生产构建"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run"
+    },
+    {
+      "id": "backend-build",
+      "command": "npm --prefix backend run build",
+      "sources": [
+        "backend/tsconfig.json"
+      ],
+      "coverage": [
+        "生产后端 TypeScript"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run"
+    },
+    {
+      "id": "encoding",
+      "command": "npm run verify:text-encoding",
+      "sources": [
+        "scripts/verify-text-encoding.mjs"
+      ],
+      "coverage": [
+        "本批中文与批量修改"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run"
+    },
+    {
+      "id": "dependency-security",
+      "command": "npm run verify:security-updates",
+      "sources": [
+        "scripts/verify-security-updates.mjs",
+        "package-lock.json",
+        "backend/package-lock.json",
+        "apps/mobile/package.json"
+      ],
+      "coverage": [
+        "Web与后端生产 high/critical 包括 major/no-fix 均阻断",
+        "具体安装路径",
+        "Mobile 完整workspace真实审计，未上线不作生产阻断",
+        "扫描失败和未执行不得记零漏洞"
+      ],
+      "environment": "完整隔离 workspace；允许官方 npm audit/Node 发行信息网络访问",
+      "status": "not-run"
+    },
+    {
+      "id": "docker-fixed-points",
+      "command": "npm run verify:docker-base-image",
+      "sources": [
+        "scripts/verify-docker-base-image.mjs",
+        "Dockerfile.onebox",
+        "Dockerfile",
+        ".github/workflows/docker-publish.yml"
+      ],
+      "coverage": [
+        "Node固定点",
+        "镜像构建参数一致",
+        "Nginx固定补丁/独立signed-by"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run"
+    },
+    {
+      "id": "zod4",
+      "command": "npm --prefix backend run verify:zod4:contract",
+      "sources": [
+        "backend/scripts/zod4-contract-verify.ts",
+        "backend/src/utils/bounded-array-schema.ts"
+      ],
+      "coverage": [
+        "真实schema：缺省/null/空串/false/0/未知键/default/transform/records/WebAuthn/递归树",
+        "幂等归一化",
+        "超限长度在元素解析之前拒绝",
+        "实际共享用户名校验与后端权威规则一致"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run"
+    },
+    {
+      "id": "optional-sdk",
+      "command": "npm --prefix backend run verify:optional-sdk:lazy",
+      "sources": [
+        "backend/scripts/optional-sdk-lazy-verify.ts",
+        "backend/src/utils/retryable-lazy-resource.ts"
+      ],
+      "coverage": [
+        "未启用不加载",
+        "首次并发合并",
+        "加载及客户端初始化失败重试",
+        "真实PNVS模型",
+        "MNS关闭幂等"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run"
+    },
+    {
+      "id": "orm-glob",
+      "command": "npm --prefix backend run verify:typeorm:glob",
+      "sources": [
+        "backend/scripts/typeorm-glob-compat-verify.mjs"
+      ],
+      "coverage": [
+        "TypeORM保持0.3.x",
+        "仅TypeORM子树glob14.0.3/minimatch11.0.2",
+        "默认CJS/ESM bundle与已修复matcher源码hash配对，不用外置版本冒充内嵌来源",
+        "CJS+syncAPI",
+        "Windows/Linux固定pattern",
+        "真实实体和SQLite迁移"
+      ],
+      "environment": "Windows 隔离副本执行；Linux amd64/arm64 在本批实际镜像中只读挂载同一脚本执行，使用镜像内 TypeORM/sqlite3",
+      "status": "not-run"
+    },
+    {
+      "id": "mobile-review",
+      "command": "npm --prefix backend run mobile-auth:review:verify",
+      "sources": [
+        "backend/scripts/mobile-password-transaction-verify.ts",
+        "backend/package.json"
+      ],
+      "coverage": [
+        "Web/Mobile 成功/错误旧密码",
+        "撤销/过期/刷新后旧Access无效",
+        "同会话并发只一提交",
+        "审计失败回滚密码/撤销/重签",
+        "回滚后风控"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run"
+    },
+    {
+      "id": "routes",
+      "command": "npm --prefix backend run task2:route-contract:verify",
+      "sources": [
+        "backend/scripts/task2-route-permission-contract-verify.ts"
+      ],
+      "coverage": [
+        "路由权限契约"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run"
+    },
+    {
+      "id": "security",
+      "command": "npm --prefix backend run security:hardening:verify",
+      "sources": [
+        "backend/scripts/security-hardening-verify.ts"
+      ],
+      "coverage": [
+        "安全基础回归"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run"
+    },
+    {
+      "id": "auth-depth",
+      "command": "npm --prefix backend run security:auth-depth:verify",
+      "sources": [
+        "backend/scripts/security-hardening-auth-verify.ts"
+      ],
+      "coverage": [
+        "认证深度回归"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run"
+    },
+    {
+      "id": "http",
+      "command": "npm --prefix backend run security:http-boundary:verify",
+      "sources": [
+        "backend/scripts/http-security-verify.ts"
+      ],
+      "coverage": [
+        "HTTP/Cookie/CSRF/响应外壳"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run"
+    },
+    {
+      "id": "webauthn",
+      "command": "npm --prefix backend run auth:webauthn:verify",
+      "sources": [
+        "backend/package.json"
+      ],
+      "coverage": [
+        "真实WebAuthn默认/启用/兼容/负向/旧数据升级"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run"
+    },
+    {
+      "id": "pnvs",
+      "command": "npm --prefix backend run verification:aliyun:verify",
+      "sources": [
+        "backend/scripts/verification-aliyun-verify.ts"
+      ],
+      "coverage": [
+        "已有验证码与回执业务契约；不向真实提供商发送"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run"
+    },
+    {
+      "id": "sqlite-o2o",
+      "command": "npm --prefix backend run o2o:verify",
+      "sources": [
+        "backend/scripts/o2o-preorder-isolated-verify.ts"
+      ],
+      "coverage": [
+        "SQLite预订单与状态机"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run"
+    },
+    {
+      "id": "sqlite-stock",
+      "command": "npm --prefix backend run o2o:stock-consistency:verify",
+      "sources": [
+        "backend/scripts/o2o-stock-consistency-verify.ts"
+      ],
+      "coverage": [
+        "SQLite库存占用/释放"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run"
+    },
+    {
+      "id": "sqlite-auth",
+      "command": "npm --prefix backend run account-lifecycle:verify",
+      "sources": [
+        "backend/scripts/account-lifecycle-verify.ts"
+      ],
+      "coverage": [
+        "SQLite账号生命周期"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run"
+    },
+    {
+      "id": "mysql-auth",
+      "command": "npm --prefix backend run verify:security-performance:mysql",
+      "sources": [
+        "backend/scripts/account-lifecycle-mysql-verify.ts",
+        "backend/scripts/mysql-password-session-transaction-verify.ts",
+        "backend/scripts/security-performance-mysql-verify.mjs",
+        "backend/scripts/owned-mysql-fixture.mjs"
+      ],
+      "coverage": [
+        "account-lifecycle:mysql脚本只证明044迁移/RESTRICT外键/生命周期事件不可变",
+        "新增真实Web/Mobile改密：账号后会话锁序与独立双连接竞争，performance_schema确认真实锁等待",
+        "真实refresh/注销交错与过期认证快照拒绝，同会话并发仅一次提交",
+        "密码/撤销/重签/成功审计原子提交与审计失败全回滚",
+        "旧密码错误后账号失败桶和失败审计在回滚外保留"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run"
+    },
+    {
+      "id": "redis",
+      "command": "npm --prefix backend run redis:integration:verify",
+      "sources": [
+        "backend/scripts/redis-integration-verify.ts"
+      ],
+      "coverage": [
+        "Redis启用/禁用/故障、票据/限流/启动锁/跨实例边界"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run"
+    },
+    {
+      "id": "production-pdf-unit",
+      "command": "node --test scripts/html2pdf-vite-plugin.test.mjs",
+      "sources": [
+        "scripts/html2pdf-source-guard.mjs",
+        "scripts/html2pdf-source-manifest.json",
+        "scripts/html2pdf-vite-plugin.test.mjs"
+      ],
+      "coverage": [
+        "源码清单/哈希/依赖保护",
+        "全部三插件必须进入生产图",
+        "变异与缺失fail-closed"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run"
+    },
+    {
+      "id": "production-pdf-fixture-build",
+      "command": "node node_modules/vite/bin/vite.js build --config scripts/voucher-visual-vite.config.ts",
+      "sources": [
+        "scripts/voucher-visual-vite.config.ts",
+        "scripts/voucher-visual-fixture.ts",
+        "src/utils/pdf/export-voucher-pdf.ts"
+      ],
+      "coverage": [
+        "与主构建相同PDF插件的production fixture"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run"
+    },
+    {
+      "id": "production-pdf-visual",
+      "command": "node scripts/verify-production-pdf-browser.mjs",
+      "sources": [
+        "scripts/voucher-visual-fixture.ts",
+        "scripts/client-voucher-visual-fixture.ts",
+        "src/utils/pdf/export-voucher-pdf.ts",
+        "scripts/verify-production-pdf-browser.mjs",
+        "scripts/pdf-svg-visual-fixture.ts"
+      ],
+      "coverage": [
+        "中文",
+        "图片/条码",
+        "横竖版",
+        "多页",
+        "点击时快照",
+        "失败恢复"
+      ],
+      "environment": "Chrome/Edge111、Firefox114、Safari/iOS16.4为既有目标；实际不可得的浏览器明确未验证，不以当前WebKit冒充",
+      "status": "not-run",
+      "executionGap": "驱动已实现，待统一验收与导出逐页视觉核验；历史Safari/iOS浏览器不可得仍单列"
+    },
+    {
+      "id": "mall-order-ui",
+      "command": "YLINK_BROWSER_PRODUCTION=true YLINK_ISSUES_BROWSER_SCENES=TABLE,KD1,RECOVERY,PDF node scripts/run-issues-177-178-browser.mjs",
+      "sources": [
+        "scripts/client-polish-ux-supplement.json",
+        "scripts/verify-client-cart-reconciliation.ts",
+        "backend/scripts/task6-client-core-flow-verify.ts",
+        "scripts/issues-177-178-browser-cases.mjs",
+        "scripts/production-static-server.mjs",
+        "backend/scripts/issues-177-178-ui-fixture.ts"
+      ],
+      "coverage": [
+        "真实生产表格固定列/选择/排序/横向滚动/tooltip/暗色/移动/KeepAlive/直达刷新",
+        "多规格选择",
+        "购物车恢复",
+        "结算快照",
+        "刷新恢复订单",
+        "订单业务状态"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run",
+      "executionGap": "生产静态+真实HTTP驱动已实现，待统一验收"
+    },
+    {
+      "id": "mysql-runtime-o2o",
+      "command": "npm --prefix backend run verify:security-performance:mysql",
+      "sources": [
+        "backend/scripts/account-lifecycle-mysql-verify.ts",
+        "backend/scripts/mysql-schema-contract-verify.ts",
+        "backend/scripts/security-performance-mysql-verify.mjs",
+        "backend/scripts/owned-mysql-fixture.mjs",
+        "backend/scripts/mysql-password-session-transaction-verify.ts",
+        "backend/scripts/mysql-migration-packet-verify.ts",
+        "backend/scripts/o2o-stock-consistency-verify.ts"
+      ],
+      "coverage": [
+        "MySQL真实启动",
+        "认证",
+        "O2O库存事务",
+        "MySQL O2O 幂等请求重放",
+        "同幂等键不同请求冲突",
+        "库存事务并发与回滚"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run",
+      "executionGap": "驱动已实现，待统一验收；不得用准备状态声称通过"
+    },
+    {
+      "id": "onebox-build-amd64",
+      "command": "docker buildx build --platform linux/amd64 --load -f Dockerfile.onebox -t <本批唯一镜像标签> .",
+      "sources": [
+        "Dockerfile.onebox",
+        ".dockerignore"
+      ],
+      "coverage": [
+        "目标架构真实安装与构建",
+        "Node/Nginx镜像摘要绑定"
+      ],
+      "environment": "已启动Docker Desktop，现有docker builder支持amd64/arm64；不替换任何现有容器",
+      "status": "not-run"
+    },
+    {
+      "id": "onebox-native-amd64",
+      "command": "Y_LINK_VERIFY_IMAGE=<本批镜像> Y_LINK_VERIFY_PLATFORM=linux/amd64 Y_LINK_VERIFY_EVIDENCE_DIR=<独占目录> node scripts/verify-onebox-native-runtime.mjs",
+      "sources": [
+        "scripts/verify-onebox-native-runtime.mjs",
+        "backend/scripts/typeorm-glob-compat-verify.mjs"
+      ],
+      "coverage": [
+        "nginx -t",
+        "固定APT包版本",
+        "临时目录存在",
+        "真实sqlite3写读",
+        "真实sharp编码缩放解码",
+        "平台与Node版本",
+        "目标Linux架构的真实TypeORM CJS/glob/sync/SQLite实体迁移"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run"
+    },
+    {
+      "id": "onebox-http-amd64",
+      "command": "Y_LINK_VERIFY_IMAGE=<本批镜像> Y_LINK_VERIFY_PLATFORM=linux/amd64 Y_LINK_VERIFY_EVIDENCE_DIR=<独占目录> node scripts/verify-onebox-http-runtime.mjs",
+      "sources": [
+        "docker/nginx/onebox.conf",
+        "docker/nginx/onebox-nginx.conf",
+        "docker/onebox/entrypoint.sh",
+        "scripts/verify-onebox-http-runtime.mjs",
+        "scripts/onebox-http-runtime-case.mjs"
+      ],
+      "coverage": [
+        "大上传触发client_body_temp",
+        "公开图片/cache",
+        "私有附件拒绝",
+        "SSE长连接",
+        "代理头与来源",
+        "rate429",
+        "body413",
+        "优雅退出"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run",
+      "executionGap": "驱动已实现，待实际目标架构统一验收"
+    },
+    {
+      "id": "onebox-build-arm64",
+      "command": "docker buildx build --platform linux/arm64 --load -f Dockerfile.onebox -t <本批唯一镜像标签> .",
+      "sources": [
+        "Dockerfile.onebox",
+        ".dockerignore"
+      ],
+      "coverage": [
+        "目标架构真实安装与构建",
+        "Node/Nginx镜像摘要绑定"
+      ],
+      "environment": "已启动Docker Desktop，现有docker builder支持amd64/arm64；不替换任何现有容器",
+      "status": "not-run"
+    },
+    {
+      "id": "onebox-native-arm64",
+      "command": "Y_LINK_VERIFY_IMAGE=<本批镜像> Y_LINK_VERIFY_PLATFORM=linux/arm64 Y_LINK_VERIFY_EVIDENCE_DIR=<独占目录> node scripts/verify-onebox-native-runtime.mjs",
+      "sources": [
+        "scripts/verify-onebox-native-runtime.mjs",
+        "backend/scripts/typeorm-glob-compat-verify.mjs"
+      ],
+      "coverage": [
+        "nginx -t",
+        "固定APT包版本",
+        "临时目录存在",
+        "真实sqlite3写读",
+        "真实sharp编码缩放解码",
+        "平台与Node版本",
+        "目标Linux架构的真实TypeORM CJS/glob/sync/SQLite实体迁移"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run"
+    },
+    {
+      "id": "onebox-http-arm64",
+      "command": "Y_LINK_VERIFY_IMAGE=<本批镜像> Y_LINK_VERIFY_PLATFORM=linux/arm64 Y_LINK_VERIFY_EVIDENCE_DIR=<独占目录> node scripts/verify-onebox-http-runtime.mjs",
+      "sources": [
+        "docker/nginx/onebox.conf",
+        "docker/nginx/onebox-nginx.conf",
+        "docker/onebox/entrypoint.sh",
+        "scripts/verify-onebox-http-runtime.mjs",
+        "scripts/onebox-http-runtime-case.mjs"
+      ],
+      "coverage": [
+        "大上传触发client_body_temp",
+        "公开图片/cache",
+        "私有附件拒绝",
+        "SSE长连接",
+        "代理头与来源",
+        "rate429",
+        "body413",
+        "优雅退出"
+      ],
+      "environment": "隔离普通副本，Node 22.23.5，空 ENV_FILE，独占数据目录",
+      "status": "not-run",
+      "executionGap": "驱动已实现，待实际目标架构统一验收"
+    },
+    {
+      "id": "standalone-frontend-image",
+      "command": "docker buildx build --platform linux/amd64 --load -f Dockerfile -t <本批前端唯一镜像标签> .；同镜像临时容器执行 /docker-entrypoint.sh nginx -t 与 nginx -v",
+      "sources": [
+        "Dockerfile",
+        "docker/nginx/default.conf.template",
+        "docker/nginx/nginx.conf",
+        "docker/nginx/configure-proxy-boundary.sh"
+      ],
+      "coverage": [
+        "独立前端nginx:1.30.6-alpine真实构建与版本",
+        "官方入口模板渲染及gzip_static/realip等既有模块兼容"
+      ],
+      "environment": "Docker可用后用本批唯一镜像、无网络临时容器；不替换既有容器",
+      "status": "not-run"
+    },
+    {
+      "id": "workspace-dependency-recovery",
+      "command": "定向核对主工作区根依赖；必要时在隔离验收后按最终lockfile恢复",
+      "sources": [
+        "package-lock.json",
+        "package.json"
+      ],
+      "coverage": [
+        "修复本批误启动根npm ci影响",
+        "保留用户自定义和业务数据"
+      ],
+      "environment": "主工作区只在最终明确核对后做必要恢复；不作为隔离验收环境",
+      "status": "not-run"
+    },
+    {
+      "id": "mysql-migration-packet",
+      "command": "npm --prefix backend run verify:security-performance:mysql",
+      "sources": [
+        "scripts/verify-db-migration.mjs",
+        "docker/compose.verify-db-migration.yml",
+        "backend/src/services/database-migration.service.ts",
+        "backend/scripts/security-performance-mysql-verify.mjs",
+        "backend/scripts/owned-mysql-fixture.mjs",
+        "backend/scripts/mysql-migration-packet-verify.ts",
+        "backend/scripts/o2o-stock-consistency-verify.ts"
+      ],
+      "coverage": [
+        "真实SQLite→MySQL迁移闭环",
+        "大字段触发按字节分批",
+        "转义后实际包长不超限的文本不得误拒",
+        "含引号/反斜杠/多字节字符",
+        "单行实际超 max_allowed_packet 时明确拒绝且事务回滚",
+        "延迟加载仍使用官方 mysql2.format，packet 1字节命令头口径不变"
+      ],
+      "environment": "既有脚本自建独立Compose project/随机凭据/internal网络/临时卷；不得传入外部数据库",
+      "status": "not-run",
+      "executionGap": "驱动已实现，待统一验收；不得用准备状态声称通过"
+    },
+    {
+      "id": "mobile-shared-consumer-types",
+      "command": "npm --workspace=y-link-mobile run typecheck",
+      "sources": [
+        "apps/mobile/app/(auth)/register.tsx",
+        "apps/mobile/app/(tabs)/profile.tsx",
+        "apps/mobile/package.json",
+        "packages/validation/src/auth.ts"
+      ],
+      "coverage": [
+        "实际Mobile共享校验消费者类型契约"
+      ],
+      "environment": "完整隔离workspace，Node22.23.5，安装根lockfile的workspace依赖",
+      "status": "not-run"
+    },
+    {
+      "id": "production-client-polish",
+      "command": "Y_LINK_POLISH_PRODUCTION=true node scripts/verify-client-interaction-polish.mjs",
+      "sources": [
+        "scripts/verify-client-interaction-polish.mjs",
+        "scripts/client-polish-lab-server.mjs",
+        "scripts/production-static-server.mjs"
+      ],
+      "coverage": [
+        "生产静态页面既有多规格/购物车/移动布局回归；API fixture层与真实HTTP另分报告"
+      ],
+      "status": "not-run"
+    }
+  ],
+  "reportBinding": [
+    "源码snapshot和所有新增文件hash",
+    "双lockfile hash",
+    "Node二进制hash/版本",
+    "镜像Id/RepoDigests/架构",
+    "命令argv/cwd/exit与完整日志",
+    "失败历史保留",
+    "未运行/受阻不得写通过"
+  ],
+  "consumerMapping": {
+    "@ylink/validation": {
+      "runtimeImports": [
+        "src/views/client/ClientAuthView.vue",
+        "src/views/client/ClientProfileView.vue"
+      ],
+      "implementation": "packages/validation/src/auth.ts 当前为纯函数，没有运行时 zod schema；peer 已同步4.6.7",
+      "validation": [
+        "verify:performance 内前端build/类型检查",
+        "backend/scripts/zod4-contract-verify.ts 共用规则对照"
+      ],
+      "mobile": {
+        "runtimeImports": [
+          "apps/mobile/app/(auth)/register.tsx",
+          "apps/mobile/app/(tabs)/profile.tsx"
+        ],
+        "dependency": "已补齐既有内部 workspace 包声明",
+        "validation": "npm --workspace=y-link-mobile run typecheck；不因纯函数/peer同步强制Expo全量导出"
+      }
+    }
+  },
+  "executionDeduplication": "相同command和环境只执行一次，各场景coverage关联同一结果；MySQL账号结构、改密/refresh交错、O2O与packet共享verify:security-performance:mysql的单次执行，不能重复整批运行"
+}

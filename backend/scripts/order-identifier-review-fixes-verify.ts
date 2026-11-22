@@ -3,10 +3,10 @@
  * 文件职责：覆盖删除尾号回收、业务号游标、保留幂等键、旧配置停写、重启回灌与合并搜索命中元数据。
  */
 
+import { createVerificationIsolation } from './verification-isolation.js'
 import 'reflect-metadata'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
@@ -20,9 +20,11 @@ const sliceMethodSource = (source: string, startMarker: string, endMarker: strin
   return source.slice(start, end)
 }
 
-const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ylink-identifier-review-'))
+const verificationIsolation = createVerificationIsolation('order-identifier-review-fixes-verify')
+const runtimeDir = verificationIsolation.rootDir
 process.env.APP_PROFILE = 'identifier-review-verify'
 process.env.DB_TYPE = 'sqlite'
+verificationIsolation.seal({ type: 'sqlite', database: path.join(runtimeDir, 'verification.sqlite') })
 process.env.DB_SYNC = 'false'
 process.env.SQLITE_DB_PATH = path.join(runtimeDir, 'verification.sqlite')
 process.env.Y_LINK_DATA_DIR = runtimeDir
@@ -72,20 +74,27 @@ const expectBizError = async (action: () => Promise<unknown>, statusCode: number
 }
 
 try {
+  await verificationIsolation.assertTarget(AppDataSource)
   prepareDatabaseRuntime()
+  await verificationIsolation.assertTarget(AppDataSource)
   await AppDataSource.initialize()
   await initializeDatabaseSchemaIfNeeded(AppDataSource)
   await systemConfigService.ensureDefaultConfigs()
 
-  const cachedProjectionSource = {
-    order: {
+  const sharedOrderItems = Object.freeze([{ productName: '普通订单条目', quantity: 2 }])
+  const cachedProjectionSource = Object.freeze({
+    order: Object.freeze({
       systemNo: 'OUT-W-009999',
       showNo: 'OUT-W-009999',
       businessNo: 'hyyz009999',
-      matchedIdentifierType: 'systemNo',
       matchedIdentifierValue: 'OUT-W-009999',
-    },
-  }
+      matchedIdentifierType: 'systemNo',
+      items: sharedOrderItems,
+      createdAt: new Date('2026-01-01T01:02:03Z'),
+      remark: null,
+    }),
+    summary: Object.freeze({ count: 1 }),
+  })
   const operatorProjection = projectSystemIdentifiersForRole(cachedProjectionSource, 'operator') as {
     order: Record<string, unknown>
   }
@@ -93,8 +102,37 @@ try {
   assert.equal('showNo' in operatorProjection.order, false, '普通账号统一响应投影不得保留旧 showNo 别名')
   assert.equal(operatorProjection.order.matchedIdentifierType, null, '普通账号统一响应投影不得保留 systemNo 命中类型')
   assert.equal(operatorProjection.order.matchedIdentifierValue, null, '普通账号统一响应投影不得保留 systemNo 命中值')
+  assert.equal(operatorProjection.order.items, sharedOrderItems, '普通订单条目数组可沿用缓存引用')
+  assert.equal(operatorProjection.order.createdAt, cachedProjectionSource.order.createdAt)
+  assert.equal(operatorProjection.order.remark, null)
+  assert.equal(projectSystemIdentifiersForRole(cachedProjectionSource, 'operator').summary, cachedProjectionSource.summary)
   assert.equal(cachedProjectionSource.order.systemNo, 'OUT-W-009999', '响应投影不得原地污染服务缓存或复用对象')
-  assert.deepEqual(projectSystemIdentifiersForRole(cachedProjectionSource, 'admin'), cachedProjectionSource, '管理员必须保留 canonical 与兼容字段')
+  assert.equal(projectSystemIdentifiersForRole(cachedProjectionSource, 'admin'), cachedProjectionSource, '管理员可直接复用完整缓存')
+
+  const spoofedSystemNumber = 'OUT-W-SERIAL-HOOK'
+  const revealSystemNo = () => ({ systemNo: spoofedSystemNumber })
+  const hookedRecord = Object.assign(Object.create({ toJSON: revealSystemNo }), { businessNo: 'hyyz009999' })
+  const hookedArray = [{ systemNo: spoofedSystemNumber, businessNo: 'hyyz009999' }]
+  Object.defineProperty(hookedArray, 'toJSON', { value: revealSystemNo })
+  const hookedDate = new Date('2026-01-01T01:02:03Z')
+  Object.defineProperty(hookedDate, 'toJSON', { value: revealSystemNo })
+  const accessorRecord = Object.defineProperty({ businessNo: 'hyyz009999' }, 'toJSON', {
+    enumerable: true,
+    get: () => { throw new Error('投影不得执行访问器') },
+  })
+  const legacyRecord = JSON.parse('{"__proto__":{"systemNo":"OUT-W-SERIAL-HOOK","businessNo":"hyyz009999"}}')
+  const serializedProjection = JSON.stringify(projectSystemIdentifiersForRole({
+    hookedRecord, hookedArray, hookedDate, accessorRecord, legacyRecord, missing: undefined,
+    callable: Object.assign(() => undefined, { toJSON: revealSystemNo }),
+  }, 'operator'))
+  assert.equal(serializedProjection.includes(spoofedSystemNumber), false, '原型、数组及 toJSON 不能重新引入系统号')
+  assert.deepEqual(JSON.parse(serializedProjection), {
+    hookedRecord: { businessNo: 'hyyz009999' },
+    hookedArray: [{ businessNo: 'hyyz009999' }],
+    hookedDate: '2026-01-01T01:02:03.000Z',
+    accessorRecord: { businessNo: 'hyyz009999' },
+    legacyRecord: JSON.parse('{"__proto__":{"businessNo":"hyyz009999"}}'),
+  })
 
   const configRepo = AppDataSource.getRepository(SystemConfig)
   const sequenceRepo = AppDataSource.getRepository(BusinessSequence)
@@ -186,7 +224,7 @@ try {
   const canonicalUpdateSource = sliceMethodSource(
     systemConfigServiceSource,
     '  async updateOrderIdentifierConfigs(',
-    '  /**\n   * 写时失效',
+    '  async getO2oRuleConfigs(',
   )
   assert.match(
     systemConfigServiceSource,
@@ -194,7 +232,7 @@ try {
     '多 namespace canonical 更新必须固定使用 walkin→department、system→preorder→business 锁序',
   )
   assert.match(canonicalUpdateSource, /const lockedActor = await lockActiveSysAccountForBusiness/, 'canonical 更新必须在事务内锁后重验管理员账号')
-  assert.match(canonicalUpdateSource, /lockedActor\.role !== 'admin'[\s\S]*actor\.permissions\.includes\('system_configs:update'\)/, 'canonical 更新必须在锁后重验角色与配置写权限')
+  assert.match(canonicalUpdateSource, /lockedActor\.role !== 'admin'\s*\|\|\s*actor\.role !== 'admin'\s*\|\|\s*!resolveUserPermissions\(lockedActor\)\.includes\('system_configs:update'\)/, 'canonical 更新必须在锁后重验角色与锁定账号的配置写权限')
   const canonicalSequenceLockIndex = canonicalUpdateSource.indexOf('const lockedSequences')
   const canonicalDefaultRepairIndex = canonicalUpdateSource.indexOf('ensureOrderIdentifierDefaultsForUpdate')
   const canonicalConfigLockIndex = canonicalUpdateSource.indexOf('const configQuery')
@@ -261,14 +299,14 @@ try {
   ) as Record<'system' | 'preorder' | 'business', Record<OrderType, { start: number; current: number; width: number }>>
 
   const permissionRecheckInput = toCanonicalInput(await readCanonicalConfigs())
+  // 权限以事务内锁定的账号为准，不能只删旧 actor 快照中的权限来模拟真实撤权。
+  await AppDataSource.getRepository(SysUser).update({ id: actor.userId }, { governancePermissionsJson: '[]' })
   await expectBizError(
-    () => canonicalConfigApi.updateOrderIdentifierConfigs!(permissionRecheckInput, {
-      ...actor,
-      permissions: actor.permissions.filter((permission) => permission !== 'system_configs:update'),
-    }),
+    () => canonicalConfigApi.updateOrderIdentifierConfigs!(permissionRecheckInput, actor),
     403,
     /无权/,
   )
+  await AppDataSource.getRepository(SysUser).update({ id: actor.userId }, { governancePermissionsJson: null })
   await AppDataSource.getRepository(SysUser).update({ id: actor.userId }, { role: 'operator' })
   await expectBizError(
     () => canonicalConfigApi.updateOrderIdentifierConfigs!(permissionRecheckInput, actor),
@@ -812,12 +850,14 @@ try {
   assert.doesNotMatch(purgeAudit.detailJson ?? '', new RegExp(auditPreorder.preorderNo, 'i'))
   assert.doesNotMatch(purgeAudit.detailJson ?? '', new RegExp(auditOutbound.businessNo, 'i'))
 
+  const unicodeDepartmentName = 'Édition A_%!\\'
   const sourcePreorder = await AppDataSource.getRepository(O2oPreorder).save({
     preorderNo: 'PRE-D-880001',
     clientUserId: client.id,
     verifyCode: randomUUID(),
     status: 'verified',
     clientOrderType: 'department',
+    departmentNameSnapshot: unicodeDepartmentName,
   })
   const orderRepo = AppDataSource.getRepository(BizOutboundOrder)
   const parent = await orderRepo.save({
@@ -938,6 +978,20 @@ try {
     sessionToken: 'identifier-review-session',
     authSource: 'bearer' as const,
   }
+  for (const [searchMode, keyword] of [
+    ['exact', unicodeDepartmentName],
+    ['prefix', 'ÉDITION A_%!'],
+    ['contains', 'ÉDITION A_%!\\'],
+  ] as const) {
+    const result = await o2oPreorderService.listMyOrders(clientAuth, { searchMode, keyword })
+    assert.deepEqual(result.list.map(({ id }) => id), [String(sourcePreorder.id)], '原样保留 Unicode 字面量并忽略 ASCII 大小写')
+  }
+  const differentAccentCase = await o2oPreorderService.listMyOrders(clientAuth, {
+    searchMode: 'exact',
+    keyword: unicodeDepartmentName.toLowerCase(),
+  })
+  assert.equal(differentAccentCase.total, 0, 'SQLite 内建 LOWER 不折叠重音字母大小写')
+
   for (const [keyword, expectedType] of [
     [child.businessNo, 'businessNo'],
     [child.systemNo, 'systemNo'],
@@ -971,6 +1025,48 @@ try {
       assert.equal(operatorRows.length, 0, '普通管理账号不得按正式单 systemNo 搜索 O2O 订单')
     }
   }
+
+  for (const businessNo of [parent.businessNo, child.businessNo]) {
+    const keyword = businessNo.slice(2)
+    const contains = await o2oPreorderService.listMyOrders(clientAuth, { keyword, searchMode: 'contains', pageSize: 1 })
+    assert.deepEqual(contains.list.map(({ id }) => id), [String(sourcePreorder.id)], '当前与原始业务号均支持字面包含命中')
+    assert.equal(contains.total, 1, '关联匹配不重复计算来源预订单')
+    assert.equal(contains.list[0]?.matchedIdentifierType, 'businessNo')
+    assert.equal(contains.list[0]?.matchedIdentifierValue, businessNo)
+    const legacy = await o2oPreorderService.listMyOrders(clientAuth, { keyword })
+    assert.equal(legacy.total, 0, '省略模式仍只按关联业务号前缀查询')
+  }
+  const exactPrefix = await o2oPreorderService.listMyOrders(clientAuth, { keyword: parent.businessNo.slice(0, -1), searchMode: 'exact' })
+  assert.equal(exactPrefix.total, 0, '精确匹配拒绝业务号前缀')
+  for (const keyword of [parent.systemNo, child.systemNo]) {
+    const result = await o2oPreorderService.listMyOrders(clientAuth, { keyword, searchMode: 'contains' })
+    assert.equal(result.total, 0, '显式包含搜索不能探测被隐藏的系统单号')
+  }
+
+  const reservedPreorder = await AppDataSource.getRepository(O2oPreorder).save({
+    preorderNo: 'PRE-D-880004',
+    clientUserId: client.id,
+    verifyCode: randomUUID(),
+    status: 'pending',
+    clientOrderType: 'department',
+    reservedBusinessNo: 'hyyzjd880004',
+  })
+  const reserved = await o2oPreorderService.listMyOrders(clientAuth, {
+    keyword: 'yzjd880004 部门',
+    searchMode: 'contains',
+    status: 'pending',
+  })
+  assert.equal(reserved.total, 1, '待核销预留号可以与可见归属一起命中')
+  assert.equal(reserved.list[0]?.id, String(reservedPreorder.id))
+  assert.equal(reserved.list[0]?.matchedIdentifierType, 'businessNo')
+  assert.equal(reserved.list[0]?.matchedIdentifierValue, reservedPreorder.reservedBusinessNo)
+  const verified = await o2oPreorderService.listMyOrders(clientAuth, {
+    keyword: 'hyyzjd880004',
+    searchMode: 'exact',
+    status: 'verified',
+  })
+  assert.equal(verified.total, 0, '搜索不能跨越已选订单状态')
+
   const standaloneManualRows = await o2oPreorderService.listConsoleOrders({
     keyword: standaloneManualOrder.businessNo,
     limit: 20,
@@ -994,14 +1090,14 @@ try {
   assert.equal('customerOrderShowNo' in clientDetail.order, false, '客户端 O2O 详情不得返回关联正式单旧 showNo 别名')
   assert.equal('showNo' in clientDetail.order, false, '客户端 O2O 详情不得返回旧 preorderNo 别名 showNo')
 
-  const orderRouteSource = fs.readFileSync(path.resolve(process.cwd(), 'src/routes/order.routes.ts'), 'utf8')
+  const orderRouteSource = fs.readFileSync(path.join(backendRoot, 'src/routes/order.routes.ts'), 'utf8')
   assert.match(
     orderRouteSource,
     /'\/system-no\/:systemNo',[\s\S]*?requirePermission\('orders:view'\),[\s\S]*?requireRole\('admin'\)/,
     'canonical systemNo 详情路由必须同时要求 orders:view 与 admin',
   )
 
-  const dashboardRouteSource = fs.readFileSync(path.resolve(process.cwd(), 'src/routes/dashboard.routes.ts'), 'utf8')
+  const dashboardRouteSource = fs.readFileSync(path.join(backendRoot, 'src/routes/dashboard.routes.ts'), 'utf8')
   for (const dashboardMethod of [
     'getStats',
     'getAnalytics',
@@ -1017,7 +1113,7 @@ try {
     )
   }
 
-  const o2oRouteSource = fs.readFileSync(path.resolve(process.cwd(), 'src/routes/o2o.routes.ts'), 'utf8')
+  const o2oRouteSource = fs.readFileSync(path.join(backendRoot, 'src/routes/o2o.routes.ts'), 'utf8')
   const verifyRouteStart = o2oRouteSource.indexOf("  '/verify',")
   const verifyRouteEnd = o2oRouteSource.indexOf("  '/inbound',", verifyRouteStart)
   const verifyRouteSource = o2oRouteSource.slice(verifyRouteStart, verifyRouteEnd)
@@ -1034,11 +1130,11 @@ try {
     'legacy /show-no 注释必须明确它是旧 systemNo 别名且已废弃',
   )
 
-  const routeSource = fs.readFileSync(path.resolve(process.cwd(), 'src/routes/system-config.routes.ts'), 'utf8')
+  const routeSource = fs.readFileSync(path.join(backendRoot, 'src/routes/system-config.routes.ts'), 'utf8')
   assert.match(routeSource, /\/order-identifiers/, 'system-config 路由缺少 canonical 三套编号读写契约')
 
   console.log('OK Issue #110 审查修复专项验证通过')
 } finally {
   if (AppDataSource.isInitialized) await AppDataSource.destroy()
-  fs.rmSync(runtimeDir, { recursive: true, force: true })
+  verificationIsolation.cleanup()
 }

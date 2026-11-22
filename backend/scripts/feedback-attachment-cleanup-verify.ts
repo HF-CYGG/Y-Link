@@ -6,57 +6,27 @@
 
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import os from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { createConnection, type ConnectionOptions } from 'mysql2/promise'
+import { mock } from 'node:test'
+import { createConnection } from 'mysql2/promise'
+import { createVerificationIsolation } from './verification-isolation.js'
+import { createOwnedVerificationDatabase, verificationDatabaseName } from './owned-verification-database.js'
+import { readFeedbackMysqlFixture } from './run-feedback-attachment-cleanup-verify.mjs'
 
-const runtimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'y-link-feedback-cleanup-'))
+const isolation = createVerificationIsolation('feedback-attachment-cleanup-verify')
+const runtimeRoot = isolation.rootDir
 const sqlitePath = path.join(runtimeRoot, 'feedback-cleanup.sqlite')
 const verifyDatabaseType = process.env.FEEDBACK_ATTACHMENT_VERIFY_DB?.trim().toLowerCase() === 'mysql'
   ? 'mysql'
   : 'sqlite'
-const mysqlTempDatabaseName = `y_link_feedback_verify_${process.pid}_${Date.now().toString(36)}`
+const mysqlVerifyConfig = verifyDatabaseType === 'mysql' ? readFeedbackMysqlFixture() : null
+let ownedMysql: Awaited<ReturnType<typeof createOwnedVerificationDatabase>> | undefined
 
-function readRequiredMysqlEnv(name: string): string {
-  const value = process.env[name]?.trim()
-  if (!value) throw new Error(`MySQL 专项验收缺少 ${name}，拒绝回退到业务 DB_* 配置`)
-  return value
-}
-
-function readMysqlVerifyConfig(): ConnectionOptions {
-  const portText = readRequiredMysqlEnv('FEEDBACK_ATTACHMENT_VERIFY_MYSQL_PORT')
-  const port = Number.parseInt(portText, 10)
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error('FEEDBACK_ATTACHMENT_VERIFY_MYSQL_PORT 必须是 1 到 65535 的整数')
-  }
-  return {
-    host: readRequiredMysqlEnv('FEEDBACK_ATTACHMENT_VERIFY_MYSQL_HOST'),
-    port,
-    user: readRequiredMysqlEnv('FEEDBACK_ATTACHMENT_VERIFY_MYSQL_USER'),
-    password: process.env.FEEDBACK_ATTACHMENT_VERIFY_MYSQL_PASSWORD ?? '',
-  }
-}
-
-const mysqlVerifyConfig = verifyDatabaseType === 'mysql' ? readMysqlVerifyConfig() : null
-
-process.chdir(runtimeRoot)
-process.env.APP_PROFILE = `feedback-attachment-cleanup-${Date.now()}`
 process.env.DB_SYNC = verifyDatabaseType === 'mysql' ? 'true' : 'false'
 process.env.YLINK_FEEDBACK_MAX_PENDING_ATTACHMENTS = '1'
-if (verifyDatabaseType === 'mysql' && mysqlVerifyConfig) {
-  process.env.DB_TYPE = 'mysql'
-  process.env.DB_HOST = String(mysqlVerifyConfig.host)
-  process.env.DB_PORT = String(mysqlVerifyConfig.port)
-  process.env.DB_USER = String(mysqlVerifyConfig.user)
-  process.env.DB_PASSWORD = String(mysqlVerifyConfig.password ?? '')
-  process.env.DB_NAME = mysqlTempDatabaseName
-  process.env.DB_AUTO_MIGRATE = 'true'
-} else {
-  process.env.DB_TYPE = 'sqlite'
-  process.env.SQLITE_DB_PATH = sqlitePath
-}
-
+process.env.YLINK_FEEDBACK_CLEANUP_BATCH_SIZE = '500'
+process.env.YLINK_FEEDBACK_ORPHAN_GRACE_MS = '86400000'
 const oldDate = new Date(Date.now() - 25 * 60 * 60 * 1000)
 
 function writeOldFeedbackFile(storageName: string): string {
@@ -85,9 +55,17 @@ async function runSuite() {
   const { clientFeedbackService } = await import('../src/services/client-feedback.service.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
 
+  await isolation.assertTarget(AppDataSource)
   prepareDatabaseRuntime()
+  // 在真实连接再次证明服务器与库身份后，才由下方显式初始化写入结构。
+  if (ownedMysql) AppDataSource.setOptions({ synchronize: false })
   await AppDataSource.initialize()
   try {
+    if (ownedMysql) {
+      const [target] = await AppDataSource.query('SELECT @@server_uuid AS serverId, DATABASE() AS databaseName')
+      assert.equal(target?.serverId, ownedMysql.serverId)
+      assert.equal(target?.databaseName, ownedMysql.database)
+    }
     await initializeDatabaseSchemaIfNeeded(AppDataSource)
     await systemConfigService.ensureDefaultConfigs()
 
@@ -118,10 +96,23 @@ async function runSuite() {
       authSource: 'bearer' as const,
     }
 
-    if (mysqlVerifyConfig) {
-      const mysqlConnectionOptions = { ...mysqlVerifyConfig, database: mysqlTempDatabaseName }
+    if (mysqlVerifyConfig && ownedMysql) {
+      const ownedTarget = ownedMysql
+      const openFixtureConnection = async () => {
+        const connection = await createConnection({ ...readFeedbackMysqlFixture(), database: ownedTarget.database })
+        try {
+          const [rows] = await connection.query('SELECT @@server_uuid AS serverId, DATABASE() AS databaseName')
+          const [target] = rows as Array<{ serverId: string; databaseName: string }>
+          assert.equal(target?.serverId, ownedTarget.serverId)
+          assert.equal(target?.databaseName, ownedTarget.database)
+          return connection
+        } catch (error) {
+          await connection.end()
+          throw error
+        }
+      }
 
-      const namedLockConnection = await createConnection(mysqlConnectionOptions)
+      const namedLockConnection = await openFixtureConnection()
       const namedLockFile = `${randomUUID()}.png`
       writeOldFeedbackFile(namedLockFile)
       try {
@@ -150,7 +141,7 @@ async function runSuite() {
       await AppDataSource.getRepository(ClientFeedbackAttachment).clear()
       fs.rmSync(path.join(runtimeRoot, 'uploads', 'client-feedback', namedLockFile), { force: true })
 
-      const ownerLockConnection = await createConnection(mysqlConnectionOptions)
+      const ownerLockConnection = await openFixtureConnection()
       const ownerLockFile = `${randomUUID()}.png`
       writeOldFeedbackFile(ownerLockFile)
       try {
@@ -205,6 +196,33 @@ async function runSuite() {
 
     const orphanStorageName = `${randomUUID()}.png`
     const orphanPath = writeOldFeedbackFile(orphanStorageName)
+    const uncertainStorageName = `${randomUUID()}.png`
+    const uncertainPath = writeOldFeedbackFile(uncertainStorageName)
+    await AppDataSource.getRepository(ClientFeedbackMessage).insert({
+      conversationId: historicalConversation.conversation.id,
+      senderType: 'client',
+      content: '旧附件快照格式不完整',
+      attachmentJson: `[{"url":"/uploads/client-feedback/${uncertainStorageName}"`,
+    })
+    const uploadTemp = path.join(runtimeRoot, 'uploads', '.tmp')
+    fs.mkdirSync(uploadTemp, { recursive: true })
+    const createTempFile = (name: string, aged: boolean) => {
+      const file = path.join(uploadTemp, name)
+      fs.writeFileSync(file, '隔离验收文件')
+      if (aged) fs.utimesSync(file, oldDate, oldDate)
+      return file
+    }
+    const agedFeedbackTemp = createTempFile(`client-feedback-${randomUUID()}.png`, true)
+    const agedProductTemp = createTempFile(`products-${randomUUID()}.jpg`, true)
+    const freshTemp = createTempFile(`client-feedback-${randomUUID()}.png`, false)
+    const unrecognizedTemp = createTempFile('历史临时文件.png', true)
+    const tempDirectory = path.join(uploadTemp, `products-${randomUUID()}.png`)
+    fs.mkdirSync(tempDirectory)
+    fs.utimesSync(tempDirectory, oldDate, oldDate)
+    const blockedOrphanName = '00000000-0001-4000-8000-000000000001.png'
+    const blockedOrphan = writeOldFeedbackFile(blockedOrphanName)
+    const blockedTempName = 'products-00000000-0001-4000-8000-000000000001.png'
+    const blockedTemp = createTempFile(blockedTempName, true)
     const unsafePath = writeOldFeedbackFile('legacy-uncertain-name.png')
     const unsafeAttachment = await AppDataSource.getRepository(ClientFeedbackAttachment).save({
       ownerClientUserId: user.id,
@@ -260,11 +278,19 @@ async function runSuite() {
       ]) },
     )
 
-    const cleanupResult = await clientFeedbackService.runAttachmentCleanupOnce()
+    const unlink = fs.promises.unlink
+    const blockedFiles = new Map([[blockedOrphan, 'EACCES'], [blockedTemp, 'EBUSY']])
+    const blockedUnlink = mock.method(fs.promises, 'unlink', async (...args: Parameters<typeof unlink>) => {
+      const faultCode = blockedFiles.get(String(args[0]))
+      if (faultCode) throw Object.assign(new Error('底层文件异常明细应保持脱敏'), { code: faultCode })
+      return unlink(...args)
+    })
+    const cleanupResult = await clientFeedbackService.runAttachmentCleanupOnce().finally(() => blockedUnlink.mock.restore())
     assert.equal(fs.existsSync(orphanPath), false, '超过 24 小时且无双重引用的 UUID 孤儿应回收')
     assert.equal(fs.existsSync(expiredPath), false, '过期且未绑定的草稿文件应在数据库提交后回收')
     assert.equal(fs.existsSync(referencedExpiredPath), true, '消息仍引用的过期草稿属于关系异常，必须保留')
     assert.equal(fs.existsSync(historicalPath), true, '历史消息 JSON 仍引用的文件必须保留')
+    assert.equal(fs.existsSync(uncertainPath), true, '格式不明的历史快照保留可识别的附件引用')
     assert.equal(fs.existsSync(unsafePath), true, '非 UUID 文件名属于不确定历史文件，禁止删除')
     assert.ok(
       await AppDataSource.getRepository(ClientFeedbackAttachment).findOne({ where: { id: unsafeAttachment.id } }),
@@ -273,6 +299,14 @@ async function runSuite() {
     assert.ok(cleanupResult.anomalies.some((item) => item.storageName === historicalStorageName))
     assert.ok(cleanupResult.anomalies.some((item) => item.storageName === referencedExpiredStorageName))
     assert.ok(cleanupResult.anomalies.some((item) => item.storageName === 'legacy-uncertain-name.png'))
+    assert.ok(cleanupResult.anomalies.some((item) => item.storageName === uncertainStorageName))
+    assert.equal(cleanupResult.removedTempFiles, 2)
+    for (const file of [agedFeedbackTemp, agedProductTemp]) assert.equal(fs.existsSync(file), false)
+    for (const file of [freshTemp, unrecognizedTemp, tempDirectory]) assert.equal(fs.existsSync(file), true)
+    for (const file of [blockedOrphan, blockedTemp]) assert.equal(fs.existsSync(file), true)
+    for (const storageName of [blockedOrphanName, blockedTempName]) {
+      assert.match(cleanupResult.anomalies.find((item) => item.storageName === storageName)?.reason ?? '', /保留待下次核查/)
+    }
 
     const raceStorageName = `${randomUUID()}.png`
     const racePath = writeOldFeedbackFile(raceStorageName)
@@ -295,14 +329,75 @@ async function runSuite() {
       clientFeedbackService.runAttachmentCleanupOnce(),
     ])
     const raceRow = await AppDataSource.getRepository(ClientFeedbackAttachment).findOne({ where: { id: raceAttachment.id } })
-    const createSucceeded = raceResults[0]?.status === 'fulfilled'
-    if (createSucceeded) {
-      assert.ok(raceRow?.messageId && raceRow.conversationId, '绑定成功时附件关系必须完整')
-      assert.equal(fs.existsSync(racePath), true, '绑定成功时清理不得删除附件文件')
-    } else {
-      assert.equal(raceRow, null, '清理先完成时过期草稿记录必须已删除')
-      assert.equal(fs.existsSync(racePath), false, '清理先完成时过期草稿文件必须已删除')
+    assert.equal(raceResults[0]?.status, 'rejected', '过期草稿不能绑定')
+    assert.equal(raceResults[1]?.status, 'fulfilled')
+    assert.equal(raceRow, null, '过期草稿记录必须已删除')
+    assert.equal(fs.existsSync(racePath), false, '过期草稿文件必须已删除')
+    for (const file of [blockedOrphan, blockedTemp]) assert.equal(fs.existsSync(file), false, '占用恢复后下一轮可回收')
+
+    const newBindingName = `${randomUUID()}.png`
+    const newBindingPath = writeOldFeedbackFile(newBindingName)
+    const lstat = fs.promises.lstat
+    let boundId: string | undefined
+    const registerDuringScan = mock.method(fs.promises, 'lstat', async (filename: string) => {
+      const info = await lstat(filename)
+      // 初筛已经看到该文件无登记。此处用真实业务入口完成注册、绑定，再让清理回到其候选。
+      if (filename === newBindingPath && !boundId) {
+        const newAttachment = await clientFeedbackService.createClientAttachment({
+          storageName: newBindingName, originalName: '绑定与复查并发.png', mimeType: 'image/png', sizeBytes: 100,
+        }, clientAuth)
+        boundId = newAttachment.id
+        await clientFeedbackService.appendClientMessage(historicalConversation.conversation.id, {
+          content: '消息已绑定有效附件', attachmentIds: [boundId],
+        }, clientAuth)
+      }
+      return info
+    })
+    await clientFeedbackService.runAttachmentCleanupOnce().finally(() => registerDuringScan.mock.restore())
+    assert.ok(boundId, '必须经过无登记候选的实时注册屏障')
+    const boundRow = await AppDataSource.getRepository(ClientFeedbackAttachment).findOneByOrFail({ id: boundId })
+    assert.ok(boundRow.messageId && boundRow.conversationId, '登记和绑定已真实提交')
+    assert.equal(fs.existsSync(newBindingPath), true, '回收前二次检查必须保留新登记并绑定的文件')
+
+    const attachmentRepo = AppDataSource.getRepository(ClientFeedbackAttachment)
+    const messageRepo = AppDataSource.getRepository(ClientFeedbackMessage)
+    for (let group = 0; group < 101; group += 1) {
+      const message = await messageRepo.save({
+        conversationId: historicalConversation.conversation.id,
+        senderType: 'client', content: '正常历史附件', attachmentJson: '[]',
+      })
+      const rows = await attachmentRepo.save(Array.from({ length: 5 }, (_, index) => {
+        const suffix = (group * 5 + index + 1).toString(16).padStart(12, '0')
+        const storageName = `00000000-0000-4000-8000-${suffix}.png`
+        writeOldFeedbackFile(storageName)
+        return {
+          storageName, ownerClientUserId: user.id, originalName: '正常附件.png',
+          conversationId: String(historicalConversation.conversation.id), messageId: String(message.id), expiresAt: null,
+        }
+      }))
+      await messageRepo.update({ id: message.id }, {
+        attachmentJson: JSON.stringify(rows.map(({ id, originalName: name }) => ({ name, url: `/api/client-feedback/attachments/${id}` }))),
+      })
     }
+
+    for (let group = 0; group < 5; group += 1) {
+      await attachmentRepo.insert(Array.from({ length: 100 }, (_, index) => ({
+        storageName: `历史非标准文件名-${group * 100 + index}.png`,
+        ownerClientUserId: user.id, originalName: '等待人工核查', expiresAt: oldDate,
+      })))
+    }
+    const lateDraftName = `${randomUUID()}.png`
+    const lateDraftPath = writeOldFeedbackFile(lateDraftName)
+    const lateDraft = await attachmentRepo.save({
+      storageName: lateDraftName, ownerClientUserId: user.id, originalName: '后续有效过期草稿.png', expiresAt: oldDate,
+    })
+    const lateOrphanPath = writeOldFeedbackFile('ffffffff-ffff-4fff-bfff-ffffffffffff.png')
+    await clientFeedbackService.runAttachmentCleanupOnce()
+    assert.equal(fs.existsSync(lateOrphanPath), false, '超过 500 个合法绑定文件不能挡住后续孤儿')
+    await clientFeedbackService.runAttachmentCleanupOnce()
+    assert.equal(await attachmentRepo.existsBy({ id: lateDraft.id }), false, '草稿批次推进经过异常留存行后必须回收到后续草稿')
+    assert.equal(fs.existsSync(lateDraftPath), false)
+    assert.equal(await attachmentRepo.existsBy({ storageName: '历史非标准文件名-0.png' }), true)
 
     const freezeControl = databaseOperationGate.freeze()
     try {
@@ -320,35 +415,29 @@ async function runSuite() {
   } finally {
     await clientFeedbackService.stopAttachmentCleanupWorker()
     if (AppDataSource.isInitialized) await AppDataSource.destroy()
-    process.chdir(path.dirname(runtimeRoot))
-    fs.rmSync(runtimeRoot, { recursive: true, force: true })
+    isolation.cleanup()
   }
 }
 
-async function recreateMysqlVerifyDatabase() {
-  if (!mysqlVerifyConfig) return
-  const connection = await createConnection(mysqlVerifyConfig)
-  try {
-    await connection.query(`DROP DATABASE IF EXISTS \`${mysqlTempDatabaseName}\``)
-    await connection.query(`CREATE DATABASE \`${mysqlTempDatabaseName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`)
-  } finally {
-    await connection.end()
-  }
-}
-
-async function dropMysqlVerifyDatabase() {
-  if (!mysqlVerifyConfig) return
-  const connection = await createConnection(mysqlVerifyConfig)
-  try {
-    await connection.query(`DROP DATABASE IF EXISTS \`${mysqlTempDatabaseName}\``)
-  } finally {
-    await connection.end()
-  }
-}
-
-if (verifyDatabaseType === 'mysql') await recreateMysqlVerifyDatabase()
 try {
+  if (mysqlVerifyConfig) {
+    ownedMysql = await createOwnedVerificationDatabase(mysqlVerifyConfig, verificationDatabaseName('feedback_cleanup'), async (captured) => {
+      const current = readFeedbackMysqlFixture()
+      if (current.port !== captured.port || current.password !== captured.password) {
+        throw new Error('反馈 MySQL Compose 所有权上下文已变化，未连接数据库')
+      }
+      return createConnection({ ...captured, connectTimeout: 3_000, multipleStatements: false })
+    })
+    await ownedMysql.assertEmpty()
+    isolation.seal({ type: 'mysql', ...mysqlVerifyConfig, database: ownedMysql.database })
+  } else {
+    isolation.seal({ type: 'sqlite', database: sqlitePath })
+  }
   await runSuite()
 } finally {
-  if (verifyDatabaseType === 'mysql') await dropMysqlVerifyDatabase()
+  try {
+    await ownedMysql?.cleanup()
+  } finally {
+    isolation.cleanup()
+  }
 }

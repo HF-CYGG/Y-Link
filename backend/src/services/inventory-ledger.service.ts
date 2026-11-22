@@ -80,16 +80,15 @@ export const skuContributesToProductAggregate = (sku: Pick<BaseProductSku, 'isAc
 const availableOf = (entity: { currentStock: number; preOrderedStock: number }) =>
   Number(entity.currentStock) - Number(entity.preOrderedStock)
 
-export async function applyInventoryDeltas(
-  manager: EntityManager,
-  input: ApplyInventoryDeltasInput,
-): Promise<InventoryLedgerLineView[]> {
-  const changed = input.deltas
+/**
+ * 只根据调用方已锁定的实体规划净变化并校验库存，不改实体、不查询或写入数据库。
+ * 业务可在编号/单据写入前调用；记账入口仍重新调用，不能跨事务缓存此计划。
+ */
+export function planInventoryDeltas(deltas: readonly InventoryStockDelta[]) {
+  const changed = deltas
     .filter((delta) => delta.stockDelta !== 0)
     .sort((left, right) => normalizeId(left.product.id).localeCompare(normalizeId(right.product.id))
       || normalizeId(left.sku.id).localeCompare(normalizeId(right.sku.id)))
-  if (changed.length === 0) return []
-
   const skuNetMap = new Map<string, { sku: BaseProductSku; qty: number }>()
   const productNetMap = new Map<string, { product: BaseProduct; qty: number }>()
   for (const delta of changed) {
@@ -123,6 +122,16 @@ export async function applyInventoryDeltas(
       throw new BizError(`商品 ${product.productName} 库存超过系统可处理上限`, 409)
     }
   }
+
+  return { changed, skuNetMap, productNetMap }
+}
+
+export async function applyInventoryDeltas(
+  manager: EntityManager,
+  input: ApplyInventoryDeltasInput,
+): Promise<InventoryLedgerLineView[]> {
+  const { changed, skuNetMap, productNetMap } = planInventoryDeltas(input.deltas)
+  if (changed.length === 0) return []
 
   const inventoryLogRepo = manager.getRepository(InventoryLog)
   const logs: InventoryLog[] = []

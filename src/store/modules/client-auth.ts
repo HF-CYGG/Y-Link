@@ -11,8 +11,9 @@
  */
 
 import { computed, ref, watch } from 'vue'
+import { redactClientPreorderSubmitLocks } from '@/utils/client-preorder-submit-guard'
 import { setKingdeeIdentity } from '@/utils/kingdee-freshness'
-import { defineStore } from 'pinia'
+import { defineStore, getActivePinia } from 'pinia'
 import {
   type ClientAccountType,
   type ClientAuthSuccessResult,
@@ -36,10 +37,8 @@ import {
   type ClientAuthUserSnapshot,
 } from '@/utils/client-auth-storage'
 import { normalizeRequestError } from '@/utils/error'
+import { clearClientSessionData } from '@/utils/client-session-cleanup'
 import pinia from '@/store/pinia'
-import { useClientCartStore } from './client-cart'
-import { useClientCatalogStore } from './client-catalog'
-import { useClientOrderStore } from './client-order'
 
 /**
  * 客户端鉴权 Store：
@@ -47,11 +46,14 @@ import { useClientOrderStore } from './client-order'
  * - 负责客户端用户的登录、注册、找回密码与会话恢复。
  */
 export const useClientAuthStore = defineStore('client-auth', () => {
+  const sessionPinia = getActivePinia() ?? pinia
   const currentUser = ref<ClientSafeProfile | null>(null)
   watch(() => currentUser.value?.id ?? null, (id) => setKingdeeIdentity('client', id === null ? null : String(id)), { immediate: true, flush: 'sync' })
   const expiresAt = ref<string | null>(null)
   const initialized = ref(false)
   const initializing = ref(false)
+  // 会话重建即推进代次，同账号 A → B → A 也不能接收旧会话的异步结果。
+  const sessionGeneration = ref(0)
   let initializePromise: Promise<boolean> | null = null
 
   /**
@@ -59,13 +61,14 @@ export const useClientAuthStore = defineStore('client-auth', () => {
    * - 账号切换时必须先清，避免旧账号的购物车/订单数据残留到新账号；
    * - 登出场景也复用该链路，保持状态收口一致。
    */
-  const clearClientScopedStores = () => {
-    const clientCartStore = useClientCartStore(pinia)
-    const clientCatalogStore = useClientCatalogStore(pinia)
-    const clientOrderStore = useClientOrderStore(pinia)
-    clientCartStore.clearAll()
-    clientCatalogStore.clearAll()
-    clientOrderStore.clearAll()
+  const resolvePreviousUserId = () => {
+    if (currentUser.value) return currentUser.value.id
+    try { return readPersistedClientAuthState().user?.id } catch { return undefined }
+  }
+
+  const clearClientScopedStores = (previousUserId: unknown) => {
+    clearClientSessionData(sessionPinia, previousUserId)
+    redactClientPreorderSubmitLocks()
   }
 
   /**
@@ -84,6 +87,14 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     status: user.status,
   })
 
+  const persistSessionSnapshot = (user: ClientSafeProfile, expiry: string | null) => {
+    try {
+      persistClientAuthState({ user: toUserSnapshot(user), expiresAt: expiry })
+    } catch {
+      // Cookie 会话仍然有效，浏览器禁用存储时保留当前的内存会话。
+    }
+  }
+
   /**
    * 是否已登录：
    * - 客户端已改为 Cookie 会话，前端不再持有 token；
@@ -99,16 +110,16 @@ export const useClientAuthStore = defineStore('client-auth', () => {
    * - 保证刷新页面后仍能恢复客户端登录态。
    */
   const applyAuthResult = (result: ClientAuthSuccessResult) => {
-    const previousClientUserId = currentUser.value?.id ?? null
+    sessionGeneration.value += 1
+    initializing.value = false
+    initializePromise = null
+    const previousClientUserId = resolvePreviousUserId()
     if (previousClientUserId && previousClientUserId !== result.user.id) {
-      clearClientScopedStores()
+      clearClientScopedStores(previousClientUserId)
     }
     currentUser.value = result.user
     expiresAt.value = result.expiresAt
-    persistClientAuthState({
-      user: toUserSnapshot(result.user),
-      expiresAt: result.expiresAt,
-    })
+    persistSessionSnapshot(result.user, result.expiresAt)
   }
 
   const normalizePersistedUser = (user: ClientAuthUserSnapshot | null): ClientSafeProfile | null => {
@@ -138,12 +149,13 @@ export const useClientAuthStore = defineStore('client-auth', () => {
   }
 
   const clearAuthState = () => {
-    clearClientScopedStores()
+    sessionGeneration.value += 1
+    clearClientScopedStores(resolvePreviousUserId())
     currentUser.value = null
     expiresAt.value = null
     initializing.value = false
     initializePromise = null
-    clearPersistedClientAuthState()
+    try { clearPersistedClientAuthState() } catch { /* 存储被禁用时仍已清理当前会话的内存。 */ }
   }
 
   /**
@@ -161,6 +173,7 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     }
 
     const persisted = readPersistedClientAuthState()
+    const generation = ++sessionGeneration.value
     currentUser.value = normalizePersistedUser(persisted.user)
     expiresAt.value = persisted.expiresAt
 
@@ -170,28 +183,37 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     }
 
     initializing.value = true
-    initializePromise = (async () => {
+    const request: Promise<boolean> = Promise.resolve().then(async () => {
       try {
+        if (sessionGeneration.value !== generation) return isAuthenticated.value
         const profile = await getClientMe()
+        // 登录或登出可能在请求途中完成，旧会话恢复结果不能覆盖当前账号。
+        if (sessionGeneration.value !== generation) return isAuthenticated.value
+        const previousClientUserId = currentUser.value?.id
+        if (previousClientUserId && previousClientUserId !== profile.id) {
+          sessionGeneration.value += 1
+          clearClientScopedStores(previousClientUserId)
+        }
         currentUser.value = profile
-        persistClientAuthState({
-          user: toUserSnapshot(profile),
-          expiresAt: persisted.expiresAt,
-        })
+        persistSessionSnapshot(profile, persisted.expiresAt)
         initialized.value = true
         return true
       } catch (error) {
+        if (sessionGeneration.value !== generation) return isAuthenticated.value
         normalizeRequestError(error, '客户端登录态恢复失败')
         clearAuthState()
         initialized.value = true
         return false
       } finally {
-        initializing.value = false
-        initializePromise = null
+        if (initializePromise === request) {
+          initializing.value = false
+          initializePromise = null
+        }
       }
-    })()
+    })
 
-    return initializePromise
+    initializePromise = request
+    return request
   }
 
   const register = async (payload: {
@@ -287,8 +309,15 @@ export const useClientAuthStore = defineStore('client-auth', () => {
    * 确认当前已保存的联系方式：
    * - 认证不改变身份资料，不会撤销会话，成功后直接刷新本地资料快照中的认证时间。
    */
-  const confirmSavedContact = async (payload: { channel: 'mobile' | 'email'; code: string }) => {
+  const confirmSavedContact = async (
+    payload: { channel: 'mobile' | 'email'; code: string },
+    context?: { isCurrent: () => boolean },
+  ) => {
+    const generation = sessionGeneration.value
+    const userId = currentUser.value?.id
     const profile = await confirmClientSavedContactVerification(payload)
+    if (!userId || generation !== sessionGeneration.value || userId !== currentUser.value?.id
+      || profile.id !== userId || (context && !context.isCurrent())) return null
     currentUser.value = profile
     persistClientAuthState({
       user: toUserSnapshot(profile),
@@ -302,6 +331,7 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     expiresAt,
     initialized,
     initializing,
+    sessionGeneration,
     isAuthenticated,
     initializeAuth,
     register,

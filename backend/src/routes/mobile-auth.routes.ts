@@ -8,6 +8,15 @@
 import { Router } from 'express'
 import type { NextFunction, Request, Response } from 'express'
 import { z } from 'zod'
+import {
+  AUTH_ACCOUNT_INPUT_MAX_LENGTH,
+  CAPTCHA_CODE_INPUT_MAX_LENGTH,
+  CAPTCHA_ID_INPUT_MAX_LENGTH,
+  RESET_TOKEN_INPUT_MAX_LENGTH,
+  existingPasswordInput,
+  optionalCaptchaCodeInput,
+  optionalCaptchaIdInput,
+} from '../constants/auth-input-limits.js'
 import { readRequiredMobileBearer, requireMobileAuth } from '../middleware/mobile-auth.middleware.js'
 import { authSecurityService } from '../services/auth-security.service.js'
 import { clientAuthService } from '../services/client-auth.service.js'
@@ -20,13 +29,15 @@ import { normalizeClientVerificationTarget } from '../utils/client-auth-account.
 import { BizError } from '../utils/errors.js'
 import {
   CLIENT_PASSWORD_POLICY_MIN_LENGTH,
+  PASSWORD_POLICY_MAX_LENGTH,
   getClientPasswordPolicyMessage,
   isClientPasswordPolicySatisfied,
 } from '../utils/password.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 
-const passwordSchema = (label = '密码') => z.string()
+const passwordSchema = (label = '密码') => z.string().trim()
   .min(CLIENT_PASSWORD_POLICY_MIN_LENGTH, getClientPasswordPolicyMessage(label))
+  .max(PASSWORD_POLICY_MAX_LENGTH, `${label}长度不能超过 ${PASSWORD_POLICY_MAX_LENGTH} 位`)
   .refine(isClientPasswordPolicySatisfied, getClientPasswordPolicyMessage(label))
 
 const deviceSchema = z.object({
@@ -39,24 +50,24 @@ const deviceSchema = z.object({
 const refreshDeviceSchema = deviceSchema.pick({ deviceId: true, appVersion: true })
 
 const loginSchema = z.object({
-  account: z.string().trim().min(1).max(128),
-  password: z.string().min(1),
-  captchaId: z.string().trim().min(1).optional(),
-  captchaCode: z.string().trim().min(1).optional(),
+  account: z.string().trim().min(1).max(AUTH_ACCOUNT_INPUT_MAX_LENGTH),
+  password: existingPasswordInput(),
+  captchaId: optionalCaptchaIdInput(),
+  captchaCode: optionalCaptchaCodeInput(),
   device: deviceSchema,
 })
 
 const registerSchema = z.object({
   username: z.string().trim().max(128).optional(),
-  account: z.string().trim().max(128).optional(),
+  account: z.string().trim().max(AUTH_ACCOUNT_INPUT_MAX_LENGTH).optional(),
   accountType: z.literal('personal'),
   staffNo: z.string().trim().max(64).optional(),
   inviteCode: z.string().trim().min(1).max(32).optional(),
   departmentName: z.string().trim().max(128).optional(),
   password: passwordSchema(),
   verificationCode: z.string().trim().min(4).max(8).optional(),
-  captchaId: z.string().trim().min(1).optional(),
-  captchaCode: z.string().trim().min(1).optional(),
+  captchaId: optionalCaptchaIdInput(),
+  captchaCode: optionalCaptchaCodeInput(),
   device: deviceSchema,
 })
 
@@ -67,27 +78,27 @@ const refreshSchema = z.object({
 
 const verificationCodeSchema = z.object({
   channel: z.enum(['mobile', 'email']),
-  target: z.string().trim().min(1).max(128),
+  target: z.string().trim().min(1).max(AUTH_ACCOUNT_INPUT_MAX_LENGTH),
   scene: z.enum(['register', 'forgot_password']),
-  captchaId: z.string().trim().min(1),
-  captchaCode: z.string().trim().min(1),
+  captchaId: z.string().trim().min(1).max(CAPTCHA_ID_INPUT_MAX_LENGTH, '图形验证码已失效，请刷新后重试'),
+  captchaCode: z.string().trim().min(1).max(CAPTCHA_CODE_INPUT_MAX_LENGTH, '图形验证码格式不正确'),
 })
 
 const forgotVerifySchema = z.object({
-  account: z.string().trim().min(1),
+  account: z.string().trim().min(1).max(AUTH_ACCOUNT_INPUT_MAX_LENGTH),
   verificationCode: z.string().trim().min(4).max(8).optional(),
-  captchaId: z.string().trim().min(1).optional(),
-  captchaCode: z.string().trim().min(1).optional(),
+  captchaId: optionalCaptchaIdInput(),
+  captchaCode: optionalCaptchaCodeInput(),
 })
 
 const resetSchema = z.object({
-  account: z.string().trim().min(1),
-  resetToken: z.string().trim().min(1),
+  account: z.string().trim().min(1).max(AUTH_ACCOUNT_INPUT_MAX_LENGTH),
+  resetToken: z.string().trim().min(1).max(RESET_TOKEN_INPUT_MAX_LENGTH),
   newPassword: passwordSchema('新密码'),
 })
 
 const changePasswordSchema = z.object({
-  currentPassword: z.string().min(1),
+  currentPassword: existingPasswordInput('当前密码'),
   newPassword: passwordSchema('新密码'),
   device: deviceSchema,
 })
@@ -96,7 +107,7 @@ const profileSchema = z.object({
   username: z.string().trim().min(1).max(128),
   mobile: z.string().trim().max(20).optional(),
   email: z.string().trim().max(128).optional(),
-  currentPassword: z.string().min(1),
+  currentPassword: existingPasswordInput('当前密码'),
   mobileVerificationCode: z.string().trim().min(4).max(8).optional(),
   emailVerificationCode: z.string().trim().min(4).max(8).optional(),
 })

@@ -18,6 +18,7 @@ import { extractErrorMessage, normalizeRequestError } from '@/utils/error'
 import { getRestockSkus, isValidRestockQuantity, RESTOCK_MAX_QUANTITY, toRestockIso } from '@/utils/restock'
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
+const props = withDefaults(defineProps<{ active?: boolean }>(), { active: true })
 const route = useRoute()
 const router = useRouter()
 const auth = useClientAuthStore(pinia)
@@ -37,7 +38,7 @@ const product = computed(() => products.value.find((item) => item.id === form.pr
 const skus = computed(() => getRestockSkus(product.value))
 const selectedSku = computed(() => skus.value.find((item) => item.id === form.skuId))
 const locked = computed(() => creating.value || checking.value || Boolean(pendingSubmission.value))
-watch(locked, (value) => emit('busy', value), { immediate: true })
+watch([locked, () => props.active], ([value, active]) => emit('busy', active && value), { immediate: true })
 const queryText = (value: unknown) => typeof value === 'string' ? value : ''
 const updateClock = (value: string) => {
   const time = Date.parse(value)
@@ -60,7 +61,7 @@ const checkExisting = async () => {
       if (auth.currentUser?.id !== userId || form.skuId !== skuId) return
       updateClock(result.serverNow)
       existingConversationId.value = result.restock?.conversationId ?? ''
-      if (existingConversationId.value) {
+      if (existingConversationId.value && props.active) {
         showAppSuccess('已有进行中的补货申请，进入原会话继续跟进')
         await router.replace(`/client/feedback/${existingConversationId.value}`)
       }
@@ -154,6 +155,7 @@ const submit = async () => {
 }
 
 onBeforeRouteLeave(() => {
+  if (!props.active) return
   if (pendingSubmission.value || creating.value) { showAppWarning('请先重试确认这次补货申请的结果，再离开页面'); return false }
 })
 onBeforeUnmount(() => { activeRequest.cancel(); catalogRequest.cancel() })

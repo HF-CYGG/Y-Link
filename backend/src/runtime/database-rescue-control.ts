@@ -11,6 +11,7 @@ import { inspectDatabaseRuntimeOverride, writeDatabaseRuntimeOverride } from '..
 import { appendControlAudit, inspectControlFile, removeControlFile, writeControlFile } from './durable-control-file.js'
 import { inspectSqliteForRescue, type SqliteRescueDigest } from './sqlite-rescue-inspection.js'
 import { validateCutoverControl, validateMigrationLock, validateMaintenanceControl } from './database-control-validation.js'
+import { CONTINUOUS_MIGRATION_PROTOCOL, isManagedMigration, isControlledManualMigration, isMigrationRecoveryWindowClosed } from './database-migration-protocol.js'
 
 const taskIdSchema = z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/)
 const iso = z.string().datetime()
@@ -22,6 +23,7 @@ const bindingSchema = z.object({
   credentialFormat: z.literal('separate-v1').optional(),
   credentialHash: hashSchema.optional(), expiresAt: iso.optional(), issuedAt: iso.optional(),
   snapshot: z.object({ filePath: z.string(), fileSha256: hashSchema, digest: digestSchema }).optional(),
+  manualFailureCleanup: z.object({ sourceDigest: digestSchema, previousOverrideHash: hashSchema }).optional(),
   nonce: z.object({ hash: hashSchema, expiresAt: iso }).optional(),
 })
 const credentialSchema = z.object({ version: z.literal(1), taskId: taskIdSchema, credentialHash: hashSchema, issuedAt: iso, expiresAt: iso })
@@ -33,7 +35,7 @@ const intentSchema = z.object({
 })
 type Binding = z.infer<typeof bindingSchema>
 export type DatabaseRecoveryIntent = z.infer<typeof intentSchema>
-type Task = Record<string, unknown> & { id: string; status: string; source: { sqlitePath: string }; mode: 'automatic' }
+type Task = Record<string, unknown> & { id: string; status: string; source: { sqlitePath: string }; mode: 'automatic' | 'manual' }
 const rescueDir = path.join(appDataPaths.runtimeDir, 'database-rescue')
 export const recoveryIntentPath = path.join(appDataPaths.runtimeDir, 'database-recovery-intent.json')
 const auditPath = path.join(rescueDir, 'events.jsonl')
@@ -58,8 +60,8 @@ function readBinding(taskId: string): Binding {
 function readTask(taskId: string): Task {
   const result = inspectControlFile(taskPath(taskId), (value): Task | null => {
     const record = value as Partial<Task> | null
-    return record?.id === taskId && record.mode === 'automatic'
-      && ['queued', 'running', 'restart_pending', 'verifying', 'succeeded', 'failed', 'rolled_back'].includes(String(record.status))
+    return record?.id === taskId && isManagedMigration(record)
+      && ['prechecked', 'queued', 'running', 'restart_pending', 'verifying', 'succeeded', 'failed', 'rolled_back'].includes(String(record.status))
       && typeof record.source?.sqlitePath === 'string' ? record as Task : null
   })
   return result.state === 'healthy' ? result.value : fail('RESCUE_TASK_UNAVAILABLE')
@@ -90,9 +92,27 @@ export function hasPendingRecoveryIntent(): boolean {
 }
 
 /** 由正常管理员已鉴权/CSRF 路由或容器本地 CLI 调用；明文只返回，不落任务记录。 */
+export function prepareLocalManualDatabaseRescueCredential(taskId: string): ReturnType<typeof issueDatabaseRescueCredential> {
+  taskIdSchema.parse(taskId)
+  const inspected = inspectControlFile(taskPath(taskId), value => {
+    const task = value as Partial<Task> | null
+    return task?.id === taskId && task.mode === 'manual' && ['prechecked', 'failed'].includes(String(task.status))
+      && typeof task.source?.sqlitePath === 'string' ? task as Task : null
+  })
+  if (inspected.state !== 'healthy') fail('RESCUE_MANUAL_PREPARATION_INVALID')
+  // 仅本地CLI允许为尚未run的手动任务准备凭证；不能改写任何活动冻结会话。
+  if (inspectControlFile(appDataPaths.migrationLockFile, validateMigrationLock).state !== 'absent'
+    || inspectControlFile(appDataPaths.maintenanceStateFile, validateMaintenanceControl).state !== 'absent'
+    || inspectControlFile(appDataPaths.migrationCutoverFile, validateCutoverControl).state !== 'absent'
+    || hasPendingRecoveryIntent()) fail('RESCUE_MANUAL_PREPARATION_CONFLICT')
+  sourceIdentity(path.resolve(inspected.value.source.sqlitePath))
+  writeControlFile(taskPath(taskId), { ...inspected.value, controlProtocol: CONTINUOUS_MIGRATION_PROTOCOL, controlPhase: undefined })
+  return issueDatabaseRescueCredential(taskId)
+}
+
 export function issueDatabaseRescueCredential(taskId: string): { taskId: string; credential: string; expiresAt: string } {
   const task = readTask(taskId)
-  if (['succeeded', 'rolled_back'].includes(task.status)) fail('RESCUE_WINDOW_CLOSED')
+  if (isMigrationRecoveryWindowClosed(task)) fail('RESCUE_WINDOW_CLOSED')
   const previous = inspectControlFile(bindingPath(taskId), parse(bindingSchema))
   if (previous.state === 'corrupted') fail('RESCUE_BINDING_CORRUPTED')
   if (previous.state === 'healthy' && previous.value.taskId !== taskId) fail('RESCUE_BINDING_CORRUPTED')
@@ -110,6 +130,14 @@ export function issueDatabaseRescueCredential(taskId: string): { taskId: string;
   writeControlFile(credentialPath(taskId), { version: 1, taskId, credentialHash: digest(credential), issuedAt: now(), expiresAt })
   appendControlAudit(auditPath, { taskId, event: 'credential_rotated' })
   return { taskId, credential, expiresAt }
+}
+
+/** 手动run不得轮换并撤销调用方刚取得的救援凭证；无绑定的直接服务调用仍能使用本地CLI补签。 */
+export function ensureDatabaseRescueBinding(taskId: string): void {
+  const previous = inspectControlFile(bindingPath(taskId), parse(bindingSchema))
+  if (previous.state === 'absent') { issueDatabaseRescueCredential(taskId); return }
+  if (previous.state !== 'healthy') fail('RESCUE_BINDING_CORRUPTED')
+  assertIdentity(previous.value.source)
 }
 
 export function authenticateDatabaseRescueCredential(credential: string): string {
@@ -145,10 +173,73 @@ export async function bindDatabaseRescueSnapshot(taskId: string, snapshotPath: s
   } })
 }
 
+/** 新的手动冻结会话只能在同任务维护已持有时撤销旧副本资格，不能沿用先前运行的摘要。 */
+export function resetManualDatabaseRescueSnapshot(taskId: string): void {
+  const task = readTask(taskId), binding = readBinding(taskId)
+  if (!isControlledManualMigration(task) || task.controlPhase !== 'freezing') fail('RESCUE_CONTROL_OWNERSHIP_UNPROVEN')
+  readOwnedControl(appDataPaths.maintenanceStateFile, taskId)
+  readOwnedControl(appDataPaths.migrationLockFile, taskId)
+  assertIdentity(binding.source)
+  writeControlFile(bindingPath(taskId), { ...binding, snapshot: undefined, nonce: undefined, manualFailureCleanup: undefined })
+}
+
+/** 取消/切换前验证原SQLite文件身份；已有不可变快照时必须同时验证全表摘要。 */
+export async function assertDatabaseRescueSourceUnchanged(taskId: string, sourcePath: string, requireSnapshot = true): Promise<void> {
+  const binding = readBinding(taskId)
+  if (path.resolve(sourcePath) !== binding.source.filePath) fail('RESCUE_SOURCE_IDENTITY_MISMATCH')
+  assertIdentity(binding.source)
+  if (!binding.snapshot) { if (requireSnapshot) fail('RESCUE_SNAPSHOT_UNAVAILABLE'); return }
+  const actualHash = createHash('sha256')
+  for await (const chunk of fs.createReadStream(binding.snapshot.filePath)) actualHash.update(chunk)
+  if (actualHash.digest('hex') !== binding.snapshot.fileSha256) fail('RESCUE_SNAPSHOT_DIGEST_MISMATCH')
+  const current = await inspectSqliteForRescue(binding.source.filePath, { taskId, baseline: binding.snapshot.digest })
+  if (current.sha256 !== binding.snapshot.digest.sha256) fail('RESCUE_SOURCE_DIGEST_MISMATCH')
+}
+
+/** 失败回收的独立持久证明；必须在持有源冻结及同任务锁时生成，不能把普通failed视为可解冻。 */
+export async function prepareManualFailureCleanup(taskId: string): Promise<void> {
+  const task = readTask(taskId), binding = readBinding(taskId)
+  if (!isControlledManualMigration(task) || task.status !== 'failed' || task.controlPhase !== 'failed') fail('MANUAL_FAILURE_STATE_INVALID')
+  readOwnedControl(appDataPaths.migrationLockFile, taskId)
+  readOwnedControl(appDataPaths.maintenanceStateFile, taskId)
+  if (inspectControlFile(appDataPaths.migrationCutoverFile, validateCutoverControl).state !== 'absent' || hasPendingRecoveryIntent()) fail('MANUAL_FAILURE_CUTOVER_ACTIVE')
+  const override = inspectDatabaseRuntimeOverride()
+  if (override.state === 'corrupted') fail('MANUAL_FAILURE_OVERRIDE_UNPROVEN')
+  const current = override.state === 'healthy' ? override.value : null
+  if (JSON.stringify(current) !== JSON.stringify(task.controlPreviousOverride ?? null)) fail('MANUAL_FAILURE_OVERRIDE_UNPROVEN')
+  await assertDatabaseRescueSourceUnchanged(taskId, task.source.sqlitePath, false)
+  const sourceDigest = await inspectSqliteForRescue(binding.source.filePath)
+  writeControlFile(bindingPath(taskId), { ...binding, manualFailureCleanup: { sourceDigest, previousOverrideHash: digest(JSON.stringify(current)) } })
+}
+
+/** 启动前续接已证明的失败回收；不加载业务env/数据源/bootstrap，任何证明失配均留在救援。 */
+export async function resumeManualFailureCleanupBeforeStartup(taskId: string): Promise<void> {
+  const task = readTask(taskId), binding = readBinding(taskId), proof = binding.manualFailureCleanup
+  if (!isControlledManualMigration(task) || task.status !== 'failed'
+    || !['failed_cleanup', 'failed_recovered'].includes(String(task.controlPhase)) || !proof) fail('MANUAL_FAILURE_STATE_INVALID')
+  if (inspectControlFile(appDataPaths.migrationCutoverFile, validateCutoverControl).state !== 'absent' || hasPendingRecoveryIntent()) fail('MANUAL_FAILURE_CUTOVER_ACTIVE')
+  const maintenance = inspectControlFile(appDataPaths.maintenanceStateFile, validateMaintenanceControl)
+  const lock = inspectControlFile(appDataPaths.migrationLockFile, validateMigrationLock)
+  if (maintenance.state !== 'healthy' || maintenance.value.taskId !== taskId
+    || lock.state === 'corrupted' || (lock.state === 'healthy' && lock.value.taskId !== taskId)) fail('RESCUE_CONTROL_OWNERSHIP_UNPROVEN')
+  const override = inspectDatabaseRuntimeOverride()
+  if (override.state === 'corrupted') fail('MANUAL_FAILURE_OVERRIDE_UNPROVEN')
+  const current = override.state === 'healthy' ? override.value : null
+  if (JSON.stringify(current) !== JSON.stringify(task.controlPreviousOverride ?? null)
+    || digest(JSON.stringify(current)) !== proof.previousOverrideHash) fail('MANUAL_FAILURE_OVERRIDE_UNPROVEN')
+  if (path.resolve(task.source.sqlitePath) !== binding.source.filePath) fail('RESCUE_SOURCE_IDENTITY_MISMATCH')
+  assertIdentity(binding.source)
+  if ((await inspectSqliteForRescue(binding.source.filePath)).sha256 !== proof.sourceDigest.sha256) fail('RESCUE_SOURCE_DIGEST_MISMATCH')
+  // 先终态持久化，再删锁/维护。任一步中断可用同一证明重复执行；不删除源、override或目标数据。
+  writeControlFile(taskPath(taskId), { ...task, controlPhase: 'failed_recovered', updatedAt: now() })
+  if (lock.state === 'healthy') removeControlFile(appDataPaths.migrationLockFile)
+  removeControlFile(appDataPaths.maintenanceStateFile)
+}
+
 function assertRollbackAllowed(taskId: string): { binding: Binding; task: Task } {
   const binding = readBinding(taskId)
   const task = readTask(taskId)
-  if (['succeeded', 'rolled_back'].includes(task.status)) fail('RESCUE_WINDOW_CLOSED')
+  if (isMigrationRecoveryWindowClosed(task)) fail('RESCUE_WINDOW_CLOSED')
   if (!binding.snapshot) fail('RESCUE_SNAPSHOT_UNAVAILABLE')
   if (path.resolve(task.source.sqlitePath) !== binding.source.filePath) fail('RESCUE_SOURCE_IDENTITY_MISMATCH')
   assertIdentity(binding.source)
@@ -188,10 +279,10 @@ export function prepareDatabaseRescueRollback(taskId: string) {
   return { taskId, nonce, expiresAt }
 }
 
-/** 仅由启动失败协调器调用；仍使用同一 nonce、任务归属和恢复日志，不建立旁路恢复。 */
-export async function prepareAutomaticDatabaseRescueRollback(taskId: string): Promise<DatabaseRecoveryIntent> {
+/** 已认证维护入口先持久接受，再经真实worker退出及调用方完整排空边界后恢复；不建立旁路协议。 */
+export async function prepareAutomaticDatabaseRescueRollback(taskId: string, beforeReplay: () => Promise<void>): Promise<DatabaseRecoveryIntent> {
   const prepared = prepareDatabaseRescueRollback(taskId)
-  return beginDatabaseRescueRollback(taskId, prepared.nonce, `automatic_${randomBytes(16).toString('hex')}`)
+  return beginDatabaseRescueRollback(taskId, prepared.nonce, `automatic_${randomBytes(16).toString('hex')}`, beforeReplay)
 }
 
 function checkpoint(intent: DatabaseRecoveryIntent, name: string): void {
@@ -201,7 +292,7 @@ function checkpoint(intent: DatabaseRecoveryIntent, name: string): void {
   appendControlAudit(auditPath, { taskId: intent.taskId, operationId: intent.operationId, event: name })
 }
 
-export async function beginDatabaseRescueRollback(taskId: string, nonce: string, operationId: string): Promise<DatabaseRecoveryIntent> {
+export async function beginDatabaseRescueRollback(taskId: string, nonce: string, operationId: string, beforeReplay?: () => Promise<void>): Promise<DatabaseRecoveryIntent> {
   if (!/^[a-zA-Z0-9_-]{16,128}$/.test(operationId)) fail('RESCUE_IDEMPOTENCY_REQUIRED', 400)
   const existing = inspectRecoveryIntent()
   if (existing.state === 'corrupted') fail('RESCUE_INTENT_CORRUPTED')
@@ -220,6 +311,8 @@ export async function beginDatabaseRescueRollback(taskId: string, nonce: string,
   checkpoint(intent, 'PREPARED')
   writeControlFile(bindingPath(taskId), { ...binding, nonce: undefined })
   await quiesceRuntime?.(taskId)
+  // 普通业务进程仍可能持有完整HTTP/治理租约；恢复写入必须晚于调用方的完整排空。
+  await beforeReplay?.()
   return replayDatabaseRecoveryIntent()
 }
 
@@ -231,7 +324,8 @@ export async function replayDatabaseRecoveryIntent(): Promise<DatabaseRecoveryIn
   if (intent.phase === 'COMPLETED') return intent
   assertIdentity(intent.source)
   const task = readTask(intent.taskId)
-  if (task.status === 'succeeded' || path.resolve(task.source.sqlitePath) !== intent.source.filePath) fail('RESCUE_WINDOW_CLOSED')
+  if (isMigrationRecoveryWindowClosed(task) && task.status !== 'rolled_back'
+    || path.resolve(task.source.sqlitePath) !== intent.source.filePath) fail('RESCUE_WINDOW_CLOSED')
   // 不覆盖其他任务的维护状态或锁；已完成终态只允许继续本任务收尾。
   if (task.status !== 'rolled_back') {
     readOwnedControl(appDataPaths.maintenanceStateFile, intent.taskId)

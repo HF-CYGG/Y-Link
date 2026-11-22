@@ -1,5 +1,6 @@
 /** 无数据库依赖的公开商城缓存/HTTP 条件请求验收，便于在缺少本地 sqlite3 驱动的 CI 环境运行。 */
 import assert from 'node:assert/strict'
+import { setImmediate as nextTurn } from 'node:timers/promises'
 
 process.env.NODE_ENV = 'test'
 process.env.APP_PROFILE = 'o2o-public-cache-unit-verify'
@@ -70,6 +71,50 @@ const refreshedSnapshots = await Promise.all(
 assert.equal(catalogBuildCount, 2)
 assert.equal(new Set(refreshedSnapshots.map((item) => item.generatedAt)).size, 1)
 assert.notEqual(refreshedSnapshots[0]?.etag, firstEtag)
+
+const sales = o2oPreorderService as unknown as {
+  resolveProductSoldQtyMap(ids: string[]): Promise<Map<string, number>>
+  invalidateMallSoldQtyCache(): void
+  queryProductSoldQty(ids: string[]): Promise<Map<string, number>>
+}
+const originalSalesQuery = sales.queryProductSoldQty
+const pendingSalesReads: Array<(data: Map<string, number>) => void> = []
+sales.queryProductSoldQty = () => new Promise((resolve) => pendingSalesReads.push(resolve))
+try {
+  sales.invalidateMallSoldQtyCache()
+  const readSales = () => sales.resolveProductSoldQtyMap(['1'])
+  const firstSalesRequests = Promise.all(Array.from({ length: 32 }, readSales))
+  assert.equal(pendingSalesReads.length, 1)
+  sales.invalidateMallSoldQtyCache()
+  pendingSalesReads[0]!(new Map([['1', 4]]))
+  await nextTurn()
+  assert.equal(pendingSalesReads.length, 2, '同一换代后的等待者应共享第二次聚合')
+  pendingSalesReads[1]!(new Map([['1', 8]]))
+  assert.ok((await firstSalesRequests).every((result) => result.get('1') === 8))
+  assert.equal((await readSales()).get('1'), 8)
+  assert.equal(pendingSalesReads.length, 2)
+
+  sales.invalidateMallSoldQtyCache()
+  const repeatedInvalidation = Promise.allSettled(Array.from({ length: 32 }, readSales))
+  assert.equal(pendingSalesReads.length, 3)
+  sales.invalidateMallSoldQtyCache()
+  pendingSalesReads[2]!(new Map([['1', 10]]))
+  await nextTurn()
+  assert.equal(pendingSalesReads.length, 4)
+  sales.invalidateMallSoldQtyCache()
+  pendingSalesReads[3]!(new Map([['1', 12]]))
+  await nextTurn()
+  assert.equal(pendingSalesReads.length, 4, '连续失效不得在同一请求内启动第三次聚合')
+  assert.ok((await repeatedInvalidation).every((result) => result.status === 'rejected' && result.reason.statusCode === 503))
+
+  const recovered = readSales()
+  assert.equal(pendingSalesReads.length, 5, '任何失效结果都不得成为新修订的缓存')
+  pendingSalesReads[4]!(new Map([['1', 16]]))
+  assert.equal((await recovered).get('1'), 16)
+} finally {
+  sales.queryProductSoldQty = originalSalesQuery
+  sales.invalidateMallSoldQtyCache()
+}
 
 const server = createApp().listen(0, '127.0.0.1')
 await new Promise<void>((resolve, reject) => {

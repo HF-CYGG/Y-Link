@@ -2,8 +2,11 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
+// Windows checkout 可使用 CRLF；仅统一读取后的行尾，不改变任何配置约束。
+const readSource = (file) => readFileSync(file, 'utf8').replace(/\r\n?/g, '\n')
+
 for (const file of ['docker/nginx/default.conf', 'docker/nginx/default.conf.template', 'docker/nginx/onebox.conf']) {
-  const source = readFileSync(file, 'utf8')
+  const source = readSource(file)
   assert.doesNotMatch(source, /set_real_ip_from\s+(?:10\.0\.0\.0\/8|172\.16\.0\.0\/12|192\.168\.0\.0\/16)/, `${file} 不得默认信任全部私网`)
   assert.doesNotMatch(source, /proxy_add_x_forwarded_for/, `${file} 应覆盖客户端自带的 XFF 链`)
   assert.match(source, /proxy_set_header X-Forwarded-Proto \$ylink_forwarded_proto;/)
@@ -14,9 +17,7 @@ for (const file of ['docker/nginx/default.conf', 'docker/nginx/default.conf.temp
     assert.match(body[1], /include \/etc\/nginx\/ylink\/proxy-security-headers\.conf;/,
       `${file} 代理响应必须由上游保留 API/上传专用 CSP，禁止继承页面 CSP 或重复 HSTS`)
   }
-  const htmlLocations = file.endsWith('.template')
-    ? ['location = /index.html', 'location / {']
-    : ['location = /index.html', 'location = / {', 'location ~ ^/(?:database-rescue|login']
+  const htmlLocations = ['location = /index.html', 'location = / {', 'location ~ ^/(?:database-rescue|login']
   for (const needle of htmlLocations) {
     const offset = source.indexOf(needle)
     assert.ok(offset >= 0, `${file} 缺少 HTML 入口 ${needle}`)
@@ -25,7 +26,8 @@ for (const file of ['docker/nginx/default.conf', 'docker/nginx/default.conf.temp
   }
   // 边缘限流、连接上限与请求体上限：三套配置口径一致，超限统一返回 JSON。
   for (const zone of ['ylink_auth_login', 'ylink_auth_captcha', 'ylink_auth_sensitive', 'ylink_api_general']) {
-    assert.match(source, new RegExp(`limit_req_zone \\$binary_remote_addr zone=${zone}:`), `${file} 缺少限流区 ${zone}`)
+    const key = zone === 'ylink_api_general' ? 'binary_remote_addr' : `${zone}_key`
+    assert.match(source, new RegExp(`limit_req_zone \\$${key} zone=${zone}:`), `${file} 缺少限流区 ${zone}`)
   }
   assert.match(source, /limit_conn_zone \$binary_remote_addr zone=ylink_conn_per_ip:/, `${file} 缺少每 IP 连接区`)
   for (const directive of [
@@ -69,21 +71,117 @@ for (const file of ['docker/nginx/default.conf', 'docker/nginx/default.conf.temp
     assert.match(body, /client_max_body_size 11m;/, `${file} ${declaration} 上传/导入入口应放宽到 11m`)
     assert.match(body, /limit_req zone=ylink_api_general /, `${file} ${declaration} 应计入通用限流`)
   }
-  assert.match(blockOf('location ^~ /api/'), /limit_req zone=ylink_api_general burst=\d+ nodelay;/, `${file} /api/ 缺少通用每 IP 限流`)
+  const jsonImport = blockOf('location = /api/data-maintenance/import/json')
+  assert.match(jsonImport, /client_max_body_size 8m;/, `${file} 应仅在 JSON 导入标准路径放宽到 8 MiB`)
+  assert.match(jsonImport, /limit_req zone=ylink_api_general /, `${file} JSON 导入须保留通用边缘频控`)
+  for (const endpoint of ['/api/auth/me', '/api/client-auth/me']) {
+    const body = blockOf(`location = ${endpoint}`)
+    assert.match(body, /add_header Cache-Control "no-store" always;/)
+    assert.match(body, /add_header Vary "Authorization, Cookie" always;/)
+  }
+  // 从真实配置提取分类正则，覆盖三种认证桶与所有既有 exact 入口，防止别名只走通用区。
+  const authCases = {
+    login: ['/api/auth/login', '/api/client-auth/login', '/api/auth/login/mfa',
+      '/api/auth/login/mfa/webauthn/options', '/api/auth/login/mfa/webauthn/verify',
+      '/api/auth/webauthn/login/options', '/api/auth/webauthn/login/verify', '/api/v1/mobile-auth/login'],
+    captcha: ['/api/auth/captcha', '/api/client-auth/captcha', '/api/v1/mobile-auth/captcha'],
+    sensitive: ['/api/client-auth/register', '/api/client-auth/verification-code/send',
+      '/api/client-auth/forgot-password/verify', '/api/client-auth/forgot-password/reset',
+      '/api/v1/mobile-auth/register', '/api/v1/mobile-auth/verification-code', '/api/v1/mobile-auth/forgot-password/verify',
+      '/api/v1/mobile-auth/forgot-password/reset', '/api/v1/mobile-auth/refresh'],
+  }
+  const apiBlock = blockOf('location ^~ /api/')
+  const authLocation = apiBlock.match(/^        location ~\* (\S+) \{\n([\s\S]*?)^        \}/m)
+  assert.ok(authLocation, `${file} 认证 64 KiB 位置必须嵌套在既有 /api/ 代理内`)
+  assert.match(authLocation[2], /client_max_body_size 64k;/)
+  assert.match(authLocation[2], /rewrite \^ \$uri break;/, `${file} 认证别名须沿用标准化 URI`)
+  assert.match(authLocation[2], /proxy_pass http:\/\/(?:ylink_backend|backend:3001);/, `${file} 正则位置不应在 upstream 后写替换 URI`)
+  assert.doesNotMatch(authLocation[2], /limit_req\s|proxy_set_header|proxy_cache/, `${file} 认证入口须继承 API 频控与安全代理头`)
+  const bodyLimitPattern = new RegExp(authLocation[1], 'i')
+  for (const [kind, paths] of Object.entries(authCases)) {
+    const map = source.match(new RegExp(`map \\$uri \\$ylink_auth_${kind}_key \\{([\\s\\S]*?)\\n\\}`))
+    assert.ok(map, `${file} 缺少 ${kind} 条件键`)
+    assert.match(map[1], /default "";/)
+    const expression = map[1].match(/~\*(\S+) \$binary_remote_addr;/)
+    assert.ok(expression, `${file} ${kind} 必须按 URI 忽略大小写并返回原每 IP 键`)
+    const pattern = new RegExp(expression[1], 'i')
+    for (const path of paths) {
+      const alternate = `/api/${path.slice('/api/'.length).toUpperCase()}`
+      for (const variant of [path, alternate, `${path}/`, `${alternate}/`]) {
+        assert.ok(pattern.test(variant), `${file} ${kind} 未覆盖 ${variant}`)
+        assert.ok(bodyLimitPattern.test(variant), `${file} ${variant} 缺少 64 KiB 请求体限制`)
+      }
+      assert.ok(!pattern.test(`${path}//`))
+      assert.ok(!pattern.test(`${path}/unknown`))
+      if (!path.startsWith('/api/v1/mobile-auth/')) {
+        assert.match(blockOf(`location = ${path}`), new RegExp(`limit_req zone=ylink_auth_${kind} `))
+      }
+    }
+    for (const path of Object.entries(authCases).filter(([other]) => other !== kind).flatMap(([, paths]) => paths)) {
+      assert.ok(!pattern.test(path), `${file} ${kind} 不得消耗其他认证类配额`)
+    }
+    for (const path of ['/api/users', '/api/v1/mobile-auth/me', '/api/v1/mobile-auth/capabilities', '/api/auth/%6cogin', '/api/auth//login']) {
+      assert.ok(!pattern.test(path), `${file} ${kind} 不得扩展路径语义`)
+      assert.ok(!bodyLimitPattern.test(path), `${file} ${path} 不应使用匿名认证请求体限制`)
+    }
+    assert.match(apiBlock, new RegExp(`limit_req zone=ylink_auth_${kind} burst=`))
+  }
+  assert.ok(!bodyLimitPattern.test('/api/data-maintenance/import/json'), `${file} 治理导入应保留独立的 8 MiB 限制`)
+  assert.doesNotMatch(source.replace(apiBlock, ''), /location[^\n]*~\*[^\n]*api\//, `${file} 不得在 /api/ 外扩展大小写代理范围`)
+  assert.match(apiBlock, /limit_req zone=ylink_api_general burst=\d+ nodelay;/, `${file} /api/ 缺少通用每 IP 限流`)
+  const streamingRoutes = [
+    {
+      paths: ['/api/client-feedback/stream', '/api/customer-service/stream'],
+      directives: ['proxy_read_timeout 3600s;', 'proxy_send_timeout 3600s;', 'proxy_cache off;', 'gzip off;',
+        'include /etc/nginx/ylink/proxy-security-headers.conf;', 'add_header X-Accel-Buffering no always;'],
+    },
+    {
+      paths: ['/api/reports/inventory/export', '/api/reports/tag-sales/export', '/api/audit-logs/export',
+        '/api/inventory/logs/export', '/api/products/export'],
+      directives: ['proxy_read_timeout 300s;'],
+    },
+  ]
+  const apiLocations = [...apiBlock.matchAll(/^        location ~\* (\S+) \{\n([\s\S]*?)^        \}/gm)]
+  for (const { paths, directives } of streamingRoutes) {
+    const matchingLocations = apiLocations.filter(([, pattern]) => new RegExp(pattern, 'i').test(paths[0]))
+    assert.equal(matchingLocations.length, 1, `${file} ${paths[0]} 必须命中独立的 API 子位置`)
+    const [, pattern, body] = matchingLocations[0]
+    const matchesPath = new RegExp(pattern, 'i')
+    for (const path of paths) {
+      const alternate = `/api/${path.slice('/api/'.length).toUpperCase()}`
+      for (const variant of [path, `${path}/`, alternate, `${alternate}/`]) {
+        assert.ok(matchesPath.test(variant), `${file} 流式规则缺少 ${variant}`)
+      }
+      assert.ok(!matchesPath.test(`${path}/unknown`), `${file} 流式规则越过端点 ${path}`)
+    }
+    assert.ok(!matchesPath.test('/api/reports/inventory'))
+    assert.ok(!matchesPath.test('/api/products/import'))
+    assert.match(body, /rewrite \^ \$uri break;/, `${file} 流式代理须沿用标准化 URI 并保留查询参数`)
+    assert.match(body, /proxy_pass http:\/\/(?:ylink_backend|backend:3001);/, `${file} 流式代理不应在 upstream 后写替换 URI`)
+    assert.doesNotMatch(body, /limit_(?:req|conn)\s|proxy_set_header/, `${file} 流式代理须继承 API 限流与代理头`)
+    for (const directive of ['proxy_buffering off;', ...directives]) {
+      assert.ok(body.includes(directive), `${file} ${paths[0]} 缺少 ${directive}`)
+    }
+  }
   assert.match(blockOf('location ^~ /uploads/'), /limit_req zone=ylink_api_general burst=\d+ nodelay;/, `${file} /uploads/ 缺少通用每 IP 限流`)
   // “变量 + URI”的 proxy_pass 会让 Nginx 用 URI 整体替换请求路径并丢弃查询参数（/api/orders?page=2 被转成 /api/），必须使用具名 upstream 或字面地址。
   assert.doesNotMatch(source, /proxy_pass\s+https?:\/\/\$[A-Za-z_]+\/[^;]*;/, `${file} 禁止在 proxy_pass 中同时使用变量与 URI`)
   // 压缩：优先发送构建期预压缩产物，且 JS 的两种 MIME 写法都要覆盖。
   assert.match(source, /^    gzip_static on;$/m, `${file} 缺少 gzip_static`)
+  assert.match(source, /^    gzip_comp_level 4;$/m, `${file} 动态压缩应固定在 4 级`)
   for (const mime of ['application/javascript', 'text/javascript', 'image/svg+xml', 'application/json']) {
     assert.match(source, new RegExp(`gzip_types[\\s\\S]*?${mime.replace('+', '\\+')}[\\s\\S]*?;`), `${file} gzip_types 缺少 ${mime}`)
   }
   // 未带哈希的站点图标不得按 immutable 缓存一年，且该规则必须位于通用静态资源正则之前。
-  const iconLocation = source.indexOf('location ~ ^/(?:favicon\\.ico|y-link-icon\\.png|apple-touch-icon\\.png|icons\\.svg)$')
+  const favicon = blockOf('location = /favicon.ico')
+  assert.match(favicon, /try_files \/favicon\.ico =404;/, `${file} favicon 应直出实际静态文件`)
+  assert.match(favicon, /include \/etc\/nginx\/ylink\/page-security-headers\.conf;/, `${file} favicon 必须显式包含页面头`)
+  assert.match(favicon, /add_header Cache-Control "public, max-age=86400" always;/, `${file} favicon 应使用一天缓存`)
+  const iconLocation = source.indexOf('location ~ ^/(?:y-link-icon\\.png|apple-touch-icon\\.png|icons\\.svg)$')
   const assetLocation = source.indexOf('location ~* \\.(?:css|js|mjs|json|map|svg|ico|png|jpe?g|webp|gif|woff2?|ttf|otf|eot)$')
   assert.ok(iconLocation >= 0 && iconLocation < assetLocation, `${file} 站点图标缓存规则缺失或顺序错误`)
   assert.doesNotMatch(source.slice(iconLocation, source.indexOf('\n    }', iconLocation)), /immutable/, `${file} 站点图标不得声明 immutable`)
-  if (!file.endsWith('.template')) {
+  {
     const pagePattern = source.match(/location ~ (\^\/\(\?:database-rescue\|login\S+) \{/)
     assert.ok(pagePattern, `${file} 缺少页面路由白名单`)
     const pageRoute = new RegExp(pagePattern[1])
@@ -100,7 +198,7 @@ for (const file of ['docker/nginx/default.conf', 'docker/nginx/default.conf.temp
   }
 }
 // 分体模板：后端走具名 upstream（运行期解析 + keepalive），商品图边缘缓存不得覆盖私有反馈附件。
-const splitTemplate = readFileSync('docker/nginx/default.conf.template', 'utf8')
+const splitTemplate = readSource('docker/nginx/default.conf.template')
 assert.match(splitTemplate, /upstream ylink_backend \{[\s\S]*?server backend:3001 resolve;[\s\S]*?keepalive \d+;[\s\S]*?\}/, '分体模板需使用带 resolve 与 keepalive 的具名 upstream')
 const productImageBlock = splitTemplate.slice(splitTemplate.indexOf('location ^~ /uploads/products/'), splitTemplate.indexOf('\n    }', splitTemplate.indexOf('location ^~ /uploads/products/')))
 assert.match(productImageBlock, /proxy_cache ylink_product_images;/, '分体模板商品图需启用边缘缓存')
@@ -108,16 +206,31 @@ assert.match(productImageBlock, /proxy_ignore_headers Cache-Control Expires;/, '
 assert.match(productImageBlock, /proxy_cache_valid 200 7d;/, '商品图边缘有效期应为七天')
 assert.doesNotMatch(productImageBlock, /proxy_ignore_headers[^;]*(?:Set-Cookie|Vary)/i, '不得忽略上游缓存安全控制')
 assert.doesNotMatch(splitTemplate, /location \^~ \/uploads\/client-feedback\/[\s\S]*?proxy_cache/, '私有反馈附件不得进入边缘缓存')
-const pageHeaders = readFileSync('docker/nginx/page-security-headers.conf', 'utf8')
+const pageHeaders = readSource('docker/nginx/page-security-headers.conf')
 const connectSources = pageHeaders.match(/connect-src\s+([^;]+);/)
 assert.ok(connectSources, '页面 CSP 必须显式约束网络连接来源')
 assert.deepEqual(connectSources[1].trim().split(/\s+/).sort(), ["'self'", 'https://v1.hitokoto.cn'].sort(),
   '页面只允许同源请求和现有 HTTPS 语录服务，禁止通配放开外部连接')
 for (const file of ['compose.yml', 'compose.mysql.yml', 'compose.cloud.yml']) {
-  const source = readFileSync(file, 'utf8')
+  const source = readSource(file)
   const backend = source.slice(source.indexOf('  backend:'), source.indexOf('  frontend:'))
   assert.doesNotMatch(backend, /^    ports:/m, `${file} 默认不公开后端端口`)
   assert.match(backend, /Y_LINK_TRUST_PROXY/)
+  assert.match(backend, /Y_LINK_JSON_DATA_TRANSFER_ENABLED:-false/)
+  assert.match(backend, /PERMANENT_DELETE_PASSWORD:-\}/)
+  assert.match(backend, /AUTH_WEBAUTHN_ENABLED:-false/)
+  assert.match(backend, /Y_LINK_DATA_ENCRYPTION_KEY:-\}/)
+  assert.match(backend, /Y_LINK_MANUAL_DB_MIGRATION_ENABLED:-true/)
   assert.match(source, /ipv4_address: \$\{Y_LINK_FRONTEND_PROXY_IP/)
+}
+const oneboxCompose = readSource('compose.onebox.yml')
+assert.match(oneboxCompose, /Y_LINK_MANUAL_DB_MIGRATION_ENABLED:-true/)
+for (const file of ['compose.yml', 'compose.mysql.yml', 'compose.cloud.yml', 'compose.onebox.yml']) {
+  const source = readSource(file)
+  const service = file === 'compose.onebox.yml' ? oneboxCompose : source.slice(source.indexOf('  backend:'), source.indexOf('  frontend:'))
+  for (const [key, fallback] of [['DB_SSL_MODE', 'disabled'], ['DB_SSL_CA', ''], ['DB_AUTO_MIGRATE', 'false']]) {
+    assert.match(service, new RegExp(`^      (?:- )?${key}[:=]\\s*\\$\\{${key}:-${fallback}\\}$`, 'm'),
+      `${file} 后端必须透传 ${key} 并保留兼容默认值`)
+  }
 }
 console.log('[web-edge-security] 代理头覆盖、HTML安全头、端口静态契约、边缘限流/连接/请求体上限、代理路径改写与静态缓存/压缩策略通过')

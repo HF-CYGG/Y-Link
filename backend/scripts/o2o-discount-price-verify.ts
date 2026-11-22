@@ -8,29 +8,22 @@
  * - 通过 O2O 规则配置写入商城公告，确认客户端商城接口可以透传公告与营业时间。
  * 维护说明：
  * - 若后续调整折扣字段名或订单明细金额字段，必须同步更新本脚本；
- * - 该脚本只校验折扣结算与公开配置，不覆盖库存、退货和权限全量回归。
+ * - 覆盖退货冲减价格快照、工作台及报表统计，其余库存与权限回归由对应专项覆盖。
  */
 import 'reflect-metadata'
 import assert from 'node:assert/strict'
-import fs from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { createVerificationIsolation } from './verification-isolation.js'
 
-const currentFilePath = fileURLToPath(import.meta.url)
-const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
-const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
-const sqlitePath = path.resolve(sqliteRoot, `o2o-discount-price-${verifySeed}.sqlite`)
-
-process.env.APP_PROFILE = `o2o-discount-price-${verifySeed}`
-process.env.DB_TYPE = 'sqlite'
+const isolation = createVerificationIsolation('o2o-discount-price-verify')
+isolation.seal({ type: 'sqlite', database: path.join(isolation.rootDir, 'fixture.sqlite') })
 process.env.DB_SYNC = 'false'
-process.env.SQLITE_DB_PATH = sqlitePath
 process.env.INIT_ADMIN_PASSWORD = `Admin_${verifySeed}_Aa1!`
 
 import type { AuthUserContext } from '../src/types/auth.js'
 import type { ClientAuthContext } from '../src/types/client-auth.js'
-import { installCaptchaServiceForTesting } from '../src/services/captcha.service.js'
 
 const adminActor: AuthUserContext = {
   userId: 'o2o-discount-verify-admin',
@@ -51,7 +44,6 @@ function normalizeMoney(value: unknown) {
 }
 
 const TEST_CAPTCHA_CODE = 'ABC123'
-installCaptchaServiceForTesting({ createCode: () => TEST_CAPTCHA_CODE })
 const readCaptchaCode = (_captchaSvg: string) => TEST_CAPTCHA_CODE
 const pendingClientVerificationTargets = new Set<string>()
 
@@ -76,34 +68,31 @@ async function registerAndLoginClient(clientAuthService: typeof import('../src/s
   return clientAuthService.resolveClientByToken(loginResult.token)
 }
 
-function cleanupSqliteFile() {
-  if (!fs.existsSync(sqlitePath)) {
-    return
-  }
-  try {
-    fs.rmSync(sqlitePath, { force: true })
-  } catch (error) {
-    console.warn(
-      `[o2o-discount-price-verify] 临时 SQLite 文件删除失败，已忽略：${error instanceof Error ? error.message : String(error)}`,
-    )
-  }
-}
-
 async function main() {
-  fs.mkdirSync(sqliteRoot, { recursive: true })
-
+  const { installCaptchaServiceForTesting } = await import('../src/services/captcha.service.js')
+  installCaptchaServiceForTesting({ createCode: () => TEST_CAPTCHA_CODE })
   const { AppDataSource } = await import('../src/config/data-source.js')
   const { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } = await import('../src/config/database-bootstrap.js')
   const { BaseProduct } = await import('../src/entities/base-product.entity.js')
+  const { BaseProductSku } = await import('../src/entities/base-product-sku.entity.js')
   const { BizOutboundOrder } = await import('../src/entities/biz-outbound-order.entity.js')
   const { BizOutboundOrderItem } = await import('../src/entities/biz-outbound-order-item.entity.js')
+  const { InventoryLog } = await import('../src/entities/inventory-log.entity.js')
+  const { O2oPreorder } = await import('../src/entities/o2o-preorder.entity.js')
+  const { O2oPreorderItem } = await import('../src/entities/o2o-preorder-item.entity.js')
+  const { O2oReturnRequest } = await import('../src/entities/o2o-return-request.entity.js')
+  const { O2oReturnRequestItem } = await import('../src/entities/o2o-return-request-item.entity.js')
+  const { OrderRevision } = await import('../src/entities/order-revision.entity.js')
   const { SysUser } = await import('../src/entities/sys-user.entity.js')
   const { clientAuthService } = await import('../src/services/client-auth.service.js')
   const { o2oPreorderService } = await import('../src/services/o2o-preorder.service.js')
+  const { dashboardService } = await import('../src/services/dashboard.service.js')
   const { productService } = await import('../src/services/product.service.js')
+  const { reportService } = await import('../src/services/report.service.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
   const { verificationCodeService } = await import('../src/services/verification-code.service.js')
 
+  await isolation.assertTarget(AppDataSource)
   prepareDatabaseRuntime()
   await AppDataSource.initialize()
   try {
@@ -238,15 +227,122 @@ async function main() {
       items: [{ productId: product.id, skuId: preorderSkuId, qty: 1 }],
     })
     await o2oPreorderService.verifyByCode(returnRequest.verifyCode, adminActor)
+    const afterPartial = await o2oPreorderService.detailById(preorder.order.id)
+    assert.equal(afterPartial.order.totalAmount, '8.80')
+    assert.equal(afterPartial.items[0]?.lineAmount, '8.80')
+    const preorderItems = AppDataSource.getRepository(O2oPreorderItem)
+    assert.equal(normalizeMoney((await preorderItems.findOneByOrFail({ orderId: preorder.order.id })).lineAmount), '8.80')
+    const partialOutbound = await AppDataSource.getRepository(BizOutboundOrder).findOneByOrFail({ id: outboundOrder.id })
+    assert.equal(normalizeMoney(partialOutbound.totalQty), '1.00')
+    assert.equal(normalizeMoney(partialOutbound.totalAmount), '8.80')
+    assert.equal(normalizeMoney((await AppDataSource.getRepository(BizOutboundOrderItem).findOneByOrFail({ id: outboundItems[0]!.id })).lineAmount), '8.80')
+    const partialStats = await dashboardService.getStats()
+    assert.equal(partialStats.todayOrderCount, 1)
+    assert.equal(normalizeMoney(partialStats.todayOrderAmount), '8.80')
+    // 模拟上线前已退一件、初始小计和正式单尚未冲减的存量。
+    await preorderItems.update({ orderId: preorder.order.id }, { lineAmount: '17.60' })
+    await AppDataSource.getRepository(BizOutboundOrder).update({ id: outboundOrder.id }, { totalQty: '2.00', totalAmount: '17.60' })
+    await AppDataSource.getRepository(BizOutboundOrderItem).update({ id: outboundItems[0]!.id }, { qty: '2.00', lineAmount: '17.60' })
+    assert.equal((await o2oPreorderService.detailById(preorder.order.id)).order.totalAmount, '8.80')
+    const listed = await o2oPreorderService.listMyOrders(clientAuth)
+    assert.equal(listed.list.find((item) => item.id === preorder.order.id)?.totalAmount, '8.80')
+    assert.equal(normalizeMoney((await preorderItems.findOneByOrFail({ orderId: preorder.order.id })).lineAmount), '17.60', '只读旧金额不回写历史')
     const mallConfigAfterVerifiedReturn = await o2oPreorderService.listMallProducts()
     const returnedSoldProduct = mallConfigAfterVerifiedReturn.list.find((item) => item.id === product.id)
     assert.equal(returnedSoldProduct?.soldQty, 1)
-    pass('已核销退货按商品扣减商城已售数量')
+    pass('已核销部分退货按下单价冲减，历史预订单显示实际余量金额')
+
+    const finalReturn = await o2oPreorderService.createReturnRequest(clientAuth, preorder.order.id, {
+      reason: '累计退完并冲减存量出库明细', items: [{ productId: product.id, skuId: preorderSkuId, qty: 1 }],
+    })
+    await o2oPreorderService.verifyByCode(finalReturn.verifyCode, adminActor)
+    await assert.rejects(() => o2oPreorderService.verifyByCode(finalReturn.verifyCode, adminActor), /不可重复核销/)
+    const finalOrder = await AppDataSource.getRepository(BizOutboundOrder).findOneByOrFail({ id: outboundOrder.id })
+    assert.equal(finalOrder.businessNo, outboundOrder.businessNo)
+    assert.equal(normalizeMoney(finalOrder.totalQty), '0.00')
+    assert.equal(normalizeMoney(finalOrder.totalAmount), '0.00')
+    assert.equal(Number(finalOrder.editVersion), Number(outboundOrder.editVersion) + 2)
+    assert.equal(await AppDataSource.getRepository(BizOutboundOrderItem).countBy({ orderId: outboundOrder.id }), 0)
+    const finalRevision = await AppDataSource.getRepository(OrderRevision).findOneByOrFail({
+      orderUuid: outboundOrder.orderUuid, revisionNo: finalOrder.editVersion,
+    })
+    assert.equal(JSON.parse(finalRevision.beforeSnapshotJson).items[0].qty, '2.00')
+    assert.deepEqual(JSON.parse(finalRevision.afterSnapshotJson).items, [])
+    assert.equal((await o2oPreorderService.detailById(preorder.order.id)).order.totalAmount, '0.00')
+    const fullReturnStats = await dashboardService.getStats()
+    assert.equal(fullReturnStats.todayOrderCount, 0)
+    assert.equal(normalizeMoney(fullReturnStats.todayOrderAmount), '0.00')
+    assert.equal((await reportService.query('outbound-flow', { page: 1, pageSize: 20 })).total, 0)
+    assert.equal((await reportService.query('walkin', { page: 1, pageSize: 20 })).total, 0)
+
+    const variedProduct = await productService.create({
+      productName: `旧待取货退货验证商品-${verifySeed}`, defaultPrice: 10, isActive: true, o2oStatus: 'listed',
+      specGroups: [{ name: '款式', values: ['甲', '乙'] }],
+      skus: [
+        { skuCode: `LEGACY-A-${verifySeed}`, specValues: { 款式: '甲' }, defaultPrice: 7, currentStock: 7, isActive: true },
+        { skuCode: `LEGACY-B-${verifySeed}`, specValues: { 款式: '乙' }, defaultPrice: 12.5, currentStock: 9, isActive: true },
+      ],
+      limitPerUser: 10,
+    }, adminActor)
+    const returnedSku = variedProduct.skus.find((sku) => Number(sku.defaultPrice) === 7)!
+    const pickedSku = variedProduct.skus.find((sku) => Number(sku.defaultPrice) === 12.5)!
+    const pending = await o2oPreorderService.submit(clientAuth, {
+      clientRequestId: 'discount-price-return-pending',
+      items: [{ productId: variedProduct.id, skuId: returnedSku.id, qty: 1 }, { productId: variedProduct.id, skuId: pickedSku.id, qty: 2 }],
+      pickupContact: '待取货退货验证', isSystemApplied: false,
+    })
+    // 当前待取货入口走改单，旧库仍可能有待处理的待取货退货申请。
+    const pendingReturn = await AppDataSource.getRepository(O2oReturnRequest).save({
+      returnNo: `RO-LEGACY-${verifySeed}`, orderId: pending.order.id, clientUserId: clientAuth.userId,
+      verifyCode: randomUUID(), sourceOrderStatus: 'pending', status: 'pending', totalQty: 1,
+      reason: '历史待取货退货金额回归',
+    })
+    await AppDataSource.getRepository(O2oReturnRequestItem).insert({
+      returnRequestId: pendingReturn.id, productId: variedProduct.id, skuId: returnedSku.id, qty: 1,
+    })
+    await o2oPreorderService.verifyByCode(pendingReturn.verifyCode, adminActor)
+    const afterPendingReturn = await o2oPreorderService.detailById(pending.order.id)
+    assert.equal(afterPendingReturn.order.totalAmount, '25.00')
+    assert.equal(afterPendingReturn.items.find((item) => item.skuId === String(returnedSku.id))?.qty, 0)
+    assert.equal(afterPendingReturn.items.find((item) => item.skuId === String(returnedSku.id))?.lineAmount, '0.00')
+    assert.equal(await AppDataSource.getRepository(BizOutboundOrder).countBy({ sourceDocId: pending.order.id }), 0)
+    assert.equal((await AppDataSource.getRepository(O2oPreorder).findOneByOrFail({ id: pending.order.id })).status, 'pending')
+    const readSkuStock = async (skuId: string) => {
+      const sku = await AppDataSource.getRepository(BaseProductSku).findOneByOrFail({ id: skuId })
+      return [Number(sku.currentStock), Number(sku.preOrderedStock)]
+    }
+    assert.deepEqual(await readSkuStock(returnedSku.id), [7, 0])
+    assert.deepEqual(await readSkuStock(pickedSku.id), [9, 2])
+    await o2oPreorderService.verifyByCode(pending.order.verifyCode, adminActor)
+    assert.deepEqual(await readSkuStock(returnedSku.id), [7, 0])
+    assert.deepEqual(await readSkuStock(pickedSku.id), [7, 0])
+    const logs = AppDataSource.getRepository(InventoryLog)
+    const releases = await logs.findBy({ refType: 'o2o_return_request', refId: String(pendingReturn.id), changeType: 'preorder_release' })
+    const pickups = await logs.findBy({ refType: 'o2o_preorder', refId: pending.order.id, changeType: 'preorder_verify' })
+    assert.deepEqual(releases.map((log) => [String(log.skuId), log.changeQty]), [[String(returnedSku.id), 1]])
+    assert.deepEqual(pickups.map((log) => [String(log.skuId), log.changeQty]), [[String(pickedSku.id), 2]])
+    const pickedOrder = await AppDataSource.getRepository(BizOutboundOrder).findOneByOrFail({ sourceDocId: pending.order.id })
+    assert.equal(normalizeMoney(pickedOrder.totalQty), '2.00')
+    assert.equal(normalizeMoney(pickedOrder.totalAmount), '25.00')
+    const pickedItems = await AppDataSource.getRepository(BizOutboundOrderItem).findBy({ orderId: pickedOrder.id })
+    assert.deepEqual(pickedItems.map((item) => [String(item.skuId), item.lineNo, normalizeMoney(item.lineAmount)]),
+      [[String(pickedSku.id), 1, '25.00']])
+    const pickedReturn = await o2oPreorderService.createReturnRequest(clientAuth, pending.order.id, {
+      reason: '取货后继续退回一件', items: [{ productId: variedProduct.id, skuId: pickedSku.id, qty: 1 }],
+    })
+    await o2oPreorderService.verifyByCode(pickedReturn.verifyCode, adminActor)
+    assert.deepEqual(await readSkuStock(pickedSku.id), [8, 0])
+    const pickedRevision = await AppDataSource.getRepository(OrderRevision).findOneByOrFail({
+      orderUuid: pickedOrder.orderUuid, revisionNo: Number(pickedOrder.editVersion) + 1,
+    })
+    assert.equal(JSON.parse(pickedRevision.beforeSnapshotJson).totalAmount, '25.00')
+    assert.equal(JSON.parse(pickedRevision.afterSnapshotJson).totalAmount, '12.50')
+    pass('旧待取货退完一个规格后可继续取货，库存流水、原额及退货修订按剩余规格计算')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()
     }
-    cleanupSqliteFile()
+    isolation.cleanup()
   }
 }
 

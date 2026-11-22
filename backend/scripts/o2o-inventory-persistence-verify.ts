@@ -12,6 +12,7 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { QueryFailedError } from 'typeorm'
 import type { Connection } from 'mysql2/promise'
 import type { AuthUserContext } from '../src/types/auth.js'
 import type { ClientAuthContext } from '../src/types/client-auth.js'
@@ -67,6 +68,8 @@ try {
   const { AppDataSource } = await import('../src/config/data-source.js')
   const { initializeDatabaseInfrastructure } = await import('../src/database/database-strategy.js')
   const { runInTransaction } = await import('../src/config/transaction-runner.js')
+  const { databaseOperationGate } = await import('../src/database/operation-gate.js')
+  const { readMallCatalogRevision } = await import('../src/services/mall-catalog-revision.service.js')
   const { BaseProduct } = await import('../src/entities/base-product.entity.js')
   const { BaseProductSku } = await import('../src/entities/base-product-sku.entity.js')
   const { BaseStorageLocation } = await import('../src/entities/base-storage-location.entity.js')
@@ -83,6 +86,7 @@ try {
   const { resolvePermissionsByRole } = await import('../src/constants/auth-permissions.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
   const { o2oPreorderService: service } = await import('../src/services/o2o-preorder.service.js')
+  const { inventoryDocService } = await import('../src/services/inventory-doc.service.js')
   const { auditService } = await import('../src/services/audit.service.js')
   const sql: string[] = []
   const normalizeSql = (value: string) => value.replaceAll(String.fromCharCode(96), '').replaceAll('"', '')
@@ -171,6 +175,26 @@ try {
     items: [{ productId: fixture.product.id, skuId: fixture.variants[0]!.id, qty }],
   })
   const verify = (order: Awaited<ReturnType<typeof place>>, operator = actor) => service.verifyByCode(order.order.verifyCode, operator)
+  const returnInputFor = (fixture: Fixture) => ({
+    reason: '库存专项退货', items: [{ productId: fixture.product.id, skuId: fixture.variants[0]!.id, qty: 1 }],
+  })
+  const assertStockAndLatestLog = async (fixture: Fixture, expected: Awaited<ReturnType<typeof stock>>, label: string) => {
+    assert.deepEqual(await stock(fixture), expected, label + ' 商品/SKU 必须与并发结果一致')
+    const event = await logs.findOneOrFail({ where: { productId: fixture.product.id }, order: { id: 'DESC' } })
+    assert.equal(Number(event.afterCurrentStock), expected.current, label + ' 现货流水不一致')
+    assert.equal(Number(event.afterPreorderedStock), expected.held, label + ' 预占流水不一致')
+  }
+  const assertVerifiedReturnCommitted = async (orderId: string, verifyCode: string) => {
+    const request = await AppDataSource.getRepository(O2oReturnRequest).findOneByOrFail({ verifyCode })
+    assert.equal(request.status, 'verified', '已取货退货必须提交核销状态')
+    const original = await outbound.findOneOrFail({
+      where: { sourceDocType: 'o2o_preorder', sourceDocId: orderId }, relations: { items: true },
+    })
+    assert.deepEqual(original.items, [], '退完原单商品后必须移除归零的正式出库明细')
+    assert.equal(Number(original.totalQty), 0, '原正式出库单剩余数量必须归零')
+    assert.equal(Number(original.totalAmount), 0, '原正式出库单剩余金额必须归零')
+    assert.equal(Number(original.editVersion), 2, '原正式出库单修订版本必须递增')
+  }
 
   // 拦截点只暂停真实锁查询；快照、行锁、业务 SQL 和并发事务均由真实 MySQL 执行。
   let pendingGate: { reached: () => void; wait: Promise<void> } | undefined
@@ -190,14 +214,18 @@ try {
     }
     return runner
   }
-  const interleave = async (action: () => Promise<unknown>, concurrent: () => Promise<void>) => {
+  const interleave = async (
+    action: () => Promise<unknown>,
+    concurrent: () => Promise<void>,
+    transaction: 'rr-snapshot' | 'service-default' = 'rr-snapshot',
+  ) => {
     if (mode !== 'mysql') { await concurrent(); return action() }
     let reached!: () => void
     let release!: () => void
     const arrived = new Promise<void>((resolve) => { reached = resolve })
     const wait = new Promise<void>((resolve) => { release = resolve })
     pendingGate = { reached, wait }
-    const running = runInTransaction(async (manager) => {
+    const running = transaction === 'service-default' ? action() : runInTransaction(async (manager) => {
       const isolation = await manager.query('SELECT @@session.transaction_isolation AS isolation') as Array<{ isolation: string }>
       assert.equal(isolation[0]!.isolation, 'REPEATABLE-READ')
       await manager.getRepository(BaseProduct).count() // 明确先建立 RR 普通读快照。
@@ -253,14 +281,12 @@ try {
     // 避免测试门闩等待被 A 间隙锁阻断的新 INSERT，仍由真实改单事务增加一件预占。
     const pendingOther = kind === 'pending-return' ? await place(fixture, 1, clients[1]!) : null
     const own = kind === 'submit' || kind === 'inbound' ? null : await place(fixture)
-    const other = pendingOther ?? (['submit', 'update', 'onsite', 'verified-return', 'inbound'].includes(kind)
+    const other = pendingOther ?? (['submit', 'update', 'onsite', 'inbound'].includes(kind)
       ? await place(fixture, 1, clients[1]!) : null)
     if (kind === 'verified-return') await verify(own!)
     let returnRequest: { verifyCode: string } | null = null
     if (kind === 'pending-return' || kind === 'verified-return') {
-      const returnInput = {
-        reason: '库存专项退货', items: [{ productId: fixture.product.id, skuId: fixture.variants[0]!.id, qty: 1 }],
-      }
+      const returnInput = returnInputFor(fixture)
       if (kind === 'pending-return') {
         const beforeDenied = await stock(fixture)
         await assert.rejects(service.createReturnRequest(clients[0]!, own!.order.id, returnInput), (error: unknown) => {
@@ -322,7 +348,12 @@ try {
         await service.updateMyOrder(clients[1]!, other!.order.id, {
           items: [{ productId: fixture.product.id, skuId: fixture.variants[0]!.id, qty: 2 }],
         })
-      } else if (kind === 'verified-return' || kind === 'inbound') {
+      } else if (kind === 'verified-return') {
+        // 外层 RR 已锁住原正式单的明细范围。通过其他出库扣同一规格，让真实扣减能在门闩前提交。
+        await inventoryDocService.create({
+          docType: 'other_out', reasonCode: 'internal_use', items: [{ skuId: fixture.variants[0]!.id, qty: 1 }],
+        }, actorB)
+      } else if (kind === 'inbound') {
         await verify(other!, actorB)
       } else if (kind === 'verify') {
         await service.inboundStock(fixture.product.id, 1, actorB, '交错真实入库', fixture.variants[0]!.id)
@@ -330,6 +361,12 @@ try {
         await place(fixture, 1, clients[1]!)
       }
       const afterB = await stock(fixture)
+      if (kind === 'verified-return') {
+        assert.deepEqual(afterB, {
+          current: before.current - 1, held: before.held,
+          skuCurrent: [before.skuCurrent[0]! - 1], skuHeld: before.skuHeld,
+        }, '其他出库提交后商品/SKU 现货各减一件，预占保持原值')
+      }
       expected = {
         current: afterB.current + delta[0]!, held: afterB.held + delta[1]!,
         skuCurrent: [afterB.skuCurrent[0]! + delta[0]!], skuHeld: [afterB.skuHeld[0]! + delta[1]!],
@@ -337,11 +374,8 @@ try {
       const target = delta[0] ? 'current' : 'held'
       assert.equal(expected[target], before[target], kind + ' 必须命中目标值等于旧快照')
     })
-    assert.deepEqual(await stock(fixture), expected, kind + ' 商品/SKU 必须与并发结果一致')
-    const event = await logs.findOne({ where: { productId: fixture.product.id }, order: { id: 'DESC' } })
-    assert.ok(event)
-    assert.equal(Number(event.afterCurrentStock), expected.current, kind + ' 现货流水不一致')
-    assert.equal(Number(event.afterPreorderedStock), expected.held, kind + ' 预占流水不一致')
+    await assertStockAndLatestLog(fixture, expected, kind)
+    if (kind === 'verified-return') await assertVerifiedReturnCommitted(own!.order.id, returnRequest!.verifyCode)
     if (kind === 'cancel') await assert.rejects(service.cancelMyOrder(clients[0]!, own!.order.id), /取消|撤回/)
     if (kind === 'admin-cancel') await assert.rejects(service.cancelOrderByAdmin({
       orderId: own!.order.id, reason: '重复管理员取消', actor,
@@ -352,6 +386,30 @@ try {
     if (kind === 'timeout') assert.equal((await service.cancelTimeoutOrders()).cancelledCount, 0)
     assert.deepEqual(await stock(fixture), expected, kind + ' 重复动作不能再次改库存')
     console.log('[o2o-inventory] ' + mode + ' ' + kind + ' 库存/流水一致')
+  }
+
+  if (mode === 'mysql') {
+    const fixture = await createProduct()
+    const original = await place(fixture)
+    const pickup = await place(fixture, 1, clients[1]!)
+    await verify(original)
+    const request = await service.createReturnRequest(clients[0]!, original.order.id, returnInputFor(fixture))
+    const queriesBeforeReturn = sql.length
+    // 正常核销入口自行开启 RC 事务，锁住原正式单明细后，另一张单仍可完成取货并插入自己的明细。
+    await interleave(() => service.verifyByCode(request.verifyCode, actor), async () => {
+      assert.ok(sql.slice(queriesBeforeReturn).some((query) => /\bFROM biz_outbound_order_item\b.*\bFOR UPDATE\b/is.test(query)),
+        '放行取货前，退货事务必须已锁住原正式出库明细')
+      await verify(pickup, actorB)
+      assert.deepEqual(await stock(fixture), { current: 8, held: 0, skuCurrent: [8], skuHeld: [0] },
+        '同规格取货必须在放行退货前提交现货和预占扣减')
+      const pickupOutbound = await outbound.findOneOrFail({
+        where: { sourceDocType: 'o2o_preorder', sourceDocId: pickup.order.id }, relations: { items: true },
+      })
+      assert.equal(pickupOutbound.items?.length, 1, '并发取货必须提交自己的正式出库明细')
+    }, 'service-default')
+    await assertStockAndLatestLog(fixture, { current: 9, held: 0, skuCurrent: [9], skuHeld: [0] }, 'RC 退货/取货')
+    await assertVerifiedReturnCommitted(original.order.id, request.verifyCode)
+    console.log('[o2o-inventory] mysql RC 已取货退货与同规格取货均已提交')
   }
 
   // 同商品多 SKU、历史重复明细：两个 SKU 只更新一次，商品只更新一次。
@@ -438,6 +496,55 @@ try {
   assert.equal(await audits.count(), beforeFailure.audits)
   assert.equal((await preorders.findOneByOrFail({ id: failedOrder.order.id })).status, 'pending')
   await verify(failedOrder)
+
+  // 一个到期单失败不回滚其余单；已进入事务的单完成后，冻结阻止本轮开启下一笔。
+  const timeouts = [await createProduct(), await createProduct(), await createProduct()]
+  const due = []
+  const cutoff = Date.now() - 60_000
+  for (const [index, fixture] of timeouts.entries()) {
+    const order = await place(fixture)
+    await preorders.update(order.order.id, { timeoutAt: new Date(cutoff + index * 1000) })
+    due.push(order.order.id)
+  }
+  const [failingId, committingId, frozenId] = due as [string, string, string]
+  const beforeRecycleRevision = readMallCatalogRevision()
+  let freeze: ReturnType<typeof databaseOperationGate.freeze> | undefined
+  let committingAttempts = 0
+  auditService.record = async (...args: Parameters<typeof originalAudit>) => {
+    if (args[0].actionType !== 'o2o.preorder.cancel_by_system') return originalAudit.apply(auditService, args)
+    if (args[0].targetId === failingId) throw new Error('O2O_TIMEOUT_AUDIT_FAILURE')
+    if (args[0].targetId === committingId) {
+      committingAttempts += 1
+      if (mode === 'mysql' && committingAttempts === 1) {
+        throw new QueryFailedError('超时事务短重试夹具', [], Object.assign(new Error('受控锁冲突'), {
+          code: 'ER_LOCK_DEADLOCK', errno: 1213,
+        }))
+      }
+      const saved = await originalAudit.apply(auditService, args)
+      freeze = databaseOperationGate.freeze()
+      return saved
+    }
+    return originalAudit.apply(auditService, args)
+  }
+  try {
+    assert.equal((await service.cancelTimeoutOrders()).cancelledCount, 1)
+    assert.ok(freeze?.active, '首笔已提交的回收触发冻结')
+    assert.equal(readMallCatalogRevision(), beforeRecycleRevision + 1, '冻结不吞掉本批已提交释放的目录失效')
+  } finally {
+    auditService.record = originalAudit
+    freeze?.release()
+  }
+  assert.equal(committingAttempts, mode === 'mysql' ? 2 : 1)
+  assert.equal((await preorders.findOneByOrFail({ id: failingId })).status, 'pending')
+  assert.equal((await preorders.findOneByOrFail({ id: committingId })).status, 'cancelled')
+  assert.equal((await preorders.findOneByOrFail({ id: frozenId })).status, 'pending')
+  assert.deepEqual(await Promise.all(timeouts.map(async (fixture) => (await stock(fixture)).held)), [1, 0, 1])
+  assert.equal((await service.cancelTimeoutOrders()).cancelledCount, 2)
+  assert.equal((await service.cancelTimeoutOrders()).cancelledCount, 0)
+  for (const id of due) {
+    assert.equal(await logs.countBy({ refId: id, changeType: 'preorder_release' }), 1, '每单只释放一次预占')
+    assert.equal(await audits.countBy({ actionType: 'o2o.preorder.cancel_by_system', targetId: id }), 1, '回滚与重试不得重复审计')
+  }
 
   // 两商品逆序输入并发下单、不同操作者并发核销，不扩大到全仓压力测试。
   const left = await createProduct()

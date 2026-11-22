@@ -124,7 +124,7 @@ try {
   process.env.APP_PROFILE = 'sqlite-legacy-schema-upgrade-verify'
 
   const { AppDataSource } = await import('../src/config/data-source.js')
-  const { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } = await import('../src/config/database-bootstrap.js')
+  const { backfillSqliteOrderAmendmentData, initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } = await import('../src/config/database-bootstrap.js')
   const { initializeDatabaseInfrastructure } = await import('../src/database/database-strategy.js')
   dataSource = AppDataSource
 
@@ -511,6 +511,58 @@ try {
   )
 
   console.log('OK P1-B/P2-B/P2-C：SQLite 旧库占用表结构补齐（新唯一索引 + 非空约束 + 旧索引降级）、存活 YZ 商品占用自动回填（含非当前前缀场景）、以及历史前缀记录按 product_code 结构反推（不套用当前前缀）均验收通过')
+
+  // 已完整升级的存量库仅缺性能索引时，应就地补齐并清理旧索引。
+  await AppDataSource.query('DROP INDEX idx_biz_inbound_supplier_deleted_status_id')
+  await AppDataSource.query('CREATE INDEX IF NOT EXISTS idx_biz_inbound_supplier_id ON biz_inbound_order (supplier_id)')
+  await AppDataSource.query('CREATE INDEX idx_biz_inbound_supplier_deleted_status_id ON biz_inbound_order (is_deleted, supplier_id)')
+  await AppDataSource.query('DROP INDEX idx_notification_event_pending_claim')
+  await AppDataSource.query('DROP INDEX idx_client_user_real_name_lower')
+  assert.equal((await initializeDatabaseSchemaIfNeeded(AppDataSource)).action, 'skipped')
+  const inboundPerformanceIndex = await AppDataSource.query('PRAGMA index_info(idx_biz_inbound_supplier_deleted_status_id)') as Array<{ name: string }>
+  assert.deepEqual(inboundPerformanceIndex.map((column) => column.name), ['supplier_id', 'is_deleted', 'status', 'id'])
+  const supplierForeignKeyIndex = await AppDataSource.query('PRAGMA index_info(idx_biz_inbound_supplier_id)') as Array<{ name: string }>
+  assert.deepEqual(supplierForeignKeyIndex.map((column) => column.name), ['supplier_id'], '保留与实体一致的独立供应方索引')
+  const notificationClaimIndex = await AppDataSource.query('PRAGMA index_info(idx_notification_event_pending_claim)') as Array<{ name: string }>
+  assert.deepEqual(notificationClaimIndex.map((column) => column.name), ['status', 'next_attempt_at', 'id'])
+  const nameLookupPlan = await AppDataSource.query(
+    "EXPLAIN QUERY PLAN SELECT id FROM client_user WHERE LOWER(real_name) = 'alice'",
+  ) as Array<{ detail: string }>
+  assert.ok(nameLookupPlan.some((step) => step.detail.includes('idx_client_user_real_name_lower')))
+
+  // 最大业务号位于跨越 500 条边界的下一批，且边界 ID 超过 JS 安全整数。
+  await AppDataSource.query(`
+    WITH RECURSIVE offsets(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM offsets WHERE n < 500)
+    INSERT INTO biz_outbound_order (id, order_uuid, show_no, business_no, idempotency_key, order_type)
+    SELECT 9007199254740992 + n, 'perf-walkin-' || n, printf('OUT-W-%06d', 500000 + n),
+           printf('hyyz%06d', CASE WHEN n = 0 THEN 999900 ELSE 500000 + n END), 'perf-order-' || n, 'walkin'
+    FROM offsets
+  `)
+  await AppDataSource.query("DELETE FROM business_sequence WHERE sequence_key = 'order.business.walkin'")
+  const { orderBusinessNoService } = await import('../src/services/order-business-no.service.js')
+  const suggestion = await orderBusinessNoService.suggestForAmendment('walkin', 1, [], AppDataSource.manager)
+  assert.deepEqual(suggestion.businessNos, ['hyyz999901'], '缺序列时必须读到下一批中的物理最大业务号')
+  await initializeDatabaseSchemaIfNeeded(AppDataSource)
+  const recoveredSequence = await AppDataSource.query(
+    "SELECT current_value AS value FROM business_sequence WHERE sequence_key = 'order.business.walkin'",
+  ) as Array<{ value: number }>
+  assert.equal(recoveredSequence[0]?.value, 999900, '启动补序列必须保留跨批物理最大业务号')
+
+  const namespaceScans: string[] = []
+  const logQuery = AppDataSource.logger.logQuery
+  AppDataSource.logger.logQuery = (sql, ...args) => {
+    if (/AS "cursor"[\s\S]+FROM "(?:biz_outbound_order|o2o_preorder)"/.test(sql)) namespaceScans.push(sql)
+    logQuery.call(AppDataSource.logger, sql, ...args)
+  }
+  try {
+    await initializeDatabaseSchemaIfNeeded(AppDataSource)
+    assert.equal(namespaceScans.length, 0, '启动时已就绪的六套编号不再扫描物理订单')
+    await AppDataSource.query("UPDATE biz_outbound_order SET business_no = 'invalid-fixture' WHERE id = 9007199254740992")
+    await assert.rejects(() => backfillSqliteOrderAmendmentData(AppDataSource), /命名空间规则/)
+    assert.ok(namespaceScans.length > 0, '显式修复仍须扫描并拒绝历史坏号')
+  } finally {
+    AppDataSource.logger.logQuery = logQuery
+  }
 } finally {
   if (dataSource?.isInitialized) {
     await dataSource.destroy()

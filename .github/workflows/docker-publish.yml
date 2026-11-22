@@ -29,7 +29,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: docker-publish-${{ github.ref }}
@@ -60,7 +59,9 @@ jobs:
       dockerhub_enabled: ${{ steps.prepare.outputs.dockerhub_enabled }}
     steps:
       - name: 检出代码
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: 计算镜像仓库与推送规则
         id: prepare
@@ -78,6 +79,9 @@ jobs:
   # 构建产物先按 digest 推入 GHCR 暂存，正式标签交给 merge 作业统一打。
   # ------------------------------
   build:
+    permissions:
+      contents: read
+      packages: write
     needs: prepare
     runs-on: ${{ matrix.platform == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     strategy:
@@ -100,21 +104,23 @@ jobs:
       STAGING_IMAGE: ghcr.io/${{ needs.prepare.outputs.gh_owner }}/y-link-${{ matrix.image }}
     steps:
       - name: 检出代码
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       - name: 启用 Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # 已配置的 Docker Hub 凭据可避免公共 ECR 的匿名拉取限流；无凭据时保留原默认源。
       - name: 登录 Docker Hub
         if: ${{ needs.prepare.outputs.dockerhub_enabled == 'true' }}
-        uses: docker/login-action@v4
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: 登录 GitHub Container Registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -124,19 +130,19 @@ jobs:
       # 无法留到 merge 阶段补，因此这里按暂存仓库名单独生成一份元数据。
       - name: 生成镜像标签元数据
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.STAGING_IMAGE }}
 
       - name: 构建并按 digest 推送
         id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
           platforms: linux/${{ matrix.platform }}
           build-args: |
-            Y_LINK_NODE_IMAGE=${{ needs.prepare.outputs.dockerhub_enabled == 'true' && 'docker.io/library/node:22.23.4-bookworm-slim' || 'public.ecr.aws/docker/library/node:22.23.4-bookworm-slim' }}
+            Y_LINK_NODE_IMAGE=${{ needs.prepare.outputs.dockerhub_enabled == 'true' && 'docker.io/library/node:22.23.5-bookworm-slim' || 'public.ecr.aws/docker/library/node:22.23.5-bookworm-slim' }}
           labels: ${{ steps.meta.outputs.labels }}
           # 关闭 provenance / sbom，确保 digest 直接指向平台镜像本身，便于清单合并。
           provenance: false
@@ -160,7 +166,7 @@ jobs:
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: 上传 digest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: digests-${{ matrix.image }}-${{ matrix.platform }}
           path: /tmp/digests/*
@@ -172,6 +178,9 @@ jobs:
   # 并按元数据规则一次性打到所有已启用的镜像仓库标签上。
   # ------------------------------
   merge:
+    permissions:
+      contents: read
+      packages: write
     needs: [prepare, build]
     runs-on: ubuntu-latest
     strategy:
@@ -182,7 +191,9 @@ jobs:
       STAGING_IMAGE: ghcr.io/${{ needs.prepare.outputs.gh_owner }}/y-link-${{ matrix.image }}
     steps:
       - name: 检出代码
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
 
       # 镜像仓库清单含 Docker Hub 命名空间（被判定为 secret），不能经 job output 跨作业传递，
       # 只能在本作业内就地生成；step output 在同一作业内不受该限制。
@@ -199,24 +210,24 @@ jobs:
         run: bash .github/scripts/resolve-image-repositories.sh "${{ matrix.image }}"
 
       - name: 下载 digest
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: /tmp/digests
           pattern: digests-${{ matrix.image }}-*
           merge-multiple: true
 
       - name: 启用 Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: 登录 Docker Hub
         if: ${{ needs.prepare.outputs.dockerhub_enabled == 'true' }}
-        uses: docker/login-action@v4
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: 登录 GitHub Container Registry
-        uses: docker/login-action@v4
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -224,7 +235,7 @@ jobs:
 
       - name: 登录阿里云 ACR
         if: ${{ needs.prepare.outputs.acr_enabled == 'true' }}
-        uses: docker/login-action@v4
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ${{ needs.prepare.outputs.acr_registry }}
           username: ${{ secrets.ACR_USERNAME }}
@@ -232,7 +243,7 @@ jobs:
 
       - name: 生成镜像元数据
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         env:
           # imagetools 合并出的是 image index，注解层级需要对应改成 index。
           DOCKER_METADATA_ANNOTATIONS_LEVELS: index

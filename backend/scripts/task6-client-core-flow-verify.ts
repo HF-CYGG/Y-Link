@@ -14,7 +14,7 @@
  * - 若后端 O2O 规则新增字段，优先补齐“订单编辑专项断言”，确保返回详情、库存与修改次数仍可复验。
  */
 
-import { resolveIssueVerificationRoot } from './issue-verification-paths.js'
+import { createVerificationIsolation } from './verification-isolation.js'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -45,7 +45,8 @@ const backendRoot = path.resolve(scriptsRoot, '..')
 const projectRoot = path.resolve(backendRoot, '..')
 const runtimeRoot = path.resolve(projectRoot, '.local-dev')
 const reportPath = path.resolve(runtimeRoot, 'client-core-flow-task6.report.json')
-const sqliteRoot = resolveIssueVerificationRoot(path.resolve(backendRoot, 'data', 'local-dev'))
+const verificationIsolation = createVerificationIsolation('task6-client-core-flow-verify')
+const sqliteRoot = verificationIsolation.rootDir
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqlitePath = path.resolve(sqliteRoot, `task6-client-core-flow-${verifySeed}.sqlite`)
 const adminPassword = `Task6Admin_${verifySeed}_Aa1!`
@@ -53,6 +54,7 @@ const adminPassword = `Task6Admin_${verifySeed}_Aa1!`
 // 必须先于后端运行时模块加载：env.ts 在模块初始化时固化数据库配置。
 process.env.APP_PROFILE = `task6-client-core-flow-${verifySeed}`
 process.env.DB_TYPE = 'sqlite'
+verificationIsolation.seal({ type: 'sqlite', database: sqlitePath })
 process.env.DB_SYNC = 'false'
 process.env.SQLITE_DB_PATH = sqlitePath
 process.env.INIT_ADMIN_PASSWORD = adminPassword
@@ -63,7 +65,6 @@ const [
   { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime },
   { BaseProduct },
   { O2oPreorder },
-  { SystemConfig },
   { SysUser },
   { authService },
   { clientAuthService },
@@ -77,7 +78,6 @@ const [
   import('../src/config/database-bootstrap.js'),
   import('../src/entities/base-product.entity.js'),
   import('../src/entities/o2o-preorder.entity.js'),
-  import('../src/entities/system-config.entity.js'),
   import('../src/entities/sys-user.entity.js'),
   import('../src/services/auth.service.js'),
   import('../src/services/client-auth.service.js'),
@@ -206,8 +206,10 @@ const readOptionalJson = <T>(filePath: string): T | null => {
 let scriptAdminActor: AuthUserContext
 
 const ensureReady = async () => {
+  await verificationIsolation.assertTarget(AppDataSource)
   prepareDatabaseRuntime()
   if (!AppDataSource.isInitialized) {
+    await verificationIsolation.assertTarget(AppDataSource)
     await AppDataSource.initialize()
   }
   await initializeDatabaseSchemaIfNeeded(AppDataSource)
@@ -243,6 +245,16 @@ const configureVerificationProviderForTesting = async () => {
     },
     scriptAdminActor,
   )
+}
+
+const setPreorderLimitQtyForTesting = async (limitQty: number): Promise<number> => {
+  const { autoCancelEnabled, autoCancelHours, limitEnabled, storeBusinessHoursText, mallAnnouncementText, limitQty: previous } =
+    await systemConfigService.getO2oRuleConfigs()
+  // 与真实配置更新共用提交后失效；场景切换后，预订必须读取该场景的限购。
+  await systemConfigService.updateO2oRuleConfigs({
+    autoCancelEnabled, autoCancelHours, limitEnabled, storeBusinessHoursText, mallAnnouncementText, limitQty,
+  }, scriptAdminActor)
+  return previous
 }
 
 const registerAndLoginClient = async (seed: number): Promise<ClientAuthContext> => {
@@ -336,20 +348,32 @@ const verifyOrderEditStaticRegression = () => {
     /location\.reload\(|router\.go\(\s*0\s*\)|router\.replace\(route\.fullPath\)/,
     '订单编辑成功路径疑似退化为依赖整页刷新',
   )
+  const summaryRefreshSource = /const refreshSingleOrderSummary = async[\s\S]*?(?=\nconst startClientOrderRefreshSubscription)/.exec(ordersSource)?.[0] ?? ''
+  assert.match(
+    summaryRefreshSource,
+    /if \(effectiveKeyword\.value\)\s*\{\s*await triggerSilentOrderRefresh\(true\)\s*return\s*\}[\s\S]*?await getMyO2oPreorderSummary\(orderId\)[\s\S]*?clientOrderStore\.syncOrderSummary\(result, \{ preserveFresh: true \}\)/,
+    '关键词搜索应重新校验整份查询，无关键词时才请求并更新单条摘要',
+  )
   assert.match(
     ordersSource,
-    /const refreshSingleOrderSummary = async[\s\S]*clientOrderStore\.syncOrderSummary\(result, \{ preserveFresh: true \}\)/,
-    '订单列表页缺少单条摘要增量刷新逻辑',
+    /const triggerSilentOrderRefresh = async[\s\S]*?await loadOrders\(true, \{ silent: true, preserveScroll: true \}\)/,
+    '搜索结果重新校验应调用整份列表的静默刷新并保留滚动位置',
   )
   assert.match(
     ordersSource,
     /subscribeClientOrderRefresh\(async \(event\) => \{[\s\S]*refreshSingleOrderSummary\(event\.orderId, \{ silent: true \}\)/,
     '订单列表页缺少订单刷新广播订阅逻辑',
   )
+  const summarySyncSource = /const syncOrderSummary = \(nextOrder: O2oPreorderSummary[\s\S]*?(?=\n  const clearAll)/.exec(storeSource)?.[0] ?? ''
   assert.match(
-    storeSource,
-    /const syncOrderSummary = \(nextOrder: O2oPreorderSummary[\s\S]*matchesClientOrderQuery[\s\S]*removeOrder[\s\S]*upsertOrder/,
-    '客户端订单 Store 缺少按当前筛选条件执行局部同步的核心逻辑',
+    summarySyncSource,
+    /if \(!hasCurrentResults\.value && orders\.value\.length > 0\) return\s+if \(keyword\.value && !orders\.value\.some\(\(item\) => item\.id === nextOrder\.id\)\) \{\s*markStale\(\)\s*return\s*\}/,
+    '摘要只可回写当前查询已确认的搜索命中订单，无关键词时仍可按状态同步',
+  )
+  assert.match(
+    summarySyncSource,
+    /if \(!matchesClientOrderStatus\(nextOrder, activeStatus\.value\)\) \{\s*removeOrder\(nextOrder\.id, freshness\)\s*return\s*\}[\s\S]*?upsertOrder\(nextOrder, freshness\)/,
+    '当前查询的摘要回写仍需剔除状态不符的订单',
   )
   assert.match(
     summarySource,
@@ -445,10 +469,7 @@ const measurePreorderScenario = async (clientAuth: ClientAuthContext) => {
   const product = await createListedProduct(`preorder-${Date.now()}`, 400)
   const submitSamples: number[] = []
   const orderIds: string[] = []
-  const configRepo = AppDataSource.getRepository(SystemConfig)
-  const limitConfig = await configRepo.findOneByOrFail({ configKey: 'o2o.limit_qty' })
-  const originalLimitQty = limitConfig.configValue
-  await configRepo.update({ id: limitConfig.id }, { configValue: '20' })
+  const originalLimitQty = await setPreorderLimitQtyForTesting(20)
 
   try {
     for (let index = 0; index < 5; index += 1) {
@@ -465,7 +486,7 @@ const measurePreorderScenario = async (clientAuth: ClientAuthContext) => {
       assert.equal(detail.order.status, 'pending')
     }
   } finally {
-    await configRepo.update({ id: limitConfig.id }, { configValue: originalLimitQty })
+    await setPreorderLimitQtyForTesting(originalLimitQty)
   }
 
   const refreshedProduct = await AppDataSource.getRepository(BaseProduct).findOneByOrFail({ id: product.id })
@@ -729,10 +750,7 @@ const writeReport = (status: 'passed' | 'failed', errorMessage: string | null = 
 const main = async () => {
   await ensureReady()
   await configureVerificationProviderForTesting()
-  const configRepo = AppDataSource.getRepository(SystemConfig)
-  const limitConfig = await configRepo.findOneByOrFail({ configKey: 'o2o.limit_qty' })
-  const originalLimitQty = limitConfig.configValue
-  await configRepo.update({ id: limitConfig.id }, { configValue: '999' })
+  const originalLimitQty = await setPreorderLimitQtyForTesting(999)
   try {
     const clientAuth = await measureRegistrationScenario()
     await measureMallScenario()
@@ -740,7 +758,7 @@ const main = async () => {
     await measureOrderQueryScenario(clientAuth)
     await measureOrderEditScenario(clientAuth)
   } finally {
-    await configRepo.update({ id: limitConfig.id }, { configValue: originalLimitQty })
+    await setPreorderLimitQtyForTesting(originalLimitQty)
   }
 }
 

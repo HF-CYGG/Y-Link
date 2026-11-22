@@ -106,6 +106,10 @@ try {
   assert.equal(shouldAllowWriteDuringDatabaseMaintenance('HEAD', '/api/client-auth/captcha'), false)
   assert.equal(shouldAllowWriteDuringDatabaseMaintenance('OPTIONS', '/api/client-auth/capabilities'), false)
   assert.equal(shouldAllowWriteDuringDatabaseMaintenance('POST', '/api/products'), false)
+  assert.equal(shouldAllowWriteDuringDatabaseMaintenance('POST', '/api/data-maintenance/db-migration/switch'), false)
+  assert.equal(shouldAllowWriteDuringDatabaseMaintenance('POST', '/api/data-maintenance/db-migration/switch', { taskId: 'owned', activeTaskId: 'owned' }), true)
+  assert.equal(shouldAllowWriteDuringDatabaseMaintenance('POST', '/api/data-maintenance/db-migration/switch', { taskId: 'other', activeTaskId: 'owned' }), false)
+  assert.equal(shouldAllowWriteDuringDatabaseMaintenance('POST', '/api/data-maintenance/db-migration/tasks/owned/run', { taskId: 'owned', activeTaskId: 'owned' }), false)
   assert.equal(
     shouldAllowWriteDuringDatabaseMaintenance('POST', '/api/data-maintenance/db-migration/rollback'),
     true,

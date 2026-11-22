@@ -142,7 +142,7 @@ const webauthnVerifySchema = z.object({
       attestationObject: z.string().min(1).max(65536),
       transports: z.array(z.string().max(32)).max(16).optional(),
     }).passthrough(),
-    clientExtensionResults: z.record(z.unknown()),
+    clientExtensionResults: z.record(z.string(), z.unknown()),
   }).passthrough(),
 })
 const webauthnLoginVerifySchema = z.object({
@@ -155,7 +155,7 @@ const webauthnLoginVerifySchema = z.object({
       signature: z.string().min(1).max(8192),
       userHandle: z.string().min(1).max(2048).nullable().optional(),
     }).passthrough(),
-    clientExtensionResults: z.record(z.unknown()),
+    clientExtensionResults: z.record(z.string(), z.unknown()),
   }).passthrough(),
 })
 

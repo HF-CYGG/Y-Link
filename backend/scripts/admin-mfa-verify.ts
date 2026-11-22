@@ -39,6 +39,8 @@ process.env.YLINK_ADMIN_GLOBAL_FAILURE_THRESHOLD = '100000'
 
 const { AppDataSource } = await import('../src/config/data-source.js')
 const bootstrap = await import('../src/config/database-bootstrap.js')
+const { runInTransaction } = await import('../src/config/transaction-runner.js')
+const { DatabaseOverloadedError } = await import('../src/database/database-errors.js')
 const { authService } = await import('../src/services/auth.service.js')
 const { systemConfigService } = await import('../src/services/system-config.service.js')
 const { notificationService } = await import('../src/services/notification.service.js')
@@ -496,34 +498,78 @@ async function verifyPermanentDeleteAndCli() {
   assert.match(cliAudit?.detailJson ?? '', /"via":"cli"/, '命令行重置写审计并标明来源')
 }
 
-/** 绑定事务提交后票据清理失败（模拟 Redis 抖动）时，仍须返回唯一一次展示的恢复码。 */
-async function verifyCleanupFailureKeepsRecoveryCodes() {
+/** 验证绑定尝试额度、写队列过载恢复和恢复码单次展示。 */
+async function verifyEnrollmentTicketConsumption() {
   const adminActor = await contextOf('admin')
-  await userService.create({ username: 'mfa-cleanup-target', password: OPERATOR_PASSWORD, displayName: '票据清理失败账号', role: 'operator', status: 'enabled' }, adminActor)
-  const login = await authService.login({ username: 'mfa-cleanup-target', password: OPERATOR_PASSWORD })
+  await userService.create({ username: 'mfa-ticket-target', password: OPERATOR_PASSWORD, displayName: '绑定票据回归账号', role: 'operator', status: 'enabled' }, adminActor)
+  const login = await authService.login({ username: 'mfa-ticket-target', password: OPERATOR_PASSWORD })
   assert.ok('token' in login, '绑定前应取得真实登录会话')
   const auth = await authService.resolveAuthUserByToken(login.token)
   const enrollment = await adminMfaService.beginEnrollment(auth, { currentPassword: OPERATOR_PASSWORD })
   plaintextSecrets.push(enrollment.secret)
-  // 只在确认绑定这一步模拟票据删除失败，登录与发起绑定照常执行。
-  const originalDelete = EphemeralTicketStore.prototype.delete
-  let failedDeletes = 0
-  EphemeralTicketStore.prototype.delete = async function () {
-    failedDeletes += 1
+  const wrongCode = wrongCodeFor(enrollment.secret)
+  const errors = await Promise.allSettled(Array.from({ length: 8 }, () => adminMfaService.confirmEnrollment(auth, wrongCode)))
+  const reasons = errors.map((result) => {
+    assert.equal(result.status, 'rejected')
+    assert.ok(result.reason instanceof BizError)
+    return result.reason
+  })
+  assert.equal(reasons.filter((error) => error.statusCode === 400).length, 5)
+  assert.equal(reasons.filter((error) => error.statusCode === 409).length, 3)
+  assert.equal(reasons.filter((error) => /错误次数过多/.test(error.message)).length, 1)
+  await assert.rejects(adminMfaService.confirmEnrollment(auth, codeAt(enrollment.secret, currentTotpStep())),
+    (error) => error instanceof BizError && error.statusCode === 409)
+
+  const current = await adminMfaService.beginEnrollment(auth, { currentPassword: OPERATOR_PASSWORD })
+  plaintextSecrets.push(current.secret)
+  const correctCode = codeAt(current.secret, currentTotpStep())
+  const originalVerify = EphemeralTicketStore.prototype.verifyAndConsume
+  EphemeralTicketStore.prototype.verifyAndConsume = function (key) {
+    const pending = this.get(key) as { attemptsLeft?: number } | undefined
+    assert.equal(pending?.attemptsLeft, 5, '滚动升级时旧实例仍需从待确认票据读取尝试上限')
     throw new BizError('安全票据服务暂不可用，请稍后重试', 503)
   }
-  let recoveryCodes: string[]
   try {
-    recoveryCodes = (await adminMfaService.confirmEnrollment(auth, codeAt(enrollment.secret, currentTotpStep()))).recoveryCodes
+    await assert.rejects(adminMfaService.confirmEnrollment(auth, correctCode),
+      (error) => error instanceof BizError && error.statusCode === 503)
+    assert.equal(await AppDataSource.getRepository(SysUserMfa).countBy({ userId: String(auth.userId) }), 0)
   } finally {
-    EphemeralTicketStore.prototype.delete = originalDelete
+    EphemeralTicketStore.prototype.verifyAndConsume = originalVerify
   }
-  plaintextSecrets.push(...recoveryCodes)
-  assert.ok(failedDeletes > 0, '应走到绑定提交后的票据清理')
-  assert.ok(recoveryCodes.length > 0, '票据清理失败时仍须返回恢复码')
+  for (let index = 0; index < 4; index += 1) {
+    await assert.rejects(adminMfaService.confirmEnrollment(auth, wrongCodeFor(current.secret)),
+      (error) => error instanceof BizError && error.statusCode === 400 && /动态码不正确/.test(error.message))
+  }
+  let signalAdmitted!: () => void
+  const admitted = new Promise<void>((resolve) => { signalAdmitted = resolve })
+  let releaseWriter!: () => void
+  const writerBarrier = new Promise<void>((resolve) => { releaseWriter = resolve })
+  const heldWriter = runInTransaction(async () => {
+    signalAdmitted()
+    await writerBarrier
+  })
+  try {
+    await Promise.race([admitted, heldWriter])
+    await assert.rejects(adminMfaService.confirmEnrollment(auth, correctCode),
+      (error) => error instanceof DatabaseOverloadedError && error.reason === 'queue_timeout' && error.statusCode === 503,
+      'SQLite 写事务未准入时必须保留原绑定票据')
+  } finally {
+    releaseWriter()
+    await heldWriter
+  }
+  assert.equal(await AppDataSource.getRepository(SysUserMfa).countBy({ userId: String(auth.userId) }), 0)
+  const retryCode = codeAt(current.secret, currentTotpStep())
+  const confirmations = await Promise.allSettled(Array.from({ length: 2 },
+    () => adminMfaService.confirmEnrollment(auth, retryCode)))
+  const successes = confirmations.flatMap((result) => result.status === 'fulfilled' ? [result.value] : [])
+  assert.equal(successes.length, 1, '同一张票据并发确认只能成功一次')
+  assert.equal(successes[0]?.recoveryCodes.length, 10)
+  plaintextSecrets.push(...successes[0]!.recoveryCodes)
+  const rejected = confirmations.find((result) => result.status === 'rejected')
+  assert.ok(rejected?.reason instanceof BizError && rejected.reason.statusCode === 409)
   const record = await AppDataSource.getRepository(SysUserMfa).createQueryBuilder('mfa').addSelect('mfa.totpSecretSealed')
     .where('mfa.user_id = :userId', { userId: String(auth.userId) }).getOne()
-  assert.ok(record?.totpSecretSealed, '票据清理失败不影响已提交的绑定')
+  assert.ok(record?.totpSecretSealed, '有效票据应提交加密绑定')
 }
 
 async function verifyAuditNeverStoresSecrets() {
@@ -553,9 +599,9 @@ try {
   const adminWithMfa = await verifyKeyMismatchFallback()
   await verifyAdminResetFactorFailureAccounting(adminWithMfa)
   await verifyPermanentDeleteAndCli()
-  await verifyCleanupFailureKeepsRecoveryCodes()
+  await verifyEnrollmentTicketConsumption()
   await verifyAuditNeverStoresSecrets()
-  console.log('[admin-mfa-verify] 管理端两步验证回归通过：绑定与落库加密、两段登录、防重放、恢复码一次性、票据次数与账号锁定、并发单次成功、停用与重生成、管理员重置与旧票据作废、用户列表状态、密钥不匹配降级、永久删除联动、命令行重置、票据清理失败仍返回恢复码、审计不落明文')
+  console.log('[admin-mfa-verify] 管理端两步验证回归通过：绑定与落库加密、两段登录、防重放、恢复码一次性、票据次数与账号锁定、并发单次成功、停用与重生成、管理员重置与旧票据作废、用户列表状态、密钥不匹配降级、永久删除联动、命令行重置、绑定票据耗尽、存储不可用、写队列过载重试与单次展示恢复码、审计不落明文')
 } finally {
   if (server) {
     await new Promise<void>((resolve) => server!.close(() => resolve()))

@@ -47,7 +47,7 @@ services:
       context: ..
       dockerfile: Dockerfile.onebox
       args:
-        Y_LINK_NODE_IMAGE: ${Y_LINK_NODE_IMAGE:-public.ecr.aws/docker/library/node:22.23.4-bookworm-slim}
+        Y_LINK_NODE_IMAGE: ${Y_LINK_NODE_IMAGE:-public.ecr.aws/docker/library/node:22.23.5-bookworm-slim}
     environment:
       NODE_ENV: production
       APP_PROFILE: verify-db-migration
@@ -59,6 +59,7 @@ services:
       SQLITE_DB_PATH: /app/data/y-link.sqlite
       DB_SYNC: "false"
       Y_LINK_DATA_DIR: /app/data
+      Y_LINK_ONEBOX_NON_ROOT: ${Y_LINK_VERIFY_ONEBOX_NON_ROOT:-false}
       Y_LINK_AUTOMATIC_DB_MIGRATION_ENABLED: "true"
       # 验收用 export/json 比对迁移前后业务内容；正式环境默认关闭该能力。
       Y_LINK_JSON_DATA_TRANSFER_ENABLED: "true"

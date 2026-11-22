@@ -71,6 +71,7 @@ export interface O2oRuleConfigRecord {
   limitQty: number
   clientPreorderUpdateLimit: number
   storeBusinessHoursText: string
+  storePickupAddress: string
   mallAnnouncementText: string
   updatedAt: string
 }
@@ -82,6 +83,7 @@ export interface UpdateO2oRuleConfigsPayload {
   limitQty: number
   clientPreorderUpdateLimit: number
   storeBusinessHoursText: string
+  storePickupAddress?: string
   mallAnnouncementText: string
 }
 

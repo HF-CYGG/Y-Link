@@ -5,10 +5,9 @@
  */
 
 import { randomBytes, randomUUID } from 'node:crypto'
-import sharp from 'sharp'
+import { loadSharp, loadSvgCaptcha } from '../utils/image-module-loader.js'
 import { CAPTCHA_RENDER_GATE_POLICY } from '../config/load-protection-policy.js'
 import { BoundedConcurrencyGate } from '../utils/bounded-concurrency.js'
-import svgCaptcha from 'svg-captcha'
 import { BizError } from '../utils/errors.js'
 import { createTicketStore, type TicketStore } from '../utils/ephemeral-ticket-store.js'
 
@@ -43,18 +42,20 @@ const randomCaptchaCode = () => {
 
 // 包的公开函数支持指定答案，但其类型声明仅覆盖 create 等属性；在此补齐调用签名。
 // 答案继续使用 node:crypto 生成，字形、扰动和干扰线全部交由开源包处理。
-const createSvgCaptcha = svgCaptcha as typeof svgCaptcha & (
-  (text: string, options: Parameters<typeof svgCaptcha.create>[0]) => string
-)
-
-const buildCaptchaSvg = (code: string) => createSvgCaptcha(code, {
-  width: 140,
-  height: 40,
-  fontSize: 40,
-  noise: 1,
-  color: false,
-  background: '',
-})
+const buildCaptchaSvg = async (code: string) => {
+  const svgCaptcha = await loadSvgCaptcha()
+  const createSvgCaptcha = svgCaptcha as typeof svgCaptcha & (
+    (text: string, options: Parameters<typeof svgCaptcha.create>[0]) => string
+  )
+  return createSvgCaptcha(code, {
+    width: 140,
+    height: 40,
+    fontSize: 40,
+    noise: 1,
+    color: false,
+    background: '',
+  })
+}
 
 /**
  * 验证码渲染闸门（模块级单例，Web 与移动端共用）：匿名即可反复请求验证码，sharp 渲染占用线程池，
@@ -66,10 +67,11 @@ const captchaRenderGate = new BoundedConcurrencyGate({
   busyMessage: '验证码服务繁忙，请稍后重试',
 })
 
-const renderCaptchaPng: CaptchaRenderer = (svg) => captchaRenderGate.run(() => sharp(Buffer.from(svg))
-  .flatten({ background: '#ecfdf5' })
-  .png()
-  .toBuffer())
+const renderCaptchaPng: CaptchaRenderer = (svg) => captchaRenderGate.run(async () => {
+  // 首次加载同样占用渲染槽位，不能在闸门外预先启动原生图像处理。
+  const sharp = await loadSharp()
+  return sharp(Buffer.from(svg)).flatten({ background: '#ecfdf5' }).png().toBuffer()
+})
 
 const wrapPngAsSvg = (pngDataUrl: string) => (
   `<svg xmlns="http://www.w3.org/2000/svg" width="140" height="40" viewBox="0 0 140 40" role="img" aria-label="图形验证码"><image width="140" height="40" href="${pngDataUrl}"/></svg>`
@@ -92,7 +94,7 @@ export class CaptchaService {
   async createCaptcha(scope: CaptchaScope) {
     const captchaId = randomUUID()
     const code = this.createCode()
-    const pngBuffer = await this.renderPng(buildCaptchaSvg(code))
+    const pngBuffer = await this.renderPng(await buildCaptchaSvg(code))
     await this.stores[scope].set(captchaId, {
       code,
       expireAt: Date.now() + CAPTCHA_TTL_MS,

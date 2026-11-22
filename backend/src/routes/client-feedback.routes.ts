@@ -111,7 +111,10 @@ authenticatedClientFeedbackRouter.post('/restock-requests', asyncHandler(async (
     quantity: z.number().int().min(1).max(2147483647), latestPickupAt: z.string().trim().max(40),
     remark: z.string().trim().max(1000).optional(), clientRequestId: z.string().trim().regex(/^[A-Za-z0-9_-]{1,64}$/),
   }).parse(req.body)
-  const data = await clientFeedbackService.createRestockRequest(payload, (req as ClientAuthenticatedRequest).clientAuth, extractRequestMeta(req))
+  const authReq = req as ClientAuthenticatedRequest
+  const requestMeta = extractRequestMeta(req)
+  await authSecurityService.guardClientBusinessWrite(requestMeta, authReq.clientAuth.userId, 'restock_request_create')
+  const data = await clientFeedbackService.createRestockRequest(payload, authReq.clientAuth, requestMeta)
   res.json({ code: 0, message: 'ok', data })
 }))
 
@@ -223,11 +226,9 @@ authenticatedClientFeedbackRouter.patch(
   '/conversations/:id/confirm-resolved',
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
-    const data = await clientFeedbackService.confirmConversationResolvedByClient(
-      req.params.id,
-      authReq.clientAuth,
-      extractRequestMeta(req),
-    )
+    const requestMeta = extractRequestMeta(req)
+    await authSecurityService.guardClientBusinessWrite(requestMeta, authReq.clientAuth.userId, 'feedback_conversation_state')
+    const data = await clientFeedbackService.confirmConversationResolvedByClient(req.params.id, authReq.clientAuth, requestMeta)
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -236,11 +237,9 @@ authenticatedClientFeedbackRouter.patch(
   '/conversations/:id/withdraw',
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
-    const data = await clientFeedbackService.withdrawConversationByClient(
-      req.params.id,
-      authReq.clientAuth,
-      extractRequestMeta(req),
-    )
+    const requestMeta = extractRequestMeta(req)
+    await authSecurityService.guardClientBusinessWrite(requestMeta, authReq.clientAuth.userId, 'feedback_conversation_state')
+    const data = await clientFeedbackService.withdrawConversationByClient(req.params.id, authReq.clientAuth, requestMeta)
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -250,12 +249,9 @@ authenticatedClientFeedbackRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const payload = submitSatisfactionSchema.parse(req.body)
-    const data = await clientFeedbackService.submitConversationSatisfactionByClient(
-      req.params.id,
-      payload,
-      authReq.clientAuth,
-      extractRequestMeta(req),
-    )
+    const requestMeta = extractRequestMeta(req)
+    await authSecurityService.guardClientBusinessWrite(requestMeta, authReq.clientAuth.userId, 'feedback_conversation_state')
+    const data = await clientFeedbackService.submitConversationSatisfactionByClient(req.params.id, payload, authReq.clientAuth, requestMeta)
     res.json({ code: 0, message: 'ok', data })
   }),
 )

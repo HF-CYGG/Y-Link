@@ -187,12 +187,12 @@ export class UserService {
     targetId: string,
     actor: AuthUserContext,
     requiredPermission: PermissionCode,
-  ): Promise<{ user: SysUser; accounts: Map<string, SysUser> }> {
+  ): Promise<{ user: SysUser; accounts: Map<string, SysUser>; isSelf: boolean }> {
     const accounts = await lockSysAccountGovernanceSnapshot(manager)
-    this.assertLifecycleActor(accounts.get(String(actor.userId)), requiredPermission)
+    const lockedActor = this.assertLifecycleActor(accounts.get(String(actor.userId)), requiredPermission)
     const target = accounts.get(String(targetId))
     if (!target) throw new BizError('用户不存在', 404)
-    return { user: target, accounts }
+    return { user: target, accounts, isSelf: String(lockedActor.id) === String(target.id) }
   }
 
   private assertGovernanceRecovery(accounts: Map<string, SysUser>, candidate: SysUser): void {
@@ -570,22 +570,22 @@ export class UserService {
     if (normalizedDisplayName !== undefined && !normalizedDisplayName) {
       throw new BizError('姓名不能为空', 400)
     }
-    // 本人改密必须走校验旧密码的专用入口，防止被劫持的会话借“编辑用户”静默改密并长期接管账号。
-    if (normalizedPassword !== undefined && actor.userId === id) {
-      throw new BizError('请使用本人修改密码入口处理自己的密码', 400)
-    }
     // 新密码哈希在事务外预先计算；事务内确认目标账号信息后才写入。
     const newPasswordHash = normalizedPassword === undefined ? undefined : await hashPassword(normalizedPassword)
     try {
       const result = await runInTransaction(async (manager) => {
-        const { user, accounts } = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:update')
+        const { user, accounts, isSelf } = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:update')
+        // SQLite 实体 ID 可能为数值；只能在锁后用已锁实体规范化判定本人，不能比较原始路由值。
+        if (normalizedPassword !== undefined && isSelf) {
+          throw new BizError('请使用本人修改密码入口处理自己的密码', 400)
+        }
         const userRepo = manager.getRepository(SysUser)
         const sessionRepo = manager.getRepository(SysUserSession)
         if (isCurrentlyDeactivated(user)) {
           throw new BizError('账号已注销，请先恢复后再编辑资料', 409)
         }
 
-        if (actor.userId === user.id && input.role && input.role !== 'admin') {
+        if (isSelf && input.role && input.role !== 'admin') {
           throw new BizError('不能将当前登录管理员降级为非管理员角色', 400)
         }
 
@@ -599,7 +599,7 @@ export class UserService {
           nextGovernance = JSON.stringify(currentSelection.filter((permission) => resolvePermissionsByRole(targetRole).includes(permission)))
         }
         const candidate = { ...user, role: targetRole, governancePermissionsJson: nextGovernance }
-        if (actor.userId === user.id && !isUserGovernanceAdmin(candidate)) {
+        if (isSelf && !isUserGovernanceAdmin(candidate)) {
           throw new BizError('不能移除本人用户查看或编辑权限，请保留恢复入口', 400)
         }
         this.assertGovernanceRecovery(accounts, candidate)
@@ -748,14 +748,13 @@ export class UserService {
     if (!newPassword) {
       throw new BizError('新密码不能为空', 400)
     }
-    if (actor.userId === id) {
-      throw new BizError('请使用本人修改密码入口处理自己的密码', 400)
-    }
-
     // 新密码哈希在事务外预先计算，事务内只做账号信息校验与写入。
     const newPasswordHash = await hashPassword(newPassword)
     const profile = await runInTransaction(async (manager) => {
-      const { user } = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:reset_password')
+      const { user, isSelf } = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:reset_password')
+      if (isSelf) {
+        throw new BizError('请使用本人修改密码入口处理自己的密码', 400)
+      }
       assertPasswordAvoidsAccountIdentifiers(newPassword, '新密码', [user.username, user.email])
       const userRepo = manager.getRepository(SysUser)
       const sessionRepo = manager.getRepository(SysUserSession)

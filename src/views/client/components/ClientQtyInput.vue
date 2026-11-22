@@ -51,6 +51,12 @@ const handleFocus = (event: FocusEvent) => {
   target?.select?.()
 }
 
+const readDraft = () => {
+  const raw = draft.value.trim()
+  return /^\d+$/.test(raw) && Number.isSafeInteger(Number(raw)) ? Number(raw) : null
+}
+defineExpose({ readDraft })
+
 const commitDraft = () => {
   const raw = draft.value.trim()
   // 整体校验草稿：只有纯数字串才是合法数量，小数、负数、带单位或字母的输入统一按非法处理，不做静默取整。

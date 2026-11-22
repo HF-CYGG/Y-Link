@@ -51,6 +51,7 @@ const kingdeeBuildRoot = path.join(projectRoot, 'tmp/coverage-vue-kingdee')
 const kingdeeErrorSource = path.join(projectRoot, 'src/utils/error.ts')
 const kingdeeRefreshSource = path.join(projectRoot, 'src/utils/client-order-refresh.ts')
 const kingdeeStatusSource = path.join(projectRoot, 'src/utils/kingdee-status.ts')
+const orderRecipientSource = path.join(projectRoot, 'src/views/order-list/order-recipient-display.ts')
 const kingdeeSfcTargets = [
   { generated: path.join(kingdeeBuildRoot, 'KingdeeRegistrationEditor-setup.mjs'), source: path.join(projectRoot, 'src/components/common/KingdeeRegistrationEditor.vue'), allowedSources: [kingdeeErrorSource, kingdeeRefreshSource] },
   { generated: path.join(kingdeeBuildRoot, 'ClientKingdeeReminder-setup.mjs'), source: path.join(projectRoot, 'src/views/client/components/ClientKingdeeReminder.vue'), allowedSources: [kingdeeRefreshSource] },
@@ -58,12 +59,13 @@ const kingdeeSfcTargets = [
   { generated: path.join(kingdeeBuildRoot, 'O2oVerifyConsoleView-setup.mjs'), source: path.join(projectRoot, 'src/views/o2o/O2oVerifyConsoleView.vue'), allowedSources: [
     kingdeeErrorSource, kingdeeRefreshSource, path.join(projectRoot, 'src/composables/useStableRequest.ts'),
     path.join(projectRoot, 'src/composables/usePermissionAction.ts'), path.join(projectRoot, 'src/utils/permission.ts'),
+    path.join(projectRoot, 'src/composables/useAdminProductOptionsCache.ts'), path.join(projectRoot, 'src/utils/data-change-signal.ts'),
     path.join(projectRoot, 'src/constants/o2o-order-status.ts'), path.join(projectRoot, 'src/views/o2o/o2o-verify-console.helpers.ts'),
   ] },
   // 这些产物包含真实业务 setup/模板，必须映射回源码，不能当作临时生成壳丢弃。
   { generated: path.join(kingdeeBuildRoot, 'KingdeeRegistrationEditor.vue.render.mjs'), source: path.join(projectRoot, 'src/components/common/KingdeeRegistrationEditor.vue'), allowedSources: [kingdeeErrorSource, kingdeeRefreshSource] },
-  { generated: path.join(kingdeeBuildRoot, 'OrderDetailDrawerContent.vue.mjs'), source: path.join(projectRoot, 'src/views/order-list/components/OrderDetailDrawerContent.vue'), allowedSources: [kingdeeStatusSource, path.join(projectRoot, 'src/views/order-list/order-revision.helpers.ts')] },
-  { generated: path.join(kingdeeBuildRoot, 'OrderListView.vue.mjs'), source: path.join(projectRoot, 'src/views/order-list/OrderListView.vue'), allowedSources: [kingdeeStatusSource, kingdeeErrorSource, path.join(projectRoot, 'src/utils/timed-async-loader.ts')] },
+  { generated: path.join(kingdeeBuildRoot, 'OrderDetailDrawerContent.vue.mjs'), source: path.join(projectRoot, 'src/views/order-list/components/OrderDetailDrawerContent.vue'), allowedSources: [kingdeeStatusSource, orderRecipientSource, path.join(projectRoot, 'src/views/order-list/order-revision.helpers.ts')] },
+  { generated: path.join(kingdeeBuildRoot, 'OrderListView.vue.mjs'), source: path.join(projectRoot, 'src/views/order-list/OrderListView.vue'), allowedSources: [kingdeeStatusSource, kingdeeErrorSource, orderRecipientSource, path.join(projectRoot, 'src/utils/timed-async-loader.ts')] },
 ]
 const markerBySource = new Map([
   ['src/components/account/AdminWebAuthnDialog.vue', 'form.name = credential.name'],
@@ -173,6 +175,7 @@ const SUITES = [
       'scripts/verify-order-entry-submit-preparation.ts',
       'scripts/verify-client-order-progress.ts',
       'scripts/verify-order-revision-presentation.ts',
+      'scripts/verify-order-recipient-display.ts',
       'scripts/verify-barcode-label-preflight.ts',
       'scripts/verify-v8-sfc-coverage.test.mjs',
       'scripts/verify-order-list-mobile-card-loader.ts',

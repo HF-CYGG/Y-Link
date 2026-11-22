@@ -18,6 +18,9 @@ import { toRiskSourceKey } from '../utils/ip-subnet.js'
 import { AuditThrottle } from '../utils/audit-throttle.js'
 import { getRedisClient, isRedisEnabled, isRedisReady, recordRedisDegrade, redisKey } from '../redis/redis-client.js'
 import { incrementApproxSlidingCounter } from '../redis/redis-scripts.js'
+import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
+import { clearMigrationPasswordFailures, readMigrationPasswordFailures, recordMigrationPasswordFailure } from './database-migration-password-risk.js'
+import { BoundedConcurrencyGate } from '../utils/bounded-concurrency.js'
 
 /** 管理端登录风控主体：`resolved` 为 false 表示账号不存在、subject 是输入原文，写审计前必须脱敏。 */
 export interface ResolvedLoginRiskSubject {
@@ -202,6 +205,16 @@ const RATE_LIMIT_RULES = {
     windowMs: 10 * 60 * 1000,
     blockMessage: '消息发送过于频繁，请稍后再试',
   },
+  clientRestockRequestCreateByUser: {
+    maxRequests: 30,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '补货申请提交过于频繁，请稍后再试',
+  },
+  clientFeedbackConversationStateByUser: {
+    maxRequests: 30,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '反馈状态操作过于频繁，请稍后再试',
+  },
   clientPreorderSubmitByUser: {
     maxRequests: 20,
     windowMs: 10 * 60 * 1000,
@@ -211,6 +224,16 @@ const RATE_LIMIT_RULES = {
     maxRequests: 20,
     windowMs: 10 * 60 * 1000,
     blockMessage: '撤单过于频繁，请稍后再试',
+  },
+  clientPreorderUpdateByUser: {
+    maxRequests: 20,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '修改订单过于频繁，请稍后再试',
+  },
+  clientPreorderDocumentByUser: {
+    maxRequests: 30,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '订单单据操作过于频繁，请稍后再试',
   },
   // 退货可按 1 件拆成多张申请，每张都会写审计并通知员工，需按账号封顶。
   clientReturnRequestCreateByUser: {
@@ -333,6 +356,11 @@ class GlobalLoginFailureMonitor {
 const globalLoginFailureMonitor = new GlobalLoginFailureMonitor()
 
 const LOGIN_REMAINING_WARNING_RATIO = 0.2
+// 串行交接管理员失败桶，避免冻结前最后一次落库和冻结后接管计数交错。
+const adminFailureMutationGate = new BoundedConcurrencyGate({
+  name: 'admin-password-failure-state', maxConcurrent: 1, maxQueue: 32, queueTimeoutMs: 5000,
+  busyMessage: '管理员身份复核繁忙，请稍后重试',
+})
 const REGISTER_REMAINING_WARNING_THRESHOLD = 3
 // 频控与锁定按来源计数：IPv4 映射地址还原为 IPv4，IPv6 聚合到 /64，防止同网段轮换地址绕过；审计仍记完整 IP。
 const normalizeRiskSource = (meta?: RequestMeta) => toRiskSourceKey(meta?.ipAddress) ?? 'unknown-ip'
@@ -439,8 +467,24 @@ export class AuthSecurityService {
     targetCode: string,
   ): Promise<{ captchaRequired: boolean }> {
     const nowMs = Date.now()
-    const states = await Promise.all(storeKeys.map((storeKey) => this.getFailureState(storeKey, scope, nowMs)))
+    const states = scope === 'admin-login'
+      ? await this.readAdminFailureStates(storeKeys, nowMs)
+      : await Promise.all(storeKeys.map((storeKey) => this.getFailureState(storeKey, scope, nowMs)))
+    await this.assertLoginFailuresNotLocked(scope, states, nowMs, requestMeta, targetCode)
 
+    return {
+      captchaRequired: states.some((state) => Boolean(state && state.count > 0))
+        || await globalLoginFailureMonitor.isCaptchaForced(scope, nowMs),
+    }
+  }
+
+  private async assertLoginFailuresNotLocked(
+    scope: FailureScope,
+    states: (PersistentFailureState | null | undefined)[],
+    nowMs: number,
+    requestMeta: RequestMeta | undefined,
+    targetCode: string,
+  ): Promise<void> {
     for (const state of states) {
       if (!state || state.lockedUntil <= nowMs) {
         continue
@@ -462,11 +506,16 @@ export class AuthSecurityService {
         retryAfterSeconds: waitSeconds,
       })
     }
+  }
 
-    return {
-      captchaRequired: states.some((state) => Boolean(state && state.count > 0))
-        || await globalLoginFailureMonitor.isCaptchaForced(scope, nowMs),
-    }
+  private async readAdminFailureStates(keys: string[], now: number): Promise<(PersistentFailureState | null)[]> {
+    const windowMs = FAILURE_RESET_WINDOW_MS['admin-login']
+    const control = readMigrationPasswordFailures(keys, now, windowMs)
+    const states = await Promise.all(keys.map((key, index) =>
+      control[index] ?? persistentRiskStateService.readFailure(key, windowMs, now, true),
+    ))
+    const latest = readMigrationPasswordFailures(keys, now, windowMs)
+    return states.map((state, index) => latest[index] ?? state)
   }
 
   private async recordLoginFailure(
@@ -475,18 +524,25 @@ export class AuthSecurityService {
     subject: string,
     sourceKey: string,
     subjectKey: string,
+    migrationPurpose?: string,
   ): Promise<LoginFailureRecordResult> {
     const nowMs = Date.now()
     let currentSubjectState: PersistentFailureState | null = null
-    for (const storeKey of [sourceKey, subjectKey]) {
-      const next = await persistentRiskStateService.recordFailure(
-        storeKey,
-        FAILURE_RESET_WINDOW_MS[scope],
-        FAILURE_LOCK_THRESHOLD[scope],
-        FAILURE_LOCK_MS[scope],
-        nowMs,
-      )
-      if (storeKey === subjectKey) currentSubjectState = next
+    const keys = [sourceKey, subjectKey]
+    const resetWindowMs = FAILURE_RESET_WINDOW_MS[scope]
+    const threshold = FAILURE_LOCK_THRESHOLD[scope]
+    const lockMs = FAILURE_LOCK_MS[scope]
+    const frozen = databaseMaintenanceModeService.isReadOnly()
+    if (scope === 'admin-login' && (frozen || readMigrationPasswordFailures(keys, nowMs, resetWindowMs).some(Boolean))) {
+      const persisted = await this.readAdminFailureStates(keys, nowMs)
+      currentSubjectState = recordMigrationPasswordFailure(
+        keys.map((key, index) => ({ key, persisted: persisted[index] })), { resetWindowMs, threshold, lockMs },
+        frozen ? migrationPurpose : undefined,
+      )[1]
+    } else {
+      for (const key of keys) {
+        currentSubjectState = await persistentRiskStateService.recordFailure(key, resetWindowMs, threshold, lockMs, nowMs)
+      }
     }
 
     const globalState = await globalLoginFailureMonitor.record(scope, nowMs)
@@ -674,23 +730,29 @@ export class AuthSecurityService {
   async recordAdminLoginFailure(
     requestMeta: RequestMeta | undefined,
     username: string,
-    options: { subjectResolved?: boolean } = {},
+    options: { subjectResolved?: boolean; migrationPurpose?: string } = {},
   ) {
     const source = normalizeRiskSource(requestMeta)
     const normalizedUsername = username.trim().toLowerCase()
-    await this.recordLoginFailure(
+    await adminFailureMutationGate.run(() => this.recordLoginFailure(
       'admin-login',
       requestMeta,
       options.subjectResolved === false ? maskLoginInputForAudit(normalizedUsername) : normalizedUsername,
       `admin-login:ip:${source}`,
       `admin-login:user:${normalizedUsername}`,
-    )
+      options.migrationPurpose,
+    ))
   }
 
   async clearAdminLoginFailures(requestMeta: RequestMeta | undefined, username: string) {
     const source = normalizeRiskSource(requestMeta)
     const normalizedUsername = username.trim().toLowerCase()
-    await this.clearLoginFailures(`admin-login:ip:${source}`, `admin-login:user:${normalizedUsername}`)
+    const sourceKey = `admin-login:ip:${source}`
+    const subjectKey = `admin-login:user:${normalizedUsername}`
+    await adminFailureMutationGate.run(async () => {
+      await this.clearLoginFailures(sourceKey, subjectKey)
+      clearMigrationPasswordFailures([sourceKey, subjectKey], Date.now(), FAILURE_RESET_WINDOW_MS['admin-login'])
+    })
   }
 
   async guardClientCaptchaRequest(requestMeta: RequestMeta | undefined) {
@@ -931,13 +993,26 @@ export class AuthSecurityService {
   async guardClientBusinessWrite(
     requestMeta: RequestMeta | undefined,
     userId: string,
-    kind: 'feedback_conversation_create' | 'feedback_message' | 'preorder_submit' | 'preorder_cancel' | 'return_request_create',
+    kind:
+      | 'feedback_conversation_create'
+      | 'feedback_message'
+      | 'feedback_conversation_state'
+      | 'restock_request_create'
+      | 'preorder_submit'
+      | 'preorder_cancel'
+      | 'preorder_update'
+      | 'preorder_document'
+      | 'return_request_create',
   ) {
     const ruleMap = {
       feedback_conversation_create: RATE_LIMIT_RULES.clientFeedbackConversationCreateByUser,
       feedback_message: RATE_LIMIT_RULES.clientFeedbackMessageByUser,
+      feedback_conversation_state: RATE_LIMIT_RULES.clientFeedbackConversationStateByUser,
+      restock_request_create: RATE_LIMIT_RULES.clientRestockRequestCreateByUser,
       preorder_submit: RATE_LIMIT_RULES.clientPreorderSubmitByUser,
       preorder_cancel: RATE_LIMIT_RULES.clientPreorderCancelByUser,
+      preorder_update: RATE_LIMIT_RULES.clientPreorderUpdateByUser,
+      preorder_document: RATE_LIMIT_RULES.clientPreorderDocumentByUser,
       return_request_create: RATE_LIMIT_RULES.clientReturnRequestCreateByUser,
     } as const
     await this.consumeRateLimit(`client-business-write:${kind}:user:${userId}`, ruleMap[kind], {

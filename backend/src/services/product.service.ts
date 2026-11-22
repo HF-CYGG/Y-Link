@@ -6,7 +6,7 @@
  * 3. 同时向管理端和 O2O 业务提供稳定的商品查询与写入能力，保证商品治理口径统一。
  */
 
-import { loadProductPrintLocations } from './product-label-locations.service.js'
+import { loadProductLabels } from './product-label-locations.service.js'
 import type { ProductPrintLocations } from '../types/product-labels.js'
 import { In, type EntityManager, type Repository } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
@@ -31,6 +31,7 @@ import { isRetryableSqliteLockError, isUniqueConstraintError } from '../utils/da
 import { BizError } from '../utils/errors.js'
 import { generateProductCode } from '../utils/id-generator.js'
 import { isDatabaseFlagEnabled, summarizeProductInventory } from '../utils/product-inventory-summary.js'
+import { prepareProductThumbnailIndex, resolveProductThumbnailUrl } from '../utils/product-thumbnail.js'
 import { normalizeLegacyUploadUrl } from '../utils/upload-storage.js'
 import { assertDiscountRateInRange, calculateDiscountedPrice, normalizeDiscountRate } from '../utils/discount-price.js'
 import type { RequestMeta } from '../utils/request-meta.js'
@@ -55,7 +56,7 @@ import {
   SPEC_VALUE_MAX_LENGTH,
   VARIANT_CODE_POOL,
 } from './product-code.service.js'
-import { buildSqlLikePrefix } from '../utils/sql-like.js'
+import { buildSqlLikeContains, buildSqlLikePrefix } from '../utils/sql-like.js'
 
 /**
  * YZ 通用 SKU 编码体系的规格两轴映射（B8 批次改名）：
@@ -104,6 +105,7 @@ export interface ProductQuery {
   o2oStatus?: 'listed' | 'unlisted'
   page?: number
   pageSize?: number
+  includeDetail?: boolean
 }
 
 export interface CreateProductInput {
@@ -277,6 +279,7 @@ export interface ProductSkuView {
   isCurrent: boolean
   o2oRecommended: boolean
   thumbnail: string | null
+  thumbnailSmall?: string | null
   sortOrder: number
   barcode: string | null
   /** 实际用于打印与扫码的条码：原厂条码优先，否则为 SKU 编码。 */
@@ -304,6 +307,7 @@ export interface ProductView {
   o2oStatus: 'listed' | 'unlisted'
   o2oRecommended: boolean
   thumbnail: string | null
+  thumbnailSmall?: string | null
   detailContent: string | null
   limitPerUser: number
   currentStock: number
@@ -701,6 +705,18 @@ const resolveEffectiveO2oStatus = (
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export class ProductService {
   private readonly productRepo = AppDataSource.getRepository(BaseProduct)
+  private readonly productCreateCollations = new WeakMap<EntityManager, { value?: string }>()
+
+  /** 同一批创建共享已验证的 MySQL 排序规则，新的事务仍需读取真实列定义。 */
+  async withProductCreateBatch<T>(manager: EntityManager, work: () => Promise<T>): Promise<T> {
+    if (manager.connection.options.type !== 'mysql' || !manager.queryRunner?.isTransactionActive) return work()
+    this.productCreateCollations.set(manager, {})
+    try {
+      return await work()
+    } finally {
+      this.productCreateCollations.delete(manager)
+    }
+  }
 
   /**
    * 列表与计数共用的筛选条件：
@@ -716,9 +732,9 @@ export class ProductService {
     }
     if (query.keyword?.trim()) {
       qb.andWhere(
-        `(p.product_name LIKE :keyword OR p.pinyin_abbr LIKE :keyword OR p.product_code LIKE :keyword
-          OR EXISTS (SELECT 1 FROM base_product_sku ks WHERE ks.product_id = p.id AND (ks.sku_code LIKE :keyword OR ks.barcode LIKE :keyword)))`,
-        { keyword: `%${query.keyword.trim()}%` },
+        `(p.product_name LIKE :keyword ESCAPE '!' OR p.pinyin_abbr LIKE :keyword ESCAPE '!' OR p.product_code LIKE :keyword ESCAPE '!'
+          OR EXISTS (SELECT 1 FROM base_product_sku ks WHERE ks.product_id = p.id AND (ks.sku_code LIKE :keyword ESCAPE '!' OR ks.barcode LIKE :keyword ESCAPE '!')))`,
+        { keyword: buildSqlLikeContains(query.keyword.trim()) },
       )
     }
     if (query.tagId) {
@@ -731,6 +747,14 @@ export class ProductService {
 
   async list(query: ProductQuery): Promise<ProductView[]> {
     const qb = this.productRepo.createQueryBuilder('p')
+    const fields = [
+      'p.id', 'p.productCode', 'p.productName', 'p.pinyinAbbr', 'p.defaultPrice', 'p.discountRate',
+      'p.isActive', 'p.o2oStatus', 'p.o2oRecommended', 'p.thumbnail', 'p.limitPerUser',
+      'p.currentStock', 'p.preOrderedStock', 'p.categoryId', 'p.primarySeriesTagId', 'p.seriesSeq',
+      'p.codeScheme', 'p.legacyProductCode',
+    ]
+    qb.select(fields)
+    if (query.includeDetail === true) qb.addSelect('p.detailContent')
     this.applyListFilters(qb, query)
     qb.orderBy('p.id', 'DESC')
 
@@ -793,16 +817,16 @@ export class ProductService {
 
     this.assertNoDuplicateProductCodesInBatch(inputs)
 
-    const result = await runInTransaction(async (manager) => {
+    const result = await runInTransaction((manager) => this.withProductCreateBatch(manager, async () => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
       await acquireSequenceMutex(manager, PRODUCT_SCAN_CODE_MUTEX_KEY)
-      const createdProducts: ProductView[] = []
+      const savedProducts: BaseProduct[] = []
 
       for (let index = 0; index < inputs.length; index += 1) {
         const currentInput = inputs[index]
         try {
-          const createdProduct = await this.createWithManager(currentInput, manager, actor)
-          createdProducts.push(createdProduct)
+          const createdProduct = await this.createWithManager(currentInput, manager, actor, { skipViewBuild: true })
+          savedProducts.push(createdProduct.product)
         } catch (error) {
           if (error instanceof BizError) {
             throw new BizError(`第 ${index + 1} 行创建失败：${error.message}`, error.statusCode)
@@ -811,9 +835,10 @@ export class ProductService {
         }
       }
 
+      const createdProducts = await this.buildProductViews(savedProducts, manager)
       await this.recordProductCreateAudit(createdProducts, actor, requestMeta, manager)
       return createdProducts
-    })
+    }))
     invalidateMallCatalogReadCache()
     return result
   }
@@ -1242,11 +1267,11 @@ export class ProductService {
       }
       return { view: await this.buildProductView(product, manager), changed: changedFields.length > 0 || changedSkuIds.length > 0 }
     })
-    if (result.changed) invalidateMallCatalogReadCache()
+    if (result.changed) invalidateMallCatalogReadCache({ affectsBusinessData: false })
     return result.view
   }
 
-  /** 批量上下架逐 ID 按稳定顺序锁定；任何无效或不可上架商品使事务整体回滚。 */
+  /** 批量上下架按主键升序锁定；任何无效或不可上架商品使事务整体回滚。 */
   async batchUpdateOnlineDisplay(
     input: BatchOnlineDisplayInput,
     actor: AuthUserContext,
@@ -1260,23 +1285,41 @@ export class ProductService {
     const updatedCount = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
       const repo = manager.getRepository(BaseProduct)
-      const products: BaseProduct[] = []
-      for (const id of productIds) {
-        const product = await repo.findOne({
-          where: { id },
-          lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
-        })
-        if (!product) throw new BizError('存在无效产品，批量线上展示更新失败', 404)
+      const sqlite = manager.connection.options.type === 'sqlite'
+      const idParameterType = sqlite ? 'INTEGER' : 'UNSIGNED'
+      const normalizedIds = new Set(productIds.map((id) => id.replace(/^0+(?=\d+$)/, '')))
+      if (productIds.some((id) => !/^\d+$/.test(id)) || normalizedIds.size !== productIds.length) {
+        throw new BizError('存在无效产品，批量线上展示更新失败', 404)
+      }
+      const bindIds = (ids: string[]) => {
+        const parameters = Object.fromEntries(ids.map((id, index) => [`productId${index}`, id]))
+        const values = Object.keys(parameters).map((key) => `CAST(:${key} AS ${idParameterType})`).join(', ')
+        return { parameters, values }
+      }
+      const selected = bindIds(productIds)
+      const lockQuery = repo.createQueryBuilder('product')
+        .select(`CAST(product.id AS ${sqlite ? 'TEXT' : 'CHAR'})`, 'id')
+        .addSelect('product.productCode', 'productCode')
+        .addSelect('product.isActive', 'isActive')
+        .addSelect('product.o2oStatus', 'o2oStatus')
+        .where(`product.id IN (${selected.values})`, selected.parameters)
+        .orderBy('product.id', 'ASC')
+      if (!sqlite) lockQuery.setLock('pessimistic_write')
+      const products = await lockQuery.getRawMany<Pick<BaseProduct, 'id' | 'productCode' | 'isActive' | 'o2oStatus'>>()
+      if (products.length !== productIds.length || products.some((product) => !normalizedIds.has(product.id))) {
+        throw new BizError('存在无效产品，批量线上展示更新失败', 404)
+      }
+      for (const product of products) {
         if (input.o2oStatus === 'listed' && !isDatabaseFlagEnabled(product.isActive)) {
           throw new BizError('批量上架包含已停用产品', 409)
         }
-        products.push(product)
       }
-      let changed = 0
-      for (const product of products) {
-        if (product.o2oStatus === input.o2oStatus) continue
-        await repo.update(product.id, { o2oStatus: input.o2oStatus })
-        await auditService.record({
+      const changedProducts = products.filter((product) => product.o2oStatus !== input.o2oStatus)
+      if (!changedProducts.length) return 0
+      const changed = bindIds(changedProducts.map((product) => product.id))
+      await repo.createQueryBuilder().update().set({ o2oStatus: input.o2oStatus })
+        .where(`id IN (${changed.values})`, changed.parameters).execute()
+      await auditService.recordBatch(changedProducts.map((product) => ({
           actionType: 'product.online_display.batch_status',
           actionLabel: '批量更新商品线上状态',
           targetType: 'base_product',
@@ -1285,12 +1328,10 @@ export class ProductService {
           actor,
           requestMeta,
           detail: { previousStatus: product.o2oStatus, nextStatus: input.o2oStatus },
-        }, manager)
-        changed += 1
-      }
-      return changed
+      })), manager)
+      return changedProducts.length
     })
-    if (updatedCount) invalidateMallCatalogReadCache()
+    if (updatedCount) invalidateMallCatalogReadCache({ affectsBusinessData: false })
     return { ids: productIds, updatedCount }
   }
 
@@ -2692,7 +2733,7 @@ export class ProductService {
     input: CreateProductInput | UpdateProductInput,
     manager = AppDataSource.manager,
     options: { stockBaseline?: ProductStockBaselineInput; enforceSkuStockBaseline?: boolean } = {},
-  ): Promise<void> {
+  ): Promise<number> {
     const skuRepo = manager.getRepository(BaseProductSku)
     const specGroups = this.normalizeSpecGroups(input.specGroups)
     // 只对调用方显式提交的 SKU 库存做基线校验；缺省 SKU 由商品级字段推导，已在商品级校验。
@@ -2945,10 +2986,12 @@ export class ProductService {
     }
     const savedSkus = await skuRepo.save(skuEntities)
 
-    const summarySkus = savedSkus.filter((sku) => isDatabaseFlagEnabled(sku.isCurrent) && isDatabaseFlagEnabled(sku.isActive))
+    const currentSkus = savedSkus.filter((sku) => isDatabaseFlagEnabled(sku.isCurrent))
+    const summarySkus = currentSkus.filter((sku) => isDatabaseFlagEnabled(sku.isActive))
     product.currentStock = summarySkus.reduce((sum, sku) => sum + Math.max(0, Number(sku.currentStock ?? 0)), 0)
     product.preOrderedStock = summarySkus.reduce((sum, sku) => sum + Math.max(0, Number(sku.preOrderedStock ?? 0)), 0)
     await manager.getRepository(BaseProduct).save(product)
+    return currentSkus.length
   }
 
   /** 单规格商品编辑时写入默认规格的条码、成本价与库位；多规格商品必须通过 skus 逐行提交。 */
@@ -3050,7 +3093,7 @@ export class ProductService {
       },
     })
     const skus = await manager.getRepository(BaseProductSku).find({
-      where: { productId: In(productIds) },
+      where: { productId: In(productIds), isCurrent: true },
       order: {
         productId: 'ASC',
         sortOrder: 'ASC',
@@ -3065,6 +3108,8 @@ export class ProductService {
       categoryIds.length ? manager.getRepository(BaseCategory).find({ where: { id: In(categoryIds) } }) : [],
       locationIds.length ? manager.getRepository(BaseStorageLocation).find({ where: { id: In(locationIds) } }) : [],
       seriesTagIds.length ? manager.getRepository(BaseTag).find({ where: { id: In(seriesTagIds) }, select: ['id', 'seriesCode'] }) : [],
+      !manager.queryRunner?.isTransactionActive && (products.some((product) => product.thumbnail) || skus.some((sku) => sku.thumbnail))
+        ? prepareProductThumbnailIndex() : undefined,
     ])
     const categoryMap = new Map(categories.map((category) => [String(category.id), category]))
     const locationCodeMap = new Map(locations.map((location) => [String(location.id), location.locationCode]))
@@ -3092,10 +3137,10 @@ export class ProductService {
     return products.map((product) => {
       const productId = normalizeEntityId(product.id)
       const tags = productTagMap.get(productId) ?? []
-      const allProductSkus = productSkuMap.get(productId) ?? []
-      const productSkus = allProductSkus.filter((sku) => isDatabaseFlagEnabled(sku.isCurrent))
-      const inventory = summarizeProductInventory(product, allProductSkus)
+      const productSkus = productSkuMap.get(productId) ?? []
+      const inventory = summarizeProductInventory(product, productSkus)
       const category = product.categoryId ? categoryMap.get(String(product.categoryId)) : undefined
+      const thumbnail = normalizeProductThumbnailUrl(product.thumbnail) ?? null
 
       return {
         id: productId,
@@ -3108,7 +3153,8 @@ export class ProductService {
         isActive: Boolean(product.isActive),
         o2oStatus: product.o2oStatus ?? 'unlisted',
         o2oRecommended: Boolean(product.o2oRecommended),
-        thumbnail: normalizeProductThumbnailUrl(product.thumbnail) ?? null,
+        thumbnail,
+        thumbnailSmall: resolveProductThumbnailUrl(thumbnail),
         detailContent: product.detailContent ?? null,
         limitPerUser: Number(product.limitPerUser ?? 5),
         ...inventory,
@@ -3129,6 +3175,7 @@ export class ProductService {
   }
 
   private buildProductSkuView(sku: BaseProductSku, locationCodeMap?: Map<string, string>): ProductSkuView {
+    const thumbnail = normalizeProductThumbnailUrl(sku.thumbnail) ?? null
     const specValues = parseSpecValuesJson(sku.specValuesJson)
     const originalPrice = normalizeDecimalText(sku.defaultPrice)
     const discountRate = normalizeDiscountRate(sku.discountRate)
@@ -3152,7 +3199,8 @@ export class ProductService {
       isActive: isDatabaseFlagEnabled(sku.isActive),
       isCurrent: isDatabaseFlagEnabled(sku.isCurrent),
       o2oRecommended: Boolean(sku.o2oRecommended),
-      thumbnail: normalizeProductThumbnailUrl(sku.thumbnail) ?? null,
+      thumbnail,
+      thumbnailSmall: resolveProductThumbnailUrl(thumbnail),
       sortOrder: Number(sku.sortOrder ?? 0),
       barcode: sku.barcode ?? null,
       effectiveBarcode: sku.barcode || sku.skuCode,
@@ -3262,49 +3310,12 @@ export class ProductService {
 
   /** 条码打印数据：按传入顺序返回，条码图由前端生成。 */
   async listLabels(skuIds: Array<string | number>, capability: 'full' | 'main_only' = 'main_only'): Promise<ProductLabelView[]> {
-    return runInTransaction(async (manager) => {
     const ids = [...new Set(skuIds.map((id) => normalizeEntityId(id)).filter(Boolean))]
     if (!ids.length) throw new BizError('请至少选择一个规格', 400)
     if (ids.length > 500) throw new BizError('单次最多打印 500 个规格', 400)
-    const skus = await manager.getRepository(BaseProductSku).find({ where: { id: In(ids) } })
-    if (skus.length !== ids.length) throw new BizError('存在无效的规格，请刷新后重试', 404)
-    const products = await manager.getRepository(BaseProduct).find({ where: { id: In([...new Set(skus.map((sku) => String(sku.productId)))]) } })
-    const printLocationMap = await loadProductPrintLocations(manager, skus, capability)
-    const productMap = new Map(products.map((product) => [String(product.id), product]))
-    const categoryIds = [...new Set(products.map((product) => product.categoryId).filter(Boolean).map(String))]
-    const locationIds = [...new Set(skus.map((sku) => sku.locationId).filter(Boolean).map(String))]
-    const seriesTagIds = [...new Set(products.map((product) => product.primarySeriesTagId).filter(Boolean).map(String))]
-    const [categories, locations, seriesTags] = await Promise.all([
-      categoryIds.length ? manager.getRepository(BaseCategory).find({ where: { id: In(categoryIds) } }) : [],
-      locationIds.length ? manager.getRepository(BaseStorageLocation).find({ where: { id: In(locationIds) } }) : [],
-      seriesTagIds.length ? manager.getRepository(BaseTag).find({ where: { id: In(seriesTagIds) }, select: ['id', 'tagName'] }) : [],
-    ])
-    const categoryMap = new Map(categories.map((category) => [String(category.id), category.categoryName]))
-    const locationMap = new Map(locations.map((location) => [String(location.id), location.locationCode]))
-    const seriesNameMap = new Map(seriesTags.map((tag) => [String(tag.id), tag.tagName]))
-    const skuMap = new Map(skus.map((sku) => [String(sku.id), sku]))
-    return ids.map((id) => {
-      const sku = skuMap.get(id) as BaseProductSku
-      const product = productMap.get(String(sku.productId))
-      return {
-        skuId: id,
-        printLocations: printLocationMap.get(id)!,
-        productId: String(sku.productId),
-        skuCode: sku.skuCode,
-        barcode: sku.barcode || sku.skuCode,
-        factoryBarcode: sku.barcode || null,
-        productName: product?.productName ?? '',
-        specText: sku.specText || '默认规格',
-        price: calculateDiscountedPrice(sku.defaultPrice, sku.discountRate),
-        categoryName: product?.categoryId ? categoryMap.get(String(product.categoryId)) ?? null : null,
-        locationCode: sku.locationId ? locationMap.get(String(sku.locationId)) ?? null : null,
-        variantCode: sku.variantCode || null,
-        sizeCode: sku.sizeCode || null,
-        seriesName: product?.primarySeriesTagId ? seriesNameMap.get(String(product.primarySeriesTagId)) ?? null : null,
-        codeScheme: product?.codeScheme || 'legacy',
-      }
-    })
-    }, { mysqlIsolationLevel: 'REPEATABLE READ' })
+    const labels = await loadProductLabels(AppDataSource.manager, ids, capability)
+    if (labels.length !== ids.length) throw new BizError('存在无效的规格，请刷新后重试', 404)
+    return labels
   }
 
   /** 分类只能指向存在的分类；新指定的分类必须启用，保持原分类不变时允许其已停用。 */
@@ -3372,6 +3383,9 @@ export class ProductService {
     if (manager.connection.options.type !== 'mysql') {
       throw new BizError('当前数据库不支持安全校验条码命名空间，请联系管理员', 409)
     }
+    // 建档已查询 SKU 表，MySQL 在这个事务结束前持有表元数据锁。批次结束立即丢弃缓存。
+    const batch = this.productCreateCollations.get(manager)
+    if (batch?.value !== undefined) return batch.value
     const columns = await manager.query(
       "SELECT COLUMN_NAME AS name, COLLATION_NAME AS collation FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'base_product_sku' AND COLUMN_NAME IN ('sku_code', 'barcode', 'legacy_sku_code')",
     ) as Array<{ name: string; collation: string | null }>
@@ -3382,6 +3396,7 @@ export class ProductService {
       || collations.size !== 1 || !collation || !/^utf8mb4_[a-z0-9_]+$/i.test(collation)) {
       throw new BizError('SKU 编码列的数据库排序规则不一致，无法安全保存编码，请联系管理员', 409)
     }
+    if (batch) batch.value = collation
     return collation
   }
 
@@ -3542,7 +3557,13 @@ export class ProductService {
     })
   }
 
-  async createWithManager(input: CreateProductInput, manager: EntityManager, actor: AuthUserContext): Promise<ProductView> {
+  async createWithManager(input: CreateProductInput, manager: EntityManager, actor: AuthUserContext): Promise<ProductView>
+  async createWithManager(
+    input: CreateProductInput, manager: EntityManager, actor: AuthUserContext, options: { skipViewBuild: true },
+  ): Promise<{ product: BaseProduct; skuCount: number }>
+  async createWithManager(
+    input: CreateProductInput, manager: EntityManager, actor: AuthUserContext, options?: { skipViewBuild: true },
+  ): Promise<ProductView | { product: BaseProduct; skuCount: number }> {
     const normalizedProductCode = normalizeProductCodeInput(input.productCode)
     const normalizedCreateInput = this.normalizeCreateInput(input)
     const seriesTagId = this.normalizeSeriesTagIdInput(normalizedCreateInput.primarySeriesTagId)
@@ -3587,14 +3608,14 @@ export class ProductService {
           ? [...requestedTagIds, seriesInfo.primarySeriesTagId]
           : requestedTagIds
         await this.replaceProductTags(saved.id, effectiveTagIds, manager)
-        await this.replaceProductSkus(saved, normalizedCreateInput, manager)
+        const skuCount = await this.replaceProductSkus(saved, normalizedCreateInput, manager)
         // 新建商品的初始库存同样要落流水，保证“库存 = 初始库存 + 各类变动”可追溯。
         await this.recordManualStockAdjustments(saved, {
           productCurrentStock: 0,
           productPreOrderedStock: Number(saved.preOrderedStock ?? 0),
           skus: new Map(),
         }, actor, manager, 'create')
-        return this.buildProductView(saved, manager)
+        return options?.skipViewBuild ? { product: saved, skuCount } : this.buildProductView(saved, manager)
       } catch (error) {
         lastError = error
 

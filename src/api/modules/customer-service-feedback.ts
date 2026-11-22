@@ -12,7 +12,7 @@
 
 import { request, type RequestConfig } from '@/api/http'
 import { compressImageForUpload } from '@/utils/image-upload'
-import type { ActiveRestockRequestResult, ClientRestockRequest, CreateRestockRequestInput, CreateRestockRequestResult, RestockEffectiveStatus, UpdateRestockRequestInput, UpdateRestockRequestResult } from '../../../packages/shared-types/src/index'
+import type { ClientRestockRequest, CreateRestockRequestInput, CreateRestockRequestResult, RestockEffectiveStatus, UpdateRestockRequestInput, UpdateRestockRequestResult } from '../../../packages/shared-types/src/index'
 export type { ClientRestockRequest, RestockEffectiveStatus } from '../../../packages/shared-types/src/index'
 
 /**
@@ -1342,9 +1342,7 @@ export const listSupportFeedbackConversations = async (
 }
 
 /** 补货申请始终使用专用事务接口，普通反馈字段编辑不能代替业务状态流转。 */
-export const getActiveClientRestockRequest = (skuId: string, config: RequestConfig = {}) => request<ActiveRestockRequestResult>({
-  ...config, method: 'GET', url: '/client-feedback/restock-requests/active', params: { skuId },
-})
+export { getActiveClientRestockRequest } from './client-restock-query'
 
 export const createClientRestockRequest = async (input: CreateRestockRequestInput) => {
   const result = await request<CreateRestockRequestResult>({ method: 'POST', url: '/client-feedback/restock-requests', data: input })

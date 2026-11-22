@@ -24,6 +24,20 @@ import { assertPermanentDeletePassword } from '../utils/permanent-delete-passwor
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 import { buildSkuLogFields, persistLockedInventoryStocks, snapshotSkuStock } from './inventory-ledger.service.js'
 import { formatLocationDeductions, reconcileSkuLocationStockTransitions } from './sku-location-stock.service.js'
+import { buildSqlLikeContains } from '../utils/sql-like.js'
+import { supplierSkuFieldMask } from '../utils/supplier-product-visibility.js'
+import { allocateUtcDailyDeliveryNo } from './inventory-sequence.service.js'
+
+/** 供货方只读取 SKU 基础资料，保留实体序列化时的成本保护。 */
+function presentInboundDetail(detail: { order: BizInboundOrder; items: BizInboundOrderItem[] }, actor: AuthUserContext) {
+  if (actor.role !== 'supplier') return detail
+  return {
+    ...detail,
+    items: detail.items.map((item) => item.sku ? Object.assign(new BizInboundOrderItem(), item, {
+      sku: Object.assign(new BaseProductSku(), item.sku, supplierSkuFieldMask),
+    }) : item),
+  }
+}
 
 export interface SubmitInboundItemInput {
   productId: string
@@ -392,20 +406,6 @@ class InboundService {
     return order
   }
 
-  private async generateShowNo(manager = AppDataSource.manager): Promise<string> {
-    const dateText = new Date().toISOString().slice(0, 10).replaceAll('-', '')
-    const prefix = `IN${dateText}`
-    const raw = await manager
-      .getRepository(BizInboundOrder)
-      .createQueryBuilder('order')
-      .select('order.showNo', 'showNo')
-      .where('order.showNo LIKE :prefix', { prefix: `${prefix}%` })
-      .orderBy('order.showNo', 'DESC')
-      .getRawOne<{ showNo?: string }>()
-    const current = raw?.showNo ? Number.parseInt(raw.showNo.slice(prefix.length), 10) || 0 : 0
-    return `${prefix}${String(current + 1).padStart(4, '0')}`
-  }
-
   /**
    * 送货单通知与业务写入同一事务落库：
    * - 新单提醒发给后台库管，状态变更（核验入库、现场改单）只发该单所属供货方；
@@ -446,7 +446,7 @@ class InboundService {
       
       const totalQty = this.assertInboundQuantityBounds(resolvedItems)
 
-      const showNo = await this.generateShowNo(manager)
+      const showNo = await allocateUtcDailyDeliveryNo(manager, 'inbound')
       const savedOrder = await manager.getRepository(BizInboundOrder).save(
         manager.getRepository(BizInboundOrder).create({
           showNo,
@@ -495,7 +495,7 @@ class InboundService {
       }, manager)
       await this.emitInboundNotification(manager, savedOrder, { type: 'submitted' })
 
-      return this.detailById(savedOrder.id, manager)
+      return presentInboundDetail(await this.detailById(savedOrder.id, manager), actor)
     })
   }
 
@@ -1137,31 +1137,30 @@ class InboundService {
   }
 
   private async buildSupplierDeliverySummary(supplierId: string): Promise<SupplierDeliverySummaryResult> {
-    const [rows, deleted] = await Promise.all([
-      this.inboundRepo
-        .createQueryBuilder('order')
-        .select('order.status', 'status')
-        .addSelect('COUNT(1)', 'count')
-        .where('order.supplierId = :supplierId', { supplierId })
-        .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
-        .groupBy('order.status')
-        .getRawMany<{ status: BizInboundOrder['status']; count: string }>(),
-      this.inboundRepo
-        .createQueryBuilder('order')
-        .where('order.supplierId = :supplierId', { supplierId })
-        .andWhere('order.isDeleted = :isDeleted', { isDeleted: true })
-        .getCount(),
-    ])
+    const rows = await this.inboundRepo
+      .createQueryBuilder('order')
+      .select('order.isDeleted', 'isDeleted')
+      .addSelect('order.status', 'status')
+      .addSelect('COUNT(1)', 'count')
+      .where('order.supplierId = :supplierId', { supplierId })
+      .andWhere('order.isDeleted IN (:...deletionFlags)', { deletionFlags: [false, true] })
+      .groupBy('order.isDeleted')
+      .addGroupBy('order.status')
+      .getRawMany<{ isDeleted: number | boolean | string; status: BizInboundOrder['status']; count: string }>()
 
     const summary: SupplierDeliverySummaryResult = {
       total: 0,
       pending: 0,
       verified: 0,
       cancelled: 0,
-      deleted,
+      deleted: 0,
     }
     rows.forEach((row) => {
       const count = Number(row.count || 0)
+      if (Number(row.isDeleted) === 1) {
+        summary.deleted += count
+        return
+      }
       summary.total += count
       if (row.status in summary) {
         summary[row.status] = count
@@ -1201,8 +1200,8 @@ class InboundService {
       baseQueryBuilder.andWhere(
         new Brackets((keywordBuilder) => {
           keywordBuilder
-            .where('order.showNo LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
-            .orWhere('order.supplierName LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
+            .where("order.showNo LIKE :keyword ESCAPE '!'", { keyword: buildSqlLikeContains(normalizedKeyword) })
+            .orWhere("order.supplierName LIKE :keyword ESCAPE '!'", { keyword: buildSqlLikeContains(normalizedKeyword) })
         }),
       )
     }
@@ -1248,7 +1247,7 @@ class InboundService {
       throw new BizError('核销码无效或送货单不存在', 404)
     }
     const items = await this.inboundItemRepo.find({ where: { orderId: order.id }, relations: { sku: true } })
-    return { order, items }
+    return presentInboundDetail({ order, items }, actor)
   }
 
   // 供货方/管理端：通过 showNo 查看详情（兼容人工输入单号查询）
@@ -1269,7 +1268,7 @@ class InboundService {
       throw new BizError('送货单号无效或送货单不存在', 404)
     }
     const items = await this.inboundItemRepo.find({ where: { orderId: order.id }, relations: { sku: true } })
-    return { order, items }
+    return presentInboundDetail({ order, items }, actor)
   }
 
   // 库管员核销入库
@@ -1475,8 +1474,8 @@ class InboundService {
         queryBuilder.andWhere(
           new Brackets((keywordBuilder) => {
             keywordBuilder
-              .where('order.showNo LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
-              .orWhere('order.supplierName LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
+              .where("order.showNo LIKE :keyword ESCAPE '!'", { keyword: buildSqlLikeContains(normalizedKeyword) })
+              .orWhere("order.supplierName LIKE :keyword ESCAPE '!'", { keyword: buildSqlLikeContains(normalizedKeyword) })
           }),
         )
       }

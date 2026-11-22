@@ -11,7 +11,12 @@ import express from 'express'
 const parent = path.resolve(process.env.YLINK_ISSUES_VERIFY_ROOT ?? '')
 assert.ok(process.env.YLINK_ISSUES_VERIFY_ROOT && /^[\x20-\x7e]+$/.test(parent), '必须显式指定本任务独占英文临时目录')
 const runtime = fs.mkdtempSync(path.join(parent,'ylink-issues-ui-'))
+const emptyEnvFile = path.join(runtime, 'empty.env')
+fs.writeFileSync(emptyEnvFile, '')
 Object.assign(process.env,{ NODE_ENV:'test', APP_PROFILE:'issues-177-178-browser', DB_TYPE:'sqlite', DB_SYNC:'true', SQLITE_DB_PATH:path.join(runtime,'verify.sqlite'), Y_LINK_DATA_DIR:runtime, Y_LINK_SKIP_DATABASE_RUNTIME_OVERRIDE:'true' })
+process.env.ENV_FILE = emptyEnvFile
+process.env.REDIS_URL = ''
+process.env.ALIYUN_DYPNS_MNS_ENABLED = 'false'
 const { AppDataSource:db } = await import('../src/config/data-source.js')
 const { prepareDatabaseRuntime,initializeDatabaseSchemaIfNeeded } = await import('../src/config/database-bootstrap.js')
 const { ClientUser } = await import('../src/entities/client-user.entity.js')
@@ -39,8 +44,8 @@ const admin=await users.save(users.create({username:'issues-browser-admin',displ
 const supplier=await users.save(users.create({username:'issues-browser-supplier',displayName:'只读标签用户',role:'supplier',status:'enabled',passwordHash}))
 for(const [name,user] of [['admin',admin],['supplier',supplier]] as const){const sessionToken=randomBytes(32).toString('base64url'); await db.getRepository(SysUserSession).save({userId:user.id,sessionToken:hashSessionToken(sessionToken),expiresAt,lastAccessAt:new Date()});sessions.set(name,{sessionToken,expiresAt})}
 const clients=db.getRepository(ClientUser)
-const client=await clients.save(clients.create({username:'issues-browser-client',realName:'隔离教师',mobile:'13800000177',accountType:'department',departmentName:'隔离部门',staffNo:'177',staffVerified:true,status:'enabled',passwordHash}))
-const other=await clients.save(clients.create({username:'issues-browser-other',realName:'另一账号',mobile:'13800000178',accountType:'department',departmentName:'隔离部门',staffNo:'178',staffVerified:true,status:'enabled',passwordHash}))
+const client=await clients.save(clients.create({username:'issues-browser-client',realName:'隔离教师',mobile:'13800000177',accountType:'department',departmentName:'隔离部门'.repeat(12),staffNo:'177',staffVerified:true,status:'enabled',passwordHash}))
+const other=await clients.save(clients.create({username:'issues-browser-other',realName:'另一账号',mobile:'13800000178',accountType:'department',departmentName:client.departmentName,staffNo:'178',staffVerified:true,status:'enabled',passwordHash}))
 for(const [name,user] of [['client',client],['other',other]] as const){const sessionToken=randomBytes(32).toString('base64url');await db.getRepository(ClientUserSession).save({userId:user.id,sessionToken:hashSessionToken(sessionToken),expiresAt,lastAccessAt:new Date()});sessions.set(name,{sessionToken,expiresAt})}
 const actor={userId:String(admin.id),username:admin.username,displayName:admin.displayName,role:'admin' as const,status:'enabled' as const,permissions:resolvePermissionsByRole('admin'),sessionToken:sessions.get('admin')!.sessionToken,authSource:'bearer' as const}
 const locations=db.getRepository(BaseStorageLocation)

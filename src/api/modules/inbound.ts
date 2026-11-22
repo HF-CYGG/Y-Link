@@ -282,8 +282,8 @@ export const permanentlyDeleteSupplierDelivery = (
 export const getInboundDetail = (verifyCodeOrShowNo: string, requestConfig: InboundDetailRequestConfig = {}) => {
   const normalizedCode = verifyCodeOrShowNo.trim()
   const detailPath = isInboundShowNo(normalizedCode)
-    ? `/inbound/detail/show-no/${normalizedCode.toUpperCase()}`
-    : `/inbound/detail/${normalizedCode}`
+    ? `/inbound/detail/show-no/${encodeURIComponent(normalizedCode.toUpperCase())}`
+    : `/inbound/detail/${encodeURIComponent(normalizedCode)}`
   const { includeDeleted, ...safeRequestConfig } = requestConfig
 
   return request<InboundOrderDetail>({
@@ -303,7 +303,7 @@ export const getInboundDetailByShowNo = (showNo: string, requestConfig: InboundD
   return request<InboundOrderDetail>({
     ...safeRequestConfig,
     method: 'GET',
-    url: `/inbound/detail/show-no/${showNo}`,
+    url: `/inbound/detail/show-no/${encodeURIComponent(showNo)}`,
     params: includeDeleted ? { includeDeleted: true } : undefined,
   })
 }

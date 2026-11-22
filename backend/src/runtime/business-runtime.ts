@@ -8,7 +8,7 @@ import { createApp } from '../app.js'
 import type { Server } from 'node:http'
 import { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } from '../config/database-bootstrap.js'
 import { AppDataSource } from '../config/data-source.js'
-import { maskDatabaseRuntimeOverride, readDatabaseRuntimeOverride } from '../config/database-runtime-override.js'
+import { maskDatabaseRuntimeOverride, readDatabaseRuntimeOverride, upgradeLegacyDatabaseRuntimeOverride } from '../config/database-runtime-override.js'
 import { env, envLoadContext } from '../config/env.js'
 import { initializeDatabaseInfrastructure } from '../database/database-strategy.js'
 import { authService } from '../services/auth.service.js'
@@ -26,6 +26,7 @@ import { databaseMaintenanceModeService } from '../services/database-maintenance
 import { databaseMigrationService } from '../services/database-migration.service.js'
 import { notificationService } from '../services/notification.service.js'
 import { mobileSessionService } from '../services/mobile-session.service.js'
+import { startWebSessionCleanup, stopWebSessionCleanup } from '../services/web-session-cleanup.service.js'
 import { o2oPreorderService } from '../services/o2o-preorder.service.js'
 import { persistentRiskStateService } from '../services/persistent-risk-state.service.js'
 import { productService } from '../services/product.service.js'
@@ -147,12 +148,12 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 let activeHttpServer: Server | null = null
 let shutdownPromise: Promise<void> | null = null
+// 普通启动失败只清理；随后显式信号/重启请求必须升级为退出，不能被首个exit=false捕获。
+let requestedShutdownExitCode: number | null = null
 
 const shutdownRuntime = (reason: string, exitCode: number, exit = true): Promise<void> => {
-  if (shutdownPromise) {
-    return shutdownPromise
-  }
-  shutdownPromise = (async () => {
+  if (exit && requestedShutdownExitCode === null) requestedShutdownExitCode = exitCode
+  if (!shutdownPromise) shutdownPromise = (async () => {
     logLine('SHUTDOWN', `reason=${reason}，停止接收新请求并等待后台事务完成`, 'warn')
     const server = activeHttpServer
     const serverClosed = server
@@ -166,7 +167,9 @@ const shutdownRuntime = (reason: string, exitCode: number, exit = true): Promise
     await stopProductThumbnailBackfill()
     // HTTP 断开不代表业务 Promise 完成；先关闭新准入，排空所有操作和 worker 才销毁连接。
     await databaseMaintenanceModeService.shutdownAndDrain()
+    await notificationService.stopOutboxWorker()
     await mobileSessionService.stopCleanupLoop()
+    await stopWebSessionCleanup()
     server?.closeAllConnections?.()
     await Promise.race([serverClosed, sleep(1000)])
 
@@ -180,9 +183,11 @@ const shutdownRuntime = (reason: string, exitCode: number, exit = true): Promise
       })
     }
     activeHttpServer = null
-    if (exit) process.exit(exitCode)
   })()
-  return shutdownPromise
+  // 每个等待者都在清理后读取最新意图；清理本体仍仅执行一次，首个显式75/信号退出码保留。
+  return shutdownPromise.then(() => {
+    if (requestedShutdownExitCode !== null) process.exit(requestedShutdownExitCode)
+  })
 }
 
 registerRuntimeShutdownHandler(shutdownRuntime)
@@ -412,6 +417,15 @@ export async function startBusinessRuntime(startup: { mode: 'normal' | 'cutover'
         + '请恢复与该数据库配套的 secrets/data-encryption.key；在此之前这些配置按“需重新录入”处理。',
       'warn',
     )
+  } else if (dataEncryptionPreflight && process.env.Y_LINK_SKIP_DATABASE_RUNTIME_OVERRIDE !== 'true') {
+    try {
+      upgradeLegacyDatabaseRuntimeOverride()
+      if (startup.taskId && (startup.mode === 'resume' || env.DB_TYPE === 'mysql')) {
+        await databaseMigrationService.upgradeLegacyActiveTaskPassword(startup.taskId)
+      }
+    } catch {
+      logLine('DATA ENCRYPTION', '旧迁移凭据的加密升级未完成，保留原配置供本次启动使用。', 'warn')
+    }
   }
   const cutoverMarkerInspection = inspectDatabaseMigrationCutoverMarker()
   if (cutoverMarkerInspection.state === 'corrupted') {
@@ -531,13 +545,13 @@ export async function startBusinessRuntime(startup: { mode: 'normal' | 'cutover'
     )
   ) {
     // 不可变数据验收和最终审计已完成，才允许启动补数；恢复日志先记完成，维护状态最后解除。
-    await databaseMaintenanceModeService.runGovernance(cutoverStartupResult.taskId, async () => {
+    await databaseMaintenanceModeService.runGovernance(cutoverStartupResult.taskId, () => databaseMigrationService.runManualMigrationStartupBootstrap(cutoverStartupResult.taskId, async () => {
       if (cutoverStartupResult.action === 'rollback_finalized') markRecoveryFinalizing(cutoverStartupResult.taskId)
       const schemaInitResult = await initializeDatabaseSchemaIfNeeded(AppDataSource)
       logLine('SCHEMA', `action=${schemaInitResult.action} reason=${schemaInitResult.reason}`)
       mutableStartupBootstrapResult = await runMutableStartupBootstrap()
       logMutableStartupBootstrapResult(mutableStartupBootstrapResult)
-    })
+    }))
     await completeDatabaseMigrationCutoverStartup(cutoverStartupResult.taskId)
   }
 
@@ -552,15 +566,16 @@ export async function startBusinessRuntime(startup: { mode: 'normal' | 'cutover'
     // 迁移错误对象可能携带目标库连接参数与 SQL，只输出名称、消息与堆栈。
     console.error(paint('[y-link-backend] resume automatic database migration failed:', 'red'), toSafeErrorLog(error))
   }).finally(() => {
-    // 通知 outbox 定时器在维护期只空转检查，不领取新任务；维护 drain 会等待已领取批次释放。
+    // 维护期暂停通知调度，排空时等待已领取的批次释放。
     notificationService.startOutboxWorker()
     // start 仅登记恢复意图；gate 冻结时不会启动计时器，解除维护才自动恢复。
     o2oPreorderService.startTimeoutRecycleLoop()
     persistentRiskStateService.startCleanupLoop()
     mobileSessionService.startCleanupLoop()
+    startWebSessionCleanup()
     clientFeedbackService.startAttachmentCleanupWorker()
     // 商品缩略图存量回填只读写 uploads/products 文件、不触碰数据库，延迟到启动完成后低优先级执行。
-    configureProductThumbnailInvalidation(invalidateMallCatalogReadCache)
+    configureProductThumbnailInvalidation(() => invalidateMallCatalogReadCache({ affectsBusinessData: false }))
     scheduleProductThumbnailBackfill()
     if (databaseMaintenanceModeService.isReadOnly()) {
       logLine('DB MIGRATION', '数据库仍处于只读维护，后台写任务保持暂停', 'warn')
@@ -570,4 +585,8 @@ export async function startBusinessRuntime(startup: { mode: 'normal' | 'cutover'
 
 export async function stopFailedBusinessRuntime(): Promise<void> {
   await shutdownRuntime('bootstrap_failure', 1, false)
+}
+
+export function getRequestedRuntimeExitCode(): number | null {
+  return requestedShutdownExitCode
 }

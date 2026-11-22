@@ -4,6 +4,7 @@
  * 维护边界：不读取或改写历史个人邀请码；公开视图只返回状态与更新时间，不返回摘要。
  */
 import type { EntityManager } from 'typeorm'
+import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { SystemConfig } from '../entities/system-config.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
@@ -17,7 +18,7 @@ import {
   verifySharedStaffInviteCode,
 } from '../utils/staff-invite-code.js'
 import { auditService } from './audit.service.js'
-import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
+import { assertSysAccountGovernancePermission, lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 
 interface StaffInviteConfigValue {
   enabled: boolean
@@ -64,7 +65,8 @@ export class ClientStaffInviteCodeService {
   }
 
   async getConfig(): Promise<ClientStaffInviteCodeConfig> {
-    return runInTransaction(async (manager) => this.toView(await this.readLockedConfig(manager)))
+    const row = await AppDataSource.getRepository(SystemConfig).findOneBy({ configKey: STAFF_INVITE_CONFIG_KEY })
+    return this.toView(row)
   }
 
   /** 调用方必须在同一事务内继续锁定工号并创建账号，不能在验证后提前释放配置锁。 */
@@ -103,7 +105,8 @@ export class ClientStaffInviteCodeService {
 
   private async updateConfig(digest: string | null, actor: AuthUserContext, requestMeta?: RequestMeta) {
     return runInTransaction(async (manager) => {
-      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const lockedActor = await lockActiveSysAccountForBusiness(manager, actor.userId)
+      assertSysAccountGovernancePermission(lockedActor, 'system_configs:update')
       const repo = manager.getRepository(SystemConfig)
       // 默认行由启动流程补齐；直接取写锁，避免 INSERT IGNORE 的重复键共享锁升级死锁。
       const row = await this.readLockedConfig(manager, true)

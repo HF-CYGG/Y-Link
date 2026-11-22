@@ -1,0 +1,28 @@
+{
+  "status": "prepared_not_run",
+  "scope": "本批UX的浏览器验收补充；不取代既有全入口矩阵，不声称8类已验收",
+  "automatedCommand": "node scripts/verify-client-interaction-polish.mjs",
+  "startupDiagnosticCommand": "node scripts/verify-client-polish-lab-ready.mjs",
+  "existingMatrix": "scripts/client-polish-coverage.json",
+  "supplement": [
+    {"id":"LOGIN-FIELDS","mode":"automated","assertions":["空账号、空密码、空captcha不发送login，焦点停首错字段","字段错误与aria-describedby关联，输入后清理","账号username、密码current-password autocomplete"]},
+    {"id":"LOGIN-ERROR-LOCK","mode":"automated","assertions":["401错误后显示captcha","429锁定后清空并刷新captcha、按钮恢复","保留服务端错误和锁定提示"]},
+    {"id":"CART-SKU","mode":"automated","assertions":["同产品不同SKU拥有独立可访问标签","选择和加减只改变目标SKU","失效SKU仍可单独取消选择"]},
+    {"id":"MOBILE-OVERFLOW","mode":"automated","assertions":["320px登录和非空购物车document scrollWidth不超视口","截图保留；仍需触控真机补充"]},
+    {"id":"NARROW-MALL","mode":"manual-browser","matrix":"MOTION-MATRIX","assertions":["320/390px搜索按钮与theme/version入口elementFromPoint命中各自控件","空结果及请求失败可重新搜索","639px以下分类位于商品上方，可横向滚动并与商品滚动同步","1280px侧栏保持原布局"]},
+    {"id":"RATING-HITBOX","mode":"manual-browser","matrix":"FEEDBACK-EVALUATE","assertions":["f2评价卡片文字可换行，卡片之间无视觉或命中区域交叠","逐一点击每个选项上下边缘，实际选中目标项","保存后显示正式ratedAt时间"]},
+    {"id":"ASYNC-OWNERSHIP","mode":"manual-browser","matrix":["CHECKOUT-OWNER","ORDER-EDIT","ORDER-CANCEL","ORDER-RETURN","UPLOAD-OWNER","PROFILE"],"assertions":["离页/换号后迟到响应不修改新账号状态或导航","确认阶段和在途阶段均防重复","相同提交意图重试保持clientRequestId"]}
+  ],
+  "fixtureControls": [
+    {"action":"catalog-sku","skuId":"s3","stock":40,"enabled":true},
+    {"action":"catalog-sku","skuId":"s3","enabled":false},
+    {"action":"failure","key":"POST /api/client-auth/login","status":429,"message":"账号已锁定，请稍后重试","count":1}
+  ],
+  "unifiedQa": {
+    "gate":"等待主线明确放行并冻结被验收源码快照",
+    "commands":["npm run verify:performance","npm run verify:text-encoding","npm run verify:client-detail-layout","npm run verify:client-cart-reconciliation","npm run verify:client-registration-policy","node scripts/verify-client-interaction-polish.mjs","node scripts/verify-client-polish-lab.mjs","npm --prefix backend run o2o:verify"],
+    "buildReuse":"performance首步run-frontend-build与npm run build相同；同一有效覆盖快照复用，不再单独build",
+    "performanceFailure":"预算失败中断后，仅补跑本批必要且尚未执行的后续步骤；既有总包4807>4780、coldstart>3000保留原阈值和失败证据",
+    "notCovered":["真实env、数据库、上传目录、短信邮件","真实后端业务一致性与Redis/Nginx","被其他agent继续改动的源码尚未冻结"]
+  }
+}

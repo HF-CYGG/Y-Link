@@ -1,15 +1,13 @@
+import * as crypto from 'node:crypto'
 import 'reflect-metadata'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import { execFileSync } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { installCaptchaServiceForTesting } from '../src/services/captcha.service.js'
 
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
 const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
-const repoRoot = path.resolve(backendRoot, '..')
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqlitePath = path.resolve(sqliteRoot, `client-auth-department-governance-${verifySeed}.sqlite`)
 const adminPassword = `Admin_${verifySeed}_Aa1`
@@ -22,6 +20,8 @@ process.env.SQLITE_DB_PATH = sqlitePath
 process.env.INIT_ADMIN_PASSWORD = adminPassword
 process.env.INVITE_CODE_PEPPER ||= `governance-pepper-${verifySeed}-minimum-32-bytes`
 
+// captcha 的票据依赖会加载 env，必须在全部测试环境设置完成后再导入，避免提前捕获外部初始化配置。
+const { installCaptchaServiceForTesting } = await import('../src/services/captcha.service.js')
 const TEST_CAPTCHA_CODE = 'ABC123'
 installCaptchaServiceForTesting({ createCode: () => TEST_CAPTCHA_CODE })
 
@@ -60,41 +60,6 @@ const cleanupSqliteFile = () => {
       `[client-auth-department-governance] 临时 SQLite 清理失败，已忽略: ${
         error instanceof Error ? error.message : String(error)
       }`,
-    )
-  }
-}
-
-const readFileWithGitFallback = (targetPath: string) => {
-  try {
-    return fs.readFileSync(targetPath, 'utf8')
-  } catch (error) {
-    const errorCode = (error as NodeJS.ErrnoException).code
-    if (errorCode !== 'ENOENT') {
-      throw error
-    }
-
-    const relativePath = path.relative(repoRoot, path.resolve(targetPath))
-    if (relativePath === '' || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
-      throw error
-    }
-    const posixRelativePath = relativePath.replace(/\\/g, '/')
-    const tryRefs = [`:${posixRelativePath}`, `HEAD:${posixRelativePath}`]
-    const gitErrors: string[] = []
-
-    for (const ref of tryRefs) {
-      try {
-        return execFileSync('git', ['show', ref], {
-          cwd: repoRoot,
-          encoding: 'utf8',
-          windowsHide: true,
-        })
-      } catch (gitError) {
-        gitErrors.push(String(gitError instanceof Error ? gitError.message : gitError))
-      }
-    }
-
-    throw new Error(
-      `[client-auth-department-governance] 文件在工作树缺失且无法从 Git 索引/HEAD 读取: ${targetPath}\n${gitErrors.join('\n')}`,
     )
   }
 }
@@ -165,6 +130,17 @@ async function main() {
   const { systemConfigService } = await import('../src/services/system-config.service.js')
   const { hashPassword } = await import('../src/utils/password.js')
   const { ClientUserSession } = await import('../src/entities/client-user-session.entity.js')
+  const { SysUser } = await import('../src/entities/sys-user.entity.js')
+  const { SysUserSession } = await import('../src/entities/sys-user-session.entity.js')
+  const { hashSessionToken } = await import('../src/utils/session-token.js')
+  const createProfileSession = async (userId: string) => {
+    const token = `profile-fixture-${userId}-${crypto.randomUUID()}`
+    await AppDataSource.getRepository(ClientUserSession).save({
+      userId, sessionToken: hashSessionToken(token),
+      expiresAt: new Date(Date.now() + 60_000), lastAccessAt: new Date(),
+    })
+    return token
+  }
   const { installSqliteTransactionQueue } = await import('../src/utils/sqlite-transaction-queue.js')
 
   prepareDatabaseRuntime()
@@ -178,8 +154,21 @@ async function main() {
     await authService.ensureDefaultAdmin()
     await systemConfigService.ensureDefaultConfigs()
 
+    const sysUsers = AppDataSource.getRepository(SysUser)
+    const sysSessions = AppDataSource.getRepository(SysUserSession)
+    const administrator = await sysUsers.findOneByOrFail({ username: 'admin' })
+    const otherAdmin = await sysUsers.save({
+      username: 'cleanup-other', displayName: '独立会话回收夹具', passwordHash: 'fixture-only', role: 'admin', status: 'enabled',
+    })
+    const expiredAt = new Date(Date.now() - 60_000)
+    const [ownExpiredAdmin, otherExpiredAdmin] = await sysSessions.save([administrator.id, otherAdmin.id].map((userId) => ({
+      userId, expiresAt: expiredAt, lastAccessAt: expiredAt,
+      sessionToken: hashSessionToken(crypto.randomUUID()),
+    })))
     const adminLogin = await authService.login({ username: 'admin', password: adminPassword })
     const adminAuth = await authService.resolveAuthUserByToken(adminLogin.token)
+    assert.equal(await sysSessions.existsBy({ id: ownExpiredAdmin!.id }), false, '管理端登录清理当前账号的过期会话')
+    assert.equal(await sysSessions.existsBy({ id: otherExpiredAdmin!.id }), true, '管理端登录保留其他账号的过期会话供后台清理')
     const longDepartmentLabels = [
       '第一级部门路径容量验证节点甲乙丙丁戊',
       '第二级部门路径容量验证节点甲乙丙丁戊',
@@ -501,20 +490,42 @@ async function main() {
       .getOneOrFail()
       .then((user) => user.passwordHash)
     assert.equal(departmentAccountHashAfterSkip, departmentAccountHashBeforeSkip, '跳过已有账号不得改变密码哈希')
+    await AppDataSource.getRepository(ClientUser).save({ realName: 'DEPT-AABB00CCDD', passwordHash: 'fixture-only' })
     await expectBizError(
       () => departmentAccountBatchService.createDepartmentAccountsBatch(
         {
           status: 'enabled',
           items: [
             { departmentNodeId: 'dept_finance', account: 'DEPT-FFEEDDCCBB', initialPassword: clientPassword },
-            { departmentNodeId: 'dept_hr', account: 'DEPT-AAAABBBBCC', initialPassword: clientPassword },
+            { departmentNodeId: 'dept_hr', account: 'DEPT-AABB00CCDD', initialPassword: clientPassword },
           ],
         },
         adminAuth,
       ),
-      '批量开户中账号编号冲突',
+      '待建账号编号与历史姓名冲突',
       '账号编号已被其他客户端用户使用',
     )
+    const legacyCaseOwner = await AppDataSource.getRepository(ClientUser).save({
+      realName: 'dept-ddeebbaa11', passwordHash: 'fixture-only',
+    })
+    const conflictedStaffNo = 'DEPT-DDEEBBAA11'
+    await expectBizError(
+      () => departmentAccountBatchService.createDepartmentAccountsBatch({
+        status: 'enabled',
+        items: [{ departmentNodeId: 'dept_hr', account: conflictedStaffNo, initialPassword: clientPassword }],
+      }, adminAuth),
+      '批量开户不得以新工号覆盖大小写不同的历史用户名',
+      '账号编号已被其他客户端用户使用',
+    )
+    await expectBizError(
+      () => clientUserManageService.createProfile({
+        profileKind: 'department', username: '人事处共享账号', departmentNodeId: 'dept_hr',
+        staffNo: conflictedStaffNo, password: clientPassword, status: 'enabled',
+      }, adminAuth),
+      '单个开户不得以新工号覆盖大小写不同的历史用户名',
+      '账号编号已被其他客户端用户使用',
+    )
+    assert.equal(await clientAuthService.resolveLoginRiskSubject(conflictedStaffNo), `uid:${legacyCaseOwner.id}`)
     const rollbackPreview = await departmentAccountBatchService.previewDepartmentAccounts({
       departmentNodeIds: ['dept_finance', 'dept_hr'],
     })
@@ -804,7 +815,8 @@ async function main() {
         realName: legacyUsername,
         accountType: 'personal',
         staffNo: null,
-        sessionToken: 'client-username-legacy-profile-test',
+        sessionToken: await createProfileSession(legacyUsernameUser.id),
+        authSource: 'bearer' as const,
       },
       {
         username: legacyUsername,
@@ -817,7 +829,7 @@ async function main() {
     assert.equal(legacyProfile.username, legacyUsername, '历史非法用户名仅更新联系方式时必须保持原值')
     assert.equal(legacyProfile.email, legacyEmail, '历史非法用户名仅更新联系方式时仍应允许保存新联系方式')
     await expectBizError(
-      () => clientAuthService.updateProfile(
+      async () => clientAuthService.updateProfile(
         {
           userId: legacyUsernameUser.id,
           mobile: legacyUsernameUser.mobile ?? '',
@@ -826,7 +838,8 @@ async function main() {
           realName: legacyUsername,
           accountType: 'personal',
           staffNo: null,
-          sessionToken: 'client-username-legacy-profile-space-test',
+          sessionToken: await createProfileSession(legacyUsernameUser.id),
+          authSource: 'bearer' as const,
         },
         {
           username: ` ${legacyUsername} `,
@@ -839,7 +852,7 @@ async function main() {
       usernameRuleMessage,
     )
     await expectBizError(
-      () => clientAuthService.updateProfile(
+      async () => clientAuthService.updateProfile(
         {
           userId: legacyUsernameUser.id,
           mobile: legacyUsernameUser.mobile ?? '',
@@ -848,7 +861,8 @@ async function main() {
           realName: legacyUsername,
           accountType: 'personal',
           staffNo: null,
-          sessionToken: 'client-username-legacy-profile-test',
+          sessionToken: await createProfileSession(legacyUsernameUser.id),
+          authSource: 'bearer' as const,
         },
         {
           username: '张_三',
@@ -890,7 +904,8 @@ async function main() {
         realName: legacyUsername,
         accountType: 'personal',
         staffNo: null,
-        sessionToken: 'client-username-legacy-duplicate-profile-test',
+        sessionToken: await createProfileSession(duplicateLegacyUser.id),
+        authSource: 'bearer' as const,
       },
       {
         username: legacyUsername,
@@ -904,6 +919,68 @@ async function main() {
     assert.equal(duplicateLegacyProfile.email, duplicateLegacyEmail, '历史重复用户名未改名时必须允许更新联系方式')
     pass('历史重复用户名未改名时跳过用户名唯一性检查并允许更新联系方式')
 
+    const caseUsers = AppDataSource.getRepository(ClientUser)
+    const casePasswordHash = await hashPassword(clientPassword)
+    const firstCaseUser = await caseUsers.save({
+      realName: 'SharedLegacy', mobile: '13800001981', passwordHash: casePasswordHash, status: 'enabled',
+    })
+    await caseUsers.save({
+      realName: 'sharedlegacy', mobile: '13800001982', passwordHash: casePasswordHash, status: 'enabled',
+    })
+    const caseSession = await createProfileSession(firstCaseUser.id)
+    const caseAuth = await clientAuthService.resolveClientByToken(caseSession)
+    await expectBizError(
+      () => clientAuthService.updateProfile(caseAuth, {
+        username: 'SHAREDLEGACY', mobile: firstCaseUser.mobile!, currentPassword: clientPassword,
+      }),
+      '更名查重排除本人后仍发现另一位历史同名用户',
+      '该用户名已被其他用户使用',
+    )
+    assert.equal((await caseUsers.findOneByOrFail({ id: firstCaseUser.id })).realName, 'SharedLegacy')
+    await clientUserManageService.updateProfile(firstCaseUser.id, {
+      username: firstCaseUser.realName, mobile: firstCaseUser.mobile!, email: 'legacy-contact@example.com',
+      departmentName: '资产处', status: 'enabled',
+    }, adminAuth)
+    assert.equal((await caseUsers.findOneByOrFail({ id: firstCaseUser.id })).email, 'legacy-contact@example.com',
+      '历史重名账号只更新联系方式时仍可保存')
+    await expectBizError(
+      () => clientUserManageService.updateProfile(firstCaseUser.id, {
+        username: 'SHAREDLEGACY', mobile: firstCaseUser.mobile!, email: 'legacy-contact@example.com',
+        departmentName: '资产处', status: 'enabled',
+      }, adminAuth),
+      '管理员改名排除目标账号自身后仍发现历史重名',
+      '该用户名已被其他客户端用户使用',
+    )
+
+    const { mobileAuthService } = await import('../src/services/mobile-auth.service.js')
+    const { mobileSessionService } = await import('../src/services/mobile-session.service.js')
+    const existingTrimmedOwner = await caseUsers.save({ realName: 'blockedlegacy', passwordHash: casePasswordHash })
+    for (const { username, mobile, expectedStoredName } of [
+      { username: 'PaddedLegacy', mobile: '13800001983', expectedStoredName: 'PaddedLegacy' },
+      { username: 'BlockedLegacy', mobile: '13800001984', expectedStoredName: ' BlockedLegacy ' },
+    ]) {
+      const padded = await caseUsers.save({
+        realName: ` ${username} `, mobile, departmentName: '资产处',
+        passwordHash: casePasswordHash, status: 'enabled',
+      })
+      const webSession = await clientAuthService.login({ account: mobile, password: clientPassword })
+      const mobileSession = await mobileAuthService.login({
+        account: mobile, password: clientPassword, device: { deviceId: crypto.randomUUID(), platform: 'android' },
+      })
+      await clientUserManageService.updateProfile(padded.id, { username, mobile, departmentName: '资产处', status: 'enabled' }, adminAuth)
+      assert.equal((await caseUsers.findOneByOrFail({ id: padded.id })).realName, expectedStoredName)
+      assert.equal((await clientAuthService.resolveClientByToken(webSession.token)).userId, padded.id, '显示姓名未变时保留 Web 会话')
+      assert.equal((await mobileSessionService.resolveAccess(mobileSession.accessToken)).userId, padded.id, '显示姓名未变时保留 Mobile 会话')
+      if (username === 'BlockedLegacy') {
+        assert.equal(await clientAuthService.resolveLoginRiskSubject(username), `uid:${existingTrimmedOwner.id}`, '去空格可能冲突时不能改变其他账号的标识归属')
+      }
+      await clientUserManageService.updateProfile(padded.id, {
+        username: `${username}Changed`, mobile, departmentName: '资产处', status: 'enabled',
+      }, adminAuth)
+      await assert.rejects(clientAuthService.resolveClientByToken(webSession.token), /失效/, '真实改名撤销 Web 会话')
+      await assert.rejects(mobileSessionService.resolveAccess(mobileSession.accessToken), /已撤销/, '真实改名撤销 Mobile 会话')
+    }
+
     // Issue #69：已保存联系方式的补认证闭环。
     const { SysAuditLog } = await import('../src/entities/sys-audit-log.entity.js')
     const { verificationCodeService: sharedVerificationCodeService } = await import('../src/services/verification-code.service.js')
@@ -911,7 +988,7 @@ async function main() {
     const clientUserRepository = AppDataSource.getRepository(ClientUser)
     const savedContactRequestMeta = { ipAddress: '127.0.0.1', userAgent: 'client-auth-saved-contact-verify' }
     const latestCapturedCode = (target: string) => [...capturedVerifications].reverse().find((item) => item.target === target)?.code
-    const buildSavedContactAuth = (user: { id: string; mobile: string | null; email: string | null; realName: string; accountType: 'personal' | 'department' }) => ({
+    const buildSavedContactAuth = async (user: { id: string; mobile: string | null; email: string | null; realName: string; accountType: 'personal' | 'department' }) => ({
       userId: user.id,
       mobile: user.mobile ?? '',
       email: user.email ?? '',
@@ -919,7 +996,8 @@ async function main() {
       realName: user.realName,
       accountType: user.accountType,
       staffNo: null,
-      sessionToken: `client-saved-contact-${user.id}`,
+      sessionToken: await createProfileSession(user.id),
+      authSource: 'bearer' as const,
     })
 
     const savedContactMobile = '13800001130'
@@ -933,7 +1011,7 @@ async function main() {
       staffVerified: false,
       status: 'enabled',
     }))
-    const savedContactAuth = buildSavedContactAuth(savedContactUser)
+    const savedContactAuth = await buildSavedContactAuth(savedContactUser)
 
     await verificationCodeService.sendCode({ channel: 'email', target: savedContactEmail, scene: 'profile_update' })
     const exhaustedEmailCode = latestCapturedCode(savedContactEmail)
@@ -1035,7 +1113,7 @@ async function main() {
       status: 'enabled',
     }))
     await expectBizError(
-      () => clientAuthService.sendSavedContactCode(buildSavedContactAuth(mobileOnlyUser), 'email', savedContactRequestMeta),
+      async () => clientAuthService.sendSavedContactCode(await buildSavedContactAuth(mobileOnlyUser), 'email', savedContactRequestMeta),
       '未保存邮箱时不能发送补认证验证码',
       '请先保存邮箱',
     )
@@ -1051,7 +1129,7 @@ async function main() {
       status: 'enabled',
     }))
     await expectBizError(
-      () => clientAuthService.sendSavedContactCode(buildSavedContactAuth(departmentContactUser), 'email', savedContactRequestMeta),
+      async () => clientAuthService.sendSavedContactCode(await buildSavedContactAuth(departmentContactUser), 'email', savedContactRequestMeta),
       '部门共享账号不开放补认证',
       '部门账号资料由管理员维护',
     )
@@ -1077,7 +1155,7 @@ async function main() {
     }
     try {
       await expectBizError(
-        () => clientAuthService.confirmSavedContact(buildSavedContactAuth(raceContactUser), { channel: 'email', code: raceEmailCode }),
+        async () => clientAuthService.confirmSavedContact(await buildSavedContactAuth(raceContactUser), { channel: 'email', code: raceEmailCode }),
         '验证期间联系方式被修改',
         '已变更',
       )
@@ -1111,12 +1189,12 @@ async function main() {
     )
     try {
       await expectBizError(
-        () => clientAuthService.sendSavedContactCode(buildSavedContactAuth(raceContactUser), 'email', savedContactRequestMeta),
+        async () => clientAuthService.sendSavedContactCode(await buildSavedContactAuth(raceContactUser), 'email', savedContactRequestMeta),
         '邮箱通道未启用时拒绝发送补认证验证码',
         '通道未启用',
       )
       await expectBizError(
-        () => clientAuthService.confirmSavedContact(buildSavedContactAuth(raceContactUser), { channel: 'email', code: '123456' }),
+        async () => clientAuthService.confirmSavedContact(await buildSavedContactAuth(raceContactUser), { channel: 'email', code: '123456' }),
         '邮箱通道未启用时拒绝确认补认证',
         '通道未启用',
       )
@@ -1167,7 +1245,7 @@ async function main() {
     const longEmailCode = latestCapturedCode(longContactEmail)
     assert.ok(longEmailCode, '应捕获长邮箱补认证验证码')
     const longEmailProfile = await clientAuthService.confirmSavedContact(
-      buildSavedContactAuth(longEmailUser),
+      await buildSavedContactAuth(longEmailUser),
       { channel: 'email', code: longEmailCode },
       savedContactRequestMeta,
     )
@@ -1200,7 +1278,7 @@ async function main() {
     }
     try {
       await clientAuthService.updateProfile(
-        buildSavedContactAuth(staleProfileUser),
+        await buildSavedContactAuth(staleProfileUser),
         {
           username: '资料并发认证改名',
           mobile: '13800001134',
@@ -1218,22 +1296,16 @@ async function main() {
 
     const webAuthSource = fs.readFileSync(path.resolve(backendRoot, '..', 'src', 'views', 'client', 'ClientAuthView.vue'), 'utf8')
     const webProfileSource = fs.readFileSync(path.resolve(backendRoot, '..', 'src', 'views', 'client', 'ClientProfileView.vue'), 'utf8')
-    const mobileRegisterSource = readFileWithGitFallback(path.resolve(backendRoot, '..', 'apps', 'mobile', 'app', '(auth)', 'register.tsx'))
-    const mobileProfileSource = readFileWithGitFallback(path.resolve(backendRoot, '..', 'apps', 'mobile', 'app', '(tabs)', 'profile.tsx'))
     for (const [scene, source] of [
       ['Vue Web 注册', webAuthSource],
       ['Vue Web 资料', webProfileSource],
-      ['React Native 注册', mobileRegisterSource],
-      ['React Native 资料', mobileProfileSource],
     ] as const) {
       assert.match(source, /@ylink\/validation\/auth/, `${scene} 必须消费共享用户名规则模块`)
       assert.match(source, /getPersonalClientUsernameRuleHint/, `${scene} 必须调用共享用户名即时提示函数`)
     }
     assert.match(webAuthSource, /registerUsernameRuleHint/, 'Vue Web 注册页必须在输入时计算用户名规则提示')
     assert.match(webProfileSource, /profileUsernameRuleHint/, 'Vue Web 资料页必须在输入时计算用户名规则提示')
-    assert.match(mobileRegisterSource, /usernameRuleHint/, 'React Native 注册页必须在输入时计算用户名规则提示')
-    assert.match(mobileProfileSource, /usernameRuleHint/, 'React Native 资料页必须在输入时计算用户名规则提示')
-    pass('Vue Web 与 React Native 注册、资料页面均提供一致的用户名即时提示')
+    pass('Vue Web 注册、资料页面均提供一致的用户名即时提示')
     await verificationCodeService.sendCode({
       channel: 'mobile',
       target: '13800001001',
@@ -1373,7 +1445,7 @@ async function main() {
     // 教师资料中的姓名以目录绑定值为准。即使历史数据中存在同名客户端，
     // 旧客户端提交了不同 username，也不能因无关的姓名查重阻断联系方式更新。
     const teacherProfileUser = await AppDataSource.getRepository(ClientUser).findOneByOrFail({ staffNo: 'T1001' })
-    await AppDataSource.getRepository(ClientUser).save(
+    const teacherNameCollision = await AppDataSource.getRepository(ClientUser).save(
       AppDataSource.getRepository(ClientUser).create({
         realName: teacherProfileUser.realName,
         mobile: '13800001013',
@@ -1402,7 +1474,8 @@ async function main() {
         realName: teacherProfileUser.realName,
         accountType: 'personal',
         staffNo: teacherProfileUser.staffNo,
-        sessionToken: 'client-teacher-profile-update-test',
+        sessionToken: await createProfileSession(teacherProfileUser.id),
+        authSource: 'bearer' as const,
       },
       {
         username: '客户端不应覆盖教师目录姓名',
@@ -1421,10 +1494,21 @@ async function main() {
       '未登录或登录状态已失效',
     )
     assert.match(oldTeacherTokenInvalidMessage, /未登录或登录状态已失效/, '教师资料更新后旧 token 应提示未登录或登录状态已失效')
+    const clientSessions = AppDataSource.getRepository(ClientUserSession)
+    const [ownExpiredClient, otherExpiredClient] = await clientSessions.save([teacherProfileUser.id, teacherNameCollision.id].map((userId) => ({
+      userId, expiresAt: expiredAt, lastAccessAt: expiredAt,
+      sessionToken: hashSessionToken(crypto.randomUUID()),
+    })))
     const teacherFreshLogin = await clientAuthService.login({
       account: '13800001001',
       password: clientPassword,
     })
+    assert.equal(await clientSessions.existsBy({ id: ownExpiredClient!.id }), false, '客户端登录清理当前账号的过期会话')
+    assert.equal(await clientSessions.existsBy({ id: otherExpiredClient!.id }), true, '客户端登录保留其他账号的过期会话供后台清理')
+    await AppDataSource.getRepository(ClientUser).update(teacherNameCollision.id, { realName: 'T1001' })
+    assert.equal(await clientAuthService.resolveLoginRiskSubject('T1001'), `uid:${teacherProfileUser.id}`)
+    const teacherStaffLogin = await clientAuthService.login({ account: 'T1001', password: clientPassword })
+    assert.equal(teacherStaffLogin.user.id, teacherProfileUser.id, '工号必须优先于另一人的同名历史账号')
     pass('教师资料更新后旧 token 已失效并通过手机号登录获取新 token')
     pass('教师资料更新跳过无关用户名查重并保留目录姓名')
 

@@ -15,7 +15,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
-import sharp from 'sharp'
+import { ImageDependencyUnavailableError, loadSharp } from './image-module-loader.js'
 import { BizError } from './errors.js'
 import { randomUUID } from 'node:crypto'
 import { setTimeout as pause } from 'node:timers/promises'
@@ -28,6 +28,7 @@ export const PRODUCT_THUMBNAIL_QUALITY = 78
 export const PRODUCT_THUMBNAIL_SUFFIX = '.thumb.webp'
 
 const PRODUCT_UPLOAD_DIR = path.resolve(process.cwd(), 'uploads', 'products')
+const MAX_ORIGINAL_IMAGE_BYTES = 10 * 1024 * 1024
 const ORIGINAL_FILE_NAME_MATCHER = /^([A-Za-z0-9][A-Za-z0-9_-]{0,127})\.(?:jpg|jpeg|png|webp|gif)$/i
 const PRODUCT_IMAGE_URL_MATCHER = /^\/uploads\/(?:products\/)?([^/?#]+)$/
 const INDEX_TTL_MS = 60_000
@@ -124,6 +125,7 @@ export const isProductThumbnailFileName = (fileName: string) => fileName.endsWit
 
 /** 从已通过校验的图片内容生成缩略图并写入目标路径。 */
 export const generateProductThumbnail = async (imageBuffer: Buffer, targetFilePath: string, canPublish: () => Promise<boolean> = async () => true): Promise<boolean> => {
+  const sharp = await loadSharp()
   const thumbnailBuffer = await sharp(imageBuffer, { animated: false, failOn: 'error', limitInputPixels: 4096 * 4096 })
     .rotate().resize({ width: PRODUCT_THUMBNAIL_MAX_EDGE, height: PRODUCT_THUMBNAIL_MAX_EDGE, fit: 'inside', withoutEnlargement: true })
     .webp({ quality: PRODUCT_THUMBNAIL_QUALITY, effort: 4 }).toBuffer()
@@ -168,18 +170,20 @@ export const generateProductThumbnailForFile = async (originalFilePath: string, 
   if (siblings.some(Boolean)) return null
   const handle = imageBuffer ? null : await fs.promises.open(originalFilePath, 'r')
   try {
-    // 与上传相同的 10MB 上限，在分配原图 buffer 前检查；读入时再限定长度，防止文件增长绕过。
-    if (handle && (await handle.stat()).size > 10 * 1024 * 1024) throw new Error('原图超过 10MB，已跳过')
     let sourceBuffer = imageBuffer
     if (!sourceBuffer && handle) {
-      const buffer = Buffer.alloc(10 * 1024 * 1024 + 1)
+      const { size: expectedSize } = await handle.stat()
+      if (expectedSize > MAX_ORIGINAL_IMAGE_BYTES) throw new Error('原图超过 10MB，已跳过')
+      // 多读一个字节检测文件增长，循环处理单次读取不足的情况。
+      const buffer = Buffer.alloc(Math.min(expectedSize + 1, MAX_ORIGINAL_IMAGE_BYTES + 1))
       let size = 0
       while (size < buffer.length) {
         const result = await handle.read(buffer, size, buffer.length - size, null)
         if (!result.bytesRead) break
         size += result.bytesRead
       }
-      if (size > 10 * 1024 * 1024) throw new Error('原图超过 10MB，已跳过')
+      if (size > MAX_ORIGINAL_IMAGE_BYTES) throw new Error('原图超过 10MB，已跳过')
+      if (size !== expectedSize) throw new Error('读取时原图大小已变化，已跳过')
       sourceBuffer = buffer.subarray(0, size)
     }
     if (!sourceBuffer) return null
@@ -323,7 +327,7 @@ export const backfillProductThumbnails = async (options: {
               return generateProductThumbnailForFile(filePath, undefined, currentLease.valid)
             })
           } catch (error) {
-            if (!(error instanceof BizError) || error.statusCode !== 503) throw error
+            if (error instanceof ImageDependencyUnavailableError || !(error instanceof BizError) || error.statusCode !== 503) throw error
             try { await pause(1_000, undefined, { signal: options.signal }) } catch { break }
             continue
           }
@@ -334,6 +338,9 @@ export const backfillProductThumbnails = async (options: {
       } catch (error) {
         result.failed += 1
         log(`[product-thumbnail] 缩略图生成失败：${entry.name}（${error instanceof Error ? error.message : '未知错误'}）`)
+        // 依赖整体不可用时结束本轮并由 finally 释放租约；不要逐文件重试并持续续租。
+        // 后续合法回填仍可触发资源加载器重试，真正的 gate 忙继续保留原退让行为。
+        if (error instanceof ImageDependencyUnavailableError) break
       }
       // 每张完成后让出资源，不连续占用 libuv 队列；取消时立即退出。
       try { await pause(25, undefined, { signal: options.signal }) } catch { break }

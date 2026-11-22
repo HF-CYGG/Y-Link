@@ -4,7 +4,7 @@
   "private": true,
   "main": "expo-router/entry",
   "engines": {
-    "node": "22.23.4"
+    "node": "22.23.5"
   },
   "scripts": {
     "start": "expo start",
@@ -28,7 +28,8 @@
     "react-native": "0.86.2",
     "react-native-safe-area-context": "~5.7.0",
     "react-native-screens": "~4.26.0",
-    "zustand": "^5.0.14"
+    "zustand": "^5.0.14",
+    "@ylink/validation": "*"
   },
   "devDependencies": {
     "@types/react": "~19.2.2",

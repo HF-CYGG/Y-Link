@@ -26,6 +26,7 @@ export const CLIENT_FEEDBACK_ATTACHMENT_POLICY = {
   minFreeBytes: readBoundedInteger('YLINK_FEEDBACK_MIN_FREE_BYTES', 512 * 1024 * 1024, 1, 10 * 1024 * 1024 * 1024),
   draftTtlMs: readBoundedInteger('YLINK_FEEDBACK_DRAFT_TTL_MS', 24 * 60 * 60 * 1000, 60_000, 7 * 24 * 60 * 60 * 1000),
   orphanGraceMs: readBoundedInteger('YLINK_FEEDBACK_ORPHAN_GRACE_MS', 24 * 60 * 60 * 1000, 60 * 60 * 1000, 7 * 24 * 60 * 60 * 1000),
+  tempFileGraceMs: 60 * 60 * 1000,
   cleanupIntervalMs: readBoundedInteger('YLINK_FEEDBACK_CLEANUP_INTERVAL_MS', 60 * 60 * 1000, 60_000, 24 * 60 * 60 * 1000),
   cleanupBatchSize: readBoundedInteger('YLINK_FEEDBACK_CLEANUP_BATCH_SIZE', 500, 1, 5_000),
   uploadRateLimit: readBoundedInteger('YLINK_FEEDBACK_UPLOADS_PER_WINDOW', 20, 1, 100),

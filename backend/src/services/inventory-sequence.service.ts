@@ -111,6 +111,28 @@ const formatLocalDate = (date: Date) => {
   return `${yyyy}${mm}${dd}`
 }
 
+/** 送货单与退货单沿用 UTC 日期及至少四位流水，首次启用从当天已有单号的数字后缀续编。 */
+export async function allocateUtcDailyDeliveryNo(manager: EntityManager, kind: 'inbound' | 'return', now = new Date()): Promise<string> {
+  const day = now.toISOString().slice(0, 10).replaceAll('-', '')
+  const prefix = (kind === 'inbound' ? 'IN' : 'RO') + day
+  const table = kind === 'inbound' ? 'biz_inbound_order' : 'o2o_return_request'
+  const column = kind === 'inbound' ? 'show_no' : 'return_no'
+  const value = await allocateSequenceValue(manager, `delivery.${prefix}`, async () => {
+    const rows = await manager.query(
+      `SELECT ${column} AS number FROM ${table} WHERE ${column} LIKE ?`,
+      [`${prefix}%`],
+    ) as { number: string }[]
+    let highWaterMark = 0
+    for (const row of rows) {
+      const suffix = row.number.slice(prefix.length)
+      if (/^\d{4,}$/.test(suffix)) highWaterMark = Math.max(highWaterMark, Number(suffix))
+    }
+    if (!Number.isSafeInteger(highWaterMark)) throw new BizError('历史单号流水已超出上限', 409)
+    return highWaterMark
+  })
+  return prefix + String(value).padStart(4, '0')
+}
+
 /** 库存单据号：KD20260917-0001，按自然日重新计数。 */
 export async function allocateStockDocNo(manager: EntityManager, now = new Date()): Promise<string> {
   const day = formatLocalDate(now)

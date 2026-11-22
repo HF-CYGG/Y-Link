@@ -20,10 +20,9 @@
  * - 草稿结构与键名由 src/utils/supplier-delivery-draft.ts 维护，改动字段需与录入页同步。
  */
 
-import { computed, defineAsyncComponent, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 
 import { ElMessageBox } from 'element-plus'
-import QRCode from 'qrcode'
 import { useRoute, useRouter } from 'vue-router'
 import { BizResponsiveDrawerShell, PageContainer, PagePaginationBar, PassiveNumberInput } from '@/components/common'
 import {
@@ -39,7 +38,8 @@ import {
   type InboundOrderDetail,
   type SupplierDeliverySummary,
 } from '@/api/modules/inbound'
-import { getProductList, type ProductRecord } from '@/api/modules/product'
+import type { ProductRecord } from '@/api/modules/product'
+import { getAdminProductOptions } from '@/composables/useAdminProductOptionsCache'
 import {
   getNotificationInbox,
   markNotificationInboxRead,
@@ -105,7 +105,7 @@ const editSubmitting = ref(false)
 const editProductLoading = ref(false)
 const deliverySheetDialogVisible = ref(false)
 const deliverySheetDialogMounted = ref(false)
-const products = ref<ProductRecord[]>([])
+const products = shallowRef<ProductRecord[]>([])
 const interactionLockCount = ref(0)
 const silentRefreshing = ref(false)
 const detailSyncing = ref(false)
@@ -342,7 +342,7 @@ const ensureProductOptionsFromDetail = (detail: InboundOrderDetail) => {
 const refreshProductOptions = async () => {
   editProductLoading.value = true
   await productRequest.runLatest({
-    executor: (signal) => getProductList({ isActive: true }, { signal }),
+    executor: (signal) => getAdminProductOptions({ isActive: true }, { signal }),
     onSuccess: (result) => {
       products.value = result
     },
@@ -417,14 +417,21 @@ const loadData = async (options: { silent?: boolean; force?: boolean } = {}) => 
 
 // 历史详情中仅对待入库单据补生成二维码，已入库单据无需重复展示核销码。
 const generateQRCode = async (verifyCode: string) => {
+  const isCurrentCode = () => detailVisible.value
+    && currentDetail.value?.order.status === 'pending'
+    && currentDetail.value.order.verifyCode === verifyCode
   try {
-    qrCodeDataUrl.value = await QRCode.toDataURL(verifyCode, {
+    const { default: QRCode } = await import('qrcode')
+    const dataUrl = await QRCode.toDataURL(verifyCode, {
       width: 440,
       margin: 1,
       color: { dark: '#000000', light: '#ffffff' },
     })
+    if (!isCurrentCode()) return
+    qrCodeDataUrl.value = dataUrl
     qrCodeUnavailable.value = false
   } catch (err) {
+    if (!isCurrentCode()) return
     qrCodeDataUrl.value = ''
     qrCodeUnavailable.value = true
     showAppWarning(extractErrorMessage(err, '详情已加载，但二维码生成失败，请稍后重试'))
@@ -432,6 +439,10 @@ const generateQRCode = async (verifyCode: string) => {
 }
 
 const applyDetailResult = async (detail: InboundOrderDetail, options?: { openDrawer?: boolean }) => {
+  if (currentDetail.value?.order.verifyCode !== detail.order.verifyCode) {
+    qrCodeDataUrl.value = ''
+    qrCodeUnavailable.value = false
+  }
   currentDetail.value = detail
   replaceCurrentPageRecord(detail.order)
 

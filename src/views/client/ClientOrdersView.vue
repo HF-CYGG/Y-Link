@@ -1,3 +1,20 @@
+<script lang="ts">
+import type { OrderRefreshAnchorSnapshot } from '@/utils/order-refresh-visual'
+
+interface OrderListReturnScroll {
+  userId: string | number
+  session: number
+  position: number
+  queryKey: string
+  top: number
+  anchor: OrderRefreshAnchorSnapshot | null
+}
+
+// 详情路由可能卸载订单列表实例，回位数据只在当前导航往返期间保留。
+let orderListReturnScroll: OrderListReturnScroll | null = null
+let stopTrackingOrderReturn: (() => void) | undefined
+</script>
+
 <script setup lang="ts">
 /**
  * 模块说明：src/views/client/ClientOrdersView.vue
@@ -5,7 +22,8 @@
  * 实现逻辑：
  * - 状态筛选与关键词查询统一走服务端接口，不再只对第一页缓存做本地过滤，避免遗漏更多历史订单；
  * - 订单列表支持“加载更多”，并把当前筛选条件、关键词、页码和已加载结果缓存到按账号隔离的 Store 中；
- * - 页面层继续使用 `useStableRequest` 保证只有最新一次查询结果生效，减少频繁切换筛选时的闪烁与覆盖。
+ * - 页面层继续使用 `useStableRequest` 保证只有最新一次查询结果生效，减少频繁切换筛选时的闪烁与覆盖；
+ * - 整页入场期间卡片预留布局，待页面停稳后按可见顺序揭示；只变换卡片内层，保留刷新列表的移动动效。
  * 维护说明：
  * - 若后续新增列表查询条件，需要同步修改 `buildListQuery()`、Store 快照字段与空态文案；
  * - 订单撤回等会改变服务端筛选结果的操作，要优先考虑当前列表是否需要局部剔除或整页刷新；
@@ -14,12 +32,14 @@
 
 
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
+import { onBeforeRouteLeave, useRouter, type RouteLocationNormalized } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 import { RefreshRight } from '@element-plus/icons-vue'
 import {
   cancelMyO2oPreorder,
   getMyO2oPreorderSummary,
   getMyO2oPreorders,
+  type O2oMyOrderListQuery,
   type O2oPreorderSummary,
 } from '@/api/modules/o2o'
 import { BaseRequestState } from '@/components/common'
@@ -40,7 +60,8 @@ import {
   subscribeClientOrderRefresh,
 } from '@/utils/client-order-refresh'
 import { buildClientOrderSummaryFromDetail, needsKingdeeRegistration } from '@/utils/client-order-summary'
-import type { PersistedO2oPreorderSummary } from '@/utils/client-order-storage'
+import { normalizeClientOrderKeyword, type PersistedO2oPreorderSummary } from '@/utils/client-order-storage'
+import { shouldReduceClientMotion } from '@/utils/client-motion'
 import { formatDateTime } from '@/utils/date-time'
 import { normalizeRequestError } from '@/utils/error'
 import { captureOrderRefreshAnchor, restoreOrderRefreshAnchor } from '@/utils/order-refresh-visual'
@@ -101,70 +122,172 @@ const firstScreenLoading = ref(false)
 const refreshing = ref(false)
 const silentRefreshing = ref(false)
 const loadingMore = ref(false)
+const resetOrderLoading = () => {
+  firstScreenLoading.value = false
+  refreshing.value = false
+  silentRefreshing.value = false
+  loadingMore.value = false
+}
 const recallingOrderId = ref('')
 const requestError = ref<{ type: 'offline' | 'error'; message: string } | null>(null)
 const orderListBodyRef = ref<HTMLElement | null>(null)
+const orderListPageRef = ref<HTMLElement | null>(null)
 const lastAutoRefreshAt = ref(0)
 const orderRefreshMarkExpiresAtMap = ref<Record<string, number>>({})
+defineOptions({ name: 'ClientOrdersView' })
+
+const router = useRouter()
 const clientAuthStore = useClientAuthStore(pinia)
 const clientOrderStore = useClientOrderStore(pinia)
 const { runLatest } = useStableRequest()
 clientOrderStore.initialize(clientAuthStore.currentUser?.id)
+clientOrderStore.setSearch(clientOrderStore.keyword, 'contains')
 let disposeClientOrderRefresh: () => void = () => {}
 let refreshMarkCleanupTimer: ReturnType<typeof globalThis.setTimeout> | null = null
 let autoRefreshTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let pageRuntimeActive = false
+let pendingSearchRefresh = false
+let listQueryGeneration = 0
 let hasActivatedOnce = false
+let orderCardObserver: IntersectionObserver | null = null
+let orderCardMotionGeneration = 0
+let awaitingFirstOrderCards = false
+const observedOrderCards = new Set<HTMLElement>()
 const clientOrderRefreshSourceId = `client-orders-${Math.random().toString(36).slice(2)}`
 const runLatestListRequest = runLatest
 
 const orders = computed(() => clientOrderStore.orders)
 const total = computed(() => clientOrderStore.total)
-const hasMoreOrders = computed(() => orders.value.length < total.value)
+const hasMoreOrders = computed(() => clientOrderStore.hasCurrentResults && orders.value.length < total.value)
 const keywordInput = ref(clientOrderStore.keyword)
-const effectiveKeyword = ref(clientOrderStore.keyword)
+const effectiveKeyword = computed(() => clientOrderStore.keyword)
 const keywordDebounceTimer = ref<ReturnType<typeof globalThis.setTimeout> | null>(null)
 const keywordDebouncing = ref(false)
 const activeStatus = computed({
   get: () => clientOrderStore.activeStatus,
   set: (value: 'all' | O2oPreorderSummary['status']) => clientOrderStore.setActiveStatus(value),
 })
+
+let orderListHistoryPosition: number | undefined
+let orderDetailDeparture: { route: RouteLocationNormalized; scroll: OrderListReturnScroll } | null = null
+onBeforeRouteLeave((to, from) => {
+  orderDetailDeparture = null
+  orderListReturnScroll = null
+  const userId = clientAuthStore.currentUser?.id
+  const history = router.options.history
+  const position = history.location === from.fullPath ? history.state.position : orderListHistoryPosition
+  if (to.name !== 'client-order-detail' || userId == null || typeof position !== 'number' || !clientOrderStore.hasCurrentResults) return
+
+  orderDetailDeparture = {
+    route: to,
+    scroll: {
+      userId,
+      session: clientAuthStore.sessionGeneration,
+      position,
+      queryKey: clientOrderStore.queryKey,
+      top: window.scrollY,
+      anchor: captureOrderRefreshAnchor({
+        listRoot: orderListBodyRef.value,
+        itemAttributeName: 'data-order-card-id',
+        visibilityTopOffset: ORDER_REFRESH_VIEWPORT_TOP_OFFSET,
+      }),
+    },
+  }
+})
+
+const stopSavingOrderReturn = router.afterEach((to, _from, failure) => {
+  if (orderDetailDeparture?.route !== to) return
+  const { scroll } = orderDetailDeparture
+  orderDetailDeparture = null
+  if (failure) return
+
+  stopTrackingOrderReturn?.()
+  orderListReturnScroll = scroll
+  stopTrackingOrderReturn = router.afterEach((next, previous, navigationFailure) => {
+    if (navigationFailure || next.name === 'client-order-detail') return
+    if (next.name !== 'client-orders' || previous.name !== 'client-order-detail' || router.options.history.state.position !== scroll.position) {
+      orderListReturnScroll = null
+    }
+    stopTrackingOrderReturn?.()
+    stopTrackingOrderReturn = undefined
+  })
+})
+onBeforeUnmount(stopSavingOrderReturn)
+
+const getOrderListReturnScroll = () => {
+  const scroll = orderListReturnScroll
+  if (!scroll || router.currentRoute.value.name !== 'client-orders') return null
+  if (scroll.position !== router.options.history.state.position ||
+      scroll.userId !== clientAuthStore.currentUser?.id ||
+      scroll.session !== clientAuthStore.sessionGeneration ||
+      scroll.queryKey !== clientOrderStore.queryKey) {
+    orderListReturnScroll = null
+    return null
+  }
+  return scroll
+}
+
+const restoreOrderListReturnScroll = () => {
+  const scroll = getOrderListReturnScroll()
+  const listRoot = orderListBodyRef.value
+  if (!scroll || !pageRuntimeActive || !listRoot?.isConnected) return
+
+  orderListReturnScroll = null
+  window.scrollTo({ top: scroll.top, left: 0, behavior: 'instant' })
+  restoreOrderRefreshAnchor(scroll.anchor, { listRoot, itemAttributeName: 'data-order-card-id' })
+}
+const showSilentSyncStatus = computed(() =>
+  silentRefreshing.value && !refreshing.value && !loadingMore.value && !keywordDebouncing.value,
+)
 const autoRefreshStatusText = computed(() => {
+  if (showSilentSyncStatus.value) {
+    return '正在同步最新订单'
+  }
   if (!lastAutoRefreshAt.value) {
     return '自动刷新已开启'
   }
   return `最近同步 ${formatOrderDateTime(new Date(lastAutoRefreshAt.value).toISOString())}`
 })
 
-// 关键词采用“输入词 + 生效词”双状态：
-// - 输入词实时绑定输入框，保证打字流畅；
-// - 生效词由防抖定时器更新，避免短时间重复计算导致列表抖动。
-watch(
-  () => keywordInput.value,
-  (nextKeyword) => {
-    if (keywordDebounceTimer.value !== null) {
-      globalThis.clearTimeout(keywordDebounceTimer.value)
-      keywordDebounceTimer.value = null
-    }
-    if (nextKeyword.trim() === effectiveKeyword.value.trim()) {
-      keywordDebouncing.value = false
-      return
-    }
-    keywordDebouncing.value = true
-    keywordDebounceTimer.value = globalThis.setTimeout(() => {
-      effectiveKeyword.value = nextKeyword.trim()
-      keywordDebouncing.value = false
-      keywordDebounceTimer.value = null
-    }, KEYWORD_DEBOUNCE_MS)
-  },
-)
-
-onBeforeUnmount(() => {
+const stopKeywordDebounce = () => {
   if (keywordDebounceTimer.value !== null) {
     globalThis.clearTimeout(keywordDebounceTimer.value)
     keywordDebounceTimer.value = null
   }
-})
+  keywordDebouncing.value = false
+}
+
+const applySearch = (nextKeyword: string) => {
+  stopKeywordDebounce()
+  const previousQuery = clientOrderStore.queryKey
+  clientOrderStore.setSearch(nextKeyword, 'contains')
+  if (clientOrderStore.queryKey !== previousQuery) void loadOrders(true)
+}
+
+// 打字只更新草稿，防抖后提交关键词。
+watch(
+  () => keywordInput.value,
+  (nextKeyword) => {
+    stopKeywordDebounce()
+    if (normalizeClientOrderKeyword(nextKeyword) === effectiveKeyword.value) return
+    keywordDebouncing.value = true
+    keywordDebounceTimer.value = globalThis.setTimeout(() => {
+      applySearch(nextKeyword)
+    }, KEYWORD_DEBOUNCE_MS)
+  },
+)
+
+watch(() => clientOrderStore.queryKey, () => {
+  listQueryGeneration += 1
+  pendingSearchRefresh = false
+}, { flush: 'sync' })
+const captureListQuery = () => {
+  const generation = listQueryGeneration
+  const session = clientAuthStore.sessionGeneration
+  const owner = clientAuthStore.currentUser?.id
+  return () => generation === listQueryGeneration && session === clientAuthStore.sessionGeneration
+    && owner === clientAuthStore.currentUser?.id && router.currentRoute.value.name === 'client-orders'
+}
 
 const getClientOrderTypeLabel = (order: Pick<O2oPreorderSummary, 'clientOrderType'>) => {
   return ORDER_TYPE_LABEL_MAP[order.clientOrderType]
@@ -193,6 +316,8 @@ const handleStatusChange = (value: 'all' | O2oPreorderSummary['status']) => {
   if (activeStatus.value === value) {
     return
   }
+  stopKeywordDebounce()
+  clientOrderStore.setSearch(keywordInput.value, 'contains')
   activeStatus.value = value
   void loadOrders(true)
 }
@@ -422,31 +547,33 @@ const orderCardList = computed<OrderCardPresentation[]>(() => {
 })
 
 // 详细注释：统一根据当前页面状态拼出服务端查询条件，保证刷新、筛选、加载更多共用同一口径。
-const buildListQuery = (targetPage: number) => {
+const buildListQuery = (targetPage: number): O2oMyOrderListQuery => {
   return {
     page: targetPage,
     pageSize: clientOrderStore.pageSize || DEFAULT_ORDER_PAGE_SIZE,
     status: activeStatus.value === 'all' ? undefined : activeStatus.value,
     keyword: effectiveKeyword.value || undefined,
+    searchMode: 'contains',
   }
 }
 
 const syncStoreWithCurrentUser = () => {
+  stopKeywordDebounce()
   clientOrderStore.initialize(clientAuthStore.currentUser?.id)
+  clientOrderStore.setSearch(clientOrderStore.keyword, 'contains')
   keywordInput.value = clientOrderStore.keyword
-  effectiveKeyword.value = clientOrderStore.keyword
 }
 
 // 详细注释：静默轮询需要覆盖当前已加载范围并额外保留一页缓冲；
 // 超过接口单页上限时按页读取，避免 pageSize > 50 被后端拒绝后静默刷新永久失效。
-const fetchSilentRefreshOrders = async (signal: AbortSignal) => {
-  const logicalPageSize = clientOrderStore.pageSize || DEFAULT_ORDER_PAGE_SIZE
+const fetchSilentRefreshOrders = async (query: O2oMyOrderListQuery, signal: AbortSignal) => {
+  const logicalPageSize = query.pageSize || DEFAULT_ORDER_PAGE_SIZE
   const plan = buildClientOrderSilentRefreshPlan({
-    loadedCount: clientOrderStore.orders.length,
+    loadedCount: clientOrderStore.hasCurrentResults ? clientOrderStore.orders.length : 0,
     logicalPageSize,
   })
   const buildQuery = (page: number) => ({
-    ...buildListQuery(1),
+    ...query,
     page,
     pageSize: plan.requestPageSize,
   })
@@ -469,6 +596,7 @@ const fetchSilentRefreshOrders = async (signal: AbortSignal) => {
 }
 
 const resolveSilentRefreshRecords = (latestRecords: O2oPreorderSummary[]) => {
+  if (!clientOrderStore.hasCurrentResults) return latestRecords
   const currentOrders = clientOrderStore.orders
   const currentLoadedCount = currentOrders.length
   if (!currentLoadedCount) {
@@ -481,7 +609,7 @@ const resolveSilentRefreshRecords = (latestRecords: O2oPreorderSummary[]) => {
 }
 
 const canRunAutoRefresh = () => {
-  if (!clientAuthStore.currentUser?.id) {
+  if (!pageRuntimeActive || !clientAuthStore.currentUser?.id) {
     return false
   }
   if (globalThis.document?.visibilityState === 'hidden') {
@@ -490,19 +618,28 @@ const canRunAutoRefresh = () => {
   return !firstScreenLoading.value && !refreshing.value && !loadingMore.value && !recallingOrderId.value
 }
 
-const triggerSilentOrderRefresh = async () => {
+const triggerSilentOrderRefresh = async (fromSearchChangeEvent = false) => {
   if (!canRunAutoRefresh()) {
+    if (fromSearchChangeEvent) pendingSearchRefresh = true
     return
   }
+  pendingSearchRefresh = false
   await loadOrders(true, { silent: true, preserveScroll: true })
 }
 
 const refreshSingleOrderSummary = async (orderId: string, options?: { silent?: boolean }) => {
+  if (effectiveKeyword.value) {
+    await triggerSilentOrderRefresh(true)
+    return
+  }
+  const isCurrent = captureListQuery()
   try {
     const result = normalizeSummaryIdentifiers(await getMyO2oPreorderSummary(orderId))
+    if (!isCurrent()) return
     clientOrderStore.syncOrderSummary(result, { preserveFresh: true })
     markRefreshedOrders([result.id])
   } catch (error) {
+    if (!isCurrent()) return
     const normalizedError = normalizeRequestError(error, '订单摘要刷新失败')
     if (normalizedError.status === 404) {
       clientOrderStore.removeOrder(orderId, { preserveFresh: true })
@@ -557,18 +694,126 @@ const scheduleAutoRefresh = () => {
   }, ORDER_AUTO_REFRESH_INTERVAL_MS)
 }
 
+const getCurrentOrderCards = () => {
+  const currentOrderIds = new Set(orderCardList.value.map(({ order }) => order.id))
+  const renderedCards = orderListBodyRef.value?.querySelectorAll<HTMLElement>('[data-order-card-id]') ?? []
+  // TransitionGroup 会保留正在离场的旧节点，它们不参与新卡片的入场顺序。
+  return [...renderedCards].filter(({ dataset, classList }) =>
+    dataset.orderCardId !== undefined &&
+    currentOrderIds.has(dataset.orderCardId) &&
+    !classList.contains('order-list-refresh-leave-active'),
+  )
+}
+
+const prepareOrderCardLeave = (card: Element) => {
+  if (card instanceof HTMLElement && orderListPageRef.value?.hasAttribute('data-client-page-entering')) {
+    // 入场期间被更新移除的卡片，在父页撤掉遮蔽后也要保持隐藏，直到列表离场完成。
+    card.classList.add('order-card-viewport--hidden')
+    card.inert = true
+  }
+}
+
+// 观察列表项外壳，入场变换只作用于内部卡片，保留 TransitionGroup 的移动变换。
+const syncOrderCardObserver = () => {
+  if (!orderCardObserver || !pageRuntimeActive) return
+  const currentCards = new Set(getCurrentOrderCards())
+  for (const card of observedOrderCards) {
+    if (!currentCards.has(card)) {
+      orderCardObserver.unobserve(card)
+      observedOrderCards.delete(card)
+    }
+  }
+  const newCards = [...currentCards].filter((card) => !observedOrderCards.has(card))
+  if (!newCards.length) return
+
+  // 页面停稳后以实际视口中的上下顺序排首批卡片；接口未返回时仍保留首批状态。
+  const firstCardDelays = new Map<HTMLElement, number>()
+  if (awaitingFirstOrderCards) {
+    const viewportHeight = window.innerHeight
+    const visibleCards = newCards.flatMap((card) => {
+      const { top, bottom } = card.getBoundingClientRect()
+      return bottom > 0 && top < viewportHeight ? [{ card, top }] : []
+    }).sort((a, b) => a.top - b.top)
+    visibleCards.forEach(({ card }, index) => firstCardDelays.set(card, Math.min(index * 55, 220)))
+    awaitingFirstOrderCards = false
+  }
+  for (const card of newCards) {
+    card.style.setProperty('--order-card-enter-delay', `${firstCardDelays.get(card) ?? 0}ms`)
+    card.classList.remove('order-card-viewport--seen')
+    card.classList.add('order-card-viewport--hidden')
+    observedOrderCards.add(card)
+  }
+  // 合批固定隐藏起点，只触发一次布局，再开始观察。
+  void newCards[0].offsetHeight
+  for (const card of newCards) {
+    orderCardObserver.observe(card)
+  }
+}
+
+const startOrderCardMotion = () => {
+  if (shouldReduceClientMotion() || !('IntersectionObserver' in window)) {
+    // 缓存页可能在离场后变更了系统动效设置；无观察器时不保留旧的隐藏状态。
+    for (const card of getCurrentOrderCards()) {
+      card.classList.remove('order-card-viewport--hidden', 'order-card-viewport--seen')
+      card.style.removeProperty('--order-card-enter-delay')
+    }
+    return
+  }
+  const generation = ++orderCardMotionGeneration
+  awaitingFirstOrderCards = true
+  orderCardObserver = new IntersectionObserver((entries) => {
+    if (generation !== orderCardMotionGeneration) return
+    for (const entry of entries) {
+      const card = entry.target as HTMLElement
+      if (!observedOrderCards.has(card)) continue
+      if (entry.isIntersecting) {
+        card.classList.remove('order-card-viewport--hidden')
+      } else if (!card.classList.contains('order-card-viewport--hidden')) {
+        // 卡片离屏时先固定短位移起点，下次滚入不再排队。
+        card.classList.add('order-card-viewport--hidden', 'order-card-viewport--seen')
+        card.style.removeProperty('--order-card-enter-delay')
+      }
+    }
+  })
+  syncOrderCardObserver()
+}
+
+const stopOrderCardMotion = () => {
+  orderCardMotionGeneration += 1
+  orderCardObserver?.disconnect()
+  orderCardObserver = null
+  // KeepAlive 会在旧页离场开始时触发失活，保留旧页卡片画面直到退出窗口。
+  observedOrderCards.clear()
+  awaitingFirstOrderCards = false
+}
+
+watch([orderCardList, orderListBodyRef], () => {
+  restoreOrderListReturnScroll()
+  syncOrderCardObserver()
+}, { flush: 'post' })
+
 const activatePageRuntime = () => {
   if (pageRuntimeActive) {
     return
   }
   pageRuntimeActive = true
+  const position = router.options.history.state.position
+  orderListHistoryPosition = typeof position === 'number' ? position : undefined
+  restoreOrderListReturnScroll()
+  if (!orderListPageRef.value?.hasAttribute('data-client-page-entering')) startOrderCardMotion()
   globalThis.document?.addEventListener('visibilitychange', handleVisibilityChange)
   startClientOrderRefreshSubscription()
   scheduleAutoRefresh()
   if (hasActivatedOnce && globalThis.document?.visibilityState !== 'hidden') {
-    void triggerSilentOrderRefresh()
+    if (normalizeClientOrderKeyword(keywordInput.value) !== effectiveKeyword.value) applySearch(keywordInput.value)
+    else void triggerSilentOrderRefresh()
   }
   hasActivatedOnce = true
+}
+
+const handlePageEntered = () => {
+  restoreOrderListReturnScroll()
+  if (pageRuntimeActive && !orderCardObserver) startOrderCardMotion()
 }
 
 const deactivatePageRuntime = () => {
@@ -576,6 +821,11 @@ const deactivatePageRuntime = () => {
     return
   }
   pageRuntimeActive = false
+  listQueryGeneration += 1
+  pendingSearchRefresh = false
+  stopKeywordDebounce()
+  resetOrderLoading()
+  stopOrderCardMotion()
   globalThis.document?.removeEventListener('visibilitychange', handleVisibilityChange)
   scheduleAutoRefresh()
   disposeClientOrderRefresh()
@@ -584,14 +834,18 @@ const deactivatePageRuntime = () => {
 
 const loadOrders = async (force = false, options?: { append?: boolean; silent?: boolean; preserveScroll?: boolean }) => {
   const append = options?.append === true
-  const silent = options?.silent === true
-  if (!append && !force && clientOrderStore.orders.length > 0 && clientOrderStore.isFresh) {
+  const hasCurrentResults = clientOrderStore.hasCurrentResults
+  const silent = options?.silent === true && hasCurrentResults
+  if (append && !hasMoreOrders.value) return
+  if (!append && !force && clientOrderStore.orders.length > 0 && clientOrderStore.isFreshNow()) {
     requestError.value = null
     return
   }
-  const hasCachedOrders = clientOrderStore.orders.length > 0
+  const hasCachedOrders = hasCurrentResults && clientOrderStore.orders.length > 0
   const targetPage = append ? clientOrderStore.page + 1 : 1
-  const preserveScroll = options?.preserveScroll === true && !append && hasCachedOrders
+  const query = buildListQuery(targetPage)
+  const isCurrent = captureListQuery()
+  const preserveScroll = options?.preserveScroll === true && !append && hasCachedOrders && !getOrderListReturnScroll()
   const scrollAnchor = preserveScroll
     ? captureOrderRefreshAnchor({
         listRoot: orderListBodyRef.value,
@@ -612,9 +866,10 @@ const loadOrders = async (force = false, options?: { append?: boolean; silent?: 
   await runLatestListRequest({
     executor: (signal) =>
       silent && !append
-        ? fetchSilentRefreshOrders(signal)
-        : getMyO2oPreorders(buildListQuery(targetPage), { signal }),
+        ? fetchSilentRefreshOrders(query, signal)
+        : getMyO2oPreorders(query, { signal }),
     onSuccess: async (result) => {
+      if (!isCurrent()) return
       if (append) {
         clientOrderStore.appendOrders(result.records.map(normalizeSummaryIdentifiers), {
           page: result.page,
@@ -628,7 +883,8 @@ const loadOrders = async (force = false, options?: { append?: boolean; silent?: 
       const nextRecords = silent ? resolveSilentRefreshRecords(normalizedRecords) : normalizedRecords
       const logicalPageSize = clientOrderStore.pageSize || DEFAULT_ORDER_PAGE_SIZE
       clientOrderStore.setOrders(nextRecords, {
-        page: silent ? Math.max(1, Math.ceil(nextRecords.length / logicalPageSize)) : result.page,
+        // 只跨过已完整保留的页；下一次加载会重读部分页并按订单 ID 去重。
+        page: silent ? Math.floor(nextRecords.length / logicalPageSize) : result.page,
         pageSize: silent ? logicalPageSize : result.pageSize,
         total: result.total,
       })
@@ -641,13 +897,16 @@ const loadOrders = async (force = false, options?: { append?: boolean; silent?: 
       }
       if (scrollAnchor) {
         await nextTick()
-        restoreOrderRefreshAnchor(scrollAnchor, {
-          listRoot: orderListBodyRef.value,
-          itemAttributeName: 'data-order-card-id',
-        })
+        if (pageRuntimeActive && isCurrent()) {
+          restoreOrderRefreshAnchor(scrollAnchor, {
+            listRoot: orderListBodyRef.value,
+            itemAttributeName: 'data-order-card-id',
+          })
+        }
       }
     },
     onError: (error) => {
+      if (!isCurrent()) return
       const normalizedError = normalizeRequestError(error, '订单加载失败')
       if (silent) {
         return
@@ -667,27 +926,15 @@ const loadOrders = async (force = false, options?: { append?: boolean; silent?: 
       }
     },
     onFinally: () => {
-      firstScreenLoading.value = false
-      refreshing.value = false
-      silentRefreshing.value = false
-      loadingMore.value = false
+      resetOrderLoading()
+      if (pendingSearchRefresh) void triggerSilentOrderRefresh()
     },
   })
 }
 
 const clearKeyword = () => {
-  const hadKeyword = Boolean(keywordInput.value.trim() || effectiveKeyword.value.trim())
-  if (keywordDebounceTimer.value !== null) {
-    globalThis.clearTimeout(keywordDebounceTimer.value)
-    keywordDebounceTimer.value = null
-  }
   keywordInput.value = ''
-  effectiveKeyword.value = ''
-  keywordDebouncing.value = false
-  clientOrderStore.setKeyword('')
-  if (hadKeyword) {
-    void loadOrders(true)
-  }
+  applySearch('')
 }
 
 // 详细注释：执行撤回订单，二次确认后请求撤回，并更新 Store 中的订单状态。
@@ -696,6 +943,9 @@ const handleRecallOrder = async (order: PersistedO2oPreorderSummary) => {
     showAppWarning('当前订单状态不可撤回')
     return
   }
+  const owner = clientAuthStore.currentUser?.id
+  const session = clientAuthStore.sessionGeneration
+  const isCurrentSession = () => owner === clientAuthStore.currentUser?.id && session === clientAuthStore.sessionGeneration
 
   try {
     await ElMessageBox.confirm(
@@ -716,10 +966,13 @@ const handleRecallOrder = async (order: PersistedO2oPreorderSummary) => {
     return
   }
 
+  if (!isCurrentSession()) return
   recallingOrderId.value = order.id
   try {
     const detail = await cancelMyO2oPreorder(order.id)
+    if (!isCurrentSession()) return
     clientOrderStore.syncOrderSummary(buildClientOrderSummaryFromDetail(detail), { preserveFresh: true })
+    if (effectiveKeyword.value) pendingSearchRefresh = true
     notifyClientOrderRefresh({
       orderId: detail.order.id,
       reason: 'cancelled',
@@ -727,32 +980,24 @@ const handleRecallOrder = async (order: PersistedO2oPreorderSummary) => {
     })
     showAppSuccess('订单已撤回')
   } catch (error) {
+    if (!isCurrentSession()) return
     const normalizedError = normalizeRequestError(error, '撤回订单失败')
     showAppError(normalizedError.message)
   } finally {
-    recallingOrderId.value = ''
+    if (isCurrentSession()) {
+      recallingOrderId.value = ''
+      if (pendingSearchRefresh) void triggerSilentOrderRefresh()
+    }
   }
 }
 
 watch(
-  () => effectiveKeyword.value,
-  (nextKeyword, previousKeyword) => {
-    if (nextKeyword === previousKeyword) {
-      return
-    }
-    clientOrderStore.setKeyword(nextKeyword)
-    void loadOrders(true)
-  },
-)
-
-watch(
-  () => clientAuthStore.currentUser?.id ?? '',
-  (nextUserId, previousUserId) => {
-    if (nextUserId === previousUserId) {
-      return
-    }
+  [() => clientAuthStore.currentUser?.id, () => clientAuthStore.sessionGeneration],
+  ([nextUserId]) => {
+    pendingSearchRefresh = false
+    recallingOrderId.value = ''
     syncStoreWithCurrentUser()
-    if (nextUserId) {
+    if (nextUserId && pageRuntimeActive) {
       void loadOrders(true)
     }
   },
@@ -761,8 +1006,17 @@ watch(
 onMounted(async () => {
   syncStoreWithCurrentUser()
   const hadCachedOrders = clientOrderStore.orders.length > 0
+  const hadFreshCache = hadCachedOrders && clientOrderStore.isFreshNow()
+  if (hadCachedOrders && getOrderListReturnScroll()) {
+    await nextTick()
+    restoreOrderListReturnScroll()
+    if (pageRuntimeActive && router.currentRoute.value.name === 'client-orders') {
+      void loadOrders(true, { silent: true, preserveScroll: true })
+    }
+    return
+  }
   await loadOrders()
-  if (hadCachedOrders) {
+  if (hadFreshCache && pageRuntimeActive && router.currentRoute.value.name === 'client-orders') {
     void loadOrders(true, { silent: true, preserveScroll: true })
   }
 })
@@ -776,10 +1030,7 @@ onDeactivated(() => {
 })
 
 onBeforeUnmount(() => {
-  if (keywordDebounceTimer.value !== null) {
-    globalThis.clearTimeout(keywordDebounceTimer.value)
-    keywordDebounceTimer.value = null
-  }
+  stopKeywordDebounce()
   if (refreshMarkCleanupTimer !== null) {
     globalThis.clearTimeout(refreshMarkCleanupTimer)
     refreshMarkCleanupTimer = null
@@ -789,7 +1040,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="order-list-page space-y-4">
+  <section ref="orderListPageRef" class="order-list-page space-y-4" @client-page-entered="handlePageEntered">
     <div class="rounded-[1.4rem] bg-white p-3.5 shadow-[var(--ylink-shadow-soft)] sm:p-4 dark:bg-[#141415]">
       <div class="order-list-page__hero">
         <div class="min-w-0 flex-1">
@@ -818,13 +1069,15 @@ onBeforeUnmount(() => {
           {{ tab.label }}
         </button>
       </div>
-      <div class="mt-3 flex items-center gap-2">
+      <div class="mt-2 flex items-center gap-2">
         <input
           v-model="keywordInput"
-          class="h-10 flex-1 rounded-full border border-slate-200 bg-slate-50 px-4 text-sm outline-none focus:border-slate-300 dark:border-white/10 dark:bg-white/5"
-          placeholder="搜索订单号、核销码、部门、工号或归属"
+          class="h-10 min-w-0 flex-1 rounded-full border border-slate-200 bg-slate-50 px-4 text-sm outline-none focus:border-slate-300 dark:border-white/10 dark:bg-white/5"
+          maxlength="64"
+          placeholder="订单号、商品名或规格"
+          aria-label="搜索订单号、核销码、部门工号、归属、商品名或规格"
         />
-        <button type="button" class="h-10 rounded-full border border-slate-200 px-4 text-sm text-slate-600 dark:border-white/10 dark:text-slate-300" @click="clearKeyword">清空</button>
+        <button type="button" class="h-10 shrink-0 rounded-full border border-slate-200 px-4 text-sm text-slate-600 dark:border-white/10 dark:text-slate-300" @click="clearKeyword">清空</button>
       </div>
       <p v-if="keywordDebouncing || refreshing || loadingMore" class="mt-2 text-xs text-slate-400">
         {{
@@ -835,15 +1088,15 @@ onBeforeUnmount(() => {
               : '正在刷新订单，当前列表可继续浏览'
         }}
       </p>
-      <Transition name="order-refresh-badge">
-        <p v-if="silentRefreshing && !refreshing && !loadingMore && !keywordDebouncing" class="mt-2 text-xs text-teal-600">
-          正在静默同步最新订单，当前浏览位置保持不变
-        </p>
-      </Transition>
-      <p v-if="orders.length" class="mt-2 text-xs text-slate-400">
+      <p v-if="orders.length && clientOrderStore.hasCurrentResults" class="mt-2 text-xs text-slate-400">
         已加载 {{ orders.length }} 条，服务端共命中 {{ total }} 条订单
       </p>
-      <p v-if="orders.length" class="mt-1 text-xs text-slate-400">
+      <p
+        v-if="orders.length && clientOrderStore.hasCurrentResults"
+        class="mt-1 truncate text-xs leading-4"
+        :class="showSilentSyncStatus ? 'text-teal-600 dark:text-teal-300' : 'text-slate-400'"
+        role="status"
+      >
         {{ autoRefreshStatusText }}
       </p>
     </div>
@@ -860,7 +1113,7 @@ onBeforeUnmount(() => {
       @retry="loadOrders(true)"
     />
     <BaseRequestState
-      v-else-if="!orders.length"
+      v-else-if="clientOrderStore.hasCurrentResults && !orders.length"
       type="empty"
       title="暂无订单"
       :description="effectiveKeyword ? '未匹配到符合关键词的订单，请调整关键词后重试' : '当前筛选下没有订单记录'"
@@ -868,97 +1121,102 @@ onBeforeUnmount(() => {
       @retry="loadOrders(true)"
     />
 
-    <div v-else>
+    <div v-else-if="clientOrderStore.hasCurrentResults">
       <div ref="orderListBodyRef">
-        <TransitionGroup name="order-list-refresh" tag="div" class="space-y-3">
-          <article
+        <TransitionGroup name="order-list-refresh" tag="div" class="space-y-3" @before-leave="prepareOrderCardLeave">
+          <div
             v-for="card in orderCardList"
             :key="card.order.id"
-            class="rounded-[1.2rem] bg-white p-3.5 shadow-[var(--ylink-shadow-soft)] sm:p-4 dark:bg-[#141415]"
-            :class="{ 'order-list-card--refreshed': isOrderRecentlyRefreshed(card.order.id) }"
             :data-order-card-id="card.order.id"
           >
-            <div class="order-list-card__header">
-              <div class="order-list-card__topline">
-                <div class="min-w-0 flex-1">
-                  <div class="flex flex-wrap items-center gap-2">
-                    <p class="min-w-0 flex-1 truncate text-[0.98rem] font-semibold text-slate-900 sm:flex-none sm:text-base dark:text-slate-100">
-                      {{ card.order.preorderNo }}
-                    </p>
-                    <span class="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-600 sm:text-xs dark:bg-white/10 dark:text-slate-300">
-                      {{ getClientOrderTypeLabel(card.order) }}
-                    </span>
-                    <Transition name="order-refresh-badge">
-                      <span
-                        v-if="isOrderRecentlyRefreshed(card.order.id)"
-                        class="rounded-full bg-teal-50 px-2.5 py-1 text-[11px] font-semibold text-teal-700 dark:bg-teal-500/10 dark:text-teal-300"
+            <div class="order-card-viewport">
+              <article
+                class="rounded-[1.2rem] bg-white p-3.5 shadow-[var(--ylink-shadow-soft)] sm:p-4 dark:bg-[#141415]"
+                :class="{ 'order-list-card--refreshed': isOrderRecentlyRefreshed(card.order.id) }"
+              >
+                <div class="order-list-card__header">
+                  <div class="order-list-card__topline">
+                    <div class="min-w-0 flex-1">
+                      <div class="flex flex-wrap items-center gap-2">
+                        <p class="min-w-0 flex-1 truncate text-[0.98rem] font-semibold text-slate-900 sm:flex-none sm:text-base dark:text-slate-100">
+                          {{ card.order.preorderNo }}
+                        </p>
+                        <span class="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-600 sm:text-xs dark:bg-white/10 dark:text-slate-300">
+                          {{ getClientOrderTypeLabel(card.order) }}
+                        </span>
+                        <Transition name="order-refresh-badge">
+                          <span
+                            v-if="isOrderRecentlyRefreshed(card.order.id)"
+                            class="rounded-full bg-teal-50 px-2.5 py-1 text-[11px] font-semibold text-teal-700 dark:bg-teal-500/10 dark:text-teal-300"
+                          >
+                            已更新
+                          </span>
+                        </Transition>
+                      </div>
+                      <p v-if="card.order.customerOrderBusinessNo" class="mt-1 text-xs text-teal-700 dark:text-teal-300">
+                        关联出库业务单号：{{ card.order.customerOrderBusinessNo }}
+                      </p>
+                      <p v-if="isMergedCustomerOrder(card.order)" class="mt-1 text-xs text-teal-700 dark:text-teal-300">
+                        关联正式出库单已合并（原始出库业务单号：{{ getOriginalCustomerOrderBusinessNo(card.order) }}）
+                      </p>
+                    </div>
+                    <div class="flex items-center gap-2 self-start">
+                      <button
+                        v-if="card.order.status === 'pending'"
+                        type="button"
+                        class="rounded-full border border-rose-200 px-3 py-1.5 text-xs text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400 dark:border-rose-900/60 dark:text-rose-400"
+                        :disabled="recallingOrderId === card.order.id"
+                        @click="handleRecallOrder(card.order)"
                       >
-                        已更新
-                      </span>
-                    </Transition>
+                        {{ recallingOrderId === card.order.id ? '撤回中...' : '撤回订单' }}
+                      </button>
+                      <router-link :to="`/client/orders/${card.order.id}`" class="rounded-full bg-slate-900 px-3 py-1.5 text-xs text-white">
+                        详情
+                      </router-link>
+                    </div>
                   </div>
-                  <p v-if="card.order.customerOrderBusinessNo" class="mt-1 text-xs text-teal-700 dark:text-teal-300">
-                    关联出库业务单号：{{ card.order.customerOrderBusinessNo }}
-                  </p>
-                  <p v-if="isMergedCustomerOrder(card.order)" class="mt-1 text-xs text-teal-700 dark:text-teal-300">
-                    关联正式出库单已合并（原始出库业务单号：{{ getOriginalCustomerOrderBusinessNo(card.order) }}）
-                  </p>
+                  <div class="order-list-card__meta">
+                    <span
+                      v-for="metaFact in card.metaFacts"
+                      :key="metaFact.key"
+                      class="order-list-card__meta-pill"
+                      :class="`order-list-card__meta-pill--${metaFact.key}`"
+                    >
+                      {{ metaFact.label }}
+                    </span>
+                  </div>
                 </div>
-                <div class="flex items-center gap-2 self-start">
-                  <button
-                    v-if="card.order.status === 'pending'"
-                    type="button"
-                    class="rounded-full border border-rose-200 px-3 py-1.5 text-xs text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400 dark:border-rose-900/60 dark:text-rose-400"
-                    :disabled="recallingOrderId === card.order.id"
-                    @click="handleRecallOrder(card.order)"
+
+                <div class="order-list-card__status-row">
+                  <span
+                    v-for="statusChip in card.statusChips"
+                    :key="statusChip.key"
+                    class="rounded-full px-2.5 py-1 text-[11px] font-semibold sm:text-xs"
+                    :class="statusChip.className"
                   >
-                    {{ recallingOrderId === card.order.id ? '撤回中...' : '撤回订单' }}
-                  </button>
-                  <router-link :to="`/client/orders/${card.order.id}`" class="rounded-full bg-slate-900 px-3 py-1.5 text-xs text-white">
-                    详情
+                    {{ statusChip.label }}
+                  </span>
+                </div>
+
+                <div v-if="needsKingdeeRegistration(card.order)" class="kingdee-registration-missing mt-3 flex items-center justify-between gap-3 rounded-xl border bg-red-50 px-3 py-2 text-sm dark:bg-red-500/10">
+                  <span>金蝶单据编号未填写</span>
+                  <router-link v-slot="{ navigate }" :to="`/client/orders/${card.order.id}`" custom>
+                    <el-button size="small" type="danger" plain @click="navigate">去填写</el-button>
                   </router-link>
                 </div>
-              </div>
-              <div class="order-list-card__meta">
-                <span
-                  v-for="metaFact in card.metaFacts"
-                  :key="metaFact.key"
-                  class="order-list-card__meta-pill"
-                  :class="`order-list-card__meta-pill--${metaFact.key}`"
-                >
-                  {{ metaFact.label }}
-                </span>
-              </div>
-            </div>
 
-            <div class="order-list-card__status-row">
-              <span
-                v-for="statusChip in card.statusChips"
-                :key="statusChip.key"
-                class="rounded-full px-2.5 py-1 text-[11px] font-semibold sm:text-xs"
-                :class="statusChip.className"
-              >
-                {{ statusChip.label }}
-              </span>
+                <div class="mt-3 rounded-2xl px-3 py-2.5" :class="card.report.cardClassName">
+                  <div class="order-list-card__summary">
+                    <p class="order-list-card__summary-title text-sm font-semibold">{{ card.report.cardTitle }}</p>
+                    <p class="order-list-card__summary-text text-xs">{{ card.report.cardDescription }}</p>
+                  </div>
+                  <p v-if="card.assistSummary" class="mt-1.5 text-[11px] leading-5 opacity-80">
+                    {{ card.assistSummary }}
+                  </p>
+                </div>
+              </article>
             </div>
-
-            <div v-if="needsKingdeeRegistration(card.order)" class="mt-3 flex items-center justify-between gap-3 rounded-xl bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-300">
-              <span>金蝶单据编号未填写</span>
-              <router-link v-slot="{ navigate }" :to="`/client/orders/${card.order.id}`" custom>
-                <el-button size="small" type="warning" plain @click="navigate">去填写</el-button>
-              </router-link>
-            </div>
-
-            <div class="mt-3 rounded-2xl px-3 py-2.5" :class="card.report.cardClassName">
-              <div class="order-list-card__summary">
-                <p class="order-list-card__summary-title text-sm font-semibold">{{ card.report.cardTitle }}</p>
-                <p class="order-list-card__summary-text text-xs">{{ card.report.cardDescription }}</p>
-              </div>
-              <p v-if="card.assistSummary" class="mt-1.5 text-[11px] leading-5 opacity-80">
-                {{ card.assistSummary }}
-              </p>
-            </div>
-          </article>
+          </div>
         </TransitionGroup>
       </div>
       <div class="flex justify-center pt-1">
@@ -971,13 +1229,23 @@ onBeforeUnmount(() => {
         >
           {{ loadingMore ? '加载中...' : '加载更多' }}
         </button>
-        <p v-else class="text-xs text-slate-400">已加载全部符合条件的订单</p>
+        <p v-else-if="clientOrderStore.hasCurrentResults" class="text-xs text-slate-400">已加载全部符合条件的订单</p>
       </div>
     </div>
   </section>
 </template>
 
 <style scoped>
+.kingdee-registration-missing {
+  border-color: #fecaca;
+  color: #991b1b;
+}
+
+.dark .kingdee-registration-missing {
+  border-color: #ef44444d;
+  color: #fca5a5;
+}
+
 /* 订单列表页根容器：为底部悬浮导航与安全区预留稳定空间，避免最后一张卡片被导航覆盖。 */
 .order-list-page {
   padding-bottom: calc(7.25rem + env(safe-area-inset-bottom, 0px));
@@ -1074,6 +1342,39 @@ onBeforeUnmount(() => {
   flex: 1 1 14rem;
   min-width: 0;
   line-height: 1.45;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .order-card-viewport {
+    transition:
+      opacity var(--ylink-motion-normal) var(--ylink-motion-ease) var(--order-card-enter-delay, 0ms),
+      transform var(--ylink-motion-normal) var(--ylink-motion-ease) var(--order-card-enter-delay, 0ms);
+  }
+
+  .order-card-viewport--seen > .order-card-viewport {
+    transition-duration: 180ms;
+    transition-delay: 0ms;
+  }
+
+  .order-list-page[data-client-page-entering] .order-card-viewport,
+  .order-card-viewport--hidden > .order-card-viewport {
+    opacity: 0;
+    transform: translateY(10px);
+    transition: none;
+    pointer-events: none;
+  }
+
+  .order-card-viewport--hidden.order-card-viewport--seen > .order-card-viewport {
+    transform: translateY(6px);
+  }
+
+  .order-list-page[data-client-page-entering] .order-card-viewport:focus-within,
+  .order-card-viewport--hidden:focus-within > .order-card-viewport {
+    opacity: 1;
+    transform: none;
+    transition: none;
+    pointer-events: auto;
+  }
 }
 
 .order-list-card--refreshed {

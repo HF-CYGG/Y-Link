@@ -71,7 +71,6 @@ interface CustomerServiceRealtimeSubscriber {
   sessionHash: string
   res: Response
   heartbeatTimer: NodeJS.Timeout | null
-  revalidateTimer: NodeJS.Timeout | null
   slowConsumerTimer: NodeJS.Timeout | null
   detachListeners: () => void
   drainListener: (() => void) | null
@@ -139,6 +138,8 @@ class CustomerServiceRealtimeService {
   private clusterPresence: ClusterPresenceCache | null = null
   private clusterPresenceTimer: NodeJS.Timeout | null = null
   private clusterPresenceSyncing = false
+  private idleRevalidationTimer: NodeJS.Timeout | null = null
+  private idleRevalidationRunning = false
 
   constructor() {
     // 处理器在模块加载时注册；未配置 Redis 时总线不会启动，注册本身没有副作用。
@@ -334,9 +335,12 @@ class CustomerServiceRealtimeService {
     const subscriber = this.subscribers.get(subscriberId)
     if (!subscriber) return
     if (subscriber.heartbeatTimer) clearInterval(subscriber.heartbeatTimer)
-    if (subscriber.revalidateTimer) clearInterval(subscriber.revalidateTimer)
     if (subscriber.slowConsumerTimer) clearTimeout(subscriber.slowConsumerTimer)
     this.subscribers.delete(subscriberId)
+    if (!this.subscribers.size && this.idleRevalidationTimer !== null) {
+      clearInterval(this.idleRevalidationTimer)
+      this.idleRevalidationTimer = null
+    }
     if (subscriber.scope === 'service') this.requestClusterPresenceSync()
     subscriber.detachListeners()
     if (subscriber.drainListener) subscriber.res.off('drain', subscriber.drainListener)
@@ -477,13 +481,16 @@ class CustomerServiceRealtimeService {
     }
   }
 
-  private scheduleIdleRevalidation(subscriberId: string) {
-    const subscriber = this.subscribers.get(subscriberId)
-    if (!subscriber) return
-    subscriber.revalidateTimer = setInterval(() => {
-      void this.revalidateActiveSubscribers([subscriber]).catch(() => undefined)
+  private scheduleIdleRevalidation() {
+    if (this.idleRevalidationTimer !== null || !this.subscribers.size) return
+    this.idleRevalidationTimer = setInterval(() => {
+      if (this.idleRevalidationRunning) return
+      this.idleRevalidationRunning = true
+      void this.revalidateActiveSubscribers().finally(() => {
+        this.idleRevalidationRunning = false
+      }).catch(() => undefined)
     }, CUSTOMER_SERVICE_REALTIME_POLICY.revalidateIdleMs)
-    subscriber.revalidateTimer.unref?.()
+    this.idleRevalidationTimer.unref?.()
   }
 
   private registerSubscriber(scope: RealtimeScope, ownerKey: string, sessionToken: string, res: Response, keepaliveSeconds: number, ticket: CustomerServiceRealtimeRegistrationTicket, initPayload?: CustomerServiceRealtimeInitPayloadResolver) {
@@ -523,7 +530,7 @@ class CustomerServiceRealtimeService {
       res.setHeader('X-Accel-Buffering', 'no')
       res.flushHeaders()
       if (closed || this.isResponseClosed(res)) { cleanup(); return }
-      const subscriber: CustomerServiceRealtimeSubscriber = { subscriberId, scope, clientSessionKind, ownerKey, sessionHash, res, heartbeatTimer: null, revalidateTimer: null, slowConsumerTimer: null, detachListeners, drainListener: null, blocked: false }
+      const subscriber: CustomerServiceRealtimeSubscriber = { subscriberId, scope, clientSessionKind, ownerKey, sessionHash, res, heartbeatTimer: null, slowConsumerTimer: null, detachListeners, drainListener: null, blocked: false }
       this.subscribers.set(subscriberId, subscriber)
       // 客服上线立即上报集群在线态，避免其他实例最长 5 秒才看到新客服。
       if (scope === 'service') this.requestClusterPresenceSync()
@@ -536,7 +543,7 @@ class CustomerServiceRealtimeService {
         if (!subscriber.blocked) this.writeSseEvent(subscriber, 'ping', { eventType: 'ping' })
       }, Math.max(5, keepaliveSeconds) * 1000)
       subscriber.heartbeatTimer.unref?.()
-      this.scheduleIdleRevalidation(subscriberId)
+      this.scheduleIdleRevalidation()
     } catch (error) { cleanup(); throw error }
   }
 
@@ -756,11 +763,10 @@ class CustomerServiceRealtimeService {
     this.pendingDeliveryMessages += 1
     this.pendingDeliveryBytes += payloadBytes
     const delivery = this.deliveryChain.catch(() => undefined).then(async () => {
-      const subscribers = Array.from(this.subscribers.values())
+      const subscribers = Array.from(this.subscribers.values()).filter((subscriber) => this.isSubscriberTargetedByEvent(subscriber, payload))
       const validIds = await this.revalidateActiveSubscribers(subscribers)
       for (const subscriber of subscribers) {
         if (!validIds.has(subscriber.subscriberId)) continue
-        if (!this.isSubscriberTargetedByEvent(subscriber, payload)) continue
         // 当前业务事件若遇到尚未恢复的背压，不能静默跳过后继续保持连接；
         // 关闭该连接让客户端重连并回读权威状态，避免留下无法感知的消息缺口。
         if (!this.writeSseEvent(subscriber, 'conversation', enrichedPayload)) {

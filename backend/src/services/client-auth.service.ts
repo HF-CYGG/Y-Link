@@ -6,7 +6,8 @@
  * 3. 关键认证动作会结合审计日志、图形验证码和系统配置，兼顾安全性、可维护性与业务扩展空间。
  */
 
-import { IsNull, LessThan, type EntityManager } from 'typeorm'
+import { createHash } from 'node:crypto'
+import { Brackets, IsNull, LessThan, type EntityManager, type Repository } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { env } from '../config/env.js'
@@ -17,6 +18,7 @@ import { ClientMobileSession } from '../entities/client-mobile-session.entity.js
 import type { ClientAuthContext } from '../types/client-auth.js'
 import { BizError } from '../utils/errors.js'
 import { isUniqueConstraintError } from '../utils/database-errors.js'
+import { isCaseInsensitiveMysqlCollation } from '../utils/migration-source-compatibility.js'
 import {
   type NormalizedClientAccount,
   normalizeClientAccount,
@@ -27,12 +29,14 @@ import {
 import type { RequestMeta } from '../utils/request-meta.js'
 import {
   assertClientPasswordPolicy,
+  assertPasswordAvoidsAccountIdentifiers,
   hashPassword,
   verifyPassword,
   verifyPasswordDetailed,
   verifyPasswordForNonexistentAccount,
 } from '../utils/password.js'
 import { hashSessionToken } from '../utils/session-token.js'
+import { isMobileAccessToken, hashMobileToken } from '../utils/mobile-token.js'
 import { maskLoginInputForAudit } from '../utils/audit-subject-mask.js'
 import { generateSessionToken } from '../utils/token.js'
 import { auditService } from './audit.service.js'
@@ -51,9 +55,11 @@ import {
 } from '../utils/staff-invite-code.js'
 
 interface ResetTicket {
+  version: 2
   userId: string
   accountKey: string
   expireAt: number
+  passwordState: string
 }
 
 interface ClientLoginSecuritySnapshot {
@@ -72,11 +78,17 @@ interface ClientLoginSecuritySnapshot {
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const RESET_TICKET_TTL_MS = 10 * 60 * 1000
 const CLIENT_SESSION_ACTIVITY_WRITE_INTERVAL_MS = 60 * 1000
+const CLIENT_SESSION_ACTIVITY_MAX_ENTRIES = 10_000
 const resetTicketStore = createTicketStore<ResetTicket>({
-  namespace: 'client-password-reset',
+  namespace: 'client-password-reset-v2',
   maxSize: 3000,
   resolveExpiresAt: (ticket) => ticket.expireAt,
 })
+
+/** 绑定用途、规范化 ID 与完整密码状态；票据存储中不保留可供离线验密的原始 passwordHash。 */
+const passwordResetState = (user: Pick<ClientUser, 'id' | 'passwordHash'>) => createHash('sha256')
+  .update(JSON.stringify(['client-password-reset-v2', BigInt(user.id).toString(), user.passwordHash]))
+  .digest('hex')
 
 export interface ClientRegisterInput {
   username?: string
@@ -196,6 +208,8 @@ const CLIENT_WEB_MAX_ACTIVE_SESSIONS = 20
 
 class ClientAuthService {
   private readonly userRepo = AppDataSource.getRepository(ClientUser)
+  private mysqlRealNameUsesCaseInsensitiveCollation?: Promise<boolean>
+  private readonly recentSessionActivityWrites = new Map<string, { nextWriteAt: number }>()
   private readonly sessionRepo = AppDataSource.getRepository(ClientUserSession)
   private readonly clientStaffDirectoryRepo = AppDataSource.getRepository(ClientStaffDirectory)
   private readonly staffNoPattern = /^[A-Za-z0-9-]{4,32}$/
@@ -285,33 +299,65 @@ class ClientAuthService {
     })
   }
 
-  /**
-   * 统一按归一化账号查找用户：
-   * - 手机号、邮箱使用精确匹配；
-   * - 用户名统一按小写键比较，避免 `Alice` / `alice` 形成大小写绕过。
-   */
-  private buildUserIdentifierQuery(identifier: NormalizedClientAccount, includePasswordHash = false) {
+  private async canUseIndexedRealNameEquality(repository: Repository<ClientUser>): Promise<boolean> {
+    if (repository.manager.connection.options.type !== 'mysql') return false
+    // 旧库列可能沿用不同排序规则，按真实列而非连接默认值判断是否可用普通索引。
+    if (!this.mysqlRealNameUsesCaseInsensitiveCollation) {
+      this.mysqlRealNameUsesCaseInsensitiveCollation = repository.manager.query(
+        `SELECT COLLATION_NAME AS collationName FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'client_user' AND COLUMN_NAME = 'real_name'`,
+      ).then((rows: Array<{ collationName: string | null }>) => isCaseInsensitiveMysqlCollation(rows[0]?.collationName))
+        .catch(() => {
+          this.mysqlRealNameUsesCaseInsensitiveCollation = undefined
+          return false
+        })
+    }
+    return this.mysqlRealNameUsesCaseInsensitiveCollation
+  }
+
+  /** 凭据与登录风控共用工号优先级，姓名仍按各数据库原有的不区分大小写逻辑匹配。 */
+  private async findLoginUser(identifier: NormalizedClientAccount, includePasswordHash = false) {
     const query = this.userRepo.createQueryBuilder('user')
-    if (includePasswordHash) {
-      query.addSelect('user.passwordHash')
+    if (includePasswordHash) query.addSelect('user.passwordHash')
+    if (identifier.channel !== 'username') {
+      return query.where(`user.${identifier.channel} = :account`, { account: identifier.normalizedValue }).getOne()
     }
+    const staff = await query.where('user.staffNo = :staffNo', { staffNo: identifier.rawValue }).getOne()
+    if (staff) return staff
+    const name = await this.canUseIndexedRealNameEquality(this.userRepo) ? 'user.realName' : 'LOWER(user.realName)'
+    return query.where(`${name} = :account`, { account: identifier.normalizedValue })
+      .orderBy('user.id', 'ASC').take(1).getOne()
+  }
+
+  private findUserWithPasswordByAccount(identifier: NormalizedClientAccount) {
+    return this.findLoginUser(identifier, true)
+  }
+
+  private findUserByAnyIdentifier(identifier: NormalizedClientAccount) {
+    return this.findLoginUser(identifier)
+  }
+
+  /** 查重检查所有命中项，排除当前账号后仍须识别其他人的同名或工号。 */
+  private async hasIdentifierConflict(
+    identifier: NormalizedClientAccount,
+    excludedUserId?: string,
+    repository = this.userRepo,
+  ): Promise<boolean> {
+    const query = repository.createQueryBuilder('user')
     if (identifier.channel === 'username') {
-      query.where('LOWER(user.realName) = :account OR user.staffNo = :staffNo', {
-        account: identifier.normalizedValue,
-        staffNo: identifier.rawValue,
-      })
-      return query
+      const name = await this.canUseIndexedRealNameEquality(repository) ? 'user.realName' : 'LOWER(user.realName)'
+      query.where(new Brackets((where) => {
+        where.where(`${name} = :account`, { account: identifier.normalizedValue })
+          .orWhere('user.staffNo = :staffNo', { staffNo: identifier.rawValue })
+      }))
+    } else {
+      query.where(`user.${identifier.channel} = :account`, { account: identifier.normalizedValue })
     }
-    query.where(`user.${identifier.channel} = :account`, { account: identifier.normalizedValue })
-    return query
-  }
-
-  private async findUserWithPasswordByAccount(identifier: NormalizedClientAccount) {
-    return this.buildUserIdentifierQuery(identifier, true).getOne()
-  }
-
-  private async findUserByAnyIdentifier(identifier: NormalizedClientAccount) {
-    return this.buildUserIdentifierQuery(identifier).getOne()
+    if (excludedUserId !== undefined) {
+      const idType = repository.manager.connection.options.type === 'mysql' ? 'UNSIGNED' : 'INTEGER'
+      query.andWhere(`user.id <> CAST(:excludedUserId AS ${idType})`, { excludedUserId })
+    }
+    return query.getExists()
   }
 
   toClientProfile(user: ClientUser) {
@@ -447,7 +493,7 @@ class ClientAuthService {
     },
   ) {
     if (account) {
-      const existedByAccount = await this.findUserByAnyIdentifier({
+      const existedByAccount = await this.hasIdentifierConflict({
         channel: account.channel,
         rawValue: account.account,
         normalizedValue: account.account,
@@ -469,7 +515,7 @@ class ClientAuthService {
     }
 
     const username = normalizeClientUsername(profile.usernameValue)
-    const existedByUsername = await this.findUserByAnyIdentifier({
+    const existedByUsername = await this.hasIdentifierConflict({
       channel: 'username',
       rawValue: username.value,
       normalizedValue: username.normalizedValue,
@@ -663,6 +709,32 @@ class ClientAuthService {
     return query.getOne()
   }
 
+  /** 必须在持有账号行锁后调用，不能根据 Cookie/Bearer 来源判断会话所属表。 */
+  private async assertProfileSessionCurrent(manager: EntityManager, auth: ClientAuthContext) {
+    if (isMobileAccessToken(auth.sessionToken)) {
+      const query = manager.getRepository(ClientMobileSession).createQueryBuilder('session')
+        .where('session.clientUserId = :userId AND session.accessTokenHash = :hash', {
+          userId: auth.userId, hash: hashMobileToken(auth.sessionToken),
+        })
+      if (manager.connection.options.type === 'mysql') query.setLock('pessimistic_write')
+      const session = await query.getOne()
+      const now = new Date()
+      if (!session || session.revokedAt) throw new BizError('Access Token 无效或已撤销', 401, { code: 40101 })
+      if (session.accessExpiresAt <= now || session.absoluteExpiresAt <= now) {
+        throw new BizError('Access Token 已过期', 401, { code: 40102 })
+      }
+      return
+    }
+    const query = manager.getRepository(ClientUserSession).createQueryBuilder('session')
+      .where('session.userId = :userId AND session.sessionToken = :hash', {
+        userId: auth.userId, hash: hashSessionToken(auth.sessionToken),
+      })
+    if (manager.connection.options.type === 'mysql') query.setLock('pessimistic_write')
+    const session = await query.getOne()
+    const now = new Date()
+    if (!session || session.expiresAt <= now) throw new BizError('未登录或登录状态已失效', 401)
+  }
+
   isLoginSecuritySnapshotCurrent(user: ClientUser, snapshot: ClientLoginSecuritySnapshot): boolean {
     return user.passwordHash === snapshot.passwordHash
       && (user.mobile ?? null) === snapshot.mobile
@@ -690,7 +762,7 @@ class ClientAuthService {
       if (!lockedUser || !this.isLoginSecuritySnapshotCurrent(lockedUser, securitySnapshot)) {
         throw new BizError('用户名或密码错误', 401)
       }
-      await manager.getRepository(ClientUserSession).delete({ expiresAt: LessThan(now) })
+      await manager.getRepository(ClientUserSession).delete({ userId: lockedUser.id, expiresAt: LessThan(now) })
       lockedUser.lastLoginAt = now
       const persistedUser = await manager.getRepository(ClientUser).save(lockedUser)
       await manager.getRepository(ClientUserSession).save(
@@ -1053,6 +1125,7 @@ class ClientAuthService {
     }
     const user = await this.userRepo
       .createQueryBuilder('user')
+      .addSelect('user.passwordHash')
       .where(
         account.channel === 'mobile'
           ? 'user.mobile = :account AND user.mobileVerifiedAt IS NOT NULL'
@@ -1068,9 +1141,11 @@ class ClientAuthService {
     await recordForgotVerifyAudit('success', { resetTicketIssued: true }, user.id)
     const resetToken = generateSessionToken()
     await resetTicketStore.set(resetToken, {
+      version: 2,
       userId: user.id,
       accountKey: `${account.channel}:${account.account}`,
       expireAt: Date.now() + RESET_TICKET_TTL_MS,
+      passwordState: passwordResetState(user),
     })
     return {
       resetToken,
@@ -1078,25 +1153,54 @@ class ClientAuthService {
     }
   }
 
+  private async requirePasswordResetAccount(
+    ticket: ResetTicket,
+    account: { channel: 'mobile' | 'email'; account: string },
+    newPassword: string,
+    manager?: EntityManager,
+  ) {
+    const userQuery = (manager?.getRepository(ClientUser) ?? this.userRepo)
+      .createQueryBuilder('user')
+      .addSelect('user.passwordHash')
+      .where('user.id = :userId', { userId: ticket.userId })
+      .andWhere(
+        account.channel === 'mobile'
+          ? 'user.mobile = :account AND user.mobileVerifiedAt IS NOT NULL'
+          : 'user.email = :account AND user.emailVerifiedAt IS NOT NULL',
+        { account: account.account },
+      )
+    if (manager && AppDataSource.options.type === 'mysql') userQuery.setLock('pessimistic_write')
+    const user = await userQuery.getOne()
+    if (!user || passwordResetState(user) !== ticket.passwordState || ticket.expireAt <= Date.now()) {
+      throw new BizError('重置凭证已失效', 400)
+    }
+    assertPasswordAvoidsAccountIdentifiers(newPassword, '新密码', [user.realName, user.mobile, user.email, user.staffNo])
+    return user
+  }
+
   async resetPassword(input: ClientResetPasswordInput, _requestMeta?: RequestMeta) {
     const account = this.resolveAccount(input.account)
     const newPassword = assertClientPasswordPolicy(input.newPassword, '新密码', { identifiers: [input.account] })
-    const ticket = await resetTicketStore.take(input.resetToken)
-    if (!ticket) {
+    const ticket = await resetTicketStore.get(input.resetToken)
+    if (!ticket) throw new BizError('重置凭证已失效', 400)
+    if (ticket.version !== 2 || typeof ticket.passwordState !== 'string' || !/^[a-f0-9]{64}$/.test(ticket.passwordState)
+      || !Number.isFinite(ticket.expireAt) || ticket.accountKey !== `${account.channel}:${account.account}`) {
+      // 沿用错账号或错误票据格式即作废的语义。
+      await resetTicketStore.take(input.resetToken)
       throw new BizError('重置凭证已失效', 400)
     }
-    if (ticket.accountKey !== `${account.channel}:${account.account}`) {
-      throw new BizError('重置凭证已失效', 400)
-    }
+    // 路由已限制账号与来源。先用快照拒绝不合格密码，避免它们占用派生额度。
+    await this.requirePasswordResetAccount(ticket, account, newPassword)
     const passwordHash = await hashPassword(newPassword)
     await runInTransaction(async (manager) => {
-      const userQuery = manager.getRepository(ClientUser)
-        .createQueryBuilder('user')
-        .where('user.id = :userId', { userId: ticket.userId })
-        .andWhere('(user.mobile = :account OR user.email = :account)', { account: account.account })
-      if (AppDataSource.options.type === 'mysql') userQuery.setLock('pessimistic_write')
-      const user = await userQuery.getOne()
-      if (!user) throw new BizError('用户不存在', 404)
+      const user = await this.requirePasswordResetAccount(ticket, account, newPassword, manager)
+      // 锁内仅做一次有超时的原子消费，按实际取到的票据复核，失败即回滚。
+      const consumed = await resetTicketStore.take(input.resetToken)
+      if (!consumed || consumed.version !== ticket.version || consumed.userId !== ticket.userId
+        || consumed.accountKey !== ticket.accountKey || consumed.passwordState !== ticket.passwordState
+        || consumed.expireAt !== ticket.expireAt) {
+        throw new BizError('重置凭证已失效', 400)
+      }
       await manager.getRepository(ClientUser).update(user.id, { passwordHash })
       const revokedWeb = await manager.getRepository(ClientUserSession).delete({ userId: user.id })
       const revokedMobile = await manager.getRepository(ClientMobileSession).createQueryBuilder()
@@ -1127,12 +1231,13 @@ class ClientAuthService {
 
   async resolveClientByToken(token: string): Promise<ClientAuthContext> {
     const now = new Date()
+    const sessionHash = hashSessionToken(token)
     // 每个客户端请求都要鉴权：用 QueryBuilder 一次联表取回会话与账号；
     // findOne 带 relations 时 TypeORM 会拆成“先取主键、再取数据”两条查询（与管理端鉴权同一处理方式）。
     const session = await this.sessionRepo
       .createQueryBuilder('session')
       .leftJoinAndSelect('session.user', 'user')
-      .where('session.sessionToken = :sessionToken', { sessionToken: hashSessionToken(token) })
+      .where('session.sessionToken = :sessionToken', { sessionToken: sessionHash })
       .getOne()
     if (!session || session.expiresAt <= now || !session.user) {
       throw new BizError('未登录或登录状态已失效', 401)
@@ -1142,19 +1247,7 @@ class ClientAuthService {
     }
     const threshold = new Date(now.getTime() - CLIENT_SESSION_ACTIVITY_WRITE_INTERVAL_MS)
     if (!session.lastAccessAt || session.lastAccessAt < threshold) {
-      const releaseActivityLease = databaseMaintenanceModeService.registerInFlightWrite()
-      if (releaseActivityLease) {
-        try {
-          await this.sessionRepo
-            .createQueryBuilder()
-            .update(ClientUserSession)
-            .set({ lastAccessAt: now })
-            .where('id = :id', { id: session.id })
-            .execute()
-        } finally {
-          releaseActivityLease()
-        }
-      }
+      await this.touchWebSessionActivity(session.id, sessionHash, now, threshold)
     }
     return {
       userId: session.user.id,
@@ -1167,6 +1260,34 @@ class ClientAuthService {
       sessionToken: token,
       // 直接调用服务时没有 HTTP 凭据来源；中间件会按实际 Cookie/Bearer 覆盖该默认值。
       authSource: 'bearer',
+    }
+  }
+
+  private async touchWebSessionActivity(id: string, sessionHash: string, now: Date, threshold: Date): Promise<void> {
+    const writes = this.recentSessionActivityWrites
+    const previous = writes.get(sessionHash)
+    if (previous && previous.nextWriteAt > now.getTime()) return
+    const releaseActivityLease = databaseMaintenanceModeService.registerInFlightWrite()
+    if (!releaseActivityLease) return
+
+    const marker = { nextWriteAt: Infinity }
+    writes.delete(sessionHash)
+    if (writes.size >= CLIENT_SESSION_ACTIVITY_MAX_ENTRIES) writes.delete(writes.keys().next().value!)
+    writes.set(sessionHash, marker)
+    try {
+      await this.sessionRepo
+        .createQueryBuilder()
+        .update(ClientUserSession)
+        .set({ lastAccessAt: now })
+        .where('id = :id AND session_token = :sessionHash AND expires_at > :now', { id, sessionHash, now })
+        .andWhere('(last_access_at IS NULL OR last_access_at < :threshold)', { threshold })
+        .execute()
+      marker.nextWriteAt = now.getTime() + CLIENT_SESSION_ACTIVITY_WRITE_INTERVAL_MS
+    } catch (error) {
+      if (writes.get(sessionHash) === marker) writes.delete(sessionHash)
+      throw error
+    } finally {
+      releaseActivityLease()
     }
   }
 
@@ -1185,7 +1306,7 @@ class ClientAuthService {
   }
 
   async preparePasswordChange(
-    userId: string,
+    auth: ClientAuthContext,
     input: ClientChangePasswordInput,
     passwordHash: string,
     manager: EntityManager,
@@ -1193,7 +1314,7 @@ class ClientAuthService {
     const repository = manager?.getRepository(ClientUser) ?? this.userRepo
     const query = repository.createQueryBuilder('user')
       .addSelect('user.passwordHash')
-      .where('user.id = :userId', { userId })
+      .where('user.id = :userId', { userId: auth.userId })
     if (manager && AppDataSource.options.type === 'mysql') query.setLock('pessimistic_write')
     const user = await query.getOne()
     if (!user) {
@@ -1201,11 +1322,15 @@ class ClientAuthService {
     }
     if (user.status !== 'enabled') throw new BizError('当前账号已停用', 403)
 
+    // 中间件校验后会话仍可能被注销或轮换；持有账号锁后再锁定并复核会话。
+    await this.assertProfileSessionCurrent(manager, auth)
+
     const matched = await verifyPassword(input.currentPassword, user.passwordHash)
     if (!matched) {
       throw new BizError('原密码错误', 400, { reason: 'CURRENT_PASSWORD_MISMATCH' })
     }
 
+    assertPasswordAvoidsAccountIdentifiers(input.newPassword, '新密码', [user.realName, user.mobile, user.email, user.staffNo])
     return { user, passwordHash }
   }
 
@@ -1227,7 +1352,7 @@ class ClientAuthService {
   }
 
   /** 会话内旧密码复核失败：计入账号失败锁定并写脱敏失败审计（事务外调用）。 */
-  private async recordCurrentPasswordFailure(
+  async recordCurrentPasswordFailure(
     auth: ClientAuthContext,
     requestMeta: RequestMeta | undefined,
     operation: 'change_password' | 'update_profile',
@@ -1256,7 +1381,7 @@ class ClientAuthService {
     requestMeta?: RequestMeta,
   ) {
     await runInTransaction(async (manager) => {
-      const prepared = await this.preparePasswordChange(auth.userId, input, passwordHash, manager)
+      const prepared = await this.preparePasswordChange(auth, input, passwordHash, manager)
       await manager.getRepository(ClientUser).update(prepared.user.id, { passwordHash: prepared.passwordHash })
       const revokedWeb = await manager.getRepository(ClientUserSession).delete({ userId: prepared.user.id })
       const revokedMobile = await manager.getRepository(ClientMobileSession).createQueryBuilder()
@@ -1308,20 +1433,18 @@ class ClientAuthService {
   private async ensureProfileIdentifiersUnique(
     checks: ReturnType<ClientAuthService['buildProfileUniquenessChecks']>,
     currentUserId: string,
+    repository: Repository<ClientUser>,
   ) {
     for (const check of checks) {
       if (!check.value) {
         continue
       }
-      const existed =
-        typeof check.value === 'string'
-          ? await this.findUserByAnyIdentifier({
-              channel: check.value.includes('@') ? 'email' : 'mobile',
-              rawValue: check.value,
-              normalizedValue: check.value,
-            })
-          : await this.findUserByAnyIdentifier(check.value)
-      if (existed && existed.id !== currentUserId) {
+      const identifier: NormalizedClientAccount = typeof check.value === 'string' ? {
+        channel: check.value.includes('@') ? 'email' : 'mobile',
+        rawValue: check.value,
+        normalizedValue: check.value,
+      } : check.value
+      if (await this.hasIdentifierConflict(identifier, currentUserId, repository)) {
         throw new BizError(check.message, 409)
       }
     }
@@ -1454,10 +1577,10 @@ class ClientAuthService {
       .where('user.id = :id', { id: auth.userId })
     if (manager && AppDataSource.options.type === 'mysql') userQuery.setLock('pessimistic_write')
     const user = await userQuery.getOne()
-    if (!user) {
-      throw new BizError('当前用户不存在', 404)
-    }
+    if (!user || user.status !== 'enabled') throw new BizError('未登录或登录状态已失效', 401)
+    if (manager) await this.assertProfileSessionCurrent(manager, auth)
     if (user.accountType === 'department') throw new BizError('部门账号资料由管理员维护', 403)
+    const securitySnapshot = this.buildLoginSecuritySnapshot(user)
     // Web 入口（无外层事务）把旧密码复核纳入账号失败锁定；Mobile 由外层编排事务调用，不在事务内写风控状态。
     if (!manager) await authSecurityService.assertClientPasswordReauthAllowed(requestMeta, user.id)
     if (!(await verifyPassword(input.currentPassword, user.passwordHash))) {
@@ -1485,7 +1608,7 @@ class ClientAuthService {
     }
 
     const checks = this.buildProfileUniquenessChecks(username, mobile, email, !isDirectoryTeacher && !usernameUnchanged)
-    await this.ensureProfileIdentifiersUnique(checks, user.id)
+    await this.ensureProfileIdentifiersUnique(checks, user.id, userRepository)
 
     const mobileChanged = mobile !== user.mobile
     const emailChanged = email !== user.email
@@ -1520,6 +1643,13 @@ class ClientAuthService {
     }
 
     const persist = async (transactionManager: EntityManager) => {
+      // 外部验证码可能已消费；冲突不重试、不恢复验证码，也不重复执行 scrypt。
+      const lockedUser = await this.lockUserForSession(transactionManager, user.id)
+      if (!lockedUser || lockedUser.status !== 'enabled') throw new BizError('未登录或登录状态已失效', 401)
+      await this.assertProfileSessionCurrent(transactionManager, auth)
+      if (!this.isLoginSecuritySnapshotCurrent(lockedUser, securitySnapshot)) {
+        throw new BizError('账号资料已变更，请刷新资料并重新获取验证码后重试', 409)
+      }
       const repository = transactionManager.getRepository(ClientUser)
       if (Object.keys(profilePatch).length > 0) {
         await repository.update({ id: user.id }, profilePatch)

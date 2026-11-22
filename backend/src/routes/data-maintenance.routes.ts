@@ -4,7 +4,7 @@
  * 维护重点：调整数据治理流程时，需要同步核对权限边界、导入导出结构版本以及迁移切换的审计留痕。
  */
 
-import { Router, type Request } from 'express'
+import { Router, json, type Request } from 'express'
 import { z } from 'zod'
 import { env } from '../config/env.js'
 import { requirePermission, requireRole } from '../middleware/auth.middleware.js'
@@ -37,12 +37,12 @@ const importPayloadSchema = z
     version: z.string().trim().min(1).max(100),
     tables: z
       .object({
-        systemConfigs: z.array(z.record(z.any())).default([]),
-        products: z.array(z.record(z.any())).default([]),
-        clientUsers: z.array(z.record(z.any())).default([]),
-        preorders: z.array(z.record(z.any())).default([]),
-        preorderItems: z.array(z.record(z.any())).default([]),
-        inventoryLogs: z.array(z.record(z.any())).default([]),
+        systemConfigs: z.array(z.record(z.string(), z.any())).default([]),
+        products: z.array(z.record(z.string(), z.any())).default([]),
+        clientUsers: z.array(z.record(z.string(), z.any())).default([]),
+        preorders: z.array(z.record(z.string(), z.any())).default([]),
+        preorderItems: z.array(z.record(z.string(), z.any())).default([]),
+        inventoryLogs: z.array(z.record(z.string(), z.any())).default([]),
       })
       .strict(),
     // 导入会先清空商品、客户端账号、预订单、库存流水与系统配置再写入，属于永久删除类操作，必须校验服务端永久删除口令。
@@ -55,6 +55,16 @@ const importPayloadSchema = z
 const stepUpPasswordSchema = z.object({
   currentPassword: z.string().max(EXISTING_PASSWORD_INPUT_MAX_LENGTH).optional(),
 })
+
+function requireMigrationPassword(purpose: string) {
+  return asyncHandler(async (req, _res, next) => {
+    const { currentPassword } = stepUpPasswordSchema.parse(req.body ?? {})
+    await authService.verifyStepUpPassword((req as AuthenticatedRequest).auth, currentPassword ?? '', extractRequestMeta(req), purpose, true)
+    // 严格任务 schema 及业务层只接收迁移参数，复核密码留在当前请求。
+    if (req.body) delete req.body.currentPassword
+    next()
+  })
+}
 
 const JSON_IMPORT_AUDIT_TARGET = {
   actionType: 'data_maintenance.import_json',
@@ -241,10 +251,14 @@ dataMaintenanceRouter.post(
   '/import/json',
   requirePermission('data_maintenance:import'),
   requireRole('admin'),
+  asyncHandler(async (req, _res, next) => {
+    await assertJsonDataTransferEnabled(req, JSON_IMPORT_AUDIT_TARGET)
+    next()
+  }),
   jsonImportLimiter,
+  json({ limit: '8mb' }),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
-    await assertJsonDataTransferEnabled(req, JSON_IMPORT_AUDIT_TARGET)
     const { permanentDeletePassword, currentPassword, ...payload } = importPayloadSchema.parse(req.body)
     // 先复核本人密码、再核对永久删除口令，最后才进入清表事务：被劫持的管理员会话不能凭一次请求清空业务数据。
     await authService.verifyStepUpPassword(authReq.auth, currentPassword ?? '', extractRequestMeta(req), JSON_IMPORT_AUDIT_TARGET.actionType)
@@ -258,6 +272,7 @@ dataMaintenanceRouter.post(
   '/db-migration/automatic-tasks',
   requirePermission('db_migration:operate'),
   requireRole('admin'),
+  requireMigrationPassword('database_migration.create_automatic_task'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = createAutomaticSqliteToMysqlTaskSchema.parse(req.body)
@@ -293,9 +308,14 @@ dataMaintenanceRouter.post(
   '/db-migration/tasks/:taskId/rescue-credential',
   requirePermission('db_migration:operate'),
   requireRole('admin'),
-  asyncHandler(async (req, res) => {
+  asyncHandler(async (req, _res, next) => {
     if (!isSecureOrDirectLoopback(req)) throw new BizError('救援凭证需通过可信 HTTPS 或容器本地工具签发', 403)
+    next()
+  }),
+  requireMigrationPassword('database_migration.issue_rescue_credential'),
+  asyncHandler(async (req, res) => {
     await databaseMigrationService.getSQLiteToMySqlTask(req.params.taskId)
+    await databaseMigrationService.prepareManualMigrationCredential(req.params.taskId)
     const data = issueDatabaseRescueCredential(req.params.taskId)
     await recordRescueCredentialIssued(req as AuthenticatedRequest, data.taskId, data.expiresAt, 'manual_issue')
     res.setHeader('Cache-Control', 'no-store')
@@ -356,6 +376,7 @@ dataMaintenanceRouter.post(
   '/db-migration/tasks',
   requirePermission('db_migration:operate'),
   requireRole('admin'),
+  requireMigrationPassword('database_migration.create_task'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = createSqliteToMysqlTaskSchema.parse(req.body)
@@ -372,6 +393,7 @@ dataMaintenanceRouter.post(
   '/db-migration/tasks/:taskId/run',
   requirePermission('db_migration:operate'),
   requireRole('admin'),
+  requireMigrationPassword('database_migration.run_task'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const data = await databaseMigrationService.runSQLiteToMySqlTask(
@@ -396,6 +418,7 @@ dataMaintenanceRouter.post(
   '/db-migration/switch',
   requirePermission('db_migration:operate'),
   requireRole('admin'),
+  requireMigrationPassword('database_migration.apply_switch'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = applyDatabaseSwitchSchema.parse(req.body)
@@ -408,6 +431,7 @@ dataMaintenanceRouter.post(
   '/db-migration/rollback',
   requirePermission('db_migration:operate'),
   requireRole('admin'),
+  requireMigrationPassword('database_migration.rollback_switch'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = rollbackDatabaseSwitchSchema.parse(req.body)
@@ -420,6 +444,7 @@ dataMaintenanceRouter.delete(
   '/db-migration/runtime-override',
   requirePermission('db_migration:operate'),
   requireRole('admin'),
+  requireMigrationPassword('database_migration.clear_override'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const data = await databaseMigrationService.clearRuntimeOverride(authReq.auth, extractRequestMeta(req))

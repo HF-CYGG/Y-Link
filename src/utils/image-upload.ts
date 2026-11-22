@@ -11,8 +11,6 @@
  * - 若未来引入后端图像处理服务，本文件可保留为首层轻压缩，减少网络传输量。
  */
 
-import imageCompression from 'browser-image-compression'
-
 export const IMAGE_UPLOAD_SOURCE_MAX_FILE_SIZE = 20 * 1024 * 1024
 export const IMAGE_UPLOAD_MAX_WIDTH = 4096
 export const IMAGE_UPLOAD_MAX_HEIGHT = 4096
@@ -139,6 +137,7 @@ export const compressImageForUpload = async (file: File): Promise<CompressedUplo
   }
 
   const resizeMaxEdge = resolveImageUploadResizeMaxEdge(sourceDimensions, file.size)
+  const { default: imageCompression } = await import('browser-image-compression')
   const firstPassResult = await imageCompression(file, {
     maxSizeMB: IMAGE_UPLOAD_TARGET_MAX_SIZE_MB,
     maxWidthOrHeight: resizeMaxEdge,

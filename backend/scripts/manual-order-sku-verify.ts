@@ -3,11 +3,12 @@
  * 文件职责：在隔离 SQLite 中验证手工出库的 SKU 校验、快照、历史兼容与库存扣减流水。
  * 实现逻辑：
  * - 创建单规格、多规格商品，覆盖自动选择、强制选择、归属/启停/当前版本校验；
- * - 以人工修改价提交同商品不同 SKU，核对单 SKU 主价兼容与多 current SKU 主价隔离；
+ * - 以人工修改价提交单 SKU 与多 SKU 商品，核对商品和规格默认价均保持稳定；
  * - 模拟存量 SQLite 缺少 SKU 外键，确认安全复制升级不丢明细并补齐 ON DELETE SET NULL；
  * - 将一张隔离单据改造成历史无 SKU 数据，确认仍可读取，并校验打印/PDF 共用聚合逻辑。
  */
 
+import { createVerificationIsolation } from './verification-isolation.js'
 import 'reflect-metadata'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -18,12 +19,14 @@ import type { AuthUserContext } from '../src/types/auth.js'
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
 const repositoryRoot = path.resolve(backendRoot, '..')
-const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
+const verificationIsolation = createVerificationIsolation('manual-order-sku-verify')
+const sqliteRoot = verificationIsolation.rootDir
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqlitePath = path.resolve(sqliteRoot, `manual-order-sku-${verifySeed}.sqlite`)
 
 process.env.APP_PROFILE = `manual-order-sku-${verifySeed}`
 process.env.DB_TYPE = 'sqlite'
+verificationIsolation.seal({ type: 'sqlite', database: sqlitePath })
 process.env.DB_SYNC = 'false'
 process.env.SQLITE_DB_PATH = sqlitePath
 process.env.INIT_ADMIN_PASSWORD = `Admin_${verifySeed}_Aa1!`
@@ -155,7 +158,9 @@ async function main() {
   const { reportService } = await import('../src/services/report.service.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
 
+  await verificationIsolation.assertTarget(AppDataSource)
   prepareDatabaseRuntime()
+  await verificationIsolation.assertTarget(AppDataSource)
   await AppDataSource.initialize()
   try {
     await initializeDatabaseSchemaIfNeeded(AppDataSource)
@@ -183,23 +188,34 @@ async function main() {
 
     const initialOrderEntryEditorSource = readSource('src/views/order-entry/components/OrderEntryItemsEditor.vue')
     assert.match(initialOrderEntryEditorSource, /v-model="row\.qty"[\s\S]*?:min="1"[\s\S]*?:precision="0"/, '桌面手工开单数量控件必须限制为正整数')
-    assert.match(initialOrderEntryEditorSource, /v-model="drawerForm\.qty"[\s\S]*?:min="1"[\s\S]*?:precision="0"/, '移动端手工开单数量控件必须限制为正整数')
+    assert.match(initialOrderEntryEditorSource, /<PassiveNumberInput\b[^>]*v-model="drawerQtyModel"[^>]*:min="1"[^>]*:precision="0"[^>]*:step="1"[^>]*\/>/, '响应式Web抽屉数量控件必须限制为正整数')
+    assert.match(initialOrderEntryEditorSource, /const drawerQtyModel = computed\(\{\s*get:\s*\(\)\s*=>\s*props\.drawerForm\.qty,\s*set:\s*\(value:\s*number\s*\|\s*null\)\s*=>\s*emit\('update:drawerQty', value\),?\s*\}\)/, 'Web抽屉必须由真实数量getter和更新事件setter保持受控绑定')
     assert.doesNotMatch(initialOrderEntryEditorSource, /\ballow-create\b/, '桌面与移动端手工开单只能选择已建档商品')
     const initialOrderEntryFormSource = readSource('src/views/order-entry/composables/useOrderEntryForm.ts')
+    const preparationSource = readSource('src/views/order-entry/composables/prepare-order-submission.ts')
     assert.match(initialOrderEntryFormSource, /Number\.isSafeInteger\([^)]+\.qty[^)]*\)/, '手工开单提交前必须拒绝非整数数量')
-    assert.doesNotMatch(initialOrderEntryFormSource, /productApi\.createProduct\(/, '手工开单不得在提交过程中独立创建零库存商品')
+    assert.doesNotMatch(initialOrderEntryFormSource + preparationSource, /productApi\.createProduct\(/, '手工开单不得在提交过程中独立创建零库存商品')
     assert.match(
       initialOrderEntryFormSource,
       /loadedProducts\.filter\(\(product\) => getSelectableProductSkus\(product\)\.length > 0\)/,
       '商品候选必须排除没有当前启用 SKU 的记录',
     )
-    const unknownProductGuardIndex = initialOrderEntryFormSource.indexOf('const invalidProductRow = itemRows.value.find')
-    const savingStartIndex = initialOrderEntryFormSource.indexOf('isSaving.value = true')
+    // 当前校验由真实按需模块同步执行；按钮在下载期间锁定不等于已经发起业务写请求。
+    assert.match(initialOrderEntryFormSource, /load:\s*\(\)\s*=>\s*import\('\.\/prepare-order-submission'\)/, '开单页必须实际装配被校验的准备模块')
+    const prepareCallIndex = initialOrderEntryFormSource.indexOf('const prepared = prepareOrderSubmission(headerForm, itemRows.value, products.value)')
+    const rejectPreparedIndex = initialOrderEntryFormSource.indexOf('if (!prepared.payload)', prepareCallIndex)
+    const submitWriteIndex = initialOrderEntryFormSource.indexOf('const result = await orderApi.submitOrder(')
+    assert.ok(prepareCallIndex >= 0 && prepareCallIndex < rejectPreparedIndex && rejectPreparedIndex < submitWriteIndex, '实际提交链必须先准备、拒绝非法载荷，再调用写接口')
+    assert.match(initialOrderEntryFormSource, /const \{ prepareOrderSubmission \} = await loadOrderEntrySubmission\(\)/, '不能以未使用模块的源码存在替代真实加载')
+    assert.match(initialOrderEntryFormSource, /if \(!prepared\.payload\) \{\s*showAppWarning\(prepared\.error\)\s*return\s*\}/, '非法商品准备结果必须终止真实提交')
+    const unknownProductGuardIndex = preparationSource.indexOf('if (rows.some((row) => !productMap.has(normalizeTextValue(row.productId))))')
+    const payloadBuildIndex = preparationSource.indexOf('const items:')
     assert.ok(unknownProductGuardIndex >= 0, '手工开单必须识别旧草稿或未知商品值')
     assert.ok(
-      unknownProductGuardIndex < savingStartIndex,
-      '未知商品必须在任何提交写请求开始前被业务化拒绝',
+      payloadBuildIndex > unknownProductGuardIndex,
+      '未知商品必须在构造可提交明细及任何写请求前被业务化拒绝',
     )
+    assert.match(preparationSource.slice(unknownProductGuardIndex, payloadBuildIndex), /^if \([^{]+\) \{\s*return \{ error: '存在未建档、已停用或暂无可用规格的商品，请重新选择' \}/, '已精确定位的未知商品判断必须立即返回业务拒绝')
     assert.match(
       initialOrderEntryFormSource,
       /const reconcileRestoredDraftProducts = \(\) =>/,
@@ -308,12 +324,13 @@ async function main() {
       ) => Promise<{ order: { id: string }; items: Array<Record<string, unknown>> }>
     )(payload, actor)
 
-    const singleResult = await submit({
+    const singlePayload = {
       idempotencyKey: `manual-single-${verifySeed}`,
       orderType: 'walkin',
       customerName: '单规格验证',
       items: [{ productId: singleProduct.id, qty: 2, unitPrice: 12.34 }],
-    })
+    }
+    const singleResult = await submit(singlePayload)
     const singleDetail = await orderService.detailById(singleResult.order.id)
     const singleDetailItem = singleDetail.items[0] as unknown as Record<string, unknown>
     assert.equal(singleDetailItem.skuId, singleSku.id, '单规格商品省略 skuId 时必须唯一自动选择')
@@ -323,9 +340,21 @@ async function main() {
     const singleProductAfterSubmit = await AppDataSource.getRepository(BaseProduct).findOneByOrFail({ id: singleProduct.id })
     assert.equal(
       Number(singleProductAfterSubmit.defaultPrice).toFixed(2),
-      '12.34',
-      '单一 current SKU 商品必须保留手工单价回写商品主价的既有兼容行为',
+      '11.00',
+      '单一 current SKU 商品主价不能受手工出库价影响',
     )
+    const singleSkuAfterSubmit = await AppDataSource.getRepository(BaseProductSku).findOneByOrFail({ id: singleSku.id })
+    assert.equal(Number(singleSkuAfterSubmit.defaultPrice).toFixed(2), '11.00')
+    const replay = await orderService.submit({
+      ...singlePayload,
+      idempotencyKey: ` ${singlePayload.idempotencyKey} `,
+      customerName: ' 单规格验证 ',
+      hasCustomerOrder: false,
+      items: [{ ...singlePayload.items[0], skuId: null, unitPrice: 12.3401, remark: ' ' }],
+    }, { ...actor, displayName: '修改显示名后的开单人' })
+    assert.equal(replay.order.id, singleResult.order.id)
+    assert.equal(replay.idempotentReplay, true, '默认姓名变更和等价输入归一不影响原请求重放')
+    await expectBizError(() => submit({ ...singlePayload, items: [{ ...singlePayload.items[0], skuId: singleSku.id }] }), /订单处理中/, 409)
 
     const invalidPriceIdempotencyKey = `manual-invalid-price-${verifySeed}`
     const invalidPriceProductBefore = await AppDataSource.getRepository(BaseProduct).findOneByOrFail({ id: singleProduct.id })
@@ -391,6 +420,8 @@ async function main() {
     assert.equal((await AppDataSource.getRepository(BaseProductSku).findOneByOrFail({ id: roundedPriceSku.id })).currentStock, 1)
 
     const outboundItemCountBeforeLegacyUpgrade = await AppDataSource.getRepository(BizOutboundOrderItem).count()
+    const outboundOrderCountBeforeLegacyUpgrade = await AppDataSource.getRepository(BizOutboundOrder).count()
+    await AppDataSource.query('ALTER TABLE "biz_outbound_order" DROP COLUMN "submit_request_hash"')
     await rebuildOutboundItemsWithoutSkuForeignKey(AppDataSource)
     const foreignKeysBeforeLegacyUpgrade = await AppDataSource.query(
       'PRAGMA foreign_key_list("biz_outbound_order_item")',
@@ -401,6 +432,10 @@ async function main() {
       '测试夹具必须真实模拟缺少 SKU 外键的存量 SQLite',
     )
     await initializeDatabaseSchemaIfNeeded(AppDataSource)
+    const upgradedOrders = AppDataSource.getRepository(BizOutboundOrder)
+    assert.equal(await upgradedOrders.count(), outboundOrderCountBeforeLegacyUpgrade)
+    assert.equal((await upgradedOrders.findOneByOrFail({ id: singleResult.order.id })).submitRequestHash, null, 'SQLite 补列保持历史请求摘要为空')
+    await expectBizError(() => submit(singlePayload), /订单处理中/, 409)
     const foreignKeysAfterLegacyUpgrade = await AppDataSource.query(
       'PRAGMA foreign_key_list("biz_outbound_order_item")',
     ) as Array<{ table: string; from: string; to: string; on_delete: string }>
@@ -486,7 +521,7 @@ async function main() {
     const beforeProduct = await AppDataSource.getRepository(BaseProduct).findOneByOrFail({ id: multiProduct.id })
     const beforeSkuRows = await skuRepo.find({ where: { productId: multiProduct.id }, order: { id: 'ASC' } })
     const beforeInventoryLogCount = await AppDataSource.getRepository(InventoryLog).count()
-    const multiResult = await submit({
+    const multiPayload = {
       idempotencyKey: `manual-multi-${verifySeed}`,
       orderType: 'walkin',
       customerName: '多规格验证',
@@ -494,7 +529,8 @@ async function main() {
         { productId: multiProduct.id, skuId: redSku.id, qty: 2, unitPrice: 18.8, remark: '红色人工价' },
         { productId: multiProduct.id, skuId: blueSku.id, qty: 3, unitPrice: 20.6, remark: '蓝色人工价' },
       ],
-    })
+    }
+    const multiResult = await submit(multiPayload)
     assert.equal(multiResult.items.length, 2, '同一商品不同 SKU 必须允许分行保存')
 
     const storedItems = await AppDataSource.getRepository(BizOutboundOrderItem).find({
@@ -510,14 +546,17 @@ async function main() {
     assert.deepEqual(storedItems.map((item) => Number(item.unitPrice).toFixed(2)), ['18.80', '20.60'])
 
     const afterForwardProduct = await AppDataSource.getRepository(BaseProduct).findOneByOrFail({ id: multiProduct.id })
+    const reversedItems = [...multiPayload.items].reverse()
+    await expectBizError(
+      () => submit({ ...multiPayload, items: reversedItems }),
+      /订单处理中/,
+      409,
+    )
     await submit({
       idempotencyKey: `manual-multi-reversed-${verifySeed}`,
       orderType: 'walkin',
       customerName: '多规格反序验证',
-      items: [
-        { productId: multiProduct.id, skuId: blueSku.id, qty: 3, unitPrice: 20.6, remark: '蓝色人工价' },
-        { productId: multiProduct.id, skuId: redSku.id, qty: 2, unitPrice: 18.8, remark: '红色人工价' },
-      ],
+      items: reversedItems,
     })
     const afterReversedProduct = await AppDataSource.getRepository(BaseProduct).findOneByOrFail({ id: multiProduct.id })
     const afterSkuRows = await skuRepo.find({ where: { productId: multiProduct.id }, order: { id: 'ASC' } })

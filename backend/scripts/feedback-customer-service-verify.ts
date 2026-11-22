@@ -8,30 +8,24 @@
  */
 
 import assert from 'node:assert/strict'
-import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { inspect } from 'node:util'
 import sharp from 'sharp'
+import { createVerificationIsolation } from './verification-isolation.js'
 
 interface SseEventRecord<T = unknown> {
   event: string
   data: T
 }
 
-const currentFilePath = fileURLToPath(import.meta.url)
-const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
-const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
-const sqlitePath = path.resolve(sqliteRoot, `feedback-customer-service-verify-${verifySeed}.sqlite`)
+const isolation = createVerificationIsolation('feedback-customer-service-verify')
+isolation.seal({ type: 'sqlite', database: path.join(isolation.rootDir, 'fixture.sqlite') })
 const adminPassword = `Admin_${verifySeed}_Aa1!`
 const operatorPassword = `Cs_${verifySeed}_Bb2!`
 const clientPassword = `Client_${verifySeed}_Cc3!`
 
-process.env.APP_PROFILE = `feedback-customer-service-verify-${verifySeed}`
-process.env.DB_TYPE = 'sqlite'
 process.env.DB_SYNC = 'false'
-process.env.SQLITE_DB_PATH = sqlitePath
 process.env.INIT_ADMIN_PASSWORD = adminPassword
 
 function pass(message: string) {
@@ -312,19 +306,20 @@ function createSseClient(url: string, scene: string, token?: string) {
 }
 
 async function main() {
-  fs.mkdirSync(sqliteRoot, { recursive: true })
-
   const { createApp } = await import('../src/app.js')
   const { AppDataSource } = await import('../src/config/data-source.js')
+  const { ClientFeedbackMessage } = await import('../src/entities/client-feedback-message.entity.js')
   const { ClientUser } = await import('../src/entities/client-user.entity.js')
   const { ClientUserSession } = await import('../src/entities/client-user-session.entity.js')
   const { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } = await import('../src/config/database-bootstrap.js')
   const { authService } = await import('../src/services/auth.service.js')
   const { clientAuthService } = await import('../src/services/client-auth.service.js')
+  const { clientFeedbackService } = await import('../src/services/client-feedback.service.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
   const { hashPassword } = await import('../src/utils/password.js')
   const { hashSessionToken } = await import('../src/utils/session-token.js')
 
+  await isolation.assertTarget(AppDataSource)
   prepareDatabaseRuntime()
   await AppDataSource.initialize()
 
@@ -631,84 +626,21 @@ async function main() {
     )
     pass('客服详情读取与客服已读事件通过')
 
-    const updatedFields = await expectJsonOk<{
-      data: {
-        changed: boolean
-        conversation: {
-          subject: string
-          fields: {
-            orderRef: string | null
-            expectedResult: string
-            actualResult: string
-            tags: string[]
-          }
-        }
+    const assertWorkOrderEditDenied = async (token: string) => {
+      for (const [endpoint, method, body] of [
+        ['fields', 'PATCH', { subject: '仅负责人可保存的字段' }],
+        ['internal-remark', 'PUT', { content: '仅负责人可保存的备注' }],
+      ] as const) {
+        const result = await fetch(`${baseUrl}/api/customer-service/conversations/${conversationId}/${endpoint}`, {
+          method,
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        })
+        assert.equal(result.status, 400)
+        await result.text()
       }
-    }>(
-      () =>
-        fetch(`${baseUrl}/api/customer-service/conversations/${conversationId}/fields`, {
-          method: 'PATCH',
-          headers: {
-            Authorization: `Bearer ${operatorToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            subject: '反馈中心专项回归问题-已受理',
-            priority: 'urgent',
-            orderRef: 'ORDER-VERIFY-001',
-            expectedResult: '客服工作台可展示完整进度',
-            actualResult: '正在通过专项脚本校验字段保存',
-            reproductionSteps: '1. 客户端提交反馈 2. 客服保存字段',
-            contactPreference: '站内会话回复',
-            tags: ['专项回归', '客服字段'],
-            sourceLabel: '客服工作台专项验证',
-          }),
-        }),
-      '客服保存 Issue 字段',
-    )
-    assert.equal(updatedFields.changed, true)
-    assert.equal(updatedFields.conversation.fields.orderRef, 'ORDER-VERIFY-001')
-    assert.ok(updatedFields.conversation.fields.tags.includes('客服字段'))
-    await clientStream.waitForEvent<{ eventType: string; conversationId: string }>(
-      'conversation',
-      (event) => event.eventType === 'conversation_fields_updated' && event.conversationId === conversationId,
-    )
-    await serviceStream.waitForEvent<{ eventType: string; conversationId: string }>(
-      'conversation',
-      (event) => event.eventType === 'conversation_fields_updated' && event.conversationId === conversationId,
-    )
-    pass('Issue 字段保存与双端实时字段事件通过')
-
-    const updatedRemark = await expectJsonOk<{
-      data: {
-        changed: boolean
-        internalRemark: {
-          content: string
-          updatedByDisplayName: string | null
-        } | null
-      }
-    }>(
-      () =>
-        fetch(`${baseUrl}/api/customer-service/conversations/${conversationId}/internal-remark`, {
-          method: 'PUT',
-          headers: {
-            Authorization: `Bearer ${operatorToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            content: '内部备注：当前专项回归用于验证新版标签结构下的协同链路。',
-          }),
-        }),
-      '客服保存内部备注',
-    )
-    assert.equal(updatedRemark.changed, true)
-    assert.match(updatedRemark.internalRemark?.content ?? '', /专项回归/)
-    await serviceStream.waitForEvent<{ eventType: string; conversationId: string }>(
-      'conversation',
-      (event) => event.eventType === 'conversation_internal_remark_updated' && event.conversationId === conversationId,
-    )
-    pass('内部备注保存与实时事件通过')
-
+    }
+    await assertWorkOrderEditDenied(operatorToken)
     const takeOverResult = await expectJsonOk<{
       data: {
         changed: boolean
@@ -751,7 +683,99 @@ async function main() {
     )
     pass('显式接单与负责人实时事件通过')
 
-    await expectJsonOk<{
+    await assertWorkOrderEditDenied(adminToken)
+
+    const updatedFields = await expectJsonOk<{
+      data: {
+        changed: boolean
+        conversation: {
+          subject: string
+          fields: {
+            orderRef: string | null
+            expectedResult: string
+            actualResult: string
+            tags: string[]
+          }
+        }
+      }
+    }>(
+      () =>
+        fetch(`${baseUrl}/api/customer-service/conversations/${conversationId}/fields`, {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${operatorToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            subject: '反馈中心专项回归_已受理',
+            priority: 'urgent',
+            orderRef: 'ORDER-VERIFY-001',
+            expectedResult: '客服工作台可展示完整进度',
+            actualResult: '正在通过专项脚本校验字段保存',
+            reproductionSteps: '1. 客户端提交反馈 2. 客服保存字段',
+            contactPreference: '站内会话回复',
+            tags: ['专项回归', '客服字段'],
+            sourceLabel: '客服工作台专项验证',
+          }),
+        }),
+      '客服保存 Issue 字段',
+    )
+    assert.equal(updatedFields.changed, true)
+    assert.equal(updatedFields.conversation.fields.orderRef, 'ORDER-VERIFY-001')
+    assert.ok(updatedFields.conversation.fields.tags.includes('客服字段'))
+    await clientStream.waitForEvent<{ eventType: string; conversationId: string }>(
+      'conversation',
+      (event) => event.eventType === 'conversation_fields_updated' && event.conversationId === conversationId,
+    )
+    await serviceStream.waitForEvent<{ eventType: string; conversationId: string }>(
+      'conversation',
+      (event) => event.eventType === 'conversation_fields_updated' && event.conversationId === conversationId,
+    )
+    pass('Issue 字段保存与双端实时字段事件通过')
+
+    for (const [endpoint, token] of [['client-feedback', clientToken], ['customer-service', operatorToken]]) {
+      const lookup = async (keyword: string) => {
+        const data = await expectJsonOk<{ data: { list: { id: string }[] } }>(() =>
+          fetch(`${baseUrl}/api/${endpoint}/conversations?keyword=${encodeURIComponent(keyword)}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          }), '工单关键词按字面搜索')
+        return data.list.map(({ id }) => id)
+      }
+      assert.deepEqual(await lookup('_已受理'), [conversationId])
+      assert.deepEqual(await lookup('%'), [])
+    }
+
+    const updatedRemark = await expectJsonOk<{
+      data: {
+        changed: boolean
+        internalRemark: {
+          content: string
+          updatedByDisplayName: string | null
+        } | null
+      }
+    }>(
+      () =>
+        fetch(`${baseUrl}/api/customer-service/conversations/${conversationId}/internal-remark`, {
+          method: 'PUT',
+          headers: {
+            Authorization: `Bearer ${operatorToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            content: '内部备注：当前专项回归用于验证新版标签结构下的协同链路。',
+          }),
+        }),
+      '客服保存内部备注',
+    )
+    assert.equal(updatedRemark.changed, true)
+    assert.match(updatedRemark.internalRemark?.content ?? '', /专项回归/)
+    await serviceStream.waitForEvent<{ eventType: string; conversationId: string }>(
+      'conversation',
+      (event) => event.eventType === 'conversation_internal_remark_updated' && event.conversationId === conversationId,
+    )
+    pass('内部备注保存与实时事件通过')
+
+    const serviceReply = await expectJsonOk<{
       data: {
         conversation: {
           id: string
@@ -759,6 +783,7 @@ async function main() {
         message: {
           senderType: string
           content: string
+          attachments: Array<{ name: string; url: string; mimeType: string; size: number }>
         }
       }
     }>(
@@ -771,10 +796,17 @@ async function main() {
           },
           body: JSON.stringify({
             content: '客服回复：已收到你的问题，我们正在继续核对，请稍候查看处理进度。',
+            attachments: [{ ...initialAttachment.attachment, name: '客户端传来的显示名.png', size: 1 }],
           }),
         }),
       '客服发送回复',
     )
+    assert.deepEqual(serviceReply.message.attachments, [{
+      name: initialAttachment.attachment.name,
+      url: initialAttachment.attachment.url.replace('/api/client-feedback/', '/api/customer-service/'),
+      mimeType: initialAttachment.attachment.mimeType,
+      size: initialAttachment.attachment.size,
+    }])
     await clientStream.waitForEvent<{ eventType: string; conversationId: string; detail?: { senderType?: string } }>(
       'conversation',
       (event) =>
@@ -854,6 +886,13 @@ async function main() {
     )
     assert.match(replyAttachment.attachment.url, /^\/api\/client-feedback\/attachments\//)
     pass('客户端上传补充说明附件通过')
+    const staffReplyWithDraft = await fetch(`${baseUrl}/api/customer-service/conversations/${conversationId}/messages`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${operatorToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: '客服引用未提交附件应被拒绝', attachments: [replyAttachment.attachment] }),
+    })
+    assert.equal(staffReplyWithDraft.status, 404, '未绑定的草稿不能用于客服回复')
+    await staffReplyWithDraft.text()
 
     await expectJsonOk<{
       data: {
@@ -1002,6 +1041,7 @@ async function main() {
         && event.detail?.confirmedBy === 'client',
     )
     pass('客户端确认已解决与双端实时关闭事件通过')
+    await assertWorkOrderEditDenied(operatorToken)
 
     const submittedSatisfaction = await expectJsonOk<{
       data: {
@@ -1042,6 +1082,99 @@ async function main() {
     )
     pass('客户端满意度评价与双端实时事件通过')
 
+    await expectJsonOk(() => fetch(`${baseUrl}/api/customer-service/conversations/${conversationId}/status`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${operatorToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'processing' }),
+    }), '负责人可以重新打开已关闭的普通工单')
+    const anotherConversation = await expectJsonOk<{ data: { conversation: { id: string } } }>(
+      () => fetch(`${baseUrl}/api/client-feedback/conversations`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${clientToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subject: '第二条独立工单', content: '第二个受理流程' }),
+      }),
+      '创建独立反馈会话',
+    )
+    const secondId = anotherConversation.conversation.id
+    await expectJsonOk(() => fetch(`${baseUrl}/api/customer-service/conversations/${secondId}/assignee`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${operatorToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ assigneeUserId: operator.id }),
+    }), '客服受理第二条反馈')
+    const crossConversationReply = await fetch(`${baseUrl}/api/customer-service/conversations/${secondId}/messages`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${operatorToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: '按会话归属限制客服附件引用', attachments: [initialAttachment.attachment] }),
+    })
+    assert.equal(crossConversationReply.status, 404, '其他会话已绑定的附件仍不能引用')
+    await crossConversationReply.text()
+
+    // 在摘要读取后提交首条消息，再于消息快照和写锁之间提交两条新消息和读取方的回复。
+    type DetailBody = {
+      data: {
+        conversation: { unreadForClientCount: number; unreadForServiceCount: number }
+        messages: Array<{ content: string; clientReadAt: string | null; serviceReadAt: string | null }>
+      }
+    }
+    const reader = clientFeedbackService as unknown as {
+      loadConversationMessages: (manager: unknown, id: string, lastVisibleId?: string) => Promise<unknown>
+    }
+    const loadMessages = reader.loadConversationMessages
+    const postMessage = (realm: string, token: string, content: string) =>
+      expectJsonOk(() => fetch(baseUrl + '/api/' + realm + '/conversations/' + secondId + '/messages', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+        signal: AbortSignal.timeout(5_000),
+      }), '提交竞态中的会话消息 ' + content)
+    const messages = AppDataSource.getRepository(ClientFeedbackMessage)
+    for (const [readerRealm, readerToken, writerRealm, writerToken, counter, readAt, eventType, stream] of [
+      ['client-feedback', clientToken, 'customer-service', operatorToken, 'unreadForClientCount', 'clientReadAt', 'conversation_read_by_client', serviceStream],
+      ['customer-service', operatorToken, 'client-feedback', clientToken, 'unreadForServiceCount', 'serviceReadAt', 'conversation_read_by_service', clientStream],
+    ] as const) {
+      const loadDetail = () => expectJsonOk<DetailBody>(() => fetch(
+        baseUrl + '/api/' + readerRealm + '/conversations/' + secondId,
+        { headers: { Authorization: 'Bearer ' + readerToken } },
+      ), '读取竞态中的会话详情')
+      assert.equal((await loadDetail()).conversation[counter], 0, '竞态开始前读取方没有未读消息')
+      const first = '读取消息快照之前提交的消息 ' + writerRealm
+      const beforeReply = '读取方回复前的未显示消息 ' + writerRealm
+      const reply = '读取方从另一标签回复 ' + readerRealm
+      const afterReply = '读取方回复后的未显示消息 ' + writerRealm
+      let inserted = false
+      reader.loadConversationMessages = async function (manager, id, lastVisibleId) {
+        if (id === secondId && lastVisibleId === undefined && !inserted) {
+          inserted = true
+          await postMessage(writerRealm, writerToken, first)
+          const snapshot = await loadMessages.call(this, manager, id, lastVisibleId)
+          await postMessage(writerRealm, writerToken, beforeReply)
+          await postMessage(readerRealm, readerToken, reply)
+          await postMessage(writerRealm, writerToken, afterReply)
+          return snapshot
+        }
+        return loadMessages.call(this, manager, id, lastVisibleId)
+      }
+      try {
+        const detail = await loadDetail()
+        assert.equal(inserted, true)
+        assert.ok(detail.messages.find((message) => message.content === first)?.[readAt], '本次已经显示的新增消息必须标为已读')
+        assert.equal(detail.conversation[counter], 1, '仅回复之后尚未显示的对方消息保留在未读计数')
+        for (const content of [beforeReply, reply, afterReply]) {
+          assert.ok(!detail.messages.some((message) => message.content === content), '详情保留本次实际显示的消息范围')
+        }
+        for (const content of [beforeReply, afterReply]) {
+          const unread = await messages.findOneByOrFail({ conversationId: secondId, content })
+          assert.equal(unread[readAt], null, '未显示的对方消息不写入已读时间')
+        }
+      } finally {
+        reader.loadConversationMessages = loadMessages
+      }
+      await stream.waitForEvent<{ eventType: string; conversationId: string; conversation?: { lastMessagePreview?: string } }>(
+        'conversation', (event) => event.eventType === eventType && event.conversationId === secondId && event.conversation?.lastMessagePreview === afterReply,
+      )
+    }
+    pass('客户端与客服详情并发新消息的已读计数与事件通过')
+
     clientStream.close()
     serviceStream.close()
     // eslint-disable-next-line no-console
@@ -1051,9 +1184,7 @@ async function main() {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()
     }
-    if (fs.existsSync(sqlitePath)) {
-      fs.rmSync(sqlitePath, { force: true })
-    }
+    isolation.cleanup()
   }
 }
 

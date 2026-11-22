@@ -16,7 +16,7 @@
  */
 import { createHash } from 'node:crypto'
 import { getRedisClient, isRedisEnabled, isRedisReady, recordRedisDegrade, redisKey } from '../redis/redis-client.js'
-import { runRedisScript, TICKET_RECORD_FAILED_ATTEMPT } from '../redis/redis-scripts.js'
+import { runRedisScript, TICKET_CLAIM_ATTEMPT, TICKET_CONSUME_MATCHED } from '../redis/redis-scripts.js'
 import { openSensitiveValue, sealSensitiveValue } from './data-encryption.js'
 import { BizError } from './errors.js'
 
@@ -31,11 +31,18 @@ export interface TicketStore<TTicket> {
   /** 原子读取并删除：并发消费同一票据时只有一个调用方能拿到。 */
   take(key: string): MaybePromise<TTicket | undefined>
   delete(key: string): MaybePromise<void>
-  /**
-   * 原子记录一次错误尝试，返回累计错误次数；达到上限时票据随之作废。票据不存在返回 null。
-   * 重新 set 同一键会清零错误次数。
-   */
-  recordFailedAttempt(key: string, maxAttempts: number): MaybePromise<number | null>
+}
+
+type TicketAttemptResult<TMatch> =
+  | { status: 'unavailable' }
+  | { status: 'mismatch'; attemptsLeft: number }
+  | { status: 'verified'; value: TMatch }
+
+export interface VerifiableTicketStore<TTicket> extends TicketStore<TTicket> {
+  /** 在剩余额度内执行同步比对。null 表示答案错误；成功时仅消费参与这次核验的原票据。 */
+  verifyAndConsume<TMatch>(
+    key: string, maxAttempts: number, match: (ticket: TTicket) => TMatch | null,
+  ): MaybePromise<TicketAttemptResult<TMatch>>
 }
 
 interface EphemeralTicketStoreOptions<TTicket> {
@@ -51,7 +58,7 @@ const SWEEP_BATCH_LIMIT = 64
  * - 适用于验证码、重置凭证等“短 TTL、单次消费、允许进程重启丢失”的场景；
  * - 不负责序列化、持久化与分布式同步，只治理容量和过期生命周期。
  */
-export class EphemeralTicketStore<TTicket> implements TicketStore<TTicket> {
+export class EphemeralTicketStore<TTicket> implements VerifiableTicketStore<TTicket> {
   private readonly store = new Map<string, TTicket>()
   private readonly attempts = new Map<string, number>()
 
@@ -139,18 +146,21 @@ export class EphemeralTicketStore<TTicket> implements TicketStore<TTicket> {
     this.attempts.delete(key)
   }
 
-  /** 记录一次错误尝试；达到上限即删除票据。单线程事件循环内读改写不会被打断。 */
-  recordFailedAttempt(key: string, maxAttempts: number, now = Date.now()) {
-    if (!this.get(key, now)) {
-      return null
+  /** 在事件循环内同步核验、计数和消费，途中不会让出执行权。 */
+  verifyAndConsume<TMatch>(
+    key: string, maxAttempts: number, match: (ticket: TTicket) => TMatch | null,
+  ): TicketAttemptResult<TMatch> {
+    const ticket = this.get(key)
+    if (!ticket) return { status: 'unavailable' }
+    const value = match(ticket)
+    if (value !== null) {
+      this.delete(key)
+      return { status: 'verified', value }
     }
     const attempts = (this.attempts.get(key) ?? 0) + 1
-    if (attempts >= maxAttempts) {
-      this.delete(key)
-    } else {
-      this.attempts.set(key, attempts)
-    }
-    return attempts
+    if (attempts >= maxAttempts) this.delete(key)
+    else this.attempts.set(key, attempts)
+    return { status: 'mismatch', attemptsLeft: maxAttempts - attempts }
   }
 
   /**
@@ -172,11 +182,11 @@ const TICKET_UNAVAILABLE_MESSAGE = '安全票据服务暂不可用，请稍后�
 
 /**
  * Redis 票据存储：
- * - 键：<前缀>ticket:<namespace>:<sha256(业务键)>，错误计数键在其后追加 :attempts；
+ * - 键：<前缀>ticket:<namespace>:<sha256(业务键)>，尝试计数键在其后追加 :attempts；
  * - 值：JSON 经 AES-256-GCM 加密（AAD 绑定 namespace），多实例需注入同一把 Y_LINK_DATA_ENCRYPTION_KEY；
  * - 有效期：按票据自身的过期时刻换算 PX，Redis 到期自动删除，读取时仍复核过期时刻以容忍实例间时钟偏差。
  */
-export class RedisTicketStore<TTicket> implements TicketStore<TTicket> {
+export class RedisTicketStore<TTicket> implements VerifiableTicketStore<TTicket> {
   private readonly encryptionContext: string
 
   constructor(
@@ -265,13 +275,26 @@ export class RedisTicketStore<TTicket> implements TicketStore<TTicket> {
     })
   }
 
-  async recordFailedAttempt(key: string, maxAttempts: number): Promise<number | null> {
+  async verifyAndConsume<TMatch>(
+    key: string, maxAttempts: number, match: (ticket: TTicket) => TMatch | null,
+  ): Promise<TicketAttemptResult<TMatch>> {
     const client = this.requireClient()
-    const [ticketKey, attemptsKey] = this.keysOf(key)
-    return this.run('记录错误次数', async () => {
-      const attempts = await runRedisScript<number>(client, TICKET_RECORD_FAILED_ATTEMPT, [ticketKey, attemptsKey], [maxAttempts])
-      return attempts < 0 ? null : attempts
-    })
+    const keys = this.keysOf(key)
+    // 先在 Redis 预占次数再解密。额度耗尽时仅停止准入，已预占的核验仍可完成。
+    const claim = await this.run('预占核验次数', () =>
+      runRedisScript<[string, number] | []>(client, TICKET_CLAIM_ATTEMPT, keys, [maxAttempts]))
+    if (claim.length === 0) return { status: 'unavailable' }
+    const [raw, attemptsLeft] = claim
+    const ticket = this.decode(raw, Date.now())
+    if (!ticket) return { status: 'unavailable' }
+    const value = match(ticket)
+    if (value === null) return { status: 'mismatch', attemptsLeft }
+
+    // 每次签发的密文随机生成。按原密文比较并删除，既防止重复消费，也不影响后来签发的票据。
+    const consumed = await this.run('消费已核验票据', () =>
+      runRedisScript<number>(client, TICKET_CONSUME_MATCHED, keys, [raw]))
+    if (!consumed || this.resolveExpiresAt(ticket) <= Date.now()) return { status: 'unavailable' }
+    return { status: 'verified', value }
   }
 }
 
@@ -281,7 +304,7 @@ export class RedisTicketStore<TTicket> implements TicketStore<TTicket> {
  */
 export function createTicketStore<TTicket>(
   options: EphemeralTicketStoreOptions<TTicket> & { namespace: string },
-): TicketStore<TTicket> {
+): VerifiableTicketStore<TTicket> {
   if (isRedisEnabled()) {
     return new RedisTicketStore<TTicket>(options.namespace, options.resolveExpiresAt)
   }

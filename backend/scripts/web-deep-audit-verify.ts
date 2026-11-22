@@ -245,7 +245,15 @@ async function verifyPermanentDeletePasswordSharedBucket() {
 
 function verifySelfPasswordAndClientWriteGuards() {
   const userService = read('src/services/user.service.ts')
-  assert.match(userService, /normalizedPassword !== undefined && actor\.userId === id[\s\S]{0,80}请使用本人修改密码入口/, '编辑用户接口不得用于本人免旧密码改密')
+  const lockStart = userService.indexOf('  private async lockLifecycleActorAndTarget(')
+  const lockActorAndTarget = userService.slice(lockStart, userService.indexOf('\n  }\n', lockStart))
+  assert.match(lockActorAndTarget, /const accounts = await lockSysAccountGovernanceSnapshot\(manager\)\s+const lockedActor = this\.assertLifecycleActor\(accounts\.get\(String\(actor\.userId\)\), requiredPermission\)\s+const target = accounts\.get\(String\(targetId\)\)/, '本人判定必须使用同一治理锁内的操作人与目标账号')
+  assert.match(lockActorAndTarget, /isSelf: String\(lockedActor\.id\) === String\(target\.id\)/, '本人判定必须比较规范化的已锁实体 ID')
+
+  const updateStart = userService.indexOf('  async update(')
+  const updateUser = userService.slice(updateStart, userService.indexOf('\n  }\n', updateStart))
+  assert.match(updateUser, /const normalizedPassword = input\.password === undefined \? undefined : assertAdminPasswordPolicy\(input\.password\)/, '编辑用户必须识别是否提交密码')
+  assert.match(updateUser, /await runInTransaction\(async \(manager\) => \{\s*const \{ user, accounts, isSelf \} = await this\.lockLifecycleActorAndTarget\(manager, id, actor, 'users:update'\)[\s\S]{0,160}if \(normalizedPassword !== undefined && isSelf\) \{\s*throw new BizError\('请使用本人修改密码入口[^']*', 400\)/, '编辑用户接口必须在锁后拒绝本人免旧密码改密并返回 400')
 
   const feedbackRoutes = read('src/routes/client-feedback.routes.ts')
   const o2oRoutes = read('src/routes/o2o.routes.ts')
@@ -475,7 +483,6 @@ async function verifyJsonImportRequiresPermanentDeletePassword() {
   }
 
   const app = express()
-  app.use(express.json())
   app.use((req, _res, next) => {
     ;(req as unknown as { auth: Record<string, unknown> }).auth = {
       userId: 'verify-admin',
@@ -501,18 +508,22 @@ async function verifyJsonImportRequiresPermanentDeletePassword() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })
-    // 频控按账号计每一次请求：以下 5 次放行、第 6 次 429。
-    assert.equal((await post({ ...basePayload, permanentDeletePassword: 'Verify-Import-Pass-123' })).status, 403, '未开启时必须拒绝')
+    const enabledPayload = { ...basePayload, permanentDeletePassword: 'Verify-Import-Pass-123' }
+    const largeTables = (length: number) => ({ products: [{ description: 'x'.repeat(length) }] })
+    // 禁用时应在解析大请求体和消耗账号额度以前拒绝。
+    assert.equal((await post({ ...enabledPayload, tables: largeTables(8 * 1024 * 1024) })).status, 403)
     mutableEnv.Y_LINK_JSON_DATA_TRANSFER_ENABLED = true
     assert.equal((await post({ ...basePayload, currentPassword: 'wrong-current', permanentDeletePassword: 'Verify-Import-Pass-123' })).status, 400, '本人密码复核失败必须拒绝')
     assert.equal((await post(basePayload)).status, 400, '缺少永久删除口令必须拒绝')
     assert.equal((await post({ ...basePayload, permanentDeletePassword: 'wrong-pass' })).status, 403, '口令错误必须拒绝')
     assert.equal(importedPayloads.length, 0, '复核与口令通过前不得进入清表导入逻辑')
     assert.deepEqual(failureAudits, ['disabled', 'password_missing', 'password_rejected'], '开关拒绝与口令拒绝必须写脱敏失败审计')
-    assert.equal((await post({ ...basePayload, permanentDeletePassword: 'Verify-Import-Pass-123' })).status, 200)
+    assert.equal((await post({ ...enabledPayload, tables: largeTables(2 * 1024 * 1024) })).status, 200)
     assert.equal(importedPayloads.length, 1)
     assert.ok(!('permanentDeletePassword' in importedPayloads[0]), '口令不得透传进导入服务与审计')
     assert.ok(!('currentPassword' in importedPayloads[0]), '本人密码不得透传进导入服务与审计')
+    assert.equal((await post({ ...enabledPayload, tables: largeTables(8 * 1024 * 1024) })).status, 413)
+    assert.equal(importedPayloads.length, 1, '超限请求不得进入导入服务')
     assert.equal((await post(basePayload)).status, 429, 'JSON 导入必须按账号限流')
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()))

@@ -278,6 +278,20 @@ try {
   if ((overlongBusinessNoSnapshot?.orders?.length ?? 0) !== 0) {
     failures.push('超过业务号最大位宽的 hyyz showNo 不得恢复为 O2O preorderNo')
   }
+
+  const splitOwner = 'legacy-split-query-mismatch'
+  storage.setItem(`y-link.client-order.snapshot.meta:${splitOwner}`, JSON.stringify({
+    activeStatus: 'cancelled', keyword: '', page: 3, pageSize: 20, total: 51, updatedAt: Date.now(),
+  }))
+  storage.setItem(`y-link.client-order.snapshot.orders:${splitOwner}`, JSON.stringify([
+    buildLegacyRow({ preorderNo: 'PRE-D-000007' }),
+  ]))
+  const splitSnapshot = readPersistedClientOrderSnapshot(splitOwner)
+  if (!splitSnapshot || splitSnapshot.activeStatus !== 'cancelled' || splitSnapshot.searchMode !== 'contains'
+    || splitSnapshot.orders.length || splitSnapshot.resultQueryKey || splitSnapshot.page !== 1
+    || splitSnapshot.total !== 0 || splitSnapshot.updatedAt !== 0) {
+    failures.push('旧拆分缓存应恢复筛选条件并重新查询，不得把待提货摘要或分页恢复到已取消筛选')
+  }
 } finally {
   delete globalThis.window
   await vite.close()

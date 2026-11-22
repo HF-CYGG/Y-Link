@@ -31,8 +31,9 @@ import { Writable } from 'node:stream'
 import { EventEmitter } from 'node:events'
 import { fileURLToPath } from 'node:url'
 import type { AuthUserContext } from '../src/types/auth.js'
-import type { ClientAuthContext } from '../src/types/client-auth.js'
+import { buildMySqlTargetConnectionIssue } from '../src/utils/mysql-target-issue.js'
 import type { RequestMeta } from '../src/utils/request-meta.js'
+import { toSafeStartupErrorLog } from '../src/utils/safe-error-log.js'
 
 const scriptPath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(scriptPath), '..')
@@ -100,7 +101,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 // ---------------------------------------------------------------------------
 
 async function loadModules() {
-  const { AppDataSource, resolveMysqlSslOptions } = await import('../src/config/data-source.js')
+  const { AppDataSource, createDataSourceOptions, resolveMysqlSslOptions } = await import('../src/config/data-source.js')
   const bootstrap = await import('../src/config/database-bootstrap.js')
   const { env } = await import('../src/config/env.js')
   const { createApp } = await import('../src/app.js')
@@ -138,6 +139,7 @@ async function loadModules() {
   const { NotificationRule } = await import('../src/entities/notification-rule.entity.js')
   return {
     AppDataSource,
+    createDataSourceOptions,
     resolveMysqlSslOptions,
     bootstrap,
     env,
@@ -604,11 +606,49 @@ function verifyAuditMaskPrimitives() {
 function verifyMysqlSslOptions() {
   assert.deepEqual(m.resolveMysqlSslOptions('disabled', undefined), {})
   assert.deepEqual(m.resolveMysqlSslOptions('required', undefined), { ssl: { rejectUnauthorized: false } })
-  assert.deepEqual(m.resolveMysqlSslOptions('verify-full', undefined), { ssl: { rejectUnauthorized: true } })
+  assert.deepEqual(m.resolveMysqlSslOptions('verify-full', undefined), { ssl: { rejectUnauthorized: true, verifyIdentity: true } })
   const caFile = path.join(tempRoot, 'verify-ca.pem')
   fs.writeFileSync(caFile, 'VERIFY-CA-PEM')
-  assert.deepEqual(m.resolveMysqlSslOptions('verify-full', caFile), { ssl: { rejectUnauthorized: true, ca: 'VERIFY-CA-PEM' } })
+  assert.deepEqual(m.resolveMysqlSslOptions('verify-full', caFile), { ssl: { rejectUnauthorized: true, verifyIdentity: true, ca: 'VERIFY-CA-PEM' } })
   assert.throws(() => m.resolveMysqlSslOptions('verify-full', path.join(tempRoot, 'missing-ca.pem')), /DB_SSL_CA/)
+
+  const previous = { DB_TYPE: m.env.DB_TYPE, DB_HOST: m.env.DB_HOST, DB_SSL_MODE: m.env.DB_SSL_MODE, DB_SSL_CA: m.env.DB_SSL_CA }
+  const mysql = { DB_TYPE: 'mysql' as const, DB_HOST: 'mysql.verify.test', DB_PORT: 3306, DB_USER: 'fixture_user', DB_NAME: 'fixture_db' }
+  const ipAddress = '192.0.2.15'
+  try {
+    Object.assign(m.env, { DB_TYPE: 'mysql', DB_HOST: ipAddress, DB_SSL_MODE: 'verify-full', DB_SSL_CA: undefined })
+    assert.throws(() => m.createDataSourceOptions(), (error: unknown) => {
+      assert.match(String(toSafeStartupErrorLog(error).message), /证书匹配的 DNS 名称/)
+      return true
+    }, '普通启动按环境配置的主机阻断 IP 并保留可行动诊断')
+
+    const dnsOptions = m.createDataSourceOptions(mysql)
+    assert.equal(dnsOptions.type, 'mysql')
+    assert.equal(dnsOptions.host, mysql.DB_HOST, '覆盖目标使用自身 DNS 名称，即使环境地址是 IP')
+    assert.deepEqual(dnsOptions.ssl, { rejectUnauthorized: true, verifyIdentity: true })
+
+    Object.assign(m.env, { DB_HOST: mysql.DB_HOST })
+    for (const host of [ipAddress, '2001:db8::15', '[::ffff:192.0.2.15]', '[fe80::1%eth0]', '127.1', '0177.0.0.1', '0x7f000001', `${ipAddress}.`]) {
+      assert.throws(() => m.createDataSourceOptions({ ...mysql, DB_HOST: host }), (error: unknown) => {
+        const issue = buildMySqlTargetConnectionIssue(error, host)
+        assert.equal(issue.level, 'error')
+        assert.equal(issue.code, 'target_tls_dns_host_required')
+        assert.match(issue.message, /证书匹配的 DNS 名称/)
+        return true
+      }, '迁移目标预检在连接前拒绝 IP 字面量')
+    }
+    const sqliteOptions = m.createDataSourceOptions({ DB_TYPE: 'sqlite', SQLITE_DB_PATH: path.join(tempRoot, 'tls-options.sqlite') })
+    assert.equal(sqliteOptions.type, 'sqlite')
+    for (const mode of ['disabled', 'required'] as const) {
+      Object.assign(m.env, { DB_SSL_MODE: mode })
+      const options = m.createDataSourceOptions({ ...mysql, DB_HOST: ipAddress })
+      assert.equal(options.type, 'mysql')
+      assert.equal(options.host, ipAddress)
+      assert.deepEqual(options.ssl, mode === 'required' ? { rejectUnauthorized: false } : undefined)
+    }
+  } finally {
+    Object.assign(m.env, previous)
+  }
 }
 
 /** 第 9 项：新哈希参数、旧格式兼容与升级标记、参数区间校验，以及三种情况的耗时一致。 */
@@ -732,6 +772,16 @@ function verifyOverloadPrimitives() {
   assert.equal(classify('GET', '/api/auth/me', 'critical'), null)
   assert.equal(classify('POST', '/api/orders', 'critical'), null, '写请求永不削峰')
   assert.equal(classify('POST', '/api/v1/mobile-auth/login', 'critical'), null, '移动端不纳入')
+  for (const level of ['elevated', 'critical'] as const) {
+    for (const alias of ['/api/auth/LOGIN', '/api/auth/login/', '/API/AUTH/LOGIN/']) {
+      assert.equal(classify('POST', alias, level), 'anonymousAuth', 'POST 别名须按匿名认证削峰')
+    }
+    assert.equal(classify('GET', '/api/client-auth/CAPTCHA/', level), 'anonymousAuth', '验证码别名不应仅依赖 critical 通用读削峰')
+    assert.equal(classify('GET', '/API/AUTH/ME/', level), null)
+    assert.equal(classify('POST', '/API/V1/MOBILE-AUTH/LOGIN/', level), null)
+    assert.equal(classify('GET', '/API/CUSTOMER-SERVICE/STREAM/', level), 'realtime')
+    assert.equal(classify('POST', '/API/DATA-MAINTENANCE/EXPORT/JSON/', level), 'export')
+  }
   assert.equal(classify('GET', '/health', 'critical'), null)
   assert.equal(classify('GET', '/api/database-rescue/status', 'critical'), null, '救援面不纳入')
 }
@@ -1098,11 +1148,15 @@ async function verifyEncryptionKeyPreflightAndBackup() {
     .map((file) => path.relative(backendRoot, file).replaceAll('\\', '/'))
     .sort()
   assert.deepEqual(sealingFiles, [
+    // 运行时控制文件由数据库治理专项验证，不属于下面的数据库列。
+    'src/config/database-runtime-override.ts',
     'src/entities/notification-rule.entity.ts',
     'src/services/admin-mfa.service.ts',
+    // 通知通道密文写入已登记的 system_configs.config_value。
+    'src/services/notification-channel-config.service.ts',
     'src/services/notification.service.ts',
     'src/services/system-config.service.ts',
-  ], '出现新的加密落库位置，须登记到 data-encryption-preflight.ts 的 SEALED_COLUMNS')
+  ], '出现新的密封调用位置，须核对对应的密文启动预检')
   assert.deepEqual(SEALED_COLUMNS.map((item) => `${item.table}.${item.column}`).sort(), [
     'notification_rule.feishu_sign_secret',
     'notification_rule.feishu_webhook_url',
@@ -1447,18 +1501,9 @@ async function verifyHashOutsideTransactions() {
     await m.authService.changeOwnPassword(await contextOf('tx-operator'), { currentPassword: 'Tq7mZ2vR9pLm-c', newPassword: 'Tq7mZ2vR9pLm-d' })
     assertChangeSplit(operatorHash, '管理端本人改密')
 
+    const clientLogin = await m.clientAuthService.login({ account: '13900001111', password: 'Cli9-Tx#Reset2026' })
+    const clientAuth = await m.clientAuthService.resolveClientByToken(clientLogin.token)
     const clientHash = await readClientUserHash(client.id)
-    const clientAuth: ClientAuthContext = {
-      userId: String(client.id),
-      account: '',
-      mobile: '13900001111',
-      email: '',
-      realName: '事务外客户',
-      accountType: 'personal',
-      staffNo: null,
-      sessionToken: 'verify-client-session',
-      authSource: 'bearer',
-    }
     calls.length = 0
     await m.clientAuthService.changePassword(clientAuth, { currentPassword: 'Cli9-Tx#Reset2026', newPassword: 'Cli9-Tx#Mine2026' })
     assertChangeSplit(clientHash, '客户端 Web 改密')
@@ -1936,11 +1981,34 @@ async function verifyProductImageGate() {
   const busy = responses.find((response) => response.status === 503)!
   assert.equal(busy.headers.get('retry-after'), '2')
   assert.match(((await busy.json()) as { message: string }).message, /商品图片处理繁忙/)
-  await responses.find((response) => response.status === 200)!.arrayBuffer()
+  const uploaded = await responses.find((response) => response.status === 200)!.json() as {
+    code?: number; data?: { url?: unknown }
+  }
+  assert.equal(uploaded.code, 0, '成功上传必须返回业务成功码')
+  assert.equal(typeof uploaded.data?.url, 'string', '成功上传必须返回原图 URL')
+  const originalMatch = /^\/uploads\/products\/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.png)$/i.exec(uploaded.data!.url as string)
+  assert.ok(originalMatch, 'PNG 夹具应返回 UUID 命名、无额外路径或参数的原图 URL')
+  const originalFileName = originalMatch[1]!
+  const thumbnailFileName = originalFileName.replace(/\.png$/i, '.thumb.webp')
   const uploadsRoot = path.join(process.cwd(), 'uploads')
   const tmpDir = path.join(uploadsRoot, '.tmp')
   assert.deepEqual(fs.existsSync(tmpDir) ? fs.readdirSync(tmpDir) : [], [], '被拒绝的上传必须清理临时文件')
-  assert.equal(fs.readdirSync(path.join(uploadsRoot, 'products')).length, 1)
+  const productDir = path.join(uploadsRoot, 'products')
+  const entries = fs.readdirSync(productDir, { withFileTypes: true })
+  assert.deepEqual(entries.map((entry) => entry.name).sort(), [originalFileName, thumbnailFileName].sort(),
+    '只允许响应 URL 对应的一张原图及其同目录缩略图，不得遗留额外文件或目录')
+  assert.ok(entries.every((entry) => entry.isFile()), '原图和缩略图均须为普通文件')
+  // 先由 Node 读入并关闭文件，再让 sharp 只接触 Buffer，避免 libvips 文件缓存阻塞 Windows 清理。
+  const originalImage = await fs.promises.readFile(path.join(productDir, originalFileName))
+  const originalMetadata = await sharp(originalImage).metadata()
+  assert.equal(originalMetadata.format, 'png')
+  assert.equal(originalMetadata.width, width)
+  assert.equal(originalMetadata.height, height)
+  const thumbnailImage = await fs.promises.readFile(path.join(productDir, thumbnailFileName))
+  const thumbnailMetadata = await sharp(thumbnailImage).metadata()
+  assert.equal(thumbnailMetadata.format, 'webp')
+  assert.equal(thumbnailMetadata.width, 480, '1800px 正方形夹具应生成长边 480px 的缩略图')
+  assert.equal(thumbnailMetadata.height, 480)
 }
 
 /** 第 21 项：同一会话突发后 429，其他会话不受影响，等待补充后恢复；客户端会话同样生效。 */

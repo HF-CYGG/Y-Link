@@ -5,6 +5,7 @@
  */
 import { isIP } from 'node:net'
 import type { Express, Request } from 'express'
+import { staticPathKey } from './static-path-key.js'
 
 export interface HttpSecurityConfig {
   trustedProxies: false | string[]
@@ -44,6 +45,7 @@ export interface HttpSecurityHooks {
 }
 
 const SAFE_HTTP_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
+const isApiPath = (path: string) => path === '/api' || path.startsWith('/api/')
 
 const readSingleHeader = (value: string | string[] | undefined): string | null => {
   const raw = Array.isArray(value) ? value[0] : value
@@ -63,7 +65,7 @@ const readSingleHeader = (value: string | string[] | undefined): string | null =
 export function resolveCrossSiteBlockReason(
   req: Pick<Request, 'method' | 'path' | 'headers' | 'hostname'>,
 ): CrossSiteBlockReason | null {
-  if (!(req.path === '/api' || req.path.startsWith('/api/'))) return null
+  if (!isApiPath(staticPathKey(req.path))) return null
   const safeMethod = SAFE_HTTP_METHODS.has(req.method.toUpperCase())
   const fetchSite = readSingleHeader(req.headers['sec-fetch-site'])?.toLowerCase()
   if (fetchSite) {
@@ -115,7 +117,8 @@ export function configureHttpSecurity(
     res.setHeader('Cross-Origin-Opener-Policy', 'same-origin')
     res.setHeader('Cross-Origin-Resource-Policy', 'same-origin')
     res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
-    if (!req.path.startsWith('/uploads')) {
+    const path = staticPathKey(req.path)
+    if (path !== '/uploads' && !path.startsWith('/uploads/')) {
       res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
     }
     if (config.production && req.secure && config.hstsMaxAge > 0) {
@@ -123,7 +126,7 @@ export function configureHttpSecurity(
     }
     // 接口响应默认禁止缓存（ASVS V14.3）：用户、订单、审计、配置等数据不得落入浏览器磁盘缓存或中间代理；
     // 公开商城目录、SSE 等确需其它缓存语义的接口在处理器内显式覆盖。
-    if (req.path === '/api' || req.path.startsWith('/api/') || req.path === '/health') {
+    if (isApiPath(path) || path === '/health') {
       res.setHeader('Cache-Control', 'no-store')
     }
     const crossSiteBlockReason = resolveCrossSiteBlockReason(req)

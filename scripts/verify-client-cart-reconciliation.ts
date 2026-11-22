@@ -2,15 +2,16 @@
  * 文件说明：Issue #52 客户端购物车目录对账回归验证。
  * 文件职责：以真实 Pinia Store 与浏览器存储替身覆盖库存刷新、缓存恢复和多标签页隔离语义；不访问业务数据库或网络。
  * 维护说明：本脚本只验证购物车本地状态不能在后台目录刷新时静默减量或取消勾选，结算提交拦截由结算页守卫单独覆盖；
- * Issue #97 追加手动输入数量断言：合法值按可购上限收口，非法值（空、非数字、小于 1）不得写入 NaN 或删除商品。
+ * 手动输入合法增量按可购上限收口、减量保留目标；非法值（空、非数字、小于 1）不得写入 NaN 或删除商品。
  */
 
 import assert from 'node:assert/strict'
 
 import { createPinia, setActivePinia } from 'pinia'
 
-import type { O2oMallProduct } from '../src/api/modules/o2o'
+import type { O2oMallProduct, SubmitO2oPreorderPayload } from '../src/api/modules/o2o'
 import { useClientCartStore } from '../src/store/modules/client-cart'
+import { resolveUserScopedStorageKey } from '../src/utils/storage-user-scope'
 import {
   buildClientPreorderSubmitIntentKey,
   clearClientPreorderSubmitLock,
@@ -21,6 +22,7 @@ import { decideClientCheckoutSubmit } from '../src/views/client/client-checkout-
 
 class MemoryStorage {
   private readonly values = new Map<string, string>()
+  writes = 0
   failOperation: 'get' | 'set' | 'remove' | null = null
   failRemoveKey: string | null = null
 
@@ -48,14 +50,16 @@ class MemoryStorage {
 
   setItem(key: string, value: string) {
     if (this.failOperation === 'set') throw new DOMException('存储配额耗尽', 'QuotaExceededError')
+    this.writes += 1
     this.values.set(key, String(value))
   }
 }
 
 const storage = new MemoryStorage()
+const sessionStorage = new MemoryStorage()
 Object.defineProperty(globalThis, 'window', {
   configurable: true,
-  value: { localStorage: storage, sessionStorage: storage },
+  value: { localStorage: storage, sessionStorage },
 })
 
 const createProduct = ({
@@ -124,8 +128,20 @@ assert.equal(firstTabCart.items[0]?.selected, true, '目录库存减少时，后
 assert.equal(firstTabCart.selectedCheckoutConflicts.length, 1, '超出可购量的已选商品必须被标记为结算冲突')
 assert.equal(firstTabCart.createSelectedCheckoutSnapshot(), null, '含超库存选中行时不得生成部分提交载荷')
 
+const reconciledRows = firstTabCart.items
+const reconcileWrites = storage.writes
+firstTabCart.syncWithCatalog([createProduct({ availableStock: 1 })])
+assert.equal(firstTabCart.items, reconciledRows, '相同目录不能替换购物车数组')
+assert.equal(storage.writes, reconcileWrites, '相同目录不能重复写入浏览器存储')
+const renamedProduct = { ...createProduct({ availableStock: 1 }), productName: '商品新名称' }
+firstTabCart.syncWithCatalog([renamedProduct])
+assert.equal(firstTabCart.items[0]?.productName, '商品新名称', '只变更展示字段也须更新快照')
+assert.equal(storage.writes, reconcileWrites + 1)
+
 firstTabCart.updateQty('sku-1', 4)
-assert.equal(firstTabCart.items[0]?.qty, 1, '用户主动改数量时仍应按当前可购量收口，而不是由后台刷新静默改写')
+assert.equal(firstTabCart.items[0]?.qty, 4, '用户主动减量保留目标，即使仍超库存也不能静默截到上限')
+assert.equal(firstTabCart.createSelectedCheckoutSnapshot(), null, '逐步减量后仍超库存时必须继续拦截结算')
+firstTabCart.updateQty('sku-1', 1)
 assert.deepEqual(
   firstTabCart.createSelectedCheckoutSnapshot(),
   [{ productId: 'product-1', skuId: 'sku-1', qty: 1 }],
@@ -189,20 +205,27 @@ const pendingProduct = createProduct({ id: 'product-pending', skuId: 'sku-pendin
 pendingCart.addProduct(pendingProduct, 1, pendingProduct.skus?.[0] ?? null)
 const pendingSnapshot = pendingCart.createSelectedCheckoutSnapshot()
 assert.ok(pendingSnapshot, '有效商品应能生成首次提交快照')
+const pendingPayload: Omit<SubmitO2oPreorderPayload, 'clientRequestId'> = {
+  isSystemApplied: false,
+  kingdeeVoucherNo: null,
+  pickupContact: '测试用户',
+  pickupAt: null,
+  remark: '  原始备注  \n  保留内部空白  ',
+  items: pendingSnapshot,
+}
 const pendingIntent = buildClientPreorderSubmitIntentKey({
+  ...pendingPayload,
   clientUserId: 'client-pending',
   clientOrderType: 'walkin',
-  isSystemApplied: false,
-  pickupContact: '测试用户',
-  items: pendingSnapshot,
 })
-const pendingRequestKey = createClientPreorderSubmitLock('client-pending', pendingIntent)
+const pendingRequestKey = createClientPreorderSubmitLock('client-pending', pendingIntent, pendingPayload)
 // 模拟服务端已成功占库存、但首个响应在网络层丢失；目录刷新后本地行应为无库存，
 // 而相同冻结意图仍必须命中同一 requestKey，交给服务端幂等层回查原订单。
 pendingCart.syncWithCatalog([createProduct({ id: 'product-pending', skuId: 'sku-pending', availableStock: 0 })])
 assert.equal(pendingCart.selectedCheckoutConflicts.length, 1, '响应丢失后的目录刷新应显示库存冲突')
 assert.equal(
   buildClientPreorderSubmitIntentKey({
+    ...pendingPayload,
     clientUserId: 'client-pending',
     clientOrderType: 'walkin',
     isSystemApplied: false,
@@ -217,8 +240,19 @@ assert.equal(
   pendingRequestKey,
   '完全相同意图必须仍可复用结果未知订单的 requestKey',
 )
+const restoredPendingLock = readActiveClientPreorderSubmitLock('client-pending')
+assert.ok(restoredPendingLock, '刷新后必须恢复原提交记录')
+assert.equal(restoredPendingLock.version, 2, '提交记录必须使用支持精确恢复的版本')
+assert.equal(restoredPendingLock.owner, 'client-pending', '原提交记录必须绑定当前账号')
+assert.equal(restoredPendingLock.expired, false, '刚创建的原提交必须处于确认期内')
+assert.equal(restoredPendingLock.expiresAt - restoredPendingLock.createdAt, 30 * 60 * 1000, '原提交确认期固定为 30 分钟')
+assert.deepEqual(restoredPendingLock.payload, { ...pendingPayload, clientRequestId: pendingRequestKey },
+  '目录库存归零及刷新恢复不能改写原载荷，包括备注空白、提货信息和显式空值')
+assert.throws(() => createClientPreorderSubmitLock('client-pending', 'changed-intent', pendingPayload), /未确认/,
+  '未决订单存在时不能通过更换意图或请求键绕过原提交')
 assert.notEqual(
   buildClientPreorderSubmitIntentKey({
+    ...pendingPayload,
     clientUserId: 'client-pending',
     clientOrderType: 'walkin',
     isSystemApplied: false,
@@ -233,6 +267,27 @@ clearClientPreorderSubmitLock('client-pending', pendingRequestKey)
 const submitItems = [{ productId: 'product-submit', skuId: 'sku-submit', qty: 1 }]
 const requestedSubmitIntent = 'requested-intent'
 const freshSubmitIntent = requestedSubmitIntent
+const originalSubmitPayload: SubmitO2oPreorderPayload = {
+  clientRequestId: 'original-request-key',
+  isSystemApplied: true,
+  kingdeeVoucherNo: '  KD-Original-AbC  ',
+  pickupContact: '原领取教师',
+  pickupAt: '2026-11-06T04:00:00.000Z',
+  remark: '  第一行  \n 第二行\t原始空白  ',
+  items: submitItems,
+}
+const activeSubmitLock = {
+  intentKey: requestedSubmitIntent,
+  requestKey: originalSubmitPayload.clientRequestId,
+  payload: originalSubmitPayload,
+}
+const expectedPendingRetry = {
+  type: 'retry_pending',
+  items: submitItems,
+  intentKey: requestedSubmitIntent,
+  requestKey: originalSubmitPayload.clientRequestId,
+  payload: originalSubmitPayload,
+}
 const assertBlockedDecision = (decision: ReturnType<typeof decideClientCheckoutSubmit>, reason: string) => {
   assert.equal(decision.type, 'blocked', `应阻断提交：${reason}`)
   if (decision.type === 'blocked') {
@@ -262,25 +317,45 @@ assert.deepEqual(decideClientCheckoutSubmit({
   refreshSucceeded: true,
   requestedItems: submitItems,
   requestedIntentKey: requestedSubmitIntent,
-  activeSubmitLock: { intentKey: requestedSubmitIntent, requestKey: 'original-request-key' },
+  activeSubmitLock,
   selectedConflictCount: 1,
   freshItems: null,
   freshIntentKey: null,
-}), {
-  type: 'retry_pending',
-  items: submitItems,
-  intentKey: requestedSubmitIntent,
-  requestKey: 'original-request-key',
-}, '结果未知且同意图时必须用原 payload 与 requestKey 重试')
+}), expectedPendingRetry, '结果未知且同意图时必须返回完整原 payload 与 requestKey，不能只返回商品或重建字段')
 assertBlockedDecision(decideClientCheckoutSubmit({
   refreshSucceeded: true,
   requestedItems: submitItems,
   requestedIntentKey: 'changed-intent',
-  activeSubmitLock: { intentKey: requestedSubmitIntent, requestKey: 'original-request-key' },
+  activeSubmitLock,
   selectedConflictCount: 0,
   freshItems: submitItems,
   freshIntentKey: freshSubmitIntent,
 }), 'pending_intent_changed')
+assert.deepEqual(decideClientCheckoutSubmit({
+  refreshSucceeded: false,
+  requestedItems: [{ productId: 'new-cart-product', skuId: 'new-cart-sku', qty: 8 }],
+  requestedIntentKey: requestedSubmitIntent,
+  activeSubmitLock,
+  selectedConflictCount: 1,
+  freshItems: null,
+  freshIntentKey: null,
+}), expectedPendingRetry, '确认原提交不依赖目录刷新成功，也不能采用当前购物车重造原载荷')
+for (const unrecoverableLock of [
+  { intentKey: requestedSubmitIntent, requestKey: originalSubmitPayload.clientRequestId },
+  { ...activeSubmitLock, payload: null },
+  { ...activeSubmitLock, expired: true },
+  { ...activeSubmitLock, requestKey: 'mismatched-request-key' },
+]) {
+  assertBlockedDecision(decideClientCheckoutSubmit({
+    refreshSucceeded: true,
+    requestedItems: submitItems,
+    requestedIntentKey: requestedSubmitIntent,
+    activeSubmitLock: unrecoverableLock,
+    selectedConflictCount: 0,
+    freshItems: submitItems,
+    freshIntentKey: freshSubmitIntent,
+  }), 'pending_unrecoverable')
+}
 assert.deepEqual(decideClientCheckoutSubmit({
   refreshSucceeded: true,
   requestedItems: submitItems,
@@ -304,7 +379,7 @@ assertBlockedDecision(decideClientCheckoutSubmit({
   freshIntentKey: 'selection-changed-intent',
 }), 'selection_changed_after_refresh')
 
-// 浏览器缓存不是下单前置条件：失败时必须保留内存中的最新库存与原选数量。
+// 购物车辅助缓存失败必须保留内存中的最新库存与原选数量；首次 POST 的原提交记录仍必须成功持久化。
 const unavailableStorageCart = createCart('client-storage-failure')
 unavailableStorageCart.addProduct(originalCatalogItem, 2, originalCatalogItem.skus?.[0] ?? null)
 try {
@@ -390,5 +465,221 @@ const largeQtyProduct = createProduct({ id: 'product-large', skuId: 'sku-large',
 largeQtyCart.addProduct(largeQtyProduct, 1, largeQtyProduct.skus?.[0] ?? null)
 largeQtyCart.setQtyFromInput('sku-large', 100000)
 assert.equal(largeQtyCart.items[0]?.qty, 100000, '库存允许时必须支持录入五位以上的合法数量')
+
+// 多规格本次新增量整体提交，失败不得影响已有行或选中态。
+const batchCart = createCart('client-batch')
+const batchProduct = createProduct({ id: 'batch-product', skuId: 'batch-a', availableStock: 10 })
+batchProduct.limitPerUser = 5
+batchProduct.skus!.push({ ...batchProduct.skus![0]!, id: 'batch-b' })
+assert.deepEqual(batchCart.addProductsBatch(batchProduct, [{ skuId: 'batch-a', qty: 0 }]), {
+  ok: true, addedQty: 0, conflicts: [], addedSkus: [],
+}, '全零数量不得写入购物车')
+assert.equal(batchCart.items.length, 0)
+assert.equal(batchCart.addProductsBatch(batchProduct, [{ skuId: 'batch-a', qty: 2 }]).addedQty, 2)
+batchCart.toggleItemSelected('batch-a', false)
+const batchSuccess = batchCart.addProductsBatch(batchProduct, [
+  { skuId: 'batch-a', qty: 1 }, { skuId: 'batch-b', qty: 1 }, { skuId: 'batch-b', qty: 1 },
+])
+assert.equal(batchSuccess.addedQty, 3, '跨规格共享商品总限购，重复规格累计本次新增量')
+assert.deepEqual(batchCart.items.map(({ skuId, qty, selected }) => [skuId, qty, selected]), [
+  ['batch-a', 3, false], ['batch-b', 2, true],
+])
+const batchBefore = JSON.stringify(batchCart.items)
+const persistedBatchBefore = storage.getItem(resolveUserScopedStorageKey('y-link.client-cart.snapshot', 'client-batch')!)
+assert.ok(persistedBatchBefore, '原车快照应已持久化')
+for (const invalidQty of [-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+  const result = batchCart.addProductsBatch(batchProduct, [{ skuId: 'batch-a', qty: invalidQty }])
+  assert.equal(result.ok, false)
+  assert.equal(result.conflicts[0]?.code, 'invalid_qty')
+  assert.equal(JSON.stringify(batchCart.items), batchBefore, '非法数量不得改变原车')
+}
+for (const badSku of [
+  { ...batchProduct.skus![0]!, id: 'missing', productId: 'other-product' },
+  { ...batchProduct.skus![0]!, isActive: false },
+  { ...batchProduct.skus![0]!, isCurrent: false },
+]) {
+  const result = batchCart.addProductsBatch({ ...batchProduct, skus: [badSku] }, [{ skuId: badSku.id, qty: 1 }])
+  assert.equal(result.ok, false)
+  assert.equal(result.conflicts[0]?.code, 'sku_unavailable')
+}
+const exceededBatch = batchCart.addProductsBatch(batchProduct, [
+  { skuId: 'batch-a', qty: 1 }, { skuId: 'batch-b', qty: 1 },
+])
+assert.equal(exceededBatch.ok, false)
+assert.equal(exceededBatch.addedQty, 0)
+assert.deepEqual(exceededBatch.addedSkus, [])
+assert.equal(JSON.stringify(batchCart.items), batchBefore, '其中一项超量时合法项也不得写入')
+assert.equal(storage.getItem(resolveUserScopedStorageKey('y-link.client-cart.snapshot', 'client-batch')!), persistedBatchBefore)
+assert.equal(batchCart.addProductsBatch(batchProduct, [{ skuId: 'batch-a', qty: 2 }, { skuId: 'batch-a', qty: 1 }]).ok, false, '重复规格不得绕过含已有量上限')
+assert.equal(batchCart.addProductsBatch({ ...batchProduct, skus: [] }, [{ skuId: 'batch-a', qty: 1 }]).ok, false)
+const stockConflictProduct = { ...batchProduct, limitPerUser: 0, skus: batchProduct.skus!.map((sku) => ({ ...sku, availableStock: 3 })) }
+assert.equal(batchCart.addProductsBatch(stockConflictProduct, [{ skuId: 'batch-a', qty: 1 }]).ok, false, '库存必须包含已有量')
+storage.failOperation = 'set'
+assert.equal(batchCart.addProductsBatch({ ...batchProduct, limitPerUser: 0 }, [{ skuId: 'batch-a', qty: 1 }]).ok, true, '持久化拒写仍保留内存成功语义')
+assert.equal(batchCart.items[0]?.qty, 4)
+assert.equal(batchCart.items[0]?.selected, false)
+storage.failOperation = null
+
+const sharedLimitCart = createCart('shared-limit')
+assert.equal(sharedLimitCart.addProductsBatch(batchProduct, [{ skuId: 'batch-a', qty: 3 }, { skuId: 'batch-b', qty: 3 }]).ok, false, 'A3+B3不能绕过商品限购5')
+assert.equal(sharedLimitCart.items.length, 0, '总量超限整批零写入')
+assert.equal(sharedLimitCart.addProductsBatch(batchProduct, [{ skuId: 'batch-a', qty: 3 }, { skuId: 'batch-b', qty: 2 }]).ok, true)
+assert.equal(sharedLimitCart.addProduct(batchProduct, 1, batchProduct.skus![1]), 0, '普通加购计入其它规格已有量')
+sharedLimitCart.setQtyFromInput('batch-b', 4)
+assert.equal(sharedLimitCart.items.find((item) => item.skuId === 'batch-b')?.qty, 2, '手输上限同样共享，不能改另一行数量')
+const staleLimitCart = createCart('stale-shared-limit')
+assert.equal(staleLimitCart.addProductsBatch({ ...batchProduct, limitPerUser: 0 }, [{ skuId: 'batch-a', qty: 3 }, { skuId: 'batch-b', qty: 3 }]).ok, true)
+staleLimitCart.syncWithCatalog([batchProduct])
+assert.equal(staleLimitCart.totalQty, 6, '目录限购变化不能静默缩量')
+assert.equal(staleLimitCart.selectedCheckoutConflicts.length, 2, '已选多规格合计超限必须拦截结算')
+staleLimitCart.toggleItemSelected('batch-b', false)
+assert.equal(staleLimitCart.selectedCheckoutConflicts.length, 0, '取消其它规格选择后只校验本次结算总量')
+
+// PR197 P2：两种页面入口均须允许从既有超限数量逐步减少，不影响其它SKU、选择和持久化。
+for (const entry of ['stepper', 'input'] as const) {
+  const owner = `lowered-limit-${entry}`
+  const cart = createCart(owner)
+  const otherProduct = createProduct({ id: `other-${entry}`, skuId: `other-sku-${entry}`, availableStock: 2 })
+  assert.equal(cart.addProductsBatch({ ...batchProduct, limitPerUser: 0 }, [
+    { skuId: 'batch-a', qty: 4 }, { skuId: 'batch-b', qty: 4 },
+  ]).ok, true)
+  cart.addProduct(otherProduct, 1, otherProduct.skus![0])
+  cart.toggleItemSelected(otherProduct.skus![0]!.id, false)
+  cart.syncWithCatalog([{ ...batchProduct, limitPerUser: 3 }, otherProduct])
+  const state = () => cart.items.map(({ skuId, qty, selected }) => [skuId, qty, selected])
+  const change = (skuId: string, qty: number) => {
+    if (entry === 'input') cart.setQtyFromInput(skuId, qty)
+    else cart.incrementQty(skuId, qty - cart.items.find(item => item.skuId === skuId)!.qty)
+  }
+  change('batch-a', 3)
+  const expectedReduced = [['batch-a', 3, true], ['batch-b', 4, true], [otherProduct.skus![0]!.id, 1, false]]
+  assert.deepEqual(state(), expectedReduced, `${entry}:4+4限购降3后，A4→3必须按目标落地且其它行不变`)
+  assert.deepEqual(createCart(owner).items.map(({ skuId, qty, selected }) => [skuId, qty, selected]), expectedReduced,
+    `${entry}:刷新恢复必须保留本次减量、其它SKU和选择`)
+  assert.ok(cart.selectedCheckoutConflicts.length > 0, `${entry}:3+4仍超限，结算冲突必须保持`)
+  assert.equal(cart.createSelectedCheckoutSnapshot(), null)
+  change('batch-a', 4)
+  assert.deepEqual(state(), expectedReduced, `${entry}:仍超限时继续加量必须拒绝，不得截量或误改其它行`)
+  for (const [skuId, qty] of [['batch-b', 3], ['batch-a', 2], ['batch-b', 2], ['batch-b', 1]] as const) {
+    change(skuId, qty)
+    assert.equal(cart.items.find(item => item.skuId === skuId)?.qty, qty, `${entry}:每一步减量必须按目标执行`)
+    if (cart.qtyByProductId.get(batchProduct.id)! > 3) assert.equal(cart.createSelectedCheckoutSnapshot(), null)
+  }
+  assert.deepEqual(cart.createSelectedCheckoutSnapshot(), [
+    { productId: batchProduct.id, skuId: 'batch-a', qty: 2 }, { productId: batchProduct.id, skuId: 'batch-b', qty: 1 },
+  ], `${entry}:合计恢复3后才允许结算，未选行仍不提交`)
+  change('batch-b', 2)
+  assert.equal(cart.items.find(item => item.skuId === 'batch-b')?.qty, 1, `${entry}:合法合计触顶后不得增加`)
+  change('batch-a', 1)
+  change('batch-b', 2)
+  assert.equal(cart.items.find(item => item.skuId === 'batch-b')?.qty, 2, `${entry}:限购和库存允许时仍可正常增加`)
+  const beforeInvalid = JSON.stringify(state())
+  for (const invalid of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -1]) {
+    cart.updateQty('batch-a', invalid)
+    cart.setQtyFromInput('batch-a', invalid)
+    assert.equal(JSON.stringify(state()), beforeInvalid, `${entry}:非法数量不能写入或删除既有行`)
+  }
+  cart.setQtyFromInput('batch-a', 0)
+  assert.equal(JSON.stringify(state()), beforeInvalid, `${entry}:手输0仍不视为删除`)
+  cart.incrementQty('batch-a', -1)
+  assert.deepEqual(state(), [['batch-b', 2, true], [otherProduct.skus![0]!.id, 1, false]],
+    `${entry}:合法减至0只移除目标SKU，保留其它SKU和选择`)
+  assert.deepEqual(createCart(owner).items.map(({ skuId, qty, selected }) => [skuId, qty, selected]), state())
+}
+
+const recoveryOwner = 'confirmed-recovery-quantity'
+const recoveryCart = createCart(recoveryOwner)
+const recoveryProduct = { ...batchProduct, limitPerUser: 0 }
+recoveryCart.addProduct(recoveryProduct, 2, recoveryProduct.skus![0])
+const firstCheckoutItems = recoveryCart.createSelectedCheckoutSnapshot()!
+const firstCheckoutDraft = { isSystemApplied: false, pickupContact: '测试用户', items: firstCheckoutItems }
+const firstCheckoutKey = createClientPreorderSubmitLock(recoveryOwner, 'first-checkout', firstCheckoutDraft)
+recoveryCart.addProductsBatch(recoveryProduct, [{ skuId: 'batch-a', qty: 3 }, { skuId: 'batch-b', qty: 3 }])
+recoveryCart.toggleItemSelected('batch-a', false)
+recoveryCart.consumeSubmittedItems(firstCheckoutItems, firstCheckoutKey)
+assert.deepEqual(recoveryCart.items.map(({ skuId, qty, selected }) => [skuId, qty, selected]), [['batch-a', 3, false], ['batch-b', 3, true]], '确认原2件后保留后加3件及其它SKU')
+// 上一版 4a85e049 的 normalizeSnapshotItems 要求顶层数组，逐行保留具有商品 ID、名称和有效数量的记录。
+const savedRecoveryRows: unknown = JSON.parse(storage.getItem(`y-link.client-cart.snapshot:${recoveryOwner}`) ?? 'null')
+assert.ok(Array.isArray(savedRecoveryRows), '旧版必须能按原数组结构读取扣量后的商品')
+const legacyItems = savedRecoveryRows.filter((row) => row && typeof row === 'object'
+  && typeof row.productId === 'string' && row.productId && typeof row.productName === 'string' && row.productName
+  && Number.isFinite(row.qty) && Math.floor(row.qty) > 0)
+assert.deepEqual(legacyItems.map(({ skuId, qty, selected }) => [skuId, qty, selected]), [['batch-a', 3, false], ['batch-b', 3, true]], '旧版跳过请求记录，仍能恢复后加商品、其它规格和选择状态')
+sessionStorage.failOperation = 'remove'
+assert.throws(() => clearClientPreorderSubmitLock(recoveryOwner, firstCheckoutKey), { name: 'SecurityError' })
+sessionStorage.failOperation = null
+const recoveredCheckout = readActiveClientPreorderSubmitLock(recoveryOwner)?.payload
+assert.deepEqual(recoveredCheckout, { ...firstCheckoutDraft, clientRequestId: firstCheckoutKey }, '清锁失败仍保留完整原请求')
+const reopenedCart = createCart(recoveryOwner)
+reopenedCart.consumeSubmittedItems(recoveredCheckout!.items, recoveredCheckout!.clientRequestId)
+assert.equal(reopenedCart.qtyByItemId.get('batch-a'), 3, '刷新后确认同一笔订单，仍保留后加3件')
+clearClientPreorderSubmitLock(recoveryOwner, firstCheckoutKey)
+const secondCheckoutItems = [{ productId: batchProduct.id, skuId: 'batch-a', qty: 1 }]
+const secondCheckoutKey = createClientPreorderSubmitLock(recoveryOwner, 'second-checkout', { ...firstCheckoutDraft, items: secondCheckoutItems })
+reopenedCart.consumeSubmittedItems(secondCheckoutItems, secondCheckoutKey)
+assert.equal(reopenedCart.qtyByItemId.get('batch-a'), 2, '新订单使用自己的请求键独立扣量')
+const againCart = createCart(recoveryOwner)
+againCart.consumeSubmittedItems(firstCheckoutItems, firstCheckoutKey)
+againCart.consumeSubmittedItems(secondCheckoutItems, secondCheckoutKey)
+assert.deepEqual(againCart.items.map(({ skuId, qty, selected }) => [skuId, qty, selected]), [['batch-a', 2, false], ['batch-b', 3, true]], '确认了新订单后，两笔订单的重放仍都应跳过')
+
+const emptyOwner = 'confirmed-empty-cart'
+const emptyCart = createCart(emptyOwner)
+emptyCart.addProduct(recoveryProduct, 1, recoveryProduct.skus![0])
+const emptyCheckoutKey = 'empty-cart-checkout'
+emptyCart.consumeSubmittedItems(firstCheckoutItems, emptyCheckoutKey)
+assert.equal(emptyCart.totalQty, 0, '扣量不会产生负数')
+const restoredEmptyCart = createCart(emptyOwner)
+assert.equal(restoredEmptyCart.totalQty, 0)
+restoredEmptyCart.addProduct(recoveryProduct, 3, recoveryProduct.skus![0])
+const restoredNewItemsCart = createCart(emptyOwner)
+restoredNewItemsCart.consumeSubmittedItems(firstCheckoutItems, emptyCheckoutKey)
+assert.equal(restoredNewItemsCart.totalQty, 3, '空车快照也要保留原请求记录以保护后加商品')
+restoredNewItemsCart.clearItems()
+restoredNewItemsCart.addProduct(recoveryProduct, 3, recoveryProduct.skus![0])
+restoredNewItemsCart.consumeSubmittedItems(firstCheckoutItems, emptyCheckoutKey)
+assert.equal(restoredNewItemsCart.totalQty, 3, '主动清空商品不应丢失原请求记录')
+restoredNewItemsCart.clearAll()
+assert.equal(storage.getItem(`y-link.client-cart.snapshot:${emptyOwner}`), null, '登出按原规则清除账号快照')
+
+const volatileOwner = 'confirmed-storage-failure'
+const volatileCart = createCart(volatileOwner)
+volatileCart.addProduct(recoveryProduct, 5, recoveryProduct.skus![0])
+const volatileKey = 'storage-failure-checkout'
+const volatileCartKey = `y-link.client-cart.snapshot:${volatileOwner}`
+const snapshotBeforeFailure = storage.getItem(volatileCartKey)
+try {
+  storage.failOperation = 'set'
+  volatileCart.consumeSubmittedItems(firstCheckoutItems, volatileKey)
+  volatileCart.consumeSubmittedItems(firstCheckoutItems, volatileKey)
+  assert.equal(volatileCart.totalQty, 3, '辅助缓存拒写时，同一内存购物车也只扣一次')
+  assert.equal(storage.getItem(volatileCartKey), snapshotBeforeFailure, '拒写时持久缓存的数量与请求记录均不应部分变更')
+} finally {
+  storage.failOperation = null
+}
+volatileCart.initialize('confirmed-storage-other-owner')
+volatileCart.addProduct(recoveryProduct, 5, recoveryProduct.skus![0])
+volatileCart.consumeSubmittedItems(firstCheckoutItems, volatileKey)
+assert.equal(volatileCart.totalQty, 3, '相同请求键在另一账号独立生效')
+
+const retentionOwner = 'checkout-confirmation-retention'
+const retentionKey = 'retained-checkout'
+const originalNow = Date.now
+const firstConfirmedAt = Date.now()
+try {
+  const retentionCart = createCart(retentionOwner)
+  retentionCart.addProduct(recoveryProduct, 5, recoveryProduct.skus![0])
+  Date.now = () => firstConfirmedAt
+  retentionCart.consumeSubmittedItems(firstCheckoutItems, retentionKey)
+  Date.now = () => firstConfirmedAt + 30 * 60 * 1000 + 45 * 1000
+  const inFlightCart = createCart(retentionOwner)
+  inFlightCart.consumeSubmittedItems(firstCheckoutItems, retentionKey)
+  assert.equal(inFlightCart.totalQty, 3, '记录须覆盖原确认期及临近到期前发出的请求')
+  Date.now = () => firstConfirmedAt + 60 * 60 * 1000
+  assert.equal(createCart(retentionOwner).totalQty, 3, '清理过期记录时应保留商品')
+  assert.ok(!storage.getItem(`y-link.client-cart.snapshot:${retentionOwner}`)?.includes(retentionKey), '重放不会延长记录保留期')
+} finally {
+  Date.now = originalNow
+}
 
 console.log('[verify:client-cart-reconciliation] 购物车目录对账及存储故障降级回归验证通过')

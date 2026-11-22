@@ -62,11 +62,17 @@ export interface BusinessNoSuggestion {
 /** 建议号每批按区间查询物理订单，并限制最大扫描跨度，避免异常数据导致长时间扫描。 */
 const SUGGESTION_WINDOW_SIZE = 200
 const SUGGESTION_SCAN_LIMIT = 5000
+const PHYSICAL_SERIAL_SCAN_BATCH_SIZE = 500
 
 export interface BusinessNoReservationTarget {
   parsed: ParsedBusinessNo
   orderUuid: string
   reason: string | null
+}
+
+interface BusinessNoInspection {
+  parsed: ParsedBusinessNo | null
+  blockingReason: string | null
 }
 
 export class OrderBusinessNoService {
@@ -135,8 +141,13 @@ export class OrderBusinessNoService {
         left.parsed.serialValue - right.parsed.serialValue
         || left.orderUuid.localeCompare(right.orderUuid),
       )
+      const occupancy = await this.readBusinessNoOccupancy(sortedTargets.map((target) => target.parsed.businessNo), manager, true)
       for (const target of sortedTargets) {
-        await this.assertBusinessNoAvailable(target.parsed.businessNo, target.orderUuid, manager)
+        const businessNo = target.parsed.businessNo
+        const owner = occupancy.orders.get(businessNo)
+        if ((owner !== undefined && owner !== target.orderUuid) || occupancy.preorders.has(businessNo)) {
+          throw new BizError(`业务号 ${businessNo} 当前已被其他订单使用`, 409)
+        }
       }
       const afterCursor = Math.max(beforeCursor, sortedTargets.at(-1)?.parsed.serialValue ?? beforeCursor)
       sequence.currentValue = afterCursor
@@ -234,27 +245,49 @@ export class OrderBusinessNoService {
     businessNo: string,
     orderType: OrderType,
     manager: EntityManager,
-  ): Promise<{ parsed: ParsedBusinessNo | null; blockingReason: string | null }> {
-    let parsed: ParsedBusinessNo
-    try {
-      parsed = await this.parseForOrderType(businessNo, orderType, manager)
-    } catch (error) {
-      return {
-        parsed: null,
-        blockingReason: error instanceof Error ? error.message : '业务号格式非法',
+  ): Promise<BusinessNoInspection> {
+    const [result] = await this.inspectConfirmedBatch([{ businessNo, orderType }], manager)
+    return result!
+  }
+
+  async inspectConfirmedBatch(
+    numbers: Array<{ businessNo: string; orderType: OrderType }>,
+    manager: EntityManager,
+  ): Promise<BusinessNoInspection[]> {
+    const configs = new Map<OrderType, Promise<BusinessNoConfig>>()
+    const results: BusinessNoInspection[] = []
+    for (const item of numbers) {
+      try {
+        let config = configs.get(item.orderType)
+        if (!config) {
+          config = this.loadConfig(BUSINESS_NO_RULES[item.orderType].configKeyPrefix, manager)
+          configs.set(item.orderType, config)
+        }
+        results.push({ parsed: this.parseWithConfig(item.businessNo, item.orderType, await config), blockingReason: null })
+      } catch (error) {
+        results.push({ parsed: null, blockingReason: error instanceof Error ? error.message : '业务号格式非法' })
       }
     }
-    const occupied = await manager.getRepository(BizOutboundOrder).existsBy({ businessNo: parsed.businessNo })
-      || await manager.getRepository(O2oPreorder).existsBy({ reservedBusinessNo: parsed.businessNo })
-    return occupied
-      ? { parsed, blockingReason: `业务号 ${parsed.businessNo} 当前已被其他订单使用` }
-      : { parsed, blockingReason: null }
+    const businessNos = results.flatMap((item) => item.parsed ? [item.parsed.businessNo] : [])
+    if (!businessNos.length) return results
+    const occupancy = await this.readBusinessNoOccupancy(businessNos, manager, false)
+    for (const item of results) {
+      const businessNo = item.parsed?.businessNo
+      if (businessNo && (occupancy.orders.has(businessNo) || occupancy.preorders.has(businessNo))) {
+        item.blockingReason = `业务号 ${businessNo} 当前已被其他订单使用`
+      }
+    }
+    return results
   }
 
   async parseForOrderType(businessNo: string, orderType: OrderType, manager: EntityManager): Promise<ParsedBusinessNo> {
+    const config = await this.loadConfig(BUSINESS_NO_RULES[orderType].configKeyPrefix, manager)
+    return this.parseWithConfig(businessNo, orderType, config)
+  }
+
+  private parseWithConfig(businessNo: string, orderType: OrderType, config: BusinessNoConfig): ParsedBusinessNo {
     const normalizedBusinessNo = businessNo.trim().toLowerCase()
     const rule = BUSINESS_NO_RULES[orderType]
-    const config = await this.loadConfig(rule.configKeyPrefix, manager)
     const pattern = new RegExp(`^${rule.namespace}\\d{${config.width}}$`)
     if (!pattern.test(normalizedBusinessNo)) {
       throw new BizError(`业务号格式或命名空间不匹配，应为 ${rule.namespace} 加 ${config.width} 位数字`, 409)
@@ -264,6 +297,33 @@ export class OrderBusinessNoService {
       throw new BizError('业务号流水值非法', 409)
     }
     return { orderType, namespace: rule.namespace, serialValue, businessNo: normalizedBusinessNo }
+  }
+
+  private async readBusinessNoOccupancy(businessNos: string[], manager: EntityManager, lock: boolean) {
+    const unique = [...new Set(businessNos)]
+    const bindings = unique.map((businessNo, index) => [`confirmed${index}`, businessNo] as const)
+    const parameters = { businessNos: unique, ...Object.fromEntries(bindings) }
+    // 返回数据库实际判等的候选号。历史值即使大小写或字形不同，也沿用各列原生排序规则。
+    const matchedNo = (column: string) => `CASE ${column} ${bindings.map(([key]) => `WHEN :${key} THEN :${key}`).join(' ')} END`
+    const orders = manager.getRepository(BizOutboundOrder).createQueryBuilder('order')
+      .select(matchedNo('order.businessNo'), 'businessNo')
+      .addSelect('order.orderUuid', 'orderUuid')
+      .where('order.businessNo IN (:...businessNos)', parameters)
+      .orderBy('order.businessNo', 'ASC')
+    const preorders = manager.getRepository(O2oPreorder).createQueryBuilder('preorder')
+      .select(matchedNo('preorder.reservedBusinessNo'), 'businessNo')
+      .where('preorder.reservedBusinessNo IN (:...businessNos)', parameters)
+      .orderBy('preorder.reservedBusinessNo', 'ASC')
+    if (lock && manager.connection.options.type !== 'sqlite') {
+      orders.setLock('pessimistic_read')
+      preorders.setLock('pessimistic_read')
+    }
+    const orderRows = await orders.getRawMany<{ businessNo: string; orderUuid: string }>()
+    const preorderRows = await preorders.getRawMany<{ businessNo: string }>()
+    return {
+      orders: new Map(orderRows.map((order) => [order.businessNo, order.orderUuid])),
+      preorders: new Set(preorderRows.map((preorder) => preorder.businessNo)),
+    }
   }
 
   private async assertBusinessNoAvailable(
@@ -321,37 +381,46 @@ export class OrderBusinessNoService {
   ): Promise<number> {
     const rule = BUSINESS_NO_RULES[orderType]
     const pattern = new RegExp(`^${rule.namespace}\\d{${config.width}}$`)
-    const query = manager.getRepository(BizOutboundOrder)
-      .createQueryBuilder('order')
-      .select('order.businessNo', 'businessNo')
-      .addSelect('order.id', 'id')
-      .where('order.orderType = :orderType', { orderType })
-    if (excludeOrderId) query.andWhere('order.id <> :excludeOrderId', { excludeOrderId })
-    const rows = await query.getRawMany<{ id: string; businessNo: string }>()
+    const outbound = manager.getRepository(BizOutboundOrder)
+      .createQueryBuilder('entry')
+      .select('entry.businessNo', 'businessNo')
+      .where('entry.orderType = :orderType', { orderType })
+    if (excludeOrderId) outbound.andWhere('entry.id <> :excludeOrderId', { excludeOrderId })
+    const preorder = manager.getRepository(O2oPreorder)
+      .createQueryBuilder('entry')
+      .select('entry.reservedBusinessNo', 'businessNo')
+      .where('entry.clientOrderType = :orderType', { orderType })
+      .andWhere('entry.reservedBusinessNo IS NOT NULL')
+
+    const sqlite = manager.connection.options.type === 'sqlite'
+    const idTextType = sqlite ? 'TEXT' : 'CHAR'
+    const idParameterType = sqlite ? 'INTEGER' : 'UNSIGNED'
     let maxSerial = 0
-    for (const row of rows) {
-      const businessNo = String(row.businessNo ?? '').trim().toLowerCase()
-      if (!pattern.test(businessNo)) {
-        throw new BizError(`订单 ${row.id || '未知'} 的当前业务号不符合 ${rule.namespace} 命名空间，无法安全校准游标`, 500)
+    for (const [source, query] of [['outbound', outbound], ['preorder', preorder]] as const) {
+      query.addSelect(`CAST(entry.id AS ${idTextType})`, 'id')
+        .orderBy('entry.id', 'DESC').limit(PHYSICAL_SERIAL_SCAN_BATCH_SIZE)
+      let cursor: string | undefined
+      while (true) {
+        const batch = query.clone()
+        if (cursor !== undefined) batch.andWhere(`entry.id < CAST(:cursor AS ${idParameterType})`, { cursor })
+        const rows = await batch.getRawMany<{ id: string; businessNo: string }>()
+        for (const row of rows) {
+          const businessNo = String(row.businessNo ?? '').trim().toLowerCase()
+          if (!pattern.test(businessNo)) {
+            if (source === 'preorder') {
+              throw new BizError(`预订单预留业务号 ${businessNo} 不符合 ${rule.namespace} 命名空间，无法安全校准游标`, 500)
+            }
+            throw new BizError(`订单 ${row.id || '未知'} 的当前业务号不符合 ${rule.namespace} 命名空间，无法安全校准游标`, 500)
+          }
+          const serialValue = Number.parseInt(businessNo.slice(rule.namespace.length), 10)
+          if (source === 'outbound' && (!Number.isSafeInteger(serialValue) || serialValue < config.start)) {
+            throw new BizError(`订单 ${row.id || '未知'} 的当前业务号流水值非法，无法安全校准游标`, 500)
+          }
+          maxSerial = Math.max(maxSerial, serialValue)
+        }
+        if (rows.length < PHYSICAL_SERIAL_SCAN_BATCH_SIZE) break
+        cursor = rows.at(-1)!.id
       }
-      const serialValue = Number.parseInt(businessNo.slice(rule.namespace.length), 10)
-      if (!Number.isSafeInteger(serialValue) || serialValue < config.start) {
-        throw new BizError(`订单 ${row.id || '未知'} 的当前业务号流水值非法，无法安全校准游标`, 500)
-      }
-      maxSerial = Math.max(maxSerial, serialValue)
-    }
-    const reservedRows = await manager.getRepository(O2oPreorder)
-      .createQueryBuilder('preorder')
-      .select('preorder.reservedBusinessNo', 'businessNo')
-      .where('preorder.clientOrderType = :orderType', { orderType })
-      .andWhere('preorder.reservedBusinessNo IS NOT NULL')
-      .getRawMany<{ businessNo: string }>()
-    for (const row of reservedRows) {
-      const businessNo = String(row.businessNo ?? '').trim().toLowerCase()
-      if (!pattern.test(businessNo)) {
-        throw new BizError(`预订单预留业务号 ${businessNo} 不符合 ${rule.namespace} 命名空间，无法安全校准游标`, 500)
-      }
-      maxSerial = Math.max(maxSerial, Number.parseInt(businessNo.slice(rule.namespace.length), 10))
     }
     return maxSerial
   }

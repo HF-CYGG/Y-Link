@@ -8,6 +8,7 @@
  * 维护说明：新增匿名入口、导出或 SSE 接口时同步登记下方清单；削峰只是保护手段，容量型 DDoS 仍需上游 CDN/高防。
  */
 
+import { staticPathKey } from '../utils/static-path-key.js'
 import type { NextFunction, Request, Response } from 'express'
 import { OVERLOAD_SHEDDING_POLICY } from '../config/load-protection-policy.js'
 import { OverloadMonitor, type OverloadLevel, type OverloadShedCategory } from '../utils/overload-monitor.js'
@@ -43,6 +44,7 @@ const CRITICAL_READ_ALLOWLIST = new Set(['/api/auth/me', '/api/client-auth/me'])
 /** 按等级判定请求是否应被削峰，返回削峰类别；不削峰返回 null。 */
 export function classifyOverloadShed(method: string, path: string, level: OverloadLevel): OverloadShedCategory | null {
   if (level === 'normal') return null
+  path = staticPathKey(path)
   if (!path.startsWith('/api/') || path.startsWith('/api/v1/') || path.startsWith('/api/database-rescue')) return null
   if (ANONYMOUS_AUTH_PATHS.has(path)) return 'anonymousAuth'
   if (REALTIME_PATHS.has(path)) return 'realtime'
