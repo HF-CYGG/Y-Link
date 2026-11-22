@@ -19,6 +19,7 @@ import { BizOutboundOrderItem } from '../src/entities/biz-outbound-order-item.en
 import { ClientUser } from '../src/entities/client-user.entity.js'
 import { InventoryLog } from '../src/entities/inventory-log.entity.js'
 import { O2oPreorder } from '../src/entities/o2o-preorder.entity.js'
+import { O2oPreorderItem } from '../src/entities/o2o-preorder-item.entity.js'
 import { O2oReturnRequest } from '../src/entities/o2o-return-request.entity.js'
 import { OrderRevision } from '../src/entities/order-revision.entity.js'
 import { SysAuditLog } from '../src/entities/sys-audit-log.entity.js'
@@ -1149,7 +1150,7 @@ const run = async () => {
 
   const historicalUnrecordedPreorder = await submitPreorderWithPickup(clientAuth, {
     clientRequestId: 'o2o-verify-historical-unrecorded-01',
-    items: [{ productId: product.id, qty: 1 }],
+    items: [{ productId: product.id, qty: 3 }],
     isSystemApplied: false,
     pickupContact: '历史模拟领取人',
   })
@@ -1163,6 +1164,24 @@ const run = async () => {
   assert.equal(historicalOutboundDetail.order.sourcePreorderPickupContact, null)
   assert.equal(historicalOutboundDetail.order.sourcePreorderPickupAt, SCRIPT_PICKUP_AT)
   log('历史部门单缺失领取人时保持未记录，不从账号实名推断')
+
+  const historicalItems = AppDataSource.getRepository(O2oPreorderItem)
+  const historicalItem = await historicalItems.findOneByOrFail({ orderId: historicalUnrecordedPreorder.order.id })
+  const historicalOutboundItems = AppDataSource.getRepository(BizOutboundOrderItem)
+  const historicalOutboundItem = await historicalOutboundItems.findOneByOrFail({ orderId: String(historicalOutbound.id) })
+  await historicalItems.update(historicalItem.id, { unitPrice: '0.00', lineAmount: '10.00' })
+  for (const [qty, remaining, amount] of [[1, 2, '6.67'], [2, 0, '0.00']] as const) {
+    const returnRequest = await o2oPreorderService.createReturnRequest(clientAuth, historicalUnrecordedPreorder.order.id, {
+      reason: '历史金额快照退货核销',
+      items: [{ productId: historicalItem.productId, skuId: historicalItem.skuId, qty }],
+    })
+    await o2oPreorderService.verifyByCode(returnRequest.verifyCode, scriptAdminActor)
+    const stored = await historicalItems.findOneByOrFail({ id: historicalItem.id })
+    assert.equal(stored.qty, remaining)
+    assert.equal(Number(stored.lineAmount).toFixed(2), amount)
+    const outbound = await outboundOrderRepo.findOneByOrFail({ id: historicalOutbound.id })
+    assert.equal(Number(outbound.totalAmount).toFixed(2), (Number(historicalOutboundItem.unitPrice) * remaining).toFixed(2))
+  }
 
   const historicalWalkinPreorder = await submitPreorderWithPickup(otherClientAuth, {
     clientRequestId: 'o2o-verify-historical-walkin-01',

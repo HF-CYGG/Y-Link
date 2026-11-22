@@ -4854,7 +4854,7 @@ class O2oPreorderService {
     }
     const requestQty = Number(requestItem.qty)
     const currentOrderQty = Math.max(0, Number(orderItem.qty ?? 0))
-    if (!Number.isSafeInteger(requestQty) || requestQty <= 0 || currentOrderQty < requestQty) {
+    if (!Number.isSafeInteger(requestQty) || requestQty <= 0 || !Number.isSafeInteger(currentOrderQty) || currentOrderQty < requestQty) {
       throw new BizError(`商品「${product.productName}」可退数量不足，无法核销`, 409)
     }
 
@@ -4911,7 +4911,16 @@ class O2oPreorderService {
     }
 
     orderItem.qty = currentOrderQty - requestQty
-    orderItem.lineAmount = formatMoneyFromCents(orderItem.qty * parseMoneyToCents(orderItem.unitPrice))
+    const unitPriceCents = parseMoneyToCents(orderItem.unitPrice)
+    const previousLineCents = parseMoneyToCents(orderItem.lineAmount)
+    if (orderItem.qty > 0 && unitPriceCents === 0 && previousLineCents > 0) {
+      // 旧行缺少单价时按本次退货前的行金额分摊，件数乘积按整数分四舍五入。
+      const divisor = BigInt(currentOrderQty)
+      const scaledCents = BigInt(previousLineCents) * BigInt(orderItem.qty)
+      orderItem.lineAmount = formatMoneyFromCents(Number((scaledCents + divisor / 2n) / divisor))
+    } else {
+      orderItem.lineAmount = formatMoneyFromCents(orderItem.qty * Math.max(0, unitPriceCents))
+    }
     await manager.getRepository(O2oPreorderItem).save(orderItem)
     return { orderItem, currentOrderQty }
   }
