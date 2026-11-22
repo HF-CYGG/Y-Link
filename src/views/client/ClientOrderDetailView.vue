@@ -672,17 +672,26 @@ const buildEditableItemsFromDetail = (nextDetail: O2oPreorderDetail, existingIte
   })
 }
 
-let editDraftBaseline = ''
-let returnDraftBaseline = ''
+const editDraftBaseline = ref('')
+const returnDraftBaseline = ref('')
 const currentEditDraft = () => snapshotOrderEditDraft(editRemark.value, editAddProductId.value, editOrderItems.value)
 const currentReturnDraft = () => snapshotOrderReturnDraft(returnReason.value, returnQtyMap.value)
+const hasUnsavedOrderDrafts = () => (editDialogVisible.value && currentEditDraft() !== editDraftBaseline.value)
+  || (returnDialogVisible.value && currentReturnDraft() !== returnDraftBaseline.value)
+const handleOrderDraftBeforeUnload = (event: BeforeUnloadEvent) => {
+  event.preventDefault()
+  event.returnValue = true
+}
+const warnBeforeReload = computed(() => Boolean(clientAuthStore.currentUser?.id) && hasUnsavedOrderDrafts())
+watch(warnBeforeReload, (shouldWarn) => {
+  if (shouldWarn) globalThis.window?.addEventListener('beforeunload', handleOrderDraftBeforeUnload)
+  else globalThis.window?.removeEventListener('beforeunload', handleOrderDraftBeforeUnload)
+}, { flush: 'sync' })
 let discardConfirmation: Promise<boolean> | null = null
 const confirmDiscardOrderDrafts = () => {
   if (!clientAuthStore.currentUser?.id) return Promise.resolve(true)
   if (editSubmitting.value || returnSubmitting.value) return Promise.resolve(false)
-  const dirty = (editDialogVisible.value && currentEditDraft() !== editDraftBaseline)
-    || (returnDialogVisible.value && currentReturnDraft() !== returnDraftBaseline)
-  if (!dirty) return Promise.resolve(true)
+  if (!hasUnsavedOrderDrafts()) return Promise.resolve(true)
   if (discardConfirmation) return discardConfirmation
   const owner = clientAuthStore.currentUser.id
   const session = clientAuthStore.sessionGeneration
@@ -706,13 +715,13 @@ const resetEditForm = () => {
   editRemark.value = detail.value?.order.remark ?? ''
   editAddProductId.value = ''
   editOrderItems.value = detail.value ? buildEditableItemsFromDetail(detail.value) : []
-  editDraftBaseline = currentEditDraft()
+  editDraftBaseline.value = currentEditDraft()
 }
 
 const resetReturnForm = () => {
   returnReason.value = ''
   returnQtyMap.value = {}
-  returnDraftBaseline = currentReturnDraft()
+  returnDraftBaseline.value = currentReturnDraft()
 }
 
 // 详细注释：正式出库单的补填字段仅服务于当前弹层会话，关闭或切换订单时都必须回到初始值，
@@ -957,9 +966,9 @@ const loadMallProducts = async () => {
     if (!isCurrent()) return
     mallProducts.value = products
     if (detail.value) {
-      const pristine = currentEditDraft() === editDraftBaseline
+      const pristine = currentEditDraft() === editDraftBaseline.value
       editOrderItems.value = buildEditableItemsFromDetail(detail.value, editOrderItems.value)
-      if (pristine) editDraftBaseline = currentEditDraft()
+      if (pristine) editDraftBaseline.value = currentEditDraft()
     }
   } catch (error) {
     if (!isCurrent()) return
@@ -1549,6 +1558,7 @@ onBeforeUnmount(() => {
   qrScopeActive = false; pickupQrGeneration += 1; returnQrGeneration += 1
   voucherDetailUnmounted = true
   disposeClientOrderRefresh()
+  globalThis.window?.removeEventListener('beforeunload', handleOrderDraftBeforeUnload)
   globalThis.document?.removeEventListener('visibilitychange', handleVisibilityChange)
   if (detailAutoRefreshTimer !== null) {
     globalThis.clearInterval(detailAutoRefreshTimer)
