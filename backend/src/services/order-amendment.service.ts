@@ -351,7 +351,9 @@ export class OrderAmendmentService {
   private buildAfterSnapshot(before: OrderAmendmentSnapshot, input: OrderAmendmentInput): OrderAmendmentSnapshot {
     const after: OrderAmendmentSnapshot = { ...before }
     if (hasOwn(input, 'businessNo')) {
-      after.businessNo = this.normalizeRequiredText(input.businessNo, FIELD_LIMITS.businessNo, '业务号')
+      const businessNo = this.normalizeRequiredText(input.businessNo, FIELD_LIMITS.businessNo, '业务号').toLowerCase()
+      // 只改变大小写不占新号，保留存量单据已使用的编号写法。
+      if (businessNo !== before.businessNo.toLowerCase()) after.businessNo = businessNo
     }
     if (hasOwn(input, 'orderType')) {
       if (input.orderType !== 'department' && input.orderType !== 'walkin') {

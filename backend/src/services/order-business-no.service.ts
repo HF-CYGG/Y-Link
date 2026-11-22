@@ -64,6 +64,21 @@ const SUGGESTION_WINDOW_SIZE = 200
 const SUGGESTION_SCAN_LIMIT = 5000
 const PHYSICAL_SERIAL_SCAN_BATCH_SIZE = 500
 
+/** SQLite 原有唯一索引按字节比较。枚举受控前缀的大小写等价形式，查询时仍可使用索引。 */
+function sqliteBusinessNoPrefixes(prefix: string): string[] {
+  return [...prefix].reduce(
+    (variants, letter) => variants.flatMap((variant) => [variant + letter, variant + letter.toUpperCase()]),
+    [''],
+  )
+}
+
+function sqliteBusinessNoVariants(businessNo: string): string[] {
+  const match = /^(hyyz(?:jd)?)(\d+)$/i.exec(businessNo)
+  if (!match) return [businessNo]
+  const [, prefix, digits] = match
+  return sqliteBusinessNoPrefixes(prefix!.toLowerCase()).map((variant) => variant + digits)
+}
+
 export interface BusinessNoReservationTarget {
   parsed: ParsedBusinessNo
   orderUuid: string
@@ -144,8 +159,8 @@ export class OrderBusinessNoService {
       const occupancy = await this.readBusinessNoOccupancy(sortedTargets.map((target) => target.parsed.businessNo), manager, true)
       for (const target of sortedTargets) {
         const businessNo = target.parsed.businessNo
-        const owner = occupancy.orders.get(businessNo)
-        if ((owner !== undefined && owner !== target.orderUuid) || occupancy.preorders.has(businessNo)) {
+        const owners = occupancy.orders.get(businessNo)
+        if (owners?.some((owner) => owner !== target.orderUuid) || occupancy.preorders.has(businessNo)) {
           throw new BizError(`业务号 ${businessNo} 当前已被其他订单使用`, 409)
         }
       }
@@ -195,6 +210,7 @@ export class OrderBusinessNoService {
     const businessNos: string[] = []
     const skippedBusinessNos: string[] = []
     const formatSerial = (serial: number) => `${rule.namespace}${String(serial).padStart(config.width, '0')}`
+    const prefixes = manager.connection.options.type === 'sqlite' ? sqliteBusinessNoPrefixes(rule.namespace) : [rule.namespace]
 
     let windowStart = Math.max(cursor + 1, config.start)
     while (businessNos.length < count && windowStart <= maxSerial) {
@@ -202,23 +218,24 @@ export class OrderBusinessNoService {
         throw new BizError(`业务号游标之后连续 ${SUGGESTION_SCAN_LIMIT} 个号均不可用，请手动填写业务单号`, 409)
       }
       const windowEnd = Math.min(maxSerial, windowStart + SUGGESTION_WINDOW_SIZE - 1)
+      const rangeCondition = (column: string) => '(' + prefixes.map((_, index) =>
+        `${column} BETWEEN :start${index} AND :end${index}`,
+      ).join(' OR ') + ')'
+      const rangeParameters = Object.fromEntries(prefixes.flatMap((prefix, index) => [
+        [`start${index}`, prefix + String(windowStart).padStart(config.width, '0')],
+        [`end${index}`, prefix + String(windowEnd).padStart(config.width, '0')],
+      ]))
       const occupiedRows = await manager.getRepository(BizOutboundOrder)
         .createQueryBuilder('order')
         .select('order.businessNo', 'businessNo')
         .where('order.orderType = :orderType', { orderType })
-        .andWhere('order.businessNo BETWEEN :startBusinessNo AND :endBusinessNo', {
-          startBusinessNo: formatSerial(windowStart),
-          endBusinessNo: formatSerial(windowEnd),
-        })
+        .andWhere(rangeCondition('order.businessNo'), rangeParameters)
         .getRawMany<{ businessNo: string }>()
       const reservedRows = await manager.getRepository(O2oPreorder)
         .createQueryBuilder('preorder')
         .select('preorder.reservedBusinessNo', 'businessNo')
         .where('preorder.clientOrderType = :orderType', { orderType })
-        .andWhere('preorder.reservedBusinessNo BETWEEN :startBusinessNo AND :endBusinessNo', {
-          startBusinessNo: formatSerial(windowStart),
-          endBusinessNo: formatSerial(windowEnd),
-        })
+        .andWhere(rangeCondition('preorder.reservedBusinessNo'), rangeParameters)
         .getRawMany<{ businessNo: string }>()
       const occupied = new Set([...occupiedRows, ...reservedRows].map((row) => String(row.businessNo).trim().toLowerCase()))
       for (let serial = windowStart; serial <= windowEnd && businessNos.length < count; serial += 1) {
@@ -302,9 +319,15 @@ export class OrderBusinessNoService {
   private async readBusinessNoOccupancy(businessNos: string[], manager: EntityManager, lock: boolean) {
     const unique = [...new Set(businessNos)]
     const bindings = unique.map((businessNo, index) => [`confirmed${index}`, businessNo] as const)
-    const parameters = { businessNos: unique, ...Object.fromEntries(bindings) }
+    const sqlite = manager.connection.options.type === 'sqlite'
+    const parameters = {
+      businessNos: sqlite ? unique.flatMap(sqliteBusinessNoVariants) : unique,
+      ...Object.fromEntries(bindings),
+    }
     // 返回数据库实际判等的候选号。历史值即使大小写或字形不同，也沿用各列原生排序规则。
-    const matchedNo = (column: string) => `CASE ${column} ${bindings.map(([key]) => `WHEN :${key} THEN :${key}`).join(' ')} END`
+    const matchedNo = (column: string) => sqlite
+      ? `LOWER(${column})`
+      : `CASE ${column} ${bindings.map(([key]) => `WHEN :${key} THEN :${key}`).join(' ')} END`
     const orders = manager.getRepository(BizOutboundOrder).createQueryBuilder('order')
       .select(matchedNo('order.businessNo'), 'businessNo')
       .addSelect('order.orderUuid', 'orderUuid')
@@ -314,16 +337,19 @@ export class OrderBusinessNoService {
       .select(matchedNo('preorder.reservedBusinessNo'), 'businessNo')
       .where('preorder.reservedBusinessNo IN (:...businessNos)', parameters)
       .orderBy('preorder.reservedBusinessNo', 'ASC')
-    if (lock && manager.connection.options.type !== 'sqlite') {
+    if (lock && !sqlite) {
       orders.setLock('pessimistic_read')
       preorders.setLock('pessimistic_read')
     }
     const orderRows = await orders.getRawMany<{ businessNo: string; orderUuid: string }>()
     const preorderRows = await preorders.getRawMany<{ businessNo: string }>()
-    return {
-      orders: new Map(orderRows.map((order) => [order.businessNo, order.orderUuid])),
-      preorders: new Set(preorderRows.map((preorder) => preorder.businessNo)),
+    const owners = new Map<string, string[]>()
+    for (const row of orderRows) {
+      const existing = owners.get(row.businessNo)
+      if (existing) existing.push(row.orderUuid)
+      else owners.set(row.businessNo, [row.orderUuid])
     }
+    return { orders: owners, preorders: new Set(preorderRows.map((preorder) => preorder.businessNo)) }
   }
 
   private async assertBusinessNoAvailable(
@@ -332,15 +358,17 @@ export class OrderBusinessNoService {
     manager: EntityManager,
     ownerPreorderId?: string,
   ): Promise<void> {
+    const sqlite = manager.connection.options.type === 'sqlite'
+    const businessNos = sqlite ? sqliteBusinessNoVariants(businessNo) : [businessNo]
     const query = manager.getRepository(BizOutboundOrder)
       .createQueryBuilder('order')
-      .where('order.businessNo = :businessNo', { businessNo })
+      .where('order.businessNo IN (:...businessNos)', { businessNos })
       .andWhere('order.orderUuid <> :orderUuid', { orderUuid })
     const reservationQuery = manager.getRepository(O2oPreorder)
       .createQueryBuilder('preorder')
-      .where('preorder.reservedBusinessNo = :businessNo', { businessNo })
+      .where('preorder.reservedBusinessNo IN (:...businessNos)', { businessNos })
     if (ownerPreorderId) reservationQuery.andWhere('preorder.id <> :ownerPreorderId', { ownerPreorderId })
-    if (manager.connection.options.type !== 'sqlite') {
+    if (!sqlite) {
       query.setLock('pessimistic_read')
       reservationQuery.setLock('pessimistic_read')
     }
