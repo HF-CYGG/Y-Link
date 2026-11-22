@@ -7,7 +7,7 @@
 
 import { Router } from 'express'
 import { requirePermission } from '../middleware/auth.middleware.js'
-import { reportService, REPORT_TYPES, type ReportQueryInput, type ReportType } from '../services/report.service.js'
+import { reportService, REPORT_TYPES, type ReportExportResult, type ReportQueryInput, type ReportType } from '../services/report.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
@@ -104,30 +104,37 @@ reportRouter.get(
     const type = parseReportType(req.params.type)
     const fileName = `report-${type}-${new Date().toISOString().slice(0, 19).replaceAll(/[:T]/g, '-')}.xlsx`
     const reportQuery = buildReportQuery(req.query as Record<string, unknown>)
-    const result = await reportService.exportExcel(
-      type,
-      reportQuery,
-      res,
-      () => {
-        // 首批查询成功后才声明下载，避免参数/数据库错误被浏览器误存为损坏的 xlsx。
-        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-        res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`)
-      },
-      authReq.auth.userId,
-    )
-    // 经营数据批量导出留痕：只记报表类型、时间段、字段与行数。
-    await auditService.recordDataExport({
-      exportType: 'report',
-      actor: authReq.auth,
-      requestMeta: extractRequestMeta(req),
-      rowCount: result.rowCount,
-      filters: {
-        reportType: type,
-        startDate: reportQuery.startDate ?? null,
-        endDate: reportQuery.endDate ?? null,
-        tagCount: reportQuery.tagIds?.length ?? 0,
-        fields: (reportQuery.fields ?? []).slice(0, 50).map((field) => field.slice(0, 64)),
-      },
-    })
+    let exported: ReportExportResult | undefined
+    try {
+      exported = await reportService.exportExcel(
+        type,
+        reportQuery,
+        res,
+        () => {
+          // 首批查询成功后才声明下载，避免参数/数据库错误被浏览器误存为损坏的 xlsx。
+          res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+          res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`)
+        },
+        authReq.auth.userId,
+      )
+    } finally {
+      // 一旦发出响应头就记录导出。中断时无法确认已送达客户端的行数。
+      if (exported || res.headersSent) {
+        await auditService.recordDataExport({
+          exportType: 'report',
+          actor: authReq.auth,
+          requestMeta: extractRequestMeta(req),
+          rowCount: exported?.rowCount ?? null,
+          filters: {
+            reportType: type,
+            startDate: reportQuery.startDate ?? null,
+            endDate: reportQuery.endDate ?? null,
+            tagCount: reportQuery.tagIds?.length ?? 0,
+            fields: (reportQuery.fields ?? []).slice(0, 50).map((field) => field.slice(0, 64)),
+            ...(exported ? {} : { transferStatus: 'incomplete' }),
+          },
+        })
+      }
+    }
   }),
 )

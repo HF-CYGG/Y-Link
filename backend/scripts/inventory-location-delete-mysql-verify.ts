@@ -137,6 +137,12 @@ try {
   const stocktakeRepo = AppDataSource.getRepository(InvStocktake)
   const auditRepo = AppDataSource.getRepository(SysAuditLog)
 
+  await assert.rejects(
+    () => stocktakeService.create({ scopeType: 'location', locationIds: [`${stocked.id}失效`] }, creator),
+    { statusCode: 400, message: '存在无效的库位' },
+  )
+  assert.equal(await stocktakeRepo.count(), 0, '无效库位不应被数据库隐式转换后建单')
+
   const removed = await inventoryMasterDataService.createLocation({ locationCode: 'RACE-DELETED' }, deleter)
   const [deletion, lateStocktake] = await contend(
     () => inventoryMasterDataService.deleteLocation(removed.id, deleter),

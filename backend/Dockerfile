@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 # ------------------------------
 # 文件说明：Y-Link 后端镜像构建文件。
 # 实现逻辑：
@@ -110,11 +112,11 @@ FROM ${Y_LINK_NODE_IMAGE} AS runtime
 # 保留既有合法运行基线；本批未验收native候选仅由独立target产出，尚未接入runtime。
 COPY --from=native-security-build /native-out /tmp/ylink-native-security
 COPY native-security/baseline-v7/install-backports.mjs native-security/baseline-v7/source-pins.json /tmp/ylink-native-security-installer/
-# 固定既有npm工具；官方包完整性失败即停，不改变Node/Nginx或应用锁。
-COPY scripts/install-pinned-npm.mjs /tmp/ylink-install-pinned-npm.mjs
-COPY scripts/build-pinned-npm.mjs /tmp/build-pinned-npm.mjs
-COPY npm-toolchain /tmp/ylink-npm-toolchain
-RUN node /tmp/ylink-install-pinned-npm.mjs --context=image --data-dir=/tmp/ylink-npm-toolchain
+# 安装输入只在本次构建指令内可读，运行镜像仅保留安装好的工具与构建证明。
+RUN --mount=type=bind,source=scripts/install-pinned-npm.mjs,target=/tmp/ylink-install-pinned-npm.mjs,ro \
+  --mount=type=bind,source=scripts/build-pinned-npm.mjs,target=/tmp/build-pinned-npm.mjs,ro \
+  --mount=type=bind,source=npm-toolchain,target=/tmp/ylink-npm-toolchain,ro \
+  node /tmp/ylink-install-pinned-npm.mjs --context=image --data-dir=/tmp/ylink-npm-toolchain
 
 WORKDIR /app
 

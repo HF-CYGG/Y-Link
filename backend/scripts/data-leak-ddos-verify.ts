@@ -28,7 +28,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { Writable } from 'node:stream'
-import { EventEmitter } from 'node:events'
+import { EventEmitter, once } from 'node:events'
 import { fileURLToPath } from 'node:url'
 import type { AuthUserContext } from '../src/types/auth.js'
 import { buildMySqlTargetConnectionIssue } from '../src/utils/mysql-target-issue.js'
@@ -1291,6 +1291,42 @@ async function verifyExportGovernance() {
   assert.equal(auditExport.rowCount, authLines.length - 1, '导出留痕记录行数')
   const productExport = JSON.parse(exportRows.find((row) => row.actionType === 'data_export.products')!.detailJson!) as { filters: { includeCostPrice: boolean } }
   assert.equal(productExport.filters.includeCostPrice, true)
+  const reportExport = JSON.parse(exportRows.find((row) => row.actionType === 'data_export.report')!.detailJson!)
+  assert.equal(typeof reportExport.rowCount, 'number')
+  assert.equal(reportExport.filters.transferStatus, undefined)
+
+  const reportMarker = await auditMarker()
+  const reportPath = '/api/reports/inventory/export'
+  const { reportService } = await import('../src/services/report.service.js')
+  const originalReportExport = reportService.exportExcel
+  const { BizError } = await import('../src/utils/errors.js')
+  try {
+    reportService.exportExcel = async () => { throw new BizError('测试报表查询失败', 400) }
+    const rejectedReport = await call('GET', reportPath, { session })
+    assert.equal(rejectedReport.status, 400)
+    assert.equal(rejectedReport.body?.message, '测试报表查询失败')
+
+    reportService.exportExcel = async (_type, _input, output, onReady) => {
+      const closed = once(output, 'close')
+      onReady?.()
+      output.write('报表输出测试数据')
+      await closed
+      throw new Error('测试报表传输中断')
+    }
+    const streaming = await fetch(`${baseUrl}${reportPath}`, { headers: { Cookie: session.cookie } })
+    assert.equal(streaming.status, 200)
+    assert.ok(streaming.body)
+    const reader = streaming.body.getReader()
+    assert.equal((await reader.read()).done, false)
+    await reader.cancel()
+    const rows = await settledAuditRows(reportMarker, ['data_export.report'], 1)
+    assert.equal(rows.length, 1, '只有开始传输的报表才需留痕，且只记录一次')
+    const interrupted = JSON.parse(rows[0]!.detailJson!)
+    assert.equal(interrupted.rowCount, null)
+    assert.equal(interrupted.filters.transferStatus, 'incomplete')
+  } finally {
+    reportService.exportExcel = originalReportExport
+  }
 
   // 导出租约：同一账号已有导出进行中时，审计与商品导出都立即 429。
   const lease = m.dataExportLeasePool.acquire(String(adminId))

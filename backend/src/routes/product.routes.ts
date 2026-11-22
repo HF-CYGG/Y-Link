@@ -276,7 +276,7 @@ const onlineDisplaySchema = z.object({
 }).strict().refine((value) => Object.keys(value).length > 0, { message: '至少提供一个线上展示字段' })
 
 const batchOnlineDisplaySchema = z.object({
-  ids: z.array(z.string().trim().min(1)).min(1),
+  ids: z.array(z.string().trim().min(1)).min(1).max(100, '每次最多批量处理 100 个商品'),
   o2oStatus: z.enum(['listed', 'unlisted']),
 }).strict()
 

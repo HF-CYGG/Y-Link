@@ -1,5 +1,6 @@
 /** 无数据库依赖的公开商城缓存/HTTP 条件请求验收，便于在缺少本地 sqlite3 驱动的 CI 环境运行。 */
 import assert from 'node:assert/strict'
+import { mock } from 'node:test'
 import { setImmediate as nextTurn } from 'node:timers/promises'
 
 process.env.NODE_ENV = 'test'
@@ -12,15 +13,15 @@ process.env.DB_PASSWORD = ''
 process.env.DB_NAME = 'catalog_verify'
 process.env.DB_SYNC = 'false'
 
-const [{ createApp }, { o2oPreorderService }, { invalidateMallCatalogReadCache }] = await Promise.all([
+const [{ createApp }, { o2oPreorderService }, { invalidateMallCatalogReadCache }, { clientAuthService }] = await Promise.all([
   import('../src/app.js'),
   import('../src/services/o2o-preorder.service.js'),
   import('../src/services/mall-catalog-revision.service.js'),
+  import('../src/services/client-auth.service.js'),
 ])
 
 const mutableService = o2oPreorderService as unknown as {
   buildMallProductsUncached: () => Promise<unknown>
-  loadMallStorefrontConfig: () => Promise<unknown>
 }
 let stock = 20
 let catalogBuildCount = 0
@@ -50,10 +51,17 @@ mutableService.buildMallProductsUncached = async () => {
     storefront: { businessHoursText: '10:00 - 22:00', mallAnnouncementText: '' },
   }
 }
-mutableService.loadMallStorefrontConfig = async () => ({
+let pickupWindowHours = 48
+mock.method(o2oPreorderService, 'readCurrentMallStorefrontConfig', async () => ({
   businessHoursText: '10:00 - 22:00',
+  pickupAddress: '测试门店',
   mallAnnouncementText: '',
-})
+  pickupWindowHours,
+}))
+mock.method(clientAuthService, 'resolveClientByToken', async (token: string) => ({
+  userId: '1', account: 'storefront-unit-verify', mobile: '', email: '', realName: '验收账户',
+  accountType: 'department', staffNo: null, sessionToken: token, authSource: 'bearer',
+}))
 
 const coldSnapshots = await Promise.all(
   Array.from({ length: 100 }, () => o2oPreorderService.getMallProductsPublicSnapshot()),
@@ -134,8 +142,31 @@ try {
   assert.equal(conditionalResponse.status, 304)
   assert.equal(conditionalResponse.headers.get('etag'), etag)
   assert.equal(await conditionalResponse.text(), '')
+
+  const storefrontUrl = `http://127.0.0.1:${address.port}/api/o2o/mall/storefront`
+  const storefrontResponse = await fetch(storefrontUrl)
+  assert.equal(storefrontResponse.status, 200)
+  assert.match(storefrontResponse.headers.get('cache-control') ?? '', /^public, max-age=5/)
+  assert.equal((await storefrontResponse.json()).data.pickupWindowHours, 48)
+  const storefrontEtag = storefrontResponse.headers.get('etag')
+  assert.ok(storefrontEtag)
+  pickupWindowHours = 24
+  assert.equal((await fetch(storefrontUrl, { headers: { 'If-None-Match': storefrontEtag } })).status, 304)
+
+  const checkoutUrl = `${storefrontUrl}/checkout`
+  assert.equal((await fetch(checkoutUrl)).status, 401)
+  const checkoutResponse = await fetch(checkoutUrl, { headers: { Authorization: 'Bearer storefront-unit-verify' } })
+  assert.equal(checkoutResponse.status, 200)
+  assert.equal(checkoutResponse.headers.get('cache-control'), 'private, no-store')
+  assert.equal((await checkoutResponse.json()).data.pickupWindowHours, 24, '结算须重新读取取货窗口')
+
+  invalidateMallCatalogReadCache()
+  const refreshedStorefront = await fetch(storefrontUrl, { headers: { 'If-None-Match': storefrontEtag } })
+  assert.equal(refreshedStorefront.status, 200)
+  assert.equal((await refreshedStorefront.json()).data.pickupWindowHours, 24)
 } finally {
+  mock.restoreAll()
   await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
 }
 
-console.log('✅ 公开商城 singleflight、修订失效、ETag 与 If-None-Match 304 功能验收通过')
+console.log('✅ 公开商城 singleflight、目录和门店条件请求、结算规则实时读取验收通过')

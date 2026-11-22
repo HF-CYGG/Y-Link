@@ -114,6 +114,10 @@ const RETURN_REQUEST_STATUS_META = {
 
 // 关键词防抖窗口：连续输入时只在停顿后更新筛选词，避免每次按键都触发大列表过滤。
 const KEYWORD_DEBOUNCE_MS = 260
+const MAX_CONTAINS_TERMS = 6
+const exceedsContainsTermLimit = (keyword: string) => new Set(
+  normalizeClientOrderKeyword(keyword).split(/\s+/).filter(Boolean).map((word) => word.toLowerCase()),
+).size > MAX_CONTAINS_TERMS
 const DEFAULT_ORDER_PAGE_SIZE = 20
 const ORDER_AUTO_REFRESH_INTERVAL_MS = 15 * 1000
 const ORDER_REFRESH_MARK_MS = 3200
@@ -141,7 +145,6 @@ const clientAuthStore = useClientAuthStore(pinia)
 const clientOrderStore = useClientOrderStore(pinia)
 const { runLatest } = useStableRequest()
 clientOrderStore.initialize(clientAuthStore.currentUser?.id)
-clientOrderStore.setSearch(clientOrderStore.keyword, 'contains')
 let disposeClientOrderRefresh: () => void = () => {}
 let refreshMarkCleanupTimer: ReturnType<typeof globalThis.setTimeout> | null = null
 let autoRefreshTimer: ReturnType<typeof globalThis.setInterval> | null = null
@@ -161,6 +164,9 @@ const total = computed(() => clientOrderStore.total)
 const hasMoreOrders = computed(() => clientOrderStore.hasCurrentResults && orders.value.length < total.value)
 const keywordInput = ref(clientOrderStore.keyword)
 const effectiveKeyword = computed(() => clientOrderStore.keyword)
+const keywordLimitError = computed(() => exceedsContainsTermLimit(keywordInput.value)
+  ? `最多支持 ${MAX_CONTAINS_TERMS} 个不同的搜索关键词，当前查询继续使用上次生效的关键词。`
+  : '')
 const keywordDebounceTimer = ref<ReturnType<typeof globalThis.setTimeout> | null>(null)
 const keywordDebouncing = ref(false)
 const activeStatus = computed({
@@ -257,10 +263,15 @@ const stopKeywordDebounce = () => {
   keywordDebouncing.value = false
 }
 
-const applySearch = (nextKeyword: string) => {
+const commitSearch = (nextKeyword: string) => {
   stopKeywordDebounce()
-  const previousQuery = clientOrderStore.queryKey
+  if (exceedsContainsTermLimit(nextKeyword)) return
   clientOrderStore.setSearch(nextKeyword, 'contains')
+}
+
+const applySearch = (nextKeyword: string) => {
+  const previousQuery = clientOrderStore.queryKey
+  commitSearch(nextKeyword)
   if (clientOrderStore.queryKey !== previousQuery) void loadOrders(true)
 }
 
@@ -269,7 +280,7 @@ watch(
   () => keywordInput.value,
   (nextKeyword) => {
     stopKeywordDebounce()
-    if (normalizeClientOrderKeyword(nextKeyword) === effectiveKeyword.value) return
+    if (keywordLimitError.value || normalizeClientOrderKeyword(nextKeyword) === effectiveKeyword.value) return
     keywordDebouncing.value = true
     keywordDebounceTimer.value = globalThis.setTimeout(() => {
       applySearch(nextKeyword)
@@ -316,8 +327,7 @@ const handleStatusChange = (value: 'all' | O2oPreorderSummary['status']) => {
   if (activeStatus.value === value) {
     return
   }
-  stopKeywordDebounce()
-  clientOrderStore.setSearch(keywordInput.value, 'contains')
+  commitSearch(keywordInput.value)
   activeStatus.value = value
   void loadOrders(true)
 }
@@ -560,8 +570,9 @@ const buildListQuery = (targetPage: number): O2oMyOrderListQuery => {
 const syncStoreWithCurrentUser = () => {
   stopKeywordDebounce()
   clientOrderStore.initialize(clientAuthStore.currentUser?.id)
-  clientOrderStore.setSearch(clientOrderStore.keyword, 'contains')
-  keywordInput.value = clientOrderStore.keyword
+  const cachedKeyword = clientOrderStore.keyword
+  clientOrderStore.setSearch(exceedsContainsTermLimit(cachedKeyword) ? '' : cachedKeyword, 'contains')
+  keywordInput.value = cachedKeyword
 }
 
 // 详细注释：静默轮询需要覆盖当前已加载范围并额外保留一页缓冲；
@@ -805,7 +816,7 @@ const activatePageRuntime = () => {
   startClientOrderRefreshSubscription()
   scheduleAutoRefresh()
   if (hasActivatedOnce && globalThis.document?.visibilityState !== 'hidden') {
-    if (normalizeClientOrderKeyword(keywordInput.value) !== effectiveKeyword.value) applySearch(keywordInput.value)
+    if (!keywordLimitError.value && normalizeClientOrderKeyword(keywordInput.value) !== effectiveKeyword.value) applySearch(keywordInput.value)
     else void triggerSilentOrderRefresh()
   }
   hasActivatedOnce = true
@@ -1076,10 +1087,15 @@ onBeforeUnmount(() => {
           maxlength="64"
           placeholder="订单号、商品名或规格"
           aria-label="搜索订单号、核销码、部门工号、归属、商品名或规格"
+          :aria-invalid="Boolean(keywordLimitError)"
+          :aria-describedby="keywordLimitError ? 'client-order-keyword-limit' : undefined"
         />
         <button type="button" class="h-10 shrink-0 rounded-full border border-slate-200 px-4 text-sm text-slate-600 dark:border-white/10 dark:text-slate-300" @click="clearKeyword">清空</button>
       </div>
-      <p v-if="keywordDebouncing || refreshing || loadingMore" class="mt-2 text-xs text-slate-400">
+      <p v-if="keywordLimitError" id="client-order-keyword-limit" class="mt-2 text-xs text-amber-800 dark:text-amber-300" role="status">
+        {{ keywordLimitError }}
+      </p>
+      <p v-else-if="keywordDebouncing || refreshing || loadingMore" class="mt-2 text-xs text-slate-400">
         {{
           keywordDebouncing
             ? '正在更新关键词结果...'

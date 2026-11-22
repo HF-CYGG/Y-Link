@@ -853,7 +853,7 @@ try {
     where: { actionType: 'client_user.update_profile', targetId: profileUser.id },
     order: { id: 'DESC' },
   })
-  assert.deepEqual(JSON.parse(profileAudit.detailJson ?? '{}').changedFields, ['username', 'email'])
+  assert.deepEqual(JSON.parse(profileAudit.detailJson ?? '{}'), { source: 'mobile', changedFields: ['username', 'email'] })
   assert.equal(profileAudit.actorUserId, profileUser.id)
   assert.equal(updatedProfile.requiresRelogin, true)
   assert.equal((await loadSessionWithSecrets(profileCredentials.session.id)).revokeReason, 'user_logout_all')

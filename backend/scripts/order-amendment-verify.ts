@@ -156,13 +156,14 @@ async function main() {
     const amendment = {
       orderId: String(originalWalkin.id),
       editVersion: Number(originalWalkin.editVersion),
-      businessNo: suggestion.businessNos[0],
+      businessNo: suggestion.businessNos[0]!.toUpperCase(),
       customerName: '改单后的散客',
       reason: '验证普通改单保护',
     }
     const beforePreview = await orderRepo.findOneByOrFail({ id: String(originalWalkin.id) })
     const preview = await orderService.previewAmendments({ amendments: [amendment] }, actor)
     assert.equal(preview.ready, true)
+    assert.equal(preview.items[0]!.after.businessNo, suggestion.businessNos[0], '修订预览与落库应采用同一规范编号')
     assert.deepEqual(
       await orderRepo.findOneByOrFail({ id: String(originalWalkin.id) }),
       beforePreview,
@@ -219,6 +220,31 @@ async function main() {
     await assert.rejects(() => orderService.commitAmendments({ amendments: swapInput }, actor), /当前已被其他订单使用/)
 
     const batchSuggestions = await orderBusinessNoService.suggestForAmendment('walkin', 2, [], AppDataSource.manager)
+    const caseDuplicate = batchOrders.map((row, index) => ({
+      orderId: String(row.id),
+      editVersion: Number(row.editVersion),
+      businessNo: index === 0 ? batchSuggestions.businessNos[0]!.toUpperCase() : batchSuggestions.businessNos[0]!,
+      reason: '验证批次内按编号判重',
+    }))
+    const duplicatePreview = await orderService.previewAmendments({ amendments: caseDuplicate }, actor)
+    assert.equal(duplicatePreview.ready, false)
+    assert.ok(duplicatePreview.items[1]!.blockingReasons.some((reason) => /批次内业务号/.test(reason)))
+    await assert.rejects(() => orderService.commitAmendments({ amendments: caseDuplicate }, actor), /批次内业务号/)
+
+    const occupiedNo = batchSuggestions.businessNos[0]!
+    const historicalNo = occupiedNo.replace('hyyz', 'HYyZ')
+    await orderRepo.update(switched.id, { businessNo: historicalNo })
+    try {
+      const next = await orderBusinessNoService.suggestForAmendment('walkin', 1, [], AppDataSource.manager)
+      assert.equal(next.businessNos[0], batchSuggestions.businessNos[1], '建议号跳过已被历史混合大小写编号占用的流水')
+      assert.ok(next.skippedBusinessNos.includes(occupiedNo))
+      const occupiedPreview = await orderService.previewAmendments({ amendments: [caseDuplicate[1]!] }, actor)
+      assert.equal(occupiedPreview.ready, false)
+      await assert.rejects(() => orderService.commitAmendments({ amendments: [caseDuplicate[1]!] }, actor), /当前已被其他订单使用/)
+      assert.equal((await orderRepo.findOneByOrFail({ id: switched.id })).businessNo, historicalNo)
+    } finally {
+      await orderRepo.update(switched.id, { businessNo: switched.businessNo })
+    }
     const batchInput = batchOrders.map((row, index) => ({
       orderId: String(row.id), editVersion: Number(row.editVersion), businessNo: batchSuggestions.businessNos[index],
       remark: `批次变更 ${index + 1}`, reason: '验证原子提交两张订单',

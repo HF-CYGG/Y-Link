@@ -19,10 +19,10 @@ const rescueBlocked = new Promise(resolve => { resumeRescue = resolve })
 const rescueReached = new Promise(resolve => { enteredRescue = resolve })
 const handlers = new Map()
 const report = code => {
-  const shutdownEvents = events.filter(value => ['drain', 'outbox-stopped', 'web-sessions-stopped', 'datasource-closed'].includes(value))
+  const shutdownEvents = events.filter(value => ['schema-workers-stopped', 'drain', 'outbox-stopped', 'web-sessions-stopped', 'datasource-closed'].includes(value))
   assert.deepEqual(shutdownEvents, scenario === 'cleanup-failure-signal'
-    ? []
-    : ['drain', 'outbox-stopped', 'web-sessions-stopped', 'datasource-closed'])
+    ? ['schema-workers-stopped']
+    : ['schema-workers-stopped', 'drain', 'outbox-stopped', 'web-sessions-stopped', 'datasource-closed'])
   console.log(JSON.stringify({ scenario, events, code, realApp: false, realDatabase: false, realHttp: false }))
 }
 const fakeProcess = { env: {}, once(name, handler) { handlers.set(name, handler) },
@@ -41,7 +41,9 @@ const context = vm.createContext({ globalThis: null, process: fakeProcess, conso
   customerServiceRealtimeService: { stopClusterPresenceSync: async () => {} },
   stopRedisBus: noop, closeRedis: async () => {},
   AppDataSource: { isInitialized: true, destroy: async () => events.push('datasource-closed') },
-  registerRuntimeShutdownHandler: noop, registerDatabaseRescueQuiesce: noop, databaseMigrationService: { quiesceForDatabaseRescue: noop } })
+  registerRuntimeShutdownHandler: noop, registerDatabaseRescueQuiesce: noop, databaseMigrationService: {
+    quiesceForDatabaseRescue: noop, stopSchemaWorkersForShutdown: async () => events.push('schema-workers-stopped'),
+  } })
 context.globalThis = context
 function compile(source) {
   return ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText

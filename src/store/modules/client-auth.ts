@@ -298,10 +298,7 @@ export const useClientAuthStore = defineStore('client-auth', () => {
       return profile
     }
     currentUser.value = profile
-    persistClientAuthState({
-      user: toUserSnapshot(profile),
-      expiresAt: expiresAt.value,
-    })
+    persistSessionSnapshot(profile, expiresAt.value)
     return profile
   }
 
@@ -319,10 +316,7 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     if (!userId || generation !== sessionGeneration.value || userId !== currentUser.value?.id
       || profile.id !== userId || (context && !context.isCurrent())) return null
     currentUser.value = profile
-    persistClientAuthState({
-      user: toUserSnapshot(profile),
-      expiresAt: expiresAt.value,
-    })
+    persistSessionSnapshot(profile, expiresAt.value)
     return profile
   }
 

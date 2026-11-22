@@ -1425,7 +1425,6 @@ const handleReply = async () => {
   const isRestock = Boolean(selectedConversation.value.restock)
   const issueInput = {
     title: issueForm.title,
-    status: issueForm.status,
     priority: issueForm.priority,
     issueType: isRestock ? undefined : issueForm.issueType,
     category: issueForm.category,
@@ -1466,8 +1465,9 @@ const handleReply = async () => {
         void scrollConversationToBottom()
       }
     }
-    showAppSuccess('客服回复已发送')
+    if (lifecycle === lifecycleToken) showAppSuccess('客服回复已发送')
   } catch (error) {
+    if (lifecycle !== lifecycleToken) return
     void showCriticalErrorDialog(error, {
       title: '客服回复发送失败',
       fallback: '客服回复发送失败，请稍后重试',

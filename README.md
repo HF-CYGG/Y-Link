@@ -617,11 +617,10 @@ Redis 已配置但暂时不可用时按能力分级降级：限流与风控回�
 
 ### 环境要求
 
-- Node.js 20+
-- 覆盖率命令 `npm run coverage:report` 需要 Node.js 22.6 及以上（与 CI、Docker 镜像一致使用 Node.js 22 即可）
-- 登录页主题切换浏览器回归脚本需要 Node.js 22 及以上和全局 WebSocket；不改变应用的 Node.js 20+ 要求
-- npm
-- Docker 可选，用于容器验证和 MySQL 并发验收
+- 使用 **Node.js `22.23.5`** 和 npm。后端安装会通过 `postinstall` 校验官方源码并静态重建 SQLite `3.54.1`，运行 SQLite 前必须完成这一步。
+- Linux x64／arm64 准备 C/C++ 编译器、`make`、Python 3、`ar`、`readelf` 和 `tar`。Windows x64 准备 Visual Studio 2022 或 Build Tools 的 C++ x64 工具链和 Windows SDK，以及 Python 3 和 `tar`。macOS 或 Windows ARM64 可使用受支持架构的 Linux 容器构建和运行。
+- 后端首次重建需要能访问 `sqlite.org`。本机缺少同版本 Node 头文件时还需访问 `nodejs.org`，Windows 构建需要匹配的 x64 `node.lib`。
+- 本地容器验证需要 Docker，四份 Dockerfile 均要求 BuildKit。使用 Docker Desktop 或支持 BuildKit 的 Docker 构建器。
 
 ### 安装依赖
 
@@ -687,7 +686,9 @@ docker build --file backend/Dockerfile.mysql --tag ylink-backend-mysql:local bac
 docker build --file Dockerfile.onebox --tag ylink-onebox:local .
 ```
 
-涉及依赖变更时，再在本地执行 `npm audit --omit=dev` 与 `npm --prefix backend audit --omit=dev`。Mobile 工作流只在 `apps/mobile/**`、`packages/**`、`.npmrc` 或其专用检查脚本变化时触发；仅修改 Web、后端或根锁文件不会启动 Mobile 构建。
+涉及依赖变更时，再在本地执行 `npm audit --omit=dev` 与 `npm --prefix backend audit --omit=dev`。
+
+独立 Web 镜像从 Alpine 3.24 官方仓库定向更新已安装的 zlib 和 libxslt，并纳入 APK 求解时同步更新的 libxml2。三个包的最低版本分别为 `1.4-r0`、`1.1.43-r4` 和 `2.13.9-r3`。其它运行包的名称及版本须保持一致。OpenSSL 与 libxml2 原生候选的构建阶段保留升级前的精确基座。三份后端运行镜像继续使用经过验签和完整性核验的冻结 Debian `baseline-v7` 源码与 keyring。若官方仓库归档了所需字节，构建会停止，应从 Debian 官方归档核对相同输入，再更新构建来源并重新验收。原生安全候选仅通过独立构建 target 产出。
 
 ## 项目结构
 
@@ -706,7 +707,7 @@ Y-Link
 │  ├─ src/services/             业务服务
 │  ├─ sql/                      初始化和迁移 SQL
 │  └─ scripts/                  后端验证脚本
-├─ apps/mobile/                 根 npm workspace 中的 Expo Mobile 工程
+├─ apps/mobile/                 根 npm workspace 中保留的 Mobile 配置
 ├─ packages/                    @ylink 跨端共享 packages
 ├─ docker/
 │  ├─ nginx/                    Nginx 配置
@@ -729,7 +730,7 @@ Y-Link
 | `/app/uploads` | 容器内上传文件目录，必须持久化 |
 | `backend/sql` | MySQL 历史增量迁移脚本（用于给已有库补齐特定变更；全新空库请用 `DB_SYNC=true` 初始化，详见 `.env.docker.mysql.example`） |
 | `backend/data` | 本地开发 SQLite 数据目录 |
-| `apps/mobile` | Mobile 路由占位、providers、本地与平台能力基础 |
+| `apps/mobile` | Mobile workspace 清单、EAS 配置与开发说明 |
 | `packages` | API client、共享类型、领域、校验与设计 token 边界 |
 | `docs` | 使用指南、迁移手册、维护文档 |
 
@@ -754,28 +755,24 @@ Y-Link
 
 ## Mobile 工程基础状态
 
-仓库包含 `apps/mobile` Expo 工程和 `packages/*` 跨端基础。Mobile 固定使用 Node.js `22.23.5`；根 npm workspace 让 Mobile 通过正式 package dependency 消费共享 Contract，同时不改变现有 Vue Web、Express 后端、数据库或部署方式。
+原 Expo 应用源码已移除，`apps/mobile` 保留 `package.json`、`eas.json` 与使用说明。根 npm workspace 仍将 Mobile 清单与 `packages/*` 共享基础纳入同一 `package-lock.json`，使用 Node.js `22.23.5`。
 
-当前 Mobile 尚未接入真实 API，也没有实现正式登录会话、服务端购物车、订单、库存、退货、相机、相册、通知或 Deep Link。未运行模拟器或真机验证时，只能依据 SQLite migration 专项测试、typecheck 与 Android JS bundle export 判断工程基础，不代表设备交互、签名 APK 或发布链路可用。
+Mobile 基础检查工作流目前只支持 GitHub Actions 手动触发（`workflow_dispatch`）。当前运行 workspace 契约检查、共享包 TypeScript 检查和 Native API client 单元测试。应用源码及必要配置完整恢复后，再恢复 Expo 依赖一致性、SQLite 迁移测试、应用类型检查和 Android bundle 导出。
 
 主要目录：
 
-- `apps/mobile`：根 npm workspace 中的 Expo package，自身保留 manifest，依赖统一锁定在根 `package-lock.json`；
+- `apps/mobile`：保留 Mobile workspace 清单和 EAS 配置，应用级命令见 [Mobile 开发说明](./apps/mobile/README.md)；
 - `packages/api-client`：`@ylink/api-client`，传输无关 HTTP 契约与 Native/Web adapter；
 - `packages/shared-types`：`@ylink/shared-types`，已核对的跨端客户端 Contract 真源；
-- `packages/domain`、`packages/validation`、`packages/design-tokens`：已纳入 workspace 的最小共享边界，尚未由 Mobile 消费。
+- `packages/validation`：Mobile 清单声明的共享校验包；`packages/domain` 与 `packages/design-tokens` 属于共享 workspace。
 
 常用命令：
 
 ```bash
 npm ci
 npm run verify:mobile:workspace
-npm --workspace y-link-mobile run dependencies:check
-npm --workspace y-link-mobile run test:db
-npm --workspace y-link-mobile run typecheck
-npm --workspace y-link-mobile run export:android
 node ./node_modules/typescript/bin/tsc -p packages/tsconfig.json --noEmit
 node --experimental-strip-types --test packages/api-client/test/*.test.ts
 ```
 
-开发者、GitHub Actions 与 Expo/EAS 构建入口统一使用根 workspace 与根 lockfile。Mobile 只能通过 `@ylink/*` package 名称消费共享包，禁止用相对路径跨目录导入 `packages/*`。详细边界见 [`docs/project-context/60-移动端工程与共享基础.md`](./docs/project-context/60-移动端工程与共享基础.md)。
+Mobile 通过 `@ylink/*` 包名消费共享包。详细边界见 [移动端工程与共享基础](./docs/project-context/60-移动端工程与共享基础.md)。

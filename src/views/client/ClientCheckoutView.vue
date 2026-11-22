@@ -19,7 +19,7 @@ import { onActivated, onDeactivated, onBeforeUnmount, computed, onMounted, ref, 
 import { useRouter } from 'vue-router'
 
 import { ArrowLeft } from '@element-plus/icons-vue'
-import { ElMessageBox } from 'element-plus'
+import { ElMessageBox } from 'element-plus/es/components/message-box/index.mjs'
 import { getO2oCheckoutStorefront, getO2oMallStorefront, submitO2oPreorder, type SubmitO2oPreorderPayload } from '@/api/modules/o2o'
 import { useClientMallSnapshotRefresh } from '@/composables/useClientMallSnapshotRefresh'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
@@ -27,6 +27,7 @@ import { getClientCheckoutNewSubmitBlockReason, isClientCheckoutSubmitOutcomeUnk
 import { useClientAuthStore, useClientCartStore } from '@/store'
 import { useClientCatalogStore } from '@/store/modules/client-catalog'
 import pinia from '@/store/pinia'
+import { formatDateTime } from '@/utils/date-time'
 import { normalizeRequestError } from '@/utils/error'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
@@ -63,6 +64,21 @@ const submitting = ref(false)
 const departmentSystemApplyChoice = ref<boolean | null>(null)
 const kingdeeVoucherNo = ref('')
 const pendingSubmit = ref<ClientPreorderSubmitLockSnapshot | null>(null)
+const pendingPickupTime = computed(() => {
+  const pickupAt = pendingSubmit.value?.payload?.pickupAt
+  return pickupAt ? formatDateTime(pickupAt, '原取货时间暂不可用', 'Asia/Shanghai') : '无需预约'
+})
+// 恢复摘要只读取展示资料。原提交参数与请求键仍按会话存储原样重试。
+const pendingItemSummaries = computed(() => (pendingSubmit.value?.payload?.items ?? []).map((item) => {
+  const cartItem = clientCartStore.items.find((entry) => entry.productId === item.productId && entry.skuId === (item.skuId ?? null))
+  const product = clientCatalogStore.products.find((entry) => entry.id === item.productId)
+  const sku = product?.skus.find((entry) => entry.id === item.skuId)
+  return {
+    productName: cartItem?.productName || product?.productName || '原商品资料暂不可用',
+    specText: cartItem?.specText?.trim() || sku?.specText?.trim() || (item.skuId && !sku ? '原规格资料暂不可用' : '默认规格'),
+    qty: item.qty,
+  }
+}))
 const recoveryError = ref('')
 const confirmingRecovery = ref(false)
 let pendingClockTimer: ReturnType<typeof setInterval> | null = null
@@ -663,13 +679,13 @@ const handleSubmit = async () => {
         </p>
       </div>
 
-      <div v-if="pendingSubmit || recoveryError" class="mb-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900" role="status">
+      <div v-if="pendingSubmit || recoveryError" class="mb-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-400/25 dark:bg-amber-500/10 dark:text-amber-200" role="status">
         <p class="font-semibold">{{ recoveryError || (pendingSubmit?.expired ? '原提交确认期限已到，结果仍需核实' : '有一笔提交结果尚未确认') }}</p>
         <template v-if="pendingSubmit?.payload">
-          <p class="mt-2">原提货人：{{ pendingSubmit.payload.pickupContact }}；取货时间：{{ pendingSubmit.payload.pickupAt || '无需预约' }}</p>
+          <p class="mt-2">原提货人：{{ pendingSubmit.payload.pickupContact }}；取货时间：{{ pendingPickupTime }}</p>
           <p>金蝶申请：{{ pendingSubmit.payload.isSystemApplied ? '已申请' : '未申请' }} {{ pendingSubmit.payload.kingdeeVoucherNo }}</p>
           <p class="whitespace-pre-wrap">原备注：{{ pendingSubmit.payload.remark || '无' }}</p>
-          <ul><li v-for="(item, index) in pendingSubmit.payload.items" :key="index">商品 {{ item.productId }} / 规格 {{ item.skuId || '默认' }} × {{ item.qty }}</li></ul>
+          <ul><li v-for="(item, index) in pendingItemSummaries" :key="index">{{ item.productName }} / {{ item.specText }} × {{ item.qty }}</li></ul>
         </template>
         <p v-if="pendingSubmit" class="mt-2">{{ pendingSubmit.payload ? '继续确认会原样重试首次提交。' : '原提交无法重试，结果仍需在“我的订单”核实。' }}</p>
         <div class="mt-3 flex flex-wrap gap-2">

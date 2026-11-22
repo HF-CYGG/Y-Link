@@ -74,14 +74,16 @@ const mysqlSource = readFileSync('backend/Dockerfile.mysql', 'utf8')
 assert.ok(mysqlSource.includes('npm ci --ignore-scripts'), 'MySQL-only构建显式跳过不会保留的SQLite安装hook')
 assert.ok(mysqlSource.includes('npm uninstall sqlite3 --ignore-scripts') && mysqlSource.includes('test ! -e node_modules/sqlite3'), 'MySQL-only卸载不得重新构建SQLite，最终必须不存在')
 const webSource = readFileSync('Dockerfile', 'utf8')
-const webRuntime = webSource.split('FROM nginx:1.30.6-alpine AS alpine-native-base')[1]?.split('FROM alpine-native-base AS alpine-native-build')[0]
-assert.ok(webRuntime, '独立前端基座必须固定批准的Nginx补丁版本')
-assert.ok(webSource.includes('FROM alpine-native-base AS runtime'), '最终层必须继承同一已约束的原基座')
+const alpineBase = webSource.split('FROM nginx:1.30.6-alpine AS alpine-native-base')[1]?.split('FROM alpine-native-base AS alpine-native-build')[0]
+assert.ok(alpineBase, '独立前端基座必须固定批准的Nginx补丁版本')
+const webRuntime = webSource.split('FROM alpine-native-base AS runtime')[1]
+assert.ok(webRuntime, '最终层必须继承原基座并单独更新官方运行包')
+assert.doesNotMatch(alpineBase, /apk[^\n]*--repositories-file|libxml2>=|libxslt>=|zlib>=/, '候选使用的共用基座必须保留固定的原包修订')
 const alpineCandidate = webSource.split('FROM alpine-native-base AS alpine-native-build')[1]?.split('FROM alpine-native-base AS runtime')[0]
-const webOrdinaryRuntime = webSource.split('FROM alpine-native-base AS runtime')[1]
 assert.ok(alpineCandidate?.includes('COPY docker/alpine-native-security /opt/ylink-alpine-security'), '候选stage必须消费固定完整生产/安装契约')
+assert.ok(alpineCandidate.includes('--mount=from=alpine-native-base,source=/,target=/mnt/ylink-alpine-original,ro'), '候选必须只读挂载升级前的原基座')
 assert.ok(alpineCandidate.includes('python3 /opt/ylink-alpine-security/build.py --candidate-only'), '候选构建必须显式选择未验收模式')
-assert.doesNotMatch(webOrdinaryRuntime, /--from=alpine-native-build|\/tmp\/ylink-alpine-security\/install\.sh/, '普通前端保留v7基线，不能消费未验收APK')
+assert.doesNotMatch(webRuntime, /--from=alpine-native-build|\/tmp\/ylink-alpine-security\/install\.sh/, '普通前端不得消费未验收候选 APK')
 for (const file of ['backend/Dockerfile', 'backend/Dockerfile.mysql', 'Dockerfile.onebox']) {
   const source = readFileSync(file, 'utf8'), prefix = file === 'Dockerfile.onebox' ? 'backend/' : ''
   const baseline = source.split(/ AS native-security-build\r?\n/)[1]?.split(/^FROM /m)[0]
@@ -99,18 +101,24 @@ assert.ok(alpineInstall.includes('sh ./verify-candidate-policy.sh'), '候选状�
 assert.ok(alpineInstall.includes('verify_payload after.tsv') && alpineInstall.includes('cmp -s after-packages.tsv current-packages.tsv'), '必须比较完整载荷与全运行包库存')
 assert.doesNotMatch(alpineInstall, /--allow-untrusted|--force-|--no-check-certificate|cp[^\n]*\/etc\/apk\/keys/)
 assert.ok(webRuntime.includes("grep -Eq '^3\\.24\\.' /etc/alpine-release"), 'Web运行包定向修补仅使用已核实的Alpine3.24分支')
-assert.ok(webRuntime.includes('apk info -e zlib libxslt >/dev/null'), '两个目标运行库必须原已安装，不能新增运行包')
-assert.ok(webRuntime.includes('apk add --no-cache --upgrade zlib=1.4-r0 libxslt=1.1.43-r4'), 'Web仅固定同源已核实的zlib/libxslt安全补丁版本')
+assert.ok(webRuntime.includes('apk info -e zlib libxml2 libxslt >/dev/null'), '允许升级的三个包必须原已安装')
+assert.match(webRuntime, /apk --repositories-file \/dev\/null \s*\\\r?\n\s*--repository https:\/\/dl-cdn\.alpinelinux\.org\/alpine\/v3\.24\/main \s*\\\r?\n\s*--repository https:\/\/dl-cdn\.alpinelinux\.org\/alpine\/v3\.24\/community \s*\\\r?\n\s*add --no-cache --upgrade 'zlib>=1\.4-r0' 'libxml2>=2\.13\.9-r3' 'libxslt>=1\.1\.43-r4';/,
+  'Web 更新仅接受 Alpine 3.24 官方仓库中达到版本下限的 zlib、libxml2 与 libxslt')
 for (const phase of ['before', 'after']) {
   assert.ok(webRuntime.includes(`${phase}_packages="$(apk info -v)"`), '包清单读取失败必须停止构建')
-  assert.ok(webRuntime.includes(`${phase}_other="$(printf '%s\\n' "$${phase}_packages" | grep -Ev '^(zlib|libxslt)-[0-9]' | sort)"`), '比较清单只能排除这两个目标包')
+  assert.ok(webRuntime.includes(`${phase}_other="$(printf '%s\\n' "$${phase}_packages" | grep -Ev '^(zlib|libxml2|libxslt)-[0-9]' | LC_ALL=C sort)"`), '比较清单只能排除这三个既有包')
 }
 assert.ok(webRuntime.includes('RUN set -eu;') && webRuntime.includes('test "$before_other" = "$after_other"'), '其它包的新增、删除或版本漂移必须使构建失败')
-assert.ok(webRuntime.includes("grep -Fqx 'zlib-1.4-r0'") && webRuntime.includes("grep -Fqx 'libxslt-1.1.43-r4'"), '最终实际包版本必须匹配两个批准固定点')
+assert.ok(webRuntime.includes('for requirement in zlib:1.4-r0 libxml2:2.13.9-r3 libxslt:1.1.43-r4; do')
+  && webRuntime.includes('test -n "$installed"')
+  && webRuntime.includes('apk version --test "$previous" "$minimum"')
+  && webRuntime.includes('apk version --test "$installed" "$minimum"')
+  && webRuntime.includes("'='|'>') ;;"), '三个包必须保留，版本经原生比较达到下限且不得降级')
 assert.doesNotMatch(webRuntime, /\bapk\s+upgrade\b|--allow-untrusted|--no-check-certificate/, '不得整体升级或绕过包来源验证')
 
 for (const filePath of dockerfiles) {
   const source = readFileSync(filePath, 'utf8')
+  assert.match(source, /^# syntax=docker\/dockerfile:1\r?\n/, `${filePath} 的 BuildKit syntax 必须位于首行`)
   assert.ok(
     source.includes('ARG Y_LINK_NODE_IMAGE='),
     `${filePath} should expose Y_LINK_NODE_IMAGE build arg for registry mirror override`,
@@ -131,7 +139,7 @@ for (const filePath of dockerfiles) {
 
 const workflowSource = readFileSync('.github/workflows/docker-publish.yml', 'utf8')
 assert.deepEqual(validateActionWorkflowPins(readdirSync('.github/workflows').filter(file => /\.ya?ml$/.test(file))
-  .map(file => ({ file: `.github/workflows/${file}`, content: readFileSync(`.github/workflows/${file}`, 'utf8') }))), [], '非 Mobile Action 固定点与最小权限契约')
+  .map(file => ({ file: `.github/workflows/${file}`, content: readFileSync(`.github/workflows/${file}`, 'utf8') }))), [], '全部工作流 Action 固定点与最小权限契约')
 const buildJobSource = workflowSource.split('\n  build:\n')[1]?.split('\n  merge:\n')[0]
 assert.ok(buildJobSource, '镜像发布工作流应包含 build 作业')
 const buildStepSource = buildJobSource.split('\n      - name: 构建并按 digest 推送\n')[1]?.split('\n      - name: 导出 digest\n')[0]

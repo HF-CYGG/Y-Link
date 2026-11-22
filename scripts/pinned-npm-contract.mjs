@@ -146,7 +146,7 @@ export function validatePinnedNpmToolchain(root = process.cwd(), read = name => 
         ['package-security-candidate', nodeBase], ['gcc-security-candidate', nodeBase], ['node-security-candidate', nodeBase], ['runtime', nodeBase]]
     const candidates = new Set(['native-security-candidate', 'glibc-security-build', 'package-security-candidate', 'gcc-security-candidate', 'node-security-candidate', 'alpine-native-build'])
     const stages = source.split(/(?=^FROM )/m).filter(value => /^FROM /m.test(value)).map(value => {
-      const instructions = value.split('\n').filter(line => line.trim() && !line.trim().startsWith('#')).join('\n').replace(/\\\n\s*/g, ' ').split('\n')
+      const instructions = value.split('\n').filter(line => line.trim() && !line.trim().startsWith('#')).join('\n').replace(/[ \t]*\\\n\s*/g, ' ').split('\n')
       const match = /^FROM (?:--platform=\S+ )?(\S+) AS ([a-z][a-z0-9-]*)$/.exec(instructions[0])
       if (!match) errors.push(file + '存在未知FROM/别名格式')
       return { base: match?.[1], alias: match?.[2], instructions, text: instructions.join('\n') }
@@ -178,12 +178,22 @@ export function validatePinnedNpmToolchain(root = process.cwd(), read = name => 
       if (stage.base !== nodeBase && !nodeCandidate) continue
       if (nodeCandidate) nodeCandidateCount++
       else stageCount++
-      const copies = ['COPY ' + prefix + 'scripts/install-pinned-npm.mjs /tmp/ylink-install-pinned-npm.mjs',
-        'COPY ' + prefix + 'scripts/build-pinned-npm.mjs /tmp/build-pinned-npm.mjs', 'COPY ' + prefix + 'npm-toolchain /tmp/ylink-npm-toolchain']
-      const installLine = 'RUN node /tmp/ylink-install-pinned-npm.mjs --context=image --data-dir=/tmp/ylink-npm-toolchain'
+      const inputs = [
+        ['scripts/install-pinned-npm.mjs', '/tmp/ylink-install-pinned-npm.mjs'],
+        ['scripts/build-pinned-npm.mjs', '/tmp/build-pinned-npm.mjs'],
+        ['npm-toolchain', '/tmp/ylink-npm-toolchain'],
+      ]
+      const copies = inputs.map(([from, to]) => `COPY ${prefix}${from} ${to}`)
+      const runtime = stage.alias === 'runtime'
+      const mounts = inputs.map(([from, to]) => `--mount=type=bind,source=${prefix}${from},target=${to},ro`)
+      const command = 'node /tmp/ylink-install-pinned-npm.mjs --context=image --data-dir=/tmp/ylink-npm-toolchain'
+      const installLine = runtime ? 'RUN ' + mounts.join(' ') + ' ' + command : 'RUN ' + command
       const install = stage.instructions.indexOf(installLine)
       const firstNpm = stage.instructions.findIndex(line => /^RUN\b/.test(line) && /(?:^|[\s/;&|("'])(?:npm|npx)(?=[\s;&|)"'])/.test(line))
-      if (install < 0 || stage.instructions.filter(line => line === installLine).length !== 1 || copies.some(copy => stage.instructions.indexOf(copy) < 0 || stage.instructions.indexOf(copy) > install || stage.instructions.filter(line => line === copy).length !== 1) || firstNpm >= 0 && install > firstNpm) errors.push(file + '的' + stage.alias + '未先固定完整工具制品')
+      const wrongInputs = runtime
+        ? stage.instructions.some(line => /^(?:COPY|ADD)\s/i.test(line) && inputs.some(([, target]) => line.includes(target)))
+        : copies.some(copy => stage.instructions.indexOf(copy) < 0 || stage.instructions.indexOf(copy) > install || stage.instructions.filter(line => line === copy).length !== 1)
+      if (install < 0 || stage.instructions.filter(line => line === installLine).length !== 1 || wrongInputs || firstNpm >= 0 && install > firstNpm) errors.push(file + '的' + stage.alias + '未先固定完整工具制品或将构建输入写入运行镜像')
       if (nodeCandidate) {
         const generation = 'RUN --network=none Y_LINK_NODE_SECURITY_BUILD=image sh /ylink-native-security/build-node-stage.sh --candidate-only'
         const expected = ['COPY ' + prefix + 'native-security /ylink-native-security',

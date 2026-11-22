@@ -441,16 +441,16 @@ export const useClientCartStore = defineStore('client-cart', () => {
     const isReduction = requestedQty < item.qty
     const nextQty = isReduction ? requestedQty : Math.min(requestedQty, maxQty)
 
+    if (maxQty > 0 && qty > item.qty && item.qty >= maxQty) {
+      showAppWarning('购物车内已达单人限购上限或最大库存')
+      return
+    }
+
     if (!isReduction && qty > maxQty) {
       showAppWarning(maxQty > 0 ? `当前最多可购 ${maxQty} 件，已按可购数量调整` : '该商品库存不足或已达单人限购上限')
       if (maxQty <= 0) {
         return
       }
-    }
-
-    if (!isReduction && qty > item.qty && item.qty >= maxQty) {
-      showAppWarning('购物车内已达单人限购上限或最大库存')
-      return
     }
 
     if (nextQty <= 0) {

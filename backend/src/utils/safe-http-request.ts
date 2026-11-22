@@ -9,7 +9,7 @@ import { detectUnsafeHost, isPublicNetworkAddress } from './safe-network.js'
 
 export { isPublicNetworkAddress } from './safe-network.js'
 
-const SENSITIVE_HEADERS = new Set(['authorization', 'cookie', 'proxy-authorization', 'x-api-key', 'api-key'])
+const CROSS_ORIGIN_STRIPPED_HEADERS = new Set(['host', 'authorization', 'cookie', 'proxy-authorization', 'x-api-key', 'api-key'])
 
 export interface SafeHttpRequestOptions {
   method?: string
@@ -84,18 +84,11 @@ function createSafeLookup(isStopped: () => boolean, timeoutError: Error): Lookup
   }
 }
 
-function stripCrossOriginSensitiveHeaders(headers: Record<string, string>) {
+function stripCrossOriginHeaders(headers: Record<string, string>) {
   return Object.fromEntries(Object.entries(headers).filter(([key]) => {
     const normalized = key.toLowerCase()
-    return !SENSITIVE_HEADERS.has(normalized) && !/(?:auth|token|secret|api[-_]?key)/i.test(normalized)
+    return !CROSS_ORIGIN_STRIPPED_HEADERS.has(normalized) && !/(?:auth|token|secret|api[-_]?key)/i.test(normalized)
   }))
-}
-
-function resolveRedirectMethod(statusCode: number, method: string, body: string | Buffer | undefined) {
-  if (statusCode === 303 || ((statusCode === 301 || statusCode === 302) && method === 'POST')) {
-    return { method: 'GET', body: undefined }
-  }
-  return { method, body }
 }
 
 export async function safeHttpRequest(input: string | URL, options: SafeHttpRequestOptions = {}): Promise<SafeHttpResponse> {
@@ -192,15 +185,22 @@ export async function safeHttpRequest(input: string | URL, options: SafeHttpRequ
           (safeUrl.protocol === 'https:' && redirected.protocol === 'http:')
           || (redirected.origin !== initialUrl.origin && !policy.origins.has(redirected.origin))
         )) throw new Error('出站重定向被 strict 策略拒绝')
-        const next = resolveRedirectMethod(response.statusCode, method, body)
-        headers = redirected.origin === safeUrl.origin ? { ...headers } : stripCrossOriginSensitiveHeaders(headers)
-        if (next.body == null) headers = Object.fromEntries(Object.entries(headers).filter(([key]) => key.toLowerCase() !== 'content-length'))
+        const rewriteToGet = response.statusCode === 303 || ((response.statusCode === 301 || response.statusCode === 302) && method === 'POST')
+        if (rewriteToGet) {
+          method = 'GET'
+          body = undefined
+        }
+        headers = redirected.origin === safeUrl.origin ? { ...headers } : stripCrossOriginHeaders(headers)
+        if (body == null) {
+          headers = Object.fromEntries(Object.entries(headers).filter(([key]) => {
+            const name = key.toLowerCase()
+            return name !== 'content-length' && !(rewriteToGet && (name === 'content-type' || name === 'transfer-encoding'))
+          }))
+        }
         activeResponse = undefined
         activeRequest?.destroy()
         activeRequest = undefined
         target = redirected
-        method = next.method
-        body = next.body
       }
     }
     void run().then((response) => finish(undefined, response), (error: Error) => finish(error))

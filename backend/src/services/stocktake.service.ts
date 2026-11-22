@@ -33,7 +33,6 @@ import { applyInventoryDeltas, loadLockedSkuTargets } from './inventory-ledger.s
 import { acquireSequenceMutex, allocateStocktakeNo } from './inventory-sequence.service.js'
 import { loadSkuLocationDistributions, readSkuLocationQty } from './sku-location-stock.service.js'
 import {
-  isCanonicalStocktakeLocationId,
   isInStocktakeLocationIdRange,
   normalizeStocktakeLocationId,
   readStocktakeLocationIds,
@@ -681,16 +680,18 @@ export class StocktakeService {
       }
     }
     if (input.scopeType === 'location') {
+      if (input.locationIds?.some((id) => typeof id === 'number' && !Number.isSafeInteger(id))) {
+        throw new BizError('存在无效的库位', 400)
+      }
       const requestedIds = [...new Set(uniqueIds(input.locationIds).map(normalizeStocktakeLocationId))]
       if (!requestedIds.length) throw new BizError('请选择要盘点的库位', 400)
       const mysql = manager.connection.options.type === 'mysql'
       const idType = mysql ? 'UNSIGNED' : 'INTEGER'
       const textType = mysql ? 'CHAR' : 'TEXT'
-      const predicates = requestedIds.map((id, index) => {
-        if (!isCanonicalStocktakeLocationId(id)) return `:scopeId${index}`
-        if (!isInStocktakeLocationIdRange(id, mysql)) throw new BizError('存在无效的库位', 400)
-        return `CAST(:scopeId${index} AS ${idType})`
-      })
+      if (requestedIds.some((id) => !isInStocktakeLocationIdRange(id, mysql))) {
+        throw new BizError('存在无效的库位', 400)
+      }
+      const predicates = requestedIds.map((_, index) => `CAST(:scopeId${index} AS ${idType})`)
       const locationQuery = manager.getRepository(BaseStorageLocation).createQueryBuilder('location')
         .select(`CAST(location.id AS ${textType})`, 'id')
         .addSelect('location.locationCode', 'locationCode')

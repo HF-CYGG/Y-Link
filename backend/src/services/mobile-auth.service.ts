@@ -60,7 +60,6 @@ class MobileAuthService {
   /** 失败桶和审计在外层事务回滚后记录，不能在 SQLite 写事务内另开事务。 */
   private async withPasswordReauth<T>(
     auth: MobileAuthContext,
-    operation: 'change_password' | 'update_profile',
     requestMeta: RequestMeta | undefined,
     action: () => Promise<T>,
   ): Promise<T> {
@@ -69,7 +68,7 @@ class MobileAuthService {
       return await action()
     } catch (error) {
       if (error instanceof BizError && (error.data as { reason?: string } | null)?.reason === 'CURRENT_PASSWORD_MISMATCH') {
-        await clientAuthService.recordCurrentPasswordFailure(this.toClientAuth(auth), requestMeta, operation)
+        await clientAuthService.recordCurrentPasswordFailure(this.toClientAuth(auth), requestMeta, 'change_password')
       }
       throw error
     }
@@ -134,32 +133,7 @@ class MobileAuthService {
   }
 
   async updateProfile(auth: MobileAuthContext, input: ClientUpdateProfileInput, requestMeta?: RequestMeta) {
-    const result = await this.withPasswordReauth(auth, 'update_profile', requestMeta, () => runInTransaction(async (manager) => {
-      const profile = await clientAuthService.updateProfile(this.toClientAuth(auth), input, manager, requestMeta)
-      const changedFields = [
-        profile.username !== auth.user.realName ? 'username' : null,
-        profile.mobile !== (auth.user.mobile ?? '') ? 'mobile' : null,
-        profile.email !== (auth.user.email ?? '') ? 'email' : null,
-      ].filter((field): field is 'username' | 'mobile' | 'email' => field !== null)
-      if (changedFields.length > 0) {
-        await auditService.record({
-          actionType: 'client_user.update_profile',
-          actionLabel: '客户端更新个人资料',
-          targetType: 'client_user',
-          targetId: auth.userId,
-          actor: {
-            userId: auth.user.id,
-            username: auth.user.email ?? auth.user.mobile ?? auth.user.realName,
-            displayName: auth.user.realName,
-          },
-          requestMeta,
-          detail: { source: 'mobile', changedFields },
-        }, manager)
-      }
-      return profile
-    }))
-    if (result.requiresRelogin) customerServiceRealtimeService.disconnectByOwner('client', auth.userId)
-    return result
+    return clientAuthService.updateProfile(this.toClientAuth(auth), input, 'mobile', requestMeta)
   }
 
   async changePassword(
@@ -168,7 +142,7 @@ class MobileAuthService {
     requestMeta?: RequestMeta,
   ) {
     await authSecurityService.guardClientChangePasswordRequest(requestMeta, auth.userId)
-    const result = await this.withPasswordReauth(auth, 'change_password', requestMeta, async () => {
+    const result = await this.withPasswordReauth(auth, requestMeta, async () => {
       const passwordHash = await hashPassword(assertClientPasswordPolicy(input.newPassword, '新密码'))
       return runInTransaction(async (manager) => {
         const prepared = await clientAuthService.preparePasswordChange(this.toClientAuth(auth), input, passwordHash, manager)

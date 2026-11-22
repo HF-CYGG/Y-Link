@@ -19,6 +19,7 @@ import { BizOutboundOrderItem } from '../src/entities/biz-outbound-order-item.en
 import { ClientUser } from '../src/entities/client-user.entity.js'
 import { InventoryLog } from '../src/entities/inventory-log.entity.js'
 import { O2oPreorder } from '../src/entities/o2o-preorder.entity.js'
+import { O2oPreorderItem } from '../src/entities/o2o-preorder-item.entity.js'
 import { O2oReturnRequest } from '../src/entities/o2o-return-request.entity.js'
 import { OrderRevision } from '../src/entities/order-revision.entity.js'
 import { SysAuditLog } from '../src/entities/sys-audit-log.entity.js'
@@ -414,6 +415,16 @@ const run = async () => {
     '客户端订单列表应支持通过工号快照搜索命中对应订单',
   )
   log('客户端订单列表支持通过工号关键词命中订单')
+
+  const searchTerm = departmentSnapshotPreorder.order.preorderNo.slice(0, 3)
+  const repeatedTerms = Array.from({ length: 7 }, (_, index) =>
+    index % 2 === 0 ? searchTerm : searchTerm.toLowerCase()).join(' ')
+  const repeatedSearch = await o2oPreorderService.listMyOrders(clientAuth, { keyword: repeatedTerms, searchMode: 'contains' })
+  assert.ok(repeatedSearch.list.some((item) => item.id === departmentSnapshotPreorder.order.id))
+  await assert.rejects(
+    () => o2oPreorderService.listMyOrders(clientAuth, { keyword: '库存 商品 订单 领取 规格 批次 部门', searchMode: 'contains' }),
+    { statusCode: 400, message: '最多支持 6 个不同的搜索关键词' },
+  )
 
   // 下单完成后模拟用户资料被维护人员修改，正式出库单仍必须沿用“下单时快照”。
   await clientUserRepo.update(
@@ -1149,7 +1160,7 @@ const run = async () => {
 
   const historicalUnrecordedPreorder = await submitPreorderWithPickup(clientAuth, {
     clientRequestId: 'o2o-verify-historical-unrecorded-01',
-    items: [{ productId: product.id, qty: 1 }],
+    items: [{ productId: product.id, qty: 3 }],
     isSystemApplied: false,
     pickupContact: '历史模拟领取人',
   })
@@ -1163,6 +1174,24 @@ const run = async () => {
   assert.equal(historicalOutboundDetail.order.sourcePreorderPickupContact, null)
   assert.equal(historicalOutboundDetail.order.sourcePreorderPickupAt, SCRIPT_PICKUP_AT)
   log('历史部门单缺失领取人时保持未记录，不从账号实名推断')
+
+  const historicalItems = AppDataSource.getRepository(O2oPreorderItem)
+  const historicalItem = await historicalItems.findOneByOrFail({ orderId: historicalUnrecordedPreorder.order.id })
+  const historicalOutboundItems = AppDataSource.getRepository(BizOutboundOrderItem)
+  const historicalOutboundItem = await historicalOutboundItems.findOneByOrFail({ orderId: String(historicalOutbound.id) })
+  await historicalItems.update(historicalItem.id, { unitPrice: '0.00', lineAmount: '10.00' })
+  for (const [qty, remaining, amount] of [[1, 2, '6.67'], [2, 0, '0.00']] as const) {
+    const returnRequest = await o2oPreorderService.createReturnRequest(clientAuth, historicalUnrecordedPreorder.order.id, {
+      reason: '历史金额快照退货核销',
+      items: [{ productId: historicalItem.productId, skuId: historicalItem.skuId, qty }],
+    })
+    await o2oPreorderService.verifyByCode(returnRequest.verifyCode, scriptAdminActor)
+    const stored = await historicalItems.findOneByOrFail({ id: historicalItem.id })
+    assert.equal(stored.qty, remaining)
+    assert.equal(Number(stored.lineAmount).toFixed(2), amount)
+    const outbound = await outboundOrderRepo.findOneByOrFail({ id: historicalOutbound.id })
+    assert.equal(Number(outbound.totalAmount).toFixed(2), (Number(historicalOutboundItem.unitPrice) * remaining).toFixed(2))
+  }
 
   const historicalWalkinPreorder = await submitPreorderWithPickup(otherClientAuth, {
     clientRequestId: 'o2o-verify-historical-walkin-01',
@@ -1179,6 +1208,31 @@ const run = async () => {
   })
   assert.equal(historicalWalkinOutbound.customerName, otherClientAuth.realName, '散客历史正式单保留原有客户名称兜底')
   log('历史散客单的提货人展示与正式单客户名称兼容原行为')
+
+  if (AppDataSource.options.type === 'sqlite') {
+    const [upperOrder, lowerOrder] = await Promise.all(['Ä', 'ä'].map(async (name, index) => {
+      const searchProduct = await productService.create({
+        productName: `搜索规格 ${name}`, defaultPrice: 10, currentStock: 1, o2oStatus: 'listed',
+      }, scriptAdminActor)
+      const submitted = await submitPreorderWithPickup(clientAuth, {
+        clientRequestId: `o2o-verify-unicode-search-${index}`,
+        items: [{ productId: searchProduct.id, qty: 1 }],
+        pickupContact: '搜索验收领取人',
+      })
+      return submitted.order.id
+    }))
+    const search = async (keyword: string) => (await o2oPreorderService.listMyOrders(clientAuth, {
+      keyword, searchMode: 'contains',
+    })).list.map(({ id }) => id)
+    const [upperMatches, lowerMatches, upperFirst, lowerFirst] = await Promise.all(
+      ['Ä', 'ä', 'Ä ä', 'ä Ä'].map(search),
+    )
+    assert.ok(upperMatches?.includes(upperOrder!) && !upperMatches.includes(lowerOrder!))
+    assert.ok(lowerMatches?.includes(lowerOrder!) && !lowerMatches.includes(upperOrder!))
+    for (const matches of [upperFirst, lowerFirst]) {
+      assert.ok(!matches?.includes(upperOrder!) && !matches?.includes(lowerOrder!), 'SQLite 模糊搜索保留两个非 ASCII 关键词的交集')
+    }
+  }
 
   const o2oRules = await systemConfigService.getO2oRuleConfigs()
   assert.equal(o2oRules.autoCancelHours, 24)

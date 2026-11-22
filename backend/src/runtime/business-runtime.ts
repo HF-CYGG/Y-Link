@@ -164,6 +164,8 @@ const shutdownRuntime = (reason: string, exitCode: number, exit = true): Promise
       : Promise.resolve()
 
     overloadMonitor.stop()
+    // 先关闭 schema worker 准入并等已拉起的子进程退出，治理任务才能结束而不拖住数据库排空。
+    await databaseMigrationService.stopSchemaWorkersForShutdown()
     await stopProductThumbnailBackfill()
     // HTTP 断开不代表业务 Promise 完成；先关闭新准入，排空所有操作和 worker 才销毁连接。
     await databaseMaintenanceModeService.shutdownAndDrain()

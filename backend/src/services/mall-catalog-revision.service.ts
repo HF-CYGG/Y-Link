@@ -28,12 +28,12 @@ const bumpLocalRevision = () => {
   return currentRevision
 }
 
-export function invalidateMallCatalogReadCache(options?: { affectsBusinessData?: boolean }): number {
+export function invalidateMallCatalogReadCache(options?: { affectsBusinessData?: boolean; soldQtyChanged?: boolean }): number {
   const revision = bumpLocalRevision()
   const client = isRedisReady() ? getRedisClient() : null
   // 不等待结果：命令立即进入连接的发送队列，排在随后的广播之前；失败时共享快照仍受短 TTL 约束。
   client?.incr(clusterRevisionKey()).catch((error: unknown) => recordRedisDegrade('商城目录集群修订号', error))
-  void publishRedisBus(MALL_CATALOG_BUS_TOPIC, null)
+  void publishRedisBus(MALL_CATALOG_BUS_TOPIC, options?.soldQtyChanged ? { soldQtyChanged: true } : null)
   // 库存及经营数据变更同时刷新报表、工作台；仅商城展示变化的调用须显式标明。
   if (options?.affectsBusinessData !== false) invalidateBusinessDataAfterCommit()
   return revision
@@ -59,7 +59,9 @@ subscribeRedisBus(MALL_CATALOG_BUS_TOPIC, () => {
   bumpLocalRevision()
 })
 
-/** 仅监听其他实例的失效，处理器执行前本地商城修订已更新。 */
-export function subscribeMallCatalogRemoteInvalidation(listener: () => void): () => void {
-  return subscribeRedisBus(MALL_CATALOG_BUS_TOPIC, listener)
+/** 仅监听其他实例的失效，处理器执行前本地商城修订已更新。旧版空载荷只刷新目录。 */
+export function subscribeMallCatalogRemoteInvalidation(listener: (soldQtyChanged: boolean) => void): () => void {
+  return subscribeRedisBus(MALL_CATALOG_BUS_TOPIC, (payload) => {
+    listener(payload !== null && typeof payload === 'object' && 'soldQtyChanged' in payload && payload.soldQtyChanged === true)
+  })
 }

@@ -260,6 +260,18 @@ async function runSuite() {
       sizeBytes: 100,
       expiresAt: oldDate,
     })
+    const idOnlyStorageName = `${randomUUID()}.png`
+    const idOnlyPath = writeOldFeedbackFile(idOnlyStorageName)
+    const idOnlyDraft = await AppDataSource.getRepository(ClientFeedbackAttachment).save({
+      ownerClientUserId: user.id,
+      conversationId: null,
+      messageId: null,
+      storageName: idOnlyStorageName,
+      originalName: '历史 ID 引用.png',
+      mimeType: 'image/png',
+      sizeBytes: 100,
+      expiresAt: oldDate,
+    })
     await AppDataSource.getRepository(ClientFeedbackMessage).update(
       { id: historicalConversation.message.id },
       { attachmentJson: JSON.stringify([
@@ -275,6 +287,7 @@ async function runSuite() {
           mimeType: 'image/png',
           size: 100,
         },
+        { attachmentId: String(idOnlyDraft.id) },
       ]) },
     )
 
@@ -289,6 +302,8 @@ async function runSuite() {
     assert.equal(fs.existsSync(orphanPath), false, '超过 24 小时且无双重引用的 UUID 孤儿应回收')
     assert.equal(fs.existsSync(expiredPath), false, '过期且未绑定的草稿文件应在数据库提交后回收')
     assert.equal(fs.existsSync(referencedExpiredPath), true, '消息仍引用的过期草稿属于关系异常，必须保留')
+    assert.equal(fs.existsSync(idOnlyPath), true, '历史消息仅有附件 ID 的快照仍应保留草稿文件')
+    assert.equal(await AppDataSource.getRepository(ClientFeedbackAttachment).existsBy({ id: String(idOnlyDraft.id) }), true)
     assert.equal(fs.existsSync(historicalPath), true, '历史消息 JSON 仍引用的文件必须保留')
     assert.equal(fs.existsSync(uncertainPath), true, '格式不明的历史快照保留可识别的附件引用')
     assert.equal(fs.existsSync(unsafePath), true, '非 UUID 文件名属于不确定历史文件，禁止删除')
@@ -298,9 +313,11 @@ async function runSuite() {
     )
     assert.ok(cleanupResult.anomalies.some((item) => item.storageName === historicalStorageName))
     assert.ok(cleanupResult.anomalies.some((item) => item.storageName === referencedExpiredStorageName))
+    assert.ok(cleanupResult.anomalies.some((item) => item.storageName === idOnlyStorageName))
     assert.ok(cleanupResult.anomalies.some((item) => item.storageName === 'legacy-uncertain-name.png'))
     assert.ok(cleanupResult.anomalies.some((item) => item.storageName === uncertainStorageName))
     assert.equal(cleanupResult.removedTempFiles, 2)
+    assert.equal(cleanupResult.retainedReferencedFiles, 4, '保留统计不得计入本轮回收的过期草稿')
     for (const file of [agedFeedbackTemp, agedProductTemp]) assert.equal(fs.existsSync(file), false)
     for (const file of [freshTemp, unrecognizedTemp, tempDirectory]) assert.equal(fs.existsSync(file), true)
     for (const file of [blockedOrphan, blockedTemp]) assert.equal(fs.existsSync(file), true)
@@ -398,6 +415,39 @@ async function runSuite() {
     assert.equal(await attachmentRepo.existsBy({ id: lateDraft.id }), false, '草稿批次推进经过异常留存行后必须回收到后续草稿')
     assert.equal(fs.existsSync(lateDraftPath), false)
     assert.equal(await attachmentRepo.existsBy({ storageName: '历史非标准文件名-0.png' }), true)
+
+    if (verifyDatabaseType === 'sqlite') {
+      const exactIds = ['9007199254740992', '9007199254740993']
+      const [claimedName, expiredName] = exactIds.map(() => `${randomUUID()}.png`) as [string, string]
+      const claimedFile = writeOldFeedbackFile(claimedName)
+      const expiredFile = writeOldFeedbackFile(expiredName)
+      for (const [index, storageName] of [claimedName, expiredName].entries()) {
+        await AppDataSource.query(
+          `INSERT INTO client_feedback_attachment (id, owner_client_user_id, storage_name, original_name, expires_at)
+           VALUES (CAST(? AS INTEGER), ?, ?, '历史大整数附件.png', '2000-01-01 00:00:00.000')`,
+          [exactIds[index], user.id, storageName],
+        )
+      }
+      await messageRepo.insert({
+        conversationId: historicalConversation.conversation.id,
+        senderType: 'client',
+        content: '仅引用第一个精确大整数 ID',
+        attachmentJson: `[{"attachmentId":${exactIds[0]}}]`,
+      })
+      // 第一页仍有先前用于验证分页的大批历史草稿，两次清理均走实际读写。
+      await clientFeedbackService.runAttachmentCleanupOnce()
+      await clientFeedbackService.runAttachmentCleanupOnce()
+      assert.equal(fs.existsSync(claimedFile), true, '精确被引用的附件文件应保留')
+      assert.equal(fs.existsSync(expiredFile), false, '相邻的无引用附件文件应回收')
+      assert.deepEqual(
+        await AppDataSource.query(
+          'SELECT CAST(id AS TEXT) AS id FROM client_feedback_attachment WHERE storage_name IN (?, ?) ORDER BY id',
+          [claimedName, expiredName],
+        ),
+        [{ id: exactIds[0] }],
+        '删除时应使用精确的主键，只保留历史消息真正引用的附件登记',
+      )
+    }
 
     const freezeControl = databaseOperationGate.freeze()
     try {

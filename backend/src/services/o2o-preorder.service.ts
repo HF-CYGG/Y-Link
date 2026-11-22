@@ -9,7 +9,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { setTimeout as delay } from 'node:timers/promises'
 import { kingdeeRegistrationView, normalizeKingdeeVoucherNo, type KingdeeStatus } from '../utils/kingdee-registration.js'
-import { Brackets, type EntityManager, In, IsNull, Not, type SelectQueryBuilder } from 'typeorm'
+import { Brackets, type EntityManager, In, IsNull, MoreThan, Not, type SelectQueryBuilder } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { DatabaseWriteFrozenError, databaseOperationGate } from '../database/operation-gate.js'
@@ -333,6 +333,7 @@ const isDatabaseFlagEnabled = (value: unknown): boolean => {
 
 export const CLIENT_ORDER_SEARCH_MODES = ['contains', 'prefix', 'exact'] as const
 type ClientOrderSearchMode = (typeof CLIENT_ORDER_SEARCH_MODES)[number]
+const MAX_CLIENT_ORDER_CONTAINS_TERMS = 6
 type ClientOrderIdentifierSearch = { mode: ClientOrderSearchMode; terms: readonly string[] }
 
 const CLIENT_ORDER_TYPE_SEARCH_TERMS = {
@@ -584,7 +585,9 @@ class O2oPreorderService {
   private mallSoldQtyRefreshInFlight: Promise<{ key: string; revision: number; data: Map<string, number> }> | null = null
 
   constructor() {
-    subscribeMallCatalogRemoteInvalidation(() => this.invalidateMallSoldQtyCache())
+    subscribeMallCatalogRemoteInvalidation((soldQtyChanged) => {
+      if (soldQtyChanged) this.invalidateMallSoldQtyCache()
+    })
     databaseOperationGate.registerWorker({
       name: 'o2o-timeout-recycle',
       pause: () => this.pauseTimeoutRecycleLoop(),
@@ -2464,12 +2467,10 @@ class O2oPreorderService {
    * 对外仅递增一个固定大小的修订号，不保存商品 id 集合，避免无界内存增长。
    */
   private invalidateMallReadCache(options?: { soldQtyChanged?: boolean }) {
-    invalidateMallCatalogReadCache()
+    if (options?.soldQtyChanged) this.invalidateMallSoldQtyCache()
+    invalidateMallCatalogReadCache(options)
     this.mallProductsCache = null
     this.mallStorefrontCache = null
-    if (options?.soldQtyChanged) {
-      this.invalidateMallSoldQtyCache()
-    }
   }
 
   private invalidateMallSoldQtyCache(): void {
@@ -3727,12 +3728,11 @@ class O2oPreorderService {
 
   private applyMyOrderKeyword(
     queryBuilder: SelectQueryBuilder<O2oPreorder>,
-    keyword: string,
+    words: string[],
     searchMode?: ClientOrderSearchMode,
   ): ClientOrderIdentifierSearch {
     const identifierMode = searchMode ?? 'prefix'
     const textMode = searchMode ?? 'contains'
-    const words = searchMode === 'contains' ? [...new Set(keyword.split(/\s+/))] : [keyword]
     const isMysql = AppDataSource.options.type === 'mysql'
     const lowerCaseCollation = isMysql ? ' COLLATE utf8mb4_bin' : ''
     const like = (column: string, parameter: string) => {
@@ -3821,6 +3821,13 @@ class O2oPreorderService {
     const normalizedPageSize = Math.max(1, Math.min(50, Number(query?.pageSize) || 20))
     const normalizedKeyword = query?.keyword?.trim() ?? ''
     const normalizedStatus = query?.status
+    // 仅折叠两库都能等价匹配的 ASCII 大写字母，保留 SQLite 的非 ASCII 匹配语义。
+    const terms = query?.searchMode === 'contains'
+      ? [...new Set(normalizedKeyword.replace(/[A-Z]/g, (letter) => letter.toLowerCase()).split(/\s+/).filter(Boolean))]
+      : normalizedKeyword ? [normalizedKeyword] : []
+    if (terms.length > MAX_CLIENT_ORDER_CONTAINS_TERMS) {
+      throw new BizError(`最多支持 ${MAX_CLIENT_ORDER_CONTAINS_TERMS} 个不同的搜索关键词`, 400)
+    }
 
     // 索引命中策略说明：
     // 1. status 有值时：优先命中 idx_o2o_preorder_client_status_id(client_user_id, status, id)；
@@ -3837,8 +3844,8 @@ class O2oPreorderService {
       queryBuilder.andWhere('order.status = :status', { status: normalizedStatus })
     }
 
-    const clientIdentifierSearch = normalizedKeyword
-      ? this.applyMyOrderKeyword(queryBuilder, normalizedKeyword, query?.searchMode)
+    const clientIdentifierSearch = terms.length
+      ? this.applyMyOrderKeyword(queryBuilder, terms, query?.searchMode)
       : undefined
 
     const [rows, total] = await queryBuilder.getManyAndCount()
@@ -4483,6 +4490,8 @@ class O2oPreorderService {
       })
       const returnRequestIds = returnRequests.map((item) => String(item.id))
       const releasedPreorderedQty = await this.releasePendingPreorderStockForDeleteInManager(manager, order, actor)
+      const soldQtyChanged = order.status === 'verified'
+        && await preorderItemRepo.existsBy({ orderId: String(order.id), qty: MoreThan(0) })
       await cleanupOrderIdentifiableData(manager, {
         orderIds: linkedOutboundOrder ? [String(linkedOutboundOrder.id)] : [],
         orderUuids: linkedOutboundOrder ? [linkedOutboundOrder.orderUuid] : [],
@@ -4547,7 +4556,7 @@ class O2oPreorderService {
         manager,
       )
 
-      return {
+      const deletedOrder = {
         id: String(order.id),
         preorderNo: order.preorderNo,
         showNo: order.preorderNo,
@@ -4561,9 +4570,10 @@ class O2oPreorderService {
         preorderSerialRolledBack,
         outboundSerialRolledBack,
       }
+      return { deletedOrder, soldQtyChanged }
     })
-    this.invalidateMallReadCache({ soldQtyChanged: result.status === 'verified' })
-    return result
+    this.invalidateMallReadCache({ soldQtyChanged: result.soldQtyChanged })
+    return result.deletedOrder
   }
 
   async cancelMyOrder(auth: ClientAuthContext, id: string, requestMeta?: RequestMeta) {
@@ -4851,7 +4861,7 @@ class O2oPreorderService {
     }
     const requestQty = Number(requestItem.qty)
     const currentOrderQty = Math.max(0, Number(orderItem.qty ?? 0))
-    if (!Number.isSafeInteger(requestQty) || requestQty <= 0 || currentOrderQty < requestQty) {
+    if (!Number.isSafeInteger(requestQty) || requestQty <= 0 || !Number.isSafeInteger(currentOrderQty) || currentOrderQty < requestQty) {
       throw new BizError(`商品「${product.productName}」可退数量不足，无法核销`, 409)
     }
 
@@ -4908,7 +4918,16 @@ class O2oPreorderService {
     }
 
     orderItem.qty = currentOrderQty - requestQty
-    orderItem.lineAmount = formatMoneyFromCents(orderItem.qty * parseMoneyToCents(orderItem.unitPrice))
+    const unitPriceCents = parseMoneyToCents(orderItem.unitPrice)
+    const previousLineCents = parseMoneyToCents(orderItem.lineAmount)
+    if (orderItem.qty > 0 && unitPriceCents === 0 && previousLineCents > 0) {
+      // 旧行缺少单价时按本次退货前的行金额分摊，件数乘积按整数分四舍五入。
+      const divisor = BigInt(currentOrderQty)
+      const scaledCents = BigInt(previousLineCents) * BigInt(orderItem.qty)
+      orderItem.lineAmount = formatMoneyFromCents(Number((scaledCents + divisor / 2n) / divisor))
+    } else {
+      orderItem.lineAmount = formatMoneyFromCents(orderItem.qty * Math.max(0, unitPriceCents))
+    }
     await manager.getRepository(O2oPreorderItem).save(orderItem)
     return { orderItem, currentOrderQty }
   }
@@ -5190,8 +5209,8 @@ class O2oPreorderService {
           }, manager)
         }
         return detail
-          ? { timedOut: null, detail }
-          : { timedOut: 'return_request' as const, detail: null }
+          ? { timedOut: null, detail, soldQtyChanged: returnRequest.sourceOrderStatus === 'verified' }
+          : { timedOut: 'return_request' as const, detail: null, soldQtyChanged: false }
       }
       const order = await manager.getRepository(O2oPreorder).findOne({
         where: { verifyCode: normalizedVerifyCode, isDeleted: false },
@@ -5201,7 +5220,7 @@ class O2oPreorderService {
         throw new BizError('核销单不存在', 404)
       }
       if (await this.cancelTimedOutOrderInManager(manager, order)) {
-        return { timedOut: 'preorder' as const, detail: null }
+        return { timedOut: 'preorder' as const, detail: null, soldQtyChanged: false }
       }
       const detail = await this.verifyPreorderInManager(manager, order, actor)
       const outboundOrder = await this.loadLinkedOutboundOrderInManager(manager, String(order.id))
@@ -5225,9 +5244,9 @@ class O2oPreorderService {
           outboundOrderSystemNo: outboundOrder.systemNo,
         },
       }, manager)
-      return { timedOut: null, detail }
+      return { timedOut: null, detail, soldQtyChanged: true }
     }, { mysqlIsolationLevel: 'READ COMMITTED' })
-    this.invalidateMallReadCache({ soldQtyChanged: result.timedOut === null })
+    this.invalidateMallReadCache({ soldQtyChanged: result.soldQtyChanged })
     if (result.timedOut === 'return_request') {
       throw new BizError('原订单已超时取消，退货申请无需再核销', 409)
     }

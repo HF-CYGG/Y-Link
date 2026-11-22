@@ -11,6 +11,7 @@ import { createPinia, setActivePinia } from 'pinia'
 
 import type { O2oMallProduct, SubmitO2oPreorderPayload } from '../src/api/modules/o2o'
 import { useClientCartStore } from '../src/store/modules/client-cart'
+import { showAppWarning } from '../src/utils/app-alert'
 import { resolveUserScopedStorageKey } from '../src/utils/storage-user-scope'
 import {
   buildClientPreorderSubmitIntentKey,
@@ -452,6 +453,19 @@ manualQtyCart.setQtyFromInput('sku-manual', null)
 manualQtyCart.setQtyFromInput('sku-manual', Number.NaN)
 assert.equal(manualQtyCart.items[0]?.qty, 5, '空值或非数字输入不得把数量写成 NaN')
 assert.equal(createCart('client-manual-qty').items[0]?.qty, 5, '手动输入后的合法数量应正常持久化恢复')
+
+for (const maxQty of [5, 2]) {
+  const cart = createCart(`client-reached-qty-${maxQty}`)
+  cart.addProduct(manualQtyProduct, 5, manualQtyProduct.skus[0])
+  cart.syncWithCatalog([createProduct({ id: 'product-manual', skuId: 'sku-manual', availableStock: maxQty })])
+  const countBefore = showAppWarning(`回归检查 ${maxQty} 开始`)
+  const writesBefore = storage.writes
+  cart.updateQty('sku-manual', 6)
+  const countAfter = showAppWarning(`回归检查 ${maxQty} 结束`)
+  assert.equal(countAfter - countBefore, 2, '达到上限或库存下调后尝试增量，只产生一条提示')
+  assert.equal(cart.items[0]?.qty, 5)
+  assert.equal(storage.writes, writesBefore, '被拒绝的增量不得修改购物车快照')
+}
 
 const limitedQtyCart = createCart('client-manual-limit')
 const limitedQtyProduct = { ...createProduct({ id: 'product-limit', skuId: 'sku-limit', availableStock: 10 }), limitPerUser: 3 }

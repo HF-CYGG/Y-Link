@@ -155,6 +155,7 @@ async function main(): Promise<void> {
       await json(await send(admin, 'PATCH', itemUrl, body), 400)
     }
     await json(await send(admin, 'PATCH', batchUrl, { ids: [], o2oStatus: 'listed' }), 400)
+    await json(await send(admin, 'PATCH', batchUrl, { ids: Array(101).fill(created.id), o2oStatus: 'listed' }), 400)
 
     const productRepo = AppDataSource.getRepository(BaseProduct)
     const skuRepo = AppDataSource.getRepository(BaseProductSku)
