@@ -278,20 +278,16 @@ export function createApp(options: CreateAppOptions = {}) {
     }),
   )
 
-  /**
-   * JSON 请求体上限：
-   * - 教职工目录“预览后确认导入”会把已识别记录以 JSON 数组再次提交；
-   * - 批量导入上千条记录时，默认 100 KB 容量会被轻易撑爆，导致 body-parser 直接抛 `PayloadTooLargeError`；
-   * - 这里统一放宽到与文件上传场景相同的 8 MB，覆盖系统配置大文本与批量导入确认请求。
-   */
   // 救援身份独立于业务数据库和维护准入，不允许借用普通管理员会话。
   app.use('/api/database-rescue', databaseRescueRouter)
-  // 只有同任务手动switch需在维护写屏障前读取taskId；保留原受保护JSON上限，后续鉴权/CSRF/权限仍完整执行。
-  const parseManualSwitch = express.json({ limit: PROTECTED_JSON_BODY_LIMIT })
+  // 冻结期只为同任务切换读取小体积 JSON；其它情况下统一在鉴权和 CSRF 之后解析。
+  const parseFrozenManualSwitch = express.json({ limit: '16kb' })
   app.use('/api/data-maintenance/db-migration/switch', (req, res, next) => {
-    // 这是同一受保护路由的准入前置解析，不注册第二个看似匿名的POST端点，也不处理子路径/其它方法。
-    if (req.method === 'POST' && req.path === '/') parseManualSwitch(req, res, next)
-    else next()
+    if (req.method === 'POST' && req.path === '/'
+      && databaseMaintenanceModeService.isReadOnly() && databaseMaintenanceModeService.getActiveTaskId()) {
+      return parseFrozenManualSwitch(req, res, next)
+    }
+    return next()
   })
   app.use(databaseMaintenanceWriteBarrier)
 

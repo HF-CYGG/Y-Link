@@ -12,6 +12,7 @@ process.env.Y_LINK_FORCE_SECURE_COOKIES = 'false'
 
 const { createApp } = await import('../src/app.js')
 assert.equal(createApp().get('trust proxy'), false, '直接运行 Node 默认不得信任任意私网代理')
+const { databaseMaintenanceModeService } = await import('../src/services/database-maintenance-mode.service.js')
 
 const { configureHttpSecurity, readHttpSecurityConfig, resolveSecureCookieFlag, isSecureOrDirectLoopback } =
   await import('../src/utils/http-security.js')
@@ -23,8 +24,27 @@ const guardedAddress = guardedServer.address()
 assert.ok(guardedAddress && typeof guardedAddress === 'object')
 try {
   const url = `http://127.0.0.1:${guardedAddress.port}/api/data-maintenance/db-migration/switch`
-  const unauthorized = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ taskId: 'fixture-only' }) })
-  assert.equal(unauthorized.status, 401, '解析taskId之后仍必须经过真实管理员认证')
+  const postSwitch = (body: string) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
+  const sameTask = JSON.stringify({ taskId: 'fixture-only', reason: '切换夹具' })
+  const padded = ' '.repeat(16 * 1024) + sameTask
+  for (const body of [sameTask, padded]) {
+    const unauthorized = await postSwitch(body)
+    assert.equal(unauthorized.status, 401, '营业期切换请求先鉴权，再进入受保护解析器')
+    await unauthorized.text()
+  }
+  const frozen = mock.method(databaseMaintenanceModeService, 'isReadOnly', () => true)
+  const activeTask = mock.method(databaseMaintenanceModeService, 'getActiveTaskId', () => 'fixture-only')
+  try {
+    const allowed = await postSwitch(sameTask)
+    assert.equal(allowed.status, 401, '同任务通过冻结准入后仍需管理员认证')
+    await allowed.text()
+    const blocked = await postSwitch(JSON.stringify({ taskId: 'other-fixture' }))
+    assert.equal(blocked.status, 503)
+    assert.equal((await blocked.json()).code, 50301, '冻结期间仍拒绝非同任务切换')
+    const oversized = await postSwitch(padded)
+    assert.equal(oversized.status, 413, '冻结期预读切换请求的体积上限为 16 KB')
+    await oversized.text()
+  } finally { activeTask.mock.restore(); frozen.mock.restore() }
   const crossSite = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Sec-Fetch-Site': 'cross-site' }, body: '{}' })
   assert.equal(crossSite.status, 403, '维护切换路径仍受全局跨站保护')
   await crossSite.text()
@@ -48,7 +68,6 @@ try {
 
 // 在抛弃型 Express 应用中让真实屏障面对长连接，避免修改维护状态文件及业务数据库。
 const { databaseMaintenanceWriteBarrier } = await import('../src/middleware/database-maintenance.middleware.js')
-const { databaseMaintenanceModeService } = await import('../src/services/database-maintenance-mode.service.js')
 const { databaseOperationGate } = await import('../src/database/operation-gate.js')
 const maintenanceApp = express()
 maintenanceApp.use(databaseMaintenanceWriteBarrier)

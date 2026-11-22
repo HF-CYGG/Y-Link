@@ -25,24 +25,25 @@ test('前端allowedActions类型精确包含后端自动恢复与手动switch/ca
     ['prepare_rollback', 'resume_rollback', 'manual_switch', 'cancel'].sort())
 })
 
-function setup({ storageFailure = false, prompt, passwordPrompt, protocol = 'https:', credentialError, runError, precheck = { canProceed: true, issues: [] } } = {}) {
+function setup({ storageFailure = false, prompt, passwordPrompt, protocol = 'https:', credentialError, runError, rollbackError, precheck = { canProceed: true, issues: [] } } = {}) {
   const calls = [], selectedTask = ref(task), runtimeState = ref({ activeOverride: null })
   const dependencies = {
     ensurePermission: () => true, ElMessageBox: { prompt: async (message, title, options) => {
       if (options.inputType === 'password') {
         calls.push(['password', message, title]); assert.equal(options.inputValidator(' '), false)
+        assert.equal(options.inputErrorMessage, '请输入当前登录密码')
         return passwordPrompt ? passwordPrompt() : { value: currentPassword }
       }
-      return prompt ? prompt() : { value: '隔离取消' }
+      return prompt ? prompt({ message, title, options }) : { value: options.inputValue }
     } },
-    showAppWarning: value => calls.push(['warning', value]), showAppSuccess: value => calls.push(['success', value]), showCriticalErrorDialog: async error => { calls.push(['error', error]) },
+    showAppWarning: value => calls.push(['warning', value]), showAppSuccess: value => calls.push(['success', value]), showCriticalErrorDialog: async (error, options) => { calls.push(['error', error, options]) },
     taskRunningId: ref(''), currentTabRescueCredentialTaskId: ref(''), selectedTaskId: ref(''), rollbackLoading: ref(false), runtimeState, selectedTask,
     issueDatabaseMigrationRescueCredential: async (id, password) => { calls.push(['credential', id, password]); if (credentialError) throw credentialError; return { taskId: id, credential: 'fixture-only' } },
     storeRescueCredential: (_storage, credential) => { calls.push(['store', credential.taskId]); if (storageFailure) throw new Error('storage unavailable') },
     window: { location: { protocol }, sessionStorage: {} }, runSQLiteToMySqlMigrationTask: async (id, password) => { calls.push(['run', id, password]); if (runError) throw runError; return task },
     upsertTaskRecord: () => {}, enterStepFlow: () => {}, loadOverview: async () => {}, DATABASE_MIGRATION_RESTART_EFFECT_TEXT: '重启验收',
     getSQLiteToMySqlMigrationTaskDetail: async id => ({ ...task, id, status: 'rolled_back' }),
-    DATABASE_MIGRATION_ROLLBACK_REASON_DEFAULT: '隔离取消', rollbackDatabaseMigrationSwitch: async (body, password) => { calls.push(['cancel', body, password]); return { rollbackMode: 'clear', activeOverride: null } },
+    DATABASE_MIGRATION_ROLLBACK_REASON_DEFAULT: '数据库迁移助手写入 SQLite 运行时覆盖', rollbackDatabaseMigrationSwitch: async (body, password) => { calls.push(['cancel', body, password]); if (rollbackError) throw rollbackError; return { rollbackMode: 'clear', activeOverride: null } },
     automaticMigrationCompleted: ref(false), connectionTestLoading: ref(false), precheckLoading: ref(false), automaticMigrationBusy: ref(false),
     automaticTaskCreating: ref(false), precheckResult: ref(null), validateTargetForm: () => true,
     buildNormalizedTarget: () => ({ host: 'fixture', port: 3306, database: 'fixture', dbSync: false }), migrationForm: { note: '' },
@@ -89,6 +90,23 @@ test('取消提示期间切换选中任务，仍取消操作开始时的A', asyn
   context.selectedTask.value = { ...task, id: 'B' }; release({ value: '取消A' }); await work
   assert.deepEqual(context.calls.find(([kind]) => kind === 'cancel'), ['cancel', { taskId: 'A', reason: '取消A' }, currentPassword])
   assert.ok(context.calls.some(([kind, message]) => kind === 'success' && message.includes('副本切换资格已撤销')))
+})
+
+test('取消手动迁移和回退 SQLite 分别显示自己的确认按钮、默认原因与错误标题', async () => {
+  const rollbackError = new Error('fixture rollback error')
+  for (const cancelling of [true, false]) {
+    let copy
+    const context = setup({ rollbackError, prompt: ({ title, options }) => {
+      copy = { title, button: options.confirmButtonText, input: options.inputValue }
+      return { value: options.inputValue }
+    } })
+    await context.handleRollbackToSqlite(cancelling ? task : { ...task, allowedActions: ['prepare_rollback'] })
+    assert.deepEqual(copy, cancelling
+      ? { title: '取消当前手动迁移', button: '取消迁移', input: '管理员取消手动迁移' }
+      : { title: '回退到 SQLite', button: '确认回退', input: '数据库迁移助手写入 SQLite 运行时覆盖' })
+    assert.equal(context.calls.find(([kind]) => kind === 'cancel')[1].reason, copy.input)
+    assert.equal(context.calls.find(([kind]) => kind === 'error')[2].title, cancelling ? '取消手动迁移失败' : '回退到 SQLite 失败')
+  }
 })
 
 test('自动任务先完成预检，再请求本人密码；取消密码提示不提交任务', async () => {

@@ -212,6 +212,20 @@ export async function prepareManualFailureCleanup(taskId: string): Promise<void>
   writeControlFile(bindingPath(taskId), { ...binding, manualFailureCleanup: { sourceDigest, previousOverrideHash: digest(JSON.stringify(current)) } })
 }
 
+/** 与救援 PREPARED 竞争同一持久控制权；两个认领入口的检查和提交之间都没有 await。 */
+export function claimManualFailureCleanup(taskId: string): boolean {
+  if (hasPendingRecoveryIntent()) return false
+  const task = readTask(taskId), binding = readBinding(taskId)
+  if (!isControlledManualMigration(task) || task.status !== 'failed' || task.controlPhase !== 'failed_cleanup'
+    || !binding.manualFailureCleanup) fail('MANUAL_FAILURE_STATE_INVALID')
+  readOwnedControl(appDataPaths.migrationLockFile, taskId)
+  readOwnedControl(appDataPaths.maintenanceStateFile, taskId)
+  if (inspectControlFile(appDataPaths.migrationCutoverFile, validateCutoverControl).state !== 'absent') fail('MANUAL_FAILURE_CUTOVER_ACTIVE')
+  // 先关闭救援窗口，再由调用方清理。进程中断时使用同一持久证明续接终态。
+  writeControlFile(taskPath(taskId), { ...task, controlPhase: 'failed_recovered', updatedAt: now() })
+  return true
+}
+
 /** 启动前续接已证明的失败回收；不加载业务env/数据源/bootstrap，任何证明失配均留在救援。 */
 export async function resumeManualFailureCleanupBeforeStartup(taskId: string): Promise<void> {
   const task = readTask(taskId), binding = readBinding(taskId), proof = binding.manualFailureCleanup

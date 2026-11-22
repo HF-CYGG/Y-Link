@@ -782,6 +782,7 @@ const promptMigrationPassword = async (message = '请输入当前登录密码。
   const { value } = await ElMessageBox.prompt(message, title, {
     inputType: 'password',
     inputPlaceholder: '当前登录密码',
+    inputErrorMessage: '请输入当前登录密码',
     inputValidator: (password: string) => !!password?.trim(),
   })
   return value
@@ -1034,10 +1035,10 @@ const handleRollbackToSqlite = async (task?: SQLiteToMySqlTaskRecord) => {
       cancellingManual ? '请填写取消原因。复制停止后撤销副本切换资格，已准备切换时仍须受控重启验收。' : `请输入本次回退原因。${DATABASE_MIGRATION_RESTART_EFFECT_TEXT}`,
       cancellingManual ? '取消当前手动迁移' : '回退到 SQLite',
       {
-        inputValue: DATABASE_MIGRATION_ROLLBACK_REASON_DEFAULT,
-        inputPlaceholder: '例如：目标库校验异常',
-        confirmButtonText: '确认回退',
-        cancelButtonText: '取消',
+        inputValue: cancellingManual ? '管理员取消手动迁移' : DATABASE_MIGRATION_ROLLBACK_REASON_DEFAULT,
+        inputPlaceholder: cancellingManual ? '例如：暂缓迁移' : '例如：目标库校验异常',
+        confirmButtonText: cancellingManual ? '取消迁移' : '确认回退',
+        cancelButtonText: cancellingManual ? '返回' : '取消',
       },
     )
     rollbackLoading.value = true
@@ -1057,7 +1058,8 @@ const handleRollbackToSqlite = async (task?: SQLiteToMySqlTaskRecord) => {
     showAppSuccess(cancelledTask?.status === 'rolled_back' ? '手动迁移已取消，副本切换资格已撤销，原 SQLite 继续服务' : `已准备受控回退，系统保持只读至重启验收完成。${DATABASE_MIGRATION_RESTART_EFFECT_TEXT}`)
     await loadOverview()
   } catch (error) {
-    showMigrationActionError(error, '回退到 SQLite 失败', '回退数据库到 SQLite')
+    showMigrationActionError(error, cancellingManual ? '取消手动迁移失败' : '回退到 SQLite 失败',
+      cancellingManual ? '取消手动迁移' : '回退数据库到 SQLite')
   } finally {
     rollbackLoading.value = false
   }

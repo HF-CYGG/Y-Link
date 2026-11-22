@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { randomBytes } from 'node:crypto'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { createVerificationIsolation } from './verification-isolation.js'
 import { createOwnedVerificationDatabase, verificationDatabaseName } from './owned-verification-database.js'
@@ -28,9 +28,9 @@ const timeout = async <T>(promise: Promise<T>, ms = 120_000) => {
 }
 const cases = ['manual-switch', 'prepared-switch', 'diagnostic-backup-target-unavailable', 'diagnostic-snapshot-tampered',
   'diagnostic-snapshot-sidecar-on-seal', 'diagnostic-snapshot-sidecar-on-switch', 'request-worker-drain', 'actor-disabled', 'session-revoked',
-  'run-switch-cancel', 'preadmitted-cancel', 'marker-write-failure', 'override-write-failure', 'task-write-failure', 'compensation-failure',
+  'run-switch-cancel', 'preadmitted-cancel', 'schema-worker-cancel', 'schema-worker-shutdown', 'marker-write-failure', 'override-write-failure', 'task-write-failure', 'compensation-failure',
   'startup-terminal-failure', 'legacy-stale', 'legacy-account-stale', 'legacy-session-stale', 'no-id-stale', 'no-id-equal', 'preserve-target',
-  'failed-cleanup-crash', 'failed-cleanup-unlink-failure', 'http-proxy-run', 'https-proxy-run', 'copy-completed-before-cancel', 'cancel-accept-write-failure',
+  'failed-cleanup-crash', 'failed-cleanup-unlink-failure', 'failed-cleanup-rescue-race', 'http-proxy-run', 'https-proxy-run', 'copy-completed-before-cancel', 'cancel-accept-write-failure',
   'delete-awaiting-switch', 'delete-preadmitted-cancel', 'delete-cancel-accept-write-failure', 'recovery-expired-session', 'recovery-revoked-session']
 
 if (!selected) {
@@ -49,6 +49,30 @@ if (!selected) {
       console.log(`PASS manual protocol ${name}`)
     }
   })
+} else if (selected === 'schema-worker-cancel-restart-child') {
+  const context = JSON.parse(process.env.Y_LINK_VERIFICATION_CONTEXT ?? 'null')
+  assert.ok(context && fs.readFileSync(path.join(context.rootDir, '.verification-owner'), 'utf8') === context.token)
+  process.chdir(context.rootDir)
+  const taskId = process.env.Y_LINK_MANUAL_CANCEL_TEST_TASK_ID!
+  const { inspectDatabaseStartup } = await import('../src/runtime/database-startup-preflight.js')
+  assert.deepEqual(await inspectDatabaseStartup(), { mode: 'resume', taskId })
+  const { AppDataSource: source } = await import('../src/config/data-source.js')
+  const { assertInheritedVerificationTarget } = await import('./verification-isolation.js')
+  const { databaseMigrationService: migration } = await import('../src/services/database-migration.service.js')
+  const { databaseMaintenanceModeService: maintenance } = await import('../src/services/database-maintenance-mode.service.js')
+  const { inspectSqliteForRescue } = await import('../src/runtime/sqlite-rescue-inspection.js')
+  const { appDataPaths } = await import('../src/config/app-data-paths.js')
+  await assertInheritedVerificationTarget(source)
+  try {
+    await source.initialize()
+    assert.equal(maintenance.isReadOnly(), true)
+    await migration.resumeInterruptedAutomaticMigrationAfterStartup()
+    assert.equal(maintenance.isReadOnly(), false, '重启必须续接已持久接受的取消')
+    assert.equal((await migration.getSQLiteToMySqlTask(taskId)).status, 'rolled_back')
+    for (const file of [appDataPaths.migrationLockFile, appDataPaths.maintenanceStateFile,
+      appDataPaths.migrationCutoverFile, appDataPaths.runtimeOverrideFile]) assert.equal(fs.existsSync(file), false)
+    assert.equal((await inspectSqliteForRescue(context.target.database)).sha256, process.env.Y_LINK_MANUAL_CANCEL_TEST_SOURCE_DIGEST)
+  } finally { if (source.isInitialized) await source.destroy() }
 } else if (selected === 'legacy-switch-child') {
   // 历史任务来自旧进程，不能在刚取消同一任务的服务实例内篡改 JSON 来模拟重启。
   readOwnedMysqlContext()
@@ -73,6 +97,16 @@ if (!selected) {
     assert.equal(fs.existsSync(path.join(context.rootDir, 'runtime/database-runtime-override.json')), false)
     assert.equal(fs.existsSync(path.join(context.rootDir, 'runtime/database-migration-cutover.json')), false)
   } finally { if (source.isInitialized) await source.destroy() }
+} else if (selected === 'failed-cleanup-rescue-restart-child') {
+  const context = JSON.parse(process.env.Y_LINK_VERIFICATION_CONTEXT ?? 'null')
+  assert.ok(context && fs.readFileSync(path.join(context.rootDir, '.verification-owner'), 'utf8') === context.token)
+  process.chdir(context.rootDir)
+  const taskId = process.env.Y_LINK_FAILURE_TASK_ID!
+  const { inspectDatabaseStartup } = await import('../src/runtime/database-startup-preflight.js')
+  const { inspectRecoveryIntent } = await import('../src/runtime/database-rescue-control.js')
+  assert.deepEqual(await inspectDatabaseStartup(), { mode: 'cutover', taskId })
+  const intent = inspectRecoveryIntent()
+  assert.equal(intent.state === 'healthy' && intent.value.phase, 'VERIFYING', '冷启动必须能接管先提交的救援意图')
 } else if (['failed-cleanup-fault-child', 'failed-cleanup-restart-child', 'failed-cleanup-reject-child'].includes(selected)) {
   const context = JSON.parse(process.env.Y_LINK_VERIFICATION_CONTEXT ?? 'null')
   assert.ok(context && fs.readFileSync(path.join(context.rootDir, '.verification-owner'), 'utf8') === context.token)
@@ -102,10 +136,18 @@ if (!selected) {
     await AppDataSource.initialize()
     const task = await internal.readTaskRecord!(taskId, '隔离故障回归')
     const release = internal.releaseAutomaticMigrationLock!, unlink = fs.unlinkSync
-    if (process.env.Y_LINK_FAILURE_KIND === 'crash') internal.releaseAutomaticMigrationLock = async function (...args) {
-      await release.apply(this, args)
-      process.kill(process.pid, 'SIGKILL')
-      await new Promise(() => {})
+    if (process.env.Y_LINK_FAILURE_KIND === 'crash') {
+      const { prepareDatabaseRescueRollback, beginDatabaseRescueRollback, inspectRecoveryIntent } = await import('../src/runtime/database-rescue-control.js')
+      const { nonce } = prepareDatabaseRescueRollback(taskId)
+      internal.releaseAutomaticMigrationLock = async function (...args) {
+        assert.equal(fs.existsSync(appDataPaths.migrationLockFile), true)
+        assert.equal(fs.existsSync(appDataPaths.maintenanceStateFile), true)
+        await assert.rejects(beginDatabaseRescueRollback(taskId, nonce, 'fixture_cleanup_claimed'), { message: 'RESCUE_WINDOW_CLOSED' })
+        assert.equal(inspectRecoveryIntent().state, 'absent')
+        await release.apply(this, args)
+        process.kill(process.pid, 'SIGKILL')
+        await new Promise(() => {})
+      }
     }
     else fs.unlinkSync = function (file) {
       if (String(file) === appDataPaths.maintenanceStateFile) throw new Error('MANUAL_MAINTENANCE_UNLINK_FAILURE')
@@ -455,6 +497,79 @@ if (!selected) {
       await timeout(cancel, 20_000)
       assert.equal(maintenance.isReadOnly(), false, '冻结前准入的取消请求不能令drain等待自己')
       assert.equal((await migration.getSQLiteToMySqlTask(task.id)).status, 'rolled_back')
+    } else if (selected === 'schema-worker-cancel' || selected === 'schema-worker-shutdown') {
+      const runtime = selected === 'schema-worker-shutdown' ? await import('../src/runtime/business-runtime.js') : null
+      const preloadPath = path.join(isolation.rootDir, 'schema-worker-fixture.mjs')
+      const readyPath = path.join(isolation.rootDir, 'schema-worker-ready')
+      // 仅阻塞本轮 spawn 的 worker。等待 stdout 送达后再确认 Ready，测试失败时夹具自行退出。
+      fs.writeFileSync(preloadPath, `
+        import fs from 'node:fs'
+        if (process.env.Y_LINK_MYSQL_SCHEMA_WORKER !== 'true') process.exit(2)
+        setTimeout(() => process.exit(1), 20_000)
+        await new Promise(resolve => process.stdout.write('s'.repeat(256 * 1024), resolve))
+        fs.writeFileSync(${JSON.stringify(readyPath)}, String(process.pid))
+        await new Promise(() => {})
+      `)
+      const originalNodeOptions = process.env.NODE_OPTIONS
+      const releaseLock = internal.releaseAutomaticMigrationLock!
+      const writeTask = internal.writeTaskRecordWithoutLock!
+      let staleFailureWrites = 0
+      internal.writeTaskRecordWithoutLock = async function (record) {
+        if (record.controlPhase === 'failed') staleFailureWrites++
+        return writeTask.call(this, record)
+      }
+      process.env.NODE_OPTIONS = `${originalNodeOptions ?? ''} --import=${pathToFileURL(preloadPath).href}`.trim()
+      const running = migration.runSQLiteToMySqlTask(task.id, actor)
+      void running.catch(() => undefined)
+      let cancelling: Promise<unknown> | undefined
+      let stopping: Promise<void> | undefined
+      let digest: string | undefined
+      try {
+        await Promise.race([waitFor(() => fs.existsSync(readyPath)), running.then(() => { throw new Error('预期建表子进程仍在运行') })])
+        if (runtime) {
+          const pid = Number(fs.readFileSync(readyPath, 'utf8'))
+          assert.ok(Number.isInteger(pid) && pid > 0 && pid !== process.pid)
+          const record = await internal.readTaskRecord!(task.id, '检查冻结任务', false)
+          stopping = runtime.stopFailedBusinessRuntime()
+          await assert.rejects(internal.runMysqlSchemaWorker!(record, 'verify'), /后端正在关闭/)
+          await Promise.all([timeout(stopping, 10_000), assert.rejects(timeout(running, 10_000), /后端正在关闭/)])
+          assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, '业务运行时收口后自有 schema 子进程已退出')
+          assert.equal(source.isInitialized, false)
+          sourceClosed = true
+          const { inspectDatabaseStartup } = await import('../src/runtime/database-startup-preflight.js')
+          assert.deepEqual(await inspectDatabaseStartup(), { mode: 'resume', taskId: task.id })
+        } else {
+          await assert.rejects(migration.prepareManualMigrationCredential(task.id), /已有迁移控制操作/)
+          digest = (await inspectSqliteForRescue(sqlite)).sha256
+          internal.releaseAutomaticMigrationLock = async () => { throw new Error('MANUAL_CANCEL_RELEASE_INTERRUPTED') }
+          cancelling = migration.rollbackDatabaseSwitch({ taskId: task.id }, actor)
+          const failed = assert.rejects(timeout(cancelling, 10_000), /MANUAL_CANCEL_RELEASE_INTERRUPTED/)
+          await Promise.all([assert.rejects(timeout(running, 10_000), /已由管理员.*取消/), failed])
+        }
+        assert.equal(staleFailureWrites, 0, '执行方退出不得回写旧失败状态')
+        const record = await internal.readTaskRecord!(task.id, '检查持久取消意图', false)
+        assert.ok(record.backupFile && record.immutableSnapshotFile && record.jsonSnapshotFile)
+        assert.equal(Boolean(record.cancelRequestedAt), !runtime)
+        assert.equal(record.controlPhase, runtime ? 'copying' : 'cancelled')
+        assert.equal(maintenance.isReadOnly(), true, '停机或收尾故障时必须保留冻结供重启续接')
+      } finally {
+        try { await timeout(Promise.allSettled([running, cancelling, stopping]), 25_000) }
+        catch (error) { retainIsolationForDiagnostic = true; throw error }
+        finally {
+          internal.releaseAutomaticMigrationLock = releaseLock
+          internal.writeTaskRecordWithoutLock = writeTask
+          if (originalNodeOptions === undefined) delete process.env.NODE_OPTIONS
+          else process.env.NODE_OPTIONS = originalNodeOptions
+        }
+      }
+      if (!runtime) {
+        await source.destroy(); sourceClosed = true
+        const restart = spawnSync(process.execPath, [cli, '--tsconfig', path.join(backendRoot, 'tsconfig.json'), file, '--case=schema-worker-cancel-restart-child'], {
+          cwd: isolation.rootDir, env: { ...process.env, Y_LINK_MANUAL_CANCEL_TEST_TASK_ID: task.id,
+            Y_LINK_MANUAL_CANCEL_TEST_SOURCE_DIGEST: digest }, encoding: 'utf8', windowsHide: true, timeout: 60_000,
+        })
+        assert.equal(restart.status, 0, restart.stderr.slice(-3000))
+      }
     } else if (selected === 'run-switch-cancel') {
       const entered = deferred(), release = deferred(), original = internal.migrateSingleTableByPrimaryKey!
       const traceDir = path.resolve(process.env.Y_LINK_VERIFY_EVIDENCE_DIR ?? path.join(path.dirname(isolation.rootDir), 'manual-cancel-diagnostics'))
@@ -614,6 +729,41 @@ if (!selected) {
         assert.equal((await inspectSqliteForRescue(sqlite)).sha256, before)
         assert.equal(fs.existsSync(path.join(isolation.rootDir, 'runtime/database-runtime-override.json')), false)
         assert.equal(fs.existsSync(path.join(isolation.rootDir, 'runtime/database-migration-cutover.json')), false)
+      } else if (selected === 'failed-cleanup-rescue-race') {
+        const { appDataPaths } = await import('../src/config/app-data-paths.js')
+        const { prepareDatabaseRescueRollback, beginDatabaseRescueRollback, inspectRecoveryIntent, registerDatabaseRescueQuiesce } =
+          await import('../src/runtime/database-rescue-control.js')
+        const { nonce } = prepareDatabaseRescueRollback(task.id)
+        registerDatabaseRescueQuiesce(async taskId => {
+          await migration.quiesceForDatabaseRescue(taskId)
+          throw new Error('RESCUE_PREPARED_INTERRUPTED')
+        })
+        const writeTask = internal.writeTaskRecordWithoutLock!
+        let rollback: ReturnType<typeof beginDatabaseRescueRollback> | undefined
+        internal.writeTaskRecordWithoutLock = async function (record) {
+          await writeTask.call(this, record)
+          if (record.controlPhase === 'failed_cleanup') {
+            rollback = beginDatabaseRescueRollback(task.id, nonce, 'fixture_rescue_claimed')
+            void rollback.catch(() => undefined)
+          }
+        }
+        try {
+          const record = await internal.readTaskRecord!(task.id, '失败回收与救援竞争', false)
+          await internal.runExclusiveMigration!(() => internal.finishFailedManualMigration!(record, new Error('MANUAL_EXPECTED_FAILURE')))
+          assert.ok(rollback, '旧协议的 failed_cleanup 仍允许独立救援先领取')
+          await assert.rejects(timeout(rollback, 10_000), /RESCUE_PREPARED_INTERRUPTED/)
+          const intent = inspectRecoveryIntent()
+          assert.equal(intent.state === 'healthy' && intent.value.phase, 'PREPARED')
+          assert.equal(fs.existsSync(appDataPaths.migrationLockFile), true)
+          assert.equal(fs.existsSync(appDataPaths.maintenanceStateFile), true)
+          assert.equal(maintenance.isReadOnly(), true)
+        } finally { internal.writeTaskRecordWithoutLock = writeTask }
+        await source.destroy(); sourceClosed = true
+        const restart = spawnSync(process.execPath, [cli, '--tsconfig', path.join(backendRoot, 'tsconfig.json'), file, '--case=failed-cleanup-rescue-restart-child'], {
+          cwd: isolation.rootDir, env: { ...process.env, Y_LINK_FAILURE_TASK_ID: task.id },
+          encoding: 'utf8', windowsHide: true, timeout: 60_000,
+        })
+        assert.equal(restart.status, 0, restart.stderr.slice(-3000))
       } else if (selected.startsWith('failed-cleanup-')) {
         const digest = (await inspectSqliteForRescue(sqlite)).sha256
         await source.destroy(); sourceClosed = true
