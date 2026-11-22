@@ -21,6 +21,13 @@ assert.match(revisionSummary({ ...before, totalQty: null }, after).join(' '), /�
 assert.match(revisionSummary({ ...before, totalAmount: '错误' }, after).join(' '), /快照不完整/)
 assert.match(revisionSummary({ ...before, items: null }, after).join(' '), /快照不完整/)
 assert.ok(revisionSummary({ ...before, totalQty: 0 }, { ...before, totalQty: 1 }).includes('总数量：0 → 1'))
+// 合规状态/金蝶登记类修订只记录抬头字段，不应被误判为快照不完整，且应展示真实变化。
+const header = { businessNo: 'A', orderType: 'normal', customerName: null, hasCustomerOrder: false, isSystemApplied: false, remark: null, editVersion: 1 }
+const headerLines = revisionSummary(header, { ...header, hasCustomerOrder: true, editVersion: 2 })
+assert.deepEqual(headerLines, ['关联客户订单：否 → 是'])
+assert.ok(!headerLines.join(' ').includes('快照不完整'))
+assert.deepEqual(revisionSummary({ ...header, kingdeeRegistration: { value: 'a' } }, { ...header, kingdeeRegistration: { value: 'b' } }), ['金蝶登记状态有变更'])
+assert.match(revisionSummary(header, { ...header, isSystemApplied: 'x' }).join(' '), /快照不完整/)
 assert.equal(revisionActor('', ''), '未记录')
 assert.equal(revisionActor(' '.repeat(3), '用户'), '用户')
 assert.equal(revisionActor('长'.repeat(500), ''), '长'.repeat(500))

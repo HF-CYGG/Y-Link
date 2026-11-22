@@ -57,15 +57,45 @@ export const revisionSummary = (beforeValue: Snapshot, afterValue: Snapshot): st
     if (left === null || right === null) { incomplete = true; return }
     if (left !== right) lines.push(`${label}：${render(left)} → ${render(right)}`)
   }
+  // 两侧都完全没有该字段时，说明该类修订（合规状态、金蝶登记、业务号/抬头修订）本就不记录它，
+  // 不应被误判为“快照不完整”；只有一侧缺失或值无效才算不完整。
+  const bothAbsent = (key: string) => !(key in before) && !(key in after)
+  // 抬头类可空文本：两侧均为空视为无变化，空值展示为“无”。
+  const compareOptionalText = (label: string, key: string) => {
+    if (bothAbsent(key)) return
+    const left = textValue(before[key]) ?? ''
+    const right = textValue(after[key]) ?? ''
+    if (left !== right) lines.push(`${label}：${left || '无'} → ${right || '无'}`)
+  }
+  // 布尔开关：仅当两侧都是布尔值时才比较，类型异常记为不完整。
+  const compareFlag = (label: string, key: string) => {
+    if (bothAbsent(key)) return
+    const left = before[key]
+    const right = after[key]
+    if (typeof left !== 'boolean' || typeof right !== 'boolean') { incomplete = true; return }
+    if (left !== right) lines.push(`${label}：${left ? '是' : '否'} → ${right ? '是' : '否'}`)
+  }
   compare('业务单号', textValue(before.businessNo), textValue(after.businessNo))
-  compare('总数量', numberValue(before.totalQty), numberValue(after.totalQty))
-  compare('合计金额', numberValue(before.totalAmount), numberValue(after.totalAmount), value => `¥${Number(value).toFixed(2)}`)
-  const beforeItems = normalizedItems(before.items)
-  const afterItems = normalizedItems(after.items)
-  if (beforeItems === null || afterItems === null) incomplete = true
-  else {
-    compare('明细行数', (before.items as unknown[]).length, (after.items as unknown[]).length, value => `${value} 行`)
-    if (beforeItems !== afterItems) lines.push('商品明细有调整')
+  compareOptionalText('订单类型', 'orderType')
+  compareOptionalText('客户部门', 'customerDepartmentName')
+  compareOptionalText('客户名称', 'customerName')
+  compareOptionalText('开单人', 'issuerName')
+  compareOptionalText('备注', 'remark')
+  compareFlag('关联客户订单', 'hasCustomerOrder')
+  compareFlag('系统申请订单', 'isSystemApplied')
+  if (!bothAbsent('kingdeeRegistration') && JSON.stringify(before.kingdeeRegistration ?? null) !== JSON.stringify(after.kingdeeRegistration ?? null)) {
+    lines.push('金蝶登记状态有变更')
+  }
+  if (!(bothAbsent('totalQty') && bothAbsent('totalAmount') && bothAbsent('items'))) {
+    compare('总数量', numberValue(before.totalQty), numberValue(after.totalQty))
+    compare('合计金额', numberValue(before.totalAmount), numberValue(after.totalAmount), value => `¥${Number(value).toFixed(2)}`)
+    const beforeItems = normalizedItems(before.items)
+    const afterItems = normalizedItems(after.items)
+    if (beforeItems === null || afterItems === null) incomplete = true
+    else {
+      compare('明细行数', (before.items as unknown[]).length, (after.items as unknown[]).length, value => `${value} 行`)
+      if (beforeItems !== afterItems) lines.push('商品明细有调整')
+    }
   }
   if (incomplete) lines.push('历史快照不完整，部分内容未记录或无效')
   if (!lines.length) lines.push('已记录的业务摘要未显示变化')
