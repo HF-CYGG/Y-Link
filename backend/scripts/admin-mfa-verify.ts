@@ -16,6 +16,7 @@ import type { AddressInfo } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import type { AuthUserContext } from '../src/types/auth.js'
+import type { VerifiableTicketStore } from '../src/utils/ephemeral-ticket-store.js'
 
 const backendRoot = path.resolve(process.cwd())
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ylink-admin-mfa-'))
@@ -34,6 +35,8 @@ process.env.Y_LINK_DATA_DIR = path.join(tempRoot, 'data')
 process.env.Y_LINK_SKIP_DATABASE_RUNTIME_OVERRIDE = 'true'
 process.env.INIT_ADMIN_PASSWORD = ADMIN_PASSWORD
 process.env.PERMANENT_DELETE_PASSWORD = PERMANENT_DELETE_PASSWORD
+process.env.REDIS_URL = ''
+process.env.Y_LINK_MULTI_INSTANCE = 'false'
 // 本脚本会刻意制造多次失败，全局撞库态势阈值调到上限，避免触发全员验证码干扰断言。
 process.env.YLINK_ADMIN_GLOBAL_FAILURE_THRESHOLD = '100000'
 
@@ -41,6 +44,8 @@ const { AppDataSource } = await import('../src/config/data-source.js')
 const bootstrap = await import('../src/config/database-bootstrap.js')
 const { runInTransaction } = await import('../src/config/transaction-runner.js')
 const { DatabaseOverloadedError } = await import('../src/database/database-errors.js')
+const { databaseOperationGate, DatabaseWriteFrozenError } = await import('../src/database/operation-gate.js')
+const { getCurrentTransactionManager } = await import('../src/database/transaction-coordinator.js')
 const { authService } = await import('../src/services/auth.service.js')
 const { systemConfigService } = await import('../src/services/system-config.service.js')
 const { notificationService } = await import('../src/services/notification.service.js')
@@ -505,8 +510,13 @@ async function verifyEnrollmentTicketConsumption() {
   const login = await authService.login({ username: 'mfa-ticket-target', password: OPERATOR_PASSWORD })
   assert.ok('token' in login, '绑定前应取得真实登录会话')
   const auth = await authService.resolveAuthUserByToken(login.token)
+  const secondLogin = await authService.login({ username: 'mfa-ticket-target', password: OPERATOR_PASSWORD })
+  assert.ok('token' in secondLogin)
+  const otherAuth = await authService.resolveAuthUserByToken(secondLogin.token)
   const enrollment = await adminMfaService.beginEnrollment(auth, { currentPassword: OPERATOR_PASSWORD })
   plaintextSecrets.push(enrollment.secret)
+  await assert.rejects(adminMfaService.confirmEnrollment(otherAuth, '000000'), { statusCode: 409 },
+    '第二个会话没有自己的待确认票据，不占用第一个会话的额度')
   const wrongCode = wrongCodeFor(enrollment.secret)
   const errors = await Promise.allSettled(Array.from({ length: 8 }, () => adminMfaService.confirmEnrollment(auth, wrongCode)))
   const reasons = errors.map((result) => {
@@ -523,19 +533,36 @@ async function verifyEnrollmentTicketConsumption() {
   const current = await adminMfaService.beginEnrollment(auth, { currentPassword: OPERATOR_PASSWORD })
   plaintextSecrets.push(current.secret)
   const correctCode = codeAt(current.secret, currentTotpStep())
-  const originalVerify = EphemeralTicketStore.prototype.verifyAndConsume
-  EphemeralTicketStore.prototype.verifyAndConsume = function (key) {
-    const pending = this.get(key) as { attemptsLeft?: number } | undefined
-    assert.equal(pending?.attemptsLeft, 5, '滚动升级时旧实例仍需从待确认票据读取尝试上限')
+  const ticketPrototype: Pick<VerifiableTicketStore<unknown>, 'verifyAndReserve'> = EphemeralTicketStore.prototype
+  const originalVerify = ticketPrototype.verifyAndReserve
+  let checkedDuringFreeze = false
+  ticketPrototype.verifyAndReserve = function () {
+    checkedDuringFreeze = databaseOperationGate.isFrozen()
     throw new BizError('安全票据服务暂不可用，请稍后重试', 503)
   }
   try {
+    const freeze = databaseOperationGate.freeze()
+    try {
+      await assert.rejects(adminMfaService.confirmEnrollment(auth, correctCode), DatabaseWriteFrozenError)
+      assert.equal(checkedDuringFreeze, false, '冻结前未准入的请求不核验票据')
+    } finally { freeze.release() }
     await assert.rejects(adminMfaService.confirmEnrollment(auth, correctCode),
       (error) => error instanceof BizError && error.statusCode === 503)
     assert.equal(await AppDataSource.getRepository(SysUserMfa).countBy({ userId: String(auth.userId) }), 0)
   } finally {
-    EphemeralTicketStore.prototype.verifyAndConsume = originalVerify
+    ticketPrototype.verifyAndReserve = originalVerify
   }
+  const other = await adminMfaService.beginEnrollment(otherAuth, { currentPassword: OPERATOR_PASSWORD })
+  plaintextSecrets.push(other.secret)
+  await assert.rejects(adminMfaService.confirmEnrollment(otherAuth, wrongCodeFor(other.secret)), { statusCode: 400 })
+  const staleLogin = await authService.login({ username: 'mfa-ticket-target', password: OPERATOR_PASSWORD })
+  assert.ok('token' in staleLogin)
+  const staleAuth = await authService.resolveAuthUserByToken(staleLogin.token)
+  const stale = await adminMfaService.beginEnrollment(staleAuth, { currentPassword: OPERATOR_PASSWORD })
+  plaintextSecrets.push(stale.secret)
+  await authService.logout(staleAuth)
+  await assert.rejects(adminMfaService.confirmEnrollment(staleAuth, codeAt(stale.secret, currentTotpStep())), { statusCode: 409 })
+  assert.equal(await AppDataSource.getRepository(SysUserMfa).countBy({ userId: String(auth.userId) }), 0)
   for (let index = 0; index < 4; index += 1) {
     await assert.rejects(adminMfaService.confirmEnrollment(auth, wrongCodeFor(current.secret)),
       (error) => error instanceof BizError && error.statusCode === 400 && /动态码不正确/.test(error.message))
@@ -559,10 +586,70 @@ async function verifyEnrollmentTicketConsumption() {
   }
   assert.equal(await AppDataSource.getRepository(SysUserMfa).countBy({ userId: String(auth.userId) }), 0)
   const retryCode = codeAt(current.secret, currentTotpStep())
-  const confirmations = await Promise.allSettled(Array.from({ length: 2 },
-    () => adminMfaService.confirmEnrollment(auth, retryCode)))
+  let signalVerifying!: () => void
+  let releaseVerify!: () => void
+  const verifying = new Promise<void>((resolve) => { signalVerifying = resolve })
+  const verifyBarrier = new Promise<void>((resolve) => { releaseVerify = resolve })
+  let signalOtherVerifying!: () => void
+  let releaseOtherVerify!: () => void
+  const otherVerifying = new Promise<void>((resolve) => { signalOtherVerifying = resolve })
+  const otherVerifyBarrier = new Promise<void>((resolve) => { releaseOtherVerify = resolve })
+  let verifiedCount = 0
+  let cleanupOutsideTransaction = false
+  ticketPrototype.verifyAndReserve = async function <TMatch>(
+    this: typeof ticketPrototype, key: string, maxAttempts: number, match: (ticket: unknown) => TMatch | null,
+  ) {
+    assert.equal(Boolean(getCurrentTransactionManager(AppDataSource)), false, '票据核验不能占用写事务')
+    const attempt = await originalVerify.bind(this)<TMatch>(key, maxAttempts, match)
+    if (attempt.status === 'verified') {
+      verifiedCount += 1
+      if (verifiedCount === 1) {
+        signalVerifying()
+        await verifyBarrier
+        attempt.value.finish = () => {
+          cleanupOutsideTransaction = !getCurrentTransactionManager(AppDataSource)
+          throw new BizError('模拟 Redis 提交后暂不可用', 503)
+        }
+      } else {
+        signalOtherVerifying()
+        await otherVerifyBarrier
+      }
+    }
+    return attempt
+  }
+  const firstConfirmation = adminMfaService.confirmEnrollment(auth, retryCode)
+  let confirmations: PromiseSettledResult<{ recoveryCodes: string[] }>[]
+  let otherConfirmation: ReturnType<typeof adminMfaService.confirmEnrollment> | undefined
+  try {
+    await Promise.race([verifying, firstConfirmation])
+    // 模拟 Redis 等待时，独立事务必须能完成。释放后两次确认仍只能产生一次数据库提交。
+    await runInTransaction(async (manager) => {
+      await manager.getRepository(SysUser).update(adminActor.userId, { displayName: adminActor.displayName })
+    })
+    const enrollmentAudits = { actionType: 'auth.mfa.enroll_start', targetId: String(auth.userId) }
+    const auditRepository = AppDataSource.getRepository(SysAuditLog)
+    const enrollmentAuditCount = await auditRepository.countBy(enrollmentAudits)
+    await assert.rejects(adminMfaService.beginEnrollment(auth, { currentPassword: OPERATOR_PASSWORD }),
+      (error) => error instanceof BizError && error.statusCode === 409 && /正在确认/.test(error.message))
+    assert.equal(await auditRepository.countBy(enrollmentAudits), enrollmentAuditCount,
+      '旧签发正等待确认时不得成功签发同会话的第二张票据')
+    otherConfirmation = adminMfaService.confirmEnrollment(otherAuth, codeAt(other.secret, currentTotpStep()))
+    await Promise.race([otherVerifying, otherConfirmation])
+    const secondConfirmation = adminMfaService.confirmEnrollment(auth, retryCode)
+    releaseVerify()
+    confirmations = await Promise.allSettled([firstConfirmation, secondConfirmation])
+    releaseOtherVerify()
+    await assert.rejects(otherConfirmation, { statusCode: 409 }, '其他会话已经核验的旧票据不可覆盖已提交绑定')
+  } finally {
+    releaseVerify()
+    releaseOtherVerify()
+    await firstConfirmation.catch(() => undefined)
+    await otherConfirmation?.catch(() => undefined)
+    ticketPrototype.verifyAndReserve = originalVerify
+  }
   const successes = confirmations.flatMap((result) => result.status === 'fulfilled' ? [result.value] : [])
   assert.equal(successes.length, 1, '同一张票据并发确认只能成功一次')
+  assert.equal(cleanupOutsideTransaction, true, '票据清理不能占用写事务')
   assert.equal(successes[0]?.recoveryCodes.length, 10)
   plaintextSecrets.push(...successes[0]!.recoveryCodes)
   const rejected = confirmations.find((result) => result.status === 'rejected')
@@ -570,6 +657,9 @@ async function verifyEnrollmentTicketConsumption() {
   const record = await AppDataSource.getRepository(SysUserMfa).createQueryBuilder('mfa').addSelect('mfa.totpSecretSealed')
     .where('mfa.user_id = :userId', { userId: String(auth.userId) }).getOne()
   assert.ok(record?.totpSecretSealed, '有效票据应提交加密绑定')
+  assert.equal(await AppDataSource.getRepository(SysAuditLog).countBy({
+    actionType: 'auth.mfa.enable', targetId: String(auth.userId), resultStatus: 'success',
+  }), 1, '提交后 Redis 清理失败不能导致重复写入或隐藏首次成功')
 }
 
 async function verifyAuditNeverStoresSecrets() {

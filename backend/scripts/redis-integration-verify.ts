@@ -158,6 +158,38 @@ async function runMainScenario() {
     const takes = await Promise.all(Array.from({ length: 100 }, (_, index) => (index % 2 ? instanceA : instanceB).take('race')))
     assert.equal(takes.filter(Boolean).length, 1, '100 个并发 take 只能有一个拿到票据')
 
+    const pendingTicket = { code: '1', secret: 's', expiresAt: Date.now() + 60_000 }
+    const matchPending = (ticket: Ticket) => ticket.code === pendingTicket.code ? true : null
+    await instanceA.set('reserved', pendingTicket)
+    for (let index = 0; index < 4; index += 1) {
+      assert.deepEqual(await instanceB.verifyAndReserve('reserved', 5, () => null), { status: 'mismatch', attemptsLeft: 4 - index })
+    }
+    const attempts = await Promise.all([instanceA, instanceB].map(store => store.verifyAndReserve('reserved', 5, matchPending)))
+    const reservedAttempt = attempts.find(attempt => attempt.status === 'verified')
+    assert.ok(reservedAttempt && attempts.filter(attempt => attempt.status === 'unavailable').length === 1)
+    await reservedAttempt.value.finish(false)
+    const retry = await instanceB.verifyAndReserve('reserved', 5, matchPending)
+    assert.equal(retry.status, 'verified', '退回最后一次正确尝试后仍可重试同一票据')
+    await reservedAttempt.value.finish(true)
+    assert.ok(await instanceA.get('reserved'), '过期的保留句柄不得清除同一票据的新保留')
+    await retry.value.finish(true)
+    assert.equal(await instanceA.get('reserved'), undefined)
+
+    await instanceA.set('reserved', pendingTicket)
+    const previous = await instanceA.verifyAndReserve('reserved', 5, matchPending)
+    assert.equal(previous.status, 'verified')
+    const renewedTicket = { ...pendingTicket, secret: 'renewed' }
+    assert.equal(await instanceB.setIfUnreserved('reserved', renewedTicket), false, '正在确认的旧签发必须拒绝重发')
+    assert.equal((await instanceA.get('reserved'))?.secret, pendingTicket.secret)
+    await previous.value.finish(false)
+    assert.equal(await instanceB.setIfUnreserved('reserved', renewedTicket), true, '原确认未准入并退回后可重新签发')
+    const replacement = await instanceB.verifyAndReserve('reserved', 5, matchPending)
+    assert.equal(replacement.status, 'verified')
+    await previous.value.finish(true)
+    assert.equal((await instanceA.get('reserved'))?.secret, 'renewed', '旧签发清理不能删掉新签发')
+    await replacement.value.finish(true)
+    assert.equal(await instanceA.get('reserved'), undefined)
+
     // 旧 namespace 在滚动升级期间可能仍有票据；v2 不能读取或迁移这些未绑定密码状态的凭证。
     const oldReset = new RedisTicketStore<{ userId: string; accountKey: string; expireAt: number }>(
       'client-password-reset', (ticket) => ticket.expireAt,

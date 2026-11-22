@@ -14,9 +14,12 @@
  * - Redis 实现中票据值整体加密、键名做 SHA-256 摘要，Redis 中不出现验证码、手机号、TOTP 秘钥或密码哈希明文；
  * - Redis 已配置但不可用时，票据读写抛出 503：安全票据宁可拒绝，也不能回落到实例本地而造成“跨实例失效”或放行。
  */
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { getRedisClient, isRedisEnabled, isRedisReady, recordRedisDegrade, redisKey } from '../redis/redis-client.js'
-import { runRedisScript, TICKET_CLAIM_ATTEMPT, TICKET_CONSUME_MATCHED } from '../redis/redis-scripts.js'
+import {
+  runRedisScript, TICKET_CLAIM_ATTEMPT, TICKET_CONSUME_MATCHED, TICKET_FINISH_RESERVED, TICKET_RESERVE_MATCHED,
+  TICKET_SET_IF_UNRESERVED,
+} from '../redis/redis-scripts.js'
 import { openSensitiveValue, sealSensitiveValue } from './data-encryption.js'
 import { BizError } from './errors.js'
 
@@ -38,11 +41,22 @@ type TicketAttemptResult<TMatch> =
   | { status: 'mismatch'; attemptsLeft: number }
   | { status: 'verified'; value: TMatch }
 
+interface ReservedTicket<TMatch> {
+  match: TMatch
+  finish(consume: boolean): MaybePromise<void>
+}
+
 export interface VerifiableTicketStore<TTicket> extends TicketStore<TTicket> {
+  /** 仅当原签发未被保留时覆盖票据；返回 false 时维持原票据与次数。 */
+  setIfUnreserved(key: string, ticket: TTicket): MaybePromise<boolean>
   /** 在剩余额度内执行同步比对。null 表示答案错误；成功时仅消费参与这次核验的原票据。 */
   verifyAndConsume<TMatch>(
     key: string, maxAttempts: number, match: (ticket: TTicket) => TMatch | null,
   ): MaybePromise<TicketAttemptResult<TMatch>>
+  /** 为后续写事务保留原签发；未进入事务时调用 finish(false) 退还本次次数。 */
+  verifyAndReserve<TMatch>(
+    key: string, maxAttempts: number, match: (ticket: TTicket) => TMatch | null,
+  ): MaybePromise<TicketAttemptResult<ReservedTicket<TMatch>>>
 }
 
 interface EphemeralTicketStoreOptions<TTicket> {
@@ -61,6 +75,7 @@ const SWEEP_BATCH_LIMIT = 64
 export class EphemeralTicketStore<TTicket> implements VerifiableTicketStore<TTicket> {
   private readonly store = new Map<string, TTicket>()
   private readonly attempts = new Map<string, number>()
+  private readonly reservations = new Map<string, symbol>()
 
   constructor(private readonly options: EphemeralTicketStoreOptions<TTicket>) {}
 
@@ -100,6 +115,13 @@ export class EphemeralTicketStore<TTicket> implements VerifiableTicketStore<TTic
     }
 
     this.store.set(key, ticket)
+  }
+
+  setIfUnreserved(key: string, ticket: TTicket): boolean {
+    this.get(key)
+    if (this.reservations.has(key) || !(this.options.resolveExpiresAt(ticket) > Date.now())) return false
+    this.set(key, ticket)
+    return true
   }
 
   /**
@@ -144,6 +166,7 @@ export class EphemeralTicketStore<TTicket> implements VerifiableTicketStore<TTic
   delete(key: string) {
     this.store.delete(key)
     this.attempts.delete(key)
+    this.reservations.delete(key)
   }
 
   /** 在事件循环内同步核验、计数和消费，途中不会让出执行权。 */
@@ -161,6 +184,39 @@ export class EphemeralTicketStore<TTicket> implements VerifiableTicketStore<TTic
     if (attempts >= maxAttempts) this.delete(key)
     else this.attempts.set(key, attempts)
     return { status: 'mismatch', attemptsLeft: maxAttempts - attempts }
+  }
+
+  verifyAndReserve<TMatch>(
+    key: string, maxAttempts: number, match: (ticket: TTicket) => TMatch | null,
+  ): TicketAttemptResult<ReservedTicket<TMatch>> {
+    const ticket = this.get(key)
+    if (!ticket || this.reservations.has(key)) return { status: 'unavailable' }
+    const attempts = (this.attempts.get(key) ?? 0) + 1
+    const value = match(ticket)
+    if (value === null) {
+      if (attempts >= maxAttempts) this.delete(key)
+      else this.attempts.set(key, attempts)
+      return { status: 'mismatch', attemptsLeft: maxAttempts - attempts }
+    }
+
+    const reservation = Symbol()
+    this.attempts.set(key, attempts)
+    this.reservations.set(key, reservation)
+    return {
+      status: 'verified',
+      value: {
+        match: value,
+        finish: (consume) => {
+          if (!this.get(key) || this.reservations.get(key) !== reservation) return
+          if (consume) {
+            this.delete(key)
+          } else {
+            this.reservations.delete(key)
+            this.attempts.set(key, attempts - 1)
+          }
+        },
+      },
+    }
   }
 
   /**
@@ -182,7 +238,7 @@ const TICKET_UNAVAILABLE_MESSAGE = '安全票据服务暂不可用，请稍后�
 
 /**
  * Redis 票据存储：
- * - 键：<前缀>ticket:<namespace>:<sha256(业务键)>，尝试计数键在其后追加 :attempts；
+ * - 键：<前缀>ticket:<namespace>:<sha256(业务键)>，按需追加 :attempts 和 :reservation；
  * - 值：JSON 经 AES-256-GCM 加密（AAD 绑定 namespace），多实例需注入同一把 Y_LINK_DATA_ENCRYPTION_KEY；
  * - 有效期：按票据自身的过期时刻换算 PX，Redis 到期自动删除，读取时仍复核过期时刻以容忍实例间时钟偏差。
  */
@@ -196,10 +252,10 @@ export class RedisTicketStore<TTicket> implements VerifiableTicketStore<TTicket>
     this.encryptionContext = `redis-ticket:${namespace}`
   }
 
-  private keysOf(key: string): [string, string] {
+  private keysOf(key: string): [string, string, string] {
     const digest = createHash('sha256').update(key).digest('hex')
     const ticketKey = redisKey('ticket', this.namespace, digest)
-    return [ticketKey, `${ticketKey}:attempts`]
+    return [ticketKey, `${ticketKey}:attempts`, `${ticketKey}:reservation`]
   }
 
   private requireClient() {
@@ -236,17 +292,27 @@ export class RedisTicketStore<TTicket> implements VerifiableTicketStore<TTicket>
 
   async set(key: string, ticket: TTicket): Promise<void> {
     const client = this.requireClient()
-    const [ticketKey, attemptsKey] = this.keysOf(key)
+    const [ticketKey, attemptsKey, reservationKey] = this.keysOf(key)
     const ttlMs = Math.floor(this.resolveExpiresAt(ticket) - Date.now())
     await this.run('写入', async () => {
       if (!(ttlMs > 0)) {
-        await client.del(ticketKey, attemptsKey)
+        await client.del(ticketKey, attemptsKey, reservationKey)
         return
       }
       const sealed = sealSensitiveValue(this.encryptionContext, JSON.stringify(ticket))
-      const results = await client.multi().set(ticketKey, sealed, 'PX', ttlMs).del(attemptsKey).exec()
+      const results = await client.multi().set(ticketKey, sealed, 'PX', ttlMs).del(attemptsKey, reservationKey).exec()
       const failed = results?.find(([error]) => error)
       if (!results || failed) throw failed?.[0] ?? new Error('票据写入事务被中止')
+    })
+  }
+
+  async setIfUnreserved(key: string, ticket: TTicket): Promise<boolean> {
+    const client = this.requireClient()
+    const ttlMs = Math.floor(this.resolveExpiresAt(ticket) - Date.now())
+    if (!(ttlMs > 0)) return false
+    return this.run('重新签发', async () => {
+      const sealed = sealSensitiveValue(this.encryptionContext, JSON.stringify(ticket))
+      return await runRedisScript<number>(client, TICKET_SET_IF_UNRESERVED, this.keysOf(key), [sealed, ttlMs]) === 1
     })
   }
 
@@ -258,9 +324,9 @@ export class RedisTicketStore<TTicket> implements VerifiableTicketStore<TTicket>
 
   async take(key: string): Promise<TTicket | undefined> {
     const client = this.requireClient()
-    const [ticketKey, attemptsKey] = this.keysOf(key)
+    const [ticketKey, attemptsKey, reservationKey] = this.keysOf(key)
     return this.run('消费', async () => {
-      const results = await client.multi().getdel(ticketKey).del(attemptsKey).exec()
+      const results = await client.multi().getdel(ticketKey).del(attemptsKey, reservationKey).exec()
       const failed = results?.find(([error]) => error)
       if (!results || failed) throw failed?.[0] ?? new Error('票据消费事务被中止')
       const raw = results[0]?.[1]
@@ -279,7 +345,8 @@ export class RedisTicketStore<TTicket> implements VerifiableTicketStore<TTicket>
     key: string, maxAttempts: number, match: (ticket: TTicket) => TMatch | null,
   ): Promise<TicketAttemptResult<TMatch>> {
     const client = this.requireClient()
-    const keys = this.keysOf(key)
+    const [ticketKey, attemptsKey] = this.keysOf(key)
+    const keys = [ticketKey, attemptsKey]
     // 先在 Redis 预占次数再解密。额度耗尽时仅停止准入，已预占的核验仍可完成。
     const claim = await this.run('预占核验次数', () =>
       runRedisScript<[string, number] | []>(client, TICKET_CLAIM_ATTEMPT, keys, [maxAttempts]))
@@ -295,6 +362,36 @@ export class RedisTicketStore<TTicket> implements VerifiableTicketStore<TTicket>
       runRedisScript<number>(client, TICKET_CONSUME_MATCHED, keys, [raw]))
     if (!consumed || this.resolveExpiresAt(ticket) <= Date.now()) return { status: 'unavailable' }
     return { status: 'verified', value }
+  }
+
+  async verifyAndReserve<TMatch>(
+    key: string, maxAttempts: number, match: (ticket: TTicket) => TMatch | null,
+  ): Promise<TicketAttemptResult<ReservedTicket<TMatch>>> {
+    const client = this.requireClient()
+    const keys = this.keysOf(key)
+    const claim = await this.run('预占核验次数', () =>
+      runRedisScript<[string, number] | []>(client, TICKET_CLAIM_ATTEMPT, keys, [maxAttempts]))
+    if (claim.length === 0) return { status: 'unavailable' }
+    const [raw, attemptsLeft] = claim
+    const ticket = this.decode(raw, Date.now())
+    if (!ticket) return { status: 'unavailable' }
+    const value = match(ticket)
+    if (value === null) return { status: 'mismatch', attemptsLeft }
+
+    const reservationId = randomUUID()
+    const reserved = await this.run('保留已核验票据', () =>
+      runRedisScript<number>(client, TICKET_RESERVE_MATCHED, keys, [raw, reservationId]))
+    if (!reserved) return { status: 'unavailable' }
+    return {
+      status: 'verified',
+      value: {
+        match: value,
+        finish: async (consume) => {
+          await this.run('结束票据保留', () =>
+            runRedisScript<number>(this.requireClient(), TICKET_FINISH_RESERVED, keys, [raw, reservationId, consume ? 'consume' : 'release']))
+        },
+      },
+    }
   }
 }
 

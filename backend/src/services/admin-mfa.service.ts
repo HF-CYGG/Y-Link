@@ -19,6 +19,7 @@ import { In, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { webauthnConfig } from '../config/webauthn.js'
+import { databaseOperationGate } from '../database/operation-gate.js'
 import { SysUser } from '../entities/sys-user.entity.js'
 import { SysUserMfa } from '../entities/sys-user-mfa.entity.js'
 import { SysUserWebauthnCredential } from '../entities/sys-user-webauthn-credential.entity.js'
@@ -62,12 +63,11 @@ interface PendingEnrollment {
   mfaId: string | null
   mfaRevision: number | null
   expiresAt: number
-  /** 旧版实例读取此阈值。新版核验统一使用 ENROLLMENT_MAX_ATTEMPTS。 */
-  attemptsLeft: number
 }
 
+const enrollmentKey = (userId: string, sessionDigest: string) => `${userId}:${sessionDigest}`
 const pendingEnrollmentStore = createTicketStore<PendingEnrollment>({
-  namespace: 'admin-mfa-enrollment',
+  namespace: 'admin-mfa-enrollment-v2',
   maxSize: 2000,
   resolveExpiresAt: (ticket) => ticket.expiresAt,
 })
@@ -247,7 +247,7 @@ export class AdminMfaService {
     return new Set(rows.filter((row) => Boolean(row.totpSecretSealed)).map((row) => String(row.userId)))
   }
 
-  /** 发起绑定：调用方必须已完成当前密码复核；同一账号重复发起时覆盖旧的待确认秘钥。 */
+  /** 发起绑定：调用方必须已完成当前密码复核；同一会话重复发起时覆盖旧的待确认秘钥。 */
   async beginEnrollment(auth: AuthUserContext, input: AdminMfaFactorInput & { currentPassword: string }, requestMeta?: RequestMeta) {
     const snapshot = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, auth.userId)
@@ -271,13 +271,13 @@ export class AdminMfaService {
       throw new BizError(KEY_UNAVAILABLE_MESSAGE, 503)
     }
     const secret = generateTotpSecret()
-    await pendingEnrollmentStore.set(String(auth.userId), {
+    const issued = await pendingEnrollmentStore.setIfUnreserved(enrollmentKey(auth.userId, snapshot.sessionDigest), {
       userId: String(auth.userId),
       secret,
       ...snapshot,
       expiresAt: Date.now() + ENROLLMENT_TTL_MS,
-      attemptsLeft: ENROLLMENT_MAX_ATTEMPTS,
     })
+    if (!issued) throw new BizError('当前绑定正在确认，请稍后重试', 409)
     await auditService.safeRecord({
       actionType: 'auth.mfa.enroll_start',
       actionLabel: '发起绑定两步验证',
@@ -296,46 +296,19 @@ export class AdminMfaService {
 
   /** 确认绑定：动态码正确才落库；错误次数用尽后作废待确认秘钥，需重新发起。 */
   async confirmEnrollment(auth: AuthUserContext, code: string, requestMeta?: RequestMeta): Promise<{ recoveryCodes: string[] }> {
-    // 准入失败不会接触票据。核验放在账号锁之前，避免持有行锁等待 Redis。
-    const outcome = await runInTransaction(async (manager) => {
-      const attempt = await pendingEnrollmentStore.verifyAndConsume(String(auth.userId), ENROLLMENT_MAX_ATTEMPTS, (pending) => {
-        const matchedStep = matchTotpStep(pending.secret, code)
-        return matchedStep === null ? null : { pending, matchedStep }
-      })
-      if (attempt.status !== 'verified') return attempt
-
-      const { pending, matchedStep } = attempt.value
-      const { codes, digests } = pending.mfaId ? { codes: [], digests: [] } : this.generateRecoveryCodes(auth.userId)
-      const sealedSecret = sealSensitiveValue(secretContext(auth.userId), pending.secret)
-      await lockActiveSysAccountForBusiness(manager, auth.userId)
-      const repo = manager.getRepository(SysUserMfa)
-      const user = await manager.getRepository(SysUser).createQueryBuilder('user')
-        .addSelect('user.passwordHash').where('user.id = :id', { id: auth.userId }).getOneOrFail()
-      const existing = await repo.createQueryBuilder('mfa').addSelect('mfa.totpSecretSealed')
-        .where('mfa.user_id = :userId', { userId: auth.userId }).getOne()
-      const session = await manager.getRepository(SysUserSession).findOneBy({ userId: auth.userId, sessionToken: pending.sessionDigest })
-      const now = new Date()
-      if (!session || session.expiresAt <= now || isAdminSessionIdleExpired(session, now)
-        || pending.sessionDigest !== hashSessionToken(auth.sessionToken)
-        || user.passwordHash !== pending.passwordHash || user.role !== pending.role || user.status !== pending.status
-        || (user.deactivatedAt?.getTime() ?? 0) !== pending.deactivatedAt
-        || (user.restoredAt?.getTime() ?? 0) !== pending.restoredAt
-        || (existing?.id ?? null) !== pending.mfaId || (existing?.factorRevision ?? null) !== pending.mfaRevision
-        || existing?.totpSecretSealed) {
-        throw new BizError('账号安全设置已变化，请重新绑定', 409)
-      }
-      if (existing) {
-        existing.totpSecretSealed = sealedSecret
-        existing.lastUsedStep = matchedStep
-        existing.factorRevision += 1
-        await repo.save(existing)
-      } else {
-        await repo.insert({ userId: auth.userId, totpSecretSealed: sealedSecret,
-          recoveryCodesJson: serializeRecoveryDigests(digests, currentDataKeyId()),
-          enabledAt: new Date(), lastUsedStep: matchedStep, factorRevision: 1 })
-      }
-      await auditService.record(
-        {
+    // 操作准入负责维护排空。Redis 核验和结束保留均在写事务之外。
+    return databaseOperationGate.runOperation(async () => {
+      const sessionDigest = hashSessionToken(auth.sessionToken)
+      const attempt = await pendingEnrollmentStore.verifyAndReserve(
+        enrollmentKey(auth.userId, sessionDigest), ENROLLMENT_MAX_ATTEMPTS, (pending) => {
+          const matchedStep = matchTotpStep(pending.secret, code)
+          return matchedStep === null ? null : { pending, matchedStep }
+        },
+      )
+      if (attempt.status === 'unavailable') throw new BizError('绑定已过期，请重新发起绑定', 409)
+      if (attempt.status === 'mismatch') {
+        const { attemptsLeft } = attempt
+        await auditService.safeRecord({
           actionType: 'auth.mfa.enable',
           actionLabel: '开启两步验证',
           targetType: 'user',
@@ -343,34 +316,79 @@ export class AdminMfaService {
           targetCode: auth.username,
           actor: actorOf(auth),
           requestMeta,
-          detail: { recoveryCodeCount: existing ? 0 : codes.length },
-        },
-        manager,
-      )
-      return { status: 'verified' as const, recoveryCodes: codes }
+          resultStatus: 'failed',
+          detail: { reason: 'code_mismatch', attemptsLeft },
+        })
+        throw new BizError(
+          attemptsLeft > 0 ? '动态码不正确，请确认手机时间准确后输入最新的 6 位动态码' : '动态码错误次数过多，请重新发起绑定',
+          400,
+        )
+      }
+
+      const { match: { pending, matchedStep }, finish } = attempt.value
+      let transactionStarted = false
+      try {
+        return await runInTransaction((manager) => {
+          transactionStarted = true
+          return this.persistEnrollment(manager, auth, sessionDigest, pending, matchedStep, requestMeta)
+        })
+      } finally {
+        try {
+          await finish(transactionStarted)
+        } catch {
+          // Redis 故障已由票据存储记录；保留随原票据过期，数据库结果不受影响。
+        }
+      }
     })
+  }
 
-    if (outcome.status === 'unavailable') throw new BizError('绑定已过期，请重新发起绑定', 409)
-    if (outcome.status === 'mismatch') {
-      const { attemptsLeft } = outcome
-      await auditService.safeRecord({
-        actionType: 'auth.mfa.enable',
-        actionLabel: '开启两步验证',
-        targetType: 'user',
-        targetId: auth.userId,
-        targetCode: auth.username,
-        actor: actorOf(auth),
-        resultStatus: 'failed',
-        requestMeta,
-        detail: { reason: 'code_mismatch', attemptsLeft },
-      })
-      throw new BizError(
-        attemptsLeft > 0 ? '动态码不正确，请确认手机时间准确后输入最新的 6 位动态码' : '动态码错误次数过多，请重新发起绑定',
-        400,
-      )
+  private async persistEnrollment(
+    manager: EntityManager, auth: AuthUserContext, sessionDigest: string,
+    pending: PendingEnrollment, matchedStep: number, requestMeta?: RequestMeta,
+  ): Promise<{ recoveryCodes: string[] }> {
+    await lockActiveSysAccountForBusiness(manager, auth.userId)
+    const repo = manager.getRepository(SysUserMfa)
+    const user = await manager.getRepository(SysUser).createQueryBuilder('user')
+      .addSelect('user.passwordHash').where('user.id = :id', { id: auth.userId }).getOneOrFail()
+    const existing = await repo.createQueryBuilder('mfa').addSelect('mfa.totpSecretSealed')
+      .where('mfa.user_id = :userId', { userId: auth.userId }).getOne()
+    const session = await manager.getRepository(SysUserSession).findOne({
+      where: { userId: auth.userId, sessionToken: sessionDigest },
+      lock: manager.connection.options.type === 'mysql' ? { mode: 'pessimistic_write' } : undefined,
+    })
+    const now = new Date()
+    if (pending.expiresAt <= now.getTime() || !session || session.expiresAt <= now || isAdminSessionIdleExpired(session, now)
+      || pending.userId !== String(auth.userId) || pending.sessionDigest !== sessionDigest
+      || user.passwordHash !== pending.passwordHash || user.role !== pending.role || user.status !== pending.status
+      || (user.deactivatedAt?.getTime() ?? 0) !== pending.deactivatedAt
+      || (user.restoredAt?.getTime() ?? 0) !== pending.restoredAt
+      || (existing?.id ?? null) !== pending.mfaId || (existing?.factorRevision ?? null) !== pending.mfaRevision
+      || existing?.totpSecretSealed) {
+      throw new BizError('账号安全设置已变化，请重新绑定', 409)
     }
-
-    return { recoveryCodes: outcome.recoveryCodes }
+    const { codes, digests } = existing ? { codes: [], digests: [] } : this.generateRecoveryCodes(auth.userId)
+    const sealedSecret = sealSensitiveValue(secretContext(auth.userId), pending.secret)
+    if (existing) {
+      existing.totpSecretSealed = sealedSecret
+      existing.lastUsedStep = matchedStep
+      existing.factorRevision += 1
+      await repo.save(existing)
+    } else {
+      await repo.insert({ userId: auth.userId, totpSecretSealed: sealedSecret,
+        recoveryCodesJson: serializeRecoveryDigests(digests, currentDataKeyId()),
+        enabledAt: now, lastUsedStep: matchedStep, factorRevision: 1 })
+    }
+    await auditService.record({
+      actionType: 'auth.mfa.enable',
+      actionLabel: '开启两步验证',
+      targetType: 'user',
+      targetId: auth.userId,
+      targetCode: auth.username,
+      actor: actorOf(auth),
+      requestMeta,
+      detail: { recoveryCodeCount: codes.length },
+    }, manager)
+    return { recoveryCodes: codes }
   }
 
   /**

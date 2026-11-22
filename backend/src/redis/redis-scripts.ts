@@ -154,6 +154,7 @@ export const TICKET_CLAIM_ATTEMPT = defineScript(`
 local raw = redis.call('GET', KEYS[1])
 local ttl = redis.call('PTTL', KEYS[1])
 if not raw or ttl <= 0 then return {} end
+if KEYS[3] and redis.call('EXISTS', KEYS[3]) == 1 then return {} end
 local limit = tonumber(ARGV[1])
 local attempts = tonumber(redis.call('GET', KEYS[2]) or '0')
 if attempts >= limit then return {} end
@@ -169,6 +170,34 @@ if redis.call('GET', KEYS[1]) == ARGV[1] then
   return 1
 end
 return 0
+`)
+
+/** 保留已核验的原签发，使调用方可以先尝试提交数据库写入。 */
+export const TICKET_RESERVE_MATCHED = defineScript(`
+local ttl = redis.call('PTTL', KEYS[1])
+if ttl <= 0 or redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+if redis.call('SET', KEYS[3], ARGV[2], 'PX', ttl, 'NX') then return 1 end
+return 0
+`)
+
+/** 重新签发不得覆盖正在确认的同一会话票据，也不得重置其剩余次数。 */
+export const TICKET_SET_IF_UNRESERVED = defineScript(`
+if redis.call('EXISTS', KEYS[3]) == 1 then return 0 end
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+redis.call('DEL', KEYS[2])
+return 1
+`)
+
+/** 结束保留时只改动原签发；未获写事务准入时退回这次正确核验的次数。 */
+export const TICKET_FINISH_RESERVED = defineScript(`
+if redis.call('GET', KEYS[3]) ~= ARGV[2] or redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+redis.call('DEL', KEYS[3])
+if ARGV[3] == 'consume' then
+  redis.call('DEL', KEYS[1], KEYS[2])
+else
+  redis.call('DECR', KEYS[2])
+end
+return 1
 `)
 
 /** 租约续期：仅 owner 一致时延长。KEYS[1]=租约键；ARGV=owner, ttlMs。返回 1 表示续期成功。 */
