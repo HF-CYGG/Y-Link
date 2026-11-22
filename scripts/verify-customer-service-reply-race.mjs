@@ -87,7 +87,7 @@ function setup() {
     showAppWarning: () => {}, showAppSuccess: message => calls.success.push(message),
     showCriticalErrorDialog: error => calls.errors.push(error), scrollConversationToBottom: async () => { calls.scroll++ },
   }
-  const code = `const {${Object.keys(helpers).join(',')}} = h;\n${extracted}\nreturn {handleReply,handleSelectConversation,loadConversations,loadPresence,connectRealtime,readFirstSnapshot};`
+  const code = `const {${Object.keys(helpers).join(',')}} = h;\n${extracted}\nreturn {handleReply,handleSelectConversation,loadConversations,loadPresence,connectRealtime,readFirstSnapshot,invalidateLifecycle: () => { lifecycleToken += 1 }};`
   const javascript = ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
   const controller = scope.run(() => new Function('h', javascript)(helpers))
   return { ...state, ...controller, api, issue, append, calls, streams, timers, stop: () => scope.stop() }
@@ -169,7 +169,7 @@ test('手动切B后原A仍合法发送，首个await前的ID/正文/工单字段
     await h.handleSelectConversation('B')
     h.replyDraft.value = 'B新草稿'; h.issueForm.title = 'B新标题'; h.issueForm.tagText = 'B标签'
     h.issue.resolve(); await flush()
-    assert.deepEqual(h.calls.issues, [{ id: 'A', input: { title: 'A原标题', status: 'open', priority: 'medium', issueType: 'general', category: '', orderRef: '', expectedResult: '', actualResult: '', reproductionSteps: '', contactPreference: '', tags: ['原标签'] } }])
+    assert.deepEqual(h.calls.issues, [{ id: 'A', input: { title: 'A原标题', priority: 'medium', issueType: 'general', category: '', orderRef: '', expectedResult: '', actualResult: '', reproductionSteps: '', contactPreference: '', tags: ['原标签'] } }], '回复保存工单不能附带可能过时的状态')
     assert.deepEqual(h.calls.messages, [{ id: 'A', input: { body: 'A原正文' } }])
     h.append.resolve(); await send
     assert.equal(h.selectedConversationId.value, 'B'); assert.equal(h.replyDraft.value, 'B新草稿'); assert.equal(h.issueForm.title, 'B新标题')
@@ -231,6 +231,23 @@ for (const phase of ['issue', 'append']) test(`${phase}失败保持当前草稿�
     await send
     assert.equal(h.replyDraft.value, 'A原正文'); assert.equal(h.replying.value, false); assert.equal(h.calls.errors.length, 1)
     if (phase === 'issue') assert.equal(h.calls.messages.length, 0)
+  } finally { h.stop() }
+})
+
+for (const outcome of ['sent', 'failed']) test(`生命周期结束后，迟到的回复结果 ${outcome} 不弹窗`, async () => {
+  const h = setup()
+  try {
+    const send = h.handleReply()
+    h.issue.resolve()
+    await flush()
+    assert.equal(h.calls.messages.length, 1)
+    h.invalidateLifecycle()
+    if (outcome === 'sent') h.append.resolve()
+    else h.append.reject(new Error('迟到的回复失败'))
+    await send
+    assert.deepEqual(h.calls.success, [])
+    assert.deepEqual(h.calls.errors, [])
+    assert.equal(h.replyDraft.value, 'A原正文')
   } finally { h.stop() }
 })
 
