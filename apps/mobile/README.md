@@ -1,6 +1,6 @@
 # Y-Link Mobile
 
-Y-Link 的 Expo 移动端工程。当前已建立可运行路由、Provider、Feature Mock、平台边界和共享 Contract package 消费基础，但未连接后端 API，也不代表最终视觉方案。
+Y-Link 的 Mobile npm workspace。目前仓库保留 `package.json`、`eas.json` 和本文档，原 Expo 应用源码已移除。`npm run verify:mobile:workspace` 检查 manifest、根 lockfile、本地共享包解析与 `ApiClientError` 加载。应用 Contract 检查当前不适用，恢复后须具备 Expo/TypeScript 配置、根布局、首页和共享包契约文件。
 
 ## 环境与安装
 
@@ -20,7 +20,9 @@ npm run verify:mobile:workspace
 
 不要在 `apps/mobile` 单独执行 `npm install` 或生成第二份 lockfile。共享包只能通过 `@ylink/*` package 名称导入，不得使用 `../..` 或其它相对路径直接引用根项目与 `packages/*`。
 
-## Android 启动与检查
+## Android 启动与检查（历史）
+
+从本节起保留原 Expo 应用的开发约定。Android 启动、SQLite 专项测试、应用类型检查和导出需要应用源码，当前无法执行这些应用验收。
 
 ```bash
 npm --workspace y-link-mobile run android
