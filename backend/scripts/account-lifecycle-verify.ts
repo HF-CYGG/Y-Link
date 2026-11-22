@@ -754,10 +754,12 @@ try {
 
   const realtime = realtimeModule.customerServiceRealtimeService
 
-  const currentPreview = await userService.previewDeactivation(actor.userId, actor)
+  const normalizedActor = { ...actor, userId: String(actor.userId) }
+  const currentPreview = await userService.previewDeactivation(normalizedActor.userId, normalizedActor)
   assert.ok(currentPreview.blockers.some((item) => item.code === 'current_account'), '当前登录账号必须阻断注销')
   assert.ok(currentPreview.blockers.some((item) => item.code === 'last_enabled_admin'), '唯一启用管理员必须阻断注销')
   await createSysUser('issue74-admin-backup', { role: 'admin' })
+  await assert.rejects(userService.updateStatus(normalizedActor.userId, 'disabled', normalizedActor), /不能停用当前登录账号/)
 
   // 新密码策略禁止包含用户名：测试口令与用户名 issue74-stale-own-password 保持不同。
   const stalePassword = 'Stale74-Own-Secret!9'

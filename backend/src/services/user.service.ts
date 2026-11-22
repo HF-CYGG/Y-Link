@@ -252,7 +252,7 @@ export class UserService {
   ): Promise<UserLifecyclePreview> {
     const referenceSummary = await this.buildReferenceSummary(manager, user.id)
     const blockers: AccountLifecycleBlocker[] = []
-    if (actor.userId === user.id) blockers.push({ code: 'current_account', message: '不能注销当前登录账号', count: 1 })
+    if (String(actor.userId) === String(user.id)) blockers.push({ code: 'current_account', message: '不能注销当前登录账号', count: 1 })
     if (isUserGovernanceAdmin(user)) {
       const enabledAdmins = (lockedAccounts ? [...lockedAccounts.values()] : await manager.getRepository(SysUser).find()).filter(isUserGovernanceAdmin).length
       if (enabledAdmins <= 1) blockers.push({ code: 'last_enabled_admin', message: '该账号是系统中唯一启用且可查看、编辑用户的管理员', count: 1 })
@@ -685,7 +685,7 @@ export class UserService {
       const { user, accounts } = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:status')
       const userRepo = manager.getRepository(SysUser)
 
-      if (actor.userId === user.id && status !== 'enabled') {
+      if (String(actor.userId) === String(user.id) && status !== 'enabled') {
         throw new BizError('不能停用当前登录账号', 400)
       }
 
