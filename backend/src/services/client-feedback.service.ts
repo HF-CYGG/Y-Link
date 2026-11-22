@@ -94,10 +94,14 @@ export interface ClientFeedbackAttachmentCleanupResult {
   anomalies: ClientFeedbackAttachmentCleanupAnomaly[]
 }
 
+type AttachmentCleanupRow = Pick<ClientFeedbackAttachment, 'id' | 'storageName' | 'ownerClientUserId' | 'conversationId' | 'messageId'>
+
 interface AttachmentCleanupCandidate {
   storageName: string
-  draft?: ClientFeedbackAttachment
+  draft?: AttachmentCleanupRow
 }
+
+const feedbackAttachmentUrl = (id: string) => `/api/client-feedback/attachments/${id}`
 
 const ATTACHMENT_CLEANUP_TRANSACTION_SIZE = 64
 const ATTACHMENT_CLEANUP_READ_SIZE = 500
@@ -568,7 +572,7 @@ class ClientFeedbackService {
   private buildAttachmentReference(row: ClientFeedbackAttachment) {
     return {
       name: row.originalName,
-      url: `/api/client-feedback/attachments/${row.id}`,
+      url: feedbackAttachmentUrl(row.id),
       mimeType: row.mimeType,
       size: row.sizeBytes,
     }
@@ -656,11 +660,26 @@ class ClientFeedbackService {
     }
   }
 
-  private async groupAttachmentStorageRows(names: string[], manager: EntityManager = AppDataSource.manager) {
-    const result = new Map<string, ClientFeedbackAttachment[]>()
-    const repo = manager.getRepository(ClientFeedbackAttachment)
+  /** 清理使用数据库中的精确 ID，避开 SQLite 驱动对大整数的 Number 转换。 */
+  private attachmentCleanupQuery(manager: EntityManager) {
+    const textType = manager.connection.options.type === 'mysql' ? 'CHAR' : 'TEXT'
+    return manager.getRepository(ClientFeedbackAttachment).createQueryBuilder('attachment')
+      .select(`CAST(attachment.id AS ${textType})`, 'id')
+      .addSelect(`CAST(attachment.ownerClientUserId AS ${textType})`, 'ownerClientUserId')
+      .addSelect('attachment.storageName', 'storageName')
+      .addSelect('attachment.conversationId', 'conversationId')
+      .addSelect('attachment.messageId', 'messageId')
+  }
+
+  private async groupAttachmentStorageRows(names: string[], manager: EntityManager = AppDataSource.manager, now?: Date) {
+    const result = new Map<string, Array<AttachmentCleanupRow & { expired?: number | string }>>()
     for (let start = 0; start < names.length; start += ATTACHMENT_CLEANUP_READ_SIZE) {
-      const rows = await repo.findBy({ storageName: In(names.slice(start, start + ATTACHMENT_CLEANUP_READ_SIZE)) })
+      const query = this.attachmentCleanupQuery(manager)
+        .where('attachment.storageName IN (:...names)', { names: names.slice(start, start + ATTACHMENT_CLEANUP_READ_SIZE) })
+      if (now) {
+        query.addSelect('CASE WHEN attachment.expiresAt <= :now THEN 1 ELSE 0 END', 'expired').setParameter('now', now)
+      }
+      const rows = await query.getRawMany<AttachmentCleanupRow & { expired?: number | string }>()
       for (const row of rows) {
         const key = row.storageName.toLowerCase()
         const matches = result.get(key) ?? []
@@ -674,12 +693,18 @@ class ClientFeedbackService {
   /** 批量定位候选文件的历史快照，所有消息读取和解析均在写锁之外。 */
   private async collectHistoricalAttachmentReferences(candidates: AttachmentCleanupCandidate[]) {
     const storageNames = new Map(candidates.map(({ storageName }) => [storageName.toLowerCase(), storageName]))
-    const draftNamesById = new Map(candidates.flatMap(({ storageName, draft }) => draft ? [[String(draft.id), storageName] as const] : []))
+    const draftNamesById = new Map(candidates.flatMap(({ storageName, draft }) => draft ? [[draft.id, storageName] as const] : []))
     const references = new Map<string, 'referenced' | 'uncertain'>()
     if (!candidates.length) return references
 
     const repo = AppDataSource.getRepository(ClientFeedbackMessage)
-    const [lastMessage] = await repo.find({ select: ['id'], order: { id: 'DESC' }, take: 1 })
+    const sqlite = AppDataSource.options.type === 'sqlite'
+    const textType = sqlite ? 'TEXT' : 'CHAR'
+    const idType = sqlite ? 'INTEGER' : 'UNSIGNED'
+    const [lastMessage] = await repo.createQueryBuilder('message')
+      .select(`CAST(message.id AS ${textType})`, 'id')
+      .orderBy('message.id', 'DESC').take(1)
+      .getRawMany<{ id: string }>()
     if (!lastMessage) return references
     const uploadNamePattern = new RegExp(UPLOAD_PUBLIC_FILE_NAME_MATCHER.source.slice(1, -1), 'gi')
     const record = (storageName: string | undefined, evidence: 'referenced' | 'uncertain') => {
@@ -703,19 +728,26 @@ class ClientFeedbackService {
     let after = '0'
     while (true) {
       const page = await repo.createQueryBuilder('message')
-        .select(['message.id', 'message.attachmentJson'])
-        .where('message.id > :after AND message.id <= :lastId', { after, lastId: String(lastMessage.id) })
+        .select(`CAST(message.id AS ${textType})`, 'id')
+        .addSelect('message.attachmentJson', 'attachmentJson')
+        .where(`message.id > CAST(:after AS ${idType}) AND message.id <= CAST(:lastId AS ${idType})`, { after, lastId: lastMessage.id })
         .andWhere('(' + conditions.join(' OR ') + ')', { ...parameters, escape: '\\' })
         .orderBy('message.id', 'ASC')
         .take(ATTACHMENT_CLEANUP_READ_SIZE)
-        .getMany()
+        .getRawMany<{ id: string; attachmentJson: string | null }>()
       for (const { attachmentJson } of page) {
         if (!attachmentJson || attachmentJson === '[]') continue
-        const items = this.parseJsonArray<unknown>(attachmentJson, [])
+        const items = this.parseJsonArray<unknown>(attachmentJson, [], (key, value, context) => {
+          if (key !== 'attachmentId' || typeof value !== 'number') return value
+          // 旧快照可能将 BIGINT ID 写成 JSON 数字，避免先转成双精度再判定引用。
+          return context?.source ?? (Number.isSafeInteger(value) ? String(value) : null)
+        })
         if (items.length > 0) {
           for (const item of items) {
-            if (item && typeof item === 'object' && 'url' in item && typeof item.url === 'string') {
-              inspect(item.url, 'referenced')
+            if (!item || typeof item !== 'object') continue
+            if ('url' in item && typeof item.url === 'string') inspect(item.url, 'referenced')
+            if ('attachmentId' in item && typeof item.attachmentId === 'string') {
+              record(draftNamesById.get(item.attachmentId.trim()), 'referenced')
             }
           }
         } else {
@@ -726,26 +758,28 @@ class ClientFeedbackService {
         }
       }
       if (page.length < ATTACHMENT_CLEANUP_READ_SIZE || references.size === candidates.length) return references
-      after = String(page.at(-1)!.id)
+      after = page.at(-1)!.id
     }
   }
 
   private async removeExpiredAttachmentDrafts(
-    candidates: ClientFeedbackAttachment[],
+    candidates: AttachmentCleanupRow[],
     now: Date,
     anomalies: ClientFeedbackAttachmentCleanupAnomaly[],
   ) {
     if (!candidates.length) return []
     return this.runAttachmentCoordinatedTransaction(async (manager, isMysql) => {
-      const owners = await manager.getRepository(ClientUser).find({
-        select: ['id'],
-        where: { id: In([...new Set(candidates.map((item) => item.ownerClientUserId))]) },
-        order: { id: 'ASC' },
-        lock: isMysql ? { mode: 'pessimistic_write' } : undefined,
-      })
-      const ownerIds = new Set(owners.map(({ id }) => String(id)))
-      const stored = await this.groupAttachmentStorageRows(candidates.map((item) => item.storageName), manager)
-      const removable: ClientFeedbackAttachment[] = []
+      const textType = isMysql ? 'CHAR' : 'TEXT'
+      const idType = isMysql ? 'UNSIGNED' : 'INTEGER'
+      const ownerQuery = manager.getRepository(ClientUser).createQueryBuilder('owner')
+        .select(`CAST(owner.id AS ${textType})`, 'id')
+        .where({ id: In([...new Set(candidates.map((item) => item.ownerClientUserId))]) })
+        .orderBy('owner.id', 'ASC')
+      if (isMysql) ownerQuery.setLock('pessimistic_write')
+      const owners = await ownerQuery.getRawMany<{ id: string }>()
+      const ownerIds = new Set(owners.map(({ id }) => id))
+      const stored = await this.groupAttachmentStorageRows(candidates.map((item) => item.storageName), manager, now)
+      const removable: AttachmentCleanupRow[] = []
       for (const previous of candidates) {
         const matches = stored.get(previous.storageName.toLowerCase()) ?? []
         if (matches.length > 1) {
@@ -753,16 +787,21 @@ class ClientFeedbackService {
           continue
         }
         const current = matches[0]
-        if (!current || String(previous.id) !== String(current.id) || current.storageName !== previous.storageName
+        if (!current || previous.id !== current.id || current.storageName !== previous.storageName
           || current.ownerClientUserId !== previous.ownerClientUserId || current.messageId || current.conversationId
-          || !current.expiresAt || current.expiresAt > now) continue
-        if (!ownerIds.has(String(current.ownerClientUserId))) {
+          || Number(current.expired) !== 1) continue
+        if (!ownerIds.has(current.ownerClientUserId)) {
           anomalies.push({ storageName: current.storageName, reason: '草稿所属用户不存在，保留记录与文件待人工核查' })
           continue
         }
         removable.push(current)
       }
-      if (removable.length) await manager.getRepository(ClientFeedbackAttachment).delete(removable.map(({ id }) => id))
+      if (removable.length) {
+        const parameters = Object.fromEntries(removable.map(({ id }, index) => [`draft${index}`, id]))
+        const ids = Object.keys(parameters).map((key) => `CAST(:${key} AS ${idType})`).join(', ')
+        await manager.getRepository(ClientFeedbackAttachment).createQueryBuilder().delete()
+          .where(`id IN (${ids})`, parameters).execute()
+      }
       return removable.map(({ storageName }) => storageName)
     })
   }
@@ -813,14 +852,12 @@ class ClientFeedbackService {
     }).sort()
     const scanLimit = Math.max(1_000, cleanupBatchSize * 2)
     const scanPage = names.filter((name) => name > this.attachmentCleanupFileCursor).slice(0, scanLimit)
-    const drafts = !directoryIsSafe ? [] : await this.attachmentRepo.find({
-      where: {
-        id: MoreThan(this.attachmentCleanupDraftCursor || '0'),
-        expiresAt: LessThanOrEqual(now), conversationId: IsNull(), messageId: IsNull(),
-      },
-      order: { id: 'ASC' },
-      take: cleanupBatchSize,
-    })
+    const idType = AppDataSource.options.type === 'mysql' ? 'UNSIGNED' : 'INTEGER'
+    const drafts = !directoryIsSafe ? [] : await this.attachmentCleanupQuery(AppDataSource.manager)
+      .where(`attachment.id > CAST(:cursor AS ${idType})`, { cursor: this.attachmentCleanupDraftCursor || '0' })
+      .andWhere({ expiresAt: LessThanOrEqual(now), conversationId: IsNull(), messageId: IsNull() })
+      .orderBy('attachment.id', 'ASC').take(cleanupBatchSize)
+      .getRawMany<AttachmentCleanupRow>()
     const stored = await this.groupAttachmentStorageRows([...new Set([...scanPage, ...drafts.map(({ storageName }) => storageName)])])
     const candidates: AttachmentCleanupCandidate[] = []
     for (const draft of drafts) {
@@ -833,16 +870,16 @@ class ClientFeedbackService {
       }
     }
 
-    let retainedReferencedFiles = 0
+    const retainedReferencedNames = new Set<string>()
     let orphanCount = 0
-    const observedBindings: ClientFeedbackAttachment[] = []
+    const observedBindings: AttachmentCleanupRow[] = []
     let visitedName = ''
     for (const storageName of scanPage) {
       visitedName = storageName
       const matches = stored.get(storageName.toLowerCase()) ?? []
       const attachment = matches[0]
       if (attachment) {
-        retainedReferencedFiles += 1
+        retainedReferencedNames.add(storageName.toLowerCase())
         if (matches.length > 1 || Boolean(attachment.conversationId) !== Boolean(attachment.messageId)) {
           anomalies.push({ storageName, reason: '附件登记或绑定关系不一致，保留待人工核查' })
         } else if (attachment.messageId && attachment.conversationId) {
@@ -881,7 +918,7 @@ class ClientFeedbackService {
     const eligible = candidates.filter(({ storageName, draft }) => {
       const evidence = references.get(storageName)
       if (!evidence) return true
-      if (!draft) retainedReferencedFiles += 1
+      if (!draft) retainedReferencedNames.add(storageName.toLowerCase())
       anomalies.push({
         storageName,
         reason: evidence === 'uncertain' ? '消息附件历史格式无法确认，保留待人工核查' : '文件仍被历史消息引用，保留待人工核查',
@@ -896,7 +933,10 @@ class ClientFeedbackService {
       const expired = await this.removeExpiredAttachmentDrafts(batch.flatMap(({ draft }) => draft ? [draft] : []), now, anomalies)
       removedExpiredDrafts += expired.length
       const cutoffByName = new Map(batch.filter(({ draft }) => !draft).map(({ storageName }) => [storageName, orphanCutoffTime]))
-      for (const storageName of expired) cutoffByName.set(storageName, now.getTime())
+      for (const storageName of expired) {
+        retainedReferencedNames.delete(storageName.toLowerCase())
+        cutoffByName.set(storageName, now.getTime())
+      }
       // 全部文件在删除前重新确认未登记。过期草稿必须先提交数据库删除，不能在回滚后遗留错误记录。
       const removed = await this.removeUnregisteredAttachmentFiles(directory, cutoffByName, anomalies)
       removedOrphanFiles += batch.filter(({ draft, storageName }) => !draft && removed.has(storageName)).length
@@ -907,9 +947,16 @@ class ClientFeedbackService {
       anomalies.push({ storageName, reason: '临时文件无法访问或正在使用，保留待下次核查' })
     }
     this.attachmentCleanupTempCursor = temp.cursor
-    this.attachmentCleanupDraftCursor = drafts.length === cleanupBatchSize ? String(drafts.at(-1)!.id) : ''
+    this.attachmentCleanupDraftCursor = drafts.length === cleanupBatchSize ? drafts.at(-1)!.id : ''
     this.attachmentCleanupFileCursor = visitedName && visitedName !== names.at(-1) ? visitedName : ''
-    return { scannedFiles: entries.length, removedExpiredDrafts, removedOrphanFiles, removedTempFiles: temp.removed, retainedReferencedFiles, anomalies }
+    return {
+      scannedFiles: entries.length,
+      removedExpiredDrafts,
+      removedOrphanFiles,
+      removedTempFiles: temp.removed,
+      retainedReferencedFiles: retainedReferencedNames.size,
+      anomalies,
+    }
   }
 
   async runAttachmentCleanupOnce(): Promise<ClientFeedbackAttachmentCleanupResult> {
@@ -967,8 +1014,8 @@ class ClientFeedbackService {
     return this.messageReferencesBoundAttachment(message, attachment)
   }
 
-  private messageReferencesBoundAttachment(message: ClientFeedbackMessage, attachment: ClientFeedbackAttachment) {
-    const { url } = this.buildAttachmentReference(attachment)
+  private messageReferencesBoundAttachment(message: ClientFeedbackMessage, attachment: Pick<ClientFeedbackAttachment, 'id'>) {
+    const url = feedbackAttachmentUrl(attachment.id)
     return this.parseJsonArray<ClientFeedbackMessageAttachment>(message.attachmentJson, [])
       .some((item) => item?.url === url)
   }
@@ -987,13 +1034,17 @@ class ClientFeedbackService {
     return attachment
   }
 
-  private parseJsonArray<T>(rawValue: string | null | undefined, fallback: T[]): T[] {
+  private parseJsonArray<T>(
+    rawValue: string | null | undefined,
+    fallback: T[],
+    reviver?: (key: string, value: unknown, context?: { source?: string }) => unknown,
+  ): T[] {
     const text = rawValue?.trim()
     if (!text) {
       return fallback
     }
     try {
-      const parsed = JSON.parse(text)
+      const parsed = JSON.parse(text, reviver)
       return Array.isArray(parsed) ? (parsed as T[]) : fallback
     } catch {
       return fallback
