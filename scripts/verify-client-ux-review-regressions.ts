@@ -9,11 +9,14 @@ import { readFileSync } from 'node:fs'
 import * as Vue from 'vue'
 import { baseParse, compile, NodeTypes } from '@vue/compiler-dom'
 import { parse } from '@vue/compiler-sfc'
+import ts from 'typescript'
 import type { O2oMallProduct, O2oMallSku } from '../src/api/modules/o2o'
 import { settleCurrentClientCheckoutSuccess } from '../src/views/client/client-checkout-submit-policy'
 import { createFeedbackDetailLifecycle } from '../src/views/client/client-feedback-detail-lifecycle'
 import { retryFeedbackDetailAndEnsureRealtime } from '../src/views/client/client-feedback-retry-policy'
 import { resolveCatalogDetailSelection, resolveExplicitDetailSkuReplacement } from '../src/views/client/client-mall-catalog-policy'
+import { normalizeClientOrderKeyword } from '../src/utils/client-order-storage'
+import { formatDateTime } from '../src/utils/date-time'
 import {
   buildClientPreorderSubmitIntentKey, createClientPreorderSubmitLock, readActiveClientPreorderSubmitLock,
   clearClientPreorderSubmitLock, redactClientPreorderSubmitLocks,
@@ -248,6 +251,134 @@ await retry(async () => {})
 assert.equal(connectionCount, connectionsBeforeRecovery + 1)
 assert.equal(currentConnection().isCurrent(), true)
 lifecycleScope.stop()
+
+// 执行页面真正使用的 script setup 声明，隔离请求、存储和浏览器事件。
+const evaluatePage = <T>(filename: string, names: string[], dependencies: Record<string, unknown>, includeWatch = false): T => {
+  const { descriptor } = parse(readFileSync(new URL(`../src/views/client/${filename}`, import.meta.url), 'utf8'))
+  assert.ok(descriptor.scriptSetup)
+  const script = ts.createSourceFile(filename, descriptor.scriptSetup.content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+  const declarations = script.statements.filter(ts.isVariableStatement)
+    .flatMap((statement) => statement.declarationList.declarations)
+    .filter((declaration) => names.includes(declaration.name.getText(script)))
+  assert.equal(declarations.length, names.length)
+  const watchSource = includeWatch ? script.statements.find((statement) => statement.getText(script).startsWith('watch(warnBeforeReload,')) : undefined
+  if (includeWatch) assert.ok(watchSource)
+  const executable = ts.transpileModule([
+    ...declarations.map((declaration) => `const ${declaration.getText(script)}`),
+    watchSource?.getText(script) ?? '',
+  ].join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+  return new Function(...Object.keys(dependencies), `${executable}\nreturn { ${names.join(', ')} }`)(...Object.values(dependencies))
+}
+
+{
+  const keywordInput = Vue.ref('')
+  const activeStatus = Vue.ref('all')
+  const clientOrderStore = Vue.reactive({
+    keyword: '原关键词', pageSize: 20,
+    setSearch(keyword: string, mode: string) {
+      assert.equal(mode, 'contains')
+      this.keyword = normalizeClientOrderKeyword(keyword)
+    },
+    initialize() {},
+  })
+  const requests: unknown[] = []
+  const search = evaluatePage<{
+    exceedsContainsTermLimit(keyword: string): boolean
+    keywordLimitError: Vue.ComputedRef<string>
+    commitSearch(keyword: string): void
+    handleStatusChange(value: string): void
+    buildListQuery(page: number): unknown
+    syncStoreWithCurrentUser(): void
+  }>('ClientOrdersView.vue', [
+    'MAX_CONTAINS_TERMS', 'exceedsContainsTermLimit', 'effectiveKeyword', 'keywordLimitError', 'commitSearch',
+    'handleStatusChange', 'buildListQuery', 'syncStoreWithCurrentUser',
+  ], {
+    keywordInput, activeStatus, clientOrderStore, normalizeClientOrderKeyword, computed: Vue.computed,
+    stopKeywordDebounce: () => {}, loadOrders: () => { requests.push(search.buildListQuery(1)) },
+    clientAuthStore: { currentUser: { id: 'fixture' } },
+  })
+  const valid = 'A a\u3000b\tc d  e f'
+  assert.equal(search.exceedsContainsTermLimit(valid), false)
+  search.commitSearch(valid)
+  keywordInput.value = `${valid} g`
+  assert.match(search.keywordLimitError.value, /最多支持 6 个不同的搜索关键词/)
+  search.commitSearch(keywordInput.value)
+  assert.equal(clientOrderStore.keyword, valid)
+  search.handleStatusChange('pending')
+  assert.deepEqual(requests, [{ page: 1, pageSize: 20, status: 'pending', keyword: valid, searchMode: 'contains' }])
+  assert.deepEqual(search.buildListQuery(2), { page: 2, pageSize: 20, status: 'pending', keyword: valid, searchMode: 'contains' })
+  clientOrderStore.keyword = keywordInput.value
+  search.syncStoreWithCurrentUser()
+  assert.equal(clientOrderStore.keyword, '', '旧版本缓存中超限关键词不能随页面恢复直接发出')
+  assert.match(search.keywordLimitError.value, /最多支持/)
+}
+
+{
+  const pending = {
+    payload: { clientRequestId: 'original-request-key', pickupAt: '2026-11-21T16:30:00.000Z', items: [
+      { productId: 'removed-id', skuId: 'removed-sku', qty: 2 },
+      { productId: 'new-id', skuId: 'matching-sku', qty: 3 },
+      { productId: 'new-id', skuId: 'missing-sku', qty: 1 },
+      { productId: 'missing-id', qty: 4 },
+    ] },
+  }
+  const original = structuredClone(pending)
+  const summary = evaluatePage<{
+    pendingPickupTime: Vue.ComputedRef<string>
+    pendingItemSummaries: Vue.ComputedRef<unknown[]>
+  }>('ClientCheckoutView.vue', ['pendingPickupTime', 'pendingItemSummaries'], {
+    pendingSubmit: Vue.ref(pending), computed: Vue.computed, formatDateTime,
+    clientCartStore: { items: [{ productId: 'removed-id', skuId: 'removed-sku', productName: '下架商品', specText: '历史规格' }] },
+    clientCatalogStore: { products: [{ id: 'new-id', productName: '目录商品', skus: [{ id: 'matching-sku', specText: '目录规格' }] }] },
+  })
+  assert.equal(summary.pendingPickupTime.value, '2026-11-22 00:30:00', '跨日恢复摘要按业务时区显示')
+  assert.deepEqual(summary.pendingItemSummaries.value, [
+    { productName: '下架商品', specText: '历史规格', qty: 2 },
+    { productName: '目录商品', specText: '目录规格', qty: 3 },
+    { productName: '目录商品', specText: '原规格资料暂不可用', qty: 1 },
+    { productName: '原商品资料暂不可用', specText: '默认规格', qty: 4 },
+  ])
+  assert.deepEqual(pending, original, '恢复摘要不能改动原始请求体或幂等键')
+}
+
+{
+  const listeners = new Set<(event: Event) => void>()
+  const editDialogVisible = Vue.ref(false), returnDialogVisible = Vue.ref(false)
+  const editDraft = Vue.ref('原改单'), returnDraft = Vue.ref('原退货')
+  const clientAuthStore = Vue.reactive<{currentUser: {id: string} | null}>({ currentUser: { id: 'fixture' } })
+  const scope = Vue.effectScope()
+  try {
+    const state = scope.run(() => evaluatePage<{editDraftBaseline: Vue.Ref<string>; returnDraftBaseline: Vue.Ref<string>}>(
+      'ClientOrderDetailView.vue', ['editDraftBaseline', 'returnDraftBaseline', 'hasUnsavedOrderDrafts', 'handleOrderDraftBeforeUnload', 'warnBeforeReload'], {
+        ref: Vue.ref, computed: Vue.computed, watch: Vue.watch, clientAuthStore, editDialogVisible, returnDialogVisible,
+        currentEditDraft: () => editDraft.value, currentReturnDraft: () => returnDraft.value,
+        globalThis: { window: {
+          addEventListener: (type: string, listener: (event: Event) => void) => { assert.equal(type, 'beforeunload'); listeners.add(listener) },
+          removeEventListener: (type: string, listener: (event: Event) => void) => { assert.equal(type, 'beforeunload'); listeners.delete(listener) },
+        } },
+      }, true,
+    ))!
+    state.editDraftBaseline.value = editDraft.value
+    state.returnDraftBaseline.value = returnDraft.value
+    editDialogVisible.value = true
+    assert.equal(listeners.size, 0, '未改动的弹窗不应妨碍刷新')
+    editDraft.value = '改单输入'
+    assert.equal(listeners.size, 1)
+    const event = new Event('beforeunload', { cancelable: true })
+    // Node 的普通 Event 使用只读 returnValue，替身对应浏览器可写的 BeforeUnloadEvent。
+    const beforeUnload = { preventDefault: () => event.preventDefault(), returnValue: undefined }
+    for (const listener of listeners) listener(beforeUnload as unknown as Event)
+    assert.equal(event.defaultPrevented, true)
+    assert.equal(beforeUnload.returnValue, true)
+    state.editDraftBaseline.value = editDraft.value
+    assert.equal(listeners.size, 0, '保存新基线后取消刷新拦截')
+    returnDialogVisible.value = true
+    returnDraft.value = '退货输入'
+    assert.equal(listeners.size, 1)
+    clientAuthStore.currentUser = null
+    assert.equal(listeners.size, 0, '退出登录释放当前草稿的刷新拦截')
+  } finally { scope.stop() }
+}
 
 // 自定义 Vue host 只存节点与事件，不创建浏览器或使用真实 DOM。
 interface TestNode {
