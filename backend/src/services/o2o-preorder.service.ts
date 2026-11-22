@@ -9,7 +9,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { setTimeout as delay } from 'node:timers/promises'
 import { kingdeeRegistrationView, normalizeKingdeeVoucherNo, type KingdeeStatus } from '../utils/kingdee-registration.js'
-import { Brackets, type EntityManager, In, IsNull, Not, type SelectQueryBuilder } from 'typeorm'
+import { Brackets, type EntityManager, In, IsNull, MoreThan, Not, type SelectQueryBuilder } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { DatabaseWriteFrozenError, databaseOperationGate } from '../database/operation-gate.js'
@@ -584,7 +584,9 @@ class O2oPreorderService {
   private mallSoldQtyRefreshInFlight: Promise<{ key: string; revision: number; data: Map<string, number> }> | null = null
 
   constructor() {
-    subscribeMallCatalogRemoteInvalidation(() => this.invalidateMallSoldQtyCache())
+    subscribeMallCatalogRemoteInvalidation((soldQtyChanged) => {
+      if (soldQtyChanged) this.invalidateMallSoldQtyCache()
+    })
     databaseOperationGate.registerWorker({
       name: 'o2o-timeout-recycle',
       pause: () => this.pauseTimeoutRecycleLoop(),
@@ -2464,12 +2466,10 @@ class O2oPreorderService {
    * 对外仅递增一个固定大小的修订号，不保存商品 id 集合，避免无界内存增长。
    */
   private invalidateMallReadCache(options?: { soldQtyChanged?: boolean }) {
-    invalidateMallCatalogReadCache()
+    if (options?.soldQtyChanged) this.invalidateMallSoldQtyCache()
+    invalidateMallCatalogReadCache(options)
     this.mallProductsCache = null
     this.mallStorefrontCache = null
-    if (options?.soldQtyChanged) {
-      this.invalidateMallSoldQtyCache()
-    }
   }
 
   private invalidateMallSoldQtyCache(): void {
@@ -4483,6 +4483,8 @@ class O2oPreorderService {
       })
       const returnRequestIds = returnRequests.map((item) => String(item.id))
       const releasedPreorderedQty = await this.releasePendingPreorderStockForDeleteInManager(manager, order, actor)
+      const soldQtyChanged = order.status === 'verified'
+        && await preorderItemRepo.existsBy({ orderId: String(order.id), qty: MoreThan(0) })
       await cleanupOrderIdentifiableData(manager, {
         orderIds: linkedOutboundOrder ? [String(linkedOutboundOrder.id)] : [],
         orderUuids: linkedOutboundOrder ? [linkedOutboundOrder.orderUuid] : [],
@@ -4547,7 +4549,7 @@ class O2oPreorderService {
         manager,
       )
 
-      return {
+      const deletedOrder = {
         id: String(order.id),
         preorderNo: order.preorderNo,
         showNo: order.preorderNo,
@@ -4561,9 +4563,10 @@ class O2oPreorderService {
         preorderSerialRolledBack,
         outboundSerialRolledBack,
       }
+      return { deletedOrder, soldQtyChanged }
     })
-    this.invalidateMallReadCache({ soldQtyChanged: result.status === 'verified' })
-    return result
+    this.invalidateMallReadCache({ soldQtyChanged: result.soldQtyChanged })
+    return result.deletedOrder
   }
 
   async cancelMyOrder(auth: ClientAuthContext, id: string, requestMeta?: RequestMeta) {
@@ -5190,8 +5193,8 @@ class O2oPreorderService {
           }, manager)
         }
         return detail
-          ? { timedOut: null, detail }
-          : { timedOut: 'return_request' as const, detail: null }
+          ? { timedOut: null, detail, soldQtyChanged: returnRequest.sourceOrderStatus === 'verified' }
+          : { timedOut: 'return_request' as const, detail: null, soldQtyChanged: false }
       }
       const order = await manager.getRepository(O2oPreorder).findOne({
         where: { verifyCode: normalizedVerifyCode, isDeleted: false },
@@ -5201,7 +5204,7 @@ class O2oPreorderService {
         throw new BizError('核销单不存在', 404)
       }
       if (await this.cancelTimedOutOrderInManager(manager, order)) {
-        return { timedOut: 'preorder' as const, detail: null }
+        return { timedOut: 'preorder' as const, detail: null, soldQtyChanged: false }
       }
       const detail = await this.verifyPreorderInManager(manager, order, actor)
       const outboundOrder = await this.loadLinkedOutboundOrderInManager(manager, String(order.id))
@@ -5225,9 +5228,9 @@ class O2oPreorderService {
           outboundOrderSystemNo: outboundOrder.systemNo,
         },
       }, manager)
-      return { timedOut: null, detail }
+      return { timedOut: null, detail, soldQtyChanged: true }
     }, { mysqlIsolationLevel: 'READ COMMITTED' })
-    this.invalidateMallReadCache({ soldQtyChanged: result.timedOut === null })
+    this.invalidateMallReadCache({ soldQtyChanged: result.soldQtyChanged })
     if (result.timedOut === 'return_request') {
       throw new BizError('原订单已超时取消，退货申请无需再核销', 409)
     }

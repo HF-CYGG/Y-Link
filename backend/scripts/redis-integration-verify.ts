@@ -550,14 +550,25 @@ async function runMainScenario() {
     assert.deepEqual(localHandled, [{ from: 'other' }], '其他实例的消息必须触发处理器，畸形消息被丢弃')
 
     const revisionBefore = readMallCatalogRevision()
-    const remoteRevisions: number[] = []
-    const unsubscribeRemoteRevision = subscribeMallCatalogRemoteInvalidation(() => remoteRevisions.push(readMallCatalogRevision()))
-    invalidateMallCatalogReadCache({ affectsBusinessData: false })
-    await raw.publish(`${prefix}bus:cache:mall-catalog`, JSON.stringify({ o: 'other-instance', p: null }))
+    const remoteRevisions: Array<{ revision: number; soldQtyChanged: boolean }> = []
+    const unsubscribeRemoteRevision = subscribeMallCatalogRemoteInvalidation((soldQtyChanged) => {
+      remoteRevisions.push({ revision: readMallCatalogRevision(), soldQtyChanged })
+    })
+    invalidateMallCatalogReadCache({ affectsBusinessData: false, soldQtyChanged: true })
+    for (const payload of [null, { soldQtyChanged: false }, { soldQtyChanged: true }]) {
+      await raw.publish(`${prefix}bus:cache:mall-catalog`, JSON.stringify({ o: 'other-instance', p: payload }))
+    }
     await delay(300)
     unsubscribeRemoteRevision()
-    assert.equal(readMallCatalogRevision(), revisionBefore + 2, '本地与远端商城写入均应刷新本地目录修订')
-    assert.deepEqual(remoteRevisions, [revisionBefore + 2], '仅远端广播通知监听者，通知前修订已更新')
+    assert.equal(readMallCatalogRevision(), revisionBefore + 4, '本地与远端商城写入均应刷新本地目录修订')
+    assert.deepEqual(remoteRevisions, [
+      { revision: revisionBefore + 2, soldQtyChanged: false },
+      { revision: revisionBefore + 3, soldQtyChanged: false },
+      { revision: revisionBefore + 4, soldQtyChanged: true },
+    ], '仅远端广播通知监听者，通知前目录修订已更新，销量变化需要显式标记')
+    const localMallEvent = received.find((item) => (item as { channel: string }).channel.endsWith('cache:mall-catalog')
+      && (item as { o: string }).o === redisClient.getRedisInstanceId()) as { p: unknown } | undefined
+    assert.deepEqual(localMallEvent?.p, { soldQtyChanged: true }, '本地销量变化须随目录广播传递给其他实例')
 
     // 5. 客服实时：撤权与会话事件广播、集群在线态合并
     received.length = 0
